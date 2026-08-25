@@ -16,7 +16,7 @@ import {
 } from "../../src/handlers/helpers/reopen-completed-wave";
 import type { Task, TaskGraph } from "../../src/types";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
-import { applyUntrustedStopResolution } from "../../src/handlers/subagent-stop/update-task-status";
+import { applyUntrustedStopResolution } from "../../src/core/implementation-application";
 import type { WaveReviewContextAuthority } from "../../src/handlers/helpers/programs/wave-gate";
 import { taskFixture } from "../fixtures/task-lifecycle";
 

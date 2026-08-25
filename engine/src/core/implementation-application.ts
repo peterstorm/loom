@@ -1,5 +1,5 @@
 import type { Task, TaskGraph, TaskTestResult } from "../types";
-import { changedDeclaredArtifacts } from "./artifact-baseline";
+import { attributedChangedArtifacts, changedDeclaredArtifacts } from "./artifact-baseline";
 import {
   createTaskCompletionSuiteResult,
   parseCanonicalArtifactBaseline,
@@ -12,9 +12,14 @@ import {
   type TaskCompletionSuiteResult,
 } from "./implementation-completion";
 import { compareStrings } from "./ordering";
-import type { ProofEvaluationPolicy } from "./proof-obligations";
+import {
+  evaluateTaskProof,
+  PI_STRUCTURED_EVIDENCE_POLICY,
+  type ProofEvaluationPolicy,
+} from "./proof-obligations";
 import { invalidateTaskReview } from "./review-output";
 import { parseReviewPath, type ReviewPath } from "./review-packet";
+import { taskVerificationPolicy } from "./verification-policy";
 import { newWaveGate, reconcileWaveBlock } from "./wave-gate-model";
 
 const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(value);
@@ -178,6 +183,181 @@ export function unavailableTaskLocalByteObservation(
   });
 }
 
+export type NewTestEvidence = Readonly<{
+  written: boolean;
+  evidence: string;
+}>;
+
+/** What an authority-free Stop resolution observed. It can preserve diagnostic
+ * evidence and release only a proven legacy reservation; it never mints modern
+ * completion authority. */
+export type UntrustedStopResolution = Readonly<{
+  taskCompleted: boolean;
+  testResult: TaskTestResult;
+  testEvidence: string;
+  filesModified: readonly string[];
+  changedDeclaredArtifacts: readonly string[];
+  bytesChangedSinceAttempt: boolean;
+  newTestsWritten: boolean;
+  newTestEvidence: string;
+}>;
+
+export type AppliedStopResolution = Readonly<{
+  state: TaskGraph;
+  /** true means the target was absent/completed or lacked legacy authority. */
+  skipped: boolean;
+}>;
+
+export function cumulativeModifiedPaths(
+  previous: readonly string[] | undefined,
+  current: readonly string[],
+): string[] {
+  return [...new Set([...(previous ?? []), ...current])].sort();
+}
+
+/** Wave completion projection shared by both harness shells. */
+export function isWaveComplete(state: TaskGraph, wave: number): boolean {
+  return state.tasks
+    .filter((task) => task.wave === wave)
+    .every((task) => task.status === "implemented" || task.status === "completed");
+}
+
+function applyResolvedTask(
+  state: TaskGraph,
+  taskId: string,
+  wave: number,
+  codeChanged: boolean,
+  clearedExecuting: readonly string[],
+  resolveTask: (task: Task) => Task,
+): TaskGraph {
+  const resolved: TaskGraph = {
+    ...state,
+    tasks: state.tasks.map((task) => {
+      if (task.id !== taskId) return task;
+      const updated = resolveTask(task);
+      return codeChanged ? invalidateTaskReview(updated) : updated;
+    }),
+    executing_tasks: [...clearedExecuting],
+  };
+  const specCheckCleared = codeChanged && resolved.spec_check?.wave === wave;
+  return {
+    ...resolved,
+    ...(specCheckCleared ? { spec_check: undefined } : {}),
+    wave_gates: {
+      ...resolved.wave_gates,
+      [String(wave)]: {
+        ...(resolved.wave_gates[String(wave)] ?? newWaveGate()),
+        impl_complete: isWaveComplete(resolved, wave),
+        ...(codeChanged
+          ? {
+              tests_passed: null,
+              reviews_complete: false,
+              ...(specCheckCleared ? { blocked: false } : {}),
+            }
+          : {}),
+      },
+    },
+  };
+}
+
+/** Legacy-only infrastructure cleanup. Modern attempts require an exact
+ * Oracle receipt and are deliberately left untouched by this capability-free
+ * path. */
+export function applyCompletionInfrastructureFailure(
+  state: TaskGraph,
+  taskId: string,
+  bytesChangedSinceAttempt: boolean,
+  expectedAuthority?: ImplementationAttemptAuthority,
+): TaskGraph {
+  const target = state.tasks.find((task) => task.id === taskId);
+  if (target?.active_implementation_attempt !== undefined || expectedAuthority !== undefined) return state;
+  const clearedExecuting = (state.executing_tasks ?? []).filter((id) => id !== taskId);
+  if (target === undefined || target.status === "completed" || target.legacy_missing_proof === true) {
+    return { ...state, executing_tasks: clearedExecuting };
+  }
+  return applyResolvedTask(
+    state,
+    taskId,
+    target.wave,
+    bytesChangedSinceAttempt,
+    clearedExecuting,
+    (task) => task.proof === undefined ? task : ({
+      ...task,
+      status: "pending",
+      proof: task.proof,
+      revalidation_required: true,
+      legacy_missing_proof: undefined,
+      active_implementation_attempt: undefined,
+      attempt_artifact_baseline: undefined,
+      attempt_repository_baseline: undefined,
+      reserved_at: undefined,
+    }),
+  );
+}
+
+/** Apply one authority-free legacy Stop observation against locked state. */
+export function applyUntrustedStopResolution(
+  state: TaskGraph,
+  taskId: string,
+  resolution: UntrustedStopResolution,
+  proofPolicy: ProofEvaluationPolicy = PI_STRUCTURED_EVIDENCE_POLICY,
+): AppliedStopResolution {
+  const executing = state.executing_tasks ?? [];
+  const target = state.tasks.find((task) => task.id === taskId);
+  if (!executing.includes(taskId) || target?.active_implementation_attempt !== undefined) {
+    return { state, skipped: true };
+  }
+  const clearedExecuting = executing.filter((id) => id !== taskId);
+  if (target === undefined || target.status === "completed") {
+    return { state: { ...state, executing_tasks: clearedExecuting }, skipped: true };
+  }
+  const codeChanged = resolution.bytesChangedSinceAttempt;
+  const preserveExistingTrusted = target.revalidation_required !== true &&
+    resolution.testResult.verdict === "untrusted" && (
+      target.test_result?.verdict === "trusted-fail" ||
+      (target.test_result?.verdict === "trusted-pass" && !codeChanged)
+    );
+  const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, resolution.filesModified);
+  const currentNewTests: NewTestEvidence = {
+    written: resolution.newTestsWritten,
+    evidence: resolution.newTestEvidence,
+  };
+  const proofTestResult = preserveExistingTrusted ? target.test_result : resolution.testResult;
+  const proofArtifactsChanged = attributedChangedArtifacts(
+    resolution.changedDeclaredArtifacts,
+    cumulativeFiles,
+  );
+  const proof = evaluateTaskProof(
+    {
+      verificationPolicy: taskVerificationPolicy(target),
+      declaredArtifacts: target.file_list ?? [],
+    },
+    {
+      taskCompleted: false,
+      testResult: proofTestResult,
+      filesModified: proofArtifactsChanged,
+      newTestsWritten: currentNewTests.written,
+      newTestEvidence: currentNewTests.evidence,
+    },
+    proofPolicy,
+  );
+  return {
+    skipped: false,
+    state: applyResolvedTask(state, taskId, target.wave, codeChanged, clearedExecuting, (task): Task => ({
+      ...task,
+      status: "pending",
+      proof,
+      revalidation_required: true,
+      legacy_missing_proof: undefined,
+      test_result: proofTestResult,
+      test_evidence: preserveExistingTrusted ? task.test_evidence : resolution.testEvidence,
+      files_modified: cumulativeFiles,
+      new_tests_written: currentNewTests.written,
+      new_test_evidence: currentNewTests.evidence,
+    })),
+  };
+}
+
 export type IncomingImplementationEvidence = Readonly<{
   taskCompleted: boolean;
   testResult?: TaskTestResult;
@@ -282,26 +462,16 @@ function transitionedTask(
   }
   if (transition.kind === "retry-required" || transition.kind === "escalation-required") {
     if (facts.normalizedEvidence === undefined) throw new Error(`${transition.kind} transition requires normalized evidence`);
-    const failure_reason = `${transition.kind}: ${transitionFailureKinds(transition).join(", ")}`;
+    const pending = {
+      ...common,
+      status: "pending" as const,
+      legacy_missing_proof: undefined,
+      failure_reason: `${transition.kind}: ${transitionFailureKinds(transition).join(", ")}`,
+      ...evidenceFields(facts.normalizedEvidence),
+    };
     return transition.proof.state === "satisfied"
-      ? {
-          ...common,
-          status: "pending",
-          proof: transition.proof,
-          revalidation_required: true,
-          legacy_missing_proof: undefined,
-          failure_reason,
-          ...evidenceFields(facts.normalizedEvidence),
-        }
-      : {
-          ...common,
-          status: "pending",
-          proof: transition.proof,
-          revalidation_required: undefined,
-          legacy_missing_proof: undefined,
-          failure_reason,
-          ...evidenceFields(facts.normalizedEvidence),
-        };
+      ? { ...pending, proof: transition.proof, revalidation_required: true }
+      : { ...pending, proof: transition.proof, revalidation_required: undefined };
   }
   if (task.proof === undefined) throw new Error("infrastructure settlement requires historical Proof audit data");
   return {
@@ -433,7 +603,8 @@ export function settleObservedImplementation(
     : invalidObservationResult(state, observation.error.errors);
 }
 
-/** Pure shared infrastructure settlement; history is retained and no attempt is consumed. */
+/** Pure shared infrastructure settlement. The execution reservation is
+ * released and receipted, while semantic retry budget is not consumed. */
 export function settleUnavailableImplementation(
   state: TaskGraph,
   authority: ImplementationAttemptAuthority,

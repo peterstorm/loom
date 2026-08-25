@@ -29,10 +29,9 @@ import { parseBashTestOutput } from "../engine/src/parsers/parse-bash-test-outpu
 import {
   applyCompletionInfrastructureFailure,
   applyUntrustedStopResolution,
-  collectNewTestEvidence,
   cumulativeModifiedPaths,
   type NewTestEvidence,
-} from "../engine/src/handlers/subagent-stop/update-task-status";
+} from "../engine/src/core/implementation-application";
 import { extractTestEvidence, type TestEvidence } from "../engine/src/core/test-evidence";
 import { resolveTransition } from "../engine/src/handlers/subagent-stop/advance-phase";
 import {
@@ -58,7 +57,10 @@ import {
   type ImplementationSettlementApplicationResult,
 } from "../engine/src/core/implementation-application";
 import { PI_STRUCTURED_EVIDENCE_POLICY } from "../engine/src/core/proof-obligations";
-import { observeTaskLocalCompletion } from "../engine/src/handlers/helpers/task-local-completion";
+import {
+  collectNewTestEvidence,
+  observeTaskLocalCompletion,
+} from "../engine/src/handlers/helpers/task-local-completion";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
 import { canonicalRepositoryPaths } from "../engine/src/utils/repository-path";
 import { compareAttemptBaseline } from "../engine/src/utils/artifact-baseline";
@@ -1251,8 +1253,9 @@ async function applyParsedReviewMessages(args: Readonly<{
 /**
  * Store one reviewer's findings against the task it names.
  *
- * Transcript bytes are read outside the lock; packet generation and scope
- * authority are resolved against the current task INSIDE it. The Claude Code
+ * Transcript text is derived from in-memory result messages outside the lock;
+ * packet generation and scope authority are resolved against the current task
+ * INSIDE it. The Claude Code
  * shell uses the same state-ownership boundary.
  */
 export async function applyReviewPiResult(args: Readonly<{

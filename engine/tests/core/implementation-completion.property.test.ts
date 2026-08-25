@@ -8,6 +8,7 @@ import {
   evaluateTaskCompletionSuite,
   parseArtifactBaselineDigest,
   parseCanonicalArtifactBaseline,
+  parseCompleteClaudeJsonl,
   parseGitSha,
   parseImplementationAttemptAuthority,
   parseImplementationAttemptHistory,
@@ -167,6 +168,34 @@ const parsers = [
 ] as const;
 
 describe("implementation completion exact parsers", () => {
+  it("strictly parses complete Claude JSONL before exposing transcript evidence", () => {
+    const valid = '{"type":"user"}\n\n{"type":"assistant"}\n';
+    const complete = parseCompleteClaudeJsonl(valid);
+    expect(complete).toEqual({
+      kind: "complete",
+      transcript: valid,
+      records: [{ type: "user" }, { type: "assistant" }],
+    });
+
+    const malformed = parseCompleteClaudeJsonl(`${valid}{"type":"assistant"`);
+    expect(malformed).toMatchObject({
+      kind: "malformed",
+      line: 4,
+      reason: expect.stringContaining("malformed or truncated"),
+    });
+    expect(malformed).not.toHaveProperty("transcript");
+  });
+
+  it("is total over unknown Claude transcript inputs and arbitrary strings", () => {
+    fc.assert(fc.property(fc.anything({ maxDepth: 5 }), (raw) => {
+      expect(() => parseCompleteClaudeJsonl(raw)).not.toThrow();
+      expect(["complete", "malformed"]).toContain(parseCompleteClaudeJsonl(raw).kind);
+    }), { numRuns: 500 });
+    fc.assert(fc.property(fc.string(), (raw) => {
+      expect(() => parseCompleteClaudeJsonl(raw)).not.toThrow();
+    }), { numRuns: 500 });
+  });
+
   it("are total over arbitrary unknown input", () => {
     fc.assert(fc.property(fc.anything({ maxDepth: 5 }), (raw) => {
       parsers.forEach((parser) => {

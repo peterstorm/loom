@@ -305,6 +305,70 @@ describe("Claude implementation authority sidecar", () => {
     expect(stored.wave_gates["1"]?.impl_complete).toBe(true);
   });
 
+  it("settles a valid partial transcript with a malformed tail as non-consuming infrastructure, never implemented", async () => {
+    const dir = root();
+    const statePath = join(dir, "active_task_graph.json");
+    const attempt = authority("T1", "claude-malformed-tail");
+    modernGraph(statePath, attempt, {
+      new_tests_required: false,
+      proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+    });
+    process.env.LOOM_STATE_PATH = statePath;
+    mkdirSync(process.env.LOOM_SUBAGENT_DIR!, { recursive: true });
+    writeFileSync(join(process.env.LOOM_SUBAGENT_DIR!, `${SESSION}.task_graph`), statePath);
+    const transcriptPath = join(dir, "agent.jsonl");
+    writeFileSync(transcriptPath, [
+      JSON.stringify(user("Task ID: T1")),
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Implementation complete; focused tests pass." },
+            { type: "tool_use", name: "Bash", input: { command: "npx vitest run focused.test.ts" } },
+          ],
+        },
+      }),
+      JSON.stringify({
+        type: "user",
+        message: { role: "user", content: [{ type: "tool_result", content: "1 passed (1)" }] },
+      }),
+      '{"type":"assistant","message":',
+    ].join("\n"));
+    publishImplementationAttemptSidecar({
+      sessionId: SESSION,
+      agentId: AGENT,
+      taskGraphPath: statePath,
+      authority: attempt,
+    });
+
+    const result = await dispatch(JSON.stringify({
+      session_id: SESSION,
+      agent_id: AGENT,
+      agent_type: "code-implementer-agent",
+      agent_transcript_path: transcriptPath,
+    }), []);
+
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringContaining("exact non-consuming infrastructure Oracle receipt"),
+    });
+    const stored = JSON.parse(readFileSync(statePath, "utf8")) as TaskGraph;
+    expect(stored.executing_tasks).toEqual([]);
+    expect(stored.tasks[0]).toMatchObject({
+      status: "pending",
+      revalidation_required: true,
+      implementation_attempt_history: [{
+        authorityDigest: attempt.authorityDigest,
+        transition: "infrastructure-blocked",
+        consumesSemanticAttempt: false,
+      }],
+    });
+    expect(stored.tasks[0]?.active_implementation_attempt).toBeUndefined();
+    expect(stored.tasks[0]).not.toHaveProperty("test_result");
+    expect(stored.wave_gates["1"]?.impl_complete).toBe(false);
+  });
+
   it("rejects a foreign canonical TaskGraph sidecar and preserves the current attempt", async () => {
     const dir = root();
     const statePath = join(dir, "active_task_graph.json");

@@ -6,8 +6,10 @@
  * process-global).
  */
 
-import { describe, it, expect, afterAll, vi } from "vitest";
-import { existsSync, unlinkSync } from "node:fs";
+import { describe, it, expect, afterAll, beforeAll, vi } from "vitest";
+import { existsSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import markActive from "../../src/handlers/subagent-start/mark-subagent-active";
 import recordEvidence from "../../src/handlers/post-tool-use/record-evidence";
 import enforce from "../../src/handlers/pre-tool-use/enforce-phase-tools";
@@ -24,9 +26,31 @@ import { eventsForEpoch, parseEpoch, parseSessionId } from "../../src/machine/ev
 import { SUBAGENT_DIR } from "../../src/config";
 
 const run = `handlers-e2e-${process.pid}-${Date.now()}`;
+const fixtureRoot = mkdtempSync(join(tmpdir(), "loom-machine-handler-e2e-"));
+const statePath = join(fixtureRoot, "active_task_graph.json");
+const machinesPath = fixtureRoot;
+const previousStatePath = process.env.LOOM_STATE_PATH;
+const previousMachinesPath = process.env.LOOM_MACHINES_DIR;
 // Ledger API takes the branded SessionId; parse once at construction.
 const sid = (name: string) => parseSessionId(`${run}-${name}`)!;
-const sessions = ["e2e-1", "e2e-2", "e2e-3", "e2e-4", "e2e-5", "e2e-6", "e2e-7"].map(sid);
+const sessions = ["e2e-1", "e2e-2", "e2e-3", "e2e-4", "e2e-5", "e2e-6", "e2e-6b", "e2e-7"].map(sid);
+
+beforeAll(() => {
+  writeFileSync(statePath, JSON.stringify({ current_phase: "init", phase_artifacts: {} }));
+  process.env.LOOM_STATE_PATH = statePath;
+  process.env.LOOM_MACHINES_DIR = machinesPath;
+  const machine = {
+    agent: "guarded-test-agent",
+    enforcedTools: ["Edit", "Write", "MultiEdit"],
+    phases: [
+      { id: "read-context", allowedTools: [], advance: { event: "FileRead", min: 1 } },
+      { id: "implement", allowedTools: ["Edit", "Write", "MultiEdit"], advance: { event: "FileWrite", min: 1 } },
+      { id: "verify", allowedTools: ["Edit", "Write", "MultiEdit"], advance: { event: "TestRunPassed", min: 1 } },
+      { id: "done", terminal: true, allowedTools: ["Edit", "Write", "MultiEdit"], requires: [{ event: "TestRunPassed", min: 1 }] },
+    ],
+  };
+  writeFileSync(join(machinesPath, "guarded-test-agent.machine.json"), JSON.stringify(machine), { flag: "wx" });
+});
 
 afterAll(() => {
   for (const s of sessions) {
@@ -41,9 +65,14 @@ afterAll(() => {
       } catch {}
     }
   }
+  if (previousStatePath === undefined) delete process.env.LOOM_STATE_PATH;
+  else process.env.LOOM_STATE_PATH = previousStatePath;
+  if (previousMachinesPath === undefined) delete process.env.LOOM_MACHINES_DIR;
+  else process.env.LOOM_MACHINES_DIR = previousMachinesPath;
+  rmSync(fixtureRoot, { recursive: true, force: true });
 });
 
-const start = (session: string, agentId = "a-1", agentType = "loom:code-implementer-agent") =>
+const start = (session: string, agentId = "a-1", agentType = "guarded-test-agent") =>
   JSON.stringify({ session_id: session, agent_id: agentId, agent_type: agentType });
 const stop = start;
 const pre = (session: string, tool: string) =>
@@ -81,7 +110,7 @@ describe("guarded machine — full hook lifecycle", () => {
     );
     const records = readEvidence(s);
     expect(records).toHaveLength(1);
-    expect(records[0].epoch).toBe("a-1:code-implementer-agent");
+    expect(records[0].epoch).toBe("a-1:guarded-test-agent");
     expect(records[0].event).toEqual({ kind: "TestRun", command: "npm test", exit: 1, report: null });
     // Foreign epochs see nothing (parseEpoch: the branded deserialization boundary):
     expect(eventsForEpoch(records, parseEpoch("a-9:code-implementer-agent")!)).toEqual([]);
@@ -102,12 +131,12 @@ describe("guarded machine — full hook lifecycle", () => {
 
     // A second active subagent (machine-less) makes attribution impossible:
     // both the gate and the recorder stand down.
-    await markActive(start(s, "a-2", "ts-test-agent"), []);
+    await markActive(start(s, "a-2", "brainstorm-agent"), []);
     expect((await enforce(pre(s, "Write"), [])).kind).toBe("passthrough");
     await recordEvidence(post(s, "Read", { file_path: "/other.ts" }), []);
     expect(readEvidence(s)).toEqual([]); // nothing recorded while contended
 
-    await cleanup(start(s, "a-2", "ts-test-agent"), []);
+    await cleanup(start(s, "a-2", "brainstorm-agent"), []);
     expect((await enforce(pre(s, "Write"), [])).kind).toBe("block"); // re-armed
 
     await cleanup(stop(s), []);

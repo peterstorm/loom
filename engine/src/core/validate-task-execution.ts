@@ -1,6 +1,6 @@
 /** Pure task-execution lifecycle classification and gate decisions. */
 
-import type { HookResult, Task, TaskGraph } from "../types";
+import type { Task, TaskGraph } from "../types";
 import { isImplAgent, isStandaloneReviewAgent } from "../config";
 import { extractTaskId } from "../utils/extract-task-id";
 import { stripNamespace } from "../utils/strip-namespace";
@@ -20,6 +20,12 @@ export interface ValidateTaskExecutionInput {
   readonly prompt: string;
   readonly description: string;
 }
+
+/** Transport-neutral spawn policy decision. Harness adapters decide how an
+ * ineligible reason becomes a hook response. */
+export type TaskExecutionDecision =
+  | Readonly<{ kind: "eligible" }>
+  | Readonly<{ kind: "ineligible"; reason: string }>;
 
 /**
  * Parsed lifecycle for one spawn. Only the implementation arm carries text
@@ -42,19 +48,19 @@ export function classifyTaskExecutionSpawn(input: ValidateTaskExecutionInput): T
     : { kind: "non-implementation" };
 }
 
-function dependencyExecutionBlock(state: TaskGraph, task: Task): HookResult | null {
+function dependencyExecutionBlock(state: TaskGraph, task: Task): TaskExecutionDecision | null {
   for (const dependencyId of task.depends_on) {
     const dependency = state.tasks.find((candidate) => candidate.id === dependencyId);
     if (dependency === undefined) {
       return {
-        kind: "block",
-        message: `BLOCKED: Cannot execute ${task.id} - dependency ${dependencyId} not found in task graph`,
+        kind: "ineligible",
+        reason: `Cannot execute ${task.id} - dependency ${dependencyId} not found in task graph`,
       };
     }
     if (dependency.status !== "completed") {
       return {
-        kind: "block",
-        message: `BLOCKED: Cannot execute ${task.id} - dependency ${dependencyId} not complete (status: ${dependency.status})`,
+        kind: "ineligible",
+        reason: `Cannot execute ${task.id} - dependency ${dependencyId} not complete (status: ${dependency.status})`,
       };
     }
   }
@@ -62,21 +68,21 @@ function dependencyExecutionBlock(state: TaskGraph, task: Task): HookResult | nu
 }
 
 /** Pure task gate used by both single and batch shell entry points. */
-export function taskExecutionDecision(state: TaskGraph, taskId: string): HookResult {
+export function taskExecutionDecision(state: TaskGraph, taskId: string): TaskExecutionDecision {
   const task = state.tasks.find((candidate) => candidate.id === taskId);
-  if (!task) return { kind: "allow" };
+  if (!task) return { kind: "eligible" };
   if (task.status === "completed") {
     return {
-      kind: "block",
-      message: `BLOCKED: Cannot execute ${taskId} because it is already completed.`,
+      kind: "ineligible",
+      reason: `Cannot execute ${taskId} because it is already completed.`,
     };
   }
 
   const currentWave = state.current_wave ?? 1;
   if (task.wave > currentWave) {
     return {
-      kind: "block",
-      message: `BLOCKED: Cannot execute ${taskId} (wave ${task.wave}) - current wave is ${currentWave}\nComplete all wave ${currentWave} tasks first.`,
+      kind: "ineligible",
+      reason: `Cannot execute ${taskId} (wave ${task.wave}) - current wave is ${currentWave}\nComplete all wave ${currentWave} tasks first.`,
     };
   }
 
@@ -87,7 +93,7 @@ export function taskExecutionDecision(state: TaskGraph, taskId: string): HookRes
     const prevWave = String(currentWave - 1);
     const gate = state.wave_gates[prevWave];
     if (gate && !gate.reviews_complete) {
-      const lines = [`BLOCKED: Wave ${prevWave} review gate not passed.`, ""];
+      const lines = [`Wave ${prevWave} review gate not passed.`, ""];
       if (gate.blocked) {
         lines.push(`Wave ${prevWave} is BLOCKED due to:`);
         // `tests_passed` is typed `true | null` and no writer ever produces
@@ -108,11 +114,11 @@ export function taskExecutionDecision(state: TaskGraph, taskId: string): HookRes
         lines.push(`Wave ${prevWave} gates not yet run.`);
       }
       lines.push("", "Run: /wave-gate");
-      return { kind: "block", message: lines.join("\n") };
+      return { kind: "ineligible", reason: lines.join("\n") };
     }
   }
 
-  return { kind: "allow" };
+  return { kind: "eligible" };
 }
 
 export type ImplementationTaskBindings =
@@ -514,7 +520,7 @@ export function taskExecutionRegistrationError(
   if (ownership !== null) return ownership;
   for (const taskId of expectedTaskIds) {
     const decision = taskExecutionDecision(current, taskId);
-    if (decision.kind === "block") return decision.message.replace(/^BLOCKED:\s*/, "");
+    if (decision.kind === "ineligible") return decision.reason;
     const task = current.tasks.find((candidate) => candidate.id === taskId);
     const baseline = baselines.get(taskId);
     if (task === undefined || baseline === undefined) {

@@ -10,8 +10,11 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { applyUntrustedStopResolution, isWaveComplete } from "../../src/handlers/subagent-stop/update-task-status";
-import type { UntrustedStopResolution } from "../../src/handlers/subagent-stop/update-task-status";
+import {
+  applyUntrustedStopResolution,
+  isWaveComplete,
+  type UntrustedStopResolution,
+} from "../../src/core/implementation-application";
 import type { Task, TaskGraph, TaskTestResult } from "../../src/types";
 import { taskFixture, type TaskFixtureInput } from "../fixtures/task-lifecycle";
 

@@ -23,8 +23,8 @@ function validateExecution(
   state: TaskGraph,
 ): { kind: "allow" } | { kind: "block"; reason: string } {
   const decision = taskExecutionDecision(state, taskId);
-  return decision.kind === "block"
-    ? { kind: "block", reason: decision.message }
+  return decision.kind === "ineligible"
+    ? { kind: "block", reason: decision.reason }
     : { kind: "allow" };
 }
 
@@ -120,6 +120,23 @@ describe("validate-task-execution — spawn lifecycle parsing", () => {
       .toEqual({ ok: false, error: expect.stringContaining("unknown task T99") });
     expect(parseImplementationTaskBindings(state, [implementation("Task ID: T1"), implementation("Task ID: T1")]))
       .toEqual({ ok: false, error: expect.stringContaining("more than once") });
+  });
+});
+
+describe("validate-task-execution — transport-neutral core decision", () => {
+  it("returns eligibility data without HookResult tags or transport prefixes", () => {
+    const eligible = taskExecutionDecision(mkState([mkTask({ id: "T1", wave: 1 })]), "T1");
+    const ineligible = taskExecutionDecision(
+      mkState([mkTask({ id: "T1", wave: 1, status: "completed" })]),
+      "T1",
+    );
+
+    expect(eligible).toEqual({ kind: "eligible" });
+    expect(ineligible).toEqual({
+      kind: "ineligible",
+      reason: "Cannot execute T1 because it is already completed.",
+    });
+    expect(JSON.stringify([eligible, ineligible])).not.toContain("BLOCKED:");
   });
 });
 

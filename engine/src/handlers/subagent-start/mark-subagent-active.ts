@@ -45,12 +45,33 @@ const handler: HookHandler = async (stdin) => {
   try {
     input = JSON.parse(stdin);
   } catch (e) {
-    // Malformed hook input: nothing can be tracked or bound. Say so loudly —
-    // an untracked agent means its SubagentStop cleanup is skipped and any
-    // machine binding it should have had never arms.
-    return passthroughDiagnostic(`mark-subagent-active: malformed SubagentStart input — agent not tracked, cleanup skipped, bindings may leak: ${e instanceof Error ? e.message : String(e)}\n`);
+    // The engine, not the shell shim, owns the ENOENT-only absence decision.
+    // A malformed payload while a graph is present or unobservable cannot say
+    // which authority should be bound, so launching would be fail-open.
+    const graphPath = taskGraphPath();
+    return pathExistsFailClosed(graphPath)
+      ? blockResult(`mark-subagent-active: malformed SubagentStart input while TaskGraph ${graphPath} is active or unobservable — refusing spawn: ${e instanceof Error ? e.message : String(e)}`)
+      : passthroughDiagnostic(`mark-subagent-active: malformed ad-hoc SubagentStart input — no TaskGraph exists; agent not tracked: ${e instanceof Error ? e.message : String(e)}\n`);
   }
   const { agent_id } = input;
+
+  // Ad-hoc agents retain their no-graph behavior, but only ENOENT proves that
+  // no graph exists. This probe and load happen before roster, sidecar,
+  // machine, directory, or pointer writes; any other observation failure
+  // blocks rather than creating an unchecked authority path.
+  const activeGraphPath = taskGraphPath();
+  if (!pathExistsFailClosed(activeGraphPath)) return { kind: "passthrough" };
+  const activeGraphManager = StateManager.fromPath(activeGraphPath);
+  if (activeGraphManager === null) {
+    return blockResult(`mark-subagent-active: TaskGraph at ${activeGraphPath} could not be opened; refusing spawn`);
+  }
+  try {
+    activeGraphManager.load();
+  } catch (error) {
+    return blockResult(
+      `mark-subagent-active: TaskGraph at ${activeGraphPath} is unobservable: ${error instanceof Error ? error.message : String(error)}; refusing spawn`,
+    );
+  }
 
   // Parse the session id at the boundary: session ids name files under
   // SUBAGENT_DIR (roster, binding, task_graph pointer — one of them a
@@ -58,7 +79,9 @@ const handler: HookHandler = async (stdin) => {
   // Fail closed: no tracking, no binding, no pointer write.
   const sessionId = parseSessionId(input.session_id ?? "");
   if (sessionId === null) {
-    return passthroughDiagnostic(`mark-subagent-active: invalid session_id ${JSON.stringify(input.session_id ?? "")} — refusing all session-file writes; agent not tracked, machine NOT bound, task_graph pointer not written\n`);
+    return blockResult(
+      `mark-subagent-active: invalid session_id ${JSON.stringify(input.session_id ?? "")} while a TaskGraph is active — exact authority cannot be bound; refusing spawn`,
+    );
   }
 
   try {
@@ -95,7 +118,7 @@ const handler: HookHandler = async (stdin) => {
 
   const rosterAgentTypeRaw = stripNamespace(input.agent_type ?? "");
   const rosterAgentType = rosterAgentTypeRaw ? parseAgentType(rosterAgentTypeRaw) : null;
-  const modernImplementationAgent = isImplAgent(rosterAgentTypeRaw) && pathExistsFailClosed(taskGraphPath());
+  const modernImplementationAgent = isImplAgent(rosterAgentTypeRaw);
   let sidecarPublished = false;
   let identifiedAuthority: ImplementationAttemptAuthority | null = null;
   const rollbackIdentifiedRegistration = async (): Promise<string | null> => {
@@ -116,9 +139,7 @@ const handler: HookHandler = async (stdin) => {
       if (!firstPrompt.ok) throw new Error(firstPrompt.error);
       const taskId = extractTaskId(firstPrompt.prompt);
       if (taskId === null) throw new Error("trusted first user prompt contains no Task id");
-      const graphPath = taskGraphPath();
-      const manager = StateManager.fromPath(graphPath);
-      if (manager === null) throw new Error(`TaskGraph is unavailable at ${graphPath}`);
+      const manager = activeGraphManager;
       const graph = manager.load();
       const task = graph.tasks.find((candidate) => candidate.id === taskId);
       if (task === undefined) throw new Error(`trusted first user prompt names unknown Task ${taskId}`);
@@ -224,7 +245,7 @@ const handler: HookHandler = async (stdin) => {
   // SubagentStop may run in different repo, needs this path.
   // taskGraphPath() resolves at CALL time (like machinesDir above) so the
   // path this handler persists can never drift from what the env says now.
-  const taskGraph = taskGraphPath();
+  const taskGraph = activeGraphPath;
   const taskGraphFile = sessionScopedPath(sessionId, ".task_graph");
   // Refresh the pointer whenever it is ABSENT or names a DIFFERENT graph than
   // the one this SubagentStart is serving. A write-once pointer went stale when
@@ -234,7 +255,7 @@ const handler: HookHandler = async (stdin) => {
   // of one session always share one orchestration graph, so they write the
   // identical value and never clobber each other; only a genuine graph switch
   // (sequential across repos) rewrites it.
-  const currentGraph = pathExistsFailClosed(taskGraph) ? resolve(taskGraph) : null;
+  const currentGraph = resolve(taskGraph);
   let storedGraph: string | null = null;
   let taskGraphPointerCreated = false;
   try {

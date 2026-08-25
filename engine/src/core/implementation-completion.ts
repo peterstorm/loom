@@ -55,6 +55,7 @@ declare const BASELINE_DIGEST: unique symbol;
 declare const AUTHORITY_DIGEST: unique symbol;
 declare const TASK_SUITE_DIGEST: unique symbol;
 declare const SETTLEMENT_RECEIPT_ID: unique symbol;
+declare const COMPLETE_CLAUDE_JSONL: unique symbol;
 
 export type TaskId = string & { readonly [TASK_ID]: true };
 export type Wave = WaveNumber;
@@ -66,6 +67,22 @@ export type ArtifactBaselineDigest = string & { readonly [BASELINE_DIGEST]: true
 export type ImplementationAuthorityDigest = string & { readonly [AUTHORITY_DIGEST]: true };
 export type TaskCompletionSuiteDigest = string & { readonly [TASK_SUITE_DIGEST]: true };
 export type ImplementationSettlementReceiptId = string & { readonly [SETTLEMENT_RECEIPT_ID]: true };
+export type CompleteClaudeJsonl = string & { readonly [COMPLETE_CLAUDE_JSONL]: true };
+
+/** Integrity result for a complete Claude JSONL transcript. Evidence extractors
+ * may consume only the complete arm; malformed/truncated records carry no
+ * partial transcript value by construction. */
+export type ClaudeJsonlIntegrity =
+  | Readonly<{
+      kind: "complete";
+      transcript: CompleteClaudeJsonl;
+      records: readonly unknown[];
+    }>
+  | Readonly<{
+      kind: "malformed";
+      line: number | null;
+      reason: string;
+    }>;
 
 export type ImplementationCompletionParseError = Readonly<{
   kind: "invalid-implementation-completion";
@@ -195,31 +212,58 @@ export function parseIsoInstant(raw: unknown, path = "instant"): Parsed<IsoInsta
   });
 }
 
+function parseSha256<T extends string>(raw: unknown, path: string): Parsed<T> {
+  return typeof raw === "string" && SHA256_PATTERN.test(raw)
+    ? success(raw as T)
+    : failure([`${path} must be a lowercase SHA-256 digest`]);
+}
+
 export function parseArtifactBaselineDigest(raw: unknown, path = "baselineDigest"): Parsed<ArtifactBaselineDigest> {
-  return total(() => typeof raw === "string" && SHA256_PATTERN.test(raw)
-    ? success(raw as ArtifactBaselineDigest)
-    : failure([`${path} must be a lowercase SHA-256 digest`]));
+  return total(() => parseSha256<ArtifactBaselineDigest>(raw, path));
 }
 
 export function parseImplementationAuthorityDigest(
   raw: unknown,
   path = "authorityDigest",
 ): Parsed<ImplementationAuthorityDigest> {
-  return total(() => typeof raw === "string" && SHA256_PATTERN.test(raw)
-    ? success(raw as ImplementationAuthorityDigest)
-    : failure([`${path} must be a lowercase SHA-256 digest`]));
+  return total(() => parseSha256<ImplementationAuthorityDigest>(raw, path));
 }
 
 function parseTaskSuiteDigest(raw: unknown, path: string): Parsed<TaskCompletionSuiteDigest> {
-  return typeof raw === "string" && SHA256_PATTERN.test(raw)
-    ? success(raw as TaskCompletionSuiteDigest)
-    : failure([`${path} must be a lowercase SHA-256 digest`]);
+  return parseSha256<TaskCompletionSuiteDigest>(raw, path);
 }
 
 function parseReceiptId(raw: unknown, path: string): Parsed<ImplementationSettlementReceiptId> {
-  return typeof raw === "string" && SHA256_PATTERN.test(raw)
-    ? success(raw as ImplementationSettlementReceiptId)
-    : failure([`${path} must be a lowercase SHA-256 digest`]);
+  return parseSha256<ImplementationSettlementReceiptId>(raw, path);
+}
+
+/** Total strict JSONL integrity parser. Every nonblank record must parse before
+ * the original transcript can be exposed to modern evidence extraction. */
+export function parseCompleteClaudeJsonl(raw: unknown): ClaudeJsonlIntegrity {
+  if (typeof raw !== "string") {
+    return freeze({ kind: "malformed", line: null, reason: "Claude JSONL transcript must be a string" });
+  }
+  const records: unknown[] = [];
+  const lines = raw.split(/\r?\n/u);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (line.trim() === "") continue;
+    try {
+      records.push(JSON.parse(line) as unknown);
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      return freeze({
+        kind: "malformed",
+        line: index + 1,
+        reason: `Claude JSONL transcript record ${index + 1} is malformed or truncated: ${detail}`.slice(0, 4_096),
+      });
+    }
+  }
+  return freeze({
+    kind: "complete",
+    transcript: raw as CompleteClaudeJsonl,
+    records: freezeArray(records),
+  });
 }
 
 function parseSnapshot(raw: unknown, path: string): Parsed<DeclaredArtifactBaseline["snapshot"]> {
@@ -836,21 +880,59 @@ export type ImplementationSettlementKind =
   | "escalation-required"
   | "infrastructure-blocked";
 
-export type ImplementationAttemptSettlementReceipt = Readonly<{
+type SettlementReceiptBase = Readonly<{
   schemaVersion: 1;
   kind: "implementation-attempt-settlement";
   receiptId: ImplementationSettlementReceiptId;
   taskId: TaskId;
   reservationId: ReservationId;
   authorityDigest: ImplementationAuthorityDigest;
-  semanticAttempt: SemanticAttempt;
   observedAt: IsoInstant;
-  transition: ImplementationSettlementKind;
-  consumesSemanticAttempt: boolean;
-  failureKinds: readonly string[];
 }>;
 
-type ReceiptBody = Omit<ImplementationAttemptSettlementReceipt, "receiptId">;
+type NonEmptyFailureKinds = readonly [string, ...string[]];
+
+export type ImplementedSettlementReceipt = SettlementReceiptBase & Readonly<{
+  semanticAttempt: SemanticAttempt;
+  transition: "implemented";
+  consumesSemanticAttempt: false;
+  failureKinds: readonly [];
+}>;
+
+export type RetryRequiredSettlementReceipt = SettlementReceiptBase & Readonly<{
+  semanticAttempt: SemanticAttempt & 1;
+  transition: "retry-required";
+  consumesSemanticAttempt: true;
+  failureKinds: NonEmptyFailureKinds;
+}>;
+
+export type EscalationRequiredSettlementReceipt = SettlementReceiptBase & Readonly<{
+  semanticAttempt: SemanticAttempt & 2;
+  transition: "escalation-required";
+  consumesSemanticAttempt: true;
+  failureKinds: NonEmptyFailureKinds;
+}>;
+
+export type InfrastructureBlockedSettlementReceipt = SettlementReceiptBase & Readonly<{
+  semanticAttempt: SemanticAttempt;
+  transition: "infrastructure-blocked";
+  consumesSemanticAttempt: false;
+  failureKinds: NonEmptyFailureKinds;
+}>;
+
+/** Receipt transition relations are represented by the union, not booleans
+ * callers can combine independently. */
+export type ImplementationAttemptSettlementReceipt =
+  | ImplementedSettlementReceipt
+  | RetryRequiredSettlementReceipt
+  | EscalationRequiredSettlementReceipt
+  | InfrastructureBlockedSettlementReceipt;
+
+type ReceiptBody = ImplementationAttemptSettlementReceipt extends infer Receipt
+  ? Receipt extends ImplementationAttemptSettlementReceipt
+    ? Omit<Receipt, "receiptId">
+    : never
+  : never;
 
 function receiptId(body: ReceiptBody): ImplementationSettlementReceiptId {
   // Parser proof site: sha256Hex is guaranteed to emit this exact grammar.
@@ -874,26 +956,81 @@ function parseFailureKinds(raw: unknown, path: string): Parsed<readonly string[]
   return success(freezeArray(values));
 }
 
-function receiptRelationError(body: ReceiptBody): string | null {
-  if (body.transition === "implemented") {
-    return body.consumesSemanticAttempt || body.failureKinds.length !== 0
-      ? "implemented receipt must not consume a semantic attempt or carry failures"
-      : null;
+function nonEmptyFailureKinds(values: readonly string[]): NonEmptyFailureKinds | null {
+  const [head, ...tail] = values;
+  return head === undefined ? null : Object.freeze([head, ...tail]);
+}
+
+type ReceiptBodyInput = Readonly<{
+  taskId: TaskId;
+  reservationId: ReservationId;
+  authorityDigest: ImplementationAuthorityDigest;
+  semanticAttempt: SemanticAttempt;
+  observedAt: IsoInstant;
+  transition: unknown;
+  consumesSemanticAttempt: unknown;
+  failureKinds: readonly string[];
+}>;
+
+type ReceiptBodyCommon = Readonly<{
+  schemaVersion: 1;
+  kind: "implementation-attempt-settlement";
+  taskId: TaskId;
+  reservationId: ReservationId;
+  authorityDigest: ImplementationAuthorityDigest;
+  observedAt: IsoInstant;
+}>;
+
+function receiptBodyCommon(args: ReceiptBodyInput): ReceiptBodyCommon {
+  return freeze({
+    schemaVersion: 1,
+    kind: "implementation-attempt-settlement",
+    taskId: args.taskId,
+    reservationId: args.reservationId,
+    authorityDigest: args.authorityDigest,
+    observedAt: args.observedAt,
+  });
+}
+
+function parseConsumedReceiptBody(
+  args: ReceiptBodyInput,
+  common: ReceiptBodyCommon,
+  failures: NonEmptyFailureKinds | null,
+): Parsed<ReceiptBody> {
+  if (args.consumesSemanticAttempt !== true || failures === null) {
+    return failure([`${String(args.transition)} receipt must carry failures and consume a semantic attempt`]);
   }
-  if (body.transition === "infrastructure-blocked") {
-    return body.consumesSemanticAttempt || body.failureKinds.length === 0
-      ? "infrastructure-blocked receipt must carry failures without consuming a semantic attempt"
-      : null;
+  if (args.transition === "retry-required") {
+    return args.semanticAttempt === 1
+      ? success(freeze({ ...common, semanticAttempt: args.semanticAttempt,
+          transition: "retry-required", consumesSemanticAttempt: true, failureKinds: failures }))
+      : failure(["retry-required receipt requires semantic attempt 1"]);
   }
-  if (!body.consumesSemanticAttempt || body.failureKinds.length === 0) {
-    return `${body.transition} receipt must carry failures and consume a semantic attempt`;
+  return args.semanticAttempt === 2
+    ? success(freeze({ ...common, semanticAttempt: args.semanticAttempt,
+        transition: "escalation-required", consumesSemanticAttempt: true, failureKinds: failures }))
+    : failure(["escalation-required receipt requires semantic attempt 2"]);
+}
+
+function parseReceiptBody(args: ReceiptBodyInput): Parsed<ReceiptBody> {
+  const common = receiptBodyCommon(args);
+  const failures = nonEmptyFailureKinds(args.failureKinds);
+  if (args.transition === "implemented") {
+    return args.consumesSemanticAttempt === false && args.failureKinds.length === 0
+      ? success(freeze({ ...common, semanticAttempt: args.semanticAttempt,
+          transition: "implemented", consumesSemanticAttempt: false,
+          failureKinds: Object.freeze([]) as readonly [] }))
+      : failure(["implemented receipt must not consume a semantic attempt or carry failures"]);
   }
-  if (body.transition === "retry-required" && body.semanticAttempt !== 1) {
-    return "retry-required receipt requires semantic attempt 1";
+  if (args.transition === "infrastructure-blocked") {
+    return args.consumesSemanticAttempt === false && failures !== null
+      ? success(freeze({ ...common, semanticAttempt: args.semanticAttempt,
+          transition: "infrastructure-blocked", consumesSemanticAttempt: false, failureKinds: failures }))
+      : failure(["infrastructure-blocked receipt must carry failures without consuming a semantic attempt"]);
   }
-  return body.transition === "escalation-required" && body.semanticAttempt !== 2
-    ? "escalation-required receipt requires semantic attempt 2"
-    : null;
+  return args.transition === "retry-required" || args.transition === "escalation-required"
+    ? parseConsumedReceiptBody(args, common, failures)
+    : failure(["settlementReceipt.transition is not recognized"]);
 }
 
 export function parseImplementationAttemptSettlementReceipt(
@@ -913,39 +1050,27 @@ export function parseImplementationAttemptSettlementReceipt(
     const attempt = parseSemanticAttempt(record.value.semanticAttempt, `${path}.semanticAttempt`);
     const observedAt = parseIsoInstant(record.value.observedAt, `${path}.observedAt`);
     const failureKinds = parseFailureKinds(record.value.failureKinds, `${path}.failureKinds`);
-    const transitions: readonly ImplementationSettlementKind[] = [
-      "implemented", "retry-required", "escalation-required", "infrastructure-blocked",
-    ];
     const errors = [parsedReceiptId, taskId, reservationId, digestValue, attempt, observedAt, failureKinds]
       .flatMap((result) => result.ok ? [] : result.error.errors);
     if (record.value.schemaVersion !== 1 || record.value.kind !== "implementation-attempt-settlement") {
       errors.push(`${path} must have schemaVersion 1 and kind implementation-attempt-settlement`);
     }
-    if (!transitions.includes(record.value.transition as ImplementationSettlementKind)) {
-      errors.push(`${path}.transition is not recognized`);
-    }
-    if (typeof record.value.consumesSemanticAttempt !== "boolean") {
-      errors.push(`${path}.consumesSemanticAttempt must be a boolean`);
-    }
     if (errors.length > 0 || !parsedReceiptId.ok || !taskId.ok || !reservationId.ok || !digestValue.ok ||
         !attempt.ok || !observedAt.ok || !failureKinds.ok) return failure(errors);
-    const body: ReceiptBody = freeze({
-      schemaVersion: 1,
-      kind: "implementation-attempt-settlement",
+    const body = parseReceiptBody({
       taskId: taskId.value,
       reservationId: reservationId.value,
       authorityDigest: digestValue.value,
       semanticAttempt: attempt.value,
       observedAt: observedAt.value,
-      transition: record.value.transition as ImplementationSettlementKind,
-      consumesSemanticAttempt: record.value.consumesSemanticAttempt as boolean,
+      transition: record.value.transition,
+      consumesSemanticAttempt: record.value.consumesSemanticAttempt,
       failureKinds: failureKinds.value,
     });
-    const relationError = receiptRelationError(body);
-    if (relationError !== null) return failure([`${path}: ${relationError}`]);
-    const expected = receiptId(body);
+    if (!body.ok) return failure(body.error.errors.map((error) => `${path}: ${error}`));
+    const expected = receiptId(body.value);
     return parsedReceiptId.value === expected
-      ? success(freeze({ ...body, receiptId: expected }))
+      ? success(freeze({ ...body.value, receiptId: expected }) as ImplementationAttemptSettlementReceipt)
       : failure([`${path}.receiptId does not match its canonical receipt`]);
   });
 }
@@ -991,25 +1116,25 @@ export type ImplementationCompletionTransition =
       kind: "implemented";
       proof: SatisfiedTaskProof;
       suite: TaskCompletionSuiteResult;
-      receipt: ImplementationAttemptSettlementReceipt;
+      receipt: ImplementedSettlementReceipt;
     }>
   | Readonly<{
       kind: "retry-required";
       attempt: 2;
       proof: FailedTaskProof | SatisfiedTaskProof;
       failures: readonly [ImplementationCompletionFailure, ...ImplementationCompletionFailure[]];
-      receipt: ImplementationAttemptSettlementReceipt;
+      receipt: RetryRequiredSettlementReceipt;
     }>
   | Readonly<{
       kind: "escalation-required";
       proof: FailedTaskProof | SatisfiedTaskProof;
       failures: readonly [ImplementationCompletionFailure, ...ImplementationCompletionFailure[]];
-      receipt: ImplementationAttemptSettlementReceipt;
+      receipt: EscalationRequiredSettlementReceipt;
     }>
   | Readonly<{
       kind: "infrastructure-blocked";
       failures: readonly [ImplementationInfrastructureFailure, ...ImplementationInfrastructureFailure[]];
-      receipt: ImplementationAttemptSettlementReceipt;
+      receipt: InfrastructureBlockedSettlementReceipt;
     }>
   | Readonly<{ kind: "ignored"; reason: "stale" | "duplicate" | "already-completed" }>;
 
@@ -1053,26 +1178,31 @@ function taskErrors(task: SettleableImplementationTask, supplied: Implementation
   return errors;
 }
 
-function makeReceipt(
+type SettlementReceiptFor<Kind extends ImplementationSettlementKind> =
+  Extract<ImplementationAttemptSettlementReceipt, { transition: Kind }>;
+
+function makeReceipt<Kind extends ImplementationSettlementKind>(
   authority: ImplementationAttemptAuthority,
   observedAt: IsoInstant,
-  transition: ImplementationSettlementKind,
-  consumesSemanticAttempt: boolean,
+  transition: Kind,
   failureKinds: readonly string[],
-): ImplementationAttemptSettlementReceipt {
-  const body: ReceiptBody = freeze({
-    schemaVersion: 1,
-    kind: "implementation-attempt-settlement",
+): SettlementReceiptFor<Kind> {
+  const body = parseReceiptBody({
     taskId: authority.taskId,
     reservationId: authority.reservationId,
     authorityDigest: authority.authorityDigest,
     semanticAttempt: authority.semanticAttempt,
     observedAt,
     transition,
-    consumesSemanticAttempt,
+    consumesSemanticAttempt: transition === "retry-required" || transition === "escalation-required",
     failureKinds: freezeArray([...new Set(failureKinds)].sort(compareStrings)),
   });
-  return freeze({ ...body, receiptId: receiptId(body) });
+  if (!body.ok || body.value.transition !== transition) {
+    throw new Error(body.ok
+      ? "settlement receipt transition invariant failed"
+      : body.error.errors.join("; "));
+  }
+  return freeze({ ...body.value, receiptId: receiptId(body.value) }) as SettlementReceiptFor<Kind>;
 }
 
 /**
@@ -1094,7 +1224,6 @@ export function createReclaimedImplementationAttemptReceipt(
           authority.value,
           reclaimedAt.value,
           "infrastructure-blocked",
-          false,
           ["reservation-reclaimed"],
         ))
       : failure(errors);
@@ -1119,14 +1248,14 @@ function semanticTransition(
       attempt: 2,
       proof,
       failures,
-      receipt: makeReceipt(authority, observedAt, "retry-required", true, failureKinds),
+      receipt: makeReceipt(authority, observedAt, "retry-required", failureKinds),
     });
   }
   return freeze({
     kind: "escalation-required",
     proof,
     failures,
-    receipt: makeReceipt(authority, observedAt, "escalation-required", true, failureKinds),
+    receipt: makeReceipt(authority, observedAt, "escalation-required", failureKinds),
   });
 }
 
@@ -1200,7 +1329,7 @@ export function settleImplementationAttempt(
     return completionOk(freeze({
       kind: "infrastructure-blocked",
       failures: nonEmptyInfrastructure,
-      receipt: makeReceipt(current.value, observation.value.observedAt, "infrastructure-blocked", false, failureKinds),
+      receipt: makeReceipt(current.value, observation.value.observedAt, "infrastructure-blocked", failureKinds),
     }));
   }
 
@@ -1233,6 +1362,6 @@ export function settleImplementationAttempt(
     kind: "implemented",
     proof,
     suite: suite.result,
-    receipt: makeReceipt(current.value, observation.value.observedAt, "implemented", false, []),
+    receipt: makeReceipt(current.value, observation.value.observedAt, "implemented", []),
   }));
 }

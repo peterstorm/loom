@@ -27,10 +27,10 @@ import {
 import * as git from "../../utils/git";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
 import {
-  collectNewTestEvidence,
   isWaveComplete,
   type NewTestEvidence,
-} from "../subagent-stop/update-task-status";
+} from "../../core/implementation-application";
+import { collectNewTestEvidence } from "./task-local-completion";
 import { parseWaveArg } from "./wave-args";
 import { isExactGitSha } from "../../core/git-sha";
 import { taskVerificationPolicy } from "../../core/verification-policy";

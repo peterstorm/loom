@@ -153,11 +153,10 @@ export function legacyTestsPassedNote(task: unknown): string | null {
 
 // --- Review findings ---
 //
-// The finding SHAPES live here, with `Task`, because this module is the schema
-// root: every other module may depend on it and it depends on none of them.
-// They used to be declared in core/findings and imported back, which made
-// types.ts and core/findings mutually dependent — harmless only for as long as
-// both directions stayed `import type`. core/findings still OWNS the finding
+// The finding SHAPES live here with `Task` to avoid a shape-level cycle:
+// core/findings consumes Task while Task carries findings. Declaring the shapes
+// in core/findings and importing them back here made those two declarations
+// mutually dependent. core/findings still OWNS the finding
 // aggregate (minting identity, proving lockstep, and its review-path writers)
 // and re-exports these so no import site had to move.
 
@@ -840,7 +839,7 @@ export type WaveGateProtectedSnapshotBinding = Readonly<{
 export type WaveGateNextAction =
   | Readonly<{ kind: "review-batch"; lifecycle: "preparing" | "awaiting-review-results"; action: SpawnBatchAction; binding: WaveGateProtectedSnapshotBinding }>
   | Readonly<{ kind: "advisory-decision"; lifecycle: "awaiting-advisory-decision"; action: AwaitUserAction; binding: WaveGateProtectedSnapshotBinding }>
-  | Readonly<{ kind: "blocked"; lifecycle: "recoverable-blocked" | "terminal-blocked" | "authority-blocked"; action: BlockedAction; binding: WaveGateProtectedSnapshotBinding }>
+  | Readonly<{ kind: "blocked"; lifecycle: "recoverable-blocked" | "terminal-blocked"; action: BlockedAction; binding: WaveGateProtectedSnapshotBinding }>
   | Readonly<{ kind: "completed"; lifecycle: "done"; action: DoneAction; binding: WaveGateProtectedSnapshotBinding }>;
 
 /** A registered program can be temporarily unable to expose its next semantic

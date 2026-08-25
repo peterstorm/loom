@@ -11,13 +11,13 @@
  *     (dropping evidence silently would be indistinguishable from "nothing ran")
  *
  * mark-subagent-active.sh (fail-CLOSED authority binder):
- *   - graph present + runtime unavailable → exit 2 because exact modern
- *     implementation authority cannot be published
+ *   - runtime unavailable → exit 2 because only the engine may prove graph absence
+ *   - ENOENT graph → engine passthrough; EACCES/ELOOP/ENOTDIR → engine block
  */
 
 import { describe, it, expect, afterAll } from "vitest";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -28,6 +28,7 @@ const GUARD = join(SCRIPTS, "guard-state-file.sh");
 const DISPATCH = join(SCRIPTS, "dispatch.sh");
 const MARK = join(SCRIPTS, "mark-subagent-active.sh");
 const CLEANUP = join(SCRIPTS, "cleanup-stale-subagents.sh");
+const PLUGIN_ROOT = join(SCRIPTS, "..", "..");
 
 // chmod 000 does not bar root — these tests are meaningless under uid 0.
 const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
@@ -64,6 +65,7 @@ function runShim(script: string, env: Record<string, string | undefined>): ShimR
       v !== undefined &&
       k !== "CLAUDE_PLUGIN_ROOT" &&
       k !== "LOOM_SUBAGENT_DIR" &&
+      k !== "LOOM_STATE_PATH" &&
       k !== "CLAUDE_PROJECT_DIR"
     )
       base[k] = v;
@@ -221,41 +223,80 @@ describe("guard-state-file.sh — runs on binding-without-graph, fails CLOSED on
   });
 });
 
-/** A CLAUDE_PROJECT_DIR WITH an active task graph in it. */
-function projectDirWithGraph(): string {
-  const dir = tempDir();
-  mkdirSync(join(dir, ".claude", "state"), { recursive: true });
-  writeFileSync(join(dir, ".claude", "state", "active_task_graph.json"), "{}");
-  return dir;
-}
-
-describe("mark-subagent-active.sh — fails closed when authority binding cannot run", () => {
-  it("no graph → exit 0 fast path, quiet (nothing to bind)", () => {
+describe("mark-subagent-active.sh — engine-owned ENOENT-only graph decision", () => {
+  it("proven absent graph → engine passthrough, quiet, and no session files", () => {
+    const project = graphlessProjectDir();
+    const subagents = tempDir();
     const { status, stderr } = runShim(MARK, {
-      CLAUDE_PROJECT_DIR: graphlessProjectDir(),
+      CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT,
+      LOOM_STATE_PATH: join(project, "missing-task-graph.json"),
+      LOOM_SUBAGENT_DIR: subagents,
     });
     expect(stderr).toBe("");
     expect(status).toBe(0);
+    expect(readdirSync(subagents)).toEqual([]);
   });
 
-  it("graph present + CLAUDE_PLUGIN_ROOT unset → exit 2 with exact-authority diagnostic", () => {
+  it("runtime unavailable blocks even when the graph may be absent", () => {
     const { status, stderr } = runShim(MARK, {
-      CLAUDE_PROJECT_DIR: projectDirWithGraph(),
+      LOOM_STATE_PATH: join(graphlessProjectDir(), "missing-task-graph.json"),
     });
-    expect(stderr).toContain("exact SubagentStart authority cannot be bound");
+    expect(stderr).toContain("TaskGraph absence");
     expect(stderr).toContain("refusing spawn");
     expect(status).toBe(2);
   });
 
-  it("graph present + bun not found on PATH → exit 2 with exact-authority diagnostic", () => {
+  it("bun unavailable blocks before graph observation", () => {
     const { status, stderr } = runShim(MARK, {
-      CLAUDE_PROJECT_DIR: projectDirWithGraph(),
+      LOOM_STATE_PATH: join(graphlessProjectDir(), "missing-task-graph.json"),
       CLAUDE_PLUGIN_ROOT: "/tmp/fake-plugin-root",
       PATH: bunlessPath(),
     });
-    expect(stderr).toContain("exact SubagentStart authority cannot be bound");
+    expect(stderr).toContain("TaskGraph absence");
     expect(stderr).toContain("refusing spawn");
     expect(status).toBe(2);
+  });
+
+  it("ELOOP graph observation blocks", () => {
+    const loop = join(tempDir(), "task-graph-loop");
+    symlinkSync(loop, loop);
+    const { status, stderr } = runShim(MARK, {
+      CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT,
+      LOOM_STATE_PATH: loop,
+      LOOM_SUBAGENT_DIR: tempDir(),
+    });
+    expect(stderr).toMatch(/ELOOP|too many levels of symbolic links/i);
+    expect(stderr).toContain("refusing spawn");
+    expect(status).toBe(2);
+  });
+
+  it("ENOTDIR graph observation blocks", () => {
+    const parent = join(tempDir(), "not-a-directory");
+    writeFileSync(parent, "file");
+    const { status, stderr } = runShim(MARK, {
+      CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT,
+      LOOM_STATE_PATH: join(parent, "active_task_graph.json"),
+      LOOM_SUBAGENT_DIR: tempDir(),
+    });
+    expect(stderr).toMatch(/ENOTDIR|not a directory/i);
+    expect(stderr).toContain("refusing spawn");
+    expect(status).toBe(2);
+  });
+
+  it.skipIf(isRoot)("EACCES graph observation blocks", () => {
+    const parent = tempDir();
+    const graph = join(parent, "active_task_graph.json");
+    writeFileSync(graph, "{}");
+    chmodSync(parent, 0o000);
+    const result = runShim(MARK, {
+      CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT,
+      LOOM_STATE_PATH: graph,
+      LOOM_SUBAGENT_DIR: tempDir(),
+    });
+    chmodSync(parent, 0o700);
+    expect(result.stderr).toMatch(/EACCES|permission denied/i);
+    expect(result.stderr).toContain("refusing spawn");
+    expect(result.status).toBe(2);
   });
 });
 

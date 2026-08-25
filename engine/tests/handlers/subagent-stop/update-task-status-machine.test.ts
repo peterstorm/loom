@@ -14,10 +14,10 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  applyCompletionInfrastructureFailure,
   capVerdictForMachineCompletion,
   runUpdateTaskStatus,
 } from "../../../src/handlers/subagent-stop/update-task-status";
+import { applyCompletionInfrastructureFailure } from "../../../src/core/implementation-application";
 import { SUBAGENT_DIR } from "../../../src/config";
 import { parseEpoch } from "../../../src/machine";
 import type { EvidenceRecord, Requirement } from "../../../src/machine";

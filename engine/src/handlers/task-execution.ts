@@ -20,6 +20,7 @@ import {
   taskExecutionRegistrationError,
   type ExecutionBatchMode,
   type TaskExecutionRosterObservation,
+  type TaskExecutionDecision,
   type TaskExecutionSpawn,
   type ValidateTaskExecutionInput,
 } from "../core/validate-task-execution";
@@ -75,6 +76,12 @@ export type TaskExecutionRegistrationOutcome =
   | Readonly<{ kind: "block"; message: string }>;
 
 class LockedRegistrationRefusal extends Error {}
+
+function taskExecutionHookResult(
+  decision: Extract<TaskExecutionDecision, { kind: "ineligible" }>,
+): Extract<HookResult, { kind: "block" }> {
+  return { kind: "block", message: `BLOCKED: ${decision.reason}` };
+}
 
 /**
  * Typed registration operation used by Pi. The Claude Hook wrapper below keeps
@@ -135,7 +142,7 @@ export async function registerTaskExecutionBatch(
 
   for (const taskId of taskIds) {
     const decision = taskExecutionDecision(state, taskId);
-    if (decision.kind === "block") return decision;
+    if (decision.kind === "ineligible") return taskExecutionHookResult(decision);
   }
 
   const repository = repositoryContext();

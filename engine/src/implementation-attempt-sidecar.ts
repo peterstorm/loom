@@ -136,6 +136,7 @@ function publishSidecarBytes(
 ): void {
   const staged = `${leaf}.tmp-${randomUUID()}`;
   let stagedPresent = false;
+  let primaryError: unknown = null;
   try {
     writeDirectoryFileExclusiveNoFollow(anchored, staged, bytes);
     stagedPresent = true;
@@ -150,15 +151,26 @@ function publishSidecarBytes(
         throw new Error(`implementation sidecar ${leaf} already binds different bytes`);
       }
     }
-  } finally {
-    if (stagedPresent) {
-      try {
-        unlinkSync(anchoredChildPath(anchored, staged));
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
+  } catch (error) {
+    primaryError = error;
+  }
+
+  let cleanupError: unknown = null;
+  if (stagedPresent) {
+    try {
+      unlinkSync(anchoredChildPath(anchored, staged));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") cleanupError = error;
     }
   }
+  if (primaryError !== null && cleanupError !== null) {
+    throw new AggregateError(
+      [primaryError, cleanupError],
+      `implementation sidecar ${leaf} publication and temporary-file cleanup both failed`,
+    );
+  }
+  if (primaryError !== null) throw primaryError;
+  if (cleanupError !== null) throw cleanupError;
 }
 
 export function publishImplementationAttemptSidecar(args: Readonly<{

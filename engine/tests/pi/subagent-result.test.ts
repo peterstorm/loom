@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import type { TaskGraph } from "../../src/types";
 import { derivePendingTaskProof, evaluateTaskProof } from "../../src/core/proof-obligations";
-import { applyCompletionInfrastructureFailure } from "../../src/handlers/subagent-stop/update-task-status";
+import { applyCompletionInfrastructureFailure } from "../../src/core/implementation-application";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { createImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import { taskVerificationPolicy } from "../../src/core/verification-policy";

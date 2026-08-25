@@ -94,6 +94,15 @@ const start = (s: string, agentId = "a-1", agentType = "loom:code-implementer-ag
 };
 
 describe("mark-subagent-active — roster failure is contained, never silent", () => {
+  it("blocks malformed hook input while a TaskGraph is active", async () => {
+    process.env.LOOM_STATE_PATH = statePath;
+
+    const result = await markActive("{not-json", []);
+
+    expect(result).toMatchObject({ kind: "block" });
+    if (result.kind === "block") expect(result.message).toContain("malformed SubagentStart input");
+  });
+
   it("roster write failure blocks and rolls back every modern capability", async () => {
     const s = session("fail");
     process.env.LOOM_STATE_PATH = statePath;
@@ -212,18 +221,16 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
     expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(true);
   });
 
-  it("an unparseable (traversal) session_id refuses ALL session-file writes, loudly", async () => {
+  it("an unparseable (traversal) session_id blocks and refuses all session-file writes", async () => {
     process.env.LOOM_STATE_PATH = statePath;
     const evil = "../mark-active-escape";
-    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    try {
-      const result = await markActive(start(evil), []);
-      expect(result.kind).toBe("passthrough");
-      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
-      expect(text).toContain("invalid session_id");
-      expect(text).toContain("task_graph pointer not written");
-    } finally {
-      stderrSpy.mockRestore();
+
+    const result = await markActive(start(evil), []);
+
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") {
+      expect(result.message).toContain("invalid session_id");
+      expect(result.message).toContain("exact authority cannot be bound");
     }
     // The traversal path was never created — neither inside nor above the dir.
     expect(existsSync(join(SUBAGENT_DIR, `${evil}.task_graph`))).toBe(false);
