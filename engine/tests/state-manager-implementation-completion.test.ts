@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import {
   TASK_BYTE_SCOPE_CHECK_ID_TEXT,
   createImplementationAttemptAuthority,
@@ -6,6 +6,7 @@ import {
   parseImplementationObservation,
   settleImplementationAttempt,
   type ImplementationAttemptAuthority,
+  type TaskId,
 } from "../src/core/implementation-completion";
 import {
   TRUSTED_LEDGER_ONLY_POLICY,
@@ -119,6 +120,7 @@ describe("Task lifecycle migration", () => {
     const parsed = parseTaskGraph(graph(baseTask()));
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
+    expectTypeOf(parsed.value.tasks[0]!.id).toEqualTypeOf<TaskId>();
     expect(parsed.value.tasks[0]?.status).toBe("pending");
     expect(parsed.value.tasks[0]?.proof?.state).toBe("pending");
     expect(Object.isFrozen(parsed.value.tasks[0]?.proof)).toBe(true);
@@ -309,11 +311,13 @@ describe("Task attempt authority StateManager lockstep", () => {
     expect(parseTaskGraph(JSON.parse(JSON.stringify(parsed.value))).ok).toBe(true);
   });
 
-  it("retires stale legacy classifications, preserves unknown legacy reservations, and rejects duplicate receipts", () => {
+  it("retires stale legacy classifications, rejects orphan reservations with repair guidance, and rejects duplicate receipts", () => {
     const staleMarker = parseTaskGraph(graph({ ...baseTask(), legacy_execution_reservation: true }));
     expect(staleMarker.ok).toBe(true);
     if (staleMarker.ok) expect(staleMarker.value.tasks[0]?.legacy_execution_reservation).toBeUndefined();
-    expect(parseTaskGraph(graph(baseTask(), { executing_tasks: ["T99"] })).ok).toBe(true);
+    expect(errorOf(graph(baseTask(), { executing_tasks: ["T99"] }))).toContain(
+      "orphan execution reservation T99",
+    );
     const active = authority();
     const receipt = receiptFor(active);
     expect(errorOf(graph({
@@ -321,5 +325,32 @@ describe("Task attempt authority StateManager lockstep", () => {
       proof: pendingProof(),
       implementation_attempt_history: [receipt, receipt],
     }))).toContain("duplicate receipt IDs");
+  });
+
+  it("parser-enforces persistent repository carry and migrates active legacy authority safely", () => {
+    const active = authority("carry-parser");
+    const activeTask = {
+      ...baseTask(),
+      proof: pendingProof(),
+      active_implementation_attempt: active,
+      attempt_artifact_baseline: attemptBaseline,
+      attempt_repository_baseline: repositoryBaseline,
+      reserved_at: active.reservedAt,
+    };
+    const migrated = parseTaskGraph(graph(activeTask, { executing_tasks: ["T1"] }));
+    expect(migrated.ok).toBe(true);
+    if (migrated.ok) expect(migrated.value.tasks[0]?.repository_baseline).toEqual(repositoryBaseline);
+
+    expect(errorOf(graph({
+      ...baseTask(),
+      proof: pendingProof(),
+      repository_baseline: repositoryBaseline,
+      unresolved_repository_paths: ["foreign.ts", "foreign.ts"],
+    }))).toContain("unresolved_repository_paths");
+    expect(errorOf(graph({
+      ...baseTask(),
+      proof: pendingProof(),
+      unresolved_repository_paths: ["foreign.ts"],
+    }))).toContain("requires repository_baseline");
   });
 });

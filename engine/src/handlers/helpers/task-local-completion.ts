@@ -33,6 +33,7 @@ export type TaskLocalCompletionArgs = Readonly<{
   authority: ImplementationAttemptAuthority;
   parserModifiedPaths: readonly string[];
   parserPathLabel: string;
+  siblingOwnedPaths: readonly string[];
 }>;
 
 type RequiredTaskBaselines = Readonly<{
@@ -99,6 +100,11 @@ function observeAvailableTaskScope(
       args.task.files_modified ?? [],
       `${args.task.id}.files_modified`,
     );
+    const siblingOwnedPaths = canonicalRepositoryPaths(
+      args.repositoryRoot,
+      args.siblingOwnedPaths,
+      `${args.task.id} current-Wave sibling-owned paths`,
+    );
     const currentAttemptScope = captureDeclaredArtifactBaseline(
       args.repositoryRoot,
       baselines.attempt.map(({ artifact }) => artifact),
@@ -107,10 +113,10 @@ function observeAvailableTaskScope(
       args.repositoryRoot,
       baselines.proof.map(({ artifact }) => artifact),
     );
-    const repositoryDirtySetChanged = changedRepositoryArtifactsSince(
+    const repositoryChangedPaths = changedRepositoryArtifactsSince(
       args.repositoryRoot,
       baselines.repository,
-    ).length > 0;
+    );
     observed = buildTaskLocalByteObservation({
       authority: args.authority,
       attemptBaseline: baselines.attempt,
@@ -119,7 +125,8 @@ function observeAvailableTaskScope(
       currentProofScope,
       parserModifiedPaths,
       priorAttributedPaths,
-      repositoryDirtySetChanged,
+      repositoryChangedPaths,
+      siblingOwnedPaths,
     });
   } catch (error) {
     observationFailure = error;
@@ -189,6 +196,32 @@ export type FilePresenceResult =
   | Readonly<{ ok: true; exists: boolean }>
   | Readonly<{ ok: false; error: string }>;
 
+export type NewTestObservationError =
+  | Readonly<{
+      kind: "git-observation-failed";
+      operation: "is-tracked" | "diff-since" | "diff-worktree" | "diff-index" | "diff-untracked";
+      message: string;
+    }>
+  | Readonly<{
+      kind: "filesystem-observation-failed";
+      operation: "inspect-file";
+      path: string;
+      message: string;
+    }>;
+
+export type NewTestObservationResult<T> =
+  | Readonly<{ ok: true; value: T }>
+  | Readonly<{ ok: false; error: NewTestObservationError }>;
+
+const observationOk = <T>(value: T): NewTestObservationResult<T> => Object.freeze({ ok: true, value });
+const observationError = <T>(error: NewTestObservationError): NewTestObservationResult<T> =>
+  Object.freeze({ ok: false, error });
+
+export function describeNewTestObservationError(error: NewTestObservationError): string {
+  const path = error.kind === "filesystem-observation-failed" ? ` ${error.path}` : "";
+  return `${error.operation}${path}: ${error.message}`;
+}
+
 /** Narrow injectable filesystem/Git shell used by focused tests. */
 export type DiffDeps = Readonly<{
   isTracked: (file: string) => git.GitTrackedResult;
@@ -224,32 +257,49 @@ export function collectDiff(
   filesModified: readonly string[],
   deps: DiffDeps = REAL_DIFF_DEPS,
   startSha?: string,
-): string {
-  if (filesModified.length === 0) return "";
-  const classified = filesModified.map((file) => {
+): NewTestObservationResult<string> {
+  if (filesModified.length === 0) return observationOk("");
+  const classified: Array<{ file: string; tracked: boolean }> = [];
+  for (const file of filesModified) {
     const result = deps.isTracked(file);
-    if (!result.ok) throw new Error(`new-test diff authority unavailable: ${result.error}`);
-    return { file, tracked: result.tracked };
-  });
+    if (!result.ok) {
+      return observationError({ kind: "git-observation-failed", operation: "is-tracked", message: result.error });
+    }
+    classified.push({ file, tracked: result.tracked });
+  }
   const tracked = classified.flatMap(({ file, tracked: isTracked }) => isTracked ? [file] : []);
-  const untracked = classified.flatMap(({ file, tracked: isTracked }) => {
-    if (isTracked) return [];
+  const untracked: string[] = [];
+  for (const { file, tracked: isTracked } of classified) {
+    if (isTracked) continue;
     const presence = deps.inspectFilePresence(file);
     if (!presence.ok) {
-      throw new Error(`new-test diff authority unavailable: cannot inspect ${file}: ${presence.error}`);
+      return observationError({
+        kind: "filesystem-observation-failed",
+        operation: "inspect-file",
+        path: file,
+        message: presence.error,
+      });
     }
-    return presence.exists ? [file] : [];
-  });
+    if (presence.exists) untracked.push(file);
+  }
   const diffs = [
-    startSha === undefined ? { ok: true as const, diff: "" } : deps.diffFilesSince(startSha, tracked),
-    deps.diffFiles(tracked),
-    deps.diffFilesStaged(tracked),
-    ...untracked.map((file) => deps.diffUntracked(file)),
+    {
+      operation: "diff-since" as const,
+      result: startSha === undefined ? { ok: true as const, diff: "" } : deps.diffFilesSince(startSha, tracked),
+    },
+    { operation: "diff-worktree" as const, result: deps.diffFiles(tracked) },
+    { operation: "diff-index" as const, result: deps.diffFilesStaged(tracked) },
+    ...untracked.map((file) => ({ operation: "diff-untracked" as const, result: deps.diffUntracked(file) })),
   ];
-  return diffs.map((result) => {
-    if (!result.ok) throw new Error(`new-test diff authority unavailable: ${result.error}`);
-    return result.diff;
-  }).join("\n");
+  const failed = diffs.find(({ result }) => !result.ok);
+  if (failed !== undefined && !failed.result.ok) {
+    return observationError({
+      kind: "git-observation-failed",
+      operation: failed.operation,
+      message: failed.result.error,
+    });
+  }
+  return observationOk(diffs.map(({ result }) => result.ok ? result.diff : "").join("\n"));
 }
 
 /** Shared Claude/Pi shell operation; waiver arms avoid unnecessary Git I/O. */
@@ -258,7 +308,11 @@ export function collectNewTestEvidence(
   requirement: NewTestRequirement,
   startSha?: string,
   deps: DiffDeps = REAL_DIFF_DEPS,
-): NewTestEvidence {
-  return waivedNewTestEvidence(requirement) ??
-    analyzeNewTests(collectDiff(filesModified, deps, startSha), requirement);
+): NewTestObservationResult<NewTestEvidence> {
+  const waiver = waivedNewTestEvidence(requirement);
+  if (waiver !== null) return observationOk(waiver);
+  const observed = collectDiff(filesModified, deps, startSha);
+  return observed.ok
+    ? observationOk(analyzeNewTests(observed.value, requirement))
+    : observed;
 }

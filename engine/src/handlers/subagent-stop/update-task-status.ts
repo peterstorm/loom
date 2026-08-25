@@ -60,7 +60,10 @@ import {
   type ImplementationSettlementApplicationResult,
   type NewTestEvidence,
 } from "../../core/implementation-application";
-import { collectNewTestEvidence } from "../helpers/task-local-completion";
+import {
+  collectNewTestEvidence,
+  describeNewTestObservationError,
+} from "../helpers/task-local-completion";
 import {
   productionExactSettlementPorts,
   settleExactImplementation,
@@ -303,7 +306,7 @@ export const runUpdateTaskStatus = async (
 
   // Modern identity comes only from the snapshotted sidecar. Transcript and
   // sole-executing inference remain compatibility-only for legacy graphs.
-  let taskId = authority?.taskId ?? extractTaskId(transcript);
+  let taskId: string | null = authority?.taskId ?? extractTaskId(transcript);
 
   // When transcript parse fails, try to infer task ID from executing_tasks.
   // If exactly one task is executing, it's unambiguous.
@@ -571,18 +574,17 @@ export const runUpdateTaskStatus = async (
     }
     const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, filesModified);
     const verificationPolicy = taskVerificationPolicy(target);
-    let currentNewTestEvidence: NewTestEvidence;
-    try {
-      currentNewTestEvidence = collectNewTestEvidence(
-        cumulativeFiles,
-        verificationPolicy.newTests,
-        target.start_sha,
-      );
-    } catch (error) {
-      const cause = error instanceof Error ? error.message : String(error);
-      newTestEvidenceFailure = `update-task-status: cannot collect new-test evidence for ${taskId}: ${cause}`;
+    const newTestObservation = collectNewTestEvidence(
+      cumulativeFiles,
+      verificationPolicy.newTests,
+      target.start_sha,
+    );
+    if (!newTestObservation.ok) {
+      newTestEvidenceFailure = `update-task-status: cannot collect new-test evidence for ${taskId}: ` +
+        describeNewTestObservationError(newTestObservation.error);
       return applyCompletionInfrastructureFailure(s, taskId, comparison.bytesChangedSinceAttempt);
     }
+    const currentNewTestEvidence: NewTestEvidence = newTestObservation.value;
     const applied = applyUntrustedStopResolution(s, taskId, {
       taskCompleted: true,
       testResult: testEvidence.result,

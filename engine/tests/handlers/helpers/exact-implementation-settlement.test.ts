@@ -101,16 +101,60 @@ function ports(
         currentProofScope: [],
         parserModifiedPaths: [],
         priorAttributedPaths: [],
-        repositoryDirtySetChanged: false,
+        repositoryChangedPaths: [],
+        siblingOwnedPaths: [],
       }),
     },
-    newTests: { collect: () => newTests },
+    newTests: { collect: () => ({ ok: true, value: newTests }) },
   };
 }
 
 const TRANSPORTS = ["Claude", "Pi"] as const;
 
 describe("shared exact implementation settlement shell", () => {
+  it("derives canonical current-Wave sibling ownership from locked declared and modified paths", () => {
+    const attempt = authority("sibling-ownership");
+    const initial = graph(attempt);
+    const sibling = taskFixture({
+      id: "T2",
+      description: "parallel sibling",
+      agent: "code-implementer-agent",
+      wave: 1,
+      status: "pending",
+      depends_on: [],
+      file_list: ["src/../sibling.ts"],
+      files_modified: ["other.ts"],
+    });
+    let observedSiblingPaths: readonly string[] = [];
+    const observingPorts: ExactImplementationSettlementPorts = {
+      ...ports(attempt),
+      repository: {
+        root: "/fixture",
+        observeTaskLocal: (args) => {
+          observedSiblingPaths = args.siblingOwnedPaths;
+          return buildTaskLocalByteObservation({
+            authority: attempt,
+            attemptBaseline: [],
+            currentAttemptScope: [],
+            proofBaseline: [],
+            currentProofScope: [],
+            parserModifiedPaths: [],
+            priorAttributedPaths: [],
+            repositoryChangedPaths: ["sibling.ts", "other.ts"],
+            siblingOwnedPaths: args.siblingOwnedPaths,
+          });
+        },
+      },
+    };
+    const settled = settleExactImplementation(
+      { ...initial, tasks: [...initial.tasks, sibling] },
+      facts("Claude", attempt),
+      observingPorts,
+    );
+    expect(observedSiblingPaths).toEqual(["other.ts", "sibling.ts"]);
+    expect(settled.application).toMatchObject({ kind: "applied", transition: { kind: "implemented" } });
+  });
+
   it.each(TRANSPORTS)("settles accepted %s facts through the same operation", (transport) => {
     const attempt = authority(`accepted-${transport}`);
     const settled = settleExactImplementation(graph(attempt), facts(transport, attempt), ports(attempt));
@@ -157,15 +201,29 @@ describe("shared exact implementation settlement shell", () => {
     expect(duplicate.application).toMatchObject({ kind: "ignored", reason: "duplicate" });
   });
 
-  it.each(TRANSPORTS)("settles unavailable %s new-test collection as infrastructure", (transport) => {
+  it.each(TRANSPORTS)("settles typed unavailable %s new-test observations as infrastructure", (transport) => {
     const attempt = authority(`new-test-unavailable-${transport}`);
     const failingPorts: ExactImplementationSettlementPorts = {
       ...ports(attempt),
-      newTests: { collect: () => { throw new Error("index unreadable"); } },
+      newTests: { collect: () => ({
+        ok: false,
+        error: { kind: "git-observation-failed", operation: "diff-worktree", message: "index unreadable" },
+      }) },
     };
     const settled = settleExactImplementation(graph(attempt), facts(transport, attempt), failingPorts);
     expect(settled.application).toMatchObject({ kind: "applied", transition: { kind: "infrastructure-blocked" } });
     expect(settled.infrastructureReason).toContain(`${transport} new-test observation unavailable`);
+    expect(settled.infrastructureReason).toContain("index unreadable");
+  });
+
+  it.each(TRANSPORTS)("does not downgrade unexpected %s new-test collector defects", (transport) => {
+    const attempt = authority(`new-test-defect-${transport}`);
+    const defectPorts: ExactImplementationSettlementPorts = {
+      ...ports(attempt),
+      newTests: { collect: () => { throw new TypeError("collector invariant broke"); } },
+    };
+    expect(() => settleExactImplementation(graph(attempt), facts(transport, attempt), defectPorts))
+      .toThrowError(TypeError);
   });
 
   it("preserves Pi structured provenance rather than flattening it to ledger trust", () => {

@@ -8,6 +8,7 @@ import { hasStandaloneReviewContext } from "./review-output";
 import { waveBlockCauses } from "./wave-gate-model";
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
 import {
+  canonicalArtifactBaselineDigest,
   createImplementationAttemptAuthority,
   createReclaimedImplementationAttemptReceipt,
   type ImplementationAttemptAuthority,
@@ -195,9 +196,9 @@ export function staleReservationsFromState(
   return new Set(
     reserved.filter((taskId) => {
       const task = state.tasks.find((candidate) => candidate.id === taskId);
-      // A reservation naming no task at all can never be cleared by a stop
-      // hook, so it is unconditionally abandoned.
-      if (task === undefined) return true;
+      // Parsed TaskGraph authority guarantees this lookup. A fabricated or
+      // pre-parse orphan is not migration authority and therefore stays closed.
+      if (task === undefined) return false;
       if (task.status === "completed") return false;
       const reservedAt = task.reserved_at === undefined ? Number.NaN : Date.parse(task.reserved_at);
       if (Number.isNaN(reservedAt)) return true; // legacy / corrupt timestamp → eligible
@@ -211,7 +212,7 @@ export function staleReservationsFromState(
  *
  * Registration-time probes retain the established recovery policy. Pi's
  * pre-roster observation admits only timestamped current-protocol reservations;
- * missing tasks and missing/unparseable timestamps remain untouched rather than
+ * missing/unparseable timestamps remain untouched rather than
  * becoming eligible merely because Pi changed when it sampled its own roster.
  */
 export function staleReservationsForRosterObservation(
@@ -375,20 +376,19 @@ export function createTaskExecutionAuthorityBatch(
 
 export type ProvenStaleReservation =
   | Readonly<{ kind: "modern"; taskId: string; authority: ImplementationAttemptAuthority }>
-  | Readonly<{ kind: "legacy"; taskId: string }>
-  | Readonly<{ kind: "orphan"; taskId: string }>;
+  | Readonly<{ kind: "legacy"; taskId: string }>;
 
 /** Lift Task-id staleness into the exact reservation identities held now. */
 export function proveStaleReservations(
   state: TaskGraph,
   staleTaskIds: ReadonlySet<string>,
 ): readonly ProvenStaleReservation[] {
-  return Object.freeze([...staleTaskIds].map((taskId): ProvenStaleReservation => {
+  return Object.freeze([...staleTaskIds].flatMap((taskId): readonly ProvenStaleReservation[] => {
     const task = state.tasks.find((candidate) => candidate.id === taskId);
-    if (task === undefined) return Object.freeze({ kind: "orphan", taskId });
-    return task.active_implementation_attempt === undefined
-      ? Object.freeze({ kind: "legacy", taskId })
-      : Object.freeze({ kind: "modern", taskId, authority: task.active_implementation_attempt });
+    if (task === undefined) return [];
+    return [task.active_implementation_attempt === undefined
+      ? Object.freeze({ kind: "legacy" as const, taskId })
+      : Object.freeze({ kind: "modern" as const, taskId, authority: task.active_implementation_attempt })];
   }));
 }
 
@@ -398,7 +398,6 @@ function exactStaleTaskIds(
 ): ReadonlySet<string> {
   return new Set(stale.flatMap((proof) => {
     const task = state.tasks.find((candidate) => candidate.id === proof.taskId);
-    if (proof.kind === "orphan") return task === undefined ? [proof.taskId] : [];
     if (proof.kind === "legacy") {
       return task !== undefined && task.active_implementation_attempt === undefined ? [proof.taskId] : [];
     }
@@ -532,6 +531,13 @@ export function taskExecutionRegistrationError(
         !samePaths(attemptScope, baseline.attempt.map(({ artifact }) => artifact))) {
       return `Task ${taskId} artifact scope changed before execution registration.`;
     }
+    if (task.repository_baseline !== undefined) {
+      const retained = canonicalArtifactBaselineDigest(task.repository_baseline);
+      const planned = canonicalArtifactBaselineDigest(baseline.repositoryAttempt);
+      if (!retained.ok || !planned.ok || retained.value !== planned.value) {
+        return `Task ${taskId} retained repository baseline changed before execution registration.`;
+      }
+    }
     if (authorityPlans !== undefined) {
       const plan = authorityPlans.find((candidate) => candidate.taskId === taskId);
       if (plan === undefined || plan.authority.taskId !== taskId || plan.authority.wave !== task.wave ||
@@ -561,6 +567,7 @@ export function registerTaskExecutionBaseline(
     start_sha: task.start_sha ?? sha,
     artifact_baseline: task.artifact_baseline ?? proofBaseline,
     attempt_artifact_baseline: attemptBaseline,
-    attempt_repository_baseline: repositoryAttemptBaseline,
+    attempt_repository_baseline: task.repository_baseline ?? repositoryAttemptBaseline,
+    repository_baseline: task.repository_baseline ?? repositoryAttemptBaseline,
   };
 }

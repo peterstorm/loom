@@ -51,6 +51,7 @@ function repository() {
     artifact_baseline: attemptBaseline,
     attempt_artifact_baseline: attemptBaseline,
     attempt_repository_baseline: repositoryBaseline,
+    repository_baseline: repositoryBaseline,
     active_implementation_attempt: created.value,
     reserved_at: created.value.reservedAt,
   });
@@ -71,6 +72,7 @@ describe("Task-local completion observation shell", () => {
       authority: fixture.authority,
       parserModifiedPaths: [join(fixture.root, "src/a.ts")],
       parserPathLabel: "test transcript paths",
+      siblingOwnedPaths: [],
     });
     expect(observed.suite.checks[0]?.outcome).toEqual({
       kind: "accepted",
@@ -87,6 +89,7 @@ describe("Task-local completion observation shell", () => {
       authority: fixture.authority,
       parserModifiedPaths: ["sibling.ts"],
       parserPathLabel: "test transcript paths",
+      siblingOwnedPaths: [],
     });
     expect(observed.suite.checks[0]?.outcome).toEqual({
       kind: "out-of-scope-writes",
@@ -94,7 +97,7 @@ describe("Task-local completion observation shell", () => {
     });
   });
 
-  it("uses uncommitted sibling dirty-set movement only as invalidation evidence", () => {
+  it("does not conflate uncommitted sibling movement with Task invalidation", () => {
     const fixture = repository();
     writeFileSync(join(fixture.root, "sibling.ts"), "export const sibling = 2;\n");
     const observed = observeTaskLocalCompletion({
@@ -103,11 +106,42 @@ describe("Task-local completion observation shell", () => {
       authority: fixture.authority,
       parserModifiedPaths: [],
       parserPathLabel: "test transcript paths",
+      siblingOwnedPaths: ["sibling.ts"],
     });
     expect(observed.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
     expect(observed.cumulativeProofArtifactChanges).toEqual([]);
     expect(observed.taskBytesChangedOrUnobservable).toBe(false);
-    expect(observed.invalidationBytesChanged).toBe(true);
+    expect(observed.invalidationBytesChanged).toBe(false);
+  });
+
+  it("blocks on an unowned foreign delta until its bytes return to the retained baseline", () => {
+    const fixture = repository();
+    const carriedTask = taskFixture({ ...fixture.task, unresolved_repository_paths: ["sibling.ts"] });
+    writeFileSync(join(fixture.root, "sibling.ts"), "export const sibling = 2;\n");
+    const persistent = observeTaskLocalCompletion({
+      repositoryRoot: fixture.root,
+      task: carriedTask,
+      authority: fixture.authority,
+      parserModifiedPaths: [],
+      parserPathLabel: "retry transcript paths",
+      siblingOwnedPaths: [],
+    });
+    expect(persistent.suite.checks[0]?.outcome).toEqual({
+      kind: "out-of-scope-writes",
+      paths: ["sibling.ts"],
+    });
+
+    writeFileSync(join(fixture.root, "sibling.ts"), "export const sibling = 1;\n");
+    const repaired = observeTaskLocalCompletion({
+      repositoryRoot: fixture.root,
+      task: carriedTask,
+      authority: fixture.authority,
+      parserModifiedPaths: [],
+      parserPathLabel: "retry transcript paths",
+      siblingOwnedPaths: [],
+    });
+    expect(repaired.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+    expect(repaired.unresolvedRepositoryPaths).toEqual([]);
   });
 
   it("makes the Task suite unavailable when a foreign path is committed after attempt registration", () => {
@@ -122,6 +156,7 @@ describe("Task-local completion observation shell", () => {
       authority: fixture.authority,
       parserModifiedPaths: [],
       parserPathLabel: "test transcript paths",
+      siblingOwnedPaths: [],
     });
 
     expect(observed.suite.checks[0]?.outcome).toMatchObject({
@@ -145,6 +180,7 @@ describe("Task-local completion observation shell", () => {
       authority: fixture.authority,
       parserModifiedPaths: [],
       parserPathLabel: "test transcript paths",
+      siblingOwnedPaths: [],
     }, {
       observeHead: () => observedHeads.shift() ?? { ok: false, error: "unexpected extra HEAD read" },
     });
@@ -162,6 +198,7 @@ describe("Task-local completion observation shell", () => {
       authority: fixture.authority,
       parserModifiedPaths: [],
       parserPathLabel: "test transcript paths",
+      siblingOwnedPaths: [],
     }, { observeHead: () => ({ ok: false, error: "git object database unreadable" }) });
     expect(observed.suite.checks[0]?.outcome).toMatchObject({
       kind: "observation-unavailable",
@@ -181,6 +218,7 @@ describe("Task-local completion observation shell", () => {
       authority: fixture.authority,
       parserModifiedPaths: mutation === null ? ["../escape.ts"] : [],
       parserPathLabel: "test transcript paths",
+      siblingOwnedPaths: [],
     });
     expect(observed.suite.checks[0]?.outcome).toMatchObject({ kind: "observation-unavailable" });
     expect(observed.taskBytesChangedOrUnobservable).toBe(true);

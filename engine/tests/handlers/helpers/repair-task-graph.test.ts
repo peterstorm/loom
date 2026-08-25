@@ -133,6 +133,20 @@ describe("prepareTaskGraphRepair", () => {
     },
   );
 
+  it("removes corrupt orphan reservations explicitly and produces a loadable graph", () => {
+    const orphaned = { ...graph(), executing_tasks: ["T404"] };
+    expect(parseTaskGraph(orphaned).ok).toBe(false);
+
+    const prepared = repair(orphaned);
+
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) return;
+    expect(prepared.state.executing_tasks).toEqual([]);
+    expect(prepared.notes).toContain(
+      "removed orphan execution reservation T404; no Task with that id exists",
+    );
+  });
+
   it("refuses a fixFull repair that would discard finding data", () => {
     const prepared = repair(graph({
       findings: [{ severity: "critical" }],

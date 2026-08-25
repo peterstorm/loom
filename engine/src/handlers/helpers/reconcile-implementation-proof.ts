@@ -31,7 +31,10 @@ import {
   parseNewTestEvidence,
   type NewTestEvidence,
 } from "../../core/implementation-application";
-import { collectNewTestEvidence } from "./task-local-completion";
+import {
+  collectNewTestEvidence,
+  describeNewTestObservationError,
+} from "./task-local-completion";
 import { parseWaveArg } from "./wave-args";
 import { isExactGitSha } from "../../core/git-sha";
 import { taskVerificationPolicy } from "../../core/verification-policy";
@@ -399,10 +402,16 @@ const handler: HookHandler = async (_stdin, args) => {
           taskVerificationPolicy(sourceTask).newTests,
           sourceTask.start_sha,
         );
+        if (!collectedNewTests.ok) {
+          throw new Error(
+            `cannot collect new-test evidence for ${sourceTask.id}: ` +
+            describeNewTestObservationError(collectedNewTests.error),
+          );
+        }
         return reconcileTaskFromStoredEvidence(
           sourceTask,
           proofArtifactsChanged,
-          collectedNewTests,
+          collectedNewTests.value,
           recoveredBaselineSha !== null && recoveredPaths.length > 0,
         );
       });

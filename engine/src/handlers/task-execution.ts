@@ -176,7 +176,7 @@ export async function registerTaskExecutionBatch(
       baselines.set(taskId, {
         proof: captureDeclaredArtifactBaseline(repository.root, declared),
         attempt: captureDeclaredArtifactBaseline(repository.root, attemptScope),
-        repositoryAttempt,
+        repositoryAttempt: task.repository_baseline ?? repositoryAttempt,
       });
     } catch (error) {
       return {

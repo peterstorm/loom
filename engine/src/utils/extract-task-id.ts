@@ -1,9 +1,8 @@
 /**
- * Extract task ID from prompt text with flexible pattern matching
- * Port of helpers/extract-task-id.sh
+ * Extract a canonical Task ID from legacy prompt phrasings.
  */
 
-import { parseTaskId } from "../core/task-id";
+import { parseTaskId, type TaskId } from "../core/task-id";
 
 const PATTERNS: Array<{ re: RegExp; extract: (m: RegExpMatchArray) => string | undefined }> = [
   // 1. **Task ID:** T1
@@ -22,7 +21,7 @@ const PATTERNS: Array<{ re: RegExp; extract: (m: RegExpMatchArray) => string | u
   { re: /\b(T\d+)\b/, extract: (m) => m[1] },
 ];
 
-export function extractTaskId(prompt: string): string | null {
+export function extractTaskId(prompt: string): TaskId | null {
   for (const { re, extract } of PATTERNS) {
     const match = prompt.match(re);
     if (match === null) continue;

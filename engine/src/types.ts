@@ -454,6 +454,13 @@ export interface TaskCommonMetadata {
   readonly active_implementation_attempt?: ImplementationAttemptAuthority;
   readonly attempt_artifact_baseline?: readonly DeclaredArtifactBaseline[];
   readonly attempt_repository_baseline?: readonly DeclaredArtifactBaseline[];
+  /** First repository boundary retained until an exact attempt is accepted.
+   * Fresh attempts bind to this boundary instead of snapshotting unresolved
+   * foreign bytes as their new starting state. */
+  readonly repository_baseline?: readonly DeclaredArtifactBaseline[];
+  /** Parser-attributed out-of-scope paths still different from the retained
+   * repository boundary. Sibling dirty paths never enter this set. */
+  readonly unresolved_repository_paths?: readonly string[];
   readonly reserved_at?: string;
   readonly legacy_execution_reservation?: true;
   /** Engine-issued packet authority retained after a review run closes. A

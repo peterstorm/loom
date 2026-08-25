@@ -9,9 +9,8 @@ import { accessSync, constants as fsConstants } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PHASES, type Phase } from "./types";
-// Panel SIZE policy is derived from the lens tables that enforce it, not
-// restated. core/panel-contract depends only on core/panel-kernel, which
-// depends on nothing in src — so this import adds no cycle.
+// Panel SIZE policy is derived from the pure panel-contract lens tables, not
+// restated here. Its pure-core dependencies add no cycle back to config.
 import { PANEL_BASELINE_LENSES, PANEL_LENSES } from "./core/panel-contract";
 // The Agent Catalog is the single identity source for every Loom-owned agent
 // (kind, profile, required Skill). model-profiles is a pure leaf module — this

@@ -39,7 +39,9 @@ export type TaskLocalByteObservation = Readonly<{
   cumulativeProofArtifactChanges: readonly ReviewPath[];
   /** Task-scope bytes changed, or exact observation was unavailable. */
   taskBytesChangedOrUnobservable: boolean;
-  /** Dirty-set delta is conservative invalidation evidence only. */
+  /** Unowned foreign paths still different from the retained repository boundary. */
+  unresolvedRepositoryPaths: readonly ReviewPath[];
+  /** Only Task-local bytes or unresolved unowned foreign bytes invalidate. */
   invalidationBytesChanged: boolean;
 }>;
 
@@ -51,7 +53,8 @@ export type TaskLocalObservationInput = Readonly<{
   currentProofScope: unknown;
   parserModifiedPaths: readonly unknown[];
   priorAttributedPaths: readonly unknown[];
-  repositoryDirtySetChanged: boolean;
+  repositoryChangedPaths: readonly unknown[];
+  siblingOwnedPaths: readonly unknown[];
 }>;
 
 function parsePaths(raw: readonly unknown[], path: string):
@@ -106,8 +109,9 @@ function unavailableReason(errors: readonly string[]): string {
 
 /**
  * Build the one engine-owned Task suite from already-observed snapshots.
- * Repository dirty-set movement is deliberately excluded from attribution and
- * suite scope; it can only force conservative review/spec/Wave invalidation.
+ * Repository movement is classified against locked Wave ownership. It never
+ * grants attribution: allowed paths stay Task-local, sibling paths are inert,
+ * and every remaining changed path is semantic out-of-scope evidence.
  */
 export function buildTaskLocalByteObservation(
   input: TaskLocalObservationInput,
@@ -124,13 +128,18 @@ export function buildTaskLocalByteObservation(
   );
   const parserPaths = parsePaths(input.parserModifiedPaths, "parserModifiedPaths");
   const priorPaths = parsePaths(input.priorAttributedPaths, "priorAttributedPaths");
+  const repositoryPaths = parsePaths(input.repositoryChangedPaths, "repositoryChangedPaths");
+  const siblingPaths = parsePaths(input.siblingOwnedPaths, "siblingOwnedPaths");
   const errors = [
     ...(attempt.ok ? [] : attempt.errors),
     ...(proof.ok ? [] : proof.errors),
     ...(parserPaths.ok ? [] : parserPaths.errors),
     ...(priorPaths.ok ? [] : priorPaths.errors),
+    ...(repositoryPaths.ok ? [] : repositoryPaths.errors),
+    ...(siblingPaths.ok ? [] : siblingPaths.errors),
   ];
-  if (errors.length > 0 || !attempt.ok || !proof.ok || !parserPaths.ok || !priorPaths.ok) {
+  if (errors.length > 0 || !attempt.ok || !proof.ok || !parserPaths.ok || !priorPaths.ok ||
+      !repositoryPaths.ok || !siblingPaths.ok) {
     const reason = unavailableReason(errors);
     const suite = createTaskCompletionSuiteResult(input.authority, {
       kind: "observation-unavailable",
@@ -143,12 +152,22 @@ export function buildTaskLocalByteObservation(
       cumulativeModifiedPaths: priorPaths.ok ? priorPaths.value : frozenArray([]),
       cumulativeProofArtifactChanges: frozenArray([]),
       taskBytesChangedOrUnobservable: true,
+      unresolvedRepositoryPaths: frozenArray([]),
       invalidationBytesChanged: true,
     });
   }
 
   const allowed = new Set(attempt.baseline.map(({ artifact }) => artifact));
-  const outside = parserPaths.value.filter((path) => !allowed.has(path));
+  const siblings = new Set(siblingPaths.value);
+  // Parser authority is strict independently of repository ownership: a raw
+  // transcript path outside this Task's registered scope always fails.
+  const rawOutside = parserPaths.value.filter((path) => !allowed.has(path));
+  const unresolvedRepositoryPaths = frozenArray(repositoryPaths.value.filter((path) =>
+    !allowed.has(path) && !siblings.has(path)
+  ));
+  const outside = frozenArray(
+    [...new Set([...rawOutside, ...unresolvedRepositoryPaths])].sort(compareStrings),
+  );
   const insideParserPaths = parserPaths.value.filter((path) => allowed.has(path));
   const changedAttempt = new Set(attempt.changed);
   const attributedAttempt = insideParserPaths.filter((path) => changedAttempt.has(path));
@@ -169,7 +188,8 @@ export function buildTaskLocalByteObservation(
     cumulativeModifiedPaths: cumulative,
     cumulativeProofArtifactChanges: frozenArray(proofChanges),
     taskBytesChangedOrUnobservable: attempt.changed.length > 0,
-    invalidationBytesChanged: attempt.changed.length > 0 || input.repositoryDirtySetChanged,
+    unresolvedRepositoryPaths,
+    invalidationBytesChanged: attempt.changed.length > 0 || unresolvedRepositoryPaths.length > 0,
   });
 }
 
@@ -188,6 +208,7 @@ export function unavailableTaskLocalByteObservation(
     cumulativeModifiedPaths: frozenArray([]),
     cumulativeProofArtifactChanges: frozenArray([]),
     taskBytesChangedOrUnobservable: true,
+    unresolvedRepositoryPaths: frozenArray([]),
     invalidationBytesChanged: true,
   });
 }
@@ -491,6 +512,8 @@ function transitionedTask(
     return {
       ...common,
       status: "implemented",
+      repository_baseline: undefined,
+      unresolved_repository_paths: undefined,
       proof: transition.proof,
       revalidation_required: undefined,
       legacy_missing_proof: undefined,
@@ -500,9 +523,14 @@ function transitionedTask(
   }
   if (transition.kind === "retry-required" || transition.kind === "escalation-required") {
     if (facts.normalizedEvidence === undefined) throw new Error(`${transition.kind} transition requires normalized evidence`);
+    const repositoryBaseline = task.repository_baseline ?? task.attempt_repository_baseline;
     const pending = {
       ...common,
       status: "pending" as const,
+      ...(repositoryBaseline === undefined ? {} : { repository_baseline: repositoryBaseline }),
+      unresolved_repository_paths: facts.bytes.unresolvedRepositoryPaths.length === 0
+        ? undefined
+        : facts.bytes.unresolvedRepositoryPaths,
       legacy_missing_proof: undefined,
       failure_reason: `${transition.kind}: ${transitionFailureKinds(transition).join(", ")}`,
       ...evidenceFields(facts.normalizedEvidence),
@@ -512,10 +540,18 @@ function transitionedTask(
       : { ...pending, proof: transition.proof, revalidation_required: undefined };
   }
   if (task.proof === undefined) throw new Error("infrastructure settlement requires historical Proof audit data");
+  const byteOutcome = facts.bytes.suite.checks[0]?.outcome;
+  const unresolvedRepositoryPaths = byteOutcome?.kind === "observation-unavailable"
+    ? task.unresolved_repository_paths
+    : facts.bytes.unresolvedRepositoryPaths;
   return {
     ...common,
     status: "pending",
     proof: task.proof,
+    repository_baseline: task.repository_baseline ?? task.attempt_repository_baseline,
+    unresolved_repository_paths: unresolvedRepositoryPaths === undefined || unresolvedRepositoryPaths.length === 0
+      ? undefined
+      : unresolvedRepositoryPaths,
     revalidation_required: true,
     legacy_missing_proof: undefined,
     failure_reason: `infrastructure-blocked: ${transitionFailureKinds(transition).join(", ")}`,

@@ -57,7 +57,8 @@ function observedBytes(
     currentProofScope: baseline("src/a.ts", digest("b")),
     parserModifiedPaths: ["src/a.ts"],
     priorAttributedPaths: [],
-    repositoryDirtySetChanged: false,
+    repositoryChangedPaths: [],
+    siblingOwnedPaths: [],
     ...overrides,
   });
 }
@@ -79,6 +80,7 @@ function pendingTask(
     active_implementation_attempt: attempt,
     attempt_artifact_baseline: baseline("src/a.ts", digest("a")),
     attempt_repository_baseline: [],
+    repository_baseline: [],
     artifact_baseline: baseline("src/a.ts", digest("a")),
     reserved_at: attempt.reservedAt,
     ...overrides,
@@ -174,17 +176,86 @@ describe("Task-local byte-scope application core", () => {
     expect(bytes.invalidationBytesChanged).toBe(true);
   });
 
-  it("never turns repository dirty-set movement into Task attribution or proof", () => {
+  it("never turns sibling repository movement into Task attribution, proof, or invalidation", () => {
     const bytes = observedBytes(authority(), {
       currentAttemptScope: baseline("src/a.ts", digest("a")),
       currentProofScope: baseline("src/a.ts", digest("a")),
       parserModifiedPaths: [],
-      repositoryDirtySetChanged: true,
+      repositoryChangedPaths: ["src/sibling.ts"],
+      siblingOwnedPaths: ["src/sibling.ts"],
     });
     expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
     expect(bytes.cumulativeProofArtifactChanges).toEqual([]);
+    expect(bytes.unresolvedRepositoryPaths).toEqual([]);
     expect(bytes.taskBytesChangedOrUnobservable).toBe(false);
-    expect(bytes.invalidationBytesChanged).toBe(true);
+    expect(bytes.invalidationBytesChanged).toBe(false);
+  });
+
+  it("carries every unowned repository delta even when the parser omits it", () => {
+    const first = observedBytes(authority(), {
+      parserModifiedPaths: ["src/a.ts"],
+      repositoryChangedPaths: ["src/foreign.ts", "src/sibling.ts"],
+      siblingOwnedPaths: ["src/sibling.ts"],
+    });
+    expect(first.suite.checks[0]?.outcome).toEqual({
+      kind: "out-of-scope-writes",
+      paths: ["src/foreign.ts"],
+    });
+    expect(first.unresolvedRepositoryPaths).toEqual(["src/foreign.ts"]);
+    expect(first.invalidationBytesChanged).toBe(true);
+
+    const persistent = observedBytes(authority(), {
+      parserModifiedPaths: [],
+      repositoryChangedPaths: ["src/foreign.ts", "src/sibling.ts"],
+      siblingOwnedPaths: ["src/sibling.ts"],
+    });
+    expect(persistent.suite.checks[0]?.outcome).toEqual({
+      kind: "out-of-scope-writes",
+      paths: ["src/foreign.ts"],
+    });
+    expect(persistent.unresolvedRepositoryPaths).toEqual(["src/foreign.ts"]);
+  });
+
+  it("keeps a current Task-owned repository path local without granting parser attribution", () => {
+    const scoped = [
+      ...baseline("src/a.ts", digest("a")),
+      ...baseline("src/foreign.ts", digest("f")),
+    ];
+    const bytes = observedBytes(authority(), {
+      attemptBaseline: scoped,
+      currentAttemptScope: scoped,
+      parserModifiedPaths: [],
+      repositoryChangedPaths: ["src/foreign.ts", "src/sibling.ts"],
+      siblingOwnedPaths: ["src/sibling.ts"],
+    });
+    expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+    expect(bytes.unresolvedRepositoryPaths).toEqual([]);
+  });
+
+  it("accepts cleanup once foreign bytes return to the retained baseline", () => {
+    const bytes = observedBytes(authority(), {
+      currentAttemptScope: baseline("src/a.ts", digest("a")),
+      currentProofScope: baseline("src/a.ts", digest("a")),
+      parserModifiedPaths: [],
+      repositoryChangedPaths: ["src/sibling.ts"],
+      siblingOwnedPaths: ["src/sibling.ts"],
+    });
+    expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+    expect(bytes.unresolvedRepositoryPaths).toEqual([]);
+    expect(bytes.invalidationBytesChanged).toBe(false);
+  });
+
+  it("fails raw parser paths outside Task scope even when a sibling owns them", () => {
+    const bytes = observedBytes(authority(), {
+      parserModifiedPaths: ["src/sibling.ts"],
+      repositoryChangedPaths: ["src/sibling.ts"],
+      siblingOwnedPaths: ["src/sibling.ts"],
+    });
+    expect(bytes.suite.checks[0]?.outcome).toEqual({
+      kind: "out-of-scope-writes",
+      paths: ["src/sibling.ts"],
+    });
+    expect(bytes.unresolvedRepositoryPaths).toEqual([]);
   });
 });
 
@@ -248,6 +319,8 @@ describe("exact transition application", () => {
       files_modified: ["src/a.ts"],
     });
     expect(task.active_implementation_attempt).toBeUndefined();
+    expect(task.repository_baseline).toBeUndefined();
+    expect(task.unresolved_repository_paths).toBeUndefined();
     expect(task.implementation_attempt_history).toHaveLength(1);
     expect(task.implementation_attempt_history?.[0]).toMatchObject({
       transition: "implemented",
@@ -310,7 +383,7 @@ describe("exact transition application", () => {
     }
   });
 
-  it("keeps satisfied historical Proof pending+revalidation when only the Task suite fails", () => {
+  it("keeps satisfied historical Proof pending+revalidation and retains exact foreign-delta carry", () => {
     const attempt = authority();
     const result = expectApplied(settleObservedImplementation(
       graph(pendingTask(attempt)),
@@ -318,13 +391,42 @@ describe("exact transition application", () => {
       "2026-08-24T00:03:00.000Z" as never,
       completedEvidence,
       TRUSTED_LEDGER_ONLY_POLICY,
-      observedBytes(attempt, { parserModifiedPaths: ["src/a.ts", "foreign.ts"] }),
+      observedBytes(attempt, {
+        parserModifiedPaths: ["src/a.ts", "foreign.ts"],
+        repositoryChangedPaths: ["foreign.ts", "sibling.ts"],
+        siblingOwnedPaths: ["sibling.ts"],
+      }),
     ));
     expect(result.transition.kind).toBe("retry-required");
     expect(result.state.tasks[0]).toMatchObject({
       status: "pending",
       proof: { state: "satisfied" },
       revalidation_required: true,
+      repository_baseline: [],
+      unresolved_repository_paths: ["foreign.ts"],
+    });
+    expect(result.state.tasks[0]?.attempt_repository_baseline).toBeUndefined();
+  });
+
+  it("infrastructure settlement after exact byte observation persists newly discovered unowned paths", () => {
+    const attempt = authority(1, "infrastructure-unowned-path");
+    const bytes = observedBytes(attempt, {
+      parserModifiedPaths: [],
+      repositoryChangedPaths: ["foreign.ts", "sibling.ts"],
+      siblingOwnedPaths: ["sibling.ts"],
+    });
+    const result = settleUnavailableImplementation(
+      graph(pendingTask(attempt)),
+      attempt,
+      "2026-08-24T00:03:30.000Z" as never,
+      "new-test observation failed",
+      bytes,
+    );
+    expect(result.kind).toBe("applied");
+    if (result.kind !== "applied") return;
+    expect(result.state.tasks[0]).toMatchObject({
+      repository_baseline: [],
+      unresolved_repository_paths: ["foreign.ts"],
     });
   });
 
@@ -334,6 +436,7 @@ describe("exact transition application", () => {
       test_result: { verdict: "trusted-pass" },
       test_evidence: "historical pass",
       files_modified: ["src/a.ts"],
+      unresolved_repository_paths: ["foreign.ts"],
     }));
     const result = settleUnavailableImplementation(
       initial,
@@ -350,11 +453,13 @@ describe("exact transition application", () => {
       test_result: { verdict: "trusted-pass" },
       test_evidence: "historical pass",
       files_modified: ["src/a.ts"],
+      unresolved_repository_paths: ["foreign.ts"],
     });
     expect(result.state.tasks[0]?.implementation_attempt_history?.[0]).toMatchObject({
       transition: "infrastructure-blocked",
       consumesSemanticAttempt: false,
     });
+    expect(result.state.tasks[0]?.repository_baseline).toEqual([]);
     expect(result.state.executing_tasks).toEqual([]);
   });
 

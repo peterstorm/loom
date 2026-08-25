@@ -213,12 +213,22 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
       const result = await markActive(start(s), []);
       expect(result.kind).toBe("block");
       const text = stderrSpy.mock.calls.map(([value]) => String(value)).join("");
-      expect(text).toContain(`cannot read task_graph pointer ${pointer}`);
-      expect(text).toContain("attempting rewrite");
+      expect(text).toContain(`failed to bind task_graph pointer for ${s}`);
+      expect(text).toContain("cross-repo SubagentStop authority is unavailable");
       expect(text).toMatch(/ELOOP|too many levels of symbolic links/i);
     } finally {
       stderrSpy.mockRestore();
     }
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.a-1.implementation-attempt.json`))).toBe(false);
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.active`))).toBe(false);
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.machine`))).toBe(false);
+    const rolledBack = JSON.parse(readFileSync(statePath, "utf8")) as TaskGraph;
+    expect(rolledBack.executing_tasks).toEqual([]);
+    expect(rolledBack.tasks[0]?.active_implementation_attempt).toBeUndefined();
+    expect(rolledBack.tasks[0]?.implementation_attempt_history?.[0]).toMatchObject({
+      transition: "infrastructure-blocked",
+      failureKinds: ["reservation-reclaimed"],
+    });
   });
 
   it("task_graph pointer write failure blocks a non-implementation Loom Agent", async () => {
@@ -231,7 +241,7 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
 
     expect(result).toMatchObject({
       kind: "block",
-      message: expect.stringContaining("failed to write task_graph pointer"),
+      message: expect.stringContaining("failed to bind task_graph pointer"),
     });
     const parsedSession = parseSessionId(s);
     expect(parsedSession).not.toBeNull();

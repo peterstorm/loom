@@ -113,6 +113,19 @@ describe("validateFull (pure)", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("rejects orphan execution reservations with the same repair diagnostic as the parser", () => {
+    const graph = {
+      plan_title: "Test plan",
+      plan_file: ".claude/plans/plan.md",
+      spec_file: ".claude/specs/spec.md",
+      executing_tasks: ["T404"],
+      tasks: [validTask],
+    };
+    const errors = errorsOf(validateFull(graph));
+    expect(errors.join("\n")).toContain("orphan execution reservation T404");
+    expect(errors.join("\n")).toContain("repair-task-graph");
+  });
+
   it("rejects a coercible string current_wave just like the state loader", () => {
     const graph = {
       plan_title: "Test plan",

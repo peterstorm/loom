@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -10,10 +10,17 @@ import {
   createTaskExecutionAuthorityBatch,
   rollbackTaskExecutionAuthorityBatch,
 } from "../../src/core/validate-task-execution";
+import { TRUSTED_LEDGER_ONLY_POLICY } from "../../src/core/proof-obligations";
+import {
+  productionExactSettlementPorts,
+  settleExactImplementation,
+} from "../../src/handlers/helpers/exact-implementation-settlement";
+import { StateManager } from "../../src/state-manager";
 import {
   createImplementationAttemptAuthority,
   parseIsoInstant,
   parseReservationId,
+  type ImplementationAttemptAuthority,
 } from "../../src/core/implementation-completion";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import type { TaskGraph } from "../../src/types";
@@ -30,9 +37,11 @@ function repository(): Readonly<{ root: string; statePath: string; headSha: stri
   execFileSync("git", ["config", "user.email", "loom@example.test"], { cwd: root });
   execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
   writeFileSync(join(root, "seed.txt"), "seed\n");
-  execFileSync("git", ["add", "seed.txt"], { cwd: root });
+  writeFileSync(join(root, ".gitignore"), ".loom-state/\n");
+  execFileSync("git", ["add", "seed.txt", ".gitignore"], { cwd: root });
   execFileSync("git", ["commit", "--quiet", "-m", "seed"], { cwd: root });
-  const statePath = join(root, "active_task_graph.json");
+  mkdirSync(join(root, ".loom-state"));
+  const statePath = join(root, ".loom-state", "active_task_graph.json");
   process.env.LOOM_STATE_PATH = statePath;
   process.env.CLAUDE_PROJECT_DIR = root;
   process.env.LOOM_SUBAGENT_DIR = join(root, "subagents");
@@ -106,6 +115,105 @@ describe("modern implementation attempt registration", () => {
       expect(task.attempt_artifact_baseline).toBeDefined();
       expect(task.attempt_repository_baseline).toBeDefined();
     }
+  });
+
+  it("binds a fresh attempt to the first unresolved repository baseline instead of laundering persistent foreign bytes", async () => {
+    const repo = repository();
+    writeFileSync(join(repo.root, "foreign.ts"), "foreign write from failed attempt\n");
+    const task = taskFixture({
+      id: "T1",
+      description: "retry after foreign write",
+      agent: "code-implementer-agent",
+      wave: 1,
+      status: "pending",
+      depends_on: [],
+      file_list: ["src/a.ts"],
+      repository_baseline: [],
+      unresolved_repository_paths: ["foreign.ts"],
+    });
+    writeGraph(repo.statePath, graph([task]));
+
+    const result = await registerTaskExecutionBatch([spawn("T1")]);
+
+    expect(result.kind).toBe("registered");
+    if (result.kind !== "registered") return;
+    const stored = JSON.parse(readFileSync(repo.statePath, "utf8")) as TaskGraph;
+    expect(stored.tasks[0]?.repository_baseline).toEqual([]);
+    expect(stored.tasks[0]?.attempt_repository_baseline).toEqual([]);
+    expect(stored.tasks[0]?.unresolved_repository_paths).toEqual(["foreign.ts"]);
+  });
+
+  it("keeps an unreported unowned delta non-positive while a parallel sibling-owned dirty path stays inert", async () => {
+    const repo = repository();
+    const task = taskFixture({
+      id: "T1",
+      description: "foreign-write carry",
+      agent: "code-implementer-agent",
+      wave: 1,
+      status: "pending",
+      depends_on: [],
+      file_list: ["src/a.ts"],
+      new_tests_required: false,
+    });
+    const sibling = taskFixture({
+      id: "T2",
+      description: "parallel sibling owner",
+      agent: "code-implementer-agent",
+      wave: 1,
+      status: "pending",
+      depends_on: [],
+      file_list: ["sibling.ts"],
+    });
+    writeGraph(repo.statePath, graph([task, sibling]));
+    const manager = StateManager.fromPath(repo.statePath);
+    if (manager === null) throw new Error("state fixture missing");
+    const settle = async (
+      authority: ImplementationAttemptAuthority,
+      parserModifiedPaths: readonly string[],
+      observedAt: string,
+      taskCompleted = true,
+    ) => manager.update((state) => settleExactImplementation(state, {
+      transport: "Pi",
+      authority,
+      observedAt: observedAt as never,
+      parserModifiedPaths,
+      parserPathLabel: "integration result paths",
+      taskCompleted,
+      testResult: { verdict: "trusted-pass" },
+      testEvidence: "focused integration pass",
+      proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
+    }, productionExactSettlementPorts(repo.root)).application.state);
+
+    const first = await registerTaskExecutionBatch([spawn("T1")]);
+    if (first.kind !== "registered") throw new Error(first.message);
+    const retainedBaseline = manager.load().tasks[0]?.repository_baseline;
+    mkdirSync(join(repo.root, "src"), { recursive: true });
+    writeFileSync(join(repo.root, "src/a.ts"), "export const a = 1;\n");
+    writeFileSync(join(repo.root, "foreign.ts"), "foreign\n");
+    writeFileSync(join(repo.root, "sibling.ts"), "parallel T2 bytes\n");
+    await settle(first.authorities[0]!, ["src/a.ts"], "2026-08-25T00:01:00.000Z", false);
+    expect(manager.load().tasks[0]).toMatchObject({
+      status: "pending",
+      repository_baseline: retainedBaseline,
+      unresolved_repository_paths: ["foreign.ts"],
+    });
+
+    const second = await registerTaskExecutionBatch([spawn("T1")]);
+    if (second.kind !== "registered") throw new Error(second.message);
+    await settle(second.authorities[0]!, [], "2026-08-25T00:02:00.000Z");
+    expect(manager.load().tasks[0]).toMatchObject({
+      status: "pending",
+      unresolved_repository_paths: ["foreign.ts"],
+    });
+    expect(manager.load().tasks[0]?.files_modified).not.toContain("sibling.ts");
+
+    rmSync(join(repo.root, "foreign.ts"));
+    const third = await registerTaskExecutionBatch([spawn("T1")]);
+    if (third.kind !== "registered") throw new Error(third.message);
+    await settle(third.authorities[0]!, [], "2026-08-25T00:03:00.000Z");
+    expect(manager.load().tasks[0]).toMatchObject({ status: "implemented" });
+    expect(manager.load().tasks[0]?.repository_baseline).toBeUndefined();
+    expect(readFileSync(join(repo.root, "sibling.ts"), "utf8")).toBe("parallel T2 bytes\n");
   });
 
   it("writes no TaskGraph bytes when any sibling makes the batch invalid", async () => {

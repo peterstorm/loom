@@ -524,6 +524,10 @@ describe("update-task-status — transcript path resolution", () => {
             artifact_baseline: artifactBaseline,
           } : {}),
         },
+        ...((opts.executingTasks ?? []).includes("T2") ? [{
+          id: "T2", description: "concurrent task", agent: "code-implementer-agent",
+          status: "pending", wave: 1, depends_on: [],
+        }] : []),
       ],
       wave_gates: {},
     }));

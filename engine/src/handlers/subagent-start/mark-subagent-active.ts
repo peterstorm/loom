@@ -9,8 +9,7 @@
  * 3. Persist the task_graph absolute path for cross-repo SubagentStop access.
  */
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdirSync } from "node:fs";
 import { blockResult, type HookHandler, type SubagentStartInput } from "../../types";
 import { machinesDir, pathExistsFailClosed, subagentDir, taskGraphPath } from "../../config";
 import { isImplementationAgent } from "../../core/model-profiles";
@@ -25,8 +24,10 @@ import {
   parseSessionId,
   removeActiveAgentStrict,
   reportedRosterAgentId,
-  sessionScopedPath,
+  bindSessionTaskGraphPointer,
+  rollbackSessionTaskGraphPointer,
   WRITE_GRANT_AGENT_NAMESPACE,
+  type SessionTaskGraphPointerBinding,
 } from "../../machine";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
@@ -255,38 +256,14 @@ const handler: HookHandler = async (stdin) => {
   // SubagentStop may run in different repo, needs this path.
   // taskGraphPath() resolves at CALL time (like machinesDir above) so the
   // path this handler persists can never drift from what the env says now.
-  const taskGraph = activeGraphPath;
-  const taskGraphFile = sessionScopedPath(sessionId, ".task_graph");
-  // Refresh the pointer whenever it is ABSENT or names a DIFFERENT graph than
-  // the one this SubagentStart is serving. A write-once pointer went stale when
-  // a single session served a second graph (cross-repo reuse): every later
-  // agent resolved to the FIRST graph, and reservation reclamation probed the
-  // wrong roster. Overwriting only on a real change is safe: concurrent agents
-  // of one session always share one orchestration graph, so they write the
-  // identical value and never clobber each other; only a genuine graph switch
-  // (sequential across repos) rewrites it.
-  const currentGraph = resolve(taskGraph);
-  let storedGraph: string | null = null;
-  let taskGraphPointerCreated = false;
+  let taskGraphPointerBinding: SessionTaskGraphPointerBinding | null = null;
   try {
-    storedGraph = readFileSync(taskGraphFile, "utf-8").trim();
+    taskGraphPointerBinding = await bindSessionTaskGraphPointer(sessionId, activeGraphPath);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
-      process.stderr.write(
-        `mark-subagent-active: cannot read task_graph pointer ${taskGraphFile}: ${error instanceof Error ? error.message : String(error)} — attempting rewrite\n`,
-      );
-    }
-  }
-  if (currentGraph !== null && storedGraph !== currentGraph) {
-    try {
-      writeFileSync(taskGraphFile, currentGraph);
-      taskGraphPointerCreated = storedGraph === null;
-    } catch (e) {
-      const pointerFailure =
-        `mark-subagent-active: failed to write task_graph pointer for ${sessionId} — cross-repo SubagentStop authority is unavailable: ${e instanceof Error ? e.message : String(e)}`;
-      process.stderr.write(`${pointerFailure}\n`);
-      if (loomOwnedAgent) bindingFailure = bindingFailure ?? pointerFailure;
-    }
+    const pointerFailure =
+      `mark-subagent-active: failed to bind task_graph pointer for ${sessionId} — cross-repo SubagentStop authority is unavailable: ${error instanceof Error ? error.message : String(error)}`;
+    process.stderr.write(`${pointerFailure}\n`);
+    if (loomOwnedAgent) bindingFailure = bindingFailure ?? pointerFailure;
   }
 
   if (bindingFailure !== null && agentId !== null) {
@@ -312,9 +289,12 @@ const handler: HookHandler = async (stdin) => {
         rollbackFailures.push(`sidecar rollback failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    if (taskGraphPointerCreated) {
+    if (taskGraphPointerBinding?.kind === "owned") {
       try {
-        rmSync(taskGraphFile, { force: true });
+        const rolledBack = await rollbackSessionTaskGraphPointer(taskGraphPointerBinding);
+        if (rolledBack !== "rolled-back") {
+          rollbackFailures.push(`task-graph pointer rollback lost exact ownership (${rolledBack})`);
+        }
       } catch (error) {
         rollbackFailures.push(`task-graph pointer rollback failed: ${error instanceof Error ? error.message : String(error)}`);
       }

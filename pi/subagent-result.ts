@@ -29,7 +29,6 @@ import {
   applyCompletionInfrastructureFailure,
   applyUntrustedStopResolution,
   cumulativeModifiedPaths,
-  parseNewTestEvidence,
   type NewTestEvidence,
 } from "../engine/src/core/implementation-application";
 import { extractTestEvidence, type TestEvidence } from "../engine/src/core/test-evidence";
@@ -60,7 +59,10 @@ import {
   type ImplementationSettlementApplicationResult,
 } from "../engine/src/core/implementation-application";
 import { PI_STRUCTURED_EVIDENCE_POLICY } from "../engine/src/core/proof-obligations";
-import { collectNewTestEvidence } from "../engine/src/handlers/helpers/task-local-completion";
+import {
+  collectNewTestEvidence,
+  describeNewTestObservationError,
+} from "../engine/src/handlers/helpers/task-local-completion";
 import {
   productionExactSettlementPorts,
   settleExactImplementation,
@@ -886,11 +888,13 @@ async function applyLegacyImplementationQuarantine(
       return state;
     }
     const currentTarget = state.tasks.find((candidate) => candidate.id === args.taskId);
+    const testResult = implementationTestResult(args.test);
+    const testEvidence = args.test.evidence.evidence;
     if (currentTarget === undefined || currentTarget.status === "completed") {
       const applied = applyUntrustedStopResolution(state, args.taskId, {
         taskCompleted: true,
-        testResult: implementationTestResult(args.test),
-        testEvidence: args.test.evidence.evidence,
+        testResult,
+        testEvidence,
         filesModified: args.filesModified,
         changedDeclaredArtifacts: [],
         bytesChangedSinceAttempt: false,
@@ -925,23 +929,22 @@ async function applyLegacyImplementationQuarantine(
     if (repository.kind === "unavailable" && requiresNewTests(verificationPolicy)) {
       return quarantineCompletionAuthority(repository.diagnostic);
     }
-    let newTestEvidence = parseNewTestEvidence(false, "");
-    try {
-      newTestEvidence = collectNewTestEvidence(
-        cumulativeFiles,
-        verificationPolicy.newTests,
-        currentTarget.start_sha,
-      );
-    } catch (error) {
-      const cause = error instanceof Error ? error.message : String(error);
+    const newTestObservation = collectNewTestEvidence(
+      cumulativeFiles,
+      verificationPolicy.newTests,
+      currentTarget.start_sha,
+    );
+    if (!newTestObservation.ok) {
       return quarantineCompletionAuthority(
-        `loom(pi): cannot collect new-test evidence for ${args.taskId}: ${cause}`,
+        `loom(pi): cannot collect new-test evidence for ${args.taskId}: ` +
+          describeNewTestObservationError(newTestObservation.error),
       );
     }
+    const newTestEvidence = newTestObservation.value;
     const applied = applyUntrustedStopResolution(state, args.taskId, {
       taskCompleted: true,
-      testResult: implementationTestResult(args.test),
-      testEvidence: args.test.evidence.evidence,
+      testResult,
+      testEvidence,
       filesModified: args.filesModified,
       changedDeclaredArtifacts: comparison.changedDeclaredArtifacts,
       bytesChangedSinceAttempt: comparison.bytesChangedSinceAttempt,

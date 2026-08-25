@@ -213,6 +213,41 @@ export function writeDirectoryFileExclusiveNoFollow(
   }
 }
 
+/** Atomically replace one leaf through an exclusively-created no-follow temp. */
+export function writeDirectoryFileAtomicNoFollow(
+  directory: AnchoredDirectory,
+  name: string,
+  data: string | Uint8Array,
+): void {
+  assertLeafName(name);
+  const temporary = `${name}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  assertLeafName(temporary);
+  let published = false;
+  try {
+    writeDirectoryFileExclusiveNoFollow(directory, temporary, data);
+    renameSync(anchoredChildPath(directory, temporary), anchoredChildPath(directory, name));
+    published = true;
+  } finally {
+    if (!published) {
+      try {
+        unlinkSync(anchoredChildPath(directory, temporary));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+  }
+}
+
+/** Remove one anchored leaf; ENOENT is the only idempotent absence. */
+export function removeDirectoryFileNoFollow(directory: AnchoredDirectory, name: string): void {
+  assertLeafName(name);
+  try {
+    unlinkSync(anchoredChildPath(directory, name));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
 const LOCK_ATTEMPTS = 50;
 const LOCK_RETRY_MS = 100;
 const wait = (milliseconds: number): Promise<void> =>

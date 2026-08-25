@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -2517,6 +2517,50 @@ describe("Pi extension review tool_result integration", () => {
     expect(() => readFileSync(join(subagentDir, `${session}.task_graph`), "utf-8")).toThrow();
   });
 
+  it("refreshes a stale same-session graph pointer so registration and result settle only the active graph", async () => {
+    const graphAPath = join(temp, "stale-graph-a.json");
+    const planPath = join(temp, "stale-pointer-switch-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    const graphA = initialGraph();
+    writeFileSync(graphAPath, JSON.stringify(graphA, null, 2));
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const beforeA = readFileSync(graphAPath, "utf8");
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad498";
+    const pointer = join(subagentDir, `${session}.task_graph`);
+    writeFileSync(pointer, graphAPath);
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-stale-pointer-switch";
+    const prompt = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: { agent: "code-implementer-agent", task: prompt, agentScope: "user" },
+    }, context)).toEqual([undefined]);
+    expect(readFileSync(pointer, "utf8")).toBe(realpathSync.native(statePath));
+    expect(JSON.parse(readFileSync(statePath, "utf8")).executing_tasks).toEqual(["T1"]);
+    expect(readFileSync(graphAPath, "utf8")).toBe(beforeA);
+
+    await pi.emit("tool_result", {
+      toolName: "subagent",
+      toolCallId,
+      content: [],
+      details: {
+        results: [{ agent: "code-implementer-agent", task: prompt, exitCode: 1, messages: [] }],
+      },
+    }, context);
+
+    expect(JSON.parse(readFileSync(statePath, "utf8")).executing_tasks).toEqual([]);
+    expect(readFileSync(graphAPath, "utf8")).toBe(beforeA);
+    expect(readFileSync(pointer, "utf8")).toBe(graphAPath);
+  });
+
   it("validates a task batch completely before one atomic registration", async () => {
     const graph = {
       ...initialGraph(),
@@ -2856,8 +2900,25 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
+  it("rejects a corrupt orphan execution reservation instead of silently clearing it", async () => {
+    writeState({ ...initialGraph(), tasks: [], executing_tasks: ["T1"] });
+    const before = readFileSync(statePath, "utf8");
+    const pi = await extension();
+    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    const responses = await pi.emit("tool_result", {
+      toolName: "subagent",
+      content: [],
+      details: { results: [{ agent: "code-implementer-agent", task: "Task ID: T1", exitCode: 0, messages: [] }] },
+    }, context);
+
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({ text: expect.stringContaining("orphan execution reservation T1") })],
+    }));
+    expect(readFileSync(statePath, "utf8")).toBe(before);
+  });
+
   it.each([
-    ["missing", [], ["T1"]],
     ["completed", [{
       id: "T1", description: "done", agent: "code-implementer-agent", wave: 1,
       status: "completed", depends_on: [], new_tests_required: false,

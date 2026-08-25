@@ -99,3 +99,9 @@ export {
   type LoadedMachine,
 } from "./ledger";
 export { fsSessionRegistry } from "./session-registry";
+export {
+  bindSessionTaskGraphPointer,
+  rollbackSessionTaskGraphPointer,
+  type SessionTaskGraphPointerBinding,
+  type SessionTaskGraphPointerRollback,
+} from "./task-graph-pointer";

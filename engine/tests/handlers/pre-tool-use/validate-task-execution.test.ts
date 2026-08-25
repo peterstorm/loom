@@ -374,9 +374,9 @@ describe("validate-task-execution — reservation grace window (startup-race saf
     expect(staleReservationsFromState(state, false, T0 + RESERVATION_GRACE_MS * 100)).toEqual(new Set());
   });
 
-  it("reclaims a reservation naming a task absent from the graph", () => {
+  it("does not treat a pre-parse orphan reservation as stale-recovery authority", () => {
     const state = mkState([reserved("T1", T0)], { executing_tasks: ["T1", "T404"] });
-    expect(staleReservationsFromState(state, false, T0 + RESERVATION_GRACE_MS + 1)).toEqual(new Set(["T1", "T404"]));
+    expect(staleReservationsFromState(state, false, T0 + RESERVATION_GRACE_MS + 1)).toEqual(new Set(["T1"]));
   });
 
   it("still shields an implemented task's reservation inside the grace window", () => {

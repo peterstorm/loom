@@ -47,7 +47,11 @@ function root(): string {
   execFileSync("git", ["config", "user.email", "loom@example.test"], { cwd: value });
   execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: value });
   writeFileSync(join(value, ".gitkeep"), "fixture\n");
-  execFileSync("git", ["add", ".gitkeep"], { cwd: value });
+  writeFileSync(
+    join(value, ".gitignore"),
+    ["active_task_graph.json", "foreign-task-graph.json", "agent.jsonl", "subagents/", ".task_graph*", ""].join("\n"),
+  );
+  execFileSync("git", ["add", ".gitkeep", ".gitignore"], { cwd: value });
   execFileSync("git", ["commit", "--quiet", "-m", "fixture root"], { cwd: value });
   return value;
 }

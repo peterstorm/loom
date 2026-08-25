@@ -31,6 +31,7 @@ import type {
   WaveReopeningAudit,
   SpecCheck,
   SpecTraceWaveGateRetirement,
+  Task,
   TaskGraph,
   WaveReviewEpochAuthority,
 } from "./types";
@@ -68,7 +69,7 @@ import {
   parseImplementationAttemptAuthority,
   parseImplementationAttemptHistory,
 } from "./core/implementation-completion";
-import { parseTaskId } from "./core/task-id";
+import { parseTaskId, type TaskId } from "./core/task-id";
 
 export { TASK_ID_PATTERN } from "./core/task-id";
 import {
@@ -696,6 +697,19 @@ export function taskIdError(value: unknown, label: string): string | null {
     : `${label}: id must match T\\d+, got ${JSON.stringify(value)}`;
 }
 
+export function orphanExecutionReservationError(
+  tasks: readonly Record<string, unknown>[],
+  executingTasks: unknown,
+): string | null {
+  if (!Array.isArray(executingTasks)) return null;
+  const taskIds = new Set(tasks.flatMap((task) => typeof task.id === "string" ? [task.id] : []));
+  const orphan = executingTasks.find((id) => typeof id === "string" && !taskIds.has(id));
+  return orphan === undefined
+    ? null
+    : `orphan execution reservation ${orphan}: executing_tasks must name an existing Task; ` +
+      "run helper repair-task-graph to remove corrupt orphan reservations";
+}
+
 export function taskDependencyErrors(tasks: readonly Record<string, unknown>[]): readonly string[] {
   const byId = new Map(
     tasks.flatMap((task) => typeof task.id === "string" ? [[task.id, task] as const] : []),
@@ -749,6 +763,7 @@ export function taskUnionError(v: unknown, index: number): string | null {
   return taskShapeError(t, index, id)
     ?? taskBaselineError(t, index, id)
     ?? taskAttemptAuthorityError(t, index, id)
+    ?? taskRepositoryCarryError(t, index, id)
     ?? taskPacketError(t, index, id)
     ?? taskStatusError(t, index, id)
     ?? taskEvidenceError(t, index, id)
@@ -938,6 +953,48 @@ function taskAttemptAuthorityError(
   if (taskDigest.value !== authority.value.taskScopeBaselineDigest ||
       dirtyDigest.value !== authority.value.dirtySetBaselineDigest) {
     return `${label}: active attempt baseline digests do not match active_implementation_attempt`;
+  }
+  return null;
+}
+
+/** Persistent unresolved-attempt repository authority and attributed paths. */
+function taskRepositoryCarryError(
+  t: Record<string, unknown>,
+  index: number,
+  id: string,
+): string | null {
+  const label = `tasks[${index}] ("${id}")`;
+  if (t.repository_baseline !== undefined) {
+    const baseline = parseDeclaredArtifactBaseline(t.repository_baseline, `${label}: repository_baseline`);
+    if (!baseline.ok) return baseline.errors.join("; ");
+    if (t.active_implementation_attempt !== undefined && t.attempt_repository_baseline !== undefined) {
+      const persistentDigest = canonicalArtifactBaselineDigest(baseline.value);
+      const attemptDigest = canonicalArtifactBaselineDigest(t.attempt_repository_baseline);
+      if (!persistentDigest.ok || !attemptDigest.ok || persistentDigest.value !== attemptDigest.value) {
+        return `${label}: active attempt_repository_baseline must equal retained repository_baseline`;
+      }
+    }
+  }
+  if (t.unresolved_repository_paths !== undefined) {
+    if (t.repository_baseline === undefined) {
+      return `${label}: unresolved_repository_paths requires repository_baseline`;
+    }
+    if (!Array.isArray(t.unresolved_repository_paths)) {
+      return `${label}: unresolved_repository_paths must be an array of canonical repository paths`;
+    }
+    const canonical: string[] = [];
+    for (const [pathIndex, raw] of t.unresolved_repository_paths.entries()) {
+      const parsed = parseReviewPath(raw, `${label}: unresolved_repository_paths[${pathIndex}]`);
+      if (!parsed.ok) return parsed.errors.join("; ");
+      canonical.push(parsed.value);
+    }
+    if (canonical.length === 0 || new Set(canonical).size !== canonical.length) {
+      return `${label}: unresolved_repository_paths must be non-empty and unique when present`;
+    }
+  }
+  if ((t.status === "implemented" || t.status === "completed") && t.repository_baseline !== undefined &&
+      t.active_implementation_attempt === undefined) {
+    return `${label}: accepted implementation lifecycle cannot retain repository_baseline`;
   }
   return null;
 }
@@ -1425,9 +1482,9 @@ function taskGraphScalarFieldError(obj: Record<string, unknown>): string | null 
   }
   if (obj.executing_tasks !== undefined &&
       (!Array.isArray(obj.executing_tasks) ||
-        obj.executing_tasks.some((id) => typeof id !== "string" || id.trim() === "") ||
+        obj.executing_tasks.some((id) => !parseTaskId(id, "executing_tasks entry").ok) ||
         new Set(obj.executing_tasks).size !== obj.executing_tasks.length)) {
-    return "executing_tasks must be an array of distinct non-empty strings when present";
+    return "executing_tasks must be an array of distinct canonical Task IDs when present";
   }
   if (obj.current_wave !== undefined &&
       (typeof obj.current_wave !== "number" || !Number.isInteger(obj.current_wave) || obj.current_wave < 1)) {
@@ -1441,9 +1498,11 @@ function migrateParsedTask(
   index: number,
   executing: ReadonlySet<string>,
 ): ParseResult<Record<string, unknown>> {
+  const identity = parseTaskId(task.id, `tasks[${index}].id`);
+  if (!identity.ok) return parseErr(identity.error.errors.join("; "));
   const verification = parseTaskVerificationPolicy(task, `tasks[${index}]`);
   if (!verification.ok) return parseErr(verification.errors.join("; "));
-  let migrated = { ...task };
+  let migrated: Record<string, unknown> = { ...task, id: identity.value };
   if (task.proof === undefined && task.status === "pending") {
     migrated = {
       ...migrated,
@@ -1469,6 +1528,26 @@ function migrateParsedTask(
     const { legacy_execution_reservation: staleLegacyClassification, ...withoutLegacyClassification } = migrated;
     void staleLegacyClassification;
     migrated = withoutLegacyClassification;
+  }
+  const repositoryCarry = task.repository_baseline ?? (
+    task.active_implementation_attempt === undefined ? undefined : task.attempt_repository_baseline
+  );
+  if (repositoryCarry !== undefined) {
+    const baseline = parseDeclaredArtifactBaseline(repositoryCarry, `tasks[${index}].repository_baseline`);
+    if (!baseline.ok) return parseErr(baseline.errors.join("; "));
+    migrated = { ...migrated, repository_baseline: baseline.value };
+  }
+  if (task.unresolved_repository_paths !== undefined) {
+    if (!Array.isArray(task.unresolved_repository_paths)) {
+      return parseErr(`tasks[${index}].unresolved_repository_paths must be an array`);
+    }
+    const paths: string[] = [];
+    for (const [pathIndex, raw] of task.unresolved_repository_paths.entries()) {
+      const parsed = parseReviewPath(raw, `tasks[${index}].unresolved_repository_paths[${pathIndex}]`);
+      if (!parsed.ok) return parseErr(parsed.errors.join("; "));
+      paths.push(parsed.value);
+    }
+    migrated = { ...migrated, unresolved_repository_paths: Object.freeze(paths.sort()) };
   }
   if (task.implementation_attempt_history !== undefined) {
     const history = parseImplementationAttemptHistory(task.implementation_attempt_history);
@@ -1498,6 +1577,8 @@ function parseTaskGraphTasks(obj: Record<string, unknown>): ParseResult<readonly
   const taskIds = parsedTasks.map((task) => task.id as string);
   const duplicateTaskId = taskIds.find((id, index) => taskIds.indexOf(id) !== index);
   if (duplicateTaskId !== undefined) return parseErr(`duplicate task id: ${duplicateTaskId}`);
+  const orphanReservation = orphanExecutionReservationError(parsedTasks, [...executing]);
+  if (orphanReservation !== null) return parseErr(orphanReservation);
   const relationError = parsedTasks.flatMap((task) => {
     const id = task.id as string;
     const isExecuting = executing.has(id);
@@ -1737,7 +1818,13 @@ type ParsedTaskGraphParts = Readonly<{
   history: ParsedTaskGraphHistoryFields;
 }>;
 
-function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTaskGraphParts): TaskGraph {
+export type ParsedTask = Task & Readonly<{ id: TaskId }>;
+export type ParsedTaskGraph = Omit<TaskGraph, "tasks" | "executing_tasks"> & Readonly<{
+  tasks: readonly ParsedTask[];
+  executing_tasks?: readonly TaskId[];
+}>;
+
+function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTaskGraphParts): ParsedTaskGraph {
   // Fresh recursively frozen copies, never aliases of parsed JSON: a caller
   // retaining the raw object cannot mutate nested Task or Wave Gate data and
   // bypass StateManager.update's locked transform.
@@ -1774,7 +1861,7 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     ...(reopeningHistory === undefined ? {} : { wave_reopening_history: reopeningHistory }),
     ...(orphanedHistory === undefined ? {} : { orphaned_wave_gate_history: orphanedHistory }),
     ...(specTraceRetirements === undefined ? {} : { spec_trace_wave_gate_retirements: specTraceRetirements }),
-  } as unknown as TaskGraph;
+  } as unknown as ParsedTaskGraph;
 }
 
 /**
@@ -1787,7 +1874,7 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
  * through untouched (legacyTestsPassedNote still fires downstream);
  * missing tasks/wave_gates default for early phases (populated in Phase 4).
  */
-export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
+export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return parseErr("not an object");
   }

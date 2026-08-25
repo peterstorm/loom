@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { existsSync, unlinkSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // Engine core — harness-agnostic, no Claude Code dependency (these do fs I/O)
@@ -71,7 +71,16 @@ import {
 import { isReviewAgent, taskGraphPath, subagentDir, PHASE_AGENT_MAP, IMPL_AGENTS, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
-import { anyActiveSubagent, fsSessionRegistry, parseAgentId, parseSessionId, rosterAgentId } from "../engine/src/machine";
+import {
+  anyActiveSubagent,
+  bindSessionTaskGraphPointer,
+  fsSessionRegistry,
+  parseAgentId,
+  parseSessionId,
+  rollbackSessionTaskGraphPointer,
+  rosterAgentId,
+  type SessionTaskGraphPointerBinding,
+} from "../engine/src/machine";
 import type { AgentId } from "../engine/src/machine/evidence";
 import { buildContextOutput } from "../engine/src/handlers/session-start/resume-after-clear";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
@@ -801,13 +810,13 @@ function recoverPiSpawnReservation(
 interface PiParentSessionRuntime {
   readonly issuedWriteGrants: Map<string, readonly string[]>;
   readonly spawnReservations: Map<string, PiSpawnReservation>;
-  taskGraphPointerOwned: boolean;
+  taskGraphPointerBinding: SessionTaskGraphPointerBinding | null;
 }
 
 const emptyParentSessionRuntime = (): PiParentSessionRuntime => ({
   issuedWriteGrants: new Map(),
   spawnReservations: new Map(),
-  taskGraphPointerOwned: false,
+  taskGraphPointerBinding: null,
 });
 
 export function standaloneCompletionCheckpointProblem(checkpoint: string): string | null {
@@ -934,13 +943,13 @@ export default function (pi: ExtensionAPI) {
   };
   const pruneRuntime = (sessionId: PiSessionId, runtime: PiParentSessionRuntime): void => {
     if (runtime.issuedWriteGrants.size === 0 && runtime.spawnReservations.size === 0 &&
-        !runtime.taskGraphPointerOwned) {
+        runtime.taskGraphPointerBinding === null) {
       parentSessionRuntimes.delete(sessionId);
     }
   };
   const activeChildWriteGrants = new Map<string, {
     agentId: AgentId;
-    pointerCreated: boolean;
+    pointerBinding: SessionTaskGraphPointerBinding;
     /** Present only on scoped (phase/panel) grants: Edit/Write targets must
      *  fall inside one of these artifact dirs. Scopes resolve against
      *  `grantCwd` (the spawn cwd), which is also the base relative targets
@@ -1172,7 +1181,7 @@ export default function (pi: ExtensionAPI) {
         );
         const reserved: Array<(typeof rosterIds)[number]> = [];
         const writeGrants: Array<{ index: number; token: string; task: string; originalTask: string; injected: boolean }> = [];
-        let taskGraphPointerCreated = false;
+        let taskGraphPointerBinding: SessionTaskGraphPointerBinding | null = null;
         let orchestrationRunBinding: SessionRunBinding | null = null;
         const rollbackLifecycle = async (): Promise<readonly string[]> => {
           const actions: PiCleanupAction[] = [];
@@ -1194,10 +1203,14 @@ export default function (pi: ExtensionAPI) {
               run: () => fsSessionRegistry.removeActive(safeSessionId, agentId),
             });
           }
-          if (taskGraphPointerCreated) {
+          if (taskGraphPointerBinding?.kind === "owned") {
+            const ownedPointer = taskGraphPointerBinding;
             actions.push({
-              label: "remove task-graph pointer",
-              run: () => unlinkSync(`${subagentDir()}/${safeSessionId}.task_graph`),
+              label: "roll back task-graph pointer",
+              run: async () => {
+                const result = await rollbackSessionTaskGraphPointer(ownedPointer);
+                if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
+              },
             });
           }
           return runPiCleanupActions(actions);
@@ -1223,11 +1236,10 @@ export default function (pi: ExtensionAPI) {
           }
           const activeTaskGraphPath = taskGraphPath();
           if (needsTaskGraphLifecycle && pathExistsFailClosed(activeTaskGraphPath)) {
-            const taskGraphFile = `${subagentDir()}/${safeSessionId}.task_graph`;
-            if (!existsSync(taskGraphFile)) {
-              writeFileSync(taskGraphFile, resolve(activeTaskGraphPath));
-              taskGraphPointerCreated = true;
-            }
+            taskGraphPointerBinding = await bindSessionTaskGraphPointer(
+              safeSessionId,
+              activeTaskGraphPath,
+            );
           }
           // Bind every Loom-owned Pi native spawn identity to the exact issued
           // request before the harness can dispatch the batch. The durable run
@@ -1336,7 +1348,9 @@ export default function (pi: ExtensionAPI) {
         if (writeGrants.length > 0) {
           sessionRuntime.issuedWriteGrants.set(toolCallId, writeGrants.map((grant) => grant.token));
         }
-        if (taskGraphPointerCreated) sessionRuntime.taskGraphPointerOwned = true;
+        if (taskGraphPointerBinding?.kind === "owned") {
+          sessionRuntime.taskGraphPointerBinding = taskGraphPointerBinding;
+        }
         sessionRuntime.spawnReservations.set(toolCallId, {
           sessionId: safeSessionId,
           needsTaskGraphLifecycle,
@@ -1413,10 +1427,8 @@ export default function (pi: ExtensionAPI) {
       if (!sessionId || !agentId) throw new Error("child session or grant agent identity is invalid");
       await fsSessionRegistry.markActive(sessionId, agentId);
       partialBinding = { sessionId, agentId };
-      const pointer = `${subagentDir()}/${sessionId}.task_graph`;
-      const pointerCreated = !existsSync(pointer);
-      if (pointerCreated) writeFileSync(pointer, grant.taskGraphPath, { mode: 0o600 });
-      activeChildWriteGrants.set(sessionId, { agentId, pointerCreated, scopeDirs: grant.scopeDirs, grantCwd: grant.cwd });
+      const pointerBinding = await bindSessionTaskGraphPointer(sessionId, grant.taskGraphPath);
+      activeChildWriteGrants.set(sessionId, { agentId, pointerBinding, scopeDirs: grant.scopeDirs, grantCwd: grant.cwd });
       partialBinding = null;
       process.stderr.write(`loom(pi): activated child write grant for ${grant.taskId}/${sessionId}\n`);
     } catch (error) {
@@ -1470,10 +1482,13 @@ export default function (pi: ExtensionAPI) {
         label: `remove child roster entry ${binding.agentId}`,
         run: () => fsSessionRegistry.removeActive(sessionId, binding.agentId),
       });
-      if (binding.pointerCreated) {
+      if (binding.pointerBinding.kind === "owned") {
         actions.push({
-          label: `remove child task-graph pointer for ${sessionId}`,
-          run: () => rmSync(`${subagentDir()}/${sessionId}.task_graph`, { force: true }),
+          label: `roll back child task-graph pointer for ${sessionId}`,
+          run: async () => {
+            const result = await rollbackSessionTaskGraphPointer(binding.pointerBinding);
+            if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
+          },
         });
       }
     }
@@ -1485,10 +1500,14 @@ export default function (pi: ExtensionAPI) {
         });
       }
     }
-    if (sessionId && parentRuntime?.taskGraphPointerOwned) {
+    if (sessionId && parentRuntime?.taskGraphPointerBinding?.kind === "owned") {
+      const pointerBinding = parentRuntime.taskGraphPointerBinding;
       actions.push({
-        label: `remove parent task-graph pointer for ${sessionId}`,
-        run: () => rmSync(`${subagentDir()}/${sessionId}.task_graph`, { force: true }),
+        label: `roll back parent task-graph pointer for ${sessionId}`,
+        run: async () => {
+          const result = await rollbackSessionTaskGraphPointer(pointerBinding);
+          if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
+        },
       });
     }
 
@@ -1688,16 +1707,18 @@ export default function (pi: ExtensionAPI) {
     if (reservationRecoveryFailed) return processingErrorResponse();
     let parentPointerCleanupAttempted = false;
     const cleanupParentTaskGraphPointer = async (): Promise<void> => {
-      if (parentPointerCleanupAttempted || !resultSessionId || !sessionRuntime?.taskGraphPointerOwned ||
+      if (parentPointerCleanupAttempted || !resultSessionId || sessionRuntime?.taskGraphPointerBinding?.kind !== "owned" ||
           [...sessionRuntime.spawnReservations.values()].some((entry) => entry.needsTaskGraphLifecycle)) {
         return;
       }
       parentPointerCleanupAttempted = true;
+      const pointerBinding = sessionRuntime.taskGraphPointerBinding;
       const errors = await runPiCleanupActions([{
-        label: `remove parent task-graph pointer for ${resultSessionId}`,
-        run: () => {
-          rmSync(`${subagentDir()}/${resultSessionId}.task_graph`, { force: true });
-          sessionRuntime.taskGraphPointerOwned = false;
+        label: `roll back parent task-graph pointer for ${resultSessionId}`,
+        run: async () => {
+          const result = await rollbackSessionTaskGraphPointer(pointerBinding);
+          if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
+          sessionRuntime.taskGraphPointerBinding = null;
         },
       }]);
       processingErrors.push(...errors);

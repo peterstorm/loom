@@ -1,4 +1,4 @@
-import type { TaskGraph, TaskTestResult } from "../../types";
+import type { Task, TaskGraph, TaskTestResult } from "../../types";
 import {
   settleObservedImplementation,
   settleUnavailableImplementation,
@@ -12,9 +12,12 @@ import type {
 } from "../../core/implementation-completion";
 import type { ProofEvaluationPolicy } from "../../core/proof-obligations";
 import { taskVerificationPolicy, type NewTestWaiverReason, type VerificationRequirement } from "../../core/verification-policy";
+import { canonicalRepositoryPaths } from "../../utils/repository-path";
 import {
   collectNewTestEvidence,
+  describeNewTestObservationError,
   observeTaskLocalCompletion,
+  type NewTestObservationResult,
   type TaskLocalCompletionArgs,
 } from "./task-local-completion";
 
@@ -42,7 +45,7 @@ export type ExactNewTestCollectionArgs = Readonly<{
 }>;
 
 export type ExactSettlementNewTestPort = Readonly<{
-  collect: (args: ExactNewTestCollectionArgs) => NewTestEvidence;
+  collect: (args: ExactNewTestCollectionArgs) => NewTestObservationResult<NewTestEvidence>;
 }>;
 
 export type ExactImplementationSettlementPorts = Readonly<{
@@ -68,6 +71,21 @@ export function productionExactSettlementPorts(
         collectNewTestEvidence(args.filesModified, args.requirement, args.startSha),
     }),
   });
+}
+
+function currentWaveSiblingOwnedPaths(
+  state: TaskGraph,
+  task: Task,
+  repositoryRoot: string,
+): readonly string[] {
+  const paths = state.tasks
+    .filter((candidate) => candidate.id !== task.id && candidate.wave === task.wave)
+    .flatMap((candidate) => [...(candidate.file_list ?? []), ...(candidate.files_modified ?? [])]);
+  return canonicalRepositoryPaths(
+    repositoryRoot,
+    paths,
+    `${task.id} current-Wave sibling-owned paths`,
+  );
 }
 
 function unavailable(
@@ -106,12 +124,23 @@ export function settleExactImplementation(
     return unavailable(state, facts, `late ${facts.transport} result delivery`);
   }
 
+  let siblingOwnedPaths: readonly string[];
+  try {
+    siblingOwnedPaths = currentWaveSiblingOwnedPaths(state, task, ports.repository.root);
+  } catch (error) {
+    return unavailable(
+      state,
+      facts,
+      `${facts.transport} sibling ownership observation unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   const bytes = ports.repository.observeTaskLocal({
     repositoryRoot: ports.repository.root,
     task,
     authority: facts.authority,
     parserModifiedPaths: facts.parserModifiedPaths,
     parserPathLabel: facts.parserPathLabel,
+    siblingOwnedPaths,
   });
   const suiteOutcome = bytes.suite.checks[0]?.outcome;
   if (suiteOutcome?.kind === "observation-unavailable") {
@@ -119,18 +148,16 @@ export function settleExactImplementation(
   }
 
   const policy = taskVerificationPolicy(task);
-  let newTests: NewTestEvidence;
-  try {
-    newTests = ports.newTests.collect({
-      filesModified: bytes.cumulativeModifiedPaths,
-      requirement: policy.newTests,
-      startSha: task.start_sha,
-    });
-  } catch (error) {
+  const newTests = ports.newTests.collect({
+    filesModified: bytes.cumulativeModifiedPaths,
+    requirement: policy.newTests,
+    startSha: task.start_sha,
+  });
+  if (!newTests.ok) {
     return unavailable(
       state,
       facts,
-      `${facts.transport} new-test observation unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      `${facts.transport} new-test observation unavailable: ${describeNewTestObservationError(newTests.error)}`,
       bytes,
     );
   }
@@ -144,8 +171,8 @@ export function settleExactImplementation(
         taskCompleted: facts.taskCompleted,
         testResult: facts.testResult,
         testEvidence: facts.testEvidence,
-        newTestsWritten: newTests.written,
-        newTestEvidence: newTests.evidence,
+        newTestsWritten: newTests.value.written,
+        newTestEvidence: newTests.value.evidence,
       },
       facts.proofEvaluationPolicy,
       bytes,

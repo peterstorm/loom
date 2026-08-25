@@ -1,8 +1,8 @@
 /**
  * Core: Enforce phase ordering during loom orchestration.
- * Harness-agnostic — no stdin parsing, and no filesystem imports: BOTH
- * categories of I/O this gate needs (the protected-state read and the phase
- * artifact probes) arrive as injected ports, so the decision logic is data-in /
+ * Harness-agnostic — no stdin parsing. BOTH categories of runtime I/O this
+ * gate needs (the protected-state read and the phase artifact probes) arrive as
+ * injected ports, so the decision logic itself is data-in /
  * data-out and can be exercised with in-memory fixtures.
  *
  * Definition site of `detectPhase` and `checkArtifacts`. `core/index.ts` and the

@@ -197,7 +197,7 @@ The pure aggregate command that combines Implementation Attempt authority, norma
 _Avoid_: SubagentStop hook, Wave Gate check, test runner, completion service
 
 **Task-local Byte Scope**:
-The exact path set captured in `attempt_artifact_baseline`: declared Task paths plus previously attributed Task paths at registration. `loom:task-byte-scope` compares only those bytes against that attempt baseline. Parser-proven transcript paths outside the set are semantic failure; baseline/path/read/Git uncertainty is infrastructure unavailable. Repository dirty-set delta is conservative invalidation evidence only—never Task attribution, Proof, or sibling evidence. The Task-local suite runs no Task/project subprocesses; build, test, typecheck, reports, and full-tier lint remain Wave-quiescent checks.
+The exact path set captured in `attempt_artifact_baseline`: declared Task paths plus previously attributed Task paths at registration. `loom:task-byte-scope` compares only those bytes against that attempt baseline. Parser-proven transcript paths outside the set are semantic failure regardless of repository ownership; baseline/path/read/Git uncertainty is infrastructure unavailable. Under the locked TaskGraph, other current-Wave Tasks' canonical `file_list` plus `files_modified` form sibling ownership. Repository changes relative to the first unresolved baseline classify exactly: current Task paths are Task-local, sibling-owned paths are inert/non-attributable, and every remaining unowned path is semantic out-of-scope evidence recorded in `unresolved_repository_paths` even when the transcript omits it. The baseline and unresolved paths persist across failed, infrastructure-blocked, rolled-back, and reclaimed attempts; reversion removes resolved paths, and accepted exact settlement clears the carry. The Task-local suite runs no Task/project subprocesses; build, test, typecheck, reports, and full-tier lint remain Wave-quiescent checks.
 _Avoid_: Repository dirty set, transcript file list, Task test command
 
 **Implementation Settlement Receipt**:
@@ -280,7 +280,7 @@ _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory ru
 - A **Task** becomes implemented only after all of its **Proof Obligations** and required Task-scoped Completion Check Results are satisfied
 - An **Implementation Attempt** is settled only by the **Implementation Completion Oracle** under exact engine-issued authority and one **Implementation Settlement Receipt**
 - A Task-local Completion Suite contains only `loom:task-byte-scope`; it runs no Task/project subprocesses
-- Repository dirty-set delta may invalidate stale authority but never becomes Task attribution, Proof, or sibling evidence
+- Repository observation never grants Task attribution: current Task paths stay local, locked current-Wave sibling-owned paths stay inert, and every changed unowned path is unresolved semantic failure/invalidation
 - Slice 3 classifies retry-required/escalation-required without dispatch; Slice 4 alone freezes retry context and launches semantic attempt 2 or escalation
 - A Task's **Verification Policy** independently determines its regression and new-test **Proof Obligations**
 - A **Verification Manifest** is frozen by the engine before implementation and cannot be authored through decompose output

@@ -59,8 +59,11 @@ describe("guard-state-file — property tests", () => {
     fc.assert(
       fc.property(
         fc.string({ minLength: 1, maxLength: 200 }).filter(
+          // Dynamic expansion and malformed quoting are intentionally blocked
+          // even when the literal source does not name a protected path.
           (s) => !s.includes("active_task_graph") && !s.includes("review-invocations") &&
-            !s.includes(SUBAGENT_DIR) && !s.includes(MACHINES_DIR) && !/[?*{}[\]]/.test(s),
+            !s.includes(SUBAGENT_DIR) && !s.includes(MACHINES_DIR) &&
+            !/[?*{}[\]`$\\'"\n\r]/.test(s),
         ),
         (cmd) => {
           expect(guardDecision(cmd)).toBe("allow");
