@@ -71,6 +71,7 @@ import {
 import { isReviewAgent, taskGraphPath, subagentDir, PHASE_AGENT_MAP, IMPL_AGENTS, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
+import type { Task, TaskGraph } from "../engine/src/types";
 import {
   anyActiveSubagent,
   bindSessionTaskGraphPointer,
@@ -178,10 +179,16 @@ type TrustedReviewCapture = Readonly<{
   byteLength: number;
 }>;
 
-type TrustedReviewRun = {
+type TrustedReviewRun = Readonly<{
   binding: SessionRunBinding;
-  captures: Map<CaptureKey, TrustedReviewCapture>;
-};
+  captures: ReadonlyMap<CaptureKey, TrustedReviewCapture>;
+  touchedAt: number;
+}>;
+
+type TrustedReviewRoot = Readonly<{
+  nextTouch: number;
+  runs: ReadonlyMap<string, TrustedReviewRun>;
+}>;
 
 type LoomReviewAuthorityReceipt = Readonly<{
   schemaVersion: 1;
@@ -195,7 +202,7 @@ type LoomReviewAuthorityReceipt = Readonly<{
   reviewedSource: StandaloneReviewedSource;
 }>;
 
-const trustedReviewRuns = new Map<string, Map<string, TrustedReviewRun>>();
+const trustedReviewRuns = new Map<string, Map<string, TrustedReviewRoot>>();
 const trustedRunIdentity = ({ runsRoot, runDirectory }: Pick<SessionRunBinding, "runsRoot" | "runDirectory">): string =>
   `${runsRoot}\0${runDirectory}`;
 const trustedCaptureIdentity = (slotId: string, attempt: 1 | 2): CaptureKey => captureKey(slotId, attempt);
@@ -280,23 +287,38 @@ export function piBashCommand(raw: unknown): string | null {
   return typeof command === "string" ? command : null;
 }
 
-/** Extract the file path(s) a Pi Edit/Write/multi_edit call targets. Returns
- *  [] when the shape is unrecognized — scoped grants then fail closed. */
-export function piWriteTargetPaths(raw: unknown): readonly string[] {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return [];
-  const input = raw as Record<string, unknown>;
-  const direct = input.path ?? input.file_path ?? input.filePath;
-  if (typeof direct === "string" && direct !== "") return [direct];
-  if (Array.isArray(input.edits)) {
-    const paths: string[] = [];
-    for (const edit of input.edits) {
-      if (typeof edit !== "object" || edit === null || Array.isArray(edit)) continue;
-      const p = (edit as Record<string, unknown>).path ?? (edit as Record<string, unknown>).file_path;
-      if (typeof p === "string" && p !== "" && !paths.includes(p)) paths.push(p);
-    }
-    return paths;
+export type PiWriteTargetPathsResult =
+  | Readonly<{ ok: true; value: readonly [string, ...string[]] }>
+  | Readonly<{ ok: false; error: string }>;
+
+const writeTarget = (input: Record<string, unknown>, path: string): PiWriteTargetPathsResult => {
+  const target = input.path ?? input.file_path ?? input.filePath;
+  return typeof target === "string" && target !== ""
+    ? Object.freeze({ ok: true, value: Object.freeze([target]) as readonly [string] })
+    : Object.freeze({ ok: false, error: `${path} must name one non-empty path, file_path, or filePath target` });
+};
+
+/** Parse every target before a scoped write can proceed; no partial batch exists. */
+export function piWriteTargetPaths(raw: unknown): PiWriteTargetPathsResult {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return Object.freeze({ ok: false, error: "write input must be a plain object" });
   }
-  return [];
+  const input = raw as Record<string, unknown>;
+  if ("path" in input || "file_path" in input || "filePath" in input) return writeTarget(input, "write input");
+  if (!Array.isArray(input.edits) || input.edits.length === 0) {
+    return Object.freeze({ ok: false, error: "write input must contain a target or a non-empty edits array" });
+  }
+  const paths: string[] = [];
+  for (const [index, edit] of input.edits.entries()) {
+    if (typeof edit !== "object" || edit === null || Array.isArray(edit)) {
+      return Object.freeze({ ok: false, error: `write input.edits[${index}] must be a plain object` });
+    }
+    const parsed = writeTarget(edit as Record<string, unknown>, `write input.edits[${index}]`);
+    if (!parsed.ok) return parsed;
+    const target = parsed.value[0];
+    if (!paths.includes(target)) paths.push(target);
+  }
+  return Object.freeze({ ok: true, value: Object.freeze(paths) as readonly [string, ...string[]] });
 }
 
 export function replacePiSpawnTask(raw: unknown, index: number, task: string): void {
@@ -346,12 +368,17 @@ function rememberTrustedReviewCapture(
   if (markers === null || markers.requestId !== outcome.receipt.requestId) {
     throw new Error(`captured request ${outcome.receipt.requestId} is missing its exact task authority markers`);
   }
-  const sessionRuns = trustedReviewRuns.get(sessionId) ?? new Map<string, TrustedReviewRun>();
-  trustedReviewRuns.set(sessionId, sessionRuns);
+  const sessionRoots = trustedReviewRuns.get(sessionId) ?? new Map<string, TrustedReviewRoot>();
+  trustedReviewRuns.set(sessionId, sessionRoots);
+  const rootIdentity = resolve(binding.runsRoot);
+  const root = sessionRoots.get(rootIdentity) ?? Object.freeze({
+    nextTouch: 1,
+    runs: new Map<string, TrustedReviewRun>(),
+  });
   const identity = trustedRunIdentity(binding);
-  const run = sessionRuns.get(identity) ?? { binding, captures: new Map<CaptureKey, TrustedReviewCapture>() };
-  run.binding = binding;
-  run.captures.set(
+  const previousRun = root.runs.get(identity);
+  const captures = new Map(previousRun?.captures ?? []);
+  captures.set(
     trustedCaptureIdentity(outcome.receipt.slotId, outcome.receipt.attempt),
     Object.freeze({
       requestId: outcome.receipt.requestId,
@@ -363,7 +390,9 @@ function rememberTrustedReviewCapture(
       byteLength: outcome.receipt.byteLength,
     }),
   );
-  sessionRuns.set(identity, run);
+  const runs = new Map(root.runs);
+  runs.set(identity, Object.freeze({ binding, captures, touchedAt: root.nextTouch }));
+  sessionRoots.set(rootIdentity, Object.freeze({ nextTouch: root.nextTouch + 1, runs }));
 }
 
 function environmentRunBinding(): SessionRunBinding | null {
@@ -671,6 +700,7 @@ type PiSpawnReservation = Readonly<{
    */
   graphActiveAtSpawn: boolean;
   orchestrationRunBinding: SessionRunBinding | null;
+  pointerBinding: SessionTaskGraphPointerBinding | null;
   items: readonly Readonly<{
     agentType: string;
     rosterId: AgentId;
@@ -784,6 +814,7 @@ function recoverPiSpawnReservation(
       // guess.
       graphActiveAtSpawn: true,
       orchestrationRunBinding: binding,
+      pointerBinding: null,
       items: Object.freeze(indexes.map((index) => {
         const item = byIndex.get(index)!;
         return Object.freeze({
@@ -810,13 +841,11 @@ function recoverPiSpawnReservation(
 interface PiParentSessionRuntime {
   readonly issuedWriteGrants: Map<string, readonly string[]>;
   readonly spawnReservations: Map<string, PiSpawnReservation>;
-  taskGraphPointerBinding: SessionTaskGraphPointerBinding | null;
 }
 
 const emptyParentSessionRuntime = (): PiParentSessionRuntime => ({
   issuedWriteGrants: new Map(),
   spawnReservations: new Map(),
-  taskGraphPointerBinding: null,
 });
 
 export function standaloneCompletionCheckpointProblem(checkpoint: string): string | null {
@@ -829,7 +858,6 @@ export function standaloneCompletionCheckpointProblem(checkpoint: string): strin
 }
 
 type TrustedRunVerification =
-  | Readonly<{ kind: "skipped" }>
   | Readonly<{ kind: "rejected"; message: string }>
   | Readonly<{ kind: "accepted"; receipt: LoomReviewAuthorityReceipt }>;
 
@@ -862,10 +890,8 @@ function trustedCaptureProblem(handle: RunDirHandle, run: TrustedReviewRun): str
 
 function verifyTrustedReviewRun(
   input: Readonly<{ sessionId: string }>,
-  expectedRoot: string,
   run: TrustedReviewRun,
 ): TrustedRunVerification {
-  if (resolve(run.binding.runsRoot) !== expectedRoot) return { kind: "skipped" };
   const reject = (message: string): TrustedRunVerification => ({
     kind: "rejected",
     message: `${run.binding.runId}: ${message}`,
@@ -909,19 +935,27 @@ function verifyTrustedReviewRun(
 }
 
 async function verifyTrustedStandaloneReview(input: Readonly<{ cwd: string; sessionId: string }>): Promise<unknown> {
-  const runs = trustedReviewRuns.get(input.sessionId);
-  if (runs === undefined) throw new Error(`no request-bound Loom captures were witnessed for Pi session ${input.sessionId}`);
+  const sessionRoots = trustedReviewRuns.get(input.sessionId);
+  if (sessionRoots === undefined) throw new Error(`no request-bound Loom captures were witnessed for Pi session ${input.sessionId}`);
   const expectedRoot = resolve(input.cwd, ".claude/reviews/review-and-fix-runs");
-  const outcomes = [...runs.values()].map((run) => verifyTrustedReviewRun(input, expectedRoot, run));
-  const receipts = outcomes.flatMap((outcome) => outcome.kind === "accepted" ? [outcome.receipt] : []);
-  const rejections = outcomes.flatMap((outcome) => outcome.kind === "rejected" ? [outcome.message] : []);
-  if (receipts.length !== 1 || rejections.length !== 0) {
-    throw new Error(
-      `expected one unambiguous witnessed Standalone Review for Pi session ${input.sessionId}, found ${receipts.length}` +
-      (rejections.length === 0 ? "" : `; rejected: ${rejections.join(" | ")}`),
-    );
+  const root = sessionRoots.get(expectedRoot);
+  if (root === undefined || root.runs.size === 0) {
+    throw new Error(`no request-bound Loom captures were witnessed for Pi session ${input.sessionId} and root ${expectedRoot}`);
   }
-  return receipts[0]!;
+  const current = [...root.runs.entries()].reduce((latest, candidate) =>
+    candidate[1].touchedAt > latest[1].touchedAt ? candidate : latest);
+  const outcome = verifyTrustedReviewRun(input, current[1]);
+  if (outcome.kind === "rejected") {
+    throw new Error(`current witnessed Standalone Review rejected: ${outcome.message}`);
+  }
+  // Exact accepted replay is idempotent. Once accepted, older witnesses for
+  // this root are retired so they can never make a later verification
+  // ambiguous or become fallback authority after a new run is touched.
+  sessionRoots.set(expectedRoot, Object.freeze({
+    nextTouch: root.nextTouch,
+    runs: new Map([[current[0], current[1]]]),
+  }));
+  return outcome.receipt;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -942,8 +976,7 @@ export default function (pi: ExtensionAPI) {
     return created;
   };
   const pruneRuntime = (sessionId: PiSessionId, runtime: PiParentSessionRuntime): void => {
-    if (runtime.issuedWriteGrants.size === 0 && runtime.spawnReservations.size === 0 &&
-        runtime.taskGraphPointerBinding === null) {
+    if (runtime.issuedWriteGrants.size === 0 && runtime.spawnReservations.size === 0) {
       parentSessionRuntimes.delete(sessionId);
     }
   };
@@ -1041,13 +1074,13 @@ export default function (pi: ExtensionAPI) {
         const granted = activeChildWriteGrants.get(sessionId);
         if (granted !== undefined && granted.scopeDirs !== undefined && granted.scopeDirs.length > 0) {
           const targets = piWriteTargetPaths(event.input);
-          if (targets.length === 0) {
+          if (!targets.ok) {
             return {
               block: true,
-              reason: "BLOCKED: cannot verify the write target for a scoped phase-agent write grant; refusing the edit.",
+              reason: `BLOCKED: cannot verify every write target for a scoped phase-agent write grant: ${targets.error}; refusing the edit.`,
             };
           }
-          for (const target of targets) {
+          for (const target of targets.value) {
             const violation = writeTargetViolatesScope(target, granted.scopeDirs, granted.grantCwd ?? ctx.cwd);
             if (violation !== null) {
               return {
@@ -1203,7 +1236,7 @@ export default function (pi: ExtensionAPI) {
               run: () => fsSessionRegistry.removeActive(safeSessionId, agentId),
             });
           }
-          if (taskGraphPointerBinding?.kind === "owned") {
+          if (taskGraphPointerBinding !== null) {
             const ownedPointer = taskGraphPointerBinding;
             actions.push({
               label: "roll back task-graph pointer",
@@ -1348,14 +1381,12 @@ export default function (pi: ExtensionAPI) {
         if (writeGrants.length > 0) {
           sessionRuntime.issuedWriteGrants.set(toolCallId, writeGrants.map((grant) => grant.token));
         }
-        if (taskGraphPointerBinding?.kind === "owned") {
-          sessionRuntime.taskGraphPointerBinding = taskGraphPointerBinding;
-        }
         sessionRuntime.spawnReservations.set(toolCallId, {
           sessionId: safeSessionId,
           needsTaskGraphLifecycle,
           graphActiveAtSpawn: graphIsActive,
           orchestrationRunBinding,
+          pointerBinding: taskGraphPointerBinding,
           items: parsedItems.map((item, index) => ({
             agentType: item.agent,
             rosterId: rosterIds[index]!,
@@ -1459,6 +1490,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     const rawSessionId = ctx.sessionManager.getSessionId() ?? "";
+    trustedReviewRuns.delete(rawSessionId);
     const sessionId = parseSessionId(rawSessionId);
     const binding = activeChildWriteGrants.get(rawSessionId);
     const actions: PiCleanupAction[] = [];
@@ -1482,15 +1514,13 @@ export default function (pi: ExtensionAPI) {
         label: `remove child roster entry ${binding.agentId}`,
         run: () => fsSessionRegistry.removeActive(sessionId, binding.agentId),
       });
-      if (binding.pointerBinding.kind === "owned") {
-        actions.push({
-          label: `roll back child task-graph pointer for ${sessionId}`,
-          run: async () => {
-            const result = await rollbackSessionTaskGraphPointer(binding.pointerBinding);
-            if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
-          },
-        });
-      }
+      actions.push({
+        label: `roll back child task-graph pointer for ${sessionId}`,
+        run: async () => {
+          const result = await rollbackSessionTaskGraphPointer(binding.pointerBinding);
+          if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
+        },
+      });
     }
     for (const reservation of parentRuntime?.spawnReservations.values() ?? []) {
       for (const item of reservation.items) {
@@ -1499,16 +1529,16 @@ export default function (pi: ExtensionAPI) {
           run: () => fsSessionRegistry.removeActive(reservation.sessionId, item.rosterId),
         });
       }
-    }
-    if (sessionId && parentRuntime?.taskGraphPointerBinding?.kind === "owned") {
-      const pointerBinding = parentRuntime.taskGraphPointerBinding;
-      actions.push({
-        label: `roll back parent task-graph pointer for ${sessionId}`,
-        run: async () => {
-          const result = await rollbackSessionTaskGraphPointer(pointerBinding);
-          if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
-        },
-      });
+      if (reservation.pointerBinding !== null) {
+        const pointerBinding = reservation.pointerBinding;
+        actions.push({
+          label: `release shutdown task-graph pointer lease for ${reservation.sessionId}`,
+          run: async () => {
+            const result = await rollbackSessionTaskGraphPointer(pointerBinding);
+            if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
+          },
+        });
+      }
     }
 
     const cleanupErrors = await runPiCleanupActions(actions);
@@ -1707,23 +1737,20 @@ export default function (pi: ExtensionAPI) {
     if (reservationRecoveryFailed) return processingErrorResponse();
     let parentPointerCleanupAttempted = false;
     const cleanupParentTaskGraphPointer = async (): Promise<void> => {
-      if (parentPointerCleanupAttempted || !resultSessionId || sessionRuntime?.taskGraphPointerBinding?.kind !== "owned" ||
-          [...sessionRuntime.spawnReservations.values()].some((entry) => entry.needsTaskGraphLifecycle)) {
-        return;
-      }
+      if (parentPointerCleanupAttempted || !resultSessionId || reservation?.pointerBinding === null ||
+          reservation?.pointerBinding === undefined) return;
       parentPointerCleanupAttempted = true;
-      const pointerBinding = sessionRuntime.taskGraphPointerBinding;
+      const pointerBinding = reservation.pointerBinding;
       const errors = await runPiCleanupActions([{
-        label: `roll back parent task-graph pointer for ${resultSessionId}`,
+        label: `release parent task-graph pointer lease for ${resultSessionId}`,
         run: async () => {
           const result = await rollbackSessionTaskGraphPointer(pointerBinding);
           if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
-          sessionRuntime.taskGraphPointerBinding = null;
         },
       }]);
       processingErrors.push(...errors);
       for (const error of errors) process.stderr.write(`loom(pi): reserved subagent cleanup failed: ${error}\n`);
-      pruneRuntime(resultSessionId, sessionRuntime);
+      if (sessionRuntime) pruneRuntime(resultSessionId, sessionRuntime);
     };
 
     const finalizeReservedImplementations = async (
@@ -1763,7 +1790,7 @@ export default function (pi: ExtensionAPI) {
       if (!finalizedAt.ok) return [finalizedAt.error.errors.join("; ")];
       try {
         const committed = await manager.updateAndReturn((initial) => {
-          let state = initial;
+          let state: TaskGraph = initial;
           const diagnostics: string[] = [];
           const logs: string[] = [];
           for (const [index, item] of reservation.items.entries()) {
@@ -1903,11 +1930,11 @@ export default function (pi: ExtensionAPI) {
           // `processingErrors` and zero stderr. The throw now becomes a
           // diagnostic and the batch continues.
           try {
-            await manager.update((state) => ({
+            await manager.update((state): TaskGraph => ({
               ...state,
-              tasks: state.tasks.map((task) => {
+              tasks: state.tasks.map<Task>((task) => {
                 const failures = missingReviews.filter(({ item }) => item.taskId === task.id);
-                return failures.reduce((current, { item, index }) => applyReviewResolution(current, {
+                return failures.reduce<Task>((current, { item, index }) => applyReviewResolution(current, {
                   kind: "evidence-failed" as const,
                   agent: item.agentType,
                   message: `reserved reviewer result ${index + 1} for ${item.agentType} was missing or mismatched`,

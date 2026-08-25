@@ -1,21 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { piWriteTargetPaths } from "../../pi/extension";
 
-/**
- * `piWriteTargetPaths` is the extraction step a SCOPED phase-agent write grant
- * enforces against: `pi/extension.ts` blocks the edit outright when it returns
- * `[]` ("cannot verify the write target"), and runs every returned path through
- * `writeTargetViolatesScope` otherwise.
- *
- * Only the downstream predicate had tests. The extraction itself had none, in
- * either direction — so neither the fail-closed empty result nor the
- * `multi_edit` branch was verified, and a multi-target edit whose SECOND target
- * escaped the grant's scope had nothing proving the extractor even reported it.
- * A regression that dropped the `edits` branch would have turned every scoped
- * multi-edit into a silently unverified write.
- */
-describe("piWriteTargetPaths — the scoped-grant write-target extractor", () => {
-  describe("fails closed: an unrecognized shape yields no targets", () => {
+const paths = (input: unknown): readonly string[] => {
+  const parsed = piWriteTargetPaths(input);
+  if (!parsed.ok) throw new Error(parsed.error);
+  return parsed.value;
+};
+
+describe("piWriteTargetPaths — all-or-nothing scoped write parsing", () => {
+  describe("fails closed with a typed parse error", () => {
     it.each([
       ["null", null],
       ["undefined", undefined],
@@ -27,9 +20,9 @@ describe("piWriteTargetPaths — the scoped-grant write-target extractor", () =>
       ["an empty path string", { path: "" }],
       ["an empty file_path string", { file_path: "" }],
       ["an edits value that is not an array", { edits: { path: "src/a.ts" } }],
-      ["an edits array with no usable entries", { edits: [null, 3, "src/a.ts", {}, { path: "" }] }],
-    ])("%s → []", (_label, input) => {
-      expect(piWriteTargetPaths(input)).toEqual([]);
+      ["an empty edits array", { edits: [] }],
+    ])("rejects %s", (_label, input) => {
+      expect(piWriteTargetPaths(input)).toMatchObject({ ok: false, error: expect.any(String) });
     });
   });
 
@@ -39,43 +32,44 @@ describe("piWriteTargetPaths — the scoped-grant write-target extractor", () =>
       ["file_path", { file_path: "src/a.ts" }],
       ["filePath", { filePath: "src/a.ts" }],
     ])("reads %s", (_label, input) => {
-      expect(piWriteTargetPaths(input)).toEqual(["src/a.ts"]);
+      expect(paths(input)).toEqual(["src/a.ts"]);
     });
 
-    it("prefers `path` when more than one spelling is present", () => {
-      expect(piWriteTargetPaths({ path: "src/a.ts", file_path: "src/b.ts" })).toEqual(["src/a.ts"]);
+    it("preserves direct-path precedence when more than one spelling is present", () => {
+      expect(paths({ path: "src/a.ts", file_path: "src/b.ts" })).toEqual(["src/a.ts"]);
     });
   });
 
-  describe("multi_edit: the `edits` array branch", () => {
-    it("returns every distinct target, in order", () => {
-      expect(piWriteTargetPaths({
+  describe("multi_edit entries", () => {
+    it("returns every distinct parsed target in order", () => {
+      expect(paths({
         edits: [
           { path: "src/a.ts", old: "x", new: "y" },
           { file_path: "src/b.ts" },
-          { path: "src/c.ts" },
+          { filePath: "src/c.ts" },
+          { path: "src/a.ts" },
         ],
       })).toEqual(["src/a.ts", "src/b.ts", "src/c.ts"]);
     });
 
-    it("deduplicates repeated targets without dropping distinct ones", () => {
-      expect(piWriteTargetPaths({
-        edits: [{ path: "src/a.ts" }, { path: "src/a.ts" }, { path: "src/b.ts" }],
-      })).toEqual(["src/a.ts", "src/b.ts"]);
+    it("blocks the whole batch when any sibling is malformed", () => {
+      const parsed = piWriteTargetPaths({
+        edits: [{ path: "src/a.ts" }, { path: 7 }, { file_path: "../../etc/passwd" }],
+      });
+      expect(parsed).toEqual({
+        ok: false,
+        error: "write input.edits[1] must name one non-empty path, file_path, or filePath target",
+      });
+      expect(parsed).not.toHaveProperty("value");
     });
 
-    it("skips unusable entries but still reports the usable siblings", () => {
-      // The scope check runs over EVERY returned path, so an out-of-scope
-      // target sitting behind a malformed sibling must still be reported —
-      // silently returning [] here would instead block the whole edit, and
-      // silently returning only the first would let the second escape.
-      expect(piWriteTargetPaths({
-        edits: [null, { path: "src/a.ts" }, "nonsense", { path: 7 }, { file_path: "../../etc/passwd" }],
-      })).toEqual(["src/a.ts", "../../etc/passwd"]);
+    it("returns every valid target so an out-of-scope sibling cannot hide", () => {
+      expect(paths({ edits: [{ path: "src/a.ts" }, { file_path: "../../etc/passwd" }] }))
+        .toEqual(["src/a.ts", "../../etc/passwd"]);
     });
 
-    it("ignores `edits` when a direct path is also present", () => {
-      expect(piWriteTargetPaths({ path: "src/a.ts", edits: [{ path: "src/b.ts" }] }))
+    it("uses a direct path for the standard one-file multi-edit shape", () => {
+      expect(paths({ path: "src/a.ts", edits: [{ oldText: "x", newText: "y" }] }))
         .toEqual(["src/a.ts"]);
     });
   });

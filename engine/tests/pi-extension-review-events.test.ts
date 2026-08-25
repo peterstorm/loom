@@ -1145,7 +1145,7 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
-  it("captures CLI-issued review authority and rejects two witnessed completed runs as ambiguous", async () => {
+  it("verifies only the current review witness, retires older accepted runs, and prunes on shutdown", async () => {
     const pi = await extension();
     const session = "019fca39-f989-7510-8e62-50dadbcad43c";
     const toolCallId = "call-session-run-binding";
@@ -1352,8 +1352,24 @@ describe("Pi extension review tool_result integration", () => {
       },
     });
     expect(JSON.parse(secondResumed)).toMatchObject({ kind: "done" });
+
+    const secondResultPath = join(secondRunDir, "result.json");
+    const canonicalSecondResult = readFileSync(secondResultPath, "utf8");
+    writeFileSync(secondResultPath, "{}\n");
     await expect(bridge.verify({ cwd: projectCwd, sessionId: session }))
-      .rejects.toThrow(`expected one unambiguous witnessed Standalone Review for Pi session ${session}, found 2`);
+      .rejects.toThrow(`current witnessed Standalone Review rejected: run.cli-session-binding-second`);
+    writeFileSync(secondResultPath, canonicalSecondResult);
+
+    const currentReceipt = await bridge.verify({ cwd: projectCwd, sessionId: session });
+    expect(currentReceipt).toMatchObject({ runId: "run.cli-session-binding-second" });
+    expect(await bridge.verify({ cwd: projectCwd, sessionId: session })).toEqual(currentReceipt);
+
+    await pi.emit("session_shutdown", {}, {
+      cwd: projectCwd,
+      sessionManager: { getSessionId: () => session },
+    });
+    await expect(bridge.verify({ cwd: projectCwd, sessionId: session }))
+      .rejects.toThrow(`no request-bound Loom captures were witnessed for Pi session ${session}`);
   });
 
   it("reloads durable session authority when the Pi extension restarts between spawn and result", async () => {
@@ -2084,6 +2100,28 @@ describe("Pi extension review tool_result integration", () => {
       input: { path: ".claude/specs/2026-08-12-foo/spec.md", content: "# Spec" },
     }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
     expect(inScope).toEqual([undefined]);
+    const malformedBatch = await pi.emit("tool_call", {
+      toolName: "multi_edit",
+      input: { edits: [
+        { path: ".claude/specs/2026-08-12-foo/spec.md" },
+        { path: 7 },
+      ] },
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
+    expect(malformedBatch).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("cannot verify every write target"),
+    }));
+    const mixedScopeBatch = await pi.emit("tool_call", {
+      toolName: "multi_edit",
+      input: { edits: [
+        { path: ".claude/specs/2026-08-12-foo/spec.md" },
+        { file_path: ".claude/specs/other.md" },
+      ] },
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
+    expect(mixedScopeBatch).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("outside the granted artifact scope"),
+    }));
     // Sibling file directly under specs/ (not the run slug) is out of scope.
     const sibling = await pi.emit("tool_call", {
       toolName: "write",

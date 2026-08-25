@@ -104,6 +104,14 @@ _Avoid_: Synthetic Task, fake Wave, ad-hoc review output
 The single source of truth for orchestration progress (`active_task_graph.json`). Write-protected; only hooks mutate it.
 _Avoid_: Config, manifest, plan file
 
+**Session TaskGraph Pointer Lease Registry**:
+The exact parsed immutable generation record beside one session's `.task_graph` pointer. Every same-target binder owns one lease; only the final lease may restore the generation's previous target, and a different target or contradictory/malformed crash state fails closed under the same no-follow lock.
+_Avoid_: Pointer owner flag, shared pointer, best-effort rollback
+
+**Trusted Review Witness Aggregate**:
+The process-local Pi authority grouped by session, Standalone Review root, and Review Run, with explicit touch recency. Verification considers only the current run for that root; rejection never falls back, exact acceptance is idempotent and retires older root witnesses, and session shutdown prunes the session aggregate.
+_Avoid_: Review cache, accepted result fallback, global witness map
+
 **Plan**:
 The architecture document produced in Phase 3. Defines component design, file structure, and implementation phases that decompose parses into a task graph.
 _Avoid_: Design doc, architecture doc, blueprint
@@ -286,6 +294,8 @@ _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory ru
 - A **Verification Manifest** is frozen by the engine before implementation and cannot be authored through decompose output
 - A Task-scoped **Completion Suite Result** binds to one **Implementation Attempt**; a Wave-scoped result binds to a quiescent Wave workspace
 - Review Agents consume one immutable **Review Packet** per Task
+- A **Session TaskGraph Pointer Lease Registry** restores its previous target only after the generation's final exact lease is released
+- A **Trusted Review Witness Aggregate** verifies only the most recently touched Standalone Review Run for one session/root and is pruned at session shutdown
 - A **Review Run** binds that Review Packet to one **Review Generation**, the expected review Agents, and all prior active Finding IDs
 - A **Resolved Finding** leaves the active set only when every Agent in its Review Run explicitly verifies remediation; any `still_present` assessment keeps it active
 - A **Panel Program** emits the exact Agent batches and engine operations for each panel

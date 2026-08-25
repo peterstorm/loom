@@ -20,7 +20,6 @@ import {
   taskExecutionRegistrationError,
   type ExecutionBatchMode,
   type TaskExecutionRosterObservation,
-  type TaskExecutionDecision,
   type TaskExecutionSpawn,
   type ValidateTaskExecutionInput,
 } from "../core/validate-task-execution";
@@ -57,10 +56,6 @@ import { anyActiveSubagent } from "../machine";
  * the machine, so a project-blind probe lets another repo's live agent — or
  * any stray roster file — veto recovery here indefinitely.
  */
-function activeSubagentForGraph(taskGraphPath: string): boolean {
-  return anyActiveSubagent(taskGraphPath);
-}
-
 /**
  * Imperative shell: preflight every input against one state snapshot, capture
  * every baseline, then register the accepted batch in one locked update. A
@@ -76,12 +71,6 @@ export type TaskExecutionRegistrationOutcome =
   | Readonly<{ kind: "block"; message: string }>;
 
 class LockedRegistrationRefusal extends Error {}
-
-function taskExecutionHookResult(
-  decision: Extract<TaskExecutionDecision, { kind: "ineligible" }>,
-): Extract<HookResult, { kind: "block" }> {
-  return { kind: "block", message: `BLOCKED: ${decision.reason}` };
-}
 
 /**
  * Typed registration operation used by Pi. The Claude Hook wrapper below keeps
@@ -132,7 +121,7 @@ export async function registerTaskExecutionBatch(
   const now = Date.now();
   const observedRoster: TaskExecutionRosterObservation = rosterObservation ?? {
     kind: "at-registration",
-    anyActiveForGraph: activeSubagentForGraph(statePath),
+    anyActiveForGraph: anyActiveSubagent(statePath),
   };
   const staleFor = (snapshot: TaskGraph) =>
     staleReservationsForRosterObservation(snapshot, observedRoster, now);
@@ -142,7 +131,7 @@ export async function registerTaskExecutionBatch(
 
   for (const taskId of taskIds) {
     const decision = taskExecutionDecision(state, taskId);
-    if (decision.kind === "ineligible") return taskExecutionHookResult(decision);
+    if (decision.kind === "ineligible") return { kind: "block", message: `BLOCKED: ${decision.reason}` };
   }
 
   const repository = repositoryContext();

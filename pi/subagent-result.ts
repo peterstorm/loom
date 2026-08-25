@@ -49,6 +49,7 @@ import { reconcileWaveBlock } from "../engine/src/core/wave-gate-model";
 import { phaseArtifactUpdates } from "../engine/src/core/phase-artifact-paths";
 import { IMPL_AGENTS, isReviewAgent } from "../engine/src/config";
 import type { Phase, TaskGraph } from "../engine/src/types";
+import type { ParsedTaskGraph } from "../engine/src/state-manager";
 import {
   parseIsoInstant,
   type ImplementationAttemptAuthority,
@@ -89,10 +90,10 @@ import {
  * should own.
  */
 export type TaskGraphStore = Readonly<{
-  load(): TaskGraph;
-  update(mutate: (state: TaskGraph) => TaskGraph): Promise<void>;
+  load(): ParsedTaskGraph;
+  update(mutate: (state: ParsedTaskGraph) => TaskGraph): Promise<void>;
   updateAndReturn<T>(
-    mutate: (state: TaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
+    mutate: (state: ParsedTaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
   ): Promise<T>;
 }>;
 

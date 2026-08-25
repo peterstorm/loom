@@ -2075,7 +2075,7 @@ export class StateManager {
     return pathExistsFailClosed(path) ? new StateManager(path) : null;
   }
 
-  load(): TaskGraph {
+  load(): ParsedTaskGraph {
     const raw = readFileSync(this.path, "utf-8");
     let parsed: unknown;
     try {
@@ -2093,13 +2093,13 @@ export class StateManager {
   }
 
   /** Atomically update state via pure transform: (state) => state */
-  async update(fn: (state: TaskGraph) => TaskGraph): Promise<void> {
+  async update(fn: (state: ParsedTaskGraph) => TaskGraph): Promise<void> {
     await this.updateAndReturn((state) => ({ state: fn(state), value: undefined }));
   }
 
   /** Atomic shell primitive for effects that must return the locked decision they committed. */
   async updateAndReturn<T>(
-    fn: (state: TaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
+    fn: (state: ParsedTaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
   ): Promise<T> {
     return this.atomicWrite(() => fn(this.load()));
   }

@@ -7,6 +7,7 @@ import {
 } from "../../src/core/implementation-completion";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import type { TaskGraph } from "../../src/types";
+import { parseTaskGraph, type ParsedTaskGraph } from "../../src/state-manager";
 
 function authority(reservation: string) {
   const instant = parseIsoInstant("2026-08-24T00:00:00.000Z");
@@ -21,18 +22,24 @@ function authority(reservation: string) {
   return created.value;
 }
 
+function parsedGraph(graph: TaskGraph): ParsedTaskGraph {
+  const parsed = parseTaskGraph(graph);
+  if (!parsed.ok) throw new Error(parsed.error);
+  return parsed.value;
+}
+
 function store(initial: TaskGraph): TaskGraphStore & { current(): TaskGraph } {
-  let state = initial;
+  let state = parsedGraph(initial);
   const updateAndReturn = async <T>(
-    mutate: (current: TaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
+    mutate: (current: ParsedTaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
   ): Promise<T> => {
     const applied = mutate(state);
-    state = applied.state;
+    state = parsedGraph(applied.state);
     return applied.value;
   };
   return {
     load: () => state,
-    update: async (mutate) => { state = mutate(state); },
+    update: async (mutate) => { state = parsedGraph(mutate(state)); },
     updateAndReturn,
     current: () => state,
   };
@@ -137,7 +144,7 @@ describe("Pi exact implementation authority correlation", () => {
 
     expect(result.processingErrors).toEqual([]);
     expect(result.log.join("\n")).toContain("stale");
-    expect(fake.current()).toBe(graph);
+    expect(fake.current()).toEqual(parsedGraph(graph));
     expect(fake.current().executing_tasks).toEqual(["T1"]);
     expect(fake.current().tasks[0]?.active_implementation_attempt).toEqual(replacement);
   });

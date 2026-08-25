@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import type { TaskGraph } from "../../src/types";
+import { parseTaskGraph, type ParsedTaskGraph } from "../../src/state-manager";
 import { derivePendingTaskProof, evaluateTaskProof } from "../../src/core/proof-obligations";
 import { applyCompletionInfrastructureFailure } from "../../src/core/implementation-application";
 import { taskFixture } from "../fixtures/task-lifecycle";
@@ -68,19 +69,25 @@ function graph(overrides: Partial<TaskGraph> = {}): TaskGraph {
   } as TaskGraph;
 }
 
-/** An in-memory stand-in for StateManager: load, mutate, keep. */
+function parsedGraph(graph: TaskGraph): ParsedTaskGraph {
+  const parsed = parseTaskGraph(graph);
+  if (!parsed.ok) throw new Error(`invalid parsed graph fixture: ${parsed.error}`);
+  return parsed.value;
+}
+
+/** An in-memory stand-in for StateManager: every persisted update is reparsed. */
 function fakeStore(initial: TaskGraph): TaskGraphStore & { current: () => TaskGraph } {
-  let state = initial;
+  let state = parsedGraph(initial);
   const updateAndReturn = async <T>(
-    mutate: (current: TaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
+    mutate: (current: ParsedTaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
   ): Promise<T> => {
     const applied = mutate(state);
-    state = applied.state;
+    state = parsedGraph(applied.state);
     return applied.value;
   };
   return {
     load: () => state,
-    update: async (mutate) => { state = mutate(state); },
+    update: async (mutate) => { state = parsedGraph(mutate(state)); },
     updateAndReturn,
     current: () => state,
   };
@@ -256,15 +263,15 @@ describe("applyPhaseAgentPiResult", () => {
   });
 
   it("cannot regress a concurrently advanced phase or route artifacts from a stale load", async () => {
-    const stale = graph({ current_phase: "specify", spec_dir: ".claude/specs/stale" } as Partial<TaskGraph>);
-    let current = graph({ current_phase: "architecture", spec_dir: ".claude/specs/current" } as Partial<TaskGraph>);
+    const stale = parsedGraph(graph({ current_phase: "specify", spec_dir: ".claude/specs/stale" } as Partial<TaskGraph>));
+    let current = parsedGraph(graph({ current_phase: "architecture", spec_dir: ".claude/specs/current" } as Partial<TaskGraph>));
     let loadCount = 0;
     const store: TaskGraphStore & { current(): TaskGraph } = {
       load: () => { loadCount += 1; return stale; },
-      update: async (mutate) => { current = mutate(current); },
+      update: async (mutate) => { current = parsedGraph(mutate(current)); },
       updateAndReturn: async (mutate) => {
         const applied = mutate(current);
-        current = applied.state;
+        current = parsedGraph(applied.state);
         return applied.value;
       },
       current: () => current,
@@ -321,9 +328,13 @@ describe("applyFailedPiResult", () => {
   });
 
   it("idempotently releases the reserved implementation task without replacing prior settlement", async () => {
+    const base = graph();
     const store = fakeStore(graph({
       executing_tasks: ["T1", "T2"],
-      tasks: [{ ...graph().tasks[0]!, failure_reason: "already settled" }],
+      tasks: [
+        { ...base.tasks[0]!, failure_reason: "already settled" },
+        { ...base.tasks[0]!, id: "T2" },
+      ],
     }));
     const applied = await applyFailedPiResult({
       store,
@@ -354,7 +365,11 @@ describe("applyFailedPiResult", () => {
   });
 
   it("preserves parallel execution and reports an unbound failed implementation", async () => {
-    const store = fakeStore(graph({ executing_tasks: ["T1", "T2"] }));
+    const base = graph();
+    const store = fakeStore(graph({
+      executing_tasks: ["T1", "T2"],
+      tasks: [...base.tasks, { ...base.tasks[0]!, id: "T2" }],
+    }));
     const applied = await applyFailedPiResult({
       store,
       agentType: "code-implementer-agent",
@@ -463,8 +478,8 @@ describe("applyReviewPiResult", () => {
   });
 
   it("reports a task disappearing during locked evidence application as a processing error", async () => {
-    const initial = graph();
-    const withoutTask = { ...initial, tasks: [] };
+    const initial = parsedGraph(graph());
+    const withoutTask = parsedGraph({ ...initial, tasks: [] });
     const store: TaskGraphStore = {
       load: () => initial,
       update: async (mutate) => { mutate(withoutTask); },
@@ -558,15 +573,15 @@ describe("applySpecCheckPiResult", () => {
   });
 
   it("uses locked current_wave when the transcript omits its Wave despite a stale load", async () => {
-    const stale = graph({ current_wave: 1 });
-    let current = graph({ current_wave: 3, wave_gates: {} });
+    const stale = parsedGraph(graph({ current_wave: 1 }));
+    let current = parsedGraph(graph({ current_wave: 3, wave_gates: {} }));
     let loadCount = 0;
     const store: TaskGraphStore & { current(): TaskGraph } = {
       load: () => { loadCount += 1; return stale; },
-      update: async (mutate) => { current = mutate(current); },
+      update: async (mutate) => { current = parsedGraph(mutate(current)); },
       updateAndReturn: async (mutate) => {
         const applied = mutate(current);
-        current = applied.state;
+        current = parsedGraph(applied.state);
         return applied.value;
       },
       current: () => current,
@@ -591,10 +606,28 @@ describe("applyImplementationPiResult", () => {
 
   const implementationGraph = (taskOverrides: Record<string, unknown> = {}): TaskGraph => {
     const base = graph({ executing_tasks: ["T1"] });
-    return {
-      ...base,
-      tasks: [{ ...base.tasks[0]!, ...taskOverrides }],
-    } as TaskGraph;
+    const overridden = { ...base.tasks[0]!, ...taskOverrides } as TaskGraph["tasks"][number];
+    const attemptBaseline = overridden.attempt_artifact_baseline;
+    const task = taskFixture({
+      ...overridden,
+      ...(!("proof" in taskOverrides)
+        ? {
+            proof: derivePendingTaskProof({
+              verificationPolicy: taskVerificationPolicy(overridden),
+              declaredArtifacts: overridden.file_list ?? [],
+            }),
+          }
+        : {}),
+      ...(attemptBaseline?.length === 0 && (overridden.file_list?.length ?? 0) > 0
+        ? {
+            attempt_artifact_baseline: overridden.file_list!.map((artifact) => ({
+              artifact,
+              snapshot: { kind: "missing" as const },
+            })),
+          }
+        : {}),
+    });
+    return { ...base, tasks: [task] } as TaskGraph;
   };
 
   const modernize = (state: TaskGraph, root: string, reservationId: string): Readonly<{
@@ -746,13 +779,13 @@ describe("applyImplementationPiResult", () => {
         proof: task.proof,
       })),
     };
-    let current = reopened;
+    let current = parsedGraph(reopened);
     const store: TaskGraphStore & { current(): TaskGraph } = {
-      load: () => completedView,
-      update: async (mutate) => { current = mutate(current); },
+      load: () => parsedGraph(completedView),
+      update: async (mutate) => { current = parsedGraph(mutate(current)); },
       updateAndReturn: async (mutate) => {
         const applied = mutate(current);
-        current = applied.state;
+        current = parsedGraph(applied.state);
         return applied.value;
       },
       current: () => current,
@@ -818,7 +851,10 @@ describe("applyImplementationPiResult", () => {
       // A baseline naming an artifact under a root that does not exist makes
       // the comparator throw, which it reports as a failure rather than "no
       // change" — the fail-closed direction.
-      attempt_artifact_baseline: [{ artifact: "engine/src/x.ts", sha256: "a".repeat(64) }],
+      attempt_artifact_baseline: [{
+        artifact: "engine/src/x.ts",
+        snapshot: { kind: "sha256", digest: "a".repeat(64) },
+      }],
     }));
     const outcome = await applyImplementationPiResult({
       store,
@@ -846,6 +882,7 @@ describe("applyImplementationPiResult", () => {
       proof,
       new_tests_required: false,
       review_status: "passed",
+      file_list: [],
       attempt_artifact_baseline: [],
     });
     const store = fakeStore({
@@ -908,7 +945,10 @@ describe("applyImplementationPiResult", () => {
       proof: staleProof,
       test_result: { verdict: "trusted-pass" },
       review_status: "passed",
-      attempt_artifact_baseline: [{ artifact: "engine/src/x.ts", sha256: "a".repeat(64) }],
+      attempt_artifact_baseline: [{
+        artifact: "engine/src/x.ts",
+        snapshot: { kind: "sha256", digest: "a".repeat(64) },
+      }],
       verification_policy: {
         regression: verificationPolicy.regression,
         new_tests: verificationPolicy.newTests,
@@ -1009,13 +1049,10 @@ describe("applyImplementationPiResult", () => {
         regression: { kind: "required" },
         new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
       },
-      status: "implemented",
-      test_result: { verdict: "trusted-pass" },
-      review_status: "passed",
     });
-    let current = initial;
+    let current = parsedGraph(initial);
     let loads = 0;
-    const lockedState: TaskGraph = {
+    const lockedState = parsedGraph({
       ...initial,
       tasks: initial.tasks.map((task) => task.id === "T1"
         ? {
@@ -1026,16 +1063,16 @@ describe("applyImplementationPiResult", () => {
             }],
           }
         : task),
-    };
+    });
     const store: TaskGraphStore & { current(): TaskGraph } = {
       load: () => {
         loads += 1;
-        return initial;
+        return parsedGraph(initial);
       },
-      update: async (mutate) => { current = mutate(lockedState); },
+      update: async (mutate) => { current = parsedGraph(mutate(lockedState)); },
       updateAndReturn: async (mutate) => {
         const applied = mutate(lockedState);
-        current = applied.state;
+        current = parsedGraph(applied.state);
         return applied.value;
       },
       current: () => current,

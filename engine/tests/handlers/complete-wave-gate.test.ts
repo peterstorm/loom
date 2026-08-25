@@ -2494,7 +2494,7 @@ describe("final-Wave compatibility completion replay", () => {
       const manager = new (class extends StateManager {
         private readCount = 0;
 
-        override load(): TaskGraph {
+        override load(): ReturnType<StateManager["load"]> {
           this.readCount++;
           if (this.readCount > 1) throw new Error("simulated legacy replay read failure");
           return super.load();

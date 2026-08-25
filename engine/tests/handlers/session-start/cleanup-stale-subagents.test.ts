@@ -106,7 +106,7 @@ describe("sweepStaleSessions (fs)", () => {
     const oldms = (path: string) => utimesSync(path, old, old);
 
     // Live session: .machine fresh (activity anchor), everything else old.
-    for (const suffix of ["active", "evidence.jsonl"]) {
+    for (const suffix of ["active", "evidence.jsonl", "task-graph-pointer-leases.json"]) {
       const p = join(subDir, `live.${suffix}`);
       writeFileSync(p, "x\n");
       oldms(p);
@@ -114,7 +114,7 @@ describe("sweepStaleSessions (fs)", () => {
     writeFileSync(join(subDir, "live.machine"), "a-1\tcode-implementer-agent\t1\n"); // fresh mtime
 
     // Dead session: every file old, including the mkdir-lock directory.
-    for (const suffix of ["machine", "active", "evidence.jsonl", "task_graph", "callstart.json"]) {
+    for (const suffix of ["machine", "active", "evidence.jsonl", "task_graph", "task-graph-pointer-leases.json", "callstart.json"]) {
       const p = join(subDir, `dead.${suffix}`);
       writeFileSync(p, "x\n");
       oldms(p);
@@ -133,9 +133,10 @@ describe("sweepStaleSessions (fs)", () => {
     expect(existsSync(join(subDir, "live.machine"))).toBe(true);
     expect(existsSync(join(subDir, "live.active"))).toBe(true);
     expect(existsSync(join(subDir, "live.evidence.jsonl"))).toBe(true);
+    expect(existsSync(join(subDir, "live.task-graph-pointer-leases.json"))).toBe(true);
 
     // Dead group is gone ENTIRELY, lock dir included.
-    for (const suffix of ["machine", "active", "evidence.jsonl", "task_graph", "callstart.json", "cleanup"]) {
+    for (const suffix of ["machine", "active", "evidence.jsonl", "task_graph", "task-graph-pointer-leases.json", "callstart.json", "cleanup"]) {
       expect(existsSync(join(subDir, `dead.${suffix}`)), `dead.${suffix} should be swept`).toBe(false);
     }
 

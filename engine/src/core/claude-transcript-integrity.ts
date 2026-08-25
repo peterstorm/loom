@@ -13,6 +13,7 @@ const MAX_CONTENT_DEPTH = 8;
 export const CLAUDE_CONTENT_BLOCK_TYPES = Object.freeze([
   "text",
   "thinking",
+  "redacted_thinking",
   "tool_use",
   "server_tool_use",
   "tool_result",
@@ -34,6 +35,11 @@ export type ClaudeThinkingBlock = SurplusFields & Readonly<{
   type: "thinking";
   thinking: string;
   signature?: string;
+}>;
+
+export type ClaudeRedactedThinkingBlock = SurplusFields & Readonly<{
+  type: "redacted_thinking";
+  data: string;
 }>;
 
 export type ClaudeToolUseBlock = SurplusFields & Readonly<{
@@ -85,6 +91,7 @@ export type ClaudeFallbackBlock = SurplusFields & Readonly<{
 export type ClaudeContentBlock =
   | ClaudeTextBlock
   | ClaudeThinkingBlock
+  | ClaudeRedactedThinkingBlock
   | ClaudeToolUseBlock
   | ClaudeToolResultBlock
   | ClaudeToolReferenceBlock
@@ -184,6 +191,8 @@ function contentBlockError(block: UnknownRecord, path: string, depth: number): s
       if (typeof block.thinking !== "string") return `${path}.thinking must be a string for a thinking block`;
       return optionalStringField(block, "signature", path);
     }
+    case "redacted_thinking":
+      return nonEmptyStringField(block, "data", path);
     case "tool_use":
     case "server_tool_use": {
       const idError = nonEmptyStringField(block, "id", path);

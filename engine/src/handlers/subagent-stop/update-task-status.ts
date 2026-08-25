@@ -559,7 +559,7 @@ export const runUpdateTaskStatus = async (
     // compare and invalidate a proven legacy reservation, but never consume a
     // modern attempt or decide positive completion.
     if (target.active_implementation_attempt !== undefined ||
-        !(s.executing_tasks ?? []).includes(taskId)) {
+        !(s.executing_tasks ?? []).some((executingTaskId) => executingTaskId === taskId)) {
       skippedExistingVerdict = true;
       return s;
     }

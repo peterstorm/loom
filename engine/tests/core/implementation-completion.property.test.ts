@@ -216,6 +216,9 @@ describe("implementation completion exact parsers", () => {
     ["non-object block", '{"type":"user","message":{"role":"user","content":["hello"]}}', "plain object", 1],
     ["missing block type", '{"type":"assistant","message":{"role":"assistant","content":[{}]}}', "type", 1],
     ["malformed text block", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":7}]}}', "text", 1],
+    ["redacted thinking without data", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"redacted_thinking"}]}}', "data", 1],
+    ["redacted thinking with empty data", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"redacted_thinking","data":"   "}]}}', "non-empty", 1],
+    ["redacted thinking with non-string data", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"redacted_thinking","data":7}]}}', "non-empty", 1],
     ["malformed tool-use block", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":[]}]}}', "input", 1],
     ["malformed tool-result block", '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":null}]}}', "content", 1],
     ["malformed tool-reference block", '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":[{"type":"tool_reference","tool_name":"   "}]}]}}', "tool_name", 1],
@@ -237,6 +240,7 @@ describe("implementation completion exact parsers", () => {
     const blocks = [
       { type: "text", text: "done", future: true },
       { type: "thinking", thinking: "work", signature: "sig", future: true },
+      { type: "redacted_thinking", data: "opaque-provider-data", future: true },
       { type: "tool_use", id: "tool-1", name: "Bash", input: {}, future: true },
       { type: "server_tool_use", id: "server-1", name: "search", input: {}, future: true },
       { type: "tool_result", tool_use_id: "tool-1", content: "pass", is_error: false, future: true },

@@ -399,7 +399,7 @@ export type TaskCompletionSuiteAuthority = Readonly<{
   schemaVersion: 1;
   kind: "task-completion-suite-authority";
   implementationAuthorityDigest: ImplementationAuthorityDigest;
-  checks: readonly [AuthorizedTaskCompletionCheck, ...AuthorizedTaskCompletionCheck[]];
+  checks: readonly [AuthorizedTaskCompletionCheck];
   suiteDigest: TaskCompletionSuiteDigest;
 }>;
 
@@ -433,7 +433,7 @@ function parseAuthorizedTaskCheck(raw: unknown, path: string): Parsed<Authorized
     : failure(errors);
 }
 
-function parseTaskRoster(raw: unknown, path: string): Parsed<readonly [AuthorizedTaskCompletionCheck, ...AuthorizedTaskCompletionCheck[]]> {
+function parseTaskRoster(raw: unknown, path: string): Parsed<readonly [AuthorizedTaskCompletionCheck]> {
   const array = parseDenseArray(raw, path);
   if (!array.ok) return array;
   if (array.value.length === 0) return failure([`${path} must be non-empty`]);
@@ -455,7 +455,7 @@ export function createTaskCompletionSuiteAuthority(
     const authority = parseImplementationAttemptAuthority(rawAuthority);
     if (!authority.ok) return authority;
     const check = taskByteScopeCheck();
-    const checks: readonly [AuthorizedTaskCompletionCheck, ...AuthorizedTaskCompletionCheck[]] = Object.freeze([check]);
+    const checks: readonly [AuthorizedTaskCompletionCheck] = Object.freeze([check]);
     return success(freeze({
       schemaVersion: 1,
       kind: "task-completion-suite-authority",

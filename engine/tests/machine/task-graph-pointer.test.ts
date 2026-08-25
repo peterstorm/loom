@@ -1,11 +1,13 @@
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   bindSessionTaskGraphPointer,
+  parseSessionTaskGraphPointerLeaseRegistry,
   rollbackSessionTaskGraphPointer,
-} from "../../src/machine/task-graph-pointer";
+  TASK_GRAPH_POINTER_LEASES_SUFFIX,
+} from "../../src/machine";
 import { parseSessionId } from "../../src/machine";
 
 const roots: string[] = [];
@@ -21,45 +23,117 @@ function fixture() {
   writeFileSync(graphC, "{}\n");
   const sessionId = parseSessionId("019fca39-f989-7510-8e62-50dadbcad499");
   if (sessionId === null) throw new Error("session fixture must parse");
-  return { root, graphA, graphB, graphC, sessionId, pointer: join(root, `${sessionId}.task_graph`) };
+  return {
+    root,
+    graphA,
+    graphB,
+    graphC,
+    sessionId,
+    pointer: join(root, `${sessionId}.task_graph`),
+    registry: join(root, `${sessionId}${TASK_GRAPH_POINTER_LEASES_SUFFIX}`),
+  };
+}
+
+function registry(path: string) {
+  const parsed = parseSessionTaskGraphPointerLeaseRegistry(JSON.parse(readFileSync(path, "utf8")));
+  if (!parsed.ok) throw new Error(parsed.error);
+  return parsed.value;
 }
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe("shared session TaskGraph pointer binder", () => {
-  it("atomically refreshes a stale pointer and returns exact rollback ownership", async () => {
-    const { root, graphA, graphB, sessionId, pointer } = fixture();
+describe("shared session TaskGraph pointer lease registry", () => {
+  it("atomically refreshes a stale pointer and restores it after the final lease", async () => {
+    const { root, graphA, graphB, sessionId, pointer, registry: registryPath } = fixture();
     writeFileSync(pointer, graphA);
 
     const binding = await bindSessionTaskGraphPointer(sessionId, graphB, root);
 
-    expect(binding).toMatchObject({ kind: "owned", previous: graphA, target: graphB });
+    expect(binding).toMatchObject({ target: graphB });
     expect(readFileSync(pointer, "utf8")).toBe(graphB);
+    expect(registry(registryPath)).toMatchObject({ target: graphB, previous: graphA, leases: [binding.leaseId] });
     expect(await rollbackSessionTaskGraphPointer(binding)).toBe("rolled-back");
     expect(readFileSync(pointer, "utf8")).toBe(graphA);
+    expect(existsSync(registryPath)).toBe(false);
   });
 
-  it("does not claim or clean a pointer already bound to the canonical graph", async () => {
+  it("does not restore stale state while a same-target shared lease remains", async () => {
+    const { root, graphA, graphB, sessionId, pointer, registry: registryPath } = fixture();
+    writeFileSync(pointer, graphA);
+    const first = await bindSessionTaskGraphPointer(sessionId, graphB, root);
+    const shared = await bindSessionTaskGraphPointer(sessionId, graphB, root);
+
+    expect(registry(registryPath).leases).toEqual([first.leaseId, shared.leaseId]);
+    expect(await rollbackSessionTaskGraphPointer(first)).toBe("rolled-back");
+    expect(readFileSync(pointer, "utf8")).toBe(graphB);
+    expect(registry(registryPath).leases).toEqual([shared.leaseId]);
+
+    expect(await rollbackSessionTaskGraphPointer(shared)).toBe("rolled-back");
+    expect(readFileSync(pointer, "utf8")).toBe(graphA);
+    expect(existsSync(registryPath)).toBe(false);
+  });
+
+  it("removes only the exact lease and makes repeated release idempotent", async () => {
     const { root, graphB, sessionId, pointer } = fixture();
+    const first = await bindSessionTaskGraphPointer(sessionId, graphB, root);
+    const second = await bindSessionTaskGraphPointer(sessionId, graphB, root);
+
+    expect(await rollbackSessionTaskGraphPointer(second)).toBe("rolled-back");
+    expect(await rollbackSessionTaskGraphPointer(second)).toBe("not-owned");
+    expect(readFileSync(pointer, "utf8")).toBe(graphB);
+    expect(await rollbackSessionTaskGraphPointer(first)).toBe("rolled-back");
+    expect(existsSync(pointer)).toBe(false);
+  });
+
+  it("fails closed when a different target is requested under live leases", async () => {
+    const { root, graphA, graphB, sessionId, pointer } = fixture();
+    const binding = await bindSessionTaskGraphPointer(sessionId, graphA, root);
+
+    await expect(bindSessionTaskGraphPointer(sessionId, graphB, root))
+      .rejects.toThrow(/live pointer lease.*refusing target/);
+    expect(readFileSync(pointer, "utf8")).toBe(graphA);
+    expect(await rollbackSessionTaskGraphPointer(binding)).toBe("rolled-back");
+  });
+
+  it("fails closed on a crash-state pointer/registry mismatch and preserves both", async () => {
+    const { root, graphA, graphB, sessionId, pointer, registry: registryPath } = fixture();
+    const binding = await bindSessionTaskGraphPointer(sessionId, graphA, root);
+    const beforeRegistry = readFileSync(registryPath, "utf8");
     writeFileSync(pointer, graphB);
 
-    const binding = await bindSessionTaskGraphPointer(sessionId, graphB, root);
-
-    expect(binding.kind).toBe("shared");
-    expect(await rollbackSessionTaskGraphPointer(binding)).toBe("not-owned");
+    await expect(bindSessionTaskGraphPointer(sessionId, graphA, root))
+      .rejects.toThrow(/disagrees.*refusing crash-state recovery/);
+    expect(await rollbackSessionTaskGraphPointer(binding)).toBe("ownership-lost");
     expect(readFileSync(pointer, "utf8")).toBe(graphB);
+    expect(readFileSync(registryPath, "utf8")).toBe(beforeRegistry);
   });
 
-  it("never rolls back a pointer replaced after this binding", async () => {
-    const { root, graphA, graphB, graphC, sessionId, pointer } = fixture();
+  it("fails closed on malformed registry JSON without changing the pointer", async () => {
+    const { root, graphA, graphB, sessionId, pointer, registry: registryPath } = fixture();
     writeFileSync(pointer, graphA);
-    const binding = await bindSessionTaskGraphPointer(sessionId, graphB, root);
-    writeFileSync(pointer, graphC);
+    writeFileSync(registryPath, "{not-json");
 
-    expect(await rollbackSessionTaskGraphPointer(binding)).toBe("ownership-lost");
-    expect(readFileSync(pointer, "utf8")).toBe(graphC);
+    await expect(bindSessionTaskGraphPointer(sessionId, graphB, root))
+      .rejects.toThrow(/registry.*malformed JSON/);
+    expect(readFileSync(pointer, "utf8")).toBe(graphA);
+    expect(readFileSync(registryPath, "utf8")).toBe("{not-json");
+  });
+
+  it("parses only the exact registry shape into recursively immutable state", async () => {
+    const { root, graphB, sessionId, registry: registryPath } = fixture();
+    const binding = await bindSessionTaskGraphPointer(sessionId, graphB, root);
+    const raw = JSON.parse(readFileSync(registryPath, "utf8"));
+    const parsed = parseSessionTaskGraphPointerLeaseRegistry(raw);
+
+    expect(parsed.ok).toBe(true);
+    expect(parsed.ok && Object.isFrozen(parsed.value)).toBe(true);
+    expect(parsed.ok && Object.isFrozen(parsed.value.leases)).toBe(true);
+    expect(parseSessionTaskGraphPointerLeaseRegistry({ ...raw, surplus: true }).ok).toBe(false);
+    expect(parseSessionTaskGraphPointerLeaseRegistry({ ...raw, leases: [] }).ok).toBe(false);
+    expect(parseSessionTaskGraphPointerLeaseRegistry({ ...raw, leases: [binding.leaseId, binding.leaseId] }).ok).toBe(false);
+    await rollbackSessionTaskGraphPointer(binding);
   });
 
   it("refuses a symlink pointer instead of following or replacing it", async () => {

@@ -289,7 +289,7 @@ const handler: HookHandler = async (stdin) => {
         rollbackFailures.push(`sidecar rollback failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    if (taskGraphPointerBinding?.kind === "owned") {
+    if (taskGraphPointerBinding !== null) {
       try {
         const rolledBack = await rollbackSessionTaskGraphPointer(taskGraphPointerBinding);
         if (rolledBack !== "rolled-back") {
