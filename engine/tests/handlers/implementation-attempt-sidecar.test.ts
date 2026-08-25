@@ -16,6 +16,7 @@ import cleanupSubagentFlag from "../../src/handlers/subagent-stop/cleanup-subage
 import {
   implementationAttemptSidecarLeaf,
   publishImplementationAttemptSidecar,
+  publishSidecarBytes,
   snapshotImplementationAttemptSidecar,
 } from "../../src/implementation-attempt-sidecar";
 import {
@@ -43,6 +44,11 @@ function root(): string {
   process.env.LOOM_SUBAGENT_DIR = join(value, "subagents");
   process.env.CLAUDE_PROJECT_DIR = value;
   execFileSync("git", ["init", "--quiet"], { cwd: value });
+  execFileSync("git", ["config", "user.email", "loom@example.test"], { cwd: value });
+  execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: value });
+  writeFileSync(join(value, ".gitkeep"), "fixture\n");
+  execFileSync("git", ["add", ".gitkeep"], { cwd: value });
+  execFileSync("git", ["commit", "--quiet", "-m", "fixture root"], { cwd: value });
   return value;
 }
 
@@ -55,7 +61,10 @@ function authority(taskId = "T1", reservation = "sidecar-reservation"): Implemen
     wave: 1,
     semanticAttempt: 1,
     reservationId: reservationId.value,
-    headSha: "1".repeat(40),
+    headSha: execFileSync("git", ["rev-parse", "--verify", "HEAD"], {
+      cwd: process.env.CLAUDE_PROJECT_DIR,
+      encoding: "utf8",
+    }).trim(),
     reservedAt: instant.value,
     taskScopeBaseline: [],
     dirtySetBaseline: [],
@@ -113,6 +122,40 @@ function startInput(transcriptPath: string): string {
     agent_type: "code-implementer-agent",
     agent_transcript_path: transcriptPath,
   });
+}
+
+async function settleInvalidModernRecord(
+  invalidRecord: string,
+  reservation: string,
+): Promise<Readonly<{ result: Awaited<ReturnType<typeof dispatch>>; stored: TaskGraph }>> {
+  const dir = root();
+  const statePath = join(dir, "active_task_graph.json");
+  const attempt = authority("T1", reservation);
+  modernGraph(statePath, attempt, {
+    new_tests_required: false,
+    proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+  });
+  process.env.LOOM_STATE_PATH = statePath;
+  mkdirSync(process.env.LOOM_SUBAGENT_DIR!, { recursive: true });
+  writeFileSync(join(process.env.LOOM_SUBAGENT_DIR!, `${SESSION}.task_graph`), statePath);
+  const transcriptPath = join(dir, "agent.jsonl");
+  writeFileSync(transcriptPath, `${JSON.stringify(user("Task ID: T1"))}\n${invalidRecord}\n`);
+  publishImplementationAttemptSidecar({
+    sessionId: SESSION,
+    agentId: AGENT,
+    taskGraphPath: statePath,
+    authority: attempt,
+  });
+  const result = await dispatch(JSON.stringify({
+    session_id: SESSION,
+    agent_id: AGENT,
+    agent_type: "code-implementer-agent",
+    agent_transcript_path: transcriptPath,
+  }), []);
+  return {
+    result,
+    stored: JSON.parse(readFileSync(statePath, "utf8")) as TaskGraph,
+  };
 }
 
 afterEach(() => {
@@ -369,6 +412,34 @@ describe("Claude implementation authority sidecar", () => {
     expect(stored.wave_gates["1"]?.impl_complete).toBe(false);
   });
 
+  it.each([
+    ["empty object", "{}"],
+    ["null", "null"],
+    ["scalar", "42"],
+    ["array", "[]"],
+    ["invalid tail", '{"type":"assistant","message":'],
+  ])("settles a syntactically invalid or schema-invalid modern %s as non-consuming infrastructure", async (name, invalidRecord) => {
+    const { result, stored } = await settleInvalidModernRecord(
+      invalidRecord,
+      `claude-invalid-${name.replace(/[^a-z]+/g, "-")}`,
+    );
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringContaining("exact non-consuming infrastructure Oracle receipt"),
+    });
+    expect(stored.tasks[0]).toMatchObject({
+      status: "pending",
+      revalidation_required: true,
+      implementation_attempt_history: [{
+        transition: "infrastructure-blocked",
+        consumesSemanticAttempt: false,
+      }],
+    });
+    expect(stored.tasks[0]?.active_implementation_attempt).toBeUndefined();
+    expect(stored.tasks[0]).not.toHaveProperty("test_result");
+    expect(stored.wave_gates["1"]?.impl_complete).toBe(false);
+  });
+
   it("rejects a foreign canonical TaskGraph sidecar and preserves the current attempt", async () => {
     const dir = root();
     const statePath = join(dir, "active_task_graph.json");
@@ -454,6 +525,28 @@ describe("Claude implementation authority sidecar", () => {
       expect(stored.tasks[0]?.active_implementation_attempt).toEqual(attempt);
     },
   );
+
+  it("retains primary publication and temporary cleanup failures through the plain operation seam", () => {
+    const primary = new Error("link publication failed");
+    const cleanup = new Error("temporary cleanup failed");
+    let thrown: unknown;
+    try {
+      publishSidecarBytes("attempt.json", Buffer.from("authority"), {
+        writeStaged: () => undefined,
+        publishNoReplace: () => { throw primary; },
+        readLive: () => Buffer.from("unused"),
+        removeStaged: () => { throw cleanup; },
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect(thrown).toMatchObject({
+      message: expect.stringContaining("publication and temporary-file cleanup both failed"),
+      errors: [primary, cleanup],
+    });
+  });
 
   it("publishes idempotently for identical bytes and never overwrites a different live authority", () => {
     const dir = root();

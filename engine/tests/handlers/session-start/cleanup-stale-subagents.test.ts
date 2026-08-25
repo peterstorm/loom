@@ -143,8 +143,38 @@ describe("sweepStaleSessions (fs)", () => {
     expect(existsSync(join(subDir, "stray-new.txt"))).toBe(true);
   });
 
+  it("returns stat and remove diagnostics with operation, exact path, and cause", () => {
+    const removed: string[] = [];
+    const diagnostics = sweepStaleSessions("/tracking", 100, {
+      exists: () => true,
+      entries: () => ["unstatable.active", "stale.active"],
+      mtime: (path) => {
+        if (path.endsWith("unstatable.active")) throw new Error("EACCES stat");
+        return 10;
+      },
+      remove: (path) => {
+        removed.push(path);
+        throw new Error("EROFS remove");
+      },
+    });
+
+    expect(removed).toEqual([join("/tracking", "stale.active")]);
+    expect(diagnostics).toEqual([
+      {
+        operation: "stat",
+        path: join("/tracking", "unstatable.active"),
+        cause: "EACCES stat",
+      },
+      {
+        operation: "remove",
+        path: join("/tracking", "stale.active"),
+        cause: "EROFS remove",
+      },
+    ]);
+  });
+
   it("a missing dir is a no-op, and the handler wrapper passes through", async () => {
-    expect(() => sweepStaleSessions(join(subDir, "nope"), Date.now())).not.toThrow();
+    expect(sweepStaleSessions(join(subDir, "nope"), Date.now())).toEqual([]);
     expect((await cleanup("", [])).kind).toBe("passthrough");
   });
 });

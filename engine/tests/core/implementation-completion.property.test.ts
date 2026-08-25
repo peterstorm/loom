@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
@@ -168,15 +169,43 @@ const parsers = [
 ] as const;
 
 describe("implementation completion exact parsers", () => {
-  it("strictly parses complete Claude JSONL before exposing transcript evidence", () => {
-    const valid = '{"type":"user"}\n\n{"type":"assistant"}\n';
+  it("parses real modern Claude record variants and preserves forward-compatible surplus fields", () => {
+    const valid = readFileSync(new URL("../fixtures/claude-modern-transcript.jsonl", import.meta.url), "utf8");
     const complete = parseCompleteClaudeJsonl(valid);
-    expect(complete).toEqual({
-      kind: "complete",
-      transcript: valid,
-      records: [{ type: "user" }, { type: "assistant" }],
+    expect(complete.kind).toBe("complete");
+    if (complete.kind !== "complete") return;
+    expect(complete.transcript).toBe(valid);
+    expect(complete.records).toHaveLength(6);
+    expect(complete.records[0]).toMatchObject({
+      type: "system",
+      forward_compatible: { protocol: 2 },
     });
+    expect(complete.records[2]).toMatchObject({ type: "assistant" });
+    const message = complete.records[2]?.message as { content?: readonly unknown[] } | undefined;
+    expect(message?.content?.[0]).toMatchObject({ future_block_field: 1 });
+  });
 
+  it.each([
+    ["empty object", "{}", "type"],
+    ["null", "null", "plain object"],
+    ["scalar", "42", "plain object"],
+    ["array", "[]", "plain object"],
+    ["missing message role", '{"type":"user","message":{"content":"hello"}}', "role"],
+    ["non-string message role", '{"type":"user","message":{"role":1,"content":"hello"}}', "role"],
+    ["unsupported message content", '{"type":"user","message":{"role":"user","content":null}}', "string or an array"],
+    ["non-object block", '{"type":"user","message":{"role":"user","content":["hello"]}}', "plain object"],
+    ["missing block type", '{"type":"assistant","message":{"role":"assistant","content":[{}]}}', "type"],
+    ["malformed text block", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":7}]}}', "text"],
+    ["malformed tool-use block", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":[]}]}}', "input"],
+    ["malformed tool-result block", '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":null}]}}', "content"],
+  ])("rejects the %s record through the bounded schema", (_name, line, expectedReason) => {
+    const parsed = parseCompleteClaudeJsonl(`${line}\n`);
+    expect(parsed).toMatchObject({ kind: "malformed", line: 1, reason: expect.stringContaining(expectedReason) });
+    expect(parsed).not.toHaveProperty("transcript");
+  });
+
+  it("rejects a syntactically malformed tail without exposing partial transcript authority", () => {
+    const valid = '{"type":"user"}\n\n{"type":"assistant"}\n';
     const malformed = parseCompleteClaudeJsonl(`${valid}{"type":"assistant"`);
     expect(malformed).toMatchObject({
       kind: "malformed",

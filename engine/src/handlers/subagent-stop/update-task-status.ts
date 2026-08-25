@@ -53,15 +53,15 @@ import {
   applyUntrustedStopResolution,
   cumulativeModifiedPaths,
   isWaveComplete,
-  settleObservedImplementation,
   settleUnavailableImplementation,
   type ImplementationSettlementApplicationResult,
   type NewTestEvidence,
 } from "../../core/implementation-application";
+import { collectNewTestEvidence } from "../helpers/task-local-completion";
 import {
-  collectNewTestEvidence,
-  observeTaskLocalCompletion,
-} from "../helpers/task-local-completion";
+  productionExactSettlementPorts,
+  settleExactImplementation,
+} from "../helpers/exact-implementation-settlement";
 // Historical callers import these shell utilities from this handler. Keep the
 // surface while the implementation lives in the neutral shared shell module.
 export {
@@ -654,84 +654,23 @@ export const runUpdateTaskStatus = async (
   if (authority !== null) {
     const observedAt = parseIsoInstant(new Date().toISOString(), "Claude implementation observation instant");
     if (!observedAt.ok) return { kind: "error", message: observedAt.error.errors.join("; ") };
-    const modernOutcome: {
-      settlement?: ImplementationSettlementApplicationResult;
-      diagnostic?: string;
-    } = {};
+    const modernOutcome: { settlement?: ImplementationSettlementApplicationResult } = {};
+    const settlementPorts = productionExactSettlementPorts(repositoryRoot);
     await mgr.update((locked) => {
-      const target = locked.tasks.find((candidate) => candidate.id === authority.taskId);
-      if (target?.implementation_attempt_history?.some(
-        (receipt) => receipt.authorityDigest === authority.authorityDigest,
-      )) {
-        modernOutcome.settlement = settleUnavailableImplementation(
-          locked,
-          authority,
-          observedAt.value,
-          "duplicate Claude result delivery",
-        );
-        return locked;
-      }
-      if (target?.active_implementation_attempt?.authorityDigest !== authority.authorityDigest) {
-        modernOutcome.diagnostic = `update-task-status: ${authority.taskId} active implementation attempt changed during settlement; late result was ignored`;
-        return locked;
-      }
-      const bytes = observeTaskLocalCompletion({
-        repositoryRoot,
-        task: target,
+      const settled = settleExactImplementation(locked, {
+        transport: "Claude",
         authority,
+        observedAt: observedAt.value,
         parserModifiedPaths: filesModified,
         parserPathLabel: "Claude transcript files_modified",
-      });
-      const suiteOutcome = bytes.suite.checks[0]?.outcome;
-      if (suiteOutcome?.kind === "observation-unavailable") {
-        modernOutcome.settlement = settleUnavailableImplementation(
-          locked,
-          authority,
-          observedAt.value,
-          suiteOutcome.reason,
-          bytes,
-        );
-      } else {
-        const verificationPolicy = taskVerificationPolicy(target);
-        let currentNewTestEvidence: NewTestEvidence;
-        try {
-          currentNewTestEvidence = collectNewTestEvidence(
-            bytes.cumulativeModifiedPaths,
-            verificationPolicy.newTests,
-            target.start_sha,
-          );
-        } catch (error) {
-          const unavailable = settleUnavailableImplementation(
-            locked,
-            authority,
-            observedAt.value,
-            `Claude new-test observation unavailable: ${error instanceof Error ? error.message : String(error)}`,
-            bytes,
-          );
-          modernOutcome.settlement = unavailable;
-          return unavailable.kind === "error" ? locked : unavailable.state;
-        }
-        modernOutcome.settlement = settleObservedImplementation(
-          locked,
-          authority,
-          observedAt.value,
-          {
-            taskCompleted: true,
-            testResult: testEvidence.result,
-            testEvidence: testEvidence.evidence,
-            newTestsWritten: currentNewTestEvidence.written,
-            newTestEvidence: currentNewTestEvidence.evidence,
-          },
-          TRUSTED_LEDGER_ONLY_POLICY,
-          bytes,
-        );
-      }
-      const settlement = modernOutcome.settlement;
-      return settlement === undefined || settlement.kind === "error" ? locked : settlement.state;
+        taskCompleted: true,
+        testResult: testEvidence.result,
+        testEvidence: testEvidence.evidence,
+        proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
+      }, settlementPorts);
+      modernOutcome.settlement = settled.application;
+      return settled.application.kind === "error" ? locked : settled.application.state;
     });
-    if (modernOutcome.diagnostic !== undefined) {
-      return { kind: "error", message: modernOutcome.diagnostic };
-    }
     const modernSettlement = modernOutcome.settlement;
     if (modernSettlement === undefined) {
       return { kind: "error", message: "update-task-status: modern Oracle settlement produced no transition" };

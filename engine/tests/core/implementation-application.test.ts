@@ -132,7 +132,7 @@ describe("Task-local byte-scope application core", () => {
     expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: ["src/a.ts"] });
     expect(bytes.cumulativeModifiedPaths).toEqual(["src/a.ts"]);
     expect(bytes.cumulativeProofArtifactChanges).toEqual(["src/a.ts"]);
-    expect(bytes.exactTaskBytesChanged).toBe(true);
+    expect(bytes.taskBytesChangedOrUnobservable).toBe(true);
   });
 
   it("classifies transcript paths outside the registered attempt scope as semantic failure", () => {
@@ -146,7 +146,7 @@ describe("Task-local byte-scope application core", () => {
   it("classifies malformed/mismatched baseline observations as infrastructure unavailable", () => {
     const bytes = observedBytes(authority(), { currentAttemptScope: [] });
     expect(bytes.suite.checks[0]?.outcome).toMatchObject({ kind: "observation-unavailable" });
-    expect(bytes.exactTaskBytesChanged).toBe(true);
+    expect(bytes.taskBytesChangedOrUnobservable).toBe(true);
     expect(bytes.invalidationBytesChanged).toBe(true);
   });
 
@@ -159,12 +159,22 @@ describe("Task-local byte-scope application core", () => {
     });
     expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
     expect(bytes.cumulativeProofArtifactChanges).toEqual([]);
-    expect(bytes.exactTaskBytesChanged).toBe(false);
+    expect(bytes.taskBytesChangedOrUnobservable).toBe(false);
     expect(bytes.invalidationBytesChanged).toBe(true);
   });
 });
 
 describe("shared evidence preservation", () => {
+  it("normalizes legacy written+empty evidence to the not-written ADT arm", () => {
+    const attempt = authority();
+    const normalized = normalizeImplementationEvidence(
+      pendingTask(attempt),
+      { taskCompleted: true, newTestsWritten: true, newTestEvidence: "" },
+      observedBytes(attempt),
+    );
+    expect(normalized.newTests).toEqual({ kind: "not-written", written: false, evidence: "" });
+  });
+
   it.each([
     ["trusted-fail", true, false, "trusted-fail"],
     ["trusted-pass", false, false, "trusted-pass"],

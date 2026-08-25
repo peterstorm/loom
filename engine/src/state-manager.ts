@@ -970,7 +970,8 @@ function taskPacketError(
     const scopeError = scope.find((parsed) => !parsed.ok);
     if (scopeError !== undefined && !scopeError.ok) return scopeError.errors.join("; ");
     const scopePaths = scope.map((parsed) => parsed.ok ? parsed.value : "");
-    if (new Set(scopePaths).size !== scopePaths.length || scopePaths.some((path, pathIndex) => path !== [...scopePaths].sort()[pathIndex])) {
+    const sortedScopePaths = [...scopePaths].sort();
+    if (new Set(scopePaths).size !== scopePaths.length || scopePaths.some((path, pathIndex) => path !== sortedScopePaths[pathIndex])) {
       return `tasks[${index}] ("${id}"): accepted_review_authority.scope must be sorted and unique`;
     }
     if ((authority.run_id === undefined) !== (authority.authority_digest === undefined) ||

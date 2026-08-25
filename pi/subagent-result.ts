@@ -30,6 +30,7 @@ import {
   applyCompletionInfrastructureFailure,
   applyUntrustedStopResolution,
   cumulativeModifiedPaths,
+  parseNewTestEvidence,
   type NewTestEvidence,
 } from "../engine/src/core/implementation-application";
 import { extractTestEvidence, type TestEvidence } from "../engine/src/core/test-evidence";
@@ -52,15 +53,17 @@ import {
   type IsoInstant,
 } from "../engine/src/core/implementation-completion";
 import {
-  settleObservedImplementation,
   settleUnavailableImplementation,
   type ImplementationSettlementApplicationResult,
 } from "../engine/src/core/implementation-application";
 import { PI_STRUCTURED_EVIDENCE_POLICY } from "../engine/src/core/proof-obligations";
+import { collectNewTestEvidence } from "../engine/src/handlers/helpers/task-local-completion";
 import {
-  collectNewTestEvidence,
-  observeTaskLocalCompletion,
-} from "../engine/src/handlers/helpers/task-local-completion";
+  productionExactSettlementPorts,
+  settleExactImplementation,
+  type ExactImplementationSettlementPorts,
+  type ExactNewTestCollectionArgs,
+} from "../engine/src/handlers/helpers/exact-implementation-settlement";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
 import { canonicalRepositoryPaths } from "../engine/src/utils/repository-path";
 import { compareAttemptBaseline } from "../engine/src/utils/artifact-baseline";
@@ -553,10 +556,12 @@ export async function applyPhaseAgentPiResult(args: Readonly<{
  * are all the inputs, and the answer is the only output — this function mutates
  * nothing. An unextractable id must not vanish silently: exactly one executing
  * task infers it, while ambiguous or empty is reported as `unbound`. The
- * caller (`applyImplementationPiResult`) reports the binding failure and leaves
- * execution authority unchanged: without attribution it cannot safely release
- * one Task, and clearing all would release unrelated parallel Tasks. Only a
- * bound completed or missing Task is removed from `executing_tasks`.
+ * caller (`applyImplementationPiResult`) reports an unbound failure and keeps
+ * execution authority: without attribution it cannot safely release one Task.
+ * Exact Oracle settlement releases matching modern authority for every proven
+ * terminal transition, while compatibility settlement releases only a proven
+ * legacy reservation; both ordinary terminal paths and completed/missing
+ * cleanup therefore release the reservation they can identify.
  */
 export type ImplementationTaskBinding =
   | Readonly<{ kind: "bound"; taskId: string; inferred: boolean }>
@@ -906,7 +911,7 @@ async function applyLegacyImplementationQuarantine(
     if (repository.kind === "unavailable" && requiresNewTests(verificationPolicy)) {
       return quarantineCompletionAuthority(repository.diagnostic);
     }
-    let newTestEvidence = { written: false, evidence: "" };
+    let newTestEvidence = parseNewTestEvidence(false, "");
     try {
       newTestEvidence = collectNewTestEvidence(
         cumulativeFiles,
@@ -999,76 +1004,23 @@ async function settleExactPiInfrastructure(
   return renderExactPiSettlement(args, settled.value);
 }
 
-type PiNewTestObservation =
-  | Readonly<{ ok: true; evidence: NewTestEvidence }>
-  | Readonly<{ ok: false; reason: string }>;
-
-function observePiNewTests(
-  args: ExactPiSettlementArgs,
-  task: LoomTask,
-  paths: readonly string[],
-): PiNewTestObservation {
-  const policy = taskVerificationPolicy(task);
-  if (!args.repository.isRepo() && requiresNewTests(policy)) {
-    return { ok: false, reason: `Pi new-test observation unavailable for ${args.binding.taskId}: repository probe reports a non-Git working directory` };
-  }
-  try {
-    return {
-      ok: true,
-      evidence: collectNewTestEvidence(paths, policy.newTests, task.start_sha),
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      reason: `Pi new-test observation unavailable: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
-}
-
-function settleCurrentPiTask(
-  state: TaskGraph,
-  task: LoomTask,
-  args: ExactPiSettlementArgs,
-  transcript: Extract<ImplementationTranscriptObservation, { kind: "accepted" }>,
-  modifiedPaths: readonly string[],
-): LockedPiSettlement {
-  const bytes = observeTaskLocalCompletion({
-    repositoryRoot: args.repository.root(),
-    task,
-    authority: args.authority,
-    parserModifiedPaths: modifiedPaths,
-    parserPathLabel: "Pi transcript files_modified",
-  });
-  const suiteOutcome = bytes.suite.checks[0]?.outcome;
-  if (suiteOutcome?.kind === "observation-unavailable") {
-    return {
-      application: settleUnavailableImplementation(state, args.authority, args.observedAt, suiteOutcome.reason, bytes),
-      infrastructureReason: suiteOutcome.reason,
-    };
-  }
-  const newTests = observePiNewTests(args, task, bytes.cumulativeModifiedPaths);
-  if (!newTests.ok) {
-    return {
-      application: settleUnavailableImplementation(state, args.authority, args.observedAt, newTests.reason, bytes),
-      infrastructureReason: newTests.reason,
-    };
-  }
-  return {
-    application: settleObservedImplementation(
-      state,
-      args.authority,
-      args.observedAt,
-      {
-        taskCompleted: true,
-        testResult: implementationTestResult(transcript.test),
-        testEvidence: transcript.test.evidence.evidence,
-        newTestsWritten: newTests.evidence.written,
-        newTestEvidence: newTests.evidence.evidence,
+function piExactSettlementPorts(args: ExactPiSettlementArgs): ExactImplementationSettlementPorts {
+  const production = productionExactSettlementPorts(args.repository.root());
+  return Object.freeze({
+    ...production,
+    newTests: Object.freeze({
+      collect: (input: ExactNewTestCollectionArgs) => {
+        const waived = input.requirement === false ||
+          (typeof input.requirement === "object" && input.requirement.kind === "waived");
+        if (!waived && !args.repository.isRepo()) {
+          throw new Error(
+            `repository probe for ${args.binding.taskId} reports a non-Git working directory`,
+          );
+        }
+        return production.newTests.collect(input);
       },
-      PI_STRUCTURED_EVIDENCE_POLICY,
-      bytes,
-    ),
-  };
+    }),
+  });
 }
 
 function settleLockedPiResult(
@@ -1077,16 +1029,17 @@ function settleLockedPiResult(
   transcript: Extract<ImplementationTranscriptObservation, { kind: "accepted" }>,
   modifiedPaths: readonly string[],
 ): LockedPiSettlement {
-  const task = state.tasks.find((candidate) => candidate.id === args.authority.taskId);
-  if (task?.implementation_attempt_history?.some(
-    (receipt) => receipt.authorityDigest === args.authority.authorityDigest,
-  )) {
-    return { application: settleUnavailableImplementation(state, args.authority, args.observedAt, "duplicate Pi result delivery") };
-  }
-  if (task?.active_implementation_attempt?.authorityDigest !== args.authority.authorityDigest) {
-    return { application: settleUnavailableImplementation(state, args.authority, args.observedAt, "late Pi result delivery") };
-  }
-  return settleCurrentPiTask(state, task, args, transcript, modifiedPaths);
+  return settleExactImplementation(state, {
+    transport: "Pi",
+    authority: args.authority,
+    observedAt: args.observedAt,
+    parserModifiedPaths: modifiedPaths,
+    parserPathLabel: "Pi transcript files_modified",
+    taskCompleted: true,
+    testResult: implementationTestResult(transcript.test),
+    testEvidence: transcript.test.evidence.evidence,
+    proofEvaluationPolicy: PI_STRUCTURED_EVIDENCE_POLICY,
+  }, piExactSettlementPorts(args));
 }
 
 async function applyExactImplementationPiResult(args: ExactPiSettlementArgs): Promise<PiResultOutcome> {

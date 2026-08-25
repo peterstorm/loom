@@ -198,9 +198,10 @@ export function reopenCompletedWave(
     });
     return {
       ...task,
-      // Historical proof/test/finding bytes remain audit evidence, not authority
-      // for the current workspace. Only a fresh implementation-agent stop clears
-      // this marker after recording fresh passing test evidence.
+      // Reopening invalidates accepted completion/review authority and requires
+      // fresh Proof. Retained Findings and test evidence remain active
+      // remediation/audit inputs wherever gate and status projections read them;
+      // only a fresh implementation settlement clears this revalidation marker.
       status: "pending",
       proof: historicalProof,
       revalidation_required: true,

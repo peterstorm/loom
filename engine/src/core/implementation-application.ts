@@ -33,8 +33,8 @@ export type TaskLocalByteObservation = Readonly<{
   cumulativeModifiedPaths: readonly ReviewPath[];
   /** Declared paths changed from the first Task baseline and parser-attributed. */
   cumulativeProofArtifactChanges: readonly ReviewPath[];
-  /** Exact Task-scope bytes changed, independent of transcript completeness. */
-  exactTaskBytesChanged: boolean;
+  /** Task-scope bytes changed, or exact observation was unavailable. */
+  taskBytesChangedOrUnobservable: boolean;
   /** Dirty-set delta is conservative invalidation evidence only. */
   invalidationBytesChanged: boolean;
 }>;
@@ -131,7 +131,7 @@ export function buildTaskLocalByteObservation(
       attributedAttemptChangedPaths: frozenArray([]),
       cumulativeModifiedPaths: priorPaths.ok ? priorPaths.value : frozenArray([]),
       cumulativeProofArtifactChanges: frozenArray([]),
-      exactTaskBytesChanged: true,
+      taskBytesChangedOrUnobservable: true,
       invalidationBytesChanged: true,
     });
   }
@@ -159,7 +159,7 @@ export function buildTaskLocalByteObservation(
     attributedAttemptChangedPaths: frozenArray(attributedAttempt),
     cumulativeModifiedPaths: cumulative,
     cumulativeProofArtifactChanges: frozenArray(proofChanges),
-    exactTaskBytesChanged: attempt.changed.length > 0,
+    taskBytesChangedOrUnobservable: attempt.changed.length > 0,
     invalidationBytesChanged: attempt.changed.length > 0 || input.repositoryDirtySetChanged,
   });
 }
@@ -178,15 +178,32 @@ export function unavailableTaskLocalByteObservation(
     attributedAttemptChangedPaths: frozenArray([]),
     cumulativeModifiedPaths: frozenArray([]),
     cumulativeProofArtifactChanges: frozenArray([]),
-    exactTaskBytesChanged: true,
+    taskBytesChangedOrUnobservable: true,
     invalidationBytesChanged: true,
   });
 }
 
-export type NewTestEvidence = Readonly<{
-  written: boolean;
-  evidence: string;
-}>;
+declare const NON_EMPTY_NEW_TEST_EVIDENCE: unique symbol;
+type NonEmptyNewTestEvidence = string & { readonly [NON_EMPTY_NEW_TEST_EVIDENCE]: true };
+
+export type NewTestEvidence =
+  | Readonly<{ kind: "not-written"; written: false; evidence: string }>
+  | Readonly<{ kind: "written"; written: true; evidence: NonEmptyNewTestEvidence }>;
+
+/** Compatibility parser for legacy boolean/string evidence pairs. */
+export function parseNewTestEvidence(written: unknown, evidence: unknown): NewTestEvidence {
+  const text = typeof evidence === "string" ? evidence : "";
+  return written === true && text.trim() !== ""
+    ? freeze({ kind: "written", written: true, evidence: text as NonEmptyNewTestEvidence })
+    : freeze({ kind: "not-written", written: false, evidence: text });
+}
+
+export function projectNewTestEvidence(evidence: NewTestEvidence): Readonly<{
+  newTestsWritten: boolean;
+  newTestEvidence: string;
+}> {
+  return freeze({ newTestsWritten: evidence.written, newTestEvidence: evidence.evidence });
+}
 
 /** What an authority-free Stop resolution observed. It can preserve diagnostic
  * evidence and release only a proven legacy reservation; it never mints modern
@@ -318,10 +335,10 @@ export function applyUntrustedStopResolution(
       (target.test_result?.verdict === "trusted-pass" && !codeChanged)
     );
   const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, resolution.filesModified);
-  const currentNewTests: NewTestEvidence = {
-    written: resolution.newTestsWritten,
-    evidence: resolution.newTestEvidence,
-  };
+  const currentNewTests = parseNewTestEvidence(
+    resolution.newTestsWritten,
+    resolution.newTestEvidence,
+  );
   const proofTestResult = preserveExistingTrusted ? target.test_result : resolution.testResult;
   const proofArtifactsChanged = attributedChangedArtifacts(
     resolution.changedDeclaredArtifacts,
@@ -370,8 +387,7 @@ export type NormalizedImplementationEvidence = Readonly<{
   testResult?: TaskTestResult;
   testEvidence?: string;
   cumulativeModifiedPaths: readonly ReviewPath[];
-  newTestsWritten: boolean;
-  newTestEvidence: string;
+  newTests: NewTestEvidence;
 }>;
 
 /** One preservation rule shared by Claude and Pi, without provenance relabeling. */
@@ -383,7 +399,7 @@ export function normalizeImplementationEvidence(
   const incomingUntrusted = incoming.testResult?.verdict === "untrusted";
   const preserveTrusted = task.revalidation_required !== true && incomingUntrusted && (
     task.test_result?.verdict === "trusted-fail" ||
-    (task.test_result?.verdict === "trusted-pass" && !bytes.exactTaskBytesChanged)
+    (task.test_result?.verdict === "trusted-pass" && !bytes.taskBytesChangedOrUnobservable)
   );
   return freeze({
     ...(preserveTrusted
@@ -393,8 +409,7 @@ export function normalizeImplementationEvidence(
           ...(incoming.testEvidence === undefined ? {} : { testEvidence: incoming.testEvidence }),
         }),
     cumulativeModifiedPaths: bytes.cumulativeModifiedPaths,
-    newTestsWritten: incoming.newTestsWritten === true,
-    newTestEvidence: incoming.newTestEvidence ?? "",
+    newTests: parseNewTestEvidence(incoming.newTestsWritten, incoming.newTestEvidence),
   });
 }
 
@@ -429,12 +444,13 @@ function clearAttempt(task: Task): Omit<Task, "status" | "proof" | "revalidation
 }
 
 function evidenceFields(evidence: NormalizedImplementationEvidence) {
+  const newTests = projectNewTestEvidence(evidence.newTests);
   return {
     ...(evidence.testResult === undefined ? {} : { test_result: evidence.testResult }),
     ...(evidence.testEvidence === undefined ? {} : { test_evidence: evidence.testEvidence }),
     files_modified: evidence.cumulativeModifiedPaths,
-    new_tests_written: evidence.newTestsWritten,
-    new_test_evidence: evidence.newTestEvidence,
+    new_tests_written: newTests.newTestsWritten,
+    new_test_evidence: newTests.newTestEvidence,
   };
 }
 
@@ -593,8 +609,8 @@ export function settleObservedImplementation(
       taskCompleted: incoming.taskCompleted,
       ...(normalized.testResult === undefined ? {} : { testResult: normalized.testResult }),
       filesModified: bytes.cumulativeProofArtifactChanges,
-      newTestsWritten: normalized.newTestsWritten,
-      newTestEvidence: normalized.newTestEvidence,
+      newTestsWritten: normalized.newTests.written,
+      newTestEvidence: normalized.newTests.evidence,
     },
     proofEvaluationPolicy,
   });

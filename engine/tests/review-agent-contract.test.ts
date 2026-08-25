@@ -18,11 +18,10 @@ const agentFile = (name: string): string =>
  * its file being given the contract, and the result is a wave blocked by an agent
  * that did nothing wrong.
  *
- * That is not hypothetical: `code-simplifier` sat in `REVIEW_SUB_AGENTS` and was
- * spawned as reviewer #7 by `commands/review-pr.md` with no Machine Summary
- * section at all, while a comment in `core/review-output.ts` asserted that
- * "every reviewer agent file now requires the block". These tests replace that
- * assertion with a proof.
+ * Historical context: `code-simplifier` was once catalogued as a review Agent
+ * without the Machine Summary contract its runtime parser required. This test
+ * executes the current catalog/agent-file relationship so that mismatch cannot
+ * recur; it does not infer historical spawn order from today’s command prose.
  */
 describe("every REVIEW_SUB_AGENT declares the Machine Summary contract", () => {
   const agents = [...REVIEW_SUB_AGENTS].sort();
@@ -61,11 +60,10 @@ describe("every REVIEW_SUB_AGENT declares the Machine Summary contract", () => {
   /**
    * The lifecycle parser (`parsePriorAssessments`) accepts ONLY `finding_id`
    * and `verdict` — never the plausible synonyms `id`/`status` a model infers
-   * from prose alone. A production wave failed 17/20 reviewer slots because the
-   * agent files described the block without ever showing those key names, so
-   * every model emitted `{id, status}` and every output was rejected until the
-   * two-attempt allowance was exhausted. Prose is not a schema; these tests
-   * require the exact wire keys to appear literally in every reviewer file.
+   * from prose alone. Historical reviewer outputs used the plausible
+   * `{id, status}` synonyms and were rejected by that exact parser contract.
+   * Prose is not a schema; these tests require the wire keys to appear
+   * literally in every current reviewer file.
    */
   it.each(WAVE_REVIEW_AGENTS)("%s shows the EXACT lifecycle key names, not synonyms", (agent) => {
     const md = agentFile(agent);

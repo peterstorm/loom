@@ -10,6 +10,7 @@ import { lstatSync } from "node:fs";
 import type { Task } from "../../types";
 import {
   buildTaskLocalByteObservation,
+  parseNewTestEvidence,
   unavailableTaskLocalByteObservation,
   type NewTestEvidence,
   type TaskLocalByteObservation,
@@ -26,7 +27,7 @@ import type {
 } from "../../core/verification-policy";
 import * as git from "../../utils/git";
 
-type TaskLocalCompletionArgs = Readonly<{
+export type TaskLocalCompletionArgs = Readonly<{
   repositoryRoot: string;
   task: Task;
   authority: ImplementationAttemptAuthority;
@@ -57,47 +58,84 @@ function requireTaskBaselines(task: Task): RequiredTaskBaselines {
   };
 }
 
+export type TaskLocalCompletionPorts = Readonly<{
+  observeHead: (repositoryRoot: string) => git.GitHeadObservation;
+}>;
+
+const REAL_TASK_LOCAL_PORTS: TaskLocalCompletionPorts = Object.freeze({
+  observeHead: git.observeExactHead,
+});
+
+function authorityHead(
+  args: TaskLocalCompletionArgs,
+  ports: TaskLocalCompletionPorts,
+  phase: "before" | "after",
+): void {
+  const observed = ports.observeHead(args.repositoryRoot);
+  if (!observed.ok) throw new Error(`Git HEAD ${phase} Task-local observation is unreadable: ${observed.error}`);
+  if (observed.headSha !== args.authority.headSha) {
+    throw new Error(
+      `Git HEAD ${phase} Task-local observation ${observed.headSha} does not equal attempt authority ${args.authority.headSha}`,
+    );
+  }
+}
+
 function observeAvailableTaskScope(
   args: TaskLocalCompletionArgs,
   baselines: RequiredTaskBaselines,
+  ports: TaskLocalCompletionPorts,
 ): TaskLocalByteObservation {
-  const parserModifiedPaths = canonicalRepositoryPaths(
-    args.repositoryRoot,
-    args.parserModifiedPaths,
-    args.parserPathLabel,
-  );
-  const priorAttributedPaths = canonicalRepositoryPaths(
-    args.repositoryRoot,
-    args.task.files_modified ?? [],
-    `${args.task.id}.files_modified`,
-  );
-  const currentAttemptScope = captureDeclaredArtifactBaseline(
-    args.repositoryRoot,
-    baselines.attempt.map(({ artifact }) => artifact),
-  );
-  const currentProofScope = captureDeclaredArtifactBaseline(
-    args.repositoryRoot,
-    baselines.proof.map(({ artifact }) => artifact),
-  );
-  const repositoryDirtySetChanged = changedRepositoryArtifactsSince(
-    args.repositoryRoot,
-    baselines.repository,
-  ).length > 0;
-  return buildTaskLocalByteObservation({
-    authority: args.authority,
-    attemptBaseline: baselines.attempt,
-    currentAttemptScope,
-    proofBaseline: baselines.proof,
-    currentProofScope,
-    parserModifiedPaths,
-    priorAttributedPaths,
-    repositoryDirtySetChanged,
-  });
+  authorityHead(args, ports, "before");
+  let observed: TaskLocalByteObservation | undefined;
+  let observationFailure: unknown;
+  try {
+    const parserModifiedPaths = canonicalRepositoryPaths(
+      args.repositoryRoot,
+      args.parserModifiedPaths,
+      args.parserPathLabel,
+    );
+    const priorAttributedPaths = canonicalRepositoryPaths(
+      args.repositoryRoot,
+      args.task.files_modified ?? [],
+      `${args.task.id}.files_modified`,
+    );
+    const currentAttemptScope = captureDeclaredArtifactBaseline(
+      args.repositoryRoot,
+      baselines.attempt.map(({ artifact }) => artifact),
+    );
+    const currentProofScope = captureDeclaredArtifactBaseline(
+      args.repositoryRoot,
+      baselines.proof.map(({ artifact }) => artifact),
+    );
+    const repositoryDirtySetChanged = changedRepositoryArtifactsSince(
+      args.repositoryRoot,
+      baselines.repository,
+    ).length > 0;
+    observed = buildTaskLocalByteObservation({
+      authority: args.authority,
+      attemptBaseline: baselines.attempt,
+      currentAttemptScope,
+      proofBaseline: baselines.proof,
+      currentProofScope,
+      parserModifiedPaths,
+      priorAttributedPaths,
+      repositoryDirtySetChanged,
+    });
+  } catch (error) {
+    observationFailure = error;
+  }
+  authorityHead(args, ports, "after");
+  if (observationFailure !== undefined) throw observationFailure;
+  if (observed === undefined) throw new Error("Task-local observation produced no facts");
+  return observed;
 }
 
-export function observeTaskLocalCompletion(args: TaskLocalCompletionArgs): TaskLocalByteObservation {
+export function observeTaskLocalCompletion(
+  args: TaskLocalCompletionArgs,
+  ports: TaskLocalCompletionPorts = REAL_TASK_LOCAL_PORTS,
+): TaskLocalByteObservation {
   try {
-    return observeAvailableTaskScope(args, requireTaskBaselines(args.task));
+    return observeAvailableTaskScope(args, requireTaskBaselines(args.task), ports);
   } catch (error) {
     return unavailableTaskLocalByteObservation(
       args.authority,
@@ -122,10 +160,10 @@ export function analyzeNewTests(
 ): NewTestEvidence {
   const waiverReason = newTestWaiverReason(requirement);
   if (waiverReason !== null) {
-    return {
-      written: false,
-      evidence: `verification_policy.new_tests waived: ${waiverReason}`,
-    };
+    return parseNewTestEvidence(
+      false,
+      `verification_policy.new_tests waived: ${waiverReason}`,
+    );
   }
 
   const tests = git.countNewTests(diff);
@@ -137,14 +175,15 @@ export function analyzeNewTests(
       tests.python > 0 ? `python: ${tests.python} test functions` : "",
       tests.rust > 0 ? `rust: ${tests.rust} #[test]` : "",
     ].filter(Boolean).join("; ");
-    return {
-      written: true,
-      evidence: `${tests.total} new test methods, ${assertions} assertions (${details})`,
-    };
+    return parseNewTestEvidence(
+      true,
+      `${tests.total} new test methods, ${assertions} assertions (${details})`,
+    );
   }
-  return tests.total > 0
-    ? { written: false, evidence: `${tests.total} test methods but 0 assertions (empty stubs?)` }
-    : { written: false, evidence: "" };
+  return parseNewTestEvidence(
+    false,
+    tests.total > 0 ? `${tests.total} test methods but 0 assertions (empty stubs?)` : "",
+  );
 }
 
 export type FilePresenceResult =

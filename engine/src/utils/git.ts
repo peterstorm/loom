@@ -148,7 +148,27 @@ function execArgs(args: string[]): string {
   }
 }
 
-/** Get current HEAD SHA */
+export type GitHeadObservation =
+  | Readonly<{ ok: true; headSha: string }>
+  | Readonly<{ ok: false; error: string }>;
+
+/** Fixed-argv exact HEAD observation for implementation authority checks. */
+export function observeExactHead(root: string): GitHeadObservation {
+  try {
+    const headSha = execFileSync("git", ["rev-parse", "--verify", "HEAD"], {
+      cwd: root,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    return isExactGitSha(headSha)
+      ? { ok: true, headSha }
+      : { ok: false, error: `git returned an invalid HEAD for ${root}: ${JSON.stringify(headSha)}` };
+  } catch (error) {
+    return { ok: false, error: `cannot read Git HEAD for ${root}: ${commandFailure(error)}` };
+  }
+}
+
+/** Get current HEAD SHA through the legacy warning-contract adapter. */
 export function headSha(): string | null {
   const result = exec("git rev-parse HEAD").trim();
   return result || null;

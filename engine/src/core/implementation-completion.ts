@@ -72,11 +72,13 @@ export type CompleteClaudeJsonl = string & { readonly [COMPLETE_CLAUDE_JSONL]: t
 /** Integrity result for a complete Claude JSONL transcript. Evidence extractors
  * may consume only the complete arm; malformed/truncated records carry no
  * partial transcript value by construction. */
+export type ClaudeTranscriptRecord = Readonly<Record<string, unknown>>;
+
 export type ClaudeJsonlIntegrity =
   | Readonly<{
       kind: "complete";
       transcript: CompleteClaudeJsonl;
-      records: readonly unknown[];
+      records: readonly ClaudeTranscriptRecord[];
     }>
   | Readonly<{
       kind: "malformed";
@@ -237,27 +239,118 @@ function parseReceiptId(raw: unknown, path: string): Parsed<ImplementationSettle
   return parseSha256<ImplementationSettlementReceiptId>(raw, path);
 }
 
-/** Total strict JSONL integrity parser. Every nonblank record must parse before
- * the original transcript can be exposed to modern evidence extraction. */
+const MAX_CLAUDE_CONTENT_DEPTH = 8;
+
+function nonEmptyStringField(record: UnknownRecord, field: string, path: string): string | null {
+  const value = record[field];
+  return typeof value === "string" && value.trim() !== ""
+    ? null
+    : `${path}.${field} must be a non-empty string`;
+}
+
+function optionalStringField(record: UnknownRecord, field: string, path: string): string | null {
+  return !Object.prototype.hasOwnProperty.call(record, field) || typeof record[field] === "string"
+    ? null
+    : `${path}.${field} must be a string when present`;
+}
+
+function claudeContentError(raw: unknown, path: string, depth: number): string | null {
+  if (typeof raw === "string") return null;
+  if (!Array.isArray(raw)) return `${path} must be a string or an array of content blocks`;
+  if (depth > MAX_CLAUDE_CONTENT_DEPTH) return `${path} exceeds the supported nested content depth`;
+  for (let index = 0; index < raw.length; index += 1) {
+    if (!Object.prototype.hasOwnProperty.call(raw, index)) return `${path}[${index}] must be present`;
+    const block = raw[index];
+    const blockPath = `${path}[${index}]`;
+    if (!isRecord(block)) return `${blockPath} must be a plain object`;
+    const typeError = nonEmptyStringField(block, "type", blockPath);
+    if (typeError !== null) return typeError;
+    const textError = optionalStringField(block, "text", blockPath);
+    if (textError !== null) return textError;
+    const nameError = optionalStringField(block, "name", blockPath);
+    if (nameError !== null || (typeof block.name === "string" && block.name.trim() === "")) {
+      return nameError ?? `${blockPath}.name must be non-empty when present`;
+    }
+    if (Object.prototype.hasOwnProperty.call(block, "input") && !isRecord(block.input)) {
+      return `${blockPath}.input must be a plain object when present`;
+    }
+    if (Object.prototype.hasOwnProperty.call(block, "tool_use_id") &&
+        (typeof block.tool_use_id !== "string" || block.tool_use_id.trim() === "")) {
+      return `${blockPath}.tool_use_id must be a non-empty string when present`;
+    }
+    if (Object.prototype.hasOwnProperty.call(block, "is_error") && typeof block.is_error !== "boolean") {
+      return `${blockPath}.is_error must be a boolean when present`;
+    }
+    if (block.type === "text" && typeof block.text !== "string") {
+      return `${blockPath}.text must be a string for a text block`;
+    }
+    if (block.type === "thinking") {
+      if (typeof block.thinking !== "string") return `${blockPath}.thinking must be a string for a thinking block`;
+      const signatureError = optionalStringField(block, "signature", blockPath);
+      if (signatureError !== null) return signatureError;
+    }
+    if (block.type === "tool_use" || block.type === "server_tool_use") {
+      const toolNameError = nonEmptyStringField(block, "name", blockPath);
+      if (toolNameError !== null) return toolNameError;
+      if (!isRecord(block.input)) return `${blockPath}.input must be a plain object for a tool-use block`;
+    }
+    if (block.type === "tool_result") {
+      if (!Object.prototype.hasOwnProperty.call(block, "content")) {
+        return `${blockPath}.content is required for a tool-result block`;
+      }
+      const nestedError = claudeContentError(block.content, `${blockPath}.content`, depth + 1);
+      if (nestedError !== null) return nestedError;
+    }
+  }
+  return null;
+}
+
+function claudeRecordError(raw: unknown, path: string): string | null {
+  if (!isRecord(raw)) return `${path} must be a plain object`;
+  const typeError = nonEmptyStringField(raw, "type", path);
+  if (typeError !== null) return typeError;
+  if (!Object.prototype.hasOwnProperty.call(raw, "message")) return null;
+  if (!isRecord(raw.message)) return `${path}.message must be a plain object when present`;
+  const roleError = nonEmptyStringField(raw.message, "role", `${path}.message`);
+  if (roleError !== null) return roleError;
+  if (!Object.prototype.hasOwnProperty.call(raw.message, "content")) {
+    return `${path}.message.content is required when message is present`;
+  }
+  return claudeContentError(raw.message.content, `${path}.message.content`, 0);
+}
+
+/** Total strict JSONL integrity parser. Every nonblank line must parse through
+ * the forward-compatible Claude transcript-record schema before the original
+ * transcript can become modern evidence authority. */
 export function parseCompleteClaudeJsonl(raw: unknown): ClaudeJsonlIntegrity {
   if (typeof raw !== "string") {
     return freeze({ kind: "malformed", line: null, reason: "Claude JSONL transcript must be a string" });
   }
-  const records: unknown[] = [];
+  const records: ClaudeTranscriptRecord[] = [];
   const lines = raw.split(/\r?\n/u);
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
     if (line.trim() === "") continue;
+    let parsed: unknown;
     try {
-      records.push(JSON.parse(line) as unknown);
+      parsed = JSON.parse(line) as unknown;
     } catch (cause) {
       const detail = cause instanceof Error ? cause.message : String(cause);
       return freeze({
         kind: "malformed",
         line: index + 1,
-        reason: `Claude JSONL transcript record ${index + 1} is malformed or truncated: ${detail}`.slice(0, 4_096),
+        reason: `Claude JSONL transcript record ${index + 1} is malformed or truncated: ${detail}`.slice(0, MAX_REASON_LENGTH),
       });
     }
+    const schemaError = claudeRecordError(parsed, `Claude JSONL transcript record ${index + 1}`);
+    if (schemaError !== null || !isRecord(parsed)) {
+      return freeze({
+        kind: "malformed",
+        line: index + 1,
+        reason: (schemaError ?? `Claude JSONL transcript record ${index + 1} is invalid`).slice(0, MAX_REASON_LENGTH),
+      });
+    }
+    records.push(Object.freeze(parsed));
   }
   return freeze({
     kind: "complete",
@@ -567,10 +660,9 @@ export type TaskCompletionSuiteResult = Readonly<{
   checks: readonly TaskCompletionCheckResult[];
 }>;
 
-function parseCanonicalPaths(raw: unknown, path: string, nonEmpty: boolean): Parsed<readonly ReviewPath[]> {
+function parseCanonicalPaths(raw: unknown, path: string): Parsed<readonly ReviewPath[]> {
   const array = parseDenseArray(raw, path);
   if (!array.ok) return array;
-  if (nonEmpty && array.value.length === 0) return failure([`${path} must be non-empty`]);
   const paths = collect<ReviewPath>(array.value, path, (value, valuePath) => {
     const parsed = parseReviewPath(value, valuePath);
     return parsed.ok ? success(parsed.value) : failure(parsed.errors);
@@ -581,26 +673,33 @@ function parseCanonicalPaths(raw: unknown, path: string, nonEmpty: boolean): Par
   return success(freezeArray(sorted));
 }
 
+function parseNonEmptyCanonicalPaths(
+  raw: unknown,
+  path: string,
+): Parsed<readonly [ReviewPath, ...ReviewPath[]]> {
+  const paths = parseCanonicalPaths(raw, path);
+  if (!paths.ok) return paths;
+  const [head, ...tail] = paths.value;
+  return head === undefined
+    ? failure([`${path} must be non-empty`])
+    : success(Object.freeze([head, ...tail]));
+}
+
 function parseTaskCheckOutcome(raw: unknown, path: string): Parsed<TaskByteScopeOutcome> {
   if (!isRecord(raw)) return failure([`${path} must be a plain object`]);
   if (raw.kind === "accepted") {
     const record = exactRecord(raw, ["kind", "changedPaths"], path);
     if (!record.ok) return record;
-    const paths = parseCanonicalPaths(record.value.changedPaths, `${path}.changedPaths`, false);
+    const paths = parseCanonicalPaths(record.value.changedPaths, `${path}.changedPaths`);
     return paths.ok ? success(freeze({ kind: "accepted", changedPaths: paths.value })) : paths;
   }
   if (raw.kind === "out-of-scope-writes") {
     const record = exactRecord(raw, ["kind", "paths"], path);
     if (!record.ok) return record;
-    const paths = parseCanonicalPaths(record.value.paths, `${path}.paths`, true);
-    if (!paths.ok) return paths;
-    const first = paths.value[0];
-    const nonEmptyPaths: readonly [ReviewPath, ...ReviewPath[]] | null = first === undefined
-      ? null
-      : Object.freeze([first, ...paths.value.slice(1)]);
-    return nonEmptyPaths === null
-      ? failure([`${path}.paths must be non-empty`])
-      : success(freeze({ kind: "out-of-scope-writes", paths: nonEmptyPaths }));
+    const paths = parseNonEmptyCanonicalPaths(record.value.paths, `${path}.paths`);
+    return paths.ok
+      ? success(freeze({ kind: "out-of-scope-writes", paths: paths.value }))
+      : paths;
   }
   if (raw.kind === "observation-unavailable") {
     const record = exactRecord(raw, ["kind", "reason"], path);
@@ -950,7 +1049,8 @@ function parseFailureKinds(raw: unknown, path: string): Parsed<readonly string[]
     else errors.push(...parsed.error.errors);
   });
   if (errors.length > 0) return failure(errors);
-  if (new Set(values).size !== values.length || values.some((value, index) => value !== [...values].sort(compareStrings)[index])) {
+  const sorted = [...values].sort(compareStrings);
+  if (new Set(values).size !== values.length || values.some((value, index) => value !== sorted[index])) {
     return failure([`${path} must be sorted and unique`]);
   }
   return success(freezeArray(values));

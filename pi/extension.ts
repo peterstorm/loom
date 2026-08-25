@@ -1383,7 +1383,7 @@ export default function (pi: ExtensionAPI) {
     for (const sweep of [
       {
         name: "sweepStaleSessions",
-        run: (): void => sweepStaleSessions(subagentDir(), Date.now() - STALE_SUBAGENT_TTL_MS),
+        run: (): void => { sweepStaleSessions(subagentDir(), Date.now() - STALE_SUBAGENT_TTL_MS); },
       },
       { name: "sweepExpiredPiWriteGrants", run: (): void => sweepExpiredPiWriteGrants() },
     ]) {

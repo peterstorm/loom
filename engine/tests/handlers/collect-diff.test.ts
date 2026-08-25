@@ -118,6 +118,7 @@ describe("collectDiff", () => {
     );
 
     expect(evidence).toEqual({
+      kind: "written",
       written: true,
       evidence: "1 new test methods, 1 assertions (ts: 1 it/test/describe)",
     });
@@ -149,6 +150,7 @@ describe("collectDiff", () => {
       files: ["engine/tests/committed.test.ts"],
     }]);
     expect(evidence).toEqual({
+      kind: "written",
       written: true,
       evidence: "1 new test methods, 1 assertions (ts: 1 it/test/describe)",
     });

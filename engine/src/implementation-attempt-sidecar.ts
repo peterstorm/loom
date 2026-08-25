@@ -129,24 +129,44 @@ function canonicalTaskGraphPath(path: string): string {
   return canonical;
 }
 
-function publishSidecarBytes(
+export type SidecarPublicationOperations = Readonly<{
+  writeStaged: (leaf: string, bytes: Buffer) => void;
+  publishNoReplace: (stagedLeaf: string, liveLeaf: string) => void;
+  readLive: (leaf: string) => Buffer;
+  removeStaged: (leaf: string) => void;
+}>;
+
+function sidecarPublicationOperations(
   anchored: AnchoredDirectory,
+): SidecarPublicationOperations {
+  return Object.freeze({
+    writeStaged: (leaf, bytes) => writeDirectoryFileExclusiveNoFollow(anchored, leaf, bytes),
+    publishNoReplace: (stagedLeaf, liveLeaf) => {
+      // link(2) is atomic and never replaces an existing destination. Unlike
+      // rename(2), a racing different authority cannot overwrite the live key.
+      linkSync(anchoredChildPath(anchored, stagedLeaf), anchoredChildPath(anchored, liveLeaf));
+    },
+    readLive: (leaf) => readDirectoryFileNoFollow(anchored, leaf),
+    removeStaged: (leaf) => unlinkSync(anchoredChildPath(anchored, leaf)),
+  });
+}
+
+export function publishSidecarBytes(
   leaf: string,
   bytes: Buffer,
+  operations: SidecarPublicationOperations,
 ): void {
   const staged = `${leaf}.tmp-${randomUUID()}`;
   let stagedPresent = false;
   let primaryError: unknown = null;
   try {
-    writeDirectoryFileExclusiveNoFollow(anchored, staged, bytes);
+    operations.writeStaged(staged, bytes);
     stagedPresent = true;
     try {
-      // link(2) is atomic and never replaces an existing destination. Unlike
-      // rename(2), a racing different authority cannot overwrite the live key.
-      linkSync(anchoredChildPath(anchored, staged), anchoredChildPath(anchored, leaf));
+      operations.publishNoReplace(staged, leaf);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const existing = readDirectoryFileNoFollow(anchored, leaf);
+      const existing = operations.readLive(leaf);
       if (!existing.equals(bytes)) {
         throw new Error(`implementation sidecar ${leaf} already binds different bytes`);
       }
@@ -158,7 +178,7 @@ function publishSidecarBytes(
   let cleanupError: unknown = null;
   if (stagedPresent) {
     try {
-      unlinkSync(anchoredChildPath(anchored, staged));
+      operations.removeStaged(staged);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") cleanupError = error;
     }
@@ -203,9 +223,9 @@ export function publishImplementationAttemptSidecar(args: Readonly<{
   }
   try {
     publishSidecarBytes(
-      anchored,
       leaf,
       Buffer.from(`${JSON.stringify(parsed.value)}\n`, "utf8"),
+      sidecarPublicationOperations(anchored),
     );
     return parsed.value;
   } finally {

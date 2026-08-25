@@ -69,47 +69,77 @@ export function staleEntries(
 /** Shell: sweep one tracking dir. Dir is a parameter so tests can run the
  *  sweep hermetically against a temp dir (SUBAGENT_DIR freezes at first
  *  config import, which a shared-process test run cannot re-point). */
-export function sweepStaleSessions(dir: string, cutoffMs: number): void {
-  if (!existsSync(dir)) return;
+export type StaleCleanupDiagnostic = Readonly<{
+  operation: "read-directory" | "stat" | "remove";
+  path: string;
+  cause: string;
+}>;
 
+export type StaleSessionOperations = Readonly<{
+  exists: (path: string) => boolean;
+  entries: (path: string) => readonly string[];
+  mtime: (path: string) => number;
+  remove: (path: string) => void;
+}>;
+
+const REAL_STALE_SESSION_OPERATIONS: StaleSessionOperations = Object.freeze({
+  exists: existsSync,
+  entries: readdirSync,
+  mtime: (path) => statSync(path).mtimeMs,
+  remove: (path) => rmSync(path, { recursive: true, force: true }),
+});
+
+function diagnostic(
+  operation: StaleCleanupDiagnostic["operation"],
+  path: string,
+  error: unknown,
+): StaleCleanupDiagnostic {
+  return Object.freeze({
+    operation,
+    path,
+    cause: error instanceof Error ? error.message : String(error),
+  });
+}
+
+/** Shell: returns every failed operation with its exact path and cause. */
+export function sweepStaleSessions(
+  dir: string,
+  cutoffMs: number,
+  operations: StaleSessionOperations = REAL_STALE_SESSION_OPERATIONS,
+): readonly StaleCleanupDiagnostic[] {
+  if (!operations.exists(dir)) return Object.freeze([]);
+  const diagnostics: StaleCleanupDiagnostic[] = [];
+  let entries: readonly string[];
   try {
-    const mtimes = new Map<string, number>();
-    let failedStats = 0;
-    for (const entry of readdirSync(dir)) {
-      try {
-        mtimes.set(entry, statSync(join(dir, entry)).mtimeMs);
-      } catch {
-        failedStats++;
-      }
+    entries = operations.entries(dir);
+  } catch (error) {
+    diagnostics.push(diagnostic("read-directory", dir, error));
+    entries = [];
+  }
+
+  const mtimes = new Map<string, number>();
+  for (const entry of entries) {
+    const path = join(dir, entry);
+    try {
+      mtimes.set(entry, operations.mtime(path));
+    } catch (error) {
+      diagnostics.push(diagnostic("stat", path, error));
     }
-    if (failedStats > 0) {
-      // An unstatable entry is excluded from its session group's max-mtime
-      // anchor AND from the sweep — say so once (mirrors failedRemovals).
-      process.stderr.write(
-        `cleanup-stale-subagents: could not stat ${failedStats} tracking entr${failedStats === 1 ? "y" : "ies"} under ${dir} — skipped this sweep\n`,
-      );
+  }
+  for (const entry of staleEntries(mtimes, cutoffMs)) {
+    const path = join(dir, entry);
+    try {
+      operations.remove(path);
+    } catch (error) {
+      diagnostics.push(diagnostic("remove", path, error));
     }
-    let failedRemovals = 0;
-    for (const entry of staleEntries(mtimes, cutoffMs)) {
-      // rmSync handles both files and the `.cleanup` mkdir-lock directories.
-      try {
-        rmSync(join(dir, entry), { recursive: true, force: true });
-      } catch {
-        failedRemovals++;
-      }
-    }
-    if (failedRemovals > 0) {
-      process.stderr.write(
-        `cleanup-stale-subagents: ${failedRemovals} stale tracking entr${failedRemovals === 1 ? "y" : "ies"} could not be removed under ${dir}\n`,
-      );
-    }
-  } catch (e) {
-    // A failed sweep leaks stale bindings/rosters until the NEXT session
-    // start — mirror the pi twin's logging instead of swallowing it.
+  }
+  for (const failure of diagnostics) {
     process.stderr.write(
-      `loom: session cleanup failed for ${dir}: ${e instanceof Error ? e.message : String(e)}\n`,
+      `cleanup-stale-subagents: ${failure.operation} failed for ${failure.path}: ${failure.cause}\n`,
     );
   }
+  return Object.freeze(diagnostics);
 }
 
 const handler: HookHandler = async (_stdin, _args) => {

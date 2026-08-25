@@ -28,6 +28,7 @@ import * as git from "../../utils/git";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
 import {
   isWaveComplete,
+  parseNewTestEvidence,
   type NewTestEvidence,
 } from "../../core/implementation-application";
 import { collectNewTestEvidence } from "./task-local-completion";
@@ -219,12 +220,16 @@ function taskCompletionWasObserved(task: Task): boolean {
 export function reconcileTaskFromStoredEvidence(
   task: Task,
   proofArtifactsChanged: readonly string[],
-  collectedNewTests: NewTestEvidence,
+  collectedNewTests: NewTestEvidence | Readonly<{ written: boolean; evidence: string }>,
   allowLegacyPositiveMigration = false,
 ): Task {
   if (task.status === "completed") return task;
-  const newTestsWritten = collectedNewTests.written;
-  const newTestEvidence = collectedNewTests.evidence;
+  const normalizedNewTests = parseNewTestEvidence(
+    collectedNewTests.written,
+    collectedNewTests.evidence,
+  );
+  const newTestsWritten = normalizedNewTests.written;
+  const newTestEvidence = normalizedNewTests.evidence;
   const proof = evaluateTaskProof(
     {
       verificationPolicy: taskVerificationPolicy(task),
