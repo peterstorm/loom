@@ -61,8 +61,8 @@ import {
   type TaskGraphStore,
 } from "./subagent-result";
 
-// `isReviewAgent` lives in `config`, NOT in `core/review-output` beside the three
-// functions above it: it reads the review-agent roster, and `core/review-output`
+// `isReviewAgent` lives in `config`, NOT in `core/review-output` beside the
+// review-output helpers above: it reads the review-agent roster, and `core/review-output`
 // declares itself free of config so its parse/merge rules stay pure. Importing it
 // from the wrong module is a LINK-time ESM failure that takes the whole extension
 // with it — every hook below, not just review capture. `engine/tests/pi-imports.test.ts`

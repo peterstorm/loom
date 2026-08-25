@@ -39,6 +39,7 @@ import {
 } from "../../implementation-attempt-sidecar";
 import { rollbackTaskExecutionRegistration } from "../task-execution";
 import type { ImplementationAttemptAuthority } from "../../core/implementation-completion";
+import { parseAgentName } from "../../core/model-profiles";
 
 const handler: HookHandler = async (stdin) => {
   let input: SubagentStartInput;
@@ -126,6 +127,7 @@ const handler: HookHandler = async (stdin) => {
     );
   }
   const modernImplementationAgent = isImplAgent(rosterAgentTypeRaw);
+  const loomOwnedAgent = parseAgentName(rosterAgentTypeRaw).ok || modernImplementationAgent;
   let sidecarPublished = false;
   let identifiedAuthority: ImplementationAttemptAuthority | null = null;
   const rollbackIdentifiedRegistration = async (): Promise<string | null> => {
@@ -282,11 +284,11 @@ const handler: HookHandler = async (stdin) => {
       const pointerFailure =
         `mark-subagent-active: failed to write task_graph pointer for ${sessionId} — cross-repo SubagentStop authority is unavailable: ${e instanceof Error ? e.message : String(e)}`;
       process.stderr.write(`${pointerFailure}\n`);
-      if (modernImplementationAgent) bindingFailure = bindingFailure ?? pointerFailure;
+      if (loomOwnedAgent) bindingFailure = bindingFailure ?? pointerFailure;
     }
   }
 
-  if (bindingFailure !== null && modernImplementationAgent && agentId !== null) {
+  if (bindingFailure !== null && agentId !== null) {
     const rollbackFailures: string[] = [];
     if (machineBound && rosterAgentType !== null) {
       try {

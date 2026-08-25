@@ -35,15 +35,10 @@ function fallbackEvidenceLabel(
 
 function untrustedTranscriptEvidence(label: string, bashOutput: string): ResolvedTestEvidence {
   const transcript = extractTestEvidence(bashOutput);
-  return transcript.passed
-    ? {
-        result: { verdict: "untrusted", passed: true, label, provenance: "unverified" },
-        evidence: `${label}: ${transcript.evidence}`,
-      }
-    : {
-        result: { verdict: "untrusted", passed: false, label, provenance: "unverified" },
-        evidence: "",
-      };
+  return {
+    result: { verdict: "untrusted", passed: transcript.passed, label, provenance: "unverified" },
+    evidence: transcript.passed ? `${label}: ${transcript.evidence}` : "",
+  };
 }
 
 /**

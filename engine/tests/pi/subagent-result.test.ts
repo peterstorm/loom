@@ -71,9 +71,17 @@ function graph(overrides: Partial<TaskGraph> = {}): TaskGraph {
 /** An in-memory stand-in for StateManager: load, mutate, keep. */
 function fakeStore(initial: TaskGraph): TaskGraphStore & { current: () => TaskGraph } {
   let state = initial;
+  const updateAndReturn = async <T>(
+    mutate: (current: TaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
+  ): Promise<T> => {
+    const applied = mutate(state);
+    state = applied.state;
+    return applied.value;
+  };
   return {
     load: () => state,
     update: async (mutate) => { state = mutate(state); },
+    updateAndReturn,
     current: () => state,
   };
 }
@@ -244,6 +252,37 @@ describe("applyPhaseAgentPiResult", () => {
     expect(applied.processingErrors).toHaveLength(1);
     expect(applied.processingErrors[0]).toContain("phase artifact extraction failed");
     expect(store.current().current_phase).toBe("specify");
+    expect(store.current().spec_file).toBeNull();
+  });
+
+  it("cannot regress a concurrently advanced phase or route artifacts from a stale load", async () => {
+    const stale = graph({ current_phase: "specify", spec_dir: ".claude/specs/stale" } as Partial<TaskGraph>);
+    let current = graph({ current_phase: "architecture", spec_dir: ".claude/specs/current" } as Partial<TaskGraph>);
+    let loadCount = 0;
+    const store: TaskGraphStore & { current(): TaskGraph } = {
+      load: () => { loadCount += 1; return stale; },
+      update: async (mutate) => { current = mutate(current); },
+      updateAndReturn: async (mutate) => {
+        const applied = mutate(current);
+        current = applied.state;
+        return applied.value;
+      },
+      current: () => current,
+    };
+
+    await applyPhaseAgentPiResult({
+      store,
+      agentType: "specify-agent",
+      completedPhase: "specify",
+      result: result({
+        agent: "specify-agent",
+        messages: [writeCall(".claude/specs/stale/spec.md")],
+      }),
+      now: NOW,
+    });
+
+    expect(loadCount).toBe(0);
+    expect(store.current().current_phase).toBe("architecture");
     expect(store.current().spec_file).toBeNull();
   });
 });
@@ -454,8 +493,8 @@ describe("applyReviewPiResult", () => {
 });
 
 describe("applySpecCheckPiResult", () => {
-  const specCheckText = (critical: number) => [
-    "SPEC_CHECK_WAVE: 1",
+  const specCheckText = (critical: number, wave: number | null = 1) => [
+    ...(wave === null ? [] : [`SPEC_CHECK_WAVE: ${wave}`]),
     `SPEC_CHECK_CRITICAL_COUNT: ${critical}`,
     "SPEC_CHECK_HIGH_COUNT: 0",
     `SPEC_CHECK_VERDICT: ${critical > 0 ? "BLOCKED" : "PASSED"}`,
@@ -493,6 +532,33 @@ describe("applySpecCheckPiResult", () => {
     });
 
     expect(store.current().spec_check).toMatchObject({ verdict: "EVIDENCE_CAPTURE_FAILED" });
+  });
+
+  it("uses locked current_wave when the transcript omits its Wave despite a stale load", async () => {
+    const stale = graph({ current_wave: 1 });
+    let current = graph({ current_wave: 3, wave_gates: {} });
+    let loadCount = 0;
+    const store: TaskGraphStore & { current(): TaskGraph } = {
+      load: () => { loadCount += 1; return stale; },
+      update: async (mutate) => { current = mutate(current); },
+      updateAndReturn: async (mutate) => {
+        const applied = mutate(current);
+        current = applied.state;
+        return applied.value;
+      },
+      current: () => current,
+    };
+
+    await applySpecCheckPiResult({
+      store,
+      result: result({ agent: "spec-check-invoker", messages: assistantText(specCheckText(1, null)) }),
+      now: NOW,
+    });
+
+    expect(loadCount).toBe(0);
+    expect(store.current().spec_check).toMatchObject({ wave: 3, verdict: "BLOCKED" });
+    expect(store.current().wave_gates["3"]).toMatchObject({ blocked: true });
+    expect(store.current().wave_gates["1"]).toBeUndefined();
   });
 });
 
@@ -661,6 +727,11 @@ describe("applyImplementationPiResult", () => {
     const store: TaskGraphStore & { current(): TaskGraph } = {
       load: () => completedView,
       update: async (mutate) => { current = mutate(current); },
+      updateAndReturn: async (mutate) => {
+        const applied = mutate(current);
+        current = applied.state;
+        return applied.value;
+      },
       current: () => current,
     };
 
@@ -921,25 +992,28 @@ describe("applyImplementationPiResult", () => {
     });
     let current = initial;
     let loads = 0;
+    const lockedState: TaskGraph = {
+      ...initial,
+      tasks: initial.tasks.map((task) => task.id === "T1"
+        ? {
+            ...task,
+            attempt_artifact_baseline: [{
+              artifact,
+              snapshot: { kind: "sha256" as const, digest: digest("old bytes\n") },
+            }],
+          }
+        : task),
+    };
     const store: TaskGraphStore & { current(): TaskGraph } = {
       load: () => {
         loads += 1;
         return initial;
       },
-      update: async (mutate) => {
-        const locked: TaskGraph = {
-          ...initial,
-          tasks: initial.tasks.map((task) => task.id === "T1"
-            ? {
-                ...task,
-                attempt_artifact_baseline: [{
-                  artifact,
-                  snapshot: { kind: "sha256" as const, digest: digest("old bytes\n") },
-                }],
-              }
-            : task),
-        };
-        current = mutate(locked);
+      update: async (mutate) => { current = mutate(lockedState); },
+      updateAndReturn: async (mutate) => {
+        const applied = mutate(lockedState);
+        current = applied.state;
+        return applied.value;
       },
       current: () => current,
     };

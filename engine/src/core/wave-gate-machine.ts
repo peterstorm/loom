@@ -532,7 +532,7 @@ export function checkImplementationProof(tasks: readonly Task[]): GateCheck {
 }
 
 /**
- * The three test-readiness predicates, defined ONCE.
+ * The shared test-readiness predicates, defined ONCE.
  *
  * The gate (`checkTestEvidence`/`checkNewTests`) and the status projection
  * (`deriveTestReadinessForTasks`) must answer "is this task test-ready?"

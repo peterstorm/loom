@@ -348,6 +348,47 @@ describe("Claude implementation authority sidecar", () => {
     expect(stored.wave_gates["1"]?.impl_complete).toBe(true);
   });
 
+  it("accepts and settles the real nested tool_reference transcript fixture", async () => {
+    const dir = root();
+    const statePath = join(dir, "active_task_graph.json");
+    const attempt = authority("T1", "claude-nested-tool-reference");
+    modernGraph(statePath, attempt, {
+      new_tests_required: false,
+      proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+    });
+    process.env.LOOM_STATE_PATH = statePath;
+    mkdirSync(process.env.LOOM_SUBAGENT_DIR!, { recursive: true });
+    writeFileSync(join(process.env.LOOM_SUBAGENT_DIR!, `${SESSION}.task_graph`), statePath);
+    const transcriptPath = join(dir, "agent.jsonl");
+    writeFileSync(
+      transcriptPath,
+      readFileSync(new URL("../fixtures/claude-modern-transcript.jsonl", import.meta.url)),
+    );
+    publishImplementationAttemptSidecar({
+      sessionId: SESSION,
+      agentId: AGENT,
+      taskGraphPath: statePath,
+      authority: attempt,
+    });
+
+    const result = await dispatch(JSON.stringify({
+      session_id: SESSION,
+      agent_id: AGENT,
+      agent_type: "code-implementer-agent",
+      agent_transcript_path: transcriptPath,
+    }), []);
+
+    expect(result.kind).toBe("passthrough");
+    const stored = JSON.parse(readFileSync(statePath, "utf8")) as TaskGraph;
+    expect(stored.tasks[0]).toMatchObject({
+      status: "implemented",
+      implementation_attempt_history: [{
+        authorityDigest: attempt.authorityDigest,
+        transition: "implemented",
+      }],
+    });
+  });
+
   it("settles a modern stop with no resolvable transcript as exact infrastructure and releases only that authority", async () => {
     const dir = root();
     const statePath = join(dir, "active_task_graph.json");

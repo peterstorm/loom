@@ -23,9 +23,17 @@ function authority(reservation: string) {
 
 function store(initial: TaskGraph): TaskGraphStore & { current(): TaskGraph } {
   let state = initial;
+  const updateAndReturn = async <T>(
+    mutate: (current: TaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
+  ): Promise<T> => {
+    const applied = mutate(state);
+    state = applied.state;
+    return applied.value;
+  };
   return {
     load: () => state,
     update: async (mutate) => { state = mutate(state); },
+    updateAndReturn,
     current: () => state,
   };
 }

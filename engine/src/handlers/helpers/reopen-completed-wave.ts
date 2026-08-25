@@ -18,6 +18,12 @@ type ReopenRequest = Readonly<{
   taskIds: readonly string[];
 }>;
 
+type WaveReopeningStore = Readonly<{
+  updateAndReturn<T>(
+    mutate: (state: TaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
+  ): Promise<T>;
+}>;
+
 export type WaveReopeningProof = Readonly<{
   mode: "modern-exact-workspace-drift" | "legacy-workspace-authority-unverifiable";
   taskIds: readonly string[];
@@ -232,6 +238,42 @@ export function reopenCompletedWave(
   };
 }
 
+type WaveReopeningCommit =
+  | Readonly<{ kind: "already-committed"; proof: WaveReopeningProof }>
+  | Readonly<{ kind: "committed"; proof: WaveReopeningProof }>;
+
+/** Commit and return one proof derived from the same locked graph. */
+export function commitCompletedWaveReopening(
+  store: WaveReopeningStore,
+  request: ReopenRequest,
+  prove: (locked: TaskGraph, request: ReopenRequest) => WaveReopeningProof,
+): Promise<WaveReopeningCommit> {
+  return store.updateAndReturn<WaveReopeningCommit>((locked) => {
+    const replay = locked.wave_reopening_history?.find((audit) =>
+      audit.runId === request.runId && audit.authorityDigest === request.authorityDigest);
+    if (replay !== undefined) {
+      if (replay.wave !== request.wave || !exactIds(replay.reopenedTaskIds, request.taskIds)) {
+        throw new Error("reopening conflicts with an immutable prior reopening audit");
+      }
+      return {
+        state: locked,
+        value: Object.freeze({
+          kind: "already-committed",
+          proof: Object.freeze({
+            mode: replay.proofMode,
+            taskIds: Object.freeze([...replay.reopenedTaskIds]),
+          }),
+        }),
+      };
+    }
+    const proof = prove(locked, request);
+    return {
+      state: reopenCompletedWave(locked, request, proof),
+      value: Object.freeze({ kind: "committed", proof }),
+    };
+  });
+}
+
 const handler: HookHandler = async (stdin, args) => {
   try {
     const request = parseRequest(stdin);
@@ -239,15 +281,18 @@ const handler: HookHandler = async (stdin, args) => {
     if (runsRoot === null) return { kind: "error", message: USAGE };
     const manager = StateManager.fromPath(taskGraphPath());
     if (manager === null) return { kind: "error", message: "no protected TaskGraph exists" };
-    const before = manager.load();
-    const replay = before.wave_reopening_history?.find((audit) => audit.runId === request.runId && audit.authorityDigest === request.authorityDigest);
-    if (replay !== undefined) {
-      if (replay.wave === request.wave && exactIds(replay.reopenedTaskIds, request.taskIds)) return { kind: "passthrough", systemMessage: "completed Wave reopening already committed" };
-      return { kind: "error", message: "reopening conflicts with an immutable prior reopening audit" };
-    }
-    const proven = packetReopeningProof(before, request, runsRoot);
-    await manager.update((locked) => reopenCompletedWave(locked, request, packetReopeningProof(locked, request, runsRoot)));
-    return { kind: "passthrough", systemMessage: `reopened Wave ${request.wave} (${proven.mode}); refresh review evidence for ${proven.taskIds.join(", ")}` };
+    const committed = await commitCompletedWaveReopening(
+      manager,
+      request,
+      (locked, lockedRequest) => packetReopeningProof(locked, lockedRequest, runsRoot),
+    );
+    return committed.kind === "already-committed"
+      ? { kind: "passthrough", systemMessage: "completed Wave reopening already committed" }
+      : {
+          kind: "passthrough",
+          systemMessage: `reopened Wave ${request.wave} (${committed.proof.mode}); ` +
+            `refresh review evidence for ${committed.proof.taskIds.join(", ")}`,
+        };
   } catch (error) {
     return { kind: "error", message: `[loom] reopen-completed-wave: ${error instanceof Error ? error.message : String(error)}` };
   }

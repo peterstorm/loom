@@ -100,7 +100,7 @@ describe("category handler errors propagate instead of passthrough (critical)", 
 });
 
 describe("request-bound capture gates legacy dispatch", () => {
-  it("runs cleanup but skips state mutation after Claude capture rejection", async () => {
+  it("combines capture and cleanup failures while skipping legacy state mutation", async () => {
     const dir = tempDir();
     const statePath = writeState(dir);
     const session = sid("capture-rejected");
@@ -125,13 +125,17 @@ describe("request-bound capture gates legacy dispatch", () => {
     process.env.LOOM_ORCHESTRATION_RUNS_ROOT = runsRoot;
     process.env.LOOM_ORCHESTRATION_RUN_DIR = runDir;
     try {
-      const result = await dispatch(JSON.stringify({
+      const result = await runDispatch(JSON.stringify({
         session_id: session,
         agent_id: "agent-capture",
         agent_type: "code-reviewer",
         agent_transcript_path: join(dir, "missing-transcript.jsonl"),
-      }), []);
-      expect(result.kind).toBe("error");
+      }), [], async () => ({ kind: "error", message: "injected cleanup failure" }));
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringContaining("injected cleanup failure"),
+      });
+      if (result.kind === "error") expect(result.message).toContain("request-bound capture rejected");
       const task = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
       expect(task.critical_findings ?? []).toEqual([]);
     } finally {

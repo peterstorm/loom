@@ -221,6 +221,23 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
     }
   });
 
+  it("task_graph pointer write failure blocks a non-implementation Loom Agent", async () => {
+    const s = session("review-pointer-eloop");
+    const pointer = join(SUBAGENT_DIR, `${s}.task_graph`);
+    process.env.LOOM_STATE_PATH = statePath;
+    symlinkSync(pointer, pointer);
+
+    const result = await markActive(start(s, "reviewer-1", "loom:code-reviewer"), []);
+
+    expect(result).toMatchObject({
+      kind: "block",
+      message: expect.stringContaining("failed to write task_graph pointer"),
+    });
+    const parsedSession = parseSessionId(s);
+    expect(parsedSession).not.toBeNull();
+    if (parsedSession !== null) expect(activeRosterProbe(parsedSession)).toBeNull();
+  });
+
   it("control: a healthy roster arms the binding AND writes .task_graph", async () => {
     const s = session("ok");
     process.env.LOOM_STATE_PATH = statePath;

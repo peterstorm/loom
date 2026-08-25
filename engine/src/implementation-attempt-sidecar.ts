@@ -59,10 +59,12 @@ const exactKeys = (raw: Record<string, unknown>, expected: readonly string[]): b
     typeof key === "string" && expected.includes(key));
 };
 
+type SidecarIdentity = Readonly<{ sessionId: SessionId; agentId: AgentId }>;
+
 function parsedIdentity(
   rawSessionId: unknown,
   rawAgentId: unknown,
-): Readonly<{ sessionId: SessionId; agentId: AgentId }> | null {
+): SidecarIdentity | null {
   const sessionId = typeof rawSessionId === "string" ? parseSessionId(rawSessionId) : null;
   const agentId = typeof rawAgentId === "string" ? parseReportedAgentId(rawAgentId) : null;
   return sessionId !== null && agentId !== null ? Object.freeze({ sessionId, agentId }) : null;
@@ -111,14 +113,16 @@ export function parseClaudeImplementationAttemptSidecar(
   }
 }
 
+function sidecarLeaf(identity: SidecarIdentity): string {
+  return `${identity.sessionId}.${Buffer.from(identity.agentId, "utf8").toString("hex")}${IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX}`;
+}
+
 export function implementationAttemptSidecarLeaf(
   rawSessionId: string,
   rawAgentId: string,
 ): string | null {
   const identity = parsedIdentity(rawSessionId, rawAgentId);
-  return identity === null
-    ? null
-    : `${identity.sessionId}.${Buffer.from(identity.agentId, "utf8").toString("hex")}${IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX}`;
+  return identity === null ? null : sidecarLeaf(identity);
 }
 
 function canonicalTaskGraphPath(path: string): string {
@@ -216,11 +220,7 @@ export function publishImplementationAttemptSidecar(args: Readonly<{
   const directory = subagentDir();
   ensureDirectoryNoFollow(directory);
   const anchored = openDirectoryNoFollow(directory);
-  const leaf = implementationAttemptSidecarLeaf(identity.sessionId, identity.agentId);
-  if (leaf === null) {
-    closeAnchoredDirectory(anchored);
-    throw new Error("implementation sidecar identity invariant failed");
-  }
+  const leaf = sidecarLeaf(identity);
   try {
     publishSidecarBytes(
       leaf,
@@ -246,10 +246,10 @@ export function snapshotImplementationAttemptSidecar(
   rawAgentId: string,
 ): ImplementationAuthorityObservation {
   const identity = parsedIdentity(rawSessionId, rawAgentId);
-  const leaf = implementationAttemptSidecarLeaf(rawSessionId, rawAgentId);
-  if (identity === null || leaf === null) {
+  if (identity === null) {
     return unavailable("invalid-sidecar-identity", "SubagentStop session/agent identity cannot name an implementation sidecar");
   }
+  const leaf = sidecarLeaf(identity);
   let anchored;
   try {
     anchored = openDirectoryNoFollow(subagentDir());
@@ -296,8 +296,9 @@ export function removeImplementationAttemptSidecar(
   rawSessionId: string,
   rawAgentId: string,
 ): void {
-  const leaf = implementationAttemptSidecarLeaf(rawSessionId, rawAgentId);
-  if (leaf === null) throw new Error("cannot remove implementation sidecar for invalid session/agent identity");
+  const identity = parsedIdentity(rawSessionId, rawAgentId);
+  if (identity === null) throw new Error("cannot remove implementation sidecar for invalid session/agent identity");
+  const leaf = sidecarLeaf(identity);
   let anchored;
   try {
     anchored = openDirectoryNoFollow(subagentDir());

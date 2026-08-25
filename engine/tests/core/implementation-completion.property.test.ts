@@ -186,6 +186,12 @@ describe("implementation completion exact parsers", () => {
     expect(complete.records[2]).toMatchObject({ type: "assistant" });
     const message = complete.records[2]?.message as { content?: readonly unknown[] } | undefined;
     expect(message?.content?.[0]).toMatchObject({ future_block_field: 1 });
+    const nestedResult = complete.records[4]?.message as { content?: readonly { content?: readonly unknown[] }[] } | undefined;
+    expect(nestedResult?.content?.[0]?.content?.[0]).toMatchObject({
+      type: "tool_reference",
+      tool_name: "Bash",
+      future_reference_field: true,
+    });
   });
 
   it.each([
@@ -203,6 +209,7 @@ describe("implementation completion exact parsers", () => {
     ["malformed text block", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":7}]}}', "text", 1],
     ["malformed tool-use block", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":[]}]}}', "input", 1],
     ["malformed tool-result block", '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":null}]}}', "content", 1],
+    ["malformed tool-reference block", '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":[{"type":"tool_reference","tool_name":"   "}]}]}}', "tool_name", 1],
     ["unknown block discriminant", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"future_block","text":"no"}]}}', "must be one of", 1],
     ["misspelled block discriminant", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_uses","id":"tool-1","name":"Bash","input":{}}]}}', "must be one of", 1],
     ["malformed fallback block", '{"type":"assistant","message":{"role":"assistant","content":[{"type":"fallback","from":{"model":""},"to":{"model":"claude"}}]}}', "model", 1],
@@ -219,6 +226,7 @@ describe("implementation completion exact parsers", () => {
       { type: "tool_use", id: "tool-1", name: "Bash", input: {}, future: true },
       { type: "server_tool_use", id: "server-1", name: "search", input: {}, future: true },
       { type: "tool_result", tool_use_id: "tool-1", content: "pass", is_error: false, future: true },
+      { type: "tool_reference", tool_name: "Bash", future: true },
       { type: "fallback", from: { model: "claude-fable", future: true }, to: { model: "claude-opus" }, future: true },
     ];
     expect(blocks.map(({ type }) => type)).toEqual(CLAUDE_CONTENT_BLOCK_TYPES);

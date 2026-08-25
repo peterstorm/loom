@@ -148,7 +148,12 @@ export const runDispatch = async (
   }
 
   if (captureFailure !== null) {
-    return { kind: "error", message: captureFailure };
+    return {
+      kind: "error",
+      message: cleanupFailure === null
+        ? captureFailure
+        : `${captureFailure}; cleanup also failed: ${cleanupFailure}`,
+    };
   }
 
   // No exact session TaskGraph authority → no orchestration Hooks.

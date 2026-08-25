@@ -16,6 +16,7 @@ export const CLAUDE_CONTENT_BLOCK_TYPES = Object.freeze([
   "tool_use",
   "server_tool_use",
   "tool_result",
+  "tool_reference",
   "fallback",
 ] as const);
 
@@ -48,6 +49,11 @@ export type ClaudeToolResultBlock = SurplusFields & Readonly<{
   is_error?: boolean;
 }>;
 
+export type ClaudeToolReferenceBlock = SurplusFields & Readonly<{
+  type: "tool_reference";
+  tool_name: string;
+}>;
+
 export type ClaudeFallbackBlock = SurplusFields & Readonly<{
   type: "fallback";
   from: Readonly<Record<string, unknown>> & Readonly<{ model: string }>;
@@ -59,6 +65,7 @@ export type ClaudeContentBlock =
   | ClaudeThinkingBlock
   | ClaudeToolUseBlock
   | ClaudeToolResultBlock
+  | ClaudeToolReferenceBlock
   | ClaudeFallbackBlock;
 
 export type ClaudeMessageContent = string | readonly ClaudeContentBlock[];
@@ -155,6 +162,8 @@ function contentBlockError(block: UnknownRecord, path: string, depth: number): s
       }
       return claudeContentError(block.content, `${path}.content`, depth + 1);
     }
+    case "tool_reference":
+      return nonEmptyStringField(block, "tool_name", path);
     case "fallback": {
       const fromError = modelEndpointError(block.from, `${path}.from`);
       return fromError ?? modelEndpointError(block.to, `${path}.to`);

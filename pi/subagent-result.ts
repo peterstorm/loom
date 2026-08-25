@@ -12,12 +12,11 @@
  *
  * Here each concern is one named function with explicit parameters and two
  * injected ports — `TaskGraphStore` for protected state, `RepositoryProbe` for
- * git — so a test supplies plain objects instead of a working tree. Every
- * function is a shell orchestrator in the repo's sense: load through the port,
- * decide with pure engine functions, persist through the port. The genuinely
- * pure rules live further in, in `engine/src/core` (see
- * `core/phase-artifact-paths`), shared verbatim with the Claude Code handlers so
- * the two harnesses cannot drift.
+ * git — so a test supplies plain objects instead of a working tree. Exported
+ * appliers are shell orchestrators: observe through ports, call pure reducers,
+ * and persist. Parsing, classification, and lifecycle reducers remain pure and
+ * testable as plain data transformations; shared engine rules live further in
+ * under `engine/src/core` (see `core/phase-artifact-paths`).
  *
  * Diagnostics are RETURNED, never written. `extension.ts` owns stderr and owns
  * which diagnostics become orchestration processing errors; an applier that
@@ -42,10 +41,14 @@ import {
   reviewResolutionLog,
   type ReviewResolution,
 } from "../engine/src/core/review-output";
-import { parseSpecCheckOutput, reconcileSpecCheck } from "../engine/src/core/spec-check";
+import {
+  parseSpecCheckOutput,
+  reconcileSpecCheck,
+  type ParsedSpecCheckOutput,
+} from "../engine/src/core/spec-check";
 import { reconcileWaveBlock } from "../engine/src/core/wave-gate-model";
 import { phaseArtifactUpdates } from "../engine/src/core/phase-artifact-paths";
-import { IMPL_AGENTS, PHASE_ORDER, isReviewAgent } from "../engine/src/config";
+import { IMPL_AGENTS, isReviewAgent } from "../engine/src/config";
 import type { Phase, TaskGraph } from "../engine/src/types";
 import {
   parseIsoInstant,
@@ -86,6 +89,9 @@ import {
 export type TaskGraphStore = Readonly<{
   load(): TaskGraph;
   update(mutate: (state: TaskGraph) => TaskGraph): Promise<void>;
+  updateAndReturn<T>(
+    mutate: (state: TaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
+  ): Promise<T>;
 }>;
 
 /**
@@ -421,16 +427,8 @@ export async function applyFailedPiResult(args: Readonly<{
   }
 
   if (agentType === "spec-check-invoker") {
-    await store.update((state) => ({
-      ...state,
-      spec_check: {
-        wave: state.current_wave ?? 1,
-        run_at: args.now,
-        verdict: "EVIDENCE_CAPTURE_FAILED" as const,
-        error: failure,
-      },
-    }));
-    return outcome([`loom(pi): ${failure} — marking spec-check evidence_capture_failed`]);
+    return store.updateAndReturn((state) =>
+      reducePiSpecCheckResult(state, { kind: "capture-failed", error: failure }, args.now));
   }
 
   // The dispatcher normally settled a reserved failure through
@@ -465,58 +463,46 @@ export function writtenPathsOf(
 
 type PhaseTransition = NonNullable<ReturnType<typeof resolveTransition>>;
 
-async function recordPhaseWrites(args: Readonly<{
-  store: TaskGraphStore;
-  agentType: string;
-  result: PiSubagentResult;
-}>): Promise<PiResultOutcome | null> {
-  const parsed = parsePiMessages(args.result.messages);
-  if (!parsed.ok) {
-    const diagnostic = `${args.agentType} phase artifact extraction failed: ${parsed.errors.join("; ")}`;
-    return outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]);
-  }
+type PiPhasePreparation = Readonly<{
+  state: TaskGraph;
+  transitionEligible: boolean;
+}>;
 
-  try {
-    const updates = phaseArtifactUpdates(writtenPathsOf(parsed.value), args.store.load().spec_dir ?? undefined);
-    if (Object.keys(updates).length > 0) await args.store.update((state) => ({ ...state, ...updates }));
-    return null;
-  } catch (error) {
-    const diagnostic =
-      `${args.agentType} phase artifact extraction failed: ${error instanceof Error ? error.message : String(error)}`;
-    return outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]);
+/** Pure locked-state reducer: stale/future phase results cannot route artifacts or advance. */
+function preparePiPhaseResult(
+  state: TaskGraph,
+  completedPhase: Phase,
+  writtenPaths: readonly string[],
+): PiPhasePreparation {
+  if (state.current_phase !== completedPhase) {
+    return Object.freeze({ state, transitionEligible: false });
   }
+  const updates = phaseArtifactUpdates(writtenPaths, state.spec_dir ?? undefined);
+  return Object.freeze({
+    state: Object.keys(updates).length === 0 ? state : { ...state, ...updates },
+    transitionEligible: true,
+  });
 }
 
-function phaseAlreadyAdvanced(state: TaskGraph, completedPhase: Phase): boolean {
-  const currentIdx = PHASE_ORDER.indexOf(state.current_phase);
-  const completedIdx = PHASE_ORDER.indexOf(completedPhase);
-  return completedIdx >= 0 && currentIdx > completedIdx;
-}
-
-async function applyPhaseTransition(args: Readonly<{
-  store: TaskGraphStore;
-  completedPhase: Phase;
-  transition: PhaseTransition;
-  now: string;
-}>): Promise<PiResultOutcome> {
-  const state = args.store.load();
-  const artifactUpdates = phaseArtifactUpdates([args.transition.artifact], state.spec_dir ?? undefined);
-  try {
-    await args.store.update((current) => ({
-      ...current,
-      current_phase: args.transition.nextPhase,
-      phase_artifacts: { ...current.phase_artifacts, [args.completedPhase]: args.transition.artifact },
-      ...artifactUpdates,
-      skipped_phases: args.transition.skipClarify
-        ? [...new Set([...current.skipped_phases, "clarify" as const])]
-        : current.skipped_phases,
-      updated_at: args.now,
-    }));
-    return outcome();
-  } catch (error) {
-    const diagnostic = `phase advancement failed: ${error instanceof Error ? error.message : String(error)}`;
-    return outcome([`loom: ${diagnostic}`], [diagnostic]);
-  }
+/** Pure phase command: rechecks exact eligibility before applying a transition. */
+function reducePiPhaseTransition(
+  state: TaskGraph,
+  completedPhase: Phase,
+  transition: PhaseTransition | null,
+  now: string,
+): TaskGraph {
+  if (transition === null || state.current_phase !== completedPhase) return state;
+  const artifactUpdates = phaseArtifactUpdates([transition.artifact], state.spec_dir ?? undefined);
+  return {
+    ...state,
+    current_phase: transition.nextPhase,
+    phase_artifacts: { ...state.phase_artifacts, [completedPhase]: transition.artifact },
+    ...artifactUpdates,
+    skipped_phases: transition.skipClarify
+      ? [...new Set([...state.skipped_phases, "clarify" as const])]
+      : state.skipped_phases,
+    updated_at: now,
+  };
 }
 
 /**
@@ -536,13 +522,41 @@ export async function applyPhaseAgentPiResult(args: Readonly<{
   result: PiSubagentResult;
   now: string;
 }>): Promise<PiResultOutcome> {
-  const writesOutcome = await recordPhaseWrites(args);
-  if (writesOutcome !== null) return writesOutcome;
-
-  const state = args.store.load();
-  if (phaseAlreadyAdvanced(state, args.completedPhase)) return outcome();
-  const transition = resolveTransition(args.completedPhase, state);
-  return transition ? applyPhaseTransition({ ...args, transition }) : outcome();
+  const parsed = parsePiMessages(args.result.messages);
+  if (!parsed.ok) {
+    const diagnostic = `${args.agentType} phase artifact extraction failed: ${parsed.errors.join("; ")}`;
+    return outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]);
+  }
+  const writtenPaths = writtenPathsOf(parsed.value);
+  try {
+    return await args.store.updateAndReturn((locked) => {
+      let prepared: PiPhasePreparation;
+      try {
+        prepared = preparePiPhaseResult(locked, args.completedPhase, writtenPaths);
+      } catch (error) {
+        const diagnostic = `${args.agentType} phase artifact extraction failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`;
+        return {
+          state: locked,
+          value: outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]),
+        };
+      }
+      if (!prepared.transitionEligible) return { state: prepared.state, value: outcome() };
+      try {
+        const transition = resolveTransition(args.completedPhase, prepared.state);
+        return {
+          state: reducePiPhaseTransition(prepared.state, args.completedPhase, transition, args.now),
+          value: outcome(),
+        };
+      } catch (error) {
+        const diagnostic = `phase advancement failed: ${error instanceof Error ? error.message : String(error)}`;
+        return { state: prepared.state, value: outcome([`loom: ${diagnostic}`], [diagnostic]) };
+      }
+    });
+  } catch (error) {
+    const diagnostic = `phase state commit failed: ${error instanceof Error ? error.message : String(error)}`;
+    return outcome([`loom: ${diagnostic}`], [diagnostic]);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1232,6 +1246,51 @@ export async function applyReviewPiResult(args: Readonly<{
 // Spec-check invoker
 // ---------------------------------------------------------------------------
 
+type PiSpecCheckObservation =
+  | Readonly<{ kind: "capture-failed"; error: string }>
+  | Readonly<{ kind: "parsed"; findings: ParsedSpecCheckOutput }>;
+
+/** Pure spec-check command. An omitted Wave is selected only from locked state. */
+function reducePiSpecCheckResult(
+  state: TaskGraph,
+  observation: PiSpecCheckObservation,
+  now: string,
+): Readonly<{ state: TaskGraph; value: PiResultOutcome }> {
+  const wave = observation.kind === "parsed"
+    ? observation.findings.wave ?? state.current_wave ?? 1
+    : state.current_wave ?? 1;
+  if (observation.kind === "capture-failed") {
+    return {
+      state: {
+        ...state,
+        spec_check: {
+          wave,
+          run_at: now,
+          verdict: "EVIDENCE_CAPTURE_FAILED",
+          error: observation.error,
+        },
+      },
+      value: outcome([`loom(pi): ${observation.error} — marking spec-check evidence_capture_failed`]),
+    };
+  }
+
+  const resolution = reconcileSpecCheck(observation.findings, wave, now);
+  if (resolution.kind === "evidence-failed") {
+    return {
+      state: { ...state, spec_check: resolution.specCheck },
+      value: outcome([`loom(pi): ${resolution.specCheck.error} — marking spec-check evidence_capture_failed`]),
+    };
+  }
+  return {
+    state: {
+      ...state,
+      spec_check: resolution.specCheck,
+      wave_gates: reconcileWaveBlock(state.wave_gates, state.tasks, resolution.specCheck, wave),
+    },
+    value: outcome(),
+  };
+}
+
 /**
  * Reconcile the wave's spec-check evidence.
  *
@@ -1244,34 +1303,18 @@ export async function applySpecCheckPiResult(args: Readonly<{
   result: PiSubagentResult;
   now: string;
 }>): Promise<PiResultOutcome> {
-  const { store, result } = args;
-  const parsedMessages = parsePiMessages(result.messages);
-  if (!parsedMessages.ok) {
-    const error = `spec-check-invoker messages are malformed: ${parsedMessages.errors.join("; ")}`;
-    await store.update((state) => ({
-      ...state,
-      spec_check: {
-        wave: state.current_wave ?? 1,
-        run_at: args.now,
-        verdict: "EVIDENCE_CAPTURE_FAILED" as const,
-        error,
-      },
-    }));
-    return outcome([`loom(pi): ${error} — marking spec-check evidence_capture_failed`]);
+  const parsedMessages = parsePiMessages(args.result.messages);
+  const observation: PiSpecCheckObservation = parsedMessages.ok
+    ? { kind: "parsed", findings: parseSpecCheckOutput(transcriptTextOf(parsedMessages.value)) }
+    : {
+        kind: "capture-failed",
+        error: `spec-check-invoker messages are malformed: ${parsedMessages.errors.join("; ")}`,
+      };
+  try {
+    return await args.store.updateAndReturn((state) =>
+      reducePiSpecCheckResult(state, observation, args.now));
+  } catch (error) {
+    const diagnostic = `spec-check state commit failed: ${error instanceof Error ? error.message : String(error)}`;
+    return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);
   }
-
-  const findings = parseSpecCheckOutput(transcriptTextOf(parsedMessages.value));
-  const wave = findings.wave ?? store.load().current_wave ?? 1;
-  const resolution = reconcileSpecCheck(findings, wave, args.now);
-  if (resolution.kind === "evidence-failed") {
-    await store.update((state) => ({ ...state, spec_check: resolution.specCheck }));
-    return outcome([`loom(pi): ${resolution.specCheck.error} — marking spec-check evidence_capture_failed`]);
-  }
-
-  await store.update((state) => ({
-    ...state,
-    spec_check: resolution.specCheck,
-    wave_gates: reconcileWaveBlock(state.wave_gates, state.tasks, resolution.specCheck, wave),
-  }));
-  return outcome();
 }

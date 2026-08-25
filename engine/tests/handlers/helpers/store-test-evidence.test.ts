@@ -127,7 +127,8 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
       files_modified: ["src/implementation.ts", "tests/implementation.test.ts"],
       failure_reason: "infrastructure-blocked: transcript unavailable",
     });
-    writeFileSync(statePath, JSON.stringify(original, null, 2));
+    const originalBytes = JSON.stringify(original, null, 2);
+    writeFileSync(statePath, originalBytes);
 
     const { exitCode, stderr } = runHelper(
       "TEST_PASSED: false\nTEST_EVIDENCE: overwrite\nNEW_TESTS_WRITTEN: false\nNEW_TEST_EVIDENCE: overwrite\n",
@@ -136,6 +137,7 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
     expect(exitCode).toBe(1);
     expect(stderr).toContain("requires a re-spawned implementation Agent");
     expect(readState()).toEqual(original);
+    expect(readFileSync(statePath, "utf8")).toBe(originalBytes);
   });
 
   it("stores labeled untrusted evidence without minting positive completion authority", () => {

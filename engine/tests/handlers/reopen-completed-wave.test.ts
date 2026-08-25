@@ -8,6 +8,7 @@ import fc from "fast-check";
 import { checkImplementationProof, checkReviewedWorkspace } from "../../src/core/wave-gate-machine";
 import { reviewedWorkspaceObservation } from "../../src/core/reviewed-workspace";
 import {
+  commitCompletedWaveReopening,
   deriveWaveReopeningProof,
   hasLaterWaveProgress,
   hasLaterWaveTaskProgress,
@@ -178,6 +179,59 @@ describe("later-Wave progress refusal", () => {
 });
 
 describe("reopen completed Wave", () => {
+  it("returns the exact proof derived and committed from locked state", async () => {
+    const locked = graph();
+    let current = locked;
+    const committedProof = legacyProof;
+    const store = {
+      updateAndReturn: async <T>(
+        mutate: (state: TaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
+      ): Promise<T> => {
+        const applied = mutate(current);
+        current = applied.state;
+        return applied.value;
+      },
+    };
+
+    const committed = await commitCompletedWaveReopening(
+      store,
+      request,
+      (observed, lockedRequest) => {
+        expect(observed).toBe(locked);
+        expect(lockedRequest).toBe(request);
+        return committedProof;
+      },
+    );
+
+    expect(committed).toEqual({ kind: "committed", proof: committedProof });
+    expect(current.wave_reopening_history?.[0]).toMatchObject({
+      proofMode: committed.proof.mode,
+      reopenedTaskIds: committed.proof.taskIds,
+    });
+  });
+
+  it("returns immutable committed audit proof on exact replay without recomputing", async () => {
+    let current = reopenCompletedWave(graph(), request, legacyProof);
+    const store = {
+      updateAndReturn: async <T>(
+        mutate: (state: TaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
+      ): Promise<T> => {
+        const applied = mutate(current);
+        current = applied.state;
+        return applied.value;
+      },
+    };
+    let proveCalled = false;
+
+    const replay = await commitCompletedWaveReopening(store, request, () => {
+      proveCalled = true;
+      return modernProof(["T22"]);
+    });
+
+    expect(proveCalled).toBe(false);
+    expect(replay).toEqual({ kind: "already-committed", proof: legacyProof });
+  });
+
   it("reopens only the derived Tasks, retains historical evidence, and requires fresh task revalidation", () => {
     const before = graph();
     const after = reopenCompletedWave(before, request, legacyProof);
