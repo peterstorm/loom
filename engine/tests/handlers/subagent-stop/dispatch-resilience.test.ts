@@ -209,6 +209,19 @@ describe("dispatch names what it discarded (audit diagnostics)", () => {
     expect(result.message).toContain("cleanup also failed: injected cleanup failure");
   });
 
+  it.each([
+    ["invalid session", { session_id: "../../invalid session", agent_id: "agent-invalid-session", agent_type: "code-reviewer" }, "missing/invalid session id"],
+    ["missing agent", { session_id: sid("missing-agent"), agent_type: "code-reviewer" }, "missing agent_id"],
+  ])("propagates %s cleanup identity failure instead of reporting successful cleanup", async (_label, payload, diagnostic) => {
+    const result = await runDispatch(JSON.stringify(payload), []);
+
+    expect(result).toMatchObject({ kind: "error" });
+    if (result.kind !== "error") return;
+    expect(result.message).toContain("SubagentStop recorded NOTHING");
+    expect(result.message).toContain("cleanup also failed");
+    expect(result.message).toContain(diagnostic);
+  });
+
   it("distinguishes an UNNAMEABLE agent from a merely unrouted one", async () => {
     const dir = tempDir();
     const session = sid("unnameable");
@@ -505,7 +518,7 @@ describe("a FAILED evidence snapshot is never laundered into 'genuinely empty' (
 });
 
 describe("an INVALID session id is a typed snapshot failure, never an empty snapshot (round-10 gap 22)", () => {
-  it("session_id with reserved characters → 'invalid session id' stderr + passthrough", async () => {
+  it("session_id with reserved characters → typed snapshot failure + cleanup error", async () => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const result = await dispatch(
       JSON.stringify({
@@ -518,7 +531,10 @@ describe("an INVALID session id is a typed snapshot failure, never an empty snap
     const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
     stderrSpy.mockRestore();
 
-    expect(result.kind).toBe("passthrough"); // dispatcher never crashes the pipeline
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringContaining("missing/invalid session id"),
+    });
     // The snapshot is labeled FAILED (invalid id can name no ledger file) —
     // downstream would label the verdict snapshot-read-failed, never "degraded".
     expect(text).toContain("evidence snapshot failed");

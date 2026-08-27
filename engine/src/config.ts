@@ -111,7 +111,7 @@ export const ARCH_PANEL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("ar
  *
  * ONE constant rather than a per-agent field, because the panel is a stage
  * WITHIN a phase: an interviewer, N designers and K judges all run inside
- * `architecture` and none of them may advance out of it. `AgentRole`'s panel
+ * `architecture` and none of them may advance out of it. `AgentKind`'s panel
  * branch therefore carries no `phase` to disagree with this, which is what
  * retired `derivePanelPhase` — a function that collected the distinct declared
  * phases and threw unless there was exactly one, policing at load time a state

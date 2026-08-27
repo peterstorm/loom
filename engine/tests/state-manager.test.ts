@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { StateManager, parseTaskGraph, resolveTaskGraph } from "../src/state-manager";
 import { SUBAGENT_DIR } from "../src/config";
-import type { TaskGraph } from "../src/types";
+import { parseNewTestEvidence, type TaskGraph } from "../src/types";
 import { derivePendingTaskProof, evaluateTaskProof } from "../src/core/proof-obligations";
 
 function makeTmpDir(): string {
@@ -669,6 +669,27 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     });
     expect(malformedResult.ok).toBe(false);
     if (!malformedResult.ok) expect(malformedResult.error).toContain("unexpected field(s): passed, provenance");
+  });
+
+  it("rejects malformed persisted new-test observations and legacy-field coexistence", () => {
+    for (const new_test_observation of [
+      { kind: "written", written: true, evidence: "" },
+      { kind: "not-written", written: true, evidence: "" },
+      { kind: "unknown", written: false },
+    ]) {
+      expect(parseTaskGraph({
+        ...validGraph,
+        tasks: [{ ...validTask, new_test_observation }],
+      }).ok).toBe(false);
+    }
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{
+        ...validTask,
+        new_test_observation: parseNewTestEvidence(false, ""),
+        new_tests_written: false,
+      }],
+    }).ok).toBe(false);
   });
 
   it("keeps explicit asymmetric policies and proof obligations in exact lockstep", () => {

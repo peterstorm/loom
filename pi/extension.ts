@@ -2281,13 +2281,12 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const sm = StateManager.fromPath(activeTaskGraphPath);
-      if (!sm) {
-        ctx.ui.notify("Could not load task graph", "error");
-        return;
-      }
-
       try {
+        const sm = StateManager.fromPath(activeTaskGraphPath);
+        if (!sm) {
+          ctx.ui.notify("Could not load task graph", "error");
+          return;
+        }
         const state = sm.load();
         const totalTasks = state.tasks.length;
         const completed = state.tasks.filter(t => t.status === "completed").length;

@@ -43,10 +43,16 @@ export const runCleanupSubagentFlag = async (
   // so nothing can be released here — the liveness TTL reaps it.
   const sessionId = input.session_id ? parseSessionId(input.session_id) : null;
   if (!sessionId) {
-    process.stderr.write(
-      `cleanup-subagent-flag: missing/invalid session id — roster entry and binding NOT released (liveness TTL will reap them)\n`,
-    );
-    return { kind: "passthrough" as const };
+    return {
+      kind: "error" as const,
+      message: "cleanup-subagent-flag: missing/invalid session id — roster, sidecar, task-graph pointer, and machine binding NOT released (liveness TTL will reap them)",
+    };
+  }
+  if (!agent_id) {
+    return {
+      kind: "error" as const,
+      message: `cleanup-subagent-flag: missing agent_id for ${sessionId} — roster, sidecar, task-graph pointer, and machine-binding cleanup NOT attempted`,
+    };
   }
 
   // Release guarded-machine binding. unbind locks internally (same lock file)
@@ -78,8 +84,6 @@ export const runCleanupSubagentFlag = async (
       failures.push(`machine unbind failed for ${agent_id}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-
-  if (!agent_id) return { kind: "passthrough" as const };
 
   if (parseReportedAgentId(agent_id) !== null) {
     try {

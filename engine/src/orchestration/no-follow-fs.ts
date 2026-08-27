@@ -149,16 +149,38 @@ export function openChildDirectoryNoFollow(directory: AnchoredDirectory, name: s
   return anchorFor(openSync(childPath, dirFlags()));
 }
 
+function closeFileDescriptor(
+  fileDescriptor: number | null,
+  primaryError: unknown,
+  operation: string,
+): unknown {
+  if (fileDescriptor === null) return primaryError;
+  try {
+    closeSync(fileDescriptor);
+    return primaryError;
+  } catch (closeError) {
+    return primaryError === null
+      ? closeError
+      : new AggregateError([primaryError, closeError], `${operation} and descriptor close both failed`);
+  }
+}
+
 /** Read one leaf relative to an anchored directory, following no component. */
 export function readDirectoryFileNoFollow(directory: AnchoredDirectory, name: string): Buffer {
   assertLeafName(name);
   let fileFd: number | null = null;
+  let bytes: Buffer | null = null;
+  let primaryError: unknown = null;
   try {
     fileFd = openSync(anchoredChildPath(directory, name), leafFlags(fsConstants.O_RDONLY));
-    return readFileSync(fileFd);
-  } finally {
-    if (fileFd !== null) closeSync(fileFd);
+    bytes = readFileSync(fileFd);
+  } catch (error) {
+    primaryError = error;
   }
+  primaryError = closeFileDescriptor(fileFd, primaryError, `read of ${name}`);
+  if (primaryError !== null) throw primaryError;
+  if (bytes === null) throw new Error(`read of ${name} produced no bytes`);
+  return bytes;
 }
 
 /** Exclusively publish one leaf relative to an anchored directory. */
@@ -169,6 +191,7 @@ export function writeDirectoryFileExclusiveNoFollow(
 ): void {
   assertLeafName(name);
   let fileFd: number | null = null;
+  let primaryError: unknown = null;
   try {
     fileFd = openSync(
       anchoredChildPath(directory, name),
@@ -176,9 +199,11 @@ export function writeDirectoryFileExclusiveNoFollow(
       0o600,
     );
     writeFileSync(fileFd, data);
-  } finally {
-    if (fileFd !== null) closeSync(fileFd);
+  } catch (error) {
+    primaryError = error;
   }
+  primaryError = closeFileDescriptor(fileFd, primaryError, `exclusive write of ${name}`);
+  if (primaryError !== null) throw primaryError;
 }
 
 function writeDirectoryFileAtomicPreparedNoFollow(
@@ -209,7 +234,7 @@ function writeDirectoryFileAtomicPreparedNoFollow(
   } catch (error) {
     primaryError = error;
   } finally {
-    if (fileFd !== null) closeSync(fileFd);
+    primaryError = closeFileDescriptor(fileFd, primaryError, `atomic write of ${name}`);
   }
 
   let cleanupError: unknown = null;

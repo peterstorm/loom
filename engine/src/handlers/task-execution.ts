@@ -61,7 +61,7 @@ import { anyActiveSubagent } from "../machine";
  * every baseline, then register the accepted batch in one locked update. A
  * blocked sibling therefore leaves no ghost execution state behind — and a
  * spawn denied by a SIBLING HOOK, which this registration cannot observe, is
- * reclaimed by `staleTaskReservations` on the next attempt.
+ * reclaimed by `staleReservationsForRosterObservation` on the next attempt.
  */
 export type TaskExecutionRegistrationOutcome =
   | Readonly<{

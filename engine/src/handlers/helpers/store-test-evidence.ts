@@ -16,9 +16,9 @@ const handler: HookHandler = async (stdin, args) => {
   const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
   if (!mgr) return { kind: "error", message: `No task graph at ${TASK_GRAPH_PATH}` };
 
-  const passed = /TEST_PASSED:\s*true/i.test(stdin);
+  const passed = /^TEST_PASSED:[ \t]*true[ \t]*$/im.test(stdin);
   const evidenceMatch = stdin.match(/TEST_EVIDENCE:\s*(.*)/);
-  const newWritten = /NEW_TESTS_WRITTEN:\s*true/i.test(stdin);
+  const newWritten = /^NEW_TESTS_WRITTEN:[ \t]*true[ \t]*$/im.test(stdin);
   const newEvidenceMatch = stdin.match(/NEW_TEST_EVIDENCE:\s*(.*)/);
 
   // A trusted verdict (ledger-derived ground truth) must never be laundered

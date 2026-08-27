@@ -21,9 +21,26 @@ describe("cleanup-subagent-flag — malformed stdin", () => {
     }
   });
 
-  it("well-formed input without agent_id stays a passthrough (no roster entry to remove)", async () => {
+  it("fails closed when agent_id is missing because cleanup identity is unknown", async () => {
     const result = await cleanup(JSON.stringify({ session_id: "s-none" }), []);
-    expect(result.kind).toBe("passthrough");
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/missing agent_id.*cleanup NOT attempted/i),
+    });
+  });
+
+  it.each([
+    ["missing", { agent_id: "agent-cleanup" }],
+    ["invalid", { session_id: "../../unsafe", agent_id: "agent-cleanup" }],
+  ])("fails closed for a %s session id and names every unreleased capability", async (_label, input) => {
+    const result = await cleanup(JSON.stringify(input), []);
+    expect(result).toMatchObject({ kind: "error" });
+    if (result.kind !== "error") return;
+    expect(result.message).toContain("missing/invalid session id");
+    expect(result.message).toContain("roster");
+    expect(result.message).toContain("sidecar");
+    expect(result.message).toContain("task-graph pointer");
+    expect(result.message).toContain("machine binding");
   });
 
   it("attempts machine unbind, sidecar deletion, and roster cleanup and returns every failure", async () => {

@@ -156,8 +156,8 @@ run_stop() {
   local agent="$1" rc=0 payload
   # Same pipefail-attribution guard as run_gate: construct the payload first so a
   # jq failure is fatal-and-labeled, not misread as a dispatch crash (rc != 0).
-  payload="$(jq -nc --arg a "$agent" --arg s "$SESSION" --arg c "$TMP" \
-    '{agent_type:$a,session_id:$s,cwd:$c}')" \
+  payload="$(jq -nc --arg a "$agent" --arg i "smoke-$agent" --arg s "$SESSION" --arg c "$TMP" \
+    '{agent_type:$a,agent_id:$i,session_id:$s,cwd:$c}')" \
     || { echo "FATAL: jq failed building the run_stop payload for agent '$agent'" >&2; exit 1; }
   printf '%s' "$payload" \
     | ( cd "$TMP" && bun "$CLI" subagent-stop dispatch ) >/dev/null 2>"$GATE_ERR" || rc=$?
@@ -187,8 +187,8 @@ write_state "architecture" "null"
 # Deliberately regex-NEUTRAL prompt: "design"/"architecture"/"plan.md" would each
 # match detectPhase's architecture prompt-regex fallback, so a prompt containing
 # them could pass even if ARCH_PANEL_AGENTS recognition were broken — a false
-# green. This prompt matches no detectPhase regex, so the allow proves the panel
-# recognition path (validate-phase-order.ts:57) specifically.
+# green. This prompt matches no detectPhase regex, so the allow proves the
+# explicit ARCH_PANEL_AGENTS recognition branch specifically.
 rc="$(run_gate arch-designer-agent "candidate under the simplicity-first lens")"
 [ "$rc" = "0" ] && ok "ALLOWED (exit 0)" || bad "expected allow (exit 0), got exit $rc"
 

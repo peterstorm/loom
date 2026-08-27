@@ -165,6 +165,7 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
   it.each([
     ["missing", "TEST_EVIDENCE: no positive markers supplied\n"],
     ["malformed", "TEST_PASSED: maybe\nNEW_TESTS_WRITTEN: definitely\n"],
+    ["prefix-positive malformed", "TEST_PASSED: trueish\nNEW_TESTS_WRITTEN: true-but-unproven\n"],
   ])("treats %s positive markers as explicit untrusted negative evidence", (_label, stdin) => {
     writeFileSync(statePath, JSON.stringify(graphWith({}), null, 2));
 
