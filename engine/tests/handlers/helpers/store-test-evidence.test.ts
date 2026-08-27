@@ -162,6 +162,26 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
     });
   });
 
+  it.each([
+    ["missing", "TEST_EVIDENCE: no positive markers supplied\n"],
+    ["malformed", "TEST_PASSED: maybe\nNEW_TESTS_WRITTEN: definitely\n"],
+  ])("treats %s positive markers as explicit untrusted negative evidence", (_label, stdin) => {
+    writeFileSync(statePath, JSON.stringify(graphWith({}), null, 2));
+
+    const { exitCode } = runHelper(stdin);
+
+    expect(exitCode).toBe(0);
+    expect(readState().tasks[0]).toMatchObject({
+      test_result: {
+        verdict: "untrusted",
+        passed: false,
+        label: "helper-reported (store-test-evidence stdin)",
+        provenance: "unverified",
+      },
+      new_test_observation: { kind: "not-written", written: false },
+    });
+  });
+
   it("a --task matching no task is an ERROR, not a silent success", () => {
     const original = JSON.stringify(graphWith({}), null, 2);
     writeFileSync(statePath, original);

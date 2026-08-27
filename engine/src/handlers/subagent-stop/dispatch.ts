@@ -43,10 +43,13 @@ export const runDispatch = async (
   try {
     input = JSON.parse(stdin);
   } catch (e) {
-    // Malformed stop input: no session to clean. Say exactly what breaks —
-    // cleanup skipped means the .active roster and machine bindings may leak
-    // until the SessionStart stale-sweep runs.
-    return passthroughDiagnostic(`dispatch: malformed SubagentStop input — cleanup skipped, bindings may leak: ${e instanceof Error ? e.message : String(e)}\n`);
+    // No trustworthy session or Agent identity exists, so cleanup cannot be
+    // named. Fail closed rather than reporting a successful stop that settled
+    // nothing and may have leaked runtime authority.
+    return {
+      kind: "error",
+      message: `dispatch: malformed SubagentStop input — cleanup skipped, bindings may leak: ${e instanceof Error ? e.message : String(e)}`,
+    };
   }
 
   // Category handlers are evidence boundaries, not best-effort side effects:

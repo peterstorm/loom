@@ -109,11 +109,10 @@ export function repositoryContext(): GitRepositoryContext {
  * The repository root this module's own git commands run from — the `cwd` for
  * `exec`/`execArgs` and the base every path helper here resolves against.
  *
- * Still NOT the same boundary as `repositoryContext` above: that one resolves
- * root AND exact HEAD together in one `execFileSync` pass, because a proof
- * needs both to come from a single observation. This one answers only "where
- * do my commands run", and both now resolve against the live environment
- * rather than one captured at module load.
+ * Still NOT the same boundary as `repositoryContext` above: that one collects
+ * root and exact HEAD through two fixed-argv Git observations and returns one
+ * typed result. This one answers only "where do my commands run", and both now
+ * resolve against the live environment rather than one captured at module load.
  */
 export function repositoryRoot(): string | undefined {
   return currentRepoRoot("repositoryRoot");

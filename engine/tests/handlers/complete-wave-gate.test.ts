@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import fc from "fast-check";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import completeWaveGateHandler, {
@@ -2622,44 +2622,38 @@ describe("final-Wave compatibility completion replay", () => {
     }, registeredGraph());
   });
 
-  it("preserves AggregateError permission-restoration detail when the locked gate decision is blocked", async () => {
+  it("does not invoke the publish-mode port when the locked gate decision is blocked", async () => {
     const blockedGraph = registeredGraph({ tasks: [{ ...baseTask, review_status: "pending" }] });
     await withHandlerState(async (path) => {
-      const manager = new StateManager(path, (_target, mode) => {
-        if (mode === 0o444) throw new Error("simulated pre-commit chmod 0444 failure");
-      });
+      const setMode = vi.fn((_fileDescriptor: number, _mode: number) => undefined);
+      const manager = new StateManager(path, setMode);
       const result = await createCompleteWaveGateHandler(() => manager)("", []);
 
       expect(result).toMatchObject({ kind: "error" });
       if (result.kind !== "error") return;
       expect(result.message).toContain("Not all tasks have been reviewed");
-      expect(result.message).toContain("Task graph write and permission restoration both failed");
-      expect(result.message).toContain("simulated pre-commit chmod 0444 failure");
+      expect(setMode).not.toHaveBeenCalled();
       expect(new StateManager(path).load().wave_gate_history).toBeUndefined();
     }, blockedGraph);
   });
 
-  it("surfaces post-commit read-only restoration failure with the committed receipt and remediation", async () => {
+  it("fails before commit when the staged graph cannot be made read-only", async () => {
     await withHandlerState(async (path) => {
-      const manager = new StateManager(path, (_target, mode) => {
-        if (mode === 0o444) throw new Error("simulated chmod 0444 failure");
+      chmodSync(path, 0o444);
+      const before = readFileSync(path, "utf8");
+      const manager = new StateManager(path, (_fileDescriptor, mode) => {
+        if (mode === 0o444) throw new Error("simulated staged chmod 0444 failure");
       });
-      const handlerWithProtectionFailure = createCompleteWaveGateHandler(() => manager);
+      const result = await createCompleteWaveGateHandler(() => manager)("", []);
+      const retained = new StateManager(path).load();
 
-      const result = await handlerWithProtectionFailure("", []);
-      const committed = new StateManager(path).load();
-      const receipt = committed.wave_gate_history?.[0]?.completionReceipt;
-
-      expect(receipt).toBeDefined();
       expect(result).toMatchObject({ kind: "error" });
-      if (result.kind !== "error" || receipt === undefined) return;
-      expect(result.message).toContain(`committed with receipt ${receipt.effectId}`);
-      expect(result.message).toContain(`revision ${receipt.committedRevision}`);
-      expect(result.message).toContain("simulated chmod 0444 failure");
-      expect(result.message).toContain(`chmod 0444 ${JSON.stringify(path)}`);
-      expect(result.message).toContain("do not rerun completion as if this were an idempotent replay");
-      expect(committed.active_wave_gate).toBeUndefined();
-      expect(committed.wave_gate_history).toHaveLength(1);
+      if (result.kind !== "error") return;
+      expect(result.message).toContain("simulated staged chmod 0444 failure");
+      expect(readFileSync(path, "utf8")).toBe(before);
+      expect(statSync(path).mode & 0o777).toBe(0o444);
+      expect(retained.active_wave_gate).toBeDefined();
+      expect(retained.wave_gate_history).toBeUndefined();
     }, registeredGraph());
   });
 

@@ -1679,12 +1679,9 @@ export default function (pi: ExtensionAPI) {
       ? sessionRuntime?.issuedWriteGrants.get(toolCallId) ?? []
       : [];
 
-    // Consume only this session's reservation. Capability, roster, and owned
-    // pointer cleanup are isolated: one failure is reported but never prevents
-    // result reconciliation or the remaining cleanup actions.
-    if (typeof toolCallId === "string" && sessionRuntime) {
-      sessionRuntime.spawnReservations.delete(toolCallId);
-    }
+    // Roster and grant cleanup may consume immediately, but the reservation is
+    // the retry capability for its pointer lease. Retain it until exact pointer
+    // release succeeds; shutdown can retry a transient result-time failure.
     const cleanupActions: PiCleanupAction[] = grantTokens.map((token, index) => ({
       label: `revoke write grant ${index + 1}`,
       run: () => revokePiWriteGrant(token),
@@ -1710,6 +1707,9 @@ export default function (pi: ExtensionAPI) {
     if (typeof toolCallId === "string" && sessionRuntime &&
         !cleanupErrors.some((error) => error.startsWith("revoke write grant "))) {
       sessionRuntime.issuedWriteGrants.delete(toolCallId);
+    }
+    if (typeof toolCallId === "string" && sessionRuntime && reservation?.pointerBinding === null) {
+      sessionRuntime.spawnReservations.delete(toolCallId);
     }
     if (resultSessionId && sessionRuntime) pruneRuntime(resultSessionId, sessionRuntime);
     const processingErrorResponse = () => processingErrors.length === 0
@@ -1754,6 +1754,9 @@ export default function (pi: ExtensionAPI) {
       }]);
       processingErrors.push(...errors);
       for (const error of errors) process.stderr.write(`loom(pi): reserved subagent cleanup failed: ${error}\n`);
+      if (errors.length === 0 && typeof toolCallId === "string" && sessionRuntime) {
+        sessionRuntime.spawnReservations.delete(toolCallId);
+      }
       if (sessionRuntime) pruneRuntime(resultSessionId, sessionRuntime);
     };
 

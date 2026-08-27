@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { evaluateTaskProof } from "../src/core/proof-obligations";
 import { createImplementationAttemptAuthority } from "../src/core/implementation-completion";
 import type { AgentRequestAuthority } from "../src/core/orchestration-contract";
-import { fsSessionRegistry } from "../src/machine";
+import { fsSessionRegistry, TASK_GRAPH_POINTER_LEASES_SUFFIX } from "../src/machine";
 import { openRunDirectory, type RunDirHandle } from "../src/orchestration/run-directory-handle";
 import { buildContextPacket, encodeByteSection } from "../src/orchestration/context-packets";
 import { registerSessionRunBinding } from "../src/orchestration/session-run-bindings";
@@ -1262,6 +1262,14 @@ describe("Pi extension review tool_result integration", () => {
         }],
       },
     });
+
+    const capturedTranscriptPath = join(runDir, request.authority.outputSlot.path);
+    writeFileSync(capturedTranscriptPath, `${expected}\npost-witness tamper`);
+    await expect(bridge.verify({ cwd: projectCwd, sessionId: session }))
+      .rejects.toThrow(/captured slot .* changed after Pi witnessed it/);
+    writeFileSync(capturedTranscriptPath, expected);
+    expect(await bridge.verify({ cwd: projectCwd, sessionId: session }))
+      .toMatchObject({ runId: "run.cli-session-binding" });
 
     // Registration and result are projections, not the scope the reviewer
     // witnessed. Rewriting both to another same-class path used to replay a
@@ -2558,6 +2566,46 @@ describe("Pi extension review tool_result integration", () => {
     expect(readFileSync(statePath, "utf-8")).toBe(before);
     expect(() => readFileSync(join(subagentDir, `${session}.active`), "utf-8")).toThrow();
     expect(() => readFileSync(join(subagentDir, `${session}.task_graph`), "utf-8")).toThrow();
+  });
+
+  it("retains parent pointer cleanup authority after result-time failure and retries it on shutdown", async () => {
+    const planPath = join(temp, "pointer-cleanup-retry-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4d1";
+    const toolCallId = "call-pointer-cleanup-retry";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const prompt = "Task ID: T1\nReview the implementation.";
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent", toolCallId,
+      input: { agent: "code-reviewer", task: prompt, agentScope: "user" },
+    }, context)).toEqual([undefined]);
+
+    const pointer = join(subagentDir, `${session}.task_graph`);
+    const registry = join(subagentDir, `${session}${TASK_GRAPH_POINTER_LEASES_SUFFIX}`);
+    const registryBytes = readFileSync(registry, "utf8");
+    writeFileSync(registry, "{malformed");
+    const responses = await pi.emit("tool_result", {
+      ...reviewResult(prompt, "review completed"),
+      toolCallId,
+    }, context);
+
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({ text: expect.stringContaining("release parent task-graph pointer lease") })],
+    }));
+    expect(existsSync(pointer)).toBe(true);
+    writeFileSync(registry, registryBytes);
+
+    await pi.emit("session_shutdown", {}, context);
+    expect(existsSync(pointer)).toBe(false);
+    expect(existsSync(registry)).toBe(false);
   });
 
   it("refreshes a stale same-session graph pointer so registration and result settle only the active graph", async () => {

@@ -65,11 +65,12 @@ const handler: HookHandler = async (stdin) => {
   // blocks rather than creating an unchecked authority path.
   const activeGraphPath = taskGraphPath();
   if (!pathExistsFailClosed(activeGraphPath)) return { kind: "passthrough" };
-  const activeGraphManager = StateManager.fromPath(activeGraphPath);
-  if (activeGraphManager === null) {
-    return blockResult(`mark-subagent-active: TaskGraph at ${activeGraphPath} could not be opened; refusing spawn`);
-  }
+  let activeGraphManager: StateManager | null;
   try {
+    activeGraphManager = StateManager.fromPath(activeGraphPath);
+    if (activeGraphManager === null) {
+      return blockResult(`mark-subagent-active: TaskGraph at ${activeGraphPath} could not be opened; refusing spawn`);
+    }
     activeGraphManager.load();
   } catch (error) {
     return blockResult(

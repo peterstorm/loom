@@ -281,7 +281,7 @@ export const REVIEW_AGENTS: ReadonlySet<string> = frozenSet([
 export const REVIEW_PANEL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("review-verifier"));
 
 /** Review-panel agents that would be MISROUTED by colliding with a phase,
- *  impl, review, or utility agent — detectPhase probes bare and `-agent`-
+ *  architecture-panel, impl, review, or utility agent — detectPhase probes bare and `-agent`-
  *  suffixed forms and reaches those sets first. Must always be empty. Exported
  *  so the guard can be driven with a synthetic overlap in tests. */
 export function reviewPanelOverlap(

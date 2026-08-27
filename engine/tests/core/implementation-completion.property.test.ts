@@ -450,6 +450,16 @@ describe("pure Task suite evaluation", () => {
     expect(evaluated.kind).toBe("accepted");
   });
 
+  it("rejects a syntactically valid digest that does not identify the canonical Task roster", () => {
+    const attempt = authority();
+    const malformed = { ...suiteResult(attempt), suiteDigest: "f".repeat(64) };
+
+    expect(parseTaskCompletionSuiteResult(malformed)).toMatchObject({
+      ok: false,
+      error: { errors: [expect.stringContaining("does not match its canonical roster")] },
+    });
+  });
+
   it.each(INVALID_TASK_SUITE_CASES)("rejects %s roster evidence", (_label, checks) => {
     const attempt = authority();
     expect(parseTaskCompletionSuiteResult(suiteResult(attempt, checks)).ok).toBe(false);

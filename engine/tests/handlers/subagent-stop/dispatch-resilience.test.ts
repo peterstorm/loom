@@ -1,7 +1,6 @@
 /**
  * SubagentStop dispatch resilience:
- * - malformed stdin is caught with a specific "bindings may leak" note
- *   instead of crashing the whole pipeline (Advisory 4)
+ * - malformed stdin fails closed with a specific "bindings may leak" error
  * - a cleanupSubagentFlag crash still runs update-task-status (Advisory 4)
  * - update-task-status judges the dispatcher's pre-unbind ledger snapshot,
  *   not whatever file is on disk when it runs (Advisory 7)
@@ -148,13 +147,12 @@ describe("request-bound capture gates legacy dispatch", () => {
 });
 
 describe("malformed hook input is caught, not crashed on (Advisory 4)", () => {
-  it("dispatch: malformed stdin → passthrough + 'bindings may leak' stderr", async () => {
-    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  it("dispatch: malformed stdin fails closed and names skipped cleanup", async () => {
     const result = await dispatch("{not json", []);
-    expect(result.kind).toBe("passthrough");
-    const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
-    expect(text).toContain("cleanup skipped");
-    expect(text).toContain("bindings may leak");
+    expect(result).toMatchObject({ kind: "error" });
+    if (result.kind !== "error") return;
+    expect(result.message).toContain("cleanup skipped");
+    expect(result.message).toContain("bindings may leak");
   });
 
   it("mark-subagent-active: malformed stdin → passthrough + loud stderr", async () => {

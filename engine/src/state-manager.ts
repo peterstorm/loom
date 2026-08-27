@@ -1,16 +1,15 @@
 /**
- * Atomic state file manager with chmod-based protection + locking
+ * Descriptor-anchored atomic State File manager.
  *
- * State file stays chmod 444 at rest. Hooks and whitelisted helpers
- * (populate-task-graph, complete-wave-gate, set-phase, …) write via this
- * manager.
+ * The State File stays mode 0444 at rest. Hooks and whitelisted helpers stage
+ * validated bytes, set mode 0444 before publication, and rename under one
+ * retained parent descriptor and lock.
  * Replaces: state-file-write.sh, resolve-task-graph.sh, loom-config.sh
  */
 
-import { readFileSync, writeFileSync, chmodSync, existsSync, renameSync, unlinkSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { fchmodSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { withLock } from "./utils/lock";
 import { KNOWN_AGENTS, PHASE_ORDER, REVIEW_SUB_AGENTS, pathExistsFailClosed, taskGraphPath } from "./config";
 import {
   parseCanonicalTaskGraphPointer,
@@ -84,6 +83,18 @@ import {
   parseImplementationAttemptHistory,
 } from "./core/implementation-completion";
 import { parseTaskId, type TaskId } from "./core/task-id";
+import {
+  anchoredDirectoryHasIdentity,
+  anchoredDirectoryIdentity,
+  closeAnchoredDirectory,
+  openDirectoryNoFollow,
+  readDirectoryFileNoFollow,
+  withAnchoredDirectoryHandleLock,
+  writeDirectoryFileAtomicModeNoFollow,
+  type AnchoredDirectory,
+  type AnchoredDirectoryIdentity,
+  type AnchoredFileModePort,
+} from "./orchestration/no-follow-fs";
 
 export { TASK_ID_PATTERN } from "./core/task-id";
 import {
@@ -95,75 +106,120 @@ import {
 
 const PACKAGE_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
-function parseSessionPointerBytes(raw: string, sessionFile: string): string {
-  const parsed = parseCanonicalTaskGraphPointer(raw);
-  if (!parsed.ok) {
-    throw new Error(`session pointer ${sessionFile} is malformed: ${parsed.error}`);
+type TaskGraphFileAuthority = Readonly<{
+  kind: "task-graph-file-authority";
+  path: string;
+  directoryPath: string;
+  directoryIdentity: AnchoredDirectoryIdentity;
+  leaf: string;
+}>;
+
+function readAbsoluteFileNoFollow(path: string): Buffer {
+  const directory = openDirectoryNoFollow(dirname(path));
+  try {
+    return readDirectoryFileNoFollow(directory, basename(path));
+  } finally {
+    closeAnchoredDirectory(directory);
   }
+}
+
+function captureTaskGraphFileAuthority(path: string, requireExisting: boolean): TaskGraphFileAuthority {
+  const parsedPath = parseCanonicalTaskGraphPointer(resolve(path));
+  if (!parsedPath.ok) throw new Error(parsedPath.error);
+  const directoryPath = dirname(parsedPath.value);
+  const directory = openDirectoryNoFollow(directoryPath);
+  try {
+    if (requireExisting) readDirectoryFileNoFollow(directory, basename(parsedPath.value));
+    return Object.freeze({
+      kind: "task-graph-file-authority",
+      path: parsedPath.value,
+      directoryPath,
+      directoryIdentity: anchoredDirectoryIdentity(directory),
+      leaf: basename(parsedPath.value),
+    });
+  } finally {
+    closeAnchoredDirectory(directory);
+  }
+}
+
+function parseSessionPointerFile(sessionFile: string): string {
+  const parsed = parseCanonicalTaskGraphPointer(readAbsoluteFileNoFollow(sessionFile).toString("utf8"));
+  if (!parsed.ok) throw new Error(`session pointer ${sessionFile} is malformed: ${parsed.error}`);
   return parsed.value;
 }
 
-/** Resolve TaskGraph authority for session-bound Hooks or local helpers.
- * A supplied session id must resolve through its exact `.task_graph` pointer;
- * malformed, absent, or dangling authority refuses mutation rather than
- * retargeting the repository-local State File. Only callers with no session
- * binding may use local TaskGraph resolution. */
-export function resolveTaskGraph(sessionId?: string): string | null {
-  if (sessionId !== undefined) {
-    const parsed = parseSessionId(sessionId);
-    if (parsed === null) {
-      throw new Error(
-        `resolveTaskGraph: invalid session id ${JSON.stringify(sessionId)} — refusing local task-graph fallback`,
-      );
-    }
-    const sessionFile = sessionScopedPath(parsed, ".task_graph");
-    let absPath: string;
-    try {
-      absPath = parseSessionPointerBytes(readFileSync(sessionFile, "utf-8"), sessionFile);
-    } catch (error) {
-      const cause = error instanceof Error ? error.message : String(error);
-      const message = (error as NodeJS.ErrnoException).code === "ENOENT"
-        ? `session pointer ${sessionFile} is absent: ${cause}`
-        : `cannot read session pointer ${sessionFile}: ${cause}`;
-      throw new Error(`resolveTaskGraph: ${message} — refusing local task-graph fallback`);
-    }
-    if (!pathExistsFailClosed(absPath)) {
-      throw new Error(
-        `resolveTaskGraph: session pointer ${sessionFile} names missing graph '${absPath}' — refusing local task-graph fallback`,
-      );
-    }
-    return absPath;
+function optionalLocalTaskGraphAuthority(): TaskGraphFileAuthority | null {
+  try {
+    return captureTaskGraphFileAuthority(taskGraphPath(), true);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
   }
-
-  const localTaskGraph = taskGraphPath();
-  return pathExistsFailClosed(localTaskGraph) ? localTaskGraph : null;
 }
 
-/** Explicit Pi-parent compatibility: an absent session pointer means the Pi
- * adapter owns the repository-local State File. A present pointer still owns
- * authority and must be readable and non-dangling; only ENOENT selects local. */
-function resolveLocalSessionTaskGraph(sessionId: string): string | null {
+function resolveTaskGraphFileAuthority(sessionId?: string): TaskGraphFileAuthority | null {
+  if (sessionId === undefined) return optionalLocalTaskGraphAuthority();
   const parsed = parseSessionId(sessionId);
   if (parsed === null) {
-    throw new Error(`resolveTaskGraph: invalid session id ${JSON.stringify(sessionId)}`);
+    throw new Error(
+      `resolveTaskGraph: invalid session id ${JSON.stringify(sessionId)} — refusing local task-graph fallback`,
+    );
   }
   const sessionFile = sessionScopedPath(parsed, ".task_graph");
   let pointedPath: string;
   try {
-    pointedPath = parseSessionPointerBytes(readFileSync(sessionFile, "utf-8"), sessionFile);
+    pointedPath = parseSessionPointerFile(sessionFile);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return resolveTaskGraph();
+    const cause = error instanceof Error ? error.message : String(error);
+    const message = (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? `session pointer ${sessionFile} is absent: ${cause}`
+      : `cannot read session pointer ${sessionFile}: ${cause}`;
+    throw new Error(`resolveTaskGraph: ${message} — refusing local task-graph fallback`);
+  }
+  try {
+    return captureTaskGraphFileAuthority(pointedPath, true);
+  } catch (error) {
+    const cause = error instanceof Error ? error.message : String(error);
+    const description = (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? `names missing graph '${pointedPath}'`
+      : `names inaccessible graph '${pointedPath}': ${cause}`;
+    throw new Error(
+      `resolveTaskGraph: session pointer ${sessionFile} ${description} — refusing local task-graph fallback`,
+    );
+  }
+}
+
+/** Resolve a TaskGraph display path after proving no-follow file authority. */
+export function resolveTaskGraph(sessionId?: string): string | null {
+  return resolveTaskGraphFileAuthority(sessionId)?.path ?? null;
+}
+
+/** Explicit Pi-parent compatibility: only an absent pointer selects local authority. */
+function resolveLocalSessionTaskGraphAuthority(sessionId: string): TaskGraphFileAuthority | null {
+  const parsed = parseSessionId(sessionId);
+  if (parsed === null) throw new Error(`resolveTaskGraph: invalid session id ${JSON.stringify(sessionId)}`);
+  const sessionFile = sessionScopedPath(parsed, ".task_graph");
+  let pointedPath: string;
+  try {
+    pointedPath = parseSessionPointerFile(sessionFile);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return optionalLocalTaskGraphAuthority();
     throw new Error(
       `resolveTaskGraph: cannot read session pointer ${sessionFile}: ` +
       `${error instanceof Error ? error.message : String(error)} — refusing local task-graph fallback`,
     );
   }
-  if (!pathExistsFailClosed(pointedPath)) {
+  try {
+    return captureTaskGraphFileAuthority(pointedPath, true);
+  } catch (error) {
+    const cause = error instanceof Error ? error.message : String(error);
+    const description = (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? `names missing graph '${pointedPath}'`
+      : `names inaccessible graph '${pointedPath}': ${cause}`;
     throw new Error(
-      `resolveTaskGraph: session pointer ${sessionFile} names missing graph '${pointedPath}' — refusing local task-graph fallback`,
+      `resolveTaskGraph: session pointer ${sessionFile} ${description} — refusing local task-graph fallback`,
     );
   }
-  return pointedPath;
 }
 
 // --- Parse, don't validate: disk JSON → TaskGraph ---
@@ -2043,7 +2099,7 @@ export {
   type LegacyWaveGateCompletionReplayError,
 } from "./core/legacy-archive";
 
-export type StateFilePermissionPort = (path: string, mode: number) => void;
+export type StateFilePermissionPort = AnchoredFileModePort;
 
 /** The protected graph was durably renamed, but restoring its read-only mode
  * failed. The committed value is retained so callers can report the exact
@@ -2112,21 +2168,27 @@ function parseLegacyWaveGateMigrationAuthority(raw: unknown): ParseResult<Parsed
 export class StateManager {
   private readonly path: string;
   private readonly setPermissions: StateFilePermissionPort;
+  private readonly authority: TaskGraphFileAuthority;
 
-  constructor(path: string, setPermissions: StateFilePermissionPort = chmodSync) {
-    this.path = path;
+  constructor(
+    path: string,
+    setPermissions: StateFilePermissionPort = fchmodSync,
+    authority: TaskGraphFileAuthority = captureTaskGraphFileAuthority(path, false),
+  ) {
+    this.path = authority.path;
     this.setPermissions = setPermissions;
+    this.authority = authority;
   }
 
   static fromSession(sessionId?: string): StateManager | null {
-    const path = resolveTaskGraph(sessionId);
-    return path ? new StateManager(path) : null;
+    const authority = resolveTaskGraphFileAuthority(sessionId);
+    return authority === null ? null : new StateManager(authority.path, fchmodSync, authority);
   }
 
-  /** Pi parent adapter seam; see resolveLocalSessionTaskGraph. */
+  /** Pi parent adapter seam; see resolveLocalSessionTaskGraphAuthority. */
   static fromLocalSession(sessionId: string): StateManager | null {
-    const path = resolveLocalSessionTaskGraph(sessionId);
-    return path ? new StateManager(path) : null;
+    const authority = resolveLocalSessionTaskGraphAuthority(sessionId);
+    return authority === null ? null : new StateManager(authority.path, fchmodSync, authority);
   }
 
   /**
@@ -2141,8 +2203,15 @@ export class StateManager {
     return pathExistsFailClosed(path) ? new StateManager(path) : null;
   }
 
-  load(): ParsedTaskGraph {
-    const raw = readFileSync(this.path, "utf-8");
+  private openAuthorityDirectory(): AnchoredDirectory {
+    const directory = openDirectoryNoFollow(this.authority.directoryPath);
+    if (anchoredDirectoryHasIdentity(directory, this.authority.directoryIdentity)) return directory;
+    closeAnchoredDirectory(directory);
+    throw new Error(`TaskGraph parent authority changed after capture: ${this.authority.directoryPath}`);
+  }
+
+  private loadFrom(directory: AnchoredDirectory): ParsedTaskGraph {
+    const raw = readDirectoryFileNoFollow(directory, this.authority.leaf).toString("utf8");
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
@@ -2152,6 +2221,15 @@ export class StateManager {
     const graph = parseTaskGraph(parsed);
     if (!graph.ok) throw new Error(`Corrupt state file (${graph.error}): ${this.path}`);
     return graph.value;
+  }
+
+  load(): ParsedTaskGraph {
+    const directory = this.openAuthorityDirectory();
+    try {
+      return this.loadFrom(directory);
+    } finally {
+      closeAnchoredDirectory(directory);
+    }
   }
 
   getPath(): string {
@@ -2167,7 +2245,7 @@ export class StateManager {
   async updateAndReturn<T>(
     fn: (state: ParsedTaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
   ): Promise<T> {
-    return this.atomicWrite(() => fn(this.load()));
+    return this.atomicWrite((directory) => fn(this.loadFrom(directory)));
   }
 
   /** Install one fresh protected active-run anchor, idempotently for exact replay. */
@@ -2291,65 +2369,31 @@ export class StateManager {
     await this.atomicWrite(() => ({ state, value: undefined }));
   }
 
-  /** lock → chmod 644 → produce/parse → write tmp → rename → chmod 444 → unlock */
-  private async atomicWrite<T>(produce: () => Readonly<{ state: TaskGraph; value: T }>): Promise<T> {
+  /** lock → derive/parse → stage read-only bytes → descriptor-relative rename → unlock */
+  private async atomicWrite<T>(
+    produce: (directory: AnchoredDirectory) => Readonly<{ state: TaskGraph; value: T }>,
+  ): Promise<T> {
     // This is the final shared write boundary, including replacement/repair
-    // paths. Check before lock creation or chmod so a skewed fresh CLI leaves
-    // the protected graph byte-for-byte and metadata-for-metadata untouched.
+    // paths. Check before lock creation so a skewed fresh CLI leaves the
+    // protected graph byte-for-byte and metadata-for-metadata untouched.
     assertPiCliMutationCompatible(process.env, captureLoomRuntimeIdentity(PACKAGE_ROOT));
-    const lockFile = `${dirname(this.path)}/.task_graph`;
-    const tmp = `${this.path}.tmp`;
-    return withLock(lockFile, () => {
-      this.setPermissions(this.path, 0o644);
-      let primaryError: unknown = null;
-      let committed = false;
-      let value: T | undefined;
-      try {
-        const produced = produce();
+    const directory = this.openAuthorityDirectory();
+    try {
+      return await withAnchoredDirectoryHandleLock(directory, ".task_graph", () => {
+        const produced = produce(directory);
         const parsed = parseTaskGraph(produced.state);
         if (!parsed.ok) throw new Error(`Refusing to persist invalid task graph (${parsed.error}): ${this.path}`);
-        writeFileSync(tmp, JSON.stringify(parsed.value, null, 2));
-        renameSync(tmp, this.path);
-        committed = true;
-        value = produced.value;
-      } catch (error) {
-        primaryError = error;
-        if (!committed && existsSync(tmp)) {
-          try {
-            unlinkSync(tmp);
-          } catch (cleanupError) {
-            primaryError = new AggregateError(
-              [error, cleanupError],
-              `Task graph write failed and temporary-file cleanup failed: ${this.path}`,
-            );
-          }
-        }
-      }
-
-      let permissionError: unknown = null;
-      try {
-        this.setPermissions(this.path, 0o444);
-      } catch (error) {
-        permissionError = error;
-      }
-
-      if (primaryError !== null && permissionError !== null) {
-        throw new AggregateError(
-          [primaryError, permissionError],
-          `Task graph write and permission restoration both failed: ${this.path}`,
+        writeDirectoryFileAtomicModeNoFollow(
+          directory,
+          this.authority.leaf,
+          JSON.stringify(parsed.value, null, 2),
+          0o444,
+          this.setPermissions,
         );
-      }
-      if (primaryError !== null) throw primaryError;
-      if (permissionError !== null) {
-        if (committed) {
-          throw new PostCommitStateProtectionError(this.path, value as T, permissionError);
-        }
-        throw new Error(
-          `Task graph was not committed and read-only permission restoration failed: ${this.path}: ${permissionError instanceof Error ? permissionError.message : String(permissionError)}`,
-          { cause: permissionError },
-        );
-      }
-      return value as T;
-    });
+        return produced.value;
+      });
+    } finally {
+      closeAnchoredDirectory(directory);
+    }
   }
 }

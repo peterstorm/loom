@@ -23,6 +23,8 @@
 import {
   closeSync,
   constants as fsConstants,
+  fchmodSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -37,6 +39,22 @@ import { basename, dirname, isAbsolute, parse, relative, resolve, sep } from "no
 
 /** A directory held open as the capability for every child operation. */
 export type AnchoredDirectory = Readonly<{ anchor: "descriptor"; fd: number }>;
+
+/** Stable identity used to reject a pathname that was rebound after capture. */
+export type AnchoredDirectoryIdentity = Readonly<{ device: bigint; inode: bigint }>;
+
+export function anchoredDirectoryIdentity(directory: AnchoredDirectory): AnchoredDirectoryIdentity {
+  const stat = fstatSync(directory.fd, { bigint: true });
+  return Object.freeze({ device: stat.dev, inode: stat.ino });
+}
+
+export function anchoredDirectoryHasIdentity(
+  directory: AnchoredDirectory,
+  expected: AnchoredDirectoryIdentity,
+): boolean {
+  const observed = anchoredDirectoryIdentity(directory);
+  return observed.device === expected.device && observed.inode === expected.inode;
+}
 
 export function assertAnchoredFilesystemPlatformSupported(
   platform: NodeJS.Platform = process.platform,
@@ -163,23 +181,35 @@ export function writeDirectoryFileExclusiveNoFollow(
   }
 }
 
-/** Atomically replace one leaf through an exclusively-created no-follow temp. */
-export function writeDirectoryFileAtomicNoFollow(
+function writeDirectoryFileAtomicPreparedNoFollow(
   directory: AnchoredDirectory,
   name: string,
   data: string | Uint8Array,
+  prepare: (fileDescriptor: number) => void,
 ): void {
   assertLeafName(name);
   const temporary = `${name}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   assertLeafName(temporary);
+  let fileFd: number | null = null;
   let published = false;
   let primaryError: unknown = null;
   try {
-    writeDirectoryFileExclusiveNoFollow(directory, temporary, data);
+    fileFd = openSync(
+      anchoredChildPath(directory, temporary),
+      leafFlags(fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL),
+      0o600,
+    );
+    writeFileSync(fileFd, data);
+    prepare(fileFd);
+    const preparedFd = fileFd;
+    fileFd = null;
+    closeSync(preparedFd);
     renameSync(anchoredChildPath(directory, temporary), anchoredChildPath(directory, name));
     published = true;
   } catch (error) {
     primaryError = error;
+  } finally {
+    if (fileFd !== null) closeSync(fileFd);
   }
 
   let cleanupError: unknown = null;
@@ -198,6 +228,34 @@ export function writeDirectoryFileAtomicNoFollow(
   }
   if (primaryError !== null) throw primaryError;
   if (cleanupError !== null) throw cleanupError;
+}
+
+/** Atomically replace one leaf through an exclusively-created no-follow temp. */
+export function writeDirectoryFileAtomicNoFollow(
+  directory: AnchoredDirectory,
+  name: string,
+  data: string | Uint8Array,
+): void {
+  writeDirectoryFileAtomicPreparedNoFollow(directory, name, data, () => undefined);
+}
+
+export type AnchoredFileModePort = (fileDescriptor: number, mode: number) => void;
+
+/**
+ * Publish one replacement whose final mode is installed before rename.
+ *
+ * The target never needs to become writable: bytes and mode are prepared on an
+ * exclusively-created leaf, then one descriptor-relative rename commits both.
+ */
+export function writeDirectoryFileAtomicModeNoFollow(
+  directory: AnchoredDirectory,
+  name: string,
+  data: string | Uint8Array,
+  mode: number,
+  setMode: AnchoredFileModePort = fchmodSync,
+): void {
+  writeDirectoryFileAtomicPreparedNoFollow(directory, name, data, (fileDescriptor) =>
+    setMode(fileDescriptor, mode));
 }
 
 /** Remove one anchored leaf; ENOENT is the only idempotent absence. */
@@ -426,6 +484,37 @@ function releaseDirectoryLock(directory: AnchoredDirectory, lockName: string, ow
   }
 }
 
+/** Hold one lock inside an already-retained directory capability. */
+export async function withAnchoredDirectoryHandleLock<T>(
+  anchored: AnchoredDirectory,
+  lockName: string,
+  operation: (directory: AnchoredDirectory) => T | Promise<T>,
+): Promise<T> {
+  assertLeafName(lockName);
+  const ownerToken = await acquireDirectoryLock(anchored, lockName);
+  let operationFailed = false;
+  let operationError: unknown;
+  try {
+    return await operation(anchored);
+  } catch (error) {
+    operationFailed = true;
+    operationError = error;
+    throw error;
+  } finally {
+    try {
+      releaseDirectoryLock(anchored, lockName, ownerToken);
+    } catch (releaseError) {
+      if (operationFailed) {
+        throw new AggregateError(
+          [operationError, releaseError],
+          `anchored operation failed and lock ${lockName} could not be released`,
+        );
+      }
+      throw releaseError;
+    }
+  }
+}
+
 /**
  * Hold a lock and its target directory through one retained descriptor.
  *
@@ -437,31 +526,9 @@ export async function withAnchoredDirectoryLock<T>(
   lockName: string,
   operation: (directory: AnchoredDirectory) => T | Promise<T>,
 ): Promise<T> {
-  assertLeafName(lockName);
   const anchored = openDirectoryNoFollow(directory);
   try {
-    const ownerToken = await acquireDirectoryLock(anchored, lockName);
-    let operationFailed = false;
-    let operationError: unknown;
-    try {
-      return await operation(anchored);
-    } catch (error) {
-      operationFailed = true;
-      operationError = error;
-      throw error;
-    } finally {
-      try {
-        releaseDirectoryLock(anchored, lockName, ownerToken);
-      } catch (releaseError) {
-        if (operationFailed) {
-          throw new AggregateError(
-            [operationError, releaseError],
-            `anchored operation failed and lock ${lockName} could not be released`,
-          );
-        }
-        throw releaseError;
-      }
-    }
+    return await withAnchoredDirectoryHandleLock(anchored, lockName, operation);
   } finally {
     closeAnchoredDirectory(anchored);
   }
@@ -604,13 +671,8 @@ function readAnchoredRunFile(path: string): Buffer {
 
 /**
  * Remove a run artifact relative to its retained parent descriptor.
- *
- * Darwin's anchor retains a verified textual path because Node exposes no
- * `unlinkat`. Reusing that path would reopen an ancestor-swap race between the
- * verified open and `unlinkSync`, so removal fails closed there until a native
- * descriptor-relative boundary is available. Linux names the leaf through the
- * retained descriptor; `unlink` removes a planted leaf symlink, never its
- * target.
+ * The leaf is named through the Linux descriptor capability, so unlinking a
+ * planted symlink removes the link itself and never its target.
  */
 export function removeRunFileNoFollow(path: string): void {
   const parent = openDirectoryNoFollow(dirname(path));

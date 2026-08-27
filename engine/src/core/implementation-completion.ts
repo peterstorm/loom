@@ -666,8 +666,13 @@ function exactTaskCompletionSuiteResult(
       `taskSuiteResult.checks must contain exactly one task-scoped ${TASK_BYTE_SCOPE_CHECK_ID_TEXT} result`,
     ]);
   }
+  const canonicalSuiteDigest = taskSuiteDigest(Object.freeze([taskByteScopeCheck()]));
+  if (unchecked.suiteDigest !== canonicalSuiteDigest) {
+    return failure(["taskSuiteResult.suiteDigest does not match its canonical roster"]);
+  }
   return success(freeze({
     ...unchecked,
+    suiteDigest: canonicalSuiteDigest,
     checks: Object.freeze([freeze({
       checkId: check.checkId as TaskByteScopeCheckId,
       scope: "task",
