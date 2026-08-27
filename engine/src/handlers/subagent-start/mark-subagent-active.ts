@@ -108,9 +108,11 @@ const handler: HookHandler = async (stdin) => {
   //   - the reserved write-grant namespace, which the write gate reads as a
   //     capability — a reported id shaped like one would be granted Edit/Write
   //     with no grant ever consumed.
-  // The SAME constructor governs machine binding and roster identity, so they
-  // can never disagree. A machine-bearing role with no parsed id is blocked
-  // before any per-agent capability is published.
+  // Machine authority and roster counting deliberately diverge for rejected
+  // identities: parseReportedAgentId returns null (no capability), while
+  // reportedRosterAgentId mints a deterministic non-authorizing placeholder so
+  // the running Agent still counts against sole-agent attribution. A guarded
+  // role with no machine-capable identity is blocked before publication.
   const agentId = agent_id ? parseReportedAgentId(agent_id) : null;
   const rosterId = agent_id ? reportedRosterAgentId(agent_id) : null;
   if (agent_id && agentId === null) {
@@ -132,6 +134,7 @@ const handler: HookHandler = async (stdin) => {
   const modernImplementationAgent = isImplementationAgent(rosterAgentTypeRaw);
   const loomOwnedAgent = parseAgentName(rosterAgentTypeRaw).ok || modernImplementationAgent;
   let sidecarPublished = false;
+  let duplicateStart = false;
   let identifiedAuthority: ImplementationAttemptAuthority | null = null;
   const rollbackIdentifiedRegistration = async (): Promise<string | null> => {
     if (identifiedAuthority === null) return null;
@@ -159,13 +162,14 @@ const handler: HookHandler = async (stdin) => {
         throw new Error(`Task ${taskId} has no current modern implementation attempt`);
       }
       identifiedAuthority = task.active_implementation_attempt;
-      publishImplementationAttemptSidecar({
+      const sidecar = publishImplementationAttemptSidecar({
         sessionId,
         agentId,
         taskGraphPath: manager.getPath(),
         authority: identifiedAuthority,
       });
-      sidecarPublished = true;
+      sidecarPublished = sidecar.disposition === "published";
+      duplicateStart = sidecar.disposition === "already-owned";
     } catch (error) {
       const rollbackFailure = await rollbackIdentifiedRegistration();
       return blockResult(
@@ -203,6 +207,9 @@ const handler: HookHandler = async (stdin) => {
       const message = `mark-subagent-active: roster update failed — attribution unsound; refusing to arm machine binding for ${agent_id}/${sessionId}: ${e instanceof Error ? e.message : String(e)}`;
       process.stderr.write(`${message}\n`);
       if (modernImplementationAgent) {
+        if (duplicateStart) {
+          return blockResult(`${message}; duplicate SubagentStart preserved the original live capabilities`);
+        }
         const rollbackFailures: string[] = [];
         try {
           if (sidecarPublished && agentId !== null) removeImplementationAttemptSidecar(sessionId, agentId);
@@ -259,13 +266,12 @@ const handler: HookHandler = async (stdin) => {
   // path this handler persists can never drift from what the env says now.
   let taskGraphPointerBinding: SessionTaskGraphPointerBinding | null = null;
   let pointerBindingPersisted = false;
-  let duplicateStart = false;
   if (rosterId !== null) {
     try {
       const claim = await claimPersistedSessionTaskGraphPointerBinding(sessionId, rosterId, activeGraphPath);
       taskGraphPointerBinding = claim.binding;
       pointerBindingPersisted = true;
-      duplicateStart = claim.kind === "already-owned";
+      duplicateStart = duplicateStart || claim.kind === "already-owned";
     } catch (error) {
       const pointerFailure =
         `mark-subagent-active: failed to persist task_graph pointer authority for ${sessionId}/${rosterId} — cross-repo SubagentStop cleanup is unavailable: ${error instanceof Error ? error.message : String(error)}`;

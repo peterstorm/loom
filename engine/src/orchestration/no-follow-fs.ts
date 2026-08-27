@@ -142,8 +142,8 @@ const anchorFor = (fd: number, path: string): AnchoredDirectory =>
  * documented point — after this returns, every path built under the result can
  * be, and is, held to the strict rule.
  *
- * On Linux this is an identity: a base containing a symlink is already refused
- * by the anchored walk today, so any base that works keeps working unchanged.
+ * The configured base is trusted and realpath-canonicalized on every platform;
+ * the strict no-symlink invariant starts below that resolved boundary.
  */
 export function ensureResolvedBaseDirectory(path: string): string {
   const absolute = resolve(path);

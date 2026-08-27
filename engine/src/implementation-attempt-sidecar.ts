@@ -159,10 +159,11 @@ export function publishSidecarBytes(
   leaf: string,
   bytes: Buffer,
   operations: SidecarPublicationOperations,
-): void {
+): "published" | "already-owned" {
   const staged = `${leaf}.tmp-${randomUUID()}`;
   let stagedPresent = false;
   let primaryError: unknown = null;
+  let disposition: "published" | "already-owned" = "published";
   try {
     operations.writeStaged(staged, bytes);
     stagedPresent = true;
@@ -174,6 +175,7 @@ export function publishSidecarBytes(
       if (!existing.equals(bytes)) {
         throw new Error(`implementation sidecar ${leaf} already binds different bytes`);
       }
+      disposition = "already-owned";
     }
   } catch (error) {
     primaryError = error;
@@ -195,6 +197,7 @@ export function publishSidecarBytes(
   }
   if (primaryError !== null) throw primaryError;
   if (cleanupError !== null) throw cleanupError;
+  return disposition;
 }
 
 export function publishImplementationAttemptSidecar(args: Readonly<{
@@ -202,7 +205,10 @@ export function publishImplementationAttemptSidecar(args: Readonly<{
   agentId: string;
   taskGraphPath: string;
   authority: unknown;
-}>): ClaudeImplementationAttemptSidecar {
+}>): Readonly<{
+  sidecar: ClaudeImplementationAttemptSidecar;
+  disposition: "published" | "already-owned";
+}> {
   const identity = parsedIdentity(args.sessionId, args.agentId);
   if (identity === null) throw new Error("cannot publish implementation sidecar for invalid session/agent identity");
   const authority = parseImplementationAttemptAuthority(args.authority);
@@ -222,12 +228,12 @@ export function publishImplementationAttemptSidecar(args: Readonly<{
   const anchored = openDirectoryNoFollow(directory);
   const leaf = sidecarLeaf(identity);
   try {
-    publishSidecarBytes(
+    const disposition = publishSidecarBytes(
       leaf,
       Buffer.from(`${JSON.stringify(parsed.value)}\n`, "utf8"),
       sidecarPublicationOperations(anchored),
     );
-    return parsed.value;
+    return Object.freeze({ sidecar: parsed.value, disposition });
   } finally {
     closeAnchoredDirectory(anchored);
   }

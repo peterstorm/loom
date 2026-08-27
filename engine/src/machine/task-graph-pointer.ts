@@ -178,11 +178,68 @@ const bindingFor = (
   leaseId,
 });
 
-/**
- * Acquire one lease on the session's canonical active graph. Registry and
- * pointer state are observed and changed under the same no-follow lock. A
- * different target cannot replace a generation while any lease is live.
- */
+function acquirePointerLease(
+  anchored: AnchoredDirectory,
+  sessionId: SessionId,
+  target: string,
+  canonicalDirectory: string,
+): SessionTaskGraphPointerBinding {
+  const pointerName = `${sessionId}.task_graph`;
+  const registryName = `${sessionId}${TASK_GRAPH_POINTER_LEASES_SUFFIX}`;
+  const pointer = optionalPointer(anchored, pointerName);
+  const registry = optionalRegistry(anchored, registryName);
+  const leaseId = randomUUID() as PointerLeaseId;
+  if (registry !== null) {
+    if (pointer !== registry.target) {
+      throw new Error(`pointer lease registry ${registryName} disagrees with ${pointerName}; refusing crash-state recovery`);
+    }
+    if (registry.target !== target) {
+      throw new Error(`session ${sessionId} still has ${registry.leases.length} live pointer lease(s) for ${registry.target}; refusing target ${target}`);
+    }
+    const next = Object.freeze({
+      ...registry,
+      leases: Object.freeze([...registry.leases, leaseId]) as readonly [PointerLeaseId, ...PointerLeaseId[]],
+    });
+    writeRegistry(anchored, registryName, next);
+    return bindingFor(canonicalDirectory, pointerName, registryName, next, leaseId);
+  }
+  const next: SessionTaskGraphPointerLeaseRegistry = Object.freeze({
+    schemaVersion: 1,
+    kind: "session-task-graph-pointer-leases",
+    generationId: randomUUID() as PointerGenerationId,
+    target,
+    previous: pointer,
+    leases: Object.freeze([leaseId]) as readonly [PointerLeaseId],
+  });
+  writeRegistry(anchored, registryName, next);
+  writeDirectoryFileAtomicNoFollow(anchored, pointerName, target);
+  return bindingFor(canonicalDirectory, pointerName, registryName, next, leaseId);
+}
+
+function releasePointerLease(
+  anchored: AnchoredDirectory,
+  binding: SessionTaskGraphPointerBinding,
+): SessionTaskGraphPointerRollback {
+  const registry = optionalRegistry(anchored, binding.registryName);
+  if (registry === null) return "not-owned";
+  if (registry.generationId !== binding.generationId || registry.target !== binding.target) return "ownership-lost";
+  if (optionalPointer(anchored, binding.pointerName) !== registry.target) return "ownership-lost";
+  if (!registry.leases.includes(binding.leaseId)) return "not-owned";
+  const remaining = registry.leases.filter((lease) => lease !== binding.leaseId);
+  if (remaining.length > 0) {
+    writeRegistry(anchored, binding.registryName, Object.freeze({
+      ...registry,
+      leases: Object.freeze(remaining) as readonly [PointerLeaseId, ...PointerLeaseId[]],
+    }));
+    return "rolled-back";
+  }
+  if (registry.previous === null) removeDirectoryFileNoFollow(anchored, binding.pointerName);
+  else writeDirectoryFileAtomicNoFollow(anchored, binding.pointerName, registry.previous);
+  removeDirectoryFileNoFollow(anchored, binding.registryName);
+  return "rolled-back";
+}
+
+/** Acquire one exact lease under the session pointer lock. */
 export async function bindSessionTaskGraphPointer(
   sessionId: SessionId,
   activeTaskGraphPath: string,
@@ -190,43 +247,8 @@ export async function bindSessionTaskGraphPointer(
 ): Promise<SessionTaskGraphPointerBinding> {
   const target = realpathSync.native(activeTaskGraphPath);
   const canonicalDirectory = realpathSync.native(directory);
-  const pointerName = `${sessionId}.task_graph`;
-  const registryName = `${sessionId}${TASK_GRAPH_POINTER_LEASES_SUFFIX}`;
-  const lockName = `${sessionId}.task-graph-pointer.lock`;
-  return withAnchoredDirectoryLock(canonicalDirectory, lockName, (anchored) => {
-    const pointer = optionalPointer(anchored, pointerName);
-    const registry = optionalRegistry(anchored, registryName);
-    const leaseId = randomUUID() as PointerLeaseId;
-    if (registry !== null) {
-      if (pointer !== registry.target) {
-        throw new Error(`pointer lease registry ${registryName} disagrees with ${pointerName}; refusing crash-state recovery`);
-      }
-      if (registry.target !== target) {
-        throw new Error(`session ${sessionId} still has ${registry.leases.length} live pointer lease(s) for ${registry.target}; refusing target ${target}`);
-      }
-      const next = Object.freeze({
-        ...registry,
-        leases: Object.freeze([...registry.leases, leaseId]) as readonly [PointerLeaseId, ...PointerLeaseId[]],
-      });
-      writeRegistry(anchored, registryName, next);
-      return bindingFor(canonicalDirectory, pointerName, registryName, next, leaseId);
-    }
-
-    const next: SessionTaskGraphPointerLeaseRegistry = Object.freeze({
-      schemaVersion: 1,
-      kind: "session-task-graph-pointer-leases",
-      generationId: randomUUID() as PointerGenerationId,
-      target,
-      previous: pointer,
-      leases: Object.freeze([leaseId]) as readonly [PointerLeaseId],
-    });
-    // Registry first is deliberate: a crash before pointer publication leaves
-    // a detectable mismatch. Publishing the pointer first could lose `previous`
-    // and let a later bind silently treat the half-written target as preexisting.
-    writeRegistry(anchored, registryName, next);
-    writeDirectoryFileAtomicNoFollow(anchored, pointerName, target);
-    return bindingFor(canonicalDirectory, pointerName, registryName, next, leaseId);
-  });
+  return withAnchoredDirectoryLock(canonicalDirectory, `${sessionId}.task-graph-pointer.lock`, (anchored) =>
+    acquirePointerLease(anchored, sessionId, target, canonicalDirectory));
 }
 
 /** Release only this lease; restore the previous pointer after the final lease. */
@@ -234,30 +256,8 @@ export async function rollbackSessionTaskGraphPointer(
   binding: SessionTaskGraphPointerBinding,
 ): Promise<SessionTaskGraphPointerRollback> {
   const lockName = `${binding.pointerName.slice(0, -".task_graph".length)}.task-graph-pointer.lock`;
-  return withAnchoredDirectoryLock(binding.directory, lockName, (anchored) => {
-    const registry = optionalRegistry(anchored, binding.registryName);
-    if (registry === null) return "not-owned" as const;
-    if (registry.generationId !== binding.generationId || registry.target !== binding.target) {
-      return "ownership-lost" as const;
-    }
-    if (optionalPointer(anchored, binding.pointerName) !== registry.target) return "ownership-lost" as const;
-    if (!registry.leases.includes(binding.leaseId)) return "not-owned" as const;
-    const remaining = registry.leases.filter((lease) => lease !== binding.leaseId);
-    if (remaining.length > 0) {
-      writeRegistry(anchored, binding.registryName, Object.freeze({
-        ...registry,
-        leases: Object.freeze(remaining) as readonly [PointerLeaseId, ...PointerLeaseId[]],
-      }));
-      return "rolled-back" as const;
-    }
-    // Pointer first is deliberate: a crash before registry removal leaves a
-    // detectable mismatch. Removing authority first could expose `target` as a
-    // fresh unowned pointer and later restore stale state.
-    if (registry.previous === null) removeDirectoryFileNoFollow(anchored, binding.pointerName);
-    else writeDirectoryFileAtomicNoFollow(anchored, binding.pointerName, registry.previous);
-    removeDirectoryFileNoFollow(anchored, binding.registryName);
-    return "rolled-back" as const;
-  });
+  return withAnchoredDirectoryLock(binding.directory, lockName, (anchored) =>
+    releasePointerLease(anchored, binding));
 }
 
 function bindingSidecarLeaf(sessionId: SessionId, agentId: AgentId): string {
@@ -372,36 +372,76 @@ export function persistSessionTaskGraphPointerBinding(
   }
 }
 
-/** Acquire or reuse one exact Claude pointer capability without replacing its live owner. */
+function readPersistedPointerBinding(
+  anchored: AnchoredDirectory,
+  leaf: string,
+): PersistedSessionTaskGraphPointerBinding | null {
+  let bytes: Buffer;
+  try {
+    bytes = readDirectoryFileNoFollow(anchored, leaf);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(bytes.toString("utf8")) as unknown;
+  } catch (error) {
+    throw new Error(`persisted pointer binding ${leaf} is malformed JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const parsed = parsePersistedSessionTaskGraphPointerBinding(raw);
+  if (!parsed.ok) throw new Error(`persisted pointer binding ${leaf} is malformed: ${parsed.error}`);
+  return parsed.value;
+}
+
+/** Atomically acquire or reuse one exact Claude pointer capability. */
 export async function claimPersistedSessionTaskGraphPointerBinding(
   sessionId: SessionId,
   agentId: AgentId,
   activeTaskGraphPath: string,
+  directory = subagentDir(),
 ): Promise<PersistedSessionTaskGraphPointerClaim> {
-  const acquired = await bindSessionTaskGraphPointer(sessionId, activeTaskGraphPath);
-  let claim: PersistedSessionTaskGraphPointerClaim;
-  try {
-    claim = persistSessionTaskGraphPointerBinding(sessionId, agentId, acquired);
-  } catch (error) {
-    const released = await rollbackSessionTaskGraphPointer(acquired);
-    if (released !== "rolled-back") {
-      throw new AggregateError(
-        [error, new Error(`new pointer lease rollback returned ${released}`)],
-        "pointer claim failed and its newly acquired lease could not be released",
-      );
+  const target = realpathSync.native(activeTaskGraphPath);
+  const canonicalDirectory = realpathSync.native(directory);
+  const leaf = bindingSidecarLeaf(sessionId, agentId);
+  return withAnchoredDirectoryLock(canonicalDirectory, `${sessionId}.task-graph-pointer.lock`, (anchored) => {
+    const existing = readPersistedPointerBinding(anchored, leaf);
+    if (existing !== null) {
+      const registry = optionalRegistry(anchored, existing.binding.registryName);
+      if (existing.sessionId !== sessionId || existing.agentId !== agentId ||
+          existing.binding.directory !== canonicalDirectory || existing.binding.target !== target ||
+          registry === null || registry.generationId !== existing.binding.generationId ||
+          registry.target !== target || !registry.leases.includes(existing.binding.leaseId) ||
+          optionalPointer(anchored, existing.binding.pointerName) !== target) {
+        throw new Error(`existing persisted pointer binding ${leaf} does not prove the same live authority`);
+      }
+      return Object.freeze({ kind: "already-owned", binding: existing.binding });
     }
-    throw error;
-  }
-  if (claim.kind === "already-owned") {
-    const released = await rollbackSessionTaskGraphPointer(acquired);
-    if (released !== "rolled-back") {
-      throw new Error(`duplicate pointer claim could not release its surplus lease: ${released}`);
+    const acquired = acquirePointerLease(anchored, sessionId, target, canonicalDirectory);
+    const persisted: PersistedSessionTaskGraphPointerBinding = Object.freeze({
+      schemaVersion: 1,
+      kind: "persisted-session-task-graph-pointer-binding",
+      sessionId,
+      agentId,
+      binding: acquired,
+    });
+    try {
+      writeDirectoryFileExclusiveNoFollow(anchored, leaf, `${JSON.stringify(persisted)}\n`);
+      return Object.freeze({ kind: "persisted", binding: acquired });
+    } catch (error) {
+      const released = releasePointerLease(anchored, acquired);
+      if (released !== "rolled-back") {
+        throw new AggregateError(
+          [error, new Error(`new pointer lease rollback returned ${released}`)],
+          "pointer claim failed and its newly acquired lease could not be released",
+        );
+      }
+      throw error;
     }
-  }
-  return claim;
+  });
 }
 
-/** Release exactly the persisted Claude lease; retain the sidecar on uncertainty. */
+/** Atomically release the persisted Claude lease and its sidecar. */
 export async function releasePersistedSessionTaskGraphPointerBinding(
   sessionId: SessionId,
   agentId: AgentId,
@@ -414,37 +454,17 @@ export async function releasePersistedSessionTaskGraphPointerBinding(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return "binding-missing";
     throw error;
   }
-  const anchored = openDirectoryNoFollow(canonicalDirectory);
   const leaf = bindingSidecarLeaf(sessionId, agentId);
-  let bytes: Buffer;
-  try {
-    try {
-      bytes = readDirectoryFileNoFollow(anchored, leaf);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return "binding-missing";
-      throw error;
+  return withAnchoredDirectoryLock(canonicalDirectory, `${sessionId}.task-graph-pointer.lock`, (anchored) => {
+    const persisted = readPersistedPointerBinding(anchored, leaf);
+    if (persisted === null) return "binding-missing";
+    if (persisted.sessionId !== sessionId || persisted.agentId !== agentId ||
+        persisted.binding.directory !== canonicalDirectory) {
+      throw new Error(`persisted pointer binding ${leaf} belongs to different authority`);
     }
-  } finally {
-    closeAnchoredDirectory(anchored);
-  }
-  let raw: unknown;
-  try {
-    raw = JSON.parse(bytes.toString("utf8")) as unknown;
-  } catch (error) {
-    throw new Error(`persisted pointer binding ${leaf} is malformed JSON: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  const parsed = parsePersistedSessionTaskGraphPointerBinding(raw);
-  if (!parsed.ok || parsed.value.sessionId !== sessionId || parsed.value.agentId !== agentId ||
-      parsed.value.binding.directory !== canonicalDirectory) {
-    throw new Error(`persisted pointer binding ${leaf} is malformed or belongs to different authority: ${parsed.ok ? "identity mismatch" : parsed.error}`);
-  }
-  const released = await rollbackSessionTaskGraphPointer(parsed.value.binding);
-  if (released === "ownership-lost") return released;
-  const cleanupDirectory = openDirectoryNoFollow(canonicalDirectory);
-  try {
-    removeDirectoryFileNoFollow(cleanupDirectory, leaf);
-  } finally {
-    closeAnchoredDirectory(cleanupDirectory);
-  }
-  return released;
+    const released = releasePointerLease(anchored, persisted.binding);
+    if (released === "ownership-lost") return released;
+    removeDirectoryFileNoFollow(anchored, leaf);
+    return released;
+  });
 }

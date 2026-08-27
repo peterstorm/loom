@@ -5,7 +5,7 @@
  *
  * Per session under SUBAGENT_DIR (the full suffix vocabulary is
  * SESSION_SUFFIXES in evidence.ts):
- *   <session>.evidence.jsonl  — append-only { epoch, event } records
+ *   <session>.evidence.jsonl  — append-only { epoch, event, callId? } records
  *   <session>.machine         — one "<agent_id>\t<agent_type>\t<bound_at_ms>"
  *                               line per active machine-gated subagent
  *   <session>.active          — active-subagent roster (attribution)
