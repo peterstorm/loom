@@ -1,6 +1,6 @@
 # Deterministic implementation and verification
 
-Status: design proposal with explicitly marked shipped-baseline sections. Verification Policy and the quiescent Wave completion suite are shipped; Task-local attempt authority and later items remain proposals. Only passages labeled **Shipped baseline** or **shipped** describe current behavior. For the complete shipped guarantees this proposal builds on, see [Deterministic core](deterministic-core.md).
+Status: design proposal with explicitly marked shipped-baseline sections. Verification Policy, the quiescent Wave completion suite, and Slice 3 Task-local Implementation Attempt authority are shipped; bounded retry dispatch and later items remain proposals. Passages labeled **Shipped baseline**, **shipped**, or **implemented** describe current behavior. For the complete shipped guarantees this proposal builds on, see [Deterministic core](deterministic-core.md).
 
 Loom 1.1 made orchestration *authority* deterministic: state transitions, gate arithmetic, retry accounting, and evidence attribution are code. What remains model judgment is verification *content* — reviewers produce prose findings, spec-check emits an LLM verdict, and implementers generate code with no machine-checkable contract beyond `file_list` byte changes. The remediation phase is where that residual judgment gets paid for, repeatedly and expensively.
 

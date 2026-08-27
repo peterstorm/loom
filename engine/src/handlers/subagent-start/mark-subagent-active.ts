@@ -170,6 +170,11 @@ const handler: HookHandler = async (stdin) => {
       });
       sidecarPublished = sidecar.disposition === "published";
       duplicateStart = sidecar.disposition === "already-owned";
+      if (sidecar.cleanupFailure !== null) {
+        process.stderr.write(
+          `mark-subagent-active: implementation sidecar is live but staged cleanup failed for ${agentId}/${sessionId}: ${sidecar.cleanupFailure}\n`,
+        );
+      }
     } catch (error) {
       const rollbackFailure = await rollbackIdentifiedRegistration();
       return blockResult(

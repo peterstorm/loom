@@ -476,20 +476,9 @@ export async function removeActiveAgentStrict(sessionId: SessionId, agentId: Age
   });
 }
 
-/**
- * Completion cleanup preserves its historical failure split: a rewrite error
- * is logged, while lock acquisition failure escapes to dispatch isolation.
- */
+/** Completion cleanup is strict so the caller can aggregate every failed capability release. */
 export async function removeActiveAgent(sessionId: SessionId, agentId: AgentId): Promise<void> {
-  const path = activeFlagPath(sessionId);
-  await withLock(bindingLock(sessionId), () => {
-    try {
-      removeActiveRosterEntry(path, agentId);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      process.stderr.write(`removeActiveAgent: .active update failed for ${sessionId}: ${error}\n`);
-    }
-  });
+  return removeActiveAgentStrict(sessionId, agentId);
 }
 
 /**
@@ -585,7 +574,10 @@ export async function unbindMachineAgent(
       }
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
-      process.stderr.write(`unbindMachineAgent: failed for ${agentId}/${sessionId}: ${e}\n`);
+      throw new Error(
+        `unbindMachineAgent failed for ${agentId}/${sessionId}: ${e instanceof Error ? e.message : String(e)}`,
+        { cause: e },
+      );
     }
   });
 }

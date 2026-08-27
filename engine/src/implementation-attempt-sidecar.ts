@@ -155,11 +155,16 @@ function sidecarPublicationOperations(
   });
 }
 
+export type SidecarPublicationResult = Readonly<{
+  disposition: "published" | "already-owned";
+  cleanupFailure: string | null;
+}>;
+
 export function publishSidecarBytes(
   leaf: string,
   bytes: Buffer,
   operations: SidecarPublicationOperations,
-): "published" | "already-owned" {
+): SidecarPublicationResult {
   const staged = `${leaf}.tmp-${randomUUID()}`;
   let stagedPresent = false;
   let primaryError: unknown = null;
@@ -196,8 +201,12 @@ export function publishSidecarBytes(
     );
   }
   if (primaryError !== null) throw primaryError;
-  if (cleanupError !== null) throw cleanupError;
-  return disposition;
+  return Object.freeze({
+    disposition,
+    cleanupFailure: cleanupError === null
+      ? null
+      : (cleanupError instanceof Error ? cleanupError.message : String(cleanupError)),
+  });
 }
 
 export function publishImplementationAttemptSidecar(args: Readonly<{
@@ -208,6 +217,7 @@ export function publishImplementationAttemptSidecar(args: Readonly<{
 }>): Readonly<{
   sidecar: ClaudeImplementationAttemptSidecar;
   disposition: "published" | "already-owned";
+  cleanupFailure: string | null;
 }> {
   const identity = parsedIdentity(args.sessionId, args.agentId);
   if (identity === null) throw new Error("cannot publish implementation sidecar for invalid session/agent identity");
@@ -228,12 +238,12 @@ export function publishImplementationAttemptSidecar(args: Readonly<{
   const anchored = openDirectoryNoFollow(directory);
   const leaf = sidecarLeaf(identity);
   try {
-    const disposition = publishSidecarBytes(
+    const publication = publishSidecarBytes(
       leaf,
       Buffer.from(`${JSON.stringify(parsed.value)}\n`, "utf8"),
       sidecarPublicationOperations(anchored),
     );
-    return Object.freeze({ sidecar: parsed.value, disposition });
+    return Object.freeze({ sidecar: parsed.value, ...publication });
   } finally {
     closeAnchoredDirectory(anchored);
   }

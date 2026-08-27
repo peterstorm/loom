@@ -642,6 +642,20 @@ describe("Claude implementation authority sidecar", () => {
     });
   });
 
+  it("retains successful live publication when only staged cleanup fails", () => {
+    const result = publishSidecarBytes("attempt.json", Buffer.from("authority"), {
+      writeStaged: () => undefined,
+      publishNoReplace: () => undefined,
+      readLive: () => Buffer.from("unused"),
+      removeStaged: () => { throw new Error("temporary cleanup failed"); },
+    });
+
+    expect(result).toEqual({
+      disposition: "published",
+      cleanupFailure: "temporary cleanup failed",
+    });
+  });
+
   it("publishes idempotently for identical bytes and never overwrites a different live authority", () => {
     const dir = root();
     const statePath = join(dir, "active_task_graph.json");

@@ -497,32 +497,24 @@ describe("roster records the agent role alongside its identity", () => {
     await expect(ledger.removeActiveAgentStrict(s, agentId("denied-agent"))).rejects.toThrow(/ELOOP/i);
   });
 
-  it("completion removal logs an inaccessible roster instead of treating it as absent", async () => {
+  it("completion removal rejects an inaccessible roster instead of reporting success", async () => {
     const s = sid("roster-inaccessible-completion");
     const path = `${SUBAGENT_DIR}/${s}.active`;
     symlinkSync(path, path);
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    try {
-      await ledger.removeActiveAgent(s, agentId("finished-agent"));
-      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
-        .toMatch(/removeActiveAgent:.*ELOOP/i);
-    } finally {
-      stderr.mockRestore();
-    }
+
+    await expect(ledger.removeActiveAgent(s, agentId("finished-agent"))).rejects.toThrow(/ELOOP/i);
   });
 
-  it("binding cleanup logs an inaccessible binding instead of treating it as absent", async () => {
+  it("binding cleanup rejects an inaccessible binding instead of reporting success", async () => {
     const s = sid("binding-inaccessible-completion");
     const path = ledger.machineBindingPath(s);
     symlinkSync(path, path);
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    try {
-      await ledger.unbindMachineAgent(s, agentType("code-implementer-agent"), agentId("finished-agent"));
-      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
-        .toMatch(/unbindMachineAgent:.*ELOOP/i);
-    } finally {
-      stderr.mockRestore();
-    }
+
+    await expect(ledger.unbindMachineAgent(
+      s,
+      agentType("code-implementer-agent"),
+      agentId("finished-agent"),
+    )).rejects.toThrow(/unbindMachineAgent failed.*ELOOP/i);
   });
 
   it("treats identity as column 0 for duplicate detection", async () => {
