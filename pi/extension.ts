@@ -115,7 +115,10 @@ import {
   replayStandaloneResultFromEvidence,
   type StandaloneReviewedSource,
 } from "../engine/src/handlers/helpers/programs";
-import { readRunBytesNoFollow } from "../engine/src/orchestration/no-follow-fs";
+import {
+  assertAnchoredFilesystemPlatformSupported,
+  readRunBytesNoFollow,
+} from "../engine/src/orchestration/no-follow-fs";
 import {
   readSessionRunBindings,
   type SessionRunBinding,
@@ -959,6 +962,7 @@ async function verifyTrustedStandaloneReview(input: Readonly<{ cwd: string; sess
 }
 
 export default function (pi: ExtensionAPI) {
+  assertAnchoredFilesystemPlatformSupported();
   registerInteractiveSubagentTool(pi, PACKAGE_ROOT, PI_AGENT_DIR);
   (globalThis as unknown as Record<PropertyKey, unknown>)[LOOM_REVIEW_AUTHORITY_SYMBOL] = Object.freeze({
     verify: verifyTrustedStandaloneReview,

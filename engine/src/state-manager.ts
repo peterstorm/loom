@@ -12,7 +12,14 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { withLock } from "./utils/lock";
 import { KNOWN_AGENTS, PHASE_ORDER, REVIEW_SUB_AGENTS, pathExistsFailClosed, taskGraphPath } from "./config";
-import { parseErr, parseOk, parseSessionId, sessionScopedPath, type ParseResult } from "./machine";
+import {
+  parseCanonicalTaskGraphPointer,
+  parseErr,
+  parseOk,
+  parseSessionId,
+  sessionScopedPath,
+  type ParseResult,
+} from "./machine";
 import {
   parseNewTestEvidence,
   parseStoredNewTestEvidence,
@@ -88,6 +95,14 @@ import {
 
 const PACKAGE_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
+function parseSessionPointerBytes(raw: string, sessionFile: string): string {
+  const parsed = parseCanonicalTaskGraphPointer(raw);
+  if (!parsed.ok) {
+    throw new Error(`session pointer ${sessionFile} is malformed: ${parsed.error}`);
+  }
+  return parsed.value;
+}
+
 /** Resolve TaskGraph authority for session-bound Hooks or local helpers.
  * A supplied session id must resolve through its exact `.task_graph` pointer;
  * malformed, absent, or dangling authority refuses mutation rather than
@@ -104,7 +119,7 @@ export function resolveTaskGraph(sessionId?: string): string | null {
     const sessionFile = sessionScopedPath(parsed, ".task_graph");
     let absPath: string;
     try {
-      absPath = readFileSync(sessionFile, "utf-8").trim();
+      absPath = parseSessionPointerBytes(readFileSync(sessionFile, "utf-8"), sessionFile);
     } catch (error) {
       const cause = error instanceof Error ? error.message : String(error);
       const message = (error as NodeJS.ErrnoException).code === "ENOENT"
@@ -135,7 +150,7 @@ function resolveLocalSessionTaskGraph(sessionId: string): string | null {
   const sessionFile = sessionScopedPath(parsed, ".task_graph");
   let pointedPath: string;
   try {
-    pointedPath = readFileSync(sessionFile, "utf-8").trim();
+    pointedPath = parseSessionPointerBytes(readFileSync(sessionFile, "utf-8"), sessionFile);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return resolveTaskGraph();
     throw new Error(
@@ -1592,11 +1607,14 @@ function migrateParsedTask(
     ? null
     : parseStoredNewTestEvidence(task.new_test_observation);
   if (storedNewTests !== null && !storedNewTests.ok) return parseErr(storedNewTests.error);
-  const parsedNewTests = storedNewTests?.ok
-    ? storedNewTests.value
-    : (task.new_tests_written === undefined && task.new_test_evidence === undefined
-        ? null
-        : parseNewTestEvidence(task.new_tests_written, task.new_test_evidence));
+  let parsedNewTests;
+  if (storedNewTests?.ok) {
+    parsedNewTests = storedNewTests.value;
+  } else if (task.new_tests_written === undefined && task.new_test_evidence === undefined) {
+    parsedNewTests = null;
+  } else {
+    parsedNewTests = parseNewTestEvidence(task.new_tests_written, task.new_test_evidence);
+  }
   const {
     new_tests_written: _legacyNewTestsWritten,
     new_test_evidence: _legacyNewTestEvidence,

@@ -30,6 +30,7 @@ The engine owns deterministic mechanics. Agents do semantic work; users make rea
 
 ### Prerequisites
 
+- Linux (`/proc/self/fd` descriptor-relative filesystem authority is required)
 - [Bun](https://bun.sh/)
 - Git
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Pi](https://github.com/earendil-works/pi-coding-agent)

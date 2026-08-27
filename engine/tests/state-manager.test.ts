@@ -1094,6 +1094,33 @@ describe("resolveTaskGraph — session ids are parsed before naming SUBAGENT_DIR
     }
   });
 
+  it.each([
+    ["empty", ""],
+    ["relative", "active_task_graph.json"],
+    ["whitespace-padded", null],
+    ["non-normalized", null],
+  ])("a readable %s session pointer refuses authority before probing", (kind, fixture) => {
+    const s = `sm-malformed-${kind}-${process.pid}-${Date.now()}`;
+    const dir = makeTmpDir();
+    const statePath = join(dir, "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify(minimalGraph()));
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${s}.task_graph`);
+    const raw = kind === "whitespace-padded"
+      ? `${statePath}\n`
+      : kind === "non-normalized"
+        ? `${dir}/./active_task_graph.json`
+        : fixture!;
+    writeFileSync(pointer, raw);
+    try {
+      expect(() => resolveTaskGraph(s)).toThrow(/session pointer .* is malformed/i);
+      expect(() => StateManager.fromLocalSession(s)).toThrow(/session pointer .* is malformed/i);
+    } finally {
+      rmSync(pointer, { force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("an absent session pointer refuses local TaskGraph authority", () => {
     const s = `sm-absent-pointer-${process.pid}-${Date.now()}`;
     const pointer = join(SUBAGENT_DIR, `${s}.task_graph`);

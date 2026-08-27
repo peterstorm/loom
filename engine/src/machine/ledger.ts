@@ -40,7 +40,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { isAbsolute, normalize, resolve } from "node:path";
+import { resolve } from "node:path";
 import {
   appendFileSync,
   existsSync,
@@ -80,6 +80,7 @@ import {
   resolveSoleActiveBinding,
 } from "./evidence";
 import type { Epoch, Evidence, EvidenceRecord, MachineDef } from "./types";
+import { parseCanonicalTaskGraphPointer } from "./task-graph-pointer";
 
 /**
  * The single path-construction boundary for session files. It takes the
@@ -296,15 +297,16 @@ export function anyActiveSubagent(taskGraphPath: string): boolean {
       return true;
     }
     try {
-      const rawPointer = readFileSync(`${subagentDir()}/${session}.task_graph`, "utf-8");
-      const pointer = rawPointer.trim();
-      if (pointer === "" || pointer !== rawPointer || !isAbsolute(pointer) || normalize(pointer) !== pointer) {
+      const parsedPointer = parseCanonicalTaskGraphPointer(
+        readFileSync(`${subagentDir()}/${session}.task_graph`, "utf-8"),
+      );
+      if (!parsedPointer.ok) {
         process.stderr.write(
           `anyActiveSubagent: malformed task-graph pointer for ${session} — assuming it serves this graph (fail closed)\n`,
         );
         return true;
       }
-      return pointer === wanted;
+      return parsedPointer.value === wanted;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
       process.stderr.write(

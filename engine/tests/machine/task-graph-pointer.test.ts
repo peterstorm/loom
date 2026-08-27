@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   bindSessionTaskGraphPointer,
   parseAgentId,
+  parseCanonicalTaskGraphPointer,
   parseSessionId,
   parseSessionTaskGraphPointerLeaseRegistry,
   persistSessionTaskGraphPointerBinding,
@@ -49,6 +50,36 @@ afterEach(() => {
 });
 
 describe("shared session TaskGraph pointer lease registry", () => {
+  it.each([
+    ["empty", ""],
+    ["relative", "graph.json"],
+    ["whitespace-padded", "/repo/graph.json\n"],
+    ["non-normalized", "/repo/./graph.json"],
+  ])("rejects %s pointer bytes at the shared parse boundary", (_label, raw) => {
+    expect(parseCanonicalTaskGraphPointer(raw)).toMatchObject({ ok: false });
+  });
+
+  it("refuses malformed existing pointer bytes before acquiring a lease", async () => {
+    const { root, graphA, sessionId, pointer, registry: registryPath } = fixture();
+    writeFileSync(pointer, `${graphA}\n`);
+
+    await expect(bindSessionTaskGraphPointer(sessionId, graphA, root))
+      .rejects.toThrow(/TaskGraph pointer .* is malformed/i);
+    expect(readFileSync(pointer, "utf8")).toBe(`${graphA}\n`);
+    expect(existsSync(registryPath)).toBe(false);
+  });
+
+  it("refuses malformed live pointer bytes before releasing a lease", async () => {
+    const { root, graphA, sessionId, pointer, registry: registryPath } = fixture();
+    const binding = await bindSessionTaskGraphPointer(sessionId, graphA, root);
+    writeFileSync(pointer, `${graphA}\n`);
+
+    await expect(rollbackSessionTaskGraphPointer(binding))
+      .rejects.toThrow(/TaskGraph pointer .* is malformed/i);
+    expect(registry(registryPath).leases).toEqual([binding.leaseId]);
+    expect(readFileSync(pointer, "utf8")).toBe(`${graphA}\n`);
+  });
+
   it("atomically refreshes a stale pointer and restores it after the final lease", async () => {
     const { root, graphA, graphB, sessionId, pointer, registry: registryPath } = fixture();
     writeFileSync(pointer, graphA);

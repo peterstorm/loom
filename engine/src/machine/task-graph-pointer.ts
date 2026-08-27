@@ -28,8 +28,23 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 
 declare const POINTER_GENERATION_ID: unique symbol;
 declare const POINTER_LEASE_ID: unique symbol;
+declare const CANONICAL_TASK_GRAPH_POINTER: unique symbol;
 type PointerGenerationId = string & { readonly [POINTER_GENERATION_ID]: true };
 type PointerLeaseId = string & { readonly [POINTER_LEASE_ID]: true };
+export type CanonicalTaskGraphPointer = string & { readonly [CANONICAL_TASK_GRAPH_POINTER]: true };
+
+export type CanonicalTaskGraphPointerParse =
+  | Readonly<{ ok: true; value: CanonicalTaskGraphPointer }>
+  | Readonly<{ ok: false; error: string }>;
+
+/** Parse exact pointer bytes; normalization must never repair persisted authority. */
+export function parseCanonicalTaskGraphPointer(raw: unknown): CanonicalTaskGraphPointerParse {
+  if (typeof raw !== "string" || raw === "" || raw.trim() !== raw ||
+      !isAbsolute(raw) || normalize(raw) !== raw) {
+    return Object.freeze({ ok: false, error: "TaskGraph pointer must be one exact canonical absolute path" });
+  }
+  return Object.freeze({ ok: true, value: raw as CanonicalTaskGraphPointer });
+}
 
 export type SessionTaskGraphPointerLeaseRegistry = Readonly<{
   schemaVersion: 1;
@@ -92,8 +107,8 @@ export function parseSessionTaskGraphPointerLeaseRegistry(
   }
   const generationId = parseUuid<PointerGenerationId>(record.generationId);
   if (generationId === null) return Object.freeze({ ok: false, error: "pointer lease registry generationId is invalid" });
-  if (typeof record.target !== "string" || record.target.trim() !== record.target ||
-      !isAbsolute(record.target) || normalize(record.target) !== record.target) {
+  const target = parseCanonicalTaskGraphPointer(record.target);
+  if (!target.ok) {
     return Object.freeze({ ok: false, error: "pointer lease registry target must be one canonical absolute path" });
   }
   if (record.previous !== null && (typeof record.previous !== "string" ||
@@ -117,18 +132,20 @@ export function parseSessionTaskGraphPointerLeaseRegistry(
       schemaVersion: 1,
       kind: "session-task-graph-pointer-leases",
       generationId,
-      target: record.target,
+      target: target.value,
       previous: record.previous as string | null,
       leases: Object.freeze(parsedLeases) as readonly [PointerLeaseId, ...PointerLeaseId[]],
     }),
   });
 }
 
-function optionalPointer(directory: AnchoredDirectory, pointerName: string): string | null {
+function optionalPointer(directory: AnchoredDirectory, pointerName: string): CanonicalTaskGraphPointer | null {
   try {
-    const pointer = readDirectoryFileNoFollow(directory, pointerName).toString("utf8").trim();
-    if (pointer === "") throw new Error(`session TaskGraph pointer ${pointerName} is empty`);
-    return pointer;
+    const parsed = parseCanonicalTaskGraphPointer(
+      readDirectoryFileNoFollow(directory, pointerName).toString("utf8"),
+    );
+    if (!parsed.ok) throw new Error(`session TaskGraph pointer ${pointerName} is malformed: ${parsed.error}`);
+    return parsed.value;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;

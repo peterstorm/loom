@@ -85,7 +85,7 @@ mkdir -p "$SPEC_DIR" "$PLANS_DIR" "$TMP/.claude/state" "$LOOM_SUBAGENT_DIR"
 # SubagentStop Hooks require exact session TaskGraph authority. Publish the same
 # pointer SessionStart establishes; local LOOM_STATE_PATH fallback is reserved
 # for non-session helpers and must not authorize these writes.
-printf '%s\n' "$STATE" > "$LOOM_SUBAGENT_DIR/$SESSION.task_graph"
+printf '%s' "$STATE" > "$LOOM_SUBAGENT_DIR/$SESSION.task_graph"
 
 # Spec with zero NEEDS CLARIFICATION markers → architecture gate is satisfied.
 printf '# Smoke spec\n\nFR-001: do the thing.\n' > "$SPEC_DIR/spec.md"
