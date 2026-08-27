@@ -67,6 +67,10 @@ export type PersistedSessionTaskGraphPointerRelease =
   | SessionTaskGraphPointerRollback
   | "binding-missing";
 
+export type PersistedSessionTaskGraphPointerClaim =
+  | Readonly<{ kind: "persisted"; binding: SessionTaskGraphPointerBinding }>
+  | Readonly<{ kind: "already-owned"; binding: SessionTaskGraphPointerBinding }>;
+
 const parseUuid = <Brand extends string>(raw: unknown): Brand | null =>
   typeof raw === "string" && UUID.test(raw) ? raw as Brand : null;
 
@@ -327,7 +331,7 @@ export function persistSessionTaskGraphPointerBinding(
   sessionId: SessionId,
   agentId: AgentId,
   binding: SessionTaskGraphPointerBinding,
-): void {
+): PersistedSessionTaskGraphPointerClaim {
   const persisted: PersistedSessionTaskGraphPointerBinding = Object.freeze({
     schemaVersion: 1,
     kind: "persisted-session-task-graph-pointer-binding",
@@ -340,14 +344,61 @@ export function persistSessionTaskGraphPointerBinding(
   ensureDirectoryNoFollow(binding.directory);
   const anchored = openDirectoryNoFollow(binding.directory);
   try {
-    writeDirectoryFileExclusiveNoFollow(
-      anchored,
-      bindingSidecarLeaf(sessionId, agentId),
-      `${JSON.stringify(parsed.value)}\n`,
-    );
+    const leaf = bindingSidecarLeaf(sessionId, agentId);
+    try {
+      writeDirectoryFileExclusiveNoFollow(anchored, leaf, `${JSON.stringify(parsed.value)}\n`);
+      return Object.freeze({ kind: "persisted", binding: parsed.value.binding });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      let existingRaw: unknown;
+      try {
+        existingRaw = JSON.parse(readDirectoryFileNoFollow(anchored, leaf).toString("utf8")) as unknown;
+      } catch (readError) {
+        throw new Error(`existing persisted pointer binding ${leaf} is unreadable: ${readError instanceof Error ? readError.message : String(readError)}`);
+      }
+      const existing = parsePersistedSessionTaskGraphPointerBinding(existingRaw);
+      const registry = optionalRegistry(anchored, binding.registryName);
+      if (!existing.ok || existing.value.sessionId !== sessionId || existing.value.agentId !== agentId ||
+          existing.value.binding.directory !== binding.directory || existing.value.binding.target !== binding.target ||
+          registry === null || registry.generationId !== existing.value.binding.generationId ||
+          registry.target !== existing.value.binding.target || !registry.leases.includes(existing.value.binding.leaseId) ||
+          optionalPointer(anchored, binding.pointerName) !== registry.target) {
+        throw new Error(`existing persisted pointer binding ${leaf} does not prove the same live authority`);
+      }
+      return Object.freeze({ kind: "already-owned", binding: existing.value.binding });
+    }
   } finally {
     closeAnchoredDirectory(anchored);
   }
+}
+
+/** Acquire or reuse one exact Claude pointer capability without replacing its live owner. */
+export async function claimPersistedSessionTaskGraphPointerBinding(
+  sessionId: SessionId,
+  agentId: AgentId,
+  activeTaskGraphPath: string,
+): Promise<PersistedSessionTaskGraphPointerClaim> {
+  const acquired = await bindSessionTaskGraphPointer(sessionId, activeTaskGraphPath);
+  let claim: PersistedSessionTaskGraphPointerClaim;
+  try {
+    claim = persistSessionTaskGraphPointerBinding(sessionId, agentId, acquired);
+  } catch (error) {
+    const released = await rollbackSessionTaskGraphPointer(acquired);
+    if (released !== "rolled-back") {
+      throw new AggregateError(
+        [error, new Error(`new pointer lease rollback returned ${released}`)],
+        "pointer claim failed and its newly acquired lease could not be released",
+      );
+    }
+    throw error;
+  }
+  if (claim.kind === "already-owned") {
+    const released = await rollbackSessionTaskGraphPointer(acquired);
+    if (released !== "rolled-back") {
+      throw new Error(`duplicate pointer claim could not release its surplus lease: ${released}`);
+    }
+  }
+  return claim;
 }
 
 /** Release exactly the persisted Claude lease; retain the sidecar on uncertainty. */

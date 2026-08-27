@@ -59,6 +59,12 @@ function ep(s: string) {
   return v;
 }
 
+function parsedLine(line: string) {
+  const parsed = ledger.parseEvidenceLine(line);
+  if (!parsed.ok) throw new Error(parsed.error);
+  return parsed.value;
+}
+
 /** Put exactly these agents on the session's `.active` roster. */
 function roster(s: string, ...ids: string[]): void {
   writeFileSync(`${SUBAGENT_DIR}/${s}.active`, ids.map((i) => `${i}\n`).join(""));
@@ -96,12 +102,12 @@ describe("evidence ledger", () => {
     expect(() => ledger.readEvidence(s)).toThrow(/cannot read evidence ledger.*ELOOP/i);
   });
 
-  it("skips corrupt, unknown, and epoch-less ledger lines", () => {
-    expect(ledger.parseEvidenceLine("{broken")).toBeNull();
-    expect(ledger.parseEvidenceLine('{"epoch":"a:b","event":{"kind":"Unknown"}}')).toBeNull();
-    expect(ledger.parseEvidenceLine('{"event":{"kind":"FileRead","path":"/a.ts"}}')).toBeNull();
-    expect(ledger.parseEvidenceLine('{"epoch":"","event":{"kind":"FileRead","path":"/a.ts"}}')).toBeNull();
-    expect(ledger.parseEvidenceLine('{"epoch":"a:b","event":{"kind":"FileRead","path":"/a.ts"}}')).toEqual({
+  it("returns typed failures for corrupt, unknown, and epoch-less ledger lines", () => {
+    expect(ledger.parseEvidenceLine("{broken")).toMatchObject({ ok: false });
+    expect(ledger.parseEvidenceLine('{"epoch":"a:b","event":{"kind":"Unknown"}}')).toMatchObject({ ok: false });
+    expect(ledger.parseEvidenceLine('{"event":{"kind":"FileRead","path":"/a.ts"}}')).toMatchObject({ ok: false });
+    expect(ledger.parseEvidenceLine('{"epoch":"","event":{"kind":"FileRead","path":"/a.ts"}}')).toMatchObject({ ok: false });
+    expect(parsedLine('{"epoch":"a:b","event":{"kind":"FileRead","path":"/a.ts"}}')).toEqual({
       epoch: "a:b",
       event: read("/a.ts"),
     });
@@ -109,9 +115,7 @@ describe("evidence ledger", () => {
 
   it("a malformed report sub-object demotes to report: null (parseReportField rejection)", () => {
     const parse = (report: unknown) =>
-      ledger.parseEvidenceLine(
-        JSON.stringify({ epoch: "a:b", event: { kind: "TestRun", command: "npm test", exit: 0, report } }),
-      );
+      parsedLine(JSON.stringify({ epoch: "a:b", event: { kind: "TestRun", command: "npm test", exit: 0, report } }));
     const demoted = { epoch: "a:b", event: { kind: "TestRun", command: "npm test", exit: 0, report: null } };
     // wrong types / missing fields / unknown source / non-object
     expect(parse({ total: "5", failed: 0, source: "vitest-json" })).toEqual(demoted);
@@ -138,20 +142,20 @@ describe("evidence ledger", () => {
       epoch: "a:b",
       event: { kind: "TestRun", command: "npm test", exit: 1, report: null, passed: true, trusted: true },
     });
-    const parsed = ledger.parseEvidenceLine(forged);
+    const parsed = parsedLine(forged);
     expect(parsed).toEqual({
       epoch: "a:b",
       event: { kind: "TestRun", command: "npm test", exit: 1, report: null },
     });
   });
 
-  it("valid lines survive corrupt neighbours mid-file", () => {
+  it("one corrupt neighbour invalidates the whole ledger", () => {
     const s = sid("s5");
     appendFileSync(
       ledger.ledgerPath(s),
       `${JSON.stringify({ epoch: "a:b", event: read("/ok.ts") })}\n{torn line\n${JSON.stringify({ epoch: "a:b", event: testRun })}\n`,
     );
-    expect(ledger.eventsForEpoch(ledger.readEvidence(s), ep("a:b"))).toEqual([read("/ok.ts"), testRun]);
+    expect(() => ledger.readEvidence(s)).toThrow(/refusing partial evidence.*line 2/i);
   });
 });
 
@@ -394,9 +398,9 @@ describe("branded epochs — the deserialization boundary", () => {
     }
   });
 
-  it("ledger lines with corrupt epochs are skipped at read time", () => {
-    expect(ledger.parseEvidenceLine('{"epoch":"no-colon","event":{"kind":"FileRead","path":"/a.ts"}}')).toBeNull();
-    expect(ledger.parseEvidenceLine('{"epoch":"a:b:c","event":{"kind":"FileRead","path":"/a.ts"}}')).toBeNull();
+  it("ledger lines with corrupt epochs return typed parse failures", () => {
+    expect(ledger.parseEvidenceLine('{"epoch":"no-colon","event":{"kind":"FileRead","path":"/a.ts"}}')).toMatchObject({ ok: false });
+    expect(ledger.parseEvidenceLine('{"epoch":"a:b:c","event":{"kind":"FileRead","path":"/a.ts"}}')).toMatchObject({ ok: false });
   });
 });
 
@@ -634,26 +638,26 @@ describe("callId idempotency stamp (round-10 Fix 6)", () => {
 
   it("parseEvidenceLine reads back callId and the FileWrite via field; unknown via fails closed to shell", () => {
     expect(
-      ledger.parseEvidenceLine('{"epoch":"a:b","event":{"kind":"FileRead","path":"/a"},"callId":"toolu_9"}'),
+      parsedLine('{"epoch":"a:b","event":{"kind":"FileRead","path":"/a"},"callId":"toolu_9"}'),
     ).toEqual({ epoch: "a:b", event: { kind: "FileRead", path: "/a" }, callId: "toolu_9" });
     expect(
-      ledger.parseEvidenceLine('{"epoch":"a:b","event":{"kind":"FileWrite","path":"/w","via":"shell"}}')!.event,
+      parsedLine('{"epoch":"a:b","event":{"kind":"FileWrite","path":"/w","via":"shell"}}').event,
     ).toEqual({ kind: "FileWrite", path: "/w", via: "shell" });
     expect(
-      ledger.parseEvidenceLine('{"epoch":"a:b","event":{"kind":"FileWrite","path":"/w","via":"tool"}}')!.event,
+      parsedLine('{"epoch":"a:b","event":{"kind":"FileWrite","path":"/w","via":"tool"}}').event,
     ).toEqual({ kind: "FileWrite", path: "/w", via: "tool" });
     // Absent via = old record = tool write (only tool writes were minted
     // historically) — the parse boundary makes the default EXPLICIT.
     expect(
-      ledger.parseEvidenceLine('{"epoch":"a:b","event":{"kind":"FileWrite","path":"/w"}}')!.event,
+      parsedLine('{"epoch":"a:b","event":{"kind":"FileWrite","path":"/w"}}').event,
     ).toEqual({ kind: "FileWrite", path: "/w", via: "tool" });
     // Garbage via fails CLOSED to "shell": still vetoes, never advances a guard.
     expect(
-      ledger.parseEvidenceLine('{"epoch":"a:b","event":{"kind":"FileWrite","path":"/w","via":"nonsense"}}')!.event,
+      parsedLine('{"epoch":"a:b","event":{"kind":"FileWrite","path":"/w","via":"nonsense"}}').event,
     ).toEqual({ kind: "FileWrite", path: "/w", via: "shell" });
     // A non-string callId is ignored, not a parse failure.
     expect(
-      ledger.parseEvidenceLine('{"epoch":"a:b","event":{"kind":"FileRead","path":"/a"},"callId":42}'),
+      parsedLine('{"epoch":"a:b","event":{"kind":"FileRead","path":"/a"},"callId":42}'),
     ).toEqual({ epoch: "a:b", event: { kind: "FileRead", path: "/a" } });
   });
 });

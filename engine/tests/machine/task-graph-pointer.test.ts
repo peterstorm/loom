@@ -104,6 +104,24 @@ describe("shared session TaskGraph pointer lease registry", () => {
     expect(await rollbackSessionTaskGraphPointer(nextTarget)).toBe("rolled-back");
   });
 
+  it("fails closed on a malformed persisted cleanup sidecar without releasing its lease", async () => {
+    const { root, graphA, sessionId, pointer, registry: registryPath } = fixture();
+    const agentId = parseAgentId("claude-agent-malformed");
+    if (agentId === null) throw new Error("agent fixture must parse");
+    const binding = await bindSessionTaskGraphPointer(sessionId, graphA, root);
+    persistSessionTaskGraphPointerBinding(sessionId, agentId, binding);
+    const sidecar = join(
+      root,
+      `${sessionId}.${Buffer.from(agentId, "utf8").toString("hex")}${TASK_GRAPH_POINTER_BINDING_SUFFIX}`,
+    );
+    writeFileSync(sidecar, "{broken\n");
+
+    await expect(releasePersistedSessionTaskGraphPointerBinding(sessionId, agentId, root))
+      .rejects.toThrow(/malformed JSON/);
+    expect(readFileSync(pointer, "utf8")).toBe(graphA);
+    expect(registry(registryPath).leases).toEqual([binding.leaseId]);
+  });
+
   it("retains persisted cleanup authority when pointer ownership is lost", async () => {
     const { root, graphA, graphB, sessionId, pointer } = fixture();
     const agentId = parseAgentId("claude-agent-2");

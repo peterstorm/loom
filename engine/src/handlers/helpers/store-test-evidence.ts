@@ -26,23 +26,22 @@ const handler: HookHandler = async (stdin, args) => {
   // trusted-fail would sail through the wave gate. Mirror update-task-status's
   // skip guard: leave the task untouched and say so. Decided INSIDE the
   // locked update so a concurrently-written trusted verdict is honored.
-  let matched = false;
-  let skippedTrustedVerdict = false;
-  let requiresAgentRevalidation = false;
+  type StoreOutcome = "missing" | "requires-agent-revalidation" | "trusted-verdict-skipped" | "stored";
+  let storeOutcome: StoreOutcome = "missing";
   await mgr.update((s) => ({
     ...s,
     tasks: s.tasks.map((t) => {
       if (t.id !== taskId) return t;
-      matched = true;
       const verdict = t.test_result?.verdict;
       if (t.revalidation_required === true) {
-        requiresAgentRevalidation = true;
+        storeOutcome = "requires-agent-revalidation";
         return t;
       }
       if (verdict === "trusted-pass" || verdict === "trusted-fail") {
-        skippedTrustedVerdict = true;
+        storeOutcome = "trusted-verdict-skipped";
         return t;
       }
+      storeOutcome = "stored";
       return {
         ...t,
         // Evidence storage is not positive completion authority. The
@@ -62,15 +61,15 @@ const handler: HookHandler = async (stdin, args) => {
 
   // A --task that matches nothing is a silent success otherwise: the caller
   // believes evidence was stored while the graph is untouched.
-  if (!matched) {
+  if (storeOutcome === "missing") {
     return { kind: "error", message: `store-test-evidence: no task ${taskId} in the task graph — nothing stored` };
   }
 
-  if (requiresAgentRevalidation) {
+  if (storeOutcome === "requires-agent-revalidation") {
     return { kind: "error", message: `store-test-evidence: ${taskId} requires a re-spawned implementation Agent to record fresh test evidence` };
   }
 
-  if (skippedTrustedVerdict) {
+  if (storeOutcome === "trusted-verdict-skipped") {
     process.stderr.write(
       `store-test-evidence: ${taskId} already carries a trusted verdict from the evidence ledger — refusing to overwrite it with helper-reported (untrusted) results\n`,
     );

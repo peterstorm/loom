@@ -13,11 +13,14 @@
  * now keeps the I/O and calls this for the decision.
  */
 
-import { isReviewAgent } from "../engine/src/config";
+import { agentsOfKind } from "../engine/src/core/model-profiles";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
 import { type TaskExecutionSpawn } from "../engine/src/core/validate-task-execution";
 import type { ImplementationAttemptAuthority } from "../engine/src/core/implementation-completion";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
+
+const REVIEW_AGENTS: ReadonlySet<string> = new Set(agentsOfKind("reviewer"));
+const isReviewAgent = (agentType: string): boolean => REVIEW_AGENTS.has(agentType);
 
 /**
  * The reservation fields the classification actually reads.

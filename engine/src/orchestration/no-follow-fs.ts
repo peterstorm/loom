@@ -451,10 +451,12 @@ async function acquireDirectoryLock(directory: AnchoredDirectory, lockName: stri
 
 function releaseDirectoryLock(directory: AnchoredDirectory, lockName: string, ownerToken: string): void {
   try {
-    if (readDirectoryFileNoFollow(directory, lockName).toString("utf-8").trim() !== ownerToken) return;
+    const observed = readDirectoryFileNoFollow(directory, lockName).toString("utf-8").trim();
+    if (observed !== ownerToken) {
+      throw new Error(`anchored lock ${lockName} ownership lost: expected ${ownerToken}, found ${observed}`);
+    }
     unlinkSync(anchoredChildPath(directory, lockName));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw new Error(
       `cannot release anchored lock ${lockName}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },

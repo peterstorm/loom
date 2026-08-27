@@ -361,26 +361,36 @@ function parseEvent(raw: unknown): Evidence | null {
   }
 }
 
-/** Parse one ledger line. Unknown/corrupt lines yield null and are skipped. */
-export function parseEvidenceLine(line: string): EvidenceRecord | null {
+export type EvidenceLineParse =
+  | Readonly<{ ok: true; value: EvidenceRecord }>
+  | Readonly<{ ok: false; error: string }>;
+
+/** Parse one ledger line exactly. Corruption is data the reader must fail on, never absence. */
+export function parseEvidenceLine(line: string): EvidenceLineParse {
   let raw: unknown;
   try {
     raw = JSON.parse(line);
-  } catch {
-    return null;
+  } catch (error) {
+    return Object.freeze({
+      ok: false,
+      error: `evidence line is invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    });
   }
-  if (typeof raw !== "object" || raw === null) return null;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return Object.freeze({ ok: false, error: "evidence line must be an object" });
+  }
   const o = raw as Record<string, unknown>;
-  if (typeof o.epoch !== "string") return null;
+  if (typeof o.epoch !== "string") return Object.freeze({ ok: false, error: "evidence line epoch is missing" });
   const epoch = parseEpoch(o.epoch);
-  if (epoch === null) return null;
+  if (epoch === null) return Object.freeze({ ok: false, error: "evidence line epoch is invalid" });
   const event = parseEvent(o.event);
-  if (event === null) return null;
+  if (event === null) return Object.freeze({ ok: false, error: "evidence line event is invalid" });
   // callId is the optional idempotency stamp (harness tool_use_id) —
   // additive wire change: absent or non-string reads as "no stamp".
-  return typeof o.callId === "string" && o.callId !== ""
+  const value = typeof o.callId === "string" && o.callId !== ""
     ? { epoch, event, callId: o.callId }
     : { epoch, event };
+  return Object.freeze({ ok: true, value });
 }
 
 /**

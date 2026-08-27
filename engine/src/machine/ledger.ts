@@ -685,12 +685,16 @@ export function readEvidence(sessionId: SessionId): readonly EvidenceRecord[] {
   const lines = content
     .split("\n")
     .filter((l) => l.trim() !== "");
-  const records = lines.map(parseEvidenceLine).filter((r): r is EvidenceRecord => r !== null);
-  const dropped = lines.length - records.length;
-  if (dropped > 0) {
-    process.stderr.write(`readEvidence: skipped ${dropped} corrupt ledger line(s) for ${sessionId}\n`);
+  const parsed = lines.map(parseEvidenceLine);
+  const corrupt = parsed.flatMap((result, index) =>
+    result.ok ? [] : [`line ${index + 1}: ${result.error}`]);
+  if (corrupt.length > 0) {
+    throw new Error(`evidence ledger ${path} is corrupt; refusing partial evidence: ${corrupt.join("; ")}`);
   }
-  return records;
+  return parsed.map((result) => {
+    if (!result.ok) throw new Error("unreachable: corrupt evidence was rejected above");
+    return result.value;
+  });
 }
 
 // --- Machine registry (definitions shipped with the plugin) ---

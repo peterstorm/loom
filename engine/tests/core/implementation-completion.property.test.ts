@@ -422,6 +422,21 @@ describe("canonical baseline and self-digest policy", () => {
   });
 });
 
+const INVALID_TASK_SUITE_CASES = Object.freeze([
+  ["missing", []],
+  ["duplicate", [
+    { checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "task", outcome: { kind: "accepted", changedPaths: [] } },
+    { checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "task", outcome: { kind: "accepted", changedPaths: [] } },
+  ]],
+  ["surplus", [
+    { checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "task", outcome: { kind: "accepted", changedPaths: [] } },
+    { checkId: "project:surplus", scope: "task", outcome: { kind: "accepted", changedPaths: [] } },
+  ]],
+  ["wrong-scope", [
+    { checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "wave", outcome: { kind: "accepted", changedPaths: [] } },
+  ]],
+] as const);
+
 describe("pure Task suite evaluation", () => {
   it("accepts only the exact engine-owned byte-scope result", () => {
     const attempt = authority();
@@ -435,20 +450,7 @@ describe("pure Task suite evaluation", () => {
     expect(evaluated.kind).toBe("accepted");
   });
 
-  it.each([
-    ["missing", []],
-    ["duplicate", [
-      { checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "task", outcome: { kind: "accepted", changedPaths: [] } },
-      { checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "task", outcome: { kind: "accepted", changedPaths: [] } },
-    ]],
-    ["surplus", [
-      { checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "task", outcome: { kind: "accepted", changedPaths: [] } },
-      { checkId: "project:test", scope: "task", outcome: { kind: "accepted", changedPaths: [] } },
-    ]],
-    ["wrong-scope", [
-      { checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "wave", outcome: { kind: "accepted", changedPaths: [] } },
-    ]],
-  ])("rejects %s roster evidence", (_label, checks) => {
+  it.each(INVALID_TASK_SUITE_CASES)("rejects %s roster evidence", (_label, checks) => {
     const attempt = authority();
     expect(parseTaskCompletionSuiteResult(suiteResult(attempt, checks)).ok).toBe(false);
     const evaluated = evaluateTaskCompletionSuite(suiteAuthority(attempt), suiteResult(attempt, checks));
@@ -630,20 +632,7 @@ describe("Implementation Completion Oracle", () => {
     ))).toEqual({ kind: "ignored", reason: "already-completed" });
   });
 
-  it.each([
-    ["missing", []],
-    ["duplicate", [
-      { checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "task", outcome: { kind: "accepted", changedPaths: [] } },
-      { checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "task", outcome: { kind: "accepted", changedPaths: [] } },
-    ]],
-    ["surplus", [
-      { checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "task", outcome: { kind: "accepted", changedPaths: [] } },
-      { checkId: "project:surplus", scope: "task", outcome: { kind: "accepted", changedPaths: [] } },
-    ]],
-    ["wrong-scope", [
-      { checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT, scope: "wave", outcome: { kind: "accepted", changedPaths: [] } },
-    ]],
-  ])("cannot implement with %s suite evidence", (_label, checks) => {
+  it.each(INVALID_TASK_SUITE_CASES)("cannot implement with %s suite evidence", (_label, checks) => {
     const attempt = authority();
     const settled = settleImplementationAttempt(task(attempt), attempt, attempt, observation(), suiteResult(attempt, checks));
     expect(settled.ok).toBe(false);

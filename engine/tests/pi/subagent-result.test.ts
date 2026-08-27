@@ -182,7 +182,8 @@ describe("writtenPathsOf", () => {
       { role: "assistant", content: [{ type: "toolCall", id: "c2", name: "bash", arguments: { path: "b.md" } }] },
       { role: "user", content: [{ type: "toolCall", id: "c3", name: "write", arguments: { path: "c.md" } }] },
       { role: "assistant", content: [{ type: "toolCall", id: "c4", name: "Write", arguments: { file_path: "d.md" } }] },
-    ] as never)).toEqual(["a.md", "d.md"]);
+      { role: "assistant", content: [{ type: "toolCall", id: "c5", name: "write", arguments: { filePath: "e.md" } }] },
+    ] as never)).toEqual(["a.md", "d.md", "e.md"]);
   });
 });
 

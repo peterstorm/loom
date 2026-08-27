@@ -47,7 +47,7 @@ import {
 } from "../engine/src/core/spec-check";
 import { reconcileWaveBlock } from "../engine/src/core/wave-gate-model";
 import { phaseArtifactUpdates } from "../engine/src/core/phase-artifact-paths";
-import { IMPL_AGENTS, isReviewAgent } from "../engine/src/config";
+import { agentsOfKind } from "../engine/src/core/model-profiles";
 import type { Phase, TaskGraph } from "../engine/src/types";
 import type { ParsedTaskGraph } from "../engine/src/state-manager";
 import {
@@ -82,6 +82,10 @@ import {
   type PiMessage,
   type PiTranscriptResult,
 } from "./transcript-adapter";
+
+const IMPL_AGENTS: ReadonlySet<string> = new Set(agentsOfKind("impl"));
+const REVIEW_AGENTS: ReadonlySet<string> = new Set(agentsOfKind("reviewer"));
+const isReviewAgent = (agentType: string): boolean => REVIEW_AGENTS.has(agentType);
 
 /**
  * The protected-state seam. `StateManager` satisfies it structurally; a test
@@ -465,7 +469,9 @@ export function writtenPathsOf(
     for (const block of message.content ?? []) {
       if (block.type !== "toolCall" || (block.name !== "write" && block.name !== "Write")) continue;
       const args = block.arguments as Record<string, unknown> | undefined;
-      const path = (args?.path as string | undefined) ?? (args?.file_path as string | undefined);
+      const path = (args?.path as string | undefined) ??
+        (args?.file_path as string | undefined) ??
+        (args?.filePath as string | undefined);
       if (typeof path === "string" && path.length > 0) paths.push(path);
     }
   }

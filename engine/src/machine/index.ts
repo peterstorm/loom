@@ -37,6 +37,7 @@ export {
 } from "./extract-evidence";
 export {
   parseEvidenceLine,
+  type EvidenceLineParse,
   eventsForEpoch,
   epochOf,
   parseEpoch,
@@ -103,12 +104,14 @@ export {
 export { fsSessionRegistry } from "./session-registry";
 export {
   bindSessionTaskGraphPointer,
+  claimPersistedSessionTaskGraphPointerBinding,
   persistSessionTaskGraphPointerBinding,
   releasePersistedSessionTaskGraphPointerBinding,
   rollbackSessionTaskGraphPointer,
   parsePersistedSessionTaskGraphPointerBinding,
   parseSessionTaskGraphPointerLeaseRegistry,
   type PersistedSessionTaskGraphPointerBinding,
+  type PersistedSessionTaskGraphPointerClaim,
   type PersistedSessionTaskGraphPointerRelease,
   type SessionTaskGraphPointerBinding,
   type SessionTaskGraphPointerLeaseRegistry,

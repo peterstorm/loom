@@ -270,6 +270,13 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
     expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(true);
     expect(existsSync(pointerBinding)).toBe(true);
 
+    const duplicate = await markActive(start(s), []);
+    expect(duplicate.kind).toBe("passthrough");
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.active`))).toBe(true);
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.machine`))).toBe(true);
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(true);
+    expect(existsSync(pointerBinding)).toBe(true);
+
     const cleaned = await runCleanupSubagentFlag(JSON.stringify({
       session_id: s,
       agent_id: "a-1",
