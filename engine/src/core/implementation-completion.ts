@@ -716,6 +716,19 @@ function nonEmptyValues<T>(values: readonly T[]): readonly [T, ...T[]] | null {
   return first === undefined ? null : Object.freeze([first, ...values.slice(1)]);
 }
 
+function rejectedTaskCompletionSuite(
+  authorityFailures: readonly TaskSuiteAuthorityFailure[] = [],
+  semanticFailures: readonly TaskSuiteSemanticFailure[] = [],
+  infrastructureFailures: readonly TaskSuiteInfrastructureFailure[] = [],
+): Extract<TaskCompletionSuiteEvaluation, { kind: "rejected" }> {
+  return freeze({
+    kind: "rejected",
+    authorityFailures: freezeArray(authorityFailures),
+    semanticFailures: freezeArray(semanticFailures),
+    infrastructureFailures: freezeArray(infrastructureFailures),
+  });
+}
+
 /** Evaluate exact Task result coverage without running or authorizing commands. */
 export function evaluateTaskCompletionSuite(
   rawAuthority: unknown,
@@ -732,23 +745,17 @@ export function evaluateTaskCompletionSuite(
       ...(result.ok ? [] : result.error.errors),
     ];
     const nonEmptyErrors = nonEmptyValues(errors) ?? ["Task suite input is invalid"];
-    return freeze({
-      kind: "rejected",
-      authorityFailures: Object.freeze([freeze({ kind: "invalid-task-suite-result", errors: nonEmptyErrors })]),
-      semanticFailures: Object.freeze([]),
-      infrastructureFailures: Object.freeze([]),
-    });
+    return rejectedTaskCompletionSuite([
+      freeze({ kind: "invalid-task-suite-result", errors: nonEmptyErrors }),
+    ]);
   }
   const staleFields = (["implementationAuthorityDigest", "suiteDigest"] as const)
     .filter((field) => authority.value[field] !== result.value[field]);
   const stale = nonEmptyValues(staleFields);
   if (stale !== null) {
-    return freeze({
-      kind: "rejected",
-      authorityFailures: Object.freeze([freeze({ kind: "stale-task-suite-result", fields: stale })]),
-      semanticFailures: Object.freeze([]),
-      infrastructureFailures: Object.freeze([]),
-    });
+    return rejectedTaskCompletionSuite([
+      freeze({ kind: "stale-task-suite-result", fields: stale }),
+    ]);
   }
 
   const expectedIds: ReadonlySet<CompletionCheckId> = new Set<CompletionCheckId>(
@@ -799,12 +806,7 @@ export function evaluateTaskCompletionSuite(
   return authorityFailures.length === 0 && semanticFailures.length === 0 &&
       infrastructureFailures.length === 0 && exactResult?.ok
     ? freeze({ kind: "accepted", result: exactResult.value })
-    : freeze({
-        kind: "rejected",
-        authorityFailures: freezeArray(authorityFailures),
-        semanticFailures: freezeArray(semanticFailures),
-        infrastructureFailures: freezeArray(infrastructureFailures),
-      });
+    : rejectedTaskCompletionSuite(authorityFailures, semanticFailures, infrastructureFailures);
 }
 
 export type ImplementationObservation =

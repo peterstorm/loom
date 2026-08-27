@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
 import { freezeVerificationManifest } from "../../../../src/core/verification-manifest";
-import type { TaskGraph } from "../../../../src/types";
+import { parseNewTestEvidence, type TaskGraph } from "../../../../src/types";
 
 const ENGINE = fileURLToPath(new URL("../../../../", import.meta.url));
 const CLI = join(ENGINE, "src/cli.ts");
@@ -117,7 +117,7 @@ if (outcome === "nonzero") process.exit(7);
       file_list: ["source.ts"],
       files_modified: ["source.ts"],
       test_result: { verdict: "trusted-pass" },
-      new_tests_written: true,
+      new_test_observation: parseNewTestEvidence(true, "fixture new-test evidence"),
       review_status: "pending",
       review_generation: 0,
       critical_findings: [],

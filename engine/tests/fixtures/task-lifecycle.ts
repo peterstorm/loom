@@ -3,7 +3,13 @@ import {
   evaluateProofObligations,
   type TaskProof,
 } from "../../src/core/proof-obligations";
-import type { Task, TaskCommonMetadata, TaskStatus } from "../../src/types";
+import {
+  parseNewTestEvidence,
+  type NewTestEvidence,
+  type Task,
+  type TaskCommonMetadata,
+  type TaskStatus,
+} from "../../src/types";
 
 /** Canonical modern pending lifecycle fixture for tests outside Proof-specific suites. */
 export function pendingTaskProof(
@@ -17,6 +23,10 @@ export type TaskFixtureInput = TaskCommonMetadata & Readonly<{
   status?: TaskStatus;
   proof?: TaskProof;
   revalidation_required?: true;
+  /** Legacy flat fixture input is normalized at this test-only boundary. */
+  new_tests_written?: boolean;
+  new_test_evidence?: string;
+  new_test_observation?: NewTestEvidence;
 }>;
 
 /**
@@ -28,8 +38,18 @@ export function taskFixture(input: TaskFixtureInput): Task {
     status = "pending",
     proof: suppliedProof,
     revalidation_required: revalidation,
-    ...metadata
+    new_tests_written: legacyNewTestsWritten,
+    new_test_evidence: legacyNewTestEvidence,
+    new_test_observation: suppliedNewTestObservation,
+    ...baseMetadata
   } = input;
+  const newTestObservation = legacyNewTestsWritten !== undefined || legacyNewTestEvidence !== undefined
+    ? parseNewTestEvidence(legacyNewTestsWritten, legacyNewTestEvidence)
+    : suppliedNewTestObservation;
+  const metadata = {
+    ...baseMetadata,
+    ...(newTestObservation === undefined ? {} : { new_test_observation: newTestObservation }),
+  };
   const pending = pendingTaskProof(input.file_list ?? [], input.new_tests_required ?? true);
   if (status === "pending") {
     const proof = suppliedProof ?? pending;

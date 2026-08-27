@@ -236,8 +236,11 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
     // persists filesModified in its own locked update) agree (round-16 fix:
     // pi's omission made every wave-gate lint run over an empty set).
     expect(t1.files_modified).toEqual(["src/a.ts", "tests/a.test.ts"]);
-    expect(t1.new_tests_written).toBe(true);
-    expect(t1.new_test_evidence).toBe(untrustedPass.newTestEvidence);
+    expect(t1.new_test_observation).toEqual({
+      kind: "written",
+      written: true,
+      evidence: untrustedPass.newTestEvidence,
+    });
     expect(applied.state.executing_tasks).toEqual(["T3"]);
     expect(applied.state.wave_gates["1"].impl_complete).toBe(false);
     // Other tasks untouched.
@@ -276,8 +279,11 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
     const resolved = applied.state.tasks[0]!;
 
     expect(resolved.files_modified).toEqual(["src/new.ts", "src/old.ts"]);
-    expect(resolved.new_tests_written).toBe(false);
-    expect(resolved.new_test_evidence).toBe("");
+    expect(resolved.new_test_observation).toEqual({
+      kind: "not-written",
+      written: false,
+      evidence: "",
+    });
     expect(resolved.review_status).toBe("pending");
     expect(resolved.review_error).toBeUndefined();
     expect(resolved.review_evidence_failures).toBeUndefined();

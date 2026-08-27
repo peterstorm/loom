@@ -25,6 +25,8 @@ import {
   removeActiveAgentStrict,
   reportedRosterAgentId,
   bindSessionTaskGraphPointer,
+  persistSessionTaskGraphPointerBinding,
+  releasePersistedSessionTaskGraphPointerBinding,
   rollbackSessionTaskGraphPointer,
   WRITE_GRANT_AGENT_NAMESPACE,
   type SessionTaskGraphPointerBinding,
@@ -257,13 +259,34 @@ const handler: HookHandler = async (stdin) => {
   // taskGraphPath() resolves at CALL time (like machinesDir above) so the
   // path this handler persists can never drift from what the env says now.
   let taskGraphPointerBinding: SessionTaskGraphPointerBinding | null = null;
-  try {
-    taskGraphPointerBinding = await bindSessionTaskGraphPointer(sessionId, activeGraphPath);
-  } catch (error) {
-    const pointerFailure =
-      `mark-subagent-active: failed to bind task_graph pointer for ${sessionId} — cross-repo SubagentStop authority is unavailable: ${error instanceof Error ? error.message : String(error)}`;
-    process.stderr.write(`${pointerFailure}\n`);
-    if (loomOwnedAgent) bindingFailure = bindingFailure ?? pointerFailure;
+  let pointerBindingPersisted = false;
+  if (rosterId !== null) {
+    try {
+      taskGraphPointerBinding = await bindSessionTaskGraphPointer(sessionId, activeGraphPath);
+      persistSessionTaskGraphPointerBinding(sessionId, rosterId, taskGraphPointerBinding);
+      pointerBindingPersisted = true;
+    } catch (error) {
+      const rollbackFailures: string[] = [];
+      if (taskGraphPointerBinding !== null) {
+        try {
+          const persistedRelease = await releasePersistedSessionTaskGraphPointerBinding(sessionId, rosterId);
+          const released = persistedRelease === "binding-missing"
+            ? await rollbackSessionTaskGraphPointer(taskGraphPointerBinding)
+            : persistedRelease;
+          if (released !== "rolled-back") rollbackFailures.push(`new lease rollback returned ${released}`);
+        } catch (rollbackError) {
+          rollbackFailures.push(`new lease rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+        }
+      }
+      const pointerFailure =
+        `mark-subagent-active: failed to persist task_graph pointer authority for ${sessionId}/${rosterId} — cross-repo SubagentStop cleanup is unavailable: ${error instanceof Error ? error.message : String(error)}` +
+        (rollbackFailures.length === 0 ? "" : `; ${rollbackFailures.join("; ")}`);
+      process.stderr.write(`${pointerFailure}\n`);
+      if (loomOwnedAgent) bindingFailure = bindingFailure ?? pointerFailure;
+    }
+  } else if (loomOwnedAgent) {
+    bindingFailure = bindingFailure ??
+      `mark-subagent-active: cannot bind task_graph pointer for Loom Agent without a cleanup-capable agent_id`;
   }
 
   if (bindingFailure !== null && agentId !== null) {
@@ -291,7 +314,9 @@ const handler: HookHandler = async (stdin) => {
     }
     if (taskGraphPointerBinding !== null) {
       try {
-        const rolledBack = await rollbackSessionTaskGraphPointer(taskGraphPointerBinding);
+        const rolledBack = pointerBindingPersisted && rosterId !== null
+          ? await releasePersistedSessionTaskGraphPointerBinding(sessionId, rosterId)
+          : await rollbackSessionTaskGraphPointer(taskGraphPointerBinding);
         if (rolledBack !== "rolled-back") {
           rollbackFailures.push(`task-graph pointer rollback lost exact ownership (${rolledBack})`);
         }

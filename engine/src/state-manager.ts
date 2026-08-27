@@ -13,7 +13,14 @@ import { fileURLToPath } from "node:url";
 import { withLock } from "./utils/lock";
 import { KNOWN_AGENTS, PHASE_ORDER, REVIEW_SUB_AGENTS, pathExistsFailClosed, taskGraphPath } from "./config";
 import { parseErr, parseOk, parseSessionId, sessionScopedPath, type ParseResult } from "./machine";
-import { REVIEW_STATUSES, TASK_STATUSES, type Phase } from "./types";
+import {
+  parseNewTestEvidence,
+  parseStoredNewTestEvidence,
+  REVIEW_STATUSES,
+  storedNewTestEvidence,
+  TASK_STATUSES,
+  type Phase,
+} from "./types";
 import {
   findingIdCollisionError,
   findingsLockstepError,
@@ -1189,8 +1196,30 @@ function taskEvidenceError(
   index: number,
   id: string,
 ): string | null {
-  if (t.test_result === undefined) return null;
   const prefix = `tasks[${index}] ("${id}")`;
+  const hasWritten = t.new_tests_written !== undefined;
+  const hasEvidence = t.new_test_evidence !== undefined;
+  if (t.new_test_observation !== undefined && (hasWritten || hasEvidence)) {
+    return `${prefix}: new_test_observation cannot coexist with legacy new_tests_written/new_test_evidence`;
+  }
+  if (t.new_test_observation !== undefined) {
+    const parsedObservation = parseStoredNewTestEvidence(t.new_test_observation);
+    if (!parsedObservation.ok) return `${prefix}: ${parsedObservation.error}`;
+  }
+  if (!hasWritten && hasEvidence) {
+    return `${prefix}: new_test_evidence requires new_tests_written`;
+  }
+  if (hasWritten && typeof t.new_tests_written !== "boolean") {
+    return `${prefix}: new_tests_written must be a boolean when present`;
+  }
+  if (hasEvidence && typeof t.new_test_evidence !== "string") {
+    return `${prefix}: new_test_evidence must be a string when present`;
+  }
+  if (t.new_tests_written === true &&
+      (typeof t.new_test_evidence !== "string" || t.new_test_evidence.trim() === "")) {
+    return `${prefix}: new_tests_written true requires non-empty new_test_evidence`;
+  }
+  if (t.test_result === undefined) return null;
   const parsed = parseTaskTestResult(t.test_result, `${prefix}: test_result`);
   if (parsed.ok) return null;
   const exactShapeError = parsed.errors.find((error) => error.includes("unexpected field(s)"));
@@ -1559,6 +1588,25 @@ function migrateParsedTask(
     if (!testResult.ok) return parseErr(testResult.errors.join("; "));
     migrated = { ...migrated, test_result: testResult.value };
   }
+  const storedNewTests = task.new_test_observation === undefined
+    ? null
+    : parseStoredNewTestEvidence(task.new_test_observation);
+  if (storedNewTests !== null && !storedNewTests.ok) return parseErr(storedNewTests.error);
+  const parsedNewTests = storedNewTests?.ok
+    ? storedNewTests.value
+    : (task.new_tests_written === undefined && task.new_test_evidence === undefined
+        ? null
+        : parseNewTestEvidence(task.new_tests_written, task.new_test_evidence));
+  const {
+    new_tests_written: _legacyNewTestsWritten,
+    new_test_evidence: _legacyNewTestEvidence,
+    ...withoutLegacyNewTests
+  } = migrated;
+  void _legacyNewTestsWritten;
+  void _legacyNewTestEvidence;
+  migrated = parsedNewTests === null
+    ? withoutLegacyNewTests
+    : { ...withoutLegacyNewTests, ...storedNewTestEvidence(parsedNewTests) };
   return parseOk(migrated);
 }
 

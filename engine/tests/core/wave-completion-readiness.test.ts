@@ -21,8 +21,9 @@ import {
 } from "../../src/core/verification-manifest";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
 import type { ArtifactDigest } from "../../src/core/orchestration-contract";
-import type {
-  ActiveWaveGateRegistration,
+import {
+  parseNewTestEvidence,
+  type ActiveWaveGateRegistration,
   Task,
   TaskGraph,
   WaveCompletionResultObservation,
@@ -71,8 +72,7 @@ const task: Task = {
   depends_on: [],
   test_result: { verdict: "trusted-pass" },
   test_evidence: "vitest pass",
-  new_tests_written: true,
-  new_test_evidence: "focused readiness test",
+  new_test_observation: parseNewTestEvidence(true, "focused readiness test"),
   review_status: "passed",
   critical_findings: [],
   advisory_findings: [],

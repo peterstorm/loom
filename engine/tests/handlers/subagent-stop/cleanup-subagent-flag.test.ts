@@ -50,12 +50,16 @@ describe("cleanup-subagent-flag — malformed stdin", () => {
         attempted.push("sidecar");
         throw new Error("sidecar unavailable");
       },
+      async () => {
+        attempted.push("pointer");
+        throw new Error("pointer unavailable");
+      },
     );
 
-    expect(attempted).toEqual(["unbind", "sidecar", "roster"]);
+    expect(attempted).toEqual(["unbind", "sidecar", "pointer", "roster"]);
     expect(result).toEqual({
       kind: "error",
-      message: expect.stringMatching(/unbind unavailable.*sidecar unavailable.*roster unavailable/),
+      message: expect.stringMatching(/unbind unavailable.*sidecar unavailable.*pointer unavailable.*roster unavailable/),
     });
   });
 });

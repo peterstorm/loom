@@ -55,7 +55,7 @@ const handler: HookHandler = async (_stdin, args) => {
     .filter(({ task, verification }) => requiresRegression(verification) && !testResultPassed(task.test_result))
     .map(({ task }) => task);
   const missingNew = taskEvidence
-    .filter(({ task, verification }) => requiresNewTests(verification) && !task.new_tests_written)
+    .filter(({ task, verification }) => requiresNewTests(verification) && task.new_test_observation?.kind !== "written")
     .map(({ task }) => task);
 
   process.stderr.write(
@@ -69,7 +69,7 @@ const handler: HookHandler = async (_stdin, args) => {
       : testResultPassed(t.test_result) ? "PASS" : "MISSING";
     const newStatus = verification.newTests.kind === "waived"
       ? `N/A (${verification.newTests.reason})`
-      : t.new_tests_written ? `YES (${t.new_test_evidence})` : "MISSING";
+      : t.new_test_observation?.kind === "written" ? `YES (${t.new_test_observation.evidence})` : "MISSING";
     process.stderr.write(`  ${t.id}: tests=${testStatus} new=${newStatus}\n`);
   }
 

@@ -54,7 +54,7 @@ function failedTask(taskCompleted = true): Task {
     PI_STRUCTURED_EVIDENCE_POLICY,
   );
   if (proof.state !== "failed") throw new Error("failed Task fixture must carry failed Proof");
-  return {
+  return taskFixture({
     id: "T5",
     description: "implementation",
     agent: "code-implementer-agent",
@@ -69,7 +69,7 @@ function failedTask(taskCompleted = true): Task {
     test_result: testResult,
     test_evidence: "bun: 25 pass",
     proof,
-  };
+  });
 }
 
 describe("reconciliation failure diagnostics", () => {
@@ -307,8 +307,11 @@ describe("reconcileTaskFromStoredEvidence", () => {
 
     expect(reconciled.status).toBe("pending");
     expect(reconciled.proof?.state).toBe("failed");
-    expect(reconciled.new_tests_written).toBe(false);
-    expect(reconciled.new_test_evidence).toBe("");
+    expect(reconciled.new_test_observation).toEqual({
+      kind: "not-written",
+      written: false,
+      evidence: "",
+    });
     if (reconciled.proof?.state === "failed") {
       expect(reconciled.proof.failures.map((failure) => failure.kind)).toEqual(["new-tests-not-observed"]);
     }
@@ -343,7 +346,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
 
     expect(reconciled.status).toBe("pending");
     expect(reconciled.proof?.state).toBe("failed");
-    expect(reconciled.new_tests_written).toBe(false);
+    expect(reconciled.new_test_observation?.written).toBe(false);
   });
 
   it("reconciles both asymmetric Verification Policy directions", () => {

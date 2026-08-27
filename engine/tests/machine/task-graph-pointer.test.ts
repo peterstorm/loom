@@ -4,11 +4,15 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   bindSessionTaskGraphPointer,
+  parseAgentId,
+  parseSessionId,
   parseSessionTaskGraphPointerLeaseRegistry,
+  persistSessionTaskGraphPointerBinding,
+  releasePersistedSessionTaskGraphPointerBinding,
   rollbackSessionTaskGraphPointer,
+  TASK_GRAPH_POINTER_BINDING_SUFFIX,
   TASK_GRAPH_POINTER_LEASES_SUFFIX,
 } from "../../src/machine";
-import { parseSessionId } from "../../src/machine";
 
 const roots: string[] = [];
 
@@ -73,6 +77,47 @@ describe("shared session TaskGraph pointer lease registry", () => {
     expect(await rollbackSessionTaskGraphPointer(shared)).toBe("rolled-back");
     expect(readFileSync(pointer, "utf8")).toBe(graphA);
     expect(existsSync(registryPath)).toBe(false);
+  });
+
+  it("persists Claude cleanup authority, releases the exact final lease, and permits a new target", async () => {
+    const { root, graphA, graphB, graphC, sessionId, pointer, registry: registryPath } = fixture();
+    const agentId = parseAgentId("claude-agent-1");
+    if (agentId === null) throw new Error("agent fixture must parse");
+    writeFileSync(pointer, graphA);
+    const binding = await bindSessionTaskGraphPointer(sessionId, graphB, root);
+    const sidecar = join(
+      root,
+      `${sessionId}.${Buffer.from(agentId, "utf8").toString("hex")}${TASK_GRAPH_POINTER_BINDING_SUFFIX}`,
+    );
+
+    persistSessionTaskGraphPointerBinding(sessionId, agentId, binding);
+
+    expect(existsSync(sidecar)).toBe(true);
+    expect(await releasePersistedSessionTaskGraphPointerBinding(sessionId, agentId, root)).toBe("rolled-back");
+    expect(readFileSync(pointer, "utf8")).toBe(graphA);
+    expect(existsSync(registryPath)).toBe(false);
+    expect(existsSync(sidecar)).toBe(false);
+    expect(await releasePersistedSessionTaskGraphPointerBinding(sessionId, agentId, root)).toBe("binding-missing");
+
+    const nextTarget = await bindSessionTaskGraphPointer(sessionId, graphC, root);
+    expect(readFileSync(pointer, "utf8")).toBe(graphC);
+    expect(await rollbackSessionTaskGraphPointer(nextTarget)).toBe("rolled-back");
+  });
+
+  it("retains persisted cleanup authority when pointer ownership is lost", async () => {
+    const { root, graphA, graphB, sessionId, pointer } = fixture();
+    const agentId = parseAgentId("claude-agent-2");
+    if (agentId === null) throw new Error("agent fixture must parse");
+    const binding = await bindSessionTaskGraphPointer(sessionId, graphA, root);
+    persistSessionTaskGraphPointerBinding(sessionId, agentId, binding);
+    writeFileSync(pointer, graphB);
+
+    expect(await releasePersistedSessionTaskGraphPointerBinding(sessionId, agentId, root)).toBe("ownership-lost");
+    const sidecar = join(
+      root,
+      `${sessionId}.${Buffer.from(agentId, "utf8").toString("hex")}${TASK_GRAPH_POINTER_BINDING_SUFFIX}`,
+    );
+    expect(existsSync(sidecar)).toBe(true);
   });
 
   it("removes only the exact lease and makes repeated release idempotent", async () => {

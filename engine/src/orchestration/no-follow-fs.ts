@@ -223,19 +223,31 @@ export function writeDirectoryFileAtomicNoFollow(
   const temporary = `${name}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   assertLeafName(temporary);
   let published = false;
+  let primaryError: unknown = null;
   try {
     writeDirectoryFileExclusiveNoFollow(directory, temporary, data);
     renameSync(anchoredChildPath(directory, temporary), anchoredChildPath(directory, name));
     published = true;
-  } finally {
-    if (!published) {
-      try {
-        unlinkSync(anchoredChildPath(directory, temporary));
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
+  } catch (error) {
+    primaryError = error;
+  }
+
+  let cleanupError: unknown = null;
+  if (!published) {
+    try {
+      unlinkSync(anchoredChildPath(directory, temporary));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") cleanupError = error;
     }
   }
+  if (primaryError !== null && cleanupError !== null) {
+    throw new AggregateError(
+      [primaryError, cleanupError],
+      `atomic write of ${name} and temporary-file cleanup both failed`,
+    );
+  }
+  if (primaryError !== null) throw primaryError;
+  if (cleanupError !== null) throw cleanupError;
 }
 
 /** Remove one anchored leaf; ENOENT is the only idempotent absence. */

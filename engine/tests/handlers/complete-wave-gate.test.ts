@@ -38,7 +38,12 @@ import {
   renderLoomStatusHuman,
   renderLoomStatusJson,
 } from "../../src/core/wave-gate-machine";
-import type { CapturedSpecCheck, Task, TaskGraph } from "../../src/types";
+import {
+  parseNewTestEvidence,
+  type CapturedSpecCheck,
+  type Task,
+  type TaskGraph,
+} from "../../src/types";
 import { derivePendingTaskProof, evaluateTaskProof } from "../../src/core/proof-obligations";
 import { taskFixture, type TaskFixtureInput } from "../fixtures/task-lifecycle";
 import { defaultVerificationManifest } from "../../src/core/verification-manifest";
@@ -120,8 +125,7 @@ const baseTask: Task = {
   depends_on: [],
   test_result: { verdict: "trusted-pass" },
   test_evidence: "vitest: Tests 5 passed",
-  new_tests_written: true,
-  new_test_evidence: "1 new test, 1 assertion",
+  new_test_observation: parseNewTestEvidence(true, "1 new test, 1 assertion"),
   review_status: "passed",
   critical_findings: [],
   advisory_findings: [],
@@ -319,15 +323,62 @@ describe("checkNewTests (pure)", () => {
   });
 
   it("passes when task has new_tests_required=false", () => {
-    const task = { ...baseTask, new_tests_required: false, new_tests_written: false };
+    const task = taskState({ new_tests_required: false, new_tests_written: false });
     const result = checkNewTests([task]);
     expect(result.passed).toBe(true);
   });
 
   it("fails when task missing new tests", () => {
-    const task = { ...baseTask, new_tests_written: false, new_tests_required: undefined };
+    const task = taskState({ new_tests_written: false, new_tests_required: undefined });
     const result = checkNewTests([task]);
     expect(result.passed).toBe(false);
+  });
+
+  it("rejects positive legacy wire state without non-empty evidence and migrates valid pairs into the ADT", () => {
+    const { new_test_observation: _observation, ...withoutObservation } = baseTask;
+    const raw = {
+      current_phase: "execute",
+      current_wave: 1,
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      wave_gates: {},
+      tasks: [{
+        ...withoutObservation,
+        new_tests_written: true,
+        new_test_evidence: "",
+      }],
+    };
+    expect(parseTaskGraph(raw)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("requires non-empty new_test_evidence"),
+    });
+
+    const parsed = parseTaskGraph({
+      ...raw,
+      tasks: [{
+        ...withoutObservation,
+        new_tests_written: true,
+        new_test_evidence: "one focused regression",
+      }],
+    });
+    expect(parsed).toMatchObject({
+      ok: true,
+      value: {
+        tasks: [{
+          new_test_observation: {
+            kind: "written",
+            written: true,
+            evidence: "one focused regression",
+          },
+        }],
+      },
+    });
+    if (parsed.ok) {
+      expect("new_tests_written" in parsed.value.tasks[0]!).toBe(false);
+      expect(checkNewTests(parsed.value.tasks).passed).toBe(true);
+    }
   });
 });
 
@@ -1416,7 +1467,10 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       // A terminal receipt for the current Wave that committedTerminalStatus
       // refused (later Waves still exist) is a contradiction, not a fresh Wave.
       "terminal history contradicts the graph": withoutRegistration(registeredGraph({
-        tasks: [{ ...baseTask, id: "T1", wave: 1, status: "completed" }, { ...baseTask, id: "T2", wave: 2 }],
+        tasks: [
+          taskState({ id: "T1", wave: 1, status: "completed" }),
+          taskState({ id: "T2", wave: 2 }),
+        ],
         wave_gate_history: [terminalHistoryEntry],
       })),
     };
@@ -1632,7 +1686,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       tasks: [{
         ...baseTask,
         test_result: { verdict: "trusted-fail" },
-        new_tests_written: false,
+        new_test_observation: parseNewTestEvidence(false, ""),
         review_status: "pending",
         critical_findings: ["blocker"],
       }],
@@ -2283,7 +2337,12 @@ describe("protected active Wave Gate registration", () => {
     if (artifactProof.state !== "satisfied") throw new Error("artifact fixture proof must be satisfied");
     writeFileSync(path, JSON.stringify(registeredGraph({
       plan_file: "plan.md",
-      tasks: [{ ...baseTask, file_list: [relativeArtifact], files_modified: [relativeArtifact], proof: artifactProof }],
+      tasks: [taskState({
+        status: "implemented",
+        file_list: [relativeArtifact],
+        files_modified: [relativeArtifact],
+        proof: artifactProof,
+      })],
     })));
     const manager = new StateManager(path);
     const io: GateIO = {
@@ -2609,7 +2668,7 @@ describe("final-Wave compatibility completion replay", () => {
     const authority = authorityValue(deriveLegacyWaveGateCompatibilityAuthority(graph, null));
     const conflict = registeredGraph({
       active_wave_gate: undefined,
-      tasks: [{ ...baseTask, status: "completed" }],
+      tasks: [taskState({ status: "completed" })],
       wave_gates: {
         "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
       },

@@ -147,6 +147,7 @@ export const ORCHESTRATION_RUNS_SUFFIX = ".orchestration-runs.json" as const;
 /** Claude implementation authority sidecars encode the reported Agent id
  * before this suffix; the stale-session sweep decodes the session prefix. */
 export const IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX = ".implementation-attempt.json" as const;
+export const TASK_GRAPH_POINTER_BINDING_SUFFIX = ".task-graph-pointer-binding.json" as const;
 export const TASK_GRAPH_POINTER_LEASES_SUFFIX = ".task-graph-pointer-leases.json" as const;
 
 /**
@@ -166,6 +167,7 @@ export const SESSION_SUFFIXES = [
   CALL_START_SUFFIX,
   ORCHESTRATION_RUNS_SUFFIX,
   IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX,
+  TASK_GRAPH_POINTER_BINDING_SUFFIX,
 ] as const;
 
 export type SessionFileSuffix = (typeof SESSION_SUFFIXES)[number];

@@ -63,8 +63,8 @@ export function hasLaterWaveTaskProgress(task: Task, executingTaskIds: readonly 
     task.status !== "pending" ||
     task.reserved_at !== undefined || task.start_sha !== undefined ||
     task.files_modified !== undefined || task.test_result !== undefined ||
-    task.test_evidence !== undefined || task.new_tests_written !== undefined ||
-    task.new_test_evidence !== undefined || (task.proof !== undefined && task.proof.state !== "pending") ||
+    task.test_evidence !== undefined || task.new_test_observation !== undefined ||
+    (task.proof !== undefined && task.proof.state !== "pending") ||
     (task.review_status !== undefined && task.review_status !== "pending") ||
     (task.review_generation ?? 0) > 0 || task.review_run !== undefined ||
     task.accepted_review_authority !== undefined || task.review_error !== undefined ||

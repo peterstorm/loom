@@ -339,7 +339,61 @@ export interface RecoveredArtifactWriteEvidence {
   readonly modified_paths: readonly string[];
 }
 
-export interface TaskCommonMetadata {
+declare const NON_EMPTY_NEW_TEST_EVIDENCE: unique symbol;
+export type NonEmptyNewTestEvidence = string & { readonly [NON_EMPTY_NEW_TEST_EVIDENCE]: true };
+
+/** One normalized new-test observation. A positive observation cannot exist without evidence. */
+export type NewTestEvidence =
+  | Readonly<{ kind: "not-written"; written: false; evidence: string }>
+  | Readonly<{ kind: "written"; written: true; evidence: NonEmptyNewTestEvidence }>;
+
+/** Compatibility parser for legacy boolean/string evidence pairs. */
+export function parseNewTestEvidence(written: unknown, evidence: unknown): NewTestEvidence {
+  const text = typeof evidence === "string" ? evidence : "";
+  return written === true && text.trim() !== ""
+    ? Object.freeze({ kind: "written", written: true, evidence: text as NonEmptyNewTestEvidence })
+    : Object.freeze({ kind: "not-written", written: false, evidence: text });
+}
+
+export function parseStoredNewTestEvidence(raw: unknown):
+  | Readonly<{ ok: true; value: NewTestEvidence }>
+  | Readonly<{ ok: false; error: string }> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw) || Object.getPrototypeOf(raw) !== Object.prototype) {
+    return Object.freeze({ ok: false, error: "new_test_observation must be a plain object" });
+  }
+  const record = raw as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  if (keys.length !== 3 || keys[0] !== "evidence" || keys[1] !== "kind" || keys[2] !== "written") {
+    return Object.freeze({ ok: false, error: "new_test_observation must contain exactly evidence, kind, written" });
+  }
+  if (record.kind === "written" && record.written === true &&
+      typeof record.evidence === "string" && record.evidence.trim() !== "") {
+    return Object.freeze({
+      ok: true,
+      value: Object.freeze({
+        kind: "written",
+        written: true,
+        evidence: record.evidence as NonEmptyNewTestEvidence,
+      }),
+    });
+  }
+  if (record.kind === "not-written" && record.written === false && typeof record.evidence === "string") {
+    return Object.freeze({
+      ok: true,
+      value: Object.freeze({ kind: "not-written", written: false, evidence: record.evidence }),
+    });
+  }
+  return Object.freeze({ ok: false, error: "new_test_observation tag, written flag, and evidence are contradictory" });
+}
+
+/** Persisted Task projection: one optional ADT replaces two independently optional wire fields. */
+export type StoredNewTestEvidence = Readonly<{ new_test_observation: NewTestEvidence }>;
+
+export function storedNewTestEvidence(evidence: NewTestEvidence): StoredNewTestEvidence {
+  return Object.freeze({ new_test_observation: evidence });
+}
+
+interface TaskCommonMetadataBase {
   /** Base fields are `readonly` like the rest: every mutation flows through
    *  StateManager.update's locked transform, which returns a NEW task object.
    *  An in-place assignment on a loaded graph would bypass that transform and
@@ -364,8 +418,7 @@ export interface TaskCommonMetadata {
   /** Test outcome + trust provenance; absent until an impl agent completes. */
   readonly test_result?: TaskTestResult;
   readonly test_evidence?: string;
-  readonly new_tests_written?: boolean;
-  readonly new_test_evidence?: string;
+  readonly new_test_observation?: NewTestEvidence;
   readonly files_modified?: readonly string[];
   readonly review_status?: ReviewStatus;
   /** Monotonic implementation generation; incremented whenever task bytes change. */
@@ -480,6 +533,8 @@ export interface TaskCommonMetadata {
   /** Immutable exact receipts; append-only settlement audit in wire order. */
   readonly implementation_attempt_history?: readonly ImplementationAttemptSettlementReceipt[];
 }
+
+export type TaskCommonMetadata = Readonly<TaskCommonMetadataBase>;
 
 /** Existing flat wire fields, represented as a closed lifecycle union. */
 export type TaskLifecycle =

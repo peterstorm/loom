@@ -263,10 +263,11 @@ describe("legacy Claude stop quarantine", () => {
     expect(result.kind).toBe("passthrough");
     const persisted = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
     expect(persisted.status).toBe("pending");
-    expect(persisted.new_tests_written).toBe(false);
-    expect(persisted.new_test_evidence).toContain(
-      "verification_policy.new_tests waived: existing-tests-sufficient",
-    );
+    expect(persisted.new_test_observation).toMatchObject({
+      kind: "not-written",
+      written: false,
+      evidence: expect.stringContaining("verification_policy.new_tests waived: existing-tests-sufficient"),
+    });
     expect(persisted.proof.obligations).toEqual([
       { kind: "task-completed" },
       { kind: "regression-test-pass" },
@@ -331,8 +332,11 @@ describe("legacy Claude stop quarantine", () => {
       expect(result.kind).toBe("passthrough");
       const persisted = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
       expect(persisted.test_result).toMatchObject({ verdict: "untrusted", passed: false });
-      expect(persisted.new_tests_written).toBe(true);
-      expect(persisted.new_test_evidence).toContain("1 new test methods, 1 assertions");
+      expect(persisted.new_test_observation).toMatchObject({
+        kind: "written",
+        written: true,
+        evidence: expect.stringContaining("1 new test methods, 1 assertions"),
+      });
       expect(persisted.status).toBe("pending");
       expect(persisted.proof.obligations).toEqual([
         { kind: "task-completed" },

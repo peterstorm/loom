@@ -547,7 +547,7 @@ const newTestsExempt = (task: Task): boolean =>
 const testEvidenceSatisfied = (task: Task): boolean =>
   regressionExempt(task) || testResultPassed(task.test_result);
 const newTestsSatisfied = (task: Task): boolean =>
-  newTestsExempt(task) || task.new_tests_written === true;
+  newTestsExempt(task) || task.new_test_observation?.kind === "written";
 const regressionEvidenceLine = (task: Task): string => {
   const requirement = taskVerificationPolicy(task).regression;
   return requirement.kind === "waived"
@@ -558,7 +558,7 @@ const newTestEvidenceLine = (task: Task): string => {
   const requirement = taskVerificationPolicy(task).newTests;
   return requirement.kind === "waived"
     ? `not required (verification_policy.new_tests waived: ${requirement.reason})`
-    : (task.new_test_evidence ?? "new tests present");
+    : (task.new_test_observation?.evidence ?? "new tests present");
 };
 
 function checkTaskRequirement(

@@ -405,6 +405,7 @@ describe("trust-aware skip guard — decided INSIDE the locked update", () => {
       test_result: { verdict: "trusted-fail" },
       test_evidence: "ledger: exit 1 (npm test)",
       new_tests_written: true,
+      new_test_evidence: "legacy fixture evidence",
     });
     pointSessionAt(s, statePath);
 

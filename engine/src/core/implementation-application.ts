@@ -1,4 +1,12 @@
-import type { Task, TaskGraph, TaskTestResult } from "../types";
+import {
+  parseNewTestEvidence,
+  storedNewTestEvidence,
+  type NewTestEvidence,
+  type Task,
+  type TaskGraph,
+  type TaskTestResult,
+} from "../types";
+export { parseNewTestEvidence, type NewTestEvidence } from "../types";
 import {
   attributedChangedArtifacts,
   changedDeclaredArtifacts,
@@ -141,20 +149,11 @@ export function buildTaskLocalByteObservation(
   if (errors.length > 0 || !attempt.ok || !proof.ok || !parserPaths.ok || !priorPaths.ok ||
       !repositoryPaths.ok || !siblingPaths.ok) {
     const reason = unavailableReason(errors);
-    const suite = createTaskCompletionSuiteResult(input.authority, {
-      kind: "observation-unavailable",
+    return unavailableTaskLocalByteObservation(
+      input.authority,
       reason,
-    });
-    if (!suite.ok) throw new Error(suite.error.errors.join("; "));
-    return freeze({
-      suite: suite.value,
-      attributedAttemptChangedPaths: frozenArray([]),
-      cumulativeModifiedPaths: priorPaths.ok ? priorPaths.value : frozenArray([]),
-      cumulativeProofArtifactChanges: frozenArray([]),
-      taskBytesChangedOrUnobservable: true,
-      unresolvedRepositoryPaths: frozenArray([]),
-      invalidationBytesChanged: true,
-    });
+      priorPaths.ok ? priorPaths.value : frozenArray([]),
+    );
   }
 
   const allowed = new Set(attempt.baseline.map(({ artifact }) => artifact));
@@ -196,6 +195,7 @@ export function buildTaskLocalByteObservation(
 export function unavailableTaskLocalByteObservation(
   authority: ImplementationAttemptAuthority,
   reason: string,
+  cumulativeModifiedPaths: readonly ReviewPath[] = frozenArray([]),
 ): TaskLocalByteObservation {
   const suite = createTaskCompletionSuiteResult(authority, {
     kind: "observation-unavailable",
@@ -205,34 +205,12 @@ export function unavailableTaskLocalByteObservation(
   return freeze({
     suite: suite.value,
     attributedAttemptChangedPaths: frozenArray([]),
-    cumulativeModifiedPaths: frozenArray([]),
+    cumulativeModifiedPaths: frozenArray(cumulativeModifiedPaths),
     cumulativeProofArtifactChanges: frozenArray([]),
     taskBytesChangedOrUnobservable: true,
     unresolvedRepositoryPaths: frozenArray([]),
     invalidationBytesChanged: true,
   });
-}
-
-declare const NON_EMPTY_NEW_TEST_EVIDENCE: unique symbol;
-type NonEmptyNewTestEvidence = string & { readonly [NON_EMPTY_NEW_TEST_EVIDENCE]: true };
-
-export type NewTestEvidence =
-  | Readonly<{ kind: "not-written"; written: false; evidence: string }>
-  | Readonly<{ kind: "written"; written: true; evidence: NonEmptyNewTestEvidence }>;
-
-/** Compatibility parser for legacy boolean/string evidence pairs. */
-export function parseNewTestEvidence(written: unknown, evidence: unknown): NewTestEvidence {
-  const text = typeof evidence === "string" ? evidence : "";
-  return written === true && text.trim() !== ""
-    ? freeze({ kind: "written", written: true, evidence: text as NonEmptyNewTestEvidence })
-    : freeze({ kind: "not-written", written: false, evidence: text });
-}
-
-export function projectNewTestEvidence(evidence: NewTestEvidence): Readonly<{
-  newTestsWritten: boolean;
-  newTestEvidence: string;
-}> {
-  return freeze({ newTestsWritten: evidence.written, newTestEvidence: evidence.evidence });
 }
 
 /** What an authority-free Stop resolution observed. It can preserve diagnostic
@@ -401,8 +379,7 @@ export function applyUntrustedStopResolution(
       test_result: proofTestResult,
       test_evidence: preserveExistingTrusted ? task.test_evidence : resolution.testEvidence,
       files_modified: cumulativeFiles,
-      new_tests_written: currentNewTests.written,
-      new_test_evidence: currentNewTests.evidence,
+      ...storedNewTestEvidence(currentNewTests),
     })),
   };
 }
@@ -487,13 +464,11 @@ function clearAttempt(task: Task): Omit<Task, "status" | "proof" | "revalidation
 }
 
 function evidenceFields(evidence: NormalizedImplementationEvidence) {
-  const newTests = projectNewTestEvidence(evidence.newTests);
   return {
     ...(evidence.testResult === undefined ? {} : { test_result: evidence.testResult }),
     ...(evidence.testEvidence === undefined ? {} : { test_evidence: evidence.testEvidence }),
     files_modified: evidence.cumulativeModifiedPaths,
-    new_tests_written: newTests.newTestsWritten,
-    new_test_evidence: newTests.newTestEvidence,
+    ...storedNewTestEvidence(evidence.newTests),
   };
 }
 

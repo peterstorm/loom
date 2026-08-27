@@ -52,9 +52,9 @@ export const runDispatch = async (
   // Category handlers are evidence boundaries, not best-effort side effects:
   // a child that reports an error (e.g. storeReviewerFindings could not read
   // the reviewer transcript) must surface as a failed SubagentStop, or a wave
-  // can look clean while review evidence was silently lost. Cleanup runs
-  // BEFORE the category handler, so propagating the failure still leaves the
-  // roster/session state consistent.
+  // can look clean while review evidence was silently lost. Cleanup runs after
+  // category settlement so the exact TaskGraph pointer lease remains live for
+  // every handler that resolves session authority.
   const runChild = async (name: string, fn: () => Promise<HookResult>): Promise<HookResult | null> => {
     try {
       const result = await fn();
@@ -131,23 +131,24 @@ export const runDispatch = async (
     process.stderr.write(`ERROR in captureOrchestrationResult: ${captureFailure}\n`);
   }
 
-  // Cleanup always runs — but must never abort the rest of the pipeline
-  // (a lock-acquisition failure here would otherwise leave the task stuck
-  // in executing with no status update). A failed cleanup remains explicit and
-  // is returned after category evidence has had its one chance to settle.
-  let cleanupFailure: string | null = null;
-  try {
-    const cleanupResult = await cleanup(stdin, args);
-    if (cleanupResult.kind === "error" || cleanupResult.kind === "block") {
-      cleanupFailure = cleanupResult.message;
+  // Cleanup always runs, but only after every consumer has resolved the
+  // pointer capability. A cleanup failure remains explicit without preempting
+  // the category's one chance to settle protected state.
+  const runCleanup = async (): Promise<string | null> => {
+    try {
+      const cleanupResult = await cleanup(stdin, args);
+      return cleanupResult.kind === "error" || cleanupResult.kind === "block"
+        ? cleanupResult.message
+        : null;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`ERROR in cleanupSubagentFlag: ${message}\n`);
+      return `cleanupSubagentFlag crashed: ${message}`;
     }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    cleanupFailure = `cleanupSubagentFlag crashed: ${message}`;
-    process.stderr.write(`ERROR in cleanupSubagentFlag: ${message}\n`);
-  }
+  };
 
   if (captureFailure !== null) {
+    const cleanupFailure = await runCleanup();
     return {
       kind: "error",
       message: cleanupFailure === null
@@ -161,6 +162,7 @@ export const runDispatch = async (
   try {
     mgr = StateManager.fromSession(input.session_id);
   } catch (error) {
+    const cleanupFailure = await runCleanup();
     if (cleanupFailure !== null) return { kind: "error", message: cleanupFailure };
     return passthroughDiagnostic(
       `[loom] dispatch: no task graph resolvable for session ${JSON.stringify(input.session_id ?? "")}: ` +
@@ -169,6 +171,7 @@ export const runDispatch = async (
     );
   }
   if (!mgr) {
+    const cleanupFailure = await runCleanup();
     if (cleanupFailure !== null) return { kind: "error", message: cleanupFailure };
     return passthroughDiagnostic(`[loom] dispatch: no task graph resolvable for session ${JSON.stringify(input.session_id ?? "")} — ` +
         `SubagentStop recorded NOTHING (task status, test evidence and findings all skipped)\n`);
@@ -195,6 +198,7 @@ export const runDispatch = async (
     })
     .exhaustive();
 
+  const cleanupFailure = await runCleanup();
   if (cleanupFailure !== null) {
     const categoryMessage = childFailure !== null && (childFailure.kind === "error" || childFailure.kind === "block")
       ? `; category settlement also failed: ${childFailure.message}`

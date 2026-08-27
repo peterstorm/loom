@@ -15,7 +15,7 @@ import {
   reopenCompletedWave,
   type WaveReopeningProof,
 } from "../../src/handlers/helpers/reopen-completed-wave";
-import type { Task, TaskGraph } from "../../src/types";
+import { parseNewTestEvidence, type Task, type TaskGraph } from "../../src/types";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
 import { applyUntrustedStopResolution } from "../../src/core/implementation-application";
 import type { WaveReviewContextAuthority } from "../../src/handlers/helpers/programs/wave-gate";
@@ -138,8 +138,7 @@ describe("later-Wave progress refusal", () => {
     [(entry) => taskFixture({ ...entry, status: "pending", proof, revalidation_required: true }), "proof"],
     [(entry) => ({ ...entry, test_result: { verdict: "trusted-pass" } }), "test result"],
     [(entry) => ({ ...entry, test_evidence: "ran" }), "test evidence"],
-    [(entry) => ({ ...entry, new_tests_written: false }), "new-test result"],
-    [(entry) => ({ ...entry, new_test_evidence: "none" }), "new-test evidence"],
+    [(entry) => ({ ...entry, new_test_observation: parseNewTestEvidence(false, "none") }), "new-test observation"],
     [(entry) => ({ ...entry, review_generation: 1 }), "review generation"],
     [(entry) => ({ ...entry, review_status: "passed" }), "review status"],
     [(entry) => ({ ...entry, review_run: {} as never }), "review run"],

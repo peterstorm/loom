@@ -4,7 +4,7 @@
  * 1. Resolve test evidence — the agent's own epoch in the evidence ledger
  *    (execution-time ground truth) first; transcript regex as the labeled,
  *    lower-trust fallback
- * 2. Verify new tests written via git diff + assertion density
+ * 2. Verify new tests via git diff plus added test-declaration and assertion counts
  * 3. Atomically persist evidence and the derived Proof aggregate
  * 4. Mark implemented only when every obligation is satisfied; otherwise keep
  *    the Task pending, then signal /wave-gate only when the Wave is complete

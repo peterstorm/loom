@@ -19,13 +19,15 @@ import { STALE_SUBAGENT_TTL_MS, SUBAGENT_DIR } from "../../config";
 import {
   IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX,
   SESSION_SUFFIXES,
+  TASK_GRAPH_POINTER_BINDING_SUFFIX,
 } from "../../machine";
 
 /** Pure: session id for a tracking file, or null when the name matches no
  *  known per-session suffix. */
 export function sessionOfEntry(entry: string): string | null {
-  if (entry.endsWith(IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX)) {
-    const keyed = entry.slice(0, -IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX.length);
+  for (const suffix of [IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX, TASK_GRAPH_POINTER_BINDING_SUFFIX]) {
+    if (!entry.endsWith(suffix)) continue;
+    const keyed = entry.slice(0, -suffix.length);
     const separator = keyed.lastIndexOf(".");
     const encodedAgent = separator < 0 ? "" : keyed.slice(separator + 1);
     if (separator > 0 && encodedAgent.length > 0 && encodedAgent.length % 2 === 0 &&
@@ -50,6 +52,7 @@ export function sessionOfEntry(entry: string): string | null {
 export function staleEntries(
   mtimes: ReadonlyMap<string, number>,
   cutoffMs: number,
+  unobservableSessions: ReadonlySet<string> = new Set(),
 ): string[] {
   const groupMax = new Map<string, number>();
   for (const [entry, mtime] of mtimes) {
@@ -60,6 +63,7 @@ export function staleEntries(
   return [...mtimes.entries()]
     .filter(([entry, mtime]) => {
       const session = sessionOfEntry(entry);
+      if (session !== null && unobservableSessions.has(session)) return false;
       const anchor = session === null ? mtime : (groupMax.get(session) ?? mtime);
       return anchor < cutoffMs;
     })
@@ -138,15 +142,18 @@ export function sweepStaleSessions(
 
   const diagnostics: StaleCleanupDiagnostic[] = [];
   const mtimes = new Map<string, number>();
+  const unobservableSessions = new Set<string>();
   for (const entry of directory.entries) {
     const path = join(dir, entry);
     try {
       mtimes.set(entry, operations.mtime(path));
     } catch (error) {
       diagnostics.push(diagnostic("stat", path, error));
+      const session = sessionOfEntry(entry);
+      if (session !== null) unobservableSessions.add(session);
     }
   }
-  for (const entry of staleEntries(mtimes, cutoffMs)) {
+  for (const entry of staleEntries(mtimes, cutoffMs, unobservableSessions)) {
     const path = join(dir, entry);
     try {
       operations.remove(path);
@@ -158,11 +165,18 @@ export function sweepStaleSessions(
   return Object.freeze(diagnostics);
 }
 
-const handler: HookHandler = async (_stdin, _args) => {
-  const diagnostics = sweepStaleSessions(SUBAGENT_DIR, Date.now() - STALE_SUBAGENT_TTL_MS);
+export function runCleanupStaleSubagents(
+  dir: string,
+  nowMs: number,
+  operations: StaleSessionOperations = REAL_STALE_SESSION_OPERATIONS,
+) {
+  const diagnostics = sweepStaleSessions(dir, nowMs - STALE_SUBAGENT_TTL_MS, operations);
   return passthroughResult(
     diagnostics.length === 0 ? undefined : diagnostics.map(renderDiagnostic).join("\n"),
   );
-};
+}
+
+const handler: HookHandler = async (_stdin, _args) =>
+  runCleanupStaleSubagents(SUBAGENT_DIR, Date.now());
 
 export default handler;

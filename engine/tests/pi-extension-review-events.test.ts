@@ -907,7 +907,7 @@ describe("Pi extension review tool_result integration", () => {
     expect(readFileSync(statePath, "utf-8")).toBe(before);
   });
 
-  it("attributes review findings to the reserved task instead of substituted result text", async () => {
+  it("rejects substituted review Task identity instead of misattributing findings to the reserved Task", async () => {
     const planPath = join(temp, "reserved-review-task-plan.md");
     writeFileSync(planPath, "# Plan\n");
     writeState({
@@ -937,15 +937,20 @@ describe("Pi extension review tool_result integration", () => {
     }, context);
     expect(call).toEqual([undefined]);
 
-    await pi.emit("tool_result", {
-      ...reviewResult("Prior output mentioned Task: T2", "bind this finding to T1"),
+    const responses = await pi.emit("tool_result", {
+      ...reviewResult("Prior output mentioned Task: T2", "must not be misattributed"),
       toolCallId,
     }, context);
 
     const [t1, t2] = JSON.parse(readFileSync(statePath, "utf-8")).tasks;
-    expect(t1.critical_findings).toEqual(["bind this finding to T1"]);
+    expect(t1.critical_findings).toBeUndefined();
+    expect(t1.review_status).toBe("pending");
     expect(t2.critical_findings).toBeUndefined();
     expect(t2.review_status).toBe("pending");
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({ text: expect.stringContaining("does not match reserved Task T1") })],
+    }));
   });
 
   it("does not register review or verifier prompts as implementation execution", async () => {

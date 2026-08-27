@@ -5,13 +5,24 @@ import { realpathSync } from "node:fs";
 import { isAbsolute, normalize } from "node:path";
 import { subagentDir } from "../config";
 import {
+  closeAnchoredDirectory,
+  ensureDirectoryNoFollow,
+  openDirectoryNoFollow,
   readDirectoryFileNoFollow,
   removeDirectoryFileNoFollow,
   withAnchoredDirectoryLock,
   writeDirectoryFileAtomicNoFollow,
+  writeDirectoryFileExclusiveNoFollow,
   type AnchoredDirectory,
 } from "../orchestration/no-follow-fs";
-import { TASK_GRAPH_POINTER_LEASES_SUFFIX, type SessionId } from "./evidence";
+import {
+  parseAgentId,
+  parseSessionId,
+  TASK_GRAPH_POINTER_BINDING_SUFFIX,
+  TASK_GRAPH_POINTER_LEASES_SUFFIX,
+  type AgentId,
+  type SessionId,
+} from "./evidence";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
@@ -43,6 +54,18 @@ export type SessionTaskGraphPointerBinding = Readonly<{
 }>;
 
 export type SessionTaskGraphPointerRollback = "rolled-back" | "not-owned" | "ownership-lost";
+
+export type PersistedSessionTaskGraphPointerBinding = Readonly<{
+  schemaVersion: 1;
+  kind: "persisted-session-task-graph-pointer-binding";
+  sessionId: SessionId;
+  agentId: AgentId;
+  binding: SessionTaskGraphPointerBinding;
+}>;
+
+export type PersistedSessionTaskGraphPointerRelease =
+  | SessionTaskGraphPointerRollback
+  | "binding-missing";
 
 const parseUuid = <Brand extends string>(raw: unknown): Brand | null =>
   typeof raw === "string" && UUID.test(raw) ? raw as Brand : null;
@@ -162,10 +185,11 @@ export async function bindSessionTaskGraphPointer(
   directory = subagentDir(),
 ): Promise<SessionTaskGraphPointerBinding> {
   const target = realpathSync.native(activeTaskGraphPath);
+  const canonicalDirectory = realpathSync.native(directory);
   const pointerName = `${sessionId}.task_graph`;
   const registryName = `${sessionId}${TASK_GRAPH_POINTER_LEASES_SUFFIX}`;
   const lockName = `${sessionId}.task-graph-pointer.lock`;
-  return withAnchoredDirectoryLock(directory, lockName, (anchored) => {
+  return withAnchoredDirectoryLock(canonicalDirectory, lockName, (anchored) => {
     const pointer = optionalPointer(anchored, pointerName);
     const registry = optionalRegistry(anchored, registryName);
     const leaseId = randomUUID() as PointerLeaseId;
@@ -181,7 +205,7 @@ export async function bindSessionTaskGraphPointer(
         leases: Object.freeze([...registry.leases, leaseId]) as readonly [PointerLeaseId, ...PointerLeaseId[]],
       });
       writeRegistry(anchored, registryName, next);
-      return bindingFor(directory, pointerName, registryName, next, leaseId);
+      return bindingFor(canonicalDirectory, pointerName, registryName, next, leaseId);
     }
 
     const next: SessionTaskGraphPointerLeaseRegistry = Object.freeze({
@@ -197,7 +221,7 @@ export async function bindSessionTaskGraphPointer(
     // and let a later bind silently treat the half-written target as preexisting.
     writeRegistry(anchored, registryName, next);
     writeDirectoryFileAtomicNoFollow(anchored, pointerName, target);
-    return bindingFor(directory, pointerName, registryName, next, leaseId);
+    return bindingFor(canonicalDirectory, pointerName, registryName, next, leaseId);
   });
 }
 
@@ -230,4 +254,146 @@ export async function rollbackSessionTaskGraphPointer(
     removeDirectoryFileNoFollow(anchored, binding.registryName);
     return "rolled-back" as const;
   });
+}
+
+function bindingSidecarLeaf(sessionId: SessionId, agentId: AgentId): string {
+  return `${sessionId}.${Buffer.from(agentId, "utf8").toString("hex")}${TASK_GRAPH_POINTER_BINDING_SUFFIX}`;
+}
+
+function parsePointerBinding(raw: unknown): SessionTaskGraphPointerBinding | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw) || Object.getPrototypeOf(raw) !== Object.prototype) {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  const expected = ["directory", "generationId", "leaseId", "pointerName", "registryName", "target"];
+  const keys = Object.keys(record).sort();
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) return null;
+  const generationId = parseUuid<PointerGenerationId>(record.generationId);
+  const leaseId = parseUuid<PointerLeaseId>(record.leaseId);
+  if (generationId === null || leaseId === null) return null;
+  if (typeof record.directory !== "string" || !isAbsolute(record.directory) || normalize(record.directory) !== record.directory ||
+      typeof record.pointerName !== "string" || typeof record.registryName !== "string" ||
+      typeof record.target !== "string" || !isAbsolute(record.target) || normalize(record.target) !== record.target) {
+    return null;
+  }
+  return Object.freeze({
+    directory: record.directory,
+    pointerName: record.pointerName,
+    registryName: record.registryName,
+    target: record.target,
+    generationId,
+    leaseId,
+  });
+}
+
+export function parsePersistedSessionTaskGraphPointerBinding(
+  raw: unknown,
+): Readonly<{ ok: true; value: PersistedSessionTaskGraphPointerBinding }> |
+  Readonly<{ ok: false; error: string }> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw) || Object.getPrototypeOf(raw) !== Object.prototype) {
+    return Object.freeze({ ok: false, error: "persisted pointer binding must be a plain object" });
+  }
+  const record = raw as Record<string, unknown>;
+  const expected = ["agentId", "binding", "kind", "schemaVersion", "sessionId"];
+  const keys = Object.keys(record).sort();
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    return Object.freeze({ ok: false, error: `persisted pointer binding must contain exactly ${expected.join(", ")}` });
+  }
+  if (record.schemaVersion !== 1 || record.kind !== "persisted-session-task-graph-pointer-binding") {
+    return Object.freeze({ ok: false, error: "persisted pointer binding tag is invalid" });
+  }
+  const sessionId = typeof record.sessionId === "string" ? parseSessionId(record.sessionId) : null;
+  const agentId = typeof record.agentId === "string" ? parseAgentId(record.agentId) : null;
+  const binding = parsePointerBinding(record.binding);
+  if (sessionId === null || agentId === null || binding === null ||
+      binding.pointerName !== `${sessionId}.task_graph` ||
+      binding.registryName !== `${sessionId}${TASK_GRAPH_POINTER_LEASES_SUFFIX}`) {
+    return Object.freeze({ ok: false, error: "persisted pointer binding identity or binding is invalid" });
+  }
+  return Object.freeze({
+    ok: true,
+    value: Object.freeze({
+      schemaVersion: 1,
+      kind: "persisted-session-task-graph-pointer-binding",
+      sessionId,
+      agentId,
+      binding,
+    }),
+  });
+}
+
+/** Persist the exact Claude cleanup capability before allowing the Agent to run. */
+export function persistSessionTaskGraphPointerBinding(
+  sessionId: SessionId,
+  agentId: AgentId,
+  binding: SessionTaskGraphPointerBinding,
+): void {
+  const persisted: PersistedSessionTaskGraphPointerBinding = Object.freeze({
+    schemaVersion: 1,
+    kind: "persisted-session-task-graph-pointer-binding",
+    sessionId,
+    agentId,
+    binding,
+  });
+  const parsed = parsePersistedSessionTaskGraphPointerBinding(persisted);
+  if (!parsed.ok) throw new Error(parsed.error);
+  ensureDirectoryNoFollow(binding.directory);
+  const anchored = openDirectoryNoFollow(binding.directory);
+  try {
+    writeDirectoryFileExclusiveNoFollow(
+      anchored,
+      bindingSidecarLeaf(sessionId, agentId),
+      `${JSON.stringify(parsed.value)}\n`,
+    );
+  } finally {
+    closeAnchoredDirectory(anchored);
+  }
+}
+
+/** Release exactly the persisted Claude lease; retain the sidecar on uncertainty. */
+export async function releasePersistedSessionTaskGraphPointerBinding(
+  sessionId: SessionId,
+  agentId: AgentId,
+  directory = subagentDir(),
+): Promise<PersistedSessionTaskGraphPointerRelease> {
+  let canonicalDirectory: string;
+  try {
+    canonicalDirectory = realpathSync.native(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "binding-missing";
+    throw error;
+  }
+  const anchored = openDirectoryNoFollow(canonicalDirectory);
+  const leaf = bindingSidecarLeaf(sessionId, agentId);
+  let bytes: Buffer;
+  try {
+    try {
+      bytes = readDirectoryFileNoFollow(anchored, leaf);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return "binding-missing";
+      throw error;
+    }
+  } finally {
+    closeAnchoredDirectory(anchored);
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(bytes.toString("utf8")) as unknown;
+  } catch (error) {
+    throw new Error(`persisted pointer binding ${leaf} is malformed JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const parsed = parsePersistedSessionTaskGraphPointerBinding(raw);
+  if (!parsed.ok || parsed.value.sessionId !== sessionId || parsed.value.agentId !== agentId ||
+      parsed.value.binding.directory !== canonicalDirectory) {
+    throw new Error(`persisted pointer binding ${leaf} is malformed or belongs to different authority: ${parsed.ok ? "identity mismatch" : parsed.error}`);
+  }
+  const released = await rollbackSessionTaskGraphPointer(parsed.value.binding);
+  if (released === "ownership-lost") return released;
+  const cleanupDirectory = openDirectoryNoFollow(canonicalDirectory);
+  try {
+    removeDirectoryFileNoFollow(cleanupDirectory, leaf);
+  } finally {
+    closeAnchoredDirectory(cleanupDirectory);
+  }
+  return released;
 }

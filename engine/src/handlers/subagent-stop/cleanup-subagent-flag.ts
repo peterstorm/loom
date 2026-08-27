@@ -12,6 +12,7 @@ import {
   parseAgentType,
   parseReportedAgentId,
   parseSessionId,
+  releasePersistedSessionTaskGraphPointerBinding,
   reportedRosterAgentId,
   type SessionRegistry,
 } from "../../machine";
@@ -21,6 +22,7 @@ export const runCleanupSubagentFlag = async (
   stdin: string,
   registry: SessionRegistry = fsSessionRegistry,
   removeSidecar: typeof removeImplementationAttemptSidecar = removeImplementationAttemptSidecar,
+  releasePointer: typeof releasePersistedSessionTaskGraphPointerBinding = releasePersistedSessionTaskGraphPointerBinding,
 ) => {
   // Guard the standalone CLI route: dispatch parses stdin before calling
   // handlers, but this handler is also registered directly (KNOWN_HANDLERS),
@@ -85,6 +87,15 @@ export const runCleanupSubagentFlag = async (
     } catch (error) {
       failures.push(`implementation sidecar cleanup failed for ${agent_id}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  try {
+    const released = await releasePointer(sessionId, reportedRosterAgentId(agent_id));
+    if (released === "ownership-lost") {
+      failures.push(`task-graph pointer cleanup lost exact ownership for ${agent_id}/${sessionId}`);
+    }
+  } catch (error) {
+    failures.push(`task-graph pointer cleanup failed for ${agent_id}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   // Each cleanup capability is independent. Attempt roster removal even when

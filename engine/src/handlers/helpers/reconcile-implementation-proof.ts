@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import type {
-  HookHandler,
-  RecoveredArtifactWriteEvidence,
-  Task,
-  TaskGraph,
+import {
+  storedNewTestEvidence,
+  type HookHandler,
+  type RecoveredArtifactWriteEvidence,
+  type Task,
+  type TaskGraph,
 } from "../../types";
 import { newWaveGate } from "../../types";
 import { taskGraphPath } from "../../config";
@@ -255,8 +256,7 @@ export function reconcileTaskFromStoredEvidence(
       proof,
       revalidation_required: undefined,
       legacy_missing_proof: undefined,
-      new_tests_written: newTestsWritten,
-      new_test_evidence: newTestEvidence,
+      ...storedNewTestEvidence(normalizedNewTests),
     };
   }
   return proof.state === "satisfied"
@@ -266,8 +266,7 @@ export function reconcileTaskFromStoredEvidence(
         proof,
         revalidation_required: true,
         legacy_missing_proof: undefined,
-        new_tests_written: newTestsWritten,
-        new_test_evidence: newTestEvidence,
+        ...storedNewTestEvidence(normalizedNewTests),
       }
     : {
         ...task,
@@ -275,8 +274,7 @@ export function reconcileTaskFromStoredEvidence(
         proof,
         revalidation_required: task.revalidation_required,
         legacy_missing_proof: undefined,
-        new_tests_written: newTestsWritten,
-        new_test_evidence: newTestEvidence,
+        ...storedNewTestEvidence(normalizedNewTests),
       };
 }
 

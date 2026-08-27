@@ -20,7 +20,12 @@ import { SUBAGENT_DIR } from "../../../src/config";
 import { shouldBlockDirectEdit } from "../../../src/core/block-direct-edits";
 import { activeRosterProbe } from "../../../src/handlers/pre-tool-use/block-direct-edits";
 import markActive from "../../../src/handlers/subagent-start/mark-subagent-active";
-import { parseSessionId } from "../../../src/machine";
+import { runCleanupSubagentFlag } from "../../../src/handlers/subagent-stop/cleanup-subagent-flag";
+import {
+  parseSessionId,
+  TASK_GRAPH_POINTER_BINDING_SUFFIX,
+  TASK_GRAPH_POINTER_LEASES_SUFFIX,
+} from "../../../src/machine";
 import {
   createImplementationAttemptAuthority,
   parseIsoInstant,
@@ -84,10 +89,15 @@ const session = (label: string) => {
 afterAll(() => {
   delete process.env.LOOM_STATE_PATH;
   for (const s of sessions) {
-    for (const suffix of ["active", "active.tmp", "machine", "task_graph", "evidence.jsonl", "cleanup"]) {
+    for (const suffix of [
+      "active", "active.tmp", "machine", "task_graph", "evidence.jsonl", "cleanup",
+      TASK_GRAPH_POINTER_LEASES_SUFFIX.slice(1),
+    ]) {
       rmSync(join(SUBAGENT_DIR, `${s}.${suffix}`), { recursive: true, force: true });
     }
-    rmSync(join(SUBAGENT_DIR, `${s}.a-1.implementation-attempt.json`), { force: true });
+    const encodedAgent = Buffer.from("a-1", "utf8").toString("hex");
+    rmSync(join(SUBAGENT_DIR, `${s}.${encodedAgent}.implementation-attempt.json`), { force: true });
+    rmSync(join(SUBAGENT_DIR, `${s}.${encodedAgent}${TASK_GRAPH_POINTER_BINDING_SUFFIX}`), { force: true });
   }
   rmSync(stateDir, { recursive: true, force: true });
 });
@@ -213,8 +223,8 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
       const result = await markActive(start(s), []);
       expect(result.kind).toBe("block");
       const text = stderrSpy.mock.calls.map(([value]) => String(value)).join("");
-      expect(text).toContain(`failed to bind task_graph pointer for ${s}`);
-      expect(text).toContain("cross-repo SubagentStop authority is unavailable");
+      expect(text).toContain(`failed to persist task_graph pointer authority for ${s}/a-1`);
+      expect(text).toContain("cross-repo SubagentStop cleanup is unavailable");
       expect(text).toMatch(/ELOOP|too many levels of symbolic links/i);
     } finally {
       stderrSpy.mockRestore();
@@ -241,21 +251,34 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
 
     expect(result).toMatchObject({
       kind: "block",
-      message: expect.stringContaining("failed to bind task_graph pointer"),
+      message: expect.stringContaining("failed to persist task_graph pointer authority"),
     });
     const parsedSession = parseSessionId(s);
     expect(parsedSession).not.toBeNull();
     if (parsedSession !== null) expect(activeRosterProbe(parsedSession)).toBeNull();
   });
 
-  it("control: a healthy roster arms the binding AND writes .task_graph", async () => {
+  it("control: a healthy start persists pointer cleanup authority and successful stop releases it", async () => {
     const s = session("ok");
     process.env.LOOM_STATE_PATH = statePath;
     const result = await markActive(start(s), []);
+    const encodedAgent = Buffer.from("a-1", "utf8").toString("hex");
+    const pointerBinding = join(SUBAGENT_DIR, `${s}.${encodedAgent}${TASK_GRAPH_POINTER_BINDING_SUFFIX}`);
     expect(result.kind).toBe("passthrough");
     expect(existsSync(join(SUBAGENT_DIR, `${s}.active`))).toBe(true);
     expect(existsSync(join(SUBAGENT_DIR, `${s}.machine`))).toBe(true);
     expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(true);
+    expect(existsSync(pointerBinding)).toBe(true);
+
+    const cleaned = await runCleanupSubagentFlag(JSON.stringify({
+      session_id: s,
+      agent_id: "a-1",
+      agent_type: "loom:code-implementer-agent",
+    }));
+
+    expect(cleaned.kind).toBe("passthrough");
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(false);
+    expect(existsSync(pointerBinding)).toBe(false);
   });
 
   it("an unparseable (traversal) session_id blocks and refuses all session-file writes", async () => {

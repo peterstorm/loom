@@ -4,7 +4,7 @@
  * Reads TEST_PASSED:/TEST_EVIDENCE:/NEW_TESTS_WRITTEN:/NEW_TEST_EVIDENCE: lines from stdin.
  */
 
-import type { HookHandler } from "../../types";
+import { parseNewTestEvidence, storedNewTestEvidence, type HookHandler } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
 import { StateManager } from "../../state-manager";
 import { argumentValue } from "./cli-args";
@@ -55,8 +55,7 @@ const handler: HookHandler = async (stdin, args) => {
           provenance: "unverified" as const,
         },
         test_evidence: evidenceMatch?.[1] ?? "",
-        new_tests_written: newWritten,
-        new_test_evidence: newEvidenceMatch?.[1] ?? "",
+        ...storedNewTestEvidence(parseNewTestEvidence(newWritten, newEvidenceMatch?.[1] ?? "")),
       };
     }),
   }));

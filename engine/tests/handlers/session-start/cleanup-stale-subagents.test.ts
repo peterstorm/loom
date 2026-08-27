@@ -15,6 +15,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import cleanup, {
+  runCleanupStaleSubagents,
   sessionOfEntry,
   staleEntries,
   sweepStaleSessions,
@@ -22,6 +23,7 @@ import cleanup, {
 import {
   IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX,
   SESSION_SUFFIXES,
+  TASK_GRAPH_POINTER_BINDING_SUFFIX,
 } from "../../../src/machine";
 import { SUBAGENT_DIR } from "../../../src/config";
 
@@ -36,7 +38,7 @@ describe("sessionOfEntry (pure)", () => {
     // Driven by the shared machine/evidence tuple — a suffix added to the
     // ledger's path helpers is automatically covered here.
     for (const suffix of SESSION_SUFFIXES) {
-      const entry = suffix === IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX
+      const entry = suffix === IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX || suffix === TASK_GRAPH_POINTER_BINDING_SUFFIX
         ? `s-1.${Buffer.from("agent-1").toString("hex")}${suffix}`
         : `s-1${suffix}`;
       expect(sessionOfEntry(entry), suffix).toBe("s-1");
@@ -98,6 +100,14 @@ describe("staleEntries (pure) — group max mtime governs", () => {
   it("a file exactly at the cutoff is kept (strict less-than)", () => {
     expect(staleEntries(new Map([["s.machine", cutoff]]), cutoff)).toEqual([]);
   });
+
+  it("an unobservable member protects every readable member of its session", () => {
+    const mtimes = new Map([
+      ["uncertain.machine", cutoff - 10],
+      ["dead.machine", cutoff - 10],
+    ]);
+    expect(staleEntries(mtimes, cutoff, new Set(["uncertain"]))).toEqual(["dead.machine"]);
+  });
 });
 
 describe("sweepStaleSessions (fs)", () => {
@@ -143,6 +153,28 @@ describe("sweepStaleSessions (fs)", () => {
     // Strays: own mtime.
     expect(existsSync(join(subDir, "stray-old.txt"))).toBe(false);
     expect(existsSync(join(subDir, "stray-new.txt"))).toBe(true);
+  });
+
+  it("a stat failure protects readable siblings in the same session while unrelated stale sessions are swept", () => {
+    const removed: string[] = [];
+    const diagnostics = sweepStaleSessions("/tracking", 100, {
+      probeDirectory: () => ({
+        kind: "present",
+        entries: ["uncertain.active", "uncertain.machine", "dead.active"],
+      }),
+      mtime: (path) => {
+        if (path.endsWith("uncertain.active")) throw new Error("EACCES stat");
+        return 10;
+      },
+      remove: (path) => { removed.push(path); },
+    });
+
+    expect(removed).toEqual([join("/tracking", "dead.active")]);
+    expect(diagnostics).toEqual([{
+      operation: "stat",
+      path: join("/tracking", "uncertain.active"),
+      cause: "EACCES stat",
+    }]);
   });
 
   it("returns stat and remove diagnostics with operation, exact path, and cause", () => {
@@ -211,9 +243,11 @@ describe("sweepStaleSessions (fs)", () => {
     }
   });
 
-  it("a missing dir is a no-op, and a clean handler wrapper passes through without diagnostics", async () => {
+  it("a missing dir is a no-op, and a clean injected handler wrapper passes through without diagnostics", () => {
     expect(sweepStaleSessions(join(subDir, "nope"), Date.now())).toEqual([]);
-    const result = await cleanup("", []);
+    const cleanDir = join(subDir, "clean-wrapper");
+    mkdirSync(cleanDir);
+    const result = runCleanupStaleSubagents(cleanDir, Date.now());
     expect(result.kind).toBe("passthrough");
     if (result.kind === "passthrough") expect(result.systemMessage).toBeUndefined();
   });

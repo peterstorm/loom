@@ -14,7 +14,7 @@ import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from "nod
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync, spawnSync } from "node:child_process";
-import type { TaskGraph, Task } from "../../../src/types";
+import { parseNewTestEvidence, type TaskGraph, type Task } from "../../../src/types";
 import { pendingTaskProof } from "../../fixtures/task-lifecycle";
 
 const CLI_PATH = join(__dirname, "../../../src/cli.ts");
@@ -98,7 +98,7 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
     const task = readState().tasks[0];
     expect(task.test_result).toEqual({ verdict: "trusted-fail" }); // untouched
     expect(task.test_evidence).toBe("ledger: exit 1 (npm test)"); // untouched
-    expect(task.new_tests_written).toBeUndefined(); // nothing else laundered in either
+    expect(task.new_test_observation).toBeUndefined(); // nothing else laundered in either
     expect(stderr).toContain("refusing to overwrite");
   });
 
@@ -122,8 +122,7 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
       proof: pendingTaskProof(),
       test_result: { verdict: "trusted-pass" },
       test_evidence: "ledger: 42 tests / 0 failed",
-      new_tests_written: true,
-      new_test_evidence: "4 new tests, 8 assertions",
+      new_test_observation: parseNewTestEvidence(true, "4 new tests, 8 assertions"),
       files_modified: ["src/implementation.ts", "tests/implementation.test.ts"],
       failure_reason: "infrastructure-blocked: transcript unavailable",
     });
@@ -156,8 +155,11 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
       label: "helper-reported (store-test-evidence stdin)", provenance: "unverified",
     });
     expect(task.test_evidence).toBe("12 passing");
-    expect(task.new_tests_written).toBe(true);
-    expect(task.new_test_evidence).toBe("3 new tests");
+    expect(task.new_test_observation).toEqual({
+      kind: "written",
+      written: true,
+      evidence: "3 new tests",
+    });
   });
 
   it("a --task matching no task is an ERROR, not a silent success", () => {

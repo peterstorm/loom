@@ -416,8 +416,16 @@ export async function applyFailedPiResult(args: Readonly<{
     `${agentType} failed before evidence capture completed (${piSubagentFailureSignals(result)})`;
 
   if (isReviewAgent(agentType)) {
-    const failedTaskId = reservedSlot?.taskId ?? extractTaskId(result.task ?? "");
-    if (failedTaskId === null || !store.load().tasks.some((task) => task.id === failedTaskId)) {
+    const returnedTaskId = extractTaskId(result.task ?? "");
+    const reservedTaskId = reservedSlot?.taskId;
+    if (reservedTaskId !== undefined && reservedTaskId !== null && returnedTaskId !== reservedTaskId) {
+      const message = `loom(pi): ${failure}; returned Task ${returnedTaskId ?? "missing"} does not match ` +
+        `reserved Task ${reservedTaskId} — review evidence NOT stored`;
+      return outcome([message], [message]);
+    }
+    const failedTaskId = reservedTaskId ?? returnedTaskId;
+    if (failedTaskId === null || failedTaskId === undefined ||
+        !store.load().tasks.some((task) => task.id === failedTaskId)) {
       const message = `loom(pi): ${failure}; trusted task binding is missing or unknown — review evidence NOT stored`;
       return outcome([message], [message]);
     }
@@ -1148,7 +1156,14 @@ function resolveReviewTaskBinding(args: Readonly<{
   reservedSlot: ReservedSlot | undefined;
   parentPrompt: ParentPromptText;
 }>): ReviewTaskBinding {
-  const taskId = args.reservedSlot?.taskId ?? extractTaskId(args.result.task ?? "") ?? extractTaskId(args.parentPrompt);
+  const returnedTaskId = extractTaskId(args.result.task ?? "");
+  const reservedTaskId = args.reservedSlot?.taskId;
+  if (reservedTaskId !== undefined && reservedTaskId !== null && returnedTaskId !== reservedTaskId) {
+    const message = `WARNING: ${args.agentType} review result Task identity ${returnedTaskId ?? "missing"} ` +
+      `does not match reserved Task ${reservedTaskId} — findings NOT stored`;
+    return { kind: "blocked", outcome: outcome([message], [message]) };
+  }
+  const taskId = reservedTaskId ?? returnedTaskId ?? extractTaskId(args.parentPrompt);
   if (!taskId) {
     const message = `WARNING: ${args.agentType} review completed without an extractable task ID — findings NOT stored`;
     return { kind: "blocked", outcome: outcome([message], [message]) };
@@ -1172,14 +1187,20 @@ async function applyMalformedReviewMessages(args: Readonly<{
   const message = `Pi review messages are malformed: ${args.errors.join("; ")}`;
   const resolution = { kind: "evidence-failed" as const, agent: args.agentType, message };
   let appliedTask = args.reviewTask;
+  let taskFound = false;
   await args.store.update((state) => ({
     ...state,
     tasks: state.tasks.map((task) => {
       if (task.id !== args.taskId) return task;
+      taskFound = true;
       appliedTask = applyReviewResolution(task, resolution);
       return appliedTask;
     }),
   }));
+  if (!taskFound) {
+    const missing = `WARNING: ${args.agentType} review task ${args.taskId} disappeared before malformed evidence application — findings NOT stored`;
+    return outcome([missing], [missing]);
+  }
   return outcome([reviewResolutionLog(args.taskId, resolution, appliedTask, true)]);
 }
 

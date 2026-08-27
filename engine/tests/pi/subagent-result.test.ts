@@ -310,6 +310,22 @@ describe("applyFailedPiResult", () => {
     expect(applied.log.join("\n")).toContain("T1");
   });
 
+  it("rejects a failed reviewer whose returned Task does not match its reservation", async () => {
+    const store = fakeStore(graph());
+    const applied = await applyFailedPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ exitCode: 1, task: "Task: T2" }),
+      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      now: NOW,
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("does not match reserved Task T1"),
+    ]);
+    expect(store.current().tasks[0]!.review_status).toBe("pending");
+  });
+
   it("says so and stores nothing when the reviewer names no known task", async () => {
     const store = fakeStore(graph());
     const applied = await applyFailedPiResult({
@@ -460,6 +476,32 @@ describe("applyReviewPiResult", () => {
     });
   });
 
+  it("rejects reordered same-agent reserved reviews instead of applying findings to the wrong Tasks", async () => {
+    const base = graph();
+    const store = fakeStore(graph({
+      tasks: [base.tasks[0]!, { ...base.tasks[0]!, id: "T2", description: "second task" }],
+    }));
+
+    const first = await applyReviewPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ task: "Task: T2", messages: assistantText(machineSummary) }),
+      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      parentPrompt: "",
+    });
+    const second = await applyReviewPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ task: "Task: T1", messages: assistantText(machineSummary) }),
+      reservedSlot: { agentType: "code-reviewer", taskId: "T2" },
+      parentPrompt: "",
+    });
+
+    expect(first.processingErrors[0]).toContain("does not match reserved Task T1");
+    expect(second.processingErrors[0]).toContain("does not match reserved Task T2");
+    expect(store.current().tasks.map((task) => task.review_status)).toEqual(["pending", "pending"]);
+  });
+
   it("refuses a task id the graph does not hold instead of reporting a silent store", async () => {
     const store = fakeStore(graph());
     const applied = await applyReviewPiResult({
@@ -514,6 +556,28 @@ describe("applyReviewPiResult", () => {
       expect.stringContaining("without an extractable task ID"),
     ]);
     expect(store.current().tasks[0]!.review_status).toBe("pending");
+  });
+
+  it("reports a Task disappearing before malformed evidence application", async () => {
+    const initial = parsedGraph(graph());
+    const withoutTask = parsedGraph({ ...initial, tasks: [] });
+    const store: TaskGraphStore = {
+      load: () => initial,
+      update: async (mutate) => { mutate(withoutTask); },
+      updateAndReturn: async (mutate) => mutate(withoutTask).value,
+    };
+
+    const applied = await applyReviewPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ messages: [{ role: 42 }] }),
+      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      parentPrompt: "",
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("disappeared before malformed evidence application"),
+    ]);
   });
 
   it("records an evidence failure for malformed reviewer messages", async () => {
@@ -1206,10 +1270,11 @@ describe("applyImplementationPiResult", () => {
 
     const task = store.current().tasks[0]!;
     expect(task.status).toBe("implemented");
-    expect(task.new_tests_written).toBe(false);
-    expect(task.new_test_evidence).toContain(
-      "verification_policy.new_tests waived: existing-tests-sufficient",
-    );
+    expect(task.new_test_observation).toMatchObject({
+      kind: "not-written",
+      written: false,
+      evidence: expect.stringContaining("verification_policy.new_tests waived: existing-tests-sufficient"),
+    });
     expect(task.proof?.obligations).toEqual([
       { kind: "task-completed" },
       { kind: "regression-test-pass" },
@@ -1370,8 +1435,11 @@ describe("applyImplementationPiResult", () => {
 
       const task = store.current().tasks[0]!;
       expect(task.test_result).toMatchObject({ verdict: "untrusted", passed: false });
-      expect(task.new_tests_written).toBe(true);
-      expect(task.new_test_evidence).toContain("1 new test methods, 1 assertions");
+      expect(task.new_test_observation).toMatchObject({
+        kind: "written",
+        written: true,
+        evidence: expect.stringContaining("1 new test methods, 1 assertions"),
+      });
       expect(task.status).toBe("implemented");
       expect(task.proof?.obligations).toEqual([
         { kind: "task-completed" },
