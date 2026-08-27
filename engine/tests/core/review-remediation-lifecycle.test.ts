@@ -45,6 +45,7 @@ function reviewedTask(): Task {
     agent: "code-implementer-agent",
     wave: 1,
     status: "implemented",
+    legacy_missing_proof: true,
     depends_on: [],
     review_status: "pending",
     review_generation: 1,

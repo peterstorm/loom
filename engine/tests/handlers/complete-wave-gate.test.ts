@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import fc from "fast-check";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import completeWaveGateHandler, {
@@ -38,8 +38,14 @@ import {
   renderLoomStatusHuman,
   renderLoomStatusJson,
 } from "../../src/core/wave-gate-machine";
-import type { CapturedSpecCheck, Task, TaskGraph } from "../../src/types";
+import {
+  parseNewTestEvidence,
+  type CapturedSpecCheck,
+  type Task,
+  type TaskGraph,
+} from "../../src/types";
 import { derivePendingTaskProof, evaluateTaskProof } from "../../src/core/proof-obligations";
+import { taskFixture, type TaskFixtureInput } from "../fixtures/task-lifecycle";
 import { defaultVerificationManifest } from "../../src/core/verification-manifest";
 import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "../../src/core/model-profiles";
 import {
@@ -119,12 +125,16 @@ const baseTask: Task = {
   depends_on: [],
   test_result: { verdict: "trusted-pass" },
   test_evidence: "vitest: Tests 5 passed",
-  new_tests_written: true,
-  new_test_evidence: "1 new test, 1 assertion",
+  new_test_observation: parseNewTestEvidence(true, "1 new test, 1 assertion"),
   review_status: "passed",
   critical_findings: [],
   advisory_findings: [],
 };
+
+const taskState = (overrides: Partial<TaskFixtureInput> = {}): Task => taskFixture({
+  ...baseTask,
+  ...overrides,
+});
 
 describe("wave-gate durable summary fallback", () => {
   it("writes the documented fallback path", () => {
@@ -248,9 +258,9 @@ describe("checkImplementationProof (pure)", () => {
     );
     expect(checkImplementationProof([baseTask]).passed).toBe(true);
     for (const task of [
-      { ...baseTask, status: "pending" as const },
-      { ...baseTask, status: "pending" as const, proof: failedProof },
-      { ...baseTask, proof: undefined },
+      taskState({ status: "pending" }),
+      taskState({ status: "pending", proof: failedProof }),
+      taskState({ status: "implemented", proof: undefined }),
     ]) {
       const result = checkImplementationProof([task]);
       expect(result.passed).toBe(false);
@@ -313,15 +323,62 @@ describe("checkNewTests (pure)", () => {
   });
 
   it("passes when task has new_tests_required=false", () => {
-    const task = { ...baseTask, new_tests_required: false, new_tests_written: false };
+    const task = taskState({ new_tests_required: false, new_tests_written: false });
     const result = checkNewTests([task]);
     expect(result.passed).toBe(true);
   });
 
   it("fails when task missing new tests", () => {
-    const task = { ...baseTask, new_tests_written: false, new_tests_required: undefined };
+    const task = taskState({ new_tests_written: false, new_tests_required: undefined });
     const result = checkNewTests([task]);
     expect(result.passed).toBe(false);
+  });
+
+  it("rejects positive legacy wire state without non-empty evidence and migrates valid pairs into the ADT", () => {
+    const { new_test_observation: _observation, ...withoutObservation } = baseTask;
+    const raw = {
+      current_phase: "execute",
+      current_wave: 1,
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      wave_gates: {},
+      tasks: [{
+        ...withoutObservation,
+        new_tests_written: true,
+        new_test_evidence: "",
+      }],
+    };
+    expect(parseTaskGraph(raw)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("requires non-empty new_test_evidence"),
+    });
+
+    const parsed = parseTaskGraph({
+      ...raw,
+      tasks: [{
+        ...withoutObservation,
+        new_tests_written: true,
+        new_test_evidence: "one focused regression",
+      }],
+    });
+    expect(parsed).toMatchObject({
+      ok: true,
+      value: {
+        tasks: [{
+          new_test_observation: {
+            kind: "written",
+            written: true,
+            evidence: "one focused regression",
+          },
+        }],
+      },
+    });
+    if (parsed.ok) {
+      expect("new_tests_written" in parsed.value.tasks[0]!).toBe(false);
+      expect(checkNewTests(parsed.value.tasks).passed).toBe(true);
+    }
   });
 });
 
@@ -523,8 +580,7 @@ describe("computeNextWave (pure)", () => {
 });
 
 describe("generateWaveGateSummary (pure)", () => {
-  const mkTask = (id: string, overrides: Partial<Task> = {}): Task => ({
-    ...baseTask,
+  const mkTask = (id: string, overrides: Partial<TaskFixtureInput> = {}): Task => taskState({
     id,
     description: `Task ${id}`,
     test_evidence: "5 tests passed",
@@ -852,7 +908,7 @@ describe("evaluateWaveGate + applyGateDecision — fs resolved once before the l
       { taskCompleted: true, filesModified: [] },
     );
     const state = mkGraph({
-      tasks: [{ ...baseTask, status: "pending", proof: failedProof, new_tests_required: false }],
+      tasks: [taskState({ status: "pending", proof: failedProof, new_tests_required: false })],
     });
     const decision = evaluateWaveGate(state, null, countingDeps().deps);
     expect(decision.verdict.kind).toBe("fail");
@@ -1264,19 +1320,19 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
   it("partitions every Task exactly once and reports roster/evidence/finding gaps", () => {
     const pendingProof = derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: [] });
     const tasks: Task[] = [
-      { ...baseTask, id: "T1", wave: 1, status: "completed" },
-      { ...baseTask, id: "T2", wave: 2, status: "pending", proof: pendingProof, review_status: "pending",
+      taskState({ id: "T1", wave: 1, status: "completed" }),
+      { ...taskState({ id: "T2", wave: 2, status: "pending", proof: pendingProof }), review_status: "pending",
         review_generation: 1,
         review_run: {
           generation: 1, packet_id: "packet-2", head_sha: "head", prior_finding_ids: [],
           expected_agents: ["code-reviewer", "comment-analyzer"],
           evidence: [{ agent: "code-reviewer", prior_assessments: [], new_findings: [] }],
         } },
-      { ...baseTask, id: "T3", wave: 2, status: "failed", proof: undefined,
+      { ...taskState({ id: "T3", wave: 2, status: "failed" }),
         review_status: "evidence_capture_failed", review_error: "malformed summary",
         review_evidence_failures: ["type-design-analyzer"] },
-      { ...baseTask, id: "T4", wave: 2, status: "implemented" },
-      { ...baseTask, id: "T5", wave: 2, status: "pending", proof: pendingProof, review_status: "pending",
+      taskState({ id: "T4", wave: 2, status: "implemented" }),
+      { ...taskState({ id: "T5", wave: 2, status: "pending", proof: pendingProof }), review_status: "pending",
         critical_findings: ["critical"], advisory_findings: ["advisory"],
         refuted_findings: [{
           finding: { id: "old-1", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "old" },
@@ -1411,7 +1467,10 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       // A terminal receipt for the current Wave that committedTerminalStatus
       // refused (later Waves still exist) is a contradiction, not a fresh Wave.
       "terminal history contradicts the graph": withoutRegistration(registeredGraph({
-        tasks: [{ ...baseTask, id: "T1", wave: 1, status: "completed" }, { ...baseTask, id: "T2", wave: 2 }],
+        tasks: [
+          taskState({ id: "T1", wave: 1, status: "completed" }),
+          taskState({ id: "T2", wave: 2 }),
+        ],
         wave_gate_history: [terminalHistoryEntry],
       })),
     };
@@ -1438,9 +1497,9 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     it("keeps every fact known and names the implementation still owed", () => {
       const graph = unstarted({
         tasks: [
-          { ...baseTask, id: "T1", wave: 1, status: "completed" },
-          { ...baseTask, id: "T2", wave: 1, status: "pending" },
-          { ...baseTask, id: "T3", wave: 1, status: "pending" },
+          taskState({ id: "T1", wave: 1, status: "completed" }),
+          taskState({ id: "T2", wave: 1, status: "pending" }),
+          taskState({ id: "T3", wave: 1, status: "pending" }),
         ],
       });
 
@@ -1475,8 +1534,8 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     it("asks for the Wave Gate once every Task in the Wave is implemented", () => {
       const graph = unstarted({
         tasks: [
-          { ...baseTask, id: "T1", wave: 1, status: "implemented" },
-          { ...baseTask, id: "T2", wave: 1, status: "completed" },
+          taskState({ id: "T1", wave: 1, status: "implemented" }),
+          taskState({ id: "T2", wave: 1, status: "completed" }),
         ],
       });
 
@@ -1497,8 +1556,8 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     it("scopes the owed implementation to the current Wave, ignoring later Waves", () => {
       const graph = unstarted({
         tasks: [
-          { ...baseTask, id: "T1", wave: 1, status: "implemented" },
-          { ...baseTask, id: "T2", wave: 2, status: "pending" },
+          taskState({ id: "T1", wave: 1, status: "implemented" }),
+          taskState({ id: "T2", wave: 2, status: "pending" }),
         ],
       });
 
@@ -1510,7 +1569,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     });
 
     it("renders as a status rather than an authority failure", () => {
-      const graph = unstarted({ tasks: [{ ...baseTask, id: "T1", wave: 1, status: "pending" }] });
+      const graph = unstarted({ tasks: [taskState({ id: "T1", wave: 1, status: "pending" })] });
 
       const human = renderCoreLoomStatusHuman(
         deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps),
@@ -1524,7 +1583,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     // deriveWaveReadiness is the program/resume path; it must keep failing
     // closed on a missing registration even though status no longer does.
     it("leaves the readiness path failing closed on the same graph", () => {
-      const graph = unstarted({ tasks: [{ ...baseTask, id: "T1", wave: 1, status: "pending" }] });
+      const graph = unstarted({ tasks: [taskState({ id: "T1", wave: 1, status: "pending" })] });
 
       expect(deriveWaveReadiness(graph, statusDeps)).toMatchObject({
         ok: false,
@@ -1627,7 +1686,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       tasks: [{
         ...baseTask,
         test_result: { verdict: "trusted-fail" },
-        new_tests_written: false,
+        new_test_observation: parseNewTestEvidence(false, ""),
         review_status: "pending",
         critical_findings: ["blocker"],
       }],
@@ -2278,7 +2337,12 @@ describe("protected active Wave Gate registration", () => {
     if (artifactProof.state !== "satisfied") throw new Error("artifact fixture proof must be satisfied");
     writeFileSync(path, JSON.stringify(registeredGraph({
       plan_file: "plan.md",
-      tasks: [{ ...baseTask, file_list: [relativeArtifact], files_modified: [relativeArtifact], proof: artifactProof }],
+      tasks: [taskState({
+        status: "implemented",
+        file_list: [relativeArtifact],
+        files_modified: [relativeArtifact],
+        proof: artifactProof,
+      })],
     })));
     const manager = new StateManager(path);
     const io: GateIO = {
@@ -2489,7 +2553,7 @@ describe("final-Wave compatibility completion replay", () => {
       const manager = new (class extends StateManager {
         private readCount = 0;
 
-        override load(): TaskGraph {
+        override load(): ReturnType<StateManager["load"]> {
           this.readCount++;
           if (this.readCount > 1) throw new Error("simulated legacy replay read failure");
           return super.load();
@@ -2558,44 +2622,38 @@ describe("final-Wave compatibility completion replay", () => {
     }, registeredGraph());
   });
 
-  it("preserves AggregateError permission-restoration detail when the locked gate decision is blocked", async () => {
+  it("does not invoke the publish-mode port when the locked gate decision is blocked", async () => {
     const blockedGraph = registeredGraph({ tasks: [{ ...baseTask, review_status: "pending" }] });
     await withHandlerState(async (path) => {
-      const manager = new StateManager(path, (_target, mode) => {
-        if (mode === 0o444) throw new Error("simulated pre-commit chmod 0444 failure");
-      });
+      const setMode = vi.fn((_fileDescriptor: number, _mode: number) => undefined);
+      const manager = new StateManager(path, setMode);
       const result = await createCompleteWaveGateHandler(() => manager)("", []);
 
       expect(result).toMatchObject({ kind: "error" });
       if (result.kind !== "error") return;
       expect(result.message).toContain("Not all tasks have been reviewed");
-      expect(result.message).toContain("Task graph write and permission restoration both failed");
-      expect(result.message).toContain("simulated pre-commit chmod 0444 failure");
+      expect(setMode).not.toHaveBeenCalled();
       expect(new StateManager(path).load().wave_gate_history).toBeUndefined();
     }, blockedGraph);
   });
 
-  it("surfaces post-commit read-only restoration failure with the committed receipt and remediation", async () => {
+  it("fails before commit when the staged graph cannot be made read-only", async () => {
     await withHandlerState(async (path) => {
-      const manager = new StateManager(path, (_target, mode) => {
-        if (mode === 0o444) throw new Error("simulated chmod 0444 failure");
+      chmodSync(path, 0o444);
+      const before = readFileSync(path, "utf8");
+      const manager = new StateManager(path, (_fileDescriptor, mode) => {
+        if (mode === 0o444) throw new Error("simulated staged chmod 0444 failure");
       });
-      const handlerWithProtectionFailure = createCompleteWaveGateHandler(() => manager);
+      const result = await createCompleteWaveGateHandler(() => manager)("", []);
+      const retained = new StateManager(path).load();
 
-      const result = await handlerWithProtectionFailure("", []);
-      const committed = new StateManager(path).load();
-      const receipt = committed.wave_gate_history?.[0]?.completionReceipt;
-
-      expect(receipt).toBeDefined();
       expect(result).toMatchObject({ kind: "error" });
-      if (result.kind !== "error" || receipt === undefined) return;
-      expect(result.message).toContain(`committed with receipt ${receipt.effectId}`);
-      expect(result.message).toContain(`revision ${receipt.committedRevision}`);
-      expect(result.message).toContain("simulated chmod 0444 failure");
-      expect(result.message).toContain(`chmod 0444 ${JSON.stringify(path)}`);
-      expect(result.message).toContain("do not rerun completion as if this were an idempotent replay");
-      expect(committed.active_wave_gate).toBeUndefined();
-      expect(committed.wave_gate_history).toHaveLength(1);
+      if (result.kind !== "error") return;
+      expect(result.message).toContain("simulated staged chmod 0444 failure");
+      expect(readFileSync(path, "utf8")).toBe(before);
+      expect(statSync(path).mode & 0o777).toBe(0o444);
+      expect(retained.active_wave_gate).toBeDefined();
+      expect(retained.wave_gate_history).toBeUndefined();
     }, registeredGraph());
   });
 
@@ -2604,7 +2662,7 @@ describe("final-Wave compatibility completion replay", () => {
     const authority = authorityValue(deriveLegacyWaveGateCompatibilityAuthority(graph, null));
     const conflict = registeredGraph({
       active_wave_gate: undefined,
-      tasks: [{ ...baseTask, status: "completed" }],
+      tasks: [taskState({ status: "completed" })],
       wave_gates: {
         "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
       },

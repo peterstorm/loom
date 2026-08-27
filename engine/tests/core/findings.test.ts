@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import type { Task } from "../../src/types";
+import type { Task, TaskCommonMetadata } from "../../src/types";
+import { taskFixture as makeTaskFixture } from "../fixtures/task-lifecycle";
 import {
   applyFindingOutcomes,
   deduplicateFindingIds,
@@ -338,7 +339,7 @@ describe("parseStoredRefutations", () => {
 // Identity across a refutation — the invariant the panel introduced
 // ---------------------------------------------------------------------------
 
-const taskFixture = (over: Partial<Task> = {}): Task => ({
+const taskFixture = (over: Partial<TaskCommonMetadata> = {}): Task => makeTaskFixture({
   id: "T1",
   description: "d",
   agent: "code-implementer-agent",

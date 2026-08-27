@@ -14,7 +14,8 @@ import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from "nod
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync, spawnSync } from "node:child_process";
-import type { TaskGraph, Task } from "../../../src/types";
+import { parseNewTestEvidence, type TaskGraph, type Task } from "../../../src/types";
+import { pendingTaskProof } from "../../fixtures/task-lifecycle";
 
 const CLI_PATH = join(__dirname, "../../../src/cli.ts");
 
@@ -97,7 +98,7 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
     const task = readState().tasks[0];
     expect(task.test_result).toEqual({ verdict: "trusted-fail" }); // untouched
     expect(task.test_evidence).toBe("ledger: exit 1 (npm test)"); // untouched
-    expect(task.new_tests_written).toBeUndefined(); // nothing else laundered in either
+    expect(task.new_test_observation).toBeUndefined(); // nothing else laundered in either
     expect(stderr).toContain("refusing to overwrite");
   });
 
@@ -114,7 +115,31 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
     expect(task.test_result).toEqual({ verdict: "trusted-pass" });
   });
 
-  it("without a trusted verdict the helper stores the (labeled untrusted) result as before", () => {
+  it("rejects helper stdin for a revalidation-required Task without changing any stored evidence", () => {
+    const original = graphWith({
+      status: "pending",
+      revalidation_required: true,
+      proof: pendingTaskProof(),
+      test_result: { verdict: "trusted-pass" },
+      test_evidence: "ledger: 42 tests / 0 failed",
+      new_test_observation: parseNewTestEvidence(true, "4 new tests, 8 assertions"),
+      files_modified: ["src/implementation.ts", "tests/implementation.test.ts"],
+      failure_reason: "infrastructure-blocked: transcript unavailable",
+    });
+    const originalBytes = JSON.stringify(original, null, 2);
+    writeFileSync(statePath, originalBytes);
+
+    const { exitCode, stderr } = runHelper(
+      "TEST_PASSED: false\nTEST_EVIDENCE: overwrite\nNEW_TESTS_WRITTEN: false\nNEW_TEST_EVIDENCE: overwrite\n",
+    );
+
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("requires a re-spawned implementation Agent");
+    expect(readState()).toEqual(original);
+    expect(readFileSync(statePath, "utf8")).toBe(originalBytes);
+  });
+
+  it("stores labeled untrusted evidence without minting positive completion authority", () => {
     writeFileSync(statePath, JSON.stringify(graphWith({}), null, 2));
 
     const { exitCode } = runHelper(
@@ -123,15 +148,39 @@ describe("store-test-evidence helper — trusted verdicts survive", () => {
     expect(exitCode).toBe(0);
 
     const task = readState().tasks[0];
-    expect(task.status).toBe("implemented");
+    expect(task.status).toBe("pending");
     expect(task.test_result).toEqual({
       verdict: "untrusted",
       passed: true,
       label: "helper-reported (store-test-evidence stdin)", provenance: "unverified",
     });
     expect(task.test_evidence).toBe("12 passing");
-    expect(task.new_tests_written).toBe(true);
-    expect(task.new_test_evidence).toBe("3 new tests");
+    expect(task.new_test_observation).toEqual({
+      kind: "written",
+      written: true,
+      evidence: "3 new tests",
+    });
+  });
+
+  it.each([
+    ["missing", "TEST_EVIDENCE: no positive markers supplied\n"],
+    ["malformed", "TEST_PASSED: maybe\nNEW_TESTS_WRITTEN: definitely\n"],
+    ["prefix-positive malformed", "TEST_PASSED: trueish\nNEW_TESTS_WRITTEN: true-but-unproven\n"],
+  ])("treats %s positive markers as explicit untrusted negative evidence", (_label, stdin) => {
+    writeFileSync(statePath, JSON.stringify(graphWith({}), null, 2));
+
+    const { exitCode } = runHelper(stdin);
+
+    expect(exitCode).toBe(0);
+    expect(readState().tasks[0]).toMatchObject({
+      test_result: {
+        verdict: "untrusted",
+        passed: false,
+        label: "helper-reported (store-test-evidence stdin)",
+        provenance: "unverified",
+      },
+      new_test_observation: { kind: "not-written", written: false },
+    });
   });
 
   it("a --task matching no task is an ERROR, not a silent success", () => {

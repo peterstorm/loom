@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { existsSync, unlinkSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // Engine core — harness-agnostic, no Claude Code dependency (these do fs I/O)
@@ -28,15 +28,16 @@ import {
   type TaskExecutionRosterObservation,
   type TaskExecutionSpawn,
 } from "../engine/src/core/validate-task-execution";
-import { validateTaskExecutionBatch } from "../engine/src/handlers/task-execution";
+import {
+  registerTaskExecutionBatch,
+  rollbackTaskExecutionRegistration,
+} from "../engine/src/handlers/task-execution";
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
 import { admitPiSpawnBatch, MAX_PI_ORCHESTRATION_BATCH_SIZE } from "../engine/src/core/spawn-admission";
 
 
 // Engine SubagentStop logic (harness-agnostic functions already exported)
-import {
-  applyUntrustedStopResolution,
-} from "../engine/src/handlers/subagent-stop/update-task-status";
+import { settleUnavailableImplementation } from "../engine/src/core/implementation-application";
 import {
   applyReviewResolution,
   hasStandaloneReviewContext,
@@ -55,12 +56,13 @@ import {
   piSubagentFailureSignals,
   piSubagentResultFailed,
   type PiResultOutcome,
+  type PiSubagentResultEntry,
   type RepositoryProbe,
   type TaskGraphStore,
 } from "./subagent-result";
 
-// `isReviewAgent` lives in `config`, NOT in `core/review-output` beside the three
-// functions above it: it reads the review-agent roster, and `core/review-output`
+// `isReviewAgent` lives in `config`, NOT in `core/review-output` beside the
+// review-output helpers above: it reads the review-agent roster, and `core/review-output`
 // declares itself free of config so its parse/merge rules stay pure. Importing it
 // from the wrong module is a LINK-time ESM failure that takes the whole extension
 // with it — every hook below, not just review capture. `engine/tests/pi-imports.test.ts`
@@ -69,18 +71,31 @@ import {
 import { isReviewAgent, taskGraphPath, subagentDir, PHASE_AGENT_MAP, IMPL_AGENTS, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
-import { anyActiveSubagent, fsSessionRegistry, parseAgentId, parseSessionId, rosterAgentId } from "../engine/src/machine";
+import type { Task, TaskGraph } from "../engine/src/types";
+import {
+  anyActiveSubagent,
+  bindSessionTaskGraphPointer,
+  fsSessionRegistry,
+  parseAgentId,
+  parseSessionId,
+  rollbackSessionTaskGraphPointer,
+  rosterAgentId,
+  type SessionTaskGraphPointerBinding,
+} from "../engine/src/machine";
 import type { AgentId } from "../engine/src/machine/evidence";
 import { buildContextOutput } from "../engine/src/handlers/session-start/resume-after-clear";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
-import { classifyMissingReservedResults } from "./reserved-results";
+import {
+  alignPiImplementationAuthorities,
+  classifyMissingReservedResults,
+} from "./reserved-results";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
 import * as git from "../engine/src/utils/git";
 
 // Linter integration (PostEdit lint via tool_result)
 import { processToolResult } from "../engine/src/handlers/pi-adapter";
 import { lintFile } from "../engine/src/linter/index";
-import { piResultFinalPayloadCandidates } from "./transcript-adapter";
+import { parsePiMessages, piResultFinalPayloadCandidates } from "./transcript-adapter";
 // FR-033: Pi and Claude Code capture each completed reviewer/verifier output
 // into the SAME engine-declared slot under the same refusals. Both drive this
 // one runtime; only the native correlator and the payload observation differ.
@@ -100,19 +115,23 @@ import {
   replayStandaloneResultFromEvidence,
   type StandaloneReviewedSource,
 } from "../engine/src/handlers/helpers/programs";
-import { readRunBytesNoFollow } from "../engine/src/orchestration/no-follow-fs";
+import {
+  assertAnchoredFilesystemPlatformSupported,
+  readRunBytesNoFollow,
+} from "../engine/src/orchestration/no-follow-fs";
 import {
   readSessionRunBindings,
   type SessionRunBinding,
 } from "../engine/src/orchestration/session-run-bindings";
 import { captureKey, type CaptureKey } from "../engine/src/core/harness-capture";
 import type { AgentRequestAuthority } from "../engine/src/core/orchestration-contract";
+import {
+  parseIsoInstant,
+  type ImplementationAttemptAuthority,
+} from "../engine/src/core/implementation-completion";
 import { materializePiResources } from "./resources";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
 import { buildPiRoutingContext } from "../engine/src/utils/model-routing-context";
-import {
-  compareAttemptBaseline,
-} from "../engine/src/utils/artifact-baseline";
 import { planPiWriteGrants } from "../engine/src/core/pi-write-grant-plan";
 import {
   consumePiWriteGrant,
@@ -163,10 +182,16 @@ type TrustedReviewCapture = Readonly<{
   byteLength: number;
 }>;
 
-type TrustedReviewRun = {
+type TrustedReviewRun = Readonly<{
   binding: SessionRunBinding;
-  captures: Map<CaptureKey, TrustedReviewCapture>;
-};
+  captures: ReadonlyMap<CaptureKey, TrustedReviewCapture>;
+  touchedAt: number;
+}>;
+
+type TrustedReviewRoot = Readonly<{
+  nextTouch: number;
+  runs: ReadonlyMap<string, TrustedReviewRun>;
+}>;
 
 type LoomReviewAuthorityReceipt = Readonly<{
   schemaVersion: 1;
@@ -180,7 +205,7 @@ type LoomReviewAuthorityReceipt = Readonly<{
   reviewedSource: StandaloneReviewedSource;
 }>;
 
-const trustedReviewRuns = new Map<string, Map<string, TrustedReviewRun>>();
+const trustedReviewRuns = new Map<string, Map<string, TrustedReviewRoot>>();
 const trustedRunIdentity = ({ runsRoot, runDirectory }: Pick<SessionRunBinding, "runsRoot" | "runDirectory">): string =>
   `${runsRoot}\0${runDirectory}`;
 const trustedCaptureIdentity = (slotId: string, attempt: 1 | 2): CaptureKey => captureKey(slotId, attempt);
@@ -265,23 +290,38 @@ export function piBashCommand(raw: unknown): string | null {
   return typeof command === "string" ? command : null;
 }
 
-/** Extract the file path(s) a Pi Edit/Write/multi_edit call targets. Returns
- *  [] when the shape is unrecognized — scoped grants then fail closed. */
-export function piWriteTargetPaths(raw: unknown): readonly string[] {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return [];
-  const input = raw as Record<string, unknown>;
-  const direct = input.path ?? input.file_path ?? input.filePath;
-  if (typeof direct === "string" && direct !== "") return [direct];
-  if (Array.isArray(input.edits)) {
-    const paths: string[] = [];
-    for (const edit of input.edits) {
-      if (typeof edit !== "object" || edit === null || Array.isArray(edit)) continue;
-      const p = (edit as Record<string, unknown>).path ?? (edit as Record<string, unknown>).file_path;
-      if (typeof p === "string" && p !== "" && !paths.includes(p)) paths.push(p);
-    }
-    return paths;
+export type PiWriteTargetPathsResult =
+  | Readonly<{ ok: true; value: readonly [string, ...string[]] }>
+  | Readonly<{ ok: false; error: string }>;
+
+const writeTarget = (input: Record<string, unknown>, path: string): PiWriteTargetPathsResult => {
+  const target = input.path ?? input.file_path ?? input.filePath;
+  return typeof target === "string" && target !== ""
+    ? Object.freeze({ ok: true, value: Object.freeze([target]) as readonly [string] })
+    : Object.freeze({ ok: false, error: `${path} must name one non-empty path, file_path, or filePath target` });
+};
+
+/** Parse every target before a scoped write can proceed; no partial batch exists. */
+export function piWriteTargetPaths(raw: unknown): PiWriteTargetPathsResult {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return Object.freeze({ ok: false, error: "write input must be a plain object" });
   }
-  return [];
+  const input = raw as Record<string, unknown>;
+  if ("path" in input || "file_path" in input || "filePath" in input) return writeTarget(input, "write input");
+  if (!Array.isArray(input.edits) || input.edits.length === 0) {
+    return Object.freeze({ ok: false, error: "write input must contain a target or a non-empty edits array" });
+  }
+  const paths: string[] = [];
+  for (const [index, edit] of input.edits.entries()) {
+    if (typeof edit !== "object" || edit === null || Array.isArray(edit)) {
+      return Object.freeze({ ok: false, error: `write input.edits[${index}] must be a plain object` });
+    }
+    const parsed = writeTarget(edit as Record<string, unknown>, `write input.edits[${index}]`);
+    if (!parsed.ok) return parsed;
+    const target = parsed.value[0];
+    if (!paths.includes(target)) paths.push(target);
+  }
+  return Object.freeze({ ok: true, value: Object.freeze(paths) as readonly [string, ...string[]] });
 }
 
 export function replacePiSpawnTask(raw: unknown, index: number, task: string): void {
@@ -331,12 +371,17 @@ function rememberTrustedReviewCapture(
   if (markers === null || markers.requestId !== outcome.receipt.requestId) {
     throw new Error(`captured request ${outcome.receipt.requestId} is missing its exact task authority markers`);
   }
-  const sessionRuns = trustedReviewRuns.get(sessionId) ?? new Map<string, TrustedReviewRun>();
-  trustedReviewRuns.set(sessionId, sessionRuns);
+  const sessionRoots = trustedReviewRuns.get(sessionId) ?? new Map<string, TrustedReviewRoot>();
+  trustedReviewRuns.set(sessionId, sessionRoots);
+  const rootIdentity = resolve(binding.runsRoot);
+  const root = sessionRoots.get(rootIdentity) ?? Object.freeze({
+    nextTouch: 1,
+    runs: new Map<string, TrustedReviewRun>(),
+  });
   const identity = trustedRunIdentity(binding);
-  const run = sessionRuns.get(identity) ?? { binding, captures: new Map<CaptureKey, TrustedReviewCapture>() };
-  run.binding = binding;
-  run.captures.set(
+  const previousRun = root.runs.get(identity);
+  const captures = new Map(previousRun?.captures ?? []);
+  captures.set(
     trustedCaptureIdentity(outcome.receipt.slotId, outcome.receipt.attempt),
     Object.freeze({
       requestId: outcome.receipt.requestId,
@@ -348,7 +393,9 @@ function rememberTrustedReviewCapture(
       byteLength: outcome.receipt.byteLength,
     }),
   );
-  sessionRuns.set(identity, run);
+  const runs = new Map(root.runs);
+  runs.set(identity, Object.freeze({ binding, captures, touchedAt: root.nextTouch }));
+  sessionRoots.set(rootIdentity, Object.freeze({ nextTouch: root.nextTouch + 1, runs }));
 }
 
 function environmentRunBinding(): SessionRunBinding | null {
@@ -656,10 +703,12 @@ type PiSpawnReservation = Readonly<{
    */
   graphActiveAtSpawn: boolean;
   orchestrationRunBinding: SessionRunBinding | null;
+  pointerBinding: SessionTaskGraphPointerBinding | null;
   items: readonly Readonly<{
     agentType: string;
     rosterId: AgentId;
     taskId: string | null;
+    implementationAuthority: ImplementationAttemptAuthority | null;
     /** The closed lifecycle union, not an independent boolean pair: two
      *  booleans admitted the impossible {implementation: true, standalone:
      *  true} and left the third lifecycle state nameless. The source union's
@@ -678,6 +727,32 @@ type PiSpawnReservation = Readonly<{
  */
 function spawnedWithoutTaskGraph(reservation: PiSpawnReservation | undefined): boolean {
   return reservation !== undefined && !reservation.graphActiveAtSpawn;
+}
+
+function reservedImplementationFailure(
+  expectedAgent: string,
+  expectedTaskId: string,
+  authorityTaskId: string,
+  entry: PiSubagentResultEntry | undefined,
+): string | null {
+  if (entry === undefined) return "reserved implementation result was missing";
+  if (!entry.ok) return `reserved implementation result was malformed: ${entry.problem}`;
+  const resultAgent = stripNamespace(entry.result.agent);
+  if (resultAgent !== expectedAgent) {
+    return `reserved ${expectedAgent} result was returned as ${resultAgent}`;
+  }
+  const parsedMessages = parsePiMessages(entry.result.messages);
+  if (!parsedMessages.ok) {
+    return `reserved implementation transcript was malformed: ${parsedMessages.errors.join("; ")}`;
+  }
+  const returnedTaskId = extractTaskId(entry.result.task);
+  if (returnedTaskId === null || returnedTaskId !== expectedTaskId || returnedTaskId !== authorityTaskId) {
+    return `reserved implementation result Task identity mismatch: returned=${returnedTaskId ?? "missing"}, ` +
+      `reserved=${expectedTaskId}, authority=${authorityTaskId}`;
+  }
+  return piSubagentResultFailed(entry.result)
+    ? `${expectedAgent} failed before implementation evidence completed`
+    : null;
 }
 
 function recoverPiSpawnReservation(
@@ -742,12 +817,14 @@ function recoverPiSpawnReservation(
       // guess.
       graphActiveAtSpawn: true,
       orchestrationRunBinding: binding,
+      pointerBinding: null,
       items: Object.freeze(indexes.map((index) => {
         const item = byIndex.get(index)!;
         return Object.freeze({
           agentType: item.agentType,
           rosterId: item.rosterId,
           taskId: null,
+          implementationAuthority: null,
           kind: "standalone" as const,
         });
       })),
@@ -767,13 +844,11 @@ function recoverPiSpawnReservation(
 interface PiParentSessionRuntime {
   readonly issuedWriteGrants: Map<string, readonly string[]>;
   readonly spawnReservations: Map<string, PiSpawnReservation>;
-  taskGraphPointerOwned: boolean;
 }
 
 const emptyParentSessionRuntime = (): PiParentSessionRuntime => ({
   issuedWriteGrants: new Map(),
   spawnReservations: new Map(),
-  taskGraphPointerOwned: false,
 });
 
 export function standaloneCompletionCheckpointProblem(checkpoint: string): string | null {
@@ -786,7 +861,6 @@ export function standaloneCompletionCheckpointProblem(checkpoint: string): strin
 }
 
 type TrustedRunVerification =
-  | Readonly<{ kind: "skipped" }>
   | Readonly<{ kind: "rejected"; message: string }>
   | Readonly<{ kind: "accepted"; receipt: LoomReviewAuthorityReceipt }>;
 
@@ -819,10 +893,8 @@ function trustedCaptureProblem(handle: RunDirHandle, run: TrustedReviewRun): str
 
 function verifyTrustedReviewRun(
   input: Readonly<{ sessionId: string }>,
-  expectedRoot: string,
   run: TrustedReviewRun,
 ): TrustedRunVerification {
-  if (resolve(run.binding.runsRoot) !== expectedRoot) return { kind: "skipped" };
   const reject = (message: string): TrustedRunVerification => ({
     kind: "rejected",
     message: `${run.binding.runId}: ${message}`,
@@ -866,22 +938,31 @@ function verifyTrustedReviewRun(
 }
 
 async function verifyTrustedStandaloneReview(input: Readonly<{ cwd: string; sessionId: string }>): Promise<unknown> {
-  const runs = trustedReviewRuns.get(input.sessionId);
-  if (runs === undefined) throw new Error(`no request-bound Loom captures were witnessed for Pi session ${input.sessionId}`);
+  const sessionRoots = trustedReviewRuns.get(input.sessionId);
+  if (sessionRoots === undefined) throw new Error(`no request-bound Loom captures were witnessed for Pi session ${input.sessionId}`);
   const expectedRoot = resolve(input.cwd, ".claude/reviews/review-and-fix-runs");
-  const outcomes = [...runs.values()].map((run) => verifyTrustedReviewRun(input, expectedRoot, run));
-  const receipts = outcomes.flatMap((outcome) => outcome.kind === "accepted" ? [outcome.receipt] : []);
-  const rejections = outcomes.flatMap((outcome) => outcome.kind === "rejected" ? [outcome.message] : []);
-  if (receipts.length !== 1 || rejections.length !== 0) {
-    throw new Error(
-      `expected one unambiguous witnessed Standalone Review for Pi session ${input.sessionId}, found ${receipts.length}` +
-      (rejections.length === 0 ? "" : `; rejected: ${rejections.join(" | ")}`),
-    );
+  const root = sessionRoots.get(expectedRoot);
+  if (root === undefined || root.runs.size === 0) {
+    throw new Error(`no request-bound Loom captures were witnessed for Pi session ${input.sessionId} and root ${expectedRoot}`);
   }
-  return receipts[0]!;
+  const current = [...root.runs.entries()].reduce((latest, candidate) =>
+    candidate[1].touchedAt > latest[1].touchedAt ? candidate : latest);
+  const outcome = verifyTrustedReviewRun(input, current[1]);
+  if (outcome.kind === "rejected") {
+    throw new Error(`current witnessed Standalone Review rejected: ${outcome.message}`);
+  }
+  // Exact accepted replay is idempotent. Once accepted, older witnesses for
+  // this root are retired so they can never make a later verification
+  // ambiguous or become fallback authority after a new run is touched.
+  sessionRoots.set(expectedRoot, Object.freeze({
+    nextTouch: root.nextTouch,
+    runs: new Map([[current[0], current[1]]]),
+  }));
+  return outcome.receipt;
 }
 
 export default function (pi: ExtensionAPI) {
+  assertAnchoredFilesystemPlatformSupported();
   registerInteractiveSubagentTool(pi, PACKAGE_ROOT, PI_AGENT_DIR);
   (globalThis as unknown as Record<PropertyKey, unknown>)[LOOM_REVIEW_AUTHORITY_SYMBOL] = Object.freeze({
     verify: verifyTrustedStandaloneReview,
@@ -899,14 +980,13 @@ export default function (pi: ExtensionAPI) {
     return created;
   };
   const pruneRuntime = (sessionId: PiSessionId, runtime: PiParentSessionRuntime): void => {
-    if (runtime.issuedWriteGrants.size === 0 && runtime.spawnReservations.size === 0 &&
-        !runtime.taskGraphPointerOwned) {
+    if (runtime.issuedWriteGrants.size === 0 && runtime.spawnReservations.size === 0) {
       parentSessionRuntimes.delete(sessionId);
     }
   };
   const activeChildWriteGrants = new Map<string, {
     agentId: AgentId;
-    pointerCreated: boolean;
+    pointerBinding: SessionTaskGraphPointerBinding;
     /** Present only on scoped (phase/panel) grants: Edit/Write targets must
      *  fall inside one of these artifact dirs. Scopes resolve against
      *  `grantCwd` (the spawn cwd), which is also the base relative targets
@@ -998,13 +1078,13 @@ export default function (pi: ExtensionAPI) {
         const granted = activeChildWriteGrants.get(sessionId);
         if (granted !== undefined && granted.scopeDirs !== undefined && granted.scopeDirs.length > 0) {
           const targets = piWriteTargetPaths(event.input);
-          if (targets.length === 0) {
+          if (!targets.ok) {
             return {
               block: true,
-              reason: "BLOCKED: cannot verify the write target for a scoped phase-agent write grant; refusing the edit.",
+              reason: `BLOCKED: cannot verify every write target for a scoped phase-agent write grant: ${targets.error}; refusing the edit.`,
             };
           }
-          for (const target of targets) {
+          for (const target of targets.value) {
             const violation = writeTargetViolatesScope(target, granted.scopeDirs, granted.grantCwd ?? ctx.cwd);
             if (violation !== null) {
               return {
@@ -1138,7 +1218,7 @@ export default function (pi: ExtensionAPI) {
         );
         const reserved: Array<(typeof rosterIds)[number]> = [];
         const writeGrants: Array<{ index: number; token: string; task: string; originalTask: string; injected: boolean }> = [];
-        let taskGraphPointerCreated = false;
+        let taskGraphPointerBinding: SessionTaskGraphPointerBinding | null = null;
         let orchestrationRunBinding: SessionRunBinding | null = null;
         const rollbackLifecycle = async (): Promise<readonly string[]> => {
           const actions: PiCleanupAction[] = [];
@@ -1160,10 +1240,14 @@ export default function (pi: ExtensionAPI) {
               run: () => fsSessionRegistry.removeActive(safeSessionId, agentId),
             });
           }
-          if (taskGraphPointerCreated) {
+          if (taskGraphPointerBinding !== null) {
+            const ownedPointer = taskGraphPointerBinding;
             actions.push({
-              label: "remove task-graph pointer",
-              run: () => unlinkSync(`${subagentDir()}/${safeSessionId}.task_graph`),
+              label: "roll back task-graph pointer",
+              run: async () => {
+                const result = await rollbackSessionTaskGraphPointer(ownedPointer);
+                if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
+              },
             });
           }
           return runPiCleanupActions(actions);
@@ -1189,11 +1273,10 @@ export default function (pi: ExtensionAPI) {
           }
           const activeTaskGraphPath = taskGraphPath();
           if (needsTaskGraphLifecycle && pathExistsFailClosed(activeTaskGraphPath)) {
-            const taskGraphFile = `${subagentDir()}/${safeSessionId}.task_graph`;
-            if (!existsSync(taskGraphFile)) {
-              writeFileSync(taskGraphFile, resolve(activeTaskGraphPath));
-              taskGraphPointerCreated = true;
-            }
+            taskGraphPointerBinding = await bindSessionTaskGraphPointer(
+              safeSessionId,
+              activeTaskGraphPath,
+            );
           }
           // Bind every Loom-owned Pi native spawn identity to the exact issued
           // request before the harness can dispatch the batch. The durable run
@@ -1254,13 +1337,13 @@ export default function (pi: ExtensionAPI) {
         }
 
         currentGuard = "validate-task-execution";
-        let taskResult;
+        let taskRegistration;
         try {
           const executionMode = event.toolName === LOOM_INTERACTIVE_SUBAGENT_TOOL ||
               Array.isArray((event.input as { chain?: unknown }).chain)
             ? "sequential" as const
             : "parallel" as const;
-          taskResult = await validateTaskExecutionBatch(
+          taskRegistration = await registerTaskExecutionBatch(
             taskExecutionSpawns,
             executionMode,
             rosterObservation,
@@ -1272,24 +1355,47 @@ export default function (pi: ExtensionAPI) {
             error instanceof Error ? { cause: error } : undefined,
           );
         }
-        if (taskResult.kind === "block") {
+        if (taskRegistration.kind === "block") {
           const cleanupErrors = await rollbackLifecycle();
-          return { block: true, reason: `${taskResult.message}${cleanupFailureSuffix(cleanupErrors)}` };
+          return { block: true, reason: `${taskRegistration.message}${cleanupFailureSuffix(cleanupErrors)}` };
+        }
+        const alignment = graphIsActive
+          ? alignPiImplementationAuthorities(
+              parsedItems,
+              taskExecutionSpawns,
+              taskRegistration.authorities,
+            )
+          : {
+              ok: true as const,
+              authoritiesBySlot: Object.freeze(parsedItems.map(() => null)),
+            };
+        if (!alignment.ok) {
+          const registrationRollback = await rollbackTaskExecutionRegistration(taskRegistration.authorities);
+          const cleanupErrors = await rollbackLifecycle();
+          const rollbackErrors = [
+            ...(registrationRollback.kind === "block" ? [registrationRollback.message] : []),
+            ...cleanupErrors,
+          ];
+          return {
+            block: true,
+            reason: `BLOCKED: ${alignment.error}${cleanupFailureSuffix(rollbackErrors)}`,
+          };
         }
         const sessionRuntime = runtimeFor(safeSessionId);
         if (writeGrants.length > 0) {
           sessionRuntime.issuedWriteGrants.set(toolCallId, writeGrants.map((grant) => grant.token));
         }
-        if (taskGraphPointerCreated) sessionRuntime.taskGraphPointerOwned = true;
         sessionRuntime.spawnReservations.set(toolCallId, {
           sessionId: safeSessionId,
           needsTaskGraphLifecycle,
           graphActiveAtSpawn: graphIsActive,
           orchestrationRunBinding,
+          pointerBinding: taskGraphPointerBinding,
           items: parsedItems.map((item, index) => ({
             agentType: item.agent,
             rosterId: rosterIds[index]!,
             taskId: extractTaskId(item.task),
+            implementationAuthority: alignment.authoritiesBySlot[index] ?? null,
             kind: taskExecutionSpawns[index]?.kind ?? "non-implementation",
           })),
         });
@@ -1326,7 +1432,7 @@ export default function (pi: ExtensionAPI) {
     for (const sweep of [
       {
         name: "sweepStaleSessions",
-        run: (): void => sweepStaleSessions(subagentDir(), Date.now() - STALE_SUBAGENT_TTL_MS),
+        run: (): void => { sweepStaleSessions(subagentDir(), Date.now() - STALE_SUBAGENT_TTL_MS); },
       },
       { name: "sweepExpiredPiWriteGrants", run: (): void => sweepExpiredPiWriteGrants() },
     ]) {
@@ -1356,10 +1462,8 @@ export default function (pi: ExtensionAPI) {
       if (!sessionId || !agentId) throw new Error("child session or grant agent identity is invalid");
       await fsSessionRegistry.markActive(sessionId, agentId);
       partialBinding = { sessionId, agentId };
-      const pointer = `${subagentDir()}/${sessionId}.task_graph`;
-      const pointerCreated = !existsSync(pointer);
-      if (pointerCreated) writeFileSync(pointer, grant.taskGraphPath, { mode: 0o600 });
-      activeChildWriteGrants.set(sessionId, { agentId, pointerCreated, scopeDirs: grant.scopeDirs, grantCwd: grant.cwd });
+      const pointerBinding = await bindSessionTaskGraphPointer(sessionId, grant.taskGraphPath);
+      activeChildWriteGrants.set(sessionId, { agentId, pointerBinding, scopeDirs: grant.scopeDirs, grantCwd: grant.cwd });
       partialBinding = null;
       process.stderr.write(`loom(pi): activated child write grant for ${grant.taskId}/${sessionId}\n`);
     } catch (error) {
@@ -1390,6 +1494,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     const rawSessionId = ctx.sessionManager.getSessionId() ?? "";
+    trustedReviewRuns.delete(rawSessionId);
     const sessionId = parseSessionId(rawSessionId);
     const binding = activeChildWriteGrants.get(rawSessionId);
     const actions: PiCleanupAction[] = [];
@@ -1413,12 +1518,13 @@ export default function (pi: ExtensionAPI) {
         label: `remove child roster entry ${binding.agentId}`,
         run: () => fsSessionRegistry.removeActive(sessionId, binding.agentId),
       });
-      if (binding.pointerCreated) {
-        actions.push({
-          label: `remove child task-graph pointer for ${sessionId}`,
-          run: () => rmSync(`${subagentDir()}/${sessionId}.task_graph`, { force: true }),
-        });
-      }
+      actions.push({
+        label: `roll back child task-graph pointer for ${sessionId}`,
+        run: async () => {
+          const result = await rollbackSessionTaskGraphPointer(binding.pointerBinding);
+          if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
+        },
+      });
     }
     for (const reservation of parentRuntime?.spawnReservations.values() ?? []) {
       for (const item of reservation.items) {
@@ -1427,12 +1533,16 @@ export default function (pi: ExtensionAPI) {
           run: () => fsSessionRegistry.removeActive(reservation.sessionId, item.rosterId),
         });
       }
-    }
-    if (sessionId && parentRuntime?.taskGraphPointerOwned) {
-      actions.push({
-        label: `remove parent task-graph pointer for ${sessionId}`,
-        run: () => rmSync(`${subagentDir()}/${sessionId}.task_graph`, { force: true }),
-      });
+      if (reservation.pointerBinding !== null) {
+        const pointerBinding = reservation.pointerBinding;
+        actions.push({
+          label: `release shutdown task-graph pointer lease for ${reservation.sessionId}`,
+          run: async () => {
+            const result = await rollbackSessionTaskGraphPointer(pointerBinding);
+            if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
+          },
+        });
+      }
     }
 
     const cleanupErrors = await runPiCleanupActions(actions);
@@ -1569,12 +1679,9 @@ export default function (pi: ExtensionAPI) {
       ? sessionRuntime?.issuedWriteGrants.get(toolCallId) ?? []
       : [];
 
-    // Consume only this session's reservation. Capability, roster, and owned
-    // pointer cleanup are isolated: one failure is reported but never prevents
-    // result reconciliation or the remaining cleanup actions.
-    if (typeof toolCallId === "string" && sessionRuntime) {
-      sessionRuntime.spawnReservations.delete(toolCallId);
-    }
+    // Roster and grant cleanup may consume immediately, but the reservation is
+    // the retry capability for its pointer lease. Retain it until exact pointer
+    // release succeeds; shutdown can retry a transient result-time failure.
     const cleanupActions: PiCleanupAction[] = grantTokens.map((token, index) => ({
       label: `revoke write grant ${index + 1}`,
       run: () => revokePiWriteGrant(token),
@@ -1600,6 +1707,9 @@ export default function (pi: ExtensionAPI) {
     if (typeof toolCallId === "string" && sessionRuntime &&
         !cleanupErrors.some((error) => error.startsWith("revoke write grant "))) {
       sessionRuntime.issuedWriteGrants.delete(toolCallId);
+    }
+    if (typeof toolCallId === "string" && sessionRuntime && reservation?.pointerBinding === null) {
+      sessionRuntime.spawnReservations.delete(toolCallId);
     }
     if (resultSessionId && sessionRuntime) pruneRuntime(resultSessionId, sessionRuntime);
     const processingErrorResponse = () => processingErrors.length === 0
@@ -1631,25 +1741,27 @@ export default function (pi: ExtensionAPI) {
     if (reservationRecoveryFailed) return processingErrorResponse();
     let parentPointerCleanupAttempted = false;
     const cleanupParentTaskGraphPointer = async (): Promise<void> => {
-      if (parentPointerCleanupAttempted || !resultSessionId || !sessionRuntime?.taskGraphPointerOwned ||
-          [...sessionRuntime.spawnReservations.values()].some((entry) => entry.needsTaskGraphLifecycle)) {
-        return;
-      }
+      if (parentPointerCleanupAttempted || !resultSessionId || reservation?.pointerBinding === null ||
+          reservation?.pointerBinding === undefined) return;
       parentPointerCleanupAttempted = true;
+      const pointerBinding = reservation.pointerBinding;
       const errors = await runPiCleanupActions([{
-        label: `remove parent task-graph pointer for ${resultSessionId}`,
-        run: () => {
-          rmSync(`${subagentDir()}/${resultSessionId}.task_graph`, { force: true });
-          sessionRuntime.taskGraphPointerOwned = false;
+        label: `release parent task-graph pointer lease for ${resultSessionId}`,
+        run: async () => {
+          const result = await rollbackSessionTaskGraphPointer(pointerBinding);
+          if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
         },
       }]);
       processingErrors.push(...errors);
       for (const error of errors) process.stderr.write(`loom(pi): reserved subagent cleanup failed: ${error}\n`);
-      pruneRuntime(resultSessionId, sessionRuntime);
+      if (errors.length === 0 && typeof toolCallId === "string" && sessionRuntime) {
+        sessionRuntime.spawnReservations.delete(toolCallId);
+      }
+      if (sessionRuntime) pruneRuntime(resultSessionId, sessionRuntime);
     };
 
     const finalizeReservedImplementations = async (
-      rawResults: readonly unknown[],
+      entries: readonly PiSubagentResultEntry[],
     ): Promise<readonly string[]> => {
       if (!reservation || !reservation.items.some((item) => item.kind === "implementation")) return [];
       let manager: StateManager | null;
@@ -1681,84 +1793,58 @@ export default function (pi: ExtensionAPI) {
         process.stderr.write(`loom(pi): ${diagnostic}\n`);
         return [diagnostic];
       }
-      const root = git.repositoryRoot() ?? process.cwd();
+      const finalizedAt = parseIsoInstant(new Date().toISOString(), "Pi finalization instant");
+      if (!finalizedAt.ok) return [finalizedAt.error.errors.join("; ")];
       try {
-        await manager.update((initial) => {
-          let state = initial;
+        const committed = await manager.updateAndReturn((initial) => {
+          let state: TaskGraph = initial;
+          const diagnostics: string[] = [];
+          const logs: string[] = [];
           for (const [index, item] of reservation.items.entries()) {
             if (item.kind !== "implementation" || item.taskId === null) continue;
-            const raw = rawResults[index];
-            const envelope = typeof raw === "object" && raw !== null && !Array.isArray(raw)
-              ? raw as Record<string, unknown>
-              : null;
-            const resultAgent = typeof envelope?.agent === "string"
-              ? stripNamespace(envelope.agent)
-              : null;
-            const succeeded = resultAgent === item.agentType && !piSubagentResultFailed({
-              exitCode: envelope?.exitCode,
-              stopReason: envelope?.stopReason,
-            });
-            if (succeeded) continue;
-
-            const task = state.tasks.find((candidate) => candidate.id === item.taskId);
-            if (!task) {
-              state = {
-                ...state,
-                executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== item.taskId),
-              };
-              continue;
-            }
-
-            const comparison = compareAttemptBaseline(root, task, { kind: "repository" });
-            const { changedDeclaredArtifacts, bytesChangedSinceAttempt } = comparison;
-            if (comparison.failure !== null) {
-              // Comparison failure cannot prove the old evidence still matches
-              // current bytes. The shared helper already failed closed
-              // (bytesChangedSinceAttempt: true); retain the concrete
-              // diagnostic for the operator.
-              process.stderr.write(
-                `loom(pi): failed-attempt baseline comparison failed for ${item.taskId}: ${comparison.failure} — invalidating stale evidence\n`,
+            if (item.implementationAuthority === null) {
+              logs.push(
+                `implementation slot ${index + 1}/${item.taskId} has no exact attempt authority — current reservation preserved`,
               );
-            }
-
-            if (!bytesChangedSinceAttempt) {
-              state = {
-                ...state,
-                executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== item.taskId),
-              };
               continue;
             }
+            const failure = reservedImplementationFailure(
+              item.agentType,
+              item.taskId,
+              item.implementationAuthority.taskId,
+              entries[index],
+            );
+            if (failure === null) continue;
 
-            let failure: string;
-            if (resultAgent !== null && resultAgent !== item.agentType) {
-              failure = `reserved ${item.agentType} result was returned as ${resultAgent}`;
-            } else if (envelope === null) {
-              failure = "reserved implementation result was missing or malformed";
-            } else {
-              failure = `${item.agentType} failed before implementation evidence completed`;
+            const applied = settleUnavailableImplementation(
+              state,
+              item.implementationAuthority,
+              finalizedAt.value,
+              failure,
+            );
+            if (applied.kind === "error") {
+              const diagnostic = `Oracle could not finalize ${item.taskId}: ${JSON.stringify(applied.error)}`;
+              diagnostics.push(diagnostic);
+              logs.push(`${diagnostic}; current attempt preserved`);
+              continue;
             }
-            state = applyUntrustedStopResolution(state, item.taskId, {
-              taskCompleted: false,
-              testResult: {
-                verdict: "untrusted",
-                passed: false,
-                label: "pi-implementation-failed",
-                provenance: "unverified",
-              },
-              testEvidence: failure,
-              // The repository attempt baseline is shared by a parallel batch.
-              // Its delta proves stale evidence must be invalidated, but cannot
-              // attribute any sibling's paths to this failed task.
-              filesModified: [],
-              changedDeclaredArtifacts,
-              bytesChangedSinceAttempt: true,
-              newTestsWritten: false,
-              newTestEvidence: "",
-            }).state;
+            state = applied.state;
+            if (applied.kind === "ignored" && applied.reason === "stale") {
+              logs.push(`late result for ${item.taskId} does not match its current attempt authority — replacement preserved`);
+            }
           }
-          return state;
+          return {
+            state,
+            value: Object.freeze({
+              diagnostics: Object.freeze(diagnostics),
+              logs: Object.freeze(logs),
+            }),
+          };
         });
-        return [];
+        // StateManager callbacks are side-effect free. Emit only after the
+        // protected-state commit proves the diagnostics describe durable state.
+        for (const line of committed.logs) process.stderr.write(`loom(pi): ${line}\n`);
+        return committed.diagnostics;
       } catch (error) {
         const diagnostic = `reserved implementation finalization failed: ${error instanceof Error ? error.message : String(error)}`;
         process.stderr.write(`loom(pi): ${diagnostic}\n`);
@@ -1770,7 +1856,11 @@ export default function (pi: ExtensionAPI) {
     const rawResults = details && "results" in details && Array.isArray(details.results)
       ? details.results
       : [];
-    processingErrors.push(...await finalizeReservedImplementations(rawResults));
+    // Exact per-entry parsing precedes finalization. A matching-agent/exit-0
+    // shell is not a successful implementation envelope until transcript shape
+    // and exact returned Task identity have both parsed.
+    const entries = parsePiSubagentResults(rawResults);
+    processingErrors.push(...await finalizeReservedImplementations(entries));
 
     // A reservation is the authoritative expected batch. Pi may return a
     // shorter or reordered results array after a child disappears. Reconcile
@@ -1847,11 +1937,11 @@ export default function (pi: ExtensionAPI) {
           // `processingErrors` and zero stderr. The throw now becomes a
           // diagnostic and the batch continues.
           try {
-            await manager.update((state) => ({
+            await manager.update((state): TaskGraph => ({
               ...state,
-              tasks: state.tasks.map((task) => {
+              tasks: state.tasks.map<Task>((task) => {
                 const failures = missingReviews.filter(({ item }) => item.taskId === task.id);
-                return failures.reduce((current, { item, index }) => applyReviewResolution(current, {
+                return failures.reduce<Task>((current, { item, index }) => applyReviewResolution(current, {
                   kind: "evidence-failed" as const,
                   agent: item.agentType,
                   message: `reserved reviewer result ${index + 1} for ${item.agentType} was missing or mismatched`,
@@ -1915,7 +2005,6 @@ export default function (pi: ExtensionAPI) {
     // Per-element parse, not a cast: the array-shape guard above says nothing
     // about any individual element, and `agent`/`task`/`exitCode` are read as
     // guaranteed strings and numbers downstream.
-    const entries = parsePiSubagentResults(rawResults);
     if (reservation && entries.length > reservation.items.length) {
       const diagnostic =
         `subagent tool_result returned ${entries.length} result(s) for ${reservation.items.length} reserved slot(s) — surplus evidence ignored`;
@@ -2192,13 +2281,12 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const sm = StateManager.fromPath(activeTaskGraphPath);
-      if (!sm) {
-        ctx.ui.notify("Could not load task graph", "error");
-        return;
-      }
-
       try {
+        const sm = StateManager.fromPath(activeTaskGraphPath);
+        if (!sm) {
+          ctx.ui.notify("Could not load task graph", "error");
+          return;
+        }
         const state = sm.load();
         const totalTasks = state.tasks.length;
         const completed = state.tasks.filter(t => t.status === "completed").length;

@@ -12,15 +12,30 @@
  * fall back to their own mtime.
  */
 
-import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
+import { readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { HookHandler } from "../../types";
+import { passthroughResult, type HookHandler } from "../../types";
 import { STALE_SUBAGENT_TTL_MS, SUBAGENT_DIR } from "../../config";
-import { SESSION_SUFFIXES } from "../../machine";
+import {
+  IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX,
+  SESSION_SUFFIXES,
+  TASK_GRAPH_POINTER_BINDING_SUFFIX,
+} from "../../machine";
 
 /** Pure: session id for a tracking file, or null when the name matches no
  *  known per-session suffix. */
 export function sessionOfEntry(entry: string): string | null {
+  for (const suffix of [IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX, TASK_GRAPH_POINTER_BINDING_SUFFIX]) {
+    if (!entry.endsWith(suffix)) continue;
+    const keyed = entry.slice(0, -suffix.length);
+    const separator = keyed.lastIndexOf(".");
+    const encodedAgent = separator < 0 ? "" : keyed.slice(separator + 1);
+    if (separator > 0 && encodedAgent.length > 0 && encodedAgent.length % 2 === 0 &&
+        /^[0-9a-f]+$/.test(encodedAgent)) {
+      return keyed.slice(0, separator);
+    }
+    return null;
+  }
   for (const suffix of SESSION_SUFFIXES) {
     if (entry.endsWith(suffix) && entry.length > suffix.length) {
       return entry.slice(0, -suffix.length);
@@ -37,6 +52,7 @@ export function sessionOfEntry(entry: string): string | null {
 export function staleEntries(
   mtimes: ReadonlyMap<string, number>,
   cutoffMs: number,
+  unobservableSessions: ReadonlySet<string> = new Set(),
 ): string[] {
   const groupMax = new Map<string, number>();
   for (const [entry, mtime] of mtimes) {
@@ -47,6 +63,7 @@ export function staleEntries(
   return [...mtimes.entries()]
     .filter(([entry, mtime]) => {
       const session = sessionOfEntry(entry);
+      if (session !== null && unobservableSessions.has(session)) return false;
       const anchor = session === null ? mtime : (groupMax.get(session) ?? mtime);
       return anchor < cutoffMs;
     })
@@ -56,52 +73,110 @@ export function staleEntries(
 /** Shell: sweep one tracking dir. Dir is a parameter so tests can run the
  *  sweep hermetically against a temp dir (SUBAGENT_DIR freezes at first
  *  config import, which a shared-process test run cannot re-point). */
-export function sweepStaleSessions(dir: string, cutoffMs: number): void {
-  if (!existsSync(dir)) return;
+export type StaleCleanupDiagnostic = Readonly<{
+  operation: "read-directory" | "stat" | "remove";
+  path: string;
+  cause: string;
+}>;
 
+export type DirectoryProbe =
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "present"; entries: readonly string[] }>
+  | Readonly<{ kind: "unavailable"; cause: string }>;
+
+export type StaleSessionOperations = Readonly<{
+  probeDirectory: (path: string) => DirectoryProbe;
+  mtime: (path: string) => number;
+  remove: (path: string) => void;
+}>;
+
+function probeDirectory(path: string): DirectoryProbe {
   try {
-    const mtimes = new Map<string, number>();
-    let failedStats = 0;
-    for (const entry of readdirSync(dir)) {
-      try {
-        mtimes.set(entry, statSync(join(dir, entry)).mtimeMs);
-      } catch {
-        failedStats++;
-      }
+    return Object.freeze({ kind: "present", entries: Object.freeze(readdirSync(path)) });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return Object.freeze({ kind: "absent" });
     }
-    if (failedStats > 0) {
-      // An unstatable entry is excluded from its session group's max-mtime
-      // anchor AND from the sweep — say so once (mirrors failedRemovals).
-      process.stderr.write(
-        `cleanup-stale-subagents: could not stat ${failedStats} tracking entr${failedStats === 1 ? "y" : "ies"} under ${dir} — skipped this sweep\n`,
-      );
-    }
-    let failedRemovals = 0;
-    for (const entry of staleEntries(mtimes, cutoffMs)) {
-      // rmSync handles both files and the `.cleanup` mkdir-lock directories.
-      try {
-        rmSync(join(dir, entry), { recursive: true, force: true });
-      } catch {
-        failedRemovals++;
-      }
-    }
-    if (failedRemovals > 0) {
-      process.stderr.write(
-        `cleanup-stale-subagents: ${failedRemovals} stale tracking entr${failedRemovals === 1 ? "y" : "ies"} could not be removed under ${dir}\n`,
-      );
-    }
-  } catch (e) {
-    // A failed sweep leaks stale bindings/rosters until the NEXT session
-    // start — mirror the pi twin's logging instead of swallowing it.
-    process.stderr.write(
-      `loom: session cleanup failed for ${dir}: ${e instanceof Error ? e.message : String(e)}\n`,
-    );
+    return Object.freeze({
+      kind: "unavailable",
+      cause: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 
-const handler: HookHandler = async (_stdin, _args) => {
-  sweepStaleSessions(SUBAGENT_DIR, Date.now() - STALE_SUBAGENT_TTL_MS);
-  return { kind: "passthrough" };
-};
+const REAL_STALE_SESSION_OPERATIONS: StaleSessionOperations = Object.freeze({
+  probeDirectory,
+  mtime: (path) => statSync(path).mtimeMs,
+  remove: (path) => rmSync(path, { recursive: true, force: true }),
+});
+
+function diagnostic(
+  operation: StaleCleanupDiagnostic["operation"],
+  path: string,
+  error: unknown,
+): StaleCleanupDiagnostic {
+  return Object.freeze({
+    operation,
+    path,
+    cause: error instanceof Error ? error.message : String(error),
+  });
+}
+
+function renderDiagnostic(failure: StaleCleanupDiagnostic): string {
+  return `cleanup-stale-subagents: ${failure.operation} failed for ${failure.path}: ${failure.cause}`;
+}
+
+/** Shell: returns every failed operation with its exact path and cause. */
+export function sweepStaleSessions(
+  dir: string,
+  cutoffMs: number,
+  operations: StaleSessionOperations = REAL_STALE_SESSION_OPERATIONS,
+): readonly StaleCleanupDiagnostic[] {
+  const directory = operations.probeDirectory(dir);
+  if (directory.kind === "absent") return Object.freeze([]);
+  if (directory.kind === "unavailable") {
+    const diagnostics = Object.freeze([diagnostic("read-directory", dir, directory.cause)]);
+    process.stderr.write(`${renderDiagnostic(diagnostics[0]!)}\n`);
+    return diagnostics;
+  }
+
+  const diagnostics: StaleCleanupDiagnostic[] = [];
+  const mtimes = new Map<string, number>();
+  const unobservableSessions = new Set<string>();
+  for (const entry of directory.entries) {
+    const path = join(dir, entry);
+    try {
+      mtimes.set(entry, operations.mtime(path));
+    } catch (error) {
+      diagnostics.push(diagnostic("stat", path, error));
+      const session = sessionOfEntry(entry);
+      if (session !== null) unobservableSessions.add(session);
+    }
+  }
+  for (const entry of staleEntries(mtimes, cutoffMs, unobservableSessions)) {
+    const path = join(dir, entry);
+    try {
+      operations.remove(path);
+    } catch (error) {
+      diagnostics.push(diagnostic("remove", path, error));
+    }
+  }
+  for (const failure of diagnostics) process.stderr.write(`${renderDiagnostic(failure)}\n`);
+  return Object.freeze(diagnostics);
+}
+
+export function runCleanupStaleSubagents(
+  dir: string,
+  nowMs: number,
+  operations: StaleSessionOperations = REAL_STALE_SESSION_OPERATIONS,
+) {
+  const diagnostics = sweepStaleSessions(dir, nowMs - STALE_SUBAGENT_TTL_MS, operations);
+  return passthroughResult(
+    diagnostics.length === 0 ? undefined : diagnostics.map(renderDiagnostic).join("\n"),
+  );
+}
+
+const handler: HookHandler = async (_stdin, _args) =>
+  runCleanupStaleSubagents(SUBAGENT_DIR, Date.now());
 
 export default handler;

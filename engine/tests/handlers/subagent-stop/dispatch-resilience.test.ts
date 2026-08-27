@@ -1,7 +1,6 @@
 /**
  * SubagentStop dispatch resilience:
- * - malformed stdin is caught with a specific "bindings may leak" note
- *   instead of crashing the whole pipeline (Advisory 4)
+ * - malformed stdin fails closed with a specific "bindings may leak" error
  * - a cleanupSubagentFlag crash still runs update-task-status (Advisory 4)
  * - update-task-status judges the dispatcher's pre-unbind ledger snapshot,
  *   not whatever file is on disk when it runs (Advisory 7)
@@ -11,7 +10,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import dispatch from "../../../src/handlers/subagent-stop/dispatch";
+import dispatch, { runDispatch } from "../../../src/handlers/subagent-stop/dispatch";
 import markActive from "../../../src/handlers/subagent-start/mark-subagent-active";
 import { runUpdateTaskStatus } from "../../../src/handlers/subagent-stop/update-task-status";
 import { SUBAGENT_DIR } from "../../../src/config";
@@ -100,7 +99,7 @@ describe("category handler errors propagate instead of passthrough (critical)", 
 });
 
 describe("request-bound capture gates legacy dispatch", () => {
-  it("runs cleanup but skips state mutation after Claude capture rejection", async () => {
+  it("combines capture and cleanup failures while skipping legacy state mutation", async () => {
     const dir = tempDir();
     const statePath = writeState(dir);
     const session = sid("capture-rejected");
@@ -125,13 +124,17 @@ describe("request-bound capture gates legacy dispatch", () => {
     process.env.LOOM_ORCHESTRATION_RUNS_ROOT = runsRoot;
     process.env.LOOM_ORCHESTRATION_RUN_DIR = runDir;
     try {
-      const result = await dispatch(JSON.stringify({
+      const result = await runDispatch(JSON.stringify({
         session_id: session,
         agent_id: "agent-capture",
         agent_type: "code-reviewer",
         agent_transcript_path: join(dir, "missing-transcript.jsonl"),
-      }), []);
-      expect(result.kind).toBe("error");
+      }), [], async () => ({ kind: "error", message: "injected cleanup failure" }));
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringContaining("injected cleanup failure"),
+      });
+      if (result.kind === "error") expect(result.message).toContain("request-bound capture rejected");
       const task = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
       expect(task.critical_findings ?? []).toEqual([]);
     } finally {
@@ -144,13 +147,12 @@ describe("request-bound capture gates legacy dispatch", () => {
 });
 
 describe("malformed hook input is caught, not crashed on (Advisory 4)", () => {
-  it("dispatch: malformed stdin → passthrough + 'bindings may leak' stderr", async () => {
-    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  it("dispatch: malformed stdin fails closed and names skipped cleanup", async () => {
     const result = await dispatch("{not json", []);
-    expect(result.kind).toBe("passthrough");
-    const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
-    expect(text).toContain("cleanup skipped");
-    expect(text).toContain("bindings may leak");
+    expect(result).toMatchObject({ kind: "error" });
+    if (result.kind !== "error") return;
+    expect(result.message).toContain("cleanup skipped");
+    expect(result.message).toContain("bindings may leak");
   });
 
   it("mark-subagent-active: malformed stdin → passthrough + loud stderr", async () => {
@@ -162,19 +164,18 @@ describe("malformed hook input is caught, not crashed on (Advisory 4)", () => {
   });
 });
 
-/**
- * Each of these three paths ends in `passthrough` — indistinguishable, from the
- * hook's return value alone, from "nothing to do". The stderr line IS the
- * record that something was discarded. Untested, a refactor could drop any of
- * them and every assertion in this file would still pass, silently undoing the
- * observability they were added for.
- */
+/** Every discarded result is named; an unnameable active-graph stop also
+ * fails the evidence boundary, while known unrelated custom roles retain
+ * legacy passthrough compatibility. */
 describe("dispatch names what it discarded (audit diagnostics)", () => {
-  const stderrOf = async (payload: Record<string, unknown>): Promise<string> => {
+  const stderrOf = async (
+    payload: Record<string, unknown>,
+    expectedKind: "passthrough" | "error" = "passthrough",
+  ): Promise<string> => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       const result = await dispatch(JSON.stringify(payload), []);
-      expect(result.kind).toBe("passthrough");
+      expect(result.kind).toBe(expectedKind);
       return stderrSpy.mock.calls.map((c) => String(c[0])).join("");
     } finally {
       stderrSpy.mockRestore();
@@ -193,6 +194,34 @@ describe("dispatch names what it discarded (audit diagnostics)", () => {
     expect(text).toContain("recorded NOTHING");
   });
 
+  it("preserves recorded-NOTHING and cleanup diagnostics when graph resolution and cleanup both fail", async () => {
+    const result = await runDispatch(JSON.stringify({
+      session_id: "../../invalid session",
+      agent_id: "agent-dual-failure",
+      agent_type: "code-implementer-agent",
+    }), [], async () => ({ kind: "error", message: "injected cleanup failure" }));
+
+    expect(result).toMatchObject({ kind: "error" });
+    if (result.kind !== "error") return;
+    expect(result.message).toContain("no task graph resolvable");
+    expect(result.message).toContain("SubagentStop recorded NOTHING");
+    expect(result.message).toContain("invalid session id");
+    expect(result.message).toContain("cleanup also failed: injected cleanup failure");
+  });
+
+  it.each([
+    ["invalid session", { session_id: "../../invalid session", agent_id: "agent-invalid-session", agent_type: "code-reviewer" }, "missing/invalid session id"],
+    ["missing agent", { session_id: sid("missing-agent"), agent_type: "code-reviewer" }, "missing agent_id"],
+  ])("propagates %s cleanup identity failure instead of reporting successful cleanup", async (_label, payload, diagnostic) => {
+    const result = await runDispatch(JSON.stringify(payload), []);
+
+    expect(result).toMatchObject({ kind: "error" });
+    if (result.kind !== "error") return;
+    expect(result.message).toContain("SubagentStop recorded NOTHING");
+    expect(result.message).toContain("cleanup also failed");
+    expect(result.message).toContain(diagnostic);
+  });
+
   it("distinguishes an UNNAMEABLE agent from a merely unrouted one", async () => {
     const dir = tempDir();
     const session = sid("unnameable");
@@ -201,7 +230,10 @@ describe("dispatch names what it discarded (audit diagnostics)", () => {
     // Neither the payload nor the harness metadata can say what ran — a loom
     // agent's result may have just been lost, which is not the same as a user's
     // own subagent legitimately having no orchestration hooks.
-    const unnameable = await stderrOf({ session_id: session, agent_id: "agent-unnameable" });
+    const unnameable = await stderrOf(
+      { session_id: session, agent_id: "agent-unnameable" },
+      "error",
+    );
     expect(unnameable).toContain("carried no agent_type and none could be derived");
     expect(unnameable).toContain("its result is LOST");
   });
@@ -224,7 +256,7 @@ describe("dispatch names what it discarded (audit diagnostics)", () => {
 });
 
 describe("a cleanupSubagentFlag crash still runs update-task-status (Advisory 4)", () => {
-  it("held cleanup lock crashes cleanup; T1 evidence is still recorded but untrusted proof stays pending", async () => {
+  it("held cleanup lock reports cleanup failure after T1 quarantine still runs", async () => {
     const s = sid("cleanup-crash");
     const dir = tempDir();
     const statePath = writeState(dir);
@@ -248,9 +280,9 @@ describe("a cleanupSubagentFlag crash still runs update-task-status (Advisory 4)
         JSON.stringify({ session_id: s, agent_id: "a-1", agent_type: "code-implementer-agent" }),
         [],
       );
-      expect(result.kind).toBe("passthrough");
+      expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("cleanup-subagent-flag") });
       const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
-      expect(text).toContain("ERROR in cleanupSubagentFlag");
+      expect(text).not.toContain("ERROR in cleanupSubagentFlag");
     } finally {
       rmSync(lockDir, { recursive: true, force: true });
     }
@@ -260,6 +292,31 @@ describe("a cleanupSubagentFlag crash still runs update-task-status (Advisory 4)
     expect(state.tasks[0].proof.state).toBe("failed");
     expect(state.executing_tasks).toEqual([]);
   }, 30000);
+
+  it("catches a thrown cleanup dependency, still runs category quarantine, and returns the cleanup error", async () => {
+    const s = sid("cleanup-throws");
+    const dir = tempDir();
+    const statePath = writeState(dir, { new_tests_required: false });
+    pointSessionAt(s, statePath);
+
+    const result = await runDispatch(
+      JSON.stringify({ session_id: s, agent_id: "a-1", agent_type: "code-implementer-agent" }),
+      [],
+      async () => { throw new Error("injected cleanup crash"); },
+    );
+
+    expect(result).toEqual({
+      kind: "error",
+      message: expect.stringContaining("cleanupSubagentFlag crashed: injected cleanup crash"),
+    });
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(state.executing_tasks).toEqual([]);
+    expect(state.tasks[0]).toMatchObject({
+      status: "pending",
+      proof: { state: "failed" },
+      revalidation_required: true,
+    });
+  });
 });
 
 describe("update-task-status honors the pre-unbind evidence snapshot (Advisory 7)", () => {
@@ -292,10 +349,46 @@ describe("update-task-status honors the pre-unbind evidence snapshot (Advisory 7
     expect(result.kind).toBe("passthrough");
 
     const state = JSON.parse(readFileSync(statePath, "utf-8"));
-    expect(state.tasks[0].status).toBe("implemented");
+    expect(state.tasks[0].status).toBe("pending");
+    expect(state.tasks[0].proof.state).toBe("failed");
+    expect(state.tasks[0].revalidation_required).toBe(true);
     expect(state.tasks[0].test_result).toEqual({ verdict: "trusted-pass" });
     expect(state.tasks[0].test_evidence).toContain("ledger: exit 0");
   }, 30000);
+});
+
+describe("legacy Claude completion has no positive authority", () => {
+  it("an extracted transcript Task id and passing ledger evidence remain cleanup-only", async () => {
+    const s = sid("legacy-extracted-pass");
+    const dir = tempDir();
+    const statePath = writeState(dir, { new_tests_required: false });
+    pointSessionAt(s, statePath);
+    const transcriptPath = join(dir, "legacy-extracted.jsonl");
+    writeFileSync(transcriptPath, [
+      JSON.stringify({ type: "user", message: { role: "user", content: "Task ID: T1" } }),
+      JSON.stringify({ type: "assistant", message: { role: "assistant", content: "1 passing" } }),
+    ].join("\n"));
+    const snapshot: readonly EvidenceRecord[] = [{
+      epoch: parseEpoch("a-1:code-implementer-agent")!,
+      event: { kind: "TestRun", command: "npm test", exit: 0, report: reportSummary(1, 0) },
+    }];
+
+    const result = await runUpdateTaskStatus(JSON.stringify({
+      session_id: s,
+      agent_id: "a-1",
+      agent_type: "code-implementer-agent",
+      agent_transcript_path: transcriptPath,
+    }), [], { kind: "snapshot", events: snapshot });
+
+    expect(result.kind).toBe("passthrough");
+    const task = JSON.parse(readFileSync(statePath, "utf8")).tasks[0];
+    expect(task).toMatchObject({
+      status: "pending",
+      proof: { state: "failed" },
+      revalidation_required: true,
+      test_result: { verdict: "trusted-pass" },
+    });
+  });
 });
 
 describe("trust-aware skip guard — decided INSIDE the locked update", () => {
@@ -338,6 +431,7 @@ describe("trust-aware skip guard — decided INSIDE the locked update", () => {
       test_result: { verdict: "trusted-fail" },
       test_evidence: "ledger: exit 1 (npm test)",
       new_tests_written: true,
+      new_test_evidence: "legacy fixture evidence",
     });
     pointSessionAt(s, statePath);
 
@@ -424,7 +518,7 @@ describe("a FAILED evidence snapshot is never laundered into 'genuinely empty' (
 });
 
 describe("an INVALID session id is a typed snapshot failure, never an empty snapshot (round-10 gap 22)", () => {
-  it("session_id with reserved characters → 'invalid session id' stderr + passthrough", async () => {
+  it("session_id with reserved characters → typed snapshot failure + cleanup error", async () => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const result = await dispatch(
       JSON.stringify({
@@ -437,7 +531,10 @@ describe("an INVALID session id is a typed snapshot failure, never an empty snap
     const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
     stderrSpy.mockRestore();
 
-    expect(result.kind).toBe("passthrough"); // dispatcher never crashes the pipeline
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringContaining("missing/invalid session id"),
+    });
     // The snapshot is labeled FAILED (invalid id can name no ledger file) —
     // downstream would label the verdict snapshot-read-failed, never "degraded".
     expect(text).toContain("evidence snapshot failed");

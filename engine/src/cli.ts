@@ -15,6 +15,7 @@ import { nonEmptyMessage } from "./types";
 import { resolveInitialState } from "./phase-init";
 import { KNOWN_HANDLERS, failureExitCode, piRuntimeHandshakeRequired } from "./handler-routes";
 import { captureLoomRuntimeIdentity, piCliMutationCompatibility } from "./runtime-compatibility";
+import { assertAnchoredFilesystemPlatformSupported } from "./orchestration/no-follow-fs";
 
 /**
  * Failure polarity for the top-level catch, derived from argv BEFORE
@@ -109,6 +110,7 @@ function initializeState(args: string[]): never {
 }
 
 async function main() {
+  assertAnchoredFilesystemPlatformSupported();
   const [hookType, handlerName, ...extraArgs] = process.argv.slice(2);
   enforcePiRuntimeHandshake(hookType, handlerName, extraArgs);
 

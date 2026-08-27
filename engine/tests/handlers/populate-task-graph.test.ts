@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import populate from "../../src/handlers/helpers/populate-task-graph";
 import type { Task, TaskGraph } from "../../src/types";
+import { taskFixture } from "../fixtures/task-lifecycle";
 import {
   defaultVerificationManifest,
   freezeVerificationManifest,
@@ -114,7 +115,7 @@ function stateBytes(path: string): string {
 }
 
 function existingTask(id: string, status: Task["status"]): Task {
-  return { id, description: "x", agent: "code-implementer-agent", wave: 1, status, depends_on: [] };
+  return taskFixture({ id, description: "x", agent: "code-implementer-agent", wave: 1, status, depends_on: [] });
 }
 
 const REQUIRED_VERIFICATION = Object.freeze({
@@ -454,8 +455,7 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
     expect(t9.review_status).toBe("pending");
     expect(t9.test_result).toBeUndefined();
     expect(t9.test_evidence).toBeUndefined();
-    expect(t9.new_tests_written).toBeUndefined();
-    expect(t9.new_test_evidence).toBeUndefined();
+    expect(t9.new_test_observation).toBeUndefined();
     expect(t9.critical_findings).toEqual([]);
     expect(t9.advisory_findings).toEqual([]);
     // The authoritative array and the refutation audit trail are execution

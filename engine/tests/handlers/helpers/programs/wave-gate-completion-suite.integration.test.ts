@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
 import { freezeVerificationManifest } from "../../../../src/core/verification-manifest";
-import type { TaskGraph } from "../../../../src/types";
+import { parseNewTestEvidence, type TaskGraph } from "../../../../src/types";
 
 const ENGINE = fileURLToPath(new URL("../../../../", import.meta.url));
 const CLI = join(ENGINE, "src/cli.ts");
@@ -32,16 +32,19 @@ function write(root: string, path: string, contents: string): void {
   writeFileSync(absolute, contents);
 }
 
-const proof = evaluateTaskProof(
-  { newTestsRequired: true, declaredArtifacts: ["source.ts"] },
-  {
-    taskCompleted: true,
-    testResult: { verdict: "trusted-pass" },
-    filesModified: ["source.ts"],
-    newTestsWritten: true,
-  },
-);
-if (proof.state !== "satisfied") throw new Error("proof fixture must be satisfied");
+const proof = (() => {
+  const evaluated = evaluateTaskProof(
+    { newTestsRequired: true, declaredArtifacts: ["source.ts"] },
+    {
+      taskCompleted: true,
+      testResult: { verdict: "trusted-pass" },
+      filesModified: ["source.ts"],
+      newTestsWritten: true,
+    },
+  );
+  if (evaluated.state !== "satisfied") throw new Error("proof fixture must be satisfied");
+  return evaluated;
+})();
 
 function operatorManifest() {
   const parsed = freezeVerificationManifest(new TextEncoder().encode(JSON.stringify({
@@ -114,7 +117,7 @@ if (outcome === "nonzero") process.exit(7);
       file_list: ["source.ts"],
       files_modified: ["source.ts"],
       test_result: { verdict: "trusted-pass" },
-      new_tests_written: true,
+      new_test_observation: parseNewTestEvidence(true, "fixture new-test evidence"),
       review_status: "pending",
       review_generation: 0,
       critical_findings: [],

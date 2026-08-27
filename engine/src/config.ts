@@ -9,15 +9,18 @@ import { accessSync, constants as fsConstants } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PHASES, type Phase } from "./types";
-// Panel SIZE policy is derived from the lens tables that enforce it, not
-// restated. core/panel-contract depends only on core/panel-kernel, which
-// depends on nothing in src — so this import adds no cycle.
+// Panel SIZE policy is derived from the pure panel-contract lens tables, not
+// restated here. Its pure-core dependencies add no cycle back to config.
 import { PANEL_BASELINE_LENSES, PANEL_LENSES } from "./core/panel-contract";
 // The Agent Catalog is the single identity source for every Loom-owned agent
 // (kind, profile, required Skill). model-profiles is a pure leaf module — this
 // import adds no cycle. Every agent set and phase map below is a DERIVED
 // projection of the catalog, never a second source.
-import { AGENT_POLICIES, agentsOfKind, WAVE_REVIEW_AGENTS } from "./core/model-profiles";
+import {
+  AGENT_POLICIES,
+  agentsOfKind,
+  WAVE_REVIEW_AGENTS,
+} from "./core/model-profiles";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "./core/verification-manifest";
 
 export { WAVE_REVIEW_AGENTS };
@@ -108,7 +111,7 @@ export const ARCH_PANEL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("ar
  *
  * ONE constant rather than a per-agent field, because the panel is a stage
  * WITHIN a phase: an interviewer, N designers and K judges all run inside
- * `architecture` and none of them may advance out of it. `AgentRole`'s panel
+ * `architecture` and none of them may advance out of it. `AgentKind`'s panel
  * branch therefore carries no `phase` to disagree with this, which is what
  * retired `derivePanelPhase` — a function that collected the distinct declared
  * phases and threw unless there was exactly one, policing at load time a state
@@ -230,18 +233,6 @@ export const PANEL_JUDGES_DEFAULT = 3;
  *  validate-task-graph.ts via KNOWN_AGENTS.has(agent). */
 export const IMPL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("impl"));
 
-/**
- * Is this agent name an implementation agent, with or without the `-agent`
- * suffix the harness sometimes drops?
- *
- * One predicate rather than the `has(a) || has(`${a}-agent`)` pair written out
- * at each gate: the pair IS the rule, and two gates deciding "may this spawn
- * touch a task" from two copies of it is two chances to disagree about who
- * counts as an implementer.
- */
-export const isImplAgent = (agent: string): boolean =>
-  IMPL_AGENTS.has(agent) || IMPL_AGENTS.has(`${agent}-agent`);
-
 /** Known agents for task graph validation */
 export const KNOWN_AGENTS: ReadonlySet<string> = frozenSet([...IMPL_AGENTS, ...Object.keys(PHASE_AGENT_MAP)]);
 
@@ -289,16 +280,8 @@ export const REVIEW_AGENTS: ReadonlySet<string> = frozenSet([
  *  SubagentStop dispatcher. Frozen, symmetric with ARCH_PANEL_AGENTS. */
 export const REVIEW_PANEL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("review-verifier"));
 
-/** Closed control-plane authority for the standalone review lifecycle marker.
- * Only Machine-Summary review producers and refutation verifiers create
- * standalone run evidence; implementation, phase, and spec-check agents must
- * remain attached to orchestration state even if their prompt is untrusted. */
-export function isStandaloneReviewAgent(agentType: string): boolean {
-  return REVIEW_SUB_AGENTS.has(agentType) || REVIEW_PANEL_AGENTS.has(agentType);
-}
-
 /** Review-panel agents that would be MISROUTED by colliding with a phase,
- *  impl, review, or utility agent — detectPhase probes bare and `-agent`-
+ *  architecture-panel, impl, review, or utility agent — detectPhase probes bare and `-agent`-
  *  suffixed forms and reaches those sets first. Must always be empty. Exported
  *  so the guard can be driven with a synthetic overlap in tests. */
 export function reviewPanelOverlap(

@@ -1,19 +1,32 @@
 /**
- * Atomic state file manager with chmod-based protection + locking
+ * Descriptor-anchored atomic State File manager.
  *
- * State file stays chmod 444 at rest. Hooks and whitelisted helpers
- * (populate-task-graph, complete-wave-gate, set-phase, …) write via this
- * manager.
+ * The State File stays mode 0444 at rest. Hooks and whitelisted helpers stage
+ * validated bytes, set mode 0444 before publication, and rename under one
+ * retained parent descriptor and lock.
  * Replaces: state-file-write.sh, resolve-task-graph.sh, loom-config.sh
  */
 
-import { readFileSync, writeFileSync, chmodSync, existsSync, renameSync, unlinkSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { fchmodSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { withLock } from "./utils/lock";
 import { KNOWN_AGENTS, PHASE_ORDER, REVIEW_SUB_AGENTS, pathExistsFailClosed, taskGraphPath } from "./config";
-import { parseErr, parseOk, parseSessionId, sessionScopedPath, type ParseResult } from "./machine";
-import { REVIEW_STATUSES, TASK_STATUSES, type Phase } from "./types";
+import {
+  parseCanonicalTaskGraphPointer,
+  parseErr,
+  parseOk,
+  parseSessionId,
+  sessionScopedPath,
+  type ParseResult,
+} from "./machine";
+import {
+  parseNewTestEvidence,
+  parseStoredNewTestEvidence,
+  REVIEW_STATUSES,
+  storedNewTestEvidence,
+  TASK_STATUSES,
+  type Phase,
+} from "./types";
 import {
   findingIdCollisionError,
   findingsLockstepError,
@@ -31,6 +44,7 @@ import type {
   WaveReopeningAudit,
   SpecCheck,
   SpecTraceWaveGateRetirement,
+  Task,
   TaskGraph,
   WaveReviewEpochAuthority,
 } from "./types";
@@ -44,7 +58,12 @@ import {
   parseOrchestrationRunId,
   parseSlotId,
 } from "./core/orchestration-contract";
-import { deriveProofObligations, parseTaskProof, parseTaskTestResult } from "./core/proof-obligations";
+import {
+  derivePendingTaskProof,
+  deriveProofObligations,
+  parseTaskProof,
+  parseTaskTestResult,
+} from "./core/proof-obligations";
 import { parseDeclaredArtifactBaseline } from "./core/artifact-baseline";
 import { parseStoredSpecCheck } from "./core/spec-check";
 import { waveHasBlockCause } from "./core/wave-gate-model";
@@ -59,6 +78,26 @@ import {
   type AcceptedWaveCompletionReceipt,
 } from "./core/completion-suite";
 import {
+  canonicalArtifactBaselineDigest,
+  parseImplementationAttemptAuthority,
+  parseImplementationAttemptHistory,
+} from "./core/implementation-completion";
+import { parseTaskId, type TaskId } from "./core/task-id";
+import {
+  anchoredDirectoryHasIdentity,
+  anchoredDirectoryIdentity,
+  closeAnchoredDirectory,
+  openDirectoryNoFollow,
+  readDirectoryFileNoFollow,
+  withAnchoredDirectoryHandleLock,
+  writeDirectoryFileAtomicModeNoFollow,
+  type AnchoredDirectory,
+  type AnchoredDirectoryIdentity,
+  type AnchoredFileModePort,
+} from "./orchestration/no-follow-fs";
+
+export { TASK_ID_PATTERN } from "./core/task-id";
+import {
   authorizeWaveCompletionSuite,
   defaultVerificationManifest,
   parseFrozenVerificationManifest,
@@ -67,67 +106,120 @@ import {
 
 const PACKAGE_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
-/** Resolve TaskGraph authority for session-bound Hooks or local helpers.
- * A supplied session id must resolve through its exact `.task_graph` pointer;
- * malformed, absent, or dangling authority refuses mutation rather than
- * retargeting the repository-local State File. Only callers with no session
- * binding may use local TaskGraph resolution. */
-export function resolveTaskGraph(sessionId?: string): string | null {
-  if (sessionId !== undefined) {
-    const parsed = parseSessionId(sessionId);
-    if (parsed === null) {
-      throw new Error(
-        `resolveTaskGraph: invalid session id ${JSON.stringify(sessionId)} — refusing local task-graph fallback`,
-      );
-    }
-    const sessionFile = sessionScopedPath(parsed, ".task_graph");
-    let absPath: string;
-    try {
-      absPath = readFileSync(sessionFile, "utf-8").trim();
-    } catch (error) {
-      const cause = error instanceof Error ? error.message : String(error);
-      const message = (error as NodeJS.ErrnoException).code === "ENOENT"
-        ? `session pointer ${sessionFile} is absent: ${cause}`
-        : `cannot read session pointer ${sessionFile}: ${cause}`;
-      throw new Error(`resolveTaskGraph: ${message} — refusing local task-graph fallback`);
-    }
-    if (!pathExistsFailClosed(absPath)) {
-      throw new Error(
-        `resolveTaskGraph: session pointer ${sessionFile} names missing graph '${absPath}' — refusing local task-graph fallback`,
-      );
-    }
-    return absPath;
-  }
+type TaskGraphFileAuthority = Readonly<{
+  kind: "task-graph-file-authority";
+  path: string;
+  directoryPath: string;
+  directoryIdentity: AnchoredDirectoryIdentity;
+  leaf: string;
+}>;
 
-  const localTaskGraph = taskGraphPath();
-  return pathExistsFailClosed(localTaskGraph) ? localTaskGraph : null;
+function readAbsoluteFileNoFollow(path: string): Buffer {
+  const directory = openDirectoryNoFollow(dirname(path));
+  try {
+    return readDirectoryFileNoFollow(directory, basename(path));
+  } finally {
+    closeAnchoredDirectory(directory);
+  }
 }
 
-/** Explicit Pi-parent compatibility: an absent session pointer means the Pi
- * adapter owns the repository-local State File. A present pointer still owns
- * authority and must be readable and non-dangling; only ENOENT selects local. */
-function resolveLocalSessionTaskGraph(sessionId: string): string | null {
+function captureTaskGraphFileAuthority(path: string, requireExisting: boolean): TaskGraphFileAuthority {
+  const parsedPath = parseCanonicalTaskGraphPointer(resolve(path));
+  if (!parsedPath.ok) throw new Error(parsedPath.error);
+  const directoryPath = dirname(parsedPath.value);
+  const directory = openDirectoryNoFollow(directoryPath);
+  try {
+    if (requireExisting) readDirectoryFileNoFollow(directory, basename(parsedPath.value));
+    return Object.freeze({
+      kind: "task-graph-file-authority",
+      path: parsedPath.value,
+      directoryPath,
+      directoryIdentity: anchoredDirectoryIdentity(directory),
+      leaf: basename(parsedPath.value),
+    });
+  } finally {
+    closeAnchoredDirectory(directory);
+  }
+}
+
+function parseSessionPointerFile(sessionFile: string): string {
+  const parsed = parseCanonicalTaskGraphPointer(readAbsoluteFileNoFollow(sessionFile).toString("utf8"));
+  if (!parsed.ok) throw new Error(`session pointer ${sessionFile} is malformed: ${parsed.error}`);
+  return parsed.value;
+}
+
+function optionalLocalTaskGraphAuthority(): TaskGraphFileAuthority | null {
+  try {
+    return captureTaskGraphFileAuthority(taskGraphPath(), true);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function resolveTaskGraphFileAuthority(sessionId?: string): TaskGraphFileAuthority | null {
+  if (sessionId === undefined) return optionalLocalTaskGraphAuthority();
   const parsed = parseSessionId(sessionId);
   if (parsed === null) {
-    throw new Error(`resolveTaskGraph: invalid session id ${JSON.stringify(sessionId)}`);
+    throw new Error(
+      `resolveTaskGraph: invalid session id ${JSON.stringify(sessionId)} — refusing local task-graph fallback`,
+    );
   }
   const sessionFile = sessionScopedPath(parsed, ".task_graph");
   let pointedPath: string;
   try {
-    pointedPath = readFileSync(sessionFile, "utf-8").trim();
+    pointedPath = parseSessionPointerFile(sessionFile);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return resolveTaskGraph();
+    const cause = error instanceof Error ? error.message : String(error);
+    const message = (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? `session pointer ${sessionFile} is absent: ${cause}`
+      : `cannot read session pointer ${sessionFile}: ${cause}`;
+    throw new Error(`resolveTaskGraph: ${message} — refusing local task-graph fallback`);
+  }
+  try {
+    return captureTaskGraphFileAuthority(pointedPath, true);
+  } catch (error) {
+    const cause = error instanceof Error ? error.message : String(error);
+    const description = (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? `names missing graph '${pointedPath}'`
+      : `names inaccessible graph '${pointedPath}': ${cause}`;
+    throw new Error(
+      `resolveTaskGraph: session pointer ${sessionFile} ${description} — refusing local task-graph fallback`,
+    );
+  }
+}
+
+/** Resolve a TaskGraph display path after proving no-follow file authority. */
+export function resolveTaskGraph(sessionId?: string): string | null {
+  return resolveTaskGraphFileAuthority(sessionId)?.path ?? null;
+}
+
+/** Explicit Pi-parent compatibility: only an absent pointer selects local authority. */
+function resolveLocalSessionTaskGraphAuthority(sessionId: string): TaskGraphFileAuthority | null {
+  const parsed = parseSessionId(sessionId);
+  if (parsed === null) throw new Error(`resolveTaskGraph: invalid session id ${JSON.stringify(sessionId)}`);
+  const sessionFile = sessionScopedPath(parsed, ".task_graph");
+  let pointedPath: string;
+  try {
+    pointedPath = parseSessionPointerFile(sessionFile);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return optionalLocalTaskGraphAuthority();
     throw new Error(
       `resolveTaskGraph: cannot read session pointer ${sessionFile}: ` +
       `${error instanceof Error ? error.message : String(error)} — refusing local task-graph fallback`,
     );
   }
-  if (!pathExistsFailClosed(pointedPath)) {
+  try {
+    return captureTaskGraphFileAuthority(pointedPath, true);
+  } catch (error) {
+    const cause = error instanceof Error ? error.message : String(error);
+    const description = (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? `names missing graph '${pointedPath}'`
+      : `names inaccessible graph '${pointedPath}': ${cause}`;
     throw new Error(
-      `resolveTaskGraph: session pointer ${sessionFile} names missing graph '${pointedPath}' — refusing local task-graph fallback`,
+      `resolveTaskGraph: session pointer ${sessionFile} ${description} — refusing local task-graph fallback`,
     );
   }
-  return pointedPath;
 }
 
 // --- Parse, don't validate: disk JSON → TaskGraph ---
@@ -673,16 +765,27 @@ function parseSpecTraceWaveGateRetirements(
   return parseOk(Object.freeze(retirements));
 }
 
-export const TASK_ID_PATTERN = /^T\d+$/;
-
 /** One task-identity grammar shared by load and operator-validation boundaries. */
 export function taskIdError(value: unknown, label: string): string | null {
   if (typeof value !== "string" || value === "") {
     return `${label}: id must be a non-empty string, got ${JSON.stringify(value)}`;
   }
-  return TASK_ID_PATTERN.test(value)
+  return parseTaskId(value, `${label}: id`).ok
     ? null
     : `${label}: id must match T\\d+, got ${JSON.stringify(value)}`;
+}
+
+export function orphanExecutionReservationError(
+  tasks: readonly Record<string, unknown>[],
+  executingTasks: unknown,
+): string | null {
+  if (!Array.isArray(executingTasks)) return null;
+  const taskIds = new Set(tasks.flatMap((task) => typeof task.id === "string" ? [task.id] : []));
+  const orphan = executingTasks.find((id) => typeof id === "string" && !taskIds.has(id));
+  return orphan === undefined
+    ? null
+    : `orphan execution reservation ${orphan}: executing_tasks must name an existing Task; ` +
+      "run helper repair-task-graph to remove corrupt orphan reservations";
 }
 
 export function taskDependencyErrors(tasks: readonly Record<string, unknown>[]): readonly string[] {
@@ -737,6 +840,8 @@ export function taskUnionError(v: unknown, index: number): string | null {
   // its own. The first failure wins, so the operator sees the outermost cause.
   return taskShapeError(t, index, id)
     ?? taskBaselineError(t, index, id)
+    ?? taskAttemptAuthorityError(t, index, id)
+    ?? taskRepositoryCarryError(t, index, id)
     ?? taskPacketError(t, index, id)
     ?? taskStatusError(t, index, id)
     ?? taskEvidenceError(t, index, id)
@@ -799,9 +904,6 @@ function taskBaselineError(
   index: number,
   id: string,
 ): string | null {
-  // Both baselines answer the same question — does the declared baseline agree
-  // with file_list, in order — and differ only in whether file_list must be the
-  // WHOLE baseline or just its prefix. One comparison, two coverage rules.
   const fileListAgreement = (
     raw: unknown,
     field: "artifact_baseline" | "attempt_artifact_baseline",
@@ -833,13 +935,35 @@ function taskBaselineError(
     if (error !== null) return error;
   }
   if (t.attempt_artifact_baseline !== undefined) {
-    const error = fileListAgreement(
-      t.attempt_artifact_baseline,
-      "attempt_artifact_baseline",
-      "prefix",
-      "must cover file_list first and in order",
-    );
-    if (error !== null) return error;
+    const label = `tasks[${index}] ("${id}"): attempt_artifact_baseline`;
+    const baseline = parseDeclaredArtifactBaseline(t.attempt_artifact_baseline, label);
+    if (!baseline.ok) return baseline.errors.join("; ");
+    if (t.active_implementation_attempt !== undefined) {
+      const expectedRaw = [
+        ...(Array.isArray(t.file_list) ? t.file_list : []),
+        ...(Array.isArray(t.files_modified) ? t.files_modified : []),
+      ];
+      const expected: string[] = [];
+      for (const [pathIndex, rawPath] of expectedRaw.entries()) {
+        const parsed = parseReviewPath(rawPath, `${label}.registration_scope[${pathIndex}]`);
+        if (!parsed.ok) return parsed.errors.join("; ");
+        if (!expected.includes(parsed.value)) expected.push(parsed.value);
+      }
+      const actual = baseline.value.map(({ artifact }) => artifact);
+      const actualSet = new Set(actual);
+      if (actual.length !== expected.length || actualSet.size !== expected.length ||
+          expected.some((path) => !actualSet.has(path))) {
+        return `${label} path set must exactly equal unique(file_list + files_modified) at registration scope`;
+      }
+    } else {
+      const error = fileListAgreement(
+        t.attempt_artifact_baseline,
+        "attempt_artifact_baseline",
+        "prefix",
+        "must cover file_list first and in order",
+      );
+      if (error !== null) return error;
+    }
   }
   if (t.attempt_repository_baseline !== undefined) {
     const baseline = parseDeclaredArtifactBaseline(
@@ -847,6 +971,108 @@ function taskBaselineError(
       `tasks[${index}] ("${id}"): attempt_repository_baseline`,
     );
     if (!baseline.ok) return baseline.errors.join("; ");
+  }
+  return null;
+}
+
+/** Modern attempt authority, baseline digest lockstep, and exact receipt history. */
+function taskAttemptAuthorityError(
+  t: Record<string, unknown>,
+  index: number,
+  id: string,
+): string | null {
+  const label = `tasks[${index}] ("${id}")`;
+  const history = t.implementation_attempt_history === undefined
+    ? undefined
+    : parseImplementationAttemptHistory(
+        t.implementation_attempt_history,
+        `${label}: implementation_attempt_history`,
+      );
+  if (history !== undefined) {
+    if (!history.ok) return history.error.errors.join("; ");
+    if (history.value.some((receipt) => receipt.taskId !== id)) {
+      return `${label}: implementation_attempt_history receipt taskId must equal ${id}`;
+    }
+  }
+  if (t.legacy_execution_reservation !== undefined && t.legacy_execution_reservation !== true) {
+    return `${label}: legacy_execution_reservation must be true when present`;
+  }
+  if (t.active_implementation_attempt === undefined) return null;
+  if (t.legacy_execution_reservation === true) {
+    return `${label}: active_implementation_attempt cannot coexist with legacy_execution_reservation`;
+  }
+  if (t.legacy_missing_proof === true || t.proof === undefined) {
+    return `${label}: active_implementation_attempt requires modern authored Proof`;
+  }
+  const authority = parseImplementationAttemptAuthority(t.active_implementation_attempt);
+  if (!authority.ok) return `${label}: invalid active_implementation_attempt: ${authority.error.errors.join("; ")}`;
+  if (authority.value.taskId !== id || authority.value.wave !== t.wave) {
+    return `${label}: active_implementation_attempt must match Task id and Wave`;
+  }
+  if (history?.ok && history.value.some((receipt) =>
+    receipt.authorityDigest === authority.value.authorityDigest ||
+    receipt.reservationId === authority.value.reservationId)) {
+    return `${label}: active_implementation_attempt authorityDigest and reservationId must be absent from implementation_attempt_history`;
+  }
+  if (t.reserved_at !== authority.value.reservedAt) {
+    return `${label}: reserved_at must equal active_implementation_attempt.reservedAt`;
+  }
+  if (t.attempt_artifact_baseline === undefined || t.attempt_repository_baseline === undefined) {
+    return `${label}: active_implementation_attempt requires both attempt baselines`;
+  }
+  const taskDigest = canonicalArtifactBaselineDigest(t.attempt_artifact_baseline);
+  const dirtyDigest = canonicalArtifactBaselineDigest(t.attempt_repository_baseline);
+  if (!taskDigest.ok || !dirtyDigest.ok) {
+    return `${label}: active attempt baseline is invalid: ${[
+      ...(taskDigest.ok ? [] : taskDigest.error.errors),
+      ...(dirtyDigest.ok ? [] : dirtyDigest.error.errors),
+    ].join("; ")}`;
+  }
+  if (taskDigest.value !== authority.value.taskScopeBaselineDigest ||
+      dirtyDigest.value !== authority.value.dirtySetBaselineDigest) {
+    return `${label}: active attempt baseline digests do not match active_implementation_attempt`;
+  }
+  return null;
+}
+
+/** Persistent unresolved-attempt repository authority and attributed paths. */
+function taskRepositoryCarryError(
+  t: Record<string, unknown>,
+  index: number,
+  id: string,
+): string | null {
+  const label = `tasks[${index}] ("${id}")`;
+  if (t.repository_baseline !== undefined) {
+    const baseline = parseDeclaredArtifactBaseline(t.repository_baseline, `${label}: repository_baseline`);
+    if (!baseline.ok) return baseline.errors.join("; ");
+    if (t.active_implementation_attempt !== undefined && t.attempt_repository_baseline !== undefined) {
+      const persistentDigest = canonicalArtifactBaselineDigest(baseline.value);
+      const attemptDigest = canonicalArtifactBaselineDigest(t.attempt_repository_baseline);
+      if (!persistentDigest.ok || !attemptDigest.ok || persistentDigest.value !== attemptDigest.value) {
+        return `${label}: active attempt_repository_baseline must equal retained repository_baseline`;
+      }
+    }
+  }
+  if (t.unresolved_repository_paths !== undefined) {
+    if (t.repository_baseline === undefined) {
+      return `${label}: unresolved_repository_paths requires repository_baseline`;
+    }
+    if (!Array.isArray(t.unresolved_repository_paths)) {
+      return `${label}: unresolved_repository_paths must be an array of canonical repository paths`;
+    }
+    const canonical: string[] = [];
+    for (const [pathIndex, raw] of t.unresolved_repository_paths.entries()) {
+      const parsed = parseReviewPath(raw, `${label}: unresolved_repository_paths[${pathIndex}]`);
+      if (!parsed.ok) return parsed.errors.join("; ");
+      canonical.push(parsed.value);
+    }
+    if (canonical.length === 0 || new Set(canonical).size !== canonical.length) {
+      return `${label}: unresolved_repository_paths must be non-empty and unique when present`;
+    }
+  }
+  if ((t.status === "implemented" || t.status === "completed") && t.repository_baseline !== undefined &&
+      t.active_implementation_attempt === undefined) {
+    return `${label}: accepted implementation lifecycle cannot retain repository_baseline`;
   }
   return null;
 }
@@ -880,7 +1106,8 @@ function taskPacketError(
     const scopeError = scope.find((parsed) => !parsed.ok);
     if (scopeError !== undefined && !scopeError.ok) return scopeError.errors.join("; ");
     const scopePaths = scope.map((parsed) => parsed.ok ? parsed.value : "");
-    if (new Set(scopePaths).size !== scopePaths.length || scopePaths.some((path, pathIndex) => path !== [...scopePaths].sort()[pathIndex])) {
+    const sortedScopePaths = [...scopePaths].sort();
+    if (new Set(scopePaths).size !== scopePaths.length || scopePaths.some((path, pathIndex) => path !== sortedScopePaths[pathIndex])) {
       return `tasks[${index}] ("${id}"): accepted_review_authority.scope must be sorted and unique`;
     }
     if ((authority.run_id === undefined) !== (authority.authority_digest === undefined) ||
@@ -958,65 +1185,75 @@ function taskPacketError(
   return null;
 }
 
-/** Status, review status/generation/run, and proof obligations. */
+/** Status, review status/generation/run, and exact flat lifecycle invariants. */
 function taskStatusError(
   t: Record<string, unknown>,
   index: number,
   id: string,
 ): string | null {
+  const label = `tasks[${index}] ("${id}")`;
   if (!(TASK_STATUSES as readonly string[]).includes(t.status as string)) {
-    return `tasks[${index}] ("${id}"): status ${JSON.stringify(t.status)} is not one of ${TASK_STATUSES.join(", ")}`;
+    return `${label}: status ${JSON.stringify(t.status)} is not one of ${TASK_STATUSES.join(", ")}`;
   }
-  const verification = parseTaskVerificationPolicy(t, `tasks[${index}] ("${id}")`);
+  const verification = parseTaskVerificationPolicy(t, label);
   if (!verification.ok) return verification.errors.join("; ");
   if (t.review_status !== undefined && !(REVIEW_STATUSES as readonly string[]).includes(t.review_status as string)) {
-    return `tasks[${index}] ("${id}"): review_status ${JSON.stringify(t.review_status)} is not one of ${REVIEW_STATUSES.join(", ")}`;
+    return `${label}: review_status ${JSON.stringify(t.review_status)} is not one of ${REVIEW_STATUSES.join(", ")}`;
   }
   if (t.review_generation !== undefined && (
     typeof t.review_generation !== "number" || !Number.isInteger(t.review_generation) || t.review_generation < 0
-  )) {
-    return `tasks[${index}] ("${id}"): review_generation must be a non-negative integer`;
-  }
-  if (t.review_run !== undefined && t.review_generation === undefined) {
-    return `tasks[${index}] ("${id}"): review_run requires review_generation`;
-  }
+  )) return `${label}: review_generation must be a non-negative integer`;
+  if (t.review_run !== undefined && t.review_generation === undefined) return `${label}: review_run requires review_generation`;
   if (t.review_run !== undefined && t.review_status !== "pending" && t.review_status !== "evidence_capture_failed") {
-    return `tasks[${index}] ("${id}"): an in-progress review_run requires pending or evidence_capture_failed status`;
+    return `${label}: an in-progress review_run requires pending or evidence_capture_failed status`;
   }
   if (t.revalidation_required !== undefined && t.revalidation_required !== true) {
-    return `tasks[${index}] ("${id}"): revalidation_required must be true when present`;
+    return `${label}: revalidation_required must be true when present`;
   }
   if (t.revalidation_required === true && t.status !== "pending") {
-    return `tasks[${index}] ("${id}"): revalidation_required requires pending status until fresh task evidence is recorded`;
+    return `${label}: revalidation_required requires pending status until fresh task evidence is recorded`;
   }
-  const statusClaimsImplementation = t.status === "implemented" || t.status === "completed";
-  if (t.proof !== undefined) {
-    const proof = parseTaskProof(t.proof);
-    if (!proof.ok) {
-      return `tasks[${index}] ("${id}"): invalid proof: ${proof.errors.join("; ")}`;
+  if (t.legacy_missing_proof !== undefined && t.legacy_missing_proof !== true) {
+    return `${label}: legacy_missing_proof must be true when present`;
+  }
+
+  if (t.proof === undefined) {
+    if (t.status === "pending") {
+      return t.legacy_missing_proof === undefined
+        ? null
+        : `${label}: pending lifecycle cannot carry legacy_missing_proof`;
     }
-    const expectedObligations = deriveProofObligations({
-      verificationPolicy: verification.value.policy,
-      declaredArtifacts: Array.isArray(t.file_list) ? t.file_list : [],
+    if (t.status === "implemented" || t.status === "completed") return null;
+    return `${label}: modern failed lifecycle requires failed Proof`;
+  }
+  if (t.legacy_missing_proof === true) return `${label}: legacy_missing_proof requires absent Proof`;
+  const proof = parseTaskProof(t.proof);
+  if (!proof.ok) return `${label}: invalid proof: ${proof.errors.join("; ")}`;
+  const expectedObligations = deriveProofObligations({
+    verificationPolicy: verification.value.policy,
+    declaredArtifacts: Array.isArray(t.file_list) ? t.file_list : [],
+  });
+  const obligationsMatch = proof.value.obligations.length === expectedObligations.length &&
+    proof.value.obligations.every((actual, obligationIndex) => {
+      const expected = expectedObligations[obligationIndex];
+      return expected !== undefined && actual.kind === expected.kind &&
+        (actual.kind !== "declared-artifact-changed" ||
+          (expected.kind === "declared-artifact-changed" && actual.artifact === expected.artifact));
     });
-    const obligationsMatch = proof.value.obligations.length === expectedObligations.length &&
-      proof.value.obligations.every((actual, obligationIndex) => {
-        const expected = expectedObligations[obligationIndex];
-        return expected !== undefined && actual.kind === expected.kind &&
-          (actual.kind !== "declared-artifact-changed" ||
-            (expected.kind === "declared-artifact-changed" && actual.artifact === expected.artifact));
-      });
-    if (!obligationsMatch) {
-      return `tasks[${index}] ("${id}"): proof obligations do not exactly match verification policy and file_list`;
-    }
-    if (t.revalidation_required !== true && statusClaimsImplementation !== (proof.value.state === "satisfied")) {
-      return (
-        `tasks[${index}] ("${id}"): status/proof lockstep violated — ` +
-        `implemented/completed iff proof.state is satisfied`
-      );
-    }
+  if (!obligationsMatch) return `${label}: proof obligations do not exactly match verification policy and file_list`;
+  if (t.status === "pending") {
+    return t.revalidation_required === true || proof.value.state !== "satisfied"
+      ? null
+      : `${label}: status/proof lockstep violated — pending lifecycle without revalidation cannot carry satisfied Proof`;
   }
-  return null;
+  if (t.status === "implemented" || t.status === "completed") {
+    return proof.value.state === "satisfied"
+      ? null
+      : `${label}: status/proof lockstep violated — ${t.status} lifecycle requires satisfied Proof`;
+  }
+  return proof.value.state === "failed"
+    ? null
+    : `${label}: status/proof lockstep violated — failed lifecycle requires failed Proof`;
 }
 
 /** Test evidence. The acceptance DECISION is delegated to parseTaskTestResult —
@@ -1030,8 +1267,30 @@ function taskEvidenceError(
   index: number,
   id: string,
 ): string | null {
-  if (t.test_result === undefined) return null;
   const prefix = `tasks[${index}] ("${id}")`;
+  const hasWritten = t.new_tests_written !== undefined;
+  const hasEvidence = t.new_test_evidence !== undefined;
+  if (t.new_test_observation !== undefined && (hasWritten || hasEvidence)) {
+    return `${prefix}: new_test_observation cannot coexist with legacy new_tests_written/new_test_evidence`;
+  }
+  if (t.new_test_observation !== undefined) {
+    const parsedObservation = parseStoredNewTestEvidence(t.new_test_observation);
+    if (!parsedObservation.ok) return `${prefix}: ${parsedObservation.error}`;
+  }
+  if (!hasWritten && hasEvidence) {
+    return `${prefix}: new_test_evidence requires new_tests_written`;
+  }
+  if (hasWritten && typeof t.new_tests_written !== "boolean") {
+    return `${prefix}: new_tests_written must be a boolean when present`;
+  }
+  if (hasEvidence && typeof t.new_test_evidence !== "string") {
+    return `${prefix}: new_test_evidence must be a string when present`;
+  }
+  if (t.new_tests_written === true &&
+      (typeof t.new_test_evidence !== "string" || t.new_test_evidence.trim() === "")) {
+    return `${prefix}: new_tests_written true requires non-empty new_test_evidence`;
+  }
+  if (t.test_result === undefined) return null;
   const parsed = parseTaskTestResult(t.test_result, `${prefix}: test_result`);
   if (parsed.ok) return null;
   const exactShapeError = parsed.errors.find((error) => error.includes("unexpected field(s)"));
@@ -1323,9 +1582,9 @@ function taskGraphScalarFieldError(obj: Record<string, unknown>): string | null 
   }
   if (obj.executing_tasks !== undefined &&
       (!Array.isArray(obj.executing_tasks) ||
-        obj.executing_tasks.some((id) => typeof id !== "string" || id.trim() === "") ||
+        obj.executing_tasks.some((id) => !parseTaskId(id, "executing_tasks entry").ok) ||
         new Set(obj.executing_tasks).size !== obj.executing_tasks.length)) {
-    return "executing_tasks must be an array of distinct non-empty strings when present";
+    return "executing_tasks must be an array of distinct canonical Task IDs when present";
   }
   if (obj.current_wave !== undefined &&
       (typeof obj.current_wave !== "number" || !Number.isInteger(obj.current_wave) || obj.current_wave < 1)) {
@@ -1334,25 +1593,125 @@ function taskGraphScalarFieldError(obj: Record<string, unknown>): string | null 
   return null;
 }
 
+function migrateParsedTask(
+  task: Record<string, unknown>,
+  index: number,
+  executing: ReadonlySet<string>,
+): ParseResult<Record<string, unknown>> {
+  const identity = parseTaskId(task.id, `tasks[${index}].id`);
+  if (!identity.ok) return parseErr(identity.error.errors.join("; "));
+  const verification = parseTaskVerificationPolicy(task, `tasks[${index}]`);
+  if (!verification.ok) return parseErr(verification.errors.join("; "));
+  let migrated: Record<string, unknown> = { ...task, id: identity.value };
+  if (task.proof === undefined && task.status === "pending") {
+    migrated = {
+      ...migrated,
+      proof: derivePendingTaskProof({
+        verificationPolicy: verification.value.policy,
+        declaredArtifacts: Array.isArray(task.file_list) ? task.file_list : [],
+      }),
+    };
+  } else if (task.proof === undefined && (task.status === "implemented" || task.status === "completed")) {
+    migrated = { ...migrated, legacy_missing_proof: true };
+  } else if (task.proof !== undefined) {
+    const proof = parseTaskProof(task.proof);
+    if (!proof.ok) return parseErr(proof.errors.join("; "));
+    migrated = { ...migrated, proof: proof.value };
+  }
+  if (task.active_implementation_attempt !== undefined) {
+    const authority = parseImplementationAttemptAuthority(task.active_implementation_attempt);
+    if (!authority.ok) return parseErr(authority.error.errors.join("; "));
+    migrated = { ...migrated, active_implementation_attempt: authority.value };
+  } else if (executing.has(String(task.id))) {
+    migrated = { ...migrated, legacy_execution_reservation: true };
+  } else {
+    const { legacy_execution_reservation: staleLegacyClassification, ...withoutLegacyClassification } = migrated;
+    void staleLegacyClassification;
+    migrated = withoutLegacyClassification;
+  }
+  const repositoryCarry = task.repository_baseline ?? (
+    task.active_implementation_attempt === undefined ? undefined : task.attempt_repository_baseline
+  );
+  if (repositoryCarry !== undefined) {
+    const baseline = parseDeclaredArtifactBaseline(repositoryCarry, `tasks[${index}].repository_baseline`);
+    if (!baseline.ok) return parseErr(baseline.errors.join("; "));
+    migrated = { ...migrated, repository_baseline: baseline.value };
+  }
+  if (task.unresolved_repository_paths !== undefined) {
+    if (!Array.isArray(task.unresolved_repository_paths)) {
+      return parseErr(`tasks[${index}].unresolved_repository_paths must be an array`);
+    }
+    const paths: string[] = [];
+    for (const [pathIndex, raw] of task.unresolved_repository_paths.entries()) {
+      const parsed = parseReviewPath(raw, `tasks[${index}].unresolved_repository_paths[${pathIndex}]`);
+      if (!parsed.ok) return parseErr(parsed.errors.join("; "));
+      paths.push(parsed.value);
+    }
+    migrated = { ...migrated, unresolved_repository_paths: Object.freeze(paths.sort()) };
+  }
+  if (task.implementation_attempt_history !== undefined) {
+    const history = parseImplementationAttemptHistory(task.implementation_attempt_history);
+    if (!history.ok) return parseErr(history.error.errors.join("; "));
+    migrated = { ...migrated, implementation_attempt_history: history.value };
+  }
+  if (task.test_result !== undefined) {
+    const testResult = parseTaskTestResult(task.test_result, `tasks[${index}]: test_result`);
+    if (!testResult.ok) return parseErr(testResult.errors.join("; "));
+    migrated = { ...migrated, test_result: testResult.value };
+  }
+  const storedNewTests = task.new_test_observation === undefined
+    ? null
+    : parseStoredNewTestEvidence(task.new_test_observation);
+  if (storedNewTests !== null && !storedNewTests.ok) return parseErr(storedNewTests.error);
+  let parsedNewTests;
+  if (storedNewTests?.ok) {
+    parsedNewTests = storedNewTests.value;
+  } else if (task.new_tests_written === undefined && task.new_test_evidence === undefined) {
+    parsedNewTests = null;
+  } else {
+    parsedNewTests = parseNewTestEvidence(task.new_tests_written, task.new_test_evidence);
+  }
+  const {
+    new_tests_written: _legacyNewTestsWritten,
+    new_test_evidence: _legacyNewTestEvidence,
+    ...withoutLegacyNewTests
+  } = migrated;
+  void _legacyNewTestsWritten;
+  void _legacyNewTestEvidence;
+  migrated = parsedNewTests === null
+    ? withoutLegacyNewTests
+    : { ...withoutLegacyNewTests, ...storedNewTestEvidence(parsedNewTests) };
+  return parseOk(migrated);
+}
+
 function parseTaskGraphTasks(obj: Record<string, unknown>): ParseResult<readonly unknown[]> {
   const tasks = obj.tasks ?? [];
   if (!Array.isArray(tasks)) return parseErr("tasks must be an array");
+  const executing = new Set(Array.isArray(obj.executing_tasks) ? obj.executing_tasks.map(String) : []);
   const parsedTasks: Record<string, unknown>[] = [];
   for (let i = 0; i < tasks.length; i++) {
     const err = taskUnionError(tasks[i], i);
     if (err !== null) return parseErr(err);
-    const task = tasks[i] as Record<string, unknown>;
-    if (task.test_result === undefined) {
-      parsedTasks.push(task);
-      continue;
-    }
-    const testResult = parseTaskTestResult(task.test_result, `tasks[${i}]: test_result`);
-    if (!testResult.ok) return parseErr(testResult.errors.join("; "));
-    parsedTasks.push({ ...task, test_result: testResult.value });
+    const migrated = migrateParsedTask(tasks[i] as Record<string, unknown>, i, executing);
+    if (!migrated.ok) return migrated;
+    parsedTasks.push(migrated.value);
   }
   const taskIds = parsedTasks.map((task) => task.id as string);
   const duplicateTaskId = taskIds.find((id, index) => taskIds.indexOf(id) !== index);
   if (duplicateTaskId !== undefined) return parseErr(`duplicate task id: ${duplicateTaskId}`);
+  const orphanReservation = orphanExecutionReservationError(parsedTasks, [...executing]);
+  if (orphanReservation !== null) return parseErr(orphanReservation);
+  const relationError = parsedTasks.flatMap((task) => {
+    const id = task.id as string;
+    const isExecuting = executing.has(id);
+    const modern = task.active_implementation_attempt !== undefined;
+    const legacy = task.legacy_execution_reservation === true;
+    if (modern && !isExecuting) return [`Task ${id}: active_implementation_attempt requires executing_tasks membership`];
+    if (legacy && !isExecuting) return [`Task ${id}: legacy_execution_reservation requires executing_tasks membership`];
+    if (isExecuting && !modern && !legacy) return [`Task ${id}: executing reservation is unclassified`];
+    return [];
+  })[0];
+  if (relationError !== undefined) return parseErr(relationError);
   const dependencyError = taskDependencyErrors(parsedTasks)[0];
   if (dependencyError !== undefined) return parseErr(dependencyError);
   const trace = parseSpecTraceContract(obj.spec_trace_version, parsedTasks);
@@ -1581,7 +1940,13 @@ type ParsedTaskGraphParts = Readonly<{
   history: ParsedTaskGraphHistoryFields;
 }>;
 
-function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTaskGraphParts): TaskGraph {
+export type ParsedTask = Task & Readonly<{ id: TaskId }>;
+export type ParsedTaskGraph = Omit<TaskGraph, "tasks" | "executing_tasks"> & Readonly<{
+  tasks: readonly ParsedTask[];
+  executing_tasks?: readonly TaskId[];
+}>;
+
+function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTaskGraphParts): ParsedTaskGraph {
   // Fresh recursively frozen copies, never aliases of parsed JSON: a caller
   // retaining the raw object cannot mutate nested Task or Wave Gate data and
   // bypass StateManager.update's locked transform.
@@ -1618,7 +1983,7 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     ...(reopeningHistory === undefined ? {} : { wave_reopening_history: reopeningHistory }),
     ...(orphanedHistory === undefined ? {} : { orphaned_wave_gate_history: orphanedHistory }),
     ...(specTraceRetirements === undefined ? {} : { spec_trace_wave_gate_retirements: specTraceRetirements }),
-  } as unknown as TaskGraph;
+  } as unknown as ParsedTaskGraph;
 }
 
 /**
@@ -1631,7 +1996,7 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
  * through untouched (legacyTestsPassedNote still fires downstream);
  * missing tasks/wave_gates default for early phases (populated in Phase 4).
  */
-export function parseTaskGraph(raw: unknown): ParseResult<TaskGraph> {
+export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return parseErr("not an object");
   }
@@ -1734,7 +2099,7 @@ export {
   type LegacyWaveGateCompletionReplayError,
 } from "./core/legacy-archive";
 
-export type StateFilePermissionPort = (path: string, mode: number) => void;
+export type StateFilePermissionPort = AnchoredFileModePort;
 
 /** The protected graph was durably renamed, but restoring its read-only mode
  * failed. The committed value is retained so callers can report the exact
@@ -1803,21 +2168,27 @@ function parseLegacyWaveGateMigrationAuthority(raw: unknown): ParseResult<Parsed
 export class StateManager {
   private readonly path: string;
   private readonly setPermissions: StateFilePermissionPort;
+  private readonly authority: TaskGraphFileAuthority;
 
-  constructor(path: string, setPermissions: StateFilePermissionPort = chmodSync) {
-    this.path = path;
+  constructor(
+    path: string,
+    setPermissions: StateFilePermissionPort = fchmodSync,
+    authority: TaskGraphFileAuthority = captureTaskGraphFileAuthority(path, false),
+  ) {
+    this.path = authority.path;
     this.setPermissions = setPermissions;
+    this.authority = authority;
   }
 
   static fromSession(sessionId?: string): StateManager | null {
-    const path = resolveTaskGraph(sessionId);
-    return path ? new StateManager(path) : null;
+    const authority = resolveTaskGraphFileAuthority(sessionId);
+    return authority === null ? null : new StateManager(authority.path, fchmodSync, authority);
   }
 
-  /** Pi parent adapter seam; see resolveLocalSessionTaskGraph. */
+  /** Pi parent adapter seam; see resolveLocalSessionTaskGraphAuthority. */
   static fromLocalSession(sessionId: string): StateManager | null {
-    const path = resolveLocalSessionTaskGraph(sessionId);
-    return path ? new StateManager(path) : null;
+    const authority = resolveLocalSessionTaskGraphAuthority(sessionId);
+    return authority === null ? null : new StateManager(authority.path, fchmodSync, authority);
   }
 
   /**
@@ -1832,8 +2203,15 @@ export class StateManager {
     return pathExistsFailClosed(path) ? new StateManager(path) : null;
   }
 
-  load(): TaskGraph {
-    const raw = readFileSync(this.path, "utf-8");
+  private openAuthorityDirectory(): AnchoredDirectory {
+    const directory = openDirectoryNoFollow(this.authority.directoryPath);
+    if (anchoredDirectoryHasIdentity(directory, this.authority.directoryIdentity)) return directory;
+    closeAnchoredDirectory(directory);
+    throw new Error(`TaskGraph parent authority changed after capture: ${this.authority.directoryPath}`);
+  }
+
+  private loadFrom(directory: AnchoredDirectory): ParsedTaskGraph {
+    const raw = readDirectoryFileNoFollow(directory, this.authority.leaf).toString("utf8");
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
@@ -1845,20 +2223,29 @@ export class StateManager {
     return graph.value;
   }
 
+  load(): ParsedTaskGraph {
+    const directory = this.openAuthorityDirectory();
+    try {
+      return this.loadFrom(directory);
+    } finally {
+      closeAnchoredDirectory(directory);
+    }
+  }
+
   getPath(): string {
     return this.path;
   }
 
   /** Atomically update state via pure transform: (state) => state */
-  async update(fn: (state: TaskGraph) => TaskGraph): Promise<void> {
+  async update(fn: (state: ParsedTaskGraph) => TaskGraph): Promise<void> {
     await this.updateAndReturn((state) => ({ state: fn(state), value: undefined }));
   }
 
   /** Atomic shell primitive for effects that must return the locked decision they committed. */
   async updateAndReturn<T>(
-    fn: (state: TaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
+    fn: (state: ParsedTaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
   ): Promise<T> {
-    return this.atomicWrite(() => fn(this.load()));
+    return this.atomicWrite((directory) => fn(this.loadFrom(directory)));
   }
 
   /** Install one fresh protected active-run anchor, idempotently for exact replay. */
@@ -1982,65 +2369,31 @@ export class StateManager {
     await this.atomicWrite(() => ({ state, value: undefined }));
   }
 
-  /** lock → chmod 644 → produce/parse → write tmp → rename → chmod 444 → unlock */
-  private async atomicWrite<T>(produce: () => Readonly<{ state: TaskGraph; value: T }>): Promise<T> {
+  /** lock → derive/parse → stage read-only bytes → descriptor-relative rename → unlock */
+  private async atomicWrite<T>(
+    produce: (directory: AnchoredDirectory) => Readonly<{ state: TaskGraph; value: T }>,
+  ): Promise<T> {
     // This is the final shared write boundary, including replacement/repair
-    // paths. Check before lock creation or chmod so a skewed fresh CLI leaves
-    // the protected graph byte-for-byte and metadata-for-metadata untouched.
+    // paths. Check before lock creation so a skewed fresh CLI leaves the
+    // protected graph byte-for-byte and metadata-for-metadata untouched.
     assertPiCliMutationCompatible(process.env, captureLoomRuntimeIdentity(PACKAGE_ROOT));
-    const lockFile = `${dirname(this.path)}/.task_graph`;
-    const tmp = `${this.path}.tmp`;
-    return withLock(lockFile, () => {
-      this.setPermissions(this.path, 0o644);
-      let primaryError: unknown = null;
-      let committed = false;
-      let value: T | undefined;
-      try {
-        const produced = produce();
+    const directory = this.openAuthorityDirectory();
+    try {
+      return await withAnchoredDirectoryHandleLock(directory, ".task_graph", () => {
+        const produced = produce(directory);
         const parsed = parseTaskGraph(produced.state);
         if (!parsed.ok) throw new Error(`Refusing to persist invalid task graph (${parsed.error}): ${this.path}`);
-        writeFileSync(tmp, JSON.stringify(parsed.value, null, 2));
-        renameSync(tmp, this.path);
-        committed = true;
-        value = produced.value;
-      } catch (error) {
-        primaryError = error;
-        if (!committed && existsSync(tmp)) {
-          try {
-            unlinkSync(tmp);
-          } catch (cleanupError) {
-            primaryError = new AggregateError(
-              [error, cleanupError],
-              `Task graph write failed and temporary-file cleanup failed: ${this.path}`,
-            );
-          }
-        }
-      }
-
-      let permissionError: unknown = null;
-      try {
-        this.setPermissions(this.path, 0o444);
-      } catch (error) {
-        permissionError = error;
-      }
-
-      if (primaryError !== null && permissionError !== null) {
-        throw new AggregateError(
-          [primaryError, permissionError],
-          `Task graph write and permission restoration both failed: ${this.path}`,
+        writeDirectoryFileAtomicModeNoFollow(
+          directory,
+          this.authority.leaf,
+          JSON.stringify(parsed.value, null, 2),
+          0o444,
+          this.setPermissions,
         );
-      }
-      if (primaryError !== null) throw primaryError;
-      if (permissionError !== null) {
-        if (committed) {
-          throw new PostCommitStateProtectionError(this.path, value as T, permissionError);
-        }
-        throw new Error(
-          `Task graph was not committed and read-only permission restoration failed: ${this.path}: ${permissionError instanceof Error ? permissionError.message : String(permissionError)}`,
-          { cause: permissionError },
-        );
-      }
-      return value as T;
-    });
+        return produced.value;
+      });
+    } finally {
+      closeAnchoredDirectory(directory);
+    }
   }
 }

@@ -153,7 +153,15 @@ For each Wave, the orchestrator spawns all dependency-ready implementation Tasks
 
 Direct parent edits are blocked while an orchestration is active. Implementation happens through Agents so completion, files, test evidence, and proof can be attributed.
 
-A Task reaches `implemented` only when its proof obligations are satisfied. Completion prose alone is not authority.
+A Task reaches `implemented` only when its proof obligations are satisfied **and** the Implementation Completion Oracle accepts an exact Task Completion Suite for the engine-issued Implementation Attempt. Completion prose, a Task id inferred from `executing_tasks`, and an unreserved harness result are cleanup evidence only.
+
+Claude binds authority through a session+Agent sidecar published with no-replace semantics at SubagentStart; Pi stores the exact authority on its ReservedSlot. Duplicate delivery is idempotent, and a late result cannot release a newer reservation. Every applied transition appends one immutable settlement receipt and atomically updates lifecycle/evidence, clears only matching attempt fields, invalidates review/spec/Wave authority when required, and recomputes `impl_complete`.
+
+The Slice 3 Task-local suite has one engine-owned check: `loom:task-byte-scope`. Its allowed set is the current `attempt_artifact_baseline` (declared plus previously attributed paths captured at registration). Current-attempt bytes compare that baseline; cumulative declared-artifact Proof still compares the first `artifact_baseline`. A transcript path outside the allowed set is semantic failure regardless of ownership. Baseline/path/read/Git uncertainty is infrastructure-blocked. The first unresolved repository baseline survives non-positive settlement and stale reclamation; a fresh attempt binds to it rather than laundering existing bytes. Shared exact settlement derives canonical sibling ownership under the TaskGraph lock from every other current-Wave Task's `file_list` and `files_modified`. Repository changes from the retained baseline classify as Task-local when currently allowed, inert/non-attributable when sibling-owned, and semantic out-of-scope otherwise; every unowned changed path enters `unresolved_repository_paths` even when omitted from the transcript. Reversion removes resolved paths, and accepted exact settlement clears the retained authority.
+
+`executing_tasks` is parser-bound to the Task roster. An unknown reservation makes the TaskGraph corrupt and blocks readiness/writes until `repair-task-graph` explicitly removes it with a diagnostic. Session `.task_graph` pointers are bound through one Claude/Pi helper that canonicalizes the active graph, refreshes stale pointers atomically without following symlinks, and rolls back only an exact owned binding.
+
+Task-local settlement runs **no arbitrary Task/project subprocesses**. Build, typecheck, test commands, package scripts, reports, and full-tier lint execute only in the quiescent Wave suite. Slice 3 records retry-required after semantic attempt 1 and escalation-required after semantic attempt 2, but dispatches neither. Slice 4 alone freezes retry diagnostics/context and launches attempt 2 or escalation.
 
 ## Task proof obligations
 

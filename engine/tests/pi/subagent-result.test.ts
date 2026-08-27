@@ -6,8 +6,16 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import type { TaskGraph } from "../../src/types";
-import { evaluateTaskProof } from "../../src/core/proof-obligations";
-import { applyCompletionInfrastructureFailure } from "../../src/handlers/subagent-stop/update-task-status";
+import { parseTaskGraph, type ParsedTaskGraph } from "../../src/state-manager";
+import { derivePendingTaskProof, evaluateTaskProof } from "../../src/core/proof-obligations";
+import { applyCompletionInfrastructureFailure } from "../../src/core/implementation-application";
+import { taskFixture } from "../fixtures/task-lifecycle";
+import { createImplementationAttemptAuthority } from "../../src/core/implementation-completion";
+import { taskVerificationPolicy } from "../../src/core/verification-policy";
+import {
+  captureDeclaredArtifactBaseline,
+  captureRepositoryChangeBaseline,
+} from "../../src/utils/artifact-baseline";
 import {
   applyFailedPiResult,
   applyImplementationPiResult,
@@ -52,6 +60,7 @@ function graph(overrides: Partial<TaskGraph> = {}): TaskGraph {
       agent: "code-implementer-agent",
       wave: 1,
       status: "pending",
+      proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: ["engine/src/x.ts"] }),
       depends_on: [],
       review_status: "pending",
       file_list: ["engine/src/x.ts"],
@@ -60,12 +69,26 @@ function graph(overrides: Partial<TaskGraph> = {}): TaskGraph {
   } as TaskGraph;
 }
 
-/** An in-memory stand-in for StateManager: load, mutate, keep. */
+function parsedGraph(graph: TaskGraph): ParsedTaskGraph {
+  const parsed = parseTaskGraph(graph);
+  if (!parsed.ok) throw new Error(`invalid parsed graph fixture: ${parsed.error}`);
+  return parsed.value;
+}
+
+/** An in-memory stand-in for StateManager: every persisted update is reparsed. */
 function fakeStore(initial: TaskGraph): TaskGraphStore & { current: () => TaskGraph } {
-  let state = initial;
+  let state = parsedGraph(initial);
+  const updateAndReturn = async <T>(
+    mutate: (current: ParsedTaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
+  ): Promise<T> => {
+    const applied = mutate(state);
+    state = parsedGraph(applied.state);
+    return applied.value;
+  };
   return {
     load: () => state,
-    update: async (mutate) => { state = mutate(state); },
+    update: async (mutate) => { state = parsedGraph(mutate(state)); },
+    updateAndReturn,
     current: () => state,
   };
 }
@@ -159,7 +182,8 @@ describe("writtenPathsOf", () => {
       { role: "assistant", content: [{ type: "toolCall", id: "c2", name: "bash", arguments: { path: "b.md" } }] },
       { role: "user", content: [{ type: "toolCall", id: "c3", name: "write", arguments: { path: "c.md" } }] },
       { role: "assistant", content: [{ type: "toolCall", id: "c4", name: "Write", arguments: { file_path: "d.md" } }] },
-    ] as never)).toEqual(["a.md", "d.md"]);
+      { role: "assistant", content: [{ type: "toolCall", id: "c5", name: "write", arguments: { filePath: "e.md" } }] },
+    ] as never)).toEqual(["a.md", "d.md", "e.md"]);
   });
 });
 
@@ -238,6 +262,37 @@ describe("applyPhaseAgentPiResult", () => {
     expect(store.current().current_phase).toBe("specify");
     expect(store.current().spec_file).toBeNull();
   });
+
+  it("cannot regress a concurrently advanced phase or route artifacts from a stale load", async () => {
+    const stale = parsedGraph(graph({ current_phase: "specify", spec_dir: ".claude/specs/stale" } as Partial<TaskGraph>));
+    let current = parsedGraph(graph({ current_phase: "architecture", spec_dir: ".claude/specs/current" } as Partial<TaskGraph>));
+    let loadCount = 0;
+    const store: TaskGraphStore & { current(): TaskGraph } = {
+      load: () => { loadCount += 1; return stale; },
+      update: async (mutate) => { current = parsedGraph(mutate(current)); },
+      updateAndReturn: async (mutate) => {
+        const applied = mutate(current);
+        current = parsedGraph(applied.state);
+        return applied.value;
+      },
+      current: () => current,
+    };
+
+    await applyPhaseAgentPiResult({
+      store,
+      agentType: "specify-agent",
+      completedPhase: "specify",
+      result: result({
+        agent: "specify-agent",
+        messages: [writeCall(".claude/specs/stale/spec.md")],
+      }),
+      now: NOW,
+    });
+
+    expect(loadCount).toBe(0);
+    expect(store.current().current_phase).toBe("architecture");
+    expect(store.current().spec_file).toBeNull();
+  });
 });
 
 describe("applyFailedPiResult", () => {
@@ -254,6 +309,22 @@ describe("applyFailedPiResult", () => {
     expect(store.current().tasks[0]!.review_status).toBe("evidence_capture_failed");
     expect(applied.processingErrors).toEqual([]);
     expect(applied.log.join("\n")).toContain("T1");
+  });
+
+  it("rejects a failed reviewer whose returned Task does not match its reservation", async () => {
+    const store = fakeStore(graph());
+    const applied = await applyFailedPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ exitCode: 1, task: "Task: T2" }),
+      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      now: NOW,
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("does not match reserved Task T1"),
+    ]);
+    expect(store.current().tasks[0]!.review_status).toBe("pending");
   });
 
   it("says so and stores nothing when the reviewer names no known task", async () => {
@@ -274,9 +345,13 @@ describe("applyFailedPiResult", () => {
   });
 
   it("idempotently releases the reserved implementation task without replacing prior settlement", async () => {
+    const base = graph();
     const store = fakeStore(graph({
       executing_tasks: ["T1", "T2"],
-      tasks: [{ ...graph().tasks[0]!, failure_reason: "already settled" }],
+      tasks: [
+        { ...base.tasks[0]!, failure_reason: "already settled" },
+        { ...base.tasks[0]!, id: "T2" },
+      ],
     }));
     const applied = await applyFailedPiResult({
       store,
@@ -307,7 +382,11 @@ describe("applyFailedPiResult", () => {
   });
 
   it("preserves parallel execution and reports an unbound failed implementation", async () => {
-    const store = fakeStore(graph({ executing_tasks: ["T1", "T2"] }));
+    const base = graph();
+    const store = fakeStore(graph({
+      executing_tasks: ["T1", "T2"],
+      tasks: [...base.tasks, { ...base.tasks[0]!, id: "T2" }],
+    }));
     const applied = await applyFailedPiResult({
       store,
       agentType: "code-implementer-agent",
@@ -398,6 +477,32 @@ describe("applyReviewPiResult", () => {
     });
   });
 
+  it("rejects reordered same-agent reserved reviews instead of applying findings to the wrong Tasks", async () => {
+    const base = graph();
+    const store = fakeStore(graph({
+      tasks: [base.tasks[0]!, { ...base.tasks[0]!, id: "T2", description: "second task" }],
+    }));
+
+    const first = await applyReviewPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ task: "Task: T2", messages: assistantText(machineSummary) }),
+      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      parentPrompt: "",
+    });
+    const second = await applyReviewPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ task: "Task: T1", messages: assistantText(machineSummary) }),
+      reservedSlot: { agentType: "code-reviewer", taskId: "T2" },
+      parentPrompt: "",
+    });
+
+    expect(first.processingErrors[0]).toContain("does not match reserved Task T1");
+    expect(second.processingErrors[0]).toContain("does not match reserved Task T2");
+    expect(store.current().tasks.map((task) => task.review_status)).toEqual(["pending", "pending"]);
+  });
+
   it("refuses a task id the graph does not hold instead of reporting a silent store", async () => {
     const store = fakeStore(graph());
     const applied = await applyReviewPiResult({
@@ -413,6 +518,29 @@ describe("applyReviewPiResult", () => {
       expect.stringContaining("is not in the task graph"),
     ]);
     expect(store.current().tasks[0]!.review_status).toBe("pending");
+  });
+
+  it("reports a task disappearing during locked evidence application as a processing error", async () => {
+    const initial = parsedGraph(graph());
+    const withoutTask = parsedGraph({ ...initial, tasks: [] });
+    const store: TaskGraphStore = {
+      load: () => initial,
+      update: async (mutate) => { mutate(withoutTask); },
+      updateAndReturn: async (mutate) => mutate(withoutTask).value,
+    };
+
+    const applied = await applyReviewPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ messages: assistantText(machineSummary) }),
+      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      parentPrompt: "",
+    });
+
+    expect(applied.log).toEqual([expect.stringContaining("disappeared before evidence application")]);
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("disappeared before evidence application"),
+    ]);
   });
 
   it("reports a successful review with no Task binding as a processing error", async () => {
@@ -431,6 +559,28 @@ describe("applyReviewPiResult", () => {
     expect(store.current().tasks[0]!.review_status).toBe("pending");
   });
 
+  it("reports a Task disappearing before malformed evidence application", async () => {
+    const initial = parsedGraph(graph());
+    const withoutTask = parsedGraph({ ...initial, tasks: [] });
+    const store: TaskGraphStore = {
+      load: () => initial,
+      update: async (mutate) => { mutate(withoutTask); },
+      updateAndReturn: async (mutate) => mutate(withoutTask).value,
+    };
+
+    const applied = await applyReviewPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ messages: [{ role: 42 }] }),
+      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      parentPrompt: "",
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("disappeared before malformed evidence application"),
+    ]);
+  });
+
   it("records an evidence failure for malformed reviewer messages", async () => {
     const store = fakeStore(graph());
     await applyReviewPiResult({
@@ -446,8 +596,8 @@ describe("applyReviewPiResult", () => {
 });
 
 describe("applySpecCheckPiResult", () => {
-  const specCheckText = (critical: number) => [
-    "SPEC_CHECK_WAVE: 1",
+  const specCheckText = (critical: number, wave: number | null = 1) => [
+    ...(wave === null ? [] : [`SPEC_CHECK_WAVE: ${wave}`]),
     `SPEC_CHECK_CRITICAL_COUNT: ${critical}`,
     "SPEC_CHECK_HIGH_COUNT: 0",
     `SPEC_CHECK_VERDICT: ${critical > 0 ? "BLOCKED" : "PASSED"}`,
@@ -486,6 +636,33 @@ describe("applySpecCheckPiResult", () => {
 
     expect(store.current().spec_check).toMatchObject({ verdict: "EVIDENCE_CAPTURE_FAILED" });
   });
+
+  it("uses locked current_wave when the transcript omits its Wave despite a stale load", async () => {
+    const stale = parsedGraph(graph({ current_wave: 1 }));
+    let current = parsedGraph(graph({ current_wave: 3, wave_gates: {} }));
+    let loadCount = 0;
+    const store: TaskGraphStore & { current(): TaskGraph } = {
+      load: () => { loadCount += 1; return stale; },
+      update: async (mutate) => { current = parsedGraph(mutate(current)); },
+      updateAndReturn: async (mutate) => {
+        const applied = mutate(current);
+        current = parsedGraph(applied.state);
+        return applied.value;
+      },
+      current: () => current,
+    };
+
+    await applySpecCheckPiResult({
+      store,
+      result: result({ agent: "spec-check-invoker", messages: assistantText(specCheckText(1, null)) }),
+      now: NOW,
+    });
+
+    expect(loadCount).toBe(0);
+    expect(store.current().spec_check).toMatchObject({ wave: 3, verdict: "BLOCKED" });
+    expect(store.current().wave_gates["3"]).toMatchObject({ blocked: true });
+    expect(store.current().wave_gates["1"]).toBeUndefined();
+  });
 });
 
 describe("applyImplementationPiResult", () => {
@@ -494,10 +671,75 @@ describe("applyImplementationPiResult", () => {
 
   const implementationGraph = (taskOverrides: Record<string, unknown> = {}): TaskGraph => {
     const base = graph({ executing_tasks: ["T1"] });
+    const overridden = { ...base.tasks[0]!, ...taskOverrides } as TaskGraph["tasks"][number];
+    const attemptBaseline = overridden.attempt_artifact_baseline;
+    const task = taskFixture({
+      ...overridden,
+      ...(!("proof" in taskOverrides)
+        ? {
+            proof: derivePendingTaskProof({
+              verificationPolicy: taskVerificationPolicy(overridden),
+              declaredArtifacts: overridden.file_list ?? [],
+            }),
+          }
+        : {}),
+      ...(attemptBaseline?.length === 0 && (overridden.file_list?.length ?? 0) > 0
+        ? {
+            attempt_artifact_baseline: overridden.file_list!.map((artifact) => ({
+              artifact,
+              snapshot: { kind: "missing" as const },
+            })),
+          }
+        : {}),
+    });
+    return { ...base, tasks: [task] } as TaskGraph;
+  };
+
+  const modernize = (state: TaskGraph, root: string, reservationId: string): Readonly<{
+    graph: TaskGraph;
+    reservedSlot: NonNullable<Parameters<typeof applyImplementationPiResult>[0]["reservedSlot"]>;
+  }> => {
+    const task = state.tasks[0]!;
+    const attemptScope = [...new Set([...(task.file_list ?? []), ...(task.files_modified ?? [])])];
+    const artifactBaseline = captureDeclaredArtifactBaseline(root, task.file_list ?? []);
+    const attemptBaseline = captureDeclaredArtifactBaseline(root, attemptScope);
+    const repositoryBaseline = captureRepositoryChangeBaseline(root);
+    const authority = createImplementationAttemptAuthority({
+      taskId: task.id,
+      wave: task.wave,
+      semanticAttempt: 1,
+      reservationId,
+      headSha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim(),
+      reservedAt: "2026-08-24T00:00:00.000Z",
+      taskScopeBaseline: attemptBaseline,
+      dirtySetBaseline: repositoryBaseline,
+    });
+    if (!authority.ok) throw new Error(authority.error.errors.join("; "));
     return {
-      ...base,
-      tasks: [{ ...base.tasks[0]!, ...taskOverrides }],
-    } as TaskGraph;
+      graph: {
+        ...state,
+        executing_tasks: [task.id],
+        tasks: [taskFixture({
+          ...task,
+          status: "pending",
+          proof: derivePendingTaskProof({
+            verificationPolicy: taskVerificationPolicy(task),
+            declaredArtifacts: task.file_list ?? [],
+          }),
+          revalidation_required: undefined,
+          artifact_baseline: artifactBaseline,
+          attempt_artifact_baseline: attemptBaseline,
+          attempt_repository_baseline: repositoryBaseline,
+          active_implementation_attempt: authority.value,
+          reserved_at: authority.value.reservedAt,
+        })],
+      },
+      reservedSlot: {
+        agentType: "code-implementer-agent",
+        taskId: task.id,
+        implementationAuthority: authority.value,
+      },
+    };
   };
 
   const regressionWaivedRecoveryGraph = (): TaskGraph => {
@@ -545,7 +787,7 @@ describe("applyImplementationPiResult", () => {
     ]);
   });
 
-  it("clears revalidation when waived regression evidence rebuilds a satisfied Proof", async () => {
+  it("keeps an extracted legacy success pending with failed completion proof", async () => {
     const store = fakeStore(regressionWaivedRecoveryGraph());
 
     await applyImplementationPiResult({
@@ -560,25 +802,57 @@ describe("applyImplementationPiResult", () => {
       parentPrompt: "",
     });
 
-    expect(store.current().tasks[0]).toMatchObject({ status: "implemented", proof: { state: "satisfied" } });
-    expect(store.current().tasks[0]!.revalidation_required).toBeUndefined();
+    expect(store.current().tasks[0]).toMatchObject({
+      status: "pending",
+      proof: { state: "failed" },
+      revalidation_required: true,
+    });
     expect(store.current().executing_tasks).toEqual([]);
   });
 
-  it("settles a concurrently reopened Task from locked state despite a stale completed pre-read", async () => {
+  it("keeps a sole-executing inferred legacy success pending with failed completion proof", async () => {
+    const store = fakeStore(regressionWaivedRecoveryGraph());
+
+    await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({
+        agent: "code-implementer-agent",
+        task: "implementation completed",
+        messages: assistantText("All requested work completed."),
+      }),
+      reservedSlot: undefined,
+      parentPrompt: "",
+    });
+
+    expect(store.current().tasks[0]).toMatchObject({
+      status: "pending",
+      proof: { state: "failed" },
+      revalidation_required: true,
+    });
+    expect(store.current().executing_tasks).toEqual([]);
+  });
+
+  it("keeps a concurrently reopened unreserved Task pending despite a stale completed pre-read", async () => {
     const reopened = regressionWaivedRecoveryGraph();
     const completedView: TaskGraph = {
       ...reopened,
-      tasks: reopened.tasks.map((task) => ({
+      tasks: reopened.tasks.map((task) => taskFixture({
         ...task,
-        status: "completed" as const,
-        revalidation_required: undefined,
+        status: "completed",
+        proof: task.proof,
       })),
     };
-    let current = reopened;
+    let current = parsedGraph(reopened);
     const store: TaskGraphStore & { current(): TaskGraph } = {
-      load: () => completedView,
-      update: async (mutate) => { current = mutate(current); },
+      load: () => parsedGraph(completedView),
+      update: async (mutate) => { current = parsedGraph(mutate(current)); },
+      updateAndReturn: async (mutate) => {
+        const applied = mutate(current);
+        current = parsedGraph(applied.state);
+        return applied.value;
+      },
       current: () => current,
     };
 
@@ -594,8 +868,11 @@ describe("applyImplementationPiResult", () => {
       parentPrompt: "",
     });
 
-    expect(store.current().tasks[0]).toMatchObject({ status: "implemented", proof: { state: "satisfied" } });
-    expect(store.current().tasks[0]!.revalidation_required).toBeUndefined();
+    expect(store.current().tasks[0]).toMatchObject({
+      status: "pending",
+      proof: { state: "failed" },
+      revalidation_required: true,
+    });
     expect(applied.log.join("\n")).not.toContain("preserved completed/missing state");
   });
 
@@ -639,7 +916,10 @@ describe("applyImplementationPiResult", () => {
       // A baseline naming an artifact under a root that does not exist makes
       // the comparator throw, which it reports as a failure rather than "no
       // change" — the fail-closed direction.
-      attempt_artifact_baseline: [{ artifact: "engine/src/x.ts", sha256: "a".repeat(64) }],
+      attempt_artifact_baseline: [{
+        artifact: "engine/src/x.ts",
+        snapshot: { kind: "sha256", digest: "a".repeat(64) },
+      }],
     }));
     const outcome = await applyImplementationPiResult({
       store,
@@ -667,6 +947,7 @@ describe("applyImplementationPiResult", () => {
       proof,
       new_tests_required: false,
       review_status: "passed",
+      file_list: [],
       attempt_artifact_baseline: [],
     });
     const store = fakeStore({
@@ -729,7 +1010,10 @@ describe("applyImplementationPiResult", () => {
       proof: staleProof,
       test_result: { verdict: "trusted-pass" },
       review_status: "passed",
-      attempt_artifact_baseline: [{ artifact: "engine/src/x.ts", sha256: "a".repeat(64) }],
+      attempt_artifact_baseline: [{
+        artifact: "engine/src/x.ts",
+        snapshot: { kind: "sha256", digest: "a".repeat(64) },
+      }],
       verification_policy: {
         regression: verificationPolicy.regression,
         new_tests: verificationPolicy.newTests,
@@ -813,7 +1097,7 @@ describe("applyImplementationPiResult", () => {
       revalidation_required: true,
       review_status: "pending",
     });
-    expect(store.current().tasks[0]!.proof).toBeUndefined();
+    expect(store.current().tasks[0]!.proof?.state).toBe("pending");
   });
 
   it("compares attempt bytes against the locked current Task, not the pre-lock snapshot", async () => {
@@ -830,31 +1114,31 @@ describe("applyImplementationPiResult", () => {
         regression: { kind: "required" },
         new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
       },
-      status: "implemented",
-      test_result: { verdict: "trusted-pass" },
-      review_status: "passed",
     });
-    let current = initial;
+    let current = parsedGraph(initial);
     let loads = 0;
+    const lockedState = parsedGraph({
+      ...initial,
+      tasks: initial.tasks.map((task) => task.id === "T1"
+        ? {
+            ...task,
+            attempt_artifact_baseline: [{
+              artifact,
+              snapshot: { kind: "sha256" as const, digest: digest("old bytes\n") },
+            }],
+          }
+        : task),
+    });
     const store: TaskGraphStore & { current(): TaskGraph } = {
       load: () => {
         loads += 1;
-        return initial;
+        return parsedGraph(initial);
       },
-      update: async (mutate) => {
-        const locked: TaskGraph = {
-          ...initial,
-          tasks: initial.tasks.map((task) => task.id === "T1"
-            ? {
-                ...task,
-                attempt_artifact_baseline: [{
-                  artifact,
-                  snapshot: { kind: "sha256" as const, digest: digest("old bytes\n") },
-                }],
-              }
-            : task),
-        };
-        current = mutate(locked);
+      update: async (mutate) => { current = parsedGraph(mutate(lockedState)); },
+      updateAndReturn: async (mutate) => {
+        const applied = mutate(lockedState);
+        current = parsedGraph(applied.state);
+        return applied.value;
       },
       current: () => current,
     };
@@ -955,21 +1239,23 @@ describe("applyImplementationPiResult", () => {
       provenance: "unverified",
     });
     expect(task.status).toBe("pending");
-    expect(task.proof).toMatchObject({
-      state: "failed",
-      failures: [{ kind: "untrusted-regression-tests-failed" }],
-    });
+    expect(task.proof).toMatchObject({ state: "failed" });
+    expect(task.proof?.state === "failed" ? task.proof.failures : []).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "task-not-completed" }),
+      expect.objectContaining({ kind: "untrusted-regression-tests-failed" }),
+    ]));
   });
 
   it("accepts structured regression evidence while explicit policy waives only new tests", async () => {
-    const store = fakeStore(implementationGraph({
+    const modern = modernize(implementationGraph({
       file_list: [],
       attempt_artifact_baseline: [],
       verification_policy: {
         regression: { kind: "required" },
         new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
       },
-    }));
+    }), process.cwd(), "pi-structured-regression");
+    const store = fakeStore(modern.graph);
 
     await applyImplementationPiResult({
       store,
@@ -979,16 +1265,17 @@ describe("applyImplementationPiResult", () => {
         agent: "code-implementer-agent",
         messages: structuredBashPass(),
       }),
-      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      reservedSlot: modern.reservedSlot,
       parentPrompt: "",
     });
 
     const task = store.current().tasks[0]!;
     expect(task.status).toBe("implemented");
-    expect(task.new_tests_written).toBe(false);
-    expect(task.new_test_evidence).toContain(
-      "verification_policy.new_tests waived: existing-tests-sufficient",
-    );
+    expect(task.new_test_observation).toMatchObject({
+      kind: "not-written",
+      written: false,
+      evidence: expect.stringContaining("verification_policy.new_tests waived: existing-tests-sufficient"),
+    });
     expect(task.proof?.obligations).toEqual([
       { kind: "task-completed" },
       { kind: "regression-test-pass" },
@@ -1005,6 +1292,106 @@ describe("applyImplementationPiResult", () => {
     }
   });
 
+  it.each([
+    ["wrong", "Task ID: T2"],
+    ["missing", "implementation completed"],
+  ] as const)("infrastructure-settles an exact reserved slot when returned Task identity is %s", async (_label, returnedTask) => {
+    const modern = modernize(implementationGraph({
+      file_list: [],
+      verification_policy: {
+        regression: { kind: "waived", reason: "documentation-only" },
+        new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
+      },
+    }), process.cwd(), `pi-result-task-${_label}`);
+    const store = fakeStore(modern.graph);
+
+    const applied = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({
+        agent: "code-implementer-agent",
+        task: returnedTask,
+        messages: structuredBashPass(),
+      }),
+      reservedSlot: modern.reservedSlot,
+      parentPrompt: "Task ID: T1",
+    });
+
+    expect(applied.processingErrors).toEqual([expect.stringContaining("Task identity mismatch")]);
+    expect(store.current().executing_tasks).toEqual([]);
+    expect(store.current().tasks[0]).toMatchObject({
+      status: "pending",
+      revalidation_required: true,
+      implementation_attempt_history: [{
+        authorityDigest: modern.reservedSlot.implementationAuthority?.authorityDigest,
+        transition: "infrastructure-blocked",
+      }],
+    });
+    expect(store.current().tasks[0]?.test_result).toBeUndefined();
+  });
+
+  it("preserves a replacement when a stale successful Pi authority arrives", async () => {
+    const first = modernize(implementationGraph({ file_list: [] }), process.cwd(), "pi-stale-first");
+    const replacement = modernize(first.graph, process.cwd(), "pi-stale-replacement");
+    const store = fakeStore(replacement.graph);
+
+    const applied = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages: structuredBashPass() }),
+      reservedSlot: first.reservedSlot,
+      parentPrompt: "",
+    });
+
+    expect(applied.log.join("\n")).toContain("result ignored (stale)");
+    expect(store.current().tasks[0]?.active_implementation_attempt).toEqual(
+      replacement.reservedSlot.implementationAuthority,
+    );
+    expect(store.current().executing_tasks).toEqual(["T1"]);
+    expect(store.current().tasks[0]?.implementation_attempt_history ?? []).toEqual([]);
+  });
+
+  it("preserves spec-check, tests, and reviews when exact successful application changed no bytes", async () => {
+    const base = implementationGraph({
+      file_list: [],
+      review_status: "passed",
+      verification_policy: {
+        regression: { kind: "waived", reason: "documentation-only" },
+        new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
+      },
+    });
+    const modern = modernize({
+      ...base,
+      spec_check: {
+        wave: 1, run_at: NOW, verdict: "PASSED", critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+      wave_gates: {
+        "1": { impl_complete: false, tests_passed: true, reviews_complete: true, blocked: false },
+      },
+    }, process.cwd(), "pi-no-change-preserves-green");
+    const store = fakeStore(modern.graph);
+
+    await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages: [] }),
+      reservedSlot: modern.reservedSlot,
+      parentPrompt: "",
+    });
+
+    expect(store.current().tasks[0]).toMatchObject({ status: "implemented", review_status: "passed" });
+    expect(store.current().spec_check).toMatchObject({ verdict: "PASSED" });
+    expect(store.current().wave_gates["1"]).toMatchObject({
+      impl_complete: true,
+      tests_passed: true,
+      reviews_complete: true,
+    });
+  });
+
   it("accepts attributed new-test evidence without regression evidence when explicit policy waives only regression", async () => {
     const repositoryRoot = mkdtempSync(join(tmpdir(), "loom-pi-inverse-policy-"));
     const previousProjectDir = process.env.CLAUDE_PROJECT_DIR;
@@ -1018,21 +1405,22 @@ describe("applyImplementationPiResult", () => {
       ["-c", "user.name=Loom Tests", "-c", "user.email=loom@example.test", "commit", "-m", "baseline"],
       { cwd: repositoryRoot, stdio: "ignore" },
     );
-    writeFileSync(
-      join(repositoryRoot, testPath),
-      'export {};\n\n  it("covers the change", () => {\n    expect(true).toBe(true);\n  });\n',
-    );
     process.env.CLAUDE_PROJECT_DIR = repositoryRoot;
 
     try {
-      const store = fakeStore(implementationGraph({
-        file_list: [],
+      const modern = modernize(implementationGraph({
+        file_list: [testPath],
         attempt_artifact_baseline: [],
         verification_policy: {
           regression: { kind: "waived", reason: "documentation-only" },
           new_tests: { kind: "required" },
         },
-      }));
+      }), repositoryRoot, "pi-inverse-policy");
+      const store = fakeStore(modern.graph);
+      writeFileSync(
+        join(repositoryRoot, testPath),
+        'export {};\n\n  it("covers the change", () => {\n    expect(true).toBe(true);\n  });\n',
+      );
 
       await applyImplementationPiResult({
         store,
@@ -1042,18 +1430,22 @@ describe("applyImplementationPiResult", () => {
           agent: "code-implementer-agent",
           messages: [writeCall(testPath)],
         }),
-        reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+        reservedSlot: modern.reservedSlot,
         parentPrompt: "",
       });
 
       const task = store.current().tasks[0]!;
       expect(task.test_result).toMatchObject({ verdict: "untrusted", passed: false });
-      expect(task.new_tests_written).toBe(true);
-      expect(task.new_test_evidence).toContain("1 new test methods, 1 assertions");
+      expect(task.new_test_observation).toMatchObject({
+        kind: "written",
+        written: true,
+        evidence: expect.stringContaining("1 new test methods, 1 assertions"),
+      });
       expect(task.status).toBe("implemented");
       expect(task.proof?.obligations).toEqual([
         { kind: "task-completed" },
         { kind: "new-tests" },
+        { kind: "declared-artifact-changed", artifact: testPath },
       ]);
       expect(task.proof?.state).toBe("satisfied");
       if (task.proof?.state === "satisfied") {

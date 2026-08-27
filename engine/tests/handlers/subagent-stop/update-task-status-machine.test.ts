@@ -13,11 +13,9 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  applyCompletionInfrastructureFailure,
-  capVerdictForMachineCompletion,
-  runUpdateTaskStatus,
-} from "../../../src/handlers/subagent-stop/update-task-status";
+import { runUpdateTaskStatus } from "../../../src/handlers/subagent-stop/update-task-status";
+import { capVerdictForMachineCompletion } from "../../../src/core/implementation-evidence";
+import { applyCompletionInfrastructureFailure } from "../../../src/core/implementation-application";
 import { SUBAGENT_DIR } from "../../../src/config";
 import { parseEpoch } from "../../../src/machine";
 import type { EvidenceRecord, Requirement } from "../../../src/machine";
@@ -190,10 +188,10 @@ describe("machine terminal requirements gate the persisted verdict (Fix 7)", () 
   }, 30000);
 });
 
-describe("wave-completion gate write (round-17 A1 pin)", () => {
+describe("legacy Claude stop quarantine", () => {
   const pass = { kind: "TestRun" as const, command: "npm test", exit: 0, report: reportSummary(3, 0) };
 
-  it("resolving the last task of a wave stamps impl_complete=true", async () => {
+  it("never marks the last Task or Wave implemented without exact attempt authority", async () => {
     const s = sid("wave-done");
     const dir = tempDir();
     const statePath = writeState(dir, [implTask("T1", false)], ["T1"]);
@@ -208,8 +206,12 @@ describe("wave-completion gate write (round-17 A1 pin)", () => {
     expect(result.kind).toBe("passthrough");
 
     const state = JSON.parse(readFileSync(statePath, "utf-8"));
-    expect(state.tasks[0].status).toBe("implemented");
-    expect(state.wave_gates["1"].impl_complete).toBe(true);
+    expect(state.tasks[0]).toMatchObject({
+      status: "pending",
+      proof: { state: "failed" },
+      revalidation_required: true,
+    });
+    expect(state.wave_gates["1"].impl_complete).toBe(false);
   }, 30000);
 
   it("a still-pending sibling leaves impl_complete=false", async () => {
@@ -228,12 +230,16 @@ describe("wave-completion gate write (round-17 A1 pin)", () => {
     expect(result.kind).toBe("passthrough");
 
     const state = JSON.parse(readFileSync(statePath, "utf-8"));
-    expect(state.tasks.find((t: { id: string }) => t.id === "T1").status).toBe("implemented");
+    expect(state.tasks.find((t: { id: string }) => t.id === "T1")).toMatchObject({
+      status: "pending",
+      proof: { state: "failed" },
+      revalidation_required: true,
+    });
     expect(state.tasks.find((t: { id: string }) => t.id === "T2").status).toBe("pending");
     expect(state.wave_gates["1"].impl_complete).toBe(false);
   }, 30000);
 
-  it("settles with regression required while explicit policy waives only new tests", async () => {
+  it("captures regression evidence but quarantines when explicit policy waives only new tests", async () => {
     const s = sid("asymmetric-policy");
     const dir = tempDir();
     const task = {
@@ -256,25 +262,22 @@ describe("wave-completion gate write (round-17 A1 pin)", () => {
 
     expect(result.kind).toBe("passthrough");
     const persisted = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
-    expect(persisted.status).toBe("implemented");
-    expect(persisted.new_tests_written).toBe(false);
-    expect(persisted.new_test_evidence).toContain(
-      "verification_policy.new_tests waived: existing-tests-sufficient",
-    );
+    expect(persisted.status).toBe("pending");
+    expect(persisted.new_test_observation).toMatchObject({
+      kind: "not-written",
+      written: false,
+      evidence: expect.stringContaining("verification_policy.new_tests waived: existing-tests-sufficient"),
+    });
     expect(persisted.proof.obligations).toEqual([
       { kind: "task-completed" },
       { kind: "regression-test-pass" },
     ]);
-    expect(persisted.proof.state).toBe("satisfied");
-    expect(persisted.proof.evidence).toContainEqual({
-      kind: "regression-test-pass",
-      provenance: "evidence-ledger",
-      verdict: "trusted-pass",
-    });
-    expect(persisted.proof.evidence).not.toContainEqual(expect.objectContaining({ kind: "new-tests" }));
+    expect(persisted.proof.state).toBe("failed");
+    expect(persisted.test_result).toEqual({ verdict: "trusted-pass" });
+    expect(persisted.proof.failures).toContainEqual({ kind: "task-not-completed" });
   }, 30000);
 
-  it("settles with attributed new-test evidence and no regression evidence when explicit policy waives only regression", async () => {
+  it("captures attributed new-test evidence but quarantines when explicit policy waives regression", async () => {
     const s = sid("inverse-asymmetric-policy");
     const repositoryRoot = tempDir();
     const previousProjectDir = process.env.CLAUDE_PROJECT_DIR;
@@ -329,21 +332,18 @@ describe("wave-completion gate write (round-17 A1 pin)", () => {
       expect(result.kind).toBe("passthrough");
       const persisted = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
       expect(persisted.test_result).toMatchObject({ verdict: "untrusted", passed: false });
-      expect(persisted.new_tests_written).toBe(true);
-      expect(persisted.new_test_evidence).toContain("1 new test methods, 1 assertions");
-      expect(persisted.status).toBe("implemented");
+      expect(persisted.new_test_observation).toMatchObject({
+        kind: "written",
+        written: true,
+        evidence: expect.stringContaining("1 new test methods, 1 assertions"),
+      });
+      expect(persisted.status).toBe("pending");
       expect(persisted.proof.obligations).toEqual([
         { kind: "task-completed" },
         { kind: "new-tests" },
       ]);
-      expect(persisted.proof.state).toBe("satisfied");
-      expect(persisted.proof.evidence).toContainEqual({
-        kind: "new-tests",
-        detail: expect.stringContaining("1 new test methods, 1 assertions"),
-      });
-      expect(persisted.proof.evidence).not.toContainEqual(
-        expect.objectContaining({ kind: "regression-test-pass" }),
-      );
+      expect(persisted.proof.state).toBe("failed");
+      expect(persisted.proof.failures).toContainEqual({ kind: "task-not-completed" });
     } finally {
       if (previousProjectDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
       else process.env.CLAUDE_PROJECT_DIR = previousProjectDir;
@@ -352,7 +352,7 @@ describe("wave-completion gate write (round-17 A1 pin)", () => {
 });
 
 describe("locked implementation settlement failures", () => {
-  it("clears revalidation after a regression-waived Task rebuilds a satisfied Proof", async () => {
+  it("retains revalidation when an authority-free regression-waived Task reports success", async () => {
     const s = sid("waived-revalidation");
     const dir = tempDir();
     const verificationPolicy = {
@@ -407,9 +407,9 @@ describe("locked implementation settlement failures", () => {
 
     expect(result.kind).toBe("passthrough");
     const task = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
-    expect(task.status).toBe("implemented");
-    expect(task.proof.state).toBe("satisfied");
-    expect(task.revalidation_required).toBeUndefined();
+    expect(task.status).toBe("pending");
+    expect(task.proof.state).toBe("failed");
+    expect(task.revalidation_required).toBe(true);
   }, 30000);
 
   it("invalidates stale authority when modified-path evidence is unsafe", async () => {

@@ -3,7 +3,9 @@ import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import updateTaskStatus, { analyzeNewTests, isMachineBound, resolveTestEvidence } from "../../src/handlers/subagent-stop/update-task-status";
+import updateTaskStatus, { isMachineBound } from "../../src/handlers/subagent-stop/update-task-status";
+import { resolveTestEvidence } from "../../src/core/implementation-evidence";
+import { analyzeNewTests } from "../../src/handlers/helpers/task-local-completion";
 import { extractTestEvidence } from "../../src/core/test-evidence";
 import { legacyTestsPassedNote } from "../../src/types";
 import type { TaskGraph } from "../../src/types";
@@ -522,6 +524,10 @@ describe("update-task-status — transcript path resolution", () => {
             artifact_baseline: artifactBaseline,
           } : {}),
         },
+        ...((opts.executingTasks ?? []).includes("T2") ? [{
+          id: "T2", description: "concurrent task", agent: "code-implementer-agent",
+          status: "pending", wave: 1, depends_on: [],
+        }] : []),
       ],
       wave_gates: {},
     }));
@@ -565,7 +571,7 @@ describe("update-task-status — transcript path resolution", () => {
   }
 
   it("resolves the task from the DERIVED transcript when the payload names none", async () => {
-    const s = await makeSession({ plantTranscript: true });
+    const s = await makeSession({ plantTranscript: true, executingTasks: ["T1"] });
 
     const result = await updateTaskStatus(JSON.stringify({
       session_id: s.session,
@@ -603,6 +609,7 @@ describe("update-task-status — transcript path resolution", () => {
       plantTranscript: true,
       modifiedPath: join(dirname(fileURLToPath(import.meta.url)), "../../src/types.ts"),
       failedReview: true,
+      executingTasks: ["T1"],
     });
 
     const result = await updateTaskStatus(JSON.stringify({

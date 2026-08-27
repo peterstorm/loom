@@ -1,8 +1,8 @@
 /**
  * Core: Enforce phase ordering during loom orchestration.
- * Harness-agnostic — no stdin parsing, and no filesystem imports: BOTH
- * categories of I/O this gate needs (the protected-state read and the phase
- * artifact probes) arrive as injected ports, so the decision logic is data-in /
+ * Harness-agnostic — no stdin parsing. BOTH categories of runtime I/O this
+ * gate needs (the protected-state read and the phase artifact probes) arrive as
+ * injected ports, so the decision logic itself is data-in /
  * data-out and can be exercised with in-memory fixtures.
  *
  * Definition site of `detectPhase` and `checkArtifacts`. `core/index.ts` and the
@@ -13,11 +13,12 @@
 import { match } from "ts-pattern";
 import type { HookResult, Phase, TaskGraph } from "../types";
 import {
-  PHASE_AGENT_MAP, isImplAgent, REVIEW_AGENTS,
+  PHASE_AGENT_MAP, REVIEW_AGENTS,
   REVIEW_PANEL_AGENTS, UTILITY_AGENTS, VALID_TRANSITIONS, CLARIFY_THRESHOLD,
-  ARCH_PANEL_AGENTS, ARCH_PANEL_PHASE, isStandaloneReviewAgent,
+  ARCH_PANEL_AGENTS, ARCH_PANEL_PHASE,
 } from "../config";
 import { stripNamespace } from "../utils/strip-namespace";
+import { isImplementationAgent, isStandaloneReviewAgent } from "./model-profiles";
 import { hasStandaloneReviewContext } from "./review-output";
 
 /**
@@ -95,7 +96,7 @@ export function detectPhase(agent: string, prompt: string): Phase | "unknown" {
   if (direct) return direct;
   const suffixed = PHASE_AGENT_MAP[agent + "-agent"];
   if (suffixed) return suffixed;
-  if (isImplAgent(agent) || REVIEW_AGENTS.has(agent) || REVIEW_AGENTS.has(agent + "-agent")) return "execute";
+  if (isImplementationAgent(agent) || REVIEW_AGENTS.has(agent) || REVIEW_AGENTS.has(agent + "-agent")) return "execute";
   if (isReviewPanelAgent(agent)) return "execute";
   // Architecture-panel agents (--panel) are architecture-phase work. Recognized
   // here so validate-phase-order allows them, but never added to PHASE_AGENT_MAP
@@ -139,11 +140,10 @@ function checkPlanAlignmentGate(state: ArtifactState, probe: ArtifactProbe): str
 /**
  * The spec artifact, or the reason it is missing.
  *
- * `clarify` and `architecture` both gate on "specify produced a readable
- * spec.md", and both used to spell out the same declared-artifact →
- * spec_file → spec_dir search and the same failure string. One rule, one
- * resolution: a change to where a spec may live cannot now reach one gate and
- * not the other.
+ * `clarify` and `architecture` both require an existing spec.md and share the
+ * same declared-artifact → spec_file → spec_dir search and failure string.
+ * Architecture additionally reads the selected artifact when it must count
+ * clarification markers; clarify only needs the artifact path as its input.
  */
 function resolveSpecArtifact(
   state: ArtifactState,

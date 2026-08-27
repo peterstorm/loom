@@ -6,8 +6,10 @@
  * process-global).
  */
 
-import { describe, it, expect, afterAll, vi } from "vitest";
-import { existsSync, unlinkSync } from "node:fs";
+import { describe, it, expect, afterAll, beforeAll, vi } from "vitest";
+import { existsSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import markActive from "../../src/handlers/subagent-start/mark-subagent-active";
 import recordEvidence from "../../src/handlers/post-tool-use/record-evidence";
 import enforce from "../../src/handlers/pre-tool-use/enforce-phase-tools";
@@ -24,9 +26,31 @@ import { eventsForEpoch, parseEpoch, parseSessionId } from "../../src/machine/ev
 import { SUBAGENT_DIR } from "../../src/config";
 
 const run = `handlers-e2e-${process.pid}-${Date.now()}`;
+const fixtureRoot = mkdtempSync(join(tmpdir(), "loom-machine-handler-e2e-"));
+const statePath = join(fixtureRoot, "active_task_graph.json");
+const machinesPath = fixtureRoot;
+const previousStatePath = process.env.LOOM_STATE_PATH;
+const previousMachinesPath = process.env.LOOM_MACHINES_DIR;
 // Ledger API takes the branded SessionId; parse once at construction.
 const sid = (name: string) => parseSessionId(`${run}-${name}`)!;
-const sessions = ["e2e-1", "e2e-2", "e2e-3", "e2e-4", "e2e-5", "e2e-6", "e2e-7"].map(sid);
+const sessions = ["e2e-1", "e2e-2", "e2e-3", "e2e-4", "e2e-5", "e2e-6", "e2e-6b", "e2e-7"].map(sid);
+
+beforeAll(() => {
+  writeFileSync(statePath, JSON.stringify({ current_phase: "init", phase_artifacts: {} }));
+  process.env.LOOM_STATE_PATH = statePath;
+  process.env.LOOM_MACHINES_DIR = machinesPath;
+  const machine = {
+    agent: "guarded-test-agent",
+    enforcedTools: ["Edit", "Write", "MultiEdit"],
+    phases: [
+      { id: "read-context", allowedTools: [], advance: { event: "FileRead", min: 1 } },
+      { id: "implement", allowedTools: ["Edit", "Write", "MultiEdit"], advance: { event: "FileWrite", min: 1 } },
+      { id: "verify", allowedTools: ["Edit", "Write", "MultiEdit"], advance: { event: "TestRunPassed", min: 1 } },
+      { id: "done", terminal: true, allowedTools: ["Edit", "Write", "MultiEdit"], requires: [{ event: "TestRunPassed", min: 1 }] },
+    ],
+  };
+  writeFileSync(join(machinesPath, "guarded-test-agent.machine.json"), JSON.stringify(machine), { flag: "wx" });
+});
 
 afterAll(() => {
   for (const s of sessions) {
@@ -41,9 +65,14 @@ afterAll(() => {
       } catch {}
     }
   }
+  if (previousStatePath === undefined) delete process.env.LOOM_STATE_PATH;
+  else process.env.LOOM_STATE_PATH = previousStatePath;
+  if (previousMachinesPath === undefined) delete process.env.LOOM_MACHINES_DIR;
+  else process.env.LOOM_MACHINES_DIR = previousMachinesPath;
+  rmSync(fixtureRoot, { recursive: true, force: true });
 });
 
-const start = (session: string, agentId = "a-1", agentType = "loom:code-implementer-agent") =>
+const start = (session: string, agentId = "a-1", agentType = "guarded-test-agent") =>
   JSON.stringify({ session_id: session, agent_id: agentId, agent_type: agentType });
 const stop = start;
 const pre = (session: string, tool: string) =>
@@ -81,7 +110,7 @@ describe("guarded machine — full hook lifecycle", () => {
     );
     const records = readEvidence(s);
     expect(records).toHaveLength(1);
-    expect(records[0].epoch).toBe("a-1:code-implementer-agent");
+    expect(records[0].epoch).toBe("a-1:guarded-test-agent");
     expect(records[0].event).toEqual({ kind: "TestRun", command: "npm test", exit: 1, report: null });
     // Foreign epochs see nothing (parseEpoch: the branded deserialization boundary):
     expect(eventsForEpoch(records, parseEpoch("a-9:code-implementer-agent")!)).toEqual([]);
@@ -102,12 +131,12 @@ describe("guarded machine — full hook lifecycle", () => {
 
     // A second active subagent (machine-less) makes attribution impossible:
     // both the gate and the recorder stand down.
-    await markActive(start(s, "a-2", "ts-test-agent"), []);
+    await markActive(start(s, "a-2", "brainstorm-agent"), []);
     expect((await enforce(pre(s, "Write"), [])).kind).toBe("passthrough");
     await recordEvidence(post(s, "Read", { file_path: "/other.ts" }), []);
     expect(readEvidence(s)).toEqual([]); // nothing recorded while contended
 
-    await cleanup(start(s, "a-2", "ts-test-agent"), []);
+    await cleanup(start(s, "a-2", "brainstorm-agent"), []);
     expect((await enforce(pre(s, "Write"), [])).kind).toBe("block"); // re-armed
 
     await cleanup(stop(s), []);
@@ -121,85 +150,57 @@ describe("guarded machine — full hook lifecycle", () => {
     await cleanup(start(s, "a-9", "brainstorm-agent"), []);
   });
 
-  it("an agent_id with reserved characters is refused LOUDLY at the bind boundary (never desyncs the epoch)", async () => {
+  it("blocks a machine-bearing agent whose agent_id has reserved characters without publishing capabilities", async () => {
     const s = sid("e2e-6");
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
-      // ':' in the id would make the recorded epoch ambiguous with epochOf
-      await markActive(start(s, "evil:id"), []);
-      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
-      expect(text).toContain("is reserved or path-unsafe");
-      expect(text).toContain("UNGATED");
+      const result = await markActive(start(s, "evil:id"), []);
+      expect(result).toMatchObject({
+        kind: "block",
+        message: expect.stringContaining("no valid agent_id"),
+      });
+      expect(stderrSpy.mock.calls.map((call) => String(call[0])).join(""))
+        .toContain("is reserved or path-unsafe");
     } finally {
       stderrSpy.mockRestore();
     }
-    // No binding was written — the session is simply ungated (fail-unarmed,
-    // which the gate's binding-exists checks already cover). But the agent
-    // IS on the roster (as a sanitized placeholder) so contention counting
-    // still sees it.
     expect(existsSync(machineBindingPath(s))).toBe(false);
-    expect(countActiveAgents(s)).toBe(1);
+    expect(countActiveAgents(s)).toBe(0);
+    expect(existsSync(`${SUBAGENT_DIR}/${s}.task_graph`)).toBe(false);
     expect((await enforce(pre(s, "Write"), [])).kind).toBe("passthrough");
-    await cleanup(stop(s, "evil:id"), []);
-    expect(countActiveAgents(s)).toBe(0); // stop removes the same placeholder
   });
 
-  it("a self-reported agent_id in the write-grant namespace never reaches the roster", async () => {
-    // The write gate authorizes Edit/Write on a `pi-grant-` identity because
-    // the grant record is burnt at consume time and cannot be re-checked. That
-    // recognition is only sound while the namespace is unreachable from
-    // harness-reported input — this is the boundary that makes it so.
+  it("blocks a machine-bearing self-reported agent_id in the write-grant namespace", async () => {
     const s = sid("e2e-6b");
     const forged = "pi-grant-0123456789abcdef";
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
-      await markActive(start(s, forged), []);
-      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
-      expect(text).toContain("write-grant namespace");
-      expect(text).toContain("UNGATED");
+      const result = await markActive(start(s, forged), []);
+      expect(result.kind).toBe("block");
+      expect(stderrSpy.mock.calls.map((call) => String(call[0])).join(""))
+        .toContain("write-grant namespace");
     } finally {
       stderrSpy.mockRestore();
     }
-
-    // Counted (attribution must still see it) but under a placeholder, so the
-    // roster's identity column carries no capability.
-    expect(countActiveAgents(s)).toBe(1);
-    expect(readActiveAgentRoles(s).some(({ agentId }) => agentId === forged)).toBe(false);
-    expect(readActiveAgentRoles(s).every(({ agentId }) => agentId.startsWith("unparseable-"))).toBe(true);
-    // No machine binding, and the direct-edit gate is not opened by it.
+    expect(countActiveAgents(s)).toBe(0);
+    expect(readActiveAgentRoles(s)).toEqual([]);
     expect(existsSync(machineBindingPath(s))).toBe(false);
-
-    await cleanup(stop(s, forged), []);
-    expect(countActiveAgents(s)).toBe(0); // stop removes the same placeholder
+    expect(existsSync(`${SUBAGENT_DIR}/${s}.task_graph`)).toBe(false);
   });
 
-  it("an unparseable agent_id still counts on the roster — attribution stands down instead of cross-crediting", async () => {
+  it("a rejected unparseable sibling cannot disable an existing machine binding", async () => {
     const s = sid("e2e-7");
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
-      // A validly-bound agent…
       await markActive(start(s), []);
       expect(soleActiveBinding(s)?.agentId).toBe("a-1");
 
-      // …then a rogue agent whose id the bind boundary rejects joins the
-      // session. It cannot be bound — but it MUST still count as active,
-      // otherwise its tool calls (including trusted TestRun evidence)
-      // would be attributed to a-1's epoch.
-      await markActive(start(s, "evil:id"), []);
-      expect(countActiveAgents(s)).toBe(2);
-      expect(soleActiveBinding(s)).toBeNull(); // contended → stand down
-
-      // Gate and recorder both stand down while contended.
-      expect((await enforce(pre(s, "Write"), [])).kind).toBe("passthrough");
-      await recordEvidence(
-        post(s, "Bash", { command: "npm test" }, { exit_code: 0, stdout: "5 passing" }),
-        [],
-      );
-      expect(readEvidence(s)).toEqual([]); // the rogue run credited NOTHING
-
-      // The rogue agent stops → symmetric placeholder removal re-arms a-1.
-      await cleanup(stop(s, "evil:id"), []);
+      const rejected = await markActive(start(s, "evil:id"), []);
+      expect(rejected.kind).toBe("block");
+      expect(countActiveAgents(s)).toBe(1);
       expect(soleActiveBinding(s)?.agentId).toBe("a-1");
+      expect((await enforce(pre(s, "Write"), [])).kind).toBe("block");
+
       await cleanup(stop(s), []);
     } finally {
       stderrSpy.mockRestore();

@@ -5,12 +5,6 @@ import {
   type DiffDeps,
 } from "../../src/handlers/subagent-stop/update-task-status";
 
-/**
- * collectDiff takes its I/O seam (DiffDeps) as a parameter, so tests pass
- * plain object literals — no module mocking (bun's vitest shim supports
- * neither vi.mock nor vi.hoisted).
- */
-
 const diff = (value: string) => ({ ok: true as const, diff: value });
 
 function fakeDeps(overrides: Partial<DiffDeps> = {}): DiffDeps {
@@ -28,9 +22,11 @@ function fakeDeps(overrides: Partial<DiffDeps> = {}): DiffDeps {
 describe("collectDiff", () => {
   it("includes only paths attributed to the current task", () => {
     const result = collectDiff(["src/main.ts"], fakeDeps());
-    expect(result).toContain("src/main.ts");
-    expect(result).not.toContain("engine/tests/new.test.ts");
-    expect(result).not.toContain("apps/web/tests/login.spec.ts");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toContain("src/main.ts");
+    expect(result.value).not.toContain("engine/tests/new.test.ts");
+    expect(result.value).not.toContain("apps/web/tests/login.spec.ts");
   });
 
   it("does not duplicate test files already in filesModified", () => {
@@ -40,33 +36,27 @@ describe("collectDiff", () => {
         diffedFiles.push(f);
         return diff(`diff --untracked ${f}\n+content`);
       },
-      // Mark test file as untracked so it goes through diffUntracked path from filesModified
       isTracked: (f) => ({ ok: true, tracked: f === "src/main.ts" }),
     });
 
     collectDiff(["src/main.ts", "engine/tests/new.test.ts"], deps);
 
-    // engine/tests/new.test.ts is attributed and therefore diffed exactly once.
-    const testFileCount = diffedFiles.filter((f) => f === "engine/tests/new.test.ts").length;
-    expect(testFileCount).toBe(1);
+    expect(diffedFiles.filter((f) => f === "engine/tests/new.test.ts")).toHaveLength(1);
   });
 
   it("excludes foreign untracked tests that are not in filesModified", () => {
     const diffedFiles: string[] = [];
-    const deps = fakeDeps({
+    collectDiff(["src/main.ts"], fakeDeps({
       diffUntracked: (f) => {
         diffedFiles.push(f);
         return diff(`diff --untracked ${f}\n+content`);
       },
-    });
-
-    collectDiff(["src/main.ts"], deps);
-
+    }));
     expect(diffedFiles).toEqual([]);
   });
 
-  it("fails closed when no path is attributable to the task", () => {
-    expect(collectDiff([], fakeDeps())).toBe("");
+  it("returns an empty successful observation when no path is attributable", () => {
+    expect(collectDiff([], fakeDeps())).toEqual({ ok: true, value: "" });
   });
 
   it("collects an attributed untracked test", () => {
@@ -74,31 +64,70 @@ describe("collectDiff", () => {
       ["engine/tests/new.test.ts"],
       fakeDeps({ isTracked: () => ({ ok: true, tracked: false }) }),
     );
-    expect(result).toContain("engine/tests/new.test.ts");
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value).toContain("engine/tests/new.test.ts");
   });
 
-  it("fails closed when Git cannot establish tracking authority", () => {
-    expect(() => collectDiff(
+  it("returns typed Git tracking failure data", () => {
+    expect(collectDiff(
       ["engine/tests/existing.test.ts"],
       fakeDeps({ isTracked: () => ({ ok: false, error: "git index unreadable" }) }),
-    )).toThrow("new-test diff authority unavailable");
+    )).toEqual({
+      ok: false,
+      error: { kind: "git-observation-failed", operation: "is-tracked", message: "git index unreadable" },
+    });
   });
 
-  it("fails closed when an untracked attributed file cannot be inspected", () => {
-    expect(() => collectDiff(
+  it("returns typed file-observation failure data", () => {
+    expect(collectDiff(
       ["engine/tests/new.test.ts"],
       fakeDeps({
         isTracked: () => ({ ok: true, tracked: false }),
         inspectFilePresence: () => ({ ok: false, error: "EACCES" }),
       }),
-    )).toThrow("new-test diff authority unavailable: cannot inspect engine/tests/new.test.ts: EACCES");
+    )).toEqual({
+      ok: false,
+      error: {
+        kind: "filesystem-observation-failed",
+        operation: "inspect-file",
+        path: "engine/tests/new.test.ts",
+        message: "EACCES",
+      },
+    });
   });
 
-  it("surfaces a Git diff failure instead of reporting no tests written", () => {
-    expect(() => collectDiff(
+  it("returns typed Git diff failure data", () => {
+    expect(collectDiff(
       ["engine/tests/existing.test.ts"],
       fakeDeps({ diffFiles: () => ({ ok: false, error: "git object database unreadable" }) }),
-    )).toThrow("new-test diff authority unavailable: git object database unreadable");
+    )).toEqual({
+      ok: false,
+      error: {
+        kind: "git-observation-failed",
+        operation: "diff-worktree",
+        message: "git object database unreadable",
+      },
+    });
+  });
+
+  it.each([
+    [false, "legacy-new-tests-required-false"],
+    [{ kind: "waived" as const, reason: "existing-tests-sufficient" as const }, "existing-tests-sufficient"],
+  ])("returns waiver evidence directly without touching the diff seam", (requirement, reason) => {
+    const evidence = collectNewTestEvidence(
+      ["engine/tests/existing.test.ts"],
+      requirement,
+      undefined,
+      fakeDeps({ isTracked: () => { throw new Error("diff seam must not run"); } }),
+    );
+    expect(evidence).toEqual({
+      ok: true,
+      value: {
+        kind: "not-written",
+        written: false,
+        evidence: `verification_policy.new_tests waived: ${reason}`,
+      },
+    });
   });
 
   it("proves new tests from tracked unstaged worktree changes for every harness", () => {
@@ -118,8 +147,12 @@ describe("collectDiff", () => {
     );
 
     expect(evidence).toEqual({
-      written: true,
-      evidence: "1 new test methods, 1 assertions (ts: 1 it/test/describe)",
+      ok: true,
+      value: {
+        kind: "written",
+        written: true,
+        evidence: "1 new test methods, 1 assertions (ts: 1 it/test/describe)",
+      },
     });
   });
 
@@ -144,13 +177,21 @@ describe("collectDiff", () => {
       }),
     );
 
-    expect(calls).toEqual([{
-      revision: "a".repeat(40),
-      files: ["engine/tests/committed.test.ts"],
-    }]);
+    expect(calls).toEqual([{ revision: "a".repeat(40), files: ["engine/tests/committed.test.ts"] }]);
     expect(evidence).toEqual({
-      written: true,
-      evidence: "1 new test methods, 1 assertions (ts: 1 it/test/describe)",
+      ok: true,
+      value: {
+        kind: "written",
+        written: true,
+        evidence: "1 new test methods, 1 assertions (ts: 1 it/test/describe)",
+      },
     });
+  });
+
+  it("does not catch unexpected dependency defects", () => {
+    expect(() => collectDiff(
+      ["engine/tests/existing.test.ts"],
+      fakeDeps({ isTracked: () => { throw new TypeError("bad adapter"); } }),
+    )).toThrowError(TypeError);
   });
 });

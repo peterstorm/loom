@@ -37,6 +37,7 @@ export {
 } from "./extract-evidence";
 export {
   parseEvidenceLine,
+  type EvidenceLineParse,
   eventsForEpoch,
   epochOf,
   parseEpoch,
@@ -58,6 +59,9 @@ export {
   SESSION_SUFFIXES,
   MACHINE_SUFFIX,
   CALL_START_SUFFIX,
+  IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX,
+  TASK_GRAPH_POINTER_BINDING_SUFFIX,
+  TASK_GRAPH_POINTER_LEASES_SUFFIX,
   CALL_START_CAP,
   type AgentId,
   type AgentType,
@@ -98,3 +102,22 @@ export {
   type LoadedMachine,
 } from "./ledger";
 export { fsSessionRegistry } from "./session-registry";
+export {
+  bindSessionTaskGraphPointer,
+  claimPersistedSessionTaskGraphPointerBinding,
+  persistSessionTaskGraphPointerBinding,
+  releasePersistedSessionTaskGraphPointerBinding,
+  rollbackSessionTaskGraphPointer,
+  parseCanonicalTaskGraphPointer,
+  parsePersistedSessionTaskGraphPointerBinding,
+  parseSessionTaskGraphPointerLeaseRegistry,
+  type CanonicalTaskGraphPointer,
+  type CanonicalTaskGraphPointerParse,
+  type PersistedSessionTaskGraphPointerBinding,
+  type PersistedSessionTaskGraphPointerClaim,
+  type PersistedSessionTaskGraphPointerRelease,
+  type SessionTaskGraphPointerBinding,
+  type SessionTaskGraphPointerLeaseRegistry,
+  type SessionTaskGraphPointerLeaseRegistryParse,
+  type SessionTaskGraphPointerRollback,
+} from "./task-graph-pointer";

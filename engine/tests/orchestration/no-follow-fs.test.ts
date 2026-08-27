@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { openRunDirectory } from "../../src/orchestration/run-directory-handle";
 import {
   anchoredChildPath,
+  assertAnchoredFilesystemPlatformSupported,
   closeAnchoredDirectory,
   ensureDirectoryNoFollow,
   ensureResolvedBaseDirectory,
@@ -149,6 +150,21 @@ describe("anchored lock ownership", () => {
     }
   });
 
+  it("preserves a lock with a malformed owner instead of treating it as proven dead", () => {
+    const root = workspace();
+    const directory = join(root, "run");
+    const lockPath = join(directory, "partial.lock");
+    writeFileSync(lockPath, "not-a-pid");
+    const anchored = openDirectoryNoFollow(directory);
+    try {
+      expect(() => recoverStaleDirectoryLock(anchored, "partial.lock"))
+        .toThrow(/malformed owner token/i);
+      expect(readFileSync(lockPath, "utf-8")).toBe("not-a-pid");
+    } finally {
+      closeAnchoredDirectory(anchored);
+    }
+  });
+
   it("surfaces a corrupted lock instead of reporting false from the read", () => {
     const root = workspace();
     const directory = join(root, "run");
@@ -180,6 +196,18 @@ describe("anchored lock ownership", () => {
     } finally {
       closeAnchoredDirectory(anchored);
     }
+  });
+
+  it("refuses lock release when persisted ownership bytes were padded", async () => {
+    const root = workspace();
+    const directory = join(root, "run");
+    const lockPath = join(directory, "padded.lock");
+
+    await expect(withAnchoredDirectoryLock(directory, "padded.lock", () => {
+      const owner = readFileSync(lockPath, "utf8");
+      writeFileSync(lockPath, `${owner}\n`);
+    })).rejects.toThrow(/ownership lost/i);
+    expect(readFileSync(lockPath, "utf8")).toMatch(/\n$/u);
   });
 
   it("surfaces a release failure instead of reporting the protected operation as successful", async () => {
@@ -256,7 +284,7 @@ describe("captured-attempt inspection fails closed", () => {
 });
 
 describe("removal refuses to follow a planted symlink", () => {
-  it.skipIf(process.platform === "darwin")("removeRunFileNoFollow unlinks the LINK, never the file it points at", () => {
+  it("removeRunFileNoFollow unlinks the LINK, never the file it points at", () => {
     const root = workspace();
     const secret = secretOutsideTheRun(root);
     const link = join(root, "run", "checkpoint.json.staged");
@@ -282,7 +310,7 @@ describe("removal refuses to follow a planted symlink", () => {
     expect(readFileSync(join(real, "staged.json"), "utf-8")).toBe("{}");
   });
 
-  it.skipIf(process.platform === "darwin")("still removes a real regular file at the same path", () => {
+  it("still removes a real regular file at the same path", () => {
     const root = workspace();
     const path = join(root, "run", "staged.json");
     writeRunFileNoFollow(path, "{}");
@@ -291,47 +319,30 @@ describe("removal refuses to follow a planted symlink", () => {
 
     expect(() => readRunFileNoFollow(path)).toThrow();
   });
-
-  it.runIf(process.platform === "darwin")("fails closed when descriptor-relative unlink is unavailable", () => {
-    const root = workspace();
-    const path = join(root, "run", "staged.json");
-    writeRunFileNoFollow(path, "{}");
-
-    expect(() => removeRunFileNoFollow(path)).toThrow(/descriptor-relative.*unavailable.*refusing unsafe unlink/i);
-    expect(readRunFileNoFollow(path)).toBe("{}");
-  });
 });
 
-/**
- * The two platforms reach the same guarantee by different means, and which
- * mechanism is in play is exactly the thing a future edit could silently
- * regress — a darwin-shaped change that quietly disabled Linux's descriptor
- * anchoring would still pass every symlink test above, because the refusals
- * would keep coming from the kernel either way.
- */
 describe("platform anchoring", () => {
-  it("anchors to a descriptor on Linux and to a proven real path on macOS", () => {
+  it("rejects unsupported runtimes before orchestration startup", () => {
+    expect(() => assertAnchoredFilesystemPlatformSupported("darwin"))
+      .toThrow(/requires Linux descriptor-relative filesystem operations.*darwin.*unsupported/i);
+    expect(() => assertAnchoredFilesystemPlatformSupported("win32"))
+      .toThrow(/requires Linux descriptor-relative filesystem operations.*win32.*unsupported/i);
+    expect(() => assertAnchoredFilesystemPlatformSupported("linux")).not.toThrow();
+  });
+
+  it("addresses every child through a retained Linux descriptor", () => {
     const root = workspace();
     const anchored = openDirectoryNoFollow(join(root, "run"));
     try {
-      if (process.platform === "darwin") {
-        expect(anchored.anchor).toBe("real-path");
-        expect(anchoredChildPath(anchored, "x")).toBe(join(root, "run", "x"));
-      } else {
-        expect(anchored.anchor).toBe("descriptor");
-        expect(anchoredChildPath(anchored, "x")).toMatch(/^\/proc\/self\/fd\/\d+\/x$/);
-      }
+      expect(anchored.anchor).toBe("descriptor");
+      expect(anchoredChildPath(anchored, "x")).toMatch(/^\/proc\/self\/fd\/\d+\/x$/);
     } finally {
       closeAnchoredDirectory(anchored);
     }
   });
 });
 
-/**
- * The BASE is the one place a symlink is layout rather than attack: macOS
- * reaches every real run directory through `/tmp` → `/private/tmp`. Resolving
- * it once is what lets everything below it stay strict.
- */
+/** The configured BASE is the sole trusted path resolved before strict traversal. */
 describe("run base resolution", () => {
   it("leaves a symlink-free base exactly as given", () => {
     const root = workspace();

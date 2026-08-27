@@ -11,7 +11,9 @@ import {
 } from "../../../src/handlers/helpers/programs/wave-gate";
 import type { RegisteredWaveGateProgram } from "../../../src/handlers/helpers/programs/helpers";
 import type { TaskGraph } from "../../../src/types";
+import { parseTaskGraph } from "../../../src/state-manager";
 import type { AgentRequestAuthority } from "../../../src/core/orchestration-contract";
+import { taskFixture } from "../../fixtures/task-lifecycle";
 
 const cleanup: string[] = [];
 afterEach(() => { for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true }); });
@@ -24,11 +26,11 @@ describe("registered Wave spec-check scope", () => {
       (anchors, files) => {
         const sourceAnchors = [...anchors];
         const sourceFiles = [...files];
-        const scope = waveSpecCheckScope([{
+        const scope = waveSpecCheckScope([taskFixture({
           id: "T1", description: "scope", agent: "code-implementer-agent", wave: 1,
           status: "pending", depends_on: [], spec_anchors: sourceAnchors,
           spec_contributions: [], file_list: sourceFiles,
-        }]);
+        })]);
         sourceAnchors.push("FR-MUTATED");
         sourceFiles.push("src/mutated.ts");
         expect(scope[0]?.completionAnchors).toEqual(anchors);
@@ -57,16 +59,16 @@ describe("registered Wave spec-check scope", () => {
       plan_file: "plan.md",
       wave_gates: {},
       tasks: [
-        {
+        taskFixture({
           id: "T1", description: "partial implementation", agent: "code-implementer-agent", wave: 1,
           status: "pending", depends_on: [], spec_anchors: [], spec_contributions: contributions,
           file_list: declaredFiles,
-        },
-        {
+        }),
+        taskFixture({
           id: "T2", description: "culminating implementation", agent: "code-implementer-agent", wave: 1,
           status: "pending", depends_on: [], spec_anchors: completionAnchors, spec_contributions: [],
           file_list: ["src/completion.ts"],
-        },
+        }),
       ],
     };
     const registration: RegisteredWaveGateProgram = {
@@ -76,7 +78,10 @@ describe("registered Wave spec-check scope", () => {
       taskIds: ["T1", "T2"],
       authorityDigest: "a".repeat(64),
     };
-    const batch = waveRequests(created.value, registration, graph, 1);
+    const parsedGraph = parseTaskGraph(graph);
+    expect(parsedGraph.ok).toBe(true);
+    if (!parsedGraph.ok) return;
+    const batch = waveRequests(created.value, registration, parsedGraph.value, 1);
     const specRequest = batch.requests.find(({ authority }) =>
       (authority as AgentRequestAuthority).role === "spec-check-invoker");
     expect(specRequest).toBeDefined();

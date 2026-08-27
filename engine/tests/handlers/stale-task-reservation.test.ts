@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { anyActiveSubagent } from "../../src/machine";
+import { taskFixture } from "../fixtures/task-lifecycle";
 
 const created: string[] = [];
 const previousDir = process.env.LOOM_SUBAGENT_DIR;
@@ -104,9 +105,26 @@ describe("anyActiveSubagent", () => {
     expect(anyActiveSubagent(GRAPH)).toBe(true);
   });
 
-  it("compares the pointer by resolved path", () => {
+  it("treats a readable non-canonical pointer as active fail-closed", () => {
     const dir = scopedSubagentDir();
     activeSession(dir, "session-a", "/repo/ours/./.claude/state/../state/active_task_graph.json");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(anyActiveSubagent(GRAPH)).toBe(true);
+      expect(stderr.mock.calls.map(([message]) => String(message)).join(""))
+        .toMatch(/malformed task-graph pointer.*assuming it serves this graph.*fail closed/i);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it.each([
+    ["empty", ""],
+    ["relative", ".claude/state/active_task_graph.json"],
+    ["whitespace-padded", `${OTHER_GRAPH}\n`],
+  ])("treats a readable %s pointer as active fail-closed", (_label, pointer) => {
+    const dir = scopedSubagentDir();
+    activeSession(dir, "session-a", pointer);
 
     expect(anyActiveSubagent(GRAPH)).toBe(true);
   });
@@ -199,15 +217,15 @@ describe("Pi ordering parity", () => {
       current_wave: 1,
       wave_gates: {},
       executing_tasks: ["T1"],
-      tasks: [{
+      tasks: [taskFixture({
         id: "T1",
         description: "pi spawn",
         agent: "code-implementer-agent",
-        status: "pending" as const,
+        status: "pending",
         wave: 1,
         depends_on: [],
         file_list: ["src/a.ts"],
-      }],
+      })],
     };
 
     // Once Pi has marked its roster and graph pointer, the ordinary liveness

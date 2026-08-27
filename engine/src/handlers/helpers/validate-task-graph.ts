@@ -32,6 +32,7 @@ import {
 } from "../../core/findings";
 import { checkPlanModelBindings, productionModelBindingDeps } from "./validate-model-bindings";
 import {
+  orphanExecutionReservationError,
   taskDependencyErrors,
   taskGraphLifecycleErrors,
   taskIdError,
@@ -162,6 +163,10 @@ export function validateFull(
   );
   const duplicateIds = [...new Set(taskIds.filter((id, index) => taskIds.indexOf(id) !== index))];
   for (const id of duplicateIds) errors.push(`Duplicate task id: ${id}`);
+  if (scope === "state-file") {
+    const orphan = orphanExecutionReservationError(validTaskRecords, json.executing_tasks);
+    if (orphan !== null) errors.push(orphan);
+  }
   errors.push(...taskDependencyErrors(validTaskRecords));
 
   for (let i = 0; i < tasks.length; i++) {
@@ -673,9 +678,19 @@ export function fixFull(json: Record<string, unknown>): FixReport {
   if (json.current_wave !== undefined && !currentWaveValid) {
     notes.push(`normalized invalid current_wave ${JSON.stringify(json.current_wave)} to 1`);
   }
+  const taskIds = new Set(tasks.flatMap((task) =>
+    isRecord(task) && typeof task.id === "string" ? [task.id] : []));
+  const executing = Array.isArray(json.executing_tasks)
+    ? json.executing_tasks.filter((id) => {
+        if (typeof id !== "string" || taskIds.has(id)) return true;
+        notes.push(`removed orphan execution reservation ${id}; no Task with that id exists`);
+        return false;
+      })
+    : json.executing_tasks;
   const fixed = {
     ...json,
     ...(json.current_wave === undefined ? {} : { current_wave: currentWaveValid ? json.current_wave : 1 }),
+    ...(json.executing_tasks === undefined ? {} : { executing_tasks: executing }),
     tasks: tasks.map((rawTask, taskIndex) => fixTaskRecord(rawTask, taskIndex, notes, dataLoss)),
   };
   return { json: JSON.stringify(fixed, null, 2), notes, dataLoss };

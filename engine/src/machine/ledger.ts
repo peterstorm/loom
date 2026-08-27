@@ -5,7 +5,7 @@
  *
  * Per session under SUBAGENT_DIR (the full suffix vocabulary is
  * SESSION_SUFFIXES in evidence.ts):
- *   <session>.evidence.jsonl  — append-only { epoch, event } records
+ *   <session>.evidence.jsonl  — append-only { epoch, event, callId? } records
  *   <session>.machine         — one "<agent_id>\t<agent_type>\t<bound_at_ms>"
  *                               line per active machine-gated subagent
  *   <session>.active          — active-subagent roster (attribution)
@@ -80,6 +80,7 @@ import {
   resolveSoleActiveBinding,
 } from "./evidence";
 import type { Epoch, Evidence, EvidenceRecord, MachineDef } from "./types";
+import { parseCanonicalTaskGraphPointer } from "./task-graph-pointer";
 
 /**
  * The single path-construction boundary for session files. It takes the
@@ -267,7 +268,7 @@ export function countActiveAgents(sessionId: SessionId): number {
  *   - resolves elsewhere      → not ours
  *   - absent (ENOENT)         → not ours; "bound to no graph" is a real answer,
  *                               which is what stops stray rosters vetoing
- *   - unreadable (any other)  → active (fail closed: cannot disprove it's ours)
+ *   - malformed or unreadable → active (fail closed: cannot disprove it's ours)
  *
  * The ENOENT-vs-error split is load-bearing: absence is evidence, failure is
  * not. A directory that cannot be read at all is likewise fail-closed.
@@ -296,7 +297,16 @@ export function anyActiveSubagent(taskGraphPath: string): boolean {
       return true;
     }
     try {
-      return resolve(readFileSync(`${subagentDir()}/${session}.task_graph`, "utf-8").trim()) === wanted;
+      const parsedPointer = parseCanonicalTaskGraphPointer(
+        readFileSync(`${subagentDir()}/${session}.task_graph`, "utf-8"),
+      );
+      if (!parsedPointer.ok) {
+        process.stderr.write(
+          `anyActiveSubagent: malformed task-graph pointer for ${session} — assuming it serves this graph (fail closed)\n`,
+        );
+        return true;
+      }
+      return parsedPointer.value === wanted;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
       process.stderr.write(
@@ -476,20 +486,9 @@ export async function removeActiveAgentStrict(sessionId: SessionId, agentId: Age
   });
 }
 
-/**
- * Completion cleanup preserves its historical failure split: a rewrite error
- * is logged, while lock acquisition failure escapes to dispatch isolation.
- */
+/** Completion cleanup is strict so the caller can aggregate every failed capability release. */
 export async function removeActiveAgent(sessionId: SessionId, agentId: AgentId): Promise<void> {
-  const path = activeFlagPath(sessionId);
-  await withLock(bindingLock(sessionId), () => {
-    try {
-      removeActiveRosterEntry(path, agentId);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      process.stderr.write(`removeActiveAgent: .active update failed for ${sessionId}: ${error}\n`);
-    }
-  });
+  return removeActiveAgentStrict(sessionId, agentId);
 }
 
 /**
@@ -585,7 +584,10 @@ export async function unbindMachineAgent(
       }
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
-      process.stderr.write(`unbindMachineAgent: failed for ${agentId}/${sessionId}: ${e}\n`);
+      throw new Error(
+        `unbindMachineAgent failed for ${agentId}/${sessionId}: ${e instanceof Error ? e.message : String(e)}`,
+        { cause: e },
+      );
     }
   });
 }
@@ -685,12 +687,16 @@ export function readEvidence(sessionId: SessionId): readonly EvidenceRecord[] {
   const lines = content
     .split("\n")
     .filter((l) => l.trim() !== "");
-  const records = lines.map(parseEvidenceLine).filter((r): r is EvidenceRecord => r !== null);
-  const dropped = lines.length - records.length;
-  if (dropped > 0) {
-    process.stderr.write(`readEvidence: skipped ${dropped} corrupt ledger line(s) for ${sessionId}\n`);
+  const parsed = lines.map(parseEvidenceLine);
+  const corrupt = parsed.flatMap((result, index) =>
+    result.ok ? [] : [`line ${index + 1}: ${result.error}`]);
+  if (corrupt.length > 0) {
+    throw new Error(`evidence ledger ${path} is corrupt; refusing partial evidence: ${corrupt.join("; ")}`);
   }
-  return records;
+  return parsed.map((result) => {
+    if (!result.ok) throw new Error("unreachable: corrupt evidence was rejected above");
+    return result.value;
+  });
 }
 
 // --- Machine registry (definitions shipped with the plugin) ---

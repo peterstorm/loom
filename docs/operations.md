@@ -4,6 +4,7 @@ This guide covers status, persisted artifacts, recovery, validation, and contrib
 
 ## Prerequisites
 
+- Linux (`/proc/self/fd` descriptor-relative filesystem authority is required)
 - Bun (engine runtime and tests)
 - Git
 - Claude Code or Pi

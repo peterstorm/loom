@@ -146,8 +146,8 @@ run_gate() {
 # Run a SubagentStop dispatch for a completed agent; echo the exit code.
 run_stop() {
   local agent="$1" rc=0 payload
-  payload="$(jq -nc --arg a "$agent" --arg s "$SESSION" --arg c "$TMP" \
-    '{agent_type:$a,session_id:$s,cwd:$c}')" \
+  payload="$(jq -nc --arg a "$agent" --arg i "smoke-$agent" --arg s "$SESSION" --arg c "$TMP" \
+    '{agent_type:$a,agent_id:$i,session_id:$s,cwd:$c}')" \
     || { echo "FATAL: jq failed building the run_stop payload for agent '$agent'" >&2; exit 1; }
   printf '%s' "$payload" \
     | ( cd "$TMP" && bun "$CLI" subagent-stop dispatch ) >/dev/null 2>"$ERR" || rc=$?

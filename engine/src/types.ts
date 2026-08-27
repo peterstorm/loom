@@ -2,7 +2,16 @@
  * Shared Loom schemas and Hook result/input types.
  */
 
-import type { TaskProof } from "./core/proof-obligations";
+import type {
+  FailedTaskProof,
+  PendingTaskProof,
+  SatisfiedTaskProof,
+  TaskProof,
+} from "./core/proof-obligations";
+import type {
+  ImplementationAttemptAuthority,
+  ImplementationAttemptSettlementReceipt,
+} from "./core/implementation-completion";
 import type { StoredVerificationPolicy } from "./core/verification-policy";
 import type { DeclaredArtifactBaseline } from "./core/artifact-baseline";
 import type { IssuedReviewPacketRegistration } from "./core/review-packet";
@@ -144,11 +153,10 @@ export function legacyTestsPassedNote(task: unknown): string | null {
 
 // --- Review findings ---
 //
-// The finding SHAPES live here, with `Task`, because this module is the schema
-// root: every other module may depend on it and it depends on none of them.
-// They used to be declared in core/findings and imported back, which made
-// types.ts and core/findings mutually dependent — harmless only for as long as
-// both directions stayed `import type`. core/findings still OWNS the finding
+// The finding SHAPES live here with `Task` to avoid a shape-level cycle:
+// core/findings consumes Task while Task carries findings. Declaring the shapes
+// in core/findings and importing them back here made those two declarations
+// mutually dependent. core/findings still OWNS the finding
 // aggregate (minting identity, proving lockstep, and its review-path writers)
 // and re-exports these so no import site had to move.
 
@@ -331,7 +339,61 @@ export interface RecoveredArtifactWriteEvidence {
   readonly modified_paths: readonly string[];
 }
 
-export interface Task {
+declare const NON_EMPTY_NEW_TEST_EVIDENCE: unique symbol;
+export type NonEmptyNewTestEvidence = string & { readonly [NON_EMPTY_NEW_TEST_EVIDENCE]: true };
+
+/** One normalized new-test observation. A positive observation cannot exist without evidence. */
+export type NewTestEvidence =
+  | Readonly<{ kind: "not-written"; written: false; evidence: string }>
+  | Readonly<{ kind: "written"; written: true; evidence: NonEmptyNewTestEvidence }>;
+
+/** Compatibility parser for legacy boolean/string evidence pairs. */
+export function parseNewTestEvidence(written: unknown, evidence: unknown): NewTestEvidence {
+  const text = typeof evidence === "string" ? evidence : "";
+  return written === true && text.trim() !== ""
+    ? Object.freeze({ kind: "written", written: true, evidence: text as NonEmptyNewTestEvidence })
+    : Object.freeze({ kind: "not-written", written: false, evidence: text });
+}
+
+export function parseStoredNewTestEvidence(raw: unknown):
+  | Readonly<{ ok: true; value: NewTestEvidence }>
+  | Readonly<{ ok: false; error: string }> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw) || Object.getPrototypeOf(raw) !== Object.prototype) {
+    return Object.freeze({ ok: false, error: "new_test_observation must be a plain object" });
+  }
+  const record = raw as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  if (keys.length !== 3 || keys[0] !== "evidence" || keys[1] !== "kind" || keys[2] !== "written") {
+    return Object.freeze({ ok: false, error: "new_test_observation must contain exactly evidence, kind, written" });
+  }
+  if (record.kind === "written" && record.written === true &&
+      typeof record.evidence === "string" && record.evidence.trim() !== "") {
+    return Object.freeze({
+      ok: true,
+      value: Object.freeze({
+        kind: "written",
+        written: true,
+        evidence: record.evidence as NonEmptyNewTestEvidence,
+      }),
+    });
+  }
+  if (record.kind === "not-written" && record.written === false && typeof record.evidence === "string") {
+    return Object.freeze({
+      ok: true,
+      value: Object.freeze({ kind: "not-written", written: false, evidence: record.evidence }),
+    });
+  }
+  return Object.freeze({ ok: false, error: "new_test_observation tag, written flag, and evidence are contradictory" });
+}
+
+/** Persisted Task projection: one optional ADT replaces two independently optional wire fields. */
+export type StoredNewTestEvidence = Readonly<{ new_test_observation: NewTestEvidence }>;
+
+export function storedNewTestEvidence(evidence: NewTestEvidence): StoredNewTestEvidence {
+  return Object.freeze({ new_test_observation: evidence });
+}
+
+interface TaskCommonMetadataBase {
   /** Base fields are `readonly` like the rest: every mutation flows through
    *  StateManager.update's locked transform, which returns a NEW task object.
    *  An in-place assignment on a loaded graph would bypass that transform and
@@ -340,7 +402,6 @@ export interface Task {
   readonly description: string;
   readonly agent: string;
   readonly wave: number;
-  readonly status: TaskStatus;
   readonly depends_on: readonly string[];
   /** Requirement Completion Claims: this Task's Wave must fully satisfy each Requirement. */
   readonly spec_anchors?: readonly string[];
@@ -352,19 +413,12 @@ export interface Task {
   readonly new_tests_required?: boolean;
   /** Exact architecture context selected for this Task by decompose. */
   readonly plan_context?: string;
-  /** Engine-authored proof aggregate. New graphs always carry it. */
-  readonly proof?: TaskProof;
-  /** A completed-Wave recovery preserved historical evidence but requires a
-   * re-spawned implementation Agent to rebuild a satisfied Proof under the
-   * current Verification Policy before the Task can again satisfy a Wave Gate. */
-  readonly revalidation_required?: true;
   /** Files this task creates/modifies (decompose contract); older graphs may lack it */
   readonly file_list?: readonly string[];
   /** Test outcome + trust provenance; absent until an impl agent completes. */
   readonly test_result?: TaskTestResult;
   readonly test_evidence?: string;
-  readonly new_tests_written?: boolean;
-  readonly new_test_evidence?: string;
+  readonly new_test_observation?: NewTestEvidence;
   readonly files_modified?: readonly string[];
   readonly review_status?: ReviewStatus;
   /** Monotonic implementation generation; incremented whenever task bytes change. */
@@ -448,16 +502,20 @@ export interface Task {
    *  starts. Proof compares current bytes to this baseline; transcript tool
    *  calls remain lint targets and cannot vouch that a change occurred. */
   readonly artifact_baseline?: readonly DeclaredArtifactBaseline[];
-  /** Exact declared and previously-attributed artifact state captured
-   * immediately before the current implementation attempt. Unlike
-   * artifact_baseline, this advances on every accepted retry so byte changes
-   * from that attempt invalidate older evidence even when current transcript
-   * tool attribution is missing. */
+  /** Current implementation-attempt fields are compatibility-optional on the
+   * shared metadata; StateManager proves their all-or-none digest lockstep. */
+  readonly active_implementation_attempt?: ImplementationAttemptAuthority;
   readonly attempt_artifact_baseline?: readonly DeclaredArtifactBaseline[];
-  /** Compact snapshot of every Git-visible dirty path immediately before the
-   * current implementation attempt. Comparing this boundary with the later
-   * dirty set detects writes outside declared/previously-attributed scope. */
   readonly attempt_repository_baseline?: readonly DeclaredArtifactBaseline[];
+  /** First repository boundary retained until an exact attempt is accepted.
+   * Fresh attempts bind to this boundary instead of snapshotting unresolved
+   * foreign bytes as their new starting state. */
+  readonly repository_baseline?: readonly DeclaredArtifactBaseline[];
+  /** Parser-attributed out-of-scope paths still different from the retained
+   * repository boundary. Sibling dirty paths never enter this set. */
+  readonly unresolved_repository_paths?: readonly string[];
+  readonly reserved_at?: string;
+  readonly legacy_execution_reservation?: true;
   /** Engine-issued packet authority retained after a review run closes. A
    * self-hashed packet is integrity evidence, not provenance; historical write
    * recovery accepts a packet only when every registration field matches. */
@@ -470,16 +528,55 @@ export interface Task {
    * attribution after a legacy retry replaced files_modified. */
   readonly recovered_artifact_writes?: readonly RecoveredArtifactWriteEvidence[];
   readonly start_sha?: string;
-  /** ISO-8601 instant this task's execution reservation was committed (task
-   * added to `executing_tasks` during PreToolUse). Refreshed on every spawn
-   * attempt. Reservation reclamation shields any reservation younger than the
-   * grace window (see RESERVATION_GRACE_MS) so a live agent that has not yet
-   * reached its SubagentStart roster mark is never mistaken for one stranded by
-   * a vetoed spawn. */
-  readonly reserved_at?: string;
   readonly failure_reason?: string;
   readonly retry_count?: number;
+  /** Immutable exact receipts; append-only settlement audit in wire order. */
+  readonly implementation_attempt_history?: readonly ImplementationAttemptSettlementReceipt[];
 }
+
+export type TaskCommonMetadata = Readonly<TaskCommonMetadataBase>;
+
+/** Existing flat wire fields, represented as a closed lifecycle union. */
+export type TaskLifecycle =
+  | Readonly<{
+      status: "pending";
+      proof: PendingTaskProof | FailedTaskProof;
+      revalidation_required?: never;
+      legacy_missing_proof?: never;
+    }>
+  | Readonly<{
+      status: "pending";
+      proof: TaskProof;
+      revalidation_required: true;
+      legacy_missing_proof?: never;
+    }>
+  | Readonly<{
+      status: "implemented";
+      proof: SatisfiedTaskProof;
+      revalidation_required?: never;
+      legacy_missing_proof?: never;
+    }>
+  | Readonly<{
+      status: "completed";
+      proof: SatisfiedTaskProof;
+      revalidation_required?: never;
+      legacy_missing_proof?: never;
+    }>
+  | Readonly<{
+      status: "failed";
+      proof: FailedTaskProof;
+      revalidation_required?: never;
+      legacy_missing_proof?: never;
+    }>
+  | Readonly<{
+      status: "implemented" | "completed";
+      proof?: never;
+      revalidation_required?: never;
+      /** Protected migration marker; ordinary writers cannot claim modern completion with it. */
+      legacy_missing_proof: true;
+    }>;
+
+export type Task = Readonly<TaskCommonMetadata & TaskLifecycle>;
 
 // WaveGate + newWaveGate moved to the pure core module core/wave-gate-model
 // (re-exported above); the functional core must not pull runtime values from
@@ -804,7 +901,7 @@ export type WaveGateProtectedSnapshotBinding = Readonly<{
 export type WaveGateNextAction =
   | Readonly<{ kind: "review-batch"; lifecycle: "preparing" | "awaiting-review-results"; action: SpawnBatchAction; binding: WaveGateProtectedSnapshotBinding }>
   | Readonly<{ kind: "advisory-decision"; lifecycle: "awaiting-advisory-decision"; action: AwaitUserAction; binding: WaveGateProtectedSnapshotBinding }>
-  | Readonly<{ kind: "blocked"; lifecycle: "recoverable-blocked" | "terminal-blocked" | "authority-blocked"; action: BlockedAction; binding: WaveGateProtectedSnapshotBinding }>
+  | Readonly<{ kind: "blocked"; lifecycle: "recoverable-blocked" | "terminal-blocked"; action: BlockedAction; binding: WaveGateProtectedSnapshotBinding }>
   | Readonly<{ kind: "completed"; lifecycle: "done"; action: DoneAction; binding: WaveGateProtectedSnapshotBinding }>;
 
 /** A registered program can be temporarily unable to expose its next semantic

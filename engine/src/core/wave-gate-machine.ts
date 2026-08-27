@@ -532,7 +532,7 @@ export function checkImplementationProof(tasks: readonly Task[]): GateCheck {
 }
 
 /**
- * The three test-readiness predicates, defined ONCE.
+ * The shared test-readiness predicates, defined ONCE.
  *
  * The gate (`checkTestEvidence`/`checkNewTests`) and the status projection
  * (`deriveTestReadinessForTasks`) must answer "is this task test-ready?"
@@ -547,7 +547,7 @@ const newTestsExempt = (task: Task): boolean =>
 const testEvidenceSatisfied = (task: Task): boolean =>
   regressionExempt(task) || testResultPassed(task.test_result);
 const newTestsSatisfied = (task: Task): boolean =>
-  newTestsExempt(task) || task.new_tests_written === true;
+  newTestsExempt(task) || task.new_test_observation?.kind === "written";
 const regressionEvidenceLine = (task: Task): string => {
   const requirement = taskVerificationPolicy(task).regression;
   return requirement.kind === "waived"
@@ -558,7 +558,7 @@ const newTestEvidenceLine = (task: Task): string => {
   const requirement = taskVerificationPolicy(task).newTests;
   return requirement.kind === "waived"
     ? `not required (verification_policy.new_tests waived: ${requirement.reason})`
-    : (task.new_test_evidence ?? "new tests present");
+    : (task.new_test_observation?.evidence ?? "new tests present");
 };
 
 function checkTaskRequirement(
@@ -798,6 +798,23 @@ function completionEvaluationFailureDetail(
   return `persisted completion result is invalid for current authority: ${kinds.join(", ")}`;
 }
 
+type RequiredWaveCompletionSuite = Extract<WaveCompletionSuiteReadiness, { kind: "required" }>;
+
+function requiredWaveCompletionSuite(
+  reason: RequiredWaveCompletionSuite["reason"],
+  detail: string,
+  verificationManifestDigest: RequiredWaveCompletionSuite["verificationManifestDigest"],
+  acceptedResultDigest: RequiredWaveCompletionSuite["acceptedResultDigest"] = null,
+): RequiredWaveCompletionSuite {
+  return canonicalRecord({
+    kind: "required",
+    reason,
+    detail,
+    verificationManifestDigest,
+    acceptedResultDigest,
+  });
+}
+
 /** Pure canonical status for active or terminal Wave completion-suite evidence. */
 export function deriveWaveCompletionSuiteReadiness(
   graph: TaskGraph,
@@ -813,49 +830,39 @@ export function deriveWaveCompletionSuiteReadiness(
       return canonicalRecord({ kind: "legacy-unavailable", verificationManifestDigest: null });
     }
     if (source.registration?.kind !== "active-wave-gate" || manifest === undefined) {
-      return canonicalRecord({
-        kind: "required",
-        reason: "accepted-suite-missing",
-        detail: "an exact accepted Wave completion suite is required",
-        verificationManifestDigest: manifestDigest,
-        acceptedResultDigest: null,
-      });
+      return requiredWaveCompletionSuite(
+        "accepted-suite-missing",
+        "an exact accepted Wave completion suite is required",
+        manifestDigest,
+      );
     }
     if (currentWorkspace === undefined) {
-      return canonicalRecord({
-        kind: "required",
-        reason: "workspace-observation-missing",
-        detail: "current Wave workspace observation is missing",
-        verificationManifestDigest: manifestDigest,
-        acceptedResultDigest: null,
-      });
+      return requiredWaveCompletionSuite(
+        "workspace-observation-missing",
+        "current Wave workspace observation is missing",
+        manifestDigest,
+      );
     }
     if (currentWorkspace.kind === "unavailable") {
-      return canonicalRecord({
-        kind: "required",
-        reason: "workspace-observation-unavailable",
-        detail: currentWorkspace.reason,
-        verificationManifestDigest: manifestDigest,
-        acceptedResultDigest: null,
-      });
+      return requiredWaveCompletionSuite(
+        "workspace-observation-unavailable",
+        currentWorkspace.reason,
+        manifestDigest,
+      );
     }
     if (currentResult === undefined || currentResult.kind === "absent") {
-      return canonicalRecord({
-        kind: "required",
-        reason: "accepted-suite-missing",
-        detail: "an exact accepted Wave completion suite is required",
-        verificationManifestDigest: manifestDigest,
-        acceptedResultDigest: null,
-      });
+      return requiredWaveCompletionSuite(
+        "accepted-suite-missing",
+        "an exact accepted Wave completion suite is required",
+        manifestDigest,
+      );
     }
     if (currentResult.kind === "unavailable") {
-      return canonicalRecord({
-        kind: "required",
-        reason: "completion-result-unavailable",
-        detail: currentResult.reason,
-        verificationManifestDigest: manifestDigest,
-        acceptedResultDigest: null,
-      });
+      return requiredWaveCompletionSuite(
+        "completion-result-unavailable",
+        currentResult.reason,
+        manifestDigest,
+      );
     }
     const authorized = authorizeWaveCompletionSuite(
       manifest,
@@ -863,36 +870,30 @@ export function deriveWaveCompletionSuiteReadiness(
       currentWorkspace.workspaceDigest,
     );
     if (!authorized.ok) {
-      return canonicalRecord({
-        kind: "required",
-        reason: "completion-result-invalid",
-        detail: authorized.error.errors.join("; "),
-        verificationManifestDigest: manifestDigest,
-        acceptedResultDigest: null,
-      });
+      return requiredWaveCompletionSuite(
+        "completion-result-invalid",
+        authorized.error.errors.join("; "),
+        manifestDigest,
+      );
     }
     const evaluation = evaluateWaveCompletionSuite(authorized.value, currentResult.result);
     if (evaluation.kind === "accepted") {
-      return canonicalRecord({
-        kind: "required",
-        reason: "accepted-suite-missing",
-        detail: "persisted completion result is accepted; protected receipt recovery required",
-        verificationManifestDigest: manifestDigest,
-        acceptedResultDigest: null,
-      });
+      return requiredWaveCompletionSuite(
+        "accepted-suite-missing",
+        "persisted completion result is accepted; protected receipt recovery required",
+        manifestDigest,
+      );
     }
     if (evaluation.authorityFailures.length > 0 || evaluation.infrastructureFailures.length > 0 ||
         evaluation.semanticFailures.length === 0) {
-      return canonicalRecord({
-        kind: "required",
-        reason: "completion-result-invalid",
-        detail: completionEvaluationFailureDetail(
+      return requiredWaveCompletionSuite(
+        "completion-result-invalid",
+        completionEvaluationFailureDetail(
           evaluation.authorityFailures,
           evaluation.infrastructureFailures,
         ),
-        verificationManifestDigest: manifestDigest,
-        acceptedResultDigest: null,
-      });
+        manifestDigest,
+      );
     }
     const failureKinds = [...new Set(evaluation.semanticFailures.map((failure) => failure.kind))]
       .sort(compareStrings);
@@ -908,24 +909,22 @@ export function deriveWaveCompletionSuiteReadiness(
     });
   }
   if (source.registration === undefined) {
-    return canonicalRecord({
-      kind: "required",
-      reason: "accepted-suite-invalid",
-      detail: "accepted Wave completion suite has no active or terminal registration authority",
-      verificationManifestDigest: manifestDigest,
-      acceptedResultDigest: source.receipt.resultDigest,
-    });
+    return requiredWaveCompletionSuite(
+      "accepted-suite-invalid",
+      "accepted Wave completion suite has no active or terminal registration authority",
+      manifestDigest,
+      source.receipt.resultDigest,
+    );
   }
   if (source.registration.kind === "active-wave-gate") {
     const exactError = exactCompletionSuiteError(source.registration, source.receipt, graph);
     if (exactError !== null) {
-      return canonicalRecord({
-        kind: "required",
-        reason: "accepted-suite-invalid",
-        detail: exactError,
-        verificationManifestDigest: manifestDigest,
-        acceptedResultDigest: source.receipt.resultDigest,
-      });
+      return requiredWaveCompletionSuite(
+        "accepted-suite-invalid",
+        exactError,
+        manifestDigest,
+        source.receipt.resultDigest,
+      );
     }
   }
   if (source.terminal) {
@@ -939,22 +938,20 @@ export function deriveWaveCompletionSuiteReadiness(
     });
   }
   if (currentWorkspace === undefined) {
-    return canonicalRecord({
-      kind: "required",
-      reason: "workspace-observation-missing",
-      detail: "current Wave workspace observation is missing",
-      verificationManifestDigest: manifestDigest,
-      acceptedResultDigest: source.receipt.resultDigest,
-    });
+    return requiredWaveCompletionSuite(
+      "workspace-observation-missing",
+      "current Wave workspace observation is missing",
+      manifestDigest,
+      source.receipt.resultDigest,
+    );
   }
   if (currentWorkspace.kind === "unavailable") {
-    return canonicalRecord({
-      kind: "required",
-      reason: "workspace-observation-unavailable",
-      detail: currentWorkspace.reason,
-      verificationManifestDigest: manifestDigest,
-      acceptedResultDigest: source.receipt.resultDigest,
-    });
+    return requiredWaveCompletionSuite(
+      "workspace-observation-unavailable",
+      currentWorkspace.reason,
+      manifestDigest,
+      source.receipt.resultDigest,
+    );
   }
   if (currentWorkspace.workspaceDigest !== source.receipt.workspaceDigest) {
     return canonicalRecord({
@@ -1152,9 +1149,17 @@ export function applyGateDecision(state: TaskGraph, decision: GateDecision): Tas
     state.active_wave_gate.terminalOutcome !== null
   ) return state;
   const defaultGate = newWaveGate();
-  const clearedTasks = state.tasks.map((task) => task.wave === decision.wave
-    ? { ...task, status: "completed" as const, review_status: "passed" as const }
-    : task);
+  const clearedTasks = state.tasks.map((task): Task => {
+    if (task.wave !== decision.wave || task.status === "completed") return task;
+    if (task.status !== "implemented" || task.proof?.state !== "satisfied") return task;
+    return {
+      ...task,
+      status: "completed",
+      proof: task.proof,
+      legacy_missing_proof: undefined,
+      review_status: "passed",
+    };
+  });
   // `blocked` is DERIVED, never asserted. `wave-gate-model`'s `waveHasBlockCause`
   // is documented as the only copy of the rule every writer computes from, and a
   // literal `blocked: false` here was the writer that made that false. On a pass

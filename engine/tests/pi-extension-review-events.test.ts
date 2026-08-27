@@ -1,12 +1,13 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { evaluateTaskProof } from "../src/core/proof-obligations";
+import { createImplementationAttemptAuthority } from "../src/core/implementation-completion";
 import type { AgentRequestAuthority } from "../src/core/orchestration-contract";
-import { fsSessionRegistry } from "../src/machine";
+import { fsSessionRegistry, TASK_GRAPH_POINTER_LEASES_SUFFIX } from "../src/machine";
 import { openRunDirectory, type RunDirHandle } from "../src/orchestration/run-directory-handle";
 import { buildContextPacket, encodeByteSection } from "../src/orchestration/context-packets";
 import { registerSessionRunBinding } from "../src/orchestration/session-run-bindings";
@@ -906,7 +907,7 @@ describe("Pi extension review tool_result integration", () => {
     expect(readFileSync(statePath, "utf-8")).toBe(before);
   });
 
-  it("attributes review findings to the reserved task instead of substituted result text", async () => {
+  it("rejects substituted review Task identity instead of misattributing findings to the reserved Task", async () => {
     const planPath = join(temp, "reserved-review-task-plan.md");
     writeFileSync(planPath, "# Plan\n");
     writeState({
@@ -936,15 +937,20 @@ describe("Pi extension review tool_result integration", () => {
     }, context);
     expect(call).toEqual([undefined]);
 
-    await pi.emit("tool_result", {
-      ...reviewResult("Prior output mentioned Task: T2", "bind this finding to T1"),
+    const responses = await pi.emit("tool_result", {
+      ...reviewResult("Prior output mentioned Task: T2", "must not be misattributed"),
       toolCallId,
     }, context);
 
     const [t1, t2] = JSON.parse(readFileSync(statePath, "utf-8")).tasks;
-    expect(t1.critical_findings).toEqual(["bind this finding to T1"]);
+    expect(t1.critical_findings).toBeUndefined();
+    expect(t1.review_status).toBe("pending");
     expect(t2.critical_findings).toBeUndefined();
     expect(t2.review_status).toBe("pending");
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({ text: expect.stringContaining("does not match reserved Task T1") })],
+    }));
   });
 
   it("does not register review or verifier prompts as implementation execution", async () => {
@@ -1144,7 +1150,7 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
-  it("captures CLI-issued review authority and rejects two witnessed completed runs as ambiguous", async () => {
+  it("verifies only the current review witness, retires older accepted runs, and prunes on shutdown", async () => {
     const pi = await extension();
     const session = "019fca39-f989-7510-8e62-50dadbcad43c";
     const toolCallId = "call-session-run-binding";
@@ -1257,6 +1263,14 @@ describe("Pi extension review tool_result integration", () => {
       },
     });
 
+    const capturedTranscriptPath = join(runDir, request.authority.outputSlot.path);
+    writeFileSync(capturedTranscriptPath, `${expected}\npost-witness tamper`);
+    await expect(bridge.verify({ cwd: projectCwd, sessionId: session }))
+      .rejects.toThrow(/captured slot .* changed after Pi witnessed it/);
+    writeFileSync(capturedTranscriptPath, expected);
+    expect(await bridge.verify({ cwd: projectCwd, sessionId: session }))
+      .toMatchObject({ runId: "run.cli-session-binding" });
+
     // Registration and result are projections, not the scope the reviewer
     // witnessed. Rewriting both to another same-class path used to replay a
     // clean result under the substituted scope because request IDs and capture
@@ -1351,8 +1365,24 @@ describe("Pi extension review tool_result integration", () => {
       },
     });
     expect(JSON.parse(secondResumed)).toMatchObject({ kind: "done" });
+
+    const secondResultPath = join(secondRunDir, "result.json");
+    const canonicalSecondResult = readFileSync(secondResultPath, "utf8");
+    writeFileSync(secondResultPath, "{}\n");
     await expect(bridge.verify({ cwd: projectCwd, sessionId: session }))
-      .rejects.toThrow(`expected one unambiguous witnessed Standalone Review for Pi session ${session}, found 2`);
+      .rejects.toThrow(`current witnessed Standalone Review rejected: run.cli-session-binding-second`);
+    writeFileSync(secondResultPath, canonicalSecondResult);
+
+    const currentReceipt = await bridge.verify({ cwd: projectCwd, sessionId: session });
+    expect(currentReceipt).toMatchObject({ runId: "run.cli-session-binding-second" });
+    expect(await bridge.verify({ cwd: projectCwd, sessionId: session })).toEqual(currentReceipt);
+
+    await pi.emit("session_shutdown", {}, {
+      cwd: projectCwd,
+      sessionManager: { getSessionId: () => session },
+    });
+    await expect(bridge.verify({ cwd: projectCwd, sessionId: session }))
+      .rejects.toThrow(`no request-bound Loom captures were witnessed for Pi session ${session}`);
   });
 
   it("reloads durable session authority when the Pi extension restarts between spawn and result", async () => {
@@ -2083,6 +2113,28 @@ describe("Pi extension review tool_result integration", () => {
       input: { path: ".claude/specs/2026-08-12-foo/spec.md", content: "# Spec" },
     }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
     expect(inScope).toEqual([undefined]);
+    const malformedBatch = await pi.emit("tool_call", {
+      toolName: "multi_edit",
+      input: { edits: [
+        { path: ".claude/specs/2026-08-12-foo/spec.md" },
+        { path: 7 },
+      ] },
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
+    expect(malformedBatch).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("cannot verify every write target"),
+    }));
+    const mixedScopeBatch = await pi.emit("tool_call", {
+      toolName: "multi_edit",
+      input: { edits: [
+        { path: ".claude/specs/2026-08-12-foo/spec.md" },
+        { file_path: ".claude/specs/other.md" },
+      ] },
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
+    expect(mixedScopeBatch).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("outside the granted artifact scope"),
+    }));
     // Sibling file directly under specs/ (not the run slug) is out of scope.
     const sibling = await pi.emit("tool_call", {
       toolName: "write",
@@ -2516,6 +2568,90 @@ describe("Pi extension review tool_result integration", () => {
     expect(() => readFileSync(join(subagentDir, `${session}.task_graph`), "utf-8")).toThrow();
   });
 
+  it("retains parent pointer cleanup authority after result-time failure and retries it on shutdown", async () => {
+    const planPath = join(temp, "pointer-cleanup-retry-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4d1";
+    const toolCallId = "call-pointer-cleanup-retry";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const prompt = "Task ID: T1\nReview the implementation.";
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent", toolCallId,
+      input: { agent: "code-reviewer", task: prompt, agentScope: "user" },
+    }, context)).toEqual([undefined]);
+
+    const pointer = join(subagentDir, `${session}.task_graph`);
+    const registry = join(subagentDir, `${session}${TASK_GRAPH_POINTER_LEASES_SUFFIX}`);
+    const registryBytes = readFileSync(registry, "utf8");
+    writeFileSync(registry, "{malformed");
+    const responses = await pi.emit("tool_result", {
+      ...reviewResult(prompt, "review completed"),
+      toolCallId,
+    }, context);
+
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({ text: expect.stringContaining("release parent task-graph pointer lease") })],
+    }));
+    expect(existsSync(pointer)).toBe(true);
+    writeFileSync(registry, registryBytes);
+
+    await pi.emit("session_shutdown", {}, context);
+    expect(existsSync(pointer)).toBe(false);
+    expect(existsSync(registry)).toBe(false);
+  });
+
+  it("refreshes a stale same-session graph pointer so registration and result settle only the active graph", async () => {
+    const graphAPath = join(temp, "stale-graph-a.json");
+    const planPath = join(temp, "stale-pointer-switch-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    const graphA = initialGraph();
+    writeFileSync(graphAPath, JSON.stringify(graphA, null, 2));
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const beforeA = readFileSync(graphAPath, "utf8");
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad498";
+    const pointer = join(subagentDir, `${session}.task_graph`);
+    writeFileSync(pointer, graphAPath);
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-stale-pointer-switch";
+    const prompt = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: { agent: "code-implementer-agent", task: prompt, agentScope: "user" },
+    }, context)).toEqual([undefined]);
+    expect(readFileSync(pointer, "utf8")).toBe(realpathSync.native(statePath));
+    expect(JSON.parse(readFileSync(statePath, "utf8")).executing_tasks).toEqual(["T1"]);
+    expect(readFileSync(graphAPath, "utf8")).toBe(beforeA);
+
+    await pi.emit("tool_result", {
+      toolName: "subagent",
+      toolCallId,
+      content: [],
+      details: {
+        results: [{ agent: "code-implementer-agent", task: prompt, exitCode: 1, messages: [] }],
+      },
+    }, context);
+
+    expect(JSON.parse(readFileSync(statePath, "utf8")).executing_tasks).toEqual([]);
+    expect(readFileSync(graphAPath, "utf8")).toBe(beforeA);
+    expect(readFileSync(pointer, "utf8")).toBe(graphAPath);
+  });
+
   it("validates a task batch completely before one atomic registration", async () => {
     const graph = {
       ...initialGraph(),
@@ -2678,6 +2814,139 @@ describe("Pi extension review tool_result integration", () => {
     expect(() => readFileSync(join(subagentDir, `${session}.active`), "utf-8")).toThrow();
   });
 
+  it("infrastructure-settles a matching-agent exit-0 envelope whose messages are missing", async () => {
+    const planPath = join(temp, "missing-messages-finalization-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4c1";
+    const toolCallId = "call-missing-messages-finalization";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent", toolCallId,
+      input: {
+        agent: "code-implementer-agent",
+        task: "Task ID: T1\nUse the code-implementer skill. Implement and test.",
+        agentScope: "user",
+      },
+    }, context)).toEqual([undefined]);
+
+    await pi.emit("tool_result", {
+      toolName: "subagent", toolCallId, content: [],
+      details: { results: [{ agent: "code-implementer-agent", task: "Task ID: T1", exitCode: 0 }] },
+    }, context);
+
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(state.executing_tasks).toEqual([]);
+    expect(state.tasks[0]).toMatchObject({
+      status: "pending",
+      revalidation_required: true,
+      implementation_attempt_history: [{ transition: "infrastructure-blocked" }],
+    });
+  });
+
+  it("infrastructure-settles same-agent reordered results against their exact reserved slots", async () => {
+    const planPath = join(temp, "reordered-implementation-finalization-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks: [
+        { ...initialGraph().tasks[0], id: "T1", file_list: ["pi/extension.ts"] },
+        { ...initialGraph().tasks[0], id: "T2", file_list: ["README.md"] },
+      ],
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4c2";
+    const toolCallId = "call-reordered-implementation-finalization";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent", toolCallId,
+      input: {
+        agentScope: "user",
+        tasks: ["T1", "T2"].map((taskId) => ({
+          agent: "code-implementer-agent",
+          task: `Task ID: ${taskId}\nUse the code-implementer skill. Implement and test.`,
+        })),
+      },
+    }, context)).toEqual([undefined]);
+
+    await pi.emit("tool_result", {
+      toolName: "subagent", toolCallId, content: [],
+      details: { results: [
+        { agent: "code-implementer-agent", task: "Task ID: T2", exitCode: 0, messages: [] },
+        { agent: "code-implementer-agent", task: "Task ID: T1", exitCode: 0, messages: [] },
+      ] },
+    }, context);
+
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(state.executing_tasks).toEqual([]);
+    expect(state.tasks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "T1", status: "pending", implementation_attempt_history: [expect.objectContaining({ transition: "infrastructure-blocked" })] }),
+      expect.objectContaining({ id: "T2", status: "pending", implementation_attempt_history: [expect.objectContaining({ transition: "infrastructure-blocked" })] }),
+    ]));
+    expect(state.tasks.every((task: Record<string, unknown>) => task.test_result === undefined)).toBe(true);
+  });
+
+  it.each([
+    ["missing", []],
+    ["wrong", [{ agent: "code-implementer-agent", task: "Task ID: T2", exitCode: 0, messages: [] }]],
+  ] as const)("preserves a replacement after %s Pi finalization evidence for the stale reservation", async (_label, results) => {
+    const planPath = join(temp, `replacement-${_label}-finalization-plan.md`);
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = _label === "missing"
+      ? "019fca39-f989-7510-8e62-50dadbcad4c3"
+      : "019fca39-f989-7510-8e62-50dadbcad4c4";
+    const toolCallId = `call-replacement-${_label}-finalization`;
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent", toolCallId,
+      input: {
+        agent: "code-implementer-agent",
+        task: "Task ID: T1\nUse the code-implementer skill. Implement and test.",
+        agentScope: "user",
+      },
+    }, context)).toEqual([undefined]);
+    const spawned = JSON.parse(readFileSync(statePath, "utf8"));
+    const task = spawned.tasks[0];
+    const replacement = createImplementationAttemptAuthority({
+      taskId: "T1", wave: 1, semanticAttempt: 1,
+      reservationId: `replacement-${_label}`,
+      headSha: task.active_implementation_attempt.headSha,
+      reservedAt: "2026-08-24T00:10:00.000Z",
+      taskScopeBaseline: task.attempt_artifact_baseline,
+      dirtySetBaseline: task.attempt_repository_baseline,
+    });
+    if (!replacement.ok) throw new Error(replacement.error.errors.join("; "));
+    writeState({
+      ...spawned,
+      tasks: [{ ...task, active_implementation_attempt: replacement.value, reserved_at: replacement.value.reservedAt }],
+    });
+
+    await pi.emit("tool_result", {
+      toolName: "subagent", toolCallId, content: [], details: { results },
+    }, context);
+
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(state.executing_tasks).toEqual(["T1"]);
+    expect(state.tasks[0].active_implementation_attempt).toEqual(replacement.value);
+    expect(state.tasks[0].implementation_attempt_history ?? []).toEqual([]);
+  });
+
   it("surfaces a legacy roster cleanup failure through the tool result", async () => {
     const pi = await extension();
     const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
@@ -2722,8 +2991,25 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
+  it("rejects a corrupt orphan execution reservation instead of silently clearing it", async () => {
+    writeState({ ...initialGraph(), tasks: [], executing_tasks: ["T1"] });
+    const before = readFileSync(statePath, "utf8");
+    const pi = await extension();
+    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    const responses = await pi.emit("tool_result", {
+      toolName: "subagent",
+      content: [],
+      details: { results: [{ agent: "code-implementer-agent", task: "Task ID: T1", exitCode: 0, messages: [] }] },
+    }, context);
+
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({ text: expect.stringContaining("orphan execution reservation T1") })],
+    }));
+    expect(readFileSync(statePath, "utf8")).toBe(before);
+  });
+
   it.each([
-    ["missing", [], ["T1"]],
     ["completed", [{
       id: "T1", description: "done", agent: "code-implementer-agent", wave: 1,
       status: "completed", depends_on: [], new_tests_required: false,
@@ -3103,7 +3389,7 @@ describe("Pi extension review tool_result integration", () => {
     });
   });
 
-  it("mints pi-structured evidence from a real-shaped green Bash test run", async () => {
+  it("captures pi-structured diagnostics without minting positive legacy completion", async () => {
     // LIVE-captured payload shapes (pi 0.83 --mode json child, 2026-08-12):
     // assistant message_end carries the bash toolCall block with
     // id/name/arguments; the toolResult arrives as a message_end with role
@@ -3166,7 +3452,11 @@ describe("Pi extension review tool_result integration", () => {
       passed: true,
       label: expect.stringMatching(/^pi-structured: /),
     });
-    expect(task.proof.state).toBe("satisfied");
+    expect(task).toMatchObject({
+      status: "pending",
+      proof: { state: "failed" },
+      revalidation_required: true,
+    });
   });
 
   it.each([
@@ -3286,9 +3576,14 @@ describe("Pi extension review tool_result integration", () => {
       expect(state.executing_tasks).toEqual([]);
       expect(state.tasks[0]).toMatchObject({
         status: "pending",
+        revalidation_required: true,
         review_status: "pending",
         review_generation: 1,
-        test_result: { verdict: "untrusted", passed: false, label: "pi-transcript-capture-failed" },
+        test_result: { verdict: "trusted-pass" },
+        implementation_attempt_history: [{
+          transition: "infrastructure-blocked",
+          consumesSemanticAttempt: false,
+        }],
       });
       expect(state.spec_check).toBeUndefined();
       expect(state.wave_gates["1"]).toMatchObject({
@@ -3376,9 +3671,14 @@ describe("Pi extension review tool_result integration", () => {
       expect(state.executing_tasks).toEqual([]);
       expect(state.tasks[0]).toMatchObject({
         status: "pending",
+        revalidation_required: true,
         review_status: "pending",
         review_generation: 1,
-        test_result: { verdict: "untrusted", passed: false, label: "pi-implementation-failed" },
+        test_result: { verdict: "trusted-pass" },
+        implementation_attempt_history: [{
+          transition: "infrastructure-blocked",
+          consumesSemanticAttempt: false,
+        }],
       });
       expect(state.tasks[0].review_error).toBeUndefined();
       expect(state.tasks[0].review_evidence_failures).toBeUndefined();
@@ -3463,8 +3763,13 @@ describe("Pi extension review tool_result integration", () => {
       const state = JSON.parse(readFileSync(statePath, "utf-8"));
       expect(state.tasks[0]).toMatchObject({
         status: "pending",
+        revalidation_required: true,
         review_status: "pending",
-        test_result: { verdict: "untrusted", passed: false, label: "pi-implementation-failed" },
+        test_result: { verdict: "trusted-pass" },
+        implementation_attempt_history: [{
+          transition: "infrastructure-blocked",
+          consumesSemanticAttempt: false,
+        }],
       });
       expect(state.tasks[0].files_modified).toEqual([declaredRelative]);
       expect(state.tasks[0].files_modified).not.toContain(undeclaredRelative);
@@ -3663,9 +3968,31 @@ describe("Pi extension review tool_result integration", () => {
       },
     }, context)).toEqual([undefined]);
 
+    const spawned = JSON.parse(readFileSync(statePath, "utf8"));
+    const task = spawned.tasks[0];
+    const replacement = createImplementationAttemptAuthority({
+      taskId: "T1", wave: 1, semanticAttempt: 1,
+      reservationId: "finalization-diagnostic-replacement",
+      headSha: task.active_implementation_attempt.headSha,
+      reservedAt: "2026-08-24T00:20:00.000Z",
+      taskScopeBaseline: task.attempt_artifact_baseline,
+      dirtySetBaseline: task.attempt_repository_baseline,
+    });
+    if (!replacement.ok) throw new Error(replacement.error.errors.join("; "));
+    writeState({
+      ...spawned,
+      tasks: [{ ...task, active_implementation_attempt: replacement.value, reserved_at: replacement.value.reservedAt }],
+    });
+
     const { StateManager } = await import("../src/state-manager");
-    const update = vi.spyOn(StateManager.prototype, "update")
-      .mockRejectedValueOnce(new Error("injected persistence failure"));
+    const update = vi.spyOn(StateManager.prototype, "updateAndReturn")
+      .mockImplementationOnce(async (mutate) => {
+        const manager = StateManager.fromPath(statePath);
+        if (manager === null) throw new Error("test state manager unavailable");
+        mutate(manager.load());
+        throw new Error("injected persistence failure");
+      });
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       const responses = await pi.emit("tool_result", {
         toolName: "subagent",
@@ -3687,7 +4014,13 @@ describe("Pi extension review tool_result integration", () => {
           text: expect.stringContaining("injected persistence failure"),
         })],
       }));
+      const audit = stderr.mock.calls.map(([text]) => String(text)).join("");
+      expect(audit).toContain("reserved implementation finalization failed");
+      // Finalization emitted no callback-derived success claim. The later
+      // applyFailedPiResult pass may independently commit its own exact receipt.
+      expect(audit).not.toContain("replacement preserved");
     } finally {
+      stderr.mockRestore();
       update.mockRestore();
     }
   });
@@ -4081,11 +4414,12 @@ describe("Pi extension review tool_result integration", () => {
       expect(state.tasks[0].files_modified ?? []).not.toContain(path);
     });
 
-    it("accepts an in-repository relative path through the same boundary", async () => {
+    it("accepts an in-repository no-op path as safe without crediting unchanged bytes", async () => {
       const { state, audit } = await runImplementerWith("pi/extension.ts", "call-safe-in-repo");
 
       expect(audit).not.toContain("unsafe modified-file evidence");
-      expect(state.tasks[0].files_modified ?? []).toContain("pi/extension.ts");
+      expect(state.tasks[0].files_modified ?? []).not.toContain("pi/extension.ts");
+      expect(state.tasks[0].status).toBe("pending");
     });
   });
 });

@@ -19,6 +19,10 @@ import { runUpdateTaskStatus, type EvidenceSnapshot } from "./update-task-status
 import storeReviewerFindings from "./store-reviewer-findings";
 import storeSpecCheckFindings from "./store-spec-check-findings";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
+import {
+  snapshotImplementationAttemptSidecar,
+  type ImplementationAuthorityObservation,
+} from "../../implementation-attempt-sidecar";
 
 type AgentCategory = "phase" | "impl" | "review" | "spec-check" | "unknown";
 
@@ -30,31 +34,30 @@ export function categorize(agentType: string): AgentCategory {
   return "unknown";
 }
 
-const handler: HookHandler = async (stdin, args) => {
+export const runDispatch = async (
+  stdin: string,
+  args: string[],
+  cleanup: HookHandler = cleanupSubagentFlag,
+): Promise<HookResult> => {
   let input: SubagentStopInput;
   try {
     input = JSON.parse(stdin);
   } catch (e) {
-    // Malformed stop input: no session to clean. Say exactly what breaks —
-    // cleanup skipped means the .active roster and machine bindings may leak
-    // until the SessionStart stale-sweep runs.
-    return passthroughDiagnostic(`dispatch: malformed SubagentStop input — cleanup skipped, bindings may leak: ${e instanceof Error ? e.message : String(e)}\n`);
+    // No trustworthy session or Agent identity exists, so cleanup cannot be
+    // named. Fail closed rather than reporting a successful stop that settled
+    // nothing and may have leaked runtime authority.
+    return {
+      kind: "error",
+      message: `dispatch: malformed SubagentStop input — cleanup skipped, bindings may leak: ${e instanceof Error ? e.message : String(e)}`,
+    };
   }
-
-  const safeRun = async (name: string, fn: () => Promise<unknown>) => {
-    try {
-      await fn();
-    } catch (e) {
-      process.stderr.write(`ERROR in ${name}: ${e instanceof Error ? e.message : String(e)}\n`);
-    }
-  };
 
   // Category handlers are evidence boundaries, not best-effort side effects:
   // a child that reports an error (e.g. storeReviewerFindings could not read
   // the reviewer transcript) must surface as a failed SubagentStop, or a wave
-  // can look clean while review evidence was silently lost. Cleanup runs
-  // BEFORE the category handler, so propagating the failure still leaves the
-  // roster/session state consistent.
+  // can look clean while review evidence was silently lost. Cleanup runs after
+  // category settlement so the exact TaskGraph pointer lease remains live for
+  // every handler that resolves session authority.
   const runChild = async (name: string, fn: () => Promise<HookResult>): Promise<HookResult | null> => {
     try {
       const result = await fn();
@@ -96,6 +99,27 @@ const handler: HookHandler = async (stdin, args) => {
     }
   }
 
+  // Resolve routing before cleanup: Claude's payload may omit agent_type, and
+  // the transcript metadata used by the fallback survives cleanup. Modern
+  // implementation correlation is snapshotted here too — never reconstructed
+  // from assistant text or executing_tasks after the sidecar is removed.
+  const resolvedAgentType = resolveAgentType(input);
+  const reportedCategory = categorize(stripNamespace(resolvedAgentType));
+  const sidecarObservation = snapshotImplementationAttemptSidecar(
+    input.session_id ?? "",
+    input.agent_id ?? "",
+  );
+  // A valid sidecar is engine-issued implementation routing authority. Claude
+  // may omit or corrupt agent_type metadata, so routing cannot be conditional
+  // on that weaker field. Unavailable sidecars do not reclassify unrelated
+  // agents.
+  const category: AgentCategory = sidecarObservation.kind === "authority-observed"
+    ? "impl"
+    : reportedCategory;
+  const authorityObservation: ImplementationAuthorityObservation | undefined = category === "impl"
+    ? sidecarObservation
+    : undefined;
+
   // Request-bound capture runs BEFORE any legacy routing, and before the task
   // graph is resolved at all. Both orderings are load-bearing: the graph lookup
   // below returns early when there is none, which would skip capture for every
@@ -110,70 +134,88 @@ const handler: HookHandler = async (stdin, args) => {
     process.stderr.write(`ERROR in captureOrchestrationResult: ${captureFailure}\n`);
   }
 
-  // Cleanup always runs — but must never abort the rest of the pipeline
-  // (a lock-acquisition failure here would otherwise leave the task stuck
-  // in executing with no status update).
-  await safeRun("cleanupSubagentFlag", () => cleanupSubagentFlag(stdin, args));
+  // Cleanup always runs, but only after every consumer has resolved the
+  // pointer capability. A cleanup failure remains explicit without preempting
+  // the category's one chance to settle protected state.
+  const runCleanup = async (): Promise<string | null> => {
+    try {
+      const cleanupResult = await cleanup(stdin, args);
+      return cleanupResult.kind === "error" || cleanupResult.kind === "block"
+        ? cleanupResult.message
+        : null;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`ERROR in cleanupSubagentFlag: ${message}\n`);
+      return `cleanupSubagentFlag crashed: ${message}`;
+    }
+  };
 
   if (captureFailure !== null) {
-    return { kind: "error", message: captureFailure };
+    const cleanupFailure = await runCleanup();
+    return {
+      kind: "error",
+      message: cleanupFailure === null
+        ? captureFailure
+        : `${captureFailure}; cleanup also failed: ${cleanupFailure}`,
+    };
   }
+
+  const noTaskGraphDiagnostic = (cause?: unknown): string =>
+    `[loom] dispatch: no task graph resolvable for session ${JSON.stringify(input.session_id ?? "")}` +
+    (cause === undefined ? "" : `: ${cause instanceof Error ? cause.message : String(cause)}`) +
+    " — SubagentStop recorded NOTHING (task status, test evidence and findings all skipped)";
 
   // No exact session TaskGraph authority → no orchestration Hooks.
   let mgr: StateManager | null;
   try {
     mgr = StateManager.fromSession(input.session_id);
   } catch (error) {
-    return passthroughDiagnostic(
-      `[loom] dispatch: no task graph resolvable for session ${JSON.stringify(input.session_id ?? "")}: ` +
-      `${error instanceof Error ? error.message : String(error)} — ` +
-      `SubagentStop recorded NOTHING (task status, test evidence and findings all skipped)\n`,
-    );
+    const graphFailure = noTaskGraphDiagnostic(error);
+    const cleanupFailure = await runCleanup();
+    return cleanupFailure === null
+      ? passthroughDiagnostic(`${graphFailure}\n`)
+      : { kind: "error", message: `${graphFailure}; cleanup also failed: ${cleanupFailure}` };
   }
   if (!mgr) {
-    return passthroughDiagnostic(`[loom] dispatch: no task graph resolvable for session ${JSON.stringify(input.session_id ?? "")} — ` +
-        `SubagentStop recorded NOTHING (task status, test evidence and findings all skipped)\n`);
+    const graphFailure = noTaskGraphDiagnostic();
+    const cleanupFailure = await runCleanup();
+    return cleanupFailure === null
+      ? passthroughDiagnostic(`${graphFailure}\n`)
+      : { kind: "error", message: `${graphFailure}; cleanup also failed: ${cleanupFailure}` };
   }
 
-  // Claude Code does not send agent_type. resolveAgentType falls back to the
-  // metadata the harness writes beside the transcript; without it EVERY
-  // implementation run categorises "unknown" and is discarded.
-  const resolvedAgentType = resolveAgentType(input);
-  const category = categorize(stripNamespace(resolvedAgentType));
-
-  let childFailure: HookResult | null = null;
-  await match(category)
-    .with("phase", async () => {
-      childFailure = await runChild("advancePhase", () => advancePhase(stdin, args));
-    })
-    .with("impl", async () => {
-      childFailure = await runChild("updateTaskStatus", () =>
-        runUpdateTaskStatus(stdin, args, evidenceSnapshot),
-      );
-    })
-    .with("review", async () => {
-      childFailure = await runChild("storeReviewerFindings", () => storeReviewerFindings(stdin, args));
-    })
-    .with("spec-check", async () => {
-      childFailure = await runChild("storeSpecCheckFindings", () => storeSpecCheckFindings(stdin, args));
-    })
+  const childFailure: HookResult | null = await match(category)
+    .with("phase", () => runChild("advancePhase", () => advancePhase(stdin, args)))
+    .with("impl", () => runChild("updateTaskStatus", () =>
+      runUpdateTaskStatus(stdin, args, evidenceSnapshot, authorityObservation)))
+    .with("review", () => runChild("storeReviewerFindings", () => storeReviewerFindings(stdin, args)))
+    .with("spec-check", () => runChild("storeSpecCheckFindings", () => storeSpecCheckFindings(stdin, args)))
     .with("unknown", async () => {
       // Genuinely-unknown agents (a user's own subagent) legitimately have no
       // orchestration hooks. An UNNAMEABLE one does not: it means neither the
       // payload nor the harness metadata could say what ran, so a loom agent
       // may have just been discarded. Name which case this is.
-      process.stderr.write(
-        resolvedAgentType === ""
-          ? `[loom] dispatch: SubagentStop carried no agent_type and none could be derived for ` +
-            `session ${JSON.stringify(input.session_id ?? "")} / agent ${JSON.stringify(input.agent_id ?? "")} — ` +
-            `nothing was recorded; if this was a loom agent its result is LOST\n`
-          : `[loom] dispatch: no orchestration route for agent type ${JSON.stringify(resolvedAgentType)} — nothing recorded\n`,
-      );
+      const message = resolvedAgentType === ""
+        ? `[loom] dispatch: SubagentStop carried no agent_type and none could be derived for ` +
+          `session ${JSON.stringify(input.session_id ?? "")} / agent ${JSON.stringify(input.agent_id ?? "")} — ` +
+          `nothing was recorded; if this was a loom agent its result is LOST`
+        : `[loom] dispatch: no orchestration route for agent type ${JSON.stringify(resolvedAgentType)} — nothing recorded`;
+      process.stderr.write(`${message}\n`);
+      return resolvedAgentType === "" ? { kind: "error" as const, message } : null;
     })
     .exhaustive();
 
+  const cleanupFailure = await runCleanup();
+  if (cleanupFailure !== null) {
+    const categoryMessage = childFailure !== null && (childFailure.kind === "error" || childFailure.kind === "block")
+      ? `; category settlement also failed: ${childFailure.message}`
+      : "";
+    return { kind: "error", message: `${cleanupFailure}${categoryMessage}` };
+  }
   if (childFailure !== null) return childFailure;
   return { kind: "passthrough" };
 };
+
+const handler: HookHandler = (stdin, args) => runDispatch(stdin, args);
 
 export default handler;

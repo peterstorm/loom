@@ -10,11 +10,15 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { applyUntrustedStopResolution, isWaveComplete } from "../../src/handlers/subagent-stop/update-task-status";
-import type { UntrustedStopResolution } from "../../src/handlers/subagent-stop/update-task-status";
+import {
+  applyUntrustedStopResolution,
+  isWaveComplete,
+  type UntrustedStopResolution,
+} from "../../src/core/implementation-application";
 import type { Task, TaskGraph, TaskTestResult } from "../../src/types";
+import { taskFixture, type TaskFixtureInput } from "../fixtures/task-lifecycle";
 
-const task = (overrides: Partial<Task> & { id: string }): Task => ({
+const task = (overrides: Partial<TaskFixtureInput> & { id: string }): Task => taskFixture({
   description: "impl",
   agent: "code-implementer-agent",
   wave: 1,
@@ -122,7 +126,7 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
     expect(applied.state.wave_gates["1"].impl_complete).toBe(false);
   });
 
-  it("retains a trusted pass only when the attempt byte baseline proves no change", () => {
+  it("retains a trusted pass as historical evidence without granting legacy positive authority", () => {
     const s = graph([task({
       id: "T1", status: "implemented", test_result: { verdict: "trusted-pass" },
       new_tests_required: false,
@@ -141,7 +145,9 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
     const applied = applyUntrustedStopResolution(s, "T1", noWriteFailure);
 
     expect(applied.state.tasks[0]).toMatchObject({
-      status: "implemented",
+      status: "pending",
+      proof: { state: "failed" },
+      revalidation_required: true,
       test_result: { verdict: "trusted-pass" },
     });
   });
@@ -174,7 +180,9 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
     const applied = applyUntrustedStopResolution(s, "T1", unobservedChange);
 
     expect(applied.state.tasks[0]).toMatchObject({
-      status: "implemented",
+      status: "pending",
+      proof: { state: "failed" },
+      revalidation_required: true,
       review_status: "pending",
       test_result: unobservedChange.testResult,
     });
@@ -217,7 +225,9 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
 
     expect(applied.skipped).toBe(false);
     const t1 = applied.state.tasks.find((t) => t.id === "T1")!;
-    expect(t1.status).toBe("implemented");
+    expect(t1.status).toBe("pending");
+    expect(t1.proof?.state).toBe("failed");
+    expect(t1.revalidation_required).toBe(true);
     expect(t1.test_result).toEqual(untrustedPass.testResult);
     expect(t1.test_evidence).toBe(untrustedPass.testEvidence);
     // files_modified persists through the shared seam — lint-wave-gate
@@ -226,10 +236,13 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
     // persists filesModified in its own locked update) agree (round-16 fix:
     // pi's omission made every wave-gate lint run over an empty set).
     expect(t1.files_modified).toEqual(["src/a.ts", "tests/a.test.ts"]);
-    expect(t1.new_tests_written).toBe(true);
-    expect(t1.new_test_evidence).toBe(untrustedPass.newTestEvidence);
+    expect(t1.new_test_observation).toEqual({
+      kind: "written",
+      written: true,
+      evidence: untrustedPass.newTestEvidence,
+    });
     expect(applied.state.executing_tasks).toEqual(["T3"]);
-    expect(applied.state.wave_gates["1"].impl_complete).toBe(true);
+    expect(applied.state.wave_gates["1"].impl_complete).toBe(false);
     // Other tasks untouched.
     expect(applied.state.tasks.find((t) => t.id === "T2")).toEqual(s.tasks[1]);
   });
@@ -266,8 +279,11 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
     const resolved = applied.state.tasks[0]!;
 
     expect(resolved.files_modified).toEqual(["src/new.ts", "src/old.ts"]);
-    expect(resolved.new_tests_written).toBe(false);
-    expect(resolved.new_test_evidence).toBe("");
+    expect(resolved.new_test_observation).toEqual({
+      kind: "not-written",
+      written: false,
+      evidence: "",
+    });
     expect(resolved.review_status).toBe("pending");
     expect(resolved.review_error).toBeUndefined();
     expect(resolved.review_evidence_failures).toBeUndefined();
@@ -349,7 +365,7 @@ describe("isWaveComplete — the wave-completion predicate shared by engine and 
     expect(isWaveComplete(s, 7)).toBe(true);
   });
 
-  it("agrees with the state applyUntrustedStopResolution produces (pi calls both inside one locked update)", () => {
+  it("keeps legacy cleanup outside the Wave implementation projection", () => {
     const s = graph(
       [task({ id: "T1" }), task({ id: "T2", status: "implemented" })],
       ["T1"],
@@ -357,6 +373,6 @@ describe("isWaveComplete — the wave-completion predicate shared by engine and 
     expect(isWaveComplete(s, 1)).toBe(false);
     const applied = applyUntrustedStopResolution(s, "T1", untrustedPass);
     expect(applied.skipped).toBe(false);
-    expect(isWaveComplete(applied.state, 1)).toBe(true);
+    expect(isWaveComplete(applied.state, 1)).toBe(false);
   });
 });

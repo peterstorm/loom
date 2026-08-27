@@ -18,6 +18,7 @@ function waveTask(fileList: string[]): Task {
     agent: "code-implementer-agent",
     wave: 1,
     status: "implemented",
+    legacy_missing_proof: true,
     depends_on: [],
     file_list: fileList,
   };
@@ -203,7 +204,8 @@ describe("complete-wave-gate handler wiring (check 7 is actually in the gate)", 
       tasks: [{
         id: "T1", description: "implement machine", agent: "code-implementer-agent",
         wave: 1, status: "implemented", proof, depends_on: [],
-        new_tests_required: true, test_result: { verdict: "trusted-pass" }, new_tests_written: true,
+        new_tests_required: true, test_result: { verdict: "trusted-pass" },
+        new_tests_written: true, new_test_evidence: "fixture lifecycle test evidence",
         review_status: "passed", critical_findings: [], advisory_findings: [],
         file_list: [machineFile],
       }],

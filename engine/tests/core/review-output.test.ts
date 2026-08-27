@@ -387,6 +387,7 @@ describe("mergeFindings (pure)", () => {
     agent: "test",
     wave: 1,
     status: "implemented",
+    legacy_missing_proof: true,
     depends_on: [],
   };
 
@@ -477,7 +478,7 @@ describe("mergeFindings (pure)", () => {
   });
 
   it("accumulates across three agents", () => {
-    let task = baseTask;
+    let task: Task = baseTask;
     task = mergeFindings(task, makeParsedFindings({ critical: ["C1"], advisory: ["A1"], criticalCount: 1 }), "code-reviewer");
     task = mergeFindings(task, makeParsedFindings({ critical: [], advisory: ["A2"], criticalCount: 0 }), "silent-failure-hunter");
     task = mergeFindings(task, makeParsedFindings({ critical: ["C2"], advisory: ["A3"], criticalCount: 1 }), "pr-test-analyzer");
@@ -541,6 +542,7 @@ const partialTask: Task = {
   agent: "code-implementer-agent",
   wave: 1,
   status: "implemented",
+  legacy_missing_proof: true,
   depends_on: [],
 };
 
@@ -629,9 +631,9 @@ describe("the structured block never costs a claim the markers made", () => {
     // reporting "used" so no degradation note was printed. The wave gate's
     // advisory-disposition step (the `await-user` action in `commands/wave-gate.md`)
     // must triage every advisory to fixed/deferred/dismissed; it cannot triage
-    // what it never sees. And a criticals-only block is exactly what a reviewer
-    // following the prompt literally emits — the prompt scopes its mandatory
-    // block accounting to criticals.
+    // what it never sees. A criticals-only block remains a legacy/malformed
+    // compatibility case: the current Machine Summary contract requires both
+    // critical and advisory findings in the structured findings block.
     const result = parseMachineSummary(
       summary(1, ["unchecked cast"], JSON.stringify([entry("unchecked cast")]), [
         "advisory one",

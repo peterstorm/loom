@@ -13,9 +13,14 @@
  * now keeps the I/O and calls this for the decision.
  */
 
-import { isReviewAgent } from "../engine/src/config";
+import { agentsOfKind } from "../engine/src/core/model-profiles";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
 import { type TaskExecutionSpawn } from "../engine/src/core/validate-task-execution";
+import type { ImplementationAttemptAuthority } from "../engine/src/core/implementation-completion";
+import { extractTaskId } from "../engine/src/utils/extract-task-id";
+
+const REVIEW_AGENTS: ReadonlySet<string> = new Set(agentsOfKind("reviewer"));
+const isReviewAgent = (agentType: string): boolean => REVIEW_AGENTS.has(agentType);
 
 /**
  * The reservation fields the classification actually reads.
@@ -31,6 +36,49 @@ export type ReservedResultItem = Readonly<{
   taskId: string | null;
   kind: TaskExecutionSpawn["kind"];
 }>;
+
+export type PiImplementationAuthorityAlignment =
+  | Readonly<{ ok: true; authoritiesBySlot: readonly (ImplementationAttemptAuthority | null)[] }>
+  | Readonly<{ ok: false; error: string }>;
+
+/**
+ * Align the implementation-only ordered registration result back onto the
+ * complete Pi spawn roster. Non-implementation slots deliberately carry null;
+ * an implementation slot may never fall back to prompt/result inference.
+ */
+export function alignPiImplementationAuthorities(
+  items: readonly Readonly<{ agent: string; task: string }>[],
+  spawns: readonly TaskExecutionSpawn[],
+  authorities: readonly ImplementationAttemptAuthority[],
+): PiImplementationAuthorityAlignment {
+  if (items.length !== spawns.length) {
+    return { ok: false, error: "Pi spawn roster and execution classification lengths differ" };
+  }
+  const aligned: (ImplementationAttemptAuthority | null)[] = [];
+  let authorityIndex = 0;
+  for (const [index, spawn] of spawns.entries()) {
+    if (spawn.kind !== "implementation") {
+      aligned.push(null);
+      continue;
+    }
+    const authority = authorities[authorityIndex++];
+    const promptTaskId = extractTaskId(items[index]?.task ?? "");
+    if (authority === undefined) {
+      return { ok: false, error: `implementation spawn slot ${index + 1} has no returned attempt authority` };
+    }
+    if (promptTaskId === null || authority.taskId !== promptTaskId) {
+      return {
+        ok: false,
+        error: `implementation spawn slot ${index + 1} Task binding does not match returned authority ${authority.taskId}`,
+      };
+    }
+    aligned.push(authority);
+  }
+  if (authorityIndex !== authorities.length) {
+    return { ok: false, error: "registration returned surplus implementation attempt authorities" };
+  }
+  return { ok: true, authoritiesBySlot: Object.freeze(aligned) };
+}
 
 /** One expected slot and the batch position its result should have occupied. */
 export type MissingReservedResult<T extends ReservedResultItem> = Readonly<{

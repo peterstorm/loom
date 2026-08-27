@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { join } from "node:path";
-import type { Task } from "../../src/types";
+import type { Task, TaskCommonMetadata } from "../../src/types";
+import { taskFixture } from "../fixtures/task-lifecycle";
 import type { Finding } from "../../src/core/findings";
 import { applyFindingOutcomes, claimsOfSeverity } from "../../src/core/findings";
 import type { VerdictEnvelope } from "../../src/core/panel-kernel";
@@ -43,7 +44,7 @@ const finding = (over: Partial<Finding> = {}): Finding => ({
   ...over,
 });
 
-const task = (over: Partial<Task> = {}): Task => ({
+const task = (over: Partial<TaskCommonMetadata> = {}): Task => taskFixture({
   id: "T1",
   description: "d",
   agent: "code-implementer-agent",

@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import type {
-  HookHandler,
-  RecoveredArtifactWriteEvidence,
-  Task,
-  TaskGraph,
+import {
+  storedNewTestEvidence,
+  type HookHandler,
+  type RecoveredArtifactWriteEvidence,
+  type Task,
+  type TaskGraph,
 } from "../../types";
 import { newWaveGate } from "../../types";
 import { taskGraphPath } from "../../config";
@@ -27,10 +28,14 @@ import {
 import * as git from "../../utils/git";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
 import {
-  collectNewTestEvidence,
   isWaveComplete,
+  parseNewTestEvidence,
   type NewTestEvidence,
-} from "../subagent-stop/update-task-status";
+} from "../../core/implementation-application";
+import {
+  collectNewTestEvidence,
+  describeNewTestObservationError,
+} from "./task-local-completion";
 import { parseWaveArg } from "./wave-args";
 import { isExactGitSha } from "../../core/git-sha";
 import { taskVerificationPolicy } from "../../core/verification-policy";
@@ -219,18 +224,24 @@ function taskCompletionWasObserved(task: Task): boolean {
 export function reconcileTaskFromStoredEvidence(
   task: Task,
   proofArtifactsChanged: readonly string[],
-  collectedNewTests: NewTestEvidence,
+  collectedNewTests: NewTestEvidence | Readonly<{ written: boolean; evidence: string }>,
+  allowLegacyPositiveMigration = false,
 ): Task {
   if (task.status === "completed") return task;
-  const newTestsWritten = collectedNewTests.written;
-  const newTestEvidence = collectedNewTests.evidence;
+  const normalizedNewTests = parseNewTestEvidence(
+    collectedNewTests.written,
+    collectedNewTests.evidence,
+  );
+  const newTestsWritten = normalizedNewTests.written;
+  const newTestEvidence = normalizedNewTests.evidence;
   const proof = evaluateTaskProof(
     {
       verificationPolicy: taskVerificationPolicy(task),
       declaredArtifacts: task.file_list ?? [],
     },
     {
-      taskCompleted: taskCompletionWasObserved(task),
+      taskCompleted: taskCompletionWasObserved(task) ||
+        (allowLegacyPositiveMigration && task.legacy_missing_proof === true),
       testResult: task.test_result,
       filesModified: proofArtifactsChanged,
       newTestsWritten,
@@ -238,13 +249,33 @@ export function reconcileTaskFromStoredEvidence(
     },
     PI_STRUCTURED_EVIDENCE_POLICY,
   );
-  return {
-    ...task,
-    status: proof.state === "satisfied" ? "implemented" : "pending",
-    proof,
-    new_tests_written: newTestsWritten,
-    new_test_evidence: newTestEvidence,
-  };
+  if (proof.state === "satisfied" && task.legacy_missing_proof === true && allowLegacyPositiveMigration) {
+    return {
+      ...task,
+      status: "implemented",
+      proof,
+      revalidation_required: undefined,
+      legacy_missing_proof: undefined,
+      ...storedNewTestEvidence(normalizedNewTests),
+    };
+  }
+  return proof.state === "satisfied"
+    ? {
+        ...task,
+        status: "pending",
+        proof,
+        revalidation_required: true,
+        legacy_missing_proof: undefined,
+        ...storedNewTestEvidence(normalizedNewTests),
+      }
+    : {
+        ...task,
+        status: "pending",
+        proof,
+        revalidation_required: task.revalidation_required,
+        legacy_missing_proof: undefined,
+        ...storedNewTestEvidence(normalizedNewTests),
+      };
 }
 
 function failureSummary(task: Task): string {
@@ -326,6 +357,7 @@ const handler: HookHandler = async (_stdin, args) => {
       let recoveredWritesApplied = false;
       const tasks = state.tasks.map((task) => {
         if (task.wave !== wave || task.status === "completed" || task.proof?.state === "satisfied") return task;
+        if (task.legacy_missing_proof === true && recoveredBaselineSha === null) return task;
         const recoveredPaths = recoveredPackets.modifiedPathsByTask.get(task.id) ?? [];
         // Historical recovery may alter only Tasks carrying engine-issued,
         // registration-verified packet evidence. Ordinary reconciliation has
@@ -368,7 +400,18 @@ const handler: HookHandler = async (_stdin, args) => {
           taskVerificationPolicy(sourceTask).newTests,
           sourceTask.start_sha,
         );
-        return reconcileTaskFromStoredEvidence(sourceTask, proofArtifactsChanged, collectedNewTests);
+        if (!collectedNewTests.ok) {
+          throw new Error(
+            `cannot collect new-test evidence for ${sourceTask.id}: ` +
+            describeNewTestObservationError(collectedNewTests.error),
+          );
+        }
+        return reconcileTaskFromStoredEvidence(
+          sourceTask,
+          proofArtifactsChanged,
+          collectedNewTests.value,
+          recoveredBaselineSha !== null && recoveredPaths.length > 0,
+        );
       });
       const resolved: TaskGraph = {
         ...state,

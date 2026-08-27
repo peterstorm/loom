@@ -3,6 +3,8 @@ import {
   AGENT_CATALOG,
   AGENT_POLICIES,
   agentsOfKind,
+  isImplementationAgent,
+  isStandaloneReviewAgent,
   WAVE_REVIEW_AGENTS,
   type AgentKind,
 } from "../../src/core/model-profiles";
@@ -47,6 +49,9 @@ describe("Agent Catalog projections match the pre-catalog memberships", () => {
       "adr-writer-agent", "code-implementer-agent", "frontend-agent", "java-test-agent",
       "security-agent", "test-engineer", "ts-test-agent",
     ]);
+    expect(isImplementationAgent("code-implementer-agent")).toBe(true);
+    expect(isImplementationAgent("code-implementer")).toBe(true);
+    expect(isImplementationAgent("code-reviewer")).toBe(false);
   });
 
   it("finding-producing reviewers", () => {
@@ -63,6 +68,9 @@ describe("Agent Catalog projections match the pre-catalog memberships", () => {
 
   it("refutation-panel verifiers", () => {
     expect([...REVIEW_PANEL_AGENTS]).toEqual(["review-verifier-agent"]);
+    expect(isStandaloneReviewAgent("code-reviewer")).toBe(true);
+    expect(isStandaloneReviewAgent("review-verifier-agent")).toBe(true);
+    expect(isStandaloneReviewAgent("code-implementer-agent")).toBe(false);
   });
 
   it("required skills are the catalog's requiredSkill column", () => {

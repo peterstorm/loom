@@ -10,6 +10,7 @@
 
 import type { Epoch, Evidence, EvidenceRecord, TestReportSummary } from "./types";
 import { parseReportSummary } from "./test-report";
+export { judgeTestRun, type TrustedTestVerdict } from "./test-report";
 
 // --- Branded agent identity ---
 
@@ -143,6 +144,12 @@ export const CALL_START_SUFFIX = ".callstart.json" as const;
 /** Engine-issued Pi run bindings available to the parent session's spawn hook. */
 export const ORCHESTRATION_RUNS_SUFFIX = ".orchestration-runs.json" as const;
 
+/** Claude implementation authority sidecars encode the reported Agent id
+ * before this suffix; the stale-session sweep decodes the session prefix. */
+export const IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX = ".implementation-attempt.json" as const;
+export const TASK_GRAPH_POINTER_BINDING_SUFFIX = ".task-graph-pointer-binding.json" as const;
+export const TASK_GRAPH_POINTER_LEASES_SUFFIX = ".task-graph-pointer-leases.json" as const;
+
 /**
  * Every per-session file suffix written under SUBAGENT_DIR — the single
  * source of truth for the ledger's path helpers (ledger.ts) and the
@@ -156,8 +163,11 @@ export const SESSION_SUFFIXES = [
   ".active",
   ".cleanup",
   ".task_graph",
+  TASK_GRAPH_POINTER_LEASES_SUFFIX,
   CALL_START_SUFFIX,
   ORCHESTRATION_RUNS_SUFFIX,
+  IMPLEMENTATION_ATTEMPT_SIDECAR_SUFFIX,
+  TASK_GRAPH_POINTER_BINDING_SUFFIX,
 ] as const;
 
 export type SessionFileSuffix = (typeof SESSION_SUFFIXES)[number];
@@ -351,26 +361,36 @@ function parseEvent(raw: unknown): Evidence | null {
   }
 }
 
-/** Parse one ledger line. Unknown/corrupt lines yield null and are skipped. */
-export function parseEvidenceLine(line: string): EvidenceRecord | null {
+export type EvidenceLineParse =
+  | Readonly<{ ok: true; value: EvidenceRecord }>
+  | Readonly<{ ok: false; error: string }>;
+
+/** Parse one ledger line exactly. Corruption is data the reader must fail on, never absence. */
+export function parseEvidenceLine(line: string): EvidenceLineParse {
   let raw: unknown;
   try {
     raw = JSON.parse(line);
-  } catch {
-    return null;
+  } catch (error) {
+    return Object.freeze({
+      ok: false,
+      error: `evidence line is invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    });
   }
-  if (typeof raw !== "object" || raw === null) return null;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return Object.freeze({ ok: false, error: "evidence line must be an object" });
+  }
   const o = raw as Record<string, unknown>;
-  if (typeof o.epoch !== "string") return null;
+  if (typeof o.epoch !== "string") return Object.freeze({ ok: false, error: "evidence line epoch is missing" });
   const epoch = parseEpoch(o.epoch);
-  if (epoch === null) return null;
+  if (epoch === null) return Object.freeze({ ok: false, error: "evidence line epoch is invalid" });
   const event = parseEvent(o.event);
-  if (event === null) return null;
+  if (event === null) return Object.freeze({ ok: false, error: "evidence line event is invalid" });
   // callId is the optional idempotency stamp (harness tool_use_id) —
   // additive wire change: absent or non-string reads as "no stamp".
-  return typeof o.callId === "string" && o.callId !== ""
+  const value = typeof o.callId === "string" && o.callId !== ""
     ? { epoch, event, callId: o.callId }
     : { epoch, event };
+  return Object.freeze({ ok: true, value });
 }
 
 /**

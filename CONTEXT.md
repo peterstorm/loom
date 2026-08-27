@@ -104,6 +104,14 @@ _Avoid_: Synthetic Task, fake Wave, ad-hoc review output
 The single source of truth for orchestration progress (`active_task_graph.json`). Write-protected; only hooks mutate it.
 _Avoid_: Config, manifest, plan file
 
+**Session TaskGraph Pointer Lease Registry**:
+The exact parsed immutable generation record beside one session's `.task_graph` pointer. Every same-target binder owns one lease; only the final lease may restore the generation's previous target, and a different target or contradictory/malformed crash state fails closed under the same no-follow lock.
+_Avoid_: Pointer owner flag, shared pointer, best-effort rollback
+
+**Trusted Review Witness Aggregate**:
+The process-local Pi authority grouped by session, Standalone Review root, and Review Run, with explicit touch recency. Verification considers only the current run for that root; rejection never falls back, exact acceptance is idempotent and retires older root witnesses, and session shutdown prunes the session aggregate.
+_Avoid_: Review cache, accepted result fallback, global witness map
+
 **Plan**:
 The architecture document produced in Phase 3. Defines component design, file structure, and implementation phases that decompose parses into a task graph.
 _Avoid_: Design doc, architecture doc, blueprint
@@ -193,8 +201,16 @@ A non-empty exact set of Completion Check Results bound either to one Implementa
 _Avoid_: Test run, CI result, lint result
 
 **Implementation Completion Oracle**:
-The pure aggregate command that combines Implementation Attempt authority, normalized observation, Proof Obligations, Verification Policy, and a Completion Suite Result into exactly one transition: implemented, retry required, escalation required, infrastructure blocked, or ignored stale/duplicate evidence. Pi and Claude Code adapt into it; neither harness is a separate completion authority.
+The pure aggregate command that combines Implementation Attempt authority, normalized observation, Proof Obligations, Verification Policy, and a Completion Suite Result into exactly one transition: implemented, retry required, escalation required, infrastructure blocked, or ignored stale/duplicate evidence. Pi and Claude Code adapt into it; neither harness is a separate completion authority. One exact transition applier consumes its output, appends the settlement receipt, releases only matching authority, and performs review/spec/Wave invalidation atomically.
 _Avoid_: SubagentStop hook, Wave Gate check, test runner, completion service
+
+**Task-local Byte Scope**:
+The exact path set captured in `attempt_artifact_baseline`: declared Task paths plus previously attributed Task paths at registration. `loom:task-byte-scope` compares only those bytes against that attempt baseline. Parser-proven transcript paths outside the set are semantic failure regardless of repository ownership; baseline/path/read/Git uncertainty is infrastructure unavailable. Under the locked TaskGraph, other current-Wave Tasks' canonical `file_list` plus `files_modified` form sibling ownership. Repository changes relative to the first unresolved baseline classify exactly: current Task paths are Task-local, sibling-owned paths are inert/non-attributable, and every remaining unowned path is semantic out-of-scope evidence recorded in `unresolved_repository_paths` even when the transcript omits it. The baseline and unresolved paths persist across failed, infrastructure-blocked, rolled-back, and reclaimed attempts; reversion removes resolved paths, and accepted exact settlement clears the carry. The Task-local suite runs no Task/project subprocesses; build, test, typecheck, reports, and full-tier lint remain Wave-quiescent checks.
+_Avoid_: Repository dirty set, transcript file list, Task test command
+
+**Implementation Settlement Receipt**:
+The immutable, self-digested audit record for one exact Implementation Attempt transition. Retry/escalation receipts consume the semantic attempt; implemented and infrastructure-blocked receipts do not. Receipt identity makes duplicate delivery idempotent and prevents late results from releasing a newer reservation.
+_Avoid_: Rollback receipt, cleanup log, retry counter
 
 **Proof Obligation**:
 An engine-authored requirement a Task must discharge before its status can become implemented: completion, required regression tests, required new tests, and declared artifacts changed. Regression and new-test obligations derive independently from Verification Policy. Evidence keeps its provenance; Pi structured evidence is never relabeled as ledger-trusted.
@@ -270,11 +286,16 @@ _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory ru
 - An interactive Pi phase **Agent** runs through the **Interactive Phase Transport**; every headless role remains on the normal subagent transport
 - A Pi-launched mutating CLI process must match the in-memory extension's **Runtime Revision** before changing protected or run-scoped state
 - A **Task** becomes implemented only after all of its **Proof Obligations** and required Task-scoped Completion Check Results are satisfied
-- An **Implementation Attempt** is settled only by the **Implementation Completion Oracle** under exact engine-issued authority
+- An **Implementation Attempt** is settled only by the **Implementation Completion Oracle** under exact engine-issued authority and one **Implementation Settlement Receipt**
+- A Task-local Completion Suite contains only `loom:task-byte-scope`; it runs no Task/project subprocesses
+- Repository observation never grants Task attribution: current Task paths stay local, locked current-Wave sibling-owned paths stay inert, and every changed unowned path is unresolved semantic failure/invalidation
+- Slice 3 classifies retry-required/escalation-required without dispatch; Slice 4 alone freezes retry context and launches semantic attempt 2 or escalation
 - A Task's **Verification Policy** independently determines its regression and new-test **Proof Obligations**
 - A **Verification Manifest** is frozen by the engine before implementation and cannot be authored through decompose output
 - A Task-scoped **Completion Suite Result** binds to one **Implementation Attempt**; a Wave-scoped result binds to a quiescent Wave workspace
 - Review Agents consume one immutable **Review Packet** per Task
+- A **Session TaskGraph Pointer Lease Registry** restores its previous target only after the generation's final exact lease is released
+- A **Trusted Review Witness Aggregate** verifies only the most recently touched Standalone Review Run for one session/root and is pruned at session shutdown
 - A **Review Run** binds that Review Packet to one **Review Generation**, the expected review Agents, and all prior active Finding IDs
 - A **Resolved Finding** leaves the active set only when every Agent in its Review Run explicitly verifies remediation; any `still_present` assessment keeps it active
 - A **Panel Program** emits the exact Agent batches and engine operations for each panel

@@ -29,7 +29,11 @@ import {
 import type { RegisteredWaveGateProgram } from "../../../src/handlers/helpers/programs/helpers";
 import { createRunDirectory, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
 import { StateManager } from "../../../src/state-manager";
-import type { ActiveWaveGateRegistration, TaskGraph } from "../../../src/types";
+import {
+  parseNewTestEvidence,
+  type ActiveWaveGateRegistration,
+  type TaskGraph,
+} from "../../../src/types";
 
 const roots: string[] = [];
 const fakeReportDigest = (() => {
@@ -68,11 +72,14 @@ function manifest(mode: string, report = true) {
   return parsed.value;
 }
 
-const proof = evaluateTaskProof(
-  { newTestsRequired: true, declaredArtifacts: [] },
-  { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: [], newTestsWritten: true },
-);
-if (proof.state !== "satisfied") throw new Error("proof fixture must be satisfied");
+const proof = (() => {
+  const evaluated = evaluateTaskProof(
+    { newTestsRequired: true, declaredArtifacts: [] },
+    { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: [], newTestsWritten: true },
+  );
+  if (evaluated.state !== "satisfied") throw new Error("proof fixture must be satisfied");
+  return evaluated;
+})();
 
 function completionScript(): string {
   return `
@@ -148,7 +155,7 @@ function fixture(mode: string, report = true): Fixture {
       proof,
       depends_on: [],
       test_result: { verdict: "trusted-pass" },
-      new_tests_written: true,
+      new_test_observation: parseNewTestEvidence(true, "fixture new-test evidence"),
       review_status: "pending",
       critical_findings: [],
       advisory_findings: [],

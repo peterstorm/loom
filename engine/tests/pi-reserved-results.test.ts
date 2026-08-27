@@ -10,9 +10,15 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  alignPiImplementationAuthorities,
   classifyMissingReservedResults,
   type ReservedResultItem,
 } from "../../pi/reserved-results";
+import {
+  createImplementationAttemptAuthority,
+  parseIsoInstant,
+  parseReservationId,
+} from "../src/core/implementation-completion";
 
 const item = (over: Partial<ReservedResultItem> = {}): ReservedResultItem => ({
   agentType: "code-reviewer",
@@ -23,6 +29,53 @@ const item = (over: Partial<ReservedResultItem> = {}): ReservedResultItem => ({
 
 /** The envelope shape the harness returns for a result that DID arrive. */
 const returned = (agent: string) => ({ agent, exitCode: 0 });
+
+function authority(taskId: string, reservation: string) {
+  const instant = parseIsoInstant("2026-08-24T00:00:00.000Z");
+  const reservationId = parseReservationId(reservation);
+  if (!instant.ok || !reservationId.ok) throw new Error("fixture identity failed");
+  const created = createImplementationAttemptAuthority({
+    taskId, wave: 1, semanticAttempt: 1, reservationId: reservationId.value,
+    headSha: "1".repeat(40), reservedAt: instant.value,
+    taskScopeBaseline: [], dirtySetBaseline: [],
+  });
+  if (!created.ok) throw new Error(created.error.errors.join("; "));
+  return created.value;
+}
+
+describe("alignPiImplementationAuthorities", () => {
+  it("carries registration order onto implementation slots while preserving non-implementation slots", () => {
+    const t1 = authority("T1", "pi-t1");
+    const t2 = authority("T2", "pi-t2");
+    const aligned = alignPiImplementationAuthorities(
+      [
+        { agent: "code-reviewer", task: "Task ID: T1" },
+        { agent: "code-implementer-agent", task: "Task ID: T2" },
+        { agent: "code-implementer-agent", task: "Task ID: T1" },
+      ],
+      [
+        { kind: "non-implementation" },
+        { kind: "implementation", prompt: "Task ID: T2", description: "" },
+        { kind: "implementation", prompt: "Task ID: T1", description: "" },
+      ],
+      [t2, t1],
+    );
+    expect(aligned).toEqual({ ok: true, authoritiesBySlot: [null, t2, t1] });
+  });
+
+  it.each([
+    { name: "missing", authorities: [] },
+    { name: "mismatched", authorities: [authority("T2", "pi-wrong")] },
+    { name: "surplus", authorities: [authority("T1", "pi-right"), authority("T2", "pi-surplus")] },
+  ])("rejects $name authority instead of permitting prompt inference", ({ authorities }) => {
+    const result = alignPiImplementationAuthorities(
+      [{ agent: "code-implementer-agent", task: "Task ID: T1" }],
+      [{ kind: "implementation", prompt: "Task ID: T1", description: "" }],
+      authorities,
+    );
+    expect(result).toMatchObject({ ok: false });
+  });
+});
 
 describe("classifyMissingReservedResults", () => {
   describe("a batch bound to an orchestration run", () => {

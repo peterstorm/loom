@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import { extractTaskId, isCanonicalFormat } from "../../src/utils/extract-task-id";
+import { parseTaskId } from "../../src/core/task-id";
 
 describe("extractTaskId — property tests", () => {
   it("all 7 patterns extract the same ID for any valid T\\d+ ID", () => {
@@ -25,18 +26,25 @@ describe("extractTaskId — property tests", () => {
     );
   });
 
-  it("canonical format is always recognized by isCanonicalFormat", () => {
+  it("every canonical T\\d+ value is accepted by the central parser and extraction", () => {
     fc.assert(
       fc.property(
-        fc.integer({ min: 1, max: 99999 }),
-        (n) => {
-          const text = `**Task ID:** T${n}`;
+        fc.array(fc.integer({ min: 0, max: 9 }), { minLength: 1, maxLength: 100 })
+          .map((digits) => `T${digits.join("")}`),
+        (taskId) => {
+          const text = `**Task ID:** ${taskId}`;
+          expect(parseTaskId(taskId)).toMatchObject({ ok: true, value: taskId });
           expect(isCanonicalFormat(text)).toBe(true);
-          expect(extractTaskId(text)).toBe(`T${n}`);
+          expect(extractTaskId(text)).toBe(taskId);
         },
       ),
     );
   });
+
+  it.each(["task-42", "T", "T-1", "t1", " T1", "T1 ", "XT1", "T1X"])(
+    "keeps previously non-canonical identity %j rejected",
+    (taskId) => expect(parseTaskId(taskId).ok).toBe(false),
+  );
 
   it("random strings without T\\d+ never produce a match", () => {
     fc.assert(

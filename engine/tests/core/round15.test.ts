@@ -158,7 +158,7 @@ describe("applyFindingOutcomes derives the views rather than subtracting from th
   const claims = (severity: "critical" | "advisory", texts: readonly string[]): Task => {
     const base: Task = {
       id: "T1", description: "d", agent: "code-implementer-agent", wave: 1,
-      status: "implemented", depends_on: [], review_status: "pending",
+      status: "implemented", legacy_missing_proof: true, depends_on: [], review_status: "pending",
     };
     return mergeFindings(
       base,
@@ -232,7 +232,7 @@ describe("applyFindingOutcomes derives the views rather than subtracting from th
           const start = mergeFindings(
             {
               id: "T1", description: "d", agent: "code-implementer-agent", wave: 1,
-              status: "implemented", depends_on: [], review_status: "pending",
+              status: "implemented", legacy_missing_proof: true, depends_on: [], review_status: "pending",
             },
             {
               drafts: specs.map((s) => ({

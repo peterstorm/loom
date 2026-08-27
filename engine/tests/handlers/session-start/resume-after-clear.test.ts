@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
 import type { TaskGraph, Task, TaskStatus } from "../../../src/types";
+import { taskFixture, type TaskFixtureInput } from "../../fixtures/task-lifecycle";
 import { buildContextOutput, statusIcon } from "../../../src/handlers/session-start/resume-after-clear";
 
 const CLI_PATH = join(__dirname, "../../../src/cli.ts");
@@ -14,8 +15,8 @@ function makeTmpDir(): string {
   return dir;
 }
 
-function makeTask(overrides: Partial<Task> = {}): Task {
-  return {
+function makeTask(overrides: Partial<TaskFixtureInput> = {}): Task {
+  return taskFixture({
     id: "T1",
     description: "Implement user model",
     agent: "code-implementer-agent",
@@ -23,7 +24,7 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     status: "pending",
     depends_on: [],
     ...overrides,
-  };
+  });
 }
 
 function makeGraph(overrides: Partial<TaskGraph> = {}): TaskGraph {
@@ -249,11 +250,11 @@ describe("statusIcon (pure)", () => {
 });
 
 describe("buildContextOutput (pure)", () => {
-  function task(overrides: Partial<Task> = {}): Task {
-    return {
+  function task(overrides: Partial<TaskFixtureInput> = {}): Task {
+    return taskFixture({
       id: "T1", description: "Build thing", agent: "code-implementer-agent",
       wave: 1, status: "pending", depends_on: [], ...overrides,
-    };
+    });
   }
   function graph(overrides: Partial<TaskGraph> = {}): TaskGraph {
     return {

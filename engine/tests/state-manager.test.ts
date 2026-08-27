@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdirSync, writeFileSync, readFileSync, chmodSync, renameSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { StateManager, parseTaskGraph, resolveTaskGraph } from "../src/state-manager";
 import { SUBAGENT_DIR } from "../src/config";
-import type { TaskGraph } from "../src/types";
+import { parseNewTestEvidence, type TaskGraph } from "../src/types";
 import { derivePendingTaskProof, evaluateTaskProof } from "../src/core/proof-obligations";
 
 function makeTmpDir(): string {
@@ -98,7 +98,15 @@ describe("StateManager", () => {
     const newState: TaskGraph = {
       ...minimalGraph(),
       current_phase: "execute",
-      tasks: [{ id: "T1", description: "test", agent: "code-implementer-agent", wave: 1, status: "pending", depends_on: [] }],
+      tasks: [{
+        id: "T1",
+        description: "test",
+        agent: "code-implementer-agent",
+        wave: 1,
+        status: "pending",
+        depends_on: [],
+        proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: [] }),
+      }],
       wave_gates: {},
     };
 
@@ -508,6 +516,11 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     }
   });
 
+  it.each(["T0", "T00", "T999999999999999999999999"])(
+    "accepts canonical task id %j through the StateManager boundary",
+    (id) => expect(parseTaskGraph({ ...validGraph, tasks: [{ ...validTask, id }] }).ok).toBe(true),
+  );
+
   it.each(["bad:id", " T1", "T 1", "task-1"])(
     "rejects task id %j that cannot form a wave finding identity",
     (id) => {
@@ -656,6 +669,27 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     });
     expect(malformedResult.ok).toBe(false);
     if (!malformedResult.ok) expect(malformedResult.error).toContain("unexpected field(s): passed, provenance");
+  });
+
+  it("rejects malformed persisted new-test observations and legacy-field coexistence", () => {
+    for (const new_test_observation of [
+      { kind: "written", written: true, evidence: "" },
+      { kind: "not-written", written: true, evidence: "" },
+      { kind: "unknown", written: false },
+    ]) {
+      expect(parseTaskGraph({
+        ...validGraph,
+        tasks: [{ ...validTask, new_test_observation }],
+      }).ok).toBe(false);
+    }
+    expect(parseTaskGraph({
+      ...validGraph,
+      tasks: [{
+        ...validTask,
+        new_test_observation: parseNewTestEvidence(false, ""),
+        new_tests_written: false,
+      }],
+    }).ok).toBe(false);
   });
 
   it("keeps explicit asymmetric policies and proof obligations in exact lockstep", () => {
@@ -1081,6 +1115,33 @@ describe("resolveTaskGraph — session ids are parsed before naming SUBAGENT_DIR
     }
   });
 
+  it.each([
+    ["empty", ""],
+    ["relative", "active_task_graph.json"],
+    ["whitespace-padded", null],
+    ["non-normalized", null],
+  ])("a readable %s session pointer refuses authority before probing", (kind, fixture) => {
+    const s = `sm-malformed-${kind}-${process.pid}-${Date.now()}`;
+    const dir = makeTmpDir();
+    const statePath = join(dir, "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify(minimalGraph()));
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${s}.task_graph`);
+    const raw = kind === "whitespace-padded"
+      ? `${statePath}\n`
+      : kind === "non-normalized"
+        ? `${dir}/./active_task_graph.json`
+        : fixture!;
+    writeFileSync(pointer, raw);
+    try {
+      expect(() => resolveTaskGraph(s)).toThrow(/session pointer .* is malformed/i);
+      expect(() => StateManager.fromLocalSession(s)).toThrow(/session pointer .* is malformed/i);
+    } finally {
+      rmSync(pointer, { force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("an absent session pointer refuses local TaskGraph authority", () => {
     const s = `sm-absent-pointer-${process.pid}-${Date.now()}`;
     const pointer = join(SUBAGENT_DIR, `${s}.task_graph`);
@@ -1102,7 +1163,7 @@ describe("resolveTaskGraph — session ids are parsed before naming SUBAGENT_DIR
     }
   });
 
-  it("an unreadable pointed graph remains session authority and fails on load", () => {
+  it("rejects a pointed graph whose leaf is a symlink before minting StateManager authority", () => {
     const s = `sm-unreadable-graph-${process.pid}-${Date.now()}`;
     const dir = makeTmpDir();
     const target = join(dir, "active_task_graph.json");
@@ -1110,14 +1171,60 @@ describe("resolveTaskGraph — session ids are parsed before naming SUBAGENT_DIR
     mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
     const pointer = join(SUBAGENT_DIR, `${s}.task_graph`);
     writeFileSync(pointer, target);
-    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
-      expect(resolveTaskGraph(s)).toBe(target);
-      const manager = StateManager.fromSession(s);
-      expect(manager?.getPath()).toBe(target);
-      expect(() => manager?.load()).toThrow();
+      expect(() => resolveTaskGraph(s)).toThrow(/names inaccessible graph.*ELOOP/i);
+      expect(() => StateManager.fromSession(s)).toThrow(/refusing local task-graph fallback/i);
     } finally {
-      stderrSpy.mockRestore();
+      rmSync(pointer, { force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a pointed graph whose ancestor is a symlink", () => {
+    const s = `sm-symlink-ancestor-${process.pid}-${Date.now()}`;
+    const dir = makeTmpDir();
+    const realParent = join(dir, "real-parent");
+    const aliasParent = join(dir, "alias-parent");
+    mkdirSync(realParent);
+    writeFileSync(join(realParent, "active_task_graph.json"), JSON.stringify(minimalGraph()));
+    symlinkSync(realParent, aliasParent);
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${s}.task_graph`);
+    writeFileSync(pointer, join(aliasParent, "active_task_graph.json"));
+    try {
+      expect(() => StateManager.fromSession(s)).toThrow(/names inaccessible graph.*(?:ELOOP|ENOTDIR)/i);
+    } finally {
+      rmSync(pointer, { force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a real-directory replacement after session authority capture before any side effect", async () => {
+    const s = `sm-parent-replaced-${process.pid}-${Date.now()}`;
+    const dir = makeTmpDir();
+    const trustedParent = join(dir, "graph-parent");
+    const movedParent = join(dir, "captured-parent");
+    const statePath = join(trustedParent, "active_task_graph.json");
+    mkdirSync(trustedParent);
+    writeFileSync(statePath, JSON.stringify(minimalGraph()));
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${s}.task_graph`);
+    writeFileSync(pointer, statePath);
+    const manager = StateManager.fromSession(s);
+    if (manager === null) throw new Error("session manager fixture must resolve");
+
+    renameSync(trustedParent, movedParent);
+    mkdirSync(trustedParent);
+    const attackerGraph = JSON.stringify({ ...minimalGraph(), current_phase: "brainstorm" });
+    writeFileSync(statePath, attackerGraph);
+    try {
+      expect(() => manager.load()).toThrow(/parent authority changed after capture/i);
+      await expect(manager.update((state) => ({ ...state, current_phase: "specify" })))
+        .rejects.toThrow(/parent authority changed after capture/i);
+      expect(readFileSync(statePath, "utf8")).toBe(attackerGraph);
+      expect(() => readFileSync(join(trustedParent, ".task_graph"), "utf8")).toThrow();
+      expect(() => readFileSync(`${statePath}.tmp`, "utf8")).toThrow();
+    } finally {
       rmSync(pointer, { force: true });
       rmSync(dir, { recursive: true, force: true });
     }

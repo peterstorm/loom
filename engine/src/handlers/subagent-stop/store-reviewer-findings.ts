@@ -15,7 +15,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
+import type { HookHandler, HookResult, SubagentStopInput, Task, TaskGraph } from "../../types";
 import {
   applyReviewResolution,
   constrainReviewResolutionToScope,
@@ -135,10 +135,10 @@ const handler: HookHandler = async (stdin) => {
     agent: agentType,
     message: `review transcript empty or unreadable at ${rawPath || "<unset>"}`,
   };
-  let appliedTask = targetTask;
+  let appliedTask: Task = targetTask;
   let applicationChanged = false;
   let taskFound = false;
-  await mgr.update((s) => ({
+  await mgr.update((s): TaskGraph => ({
     ...s,
     tasks: s.tasks.map((t) => {
       if (t.id !== taskId) return t;

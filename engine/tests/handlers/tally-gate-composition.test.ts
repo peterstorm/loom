@@ -35,10 +35,11 @@ function task(id: string, criticals: readonly string[]): Task {
     agent: "code-implementer-agent",
     wave: 1,
     status: "implemented",
+    legacy_missing_proof: true,
     depends_on: [],
     review_status: "pending",
   };
-  return criticals.reduce(
+  return criticals.reduce<Task>(
     (t, claim) =>
       mergeFindings(
         t,
@@ -197,7 +198,7 @@ describe("the panel's verdict is the gate's verdict", () => {
     // wave from blocked to passing.
     const sentinel: Task = {
       id: "T1", description: "d", agent: "code-implementer-agent", wave: 1,
-      status: "implemented", depends_on: [], review_status: "blocked",
+      status: "implemented", legacy_missing_proof: true, depends_on: [], review_status: "blocked",
       critical_findings: ["none"],
     };
     expect(checkCriticalFindings([sentinel]).passed).toBe(false);
