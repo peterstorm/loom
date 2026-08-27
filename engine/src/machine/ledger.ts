@@ -40,7 +40,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { resolve } from "node:path";
+import { isAbsolute, normalize, resolve } from "node:path";
 import {
   appendFileSync,
   existsSync,
@@ -267,7 +267,7 @@ export function countActiveAgents(sessionId: SessionId): number {
  *   - resolves elsewhere      → not ours
  *   - absent (ENOENT)         → not ours; "bound to no graph" is a real answer,
  *                               which is what stops stray rosters vetoing
- *   - unreadable (any other)  → active (fail closed: cannot disprove it's ours)
+ *   - malformed or unreadable → active (fail closed: cannot disprove it's ours)
  *
  * The ENOENT-vs-error split is load-bearing: absence is evidence, failure is
  * not. A directory that cannot be read at all is likewise fail-closed.
@@ -296,7 +296,15 @@ export function anyActiveSubagent(taskGraphPath: string): boolean {
       return true;
     }
     try {
-      return resolve(readFileSync(`${subagentDir()}/${session}.task_graph`, "utf-8").trim()) === wanted;
+      const rawPointer = readFileSync(`${subagentDir()}/${session}.task_graph`, "utf-8");
+      const pointer = rawPointer.trim();
+      if (pointer === "" || pointer !== rawPointer || !isAbsolute(pointer) || normalize(pointer) !== pointer) {
+        process.stderr.write(
+          `anyActiveSubagent: malformed task-graph pointer for ${session} — assuming it serves this graph (fail closed)\n`,
+        );
+        return true;
+      }
+      return pointer === wanted;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
       process.stderr.write(

@@ -140,11 +140,10 @@ function checkPlanAlignmentGate(state: ArtifactState, probe: ArtifactProbe): str
 /**
  * The spec artifact, or the reason it is missing.
  *
- * `clarify` and `architecture` both gate on "specify produced a readable
- * spec.md", and both used to spell out the same declared-artifact →
- * spec_file → spec_dir search and the same failure string. One rule, one
- * resolution: a change to where a spec may live cannot now reach one gate and
- * not the other.
+ * `clarify` and `architecture` both require an existing spec.md and share the
+ * same declared-artifact → spec_file → spec_dir search and failure string.
+ * Architecture additionally reads the selected artifact when it must count
+ * clarification markers; clarify only needs the artifact path as its input.
  */
 function resolveSpecArtifact(
   state: ArtifactState,

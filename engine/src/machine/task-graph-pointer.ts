@@ -464,6 +464,11 @@ export async function releasePersistedSessionTaskGraphPointerBinding(
     }
     const released = releasePointerLease(anchored, persisted.binding);
     if (released === "ownership-lost") return released;
+    if (released === "not-owned") {
+      throw new Error(
+        `persisted pointer binding ${leaf} no longer owns its exact lease; retaining cleanup authority`,
+      );
+    }
     removeDirectoryFileNoFollow(anchored, leaf);
     return released;
   });

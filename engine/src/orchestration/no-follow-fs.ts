@@ -14,19 +14,17 @@
  *   race: a component swapped after validation cannot be reached through the
  *   descriptor already held.
  *
- * - **macOS — anchored to a real path.** Darwin has no usable fd→path bridge:
- *   `/dev/fd/<fd>` is an `fdesc` node, not a directory, so `open`, `readdir`,
- *   `mkdir`, and `rename` through `/dev/fd/<fd>/<child>` all fail (ENOTDIR /
- *   ENOENT), and Node exposes no `openat`. Instead every operation carries
- *   Darwin's `O_NOFOLLOW_ANY`, which makes the KERNEL reject the open with
- *   ELOOP if any component of the path is a symlink, evaluated over the whole
- *   path in a single resolution. That is atomic — strictly better than an
- *   lstat-per-component walk, which races between its own checks.
+ * - **macOS — open-only real-path authority.** Darwin has no usable fd→path
+ *   bridge: `/dev/fd/<fd>` is an `fdesc` node, not a directory, and Node exposes
+ *   no `openat`/`mkdirat`/`renameat`/`unlinkat`. Opens carry Darwin's
+ *   `O_NOFOLLOW_ANY`, which makes the kernel reject any symlink component in
+ *   one resolution. Pathname mutations cannot carry that flag, so they fail
+ *   closed before side effects rather than reopening an ancestor-swap race.
  *
- * The one guarantee darwin cannot reproduce is binding validation and use to a
- * single descriptor: an ancestor directory replaced by another REAL directory
- * between two operations is not detected, because closing that window needs
- * `openat`. Symlink escapes — the modelled attack — are refused on both.
+ * Darwin also cannot bind two separate open operations to one descriptor, so
+ * replacing an ancestor with another REAL directory between opens remains
+ * outside the guarantee. Symlink escapes are refused; unsupported pathname
+ * mutations are never attempted.
  *
  * Both platforms treat the run's BASE directory as trusted configuration: see
  * `ensureResolvedBaseDirectory`, which resolves it once so that everything
@@ -120,6 +118,17 @@ export function anchoredChildPath(directory: AnchoredDirectory, child: string): 
   return directory.anchor === "descriptor"
     ? `/proc/self/fd/${directory.fd}/${child}`
     : join(directory.path, child);
+}
+
+function requireDescriptorMutation(
+  directory: AnchoredDirectory,
+  operation: string,
+): asserts directory is Extract<AnchoredDirectory, Readonly<{ anchor: "descriptor" }>> {
+  if (directory.anchor !== "descriptor") {
+    throw new Error(
+      `descriptor-relative ${operation} is unavailable on ${process.platform}; refusing unsafe pathname mutation`,
+    );
+  }
 }
 
 /** Release a directory anchor. The descriptor is the only owned resource. */
@@ -220,6 +229,7 @@ export function writeDirectoryFileAtomicNoFollow(
   data: string | Uint8Array,
 ): void {
   assertLeafName(name);
+  requireDescriptorMutation(directory, "atomic file replacement");
   const temporary = `${name}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   assertLeafName(temporary);
   let published = false;
@@ -253,6 +263,7 @@ export function writeDirectoryFileAtomicNoFollow(
 /** Remove one anchored leaf; ENOENT is the only idempotent absence. */
 export function removeDirectoryFileNoFollow(directory: AnchoredDirectory, name: string): void {
   assertLeafName(name);
+  requireDescriptorMutation(directory, "file removal");
   try {
     unlinkSync(anchoredChildPath(directory, name));
   } catch (error) {
@@ -265,11 +276,22 @@ const LOCK_RETRY_MS = 100;
 const wait = (milliseconds: number): Promise<void> =>
   new Promise((resolveWait) => setTimeout(resolveWait, milliseconds));
 
-function processIsAlive(rawOwner: string): boolean {
-  const pid = Number(rawOwner.trim().split(":", 1)[0]);
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+type LockOwner = Readonly<{ pid: number }>;
+
+function parseLockOwner(rawOwner: string, lockName: string): LockOwner {
+  if (!/^[1-9]\d*(?::\d+:[a-z0-9]+)?$/u.test(rawOwner)) {
+    throw new Error(`lock ${lockName} has malformed owner token: ${JSON.stringify(rawOwner)}`);
+  }
+  const pid = Number(rawOwner.split(":", 1)[0]);
+  if (!Number.isSafeInteger(pid)) {
+    throw new Error(`lock ${lockName} has malformed owner token: ${JSON.stringify(rawOwner)}`);
+  }
+  return Object.freeze({ pid });
+}
+
+function processIsAlive(owner: LockOwner): boolean {
   try {
-    process.kill(pid, 0);
+    process.kill(owner.pid, 0);
     return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== "ESRCH";
@@ -336,6 +358,7 @@ export function recoverStaleDirectoryLock(
   lockName: string,
   afterTombstoned: (tombName: string) => void = () => undefined,
 ): boolean {
+  requireDescriptorMutation(directory, "stale lock recovery");
   const recoveryName = `${lockName}.recovery`;
   const recoveryToken = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2, 12)}`;
   try {
@@ -360,7 +383,7 @@ export function recoverStaleDirectoryLock(
         `cannot inspect lock ${lockName}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    if (processIsAlive(observedOwner)) return false;
+    if (processIsAlive(parseLockOwner(observedOwner, lockName))) return false;
 
     const tomb = `${lockName}.tomb-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     try {
@@ -387,7 +410,8 @@ export function recoverStaleDirectoryLock(
         );
       }
     }
-    if (tombOwner !== observedOwner || tombOwner === null || processIsAlive(tombOwner)) {
+    if (tombOwner !== observedOwner || tombOwner === null ||
+        processIsAlive(parseLockOwner(tombOwner, tomb))) {
       try {
         renameSync(anchoredChildPath(directory, tomb), anchoredChildPath(directory, lockName));
       } catch (error) {
@@ -482,6 +506,7 @@ export async function withAnchoredDirectoryLock<T>(
   assertLeafName(lockName);
   const anchored = openDirectoryNoFollow(directory);
   try {
+    requireDescriptorMutation(anchored, "anchored lock mutation");
     const ownerToken = await acquireDirectoryLock(anchored, lockName);
     let operationFailed = false;
     let operationError: unknown;
@@ -514,9 +539,8 @@ export async function withAnchoredDirectoryLock<T>(
  *
  * Linux opens every component relative to the descriptor for its parent, so
  * `O_NOFOLLOW` protects every hop and the returned descriptor IS the
- * validation. Darwin cannot walk descriptors, so it asks the kernel for the
- * same guarantee in one resolution via `O_NOFOLLOW_ANY` — which is why the
- * returned real path is safe to address children through.
+ * validation. Darwin cannot walk descriptors, so opens use `O_NOFOLLOW_ANY`;
+ * callers that require pathname mutation reject its real-path anchor.
  */
 export function openDirectoryNoFollow(path: string): AnchoredDirectory {
   const absolute = resolve(path);
@@ -571,11 +595,14 @@ export function ensureRelativeDirectoryNoFollow(
   if (fromRun === ".." || fromRun.startsWith(`..${sep}`) || isAbsolute(fromRun)) {
     throw new Error(`run subdirectory escapes run directory: ${target}`);
   }
-  let current = rootDirectory;
+  const components = fromRun.split(sep).filter(Boolean);
+  if (components.length === 0) return;
+  let current: AnchoredDirectory = rootDirectory;
   let currentPath = resolve(runDir);
   let ownsCurrent = false;
   try {
-    for (const component of fromRun.split(sep).filter(Boolean)) {
+    for (const component of components) {
+      requireDescriptorMutation(current, "directory creation");
       const child = anchoredChildPath(current, component);
       try {
         mkdirSync(child, { mode: 0o700 });
@@ -685,6 +712,7 @@ export function publishStagedRunFile(stagedPath: string, finalPath: string): voi
   }
   const parent = openDirectoryNoFollow(dirname(stagedPath));
   try {
+    requireDescriptorMutation(parent, "staged file publication");
     renameSync(
       anchoredChildPath(parent, basename(stagedPath)),
       anchoredChildPath(parent, basename(finalPath)),

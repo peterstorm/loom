@@ -19,6 +19,7 @@ import {
   anchoredChildPath,
   closeAnchoredDirectory,
   ensureDirectoryNoFollow,
+  ensureRelativeDirectoryNoFollow,
   ensureResolvedBaseDirectory,
   listDirectoryNamesNoFollow,
   openDirectoryNoFollow,
@@ -58,6 +59,16 @@ function secretOutsideTheRun(root: string): string {
 }
 
 describe("directory creation refuses symlinked ancestors", () => {
+  it("fails before mkdir when the retained anchor cannot authorize descriptor-relative mutation", () => {
+    const root = workspace();
+    const run = join(root, "run");
+    const realPathAnchor = { anchor: "real-path" as const, fd: -1, path: run };
+
+    expect(() => ensureRelativeDirectoryNoFollow(realPathAnchor, run, join(run, "uncreated")))
+      .toThrow(/descriptor-relative directory creation.*refusing unsafe pathname mutation/i);
+    expect(() => readFileSync(join(run, "uncreated"))).toThrow();
+  });
+
   it("does not create through a symlinked binding directory", () => {
     const root = workspace();
     const outside = join(root, "outside");
@@ -144,6 +155,21 @@ describe("anchored lock ownership", () => {
 
       expect(recovered).toBe(false);
       expect(readFileSync(join(directory, "changed.lock"), "utf-8")).toBe(`${process.pid}:new-live-owner`);
+    } finally {
+      closeAnchoredDirectory(anchored);
+    }
+  });
+
+  it("preserves a lock with a malformed owner instead of treating it as proven dead", () => {
+    const root = workspace();
+    const directory = join(root, "run");
+    const lockPath = join(directory, "partial.lock");
+    writeFileSync(lockPath, "not-a-pid");
+    const anchored = openDirectoryNoFollow(directory);
+    try {
+      expect(() => recoverStaleDirectoryLock(anchored, "partial.lock"))
+        .toThrow(/malformed owner token/i);
+      expect(readFileSync(lockPath, "utf-8")).toBe("not-a-pid");
     } finally {
       closeAnchoredDirectory(anchored);
     }

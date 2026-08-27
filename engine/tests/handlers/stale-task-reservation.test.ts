@@ -105,9 +105,26 @@ describe("anyActiveSubagent", () => {
     expect(anyActiveSubagent(GRAPH)).toBe(true);
   });
 
-  it("compares the pointer by resolved path", () => {
+  it("treats a readable non-canonical pointer as active fail-closed", () => {
     const dir = scopedSubagentDir();
     activeSession(dir, "session-a", "/repo/ours/./.claude/state/../state/active_task_graph.json");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(anyActiveSubagent(GRAPH)).toBe(true);
+      expect(stderr.mock.calls.map(([message]) => String(message)).join(""))
+        .toMatch(/malformed task-graph pointer.*assuming it serves this graph.*fail closed/i);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it.each([
+    ["empty", ""],
+    ["relative", ".claude/state/active_task_graph.json"],
+    ["whitespace-padded", `${OTHER_GRAPH}\n`],
+  ])("treats a readable %s pointer as active fail-closed", (_label, pointer) => {
+    const dir = scopedSubagentDir();
+    activeSession(dir, "session-a", pointer);
 
     expect(anyActiveSubagent(GRAPH)).toBe(true);
   });
