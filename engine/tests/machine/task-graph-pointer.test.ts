@@ -80,6 +80,19 @@ describe("shared session TaskGraph pointer lease registry", () => {
     expect(readFileSync(pointer, "utf8")).toBe(`${graphA}\n`);
   });
 
+  it("refuses to restore a non-canonical predecessor on final lease release", async () => {
+    const { root, graphA, graphB, sessionId, pointer, registry: registryPath } = fixture();
+    writeFileSync(pointer, graphA);
+    const binding = await bindSessionTaskGraphPointer(sessionId, graphB, root);
+    const malformed = { ...JSON.parse(readFileSync(registryPath, "utf8")), previous: "relative.json" };
+    writeFileSync(registryPath, JSON.stringify(malformed));
+
+    await expect(rollbackSessionTaskGraphPointer(binding))
+      .rejects.toThrow(/previous must be null or one canonical absolute path/i);
+    expect(readFileSync(pointer, "utf8")).toBe(graphB);
+    expect(existsSync(registryPath)).toBe(true);
+  });
+
   it("atomically refreshes a stale pointer and restores it after the final lease", async () => {
     const { root, graphA, graphB, sessionId, pointer, registry: registryPath } = fixture();
     writeFileSync(pointer, graphA);

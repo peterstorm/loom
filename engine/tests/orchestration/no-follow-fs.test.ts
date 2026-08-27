@@ -198,6 +198,18 @@ describe("anchored lock ownership", () => {
     }
   });
 
+  it("refuses lock release when persisted ownership bytes were padded", async () => {
+    const root = workspace();
+    const directory = join(root, "run");
+    const lockPath = join(directory, "padded.lock");
+
+    await expect(withAnchoredDirectoryLock(directory, "padded.lock", () => {
+      const owner = readFileSync(lockPath, "utf8");
+      writeFileSync(lockPath, `${owner}\n`);
+    })).rejects.toThrow(/ownership lost/i);
+    expect(readFileSync(lockPath, "utf8")).toMatch(/\n$/u);
+  });
+
   it("surfaces a release failure instead of reporting the protected operation as successful", async () => {
     const root = workspace();
     const directory = join(root, "run");

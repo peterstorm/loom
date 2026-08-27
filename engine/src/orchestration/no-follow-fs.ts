@@ -413,7 +413,7 @@ async function acquireDirectoryLock(directory: AnchoredDirectory, lockName: stri
 
 function releaseDirectoryLock(directory: AnchoredDirectory, lockName: string, ownerToken: string): void {
   try {
-    const observed = readDirectoryFileNoFollow(directory, lockName).toString("utf-8").trim();
+    const observed = readDirectoryFileNoFollow(directory, lockName).toString("utf-8");
     if (observed !== ownerToken) {
       throw new Error(`anchored lock ${lockName} ownership lost: expected ${ownerToken}, found ${observed}`);
     }

@@ -49,7 +49,7 @@ export type TaskLocalByteObservation = Readonly<{
   taskBytesChangedOrUnobservable: boolean;
   /** Unowned foreign paths still different from the retained repository boundary. */
   unresolvedRepositoryPaths: readonly ReviewPath[];
-  /** Only Task-local bytes or unresolved unowned foreign bytes invalidate. */
+  /** Task-local changes, unobservable exact bytes, or unresolved unowned foreign bytes invalidate. */
   invalidationBytesChanged: boolean;
 }>;
 

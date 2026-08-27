@@ -157,24 +157,28 @@ export const runDispatch = async (
     };
   }
 
+  const noTaskGraphDiagnostic = (cause?: unknown): string =>
+    `[loom] dispatch: no task graph resolvable for session ${JSON.stringify(input.session_id ?? "")}` +
+    (cause === undefined ? "" : `: ${cause instanceof Error ? cause.message : String(cause)}`) +
+    " — SubagentStop recorded NOTHING (task status, test evidence and findings all skipped)";
+
   // No exact session TaskGraph authority → no orchestration Hooks.
   let mgr: StateManager | null;
   try {
     mgr = StateManager.fromSession(input.session_id);
   } catch (error) {
+    const graphFailure = noTaskGraphDiagnostic(error);
     const cleanupFailure = await runCleanup();
-    if (cleanupFailure !== null) return { kind: "error", message: cleanupFailure };
-    return passthroughDiagnostic(
-      `[loom] dispatch: no task graph resolvable for session ${JSON.stringify(input.session_id ?? "")}: ` +
-      `${error instanceof Error ? error.message : String(error)} — ` +
-      `SubagentStop recorded NOTHING (task status, test evidence and findings all skipped)\n`,
-    );
+    return cleanupFailure === null
+      ? passthroughDiagnostic(`${graphFailure}\n`)
+      : { kind: "error", message: `${graphFailure}; cleanup also failed: ${cleanupFailure}` };
   }
   if (!mgr) {
+    const graphFailure = noTaskGraphDiagnostic();
     const cleanupFailure = await runCleanup();
-    if (cleanupFailure !== null) return { kind: "error", message: cleanupFailure };
-    return passthroughDiagnostic(`[loom] dispatch: no task graph resolvable for session ${JSON.stringify(input.session_id ?? "")} — ` +
-        `SubagentStop recorded NOTHING (task status, test evidence and findings all skipped)\n`);
+    return cleanupFailure === null
+      ? passthroughDiagnostic(`${graphFailure}\n`)
+      : { kind: "error", message: `${graphFailure}; cleanup also failed: ${cleanupFailure}` };
   }
 
   const childFailure: HookResult | null = await match(category)

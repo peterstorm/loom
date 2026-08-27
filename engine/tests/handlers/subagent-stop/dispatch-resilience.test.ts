@@ -196,6 +196,21 @@ describe("dispatch names what it discarded (audit diagnostics)", () => {
     expect(text).toContain("recorded NOTHING");
   });
 
+  it("preserves recorded-NOTHING and cleanup diagnostics when graph resolution and cleanup both fail", async () => {
+    const result = await runDispatch(JSON.stringify({
+      session_id: "../../invalid session",
+      agent_id: "agent-dual-failure",
+      agent_type: "code-implementer-agent",
+    }), [], async () => ({ kind: "error", message: "injected cleanup failure" }));
+
+    expect(result).toMatchObject({ kind: "error" });
+    if (result.kind !== "error") return;
+    expect(result.message).toContain("no task graph resolvable");
+    expect(result.message).toContain("SubagentStop recorded NOTHING");
+    expect(result.message).toContain("invalid session id");
+    expect(result.message).toContain("cleanup also failed: injected cleanup failure");
+  });
+
   it("distinguishes an UNNAMEABLE agent from a merely unrouted one", async () => {
     const dir = tempDir();
     const session = sid("unnameable");

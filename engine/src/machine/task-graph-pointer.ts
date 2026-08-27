@@ -111,9 +111,11 @@ export function parseSessionTaskGraphPointerLeaseRegistry(
   if (!target.ok) {
     return Object.freeze({ ok: false, error: "pointer lease registry target must be one canonical absolute path" });
   }
-  if (record.previous !== null && (typeof record.previous !== "string" ||
-      record.previous.trim() === "" || record.previous.trim() !== record.previous)) {
-    return Object.freeze({ ok: false, error: "pointer lease registry previous must be null or one exact non-empty path" });
+  const previous = record.previous === null
+    ? null
+    : parseCanonicalTaskGraphPointer(record.previous);
+  if (previous !== null && !previous.ok) {
+    return Object.freeze({ ok: false, error: "pointer lease registry previous must be null or one canonical absolute path" });
   }
   if (!Array.isArray(record.leases) || record.leases.length === 0) {
     return Object.freeze({ ok: false, error: "pointer lease registry leases must be non-empty" });
@@ -133,7 +135,7 @@ export function parseSessionTaskGraphPointerLeaseRegistry(
       kind: "session-task-graph-pointer-leases",
       generationId,
       target: target.value,
-      previous: record.previous as string | null,
+      previous: previous === null ? null : previous.value,
       leases: Object.freeze(parsedLeases) as readonly [PointerLeaseId, ...PointerLeaseId[]],
     }),
   });
