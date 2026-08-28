@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, extname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -8,6 +8,7 @@ import { renderMarkdownForPi } from "../src/core/harness-resources";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const RUNTIME_TREES = ["agents", "commands", "skills", "references"] as const;
+const BUN = execFileSync("which", ["bun"], { encoding: "utf8" }).trim();
 
 function markdownFiles(root: string): readonly string[] {
   const files: string[] = [];
@@ -87,6 +88,60 @@ describe("Pi harness detection", () => {
       });
       expect(overrideRun.status, overrideRun.stderr).toBe(0);
       expect(JSON.parse(overrideRun.stdout).taskGraphPath).toBe("custom/state.json");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("TaskGraph repository-root discovery", () => {
+  const configScript = `import { TASK_GRAPH_PATH } from ${JSON.stringify(pathToFileURL(join(REPO_ROOT, "engine/src/config.ts")).href)}; console.log(TASK_GRAPH_PATH);`;
+
+  function fakeGit(root: string, stderr: string, status: number): string {
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    const git = join(bin, "git");
+    writeFileSync(git, `#!/bin/sh\nprintf '%s\\n' ${JSON.stringify(stderr)} >&2\nexit ${status}\n`);
+    chmodSync(git, 0o755);
+    return bin;
+  }
+
+  it("fails closed when Git cannot prove the root from a nested repository cwd", () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-git-root-failure-")));
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: root });
+      mkdirSync(join(root, ".claude", "state"), { recursive: true });
+      writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), "{}\n");
+      const nested = join(root, "nested", "cwd");
+      mkdirSync(nested, { recursive: true });
+      const bin = fakeGit(root, "fatal: detected dubious ownership in repository", 128);
+
+      const run = spawnSync(BUN, ["-e", configScript], {
+        cwd: nested,
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+        encoding: "utf8",
+      });
+
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toContain("git rev-parse failed (exit 128)");
+      expect(run.stderr).toContain("dubious ownership");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses cwd-relative creation authority only for a proven non-repository", () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-no-git-root-")));
+    try {
+      const bin = fakeGit(root, "fatal: not a git repository (or any of the parent directories): .git", 128);
+      const run = spawnSync(BUN, ["-e", configScript], {
+        cwd: root,
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+        encoding: "utf8",
+      });
+
+      expect(run.status, run.stderr).toBe(0);
+      expect(run.stdout.trim()).toBe(".claude/state/active_task_graph.json");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

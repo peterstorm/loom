@@ -26,9 +26,7 @@ import {
   reportedRosterAgentId,
   claimPersistedSessionTaskGraphPointerBinding,
   releasePersistedSessionTaskGraphPointerBinding,
-  rollbackSessionTaskGraphPointer,
   WRITE_GRANT_AGENT_NAMESPACE,
-  type SessionTaskGraphPointerBinding,
 } from "../../machine";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
@@ -135,10 +133,10 @@ const handler: HookHandler = async (stdin) => {
   const modernImplementationAgent = isImplementationAgent(rosterAgentTypeRaw);
   const loomOwnedAgent = parseAgentName(rosterAgentTypeRaw).ok || modernImplementationAgent;
   let sidecarPublished = false;
-  let duplicateStart = false;
+  let sidecarAlreadyOwned = false;
   let identifiedAuthority: ImplementationAttemptAuthority | null = null;
   const rollbackIdentifiedRegistration = async (): Promise<string | null> => {
-    if (identifiedAuthority === null) return null;
+    if (identifiedAuthority === null || sidecarAlreadyOwned) return null;
     const rolledBack = await rollbackTaskExecutionRegistration([identifiedAuthority]);
     return rolledBack.kind === "block" ? rolledBack.message : null;
   };
@@ -170,7 +168,7 @@ const handler: HookHandler = async (stdin) => {
         authority: identifiedAuthority,
       });
       sidecarPublished = sidecar.disposition === "published";
-      duplicateStart = sidecar.disposition === "already-owned";
+      sidecarAlreadyOwned = sidecar.disposition === "already-owned";
       if (sidecar.cleanupFailure !== null) {
         process.stderr.write(
           `mark-subagent-active: implementation sidecar is live but staged cleanup failed for ${agentId}/${sessionId}: ${sidecar.cleanupFailure}\n`,
@@ -203,19 +201,16 @@ const handler: HookHandler = async (stdin) => {
   // agent-type name can match — identity alone cannot answer "may this agent
   // write?". Parsed here (not below) because the roster is written first.
   let rosterSound = true;
-  let rosterMarked = false;
+  let rosterCreated = false;
   if (rosterId !== null) {
     try {
-      await markAgentActive(sessionId, rosterId, rosterAgentType);
-      rosterMarked = true;
+      const rosterAcquisition = await markAgentActive(sessionId, rosterId, rosterAgentType);
+      rosterCreated = rosterAcquisition === "created";
     } catch (e) {
       rosterSound = false;
       const message = `mark-subagent-active: roster update failed — attribution unsound; refusing to arm machine binding for ${agent_id}/${sessionId}: ${e instanceof Error ? e.message : String(e)}`;
       process.stderr.write(`${message}\n`);
       if (modernImplementationAgent) {
-        if (duplicateStart) {
-          return blockResult(`${message}; duplicate SubagentStart preserved the original live capabilities`);
-        }
         const rollbackFailures: string[] = [];
         try {
           if (sidecarPublished && agentId !== null) removeImplementationAttemptSidecar(sessionId, agentId);
@@ -245,13 +240,13 @@ const handler: HookHandler = async (stdin) => {
     );
   }
   let bindingFailure: string | null = null;
-  let machineBound = false;
+  let machineBindingCreated = false;
   if (rosterAgentType && rosterSound) {
     if (guardedMachine.kind !== "none") {
       if (agentId && rosterId !== null) {
         try {
-          await bindMachineAgent(sessionId, rosterAgentType, agentId);
-          machineBound = true;
+          const machineAcquisition = await bindMachineAgent(sessionId, rosterAgentType, agentId);
+          machineBindingCreated = machineAcquisition === "created";
         } catch (error) {
           bindingFailure =
             `mark-subagent-active: bindMachineAgent failed — refusing to run ${rosterAgentType} (${agentId}) ungated: ${error instanceof Error ? error.message : String(error)}`;
@@ -270,14 +265,11 @@ const handler: HookHandler = async (stdin) => {
   // SubagentStop may run in different repo, needs this path.
   // taskGraphPath() resolves at CALL time (like machinesDir above) so the
   // path this handler persists can never drift from what the env says now.
-  let taskGraphPointerBinding: SessionTaskGraphPointerBinding | null = null;
-  let pointerBindingPersisted = false;
+  let pointerLeaseCreated = false;
   if (rosterId !== null) {
     try {
       const claim = await claimPersistedSessionTaskGraphPointerBinding(sessionId, rosterId, activeGraphPath);
-      taskGraphPointerBinding = claim.binding;
-      pointerBindingPersisted = true;
-      duplicateStart = duplicateStart || claim.kind === "already-owned";
+      pointerLeaseCreated = claim.kind === "persisted";
     } catch (error) {
       const pointerFailure =
         `mark-subagent-active: failed to persist task_graph pointer authority for ${sessionId}/${rosterId} — cross-repo SubagentStop cleanup is unavailable: ${error instanceof Error ? error.message : String(error)}`;
@@ -289,20 +281,16 @@ const handler: HookHandler = async (stdin) => {
       `mark-subagent-active: cannot bind task_graph pointer for Loom Agent without a cleanup-capable agent_id`;
   }
 
-  if (bindingFailure !== null && duplicateStart) {
-    return blockResult(`${bindingFailure}; duplicate SubagentStart preserved the original live capabilities`);
-  }
-
   if (bindingFailure !== null && agentId !== null) {
     const rollbackFailures: string[] = [];
-    if (machineBound && rosterAgentType !== null) {
+    if (machineBindingCreated && rosterAgentType !== null) {
       try {
         await fsSessionRegistry.unbind(sessionId, rosterAgentType, agentId);
       } catch (error) {
         rollbackFailures.push(`machine-binding rollback failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    if (rosterMarked && rosterId !== null) {
+    if (rosterCreated && rosterId !== null) {
       try {
         await removeActiveAgentStrict(sessionId, rosterId);
       } catch (error) {
@@ -316,11 +304,9 @@ const handler: HookHandler = async (stdin) => {
         rollbackFailures.push(`sidecar rollback failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    if (taskGraphPointerBinding !== null) {
+    if (pointerLeaseCreated && rosterId !== null) {
       try {
-        const rolledBack = pointerBindingPersisted && rosterId !== null
-          ? await releasePersistedSessionTaskGraphPointerBinding(sessionId, rosterId)
-          : await rollbackSessionTaskGraphPointer(taskGraphPointerBinding);
+        const rolledBack = await releasePersistedSessionTaskGraphPointerBinding(sessionId, rosterId);
         if (rolledBack !== "rolled-back") {
           rollbackFailures.push(`task-graph pointer rollback lost exact ownership (${rolledBack})`);
         }
@@ -331,7 +317,7 @@ const handler: HookHandler = async (stdin) => {
     const registrationRollback = await rollbackIdentifiedRegistration();
     if (registrationRollback !== null) rollbackFailures.push(`exact registration rollback failed: ${registrationRollback}`);
     if (rollbackFailures.length > 0) bindingFailure = `${bindingFailure}; ${rollbackFailures.join("; ")}`;
-  } else if (bindingFailure !== null && rosterMarked && rosterId !== null) {
+  } else if (bindingFailure !== null && rosterCreated && rosterId !== null) {
     try {
       await removeActiveAgentStrict(sessionId, rosterId);
     } catch (error) {

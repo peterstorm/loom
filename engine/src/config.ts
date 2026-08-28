@@ -4,7 +4,7 @@
  * update the docs if changed.
  */
 
-import { execSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { accessSync, constants as fsConstants } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -130,8 +130,9 @@ export const ARCH_PANEL_PHASE: Phase = "architecture";
  *  agent reaching it may be the stored suffixed name (`arch-designer-agent`) OR
  *  its bare form (`arch-designer`). The union of keys those probes hit is
  *  {bare, name, name + "-agent"}. The disjointness guard must forbid ALL of
- *  them — the single-source ARCHITECTURE_AGENTS map already rules out the exact
- *  name appearing in both roles, but NOT a de-suffixed phase agent (`arch-designer`)
+ *  them — the single-source Agent Catalog projection into ARCH_PANEL_AGENTS
+ *  already rules out the exact name appearing in both roles, but NOT a
+ *  de-suffixed phase agent (`arch-designer`)
  *  or a doubly-suffixed one (`arch-designer-agent-agent`) that captures the panel
  *  invocation through detectPhase's other two probes. */
 function phaseLookupKeys(panelAgent: string): string[] {
@@ -281,8 +282,9 @@ export const REVIEW_AGENTS: ReadonlySet<string> = frozenSet([
 export const REVIEW_PANEL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("review-verifier"));
 
 /** Review-panel agents that would be MISROUTED by colliding with a phase,
- *  architecture-panel, impl, review, or utility agent — detectPhase probes bare and `-agent`-
- *  suffixed forms and reaches those sets first. Must always be empty. Exported
+ *  architecture-panel, impl, review, or utility agent — validatePhaseOrder
+ *  passes utility agents through before detectPhase; detectPhase probes bare
+ *  and `-agent`-suffixed forms and reaches the remaining sets first. Must always be empty. Exported
  *  so the guard can be driven with a synthetic overlap in tests. */
 export function reviewPanelOverlap(
   panel: ReadonlySet<string> = REVIEW_PANEL_AGENTS,
@@ -318,10 +320,10 @@ assertReviewPanelDisjoint();
 export const EXECUTE_AGENTS: ReadonlySet<string> = frozenSet([...IMPL_AGENTS, ...REVIEW_AGENTS]);
 
 /** Panel agents that would be MISROUTED away from architecture classification
- *  by colliding with an execute-phase or utility agent. detectPhase
- *  (validate-phase-order.ts) classifies IMPL/REVIEW agents as "execute" — and
- *  short-circuits UTILITY agents to passthrough — BEFORE it reaches the panel
- *  branch, probing both the bare and `-agent`-suffixed forms. So a panel agent
+ *  by colliding with an execute-phase or utility agent. validatePhaseOrder
+ *  short-circuits UTILITY agents to passthrough before detectPhase runs;
+ *  detectPhase classifies IMPL/REVIEW agents as "execute" before reaching the
+ *  panel branch, probing both the bare and `-agent`-suffixed forms. So a panel agent
  *  whose name (or any phaseLookupKeys variant of it) is also an
  *  IMPL/REVIEW/UTILITY agent would never be recognized as architecture work, and
  *  no PHASE_AGENT_MAP entry exists for it — so assertPanelPhaseDisjoint above,
@@ -347,15 +349,15 @@ export function assertPanelExecuteDisjoint(
   assertNoOverlap(
     overlap,
     `loom config invariant violated: panel agents must not also be execute-phase ` +
-      `or utility agents, but these collide: ${overlap.join(", ")}. detectPhase would ` +
-      `classify them as "execute" (or pass them through as utility) before reaching ` +
+      `or utility agents, but these collide: ${overlap.join(", ")}. validatePhaseOrder would ` +
+      `pass them through as utility, or detectPhase would classify them as "execute", before reaching ` +
       `the panel branch, so they would never be recognized as architecture work.`,
   );
 }
 
 // Fail at module load if a panel agent collides with an execute/utility agent —
-// same rationale as assertPanelPhaseDisjoint above, but for the sets detectPhase
-// consults BEFORE the panel branch. Runs once per process at first import.
+// same rationale as assertPanelPhaseDisjoint above, but for the utility check
+// and detectPhase sets reached BEFORE the panel branch. Runs once per process.
 assertPanelExecuteDisjoint();
 
 /** Tool vocabulary (defined in core/tool-vocabulary — re-exported here, config stays the documented home) */
@@ -597,6 +599,27 @@ export function pathExistsFailClosed(path: string): boolean {
     `loom: cannot access ${p}: ${cause} — assuming present (fail closed)`);
 }
 
+const NOT_A_GIT_REPOSITORY = /^fatal: not a git repository(?: \(or any of the parent directories\))?:/m;
+
+/** Resolve Git root without conflating an absent repository with an unavailable probe. */
+function gitRepositoryRoot(): string | null {
+  const probe = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+    encoding: "utf-8",
+    env: { ...process.env, LANG: "C", LC_ALL: "C" },
+  });
+  if (probe.error !== undefined) {
+    throw new Error(`git rev-parse could not start: ${probe.error.message}`);
+  }
+  if (probe.status === 0) {
+    const root = probe.stdout.trim();
+    if (root === "") throw new Error("git rev-parse returned an empty repository root");
+    return root;
+  }
+  if (probe.status === 128 && NOT_A_GIT_REPOSITORY.test(probe.stderr)) return null;
+  const outcome = probe.signal === null ? `exit ${probe.status ?? "unknown"}` : `signal ${probe.signal}`;
+  throw new Error(`git rev-parse failed (${outcome}): ${probe.stderr.trim() || "no diagnostic"}`);
+}
+
 /** Find task graph by walking up from cwd to git root. */
 function findTaskGraphPath(): string {
   const relatives = taskGraphRelatives();
@@ -610,18 +633,15 @@ function findTaskGraphPath(): string {
   }
 
   // Walk up via git rev-parse and preserve candidate priority at the root.
-  try {
-    const root = execSync("git rev-parse --show-toplevel", { encoding: "utf-8" }).trim();
+  // Only a proven non-repository permits fallback. Missing Git, permission,
+  // safe-directory, I/O, and malformed-output failures throw so callers cannot
+  // mistake an unobservable repository-root graph for no graph.
+  const root = gitRepositoryRoot();
+  if (root !== null) {
     for (const relative of relatives) {
       const absolute = join(root, relative);
       if (pathExistsFailClosed(absolute)) return absolute;
     }
-  } catch (e) {
-    // Not a git repo (or git missing): the walk-up is skipped and only the
-    // cwd-relative candidates can resolve.
-    process.stderr.write(
-      `loom: git rev-parse walk-up failed while locating ${relatives.join(" or ")} — falling back to cwd-relative: ${e instanceof Error ? e.message : String(e)}\n`,
-    );
   }
 
   // No graph exists yet: retain the harness-native creation path.

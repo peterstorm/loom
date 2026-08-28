@@ -142,6 +142,9 @@ function readOptionalTextFile(path: string, label: string): string | null {
 
 // --- Bindings ---
 
+/** Whether this invocation minted the capability or merely observed its exact owner. */
+export type CapabilityAcquisition = "created" | "already-owned";
+
 /** One raw binding-file line classified for liveness decisions. */
 type ClassifiedLine =
   | { readonly kind: "fresh"; readonly raw: string; readonly persisted: PersistedBinding }
@@ -432,9 +435,9 @@ export async function markAgentActive(
   sessionId: SessionId,
   agentId: AgentId,
   agentType: AgentType | null = null,
-): Promise<void> {
+): Promise<CapabilityAcquisition> {
   mkdirSync(subagentDir(), { recursive: true, mode: 0o700 });
-  await withLock(bindingLock(sessionId), () => {
+  return withLock(bindingLock(sessionId), () => {
     const path = activeFlagPath(sessionId);
     if (existsSync(path)) {
       // Identity is column 0: a re-marked agent must be recognised as a
@@ -447,13 +450,14 @@ export async function markAgentActive(
         process.stderr.write(
           `markAgentActive: ${agentId} already on the roster for ${sessionId} — duplicate SubagentStart ignored\n`,
         );
-        return;
+        return "already-owned";
       }
     }
     // The type column is what lets PreToolUse authorize by ROLE. Omitting it
     // (unknown type) is safe but downgrades the agent to identity-only
     // authorization, which only the `pi-grant-` prefix satisfies.
     appendFileSync(path, agentType === null ? `${agentId}\n` : `${agentId}\t${agentType}\n`);
+    return "created";
   });
 }
 
@@ -520,9 +524,9 @@ export async function bindMachineAgent(
   agentType: AgentType,
   agentId: AgentId,
   nowMs: number = Date.now(),
-): Promise<void> {
+): Promise<CapabilityAcquisition> {
   mkdirSync(subagentDir(), { recursive: true, mode: 0o700 });
-  await withLock(bindingLock(sessionId), () => {
+  return withLock(bindingLock(sessionId), () => {
     const lines = classifyBindingLines(sessionId, nowMs);
     const kept = lines.filter((l) => l.kind !== "stale");
     // Idempotent on (agentId, agentType): a duplicated SubagentStart must
@@ -541,12 +545,13 @@ export async function bindMachineAgent(
       process.stderr.write(
         `bindMachineAgent: ${agentId}/${agentType} already bound for ${sessionId} — duplicate SubagentStart ignored\n`,
       );
-      return;
+      return "already-owned";
     }
     const binding: MachineBinding = { agentId, agentType, epoch: epochOf(agentId, agentType) };
     const content =
       [...kept.map((l) => l.raw), formatBindingLine(binding, nowMs)].join("\n") + "\n";
     rewriteFileAtomic(machineBindingPath(sessionId), content);
+    return "created";
   });
 }
 

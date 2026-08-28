@@ -155,6 +155,24 @@ describe("malformed hook input is caught, not crashed on (Advisory 4)", () => {
     expect(result.message).toContain("bindings may leak");
   });
 
+  it.each([
+    ["null", "null"],
+    ["scalar", "42"],
+    ["array", "[]"],
+    ["missing session identity", JSON.stringify({ agent_id: "agent-1" })],
+    ["non-string Agent identity", JSON.stringify({ session_id: "session-1", agent_id: 7 })],
+  ])("dispatch: valid JSON with an invalid %s shape fails before cleanup", async (_label, stdin) => {
+    const cleanup = vi.fn(async () => ({ kind: "passthrough" as const }));
+
+    const result = await runDispatch(stdin, [], cleanup);
+
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/invalid SubagentStop input.*cleanup skipped.*bindings may leak/),
+    });
+    expect(cleanup).not.toHaveBeenCalled();
+  });
+
   it("mark-subagent-active: malformed stdin → passthrough + loud stderr", async () => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const result = await markActive("{not json", []);

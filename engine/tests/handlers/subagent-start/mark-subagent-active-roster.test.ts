@@ -95,9 +95,11 @@ afterAll(() => {
     ]) {
       rmSync(join(SUBAGENT_DIR, `${s}.${suffix}`), { recursive: true, force: true });
     }
-    const encodedAgent = Buffer.from("a-1", "utf8").toString("hex");
-    rmSync(join(SUBAGENT_DIR, `${s}.${encodedAgent}.implementation-attempt.json`), { force: true });
-    rmSync(join(SUBAGENT_DIR, `${s}.${encodedAgent}${TASK_GRAPH_POINTER_BINDING_SUFFIX}`), { force: true });
+    for (const agentId of ["a-1", "reviewer-1"]) {
+      const encodedAgent = Buffer.from(agentId, "utf8").toString("hex");
+      rmSync(join(SUBAGENT_DIR, `${s}.${encodedAgent}.implementation-attempt.json`), { force: true });
+      rmSync(join(SUBAGENT_DIR, `${s}.${encodedAgent}${TASK_GRAPH_POINTER_BINDING_SUFFIX}`), { force: true });
+    }
   }
   rmSync(stateDir, { recursive: true, force: true });
 });
@@ -239,6 +241,33 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
       transition: "infrastructure-blocked",
       failureKinds: ["reservation-reclaimed"],
     });
+  });
+
+  it("rolls back only newly acquired capabilities when a prior pointer lease already exists", async () => {
+    const s = session("mixed-duplicate");
+    process.env.LOOM_STATE_PATH = statePath;
+    const previousMachines = process.env.LOOM_MACHINES_DIR;
+    process.env.LOOM_MACHINES_DIR = guardedReviewMachines;
+    try {
+      const payload = start(s, "reviewer-1", "loom:guarded-review-agent");
+      expect((await markActive(payload, [])).kind).toBe("passthrough");
+
+      // Preserve the prior pointer lease, but simulate partial capability loss:
+      // the roster is absent and the machine slot is now unwritable. The retry
+      // creates a roster row, observes the old pointer, then fails machine bind.
+      rmSync(join(SUBAGENT_DIR, `${s}.active`));
+      rmSync(join(SUBAGENT_DIR, `${s}.machine`));
+      mkdirSync(join(SUBAGENT_DIR, `${s}.machine`));
+
+      const retry = await markActive(payload, []);
+
+      expect(retry).toMatchObject({ kind: "block", message: expect.stringContaining("bindMachineAgent failed") });
+      expect(existsSync(join(SUBAGENT_DIR, `${s}.active`))).toBe(false);
+      expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(true);
+    } finally {
+      if (previousMachines === undefined) delete process.env.LOOM_MACHINES_DIR;
+      else process.env.LOOM_MACHINES_DIR = previousMachines;
+    }
   });
 
   it("task_graph pointer write failure blocks a non-implementation Loom Agent", async () => {

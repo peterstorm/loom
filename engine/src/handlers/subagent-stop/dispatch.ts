@@ -5,12 +5,13 @@
  */
 
 import { match } from "ts-pattern";
-import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
+import type { HookHandler, HookResult } from "../../types";
 import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_SUB_AGENTS } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { resolveAgentType } from "../../utils/agent-transcript-path";
 import { parseSessionId, readEvidence } from "../../machine";
+import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 
 import captureOrchestrationResult from "./capture-orchestration-result";
 import cleanupSubagentFlag from "./cleanup-subagent-flag";
@@ -39,18 +40,17 @@ export const runDispatch = async (
   args: string[],
   cleanup: HookHandler = cleanupSubagentFlag,
 ): Promise<HookResult> => {
-  let input: SubagentStopInput;
-  try {
-    input = JSON.parse(stdin);
-  } catch (e) {
+  const parsedInput = parseSubagentStopStdin(stdin);
+  if (!parsedInput.ok) {
     // No trustworthy session or Agent identity exists, so cleanup cannot be
     // named. Fail closed rather than reporting a successful stop that settled
     // nothing and may have leaked runtime authority.
     return {
       kind: "error",
-      message: `dispatch: malformed SubagentStop input — cleanup skipped, bindings may leak: ${e instanceof Error ? e.message : String(e)}`,
+      message: `dispatch: invalid SubagentStop input — cleanup skipped, bindings may leak: ${parsedInput.error}`,
     };
   }
+  const input = parsedInput.value;
 
   // Category handlers are evidence boundaries, not best-effort side effects:
   // a child that reports an error (e.g. storeReviewerFindings could not read

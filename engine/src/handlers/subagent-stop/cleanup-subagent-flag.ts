@@ -3,7 +3,7 @@
  * Locked to prevent race with parallel completions.
  */
 
-import type { HookHandler, SubagentStopInput } from "../../types";
+import type { HookHandler } from "../../types";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { resolveAgentType } from "../../utils/agent-transcript-path";
 import {
@@ -17,6 +17,7 @@ import {
   type SessionRegistry,
 } from "../../machine";
 import { removeImplementationAttemptSidecar } from "../../implementation-attempt-sidecar";
+import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 
 export const runCleanupSubagentFlag = async (
   stdin: string,
@@ -29,15 +30,14 @@ export const runCleanupSubagentFlag = async (
   // where a bare JSON.parse throw would surface as an uncontextualized
   // "Hook error". Malformed input means the roster entry and any binding
   // cannot be released — say so; the liveness TTL eventually reaps them.
-  let input: SubagentStopInput;
-  try {
-    input = JSON.parse(stdin);
-  } catch (e) {
+  const parsedInput = parseSubagentStopStdin(stdin);
+  if (!parsedInput.ok) {
     return {
       kind: "error" as const,
-      message: `cleanup-subagent-flag: malformed SubagentStop input — roster entry and machine binding NOT released (liveness TTL will reap them): ${e instanceof Error ? e.message : String(e)}`,
+      message: `cleanup-subagent-flag: invalid SubagentStop input — roster, sidecar, task-graph pointer, and machine binding NOT released (liveness TTL will reap them): ${parsedInput.error}`,
     };
   }
+  const input = parsedInput.value;
   const { agent_id } = input;
   // Parse the session id once. An unparseable id can address no session file,
   // so nothing can be released here — the liveness TTL reaps it.

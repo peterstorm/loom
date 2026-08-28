@@ -323,7 +323,6 @@ export type TaskExecutionBaselines = ReadonlyMap<string, Readonly<{
 }>>;
 
 export type TaskExecutionAuthorityPlan = Readonly<{
-  taskId: string;
   authority: ImplementationAttemptAuthority;
   baselines: Readonly<{
     proof: readonly DeclaredArtifactBaseline[];
@@ -369,7 +368,7 @@ export function createTaskExecutionAuthorityBatch(
     if (!authority.ok) {
       return { ok: false, error: authority.error.errors.join("; ") };
     }
-    plans.push(Object.freeze({ taskId, authority: authority.value, baselines: taskBaselines }));
+    plans.push(Object.freeze({ authority: authority.value, baselines: taskBaselines }));
   }
   return { ok: true, plans: Object.freeze(plans) };
 }
@@ -445,12 +444,14 @@ export function applyTaskExecutionAuthorityBatch(
   reclaimedAt: IsoInstant,
 ): TaskGraph {
   const staleTaskIds = exactStaleTaskIds(state, stale);
-  const planByTask = new Map(plans.map((plan) => [plan.taskId, plan]));
+  const planByTask = new Map<string, TaskExecutionAuthorityPlan>(
+    plans.map((plan) => [plan.authority.taskId, plan]),
+  );
   return {
     ...state,
     executing_tasks: [...new Set([
       ...(state.executing_tasks ?? []).filter((taskId) => !staleTaskIds.has(taskId)),
-      ...plans.map(({ taskId }) => taskId),
+      ...plans.map(({ authority }): string => authority.taskId),
     ])],
     tasks: state.tasks.map((original): Task => {
       const task = reclaimTaskAttempt(original, stale, reclaimedAt);
@@ -539,8 +540,8 @@ export function taskExecutionRegistrationError(
       }
     }
     if (authorityPlans !== undefined) {
-      const plan = authorityPlans.find((candidate) => candidate.taskId === taskId);
-      if (plan === undefined || plan.authority.taskId !== taskId || plan.authority.wave !== task.wave ||
+      const plan = authorityPlans.find((candidate) => candidate.authority.taskId === taskId);
+      if (plan === undefined || plan.authority.wave !== task.wave ||
           plan.baselines !== baseline) {
         return `Task ${taskId} implementation authority changed before execution registration.`;
       }

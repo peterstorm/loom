@@ -24,9 +24,13 @@ import {
 } from "./ledger";
 
 export const fsSessionRegistry: SessionRegistry = {
-  bind: bindMachineAgent,
+  bind: async (sessionId, agentType, agentId) => {
+    await bindMachineAgent(sessionId, agentType, agentId);
+  },
   unbind: unbindMachineAgent,
-  markActive: markAgentActive,
+  markActive: async (sessionId, agentId) => {
+    await markAgentActive(sessionId, agentId);
+  },
   removeActive: removeActiveAgent,
   countActiveAgents,
   soleActiveBinding: (sessionId) => soleActiveBinding(sessionId),
