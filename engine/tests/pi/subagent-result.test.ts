@@ -339,7 +339,7 @@ describe("applyPhaseAgentPiResult", () => {
       current: () => current,
     };
 
-    await applyPhaseAgentPiResult({
+    const applied = await applyPhaseAgentPiResult({
       store,
       agentType: "specify-agent",
       completedPhase: "specify",
@@ -350,13 +350,48 @@ describe("applyPhaseAgentPiResult", () => {
       now: NOW,
     });
 
+    expect(applied.processingErrors).toEqual([]);
+    expect(applied.log).toEqual([expect.stringContaining("already past")]);
     expect(loadCount).toBe(0);
     expect(store.current().current_phase).toBe("architecture");
     expect(store.current().spec_file).toBeNull();
   });
+
+  it("reports a future phase result as an exact-authority processing error", async () => {
+    const store = fakeStore(graph({ current_phase: "specify" }));
+
+    const applied = await applyPhaseAgentPiResult({
+      store,
+      agentType: "architecture-agent",
+      completedPhase: "architecture",
+      result: result({ agent: "architecture-agent", messages: [] }),
+      now: NOW,
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("cannot advance current Phase specify"),
+    ]);
+    expect(applied.log).toEqual([expect.stringContaining("exact Phase authority required")]);
+    expect(store.current().current_phase).toBe("specify");
+  });
 });
 
 describe("applyFailedPiResult", () => {
+  it("reports a failed phase agent as a processing error without advancing", async () => {
+    const store = fakeStore(graph({ current_phase: "architecture" }));
+
+    const applied = await applyFailedPiResult({
+      store,
+      agentType: "architecture-agent",
+      result: result({ agent: "architecture-agent", exitCode: 1 }),
+      reservedSlot: { agentType: "architecture-agent", taskId: null },
+      now: NOW,
+    });
+
+    expect(applied.processingErrors).toEqual([expect.stringContaining("phase was not advanced")]);
+    expect(store.current().current_phase).toBe("architecture");
+  });
+
   it("stores an evidence failure against the reviewer's task", async () => {
     const store = fakeStore(graph());
     const applied = await applyFailedPiResult({
@@ -486,6 +521,45 @@ describe("applyFailedPiResult", () => {
           packetId: "a".repeat(64),
           slotId: "review-slot:old",
           attempted: 1,
+        },
+      },
+      parentPrompt: "",
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("does not match exact current Task/Review Run slot authority"),
+    ]);
+    expect(store.current()).toEqual(parsedGraph(current));
+  });
+
+  it("rejects stale malformed reviewer messages after a newer Review Run replaces the reservation", async () => {
+    const base = graph();
+    const current = graph({
+      tasks: [{
+        ...base.tasks[0]!,
+        review_generation: 2,
+        review_run: {
+          generation: 2,
+          packet_id: "d".repeat(64),
+          head_sha: "4".repeat(40),
+          expected_agents: ["code-reviewer"],
+          prior_finding_ids: [],
+          evidence: [],
+          slot_authority: [{ agent: "code-reviewer", slot_id: "review-slot:new-malformed", attempted: 1 }],
+        },
+      }],
+    });
+    const store = fakeStore(current);
+    const applied = await applyReviewPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ messages: [{ role: 42 }] }),
+      reservedSlot: {
+        agentType: "code-reviewer",
+        taskId: "T1",
+        reviewAuthority: {
+          taskId: "T1", agentType: "code-reviewer", generation: 1,
+          packetId: "c".repeat(64), slotId: "review-slot:old-malformed", attempted: 1,
         },
       },
       parentPrompt: "",

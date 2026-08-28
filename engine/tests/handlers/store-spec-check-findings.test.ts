@@ -312,6 +312,57 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
     }
   });
 
+  it("rejects authority-free spec-check evidence after modern Wave authority is retired", async () => {
+    const { SUBAGENT_DIR } = await import("../../src/config");
+    const tmpDir = join(tmpdir(), `spec-check-retired-modern-${Date.now()}`);
+    mkdirSync(tmpDir, { recursive: true });
+    const statePath = join(tmpDir, "active_task_graph.json");
+    const initial = {
+      spec_trace_version: 2,
+      current_phase: "execute",
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      current_wave: 1,
+      tasks: [],
+      wave_gates: {},
+      spec_check: {
+        wave: 1, run_at: "accepted", verdict: "PASSED", critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+    };
+    writeFileSync(statePath, JSON.stringify(initial));
+    const transcriptPath = join(tmpDir, "transcript.jsonl");
+    writeFileSync(transcriptPath, JSON.stringify({
+      type: "assistant",
+      message: { content: [{
+        type: "text",
+        text: "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 1\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: BLOCKED\nCRITICAL: late stale result",
+      }] },
+    }));
+    const session = `spec-check-retired-modern-${process.pid}-${Date.now()}`;
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
+    writeFileSync(pointer, statePath);
+    try {
+      const result = await handler(JSON.stringify({
+        session_id: session,
+        agent_type: "spec-check-invoker",
+        agent_transcript_path: transcriptPath,
+      }), []);
+
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringContaining("modern Wave spec-check has no current capture-correlated request authority"),
+      });
+      expect(JSON.parse(readFileSync(statePath, "utf8"))).toEqual(initial);
+    } finally {
+      rmSync(pointer, { force: true });
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("count/findings mismatch → EVIDENCE_CAPTURE_FAILED (fail closed, mirrors the manual store-spec-check helper)", async () => {
     const { SUBAGENT_DIR } = await import("../../src/config");
     const { mkdirSync: mkdir } = await import("node:fs");

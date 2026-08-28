@@ -25,7 +25,21 @@ function specCheckAuthorityProblem(
 ): string | null {
   const epoch = state.wave_review_epoch;
   const active = state.active_wave_gate;
-  if (epoch === undefined && active === undefined) return null; // legacy compatibility
+  if (epoch === undefined && active === undefined) {
+    const modernAuthorityHistory = state.spec_trace_version === 2 ||
+      state.verification_manifest !== undefined ||
+      state.active_wave_completion_suite !== undefined ||
+      (state.wave_gate_history?.length ?? 0) > 0 ||
+      (state.wave_reopening_history?.length ?? 0) > 0 ||
+      (state.orphaned_wave_gate_history?.length ?? 0) > 0 ||
+      (state.spec_trace_wave_gate_retirements?.length ?? 0) > 0;
+    if (authority !== undefined) {
+      return `captured spec-check request ${authority.runId}/${authority.slotId}/${authority.attempt} has no current Wave authority`;
+    }
+    return modernAuthorityHistory
+      ? "modern Wave spec-check has no current capture-correlated request authority"
+      : null;
+  }
   if (authority === undefined) return "modern Wave spec-check has no capture-correlated request authority";
   if (authority.role !== "spec-check-invoker") return `captured request belongs to ${authority.role}`;
   const slot = epoch?.specCheckSlotAuthority;

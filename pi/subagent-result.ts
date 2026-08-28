@@ -48,6 +48,7 @@ import {
 import { reconcileWaveBlock } from "../engine/src/core/wave-gate-model";
 import { phaseArtifactUpdates } from "../engine/src/core/phase-artifact-paths";
 import { agentsOfKind } from "../engine/src/core/model-profiles";
+import { PHASES } from "../engine/src/core/phases";
 import type {
   Phase,
   TaskGraph,
@@ -89,6 +90,7 @@ import {
 } from "./transcript-adapter";
 
 const IMPL_AGENTS: ReadonlySet<string> = new Set(agentsOfKind("impl"));
+const PHASE_AGENTS: ReadonlySet<string> = new Set(agentsOfKind("phase"));
 const REVIEW_AGENTS: ReadonlySet<string> = new Set(agentsOfKind("reviewer"));
 const isReviewAgent = (agentType: string): boolean => REVIEW_AGENTS.has(agentType);
 
@@ -601,6 +603,10 @@ export async function applyFailedPiResult(args: Readonly<{
   if (IMPL_AGENTS.has(agentType)) {
     return applyFailedImplementationResult({ store, agentType, result, reservedSlot, failure, now: args.now });
   }
+  if (PHASE_AGENTS.has(agentType)) {
+    const message = `loom(pi): ${failure} — phase was not advanced`;
+    return outcome([message], [message]);
+  }
   return outcome([`loom(pi): ${failure} — completion evidence ignored`]);
 }
 
@@ -629,10 +635,9 @@ export function writtenPathsOf(
 
 type PhaseTransition = Extract<ReturnType<typeof resolveTransition>, { kind: "ready" }>;
 
-type PiPhasePreparation = Readonly<{
-  state: TaskGraph;
-  transitionEligible: boolean;
-}>;
+type PiPhasePreparation =
+  | Readonly<{ kind: "eligible"; state: TaskGraph }>
+  | Readonly<{ kind: "mismatch"; state: TaskGraph; relation: "past" | "future" }>;
 
 /** Pure locked-state reducer: stale/future phase results cannot route artifacts or advance. */
 function preparePiPhaseResult(
@@ -641,12 +646,18 @@ function preparePiPhaseResult(
   writtenPaths: readonly string[],
 ): PiPhasePreparation {
   if (state.current_phase !== completedPhase) {
-    return Object.freeze({ state, transitionEligible: false });
+    const currentIndex = PHASES.indexOf(state.current_phase);
+    const completedIndex = PHASES.indexOf(completedPhase);
+    return Object.freeze({
+      kind: "mismatch",
+      state,
+      relation: currentIndex > completedIndex ? "past" : "future",
+    });
   }
   const updates = phaseArtifactUpdates(writtenPaths, state.spec_dir ?? undefined);
   return Object.freeze({
+    kind: "eligible",
     state: Object.keys(updates).length === 0 ? state : { ...state, ...updates },
-    transitionEligible: true,
   });
 }
 
@@ -669,6 +680,61 @@ function reducePiPhaseTransition(
       : state.skipped_phases,
     updated_at: now,
   };
+}
+
+function phaseMismatchOutcome(
+  prepared: Extract<PiPhasePreparation, { kind: "mismatch" }>,
+  agentType: string,
+  completedPhase: Phase,
+): PiResultOutcome {
+  const diagnostic = prepared.relation === "past"
+    ? `Phase ${completedPhase} is already past (current: ${prepared.state.current_phase}); stale result ignored`
+    : `${agentType} result cannot advance current Phase ${prepared.state.current_phase}; exact Phase authority required`;
+  return outcome(
+    [`loom(pi): ${diagnostic}`],
+    prepared.relation === "future" ? [diagnostic] : [],
+  );
+}
+
+function reduceLockedPiPhaseResult(
+  locked: TaskGraph,
+  args: Readonly<{ agentType: string; completedPhase: Phase; now: string }>,
+  writtenPaths: readonly string[],
+): Readonly<{ state: TaskGraph; value: PiResultOutcome }> {
+  let prepared: PiPhasePreparation;
+  try {
+    prepared = preparePiPhaseResult(locked, args.completedPhase, writtenPaths);
+  } catch (error) {
+    const diagnostic = `${args.agentType} phase artifact extraction failed: ` +
+      `${error instanceof Error ? error.message : String(error)}`;
+    return {
+      state: locked,
+      value: outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]),
+    };
+  }
+  if (prepared.kind === "mismatch") {
+    return {
+      state: prepared.state,
+      value: phaseMismatchOutcome(prepared, args.agentType, args.completedPhase),
+    };
+  }
+  try {
+    const transition = resolveTransition(args.completedPhase, prepared.state);
+    if (transition.kind === "not-ready") {
+      const diagnostic = `${args.agentType} completed but phase transition is not ready: ${transition.reason}`;
+      return {
+        state: prepared.state,
+        value: outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]),
+      };
+    }
+    return {
+      state: reducePiPhaseTransition(prepared.state, args.completedPhase, transition, args.now),
+      value: outcome(),
+    };
+  } catch (error) {
+    const diagnostic = `phase advancement failed: ${error instanceof Error ? error.message : String(error)}`;
+    return { state: prepared.state, value: outcome([`loom: ${diagnostic}`], [diagnostic]) };
+  }
 }
 
 /**
@@ -695,37 +761,8 @@ export async function applyPhaseAgentPiResult(args: Readonly<{
   }
   const writtenPaths = writtenPathsOf(parsed.value);
   try {
-    return await args.store.updateAndReturn((locked) => {
-      let prepared: PiPhasePreparation;
-      try {
-        prepared = preparePiPhaseResult(locked, args.completedPhase, writtenPaths);
-      } catch (error) {
-        const diagnostic = `${args.agentType} phase artifact extraction failed: ` +
-          `${error instanceof Error ? error.message : String(error)}`;
-        return {
-          state: locked,
-          value: outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]),
-        };
-      }
-      if (!prepared.transitionEligible) return { state: prepared.state, value: outcome() };
-      try {
-        const transition = resolveTransition(args.completedPhase, prepared.state);
-        if (transition.kind === "not-ready") {
-          const diagnostic = `${args.agentType} completed but phase transition is not ready: ${transition.reason}`;
-          return {
-            state: prepared.state,
-            value: outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]),
-          };
-        }
-        return {
-          state: reducePiPhaseTransition(prepared.state, args.completedPhase, transition, args.now),
-          value: outcome(),
-        };
-      } catch (error) {
-        const diagnostic = `phase advancement failed: ${error instanceof Error ? error.message : String(error)}`;
-        return { state: prepared.state, value: outcome([`loom: ${diagnostic}`], [diagnostic]) };
-      }
-    });
+    return await args.store.updateAndReturn((locked) =>
+      reduceLockedPiPhaseResult(locked, args, writtenPaths));
   } catch (error) {
     const diagnostic = `phase state commit failed: ${error instanceof Error ? error.message : String(error)}`;
     return outcome([`loom: ${diagnostic}`], [diagnostic]);
