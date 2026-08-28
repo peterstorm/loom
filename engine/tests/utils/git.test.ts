@@ -302,14 +302,16 @@ describe("countAssertions (pure)", () => {
     expect(countAssertions(diff)).toBe(0);
   });
 
-  it("retains tests after a TSX generic-arrow helper", () => {
+  it("retains tests after TSX generic-arrow helpers with nested and quoted constraints", () => {
     const diff = [
       "diff --git a/example.test.tsx b/example.test.tsx",
       "--- a/example.test.tsx",
       "+++ b/example.test.tsx",
-      "@@ -0,0 +1,2 @@",
+      "@@ -0,0 +1,4 @@",
       "+const identity = <T,>(value: T) => value;",
-      "+test('works', () => expect(identity(1)).toBe(1));",
+      "+const nested = <T extends Record<string, Array<number>>>(value: T) => value;",
+      "+const quoted = <T extends Record<'closing>token', number>>(value: T) => value;",
+      "+test('works', () => expect(nested(quoted(identity({ value: [1] })))).toBeDefined());",
     ].join("\n");
 
     expect(countNewTests(diff).ts).toBe(1);

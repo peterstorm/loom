@@ -7,6 +7,7 @@
 import type { HookHandler } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
 import { parseSpecCheckOutput, reconcileSpecCheck } from "../../core/spec-check";
+import { reconcileWaveBlock } from "../../core/wave-gate-model";
 import { StateManager } from "../../state-manager";
 
 const handler: HookHandler = async (stdin) => {
@@ -28,7 +29,11 @@ const handler: HookHandler = async (stdin) => {
     return { kind: "error", message: resolution.specCheck.error };
   }
 
-  await mgr.update((s) => ({ ...s, spec_check: resolution.specCheck }));
+  await mgr.update((state) => ({
+    ...state,
+    spec_check: resolution.specCheck,
+    wave_gates: reconcileWaveBlock(state.wave_gates, state.tasks, resolution.specCheck, wave),
+  }));
   process.stderr.write(
     `Spec-check stored: wave=${wave} critical=${resolution.specCheck.critical_count} verdict=${resolution.specCheck.verdict}\n`,
   );

@@ -116,12 +116,7 @@ export {
   readIssuedRequests,
 } from "../../orchestration/harness-capture-runtime";
 
-/**
- * Capture one finished Claude agent. Pure with respect to decisions: every
- * refusal is returned as a typed outcome the caller audits. Accepted captures
- * write transcript evidence; refusals that reached a reservation may durably
- * record a rejection marker and journal event.
- */
+/** Resolve the exact issued request bound to this Claude SubagentStop correlator. */
 export function resolveClaudeRequestAuthority(
   input: SubagentStopInput,
   runsRoot: string | undefined,
@@ -138,6 +133,12 @@ export function resolveClaudeRequestAuthority(
   return readIssuedRequests(opened.value).find(({ requestId }) => requestId === identity.requestId) ?? null;
 }
 
+/**
+ * Capture one finished Claude agent. Pure with respect to decisions: every
+ * refusal is returned as a typed outcome the caller audits. Accepted captures
+ * write transcript evidence; refusals that reached a reservation may durably
+ * record a rejection marker and journal event.
+ */
 export async function captureClaudeResult(
   input: SubagentStopInput,
   runsRoot: string | undefined,

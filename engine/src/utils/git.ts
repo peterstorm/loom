@@ -409,16 +409,40 @@ const nonWhitespaceAfter = (line: string, index: number): string | null => {
   return null;
 };
 
-/** A root TSX tag can only begin where an expression may begin, never at an operator's `>`. */
-const beginsTsxGenericParameters = (line: string, index: number): boolean => {
-  const tail = line.slice(index + 1);
-  const close = tail.indexOf(">");
-  const candidate = close < 0 ? tail : tail.slice(0, close);
-  if (!/^[A-Za-z_$][\w$]*(?:\s+extends\b|\s*,)/.test(candidate)) return false;
-  if (close < 0) return true;
-  return nonWhitespaceAfter(line, index + close + 1) === "(";
+/** Find the closing `>` of a TS generic list, ignoring nested generics and quoted type literals. */
+const matchingGenericClose = (line: string, index: number): number | null => {
+  let depth = 1;
+  let quote: "'" | '"' | "`" | null = null;
+  let escaped = false;
+  for (let cursor = index + 1; cursor < line.length; cursor += 1) {
+    const char = line[cursor]!;
+    if (quote !== null) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+    } else if (char === "<") {
+      depth += 1;
+    } else if (char === ">" && line[cursor - 1] !== "=") {
+      depth -= 1;
+      if (depth === 0) return cursor;
+    }
+  }
+  return null;
 };
 
+/** Detect a TSX generic-arrow prefix without treating it as a root JSX tag. */
+const beginsTsxGenericParameters = (line: string, index: number): boolean => {
+  const close = matchingGenericClose(line, index);
+  const candidate = line.slice(index + 1, close ?? undefined);
+  if (!/^[A-Za-z_$][\w$]*(?:\s+extends\b|\s*,)/.test(candidate)) return false;
+  return close === null || nonWhitespaceAfter(line, close) === "(";
+};
+
+/** A root TSX tag can only begin where an expression may begin, never at an operator's `>`. */
 const beginsRootJsxTag = (line: string, index: number): boolean => {
   if (line[index] !== "<" || beginsTsxGenericParameters(line, index)) return false;
   const next = nonWhitespaceAfter(line, index);

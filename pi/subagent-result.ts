@@ -1411,15 +1411,17 @@ function reducePiSpecCheckResult(
   }
   const wave = authorityDecision.authority.wave;
   if (observation.kind === "capture-failed") {
+    const specCheck = {
+      wave,
+      run_at: now,
+      verdict: "EVIDENCE_CAPTURE_FAILED" as const,
+      error: observation.error,
+    };
     return {
       state: {
         ...state,
-        spec_check: {
-          wave,
-          run_at: now,
-          verdict: "EVIDENCE_CAPTURE_FAILED",
-          error: observation.error,
-        },
+        spec_check: specCheck,
+        wave_gates: reconcileWaveBlock(state.wave_gates, state.tasks, specCheck, wave),
       },
       value: outcome([`loom(pi): ${observation.error} — marking spec-check evidence_capture_failed`]),
     };
@@ -1428,7 +1430,11 @@ function reducePiSpecCheckResult(
   const resolution = reconcileSpecCheck(observation.findings, wave, now);
   if (resolution.kind === "evidence-failed") {
     return {
-      state: { ...state, spec_check: resolution.specCheck },
+      state: {
+        ...state,
+        spec_check: resolution.specCheck,
+        wave_gates: reconcileWaveBlock(state.wave_gates, state.tasks, resolution.specCheck, wave),
+      },
       value: outcome([`loom(pi): ${resolution.specCheck.error} — marking spec-check evidence_capture_failed`]),
     };
   }

@@ -40,7 +40,6 @@ import {
   parseAcceptedWaveCompletionReceipt,
   type AcceptedWaveCompletionReceipt,
   type CompletionAuthorityFailure,
-  type CompletionCheckId,
   type CompletionInfrastructureFailure,
 } from "./completion-suite";
 import { compareStrings } from "./ordering";
@@ -787,6 +786,12 @@ function completionSuiteReadinessSource(
       });
 }
 
+function sortedUniqueNonEmpty<T extends string>(head: T, tail: readonly T[]): NonEmpty<T> {
+  const [first, ...rest] = [...new Set([head, ...tail])].sort(compareStrings);
+  if (first === undefined) throw new Error("non-empty completion failure set became empty");
+  return Object.freeze([first, ...rest]);
+}
+
 function completionEvaluationFailureDetail(
   authorityFailures: readonly CompletionAuthorityFailure[],
   infrastructureFailures: readonly CompletionInfrastructureFailure[],
@@ -884,8 +889,9 @@ export function deriveWaveCompletionSuiteReadiness(
         manifestDigest,
       );
     }
+    const firstSemanticFailure = evaluation.semanticFailures[0];
     if (evaluation.authorityFailures.length > 0 || evaluation.infrastructureFailures.length > 0 ||
-        evaluation.semanticFailures.length === 0) {
+        firstSemanticFailure === undefined) {
       return requiredWaveCompletionSuite(
         "completion-result-invalid",
         completionEvaluationFailureDetail(
@@ -895,10 +901,15 @@ export function deriveWaveCompletionSuiteReadiness(
         manifestDigest,
       );
     }
-    const failureKinds = [...new Set(evaluation.semanticFailures.map((failure) => failure.kind))]
-      .sort(compareStrings);
-    const checkIds = [...new Set(evaluation.semanticFailures.map((failure) => failure.checkId))]
-      .sort(compareStrings) as readonly CompletionCheckId[];
+    const remainingSemanticFailures = evaluation.semanticFailures.slice(1);
+    const failureKinds = sortedUniqueNonEmpty(
+      firstSemanticFailure.kind,
+      remainingSemanticFailures.map((failure) => failure.kind),
+    );
+    const checkIds = sortedUniqueNonEmpty(
+      firstSemanticFailure.checkId,
+      remainingSemanticFailures.map((failure) => failure.checkId),
+    );
     return canonicalRecord({
       kind: "rejected",
       verificationManifestDigest: manifest.manifestDigest,

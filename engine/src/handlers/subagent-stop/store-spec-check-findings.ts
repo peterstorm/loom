@@ -92,7 +92,11 @@ export const runStoreSpecCheckFindings = async (
     const resolution = reconcileSpecCheck(findings, wave, new Date().toISOString());
     if (resolution.kind === "evidence-failed") {
       return {
-        state: { ...state, spec_check: resolution.specCheck },
+        state: {
+          ...state,
+          spec_check: resolution.specCheck,
+          wave_gates: reconcileWaveBlock(state.wave_gates, state.tasks, resolution.specCheck, wave),
+        },
         value: passthroughResult(`WARNING: ${resolution.specCheck.error} — marking evidence_capture_failed`),
       };
     }

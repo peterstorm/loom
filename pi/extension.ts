@@ -21,6 +21,7 @@ import { shouldBlockDirectEdit } from "../engine/src/core/block-direct-edits";
 import { activeRosterProbe } from "../engine/src/handlers/pre-tool-use/block-direct-edits";
 import { guardStateFileDecision } from "../engine/src/core/guard-state-file";
 import { validatePhaseOrder } from "../engine/src/core/validate-phase-order";
+import { reconcileWaveBlock } from "../engine/src/core/wave-gate-model";
 // Both harnesses share ONE protected-state read seam, so a Pi gate and a
 // Claude gate cannot disagree about what "no active plan" means.
 import { realPhaseOrderDeps } from "../engine/src/handlers/pre-tool-use/validate-phase-order";
@@ -489,8 +490,9 @@ function sessionRunBinding(
  * Pi's native correlator is `piSpawnRosterId(toolCallId, index, agent)` — the
  * same stable per-spawn identity the lifecycle registry already uses, and the
  * only thing available on both the spawn and result sides of a Pi batch. The
- * spawn side records it beside the reservation; a result whose correlator is
- * absent belongs to some other agent and is ignored, not failed.
+ * spawn side records it beside the reservation. A request-bound result whose
+ * correlator is absent is rejected as an authority-processing error; unrelated
+ * unbound legacy results never enter this correlation path.
  *
  * This is a fail-spawn boundary and therefore throws when exact run/request
  * authority cannot be recorded. The tool-call guard catches the failure,
@@ -2019,8 +2021,16 @@ export default function (pi: ExtensionAPI) {
                   };
                 }
               }
+              const specCheck = specCheckPatch?.spec_check;
               return {
-                state: { ...state, tasks, ...(specCheckPatch ?? {}) },
+                state: {
+                  ...state,
+                  tasks,
+                  ...(specCheckPatch ?? {}),
+                  ...(specCheck === undefined
+                    ? {}
+                    : { wave_gates: reconcileWaveBlock(state.wave_gates, tasks, specCheck, specCheck.wave) }),
+                },
                 value: Object.freeze({
                   appliedReviewIndexes: Object.freeze(appliedReviewIndexes),
                   specAuthorityProblems: Object.freeze(specAuthorityProblems),

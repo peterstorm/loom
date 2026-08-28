@@ -500,9 +500,18 @@ describe("applyFailedPiResult", () => {
     expect(applied.processingErrors[0]).toContain("ambiguous");
   });
 
-  it("marks an exactly reserved failed spec-check as evidence_capture_failed", async () => {
+  it("marks an exactly reserved failed spec-check as evidence_capture_failed and clears its obsolete block", async () => {
     const fixture = graphWithSpecCheckAuthority();
-    const store = fakeStore(fixture.state);
+    const store = fakeStore({
+      ...fixture.state,
+      spec_check: {
+        wave: 1, run_at: "earlier", verdict: "BLOCKED", critical_count: 1, high_count: 0,
+        critical_findings: ["earlier blocker"], high_findings: [], medium_findings: [],
+      },
+      wave_gates: {
+        "1": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: true },
+      },
+    });
     await applyFailedPiResult({
       store,
       agentType: "spec-check-invoker",
@@ -512,6 +521,7 @@ describe("applyFailedPiResult", () => {
     });
 
     expect(store.current().spec_check).toMatchObject({ verdict: "EVIDENCE_CAPTURE_FAILED", wave: 1 });
+    expect(store.current().wave_gates["1"]?.blocked).toBe(false);
   });
 
   it("carries the harness failure signals into the stored diagnostic", async () => {
@@ -731,17 +741,36 @@ describe("applySpecCheckPiResult", () => {
     expect(store.current().wave_gates["1"]?.blocked ?? false).toBe(false);
   });
 
-  it("marks malformed spec-check messages as evidence_capture_failed", async () => {
+  it.each([
+    ["malformed messages", [{ role: 42 }]],
+    ["count-mismatched evidence", assistantText([
+      "SPEC_CHECK_WAVE: 1",
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+      "CRITICAL: uncounted blocker",
+    ].join("\n"))],
+  ])("replaces a prior block with evidence_capture_failed for %s", async (_label, messages) => {
     const fixture = graphWithSpecCheckAuthority();
-    const store = fakeStore(fixture.state);
+    const store = fakeStore({
+      ...fixture.state,
+      spec_check: {
+        wave: 1, run_at: "earlier", verdict: "BLOCKED", critical_count: 1, high_count: 0,
+        critical_findings: ["earlier blocker"], high_findings: [], medium_findings: [],
+      },
+      wave_gates: {
+        "1": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: true },
+      },
+    });
     await applySpecCheckPiResult({
       store,
-      result: result({ agent: "spec-check-invoker", messages: [{ role: 42 }] }),
+      result: result({ agent: "spec-check-invoker", messages }),
       reservedSlot: fixture.reservedSlot,
       now: NOW,
     });
 
     expect(store.current().spec_check).toMatchObject({ verdict: "EVIDENCE_CAPTURE_FAILED" });
+    expect(store.current().wave_gates["1"]?.blocked).toBe(false);
   });
 
   it("uses locked current_wave when the transcript omits its Wave despite a stale load", async () => {

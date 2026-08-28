@@ -859,8 +859,8 @@ export type WaveCompletionSuiteReadiness =
       verificationManifestDigest: ArtifactDigest;
       suiteDigest: ArtifactDigest;
       workspaceDigest: ArtifactDigest;
-      failureKinds: readonly CompletionSemanticFailure["kind"][];
-      checkIds: readonly CompletionCheckId[];
+      failureKinds: OrchestrationNonEmpty<CompletionSemanticFailure["kind"]>;
+      checkIds: OrchestrationNonEmpty<CompletionCheckId>;
     }>
   | Readonly<{
       kind: "stale";

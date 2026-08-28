@@ -139,6 +139,24 @@ describe("countAssertions — property tests", () => {
     );
   });
 
+  it("nested TSX generic-arrow constraints never suppress following executable evidence", () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 1, max: 24 }), (depth) => {
+        const constraint = `${"Box<".repeat(depth)}string${">".repeat(depth)}`;
+        const diff = [
+          "diff --git a/example.test.tsx b/example.test.tsx",
+          "--- a/example.test.tsx",
+          "+++ b/example.test.tsx",
+          "@@ -0,0 +1,2 @@",
+          `+const nested = <T extends ${constraint}>(value: T) => value;`,
+          "+test('works', () => expect(nested(value)).toBe(value));",
+        ].join("\n");
+        expect(countNewTests(diff).ts).toBe(1);
+        expect(countAssertions(diff)).toBe(1);
+      }),
+    );
+  });
+
   it("Rust raw strings never expose evidence-shaped contents", () => {
     fc.assert(
       fc.property(

@@ -326,7 +326,13 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
       plan_file: null,
       current_wave: 1,
       tasks: [],
-      wave_gates: {},
+      spec_check: {
+        wave: 1, run_at: "earlier", verdict: "BLOCKED", critical_count: 1, high_count: 0,
+        critical_findings: ["earlier blocker"], high_findings: [], medium_findings: [],
+      },
+      wave_gates: {
+        "1": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: true },
+      },
     }));
     // A reported count of 0 alongside a listed CRITICAL finding must become a
     // typed capture failure rather than contradictory spec-check evidence.
@@ -361,6 +367,7 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
       const state = JSON.parse(readFileSync(statePath, "utf-8"));
       expect(state.spec_check.verdict).toBe("EVIDENCE_CAPTURE_FAILED");
       expect(state.spec_check.error).toContain("does not match");
+      expect(state.wave_gates["1"].blocked).toBe(false);
     } finally {
       stderrSpy.mockRestore();
       rmSync(tmpDir, { recursive: true, force: true });

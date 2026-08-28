@@ -3368,7 +3368,7 @@ describe("Pi extension review tool_result integration", () => {
       results: [{ agent: "code-reviewer", task: "spec check", exitCode: 0, messages: [] }],
     }],
     ["malformed matching envelope", { results: [{ agent: "spec-check-invoker" }] }],
-  ])("replaces stale passing spec evidence for a reserved %s result", async (label, details) => {
+  ])("replaces stale blocking spec evidence for a reserved %s result", async (label, details) => {
     const planPath = join(temp, `reserved-spec-${label.replaceAll(" ", "-")}.md`);
     writeFileSync(planPath, "# Plan\n");
     writeState(specCheckGraph({
@@ -3376,8 +3376,11 @@ describe("Pi extension review tool_result integration", () => {
       skipped_phases: ["plan-alignment"],
       plan_file: planPath,
       spec_check: {
-        wave: 1, run_at: "earlier", verdict: "PASSED", critical_count: 0, high_count: 0,
-        critical_findings: [], high_findings: [], medium_findings: [],
+        wave: 1, run_at: "earlier", verdict: "BLOCKED", critical_count: 1, high_count: 0,
+        critical_findings: ["earlier blocker"], high_findings: [], medium_findings: [],
+      },
+      wave_gates: {
+        "1": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: true },
       },
     }));
     const pi = await extension();
@@ -3401,11 +3404,13 @@ describe("Pi extension review tool_result integration", () => {
       details,
     }, context);
 
-    expect(JSON.parse(readFileSync(statePath, "utf-8")).spec_check).toMatchObject({
+    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(state.spec_check).toMatchObject({
       wave: 1,
       verdict: "EVIDENCE_CAPTURE_FAILED",
       error: expect.stringContaining("reserved spec-check result 1"),
     });
+    expect(state.wave_gates["1"].blocked).toBe(false);
   });
 
   it("does not advance a failed phase agent even when its messages contain a valid artifact", async () => {

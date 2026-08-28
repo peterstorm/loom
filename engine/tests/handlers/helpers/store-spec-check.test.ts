@@ -77,6 +77,31 @@ describe("store-spec-check helper", () => {
     expect(spec!.critical_findings).toEqual(["requirement REQ-1 not implemented"]);
   });
 
+  it("replaces a prior critical spec-check and clears its derived Wave block", () => {
+    const blocked: TaskGraph = {
+      ...readState(),
+      spec_check: {
+        wave: 1, run_at: "earlier", verdict: "BLOCKED", critical_count: 1, high_count: 0,
+        critical_findings: ["earlier blocker"], high_findings: [], medium_findings: [],
+      },
+      wave_gates: {
+        "1": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: true },
+      },
+    };
+    writeFileSync(statePath, JSON.stringify(blocked, null, 2));
+
+    const { exitCode } = runHelper([
+      "SPEC_CHECK_WAVE: 1",
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+    ].join("\n"));
+
+    expect(exitCode).toBe(0);
+    expect(readState().spec_check?.verdict).toBe("PASSED");
+    expect(readState().wave_gates["1"]?.blocked).toBe(false);
+  });
+
   it("fails closed when CRITICAL_COUNT disagrees with the CRITICAL: lines (forged-zero shape)", () => {
     const { exitCode, stderr } = runHelper(
       [
