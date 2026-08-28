@@ -24,7 +24,10 @@ import { describe, expect, it, vi } from "vitest";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import handler, { unavailableReviewerResolution } from "../../../src/handlers/subagent-stop/store-reviewer-findings";
+import handler, {
+  retainedReviewGeneration,
+  unavailableReviewerResolution,
+} from "../../../src/handlers/subagent-stop/store-reviewer-findings";
 import { SUBAGENT_DIR } from "../../../src/config";
 import type { Task } from "../../../src/types";
 
@@ -119,6 +122,28 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
       review_generation: 2,
     } as unknown as Task;
 
+    expect(retainedReviewGeneration({
+      ...retired,
+      review_generation: undefined,
+      accepted_review_authority: {
+        generation: 3,
+        packet_id: "a".repeat(64),
+        head_sha: "1".repeat(40),
+        scope: [],
+      },
+    })).toBe(3);
+    expect(retainedReviewGeneration({
+      ...retired,
+      review_generation: undefined,
+      issued_review_packets: [{
+        task_id: "T1",
+        packet_id: "b".repeat(64),
+        packet_path: "packets/T1.json",
+        base_sha: "2".repeat(40),
+        head_sha: "3".repeat(40),
+        scope: [],
+      }],
+    })).toBe(0);
     expect(unavailableReviewerResolution(retired, "code-reviewer", "transcript unreadable"))
       .toEqual({
         kind: "ignored-stale",

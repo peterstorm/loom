@@ -299,14 +299,19 @@ function reviewAuthorityForTask(
 ): PiReviewAttemptAuthority | null {
   const run = task.review_run;
   if (run === undefined) {
-    return Object.freeze({
-      taskId: task.id,
-      agentType,
-      generation: task.review_generation ?? 0,
-      packetId: null,
-      slotId: null,
-      attempted: null,
-    });
+    const explicitlyLegacy = task.review_generation === undefined &&
+      task.accepted_review_authority === undefined &&
+      (task.issued_review_packets?.length ?? 0) === 0;
+    return explicitlyLegacy
+      ? Object.freeze({
+          taskId: task.id,
+          agentType,
+          generation: 0,
+          packetId: null,
+          slotId: null,
+          attempted: null,
+        })
+      : null;
   }
   const slot = run.slot_authority?.find((candidate) => candidate.agent === agentType);
   if (slot === undefined) return null;

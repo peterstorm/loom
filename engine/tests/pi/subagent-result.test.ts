@@ -23,6 +23,7 @@ import {
   applyPhaseAgentPiResult,
   applyReviewPiResult,
   applySpecCheckPiResult,
+  currentPiReviewAuthority,
   currentPiSpecCheckAuthority,
   piSubagentFailureSignals,
   parsePiSubagentResults,
@@ -910,6 +911,7 @@ describe("applyReviewPiResult", () => {
       }],
     });
     const store = fakeStore(accepted);
+    expect(currentPiReviewAuthority(store.current(), "code-reviewer", "T1")).toBeNull();
 
     const applied = await applyReviewPiResult({
       store,

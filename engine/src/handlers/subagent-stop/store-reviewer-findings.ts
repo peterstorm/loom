@@ -42,17 +42,21 @@ const discarded = (message: string): HookResult => {
   return { kind: "error", message: diagnostic };
 };
 
+/** Generation discriminator retained after active Review Run authority retires. */
+export function retainedReviewGeneration(task: Task): number | undefined {
+  return task.review_generation ??
+    task.accepted_review_authority?.generation ??
+    ((task.issued_review_packets?.length ?? 0) > 0 ? 0 : undefined);
+}
+
 /** Resolve unavailable transcript evidence without reviving retired review authority. */
 export function unavailableReviewerResolution(
   task: Task,
   agent: string,
   message: string,
 ): ReviewResolution {
-  const retiredGenerationAwareReview = task.review_run === undefined && (
-    task.review_generation !== undefined ||
-    task.accepted_review_authority !== undefined ||
-    (task.issued_review_packets?.length ?? 0) > 0
-  );
+  const retiredGenerationAwareReview = task.review_run === undefined &&
+    retainedReviewGeneration(task) !== undefined;
   return retiredGenerationAwareReview
     ? { kind: "ignored-stale", agent, message: `stale reviewer evidence ignored: ${message}` }
     : { kind: "evidence-failed", agent, message };
@@ -159,7 +163,7 @@ const handler: HookHandler = async (stdin) => {
               transcript,
               agentType,
               t.review_run,
-              t.review_generation,
+              retainedReviewGeneration(t),
             ),
             [...(t.file_list ?? []), ...(t.files_modified ?? [])],
           )
