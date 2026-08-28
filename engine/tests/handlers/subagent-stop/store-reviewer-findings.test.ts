@@ -375,11 +375,12 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
     // while stderr reported them recorded.
     const f = fixture("unknown-task", BLOCKING.replace(/T1/g, "T97"));
     try {
-      const { stderr } = await run({
+      const { result, stderr } = await run({
         session_id: f.session,
         agent_type: "code-reviewer",
         agent_transcript_path: f.transcriptPath,
       });
+      expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("not in the task graph") });
       expect(stderr).toContain("not in the task graph");
       expect(stderr).toContain("findings NOT stored");
       expect(f.state().tasks[0].review_status).toBe("pending");
@@ -409,11 +410,10 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
 
       const { result, stderr } = await pending;
 
-      // Discarded reviewer output must reach the operator, and on an exit-0
-      // hook only systemMessage does — so it carries the line stderr carries.
+      // Discarded reviewer output is a failed evidence command, never exit 0.
       expect(result).toEqual({
-        kind: "passthrough",
-        systemMessage: "[loom] store-reviewer-findings: code-reviewer review task T1 disappeared before evidence application — findings NOT stored",
+        kind: "error",
+        message: "[loom] store-reviewer-findings: code-reviewer review task T1 disappeared before evidence application — findings NOT stored",
       });
       expect(stderr).toContain("disappeared before evidence application");
       expect(stderr).toContain("findings NOT stored");
@@ -450,7 +450,24 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
       agent_type: "code-reviewer",
       agent_transcript_path: "/nonexistent/transcript.jsonl",
     });
-    expect(result.kind).toBe("passthrough");
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/no task graph.*code-reviewer findings NOT stored/),
+    });
+    expect(stderr).toContain("findings NOT stored");
+  });
+
+  it("fails closed when a reviewer carries malformed session authority", async () => {
+    const { result, stderr } = await run({
+      session_id: "../../invalid reviewer session",
+      agent_type: "code-reviewer",
+      agent_transcript_path: "/nonexistent/transcript.jsonl",
+    });
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/no task graph.*findings NOT stored/),
+    });
+    expect(stderr).toContain("invalid session id");
     expect(stderr).toContain("findings NOT stored");
   });
 

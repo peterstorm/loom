@@ -248,6 +248,21 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
     },
   );
 
+  it.each([
+    ["absent", `missing-spec-session-${process.pid}-${Date.now()}`],
+    ["malformed", "../../invalid spec session"],
+  ])("%s TaskGraph authority fails the recognized spec-check stop", async (_label, sessionId) => {
+    const result = await handler(JSON.stringify({
+      session_id: sessionId,
+      agent_type: "spec-check-invoker",
+      agent_transcript_path: "/nonexistent/spec-check.jsonl",
+    }), []);
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/TaskGraph authority unavailable.*spec-check findings NOT stored/),
+    });
+  });
+
   it("count/findings mismatch → EVIDENCE_CAPTURE_FAILED (fail closed, mirrors the manual store-spec-check helper)", async () => {
     const { SUBAGENT_DIR } = await import("../../src/config");
     const { mkdirSync: mkdir } = await import("node:fs");

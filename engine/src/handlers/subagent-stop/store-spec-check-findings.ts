@@ -42,11 +42,17 @@ const handler: HookHandler = async (stdin) => {
   try {
     mgr = StateManager.fromSession(input.session_id);
   } catch (error) {
-    return passthroughDiagnostic(
-      `store-spec-check-findings: session TaskGraph authority unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
-    );
+    return {
+      kind: "error",
+      message: `store-spec-check-findings: session TaskGraph authority unavailable — spec-check findings NOT stored: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
-  if (!mgr) return { kind: "passthrough" };
+  if (!mgr) {
+    return {
+      kind: "error",
+      message: `store-spec-check-findings: no TaskGraph authority for session ${JSON.stringify(input.session_id)} — spec-check findings NOT stored`,
+    };
+  }
 
   // Resolved, not read off the payload: on a harness that sends no
   // `agent_transcript_path` every spec-check would otherwise land in the

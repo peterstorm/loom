@@ -193,7 +193,12 @@ export const runUpdateTaskStatus = async (
       message: `update-task-status: session TaskGraph authority unavailable: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
-  if (!mgr) return { kind: "passthrough" };
+  if (!mgr) {
+    return {
+      kind: "error",
+      message: `update-task-status: no TaskGraph authority for session ${JSON.stringify(input.session_id)} — task status and test evidence NOT updated`,
+    };
+  }
 
   const authority = authorityObservation?.kind === "authority-observed"
     ? authorityObservation.sidecar.authority

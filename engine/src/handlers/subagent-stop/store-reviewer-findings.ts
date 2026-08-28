@@ -6,9 +6,9 @@
  * transcript, find the task, write, log. `pi/extension.ts` is the same shell
  * over the same core, which is what keeps the two harnesses from drifting.
  *
- * Every early return that DISCARDS a reviewer's output logs. A reviewer whose
- * findings vanish silently is indistinguishable from one that found nothing —
- * the exact confusion the `evidence_capture_failed` status exists to prevent.
+ * Every early return that DISCARDS a reviewer's output logs and fails the hook.
+ * A reviewer whose findings vanish behind exit 0 is indistinguishable from one
+ * that found nothing — the exact confusion `evidence_capture_failed` prevents.
  * The one silent return is the `!isReviewAgent` passthrough, which discards
  * nothing: this handler fires on every SubagentStop, and a non-reviewer has no
  * findings for it to lose.
@@ -34,15 +34,12 @@ import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 
-/**
- * A reviewer's output was discarded. Report it and let the stop proceed.
- *
- * On both channels, because either one alone is silent somewhere: stderr is
- * swallowed on an exit-0 hook, and `systemMessage` is the harness's channel
- * rather than the one a `--debug` run or a direct-call harness reads.
- */
-const discarded = (message: string): HookResult =>
-  passthroughDiagnostic(`[loom] store-reviewer-findings: ${message}`);
+/** A reviewer's output was discarded: report it and fail the evidence command. */
+const discarded = (message: string): HookResult => {
+  const diagnostic = `[loom] store-reviewer-findings: ${message}`;
+  process.stderr.write(`${diagnostic}\n`);
+  return { kind: "error", message: diagnostic };
+};
 
 /**
  * The same line for the paths that then FAIL the hook. `error` exits non-zero
@@ -78,13 +75,15 @@ const handler: HookHandler = async (stdin) => {
   try {
     mgr = StateManager.fromSession(input.session_id);
   } catch (error) {
-    return discarded(
-      `no task graph for session ${input.session_id ?? "<unset>"}: ` +
-      `${error instanceof Error ? error.message : String(error)} — ${agentType} findings NOT stored`,
-    );
+    const message = `no task graph for session ${input.session_id ?? "<unset>"}: ` +
+      `${error instanceof Error ? error.message : String(error)} — ${agentType} findings NOT stored`;
+    warn(message);
+    return { kind: "error", message: `[loom] store-reviewer-findings: ${message}` };
   }
   if (!mgr) {
-    return discarded(`no task graph for session ${input.session_id ?? "<unset>"} — ${agentType} findings NOT stored`);
+    const message = `no task graph for session ${input.session_id ?? "<unset>"} — ${agentType} findings NOT stored`;
+    warn(message);
+    return { kind: "error", message: `[loom] store-reviewer-findings: ${message}` };
   }
 
   // Resolved, not read off the payload: a harness that sends no
