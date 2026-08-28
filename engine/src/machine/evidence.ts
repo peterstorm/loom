@@ -438,6 +438,9 @@ export function resolveSoleActiveBinding(
 
 // --- SessionRegistry port ---
 
+/** Exact outcome of an attempted machine-binding capability release. */
+export type MachineBindingRelease = "released" | "not-owned";
+
 /**
  * The binding/active-roster/ledger lifecycle as a port, owned by the core.
  * The fs adapter (session-registry.ts) wraps the ledger's fs code; an
@@ -453,7 +456,11 @@ export function resolveSoleActiveBinding(
  */
 export interface SessionRegistry {
   readonly bind: (sessionId: SessionId, agentType: AgentType, agentId: AgentId) => Promise<void>;
-  readonly unbind: (sessionId: SessionId, agentType: AgentType, agentId: AgentId) => Promise<void>;
+  readonly unbind: (
+    sessionId: SessionId,
+    agentType: AgentType,
+    agentId: AgentId,
+  ) => Promise<MachineBindingRelease>;
   readonly markActive: (sessionId: SessionId, agentId: AgentId) => Promise<void>;
   readonly removeActive: (sessionId: SessionId, agentId: AgentId) => Promise<void>;
   readonly countActiveAgents: (sessionId: SessionId) => number;

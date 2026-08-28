@@ -232,10 +232,21 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
     const result = await handler("{not json", []);
     expect(result.kind).toBe("error");
     if (result.kind === "error") {
-      expect(result.message).toContain("malformed SubagentStop input");
+      expect(result.message).toContain("invalid SubagentStop input");
       expect(result.message).toContain("NOT stored");
     }
   });
+
+  it.each(["null", "42", "[]", JSON.stringify({ session_id: "session-1", agent_type: 7 })])(
+    "valid JSON outside the SubagentStop domain fails closed: %s",
+    async (stdin) => {
+      const result = await handler(stdin, []);
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringMatching(/invalid SubagentStop input.*NOT stored/),
+      });
+    },
+  );
 
   it("count/findings mismatch → EVIDENCE_CAPTURE_FAILED (fail closed, mirrors the manual store-spec-check helper)", async () => {
     const { SUBAGENT_DIR } = await import("../../src/config");

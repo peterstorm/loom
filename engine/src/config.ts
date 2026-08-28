@@ -5,7 +5,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { accessSync, constants as fsConstants } from "node:fs";
+import { accessSync, constants as fsConstants, lstatSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PHASES, type Phase } from "./types";
@@ -601,6 +601,28 @@ export function pathExistsFailClosed(path: string): boolean {
 
 const NOT_A_GIT_REPOSITORY = /^fatal: not a git repository(?: \(or any of the parent directories\))?:/m;
 
+/** Prove no ancestor contains repository metadata; only ENOENT is absence. */
+function proveNoGitMetadataInAncestors(): void {
+  let directory = process.cwd();
+  while (true) {
+    const candidate = join(directory, ".git");
+    try {
+      lstatSync(candidate);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new Error(
+          `cannot inspect repository metadata candidate ${candidate}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const parent = dirname(directory);
+      if (parent === directory) return;
+      directory = parent;
+      continue;
+    }
+    throw new Error(`git reported no repository, but repository metadata exists at ${candidate}`);
+  }
+}
+
 /** Resolve Git root without conflating an absent repository with an unavailable probe. */
 function gitRepositoryRoot(): string | null {
   const probe = spawnSync("git", ["rev-parse", "--show-toplevel"], {
@@ -615,7 +637,10 @@ function gitRepositoryRoot(): string | null {
     if (root === "") throw new Error("git rev-parse returned an empty repository root");
     return root;
   }
-  if (probe.status === 128 && NOT_A_GIT_REPOSITORY.test(probe.stderr)) return null;
+  if (probe.status === 128 && NOT_A_GIT_REPOSITORY.test(probe.stderr)) {
+    proveNoGitMetadataInAncestors();
+    return null;
+  }
   const outcome = probe.signal === null ? `exit ${probe.status ?? "unknown"}` : `signal ${probe.signal}`;
   throw new Error(`git rev-parse failed (${outcome}): ${probe.stderr.trim() || "no diagnostic"}`);
 }

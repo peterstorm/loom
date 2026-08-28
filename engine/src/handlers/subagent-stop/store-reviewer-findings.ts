@@ -15,7 +15,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import type { HookHandler, HookResult, SubagentStopInput, Task, TaskGraph } from "../../types";
+import type { HookHandler, HookResult, Task, TaskGraph } from "../../types";
 import {
   applyReviewResolution,
   constrainReviewResolutionToScope,
@@ -28,10 +28,11 @@ import { isReviewAgent } from "../../config";
 import { StateManager } from "../../state-manager";
 import { extractTaskId } from "../../utils/extract-task-id";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
-import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
+import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
 import { parseFirstUserPrompt } from "../../parsers/parse-transcript";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 import { stripNamespace } from "../../utils/strip-namespace";
+import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 
 /**
  * A reviewer's output was discarded. Report it and let the stop proceed.
@@ -53,17 +54,22 @@ const warn = (message: string): void => {
 };
 
 const handler: HookHandler = async (stdin) => {
-  let input: SubagentStopInput;
-  try {
-    input = JSON.parse(stdin);
-  } catch (e) {
+  const parsedInput = parseSubagentStopStdin(stdin);
+  if (!parsedInput.ok) {
     return {
       kind: "error",
-      message: `[loom] store-reviewer-findings: invalid JSON on stdin: ${(e as Error).message}`,
+      message: `[loom] store-reviewer-findings: invalid SubagentStop input — findings NOT stored: ${parsedInput.error}`,
     };
   }
+  const input = parsedInput.value;
 
-  const agentType = stripNamespace(input.agent_type ?? "");
+  const agentType = stripNamespace(resolveAgentType(input));
+  if (agentType === "") {
+    return {
+      kind: "error",
+      message: "[loom] store-reviewer-findings: SubagentStop Agent identity is unavailable — findings NOT stored",
+    };
+  }
   if (!isReviewAgent(agentType)) {
     return { kind: "passthrough" };
   }

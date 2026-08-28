@@ -17,9 +17,28 @@ describe("update-task-status — malformed stdin guard (directly-registered rout
     const result = await updateTaskStatus("this is not json", []);
     expect(result.kind).toBe("error");
     if (result.kind === "error") {
-      expect(result.message).toContain("malformed SubagentStop input");
+      expect(result.message).toContain("invalid SubagentStop input");
       expect(result.message).toContain("NOT updated");
     }
+  });
+
+  it.each(["null", "42", "[]", JSON.stringify({ session_id: "session-1", agent_type: 7 })])(
+    "rejects valid JSON outside the SubagentStop domain: %s",
+    async (stdin) => {
+      const result = await updateTaskStatus(stdin, []);
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringMatching(/invalid SubagentStop input.*NOT updated/),
+      });
+    },
+  );
+
+  it("rejects an unnameable direct implementation result", async () => {
+    const result = await updateTaskStatus(JSON.stringify({ session_id: "session-1" }), []);
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/Agent identity is unavailable.*NOT updated/),
+    });
   });
 });
 import { parseMachineJson } from "../../src/machine";

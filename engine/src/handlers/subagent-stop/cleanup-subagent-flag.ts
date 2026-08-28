@@ -63,23 +63,33 @@ export const runCleanupSubagentFlag = async (
   // exact harmless no-op the old raw-string path produced, and branding both
   // params removes the adjacent-string argument-swap hazard.
   const failures: string[] = [];
-  let boundAgentType = agent_id ? parseAgentType(stripNamespace(resolveAgentType(input))) : null;
-  const boundAgentId = agent_id ? parseAgentId(agent_id) : null;
-  if (boundAgentType === null && boundAgentId !== null) {
+  const reportedAgentType = parseAgentType(stripNamespace(resolveAgentType(input)));
+  const boundAgentId = parseAgentId(agent_id);
+  let boundAgentType: ReturnType<typeof parseAgentType> = null;
+  if (boundAgentId !== null) {
     try {
       const matchingBindings = registry.readBindings(sessionId)
         .filter((binding) => binding.agentId === boundAgentId);
-      if (matchingBindings.length === 1) boundAgentType = matchingBindings[0]!.agentType;
-      else if (matchingBindings.length > 1) {
+      if (matchingBindings.length === 1) {
+        boundAgentType = matchingBindings[0]!.agentType;
+        if (reportedAgentType !== null && reportedAgentType !== boundAgentType) {
+          failures.push(
+            `reported agent_type ${reportedAgentType} disagrees with persisted binding ${boundAgentType} for ${agent_id}/${sessionId}`,
+          );
+        }
+      } else if (matchingBindings.length > 1) {
         failures.push(`machine unbind identity is ambiguous for ${agent_id}/${sessionId}`);
       }
     } catch (error) {
       failures.push(`machine binding lookup failed for ${agent_id}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  if (boundAgentType && boundAgentId) {
+  if (boundAgentType !== null && boundAgentId !== null) {
     try {
-      await registry.unbind(sessionId, boundAgentType, boundAgentId);
+      const release = await registry.unbind(sessionId, boundAgentType, boundAgentId);
+      if (release === "not-owned") {
+        failures.push(`machine unbind lost exact ownership for ${agent_id}/${sessionId}`);
+      }
     } catch (error) {
       failures.push(`machine unbind failed for ${agent_id}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
     }

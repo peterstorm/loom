@@ -27,6 +27,7 @@
 
 import { readFileSync } from "node:fs";
 import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
+import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 import type { FinalPayloadCandidate } from "../../core/harness-capture";
 import {
   captureAuditLine,
@@ -145,22 +146,19 @@ export async function captureClaudeResult(
 }
 
 const handler: HookHandler = async (stdin): Promise<HookResult> => {
-  const input = ((): SubagentStopInput | null => {
-    try {
-      return JSON.parse(stdin) as SubagentStopInput;
-    } catch {
-      return null;
-    }
-  })();
+  const parsedInput = parseSubagentStopStdin(stdin);
   const hasAnyRunAuthority = process.env[RUNS_ROOT_ENV] !== undefined || process.env[RUN_DIR_ENV] !== undefined;
-  if (input === null) {
+  if (!parsedInput.ok) {
     return hasAnyRunAuthority
-      ? { kind: "error", message: "request-bound capture rejected: malformed SubagentStop JSON" }
+      ? {
+          kind: "error",
+          message: `request-bound capture rejected: malformed SubagentStop JSON or domain shape: ${parsedInput.error}`,
+        }
       : { kind: "passthrough" };
   }
 
   const outcome = await captureClaudeResult(
-    input,
+    parsedInput.value,
     process.env[RUNS_ROOT_ENV],
     process.env[RUN_DIR_ENV],
   );

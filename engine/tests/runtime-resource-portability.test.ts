@@ -130,6 +130,65 @@ describe("TaskGraph repository-root discovery", () => {
     }
   });
 
+  it("rejects Git's non-repository diagnostic when ancestor metadata exists but is unreadable", () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-unreadable-git-root-")));
+    const gitDirectory = join(root, ".git");
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: root });
+      const nested = join(root, "nested", "cwd");
+      mkdirSync(nested, { recursive: true });
+      chmodSync(gitDirectory, 0o000);
+
+      const run = spawnSync(BUN, ["-e", configScript], {
+        cwd: nested,
+        env: process.env,
+        encoding: "utf8",
+      });
+
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toMatch(/repository metadata|git rev-parse failed|cannot inspect repository metadata/);
+    } finally {
+      chmodSync(gitDirectory, 0o700);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when the Git executable cannot start", () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-missing-git-")));
+    try {
+      const emptyPath = join(root, "empty-bin");
+      mkdirSync(emptyPath);
+      const run = spawnSync(BUN, ["-e", configScript], {
+        cwd: root,
+        env: { ...process.env, PATH: emptyPath },
+        encoding: "utf8",
+      });
+
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toContain("git rev-parse could not start");
+      expect(run.stderr).toMatch(/ENOENT|not found/i);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when Git reports success without a repository root", () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-empty-git-root-")));
+    try {
+      const bin = fakeGit(root, "", 0);
+      const run = spawnSync(BUN, ["-e", configScript], {
+        cwd: root,
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+        encoding: "utf8",
+      });
+
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toContain("git rev-parse returned an empty repository root");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("uses cwd-relative creation authority only for a proven non-repository", () => {
     const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-no-git-root-")));
     try {

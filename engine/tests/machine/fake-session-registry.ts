@@ -48,13 +48,18 @@ export function inMemorySessionRegistry(): SessionRegistry {
       ]);
     },
 
-    unbind: async (sessionId: string, agentType: AgentType, agentId: AgentId): Promise<void> => {
+    unbind: async (sessionId: string, agentType: AgentType, agentId: AgentId) => {
+      const current = bindings.get(sessionId) ?? [];
+      const released = current.some(
+        (binding) => binding.agentId === agentId && binding.agentType === agentType,
+      );
       bindings.set(
         sessionId,
-        (bindings.get(sessionId) ?? []).filter(
-          (b) => !(b.agentId === agentId && b.agentType === agentType),
+        current.filter(
+          (binding) => !(binding.agentId === agentId && binding.agentType === agentType),
         ),
       );
+      return released ? "released" as const : "not-owned" as const;
     },
 
     markActive: async (sessionId: string, agentId: AgentId): Promise<void> => {

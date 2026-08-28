@@ -459,6 +459,25 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
     expect(result.kind).toBe("error");
   });
 
+  it.each(["null", "42", "[]", JSON.stringify({ session_id: "session-1", agent_type: 7 })])(
+    "rejects valid JSON outside the SubagentStop domain: %s",
+    async (stdin) => {
+      const { result } = await run_raw(stdin);
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringMatching(/invalid SubagentStop input.*findings NOT stored/),
+      });
+    },
+  );
+
+  it("rejects an unnameable direct result instead of treating it as a non-reviewer", async () => {
+    const { result } = await run_raw(JSON.stringify({ session_id: "session-1" }));
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/Agent identity is unavailable.*findings NOT stored/),
+    });
+  });
+
   it("does not touch the other tasks in the wave", async () => {
     const f = fixture("siblings", BLOCKING, [task("T1"), task("T2")]);
     try {

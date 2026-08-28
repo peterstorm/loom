@@ -60,6 +60,7 @@ import {
   type AgentId,
   type AgentType,
   type MachineBinding,
+  type MachineBindingRelease,
   type PersistedBinding,
   type SessionFileSuffix,
   type SessionId,
@@ -572,26 +573,33 @@ export async function unbindMachineAgent(
   agentType: AgentType,
   agentId: AgentId,
   nowMs: number = Date.now(),
-): Promise<void> {
+): Promise<MachineBindingRelease> {
   const path = machineBindingPath(sessionId);
-  await withLock(bindingLock(sessionId), () => {
+  return withLock(bindingLock(sessionId), () => {
     try {
-      const remaining = classifyBindingLines(sessionId, nowMs).filter(
-        (l) =>
-          l.kind === "malformed" ||
-          (l.kind === "fresh" &&
-            !(l.persisted.binding.agentId === agentId && l.persisted.binding.agentType === agentType)),
+      const lines = classifyBindingLines(sessionId, nowMs);
+      const released = lines.some(
+        (line) => line.kind === "fresh" &&
+          line.persisted.binding.agentId === agentId &&
+          line.persisted.binding.agentType === agentType,
+      );
+      const remaining = lines.filter(
+        (line) =>
+          line.kind === "malformed" ||
+          (line.kind === "fresh" &&
+            !(line.persisted.binding.agentId === agentId && line.persisted.binding.agentType === agentType)),
       );
       if (remaining.length === 0) {
         unlinkSync(path);
       } else {
-        rewriteFileAtomic(path, remaining.map((l) => l.raw).join("\n") + "\n");
+        rewriteFileAtomic(path, remaining.map((line) => line.raw).join("\n") + "\n");
       }
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+      return released ? "released" : "not-owned";
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return "not-owned";
       throw new Error(
-        `unbindMachineAgent failed for ${agentId}/${sessionId}: ${e instanceof Error ? e.message : String(e)}`,
-        { cause: e },
+        `unbindMachineAgent failed for ${agentId}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
       );
     }
   });

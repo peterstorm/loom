@@ -11,7 +11,7 @@
  */
 
 import { readFileSync, realpathSync } from "node:fs";
-import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
+import type { HookHandler, HookResult } from "../../types";
 import { legacyTestsPassedNote } from "../../types";
 import { IMPL_AGENTS, machinesDir } from "../../config";
 import { StateManager } from "../../state-manager";
@@ -25,6 +25,7 @@ import {
 import { parseTranscript } from "../../parsers/parse-transcript";
 import { parseFilesModified } from "../../parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../parsers/parse-bash-test-output";
+import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 import * as git from "../../utils/git";
 import {
   epochOf,
@@ -156,20 +157,25 @@ export const runUpdateTaskStatus = async (
   // handlers, but this handler is also registered directly (KNOWN_HANDLERS),
   // where a bare JSON.parse throw would surface as an uncontextualized
   // "Hook error" (mirrors cleanup-subagent-flag).
-  let input: SubagentStopInput;
-  try {
-    input = JSON.parse(stdin);
-  } catch (e) {
+  const parsedInput = parseSubagentStopStdin(stdin);
+  if (!parsedInput.ok) {
     return {
       kind: "error",
-      message: `update-task-status: malformed SubagentStop input — task status and test evidence NOT updated: ${e instanceof Error ? e.message : String(e)}`,
+      message: `update-task-status: invalid SubagentStop input — task status and test evidence NOT updated: ${parsedInput.error}`,
     };
   }
+  const input = parsedInput.value;
   // Claude Code does not send agent_type; fall back to the metadata the
   // harness writes beside the transcript. This handler is also registered
   // standalone (KNOWN_HANDLERS), so it cannot assume the dispatcher already
   // resolved it.
   const agentType = stripNamespace(resolveAgentType(input));
+  if (agentType === "" && authorityObservation?.kind !== "authority-observed") {
+    return {
+      kind: "error",
+      message: "update-task-status: SubagentStop Agent identity is unavailable — task status and test evidence NOT updated",
+    };
+  }
 
   // A parsed sidecar is stronger routing authority than optional Claude
   // agent_type metadata. Dispatch passes the retained snapshot before cleanup;

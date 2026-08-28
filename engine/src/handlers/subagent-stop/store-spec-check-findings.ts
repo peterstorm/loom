@@ -4,13 +4,14 @@
  * Blocks wave if CRITICAL_COUNT > 0.
  */
 
-import type { HookHandler, SubagentStopInput } from "../../types";
+import type { HookHandler } from "../../types";
 import { reconcileWaveBlock } from "../../core/wave-gate-model";
 import { parseSpecCheckOutput, reconcileSpecCheck } from "../../core/spec-check";
+import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 export { parseSpecCheckOutput } from "../../core/spec-check";
 import { StateManager } from "../../state-manager";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
-import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
+import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 import { stripNamespace } from "../../utils/strip-namespace";
 
@@ -19,17 +20,22 @@ const handler: HookHandler = async (stdin) => {
   // handlers, but this handler is also registered directly (KNOWN_HANDLERS),
   // where a bare JSON.parse throw would surface as an uncontextualized
   // "Hook error" (mirrors cleanup-subagent-flag / update-task-status).
-  let input: SubagentStopInput;
-  try {
-    input = JSON.parse(stdin);
-  } catch (e) {
+  const parsedInput = parseSubagentStopStdin(stdin);
+  if (!parsedInput.ok) {
     return {
       kind: "error",
-      message: `store-spec-check-findings: malformed SubagentStop input — spec-check findings NOT stored: ${e instanceof Error ? e.message : String(e)}`,
+      message: `store-spec-check-findings: invalid SubagentStop input — spec-check findings NOT stored: ${parsedInput.error}`,
     };
   }
+  const input = parsedInput.value;
 
-  const agentType = stripNamespace(input.agent_type ?? "");
+  const agentType = stripNamespace(resolveAgentType(input));
+  if (agentType === "") {
+    return {
+      kind: "error",
+      message: "store-spec-check-findings: SubagentStop Agent identity is unavailable — spec-check findings NOT stored",
+    };
+  }
   if (agentType !== "spec-check-invoker") return { kind: "passthrough" };
 
   let mgr: StateManager | null;

@@ -70,6 +70,7 @@ describe("cleanup-subagent-flag — malformed stdin", () => {
       readBindings: () => [{ agentId, agentType, epoch }],
       unbind: async (_sessionId: unknown, observedType: unknown, observedId: unknown) => {
         attempted.push(`unbind:${String(observedType)}:${String(observedId)}`);
+        return "released" as const;
       },
       removeActive: async () => { attempted.push("roster"); },
     };
@@ -90,10 +91,78 @@ describe("cleanup-subagent-flag — malformed stdin", () => {
     ]);
   });
 
-  it("attempts machine unbind, sidecar deletion, and roster cleanup and returns every failure", async () => {
+  it("releases the persisted binding and reports a valid but conflicting agent_type", async () => {
+    const agentId = parseAgentId("agent-cleanup");
+    const persistedType = parseAgentType("code-implementer-agent");
+    const epoch = parseEpoch("agent-cleanup:code-implementer-agent");
+    if (agentId === null || persistedType === null || epoch === null) throw new Error("fixture identity failed");
     const attempted: string[] = [];
     const registry = {
       ...fsSessionRegistry,
+      readBindings: () => [{ agentId, agentType: persistedType, epoch }],
+      unbind: async (_sessionId: unknown, observedType: unknown) => {
+        attempted.push(`unbind:${String(observedType)}`);
+        return "released" as const;
+      },
+      removeActive: async () => {},
+    };
+
+    const result = await runCleanupSubagentFlag(
+      JSON.stringify({
+        session_id: "cleanup-conflicting-binding",
+        agent_id: "agent-cleanup",
+        agent_type: "code-reviewer",
+      }),
+      registry,
+      () => {},
+      async () => "binding-missing",
+    );
+
+    expect(attempted).toEqual(["unbind:code-implementer-agent"]);
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/reported agent_type code-reviewer disagrees with persisted binding code-implementer-agent/),
+    });
+  });
+
+  it("reports when exact machine-binding ownership changes before release", async () => {
+    const agentId = parseAgentId("agent-cleanup");
+    const agentType = parseAgentType("code-implementer-agent");
+    const epoch = parseEpoch("agent-cleanup:code-implementer-agent");
+    if (agentId === null || agentType === null || epoch === null) throw new Error("fixture identity failed");
+    const registry = {
+      ...fsSessionRegistry,
+      readBindings: () => [{ agentId, agentType, epoch }],
+      unbind: async () => "not-owned" as const,
+      removeActive: async () => {},
+    };
+
+    const result = await runCleanupSubagentFlag(
+      JSON.stringify({
+        session_id: "cleanup-lost-binding",
+        agent_id: "agent-cleanup",
+        agent_type: "code-implementer-agent",
+      }),
+      registry,
+      () => {},
+      async () => "binding-missing",
+    );
+
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringContaining("machine unbind lost exact ownership"),
+    });
+  });
+
+  it("attempts machine unbind, sidecar deletion, and roster cleanup and returns every failure", async () => {
+    const agentId = parseAgentId("agent-cleanup");
+    const agentType = parseAgentType("code-implementer-agent");
+    const epoch = parseEpoch("agent-cleanup:code-implementer-agent");
+    if (agentId === null || agentType === null || epoch === null) throw new Error("fixture identity failed");
+    const attempted: string[] = [];
+    const registry = {
+      ...fsSessionRegistry,
+      readBindings: () => [{ agentId, agentType, epoch }],
       unbind: async () => {
         attempted.push("unbind");
         throw new Error("unbind unavailable");

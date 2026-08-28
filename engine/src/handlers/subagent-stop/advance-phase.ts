@@ -9,13 +9,14 @@
 
 import { accessSync, constants as fsConstants, readFileSync, readdirSync } from "node:fs";
 import { match } from "ts-pattern";
-import type { HookHandler, SubagentStopInput, Phase, TaskGraph } from "../../types";
+import type { HookHandler, Phase, TaskGraph } from "../../types";
 import { PHASE_AGENT_MAP, PHASE_ORDER, CLARIFY_THRESHOLD } from "../../config";
 import { StateManager } from "../../state-manager";
 import { parsePhaseArtifacts } from "../../parsers/parse-phase-artifacts";
+import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { findFile } from "../../utils/find-file";
-import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
+import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
 import {
   PLAN_ARTIFACT_DIR,
   SPEC_ARTIFACT_DIR,
@@ -143,14 +144,16 @@ export function resolveTransition(
 }
 
 const handler: HookHandler = async (stdin) => {
-  let input: SubagentStopInput;
-  try {
-    input = JSON.parse(stdin);
-  } catch (e) {
-    return passthroughDiagnostic(`advance-phase: failed to parse stdin: ${(e as Error).message}\n`);
+  const parsedInput = parseSubagentStopStdin(stdin);
+  if (!parsedInput.ok) {
+    return {
+      kind: "error",
+      message: `advance-phase: invalid SubagentStop input — phase transition NOT evaluated: ${parsedInput.error}`,
+    };
   }
+  const input = parsedInput.value;
 
-  const completedPhase = PHASE_AGENT_MAP[stripNamespace(input.agent_type ?? "")];
+  const completedPhase = PHASE_AGENT_MAP[stripNamespace(resolveAgentType(input))];
   if (!completedPhase) return { kind: "passthrough" };
 
   let mgr: StateManager | null;
