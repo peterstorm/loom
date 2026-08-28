@@ -191,6 +191,23 @@ describe("parsePiSubagentResults", () => {
     });
   });
 
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0.5, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects non-safe-integer exitCode %s",
+    (exitCode) => {
+      const [parsed] = parsePiSubagentResults([{
+        agent: "code-reviewer",
+        task: "Task: T1",
+        exitCode,
+        messages: [],
+      }]);
+
+      expect(parsed).toMatchObject({
+        ok: false,
+        problem: expect.stringContaining("exitCode must be a finite safe integer"),
+      });
+    },
+  );
+
   it("rejects null transcript evidence rather than accepting it as empty", async () => {
     const [parsed] = parsePiSubagentResults([
       { agent: "code-reviewer", task: "Task: T1", exitCode: 0, messages: null },

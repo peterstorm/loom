@@ -10,6 +10,7 @@ import { extractTestEvidence } from "../../src/core/test-evidence";
 import { legacyTestsPassedNote } from "../../src/types";
 import type { TaskGraph } from "../../src/types";
 import { captureDeclaredArtifactBaseline } from "../../src/utils/artifact-baseline";
+import { derivePendingTaskProof } from "../../src/core/proof-obligations";
 import { StateManager } from "../../src/state-manager";
 
 describe("update-task-status — malformed stdin guard (directly-registered route)", () => {
@@ -508,6 +509,7 @@ describe("update-task-status — transcript path resolution", () => {
     transcriptTaskId?: string;
     failedReview?: boolean;
     executingTasks?: readonly string[];
+    proof?: TaskGraph["tasks"][number]["proof"];
   }): Promise<{
     session: string;
     agentId: string;
@@ -547,6 +549,7 @@ describe("update-task-status — transcript path resolution", () => {
       tasks: [
         {
           id: "T1", description: "a task", agent: "code-implementer-agent", status: "pending", wave: 1, depends_on: [],
+          ...(opts.proof === undefined ? {} : { proof: opts.proof }),
           ...(opts.failedReview ? {
             review_status: "evidence_capture_failed",
             review_error: "review transcript missing evidence",
@@ -667,8 +670,10 @@ describe("update-task-status — transcript path resolution", () => {
     }));
   });
 
-  it("quarantines the sole executing Task when a resolved transcript becomes unreadable", async () => {
-    const s = await makeSession({ plantTranscript: false, executingTasks: ["T1"] });
+  it("quarantines the sole proof-bearing executing Task when its resolved transcript becomes unreadable", async () => {
+    const proof = derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: [] });
+    const s = await makeSession({ plantTranscript: false, executingTasks: ["T1"], proof });
+    expect(s.read().tasks[0]?.proof).toEqual(proof);
     const unreadableTranscript = mkdtempSync(join(tmpdir(), "loom-unreadable-transcript-"));
     try {
       const result = await updateTaskStatus(JSON.stringify({

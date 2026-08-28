@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
+  applyCurrentSpecCheckCaptureRejection,
   handleWaveReviewContext,
   publishWaveAdvisoryDecisionRequest,
   specCheckSlotBelongsToWaveEpoch,
@@ -198,6 +199,76 @@ describe("wave review context authority", () => {
       { runId: RUN_ID, slotId, attempt: 2 },
       context.value,
     )).toBe(false);
+  });
+
+  it("does not let a paused attempt-1 rejection overwrite accepted attempt-2 evidence", () => {
+    const batchEpoch = "b".repeat(64);
+    const slotId = "wave-slot:spec-check";
+    const acceptedAttemptTwo = {
+      wave: 1,
+      run_at: "2026-08-28T00:00:02.000Z",
+      verdict: "PASSED" as const,
+      critical_count: 0,
+      high_count: 0,
+      critical_findings: [],
+      high_findings: [],
+      medium_findings: [],
+    };
+    const lockedAfterAttemptTwo = graph({
+      spec_check: acceptedAttemptTwo,
+      wave_review_epoch: {
+        runId: RUN_ID,
+        wave: 1,
+        batchEpoch,
+        specCheckSlotAuthority: { slot_id: slotId, attempted: 2 },
+      } as TaskGraph["wave_review_epoch"],
+    });
+    const attemptOneFailure = {
+      wave: 1,
+      run_at: "2026-08-28T00:00:01.000Z",
+      verdict: "EVIDENCE_CAPTURE_FAILED" as const,
+      error: "attempt 1 capture rejected",
+    };
+
+    const transition = applyCurrentSpecCheckCaptureRejection(
+      lockedAfterAttemptTwo,
+      { runId: RUN_ID, slotId, attempt: 1 },
+      { wave: 1, batchEpoch, authorityDigest: DIGEST },
+      attemptOneFailure,
+    );
+
+    expect(transition.applied).toBe(false);
+    expect(transition.state).toBe(lockedAfterAttemptTwo);
+    expect(transition.state.spec_check).toEqual(acceptedAttemptTwo);
+  });
+
+  it("applies a capture rejection while attempt 1 still owns the exact slot", () => {
+    const batchEpoch = "b".repeat(64);
+    const slotId = "wave-slot:spec-check";
+    const lockedAttemptOne = graph({
+      wave_review_epoch: {
+        runId: RUN_ID,
+        wave: 1,
+        batchEpoch,
+        specCheckSlotAuthority: { slot_id: slotId, attempted: 1 },
+      } as TaskGraph["wave_review_epoch"],
+    });
+    const failure = {
+      wave: 1,
+      run_at: "2026-08-28T00:00:01.000Z",
+      verdict: "EVIDENCE_CAPTURE_FAILED" as const,
+      error: "attempt 1 capture rejected",
+    };
+
+    const transition = applyCurrentSpecCheckCaptureRejection(
+      lockedAttemptOne,
+      { runId: RUN_ID, slotId, attempt: 1 },
+      { wave: 1, batchEpoch, authorityDigest: DIGEST },
+      failure,
+    );
+
+    expect(transition.applied).toBe(true);
+    expect(transition.state.spec_check).toEqual(failure);
   });
 
   it("loads a Task reviewer only with complete matching Task authority", () => {

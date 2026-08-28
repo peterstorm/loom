@@ -226,6 +226,41 @@ function pathExistsFailClosed(path: string): boolean {
     `loom(pi): pathExistsFailClosed cannot access ${p}: ${cause} — assuming active (fail closed)`);
 }
 
+export type PiResumeTaskGraphObservation =
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "loaded"; state: ReturnType<StateManager["load"]> }>
+  | Readonly<{ kind: "unavailable"; reason: string }>;
+
+/** Observe resume authority once; only a proven missing State File is absent. */
+export function observePiResumeTaskGraph(
+  resolvePath: () => string = taskGraphPath,
+  exists: (path: string) => boolean = pathExistsFailClosed,
+  open: (path: string) => StateManager | null = StateManager.fromPath,
+): PiResumeTaskGraphObservation {
+  let path: string;
+  try {
+    path = resolvePath();
+  } catch (error) {
+    return Object.freeze({
+      kind: "unavailable",
+      reason: `task graph path could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
+  try {
+    if (!exists(path)) return Object.freeze({ kind: "absent" });
+    const manager = open(path);
+    if (manager === null) {
+      return Object.freeze({ kind: "unavailable", reason: `task graph could not be opened at ${path}` });
+    }
+    return Object.freeze({ kind: "loaded", state: manager.load() });
+  } catch (error) {
+    return Object.freeze({
+      kind: "unavailable",
+      reason: `task graph unreadable: ${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
+}
+
 const isLoomOwnedResultAgent = (agentType: string): boolean =>
   PHASE_AGENT_MAP[agentType] !== undefined ||
   IMPL_AGENTS.has(agentType) ||
@@ -1585,9 +1620,6 @@ export default function (pi: ExtensionAPI) {
   // so the LLM knows where we are (equivalent of resume-after-clear).
 
   pi.on("before_agent_start", async (_event, ctx) => {
-    const activeTaskGraphPath = taskGraphPath();
-    if (!pathExistsFailClosed(activeTaskGraphPath)) return;
-
     const failResumeContext = (reason: string) => {
       const message = `Loom resume context unavailable: ${reason}`;
       process.stderr.write(`loom(pi): ${message}\n`);
@@ -1602,16 +1634,10 @@ export default function (pi: ExtensionAPI) {
       };
     };
 
-    const sm = StateManager.fromPath(activeTaskGraphPath);
-    if (!sm) return failResumeContext(`task graph could not be opened at ${activeTaskGraphPath}`);
-
-    let state;
-    try {
-      state = sm.load();
-    } catch (error) {
-      return failResumeContext(`task graph unreadable: ${error instanceof Error ? error.message : String(error)}`);
-    }
-
+    const observation = observePiResumeTaskGraph();
+    if (observation.kind === "absent") return;
+    if (observation.kind === "unavailable") return failResumeContext(observation.reason);
+    const state = observation.state;
     if (state.current_phase !== "execute" || state.tasks.length === 0) return;
 
     const output = buildContextOutput(state, PACKAGE_ROOT);
@@ -2227,9 +2253,9 @@ export default function (pi: ExtensionAPI) {
         };
 
         // A failed process may retain valid-looking assistant text. Never parse
-        // that text as completion/review/spec evidence, but do persist the
-        // failed CAPTURE for gate-owned agents so a healthy sibling or stale pass
-        // cannot make the missing evidence disappear.
+        // that text as completion/review/spec evidence. Persist gate-owned
+        // failure only under exact current reserved authority, so stale evidence
+        // cannot overwrite a newer slot while a healthy sibling remains visible.
         if (piSubagentResultFailed(result)) {
           emit(await applyFailedPiResult({
             store,

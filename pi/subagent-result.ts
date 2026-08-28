@@ -195,7 +195,9 @@ export function parsePiSubagentResults(raw: readonly unknown[]): readonly PiSuba
     const record = entry as Record<string, unknown>;
     if (typeof record.agent !== "string") return reject(`agent is ${typeof record.agent}, expected string`);
     if (typeof record.task !== "string") return reject(`task is ${typeof record.task}, expected string`);
-    if (typeof record.exitCode !== "number") return reject(`exitCode is ${typeof record.exitCode}, expected number`);
+    if (typeof record.exitCode !== "number" || !Number.isSafeInteger(record.exitCode)) {
+      return reject(`exitCode must be a finite safe integer, got ${String(record.exitCode)}`);
+    }
     if (!("messages" in record)) return reject("messages is missing, expected transcript evidence");
     const stopReasonProblem = optionalString(record.stopReason);
     if (stopReasonProblem !== null) return reject(`stopReason is ${stopReasonProblem}, expected string or absent`);
@@ -424,9 +426,9 @@ async function applyFailedImplementationResult(args: FailedImplementationArgs): 
  * Record the failure of an agent whose process did not succeed.
  *
  * A failed process may retain valid-looking assistant text; none of it is
- * parsed as evidence here. The failure is nonetheless PERSISTED for gate-owned
- * agents, so a healthy sibling or a stale pass cannot make the missing evidence
- * disappear at the wave gate.
+ * parsed as evidence here. Under exact current reserved authority, the failure
+ * is persisted for gate-owned agents so a healthy sibling or stale pass cannot
+ * make the missing evidence disappear at the Wave Gate.
  */
 export async function applyFailedPiResult(args: Readonly<{
   store: TaskGraphStore;
@@ -1332,20 +1334,39 @@ export function currentPiSpecCheckAuthority(state: TaskGraph): PiSpecCheckAttemp
   });
 }
 
+type PiSpecCheckAuthorityDecision =
+  | Readonly<{ kind: "accepted"; authority: PiSpecCheckAttemptAuthority }>
+  | Readonly<{ kind: "rejected"; problem: string }>;
+
+function decidePiSpecCheckAuthority(
+  state: TaskGraph,
+  authority: PiSpecCheckAttemptAuthority | null | undefined,
+): PiSpecCheckAuthorityDecision {
+  if (authority == null) {
+    return { kind: "rejected", problem: "spec-check result has no exact reserved Wave slot/attempt authority" };
+  }
+  const current = currentPiSpecCheckAuthority(state);
+  if (current === null) {
+    return { kind: "rejected", problem: "current TaskGraph has no active exact Wave spec-check authority" };
+  }
+  return current.runId === authority.runId && current.wave === authority.wave &&
+      current.batchEpoch === authority.batchEpoch && current.slotId === authority.slotId &&
+      current.attempt === authority.attempt
+    ? { kind: "accepted", authority }
+    : {
+        kind: "rejected",
+        problem: `reserved spec-check authority ${authority.runId}/${authority.wave}/${authority.slotId}/${authority.attempt} ` +
+          `does not match current ${current.runId}/${current.wave}/${current.slotId}/${current.attempt}`,
+      };
+}
+
 /** Explain why a reserved spec-check capability cannot mutate this snapshot. */
 export function piSpecCheckAuthorityProblem(
   state: TaskGraph,
   authority: PiSpecCheckAttemptAuthority | null | undefined,
 ): string | null {
-  if (authority == null) return "spec-check result has no exact reserved Wave slot/attempt authority";
-  const current = currentPiSpecCheckAuthority(state);
-  if (current === null) return "current TaskGraph has no active exact Wave spec-check authority";
-  return current.runId === authority.runId && current.wave === authority.wave &&
-      current.batchEpoch === authority.batchEpoch && current.slotId === authority.slotId &&
-      current.attempt === authority.attempt
-    ? null
-    : `reserved spec-check authority ${authority.runId}/${authority.wave}/${authority.slotId}/${authority.attempt} ` +
-      `does not match current ${current.runId}/${current.wave}/${current.slotId}/${current.attempt}`;
+  const decision = decidePiSpecCheckAuthority(state, authority);
+  return decision.kind === "accepted" ? null : decision.problem;
 }
 
 /** Pure spec-check command under exact locked Wave slot authority. */
@@ -1355,16 +1376,12 @@ function reducePiSpecCheckResult(
   observation: PiSpecCheckObservation,
   now: string,
 ): Readonly<{ state: TaskGraph; value: PiResultOutcome }> {
-  if (authority == null) {
-    const diagnostic = "spec-check evidence rejected: spec-check result has no exact reserved Wave slot/attempt authority; protected state unchanged";
+  const authorityDecision = decidePiSpecCheckAuthority(state, authority);
+  if (authorityDecision.kind === "rejected") {
+    const diagnostic = `spec-check evidence rejected: ${authorityDecision.problem}; protected state unchanged`;
     return { state, value: outcome([`loom(pi): ${diagnostic}`], [diagnostic]) };
   }
-  const authorityProblem = piSpecCheckAuthorityProblem(state, authority);
-  if (authorityProblem !== null) {
-    const diagnostic = `spec-check evidence rejected: ${authorityProblem}; protected state unchanged`;
-    return { state, value: outcome([`loom(pi): ${diagnostic}`], [diagnostic]) };
-  }
-  const wave = authority.wave;
+  const wave = authorityDecision.authority.wave;
   if (observation.kind === "capture-failed") {
     return {
       state: {

@@ -14,8 +14,8 @@ import { PHASES, type Phase } from "./types";
 import { PANEL_BASELINE_LENSES, PANEL_LENSES } from "./core/panel-contract";
 // The Agent Catalog is the single identity source for every Loom-owned agent
 // (kind, profile, required Skill). model-profiles is a pure leaf module — this
-// import adds no cycle. Every agent set and phase map below is a DERIVED
-// projection of the catalog, never a second source.
+// import adds no cycle. Every Loom-owned agent set and phase map below is a
+// DERIVED projection of the catalog; harness compatibility utilities are not.
 import {
   AGENT_POLICIES,
   agentsOfKind,
@@ -262,7 +262,7 @@ export function isReviewAgent(agentType: string): boolean {
   return REVIEW_SUB_AGENTS.has(agentType);
 }
 
-/** All review-related agents (sub-agents + spec-check invoker) */
+/** Finding-producing review agents plus the spec-check invoker. */
 export const REVIEW_AGENTS: ReadonlySet<string> = frozenSet([
   ...REVIEW_SUB_AGENTS,
   ...agentsOfKind("spec-check"),

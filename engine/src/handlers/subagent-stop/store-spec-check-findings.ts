@@ -89,9 +89,7 @@ export const runStoreSpecCheckFindings = async (
       };
     }
     const wave = state.wave_review_epoch?.wave ?? findings.wave ?? state.current_wave ?? 1;
-    const resolution = transcript === null
-      ? reconcileSpecCheck(parseSpecCheckOutput(""), wave, new Date().toISOString())
-      : reconcileSpecCheck(findings, wave, new Date().toISOString());
+    const resolution = reconcileSpecCheck(findings, wave, new Date().toISOString());
     if (resolution.kind === "evidence-failed") {
       return {
         state: { ...state, spec_check: resolution.specCheck },

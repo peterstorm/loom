@@ -42,39 +42,73 @@ import { rollbackTaskExecutionRegistration } from "../task-execution";
 import type { ImplementationAttemptAuthority } from "../../core/implementation-completion";
 import { parseAgentName } from "../../core/model-profiles";
 
-const handler: HookHandler = async (stdin) => {
-  let input: SubagentStartInput;
-  try {
-    input = JSON.parse(stdin);
-  } catch (e) {
-    // The engine, not the shell shim, owns the ENOENT-only absence decision.
-    // A malformed payload while a graph is present or unobservable cannot say
-    // which authority should be bound, so launching would be fail-open.
-    const graphPath = taskGraphPath();
-    return pathExistsFailClosed(graphPath)
-      ? blockResult(`mark-subagent-active: malformed SubagentStart input while TaskGraph ${graphPath} is active or unobservable — refusing spawn: ${e instanceof Error ? e.message : String(e)}`)
-      : passthroughDiagnostic(`mark-subagent-active: malformed ad-hoc SubagentStart input — no TaskGraph exists; agent not tracked: ${e instanceof Error ? e.message : String(e)}\n`);
-  }
-  const { agent_id } = input;
+export type ActiveTaskGraphObservation =
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "available"; path: string; manager: StateManager }>
+  | Readonly<{ kind: "unavailable"; path: string | null; reason: string }>;
 
-  // Ad-hoc agents retain their no-graph behavior, but only ENOENT proves that
-  // no graph exists. This probe and load happen before roster, sidecar,
-  // machine, directory, or pointer writes; any other observation failure
-  // blocks rather than creating an unchecked authority path.
-  const activeGraphPath = taskGraphPath();
-  if (!pathExistsFailClosed(activeGraphPath)) return { kind: "passthrough" };
-  let activeGraphManager: StateManager | null;
+/** Resolve, probe, open, and parse TaskGraph authority as one fail-closed observation. */
+export function observeActiveTaskGraph(
+  resolvePath: () => string = taskGraphPath,
+  exists: (path: string) => boolean = pathExistsFailClosed,
+  open: (path: string) => StateManager | null = StateManager.fromPath,
+): ActiveTaskGraphObservation {
+  let path: string | null = null;
   try {
-    activeGraphManager = StateManager.fromPath(activeGraphPath);
-    if (activeGraphManager === null) {
-      return blockResult(`mark-subagent-active: TaskGraph at ${activeGraphPath} could not be opened; refusing spawn`);
+    path = resolvePath();
+    if (!exists(path)) return Object.freeze({ kind: "absent" });
+    const manager = open(path);
+    if (manager === null) {
+      return Object.freeze({ kind: "unavailable", path, reason: "TaskGraph could not be opened" });
     }
-    activeGraphManager.load();
+    manager.load();
+    return Object.freeze({ kind: "available", path, manager });
   } catch (error) {
+    return Object.freeze({
+      kind: "unavailable",
+      path,
+      reason: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+const handler: HookHandler = async (stdin) => {
+  let parsedInput: Readonly<{ ok: true; input: SubagentStartInput }> |
+    Readonly<{ ok: false; error: unknown }>;
+  try {
+    parsedInput = { ok: true, input: JSON.parse(stdin) as SubagentStartInput };
+  } catch (error) {
+    parsedInput = { ok: false, error };
+  }
+
+  // Resolve all TaskGraph authority before publishing roster, sidecar,
+  // machine, directory, or pointer capabilities. Only proven absence permits
+  // ad-hoc passthrough; every discovery/open/load uncertainty blocks.
+  const graph = observeActiveTaskGraph();
+  if (!parsedInput.ok) {
+    const cause = parsedInput.error instanceof Error ? parsedInput.error.message : String(parsedInput.error);
+    if (graph.kind === "absent") {
+      return passthroughDiagnostic(
+        `mark-subagent-active: malformed ad-hoc SubagentStart input — no TaskGraph exists; agent not tracked: ${cause}\n`,
+      );
+    }
+    const authority = graph.kind === "available"
+      ? `TaskGraph ${graph.path} is active`
+      : `TaskGraph authority is unobservable${graph.path === null ? "" : ` at ${graph.path}`}: ${graph.reason}`;
     return blockResult(
-      `mark-subagent-active: TaskGraph at ${activeGraphPath} is unobservable: ${error instanceof Error ? error.message : String(error)}; refusing spawn`,
+      `mark-subagent-active: malformed SubagentStart input while ${authority} — refusing spawn: ${cause}`,
     );
   }
+  if (graph.kind === "absent") return { kind: "passthrough" };
+  if (graph.kind === "unavailable") {
+    return blockResult(
+      `mark-subagent-active: TaskGraph authority${graph.path === null ? "" : ` at ${graph.path}`} is unobservable: ${graph.reason}; refusing spawn`,
+    );
+  }
+  const input = parsedInput.input;
+  const { agent_id } = input;
+  const activeGraphPath = graph.path;
+  const activeGraphManager = graph.manager;
 
   // Parse the session id at the boundary: session ids name files under
   // SUBAGENT_DIR (roster, binding, task_graph pointer — one of them a

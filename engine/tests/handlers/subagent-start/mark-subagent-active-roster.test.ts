@@ -19,7 +19,9 @@ import { join } from "node:path";
 import { SUBAGENT_DIR } from "../../../src/config";
 import { shouldBlockDirectEdit } from "../../../src/core/block-direct-edits";
 import { activeRosterProbe } from "../../../src/handlers/pre-tool-use/block-direct-edits";
-import markActive from "../../../src/handlers/subagent-start/mark-subagent-active";
+import markActive, {
+  observeActiveTaskGraph,
+} from "../../../src/handlers/subagent-start/mark-subagent-active";
 import { runCleanupSubagentFlag } from "../../../src/handlers/subagent-stop/cleanup-subagent-flag";
 import {
   parseSessionId,
@@ -116,6 +118,18 @@ const start = (s: string, agentId: string | null = "a-1", agentType = "loom:code
 };
 
 describe("mark-subagent-active — roster failure is contained, never silent", () => {
+  it("classifies TaskGraph path-discovery failure as unavailable authority", () => {
+    const observation = observeActiveTaskGraph(() => {
+      throw new Error("git metadata cannot be inspected");
+    });
+
+    expect(observation).toEqual({
+      kind: "unavailable",
+      path: null,
+      reason: "git metadata cannot be inspected",
+    });
+  });
+
   it("blocks malformed hook input while a TaskGraph is active", async () => {
     process.env.LOOM_STATE_PATH = statePath;
 

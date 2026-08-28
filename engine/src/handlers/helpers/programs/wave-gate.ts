@@ -1186,6 +1186,23 @@ export function specCheckSlotBelongsToWaveEpoch(
     epoch.specCheckSlotAuthority.attempted === request.attempt;
 }
 
+/** Apply a capture rejection only while its exact spec-check capability is current. */
+export function applyCurrentSpecCheckCaptureRejection(
+  graph: TaskGraph,
+  request: Readonly<{ runId: string; slotId: string; attempt: 1 | 2 }>,
+  context: Readonly<{ wave: number; batchEpoch: string; authorityDigest: string }>,
+  specCheck: NonNullable<TaskGraph["spec_check"]>,
+): Readonly<{ state: TaskGraph; applied: boolean }> {
+  const active = graph.active_wave_gate;
+  if (graph.current_phase !== "execute" || graph.current_wave !== context.wave ||
+      active?.runId !== request.runId || active.wave !== context.wave ||
+      active.authorityDigest !== context.authorityDigest ||
+      !specCheckSlotBelongsToWaveEpoch(graph, request, context)) {
+    return Object.freeze({ state: graph, applied: false });
+  }
+  return Object.freeze({ state: { ...graph, spec_check: specCheck }, applied: true });
+}
+
 export function waveRefutationPreparation(
   handle: RunDirHandle,
   readiness: Extract<ReturnType<typeof deriveWaveReadiness>, { ok: true }>["value"],
@@ -1990,21 +2007,54 @@ export async function resumeWaveGateFacade(
         return waveBlocked(handle, `${context.message} (request ${request.requestId})`);
       }
       if (request.role === "spec-check-invoker") {
-        const wave = context.kind === "loaded" ? context.value.wave : undefined;
-        if (typeof wave !== "number") return waveBlocked(handle, "rejected spec-check request lacks exact Wave authority");
-        const resolution = reconcileSpecCheck(parseSpecCheckOutput(""), wave, new Date().toISOString());
-        await manager.update((locked) => ({ ...locked, spec_check: resolution.specCheck }));
+        if (context.kind !== "loaded") {
+          return waveBlocked(handle, "rejected spec-check request lacks exact Wave authority");
+        }
+        const resolution = reconcileSpecCheck(
+          parseSpecCheckOutput(""),
+          context.value.wave,
+          new Date().toISOString(),
+        );
+        await manager.updateAndReturn((locked) => {
+          const applied = applyCurrentSpecCheckCaptureRejection(
+            locked,
+            request,
+            context.value,
+            resolution.specCheck,
+          );
+          return { state: applied.state, value: applied.applied };
+        });
       } else {
-        const taskId = context.kind === "loaded" ? context.value.taskRun?.taskId : undefined;
-        if (taskId === undefined) return waveBlocked(handle, "rejected reviewer request lacks exact Task authority");
-        await manager.update((locked) => ({
-          ...locked,
-          tasks: locked.tasks.map((task) => task.id === taskId ? applyReviewResolution(task, {
-            kind: "evidence-failed",
+        const taskRun = context.kind === "loaded" ? context.value.taskRun : null;
+        if (context.kind !== "loaded" || taskRun === null) {
+          return waveBlocked(handle, "rejected reviewer request lacks exact Task authority");
+        }
+        await manager.update((locked) => {
+          const target = locked.tasks.find(({ id }) => id === taskRun.taskId);
+          const run = target?.review_run;
+          const slot = run?.slot_authority?.find(({ agent }) => agent === request.role);
+          const epoch = locked.wave_review_epoch;
+          const active = locked.active_wave_gate;
+          if (locked.current_phase !== "execute" || locked.current_wave !== context.value.wave ||
+              active?.runId !== request.runId || active.wave !== context.value.wave ||
+              active.authorityDigest !== context.value.authorityDigest ||
+              epoch?.runId !== request.runId || epoch.wave !== context.value.wave ||
+              epoch.batchEpoch !== context.value.batchEpoch || run === undefined ||
+              run.generation !== taskRun.generation || run.packet_id !== taskRun.packetId ||
+              run.head_sha !== taskRun.headSha || slot?.slot_id !== request.slotId ||
+              slot.attempted !== request.attempt) return locked;
+          const resolution = {
+            kind: "evidence-failed" as const,
             agent: request.role,
             message: `attempt 1 capture rejected: ${rejection}`,
-          }) : task),
-        }));
+          };
+          return {
+            ...locked,
+            tasks: locked.tasks.map((task) => task.id === taskRun.taskId
+              ? applyReviewResolution(task, resolution, slot)
+              : task),
+          };
+        });
       }
     }
 

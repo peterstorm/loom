@@ -565,6 +565,44 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
     });
   });
 
+  it("does not persist stale spec artifact authority after the locked Phase advances", async () => {
+    const session = `phase-spec-artifact-race-${process.pid}-${Date.now()}`;
+    const specFile = join(tmpDir, ".claude", "specs", "race", "spec.md");
+    mkdirSync(join(tmpDir, ".claude", "specs", "race"), { recursive: true });
+    writeFileSync(specFile, "resolved spec");
+    const initial = mkState({ current_phase: "specify", spec_file: specFile });
+    await withPhaseState(session, initial, async () => {
+      const originalUpdate = StateManager.prototype.update;
+      const update = vi.spyOn(StateManager.prototype, "update").mockImplementationOnce(async function (
+        this: StateManager,
+        mutate,
+      ) {
+        const path = join(tmpDir, `${session}.json`);
+        const current = JSON.parse(readFileSync(path, "utf-8"));
+        writeFileSync(path, JSON.stringify({ ...current, current_phase: "architecture" }));
+        return originalUpdate.call(this, mutate);
+      });
+      try {
+        const result = await advancePhaseHandler(JSON.stringify({
+          session_id: session,
+          agent_id: "racing-specify-agent",
+          agent_type: "specify-agent",
+        }), []);
+        expect(result).toMatchObject({
+          kind: "passthrough",
+          systemMessage: expect.stringContaining("already past"),
+        });
+        expect(JSON.parse(readFileSync(join(tmpDir, `${session}.json`), "utf-8"))).toMatchObject({
+          current_phase: "architecture",
+          spec_file: specFile,
+          phase_artifacts: {},
+        });
+      } finally {
+        update.mockRestore();
+      }
+    });
+  });
+
   it("the REAL handler reports a missing required artifact instead of silently passing through", async () => {
     const session = `phase-not-ready-${process.pid}-${Date.now()}`;
     await withPhaseState(session, mkState({ current_phase: "brainstorm" }), async () => {

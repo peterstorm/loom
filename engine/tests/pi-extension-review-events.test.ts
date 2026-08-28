@@ -1033,6 +1033,22 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
+  it("classifies resume TaskGraph path-discovery failure as unavailable", async () => {
+    const extensionSpecifier = "../../pi/extension.ts";
+    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
+      observePiResumeTaskGraph: (
+        resolvePath: () => string,
+      ) => Readonly<{ kind: string; reason?: string }>;
+    };
+
+    expect(module.observePiResumeTaskGraph(() => {
+      throw new Error("git metadata cannot be inspected");
+    })).toEqual({
+      kind: "unavailable",
+      reason: "task graph path could not be resolved: git metadata cannot be inspected",
+    });
+  });
+
   it("surfaces task-graph access failure in resume context and loom-status", async () => {
     const pi = await extension();
     const loop = join(temp, `pi-task-graph-loop-${process.pid}`);
