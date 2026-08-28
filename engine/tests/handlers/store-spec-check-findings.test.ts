@@ -3,9 +3,10 @@ import { mkdirSync, writeFileSync, chmodSync, rmSync, readFileSync } from "node:
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseSpecCheckOutput } from "../../src/handlers/subagent-stop/store-spec-check-findings";
-import handler from "../../src/handlers/subagent-stop/store-spec-check-findings";
+import handler, { runStoreSpecCheckFindings } from "../../src/handlers/subagent-stop/store-spec-check-findings";
 import { projectSlug } from "../../src/utils/agent-transcript-path";
 import { reconcileSpecCheck } from "../../src/core/spec-check";
+import { parseOrchestrationRunId, parseSlotId } from "../../src/core/orchestration-contract";
 
 describe("parseSpecCheckOutput (pure)", () => {
   it("parses all severity levels", () => {
@@ -203,15 +204,8 @@ describe("handler reads file content (not path)", () => {
     mkdirSync(subagentDir, { recursive: true });
     writeFileSync(join(subagentDir, "test-session.task_graph"), statePath);
 
-    // Temporarily override SUBAGENT_DIR by mocking fromSession behavior
-    // Instead, call handler directly — it uses StateManager.fromSession
-    // which checks SUBAGENT_DIR. We'll test the file-reading logic via the
-    // handler returning passthrough (not error) when given a valid transcript file.
-
-    // If the handler were still passing the path string to parseTranscript,
-    // it would get empty transcript and return passthrough early.
-    // With the fix, it reads file content → gets valid JSONL → parses findings.
-    // We can verify the fix by checking parseTranscript works on actual content:
+    // Parser-level regression: file bytes yield the marker text, while the old
+    // bug's path-string input yields no transcript content.
     const content = readFileSync(transcriptPath, "utf-8");
     const { parseTranscript } = await import("../../src/parsers/parse-transcript");
     const transcript = parseTranscript(content);
@@ -261,6 +255,61 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
       kind: "error",
       message: expect.stringMatching(/TaskGraph authority unavailable.*spec-check findings NOT stored/),
     });
+  });
+
+  it("rejects absent and stale request authority on a modern Wave without changing spec evidence", async () => {
+    const { SUBAGENT_DIR } = await import("../../src/config");
+    const tmpDir = join(tmpdir(), `spec-check-authority-${Date.now()}`);
+    mkdirSync(tmpDir, { recursive: true });
+    const statePath = join(tmpDir, "active_task_graph.json");
+    const runId = parseOrchestrationRunId("run.spec-authority");
+    const slotId = parseSlotId("wave-slot:spec-check");
+    if (!runId.ok || !slotId.ok) throw new Error("invalid authority fixture");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, current_wave: 1, tasks: [], wave_gates: {},
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: runId.value, wave: 1,
+        authorityDigest: "a".repeat(64), revision: 1, terminalOutcome: null,
+      },
+      wave_review_epoch: {
+        runId: runId.value, wave: 1, batchEpoch: "b".repeat(64),
+        specCheckSlotAuthority: { slot_id: slotId.value, attempted: 2 },
+      },
+    }));
+    const transcriptPath = join(tmpDir, "transcript.jsonl");
+    writeFileSync(transcriptPath, JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED" }] },
+    }));
+    const session = `spec-check-authority-${process.pid}-${Date.now()}`;
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
+    writeFileSync(pointer, statePath);
+    const stdin = JSON.stringify({
+      session_id: session,
+      agent_type: "spec-check-invoker",
+      agent_transcript_path: transcriptPath,
+    });
+    try {
+      await expect(handler(stdin, [])).resolves.toMatchObject({
+        kind: "error",
+        message: expect.stringContaining("no capture-correlated request authority"),
+      });
+      await expect(runStoreSpecCheckFindings(stdin, [], {
+        runId: runId.value,
+        slotId: slotId.value,
+        attempt: 1,
+        role: "spec-check-invoker",
+      })).resolves.toMatchObject({
+        kind: "error",
+        message: expect.stringContaining("does not match the exact current Wave epoch"),
+      });
+      expect(JSON.parse(readFileSync(statePath, "utf-8")).spec_check).toBeUndefined();
+    } finally {
+      rmSync(pointer, { force: true });
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it("count/findings mismatch → EVIDENCE_CAPTURE_FAILED (fail closed, mirrors the manual store-spec-check helper)", async () => {

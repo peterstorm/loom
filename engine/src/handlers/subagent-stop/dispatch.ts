@@ -13,12 +13,12 @@ import { resolveAgentType } from "../../utils/agent-transcript-path";
 import { parseSessionId, readEvidence } from "../../machine";
 import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 
-import captureOrchestrationResult from "./capture-orchestration-result";
+import captureOrchestrationResult, { resolveClaudeRequestAuthority } from "./capture-orchestration-result";
 import cleanupSubagentFlag from "./cleanup-subagent-flag";
 import advancePhase from "./advance-phase";
 import { runUpdateTaskStatus, type EvidenceSnapshot } from "./update-task-status";
 import storeReviewerFindings from "./store-reviewer-findings";
-import storeSpecCheckFindings from "./store-spec-check-findings";
+import { runStoreSpecCheckFindings } from "./store-spec-check-findings";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 import {
   snapshotImplementationAttemptSidecar,
@@ -150,6 +150,19 @@ export const runDispatch = async (
     }
   };
 
+  let specCheckRequestAuthority: ReturnType<typeof resolveClaudeRequestAuthority> = null;
+  if (captureFailure === null && category === "spec-check") {
+    try {
+      specCheckRequestAuthority = resolveClaudeRequestAuthority(
+        input,
+        process.env.LOOM_ORCHESTRATION_RUNS_ROOT,
+        process.env.LOOM_ORCHESTRATION_RUN_DIR,
+      );
+    } catch (error) {
+      captureFailure = `spec-check request authority resolution failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
   if (captureFailure !== null) {
     const cleanupFailure = await runCleanup();
     return {
@@ -190,7 +203,8 @@ export const runDispatch = async (
     .with("impl", () => runChild("updateTaskStatus", () =>
       runUpdateTaskStatus(stdin, args, evidenceSnapshot, authorityObservation)))
     .with("review", () => runChild("storeReviewerFindings", () => storeReviewerFindings(stdin, args)))
-    .with("spec-check", () => runChild("storeSpecCheckFindings", () => storeSpecCheckFindings(stdin, args)))
+    .with("spec-check", () => runChild("storeSpecCheckFindings", () =>
+      runStoreSpecCheckFindings(stdin, args, specCheckRequestAuthority ?? undefined)))
     .with("unknown", async () => {
       // Genuinely-unknown agents (a user's own subagent) legitimately have no
       // orchestration hooks. An UNNAMEABLE one does not: it means neither the

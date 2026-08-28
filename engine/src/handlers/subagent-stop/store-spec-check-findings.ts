@@ -1,25 +1,46 @@
 /**
  * Auto-store spec-check findings when spec-check-invoker completes.
- * Extracts CRITICAL/HIGH/MEDIUM findings and severity counts.
- * Blocks wave if CRITICAL_COUNT > 0.
+ * Modern Wave evidence requires exact capture-correlated request authority.
  */
 
-import type { HookHandler } from "../../types";
+import type { AgentRequestAuthority } from "../../core/orchestration-contract";
 import { reconcileWaveBlock } from "../../core/wave-gate-model";
 import { parseSpecCheckOutput, reconcileSpecCheck } from "../../core/spec-check";
 import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 export { parseSpecCheckOutput } from "../../core/spec-check";
 import { StateManager } from "../../state-manager";
+import { passthroughResult, type HookHandler, type HookResult, type TaskGraph } from "../../types";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
 import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
-import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 import { stripNamespace } from "../../utils/strip-namespace";
 
-const handler: HookHandler = async (stdin) => {
-  // Guard the standalone CLI route: dispatch parses stdin before calling
-  // handlers, but this handler is also registered directly (KNOWN_HANDLERS),
-  // where a bare JSON.parse throw would surface as an uncontextualized
-  // "Hook error" (mirrors cleanup-subagent-flag / update-task-status).
+type SpecCheckRequestAuthority = Pick<
+  AgentRequestAuthority,
+  "runId" | "slotId" | "attempt" | "role"
+>;
+
+function specCheckAuthorityProblem(
+  state: TaskGraph,
+  authority: SpecCheckRequestAuthority | undefined,
+): string | null {
+  const epoch = state.wave_review_epoch;
+  const active = state.active_wave_gate;
+  if (epoch === undefined && active === undefined) return null; // legacy compatibility
+  if (authority === undefined) return "modern Wave spec-check has no capture-correlated request authority";
+  if (authority.role !== "spec-check-invoker") return `captured request belongs to ${authority.role}`;
+  const slot = epoch?.specCheckSlotAuthority;
+  return state.current_phase === "execute" && epoch !== undefined && active !== undefined &&
+      state.current_wave === epoch.wave && active.runId === authority.runId && active.wave === epoch.wave &&
+      epoch.runId === authority.runId && slot?.slot_id === authority.slotId && slot.attempted === authority.attempt
+    ? null
+    : `captured spec-check request ${authority.runId}/${authority.slotId}/${authority.attempt} does not match the exact current Wave epoch`;
+}
+
+export const runStoreSpecCheckFindings = async (
+  stdin: string,
+  _args: string[],
+  requestAuthority?: SpecCheckRequestAuthority,
+): Promise<HookResult> => {
   const parsedInput = parseSubagentStopStdin(stdin);
   if (!parsedInput.ok) {
     return {
@@ -28,7 +49,6 @@ const handler: HookHandler = async (stdin) => {
     };
   }
   const input = parsedInput.value;
-
   const agentType = stripNamespace(resolveAgentType(input));
   if (agentType === "") {
     return {
@@ -38,71 +58,63 @@ const handler: HookHandler = async (stdin) => {
   }
   if (agentType !== "spec-check-invoker") return { kind: "passthrough" };
 
-  let mgr: StateManager | null;
+  let manager: StateManager | null;
   try {
-    mgr = StateManager.fromSession(input.session_id);
+    manager = StateManager.fromSession(input.session_id);
   } catch (error) {
     return {
       kind: "error",
       message: `store-spec-check-findings: session TaskGraph authority unavailable — spec-check findings NOT stored: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
-  if (!mgr) {
+  if (manager === null) {
     return {
       kind: "error",
       message: `store-spec-check-findings: no TaskGraph authority for session ${JSON.stringify(input.session_id)} — spec-check findings NOT stored`,
     };
   }
 
-  // Resolved, not read off the payload: on a harness that sends no
-  // `agent_transcript_path` every spec-check would otherwise land in the
-  // evidence_capture_failed arm below, blocking every wave gate on a
-  // capture failure rather than on the spec.
   const rawPath = resolveAgentTranscriptPath(input) ?? input.agent_transcript_path ?? "";
   const transcript = await readTranscriptWithRetry(rawPath, /SPEC_CHECK_CRITICAL_COUNT:\s*\d+/);
-  if (!transcript) {
-    // Fail CLOSED, mirroring the missing-count path below. The wave gate also
-    // rejects absent spec-check data, but persisting this typed failure keeps
-    // the concrete unreadable-transcript cause instead of collapsing it into
-    // generic missing evidence.
-    process.stderr.write(
-      `WARNING: spec-check transcript empty or unreadable (path=${rawPath || "<unset>"}) — marking evidence_capture_failed\n`,
-    );
-    const state = mgr.load();
-    await mgr.update((s) => ({
-      ...s,
-      spec_check: {
-        wave: state.current_wave ?? 1,
-        run_at: new Date().toISOString(),
-        verdict: "EVIDENCE_CAPTURE_FAILED",
-        error: "spec-check agent transcript empty or unreadable - re-run /wave-gate",
+  const findings = parseSpecCheckOutput(transcript ?? "");
+  const applied = await manager.updateAndReturn((state) => {
+    const authorityProblem = specCheckAuthorityProblem(state, requestAuthority);
+    if (authorityProblem !== null) {
+      return {
+        state,
+        value: {
+          kind: "error" as const,
+          message: `store-spec-check-findings: ${authorityProblem} — spec-check findings NOT stored`,
+        },
+      };
+    }
+    const wave = state.wave_review_epoch?.wave ?? findings.wave ?? state.current_wave ?? 1;
+    const resolution = transcript === null
+      ? reconcileSpecCheck(parseSpecCheckOutput(""), wave, new Date().toISOString())
+      : reconcileSpecCheck(findings, wave, new Date().toISOString());
+    if (resolution.kind === "evidence-failed") {
+      return {
+        state: { ...state, spec_check: resolution.specCheck },
+        value: passthroughResult(`WARNING: ${resolution.specCheck.error} — marking evidence_capture_failed`),
+      };
+    }
+    return {
+      state: {
+        ...state,
+        spec_check: resolution.specCheck,
+        wave_gates: reconcileWaveBlock(state.wave_gates, state.tasks, resolution.specCheck, wave),
       },
-    }));
-    return { kind: "passthrough" };
+      value: passthroughResult(
+        `Spec-check: ${resolution.specCheck.critical_count} critical, ${resolution.specCheck.high_count} high`,
+      ),
+    };
+  });
+  if (applied.kind === "passthrough" && applied.systemMessage !== undefined) {
+    process.stderr.write(`${applied.systemMessage}\n`);
   }
-
-  const findings = parseSpecCheckOutput(transcript);
-  const state = mgr.load();
-  const wave = findings.wave ?? state.current_wave ?? 1;
-
-  const resolution = reconcileSpecCheck(findings, wave, new Date().toISOString());
-  if (resolution.kind === "evidence-failed") {
-    process.stderr.write(`WARNING: ${resolution.specCheck.error} — marking evidence_capture_failed\n`);
-    await mgr.update((s) => ({ ...s, spec_check: resolution.specCheck }));
-    return { kind: "passthrough" };
-  }
-
-  // `blocked` is DERIVED from the freshly stored spec-check, never asserted:
-  // `wave-gate-model.waveHasBlockCause` is documented as the only copy of the
-  // rule, and a literal `blocked: true` here was a second copy that could not
-  // clear the flag when the cause went away.
-  await mgr.update((s) => ({
-    ...s,
-    spec_check: resolution.specCheck,
-    wave_gates: reconcileWaveBlock(s.wave_gates, s.tasks, resolution.specCheck, wave),
-  }));
-
-  return passthroughDiagnostic(`Spec-check: ${resolution.specCheck.critical_count} critical, ${resolution.specCheck.high_count} high\n`);
+  return applied;
 };
+
+const handler: HookHandler = (stdin, args) => runStoreSpecCheckFindings(stdin, args);
 
 export default handler;

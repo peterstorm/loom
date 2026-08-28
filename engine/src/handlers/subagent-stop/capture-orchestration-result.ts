@@ -27,15 +27,19 @@
 
 import { readFileSync } from "node:fs";
 import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
+import type { AgentRequestAuthority } from "../../core/orchestration-contract";
 import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 import type { FinalPayloadCandidate } from "../../core/harness-capture";
 import {
   captureAuditLine,
   captureHarnessResult,
+  readCorrelatorIdentity,
+  readIssuedRequests,
   RUN_DIR_ENV,
   RUNS_ROOT_ENV,
   type CaptureOutcome,
 } from "../../orchestration/harness-capture-runtime";
+import { openRunDirectory } from "../../orchestration/run-directory-handle";
 
 export type { CaptureOutcome };
 
@@ -119,6 +123,22 @@ export {
  * write transcript evidence; refusals that reached a reservation may durably
  * record a rejection marker and journal event.
  */
+export function resolveClaudeRequestAuthority(
+  input: SubagentStopInput,
+  runsRoot: string | undefined,
+  runDirectory: string | undefined,
+): AgentRequestAuthority | null {
+  if (runsRoot === undefined && runDirectory === undefined) return null;
+  if (runsRoot === undefined || runDirectory === undefined) {
+    throw new Error("Claude request authority requires both run root and run directory");
+  }
+  const opened = openRunDirectory(runsRoot, runDirectory);
+  if (!opened.ok) throw new Error(opened.error.message);
+  const identity = readCorrelatorIdentity(opened.value, "claude", input.agent_id ?? "");
+  if (identity === null) return null;
+  return readIssuedRequests(opened.value).find(({ requestId }) => requestId === identity.requestId) ?? null;
+}
+
 export async function captureClaudeResult(
   input: SubagentStopInput,
   runsRoot: string | undefined,

@@ -33,6 +33,20 @@ describe("update-task-status — malformed stdin guard (directly-registered rout
     },
   );
 
+  it.each([
+    ["absent", `missing-implementation-session-${process.pid}-${Date.now()}`],
+    ["malformed", "../../invalid implementation session"],
+  ])("fails closed for a recognized implementation stop with %s TaskGraph authority", async (_label, sessionId) => {
+    const result = await updateTaskStatus(JSON.stringify({
+      session_id: sessionId,
+      agent_type: "code-implementer-agent",
+    }), []);
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/TaskGraph authority unavailable.*task status and test evidence NOT updated|session TaskGraph authority unavailable/),
+    });
+  });
+
   it("rejects an unnameable direct implementation result", async () => {
     const result = await updateTaskStatus(JSON.stringify({ session_id: "session-1" }), []);
     expect(result).toMatchObject({

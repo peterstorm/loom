@@ -433,7 +433,7 @@ export const runUpdateTaskStatus = async (
   // A failed dispatcher snapshot means ledger contents are UNKNOWN — say so
   // and let resolveTestEvidence label the verdict snapshot-read-failed
   // instead of pretending the ledger was empty ("degraded").
-  const snapshotFailed = evidenceSnapshot?.kind === "snapshot-failed";
+  let snapshotFailed = evidenceSnapshot?.kind === "snapshot-failed";
   if (snapshotFailed) {
     process.stderr.write(
       `update-task-status: evidence snapshot for ${input.session_id} failed — ledger unavailable; verdict will be labeled snapshot-read-failed\n`,
@@ -449,14 +449,23 @@ export const runUpdateTaskStatus = async (
   // would be mislabeled "degraded"/"fallback" instead of reflecting that the
   // ledger was never read. Say so once, mirroring dispatch.ts.
   if (evidenceSnapshot === undefined && input.session_id && standaloneSessionId === null) {
+    snapshotFailed = true;
     process.stderr.write(
-      `update-task-status: invalid session id ${input.session_id} — ledger not read; verdict may be mislabeled\n`,
+      `update-task-status: invalid session id ${input.session_id} — ledger not read; verdict labeled snapshot-read-failed\n`,
     );
   }
   let records: readonly EvidenceRecord[] = [];
-  if (evidenceSnapshot === undefined) {
-    records = standaloneSessionId === null ? [] : readEvidence(standaloneSessionId);
-  } else if (evidenceSnapshot.kind === "snapshot") {
+  if (evidenceSnapshot === undefined && standaloneSessionId !== null) {
+    try {
+      records = readEvidence(standaloneSessionId);
+    } catch (error) {
+      snapshotFailed = true;
+      process.stderr.write(
+        `update-task-status: evidence ledger read failed for ${standaloneSessionId}: ` +
+        `${error instanceof Error ? error.message : String(error)}; verdict labeled snapshot-read-failed\n`,
+      );
+    }
+  } else if (evidenceSnapshot?.kind === "snapshot") {
     records = evidenceSnapshot.events;
   }
   const epochEvents = epochAgentId && epochAgentType
