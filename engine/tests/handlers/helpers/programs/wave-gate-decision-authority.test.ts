@@ -1,3 +1,4 @@
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 /**
  * `waveGateDecisionMismatch` is the guard that stops a Wave advisory decision
  * meant for one Wave Gate run from being applied to a stale or foreign one.
@@ -10,9 +11,8 @@
  * here, against plain objects.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { describe, expect, it, vi } from "vitest";
 import {
   handleWaveReviewContext,
@@ -314,7 +314,7 @@ describe("waveGateDecisionMismatch", () => {
   });
 
   it("preserves a corrupt advisory event log as unavailable and reports the cause", async () => {
-    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-advisory-events-"));
+    const runsRoot = canonicalTempDir("loom-wave-advisory-events-");
     const runDirectory = join(runsRoot, RUN_ID);
     mkdirSync(runDirectory);
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -344,7 +344,7 @@ describe("waveGateDecisionMismatch", () => {
   });
 
   it("publishes every byte referenced by the façade await-user request", async () => {
-    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-advisory-"));
+    const runsRoot = canonicalTempDir("loom-wave-advisory-");
     const runDirectory = join(runsRoot, RUN_ID);
     mkdirSync(runDirectory);
     try {

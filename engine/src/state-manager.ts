@@ -1,13 +1,13 @@
 /**
- * Descriptor-anchored atomic State File manager.
+ * Anchored atomic State File manager.
  *
  * The State File stays mode 0444 at rest. Hooks and whitelisted helpers stage
- * validated bytes, set mode 0444 before publication, and rename under one
- * retained parent descriptor and lock.
+ * validated bytes, set mode 0444 before publication, and rename through the
+ * anchored parent capability and lock — the retained parent descriptor on
+ * Linux, the `O_NOFOLLOW_ANY`-proven real path on darwin.
  * Replaces: state-file-write.sh, resolve-task-graph.sh, loom-config.sh
  */
 
-import { fchmodSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { KNOWN_AGENTS, PHASE_ORDER, REVIEW_SUB_AGENTS, pathExistsFailClosed, taskGraphPath } from "./config";
@@ -89,11 +89,11 @@ import {
   closeAnchoredDirectory,
   openDirectoryNoFollow,
   readDirectoryFileNoFollow,
+  resolveBaseDirectory,
   withAnchoredDirectoryHandleLock,
   writeDirectoryFileAtomicModeNoFollow,
   type AnchoredDirectory,
   type AnchoredDirectoryIdentity,
-  type AnchoredFileModePort,
 } from "./orchestration/no-follow-fs";
 
 export { TASK_ID_PATTERN } from "./core/task-id";
@@ -114,10 +114,21 @@ type TaskGraphFileAuthority = Readonly<{
   leaf: string;
 }>;
 
-function readAbsoluteFileNoFollow(path: string): Buffer {
-  const directory = openDirectoryNoFollow(dirname(path));
+/**
+ * Read one session pointer through its subagent base, resolved once.
+ *
+ * The subagent directory is the BASE for session-scoped files: its configured
+ * path may traverse a system symlink (macOS resolves `/tmp` to
+ * `/private/tmp`), so it is resolved here rather than walked strictly from the
+ * filesystem root — the same reason `ensureResolvedBaseDirectory` resolves a
+ * run base. ENOENT propagates: an absent base is the one absent answer, the
+ * same one an absent pointer produces. The leaf itself is still read with no
+ * component followed.
+ */
+function readSessionPointerNoFollow(sessionFile: string): string {
+  const directory = openDirectoryNoFollow(resolveBaseDirectory(dirname(sessionFile)));
   try {
-    return readDirectoryFileNoFollow(directory, basename(path));
+    return readDirectoryFileNoFollow(directory, basename(sessionFile)).toString("utf8");
   } finally {
     closeAnchoredDirectory(directory);
   }
@@ -143,7 +154,7 @@ function captureTaskGraphFileAuthority(path: string, requireExisting: boolean): 
 }
 
 function parseSessionPointerFile(sessionFile: string): string {
-  const parsed = parseCanonicalTaskGraphPointer(readAbsoluteFileNoFollow(sessionFile).toString("utf8"));
+  const parsed = parseCanonicalTaskGraphPointer(readSessionPointerNoFollow(sessionFile));
   if (!parsed.ok) throw new Error(`session pointer ${sessionFile} is malformed: ${parsed.error}`);
   return parsed.value;
 }
@@ -176,6 +187,16 @@ function resolveTaskGraphFileAuthority(sessionId?: string): TaskGraphFileAuthori
       : `cannot read session pointer ${sessionFile}: ${cause}`;
     throw new Error(`resolveTaskGraph: ${message} — refusing local task-graph fallback`);
   }
+  return pointedTaskGraphAuthority(pointedPath, sessionFile);
+}
+
+/**
+ * Capture no-follow file authority for a session pointer's target, or refuse
+ * the local fallback with the exact same diagnostic from every caller. One
+ * enforcement point for the translate-catch contract: ENOENT names a missing
+ * graph, anything else names an inaccessible one.
+ */
+function pointedTaskGraphAuthority(pointedPath: string, sessionFile: string): TaskGraphFileAuthority {
   try {
     return captureTaskGraphFileAuthority(pointedPath, true);
   } catch (error) {
@@ -209,17 +230,7 @@ function resolveLocalSessionTaskGraphAuthority(sessionId: string): TaskGraphFile
       `${error instanceof Error ? error.message : String(error)} — refusing local task-graph fallback`,
     );
   }
-  try {
-    return captureTaskGraphFileAuthority(pointedPath, true);
-  } catch (error) {
-    const cause = error instanceof Error ? error.message : String(error);
-    const description = (error as NodeJS.ErrnoException).code === "ENOENT"
-      ? `names missing graph '${pointedPath}'`
-      : `names inaccessible graph '${pointedPath}': ${cause}`;
-    throw new Error(
-      `resolveTaskGraph: session pointer ${sessionFile} ${description} — refusing local task-graph fallback`,
-    );
-  }
+  return pointedTaskGraphAuthority(pointedPath, sessionFile);
 }
 
 // --- Parse, don't validate: disk JSON → TaskGraph ---
@@ -299,10 +310,11 @@ function parseSpecCheckField(v: unknown):
  * `blocked` is an orthogonal veto — it legitimately coexists with
  * `impl_complete`/`reviews_complete` (see `WaveGate`), so no combination of the
  * flags is contradictory on its own. What IS meaningless is a veto with no
- * reason behind it: the flag has exactly two causes, and `update-task-status`
- * already clears it when the last one dies, with a comment promising "the flag
- * now tracks its causes, exactly like the load boundary's cross-field proof" —
- * a proof that did not exist. Its absence is not cosmetic:
+ * reason behind it: the flag has exactly two causes, and `updateTaskFindings`
+ * — driven by `store-review-findings` and `store-spec-check-findings` against
+ * `core/wave-gate-model.ts` `waveHasBlockCause` — already clears it when the
+ * last cause dies, using the writers' own predicate so the load boundary
+ * cannot disagree with them. Its absence is not cosmetic:
  * `validate-task-execution` renders a causeless gate as
  *
  *     BLOCKED: Wave N review gate not passed.
@@ -373,6 +385,23 @@ function exactFieldsError(
 const WAVE_REVIEW_EPOCH_FIELDS = ["runId", "wave", "batchEpoch"] as const;
 
 /** Parse the exact request-batch authority persisted beside an active Wave Gate. */
+function parseWaveNumber(value: unknown, label: string): { ok: true; value: number } | { ok: false; error: string } {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1
+    ? { ok: true, value }
+    : { ok: false, error: `${label} must be an integer >= 1` };
+}
+
+function parseIntegerBound(
+  value: unknown,
+  label: string,
+  min: number,
+  minDescription: string,
+): { ok: true; value: number } | { ok: false; error: string } {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= min
+    ? { ok: true, value }
+    : { ok: false, error: `${label} must be ${minDescription}` };
+}
+
 function parseWaveReviewEpoch(raw: unknown): ParseResult<WaveReviewEpochAuthority | undefined> {
   if (raw === undefined) return parseOk(undefined);
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
@@ -383,14 +412,13 @@ function parseWaveReviewEpoch(raw: unknown): ParseResult<WaveReviewEpochAuthorit
   if (fieldsError !== null) return parseErr(fieldsError);
   const runId = parseOrchestrationRunId(record.runId);
   if (!runId.ok) return parseErr(`wave_review_epoch.runId: ${runId.error.message}`);
-  if (typeof record.wave !== "number" || !Number.isInteger(record.wave) || record.wave < 1) {
-    return parseErr("wave_review_epoch.wave must be an integer >= 1");
-  }
+  const wave = parseWaveNumber(record.wave, "wave_review_epoch.wave");
+  if (!wave.ok) return parseErr(wave.error);
   const batchEpoch = parseArtifactDigest(record.batchEpoch);
   if (!batchEpoch.ok) return parseErr(`wave_review_epoch.batchEpoch: ${batchEpoch.error.message}`);
   return parseOk(Object.freeze({
     runId: runId.value,
-    wave: record.wave,
+    wave: wave.value,
     batchEpoch: batchEpoch.value,
   }));
 }
@@ -451,12 +479,10 @@ export function parseActiveWaveGateRegistration(raw: unknown): ParseResult<Activ
   if (!runId.ok) return parseErr(`active_wave_gate.runId: ${runId.error.message}`);
   const authorityDigest = parseArtifactDigest(record.authorityDigest);
   if (!authorityDigest.ok) return parseErr(`active_wave_gate.authorityDigest: ${authorityDigest.error.message}`);
-  if (typeof record.wave !== "number" || !Number.isInteger(record.wave) || record.wave < 1) {
-    return parseErr("active_wave_gate.wave must be an integer >= 1");
-  }
-  if (typeof record.revision !== "number" || !Number.isSafeInteger(record.revision) || record.revision < 0) {
-    return parseErr("active_wave_gate.revision must be a non-negative safe integer");
-  }
+  const wave = parseWaveNumber(record.wave, "active_wave_gate.wave");
+  if (!wave.ok) return parseErr(wave.error);
+  const revision = parseIntegerBound(record.revision, "active_wave_gate.revision", 0, "a non-negative safe integer");
+  if (!revision.ok) return parseErr(revision.error);
   if (record.runsRoot !== undefined &&
       (typeof record.runsRoot !== "string" || !isAbsolute(record.runsRoot) || resolve(record.runsRoot) !== record.runsRoot)) {
     return parseErr("active_wave_gate.runsRoot must be an absolute normalized path when present");
@@ -468,9 +494,9 @@ export function parseActiveWaveGateRegistration(raw: unknown): ParseResult<Activ
     schemaVersion: 1,
     kind: "active-wave-gate",
     runId: runId.value,
-    wave: record.wave,
+    wave: wave.value,
     authorityDigest: authorityDigest.value,
-    revision: record.revision,
+    revision: revision.value,
     ...(record.runsRoot === undefined ? {} : { runsRoot: record.runsRoot as string }),
     terminalOutcome: terminalOutcome.value,
   }));
@@ -528,20 +554,18 @@ function parseCompletedWaveGateCommon(record: Record<string, unknown>): ParseRes
   const authorityDigest = parseArtifactDigest(record.authorityDigest);
   if (!runId.ok) return parseErr(`wave_gate_history.runId: ${runId.error.message}`);
   if (!authorityDigest.ok) return parseErr(`wave_gate_history.authorityDigest: ${authorityDigest.error.message}`);
-  if (typeof record.wave !== "number" || !Number.isInteger(record.wave) || record.wave < 1) {
-    return parseErr("wave_gate_history.wave must be an integer >= 1");
-  }
-  if (typeof record.revision !== "number" || !Number.isSafeInteger(record.revision) || record.revision < 1) {
-    return parseErr("wave_gate_history.revision must be a positive safe integer");
-  }
-  const completionReceipt = parseCompletedWaveGateReceipt(record.completionReceipt, runId.value, record.revision);
+  const wave = parseWaveNumber(record.wave, "wave_gate_history.wave");
+  if (!wave.ok) return parseErr(wave.error);
+  const revision = parseIntegerBound(record.revision, "wave_gate_history.revision", 1, "a positive safe integer");
+  if (!revision.ok) return parseErr(revision.error);
+  const completionReceipt = parseCompletedWaveGateReceipt(record.completionReceipt, runId.value, revision.value);
   if (!completionReceipt.ok) return parseErr(completionReceipt.error);
   return parseOk(Object.freeze({
     kind: "completed-wave-gate" as const,
     runId: runId.value,
-    wave: record.wave,
+    wave: wave.value,
     authorityDigest: authorityDigest.value,
-    revision: record.revision,
+    revision: revision.value,
     completionReceipt: completionReceipt.value,
   }));
 }
@@ -601,7 +625,7 @@ const ORPHANED_WAVE_GATE_RETIREMENT_FIELDS = [
 ] as const;
 
 /** Parse one immutable nonterminal retirement audit entry. */
-export function parseOrphanedWaveGateRetirement(raw: unknown): ParseResult<OrphanedWaveGateRetirement> {
+function parseOrphanedWaveGateRetirement(raw: unknown): ParseResult<OrphanedWaveGateRetirement> {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return parseErr("orphaned_wave_gate_history entry must be an object");
   }
@@ -625,12 +649,10 @@ export function parseOrphanedWaveGateRetirement(raw: unknown): ParseResult<Orpha
   if (!replacementAuthorityDigest.ok) {
     return parseErr(`orphaned_wave_gate_history.replacementAuthorityDigest: ${replacementAuthorityDigest.error.message}`);
   }
-  if (typeof record.wave !== "number" || !Number.isInteger(record.wave) || record.wave < 1) {
-    return parseErr("orphaned_wave_gate_history.wave must be an integer >= 1");
-  }
-  if (typeof record.revision !== "number" || !Number.isSafeInteger(record.revision) || record.revision < 0) {
-    return parseErr("orphaned_wave_gate_history.revision must be a non-negative safe integer");
-  }
+  const wave = parseWaveNumber(record.wave, "orphaned_wave_gate_history.wave");
+  if (!wave.ok) return parseErr(wave.error);
+  const revision = parseIntegerBound(record.revision, "orphaned_wave_gate_history.revision", 0, "a non-negative safe integer");
+  if (!revision.ok) return parseErr(revision.error);
   if (typeof record.runsRoot !== "string" || !isAbsolute(record.runsRoot) || resolve(record.runsRoot) !== record.runsRoot ||
       typeof record.runDirectory !== "string" || record.runDirectory !== join(record.runsRoot, runId.value)) {
     return parseErr("orphaned_wave_gate_history must carry the exact normalized authoritative runsRoot/runDirectory");
@@ -639,9 +661,9 @@ export function parseOrphanedWaveGateRetirement(raw: unknown): ParseResult<Orpha
     schemaVersion: 1,
     kind: "orphaned-wave-gate-retirement",
     runId: runId.value,
-    wave: record.wave,
+    wave: wave.value,
     authorityDigest: authorityDigest.value,
-    revision: record.revision,
+    revision: revision.value,
     reason: "authoritative-run-directory-missing",
     runsRoot: record.runsRoot,
     runDirectory: record.runDirectory,
@@ -694,7 +716,7 @@ function parseSpecTraceSupersededBy(
 }
 
 /** Parse one immutable audit of an abandoned Wave Gate retired for trace v2. */
-export function parseSpecTraceWaveGateRetirement(raw: unknown): ParseResult<SpecTraceWaveGateRetirement> {
+function parseSpecTraceWaveGateRetirement(raw: unknown): ParseResult<SpecTraceWaveGateRetirement> {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return parseErr("spec_trace_wave_gate_retirements entry must be an object");
   }
@@ -715,12 +737,10 @@ export function parseSpecTraceWaveGateRetirement(raw: unknown): ParseResult<Spec
   if (!authorityDigest.ok) {
     return parseErr(`spec_trace_wave_gate_retirements.authorityDigest: ${authorityDigest.error.message}`);
   }
-  if (typeof record.wave !== "number" || !Number.isInteger(record.wave) || record.wave < 1) {
-    return parseErr("spec_trace_wave_gate_retirements.wave must be an integer >= 1");
-  }
-  if (typeof record.revision !== "number" || !Number.isSafeInteger(record.revision) || record.revision < 0) {
-    return parseErr("spec_trace_wave_gate_retirements.revision must be a non-negative safe integer");
-  }
+  const wave = parseWaveNumber(record.wave, "spec_trace_wave_gate_retirements.wave");
+  if (!wave.ok) return parseErr(wave.error);
+  const revision = parseIntegerBound(record.revision, "spec_trace_wave_gate_retirements.revision", 0, "a non-negative safe integer");
+  if (!revision.ok) return parseErr(revision.error);
   if (typeof record.runsRoot !== "string" || !isAbsolute(record.runsRoot) || resolve(record.runsRoot) !== record.runsRoot) {
     return parseErr("spec_trace_wave_gate_retirements.runsRoot must be an absolute normalized path");
   }
@@ -733,9 +753,9 @@ export function parseSpecTraceWaveGateRetirement(raw: unknown): ParseResult<Spec
     schemaVersion: 1,
     kind: "spec-trace-wave-gate-retirement",
     runId: runId.value,
-    wave: record.wave,
+    wave: wave.value,
     authorityDigest: authorityDigest.value,
-    revision: record.revision,
+    revision: revision.value,
     runsRoot: record.runsRoot,
     reason,
     supersededBy: supersededBy.value,
@@ -2099,28 +2119,6 @@ export {
   type LegacyWaveGateCompletionReplayError,
 } from "./core/legacy-archive";
 
-export type StateFilePermissionPort = AnchoredFileModePort;
-
-/** The protected graph was durably renamed, but restoring its read-only mode
- * failed. The committed value is retained so callers can report the exact
- * receipt instead of misclassifying the failure as an idempotent lock replay. */
-export class PostCommitStateProtectionError<T> extends Error {
-  readonly kind = "post-commit-state-protection-failed" as const;
-
-  constructor(
-    readonly statePath: string,
-    readonly committedValue: T,
-    readonly permissionCause: unknown,
-  ) {
-    super(
-      `Task graph was committed but read-only permission restoration failed: ${statePath}: ` +
-      `${permissionCause instanceof Error ? permissionCause.message : String(permissionCause)}`,
-      { cause: permissionCause },
-    );
-    this.name = "PostCommitStateProtectionError";
-  }
-}
-
 type ParsedLegacyWaveGateMigrationAuthority = Readonly<{
   registration: ActiveWaveGateRegistration;
   compatibility: LegacyWaveGateCompatibilityAuthorityLocal;
@@ -2143,14 +2141,13 @@ function parseLegacyWaveGateMigrationAuthority(raw: unknown): ParseResult<Parsed
   const digest = parseArtifactDigest(record.authorityDigest);
   if (!runId.ok) return parseErr(runId.error.message);
   if (!digest.ok) return parseErr(digest.error.message);
-  if (typeof record.wave !== "number" || !Number.isInteger(record.wave) || record.wave < 1) {
-    return parseErr("Legacy Wave Gate migration wave must be an integer >= 1");
-  }
+  const wave = parseWaveNumber(record.wave, "Legacy Wave Gate migration wave");
+  if (!wave.ok) return parseErr(wave.error);
   const registration: ActiveWaveGateRegistration = Object.freeze({
     schemaVersion: 1,
     kind: "active-wave-gate",
     runId: runId.value,
-    wave: record.wave,
+    wave: wave.value,
     authorityDigest: digest.value,
     revision: 0,
     terminalOutcome: null,
@@ -2167,28 +2164,25 @@ function parseLegacyWaveGateMigrationAuthority(raw: unknown): ParseResult<Parsed
 
 export class StateManager {
   private readonly path: string;
-  private readonly setPermissions: StateFilePermissionPort;
   private readonly authority: TaskGraphFileAuthority;
 
   constructor(
     path: string,
-    setPermissions: StateFilePermissionPort = fchmodSync,
     authority: TaskGraphFileAuthority = captureTaskGraphFileAuthority(path, false),
   ) {
     this.path = authority.path;
-    this.setPermissions = setPermissions;
     this.authority = authority;
   }
 
   static fromSession(sessionId?: string): StateManager | null {
     const authority = resolveTaskGraphFileAuthority(sessionId);
-    return authority === null ? null : new StateManager(authority.path, fchmodSync, authority);
+    return authority === null ? null : new StateManager(authority.path, authority);
   }
 
   /** Pi parent adapter seam; see resolveLocalSessionTaskGraphAuthority. */
   static fromLocalSession(sessionId: string): StateManager | null {
     const authority = resolveLocalSessionTaskGraphAuthority(sessionId);
-    return authority === null ? null : new StateManager(authority.path, fchmodSync, authority);
+    return authority === null ? null : new StateManager(authority.path, authority);
   }
 
   /**
@@ -2388,7 +2382,6 @@ export class StateManager {
           this.authority.leaf,
           JSON.stringify(parsed.value, null, 2),
           0o444,
-          this.setPermissions,
         );
         return produced.value;
       });

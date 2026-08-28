@@ -5,11 +5,11 @@
  * Isolation via unique session ids + targeted cleanup (SUBAGENT_DIR is
  * process-global).
  */
+import { existsSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 
 import { describe, it, expect, afterAll, beforeAll, vi } from "vitest";
-import { existsSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import markActive from "../../src/handlers/subagent-start/mark-subagent-active";
 import recordEvidence from "../../src/handlers/post-tool-use/record-evidence";
 import enforce from "../../src/handlers/pre-tool-use/enforce-phase-tools";
@@ -26,7 +26,7 @@ import { eventsForEpoch, parseEpoch, parseSessionId } from "../../src/machine/ev
 import { SUBAGENT_DIR } from "../../src/config";
 
 const run = `handlers-e2e-${process.pid}-${Date.now()}`;
-const fixtureRoot = mkdtempSync(join(tmpdir(), "loom-machine-handler-e2e-"));
+const fixtureRoot = canonicalTempDir("loom-machine-handler-e2e-");
 const statePath = join(fixtureRoot, "active_task_graph.json");
 const machinesPath = fixtureRoot;
 const previousStatePath = process.env.LOOM_STATE_PATH;
@@ -62,7 +62,10 @@ afterAll(() => {
     ]) {
       try {
         unlinkSync(path);
-      } catch {}
+      } catch (error) {
+        // ENOENT is the one idempotent absence; anything else is fixture damage.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
     }
   }
   if (previousStatePath === undefined) delete process.env.LOOM_STATE_PATH;

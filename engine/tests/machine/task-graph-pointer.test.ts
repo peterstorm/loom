@@ -1,6 +1,6 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   bindSessionTaskGraphPointer,
@@ -18,7 +18,7 @@ import {
 const roots: string[] = [];
 
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "loom-task-graph-pointer-"));
+  const root = canonicalTempDir("loom-task-graph-pointer-");
   roots.push(root);
   const graphA = join(root, "graph-a.json");
   const graphB = join(root, "graph-b.json");

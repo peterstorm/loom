@@ -8,6 +8,7 @@ import {
   type NewTestEvidence,
   type Task,
   type TaskCommonMetadata,
+  type TaskGraph,
   type TaskStatus,
 } from "../../src/types";
 
@@ -28,6 +29,24 @@ export type TaskFixtureInput = TaskCommonMetadata & Readonly<{
   new_test_evidence?: string;
   new_test_observation?: NewTestEvidence;
 }>;
+
+/**
+ * Canonical execute-phase TaskGraph shell: the exact literal the graph writers
+ * mint for a fresh wave. Tests that need anything beyond this shape pass their
+ * own full literal — bespoke fixture sites stay bespoke.
+ */
+export function graphFixture(tasks: readonly Task[]): TaskGraph {
+  return {
+    current_phase: "execute",
+    phase_artifacts: {},
+    skipped_phases: [],
+    spec_file: null,
+    plan_file: null,
+    current_wave: 1,
+    tasks: [...tasks],
+    wave_gates: {},
+  };
+}
 
 /**
  * Test-only lifecycle smart constructor. It keeps old scenario builders concise

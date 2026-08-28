@@ -1,8 +1,9 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import updateTaskStatus, { isMachineBound } from "../../src/handlers/subagent-stop/update-task-status";
 import { resolveTestEvidence } from "../../src/core/implementation-evidence";
 import { analyzeNewTests } from "../../src/handlers/helpers/task-local-completion";
@@ -486,7 +487,11 @@ describe("update-task-status — transcript path resolution", () => {
     const session = `uts-${stamp}`;
     const agentId = `a${stamp}`;
 
-    const tmpDir = join(tmpdir(), `uts-${stamp}`);
+    const tmpRoot = join(tmpdir(), `uts-${stamp}`);
+    mkdirSync(tmpRoot, { recursive: true });
+    // macOS tmpdir() sits behind /var → /private/var; the anchored primitives
+    // resolve the base once, so the fixture root must be canonical too.
+    const tmpDir = realpathSync.native(tmpRoot);
     const configDir = join(tmpDir, "config");
     mkdirSync(configDir, { recursive: true });
     const statePath = join(tmpDir, "graph.json");
@@ -636,7 +641,7 @@ describe("update-task-status — transcript path resolution", () => {
 
   it("quarantines the sole executing Task when a resolved transcript becomes unreadable", async () => {
     const s = await makeSession({ plantTranscript: false, executingTasks: ["T1"] });
-    const unreadableTranscript = mkdtempSync(join(tmpdir(), "loom-unreadable-transcript-"));
+    const unreadableTranscript = canonicalTempDir("loom-unreadable-transcript-");
     try {
       const result = await updateTaskStatus(JSON.stringify({
         session_id: s.session,
@@ -659,7 +664,7 @@ describe("update-task-status — transcript path resolution", () => {
 
   it("uses locked execution authority when an unreadable transcript races with a sibling reservation", async () => {
     const initial = await makeSession({ plantTranscript: false, executingTasks: ["T1"] });
-    const unreadableTranscript = mkdtempSync(join(tmpdir(), "loom-racing-transcript-"));
+    const unreadableTranscript = canonicalTempDir("loom-racing-transcript-");
     let persisted = initial.read();
     const lockedState: TaskGraph = { ...persisted, executing_tasks: ["T1", "T2"] };
     const manager = {
@@ -696,7 +701,7 @@ describe("update-task-status — transcript path resolution", () => {
 
   it("preserves ambiguous execution authority when an unreadable transcript binds no Task", async () => {
     const s = await makeSession({ plantTranscript: false, executingTasks: ["T1", "T2"] });
-    const unreadableTranscript = mkdtempSync(join(tmpdir(), "loom-ambiguous-transcript-"));
+    const unreadableTranscript = canonicalTempDir("loom-ambiguous-transcript-");
     try {
       const result = await updateTaskStatus(JSON.stringify({
         session_id: s.session,

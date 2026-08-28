@@ -33,6 +33,10 @@ command -v bun >/dev/null || { echo "FATAL: bun not found (need it to run the ho
 command -v jq  >/dev/null || { echo "FATAL: jq not found (needed to read assertions out of state)"; exit 1; }
 
 TMP="$(mktemp -d)"
+# Canonicalize: on macOS mktemp -d sits behind the /var → /private/var symlink,
+# and the CLI's anchored primitives resolve the base once while the process CWD
+# is always canonical — so the fixture must be canonical too.
+TMP="$(cd "$TMP" && pwd -P)"
 cleanup() {
   local rc=$? cleanup_failed=0
   trap - EXIT

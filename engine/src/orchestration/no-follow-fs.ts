@@ -2,18 +2,30 @@
  * Anchored filesystem primitives shared by every run directory.
  *
  * Every path below a run's base directory must be refused if ANY component of
- * it is a symlink. Linux is the sole supported runtime because Node exposes no
- * portable `openat`/`mkdirat`/`renameat`/`unlinkat` API and `/proc/self/fd`
- * provides the required descriptor-relative authority only on Linux.
+ * it is a symlink — that is the attack these primitives exist to stop, and it
+ * is enforced identically on both supported platforms. How the kernel is asked
+ * for that guarantee differs, because the two systems expose different tools:
  *
- * Each absolute path is opened one component at a time relative to the
- * descriptor for its parent. `O_NOFOLLOW` protects every hop, and validation
- * and use share one retained descriptor. A component swapped after validation
- * therefore cannot redirect a later read or pathname mutation.
+ * - **Linux — anchored to a descriptor.** Each absolute path is opened one
+ *   component at a time relative to the descriptor for its parent, addressed
+ *   through `/proc/self/fd/<fd>/<child>`, so `O_NOFOLLOW` protects every hop
+ *   AND validation and use share one retained descriptor. A component swapped
+ *   after validation therefore cannot redirect a later read or pathname
+ *   mutation.
+ *
+ * - **macOS — anchored to a real path.** Darwin has no usable fd→path bridge:
+ *   `/dev/fd/<fd>` is an fdesc node, not a directory, and Node exposes no
+ *   `openat`. Instead every open carries Darwin's `O_NOFOLLOW_ANY`, which makes
+ *   the kernel reject the open with ELOOP if ANY component of the path is a
+ *   symlink, evaluated over the whole path in one resolution. The one
+ *   guarantee darwin cannot reproduce — binding validation and use to a single
+ *   descriptor — is documented at the primitive.
  *
  * The run's BASE directory is trusted configuration: see
  * `ensureResolvedBaseDirectory`, which resolves it once so that everything
- * below it can be held to the strict no-symlink rule.
+ * below it can be held to the strict no-symlink rule. On macOS `/tmp` and
+ * `/var` are system symlinks, so a strict rule applied from the filesystem
+ * root would refuse every real run directory.
  *
  * These live in the orchestration layer because both the panel helpers and the
  * anchored `RunDirHandle` need them; the handle is the consolidation point the
@@ -27,18 +39,38 @@ import {
   fstatSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   readdirSync,
   realpathSync,
   renameSync,
+  rmSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, isAbsolute, parse, relative, resolve, sep } from "node:path";
+import { tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 
-/** A directory held open as the capability for every child operation. */
-export type AnchoredDirectory = Readonly<{ anchor: "descriptor"; fd: number }>;
+/**
+ * A descriptor that `openDirectoryNoFollow`/`openChildDirectoryNoFollow` hold
+ * open for anchored access. The brand makes a live anchor unforgeable outside
+ * this module: callers pass handles around, but only `anchorFor` can mint one,
+ * so a fabricated `{ anchor, fd }` (or a raw fd number) is a type error.
+ */
+declare const anchoredFdBrand: unique symbol;
+export type AnchoredDirectoryFd = number & { readonly [anchoredFdBrand]: "anchored-directory-fd" };
+
+/**
+ * A directory held open for anchored access, carrying whatever the platform
+ * needs to address its children. Linux addresses them through the retained
+ * descriptor; darwin has no such bridge and must re-state the real path, which
+ * `openDirectoryNoFollow` has already proven symlink-free.
+ */
+export type AnchoredDirectory =
+  | Readonly<{ anchor: "descriptor"; fd: AnchoredDirectoryFd }>
+  | Readonly<{ anchor: "real-path"; fd: AnchoredDirectoryFd; path: string }>;
 
 /** Stable identity used to reject a pathname that was rebound after capture. */
 export type AnchoredDirectoryIdentity = Readonly<{ device: bigint; inode: bigint }>;
@@ -59,14 +91,48 @@ export function anchoredDirectoryHasIdentity(
 export function assertAnchoredFilesystemPlatformSupported(
   platform: NodeJS.Platform = process.platform,
 ): void {
-  if (platform !== "linux") {
+  if (platform !== "linux" && platform !== "darwin") {
     throw new Error(
-      `Loom orchestration requires Linux descriptor-relative filesystem operations; platform ${platform} is unsupported`,
+      `Loom orchestration requires POSIX anchored-filesystem operations; platform ${platform} is unsupported`,
     );
+  }
+  if (platform === "darwin") assertDarwinNoFollowAnyCapability();
+}
+
+/**
+ * Darwin kernels first honored `O_NOFOLLOW_ANY` on macOS 13. An older kernel
+ * either fails every flagged open (fail-closed breakage) or silently ignores
+ * the unknown bit — which would open planted symlinks with NO protection and
+ * defeat the guarantee this module exists to enforce. The one-time probe below
+ * converts either unknown-kernel behavior into a fail-closed startup error: a
+ * planted symlink chain must be refused with ELOOP, and nothing else counts as
+ * proof.
+ */
+let darwinCapabilityVerified = false;
+function assertDarwinNoFollowAnyCapability(): void {
+  if (darwinCapabilityVerified) return;
+  const probeDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-anchor-probe-")));
+  try {
+    symlinkSync(".", join(probeDir, "planted-link"));
+    let refusedWithEloop = false;
+    try {
+      openSync(join(probeDir, "planted-link"), fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | DARWIN_O_NOFOLLOW_ANY);
+    } catch (error) {
+      refusedWithEloop = (error as NodeJS.ErrnoException).code === "ELOOP";
+    }
+    if (!refusedWithEloop) {
+      throw new Error(
+        "darwin kernel did not refuse an anchored open through a symlink with ELOOP — " +
+          "O_NOFOLLOW_ANY requires macOS 13 or newer; refusing unsafe anchored filesystem operations",
+      );
+    }
+    darwinCapabilityVerified = true;
+  } finally {
+    rmSync(probeDir, { recursive: true, force: true });
   }
 }
 
-export function noFollowFlag(): number {
+function noFollowFlag(): number {
   const noFollow = fsConstants.O_NOFOLLOW;
   if (typeof noFollow !== "number" || noFollow === 0) {
     throw new Error("O_NOFOLLOW is unavailable; refusing an unsafe run artifact write");
@@ -74,7 +140,27 @@ export function noFollowFlag(): number {
   return noFollow;
 }
 
-export function directoryFlag(): number {
+/**
+ * Darwin's `O_NOFOLLOW_ANY` (`sys/fcntl.h`): refuse the open with ELOOP if any
+ * component of the path is a symlink, not merely the last one. Node does not
+ * surface it in `fs.constants`, so the platform value is named here.
+ */
+const DARWIN_O_NOFOLLOW_ANY = 0x20000000;
+
+/**
+ * The no-follow mask for one anchored open.
+ *
+ * On darwin this is `O_NOFOLLOW_ANY` INSTEAD of `O_NOFOLLOW`, never both: the
+ * kernel rejects the pair with EINVAL, and it does not need them — the "any"
+ * form already covers the final component as well as every ancestor. On Linux
+ * `O_NOFOLLOW` is the whole story, because descriptor anchoring gives each hop
+ * its own open and therefore its own leaf check.
+ */
+function noFollowMask(): number {
+  return process.platform === "darwin" ? DARWIN_O_NOFOLLOW_ANY : noFollowFlag();
+}
+
+function directoryFlag(): number {
   assertAnchoredFilesystemPlatformSupported();
   const directory = fsConstants.O_DIRECTORY;
   if (typeof directory !== "number" || directory === 0) {
@@ -86,17 +172,29 @@ export function directoryFlag(): number {
 }
 
 /** Open one leaf under an anchor, following no component of its path. */
-const leafFlags = (extra: number): number => extra | noFollowFlag();
+const leafFlags = (extra: number): number => extra | noFollowMask();
 
 /** Open one directory under an anchor, following no component of its path. */
-const dirFlags = (): number => fsConstants.O_RDONLY | directoryFlag() | noFollowFlag();
+const dirFlags = (): number => fsConstants.O_RDONLY | directoryFlag() | noFollowMask();
 
 /**
- * The path that names `child` through the retained descriptor, so an ancestor
- * swapped after the anchor was opened cannot redirect it.
+ * The path that names `child` inside an already-anchored directory. On Linux
+ * this routes through the retained descriptor, so an ancestor swapped after
+ * the anchor was opened cannot redirect it. On darwin it re-states the
+ * proven-real directory path, and every open through it carries
+ * `O_NOFOLLOW_ANY` so a planted symlink is still refused by the kernel.
  */
+/**
+ * The path that addresses an anchored directory's children: the retained
+ * descriptor on Linux, the proven-real path on darwin. One enforcement point
+ * for the descriptor-versus-real-path addressing decision.
+ */
+function anchoredDirectoryPath(directory: AnchoredDirectory): string {
+  return directory.anchor === "descriptor" ? `/proc/self/fd/${directory.fd}` : directory.path;
+}
+
 export function anchoredChildPath(directory: AnchoredDirectory, child: string): string {
-  return `/proc/self/fd/${directory.fd}/${child}`;
+  return join(anchoredDirectoryPath(directory), child);
 }
 
 /** Release a directory anchor. The descriptor is the only owned resource. */
@@ -104,24 +202,42 @@ export function closeAnchoredDirectory(directory: AnchoredDirectory): void {
   closeSync(directory.fd);
 }
 
-const anchorFor = (fd: number): AnchoredDirectory =>
-  Object.freeze({ anchor: "descriptor" as const, fd });
+const anchorFor = (fd: number, path: string): AnchoredDirectory => {
+  const branded = fd as AnchoredDirectoryFd;
+  return process.platform === "darwin"
+    ? Object.freeze({ anchor: "real-path" as const, fd: branded, path })
+    : Object.freeze({ anchor: "descriptor" as const, fd: branded });
+};
 
 /**
  * Resolve a configured BASE directory to its real path, creating it if absent.
  *
- * The base is the one place an operator-configured symlink is legitimate
- * rather than hostile. Resolving it once moves that tolerance to a single
- * documented point; every path below the result follows the strict rule.
+ * The base is the one place a symlink is legitimate rather than hostile: on
+ * macOS `/tmp` and `/var` are system symlinks (`/tmp` → `/private/tmp`), so a
+ * strict no-symlink rule applied from the filesystem root would refuse every
+ * real run directory. Resolving the base once moves that tolerance to a single
+ * documented point — after this returns, every path built under the result can
+ * be, and is, held to the strict rule.
  *
- * The configured base is trusted and realpath-canonicalized;
- * the strict no-symlink invariant starts below that resolved boundary.
+ * On Linux this is an identity: a base containing a symlink is already refused
+ * by the anchored walk today, so any base that works keeps working unchanged.
  */
 export function ensureResolvedBaseDirectory(path: string): string {
-  assertAnchoredFilesystemPlatformSupported();
   const absolute = resolve(path);
   mkdirSync(absolute, { recursive: true, mode: 0o700 });
-  const real = realpathSync.native(absolute);
+  return resolveBaseDirectory(absolute);
+}
+
+/**
+ * Resolve a configured BASE directory to its real path WITHOUT creating it.
+ *
+ * Snapshot and removal callers treat an absent base as the ONE documented
+ * absent answer, so unlike `ensureResolvedBaseDirectory` this propagates
+ * ENOENT instead of mkdir-ing the base into existence. Everything below the
+ * resolved result is still held to the strict no-symlink rule.
+ */
+export function resolveBaseDirectory(path: string): string {
+  const real = realpathSync.native(resolve(path));
   if (!lstatSync(real).isDirectory()) {
     throw new Error(`run base directory is not a directory: ${real}`);
   }
@@ -135,18 +251,20 @@ function assertLeafName(name: string): void {
 }
 
 /**
- * List one anchored directory through the retained descriptor without
- * resolving its original path again.
+ * List one anchored directory without resolving its original path again.
+ * Linux reads the retained descriptor through `/proc/self/fd`; darwin has no
+ * such node, so it reads the proven-real path — whose own components were
+ * checked when the anchor was opened.
  */
 export function listDirectoryNamesNoFollow(directory: AnchoredDirectory): readonly string[] {
-  return Object.freeze(readdirSync(`/proc/self/fd/${directory.fd}`).sort());
+  return Object.freeze(readdirSync(anchoredDirectoryPath(directory)).sort());
 }
 
 /** Open one child directory relative to an anchored directory. */
 export function openChildDirectoryNoFollow(directory: AnchoredDirectory, name: string): AnchoredDirectory {
   assertLeafName(name);
   const childPath = anchoredChildPath(directory, name);
-  return anchorFor(openSync(childPath, dirFlags()));
+  return anchorFor(openSync(childPath, dirFlags()), childPath);
 }
 
 function closeFileDescriptor(
@@ -162,6 +280,27 @@ function closeFileDescriptor(
     return primaryError === null
       ? closeError
       : new AggregateError([primaryError, closeError], `${operation} and descriptor close both failed`);
+  }
+}
+
+/**
+ * Release a directory anchor without ever masking a primary error or skipping
+ * a still-owed close: close success returns the primary error unchanged, a
+ * throwing close alone propagates, and both failing aggregate — the same
+ * discipline `closeFileDescriptor` applies to file descriptors.
+ */
+export function closeAnchorGuarded(
+  directory: AnchoredDirectory,
+  primaryError: unknown,
+  operation: string,
+): unknown {
+  try {
+    closeAnchoredDirectory(directory);
+    return primaryError;
+  } catch (closeError) {
+    return primaryError === null
+      ? closeError
+      : new AggregateError([primaryError, closeError], `${operation} and directory close both failed`);
   }
 }
 
@@ -264,8 +403,6 @@ export function writeDirectoryFileAtomicNoFollow(
   writeDirectoryFileAtomicPreparedNoFollow(directory, name, data, () => undefined);
 }
 
-export type AnchoredFileModePort = (fileDescriptor: number, mode: number) => void;
-
 /**
  * Publish one replacement whose final mode is installed before rename.
  *
@@ -277,10 +414,9 @@ export function writeDirectoryFileAtomicModeNoFollow(
   name: string,
   data: string | Uint8Array,
   mode: number,
-  setMode: AnchoredFileModePort = fchmodSync,
 ): void {
   writeDirectoryFileAtomicPreparedNoFollow(directory, name, data, (fileDescriptor) =>
-    setMode(fileDescriptor, mode));
+    fchmodSync(fileDescriptor, mode));
 }
 
 /** Remove one anchored leaf; ENOENT is the only idempotent absence. */
@@ -541,10 +677,12 @@ export async function withAnchoredDirectoryHandleLock<T>(
 }
 
 /**
- * Hold a lock and its target directory through one retained descriptor.
+ * Hold a lock and its target directory through one anchored capability.
  *
- * The retained descriptor is the anchor, so no path swap after acquisition
- * can redirect either the lock or the callback's I/O.
+ * On Linux the retained descriptor is the anchor, so no path swap after
+ * acquisition can redirect either the lock or the callback's I/O. On darwin
+ * the anchor is the proven-real path; a component swapped after acquisition
+ * remains the documented accepted risk (see module header).
  */
 export async function withAnchoredDirectoryLock<T>(
   directory: string,
@@ -567,19 +705,32 @@ export async function withAnchoredDirectoryLock<T>(
  */
 export function openDirectoryNoFollow(path: string): AnchoredDirectory {
   const absolute = resolve(path);
+  if (process.platform === "darwin") {
+    // Darwin has no usable fd→path bridge: `/dev/fd/<fd>` is an fdesc node,
+    // not a directory, and Node exposes no `openat`. `O_NOFOLLOW_ANY` asks the
+    // kernel for the same whole-path guarantee in ONE resolution — the open
+    // fails with ELOOP if ANY component is a symlink — so the returned real
+    // path is safe to address children through.
+    return anchorFor(openSync(absolute, dirFlags()), absolute);
+  }
   const root = parse(absolute).root;
   let current = openSync(root, dirFlags());
   try {
     const components = relative(root, absolute).split(sep).filter(Boolean);
     for (const component of components) {
       const next = openSync(`/proc/self/fd/${current}/${component}`, dirFlags());
-      closeSync(current);
+      const previous = current;
       current = next;
+      // A throwing close must not replace the walk error nor leak the fd we
+      // just opened: `current` is adopted before the close can fail, and the
+      // outer catch releases it. The ELOOP diagnostic naming the hostile
+      // component is the single most valuable error this primitive produces.
+      const closeError = closeFileDescriptor(previous, null, `anchored walk of ${component}`);
+      if (closeError !== null) throw closeError;
     }
-    return anchorFor(current);
+    return anchorFor(current, absolute);
   } catch (error) {
-    closeSync(current);
-    throw error;
+    throw closeFileDescriptor(current, error, `anchored walk of ${absolute}`);
   }
 }
 
@@ -602,8 +753,9 @@ export function ensureDirectoryNoFollow(path: string): void {
  * with ordinary symlink-following semantics, so a swapped component would have
  * directories created at the link's TARGET. Walking one component at a time
  * refuses that instead: on Linux both mkdir and open resolve relative to a
- * retained parent descriptor, so a symlinked or swapped ancestor cannot
- * redirect the next component creation.
+ * retained parent descriptor; on darwin each open re-checks the whole path
+ * under `O_NOFOLLOW_ANY`, so a symlinked ancestor is caught before the next
+ * component is created.
  */
 export function ensureRelativeDirectoryNoFollow(
   rootDirectory: AnchoredDirectory,
@@ -626,7 +778,10 @@ export function ensureRelativeDirectoryNoFollow(
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       }
-      const next = anchorFor(openSync(child, dirFlags()));
+      // On darwin `child` names the just-created directory through its real
+      // path (the root anchor's path is the resolved runDir, so every hop
+      // extends it); on Linux the path argument is ignored.
+      const next = anchorFor(openSync(child, dirFlags()), child);
       if (ownsCurrent) closeAnchoredDirectory(current);
       current = next;
       ownsCurrent = true;
@@ -639,6 +794,7 @@ export function ensureRelativeDirectoryNoFollow(
 function writeAnchoredRunFile(path: string, data: string | Uint8Array, exclusive: boolean): void {
   const parent = openDirectoryNoFollow(dirname(path));
   let fileFd: number | null = null;
+  let primaryError: unknown = null;
   try {
     fileFd = openSync(
       anchoredChildPath(parent, basename(path)),
@@ -647,10 +803,12 @@ function writeAnchoredRunFile(path: string, data: string | Uint8Array, exclusive
       0o600,
     );
     writeFileSync(fileFd, data);
-  } finally {
-    if (fileFd !== null) closeSync(fileFd);
-    closeAnchoredDirectory(parent);
+  } catch (error) {
+    primaryError = error;
   }
+  primaryError = closeFileDescriptor(fileFd, primaryError, `write of ${basename(path)}`);
+  primaryError = closeAnchorGuarded(parent, primaryError, `write of ${basename(path)}`);
+  if (primaryError !== null) throw primaryError;
 }
 
 export function writeRunFileNoFollow(path: string, data: string): void {
@@ -685,27 +843,37 @@ export function readRunBytesNoFollow(path: string): Buffer {
 function readAnchoredRunFile(path: string): Buffer {
   const parent = openDirectoryNoFollow(dirname(path));
   let fileFd: number | null = null;
+  let bytes: Buffer | null = null;
+  let primaryError: unknown = null;
   try {
     fileFd = openSync(anchoredChildPath(parent, basename(path)), leafFlags(fsConstants.O_RDONLY));
-    return readFileSync(fileFd);
-  } finally {
-    if (fileFd !== null) closeSync(fileFd);
-    closeAnchoredDirectory(parent);
+    bytes = readFileSync(fileFd);
+  } catch (error) {
+    primaryError = error;
   }
+  primaryError = closeFileDescriptor(fileFd, primaryError, `read of ${basename(path)}`);
+  primaryError = closeAnchorGuarded(parent, primaryError, `read of ${basename(path)}`);
+  if (primaryError !== null) throw primaryError;
+  if (bytes === null) throw new Error(`read of ${basename(path)} produced no bytes`);
+  return bytes;
 }
 
 /**
- * Remove a run artifact relative to its retained parent descriptor.
- * The leaf is named through the Linux descriptor capability, so unlinking a
- * planted symlink removes the link itself and never its target.
+ * Remove a run artifact relative to its anchored parent. The leaf is named
+ * relative to the anchored parent — the retained descriptor on Linux, the
+ * proven-real path on darwin — so unlinking a planted symlink removes the link
+ * itself and never its target (unlink(2) never follows the final component).
  */
 export function removeRunFileNoFollow(path: string): void {
   const parent = openDirectoryNoFollow(dirname(path));
+  let primaryError: unknown = null;
   try {
     unlinkSync(anchoredChildPath(parent, basename(path)));
-  } finally {
-    closeAnchoredDirectory(parent);
+  } catch (error) {
+    primaryError = error;
   }
+  const closeError = closeAnchorGuarded(parent, primaryError, `removal of ${basename(path)}`);
+  if (closeError !== null) throw closeError;
 }
 
 /**
@@ -717,12 +885,15 @@ export function publishStagedRunFile(stagedPath: string, finalPath: string): voi
     throw new Error("staged and final run artifacts must share one run directory");
   }
   const parent = openDirectoryNoFollow(dirname(stagedPath));
+  let primaryError: unknown = null;
   try {
     renameSync(
       anchoredChildPath(parent, basename(stagedPath)),
       anchoredChildPath(parent, basename(finalPath)),
     );
-  } finally {
-    closeAnchoredDirectory(parent);
+  } catch (error) {
+    primaryError = error;
   }
+  const closeError = closeAnchorGuarded(parent, primaryError, `staged publication of ${basename(finalPath)}`);
+  if (closeError !== null) throw closeError;
 }

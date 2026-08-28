@@ -1,8 +1,8 @@
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import type { TaskGraph } from "../../src/types";
@@ -1101,7 +1101,7 @@ describe("applyImplementationPiResult", () => {
   });
 
   it("compares attempt bytes against the locked current Task, not the pre-lock snapshot", async () => {
-    const repositoryRoot = mkdtempSync(join(tmpdir(), "loom-pi-locked-baseline-"));
+    const repositoryRoot = canonicalTempDir("loom-pi-locked-baseline-");
     const artifact = "engine/src/x.ts";
     mkdirSync(join(repositoryRoot, "engine", "src"), { recursive: true });
     writeFileSync(join(repositoryRoot, artifact), "current bytes\n");
@@ -1393,7 +1393,7 @@ describe("applyImplementationPiResult", () => {
   });
 
   it("accepts attributed new-test evidence without regression evidence when explicit policy waives only regression", async () => {
-    const repositoryRoot = mkdtempSync(join(tmpdir(), "loom-pi-inverse-policy-"));
+    const repositoryRoot = canonicalTempDir("loom-pi-inverse-policy-");
     const previousProjectDir = process.env.CLAUDE_PROJECT_DIR;
     const testPath = "tests/inverse-policy.test.ts";
     mkdirSync(join(repositoryRoot, "tests"), { recursive: true });

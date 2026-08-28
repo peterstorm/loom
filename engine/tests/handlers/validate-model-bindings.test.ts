@@ -1,7 +1,7 @@
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import handler from "../../src/handlers/helpers/validate-task-graph";
 import populate from "../../src/handlers/helpers/populate-task-graph";
 import {
@@ -288,7 +288,7 @@ describe("validate-task-graph handler integration (plan file on disk)", () => {
   let dirs: string[] = [];
 
   function tempDir(): string {
-    const dir = mkdtempSync(join(tmpdir(), "loom-plan-"));
+    const dir = canonicalTempDir("loom-plan-");
     dirs.push(dir);
     return dir;
   }
@@ -370,7 +370,7 @@ describe("populate-task-graph enforces model bindings (the state-write funnel)",
   let dirs: string[] = [];
 
   function tempDir(): string {
-    const dir = mkdtempSync(join(tmpdir(), "loom-populate-"));
+    const dir = canonicalTempDir("loom-populate-");
     dirs.push(dir);
     return dir;
   }

@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
+  realpathSync,
   chmodSync,
   mkdirSync,
   mkdtempSync,
@@ -9,8 +10,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseReviewPath, type ReviewPath } from "../../src/core/review-packet";
 import {
@@ -33,7 +34,7 @@ function write(root: string, path: string, bytes: string): void {
 }
 
 function repository(): string {
-  const root = mkdtempSync(join(tmpdir(), "loom-workspace-digest-"));
+  const root = canonicalTempDir("loom-workspace-digest-");
   roots.push(root);
   git(root, "init", "-q");
   git(root, "config", "user.email", "loom-tests@example.invalid");
@@ -59,7 +60,7 @@ function reviewPath(raw: string): ReviewPath {
 }
 
 function observeWithDriftingGit(root: string, drift: "list" | "file") {
-  const bin = mkdtempSync(join(tmpdir(), "loom-fake-git-"));
+  const bin = canonicalTempDir("loom-fake-git-");
   roots.push(bin);
   const executable = join(bin, "git");
   const counter = join(bin, "list-count");
@@ -185,7 +186,7 @@ describe("workspace digest shell", () => {
   });
 
   it("returns typed Git and read failures rather than an empty workspace", () => {
-    const outside = mkdtempSync(join(tmpdir(), "loom-not-git-"));
+    const outside = canonicalTempDir("loom-not-git-");
     roots.push(outside);
     expect(observeWorkspaceDigest(outside)).toMatchObject({
       ok: false,

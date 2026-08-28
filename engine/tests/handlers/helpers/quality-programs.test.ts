@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  realpathSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -12,9 +13,9 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 
 const ENGINE = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -47,7 +48,7 @@ function cli(args: string[], stdin = "", env: Record<string, string> = {}): stri
  * asserted bindings machine-dependent.
  */
 function routingIsolatedEnv(piAgentDir?: string): Record<string, string> {
-  const home = mkdtempSync(join(tmpdir(), "loom-pi-home-"));
+  const home = canonicalTempDir("loom-pi-home-");
   cleanup.push(home);
   return {
     PI_PROVIDER: "",
@@ -99,7 +100,7 @@ describe("quality-program helper boundaries", () => {
   it("validates source profiles and renders exact Pi OpenAI models", () => {
     expect(cli(["helper", "model-profiles", "validate", "--agents-dir", "agents"]))
       .toContain("Validated 28");
-    const output = mkdtempSync(join(tmpdir(), "loom-pi-agents-"));
+    const output = canonicalTempDir("loom-pi-agents-");
     cleanup.push(output);
     const symlinkTarget = join(output, "source-agent.md");
     const reviewerOutput = join(output, "code-reviewer.md");
@@ -128,7 +129,7 @@ describe("quality-program helper boundaries", () => {
   });
 
   it("the user-facing sync script publishes a fully lowered Pi agent catalog", () => {
-    const piRoot = mkdtempSync(join(tmpdir(), "loom-pi-agent-home-"));
+    const piRoot = canonicalTempDir("loom-pi-agent-home-");
     cleanup.push(piRoot);
     execFileSync("bash", [join(ROOT, "scripts", "sync-pi-agents.sh")], {
       cwd: ROOT,
@@ -306,7 +307,7 @@ describe("quality-program helper boundaries", () => {
   });
 
   it("captures a staged deletion with a null postimage", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-review-packet-deletion-"));
+    const root = canonicalTempDir("loom-review-packet-deletion-");
     cleanup.push(root);
     execFileSync("git", ["init", "--quiet"], { cwd: root });
     execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });
@@ -454,7 +455,7 @@ describe("quality-program helper boundaries", () => {
 
   it("rejects external task paths instead of reading them into a review packet", () => {
     const dir = mkdtempSync(join(ROOT, ".tmp-review-packet-outside-test-"));
-    const outside = mkdtempSync(join(tmpdir(), "loom-review-packet-outside-"));
+    const outside = canonicalTempDir("loom-review-packet-outside-");
     cleanup.push(dir, outside);
     const state = join(dir, "state.json");
     const packet = join(dir, "packet.json");
@@ -480,7 +481,7 @@ describe("quality-program helper boundaries", () => {
 
   it("rejects a review-packet output path with a symlinked parent", () => {
     const dir = mkdtempSync(join(ROOT, ".tmp-review-packet-symlink-test-"));
-    const outside = mkdtempSync(join(tmpdir(), "loom-review-packet-output-"));
+    const outside = canonicalTempDir("loom-review-packet-output-");
     cleanup.push(dir, outside);
     const state = join(dir, "state.json");
     const linked = join(dir, "linked-output");

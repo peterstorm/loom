@@ -19,7 +19,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { SUBAGENT_SPAWN_TOOLS } from "../../../src/core/tool-vocabulary";
@@ -110,6 +110,11 @@ describe("spawn gates honour every SUBAGENT_SPAWN_TOOLS name", () => {
     // allows everything and would pass this test for the wrong reason.
     previousHome = process.env.HOME;
     fakeHome = join(tmpdir(), `spawn-gate-home-${process.pid}-${Date.now()}`);
+    mkdirSync(fakeHome, { recursive: true });
+    // macOS tmpdir() sits behind the system /var → /private/var symlink; the
+    // gates open the state dir through the anchored primitives, so the fixture
+    // root must be canonical, mirroring production's base resolution.
+    fakeHome = realpathSync.native(fakeHome);
     mkdirSync(join(fakeHome, ".claude/agents"), { recursive: true });
     writeFileSync(
       join(fakeHome, ".claude/agents", "code-implementer-agent.md"),

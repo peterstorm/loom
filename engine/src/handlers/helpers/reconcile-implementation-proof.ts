@@ -9,7 +9,7 @@ import {
 } from "../../types";
 import { newWaveGate } from "../../types";
 import { taskGraphPath } from "../../config";
-import { PostCommitStateProtectionError, StateManager } from "../../state-manager";
+import { StateManager } from "../../state-manager";
 import {
   evaluateTaskProof,
   PI_STRUCTURED_EVIDENCE_POLICY,
@@ -288,9 +288,6 @@ function failureSummary(task: Task): string {
 }
 
 export function reconciliationFailureMessage(error: unknown): string {
-  if (error instanceof PostCommitStateProtectionError) {
-    return `reconcile-implementation-proof committed state but failed to restore read-only protection: ${error.message}`;
-  }
   return `reconcile-implementation-proof failed without changing state: ${error instanceof Error ? error.message : String(error)}`;
 }
 

@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLI="$ROOT/engine/src/cli.ts"
 TMP="$(mktemp -d)"
+# Canonicalize: on macOS mktemp -d sits behind the /var → /private/var symlink,
+# and the CLI's anchored primitives resolve the base once while the process CWD
+# is always canonical — so the fixture must be canonical too.
+TMP="$(cd "$TMP" && pwd -P)"
 trap 'rm -rf "$TMP"' EXIT
 cd "$TMP"
 git init -q

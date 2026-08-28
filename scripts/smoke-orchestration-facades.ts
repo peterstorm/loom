@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,7 +86,10 @@ function git(cwd: string, args: readonly string[]): string {
 }
 
 function repository(label: string): string {
-  const root = mkdtempSync(join(tmpdir(), `loom-facade-smoke-${label}-`));
+  // Canonicalize: on macOS tmpdir() sits behind the /var → /private/var
+  // symlink, and the CLI's anchored primitives resolve the base once while the
+  // process CWD is always canonical — so the fixture must be canonical too.
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), `loom-facade-smoke-${label}-`)));
   temporaryRoots.push(root);
   git(root, ["init", "-q"]);
   git(root, ["config", "user.email", "loom@example.test"]);
@@ -218,7 +221,7 @@ function standaloneAndRemediationSmoke(): void {
 
   // Run evidence lives outside the repository so remediation's dirty-set audit
   // observes only product changes, exactly as a real review-and-fix run does.
-  const runsRoot = mkdtempSync(join(tmpdir(), "loom-facade-smoke-runs-"));
+  const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-facade-smoke-runs-")));
   temporaryRoots.push(runsRoot);
   const reviewRun = join(runsRoot, "run.standalone-critical");
   mkdirSync(reviewRun, { recursive: true });
@@ -266,7 +269,7 @@ function standaloneAndRemediationSmoke(): void {
 function standaloneReviewerRetrySmoke(): void {
   const { cwd, changedPath } = changedStandaloneRepository("standalone-retry");
 
-  const runsRoot = mkdtempSync(join(tmpdir(), "loom-facade-smoke-runs-"));
+  const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-facade-smoke-runs-")));
   temporaryRoots.push(runsRoot);
   const reviewRun = join(runsRoot, "run.standalone-retry");
   mkdirSync(reviewRun, { recursive: true });
@@ -330,7 +333,7 @@ function standaloneReviewerRetrySmoke(): void {
 function standaloneRetryTerminalBlockSmoke(): void {
   const { cwd, changedPath } = changedStandaloneRepository("standalone-retry-block");
 
-  const runsRoot = mkdtempSync(join(tmpdir(), "loom-facade-smoke-runs-"));
+  const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-facade-smoke-runs-")));
   temporaryRoots.push(runsRoot);
   const reviewRun = join(runsRoot, "run.standalone-retry-block");
   mkdirSync(reviewRun, { recursive: true });

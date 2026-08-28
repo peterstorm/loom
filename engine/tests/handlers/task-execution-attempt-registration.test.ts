@@ -1,7 +1,7 @@
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   registerTaskExecutionBatch,
@@ -22,7 +22,7 @@ import {
   parseReservationId,
   type ImplementationAttemptAuthority,
 } from "../../src/core/implementation-completion";
-import { taskFixture } from "../fixtures/task-lifecycle";
+import { taskFixture, graphFixture } from "../fixtures/task-lifecycle";
 import type { TaskGraph } from "../../src/types";
 
 const roots: string[] = [];
@@ -31,7 +31,7 @@ const previousProject = process.env.CLAUDE_PROJECT_DIR;
 const previousSubagents = process.env.LOOM_SUBAGENT_DIR;
 
 function repository(): Readonly<{ root: string; statePath: string; headSha: string }> {
-  const root = mkdtempSync(join(tmpdir(), "loom-attempt-registration-"));
+  const root = canonicalTempDir("loom-attempt-registration-");
   roots.push(root);
   execFileSync("git", ["init", "--quiet"], { cwd: root });
   execFileSync("git", ["config", "user.email", "loom@example.test"], { cwd: root });
@@ -56,16 +56,7 @@ function graph(tasks = [
   taskFixture({ id: "T1", description: "one", agent: "code-implementer-agent", wave: 1, status: "pending", depends_on: [], file_list: ["src/a.ts"] }),
   taskFixture({ id: "T2", description: "two", agent: "code-implementer-agent", wave: 1, status: "pending", depends_on: [], file_list: ["src/b.ts"] }),
 ]): TaskGraph {
-  return {
-    current_phase: "execute",
-    phase_artifacts: {},
-    skipped_phases: [],
-    spec_file: null,
-    plan_file: null,
-    current_wave: 1,
-    tasks,
-    wave_gates: {},
-  };
+  return graphFixture(tasks);
 }
 
 const spawn = (taskId: string) => ({

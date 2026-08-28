@@ -1,3 +1,4 @@
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 /**
  * SubagentStop dispatch resilience:
  * - malformed stdin fails closed with a specific "bindings may leak" error
@@ -7,9 +8,8 @@
  */
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import dispatch, { runDispatch } from "../../../src/handlers/subagent-stop/dispatch";
 import markActive from "../../../src/handlers/subagent-start/mark-subagent-active";
 import { runUpdateTaskStatus } from "../../../src/handlers/subagent-stop/update-task-status";
@@ -27,7 +27,7 @@ let dirs: string[] = [];
 let sessionFiles: string[] = [];
 
 function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), "loom-dispatch-"));
+  const dir = canonicalTempDir("loom-dispatch-");
   dirs.push(dir);
   return dir;
 }

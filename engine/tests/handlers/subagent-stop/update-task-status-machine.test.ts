@@ -1,3 +1,4 @@
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 /**
  * Round-10 Fix 7 + gap 17:
  * - machine-bound agents don't self-report completion: unmet terminal
@@ -10,9 +11,8 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { runUpdateTaskStatus } from "../../../src/handlers/subagent-stop/update-task-status";
 import { capVerdictForMachineCompletion } from "../../../src/core/implementation-evidence";
 import { applyCompletionInfrastructureFailure } from "../../../src/core/implementation-application";
@@ -30,7 +30,7 @@ let dirs: string[] = [];
 let sessionFiles: string[] = [];
 
 function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), "loom-uts-machine-"));
+  const dir = canonicalTempDir("loom-uts-machine-");
   dirs.push(dir);
   return dir;
 }

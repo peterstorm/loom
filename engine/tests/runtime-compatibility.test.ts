@@ -1,8 +1,8 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { canonicalTempDir } from "./fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import { piRuntimeHandshakeRequired } from "../src/handler-routes";
 import {
@@ -44,7 +44,7 @@ describe("Loom runtime revision", () => {
   });
 
   it("captures engine/Pi source drift without a manually bumped version", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-runtime-identity-"));
+    const root = canonicalTempDir("loom-runtime-identity-");
     cleanup.push(root);
     mkdirSync(join(root, "engine", "src"), { recursive: true });
     mkdirSync(join(root, "pi"), { recursive: true });
@@ -103,7 +103,7 @@ describe("Pi mutation route policy", () => {
   });
 
   it("simulates pre-handshake and N-1 Pi extensions and rejects the N writer before any run mutation", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-runtime-skew-cli-"));
+    const root = canonicalTempDir("loom-runtime-skew-cli-");
     cleanup.push(root);
     const runsRoot = join(root, "runs");
     const run = join(runsRoot, "run.skew-regression");
@@ -142,7 +142,7 @@ describe("Pi mutation route policy", () => {
   });
 
   it("allows status without a handshake so version skew remains diagnosable", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-runtime-skew-status-"));
+    const root = canonicalTempDir("loom-runtime-skew-status-");
     cleanup.push(root);
     const result = spawnSync("bun", [CLI, "helper", "orchestration", "status"], {
       cwd: root,
@@ -162,7 +162,7 @@ describe("Pi mutation route policy", () => {
 
 describe("protected-state write backstop", () => {
   it("refuses a skewed Pi write before chmod, lock creation, or byte changes", async () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-runtime-skew-state-"));
+    const root = canonicalTempDir("loom-runtime-skew-state-");
     cleanup.push(root);
     const statePath = join(root, "active_task_graph.json");
     const graph = {

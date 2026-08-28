@@ -1,11 +1,12 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mkdirSync, writeFileSync, chmodSync, rmSync, readFileSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync, chmodSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseSpecCheckOutput } from "../../src/handlers/subagent-stop/store-spec-check-findings";
 import handler from "../../src/handlers/subagent-stop/store-spec-check-findings";
 import { projectSlug } from "../../src/utils/agent-transcript-path";
 import { reconcileSpecCheck } from "../../src/core/spec-check";
+import { graphFixture } from "../fixtures/task-lifecycle";
 
 describe("parseSpecCheckOutput (pure)", () => {
   it("parses all severity levels", () => {
@@ -171,6 +172,10 @@ describe("handler reads file content (not path)", () => {
   it("reads transcript from file path and parses JSONL content", async () => {
     tmpDir = join(tmpdir(), `spec-check-test-${Date.now()}`);
     mkdirSync(tmpDir, { recursive: true });
+    // macOS tmpdir() sits behind the system /var → /private/var symlink; the
+    // anchored primitives resolve the base once, so the fixture root must be
+    // canonical too.
+    tmpDir = realpathSync.native(tmpDir);
 
     // Create a JSONL transcript file with spec-check output
     const transcriptPath = join(tmpDir, "transcript.jsonl");
@@ -203,15 +208,8 @@ describe("handler reads file content (not path)", () => {
     mkdirSync(subagentDir, { recursive: true });
     writeFileSync(join(subagentDir, "test-session.task_graph"), statePath);
 
-    // Temporarily override SUBAGENT_DIR by mocking fromSession behavior
-    // Instead, call handler directly — it uses StateManager.fromSession
-    // which checks SUBAGENT_DIR. We'll test the file-reading logic via the
-    // handler returning passthrough (not error) when given a valid transcript file.
-
-    // If the handler were still passing the path string to parseTranscript,
-    // it would get empty transcript and return passthrough early.
-    // With the fix, it reads file content → gets valid JSONL → parses findings.
-    // We can verify the fix by checking parseTranscript works on actual content:
+    // This pins one thing: parseTranscript treats its argument as transcript
+    // CONTENT — the file's bytes parse, and a file PATH yields "".
     const content = readFileSync(transcriptPath, "utf-8");
     const { parseTranscript } = await import("../../src/parsers/parse-transcript");
     const transcript = parseTranscript(content);
@@ -223,7 +221,12 @@ describe("handler reads file content (not path)", () => {
     const badResult = parseTranscript(transcriptPath);
     expect(badResult).toBe("");
 
-    try { chmodSync(statePath, 0o644); } catch {}
+    try {
+      chmodSync(statePath, 0o644);
+    } catch (error) {
+      // ENOENT is the one idempotent absence; anything else is fixture damage.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
   });
 });
 
@@ -240,19 +243,13 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
   it("count/findings mismatch → EVIDENCE_CAPTURE_FAILED (fail closed, mirrors the manual store-spec-check helper)", async () => {
     const { SUBAGENT_DIR } = await import("../../src/config");
     const { mkdirSync: mkdir } = await import("node:fs");
-    const tmpDir = join(tmpdir(), `spec-check-mismatch-${Date.now()}`);
-    mkdirSync(tmpDir, { recursive: true });
+    const tmpRoot = join(tmpdir(), `spec-check-mismatch-${Date.now()}`);
+    mkdirSync(tmpRoot, { recursive: true });
+    // macOS tmpdir() sits behind /var → /private/var; canonicalize the fixture
+    // root so the anchored primitives' base-resolution matches production.
+    const tmpDir = realpathSync.native(tmpRoot);
     const statePath = join(tmpDir, "active_task_graph.json");
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute",
-      phase_artifacts: {},
-      skipped_phases: [],
-      spec_file: null,
-      plan_file: null,
-      current_wave: 1,
-      tasks: [],
-      wave_gates: {},
-    }));
+    writeFileSync(statePath, JSON.stringify(graphFixture([])));
     // A reported count of 0 alongside a listed CRITICAL finding — storing it
     // as-is would let wave-gate check 4 pass on critical_count while the
     // findings say otherwise.
@@ -296,7 +293,9 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
 
   it("derives and consumes the transcript when agent_transcript_path is absent", async () => {
     const { SUBAGENT_DIR } = await import("../../src/config");
-    const tmpDir = join(tmpdir(), `spec-check-derived-${Date.now()}`);
+    const tmpRoot = join(tmpdir(), `spec-check-derived-${Date.now()}`);
+    mkdirSync(tmpRoot, { recursive: true });
+    const tmpDir = realpathSync.native(tmpRoot);
     const configDir = join(tmpDir, "claude-config");
     const projectDir = join(tmpDir, "project");
     const statePath = join(tmpDir, "active_task_graph.json");
@@ -354,8 +353,9 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
   it("empty/unreadable transcript → EVIDENCE_CAPTURE_FAILED recorded, never a silent skip", async () => {
     const { SUBAGENT_DIR } = await import("../../src/config");
     const { mkdirSync: mkdir } = await import("node:fs");
-    const tmpDir = join(tmpdir(), `spec-check-empty-${Date.now()}`);
-    mkdirSync(tmpDir, { recursive: true });
+    const tmpRoot = join(tmpdir(), `spec-check-empty-${Date.now()}`);
+    mkdirSync(tmpRoot, { recursive: true });
+    const tmpDir = realpathSync.native(tmpRoot);
     const statePath = join(tmpDir, "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute",

@@ -1,3 +1,4 @@
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 /**
  * Error polarity of the mark-tests-passed helper, spawned for real via the
  * CLI (TASK_GRAPH_PATH freezes at import, so a subprocess with
@@ -10,17 +11,16 @@
 
 import { describe, it, expect, afterAll } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { TaskGraph, Task } from "../../../src/types";
-import { taskFixture, type TaskFixtureInput } from "../../fixtures/task-lifecycle";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { taskFixture, graphFixture, type TaskFixtureInput } from "../../fixtures/task-lifecycle";
+import type { Task } from "../../../src/types";
 
 const CLI_PATH = join(__dirname, "../../../src/cli.ts");
 
 const dirs: string[] = [];
 function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), "loom-mtp-"));
+  const dir = canonicalTempDir("loom-mtp-");
   dirs.push(dir);
   return dir;
 }
@@ -28,19 +28,6 @@ function tempDir(): string {
 afterAll(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
-
-function graph(tasks: Task[]): TaskGraph {
-  return {
-    current_phase: "execute",
-    phase_artifacts: {},
-    skipped_phases: [],
-    spec_file: null,
-    plan_file: null,
-    current_wave: 1,
-    tasks,
-    wave_gates: {},
-  };
-}
 
 function task(id: string, over: Partial<TaskFixtureInput> = {}): Task {
   return taskFixture({
@@ -68,7 +55,7 @@ describe("mark-tests-passed — error polarity", () => {
   it("missing test evidence → exit 1 naming the task", () => {
     const dir = tempDir();
     const statePath = join(dir, "active_task_graph.json");
-    writeFileSync(statePath, JSON.stringify(graph([task("T1")])));
+    writeFileSync(statePath, JSON.stringify(graphFixture([task("T1")])));
     const { status, stderr } = runHelper(statePath);
     expect(status).toBe(1);
     expect(stderr).toContain("Missing test evidence: T1");
@@ -80,7 +67,7 @@ describe("mark-tests-passed — error polarity", () => {
     writeFileSync(
       statePath,
       JSON.stringify(
-        graph([
+        graphFixture([
           task("T1", {
             test_result: { verdict: "trusted-pass" },
             new_tests_written: true,
@@ -100,7 +87,7 @@ describe("mark-tests-passed — error polarity", () => {
     const statePath = join(dir, "active_task_graph.json");
     writeFileSync(
       statePath,
-      JSON.stringify(graph([
+      JSON.stringify(graphFixture([
         task("T1", {
           verification_policy: {
             regression: { kind: "waived", reason: "documentation-only" },
@@ -131,7 +118,7 @@ describe("mark-tests-passed — error polarity", () => {
     const statePath = join(dir, "active_task_graph.json");
     writeFileSync(
       statePath,
-      JSON.stringify(graph([task("T1", {
+      JSON.stringify(graphFixture([task("T1", {
         test_result: { verdict: "trusted-fail" },
         new_tests_written: true,
         new_test_evidence: "fixture new-test evidence",
@@ -147,7 +134,7 @@ describe("mark-tests-passed — error polarity", () => {
     const statePath = join(dir, "active_task_graph.json");
     writeFileSync(
       statePath,
-      JSON.stringify(graph([task("T1", { test_result: { verdict: "trusted-pass" }, new_tests_written: false })])),
+      JSON.stringify(graphFixture([task("T1", { test_result: { verdict: "trusted-pass" }, new_tests_written: false })])),
     );
     const { status, stderr } = runHelper(statePath);
     expect(status).toBe(1);
@@ -176,7 +163,7 @@ describe("mark-tests-passed — error polarity", () => {
     const statePath = join(dir, "active_task_graph.json");
     writeFileSync(
       statePath,
-      JSON.stringify(graph([task("T1", {
+      JSON.stringify(graphFixture([task("T1", {
         test_result: { verdict: "trusted-pass" },
         new_tests_written: true,
         new_test_evidence: "fixture new-test evidence",
@@ -192,7 +179,7 @@ describe("mark-tests-passed — error polarity", () => {
     const statePath = join(dir, "active_task_graph.json");
     writeFileSync(
       statePath,
-      JSON.stringify(graph([task("T1", {
+      JSON.stringify(graphFixture([task("T1", {
         test_result: { verdict: "trusted-pass" },
         new_tests_written: true,
         new_test_evidence: "fixture new-test evidence",
@@ -207,7 +194,7 @@ describe("mark-tests-passed — error polarity", () => {
   it("read-only: the state file is byte-identical after a failing run", () => {
     const dir = tempDir();
     const statePath = join(dir, "active_task_graph.json");
-    const content = JSON.stringify(graph([task("T1")]));
+    const content = JSON.stringify(graphFixture([task("T1")]));
     writeFileSync(statePath, content);
     runHelper(statePath);
     expect(readFileSync(statePath, "utf-8")).toBe(content);

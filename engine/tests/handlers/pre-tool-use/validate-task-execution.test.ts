@@ -1,6 +1,6 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { describe, it, expect } from "vitest";
 import {
   classifyTaskExecutionSpawn,
@@ -142,7 +142,7 @@ describe("validate-task-execution — transport-neutral core decision", () => {
 
 describe("validate-task-execution — lazy task graph authority", () => {
   it("honors LOOM_STATE_PATH set after the module was imported", async () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-lazy-task-graph-"));
+    const root = canonicalTempDir("loom-lazy-task-graph-");
     const statePath = join(root, "active_task_graph.json");
     const previous = process.env.LOOM_STATE_PATH;
     writeFileSync(statePath, JSON.stringify(mkState([mkTask({ id: "T1", wave: 1 })])));
@@ -166,7 +166,7 @@ describe("validate-task-execution — repository proof boundary", () => {
   it.each(["not-a-repository", "unborn-repository"])(
     "blocks an active implementation spawn in %s",
     async (scenario) => {
-      const root = mkdtempSync(join(tmpdir(), "loom-task-execution-git-"));
+      const root = canonicalTempDir("loom-task-execution-git-");
       const statePath = join(root, "active_task_graph.json");
       const previousState = process.env.LOOM_STATE_PATH;
       const previousProject = process.env.CLAUDE_PROJECT_DIR;
