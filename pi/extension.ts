@@ -1974,7 +1974,6 @@ export default function (pi: ExtensionAPI) {
           process.stderr.write(`loom(pi): ${diagnostic}\n`);
         } else {
           const runAt = new Date().toISOString();
-          const specAuthorityProblems: string[] = [];
           // Guarded exactly like the sibling `manager.update` in
           // `finalizeReservedImplementations` above. This handler has no
           // top-level try/catch, so an unguarded throw here (corrupt state
@@ -1985,53 +1984,68 @@ export default function (pi: ExtensionAPI) {
           // `processingErrors` and zero stderr. The throw now becomes a
           // diagnostic and the batch continues.
           try {
-            await manager.update((state): TaskGraph => ({
-              ...state,
-              tasks: state.tasks.map<Task>((task) => {
+            const settled = await manager.updateAndReturn((state) => {
+              const appliedReviewIndexes: number[] = [];
+              const tasks = state.tasks.map<Task>((task) => {
                 const failures = missingReviews.filter(({ item }) => item.taskId === task.id);
-                return failures.reduce<Task>((current, { item, index }) => applyReviewResolution(current, {
-                  kind: "evidence-failed" as const,
-                  agent: item.agentType,
-                  message: `reserved reviewer result ${index + 1} for ${item.agentType} was missing or mismatched`,
-                }), task);
-              }),
-              ...(() => {
-                if (missingSpecChecks.length === 0) return {};
-                if (missingSpecChecks.length !== 1) {
-                  specAuthorityProblems.push("multiple reserved spec-check slots were missing; no unique authority exists");
-                  return {};
-                }
-                const [missing] = missingSpecChecks;
-                if (missing === undefined) return {};
+                return failures.reduce<Task>((current, { item, index }) => {
+                  const next = applyReviewResolution(current, {
+                    kind: "evidence-failed" as const,
+                    agent: item.agentType,
+                    message: `reserved reviewer result ${index + 1} for ${item.agentType} was missing or mismatched`,
+                  });
+                  if (next !== current) appliedReviewIndexes.push(index);
+                  return next;
+                }, task);
+              });
+              const specAuthorityProblems: string[] = [];
+              let specCheckPatch: Pick<TaskGraph, "spec_check"> | undefined;
+              if (missingSpecChecks.length > 1) {
+                specAuthorityProblems.push("multiple reserved spec-check slots were missing; no unique authority exists");
+              } else if (missingSpecChecks.length === 1) {
+                const missing = missingSpecChecks[0]!;
                 const authority = missing.item.specCheckAuthority;
                 const problem = piSpecCheckAuthorityProblem(state, authority);
                 if (problem !== null || authority === null) {
                   specAuthorityProblems.push(problem ?? "reserved spec-check authority is absent");
-                  return {};
+                } else {
+                  specCheckPatch = {
+                    spec_check: {
+                      wave: authority.wave,
+                      run_at: runAt,
+                      verdict: "EVIDENCE_CAPTURE_FAILED" as const,
+                      error: `reserved spec-check result ${missing.index + 1} for spec-check-invoker was missing or mismatched`,
+                    },
+                  };
                 }
-                return {
-                  spec_check: {
-                    wave: authority.wave,
-                    run_at: runAt,
-                    verdict: "EVIDENCE_CAPTURE_FAILED" as const,
-                    error: `reserved spec-check result ${missing.index + 1} for spec-check-invoker was missing or mismatched`,
-                  },
-                };
-              })(),
-            }));
+              }
+              return {
+                state: { ...state, tasks, ...(specCheckPatch ?? {}) },
+                value: Object.freeze({
+                  appliedReviewIndexes: Object.freeze(appliedReviewIndexes),
+                  specAuthorityProblems: Object.freeze(specAuthorityProblems),
+                }),
+              };
+            });
             for (const { item, index } of missingReviews) {
-              process.stderr.write(
-                `loom(pi): reserved reviewer result ${index + 1} for ${item.agentType}/${item.taskId} was missing or mismatched — marking evidence_capture_failed\n`,
-              );
+              if (settled.appliedReviewIndexes.includes(index)) {
+                process.stderr.write(
+                  `loom(pi): reserved reviewer result ${index + 1} for ${item.agentType}/${item.taskId} was missing or mismatched — marking evidence_capture_failed\n`,
+                );
+              } else {
+                const diagnostic = `reserved reviewer result ${index + 1} for ${item.agentType}/${item.taskId} was not applied under locked current review authority`;
+                processingErrors.push(diagnostic);
+                process.stderr.write(`loom(pi): ${diagnostic}\n`);
+              }
             }
             for (const { index } of missingSpecChecks) {
               process.stderr.write(
-                specAuthorityProblems.length === 0
+                settled.specAuthorityProblems.length === 0
                   ? `loom(pi): reserved spec-check result ${index + 1} for spec-check-invoker was missing or mismatched — marking evidence_capture_failed\n`
-                  : `loom(pi): reserved spec-check result ${index + 1} was not applied: ${specAuthorityProblems.join("; ")}\n`,
+                  : `loom(pi): reserved spec-check result ${index + 1} was not applied: ${settled.specAuthorityProblems.join("; ")}\n`,
               );
             }
-            processingErrors.push(...specAuthorityProblems);
+            processingErrors.push(...settled.specAuthorityProblems);
           } catch (error) {
             // The per-item lines above stay inside the `try`: they announce
             // evidence that was RECORDED, and printing them after a failed

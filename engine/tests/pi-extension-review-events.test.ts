@@ -3278,6 +3278,47 @@ describe("Pi extension review tool_result integration", () => {
     expect(task.review_error).toContain("reserved reviewer result 2");
   });
 
+  it("reports a missing reserved reviewer whose Task disappeared before locked settlement", async () => {
+    const planPath = join(temp, "missing-review-disappeared-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4f3";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-missing-review-disappeared";
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: {
+        agent: "code-reviewer",
+        task: "Task ID: T1\nReview and emit Machine Summary findings.",
+        agentScope: "user",
+      },
+    }, context)).toEqual([undefined]);
+    const afterSpawn = JSON.parse(readFileSync(statePath, "utf8"));
+    writeState({ ...afterSpawn, tasks: [] });
+
+    const responses = await pi.emit("tool_result", {
+      toolName: "subagent",
+      toolCallId,
+      content: [],
+      details: { results: [] },
+    }, context);
+
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({
+        text: expect.stringContaining("was not applied under locked current review authority"),
+      })],
+    }));
+    expect(JSON.parse(readFileSync(statePath, "utf8")).tasks).toEqual([]);
+  });
+
   it("rejects surplus reserved results instead of applying them through compatibility dispatch", async () => {
     const planPath = join(temp, "surplus-review-results-plan.md");
     writeFileSync(planPath, "# Plan\n");

@@ -96,9 +96,8 @@ function assistantTextOf(line: string | undefined, zeroBasedLine: number): strin
   const record = message as Record<string, unknown>;
   if (record["role"] !== "assistant" || !Array.isArray(record["content"])) return null;
 
-  // Concatenating text blocks here would be the same normalisation the payload
-  // rules forbid, so a multi-block assistant message yields its blocks joined
-  // by nothing only when there is exactly one.
+  // Concatenating text blocks would be normalization the payload rules forbid:
+  // return the sole text block and reject messages with zero or multiple blocks.
   const texts = (record["content"] as readonly unknown[])
     .filter((block): block is Record<string, unknown> =>
       typeof block === "object" && block !== null && (block as Record<string, unknown>)["type"] === "text")

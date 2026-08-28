@@ -422,6 +422,51 @@ async function applyFailedImplementationResult(args: FailedImplementationArgs): 
     : settleFailedExactImplementation(args, binding, authority);
 }
 
+async function applyFailedReviewResult(args: Readonly<{
+  store: TaskGraphStore;
+  agentType: string;
+  result: PiSubagentResult;
+  reservedSlot: ReservedSlot | undefined;
+  failure: string;
+}>): Promise<PiResultOutcome> {
+  const returnedTaskId = extractTaskId(args.result.task ?? "");
+  const reservedTaskId = args.reservedSlot?.taskId;
+  if (reservedTaskId !== undefined && reservedTaskId !== null && returnedTaskId !== reservedTaskId) {
+    const message = `loom(pi): ${args.failure}; returned Task ${returnedTaskId ?? "missing"} does not match ` +
+      `reserved Task ${reservedTaskId} — review evidence NOT stored`;
+    return outcome([message], [message]);
+  }
+  const failedTaskId = reservedTaskId ?? returnedTaskId;
+  if (failedTaskId === null || failedTaskId === undefined) {
+    const message = `loom(pi): ${args.failure}; trusted task binding is missing or unknown — review evidence NOT stored`;
+    return outcome([message], [message]);
+  }
+  const resolution = { kind: "evidence-failed" as const, agent: args.agentType, message: args.failure };
+  type FailedReviewApplication =
+    | Readonly<{ kind: "missing" }>
+    | Readonly<{ kind: "unchanged" }>
+    | Readonly<{ kind: "applied"; task: TaskGraph["tasks"][number] }>;
+  const application = await args.store.updateAndReturn<FailedReviewApplication>((state) => {
+    const target = state.tasks.find((task) => task.id === failedTaskId);
+    if (target === undefined) return { state, value: { kind: "missing" as const } };
+    const appliedTask = applyReviewResolution(target, resolution);
+    if (appliedTask === target) return { state, value: { kind: "unchanged" as const } };
+    return {
+      state: {
+        ...state,
+        tasks: state.tasks.map((task) => task.id === failedTaskId ? appliedTask : task),
+      },
+      value: { kind: "applied" as const, task: appliedTask },
+    };
+  });
+  if (application.kind !== "applied") {
+    const message = `loom(pi): ${args.failure}; review task ${failedTaskId} ` +
+      `${application.kind === "missing" ? "disappeared" : "rejected duplicate/stale failure evidence"} under the state lock — review evidence NOT stored`;
+    return outcome([message], [message]);
+  }
+  return outcome([reviewResolutionLog(failedTaskId, resolution, application.task, true)]);
+}
+
 /**
  * Record the failure of an agent whose process did not succeed.
  *
@@ -442,25 +487,7 @@ export async function applyFailedPiResult(args: Readonly<{
     `${agentType} failed before evidence capture completed (${piSubagentFailureSignals(result)})`;
 
   if (isReviewAgent(agentType)) {
-    const returnedTaskId = extractTaskId(result.task ?? "");
-    const reservedTaskId = reservedSlot?.taskId;
-    if (reservedTaskId !== undefined && reservedTaskId !== null && returnedTaskId !== reservedTaskId) {
-      const message = `loom(pi): ${failure}; returned Task ${returnedTaskId ?? "missing"} does not match ` +
-        `reserved Task ${reservedTaskId} — review evidence NOT stored`;
-      return outcome([message], [message]);
-    }
-    const failedTaskId = reservedTaskId ?? returnedTaskId;
-    if (failedTaskId === null || failedTaskId === undefined ||
-        !store.load().tasks.some((task) => task.id === failedTaskId)) {
-      const message = `loom(pi): ${failure}; trusted task binding is missing or unknown — review evidence NOT stored`;
-      return outcome([message], [message]);
-    }
-    const resolution = { kind: "evidence-failed" as const, agent: agentType, message: failure };
-    await store.update((state) => ({
-      ...state,
-      tasks: state.tasks.map((task) => task.id === failedTaskId ? applyReviewResolution(task, resolution) : task),
-    }));
-    return outcome([reviewResolutionLog(failedTaskId, resolution)]);
+    return applyFailedReviewResult({ store, agentType, result, reservedSlot, failure });
   }
 
   if (agentType === "spec-check-invoker") {

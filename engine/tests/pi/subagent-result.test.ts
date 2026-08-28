@@ -372,6 +372,29 @@ describe("applyFailedPiResult", () => {
     expect(applied.log.join("\n")).toContain("T1");
   });
 
+  it("reports a reviewer task that disappears before locked failure settlement", async () => {
+    const initial = parsedGraph(graph());
+    const withoutTask = parsedGraph({ ...initial, tasks: [] });
+    const store: TaskGraphStore = {
+      load: () => initial,
+      update: async (mutate) => { mutate(withoutTask); },
+      updateAndReturn: async (mutate) => mutate(withoutTask).value,
+    };
+
+    const applied = await applyFailedPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ exitCode: 1 }),
+      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      now: NOW,
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("review task T1 disappeared under the state lock"),
+    ]);
+    expect(applied.log.join("\n")).toContain("review evidence NOT stored");
+  });
+
   it("rejects a failed reviewer whose returned Task does not match its reservation", async () => {
     const store = fakeStore(graph());
     const applied = await applyFailedPiResult({

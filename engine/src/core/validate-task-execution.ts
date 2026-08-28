@@ -526,6 +526,10 @@ export function applyTaskExecutionAuthorityBatch(
   const specCheck = state.spec_check !== undefined && invalidatedWaves.has(state.spec_check.wave)
     ? undefined
     : state.spec_check;
+  const waveReviewEpoch = state.wave_review_epoch !== undefined &&
+      invalidatedWaves.has(state.wave_review_epoch.wave)
+    ? { ...state.wave_review_epoch, specCheckSlotAuthority: undefined }
+    : state.wave_review_epoch;
   const waveGates = [...invalidatedWaves].reduce((gates, wave) => {
     const key = String(wave);
     const reopened = {
@@ -545,6 +549,7 @@ export function applyTaskExecutionAuthorityBatch(
     ])],
     tasks,
     ...(specCheck === undefined && state.spec_check !== undefined ? { spec_check: undefined } : {}),
+    ...(waveReviewEpoch === undefined ? {} : { wave_review_epoch: waveReviewEpoch }),
     wave_gates: waveGates,
   };
 }

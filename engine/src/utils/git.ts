@@ -324,6 +324,24 @@ export interface TestCount {
   readonly total: number;
 }
 
+type AddedExecutableLine = Readonly<{ path: string | null; code: string }>;
+
+const isTestSourcePath = (path: string): boolean =>
+  /(?:^|\/)(?:tests?|__tests__|spec)\//.test(path) ||
+  /(?:Test|Tests|Spec)\.java$/.test(path) ||
+  /(?:^|\/)(?:test_[^/]+|[^/]+_test)\.py$/.test(path) ||
+  /\.(?:test|spec)\.[jt]sx?$/.test(path);
+
+const languageOfTestSource = (path: string | null): "java" | "ts" | "python" | "rust" | "unknown" | null => {
+  if (path === null) return null; // Headerless synthetic diff compatibility.
+  if (!isTestSourcePath(path)) return "unknown";
+  if (path.endsWith(".java")) return "java";
+  if (/\.[jt]sx?$/.test(path)) return "ts";
+  if (path.endsWith(".py")) return "python";
+  if (path.endsWith(".rs")) return "rust";
+  return "unknown";
+};
+
 /** Heuristically count added test and suite declarations in a diff string (pure). */
 export function countNewTests(diffContent: string): TestCount {
   const lines = executableAddedLines(diffContent);
@@ -332,11 +350,12 @@ export function countNewTests(diffContent: string): TestCount {
   let python = 0;
   let rust = 0;
 
-  for (const line of lines) {
-    if (/@(Test|Property|ParameterizedTest)\b/.test(line)) java++;
-    if (/\s(it|test|describe)\(/.test(line)) ts++;
-    if (/(def test_|class Test)/.test(line)) python++;
-    if (/#\[test\]/.test(line)) rust++;
+  for (const { path, code } of lines) {
+    const language = languageOfTestSource(path);
+    if ((language === null || language === "java") && /@(Test|Property|ParameterizedTest)\b/.test(code)) java++;
+    if ((language === null || language === "ts") && /\s(it|test|describe)\(/.test(code)) ts++;
+    if ((language === null || language === "python") && /(def test_|class Test)/.test(code)) python++;
+    if ((language === null || language === "rust") && /#\[test\]/.test(code)) rust++;
   }
 
   return { java, ts, python, rust, total: java + ts + python + rust };
@@ -410,13 +429,24 @@ function assertionCodeLine(
   return Object.freeze({ code, state: Object.freeze({ blockComment, quote }) });
 }
 
-/** Project added executable code from complete-postimage patch bytes. */
-function executableAddedLines(diffContent: string): readonly string[] {
+function jsxExpressionCode(code: string, path: string | null): string {
+  if (path === null || !/\.[jt]sx$/.test(path) || !/[<>]/.test(code)) return code;
+  return [...code.matchAll(/\{([^{}]*)\}/g)].map((match) => match[1] ?? "").join(" ");
+}
+
+/** Project path-bound added executable code from complete-postimage patch bytes. */
+function executableAddedLines(diffContent: string): readonly AddedExecutableLine[] {
   let state: AssertionLexicalState = Object.freeze({ blockComment: false, quote: null });
-  const lines: string[] = [];
+  let path: string | null = null;
+  const lines: AddedExecutableLine[] = [];
   for (const diffLine of diffContent.split("\n")) {
     if (diffLine.startsWith("diff --git ")) {
       state = Object.freeze({ blockComment: false, quote: null });
+      path = null;
+      continue;
+    }
+    if (diffLine.startsWith("+++ b/") && !diffLine.includes("\t")) {
+      path = diffLine.slice("+++ b/".length);
       continue;
     }
     // Lexical state follows the complete postimage: removed lines do not exist
@@ -425,7 +455,9 @@ function executableAddedLines(diffContent: string): readonly string[] {
     if (!isSourceLine) continue;
     const parsed = assertionCodeLine(diffLine.slice(1), state);
     state = parsed.state;
-    if (diffLine.startsWith("+") && !diffLine.startsWith("+++")) lines.push(parsed.code);
+    if (diffLine.startsWith("+") && !diffLine.startsWith("+++")) {
+      lines.push(Object.freeze({ path, code: jsxExpressionCode(parsed.code, path) }));
+    }
   }
   return Object.freeze(lines);
 }
@@ -434,12 +466,13 @@ function executableAddedLines(diffContent: string): readonly string[] {
 export function countAssertions(diffContent: string): number {
   let count = 0;
 
-  for (const line of executableAddedLines(diffContent)) {
+  for (const { path, code } of executableAddedLines(diffContent)) {
+    const language = languageOfTestSource(path);
     // Match at most one per line to avoid cross-language double-counting.
-    if (/(assertThat|assertEquals|assertNotNull|assertThrows|verify)\s*\(/.test(line)) { count++; continue; }
-    if (/(expect\s*\(|\.should\.)/.test(line)) { count++; continue; }
-    if (/(assert\w*\(|assert [^=]|self\.assert|pytest\.raises)/.test(line)) { count++; continue; }
-    if (/(assert(_eq)?!|assert_ne!)/.test(line)) { count++; continue; }
+    if ((language === null || language === "java") && /(assertThat|assertEquals|assertNotNull|assertThrows|verify)\s*\(/.test(code)) { count++; continue; }
+    if ((language === null || language === "ts") && /(expect\s*\(|\.should\.)/.test(code)) { count++; continue; }
+    if ((language === null || language === "python") && /(assert\w*\(|assert [^=]|self\.assert|pytest\.raises)/.test(code)) { count++; continue; }
+    if ((language === null || language === "rust") && /(assert(_eq)?!|assert_ne!)/.test(code)) { count++; continue; }
   }
 
   return count;

@@ -324,6 +324,21 @@ describe("modern implementation attempt registration", () => {
     writeGraph(repo.statePath, {
       ...graph([reviewed]),
       executing_tasks: ["T1"],
+      active_wave_gate: {
+        schemaVersion: 1,
+        kind: "active-wave-gate",
+        runId: "run.reclaimed-spec-authority" as never,
+        wave: 1,
+        authorityDigest: "a".repeat(64) as never,
+        revision: 1,
+        terminalOutcome: null,
+      },
+      wave_review_epoch: {
+        runId: "run.reclaimed-spec-authority" as never,
+        wave: 1,
+        batchEpoch: "b".repeat(64) as never,
+        specCheckSlotAuthority: { slot_id: "wave-slot:stale" as never, attempted: 1 },
+      },
       spec_check: {
         wave: 1,
         run_at: "2020-01-01T00:01:00.000Z",
@@ -357,6 +372,11 @@ describe("modern implementation attempt registration", () => {
     expect(stored.tasks[0]).not.toHaveProperty("test_evidence");
     expect(stored.tasks[0]).not.toHaveProperty("new_test_observation");
     expect(stored.spec_check).toBeUndefined();
+    expect(stored.wave_review_epoch).toMatchObject({
+      runId: "run.reclaimed-spec-authority",
+      wave: 1,
+    });
+    expect(stored.wave_review_epoch).not.toHaveProperty("specCheckSlotAuthority");
     expect(stored.wave_gates["1"]).toMatchObject({
       impl_complete: false,
       tests_passed: null,

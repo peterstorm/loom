@@ -218,6 +218,40 @@ describe("countAssertions (pure)", () => {
     expect(countAssertions(diff)).toBe(0);
   });
 
+  it("rejects assertion-shaped prose in Markdown", () => {
+    const diff = [
+      "diff --git a/README.md b/README.md",
+      "--- a/README.md",
+      "+++ b/README.md",
+      "@@ -1 +1,2 @@",
+      "+This test(fake) example calls expect(fake) in prose.",
+    ].join("\n");
+
+    expect(countNewTests(diff).total).toBe(0);
+    expect(countAssertions(diff)).toBe(0);
+  });
+
+  it("rejects assertion-shaped TSX text while retaining brace expressions", () => {
+    const text = [
+      "diff --git a/components/Panel.test.tsx b/components/Panel.test.tsx",
+      "--- a/components/Panel.test.tsx",
+      "+++ b/components/Panel.test.tsx",
+      "@@ -1 +1,2 @@",
+      "+const prose = <div>it(fake) expect(fake)</div>;",
+    ].join("\n");
+    const expression = [
+      "diff --git a/components/Panel.test.tsx b/components/Panel.test.tsx",
+      "--- a/components/Panel.test.tsx",
+      "+++ b/components/Panel.test.tsx",
+      "@@ -1 +1,2 @@",
+      "+const result = <Panel value={expect(actual).toBe(expected)} />;",
+    ].join("\n");
+
+    expect(countNewTests(text).total).toBe(0);
+    expect(countAssertions(text)).toBe(0);
+    expect(countAssertions(expression)).toBe(1);
+  });
+
   it("resets multiline literal state at each file boundary", () => {
     const diff = [
       "diff --git a/first.py b/first.py",
@@ -314,7 +348,7 @@ describe("filterTestFiles (pure)", () => {
 
   it("excludes files that have 'spec' or 'test' only in non-directory path segments", () => {
     const files = [
-      ".claude/specs/spec.md",       // 'specs' not 'spec' dir exactly (but wait, specs/ isn't matched)
+      ".claude/specs/spec.md",       // `specs/` is deliberately distinct from the `spec/` test directory.
       "docs/testing-guide.md",       // 'testing' not 'test/'
       "src/testutils/helper.ts",     // 'testutils' not 'test/'
     ];
