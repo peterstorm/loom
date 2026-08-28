@@ -138,6 +138,8 @@ describe("collectDiff", () => {
       fakeDeps({
         diffFiles: () => diff([
           "diff --git a/engine/tests/existing.test.ts b/engine/tests/existing.test.ts",
+          "--- a/engine/tests/existing.test.ts",
+          "+++ b/engine/tests/existing.test.ts",
           "+  it(\"covers the fix\", () => {",
           "+    expect(result).toBe(true);",
           "+  });",
@@ -169,6 +171,8 @@ describe("collectDiff", () => {
           calls.push({ revision, files });
           return diff([
             "diff --git a/engine/tests/committed.test.ts b/engine/tests/committed.test.ts",
+            "--- a/engine/tests/committed.test.ts",
+            "+++ b/engine/tests/committed.test.ts",
             "+  it(\"survives an agent commit\", () => {",
             "+    expect(result).toBe(true);",
             "+  });",

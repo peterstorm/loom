@@ -353,7 +353,7 @@ export function countNewTests(diffContent: string): TestCount {
   for (const { path, code } of lines) {
     const language = languageOfTestSource(path);
     if ((language === null || language === "java") && /@(Test|Property|ParameterizedTest)\b/.test(code)) java++;
-    if ((language === null || language === "ts") && /\s(it|test|describe)\(/.test(code)) ts++;
+    if ((language === null || language === "ts") && /(?:^|\s)(it|test|describe)\(/.test(code)) ts++;
     if ((language === null || language === "python") && /(def test_|class Test)/.test(code)) python++;
     if ((language === null || language === "rust") && /#\[test\]/.test(code)) rust++;
   }
@@ -438,11 +438,13 @@ function jsxExpressionCode(code: string, path: string | null): string {
 function executableAddedLines(diffContent: string): readonly AddedExecutableLine[] {
   let state: AssertionLexicalState = Object.freeze({ blockComment: false, quote: null });
   let path: string | null = null;
+  let insidePatch = false;
   const lines: AddedExecutableLine[] = [];
   for (const diffLine of diffContent.split("\n")) {
     if (diffLine.startsWith("diff --git ")) {
       state = Object.freeze({ blockComment: false, quote: null });
       path = null;
+      insidePatch = true;
       continue;
     }
     if (diffLine.startsWith("+++ b/") && !diffLine.includes("\t")) {
@@ -455,7 +457,7 @@ function executableAddedLines(diffContent: string): readonly AddedExecutableLine
     if (!isSourceLine) continue;
     const parsed = assertionCodeLine(diffLine.slice(1), state);
     state = parsed.state;
-    if (diffLine.startsWith("+") && !diffLine.startsWith("+++")) {
+    if (diffLine.startsWith("+") && !diffLine.startsWith("+++") && (!insidePatch || path !== null)) {
       lines.push(Object.freeze({ path, code: jsxExpressionCode(parsed.code, path) }));
     }
   }

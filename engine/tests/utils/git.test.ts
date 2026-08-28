@@ -202,7 +202,9 @@ describe("countAssertions (pure)", () => {
     ["Java text block", '\"\"\"', "+    assertThat(result).isEqualTo(42);"],
   ])("does not count assertion text inside a %s", (_name, delimiter, assertion) => {
     const diff = [
-      "diff --git a/example.test b/example.test",
+      "diff --git a/tests/example.py b/tests/example.py",
+      "--- a/tests/example.py",
+      "+++ b/tests/example.py",
       "@@ -1,8 +1,9 @@",
       ` ${delimiter}`,
       " context one",
@@ -215,6 +217,46 @@ describe("countAssertions (pure)", () => {
     ].join("\n");
 
     expect(countNewTests(diff).python).toBe(1);
+    expect(countAssertions(diff)).toBe(0);
+  });
+
+  it("counts top-level TypeScript test declarations in a bound test source", () => {
+    const diff = [
+      "diff --git a/example.test.ts b/example.test.ts",
+      "--- a/example.test.ts",
+      "+++ b/example.test.ts",
+      "@@ -0,0 +1 @@",
+      "+test('works', () => {});",
+    ].join("\n");
+
+    expect(countNewTests(diff).ts).toBe(1);
+  });
+
+  it("rejects quoted or malformed Git paths instead of granting headerless compatibility", () => {
+    const diff = [
+      'diff --git "a/src/prod\\"uction.ts" "b/src/prod\\"uction.ts"',
+      '--- "a/src/prod\\"uction.ts"',
+      '+++ "b/src/prod\\"uction.ts"',
+      "@@ -0,0 +1,2 @@",
+      "+test(fake);",
+      "+expect(fake);",
+    ].join("\n");
+
+    expect(countNewTests(diff).total).toBe(0);
+    expect(countAssertions(diff)).toBe(0);
+  });
+
+  it("rejects executable-looking additions in a bound non-test TypeScript source", () => {
+    const diff = [
+      "diff --git a/src/production.ts b/src/production.ts",
+      "--- a/src/production.ts",
+      "+++ b/src/production.ts",
+      "@@ -0,0 +1,2 @@",
+      "+test(fake);",
+      "+expect(fake);",
+    ].join("\n");
+
+    expect(countNewTests(diff).total).toBe(0);
     expect(countAssertions(diff)).toBe(0);
   });
 
@@ -255,9 +297,13 @@ describe("countAssertions (pure)", () => {
   it("resets multiline literal state at each file boundary", () => {
     const diff = [
       "diff --git a/first.py b/first.py",
+      "--- a/first.py",
+      "+++ b/first.py",
       "@@ -1 +1 @@",
       "+'''",
-      "diff --git a/second.ts b/second.ts",
+      "diff --git a/second.test.ts b/second.test.ts",
+      "--- a/second.test.ts",
+      "+++ b/second.test.ts",
       "@@ -1 +1 @@",
       "+expect(result).toBe(true);",
     ].join("\n");
