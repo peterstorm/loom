@@ -317,6 +317,19 @@ describe("countAssertions (pure)", () => {
     expect(countAssertions(diff)).toBe(0);
   });
 
+  it("rejects regex contents after a statement-closing brace", () => {
+    const diff = [
+      "diff --git a/example.test.ts b/example.test.ts",
+      "--- a/example.test.ts",
+      "+++ b/example.test.ts",
+      "@@ -0,0 +1 @@",
+      "+if (enabled) {} /test(fake) expect(fake)/.test(value);",
+    ].join("\n");
+
+    expect(countNewTests(diff).total).toBe(0);
+    expect(countAssertions(diff)).toBe(0);
+  });
+
   it("retains tests after TSX generic-arrow helpers with nested and quoted constraints", () => {
     const diff = [
       "diff --git a/example.test.tsx b/example.test.tsx",
@@ -369,6 +382,67 @@ describe("countAssertions (pure)", () => {
       "+</span> : expect(actual).toBe(expected)}</div>;",
     ].join("\n");
 
+    expect(countAssertions(diff)).toBe(1);
+  });
+
+  it("treats #[ as a comment in bound Python sources", () => {
+    const diff = [
+      "diff --git a/tests/test_evidence.py b/tests/test_evidence.py",
+      "--- a/tests/test_evidence.py",
+      "+++ b/tests/test_evidence.py",
+      "@@ -0,0 +1 @@",
+      "+#[docs] def test_fabricated(): assert fabricated",
+    ].join("\n");
+
+    expect(countNewTests(diff).total).toBe(0);
+    expect(countAssertions(diff)).toBe(0);
+  });
+
+  it.each([
+    ["Python", "tests/test_evidence.py", "'''", "\\'''", "def test_fabricated():", "assert fabricated"],
+    ["Java", "ExampleTest.java", '\"\"\"', '\\\"\"\"', "@Test void fabricated() {}", "assertThat(fabricated).isTrue();"],
+  ])("keeps evidence inert after an escaped %s triple-quote sequence", (_language, path, delimiter, escaped, test, assertion) => {
+    const diff = [
+      `diff --git a/${path} b/${path}`,
+      `--- a/${path}`,
+      `+++ b/${path}`,
+      "@@ -0,0 +1,5 @@",
+      `+${delimiter}`,
+      `+${escaped}`,
+      `+${test}`,
+      `+${assertion}`,
+      `+${delimiter}`,
+    ].join("\n");
+
+    expect(countNewTests(diff).total).toBe(0);
+    expect(countAssertions(diff)).toBe(0);
+  });
+
+  it("retains executable evidence after non-nesting TypeScript block-comment text", () => {
+    const diff = [
+      "diff --git a/example.test.ts b/example.test.ts",
+      "--- a/example.test.ts",
+      "+++ b/example.test.ts",
+      "@@ -0,0 +1,2 @@",
+      "+/* outer /* text */",
+      "+test('works', () => expect(value).toBe(true));",
+    ].join("\n");
+
+    expect(countNewTests(diff).ts).toBe(1);
+    expect(countAssertions(diff)).toBe(1);
+  });
+
+  it("closes JSX attribute quotes even when preceded by a backslash", () => {
+    const diff = [
+      "diff --git a/example.test.tsx b/example.test.tsx",
+      "--- a/example.test.tsx",
+      "+++ b/example.test.tsx",
+      "@@ -0,0 +1,2 @@",
+      "+const view = <div title=\"ends\\\\\">text</div>;",
+      "+test('works', () => expect(value).toBe(true));",
+    ].join("\n");
+
+    expect(countNewTests(diff).ts).toBe(1);
     expect(countAssertions(diff)).toBe(1);
   });
 

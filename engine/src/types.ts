@@ -112,6 +112,7 @@ export interface SubagentStartInput {
   session_id: string;
   agent_id?: string;
   agent_type?: string;
+  agent_transcript_path?: string;
 }
 
 // --- Task Graph state ---

@@ -322,12 +322,35 @@ describe("removal refuses to follow a planted symlink", () => {
 });
 
 describe("platform anchoring", () => {
-  it("rejects a structurally forged descriptor capability at compile time and runtime", () => {
+  it("rejects direct and cloned descriptor capabilities not registered by the boundary", () => {
     expect(() => anchoredChildPath(
       // @ts-expect-error only no-follow constructors can produce the private capability brand
       { anchor: "descriptor", fd: 0 },
       "x",
     )).toThrow("was not produced by the no-follow filesystem boundary");
+
+    const root = workspace();
+    const anchored = openDirectoryNoFollow(join(root, "run"));
+    try {
+      const clone = { ...anchored, fd: 0 };
+      expect(() => anchoredChildPath(clone, "x"))
+        .toThrow("was not produced by the no-follow filesystem boundary");
+    } finally {
+      closeAnchoredDirectory(anchored);
+    }
+  });
+
+  it("revokes a closed capability before its descriptor number can be recycled", () => {
+    const root = workspace();
+    const closed = openDirectoryNoFollow(join(root, "run"));
+    closeAnchoredDirectory(closed);
+    const replacement = openDirectoryNoFollow(root);
+    try {
+      expect(() => anchoredChildPath(closed, "x"))
+        .toThrow("was not produced by the no-follow filesystem boundary");
+    } finally {
+      closeAnchoredDirectory(replacement);
+    }
   });
 
   it("rejects unsupported runtimes before orchestration startup", () => {

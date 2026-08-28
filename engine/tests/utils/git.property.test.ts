@@ -180,6 +180,72 @@ describe("countAssertions — property tests", () => {
     );
   });
 
+  it("bound Python comments never expose evidence after any hash prefix", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom("#", "#[", "##[", "# ["),
+        fc.constantFrom("def test_fabricated():", "assert fabricated", "class TestFabricated:"),
+        (prefix, evidence) => {
+          const diff = [
+            "diff --git a/tests/test_evidence.py b/tests/test_evidence.py",
+            "--- a/tests/test_evidence.py",
+            "+++ b/tests/test_evidence.py",
+            "@@ -0,0 +1 @@",
+            `+${prefix}${evidence}`,
+          ].join("\n");
+          expect(countNewTests(diff).total).toBe(0);
+          expect(countAssertions(diff)).toBe(0);
+        },
+      ),
+    );
+  });
+
+  it("escaped triple quotes never terminate multiline evidence suppression", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(
+          { path: "tests/test_evidence.py", delimiter: "'''", escaped: "\\'''", test: "def test_fabricated():", assertion: "assert fabricated" },
+          { path: "ExampleTest.java", delimiter: '\"\"\"', escaped: '\\\"\"\"', test: "@Test void fabricated() {}", assertion: "assertThat(fabricated).isTrue();" },
+        ),
+        fc.integer({ min: 0, max: 10 }),
+        (fixture, pairs) => {
+          const diff = [
+            `diff --git a/${fixture.path} b/${fixture.path}`,
+            `--- a/${fixture.path}`,
+            `+++ b/${fixture.path}`,
+            "@@ -0,0 +1,5 @@",
+            `+${fixture.delimiter}`,
+            `+${"\\\\".repeat(pairs)}${fixture.escaped}`,
+            `+${fixture.test}`,
+            `+${fixture.assertion}`,
+            `+${fixture.delimiter}`,
+          ].join("\n");
+          expect(countNewTests(diff).total).toBe(0);
+          expect(countAssertions(diff)).toBe(0);
+        },
+      ),
+    );
+  });
+
+  it("regex bodies after closing braces never expose evidence", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom("expect(fake)", "test(fake)", ".should."),
+        (evidence) => {
+          const diff = [
+            "diff --git a/example.test.ts b/example.test.ts",
+            "--- a/example.test.ts",
+            "+++ b/example.test.ts",
+            "@@ -0,0 +1 @@",
+            `+if (enabled) {} /${evidence}/.test(value);`,
+          ].join("\n");
+          expect(countNewTests(diff).total).toBe(0);
+          expect(countAssertions(diff)).toBe(0);
+        },
+      ),
+    );
+  });
+
   it("Rust ordinary and byte strings never expose multiline evidence-shaped contents", () => {
     fc.assert(
       fc.property(

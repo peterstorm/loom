@@ -10,7 +10,7 @@
  */
 
 import { mkdirSync } from "node:fs";
-import { blockResult, type HookHandler, type SubagentStartInput } from "../../types";
+import { blockResult, type HookHandler } from "../../types";
 import { machinesDir, pathExistsFailClosed, subagentDir, taskGraphPath } from "../../config";
 import { isImplementationAgent } from "../../core/model-profiles";
 import { stripNamespace } from "../../utils/strip-namespace";
@@ -31,6 +31,7 @@ import {
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
 import { parseFirstUserPrompt } from "../../parsers/parse-transcript";
+import { parseSubagentStartStdin } from "../../parsers/parse-subagent-start-input";
 import { extractTaskId } from "../../utils/extract-task-id";
 import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
 import { StateManager } from "../../state-manager";
@@ -73,20 +74,14 @@ export function observeActiveTaskGraph(
 }
 
 const handler: HookHandler = async (stdin) => {
-  let parsedInput: Readonly<{ ok: true; input: SubagentStartInput }> |
-    Readonly<{ ok: false; error: unknown }>;
-  try {
-    parsedInput = { ok: true, input: JSON.parse(stdin) as SubagentStartInput };
-  } catch (error) {
-    parsedInput = { ok: false, error };
-  }
+  const parsedInput = parseSubagentStartStdin(stdin);
 
   // Resolve all TaskGraph authority before publishing roster, sidecar,
   // machine, directory, or pointer capabilities. Only proven absence permits
   // ad-hoc passthrough; every discovery/open/load uncertainty blocks.
   const graph = observeActiveTaskGraph();
   if (!parsedInput.ok) {
-    const cause = parsedInput.error instanceof Error ? parsedInput.error.message : String(parsedInput.error);
+    const cause = parsedInput.error;
     if (graph.kind === "absent") {
       return passthroughDiagnostic(
         `mark-subagent-active: malformed ad-hoc SubagentStart input — no TaskGraph exists; agent not tracked: ${cause}\n`,
@@ -105,7 +100,7 @@ const handler: HookHandler = async (stdin) => {
       `mark-subagent-active: TaskGraph authority${graph.path === null ? "" : ` at ${graph.path}`} is unobservable: ${graph.reason}; refusing spawn`,
     );
   }
-  const input = parsedInput.input;
+  const input = parsedInput.value;
   const { agent_id } = input;
   const activeGraphPath = graph.path;
   const activeGraphManager = graph.manager;

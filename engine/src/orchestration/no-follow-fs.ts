@@ -1,8 +1,9 @@
 /**
  * Anchored filesystem primitives shared by every run directory.
  *
- * Every path below a run's base directory must be refused if ANY component of
- * it is a symlink. Linux is the sole supported runtime because Node exposes no
+ * No path operation below a run's base directory may FOLLOW any symlink
+ * component. Leaf symlinks may be safely removed or atomically replaced.
+ * Linux is the sole supported runtime because Node exposes no
  * portable `openat`/`mkdirat`/`renameat`/`unlinkat` API and `/proc/self/fd`
  * provides the required descriptor-relative authority only on Linux.
  *
@@ -38,6 +39,8 @@ import {
 import { basename, dirname, isAbsolute, parse, relative, resolve, sep } from "node:path";
 
 const ANCHORED_DIRECTORY_CAPABILITY: unique symbol = Symbol("loom.anchored-directory");
+const LIVE_ANCHORED_DIRECTORIES = new WeakSet<object>();
+const REVOKED_ANCHORED_DIRECTORIES = new WeakSet<object>();
 
 /** A directory held open as the capability for every child operation. */
 export type AnchoredDirectory = Readonly<{
@@ -48,7 +51,8 @@ export type AnchoredDirectory = Readonly<{
 
 function assertAnchoredDirectory(directory: AnchoredDirectory): void {
   const candidate = directory as unknown as Record<PropertyKey, unknown>;
-  if (candidate[ANCHORED_DIRECTORY_CAPABILITY] !== true || candidate.anchor !== "descriptor" ||
+  if (!LIVE_ANCHORED_DIRECTORIES.has(directory) || REVOKED_ANCHORED_DIRECTORIES.has(directory) ||
+      candidate[ANCHORED_DIRECTORY_CAPABILITY] !== true || candidate.anchor !== "descriptor" ||
       typeof candidate.fd !== "number" || !Number.isSafeInteger(candidate.fd) || candidate.fd < 0) {
     throw new Error("anchored directory capability was not produced by the no-follow filesystem boundary");
   }
@@ -116,17 +120,27 @@ export function anchoredChildPath(directory: AnchoredDirectory, child: string): 
 }
 
 /** Release a directory anchor. The descriptor is the only owned resource. */
-export function closeAnchoredDirectory(directory: AnchoredDirectory): void {
+function revokeAnchoredDirectory(directory: AnchoredDirectory): void {
   assertAnchoredDirectory(directory);
+  REVOKED_ANCHORED_DIRECTORIES.add(directory);
+  LIVE_ANCHORED_DIRECTORIES.delete(directory);
+}
+
+export function closeAnchoredDirectory(directory: AnchoredDirectory): void {
+  revokeAnchoredDirectory(directory);
   closeSync(directory.fd);
 }
 
-const anchorFor = (fd: number): AnchoredDirectory =>
-  Object.freeze({
+const anchorFor = (fd: number): AnchoredDirectory => {
+  const directory = {
     anchor: "descriptor" as const,
     fd,
     [ANCHORED_DIRECTORY_CAPABILITY]: true as const,
-  });
+  };
+  Object.defineProperty(directory, ANCHORED_DIRECTORY_CAPABILITY, { enumerable: false });
+  LIVE_ANCHORED_DIRECTORIES.add(directory);
+  return Object.freeze(directory);
+};
 
 /**
  * Resolve a configured BASE directory to its real path, creating it if absent.
@@ -185,6 +199,15 @@ function closeFileDescriptor(
       ? closeError
       : new AggregateError([primaryError, closeError], `${operation} and descriptor close both failed`);
   }
+}
+
+function closeAnchoredDirectoryAfter(
+  directory: AnchoredDirectory,
+  primaryError: unknown,
+  operation: string,
+): unknown {
+  revokeAnchoredDirectory(directory);
+  return closeFileDescriptor(directory.fd, primaryError, operation);
 }
 
 /** Read one leaf relative to an anchored directory, following no component. */
@@ -674,8 +697,8 @@ function withOpenedDirectoryNoFollow<T>(
   } catch (error) {
     outcome = { kind: "threw", error };
   }
-  const failure = closeFileDescriptor(
-    directory.fd,
+  const failure = closeAnchoredDirectoryAfter(
+    directory,
     outcome.kind === "threw" ? outcome.error : null,
     operation,
   );

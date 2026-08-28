@@ -524,6 +524,24 @@ describe("applyFailedPiResult", () => {
     expect(store.current().wave_gates["1"]?.blocked).toBe(false);
   });
 
+  it("rejects an unreserved failed spec-check without changing current Wave evidence", async () => {
+    const fixture = graphWithSpecCheckAuthority();
+    const store = fakeStore(fixture.state);
+
+    const applied = await applyFailedPiResult({
+      store,
+      agentType: "spec-check-invoker",
+      result: result({ agent: "spec-check-invoker", exitCode: 1 }),
+      reservedSlot: undefined,
+      now: NOW,
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("no exact reserved Wave slot/attempt authority"),
+    ]);
+    expect(store.current()).toEqual(fixture.state);
+  });
+
   it("carries the harness failure signals into the stored diagnostic", async () => {
     const store = fakeStore(graph());
     const applied = await applyFailedPiResult({

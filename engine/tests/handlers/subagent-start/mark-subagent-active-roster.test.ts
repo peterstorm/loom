@@ -139,6 +139,25 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
     if (result.kind === "block") expect(result.message).toContain("malformed SubagentStart input");
   });
 
+  it.each([
+    ["null", null],
+    ["array", []],
+    ["number", 42],
+    ["numeric session", { session_id: 42 }],
+    ["numeric agent id", { session_id: "session", agent_id: 42 }],
+    ["numeric agent type", { session_id: "session", agent_type: 42 }],
+    ["numeric transcript path", { session_id: "session", agent_transcript_path: 42 }],
+  ])("blocks a %s SubagentStart domain shape before capability publication", async (_label, input) => {
+    process.env.LOOM_STATE_PATH = statePath;
+
+    const result = await markActive(JSON.stringify(input), []);
+
+    expect(result).toMatchObject({
+      kind: "block",
+      message: expect.stringContaining("malformed SubagentStart input"),
+    });
+  });
+
   it("roster write failure blocks and rolls back every modern capability", async () => {
     const s = session("fail");
     process.env.LOOM_STATE_PATH = statePath;

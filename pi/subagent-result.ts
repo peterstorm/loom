@@ -1400,14 +1400,13 @@ export function piSpecCheckAuthorityProblem(
 function commitPiSpecCheck(
   state: TaskGraph,
   specCheck: NonNullable<TaskGraph["spec_check"]>,
-  wave: number,
   value: PiResultOutcome,
 ): Readonly<{ state: TaskGraph; value: PiResultOutcome }> {
   return {
     state: {
       ...state,
       spec_check: specCheck,
-      wave_gates: reconcileWaveBlock(state.wave_gates, state.tasks, specCheck, wave),
+      wave_gates: reconcileWaveBlock(state.wave_gates, state.tasks, specCheck, specCheck.wave),
     },
     value,
   };
@@ -1436,7 +1435,6 @@ function reducePiSpecCheckResult(
     return commitPiSpecCheck(
       state,
       specCheck,
-      wave,
       outcome([`loom(pi): ${observation.error} — marking spec-check evidence_capture_failed`]),
     );
   }
@@ -1446,11 +1444,10 @@ function reducePiSpecCheckResult(
     return commitPiSpecCheck(
       state,
       resolution.specCheck,
-      wave,
       outcome([`loom(pi): ${resolution.specCheck.error} — marking spec-check evidence_capture_failed`]),
     );
   }
-  return commitPiSpecCheck(state, resolution.specCheck, wave, outcome());
+  return commitPiSpecCheck(state, resolution.specCheck, outcome());
 }
 
 /**
