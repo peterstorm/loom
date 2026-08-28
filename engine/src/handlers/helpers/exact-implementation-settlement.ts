@@ -134,25 +134,44 @@ export function settleExactImplementation(
       `${facts.transport} sibling ownership observation unavailable: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  const bytes = ports.repository.observeTaskLocal({
-    repositoryRoot: ports.repository.root,
-    task,
-    authority: facts.authority,
-    parserModifiedPaths: facts.parserModifiedPaths,
-    parserPathLabel: facts.parserPathLabel,
-    siblingOwnedPaths,
-  });
+  let bytes: TaskLocalByteObservation;
+  try {
+    bytes = ports.repository.observeTaskLocal({
+      repositoryRoot: ports.repository.root,
+      task,
+      authority: facts.authority,
+      parserModifiedPaths: facts.parserModifiedPaths,
+      parserPathLabel: facts.parserPathLabel,
+      siblingOwnedPaths,
+    });
+  } catch (error) {
+    return unavailable(
+      state,
+      facts,
+      `${facts.transport} task-local observation unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   const suiteOutcome = bytes.suite.checks[0]?.outcome;
   if (suiteOutcome?.kind === "observation-unavailable") {
     return unavailable(state, facts, suiteOutcome.reason, bytes);
   }
 
   const policy = taskVerificationPolicy(task);
-  const newTests = ports.newTests.collect({
-    filesModified: bytes.cumulativeModifiedPaths,
-    requirement: policy.newTests,
-    startSha: task.start_sha,
-  });
+  let newTests: NewTestObservationResult<NewTestEvidence>;
+  try {
+    newTests = ports.newTests.collect({
+      filesModified: bytes.cumulativeModifiedPaths,
+      requirement: policy.newTests,
+      startSha: task.start_sha,
+    });
+  } catch (error) {
+    return unavailable(
+      state,
+      facts,
+      `${facts.transport} new-test observation unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      bytes,
+    );
+  }
   if (!newTests.ok) {
     return unavailable(
       state,

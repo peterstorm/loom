@@ -10,7 +10,7 @@ import {
   createTaskExecutionAuthorityBatch,
   rollbackTaskExecutionAuthorityBatch,
 } from "../../src/core/validate-task-execution";
-import { TRUSTED_LEDGER_ONLY_POLICY } from "../../src/core/proof-obligations";
+import { evaluateTaskProof, TRUSTED_LEDGER_ONLY_POLICY } from "../../src/core/proof-obligations";
 import {
   productionExactSettlementPorts,
   settleExactImplementation,
@@ -249,6 +249,10 @@ describe("modern implementation attempt registration", () => {
       attempt_artifact_baseline: baseline,
       attempt_repository_baseline: [],
       reserved_at: old.value.reservedAt,
+      review_status: "passed",
+      review_generation: 2,
+      test_result: { verdict: "trusted-pass" },
+      test_evidence: "trusted unchanged baseline",
     });
     writeGraph(repo.statePath, { ...graph([task]), executing_tasks: ["T1"] });
 
@@ -259,6 +263,12 @@ describe("modern implementation attempt registration", () => {
     const stored = JSON.parse(readFileSync(repo.statePath, "utf8")) as TaskGraph;
     const updated = stored.tasks[0]!;
     expect(updated.active_implementation_attempt).toEqual(result.authorities[0]);
+    expect(updated).toMatchObject({
+      review_status: "passed",
+      review_generation: 2,
+      test_result: { verdict: "trusted-pass" },
+      test_evidence: "trusted unchanged baseline",
+    });
     expect(updated.implementation_attempt_history).toEqual([
       expect.objectContaining({
         authorityDigest: old.value.authorityDigest,
@@ -268,6 +278,92 @@ describe("modern implementation attempt registration", () => {
         failureKinds: ["reservation-reclaimed"],
       }),
     ]);
+  });
+
+  it("invalidates passed authority when an abandoned modern attempt changed declared bytes", async () => {
+    const repo = repository();
+    const baseline = [{ artifact: "src/a.ts", snapshot: { kind: "missing" as const } }];
+    const reservedAt = parseIsoInstant("2020-01-01T00:00:00.000Z");
+    const reservationId = parseReservationId("stale-reviewed-attempt");
+    if (!reservedAt.ok || !reservationId.ok) throw new Error("fixture parse failed");
+    const old = createImplementationAttemptAuthority({
+      taskId: "T1", wave: 1, semanticAttempt: 1, reservationId: reservationId.value,
+      headSha: repo.headSha, reservedAt: reservedAt.value,
+      taskScopeBaseline: baseline, dirtySetBaseline: [],
+    });
+    if (!old.ok) throw new Error(old.error.errors.join("; "));
+    const proof = evaluateTaskProof(
+      { newTestsRequired: false, declaredArtifacts: ["src/a.ts"] },
+      {
+        taskCompleted: true,
+        testResult: { verdict: "trusted-pass" },
+        filesModified: ["src/a.ts"],
+        newTestsWritten: false,
+        newTestEvidence: "verification waived",
+      },
+    );
+    if (proof.state !== "satisfied") throw new Error("fixture proof must be satisfied");
+    const reviewed = taskFixture({
+      id: "T1", description: "reviewed before stale write", agent: "code-implementer-agent", wave: 1,
+      status: "implemented", proof, depends_on: [], file_list: ["src/a.ts"], new_tests_required: false,
+      active_implementation_attempt: old.value,
+      attempt_artifact_baseline: baseline,
+      attempt_repository_baseline: [],
+      artifact_baseline: baseline,
+      repository_baseline: [],
+      reserved_at: old.value.reservedAt,
+      review_status: "passed",
+      review_generation: 4,
+      test_result: { verdict: "trusted-pass" },
+      test_evidence: "trusted pre-abandonment result",
+      new_test_observation: { kind: "not-written", written: false, evidence: "verification waived" },
+    });
+    writeGraph(repo.statePath, {
+      ...graph([reviewed]),
+      executing_tasks: ["T1"],
+      spec_check: {
+        wave: 1,
+        run_at: "2020-01-01T00:01:00.000Z",
+        verdict: "PASSED",
+        critical_count: 0,
+        high_count: 0,
+        critical_findings: [],
+        high_findings: [],
+        medium_findings: [],
+      },
+      wave_gates: {
+        "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
+      },
+    });
+
+    mkdirSync(join(repo.root, "src"), { recursive: true });
+    writeFileSync(join(repo.root, "src/a.ts"), "export const staleWrite = true;\n");
+
+    const result = await registerTaskExecutionBatch([spawn("T1")]);
+    expect(result.kind).toBe("registered");
+    if (result.kind !== "registered") return;
+    const stored = JSON.parse(readFileSync(repo.statePath, "utf8")) as TaskGraph;
+    expect(stored.tasks[0]).toMatchObject({
+      status: "pending",
+      revalidation_required: true,
+      review_status: "pending",
+      review_generation: 5,
+      failure_reason: "infrastructure-blocked: reservation-reclaimed",
+    });
+    expect(stored.tasks[0]).not.toHaveProperty("test_result");
+    expect(stored.tasks[0]).not.toHaveProperty("test_evidence");
+    expect(stored.tasks[0]).not.toHaveProperty("new_test_observation");
+    expect(stored.spec_check).toBeUndefined();
+    expect(stored.wave_gates["1"]).toMatchObject({
+      impl_complete: false,
+      tests_passed: null,
+      reviews_complete: false,
+      blocked: false,
+    });
+    expect(stored.tasks[0]?.implementation_attempt_history).toContainEqual(expect.objectContaining({
+      authorityDigest: old.value.authorityDigest,
+      failureKinds: ["reservation-reclaimed"],
+    }));
   });
 
   it("an exact rollback cannot clear a late replacement for the same Task", () => {

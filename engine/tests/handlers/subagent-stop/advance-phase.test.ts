@@ -407,6 +407,16 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
     }
   });
 
+  it.each(["null", "42", "[]", JSON.stringify({ session_id: "smoke", agent_type: 7 })])(
+    "the REAL handler rejects valid JSON outside the SubagentStop domain: %s",
+    async (stdin) => {
+      await expect(advancePhaseHandler(stdin, [])).resolves.toMatchObject({
+        kind: "error",
+        message: expect.stringContaining("invalid SubagentStop input"),
+      });
+    },
+  );
+
   it("the REAL handler short-circuits a panel-agent SubagentStop to passthrough before any state access", async () => {
     // Drive the actual default-export handler, not just the map precondition. A
     // panel agent misses PHASE_AGENT_MAP, so the handler returns passthrough at

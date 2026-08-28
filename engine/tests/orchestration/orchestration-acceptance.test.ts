@@ -939,6 +939,13 @@ describe("Claude capture against a real run directory", () => {
 
       const malformed = await captureOrchestrationResult("{broken", []);
       expect(malformed).toMatchObject({ kind: "error", message: expect.stringContaining("malformed SubagentStop JSON") });
+      for (const stdin of ["null", "42", "[]", JSON.stringify({ session_id: "s1", agent_type: 7 })]) {
+        const wrongShape = await captureOrchestrationResult(stdin, []);
+        expect(wrongShape).toMatchObject({
+          kind: "error",
+          message: expect.stringContaining("malformed SubagentStop JSON or domain shape"),
+        });
+      }
     } finally {
       if (previousRoot === undefined) delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
       else process.env.LOOM_ORCHESTRATION_RUNS_ROOT = previousRoot;

@@ -153,6 +153,27 @@ describe("TaskGraph repository-root discovery", () => {
     }
   });
 
+  it("rejects a non-repository diagnostic when readable ancestor metadata exists", () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-readable-git-root-")));
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: root });
+      const nested = join(root, "nested", "cwd");
+      mkdirSync(nested, { recursive: true });
+      const bin = fakeGit(root, "fatal: not a git repository (or any of the parent directories): .git", 128);
+
+      const run = spawnSync(BUN, ["-e", configScript], {
+        cwd: nested,
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+        encoding: "utf8",
+      });
+
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toContain(`git reported no repository, but repository metadata exists at ${join(root, ".git")}`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("fails closed when the Git executable cannot start", () => {
     const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-missing-git-")));
     try {

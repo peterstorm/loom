@@ -566,8 +566,8 @@ export async function bindMachineAgent(
  *  MALFORMED lines are preserved (mirroring refreshBindingActivity and
  *  bindMachineAgent) — they are the fail-closed evidence of a corrupt binding
  *  file, and while any remain the file must survive so the gate's
- *  file-present-but-zero-bindings check still fires. Failures are logged — a
- *  leaked binding disables gating silently otherwise. */
+ *  file-present-but-zero-bindings check still fires. Non-ENOENT failures are
+ *  thrown so the cleanup caller can surface a leaked binding. */
 export async function unbindMachineAgent(
   sessionId: SessionId,
   agentType: AgentType,

@@ -56,7 +56,7 @@ export const runCleanupSubagentFlag = async (
   }
 
   // Release guarded-machine binding. unbind locks internally (same lock file)
-  // and logs its own failures — do NOT nest it inside another withLock here,
+  // and throws failures for this handler to aggregate — do NOT nest it inside another withLock here,
   // the mkdir lock is not reentrant. Parse the identity to the SAME branded
   // types bind used: unbind only compares against already-parsed bindings, so
   // an unparseable id could never have been bound — skipping the call is the

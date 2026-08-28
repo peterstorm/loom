@@ -321,9 +321,9 @@ function processIsAlive(owner: LockOwner): boolean {
 }
 
 /**
- * Does `name` exist as a directory entry under `directory`, without following
- * a symlink? ENOENT is the ONE absent answer; every other errno is rethrown, so
- * an unreadable entry never reads as a missing one.
+ * Does `name` exist as a readable file-like entry under `directory`, without
+ * following a symlink? ENOENT is the ONE absent answer; every other errno —
+ * including EISDIR — is rethrown, so an unreadable entry never reads as missing.
  */
 function directoryEntryExistsNoFollow(directory: AnchoredDirectory, name: string): boolean {
   try {

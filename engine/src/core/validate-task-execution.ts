@@ -4,12 +4,13 @@ import type { Task, TaskGraph } from "../types";
 import { extractTaskId } from "../utils/extract-task-id";
 import { isImplementationAgent, isStandaloneReviewAgent } from "./model-profiles";
 import { stripNamespace } from "../utils/strip-namespace";
-import { hasStandaloneReviewContext } from "./review-output";
-import { waveBlockCauses } from "./wave-gate-model";
+import { hasStandaloneReviewContext, invalidateTaskReview } from "./review-output";
+import { newWaveGate, reconcileWaveBlock, waveBlockCauses } from "./wave-gate-model";
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
 import {
   canonicalArtifactBaselineDigest,
   createImplementationAttemptAuthority,
+  type ArtifactBaselineDigest,
   createReclaimedImplementationAttemptReceipt,
   type ImplementationAttemptAuthority,
   type IsoInstant,
@@ -406,10 +407,52 @@ function exactStaleTaskIds(
   }));
 }
 
+function baselineMatchesAuthority(
+  baseline: readonly DeclaredArtifactBaseline[] | undefined,
+  expectedDigest: ArtifactBaselineDigest,
+): boolean {
+  if (baseline === undefined) return false;
+  const digest = canonicalArtifactBaselineDigest(baseline);
+  return digest.ok && digest.value === expectedDigest;
+}
+
+function canPreserveReclaimedEvidence(
+  task: Task,
+  proof: Extract<ProvenStaleReservation, { kind: "modern" }>,
+  replacement: TaskExecutionAuthorityPlan | undefined,
+): boolean {
+  return replacement !== undefined &&
+    replacement.authority.headSha === proof.authority.headSha &&
+    baselineMatchesAuthority(task.attempt_artifact_baseline, proof.authority.taskScopeBaselineDigest) &&
+    baselineMatchesAuthority(replacement.baselines.attempt, proof.authority.taskScopeBaselineDigest) &&
+    baselineMatchesAuthority(task.attempt_repository_baseline, proof.authority.dirtySetBaselineDigest) &&
+    baselineMatchesAuthority(replacement.baselines.repositoryAttempt, proof.authority.dirtySetBaselineDigest);
+}
+
+function invalidateReclaimedEvidence(task: Task): Task {
+  const invalidated = {
+    ...invalidateTaskReview(task),
+    test_result: undefined,
+    test_evidence: undefined,
+    new_test_observation: undefined,
+    failure_reason: "infrastructure-blocked: reservation-reclaimed",
+  };
+  return task.proof === undefined
+    ? invalidated
+    : {
+        ...invalidated,
+        status: "pending",
+        proof: task.proof,
+        revalidation_required: true,
+        legacy_missing_proof: undefined,
+      };
+}
+
 function reclaimTaskAttempt(
   task: Task,
   stale: readonly ProvenStaleReservation[],
   reclaimedAt: IsoInstant,
+  invalidateEvidence = false,
 ): Task {
   const proof = stale.find((candidate) => candidate.taskId === task.id);
   if (proof === undefined) return task;
@@ -421,7 +464,7 @@ function reclaimTaskAttempt(
     const archived = history.some((candidate) => candidate.authorityDigest === proof.authority.authorityDigest)
       ? history
       : [...history, receipt.value];
-    return {
+    const reclaimed: Task = {
       ...task,
       active_implementation_attempt: undefined,
       attempt_artifact_baseline: undefined,
@@ -429,6 +472,7 @@ function reclaimTaskAttempt(
       reserved_at: undefined,
       implementation_attempt_history: archived,
     };
+    return invalidateEvidence ? invalidateReclaimedEvidence(reclaimed) : reclaimed;
   }
   if (proof.kind === "legacy" && task.active_implementation_attempt === undefined) {
     return { ...task, reserved_at: undefined, legacy_execution_reservation: undefined };
@@ -447,29 +491,55 @@ export function applyTaskExecutionAuthorityBatch(
   const planByTask = new Map<string, TaskExecutionAuthorityPlan>(
     plans.map((plan) => [plan.authority.taskId, plan]),
   );
+  const invalidatedTaskIds = new Set(stale.flatMap((proof) => {
+    if (proof.kind !== "modern" || !staleTaskIds.has(proof.taskId)) return [];
+    const task = state.tasks.find((candidate) => candidate.id === proof.taskId);
+    if (task === undefined || canPreserveReclaimedEvidence(task, proof, planByTask.get(proof.taskId))) return [];
+    return [proof.taskId];
+  }));
+  const tasks = state.tasks.map((original): Task => {
+    const task = reclaimTaskAttempt(original, stale, reclaimedAt, invalidatedTaskIds.has(original.id));
+    const plan = planByTask.get(task.id);
+    if (plan === undefined) return task;
+    return {
+      ...registerTaskExecutionBaseline(
+        task,
+        plan.authority.headSha,
+        plan.baselines.proof,
+        plan.baselines.attempt,
+        plan.baselines.repositoryAttempt,
+      ),
+      active_implementation_attempt: plan.authority,
+      reserved_at: plan.authority.reservedAt,
+      legacy_execution_reservation: undefined,
+    };
+  });
+  const invalidatedWaves = new Set(
+    state.tasks.filter((task) => invalidatedTaskIds.has(task.id)).map((task) => task.wave),
+  );
+  const specCheck = state.spec_check !== undefined && invalidatedWaves.has(state.spec_check.wave)
+    ? undefined
+    : state.spec_check;
+  const waveGates = [...invalidatedWaves].reduce((gates, wave) => {
+    const key = String(wave);
+    const reopened = {
+      ...(gates[key] ?? newWaveGate()),
+      impl_complete: tasks.filter((task) => task.wave === wave)
+        .every((task) => task.status === "implemented" || task.status === "completed"),
+      tests_passed: null,
+      reviews_complete: false,
+    };
+    return reconcileWaveBlock({ ...gates, [key]: reopened }, tasks, specCheck, wave);
+  }, state.wave_gates);
   return {
     ...state,
     executing_tasks: [...new Set([
       ...(state.executing_tasks ?? []).filter((taskId) => !staleTaskIds.has(taskId)),
       ...plans.map(({ authority }): string => authority.taskId),
     ])],
-    tasks: state.tasks.map((original): Task => {
-      const task = reclaimTaskAttempt(original, stale, reclaimedAt);
-      const plan = planByTask.get(task.id);
-      if (plan === undefined) return task;
-      return {
-        ...registerTaskExecutionBaseline(
-          task,
-          plan.authority.headSha,
-          plan.baselines.proof,
-          plan.baselines.attempt,
-          plan.baselines.repositoryAttempt,
-        ),
-        active_implementation_attempt: plan.authority,
-        reserved_at: plan.authority.reservedAt,
-        legacy_execution_reservation: undefined,
-      };
-    }),
+    tasks,
+    ...(specCheck === undefined && state.spec_check !== undefined ? { spec_check: undefined } : {}),
+    wave_gates: waveGates,
   };
 }
 

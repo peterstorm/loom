@@ -186,6 +186,25 @@ describe("shared exact implementation settlement shell", () => {
     expect(settled.infrastructureReason).toContain("HEAD drift");
   });
 
+  it.each(TRANSPORTS)("archives thrown %s task-local observation failures as infrastructure", (transport) => {
+    const attempt = authority(`task-local-defect-${transport}`);
+    const defectPorts: ExactImplementationSettlementPorts = {
+      ...ports(attempt),
+      repository: {
+        root: "/fixture",
+        observeTaskLocal: () => { throw new Error("worktree unreadable"); },
+      },
+    };
+    const settled = settleExactImplementation(graph(attempt), facts(transport, attempt), defectPorts);
+    expect(settled.application).toMatchObject({
+      kind: "applied",
+      transition: { kind: "infrastructure-blocked" },
+    });
+    expect(settled.infrastructureReason).toBe(
+      `${transport} task-local observation unavailable: worktree unreadable`,
+    );
+  });
+
   it.each(TRANSPORTS)("keeps stale %s authority non-positive", (transport) => {
     const attempt = authority(`stale-${transport}`);
     const replacement = authority(`replacement-${transport}`);
@@ -216,14 +235,31 @@ describe("shared exact implementation settlement shell", () => {
     expect(settled.infrastructureReason).toContain("index unreadable");
   });
 
-  it.each(TRANSPORTS)("does not downgrade unexpected %s new-test collector defects", (transport) => {
+  it.each(TRANSPORTS)("archives thrown %s new-test observation failures as infrastructure", (transport) => {
     const attempt = authority(`new-test-defect-${transport}`);
     const defectPorts: ExactImplementationSettlementPorts = {
       ...ports(attempt),
       newTests: { collect: () => { throw new TypeError("collector invariant broke"); } },
     };
-    expect(() => settleExactImplementation(graph(attempt), facts(transport, attempt), defectPorts))
-      .toThrowError(TypeError);
+    const settled = settleExactImplementation(graph(attempt), facts(transport, attempt), defectPorts);
+    expect(settled.application).toMatchObject({
+      kind: "applied",
+      transition: {
+        kind: "infrastructure-blocked",
+        failures: [expect.objectContaining({ kind: "implementation-observation-unavailable" })],
+      },
+    });
+    expect(settled.infrastructureReason).toBe(
+      `${transport} new-test observation unavailable: collector invariant broke`,
+    );
+    if (settled.application.kind !== "applied") return;
+    expect(settled.application.state.tasks[0]?.implementation_attempt_history).toContainEqual(
+      expect.objectContaining({
+        authorityDigest: attempt.authorityDigest,
+        transition: "infrastructure-blocked",
+        consumesSemanticAttempt: false,
+      }),
+    );
   });
 
   it("preserves Pi structured provenance rather than flattening it to ledger trust", () => {
