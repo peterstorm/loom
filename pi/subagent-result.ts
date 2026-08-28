@@ -338,7 +338,11 @@ export function piReviewAuthorityProblem(
 ): string | null {
   const currentAuthority = reviewAuthorityForTask(task, agentType);
   if (reservedAuthority == null) {
-    return task.review_run === undefined && task.review_generation === undefined
+    const explicitlyLegacy = task.review_run === undefined &&
+      task.review_generation === undefined &&
+      task.accepted_review_authority === undefined &&
+      (task.issued_review_packets?.length ?? 0) === 0;
+    return explicitlyLegacy
       ? null
       : "reviewer has no exact current or retained review-generation authority";
   }
@@ -572,7 +576,8 @@ async function applyFailedReviewResult(args: Readonly<{
  * is persisted only under the authority each category owns: exact attempt/slot
  * authority for implementation and spec-check agents. Reviewers require a
  * matching Task and, for active Review Runs, exact generation/packet/slot/attempt
- * authority. Unreserved failures remain diagnostic-only.
+ * authority. Unreserved failures never store positive evidence; a proven
+ * legacy implementation reservation may still be released during cleanup.
  */
 export async function applyFailedPiResult(args: Readonly<{
   store: TaskGraphStore;

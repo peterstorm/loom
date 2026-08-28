@@ -26,11 +26,10 @@ const isReviewAgent = (agentType: string): boolean => REVIEW_AGENTS.has(agentTyp
 /**
  * The reservation fields the classification actually reads.
  *
- * `kind` is the closed lifecycle union, not a bare `string`: every construction
- * site already supplies a `TaskExecutionSpawn["kind"]`, and the predicates below
- * test it against the `"standalone"` member. Typed as `string`, a typo in that
- * comparison — or a new lifecycle arm — would silently reclassify every
- * reservation with no compile error at the site that did it.
+ * `kind` is the current closed lifecycle union, not a bare `string`: this
+ * prevents misspelled construction values. The classifier deliberately groups
+ * every existing non-`standalone` arm; adding a lifecycle arm therefore requires
+ * explicit review of that grouping rather than relying on exhaustiveness here.
  */
 export type ReservedResultItem = Readonly<{
   agentType: string;

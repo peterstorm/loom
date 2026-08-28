@@ -895,6 +895,36 @@ describe("applyReviewPiResult", () => {
     expect(store.current()).toEqual(parsedGraph(retired));
   });
 
+  it("rejects authority-free malformed evidence when accepted review authority is retained", async () => {
+    const base = graph();
+    const accepted = graph({
+      tasks: [{
+        ...base.tasks[0]!,
+        review_status: "passed",
+        accepted_review_authority: {
+          generation: 2,
+          packet_id: "e".repeat(64),
+          head_sha: "5".repeat(40),
+          scope: ["engine/src/x.ts"],
+        },
+      }],
+    });
+    const store = fakeStore(accepted);
+
+    const applied = await applyReviewPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ messages: [{ role: 42 }] }),
+      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      parentPrompt: "",
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("no exact current or retained review-generation authority"),
+    ]);
+    expect(store.current()).toEqual(parsedGraph(accepted));
+  });
+
   it("records an evidence failure for malformed reviewer messages", async () => {
     const store = fakeStore(graph());
     await applyReviewPiResult({
