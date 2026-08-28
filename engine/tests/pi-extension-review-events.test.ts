@@ -815,6 +815,70 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
+  it("does not reconcile a missing graphless reviewer into a TaskGraph created after spawn", async () => {
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4f7";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-graph-created-after-missing-review";
+    rmSync(statePath, { force: true });
+    try {
+      expect(await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: { agent: "code-reviewer", task: "Task: T1\nReview it.", agentScope: "user" },
+      }, context)).toEqual([undefined]);
+
+      writeState(initialGraph());
+      const before = readFileSync(statePath, "utf8");
+      const responses = await pi.emit("tool_result", {
+        toolName: "subagent",
+        toolCallId,
+        content: [],
+        details: { results: [] },
+      }, context);
+
+      expect(readFileSync(statePath, "utf8")).toBe(before);
+      expect(responses).not.toContainEqual(expect.objectContaining({ isError: true }));
+    } finally {
+      writeState(initialGraph());
+    }
+  });
+
+  it("does not finalize a graphless implementation into a TaskGraph created after spawn", async () => {
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4f8";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-graph-created-after-implementation-spawn";
+    const prompt = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+    rmSync(statePath, { force: true });
+    try {
+      expect(await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: { agent: "code-implementer-agent", task: prompt, agentScope: "user" },
+      }, context)).toEqual([undefined]);
+
+      writeState(initialGraph());
+      const before = readFileSync(statePath, "utf8");
+      const responses = await pi.emit("tool_result", {
+        toolName: "subagent",
+        toolCallId,
+        content: [],
+        details: { results: [{
+          agent: "code-implementer-agent",
+          task: prompt,
+          exitCode: 1,
+          messages: [],
+        }] },
+      }, context);
+
+      expect(readFileSync(statePath, "utf8")).toBe(before);
+      expect(responses).not.toContainEqual(expect.objectContaining({ isError: true }));
+    } finally {
+      writeState(initialGraph());
+    }
+  });
+
   it("treats a graphless implementation spawn as a no-op instead of a finalization failure", async () => {
     // The result-side site the two-commit sequence exists for: an ad-hoc
     // code-implementer-agent spawned with no task graph has no attempt record to
@@ -847,7 +911,7 @@ describe("Pi extension review tool_result integration", () => {
       }, context);
 
       const written = stderr.mock.calls.map(([text]) => String(text)).join("");
-      expect(written).toContain("no task graph to finalize");
+      expect(written).toContain("no TaskGraph existed at spawn, protected state untouched");
       expect(written).not.toContain("cannot finalize reserved implementation attempts");
       expect(responses).not.toContainEqual(expect.objectContaining({ isError: true }));
       expect(existsSync(statePath)).toBe(false);
@@ -887,7 +951,7 @@ describe("Pi extension review tool_result integration", () => {
       }, context);
 
       const written = stderr.mock.calls.map(([text]) => String(text)).join("");
-      expect(written).toContain("no task graph to record them against");
+      expect(written).toContain("does not match reserved \"code-reviewer\" — evidence ignored");
       expect(written).not.toContain("cannot persist");
       expect(existsSync(statePath)).toBe(false);
     } finally {

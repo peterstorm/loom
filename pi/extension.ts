@@ -1425,11 +1425,13 @@ export default function (pi: ExtensionAPI) {
               Array.isArray((event.input as { chain?: unknown }).chain)
             ? "sequential" as const
             : "parallel" as const;
-          taskRegistration = await registerTaskExecutionBatch(
-            taskExecutionSpawns,
-            executionMode,
-            rosterObservation,
-          );
+          taskRegistration = graphIsActive
+            ? await registerTaskExecutionBatch(
+                taskExecutionSpawns,
+                executionMode,
+                rosterObservation,
+              )
+            : { kind: "registered" as const, authorities: Object.freeze([]) };
         } catch (error) {
           const cleanupErrors = await rollbackLifecycle();
           throw new Error(
@@ -1939,13 +1941,15 @@ export default function (pi: ExtensionAPI) {
     // shell is not a successful implementation envelope until transcript shape
     // and exact returned Task identity have both parsed.
     const entries = parsePiSubagentResults(rawResults);
-    processingErrors.push(...await finalizeReservedImplementations(entries));
+    if (!spawnedWithoutTaskGraph(reservation)) {
+      processingErrors.push(...await finalizeReservedImplementations(entries));
+    }
 
     // A reservation is the authoritative expected batch. Pi may return a
     // shorter or reordered results array after a child disappears. Reconcile
     // every gate-owned slot before any malformed-details early return so stale
     // review/spec evidence cannot remain authoritative.
-    if (reservation) {
+    if (reservation && !spawnedWithoutTaskGraph(reservation)) {
       const { reviews: missingReviews, specChecks: missingSpecChecks, runResults: missingRunResults } =
         classifyMissingReservedResults(
           reservation.items,
