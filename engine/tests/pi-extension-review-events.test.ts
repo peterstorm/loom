@@ -1761,6 +1761,7 @@ describe("Pi extension review tool_result integration", () => {
       "Review the exact issued request",
     ].join("\n");
     expect((await bindSession(session, staged)).ok).toBe(true);
+    rmSync(statePath, { force: true });
     expect(await pi.emit("tool_call", {
       toolName: "subagent",
       toolCallId,
@@ -1790,6 +1791,7 @@ describe("Pi extension review tool_result integration", () => {
         diagnostic: expect.stringContaining("was missing or mismatched"),
       }),
     })]);
+    writeState(initialGraph());
   });
 
   it("terminalizes a missing Pi result so Standalone Review resumes at attempt 2", async () => {

@@ -1684,7 +1684,7 @@ export default function (pi: ExtensionAPI) {
   });
 
 
-  // ─── PostEdit Lint (tool_result event for edit/write) ─────────────────
+  // ─── PostEdit Lint (tool_result event for edit/write/multi_edit) ──────
   // After edit/write lands on disk, run immediate-tier lint.
   // If violations: report error content so the agent can remediate the landed edit.
   // If pass: return undefined (no injection).
@@ -1949,7 +1949,7 @@ export default function (pi: ExtensionAPI) {
     // shorter or reordered results array after a child disappears. Reconcile
     // every gate-owned slot before any malformed-details early return so stale
     // review/spec evidence cannot remain authoritative.
-    if (reservation && !spawnedWithoutTaskGraph(reservation)) {
+    if (reservation) {
       const { reviews: missingReviews, specChecks: missingSpecChecks, runResults: missingRunResults } =
         classifyMissingReservedResults(
           reservation.items,
@@ -1969,7 +1969,8 @@ export default function (pi: ExtensionAPI) {
           await persistCaptureRejection(runBinding, index, item.agentType, diagnostic);
         }
       }
-      if (missingReviews.length > 0 || missingSpecChecks.length > 0) {
+      if (!spawnedWithoutTaskGraph(reservation) &&
+          (missingReviews.length > 0 || missingSpecChecks.length > 0)) {
         let manager: StateManager | null = null;
         let pointerReadFailed = false;
         try {
@@ -1995,14 +1996,6 @@ export default function (pi: ExtensionAPI) {
           // present-but-unreadable, not absent, so the ad-hoc and
           // "task graph unavailable" arms do not apply. The batch continues
           // to the per-result evidence loop below.
-        } else if (!manager && spawnedWithoutTaskGraph(reservation)) {
-          // Ad-hoc: the missing result is still worth naming, but there is no
-          // protected state to record an evidence failure against, so it is
-          // not an orchestration processing error.
-          process.stderr.write(
-            `loom(pi): ad-hoc spawn for session ${reservation.sessionId} returned ${missingReviews.length} missing ` +
-            `review result(s) and ${missingSpecChecks.length} missing spec-check result(s) — no task graph to record them against\n`,
-          );
         } else if (!manager) {
           const diagnostic = `cannot persist ${missingReviews.length} missing reserved review result(s) and ` +
             `${missingSpecChecks.length} missing reserved spec-check result(s) for session ${reservation.sessionId} — task graph unavailable`;
