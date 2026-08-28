@@ -162,6 +162,28 @@ describe("countAssertions — property tests", () => {
     );
   });
 
+  it("returned or yielded JSX prose never becomes executable evidence", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom("return", "yield"),
+        fc.constantFrom("test(fake)", "expect(fake)", "it(fake) .should."),
+        (keyword, evidence) => {
+          const diff = [
+            "diff --git a/example.test.tsx b/example.test.tsx",
+            "--- a/example.test.tsx",
+            "+++ b/example.test.tsx",
+            "@@ -0,0 +1,3 @@",
+            `+function* View() { ${keyword} <div>`,
+            `+${evidence}`,
+            "+</div>; }",
+          ].join("\n");
+          expect(countNewTests(diff).total).toBe(0);
+          expect(countAssertions(diff)).toBe(0);
+        },
+      ),
+    );
+  });
+
   it("nested TSX generic-arrow constraints never suppress following executable evidence", () => {
     fc.assert(
       fc.property(fc.integer({ min: 1, max: 24 }), (depth) => {

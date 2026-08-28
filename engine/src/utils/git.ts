@@ -442,17 +442,18 @@ const matchingGenericClose = (line: string, index: number): number | null => {
 const beginsTsxGenericParameters = (line: string, index: number): boolean => {
   const close = matchingGenericClose(line, index);
   const candidate = line.slice(index + 1, close ?? undefined);
-  if (!/^[A-Za-z_$][\w$]*(?:\s+extends\b|\s*,)/.test(candidate)) return false;
+  if (!/^[A-Za-z_$][\w$]*(?:\s+extends\b|\s*=|\s*,)/.test(candidate)) return false;
   return close === null || nonWhitespaceAfter(line, close) === "(";
 };
 
 /** A root TSX tag can only begin where an expression may begin, never at an operator's `>`. */
-const beginsRootJsxTag = (line: string, index: number): boolean => {
+const beginsRootJsxTag = (line: string, index: number, projectedCode: string): boolean => {
   if (line[index] !== "<" || beginsTsxGenericParameters(line, index)) return false;
   const next = nonWhitespaceAfter(line, index);
   if (next === null || !/[A-Za-z_$>]/.test(next)) return false;
   const previous = nonWhitespaceBefore(line, index);
-  return previous === null || /[=([{,:;!?]|>/.test(previous);
+  return previous === null || /[=([{,:;!?]|>/.test(previous) ||
+    /(?:^|\W)(?:return|yield)\s*$/.test(projectedCode.trimEnd());
 };
 
 const followsControlFlowCondition = (code: string): boolean => {
@@ -629,7 +630,7 @@ function assertionCodeLine(
       quote = char;
       continue;
     }
-    if (isTsx && beginsRootJsxTag(line, index)) {
+    if (isTsx && beginsRootJsxTag(line, index, code)) {
       jsxDepth += 1;
       jsxInTag = true;
       jsxTagClosing = false;

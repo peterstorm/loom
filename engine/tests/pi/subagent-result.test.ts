@@ -454,6 +454,49 @@ describe("applyFailedPiResult", () => {
     expect(store.current()).toEqual(parsedGraph(current));
   });
 
+  it("rejects a stale successful reviewer reservation after a newer Review Run replaces it", async () => {
+    const base = graph();
+    const current = graph({
+      tasks: [{
+        ...base.tasks[0]!,
+        review_generation: 2,
+        review_run: {
+          generation: 2,
+          packet_id: "b".repeat(64),
+          head_sha: "2".repeat(40),
+          expected_agents: ["code-reviewer"],
+          prior_finding_ids: [],
+          evidence: [],
+          slot_authority: [{ agent: "code-reviewer", slot_id: "review-slot:new", attempted: 1 }],
+        },
+      }],
+    });
+    const store = fakeStore(current);
+    const applied = await applyReviewPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ messages: assistantText("review output without required markers") }),
+      reservedSlot: {
+        agentType: "code-reviewer",
+        taskId: "T1",
+        reviewAuthority: {
+          taskId: "T1",
+          agentType: "code-reviewer",
+          generation: 1,
+          packetId: "a".repeat(64),
+          slotId: "review-slot:old",
+          attempted: 1,
+        },
+      },
+      parentPrompt: "",
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("does not match exact current Task/Review Run slot authority"),
+    ]);
+    expect(store.current()).toEqual(parsedGraph(current));
+  });
+
   it("stores nothing when an unreserved failed reviewer names an existing Task", async () => {
     const store = fakeStore(graph());
     const applied = await applyFailedPiResult({

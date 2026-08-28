@@ -369,6 +369,21 @@ describe("countAssertions (pure)", () => {
     expect(countAssertions(diff)).toBe(0);
   });
 
+  it("rejects JSX prose returned directly from a function", () => {
+    const diff = [
+      "diff --git a/example.test.tsx b/example.test.tsx",
+      "--- a/example.test.tsx",
+      "+++ b/example.test.tsx",
+      "@@ -0,0 +1,3 @@",
+      "+function View() { return <div>",
+      "+  test(fake) expect(fake)",
+      "+</div>; }",
+    ].join("\n");
+
+    expect(countNewTests(diff).total).toBe(0);
+    expect(countAssertions(diff)).toBe(0);
+  });
+
   it("retains tests after TSX generic-arrow helpers with nested and quoted constraints", () => {
     const diff = [
       "diff --git a/example.test.tsx b/example.test.tsx",
@@ -378,7 +393,8 @@ describe("countAssertions (pure)", () => {
       "+const identity = <T,>(value: T) => value;",
       "+const nested = <T extends Record<string, Array<number>>>(value: T) => value;",
       "+const quoted = <T extends Record<'closing>token', number>>(value: T) => value;",
-      "+test('works', () => expect(nested(quoted(identity({ value: [1] })))).toBeDefined());",
+      "+const defaulted = <T = string,>(value: T) => value;",
+      "+test('works', () => expect(defaulted(nested(quoted(identity({ value: [1] }))))).toBeDefined());",
     ].join("\n");
 
     expect(countNewTests(diff).ts).toBe(1);

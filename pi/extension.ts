@@ -1267,7 +1267,8 @@ export default function (pi: ExtensionAPI) {
         const writeGrants: Array<{ index: number; token: string; task: string; originalTask: string; injected: boolean }> = [];
         let taskGraphPointerBinding: SessionTaskGraphPointerBinding | null = null;
         let orchestrationRunBinding: SessionRunBinding | null = null;
-        let reviewAuthorityGraph: TaskGraph | null = null;
+        let reviewAuthoritiesBySlot: readonly (PiReviewAttemptAuthority | null)[] =
+          Object.freeze(parsedItems.map(() => null));
         let specCheckAuthority: PiSpecCheckAttemptAuthority | null = null;
         const rollbackLifecycle = async (): Promise<readonly string[]> => {
           const actions: PiCleanupAction[] = [];
@@ -1353,13 +1354,16 @@ export default function (pi: ExtensionAPI) {
           if (graphIsActive && unboundReviewers.length > 0) {
             const manager = StateManager.fromLocalSession(safeSessionId);
             if (manager === null) throw new Error("protected Pi reviewer spawn has no TaskGraph authority");
-            reviewAuthorityGraph = manager.load();
-            for (const reviewer of unboundReviewers) {
-              const taskId = extractTaskId(reviewer.task);
-              if (taskId === null || currentPiReviewAuthority(reviewAuthorityGraph, reviewer.agent, taskId) === null) {
-                throw new Error(`protected Pi reviewer ${reviewer.agent} lacks exact current Task/Review Run authority`);
+            const reviewGraph = manager.load();
+            reviewAuthoritiesBySlot = Object.freeze(parsedItems.map((item, index) => {
+              if (!isReviewAgent(item.agent) || taskExecutionSpawns[index]?.kind === "standalone") return null;
+              const taskId = extractTaskId(item.task);
+              const authority = taskId === null ? null : currentPiReviewAuthority(reviewGraph, item.agent, taskId);
+              if (authority === null) {
+                throw new Error(`protected Pi reviewer ${item.agent} lacks exact current Task/Review Run authority`);
               }
-            }
+              return authority;
+            }));
           }
           // Implementation items get the classic whole-session capability bound
           // to their task-graph Task ID. Phase/panel agents (non-implementation)
@@ -1476,9 +1480,7 @@ export default function (pi: ExtensionAPI) {
               rosterId: rosterIds[index]!,
               taskId,
               implementationAuthority: alignment.authoritiesBySlot[index] ?? null,
-              reviewAuthority: reviewAuthorityGraph !== null && isReviewAgent(item.agent) && taskId !== null
-                ? currentPiReviewAuthority(reviewAuthorityGraph, item.agent, taskId)
-                : null,
+              reviewAuthority: reviewAuthoritiesBySlot[index] ?? null,
               specCheckAuthority: item.agent === "spec-check-invoker" ? specCheckAuthority : null,
               kind: taskExecutionSpawns[index]?.kind ?? "non-implementation",
             };

@@ -566,8 +566,9 @@ async function applyFailedReviewResult(args: Readonly<{
  * A failed process may retain valid-looking assistant text; none of it is
  * parsed as evidence here. Under exact current reserved authority, the failure
  * is persisted only under the authority each category owns: exact attempt/slot
- * authority for implementation and spec-check agents, and a matching reserved
- * Task for reviewers. Unreserved failures remain diagnostic-only.
+ * authority for implementation and spec-check agents. Reviewers require a
+ * matching Task and, for active Review Runs, exact generation/packet/slot/attempt
+ * authority. Unreserved failures remain diagnostic-only.
  */
 export async function applyFailedPiResult(args: Readonly<{
   store: TaskGraphStore;
@@ -1347,17 +1348,21 @@ async function applyMalformedReviewMessages(args: Readonly<{
   agentType: string;
   taskId: string;
   reviewTask: LoomTask;
+  reviewAuthority: PiReviewAttemptAuthority | null | undefined;
   errors: readonly string[];
 }>): Promise<PiResultOutcome> {
   const message = `Pi review messages are malformed: ${args.errors.join("; ")}`;
   const resolution = { kind: "evidence-failed" as const, agent: args.agentType, message };
   let appliedTask = args.reviewTask;
   let taskFound = false;
+  let authorityProblem: string | null = null;
   await args.store.update((state) => ({
     ...state,
     tasks: state.tasks.map((task) => {
       if (task.id !== args.taskId) return task;
       taskFound = true;
+      authorityProblem = piReviewAuthorityProblem(task, args.agentType, args.reviewAuthority);
+      if (authorityProblem !== null) return task;
       appliedTask = applyReviewResolution(task, resolution);
       return appliedTask;
     }),
@@ -1365,6 +1370,10 @@ async function applyMalformedReviewMessages(args: Readonly<{
   if (!taskFound) {
     const missing = `WARNING: ${args.agentType} review task ${args.taskId} disappeared before malformed evidence application — findings NOT stored`;
     return outcome([missing], [missing]);
+  }
+  if (authorityProblem !== null) {
+    const stale = `WARNING: ${args.agentType} review task ${args.taskId} ${authorityProblem} — findings NOT stored`;
+    return outcome([stale], [stale]);
   }
   return outcome([reviewResolutionLog(args.taskId, resolution, appliedTask, true)]);
 }
@@ -1374,6 +1383,7 @@ async function applyParsedReviewMessages(args: Readonly<{
   agentType: string;
   taskId: string;
   reviewTask: LoomTask;
+  reviewAuthority: PiReviewAttemptAuthority | null | undefined;
   messages: readonly PiMessage[];
 }>): Promise<PiResultOutcome> {
   let resolution: ReviewResolution = {
@@ -1384,12 +1394,15 @@ async function applyParsedReviewMessages(args: Readonly<{
   let appliedTask = args.reviewTask;
   let applicationChanged = false;
   let taskFound = false;
+  let authorityProblem: string | null = null;
   const transcriptText = transcriptTextOf(args.messages);
   await args.store.update((state) => ({
     ...state,
     tasks: state.tasks.map((task) => {
       if (task.id !== args.taskId) return task;
       taskFound = true;
+      authorityProblem = piReviewAuthorityProblem(task, args.agentType, args.reviewAuthority);
+      if (authorityProblem !== null) return task;
       resolution = constrainReviewResolutionToScope(
         resolveTaskReviewFindings(transcriptText, args.agentType, task.review_run, task.review_generation),
         [...(task.file_list ?? []), ...(task.files_modified ?? [])],
@@ -1402,6 +1415,10 @@ async function applyParsedReviewMessages(args: Readonly<{
   if (!taskFound) {
     const message = `WARNING: ${args.agentType} review task ${args.taskId} disappeared before evidence application — findings NOT stored`;
     return outcome([message], [message]);
+  }
+  if (authorityProblem !== null) {
+    const stale = `WARNING: ${args.agentType} review task ${args.taskId} ${authorityProblem} — findings NOT stored`;
+    return outcome([stale], [stale]);
   }
   return outcome([reviewResolutionLog(args.taskId, resolution, appliedTask, applicationChanged)]);
 }
@@ -1425,10 +1442,11 @@ export async function applyReviewPiResult(args: Readonly<{
   if (binding.kind === "blocked") return binding.outcome;
 
   const parsedMessages = parsePiMessages(args.result.messages);
+  const reviewAuthority = args.reservedSlot?.reviewAuthority;
   if (!parsedMessages.ok) {
-    return applyMalformedReviewMessages({ ...args, ...binding, errors: parsedMessages.errors });
+    return applyMalformedReviewMessages({ ...args, ...binding, reviewAuthority, errors: parsedMessages.errors });
   }
-  return applyParsedReviewMessages({ ...args, ...binding, messages: parsedMessages.value });
+  return applyParsedReviewMessages({ ...args, ...binding, reviewAuthority, messages: parsedMessages.value });
 }
 
 // ---------------------------------------------------------------------------
