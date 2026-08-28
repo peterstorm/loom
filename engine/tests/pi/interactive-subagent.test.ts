@@ -31,6 +31,16 @@ const prepareAgentDir = (): string => {
   return piAgentDir;
 };
 
+const writeLocalParentRouting = (piAgentDir: string): void => {
+  writeFileSync(join(piAgentDir, "model-routing.json"), JSON.stringify({
+    schemaVersion: 1,
+    defaultClass: "cloud",
+    modelClasses: { local: ["desktop-vllm/*"] },
+    targets: {},
+    rules: [{ id: "local-parent", when: { parentClass: "local" }, use: { kind: "parent" } }],
+  }));
+};
+
 const fakeRpcChildScript = String.raw`
 let buffer = "";
 process.stdin.setEncoding("utf8");
@@ -130,6 +140,106 @@ describe("interactive Pi subagent shell", () => {
       }),
     ]);
   });
+
+  it("routes an interactive child through the active local parent's exact binding", async () => {
+    const piAgentDir = prepareAgentDir();
+    writeLocalParentRouting(piAgentDir);
+    let invocationArgs: readonly string[] = [];
+    type ToolExecute = (
+      toolCallId: string,
+      params: { agent: string; task: string; agentScope: "user" },
+      signal: AbortSignal | undefined,
+      onUpdate: undefined,
+      ctx: {
+        hasUI: boolean;
+        cwd: string;
+        model: { provider: string; id: string };
+        thinkingLevel: "max";
+        ui: { select: () => Promise<string> };
+      },
+    ) => Promise<{ details: { results: Array<{ requestedModel: string; routing: unknown }> } }>;
+    let execute: ToolExecute | undefined;
+    registerInteractiveSubagentTool({
+      on: () => undefined,
+      registerTool: (tool: { execute: ToolExecute }) => { execute = tool.execute; },
+    } as never, ROOT, piAgentDir, {
+      spawnChild: (_command, args) => {
+        invocationArgs = args;
+        return spawn(process.execPath, ["-e", fakeRpcChildScript], {
+          cwd: ROOT, shell: false, stdio: ["pipe", "pipe", "pipe"],
+        });
+      },
+    });
+    if (execute === undefined) throw new Error("interactive subagent tool was not registered");
+
+    const result = await execute("tool-routed", {
+      agent: "arch-interviewer-agent",
+      task: "Ask and return",
+      agentScope: "user",
+    }, undefined, undefined, {
+      hasUI: true,
+      cwd: ROOT,
+      model: { provider: "desktop-vllm", id: "glm-5.3-flash-exl3-k4-vision-mtp" },
+      thinkingLevel: "max",
+      ui: { select: async () => "Typed" },
+    });
+
+    expect(invocationArgs).toEqual(expect.arrayContaining([
+      "--model", "desktop-vllm/glm-5.3-flash-exl3-k4-vision-mtp:max",
+    ]));
+    expect(result.details.results[0]).toMatchObject({
+      requestedModel: "desktop-vllm/glm-5.3-flash-exl3-k4-vision-mtp:max",
+      routing: {
+        decision: "override",
+        declared: "openai-codex/gpt-5.6-sol:high",
+        effective: "desktop-vllm/glm-5.3-flash-exl3-k4-vision-mtp:max",
+      },
+    });
+  });
+
+  it("accepts more than 64 MiB of valid transient RPC updates", async () => {
+    const piAgentDir = prepareAgentDir();
+    const streamingScript = String.raw`
+process.stdin.once("data", () => {
+  const padding = "x".repeat(1024 * 1024);
+  const update = JSON.stringify({ type: "message_update", padding }) + "\n";
+  let remaining = 65;
+  const writeNext = () => {
+    while (remaining > 0) {
+      remaining -= 1;
+      if (!process.stdout.write(update)) {
+        process.stdout.once("drain", writeNext);
+        return;
+      }
+    }
+    process.stdout.write(JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: "STREAM_OK" }], stopReason: "stop" }
+    }) + "\n");
+    process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\n");
+  };
+  writeNext();
+});
+setInterval(() => {}, 1000);
+`;
+    const result = await runInteractiveSubagent({
+      agent: "arch-interviewer-agent",
+      task: "stream",
+      cwd: ROOT,
+      packageRoot: ROOT,
+      piAgentDir,
+      relay: async () => null,
+    }, {
+      spawnChild: () => spawn(process.execPath, ["-e", streamingScript], {
+        cwd: ROOT, shell: false, stdio: ["pipe", "pipe", "pipe"],
+      }),
+    });
+
+    expect(result).toMatchObject({ exitCode: 0, stopReason: "stop" });
+    expect(result.messages).toEqual([
+      expect.objectContaining({ content: [{ type: "text", text: "STREAM_OK" }] }),
+    ]);
+  }, 15_000);
 
   it("cancels an open relay when the RPC child exits", async () => {
     const piAgentDir = prepareAgentDir();

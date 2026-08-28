@@ -10,7 +10,10 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
+import { resolveEffectivePiBindingFromParent, type EffectivePiBinding, type RoutedPiThinkingLevel } from "../engine/src/core/model-routing";
+import { lowerModelProfile, resolveAgentProfile } from "../engine/src/core/model-profiles";
+import { buildPiRoutingContext } from "../engine/src/utils/model-routing-context";
+import { validatePiAgentDefinitionFile, type PiRoutingContext } from "../engine/src/utils/render-pi-agent";
 import {
   cancelledUiResponse,
   confirmUiResponse,
@@ -22,9 +25,17 @@ import {
 } from "./interactive-rpc";
 
 export const LOOM_INTERACTIVE_SUBAGENT_TOOL = "loom_interactive_subagent";
-const MAX_RPC_STREAM_BYTES = 64 * 1024 * 1024;
+const MAX_RETAINED_MESSAGE_BYTES = 64 * 1024 * 1024;
+const MAX_RPC_EVENT_COUNT = 1_000_000;
+const MAX_UI_REQUEST_COUNT = 10_000;
 const MAX_STDERR_BYTES = 1024 * 1024;
 const MAX_INTERACTIVE_RUNTIME_MS = 60 * 60 * 1000;
+
+export type InteractiveRoutingAudit = Readonly<{
+  decision: "declared" | "override";
+  declared: string;
+  effective: string;
+}>;
 
 type InteractiveAgentSnapshot = Readonly<{
   agent: string;
@@ -32,6 +43,8 @@ type InteractiveAgentSnapshot = Readonly<{
   task: string;
   messages: readonly unknown[];
   stderr: string;
+  requestedModel: string;
+  routing: InteractiveRoutingAudit;
   usage: Readonly<{
     input: number;
     output: number;
@@ -56,7 +69,6 @@ export type InteractiveAgentResult = InteractiveAgentSnapshot & Readonly<{
 }>;
 
 type InteractiveAgentDefinition = Readonly<{
-  model: string;
   tools: readonly string[];
   systemPrompt: string;
 }>;
@@ -78,6 +90,13 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
+const formatBinding = (binding: EffectivePiBinding): string =>
+  `${binding.provider}/${binding.model}:${binding.thinking}`;
+
+const isRoutedThinkingLevel = (value: unknown): value is RoutedPiThinkingLevel =>
+  value === "off" || value === "minimal" || value === "low" || value === "medium" ||
+  value === "high" || value === "xhigh" || value === "max";
+
 const textOfLastAssistant = (messages: readonly unknown[]): string => {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
@@ -91,16 +110,11 @@ const textOfLastAssistant = (messages: readonly unknown[]): string => {
 
 function loadInteractiveAgentDefinition(path: string): InteractiveAgentDefinition {
   const parsed = parseFrontmatter<Record<string, string>>(readFileSync(path, "utf8"));
-  const model = parsed.frontmatter.model;
-  if (typeof model !== "string" || model.trim().length === 0) {
-    throw new Error(`interactive Pi agent definition ${path} has no exact model binding`);
-  }
   const declaredTools = typeof parsed.frontmatter.tools === "string"
     ? parsed.frontmatter.tools.split(",").map((tool) => tool.trim()).filter(Boolean)
     : [];
   const tools = declaredTools.length > 0 ? declaredTools : ["read", "bash", "edit", "write"];
   return Object.freeze({
-    model,
     tools: Object.freeze([...new Set([...tools, "AskUserQuestion"])]),
     systemPrompt: parsed.body,
   });
@@ -239,15 +253,45 @@ export async function runInteractiveSubagent(
     packageRoot: string;
     piAgentDir: string;
     signal?: AbortSignal;
+    routing?: Readonly<{ context: PiRoutingContext; parentThinking?: RoutedPiThinkingLevel }>;
     onUpdate?: (result: InteractiveAgentProgress) => void;
     relay: (request: ExtensionUiRequest, signal: AbortSignal) => Promise<ExtensionUiResponse | null>;
   }>,
   dependencies: InteractiveSubagentDependencies = {},
 ): Promise<InteractiveAgentResult> {
   const agentPath = join(input.piAgentDir, "agents", `${input.agent}.md`);
-  const validation = validatePiAgentDefinitionFile(agentPath, input.agent, input.packageRoot);
+  const validation = validatePiAgentDefinitionFile(
+    agentPath,
+    input.agent,
+    input.packageRoot,
+    input.routing?.context ?? null,
+  );
   if (!validation.ok) throw new Error(validation.error);
   const definition = loadInteractiveAgentDefinition(agentPath);
+  const profile = resolveAgentProfile(input.agent);
+  if (!profile.ok) throw new Error(profile.error.message);
+  const declared = lowerModelProfile(profile.value, "pi");
+  const parentRef = input.routing?.context.parentRef ?? null;
+  const parent = parentRef === null
+    ? null
+    : Object.freeze({
+        provider: parentRef.provider,
+        model: parentRef.model,
+        thinking: input.routing?.parentThinking ?? declared.thinking,
+      });
+  const effective = resolveEffectivePiBindingFromParent(
+    declared,
+    parent,
+    input.routing?.context.config ?? null,
+    Object.freeze({ workload: "subagent", profile: profile.value.id, agent: input.agent }),
+  );
+  const declaredModel = `${declared.provider}/${declared.model}:${declared.thinking}`;
+  const requestedModel = formatBinding(effective);
+  const routing: InteractiveRoutingAudit = Object.freeze({
+    decision: requestedModel === declaredModel ? "declared" : "override",
+    declared: declaredModel,
+    effective: requestedModel,
+  });
   const promptDir = await mkdtemp(join(tmpdir(), "loom-pi-interactive-"));
   const promptPath = join(promptDir, "agent.md");
   await writeFile(promptPath, definition.systemPrompt, { encoding: "utf8", mode: 0o600 });
@@ -258,7 +302,7 @@ export async function runInteractiveSubagent(
     "--no-extensions",
     "--extension", join(input.packageRoot, "pi", "extension.ts"),
     "--extension", join(input.packageRoot, "pi", "ask-user-question.ts"),
-    "--model", definition.model,
+    "--model", requestedModel,
     "--tools", definition.tools.join(","),
     "--append-system-prompt", promptPath,
   ];
@@ -278,7 +322,8 @@ export async function runInteractiveSubagent(
   let stopReason: string | undefined;
   let errorMessage: string | undefined;
   let stderr = "";
-  let stdoutBytes = 0;
+  let retainedMessageBytes = 0;
+  let rpcEventCount = 0;
   let settled = false;
   let aborted = false;
   let protocolFailure: string | null = null;
@@ -300,6 +345,8 @@ export async function runInteractiveSubagent(
     task: input.task,
     messages: Object.freeze([...messages]),
     stderr,
+    requestedModel,
+    routing,
     usage: Object.freeze({ ...usage }),
     ...(model === undefined ? {} : { model }),
     ...(stopReason === undefined ? {} : { stopReason }),
@@ -325,7 +372,14 @@ export async function runInteractiveSubagent(
   const handleLine = async (line: string): Promise<void> => {
     const parsed = parsePiRpcLine(line);
     if (!parsed.ok) throw new Error(parsed.error);
+    rpcEventCount += 1;
+    if (rpcEventCount > MAX_RPC_EVENT_COUNT) {
+      throw new Error(`Pi RPC child exceeded ${MAX_RPC_EVENT_COUNT} events`);
+    }
     if (parsed.value.kind === "extension-ui") {
+      if (observedUiRequestIds.size >= MAX_UI_REQUEST_COUNT) {
+        throw new Error(`Pi RPC child exceeded ${MAX_UI_REQUEST_COUNT} UI requests`);
+      }
       if (observedUiRequestIds.has(parsed.value.request.id)) {
         throw new Error(`Pi RPC child repeated UI request id ${parsed.value.request.id}`);
       }
@@ -337,6 +391,10 @@ export async function runInteractiveSubagent(
     const { payload, type } = parsed.value;
     if (type === "message_end" && isRecord(payload.message)) {
       const message = payload.message;
+      retainedMessageBytes += Buffer.byteLength(JSON.stringify(message), "utf8");
+      if (retainedMessageBytes > MAX_RETAINED_MESSAGE_BYTES) {
+        throw new Error(`Pi RPC retained messages exceeded ${MAX_RETAINED_MESSAGE_BYTES} bytes`);
+      }
       messages.push(Object.freeze({ ...message }));
       if (message.role === "assistant") {
         usage.turns += 1;
@@ -372,9 +430,7 @@ export async function runInteractiveSubagent(
   };
   let processing = Promise.resolve();
   child.stdout.on("data", (chunk: Buffer) => {
-    stdoutBytes += chunk.byteLength;
     processing = processing.then(async () => {
-      if (stdoutBytes > MAX_RPC_STREAM_BYTES) throw new Error(`Pi RPC stream exceeded ${MAX_RPC_STREAM_BYTES} bytes`);
       const lines = decoder.push(chunk);
       if (!lines.ok) throw new Error(lines.error);
       for (const line of lines.value) await handleLine(line);
@@ -492,6 +548,14 @@ export function registerInteractiveSubagentTool(
     executionMode: "sequential",
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       if (!ctx.hasUI) throw new Error("loom_interactive_subagent requires a parent TUI or RPC UI client");
+      const parentRef = ctx.model === undefined
+        ? null
+        : Object.freeze({ provider: ctx.model.provider, model: ctx.model.id });
+      const builtRouting = buildPiRoutingContext(process.env, piAgentDir, parentRef);
+      if (builtRouting.configError !== null) {
+        throw new Error(`Cannot route interactive Pi Agent: ${builtRouting.configError}`);
+      }
+      const parentThinking = isRoutedThinkingLevel(ctx.thinkingLevel) ? ctx.thinkingLevel : undefined;
       const result = await runInteractiveSubagent({
         agent: params.agent,
         task: params.task,
@@ -499,6 +563,10 @@ export function registerInteractiveSubagentTool(
         packageRoot,
         piAgentDir,
         signal,
+        routing: Object.freeze({
+          context: builtRouting.context,
+          ...(parentThinking === undefined ? {} : { parentThinking }),
+        }),
         relay: (request, childSignal) => relayExtensionUiRequest(request, ctx, childSignal),
         onUpdate: onUpdate === undefined ? undefined : (partial) => onUpdate({
           content: [{ type: "text", text: textOfLastAssistant(partial.messages) || "Interactive phase agent running…" }],
