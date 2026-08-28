@@ -787,6 +787,34 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
+  it("does not let a graphless reviewer mutate a TaskGraph created after spawn", async () => {
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4f6";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-graph-created-after-review-spawn";
+    const taskPrompt = "Task: T1\nReview the implementation.";
+    rmSync(statePath, { force: true });
+    try {
+      expect(await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: { agent: "code-reviewer", task: taskPrompt, agentScope: "user" },
+      }, context)).toEqual([undefined]);
+
+      writeState(initialGraph());
+      const before = readFileSync(statePath, "utf8");
+      const responses = await pi.emit("tool_result", {
+        ...reviewResult(taskPrompt, "must remain ad-hoc"),
+        toolCallId,
+      }, context);
+
+      expect(readFileSync(statePath, "utf8")).toBe(before);
+      expect(responses).not.toContainEqual(expect.objectContaining({ isError: true }));
+    } finally {
+      writeState(initialGraph());
+    }
+  });
+
   it("treats a graphless implementation spawn as a no-op instead of a finalization failure", async () => {
     // The result-side site the two-commit sequence exists for: an ad-hoc
     // code-implementer-agent spawned with no task graph has no attempt record to

@@ -2272,18 +2272,16 @@ export default function (pi: ExtensionAPI) {
           continue;
         }
 
+        if (spawnedWithoutTaskGraph(reservation)) {
+          process.stderr.write(
+            `loom(pi): ad-hoc ${agentType} completion — no TaskGraph existed at spawn, protected state untouched\n`,
+          );
+          continue;
+        }
+
         const mgr = StateManager.fromLocalSession(sessionId);
         if (!mgr) {
-          // An ad-hoc spawn had no task graph to begin with, so "completion was
-          // NOT applied" describes nothing that was lost: the agent's answer is
-          // its return value, and there is no protected state it was ever going
-          // to update. Reporting it as an evidence-processing failure made every
-          // graphless Loom agent look broken to the caller.
-          if (spawnedWithoutTaskGraph(reservation)) {
-            process.stderr.write(
-              `loom(pi): ad-hoc ${agentType} completion — no task graph for session ${JSON.stringify(sessionId)}, nothing to apply\n`,
-            );
-          } else if (isLoomOwnedResultAgent(agentType)) {
+          if (isLoomOwnedResultAgent(agentType)) {
             const diagnostic = `no task graph for session ${JSON.stringify(sessionId)}; ${agentType} completion was NOT applied`;
             processingErrors.push(diagnostic);
             process.stderr.write(`loom(pi): ${diagnostic}\n`);
