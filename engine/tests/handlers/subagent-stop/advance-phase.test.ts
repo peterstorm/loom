@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import advancePhaseHandler, {
   resolveTransition,
   countMarkers,
@@ -7,7 +7,8 @@ import { findFile } from "../../../src/utils/find-file";
 import { CLARIFY_THRESHOLD, PHASE_AGENT_MAP, ARCH_PANEL_AGENTS, SUBAGENT_DIR } from "../../../src/config";
 import { stripNamespace } from "../../../src/utils/strip-namespace";
 import type { TaskGraph } from "../../../src/types";
-import { mkdtempSync, writeFileSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { StateManager } from "../../../src/state-manager";
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -508,6 +509,59 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
         kind: "error",
         message: expect.stringContaining("phase artifact discovery failed"),
       });
+    });
+  });
+
+  it("the REAL handler refuses a future phase result without mutating protected state", async () => {
+    const session = `phase-future-${process.pid}-${Date.now()}`;
+    const initial = mkState({ current_phase: "brainstorm" });
+    await withPhaseState(session, initial, async () => {
+      const result = await advancePhaseHandler(JSON.stringify({
+        session_id: session,
+        agent_id: "future-phase-agent",
+        agent_type: "specify-agent",
+      }), []);
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringMatching(/specify result cannot advance current phase brainstorm.*exact phase authority required/),
+      });
+      expect(JSON.parse(readFileSync(join(tmpDir, `${session}.json`), "utf-8"))).toEqual(initial);
+    });
+  });
+
+  it("the locked transition preserves a phase that advanced after the initial read", async () => {
+    const session = `phase-race-${process.pid}-${Date.now()}`;
+    const artifactDir = join(tmpDir, ".claude", "specs");
+    mkdirSync(artifactDir, { recursive: true });
+    writeFileSync(join(artifactDir, "brainstorm.md"), "ideas");
+    await withPhaseState(session, mkState({ current_phase: "brainstorm" }), async () => {
+      const originalUpdate = StateManager.prototype.update;
+      const update = vi.spyOn(StateManager.prototype, "update").mockImplementationOnce(async function (
+        this: StateManager,
+        mutate,
+      ) {
+        const path = join(tmpDir, `${session}.json`);
+        const current = JSON.parse(readFileSync(path, "utf-8"));
+        writeFileSync(path, JSON.stringify({ ...current, current_phase: "specify" }));
+        return originalUpdate.call(this, mutate);
+      });
+      try {
+        const result = await advancePhaseHandler(JSON.stringify({
+          session_id: session,
+          agent_id: "racing-phase-agent",
+          agent_type: "brainstorm-agent",
+        }), []);
+        expect(result).toMatchObject({
+          kind: "passthrough",
+          systemMessage: expect.stringContaining("already past"),
+        });
+        expect(JSON.parse(readFileSync(join(tmpDir, `${session}.json`), "utf-8"))).toMatchObject({
+          current_phase: "specify",
+          phase_artifacts: {},
+        });
+      } finally {
+        update.mockRestore();
+      }
     });
   });
 

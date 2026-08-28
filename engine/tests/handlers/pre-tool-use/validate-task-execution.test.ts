@@ -28,7 +28,6 @@ function validateExecution(
     : { kind: "allow" };
 }
 
-/** Helper to build a task */
 function mkTask(overrides: Partial<TaskFixtureInput> & { id: string; wave: number }): Task {
   return taskFixture({
     description: `task ${overrides.id}`,
@@ -39,7 +38,6 @@ function mkTask(overrides: Partial<TaskFixtureInput> & { id: string; wave: numbe
   });
 }
 
-/** Helper to build a gate */
 function mkGate(overrides: Partial<WaveGate> = {}): WaveGate {
   return {
     impl_complete: false,
@@ -50,7 +48,6 @@ function mkGate(overrides: Partial<WaveGate> = {}): WaveGate {
   };
 }
 
-/** Build a minimal TaskGraph */
 function mkState(
   tasks: Task[],
   overrides: Partial<TaskGraph> = {},

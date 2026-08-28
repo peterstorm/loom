@@ -41,15 +41,6 @@ const discarded = (message: string): HookResult => {
   return { kind: "error", message: diagnostic };
 };
 
-/**
- * The same line for the paths that then FAIL the hook. `error` exits non-zero
- * and its message is surfaced by the CLI, but these handlers are also called
- * directly (pi, tests), where stderr is the only channel either way.
- */
-const warn = (message: string): void => {
-  process.stderr.write(`[loom] store-reviewer-findings: ${message}\n`);
-};
-
 const handler: HookHandler = async (stdin) => {
   const parsedInput = parseSubagentStopStdin(stdin);
   if (!parsedInput.ok) {
@@ -77,13 +68,11 @@ const handler: HookHandler = async (stdin) => {
   } catch (error) {
     const message = `no task graph for session ${input.session_id ?? "<unset>"}: ` +
       `${error instanceof Error ? error.message : String(error)} — ${agentType} findings NOT stored`;
-    warn(message);
-    return { kind: "error", message: `[loom] store-reviewer-findings: ${message}` };
+    return discarded(message);
   }
   if (!mgr) {
     const message = `no task graph for session ${input.session_id ?? "<unset>"} — ${agentType} findings NOT stored`;
-    warn(message);
-    return { kind: "error", message: `[loom] store-reviewer-findings: ${message}` };
+    return discarded(message);
   }
 
   // Resolved, not read off the payload: a harness that sends no
@@ -100,8 +89,7 @@ const handler: HookHandler = async (stdin) => {
     trustedPrompt = parsedPrompt.prompt;
   } catch (error) {
     const message = `cannot read trusted ${agentType} prompt (${error instanceof Error ? error.message : String(error)}) — review evidence cannot be attributed`;
-    warn(message);
-    return { kind: "error", message: `[loom] store-reviewer-findings: ${message}` };
+    return discarded(message);
   }
   if (hasStandaloneReviewContext(trustedPrompt)) {
     return passthroughDiagnostic(`[loom] store-reviewer-findings: ${agentType} belongs to a standalone review run — task state untouched\n`);
@@ -110,8 +98,7 @@ const handler: HookHandler = async (stdin) => {
   const taskId = extractTaskId(trustedPrompt);
   if (!taskId) {
     const message = `trusted ${agentType} prompt has no extractable task ID — review evidence cannot be attributed`;
-    warn(message);
-    return { kind: "error", message: `[loom] store-reviewer-findings: ${message}` };
+    return discarded(message);
   }
 
   // Guard: reject findings for task IDs not present in the graph.
@@ -127,8 +114,7 @@ const handler: HookHandler = async (stdin) => {
       `cannot load task graph for ${agentType} ` +
       `(${error instanceof Error ? error.message : String(error)}) — findings NOT stored`
     );
-    warn(message);
-    return { kind: "error", message: `[loom] store-reviewer-findings: ${message}` };
+    return discarded(message);
   }
   if (!targetTask) {
     return discarded(`${agentType} review names task ${taskId}, which is not in the task graph — findings NOT stored`);

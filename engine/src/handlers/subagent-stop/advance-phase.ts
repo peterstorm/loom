@@ -9,7 +9,7 @@
 
 import { accessSync, constants as fsConstants, readFileSync, readdirSync } from "node:fs";
 import { match } from "ts-pattern";
-import type { HookHandler, Phase, TaskGraph } from "../../types";
+import type { HookHandler, HookResult, Phase, TaskGraph } from "../../types";
 import { PHASE_AGENT_MAP, PHASE_ORDER, CLARIFY_THRESHOLD } from "../../config";
 import { StateManager } from "../../state-manager";
 import { parsePhaseArtifacts } from "../../parsers/parse-phase-artifacts";
@@ -78,6 +78,19 @@ const transitionReady = (
 });
 
 const transitionNotReady = (reason: string): PhaseTransitionResolution => ({ kind: "not-ready", reason });
+
+/** Exact phase capability check shared by every unlocked/locked observation. */
+function phaseAuthorityRefusal(current: Phase, completed: Phase): HookResult | null {
+  if (current === completed) return null;
+  const currentIdx = PHASE_ORDER.indexOf(current);
+  const completedIdx = PHASE_ORDER.indexOf(completed);
+  return currentIdx > completedIdx
+    ? passthroughDiagnostic(`Phase ${completed} already past (current: ${current}), skipping.\n`)
+    : {
+        kind: "error",
+        message: `advance-phase: ${completed} result cannot advance current phase ${current}; exact phase authority required`,
+      };
+}
 
 /** Determine the next phase or the exact artifact condition blocking it. */
 export function resolveTransition(
@@ -195,7 +208,8 @@ const handler: HookHandler = async (stdin) => {
     };
   }
 
-  // Guard: skip if phase already advanced past this one
+  // The phase result is a capability for exactly one current phase. A stale
+  // duplicate is a diagnosed no-op; a result from the future cannot skip work.
   let currentState: TaskGraph;
   try {
     currentState = mgr.load();
@@ -205,11 +219,8 @@ const handler: HookHandler = async (stdin) => {
       message: `advance-phase: failed to read TaskGraph authority: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
-  const currentIdx = PHASE_ORDER.indexOf(currentState.current_phase);
-  const completedIdx = PHASE_ORDER.indexOf(completedPhase);
-  if (completedIdx >= 0 && currentIdx > completedIdx) {
-    return passthroughDiagnostic(`Phase ${completedPhase} already past (current: ${currentState.current_phase}), skipping.\n`);
-  }
+  const initialPhaseRefusal = phaseAuthorityRefusal(currentState.current_phase, completedPhase);
+  if (initialPhaseRefusal !== null) return initialPhaseRefusal;
 
   // Extract artifacts from transcript before checking transition. Resolved,
   // not read off the payload: without the derived fallback a harness that
@@ -234,8 +245,11 @@ const handler: HookHandler = async (stdin) => {
       };
     }
 
+    let artifactPhaseRefusal: HookResult | null = null;
     try {
       await mgr.update((s) => {
+        artifactPhaseRefusal = phaseAuthorityRefusal(s.current_phase, completedPhase);
+        if (artifactPhaseRefusal !== null) return s;
         const updates: { spec_file?: string | null; plan_file?: string | null } = {};
 
         // RESOLVED containment, not substring containment. These paths come
@@ -262,9 +276,11 @@ const handler: HookHandler = async (stdin) => {
         message: `advance-phase: failed to persist artifacts: ${e instanceof Error ? e.message : String(e)}`,
       };
     }
+    if (artifactPhaseRefusal !== null) return artifactPhaseRefusal;
   }
 
-  // Reload after potential artifact writes
+  // Reload after potential artifact writes and prove the phase capability is
+  // still current before doing artifact-dependent transition work.
   let state: TaskGraph;
   try {
     state = mgr.load();
@@ -274,6 +290,9 @@ const handler: HookHandler = async (stdin) => {
       message: `advance-phase: failed to reload TaskGraph authority: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
+  const reloadedPhaseRefusal = phaseAuthorityRefusal(state.current_phase, completedPhase);
+  if (reloadedPhaseRefusal !== null) return reloadedPhaseRefusal;
+
   let transition: ReturnType<typeof resolveTransition>;
   try {
     transition = resolveTransition(completedPhase, state);
@@ -292,22 +311,28 @@ const handler: HookHandler = async (stdin) => {
 
   const { nextPhase, artifact, skipClarify } = transition;
 
+  let commitPhaseRefusal: HookResult | null = null;
   try {
-    await mgr.update((s) => ({
-      ...s,
-      current_phase: nextPhase,
-      phase_artifacts: { ...s.phase_artifacts, [completedPhase]: artifact },
-      skipped_phases: skipClarify
-        ? ([...new Set([...s.skipped_phases, "clarify" as Phase])] as Phase[])
-        : s.skipped_phases,
-      updated_at: new Date().toISOString(),
-    }));
+    await mgr.update((s) => {
+      commitPhaseRefusal = phaseAuthorityRefusal(s.current_phase, completedPhase);
+      if (commitPhaseRefusal !== null) return s;
+      return {
+        ...s,
+        current_phase: nextPhase,
+        phase_artifacts: { ...s.phase_artifacts, [completedPhase]: artifact },
+        skipped_phases: skipClarify
+          ? ([...new Set([...s.skipped_phases, "clarify" as Phase])] as Phase[])
+          : s.skipped_phases,
+        updated_at: new Date().toISOString(),
+      };
+    });
   } catch (e) {
     return {
       kind: "error",
       message: `advance-phase: failed to write phase transition: ${e instanceof Error ? e.message : String(e)}`,
     };
   }
+  if (commitPhaseRefusal !== null) return commitPhaseRefusal;
 
   process.stderr.write(`Phase advanced: ${completedPhase} → ${nextPhase}\n`);
   if (skipClarify) {

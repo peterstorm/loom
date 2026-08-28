@@ -51,11 +51,14 @@ import {
   applyPhaseAgentPiResult,
   applyReviewPiResult,
   applySpecCheckPiResult,
+  currentPiSpecCheckAuthority,
   piAllSlotsFailedNote,
+  piSpecCheckAuthorityProblem,
   parsePiSubagentResults,
   piSubagentFailureSignals,
   piSubagentResultFailed,
   type PiResultOutcome,
+  type PiSpecCheckAttemptAuthority,
   type PiSubagentResultEntry,
   type RepositoryProbe,
   type TaskGraphStore,
@@ -709,6 +712,7 @@ type PiSpawnReservation = Readonly<{
     rosterId: AgentId;
     taskId: string | null;
     implementationAuthority: ImplementationAttemptAuthority | null;
+    specCheckAuthority: PiSpecCheckAttemptAuthority | null;
     /** The closed lifecycle union, not an independent boolean pair: two
      *  booleans admitted the impossible {implementation: true, standalone:
      *  true} and left the third lifecycle state nameless. The source union's
@@ -825,6 +829,7 @@ function recoverPiSpawnReservation(
           rosterId: item.rosterId,
           taskId: null,
           implementationAuthority: null,
+          specCheckAuthority: null,
           kind: "standalone" as const,
         });
       })),
@@ -1220,6 +1225,7 @@ export default function (pi: ExtensionAPI) {
         const writeGrants: Array<{ index: number; token: string; task: string; originalTask: string; injected: boolean }> = [];
         let taskGraphPointerBinding: SessionTaskGraphPointerBinding | null = null;
         let orchestrationRunBinding: SessionRunBinding | null = null;
+        let specCheckAuthority: PiSpecCheckAttemptAuthority | null = null;
         const rollbackLifecycle = async (): Promise<readonly string[]> => {
           const actions: PiCleanupAction[] = [];
           for (const grant of writeGrants) {
@@ -1283,6 +1289,20 @@ export default function (pi: ExtensionAPI) {
           // directory, not the in-memory lifecycle map below, owns capture
           // authority for both Pi and Claude.
           orchestrationRunBinding = await recordPiSpawnCorrelators(parsedItems, rosterIds, safeSessionId, event.input);
+          const unboundSpecChecks = orchestrationRunBinding === null
+            ? parsedItems.filter(({ agent }) => agent === "spec-check-invoker")
+            : [];
+          if (graphIsActive && unboundSpecChecks.length > 0) {
+            if (unboundSpecChecks.length !== 1) {
+              throw new Error("a protected Pi spawn may reserve exactly one unbound spec-check slot");
+            }
+            const manager = StateManager.fromLocalSession(safeSessionId);
+            if (manager === null) throw new Error("protected Pi spec-check spawn has no TaskGraph authority");
+            specCheckAuthority = currentPiSpecCheckAuthority(manager.load());
+            if (specCheckAuthority === null) {
+              throw new Error("protected Pi spec-check spawn lacks exact current Wave slot/attempt authority");
+            }
+          }
           // Implementation items get the classic whole-session capability bound
           // to their task-graph Task ID. Phase/panel agents (non-implementation)
           // get a SCOPED capability bound to their prompt-derived artifact dirs
@@ -1396,6 +1416,7 @@ export default function (pi: ExtensionAPI) {
             rosterId: rosterIds[index]!,
             taskId: extractTaskId(item.task),
             implementationAuthority: alignment.authoritiesBySlot[index] ?? null,
+            specCheckAuthority: item.agent === "spec-check-invoker" ? specCheckAuthority : null,
             kind: taskExecutionSpawns[index]?.kind ?? "non-implementation",
           })),
         });
@@ -1927,6 +1948,7 @@ export default function (pi: ExtensionAPI) {
           process.stderr.write(`loom(pi): ${diagnostic}\n`);
         } else {
           const runAt = new Date().toISOString();
+          const specAuthorityProblems: string[] = [];
           // Guarded exactly like the sibling `manager.update` in
           // `finalizeReservedImplementations` above. This handler has no
           // top-level try/catch, so an unguarded throw here (corrupt state
@@ -1947,18 +1969,29 @@ export default function (pi: ExtensionAPI) {
                   message: `reserved reviewer result ${index + 1} for ${item.agentType} was missing or mismatched`,
                 }), task);
               }),
-              ...(missingSpecChecks.length === 0
-                ? {}
-                : {
-                    spec_check: {
-                      wave: state.current_wave ?? 1,
-                      run_at: runAt,
-                      verdict: "EVIDENCE_CAPTURE_FAILED" as const,
-                      error: missingSpecChecks.map(({ index }) =>
-                        `reserved spec-check result ${index + 1} for spec-check-invoker was missing or mismatched`
-                      ).join("; "),
-                    },
-                  }),
+              ...(() => {
+                if (missingSpecChecks.length === 0) return {};
+                if (missingSpecChecks.length !== 1) {
+                  specAuthorityProblems.push("multiple reserved spec-check slots were missing; no unique authority exists");
+                  return {};
+                }
+                const [missing] = missingSpecChecks;
+                if (missing === undefined) return {};
+                const authority = missing.item.specCheckAuthority;
+                const problem = piSpecCheckAuthorityProblem(state, authority);
+                if (problem !== null || authority === null) {
+                  specAuthorityProblems.push(problem ?? "reserved spec-check authority is absent");
+                  return {};
+                }
+                return {
+                  spec_check: {
+                    wave: authority.wave,
+                    run_at: runAt,
+                    verdict: "EVIDENCE_CAPTURE_FAILED" as const,
+                    error: `reserved spec-check result ${missing.index + 1} for spec-check-invoker was missing or mismatched`,
+                  },
+                };
+              })(),
             }));
             for (const { item, index } of missingReviews) {
               process.stderr.write(
@@ -1967,9 +2000,12 @@ export default function (pi: ExtensionAPI) {
             }
             for (const { index } of missingSpecChecks) {
               process.stderr.write(
-                `loom(pi): reserved spec-check result ${index + 1} for spec-check-invoker was missing or mismatched — marking evidence_capture_failed\n`,
+                specAuthorityProblems.length === 0
+                  ? `loom(pi): reserved spec-check result ${index + 1} for spec-check-invoker was missing or mismatched — marking evidence_capture_failed\n`
+                  : `loom(pi): reserved spec-check result ${index + 1} was not applied: ${specAuthorityProblems.join("; ")}\n`,
               );
             }
+            processingErrors.push(...specAuthorityProblems);
           } catch (error) {
             // The per-item lines above stay inside the `try`: they announce
             // evidence that was RECORDED, and printing them after a failed
@@ -2245,7 +2281,12 @@ export default function (pi: ExtensionAPI) {
 
         // --- Spec-check invoker → store spec-check findings ---
         if (agentType === "spec-check-invoker") {
-          emit(await applySpecCheckPiResult({ store, result, now: new Date().toISOString() }));
+          emit(await applySpecCheckPiResult({
+            store,
+            result,
+            reservedSlot: reservedItem,
+            now: new Date().toISOString(),
+          }));
           continue;
         }
       } catch (err) {

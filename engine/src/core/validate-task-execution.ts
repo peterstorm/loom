@@ -235,6 +235,10 @@ export function staleReservationsForRosterObservation(
   }));
 }
 
+function declaredPathOverlap(left: Task, right: Task): string | undefined {
+  return (left.file_list ?? []).find((path) => right.file_list?.includes(path));
+}
+
 /**
  * Pure ownership invariant for one execution reservation. Active tasks own
  * their declared paths until stop cleanup. One reservation captures all task
@@ -273,7 +277,7 @@ export function taskExecutionOwnershipError(
   for (const incoming of requestedTasks) {
     for (const owner of activeTasks) {
       if (incoming.wave !== owner.wave) continue;
-      const overlap = (incoming.file_list ?? []).find((path) => owner.file_list?.includes(path));
+      const overlap = declaredPathOverlap(incoming, owner);
       if (overlap !== undefined) {
         return `Task ${incoming.id} cannot execute while ${owner.id} owns declared path ${overlap}.`;
       }
@@ -285,7 +289,7 @@ export function taskExecutionOwnershipError(
     for (let rightIndex = leftIndex + 1; rightIndex < requestedTasks.length; rightIndex++) {
       const right = requestedTasks[rightIndex]!;
       if (left.wave !== right.wave) continue;
-      const overlap = (left.file_list ?? []).find((path) => right.file_list?.includes(path));
+      const overlap = declaredPathOverlap(left, right);
       if (overlap === undefined) continue;
       return mode === "parallel"
         ? `Parallel implementation tasks ${left.id} and ${right.id} both declare ${overlap}; use disjoint scopes.`

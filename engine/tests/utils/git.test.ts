@@ -1,8 +1,9 @@
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, vi } from "vitest";
-import { countNewTests, countAssertions, diffUntracked, mergeBase } from "../../src/utils/git";
+import { countNewTests, countAssertions, diffFiles, diffUntracked, mergeBase } from "../../src/utils/git";
 
 describe("git command diagnostics", () => {
   it("reports array-argument git failures instead of returning empty silently", () => {
@@ -43,6 +44,48 @@ describe("diffUntracked", () => {
     if (!result.ok) {
       expect(result.error).toContain("git diff --no-index");
       expect(result.error).toContain(missing);
+    }
+  });
+});
+
+describe("complete-postimage diff evidence", () => {
+  it("keeps a multiline opener outside ordinary hunk range visible to assertion scanning", () => {
+    const repository = mkdtempSync(join(tmpdir(), "loom-full-postimage-diff-"));
+    const file = join(repository, "ExampleTest.java");
+    const previousProjectDir = process.env.CLAUDE_PROJECT_DIR;
+    const base = [
+      "class ExampleTest {",
+      '  String docs = \"\"\"',
+      "    context one",
+      "    context two",
+      "    context three",
+      "    context four",
+      "    context five",
+      '    \"\"\";',
+      "}",
+      "",
+    ].join("\n");
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: repository });
+      writeFileSync(file, base);
+      execFileSync("git", ["add", "ExampleTest.java"], { cwd: repository });
+      execFileSync("git", ["-c", "user.name=Loom Test", "-c", "user.email=loom@example.test", "commit", "--quiet", "-m", "base"], { cwd: repository });
+      writeFileSync(file, base.replace(
+        '    \"\"\";',
+        '    assertThat(fake).isTrue();\n    \"\"\";\n\n  @Test void empty() {}',
+      ));
+      process.env.CLAUDE_PROJECT_DIR = repository;
+
+      const observed = diffFiles(["ExampleTest.java"]);
+      expect(observed.ok).toBe(true);
+      if (!observed.ok) return;
+      expect(observed.diff).toContain('  String docs = \"\"\"');
+      expect(countNewTests(observed.diff).java).toBe(1);
+      expect(countAssertions(observed.diff)).toBe(0);
+    } finally {
+      if (previousProjectDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = previousProjectDir;
+      rmSync(repository, { recursive: true, force: true });
     }
   });
 });
@@ -152,6 +195,40 @@ describe("countAssertions (pure)", () => {
 
     expect(countNewTests(diff).ts).toBe(1);
     expect(countAssertions(diff)).toBe(0);
+  });
+
+  it.each([
+    ["Python triple-quoted string", "'''", "+    assert result == 42"],
+    ["Java text block", '\"\"\"', "+    assertThat(result).isEqualTo(42);"],
+  ])("does not count assertion text inside a %s", (_name, delimiter, assertion) => {
+    const diff = [
+      "diff --git a/example.test b/example.test",
+      "@@ -1,8 +1,9 @@",
+      ` ${delimiter}`,
+      " context one",
+      " context two",
+      " context three",
+      " context four",
+      assertion,
+      ` ${delimiter}`,
+      "+def test_empty(): pass",
+    ].join("\n");
+
+    expect(countNewTests(diff).python).toBe(1);
+    expect(countAssertions(diff)).toBe(0);
+  });
+
+  it("resets multiline literal state at each file boundary", () => {
+    const diff = [
+      "diff --git a/first.py b/first.py",
+      "@@ -1 +1 @@",
+      "+'''",
+      "diff --git a/second.ts b/second.ts",
+      "@@ -1 +1 @@",
+      "+expect(result).toBe(true);",
+    ].join("\n");
+
+    expect(countAssertions(diff)).toBe(1);
   });
 
   it("does not let removed lexical state hide an added assertion", () => {

@@ -233,21 +233,30 @@ function diffArgs(args: readonly string[]): GitDiffResult {
   }
 }
 
-/** Diff specific files (unstaged). */
+// Assertion evidence needs lexical state from the complete postimage. A normal
+// three-line hunk cannot prove whether an added line is inside a multiline
+// literal opened outside the hunk.
+const FULL_POSTIMAGE_CONTEXT = "--unified=2147483647";
+
+/** Diff specific files (unstaged), retaining complete postimage context. */
 export function diffFiles(files: string[]): GitDiffResult {
-  return files.length === 0 ? { ok: true, diff: "" } : diffArgs(["diff", "--", ...files]);
+  return files.length === 0
+    ? { ok: true, diff: "" }
+    : diffArgs(["diff", FULL_POSTIMAGE_CONTEXT, "--", ...files]);
 }
 
-/** Diff specific files (staged). */
+/** Diff specific files (staged), retaining complete postimage context. */
 export function diffFilesStaged(files: string[]): GitDiffResult {
-  return files.length === 0 ? { ok: true, diff: "" } : diffArgs(["diff", "--cached", "--", ...files]);
+  return files.length === 0
+    ? { ok: true, diff: "" }
+    : diffArgs(["diff", "--cached", FULL_POSTIMAGE_CONTEXT, "--", ...files]);
 }
 
-/** Diff committed changes for specific files from one trusted task baseline. */
+/** Diff committed changes from one baseline, retaining complete postimages. */
 export function diffFilesSince(revision: string, files: string[]): GitDiffResult {
   return files.length === 0
     ? { ok: true, diff: "" }
-    : diffArgs(["diff", revision, "HEAD", "--", ...files]);
+    : diffArgs(["diff", FULL_POSTIMAGE_CONTEXT, revision, "HEAD", "--", ...files]);
 }
 
 export type GitTrackedResult =
@@ -282,7 +291,7 @@ export function diffUntracked(file: string): GitDiffResult {
   try {
     return {
       ok: true,
-      diff: execFileSync("git", ["diff", "--no-index", "/dev/null", file], {
+      diff: execFileSync("git", ["diff", "--no-index", FULL_POSTIMAGE_CONTEXT, "/dev/null", file], {
         encoding: "utf-8",
         cwd: root,
         stdio: ["pipe", "pipe", "pipe"],
@@ -317,14 +326,13 @@ export interface TestCount {
 
 /** Heuristically count added test and suite declarations in a diff string (pure). */
 export function countNewTests(diffContent: string): TestCount {
-  const lines = diffContent.split("\n");
+  const lines = executableAddedLines(diffContent);
   let java = 0;
   let ts = 0;
   let python = 0;
   let rust = 0;
 
   for (const line of lines) {
-    if (!line.startsWith("+")) continue;
     if (/@(Test|Property|ParameterizedTest)\b/.test(line)) java++;
     if (/\s(it|test|describe)\(/.test(line)) ts++;
     if (/(def test_|class Test)/.test(line)) python++;
@@ -334,12 +342,17 @@ export function countNewTests(diffContent: string): TestCount {
   return { java, ts, python, rust, total: java + ts + python + rust };
 }
 
+type AssertionQuote = "'" | '"' | "`" | "'''" | '"""' | null;
+
 type AssertionLexicalState = Readonly<{
   blockComment: boolean;
-  quote: "'" | '"' | "`" | null;
+  quote: AssertionQuote;
 }>;
 
-/** Remove comments and string contents while retaining executable token positions. */
+const isTripleQuote = (quote: AssertionQuote): quote is "'''" | '"""' =>
+  quote === "'''" || quote === '"""';
+
+/** Remove comments and string contents, returning compact executable code. */
 function assertionCodeLine(
   line: string,
   initial: AssertionLexicalState,
@@ -359,7 +372,12 @@ function assertionCodeLine(
       continue;
     }
     if (quote !== null) {
-      if (escaped) {
+      if (isTripleQuote(quote)) {
+        if (line.startsWith(quote, index)) {
+          quote = null;
+          index += 2;
+        }
+      } else if (escaped) {
         escaped = false;
       } else if (char === "\\") {
         escaped = true;
@@ -373,7 +391,14 @@ function assertionCodeLine(
       index += 1;
       continue;
     }
-    if ((char === "/" && next === "/") || char === "#") break;
+    if (char === "/" && next === "/") break;
+    if (char === "#" && next !== "[") break;
+    const triple = line.slice(index, index + 3);
+    if (triple === "'''" || triple === '"""') {
+      quote = triple;
+      index += 2;
+      continue;
+    }
     if (char === "'" || char === '"' || char === "`") {
       quote = char;
       continue;
@@ -385,19 +410,31 @@ function assertionCodeLine(
   return Object.freeze({ code, state: Object.freeze({ blockComment, quote }) });
 }
 
-/** Count executable assertions in added diff lines (pure). */
-export function countAssertions(diffContent: string): number {
+/** Project added executable code from complete-postimage patch bytes. */
+function executableAddedLines(diffContent: string): readonly string[] {
   let state: AssertionLexicalState = Object.freeze({ blockComment: false, quote: null });
-  let count = 0;
-
+  const lines: string[] = [];
   for (const diffLine of diffContent.split("\n")) {
-    // Lexical state follows the postimage: removed lines do not exist there.
+    if (diffLine.startsWith("diff --git ")) {
+      state = Object.freeze({ blockComment: false, quote: null });
+      continue;
+    }
+    // Lexical state follows the complete postimage: removed lines do not exist
+    // there, and each file boundary above starts an independent token stream.
     const isSourceLine = diffLine.startsWith("+") || diffLine.startsWith(" ");
     if (!isSourceLine) continue;
     const parsed = assertionCodeLine(diffLine.slice(1), state);
     state = parsed.state;
-    if (!diffLine.startsWith("+") || diffLine.startsWith("+++")) continue;
-    const line = parsed.code;
+    if (diffLine.startsWith("+") && !diffLine.startsWith("+++")) lines.push(parsed.code);
+  }
+  return Object.freeze(lines);
+}
+
+/** Count executable assertions in added diff lines (pure). */
+export function countAssertions(diffContent: string): number {
+  let count = 0;
+
+  for (const line of executableAddedLines(diffContent)) {
     // Match at most one per line to avoid cross-language double-counting.
     if (/(assertThat|assertEquals|assertNotNull|assertThrows|verify)\s*\(/.test(line)) { count++; continue; }
     if (/(expect\s*\(|\.should\.)/.test(line)) { count++; continue; }

@@ -111,6 +111,34 @@ describe("countAssertions — property tests", () => {
     );
   });
 
+  it("multiline string contents never become assertion evidence", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom("'''", '\"\"\"'),
+        fc.constantFrom(
+          "assert result == 42",
+          "assertThat(result).isTrue();",
+          "expect(result).toBe(true);",
+          "pytest.raises(ExpectedError)",
+        ),
+        fc.array(fc.string({ maxLength: 30 }), { minLength: 4, maxLength: 12 }),
+        (delimiter, assertion, prefix) => {
+          const diff = [
+            "diff --git a/example.test b/example.test",
+            "@@ -1,20 +1,21 @@",
+            ` ${delimiter}`,
+            ...prefix.map((line) => ` ${line.replaceAll("\n", " ").replaceAll(delimiter, "")}`),
+            "+def test_laundered():",
+            `+${assertion}`,
+            ` ${delimiter}`,
+          ].join("\n");
+          expect(countNewTests(diff).total).toBe(0);
+          expect(countAssertions(diff)).toBe(0);
+        },
+      ),
+    );
+  });
+
   it("max 1 assertion per line", () => {
     // Even if a line contains multiple assertion keywords, it should count at most 1
     fc.assert(

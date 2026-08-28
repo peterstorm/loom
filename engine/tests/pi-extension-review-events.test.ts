@@ -45,6 +45,8 @@ class FakePi {
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const temp = mkdtempSync(join(tmpdir(), "loom-pi-review-events-"));
+const specCheckPlanPath = join(temp, "spec-check-authority-plan.md");
+writeFileSync(specCheckPlanPath, "# Plan\n");
 
 /** chmod 0o500 denies nothing to root; skip the EACCES-based failure
  *  simulations there instead of asserting a permission the OS is not
@@ -92,6 +94,29 @@ const initialGraph = () => ({
     review_status: "pending",
     file_list: ["pi/extension.ts"],
   }],
+});
+
+const specCheckGraph = (overrides: Record<string, unknown> = {}) => ({
+  ...initialGraph(),
+  phase_artifacts: { architecture: specCheckPlanPath },
+  skipped_phases: ["plan-alignment"],
+  plan_file: specCheckPlanPath,
+  active_wave_gate: {
+    schemaVersion: 1,
+    kind: "active-wave-gate",
+    runId: "run.pi-spec-check",
+    wave: 1,
+    authorityDigest: "a".repeat(64),
+    revision: 1,
+    terminalOutcome: null,
+  },
+  wave_review_epoch: {
+    runId: "run.pi-spec-check",
+    wave: 1,
+    batchEpoch: "b".repeat(64),
+    specCheckSlotAuthority: { slot_id: "wave-slot:spec-check", attempted: 1 },
+  },
+  ...overrides,
 });
 
 function writeState(state: unknown): void {
@@ -3289,8 +3314,7 @@ describe("Pi extension review tool_result integration", () => {
   ])("replaces stale passing spec evidence for a reserved %s result", async (label, details) => {
     const planPath = join(temp, `reserved-spec-${label.replaceAll(" ", "-")}.md`);
     writeFileSync(planPath, "# Plan\n");
-    writeState({
-      ...initialGraph(),
+    writeState(specCheckGraph({
       phase_artifacts: { architecture: planPath },
       skipped_phases: ["plan-alignment"],
       plan_file: planPath,
@@ -3298,7 +3322,7 @@ describe("Pi extension review tool_result integration", () => {
         wave: 1, run_at: "earlier", verdict: "PASSED", critical_count: 0, high_count: 0,
         critical_findings: [], high_findings: [], medium_findings: [],
       },
-    });
+    }));
     const pi = await extension();
     const session = "019fca39-f989-7510-8e62-50dadbcad432";
     const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
@@ -3387,20 +3411,35 @@ describe("Pi extension review tool_result integration", () => {
     }));
   });
 
-  it("replaces stale spec evidence after an abort and clears failed implementation execution", async () => {
-    writeState({
-      ...initialGraph(),
-      executing_tasks: ["T1"],
-      tasks: [{ ...initialGraph().tasks[0], status: "pending" }],
+  it("replaces stale spec evidence after an exactly reserved abort and clears failed implementation execution", async () => {
+    const planPath = join(temp, "reserved-aborted-spec-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState(specCheckGraph({
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
       spec_check: {
         wave: 1, run_at: "earlier", verdict: "PASSED", critical_count: 0, high_count: 0,
         critical_findings: [], high_findings: [], medium_findings: [],
       },
-    });
+    }));
     const pi = await extension();
-    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    const toolCallId = "call-reserved-aborted-spec";
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: {
+        agentScope: "user",
+        tasks: [
+          { agent: "code-implementer-agent", task: "Task ID: T1\nUse the code-implementer skill. Implement and test." },
+          { agent: "spec-check-invoker", task: "Follow the preloaded spec-check skill with --wave 1 --tasks T1." },
+        ],
+      },
+    }, context)).toEqual([undefined]);
     await pi.emit("tool_result", {
       toolName: "subagent",
+      toolCallId,
       content: [],
       details: {
         results: [
@@ -4281,19 +4320,29 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
-  it("replaces stale passing spec evidence when successful Pi messages are malformed", async () => {
-    writeState({
-      ...initialGraph(),
+  it("replaces stale passing spec evidence when exactly reserved Pi messages are malformed", async () => {
+    writeState(specCheckGraph({
       spec_check: {
         wave: 1, run_at: "earlier", verdict: "PASSED", critical_count: 0, high_count: 0,
         critical_findings: [], high_findings: [], medium_findings: [],
       },
-    });
+    }));
     const pi = await extension();
-    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    const toolCallId = "call-reserved-malformed-spec";
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: {
+        agent: "spec-check-invoker",
+        task: "Follow the preloaded spec-check skill with --wave 1 --tasks T1.",
+        agentScope: "user",
+      },
+    }, context)).toEqual([undefined]);
 
     await pi.emit("tool_result", {
       toolName: "subagent",
+      toolCallId,
       content: [],
       details: {
         results: [{
@@ -4312,11 +4361,23 @@ describe("Pi extension review tool_result integration", () => {
     });
   });
 
-  it("marks a Pi spec-check count/findings mismatch as evidence capture failed", async () => {
+  it("marks an exactly reserved Pi spec-check count/findings mismatch as evidence capture failed", async () => {
+    writeState(specCheckGraph());
     const pi = await extension();
-    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    const toolCallId = "call-reserved-mismatched-spec";
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: {
+        agent: "spec-check-invoker",
+        task: "Follow the preloaded spec-check skill with --wave 1 --tasks T1.",
+        agentScope: "user",
+      },
+    }, context)).toEqual([undefined]);
     await pi.emit("tool_result", {
       toolName: "subagent",
+      toolCallId,
       content: [],
       details: {
         results: [{

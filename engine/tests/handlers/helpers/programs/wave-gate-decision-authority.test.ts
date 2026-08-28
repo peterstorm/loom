@@ -17,6 +17,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   handleWaveReviewContext,
   publishWaveAdvisoryDecisionRequest,
+  specCheckSlotBelongsToWaveEpoch,
   waveAdvisoryDecisionRequestId,
   waveGateDecisionMismatch,
 } from "../../../../src/handlers/helpers/programs/wave-gate";
@@ -155,6 +156,48 @@ describe("wave review context authority", () => {
       kind: "loaded",
       value: { runId: RUN_ID, wave: 1, subject: { taskId: null }, taskRun: null },
     });
+  });
+
+  it("keeps exact spec-check packet membership after every reviewer run closes", () => {
+    const batchEpoch = "b".repeat(64);
+    const slotId = "wave-slot:spec-check";
+    const packet = packetFor({
+      runId: RUN_ID,
+      wave: 1,
+      authorityDigest: DIGEST,
+      batchEpoch,
+      subject: { role: "spec-check-invoker", taskId: null },
+      taskRun: null,
+      task: null,
+      specCheckScope: [{
+        id: "T1", description: "review T1", completionAnchors: ["FR-1"], contributions: [], declaredFiles: [],
+      }],
+      packetId: null,
+      specFile: null,
+      planFile: null,
+    });
+    const context = handleWaveReviewContext([packet], packet.digest);
+    expect(context.kind).toBe("loaded");
+    if (context.kind !== "loaded") return;
+    const closedReviewGraph: Parameters<typeof specCheckSlotBelongsToWaveEpoch>[0] = {
+      wave_review_epoch: {
+        runId: RUN_ID,
+        wave: 1,
+        batchEpoch,
+        specCheckSlotAuthority: { slot_id: slotId, attempted: 1 },
+      },
+    };
+
+    expect(specCheckSlotBelongsToWaveEpoch(
+      closedReviewGraph,
+      { runId: RUN_ID, slotId, attempt: 1 },
+      context.value,
+    )).toBe(true);
+    expect(specCheckSlotBelongsToWaveEpoch(
+      closedReviewGraph,
+      { runId: RUN_ID, slotId, attempt: 2 },
+      context.value,
+    )).toBe(false);
   });
 
   it("loads a Task reviewer only with complete matching Task authority", () => {

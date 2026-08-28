@@ -415,6 +415,8 @@ export function waveRequests(
   }
   const specCheckScope = waveSpecCheckScope(tasks);
   const workspace = observeReviewedWorkspace(tasks);
+  const workspaceHeadSha = (taskId: string): string | undefined =>
+    workspace.find((entry) => entry.taskId === taskId)?.headSha;
   const parsedBatchEpoch = parseArtifactDigest(createHash("sha256").update(JSON.stringify({
     runId: handle.runId,
     wave: registration.input.wave,
@@ -427,7 +429,7 @@ export function waveRequests(
       completionAnchors: task.spec_anchors ?? [],
       contributions: task.spec_contributions ?? [],
       priorFindingIds: task.review_run?.prior_finding_ids ?? (task.findings ?? []).map(({ id }) => id),
-      reviewedHeadSha: workspace.find(({ taskId }) => taskId === task.id)?.headSha ?? null,
+      reviewedHeadSha: workspaceHeadSha(task.id) ?? null,
     })),
     specFile: graph.spec_file ?? null,
     planFile: graph.plan_file ?? null,
@@ -439,7 +441,7 @@ export function waveRequests(
     generation: task.review_generation ?? 0,
     packetId: createHash("sha256").update(`${batchEpoch}|packet|${task.id}`).digest("hex"),
     headSha: batchEpoch,
-    workspaceHeadSha: workspace.find(({ taskId }) => taskId === task.id)?.headSha ?? (() => { throw new Error(`Task ${task.id} workspace snapshot is missing`); })(),
+    workspaceHeadSha: workspaceHeadSha(task.id) ?? (() => { throw new Error(`Task ${task.id} workspace snapshot is missing`); })(),
   }));
   const subjects = [
     { role: "spec-check-invoker" as const, taskId: null as string | null },
@@ -1164,6 +1166,24 @@ export function handleWaveReviewContext(
 
 export function waveReviewContextTaskId(context: WaveReviewContextRead): string | null {
   return context.kind === "loaded" ? (context.value.taskRun?.taskId ?? null) : null;
+}
+
+/** Exact spec-check packet membership does not depend on open reviewer runs. */
+export function specCheckSlotBelongsToWaveEpoch(
+  graph: Readonly<{ wave_review_epoch?: Readonly<{
+    runId: string;
+    wave: number;
+    batchEpoch: string;
+    specCheckSlotAuthority?: Readonly<{ slot_id: string; attempted: 1 | 2 }>;
+  }> }>,
+  request: Readonly<{ runId: string; slotId: string; attempt: 1 | 2 }>,
+  context: Readonly<{ wave: number; batchEpoch: string }>,
+): boolean {
+  const epoch = graph.wave_review_epoch;
+  return epoch?.runId === request.runId && epoch.wave === context.wave &&
+    epoch.batchEpoch === context.batchEpoch &&
+    epoch.specCheckSlotAuthority?.slot_id === request.slotId &&
+    epoch.specCheckSlotAuthority.attempted === request.attempt;
 }
 
 export function waveRefutationPreparation(
@@ -1910,14 +1930,9 @@ export async function resumeWaveGateFacade(
         continue;
       }
       if (authority.role === "spec-check-invoker") {
-        const epoch = refreshed.wave_review_epoch;
         currentPacketMembership.set(
           authority.requestId,
-          currentRuns.length > 0 && currentRuns.every(({ review_run }) =>
-            review_run?.head_sha === context.value.batchEpoch) &&
-            epoch?.batchEpoch === context.value.batchEpoch &&
-            epoch.specCheckSlotAuthority?.slot_id === authority.slotId &&
-            epoch.specCheckSlotAuthority.attempted === authority.attempt,
+          specCheckSlotBelongsToWaveEpoch(refreshed, authority, context.value),
         );
         continue;
       }
@@ -1999,8 +2014,11 @@ export async function resumeWaveGateFacade(
     for (const request of currentIssued.filter((authority) => authority.program === "wave-gate" && authority.attempt === 1)) {
       if (await durableCaptureRejection(handle, request) !== null) rejectedInitials.add(request.requestId);
     }
+    const settledSpecCheck = refreshed.spec_check?.wave === registration.input.wave &&
+      refreshed.spec_check.verdict !== "EVIDENCE_CAPTURE_FAILED";
     const uncapturedInitialReviews = currentIssued.filter((request) => request.program === "wave-gate" && request.attempt === 1 &&
-      belongsToCurrentPacket(request) && !captured.value.has(captureKey(request.slotId, request.attempt)) &&
+      belongsToCurrentPacket(request) && !(request.role === "spec-check-invoker" && settledSpecCheck) &&
+      !captured.value.has(captureKey(request.slotId, request.attempt)) &&
       !rejectedInitials.has(request.requestId));
     if (uncapturedInitialReviews.length > 0) {
       return { ok: true, action: {

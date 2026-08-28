@@ -12,6 +12,7 @@ import { applyCompletionInfrastructureFailure } from "../../src/core/implementat
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { createImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import { taskVerificationPolicy } from "../../src/core/verification-policy";
+import { parseArtifactDigest, parseOrchestrationRunId } from "../../src/core/orchestration-contract";
 import {
   captureDeclaredArtifactBaseline,
   captureRepositoryChangeBaseline,
@@ -22,6 +23,7 @@ import {
   applyPhaseAgentPiResult,
   applyReviewPiResult,
   applySpecCheckPiResult,
+  currentPiSpecCheckAuthority,
   piSubagentFailureSignals,
   parsePiSubagentResults,
   resolveImplementationTaskId,
@@ -42,6 +44,15 @@ import {
  */
 
 const NOW = "2026-08-16T00:00:00.000Z";
+const parsedWaveRunId = parseOrchestrationRunId("run.pi-spec-check");
+const parsedWaveAuthorityDigest = parseArtifactDigest("a".repeat(64));
+const parsedWaveBatchEpoch = parseArtifactDigest("b".repeat(64));
+if (!parsedWaveRunId.ok || !parsedWaveAuthorityDigest.ok || !parsedWaveBatchEpoch.ok) {
+  throw new Error("invalid spec-check authority fixture constants");
+}
+const WAVE_RUN_ID = parsedWaveRunId.value;
+const WAVE_AUTHORITY_DIGEST = parsedWaveAuthorityDigest.value;
+const WAVE_BATCH_EPOCH = parsedWaveBatchEpoch.value;
 
 function graph(overrides: Partial<TaskGraph> = {}): TaskGraph {
   return {
@@ -73,6 +84,37 @@ function parsedGraph(graph: TaskGraph): ParsedTaskGraph {
   const parsed = parseTaskGraph(graph);
   if (!parsed.ok) throw new Error(`invalid parsed graph fixture: ${parsed.error}`);
   return parsed.value;
+}
+
+function graphWithSpecCheckAuthority(wave = 1) {
+  const state = parsedGraph(graph({
+    current_wave: wave,
+    active_wave_gate: {
+      schemaVersion: 1,
+      kind: "active-wave-gate",
+      runId: WAVE_RUN_ID,
+      wave,
+      authorityDigest: WAVE_AUTHORITY_DIGEST,
+      revision: 1,
+      terminalOutcome: null,
+    },
+    wave_review_epoch: {
+      runId: WAVE_RUN_ID,
+      wave,
+      batchEpoch: WAVE_BATCH_EPOCH,
+      specCheckSlotAuthority: { slot_id: "wave-slot:spec-check", attempted: 1 },
+    },
+  }));
+  const authority = currentPiSpecCheckAuthority(state);
+  if (authority === null) throw new Error("spec-check fixture lacks exact authority");
+  return Object.freeze({
+    state,
+    reservedSlot: Object.freeze({
+      agentType: "spec-check-invoker",
+      taskId: null,
+      specCheckAuthority: authority,
+    }),
+  });
 }
 
 /** An in-memory stand-in for StateManager: every persisted update is reparsed. */
@@ -402,13 +444,14 @@ describe("applyFailedPiResult", () => {
     expect(applied.processingErrors[0]).toContain("ambiguous");
   });
 
-  it("marks a failed spec-check as evidence_capture_failed", async () => {
-    const store = fakeStore(graph());
+  it("marks an exactly reserved failed spec-check as evidence_capture_failed", async () => {
+    const fixture = graphWithSpecCheckAuthority();
+    const store = fakeStore(fixture.state);
     await applyFailedPiResult({
       store,
       agentType: "spec-check-invoker",
       result: result({ agent: "spec-check-invoker", exitCode: 1 }),
-      reservedSlot: undefined,
+      reservedSlot: fixture.reservedSlot,
       now: NOW,
     });
 
@@ -607,10 +650,12 @@ describe("applySpecCheckPiResult", () => {
   ].join("\n");
 
   it("derives blocked from the stored spec-check rather than asserting it", async () => {
-    const store = fakeStore(graph());
+    const fixture = graphWithSpecCheckAuthority();
+    const store = fakeStore(fixture.state);
     await applySpecCheckPiResult({
       store,
       result: result({ agent: "spec-check-invoker", messages: assistantText(specCheckText(1)) }),
+      reservedSlot: fixture.reservedSlot,
       now: NOW,
     });
 
@@ -618,10 +663,12 @@ describe("applySpecCheckPiResult", () => {
   });
 
   it("leaves the gate unblocked when the spec-check reports no critical", async () => {
-    const store = fakeStore(graph());
+    const fixture = graphWithSpecCheckAuthority();
+    const store = fakeStore(fixture.state);
     await applySpecCheckPiResult({
       store,
       result: result({ agent: "spec-check-invoker", messages: assistantText(specCheckText(0)) }),
+      reservedSlot: fixture.reservedSlot,
       now: NOW,
     });
 
@@ -629,10 +676,12 @@ describe("applySpecCheckPiResult", () => {
   });
 
   it("marks malformed spec-check messages as evidence_capture_failed", async () => {
-    const store = fakeStore(graph());
+    const fixture = graphWithSpecCheckAuthority();
+    const store = fakeStore(fixture.state);
     await applySpecCheckPiResult({
       store,
       result: result({ agent: "spec-check-invoker", messages: [{ role: 42 }] }),
+      reservedSlot: fixture.reservedSlot,
       now: NOW,
     });
 
@@ -640,8 +689,9 @@ describe("applySpecCheckPiResult", () => {
   });
 
   it("uses locked current_wave when the transcript omits its Wave despite a stale load", async () => {
-    const stale = parsedGraph(graph({ current_wave: 1 }));
-    let current = parsedGraph(graph({ current_wave: 3, wave_gates: {} }));
+    const stale = graphWithSpecCheckAuthority(1).state;
+    const currentFixture = graphWithSpecCheckAuthority(3);
+    let current = currentFixture.state;
     let loadCount = 0;
     const store: TaskGraphStore & { current(): TaskGraph } = {
       load: () => { loadCount += 1; return stale; },
@@ -657,6 +707,7 @@ describe("applySpecCheckPiResult", () => {
     await applySpecCheckPiResult({
       store,
       result: result({ agent: "spec-check-invoker", messages: assistantText(specCheckText(1, null)) }),
+      reservedSlot: currentFixture.reservedSlot,
       now: NOW,
     });
 
@@ -664,6 +715,41 @@ describe("applySpecCheckPiResult", () => {
     expect(store.current().spec_check).toMatchObject({ wave: 3, verdict: "BLOCKED" });
     expect(store.current().wave_gates["3"]).toMatchObject({ blocked: true });
     expect(store.current().wave_gates["1"]).toBeUndefined();
+  });
+
+  it("rejects a stale reserved slot/attempt without changing current Wave state", async () => {
+    const stale = graphWithSpecCheckAuthority(1);
+    const current = graphWithSpecCheckAuthority(2);
+    const store = fakeStore(current.state);
+
+    const applied = await applySpecCheckPiResult({
+      store,
+      result: result({ agent: "spec-check-invoker", messages: assistantText(specCheckText(1, 2)) }),
+      reservedSlot: stale.reservedSlot,
+      now: NOW,
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("does not match current"),
+    ]);
+    expect(store.current()).toEqual(current.state);
+  });
+
+  it("rejects unreserved spec-check evidence without mutating protected state", async () => {
+    const current = graphWithSpecCheckAuthority();
+    const store = fakeStore(current.state);
+
+    const applied = await applySpecCheckPiResult({
+      store,
+      result: result({ agent: "spec-check-invoker", messages: assistantText(specCheckText(0)) }),
+      reservedSlot: undefined,
+      now: NOW,
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("no exact reserved Wave slot/attempt authority"),
+    ]);
+    expect(store.current()).toEqual(current.state);
   });
 });
 

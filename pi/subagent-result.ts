@@ -48,7 +48,12 @@ import {
 import { reconcileWaveBlock } from "../engine/src/core/wave-gate-model";
 import { phaseArtifactUpdates } from "../engine/src/core/phase-artifact-paths";
 import { agentsOfKind } from "../engine/src/core/model-profiles";
-import type { Phase, TaskGraph } from "../engine/src/types";
+import type {
+  Phase,
+  TaskGraph,
+  WaveReviewEpochAuthority,
+  WaveSpecCheckSlotAuthority,
+} from "../engine/src/types";
 import type { ParsedTaskGraph } from "../engine/src/state-manager";
 import {
   parseIsoInstant,
@@ -267,11 +272,22 @@ export function piSubagentFailureSignals(result: {
 }
 
 /** The reserved slot this result answers for, when the spawn reserved one. */
+export type PiSpecCheckAttemptAuthority = Readonly<{
+  runId: WaveReviewEpochAuthority["runId"];
+  wave: number;
+  batchEpoch: WaveReviewEpochAuthority["batchEpoch"];
+  slotId: WaveSpecCheckSlotAuthority["slot_id"];
+  attempt: WaveSpecCheckSlotAuthority["attempted"];
+}>;
+
+/** The reserved slot this result answers for, including exact role authority. */
 export type ReservedSlot = Readonly<{
   agentType: string;
   taskId: string | null;
   /** Required on every modern implementation reservation; absent/null is legacy compatibility-only. */
   implementationAuthority?: ImplementationAttemptAuthority | null;
+  /** Required before a non-run-bound spec-check may mutate protected Wave state. */
+  specCheckAuthority?: PiSpecCheckAttemptAuthority | null;
 }>;
 
 /** Text of the parent's own tool-call content, the last task-id fallback. */
@@ -346,8 +362,12 @@ async function settleFailedExactImplementation(
     return settlement.kind === "error" ? state : settlement.state;
   });
   const settlement = settled.value;
-  if (settlement === undefined || settlement.kind === "error") {
-    const message = `loom(pi): ${args.failure}; exact Oracle settlement failed — current attempt preserved`;
+  if (settlement === undefined) {
+    const message = `loom(pi): ${args.failure}; exact Oracle settlement produced no transition — current attempt preserved`;
+    return outcome([message], [message]);
+  }
+  if (settlement.kind === "error") {
+    const message = `loom(pi): ${args.failure}; exact Oracle settlement failed: ${JSON.stringify(settlement.error)} — current attempt preserved`;
     return outcome([message], [message]);
   }
   return settlement.kind === "ignored"
@@ -443,7 +463,12 @@ export async function applyFailedPiResult(args: Readonly<{
 
   if (agentType === "spec-check-invoker") {
     return store.updateAndReturn((state) =>
-      reducePiSpecCheckResult(state, { kind: "capture-failed", error: failure }, args.now));
+      reducePiSpecCheckResult(
+        state,
+        reservedSlot?.specCheckAuthority,
+        { kind: "capture-failed", error: failure },
+        args.now,
+      ));
   }
 
   // The dispatcher normally settled a reserved failure through
@@ -1015,8 +1040,12 @@ function renderExactPiSettlement(
   settled: LockedPiSettlement | undefined,
 ): PiResultOutcome {
   const applied = settled?.application;
-  if (applied === undefined || applied.kind === "error") {
-    const diagnostic = `loom(pi): exact Oracle settlement failed for ${args.binding.taskId} — current attempt preserved`;
+  if (applied === undefined) {
+    const diagnostic = `loom(pi): exact Oracle settlement produced no transition for ${args.binding.taskId} — current attempt preserved`;
+    return outcome([...args.log, diagnostic], [diagnostic]);
+  }
+  if (applied.kind === "error") {
+    const diagnostic = `loom(pi): exact Oracle settlement failed for ${args.binding.taskId}: ${JSON.stringify(applied.error)} — current attempt preserved`;
     return outcome([...args.log, diagnostic], [diagnostic]);
   }
   if (applied.kind === "ignored") {
@@ -1287,15 +1316,55 @@ type PiSpecCheckObservation =
   | Readonly<{ kind: "capture-failed"; error: string }>
   | Readonly<{ kind: "parsed"; findings: ParsedSpecCheckOutput }>;
 
-/** Pure spec-check command. An omitted Wave is selected only from locked state. */
+/** Freeze the exact current Wave/spec-check capability for a Pi reservation. */
+export function currentPiSpecCheckAuthority(state: TaskGraph): PiSpecCheckAttemptAuthority | null {
+  const epoch = state.wave_review_epoch;
+  const slot = epoch?.specCheckSlotAuthority;
+  if (state.current_phase !== "execute" || epoch === undefined || slot === undefined ||
+      state.current_wave !== epoch.wave || state.active_wave_gate?.runId !== epoch.runId ||
+      state.active_wave_gate.wave !== epoch.wave) return null;
+  return Object.freeze({
+    runId: epoch.runId,
+    wave: epoch.wave,
+    batchEpoch: epoch.batchEpoch,
+    slotId: slot.slot_id,
+    attempt: slot.attempted,
+  });
+}
+
+/** Explain why a reserved spec-check capability cannot mutate this snapshot. */
+export function piSpecCheckAuthorityProblem(
+  state: TaskGraph,
+  authority: PiSpecCheckAttemptAuthority | null | undefined,
+): string | null {
+  if (authority == null) return "spec-check result has no exact reserved Wave slot/attempt authority";
+  const current = currentPiSpecCheckAuthority(state);
+  if (current === null) return "current TaskGraph has no active exact Wave spec-check authority";
+  return current.runId === authority.runId && current.wave === authority.wave &&
+      current.batchEpoch === authority.batchEpoch && current.slotId === authority.slotId &&
+      current.attempt === authority.attempt
+    ? null
+    : `reserved spec-check authority ${authority.runId}/${authority.wave}/${authority.slotId}/${authority.attempt} ` +
+      `does not match current ${current.runId}/${current.wave}/${current.slotId}/${current.attempt}`;
+}
+
+/** Pure spec-check command under exact locked Wave slot authority. */
 function reducePiSpecCheckResult(
   state: TaskGraph,
+  authority: PiSpecCheckAttemptAuthority | null | undefined,
   observation: PiSpecCheckObservation,
   now: string,
 ): Readonly<{ state: TaskGraph; value: PiResultOutcome }> {
-  const wave = observation.kind === "parsed"
-    ? observation.findings.wave ?? state.current_wave ?? 1
-    : state.current_wave ?? 1;
+  if (authority == null) {
+    const diagnostic = "spec-check evidence rejected: spec-check result has no exact reserved Wave slot/attempt authority; protected state unchanged";
+    return { state, value: outcome([`loom(pi): ${diagnostic}`], [diagnostic]) };
+  }
+  const authorityProblem = piSpecCheckAuthorityProblem(state, authority);
+  if (authorityProblem !== null) {
+    const diagnostic = `spec-check evidence rejected: ${authorityProblem}; protected state unchanged`;
+    return { state, value: outcome([`loom(pi): ${diagnostic}`], [diagnostic]) };
+  }
+  const wave = authority.wave;
   if (observation.kind === "capture-failed") {
     return {
       state: {
@@ -1338,6 +1407,7 @@ function reducePiSpecCheckResult(
 export async function applySpecCheckPiResult(args: Readonly<{
   store: TaskGraphStore;
   result: PiSubagentResult;
+  reservedSlot: ReservedSlot | undefined;
   now: string;
 }>): Promise<PiResultOutcome> {
   const parsedMessages = parsePiMessages(args.result.messages);
@@ -1349,7 +1419,7 @@ export async function applySpecCheckPiResult(args: Readonly<{
       };
   try {
     return await args.store.updateAndReturn((state) =>
-      reducePiSpecCheckResult(state, observation, args.now));
+      reducePiSpecCheckResult(state, args.reservedSlot?.specCheckAuthority, observation, args.now));
   } catch (error) {
     const diagnostic = `spec-check state commit failed: ${error instanceof Error ? error.message : String(error)}`;
     return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);
