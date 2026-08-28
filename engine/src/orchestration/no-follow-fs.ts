@@ -37,13 +37,28 @@ import {
 } from "node:fs";
 import { basename, dirname, isAbsolute, parse, relative, resolve, sep } from "node:path";
 
+const ANCHORED_DIRECTORY_CAPABILITY: unique symbol = Symbol("loom.anchored-directory");
+
 /** A directory held open as the capability for every child operation. */
-export type AnchoredDirectory = Readonly<{ anchor: "descriptor"; fd: number }>;
+export type AnchoredDirectory = Readonly<{
+  anchor: "descriptor";
+  fd: number;
+  [ANCHORED_DIRECTORY_CAPABILITY]: true;
+}>;
+
+function assertAnchoredDirectory(directory: AnchoredDirectory): void {
+  const candidate = directory as unknown as Record<PropertyKey, unknown>;
+  if (candidate[ANCHORED_DIRECTORY_CAPABILITY] !== true || candidate.anchor !== "descriptor" ||
+      typeof candidate.fd !== "number" || !Number.isSafeInteger(candidate.fd) || candidate.fd < 0) {
+    throw new Error("anchored directory capability was not produced by the no-follow filesystem boundary");
+  }
+}
 
 /** Stable identity used to reject a pathname that was rebound after capture. */
 export type AnchoredDirectoryIdentity = Readonly<{ device: bigint; inode: bigint }>;
 
 export function anchoredDirectoryIdentity(directory: AnchoredDirectory): AnchoredDirectoryIdentity {
+  assertAnchoredDirectory(directory);
   const stat = fstatSync(directory.fd, { bigint: true });
   return Object.freeze({ device: stat.dev, inode: stat.ino });
 }
@@ -96,16 +111,22 @@ const dirFlags = (): number => fsConstants.O_RDONLY | directoryFlag() | noFollow
  * swapped after the anchor was opened cannot redirect it.
  */
 export function anchoredChildPath(directory: AnchoredDirectory, child: string): string {
+  assertAnchoredDirectory(directory);
   return `/proc/self/fd/${directory.fd}/${child}`;
 }
 
 /** Release a directory anchor. The descriptor is the only owned resource. */
 export function closeAnchoredDirectory(directory: AnchoredDirectory): void {
+  assertAnchoredDirectory(directory);
   closeSync(directory.fd);
 }
 
 const anchorFor = (fd: number): AnchoredDirectory =>
-  Object.freeze({ anchor: "descriptor" as const, fd });
+  Object.freeze({
+    anchor: "descriptor" as const,
+    fd,
+    [ANCHORED_DIRECTORY_CAPABILITY]: true as const,
+  });
 
 /**
  * Resolve a configured BASE directory to its real path, creating it if absent.
@@ -139,6 +160,7 @@ function assertLeafName(name: string): void {
  * resolving its original path again.
  */
 export function listDirectoryNamesNoFollow(directory: AnchoredDirectory): readonly string[] {
+  assertAnchoredDirectory(directory);
   return Object.freeze(readdirSync(`/proc/self/fd/${directory.fd}`).sort());
 }
 
@@ -636,21 +658,50 @@ export function ensureRelativeDirectoryNoFollow(
   }
 }
 
-function writeAnchoredRunFile(path: string, data: string | Uint8Array, exclusive: boolean): void {
-  const parent = openDirectoryNoFollow(dirname(path));
-  let fileFd: number | null = null;
+type AnchoredOperation<T> =
+  | Readonly<{ kind: "returned"; value: T }>
+  | Readonly<{ kind: "threw"; error: unknown }>;
+
+function withOpenedDirectoryNoFollow<T>(
+  path: string,
+  operation: string,
+  use: (directory: AnchoredDirectory) => T,
+): T {
+  const directory = openDirectoryNoFollow(path);
+  let outcome: AnchoredOperation<T>;
   try {
-    fileFd = openSync(
-      anchoredChildPath(parent, basename(path)),
-      leafFlags(fsConstants.O_WRONLY | fsConstants.O_CREAT |
-        (exclusive ? fsConstants.O_EXCL : fsConstants.O_TRUNC)),
-      0o600,
-    );
-    writeFileSync(fileFd, data);
-  } finally {
-    if (fileFd !== null) closeSync(fileFd);
-    closeAnchoredDirectory(parent);
+    outcome = { kind: "returned", value: use(directory) };
+  } catch (error) {
+    outcome = { kind: "threw", error };
   }
+  const failure = closeFileDescriptor(
+    directory.fd,
+    outcome.kind === "threw" ? outcome.error : null,
+    operation,
+  );
+  if (failure !== null) throw failure;
+  if (outcome.kind === "threw") throw outcome.error;
+  return outcome.value;
+}
+
+function writeAnchoredRunFile(path: string, data: string | Uint8Array, exclusive: boolean): void {
+  withOpenedDirectoryNoFollow(dirname(path), `write of ${basename(path)}`, (parent) => {
+    let fileFd: number | null = null;
+    let primaryError: unknown = null;
+    try {
+      fileFd = openSync(
+        anchoredChildPath(parent, basename(path)),
+        leafFlags(fsConstants.O_WRONLY | fsConstants.O_CREAT |
+          (exclusive ? fsConstants.O_EXCL : fsConstants.O_TRUNC)),
+        0o600,
+      );
+      writeFileSync(fileFd, data);
+    } catch (error) {
+      primaryError = error;
+    }
+    primaryError = closeFileDescriptor(fileFd, primaryError, `write of ${basename(path)}`);
+    if (primaryError !== null) throw primaryError;
+  });
 }
 
 export function writeRunFileNoFollow(path: string, data: string): void {
@@ -683,15 +734,21 @@ export function readRunBytesNoFollow(path: string): Buffer {
 }
 
 function readAnchoredRunFile(path: string): Buffer {
-  const parent = openDirectoryNoFollow(dirname(path));
-  let fileFd: number | null = null;
-  try {
-    fileFd = openSync(anchoredChildPath(parent, basename(path)), leafFlags(fsConstants.O_RDONLY));
-    return readFileSync(fileFd);
-  } finally {
-    if (fileFd !== null) closeSync(fileFd);
-    closeAnchoredDirectory(parent);
-  }
+  return withOpenedDirectoryNoFollow(dirname(path), `read of ${basename(path)}`, (parent) => {
+    let fileFd: number | null = null;
+    let bytes: Buffer | null = null;
+    let primaryError: unknown = null;
+    try {
+      fileFd = openSync(anchoredChildPath(parent, basename(path)), leafFlags(fsConstants.O_RDONLY));
+      bytes = readFileSync(fileFd);
+    } catch (error) {
+      primaryError = error;
+    }
+    primaryError = closeFileDescriptor(fileFd, primaryError, `read of ${basename(path)}`);
+    if (primaryError !== null) throw primaryError;
+    if (bytes === null) throw new Error(`read of ${basename(path)} produced no bytes`);
+    return bytes;
+  });
 }
 
 /**
@@ -700,12 +757,8 @@ function readAnchoredRunFile(path: string): Buffer {
  * planted symlink removes the link itself and never its target.
  */
 export function removeRunFileNoFollow(path: string): void {
-  const parent = openDirectoryNoFollow(dirname(path));
-  try {
-    unlinkSync(anchoredChildPath(parent, basename(path)));
-  } finally {
-    closeAnchoredDirectory(parent);
-  }
+  withOpenedDirectoryNoFollow(dirname(path), `remove of ${basename(path)}`, (parent) =>
+    unlinkSync(anchoredChildPath(parent, basename(path))));
 }
 
 /**
@@ -716,13 +769,9 @@ export function publishStagedRunFile(stagedPath: string, finalPath: string): voi
   if (resolve(dirname(stagedPath)) !== resolve(dirname(finalPath))) {
     throw new Error("staged and final run artifacts must share one run directory");
   }
-  const parent = openDirectoryNoFollow(dirname(stagedPath));
-  try {
+  withOpenedDirectoryNoFollow(dirname(stagedPath), `publish of ${basename(finalPath)}`, (parent) =>
     renameSync(
       anchoredChildPath(parent, basename(stagedPath)),
       anchoredChildPath(parent, basename(finalPath)),
-    );
-  } finally {
-    closeAnchoredDirectory(parent);
-  }
+    ));
 }

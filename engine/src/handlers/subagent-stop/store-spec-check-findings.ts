@@ -90,25 +90,18 @@ export const runStoreSpecCheckFindings = async (
     }
     const wave = state.wave_review_epoch?.wave ?? findings.wave ?? state.current_wave ?? 1;
     const resolution = reconcileSpecCheck(findings, wave, new Date().toISOString());
-    if (resolution.kind === "evidence-failed") {
-      return {
-        state: {
-          ...state,
-          spec_check: resolution.specCheck,
-          wave_gates: reconcileWaveBlock(state.wave_gates, state.tasks, resolution.specCheck, wave),
-        },
-        value: passthroughResult(`WARNING: ${resolution.specCheck.error} — marking evidence_capture_failed`),
-      };
-    }
+    const value = resolution.kind === "evidence-failed"
+      ? passthroughResult(`WARNING: ${resolution.specCheck.error} — marking evidence_capture_failed`)
+      : passthroughResult(
+          `Spec-check: ${resolution.specCheck.critical_count} critical, ${resolution.specCheck.high_count} high`,
+        );
     return {
       state: {
         ...state,
         spec_check: resolution.specCheck,
         wave_gates: reconcileWaveBlock(state.wave_gates, state.tasks, resolution.specCheck, wave),
       },
-      value: passthroughResult(
-        `Spec-check: ${resolution.specCheck.critical_count} critical, ${resolution.specCheck.high_count} high`,
-      ),
+      value,
     };
   });
   if (applied.kind === "passthrough" && applied.systemMessage !== undefined) {

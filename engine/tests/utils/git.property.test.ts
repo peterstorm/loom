@@ -157,6 +157,51 @@ describe("countAssertions — property tests", () => {
     );
   });
 
+  it("control-flow regex bodies never expose evidence-shaped contents", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom("if", "while", "for"),
+        fc.integer({ min: 0, max: 12 }),
+        fc.constantFrom("expect(fake)", "test(fake)", ".should."),
+        (keyword, nesting, evidence) => {
+          const condition = `${"(".repeat(nesting)}enabled${")".repeat(nesting)}`;
+          const header = keyword === "for" ? `for (; ${condition}; )` : `${keyword} (${condition})`;
+          const diff = [
+            "diff --git a/example.test.ts b/example.test.ts",
+            "--- a/example.test.ts",
+            "+++ b/example.test.ts",
+            "@@ -0,0 +1 @@",
+            `+${header} /${evidence}/.test(value);`,
+          ].join("\n");
+          expect(countNewTests(diff).total).toBe(0);
+          expect(countAssertions(diff)).toBe(0);
+        },
+      ),
+    );
+  });
+
+  it("Rust ordinary and byte strings never expose multiline evidence-shaped contents", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom("", "b"),
+        fc.constantFrom("#[test]", "assert!(fabricated);", "assert_eq!(left, right);"),
+        (prefix, content) => {
+          const diff = [
+            "diff --git a/tests/evidence.rs b/tests/evidence.rs",
+            "--- a/tests/evidence.rs",
+            "+++ b/tests/evidence.rs",
+            "@@ -0,0 +1,3 @@",
+            `+let docs = ${prefix}\"`,
+            `+${content}`,
+            "+\";",
+          ].join("\n");
+          expect(countNewTests(diff).total).toBe(0);
+          expect(countAssertions(diff)).toBe(0);
+        },
+      ),
+    );
+  });
+
   it("Rust raw strings never expose evidence-shaped contents", () => {
     fc.assert(
       fc.property(

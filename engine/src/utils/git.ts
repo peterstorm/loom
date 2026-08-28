@@ -451,9 +451,27 @@ const beginsRootJsxTag = (line: string, index: number): boolean => {
   return previous === null || /[=([{,:;!?]|>/.test(previous);
 };
 
+const followsControlFlowCondition = (code: string): boolean => {
+  const trimmed = code.trimEnd();
+  if (!trimmed.endsWith(")")) return false;
+  let depth = 0;
+  for (let cursor = trimmed.length - 1; cursor >= 0; cursor -= 1) {
+    const char = trimmed[cursor]!;
+    if (char === ")") depth += 1;
+    else if (char === "(") {
+      depth -= 1;
+      if (depth === 0) {
+        return /(?:^|\W)(?:if|while|for)\s*$/.test(trimmed.slice(0, cursor));
+      }
+    }
+  }
+  return false;
+};
+
 const canBeginRegexLiteral = (code: string): boolean => {
   const trimmed = code.trimEnd();
   if (trimmed === "" || /[([{,:;=!?&|+*%^~<>-]$/.test(trimmed)) return true;
+  if (followsControlFlowCondition(trimmed)) return true;
   return /(?:^|\s)(?:return|case|throw|else|do|yield|await|typeof|instanceof|in|of|delete|void|new)$/.test(trimmed);
 };
 
@@ -618,8 +636,9 @@ function assertionCodeLine(
     }
     code += char;
   }
-  // Ordinary single/double quoted literals cannot cross a physical line.
-  if (quote === "'" || quote === '"') quote = null;
+  // Rust ordinary and byte strings may cross physical lines. Other supported
+  // languages terminate ordinary single/double quoted literals at the line.
+  if (quote === "'" || (quote === '"' && language !== "rust")) quote = null;
   // JavaScript regex literals cannot cross an unescaped physical newline.
   regexLiteral = false;
   regexCharacterClass = false;

@@ -246,6 +246,19 @@ describe("wave review context authority", () => {
     const batchEpoch = "b".repeat(64);
     const slotId = "wave-slot:spec-check";
     const lockedAttemptOne = graph({
+      spec_check: {
+        wave: 1,
+        run_at: "2026-08-28T00:00:00.000Z",
+        verdict: "BLOCKED",
+        critical_count: 1,
+        high_count: 0,
+        critical_findings: ["earlier blocker"],
+        high_findings: [],
+        medium_findings: [],
+      },
+      wave_gates: {
+        "1": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: true },
+      },
       wave_review_epoch: {
         runId: RUN_ID,
         wave: 1,
@@ -269,6 +282,7 @@ describe("wave review context authority", () => {
 
     expect(transition.applied).toBe(true);
     expect(transition.state.spec_check).toEqual(failure);
+    expect(transition.state.wave_gates["1"]?.blocked).toBe(false);
   });
 
   it("loads a Task reviewer only with complete matching Task authority", () => {

@@ -1397,6 +1397,22 @@ export function piSpecCheckAuthorityProblem(
   return decision.kind === "accepted" ? null : decision.problem;
 }
 
+function commitPiSpecCheck(
+  state: TaskGraph,
+  specCheck: NonNullable<TaskGraph["spec_check"]>,
+  wave: number,
+  value: PiResultOutcome,
+): Readonly<{ state: TaskGraph; value: PiResultOutcome }> {
+  return {
+    state: {
+      ...state,
+      spec_check: specCheck,
+      wave_gates: reconcileWaveBlock(state.wave_gates, state.tasks, specCheck, wave),
+    },
+    value,
+  };
+}
+
 /** Pure spec-check command under exact locked Wave slot authority. */
 function reducePiSpecCheckResult(
   state: TaskGraph,
@@ -1417,35 +1433,24 @@ function reducePiSpecCheckResult(
       verdict: "EVIDENCE_CAPTURE_FAILED" as const,
       error: observation.error,
     };
-    return {
-      state: {
-        ...state,
-        spec_check: specCheck,
-        wave_gates: reconcileWaveBlock(state.wave_gates, state.tasks, specCheck, wave),
-      },
-      value: outcome([`loom(pi): ${observation.error} — marking spec-check evidence_capture_failed`]),
-    };
+    return commitPiSpecCheck(
+      state,
+      specCheck,
+      wave,
+      outcome([`loom(pi): ${observation.error} — marking spec-check evidence_capture_failed`]),
+    );
   }
 
   const resolution = reconcileSpecCheck(observation.findings, wave, now);
   if (resolution.kind === "evidence-failed") {
-    return {
-      state: {
-        ...state,
-        spec_check: resolution.specCheck,
-        wave_gates: reconcileWaveBlock(state.wave_gates, state.tasks, resolution.specCheck, wave),
-      },
-      value: outcome([`loom(pi): ${resolution.specCheck.error} — marking spec-check evidence_capture_failed`]),
-    };
+    return commitPiSpecCheck(
+      state,
+      resolution.specCheck,
+      wave,
+      outcome([`loom(pi): ${resolution.specCheck.error} — marking spec-check evidence_capture_failed`]),
+    );
   }
-  return {
-    state: {
-      ...state,
-      spec_check: resolution.specCheck,
-      wave_gates: reconcileWaveBlock(state.wave_gates, state.tasks, resolution.specCheck, wave),
-    },
-    value: outcome(),
-  };
+  return commitPiSpecCheck(state, resolution.specCheck, wave, outcome());
 }
 
 /**

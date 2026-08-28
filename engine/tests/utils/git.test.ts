@@ -302,6 +302,21 @@ describe("countAssertions (pure)", () => {
     expect(countAssertions(diff)).toBe(0);
   });
 
+  it("rejects regex contents used as control-flow statement bodies", () => {
+    const diff = [
+      "diff --git a/example.test.ts b/example.test.ts",
+      "--- a/example.test.ts",
+      "+++ b/example.test.ts",
+      "@@ -0,0 +1,3 @@",
+      "+if (enabled) /.should./.test(value);",
+      "+while (ready()) /expect(fake)/.test(value);",
+      "+for (; next(); ) /test(fake)/.test(value);",
+    ].join("\n");
+
+    expect(countNewTests(diff).total).toBe(0);
+    expect(countAssertions(diff)).toBe(0);
+  });
+
   it("retains tests after TSX generic-arrow helpers with nested and quoted constraints", () => {
     const diff = [
       "diff --git a/example.test.tsx b/example.test.tsx",
@@ -355,6 +370,24 @@ describe("countAssertions (pure)", () => {
     ].join("\n");
 
     expect(countAssertions(diff)).toBe(1);
+  });
+
+  it("rejects multiline Rust ordinary and byte-string contents as evidence", () => {
+    for (const prefix of ["", "b"]) {
+      const diff = [
+        "diff --git a/tests/evidence.rs b/tests/evidence.rs",
+        "--- a/tests/evidence.rs",
+        "+++ b/tests/evidence.rs",
+        "@@ -0,0 +1,4 @@",
+        `+let docs = ${prefix}\"`,
+        "+#[test]",
+        "+assert_eq!(fabricated, true);",
+        "+\";",
+      ].join("\n");
+
+      expect(countNewTests(diff).total).toBe(0);
+      expect(countAssertions(diff)).toBe(0);
+    }
   });
 
   it("rejects Rust raw-string and nested-comment contents as evidence", () => {

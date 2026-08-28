@@ -322,6 +322,14 @@ describe("removal refuses to follow a planted symlink", () => {
 });
 
 describe("platform anchoring", () => {
+  it("rejects a structurally forged descriptor capability at compile time and runtime", () => {
+    expect(() => anchoredChildPath(
+      // @ts-expect-error only no-follow constructors can produce the private capability brand
+      { anchor: "descriptor", fd: 0 },
+      "x",
+    )).toThrow("was not produced by the no-follow filesystem boundary");
+  });
+
   it("rejects unsupported runtimes before orchestration startup", () => {
     expect(() => assertAnchoredFilesystemPlatformSupported("darwin"))
       .toThrow(/requires Linux descriptor-relative filesystem operations.*darwin.*unsupported/i);
