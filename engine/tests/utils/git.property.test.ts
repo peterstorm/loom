@@ -139,6 +139,29 @@ describe("countAssertions — property tests", () => {
     );
   });
 
+  it("line-continuation strings never expose evidence on the next physical line", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(
+          { path: "example.test.ts", opener: 'const docs = "prose', content: 'test(fake) expect(fake)";' },
+          { path: "tests/test_evidence.py", opener: 'docs = "prose', content: 'def test_fake(): assert fabricated"' },
+        ),
+        (fixture) => {
+          const diff = [
+            `diff --git a/${fixture.path} b/${fixture.path}`,
+            `--- a/${fixture.path}`,
+            `+++ b/${fixture.path}`,
+            "@@ -0,0 +1,2 @@",
+            `+${fixture.opener}${String.fromCharCode(92)}`,
+            `+${fixture.content}`,
+          ].join("\n");
+          expect(countNewTests(diff).total).toBe(0);
+          expect(countAssertions(diff)).toBe(0);
+        },
+      ),
+    );
+  });
+
   it("nested TSX generic-arrow constraints never suppress following executable evidence", () => {
     fc.assert(
       fc.property(fc.integer({ min: 1, max: 24 }), (depth) => {

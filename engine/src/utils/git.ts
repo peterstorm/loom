@@ -330,7 +330,8 @@ const isTestSourcePath = (path: string): boolean =>
   /(?:^|\/)(?:tests?|__tests__|spec)\//.test(path) ||
   /(?:Test|Tests|Spec)\.java$/.test(path) ||
   /(?:^|\/)(?:test_[^/]+|[^/]+_test)\.py$/.test(path) ||
-  /\.(?:test|spec)\.[jt]sx?$/.test(path);
+  /\.(?:test|spec)\.[jt]sx?$/.test(path) ||
+  /\.rs$/.test(path);
 
 const languageOfTestSource = (path: string | null): "java" | "ts" | "python" | "rust" | "unknown" | null => {
   if (path === null) return null; // Headerless synthetic diff compatibility.
@@ -639,9 +640,13 @@ function assertionCodeLine(
     }
     code += char;
   }
-  // Rust ordinary and byte strings may cross physical lines. Other supported
-  // languages terminate ordinary single/double quoted literals at the line.
-  if (quote === "'" || (quote === '"' && language !== "rust")) quote = null;
+  // Rust ordinary and byte strings may cross physical lines. A trailing
+  // backslash continues ordinary strings in JS/TS and Python; otherwise
+  // non-Rust ordinary quotes terminate at the physical line.
+  const continuedOrdinaryQuote = escaped &&
+    (language === "ts" || language === "python" || language === null);
+  if (quote === "'" && !continuedOrdinaryQuote) quote = null;
+  if (quote === '"' && language !== "rust" && !continuedOrdinaryQuote) quote = null;
   const state = Object.freeze({
     blockCommentDepth,
     quote,

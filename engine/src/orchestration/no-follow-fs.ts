@@ -116,6 +116,7 @@ const dirFlags = (): number => fsConstants.O_RDONLY | directoryFlag() | noFollow
  */
 export function anchoredChildPath(directory: AnchoredDirectory, child: string): string {
   assertAnchoredDirectory(directory);
+  assertLeafName(child);
   return `/proc/self/fd/${directory.fd}/${child}`;
 }
 

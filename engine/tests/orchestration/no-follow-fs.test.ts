@@ -10,7 +10,7 @@
  * start following links out of the run directory.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -340,6 +340,19 @@ describe("platform anchoring", () => {
     }
   });
 
+  it.each(["", ".", "..", "../escaped", "nested/escaped", "nested\\escaped"])(
+    "rejects unsafe anchored child %j",
+    (child) => {
+      const root = workspace();
+      const anchored = openDirectoryNoFollow(join(root, "run"));
+      try {
+        expect(() => anchoredChildPath(anchored, child)).toThrow("one safe leaf name");
+      } finally {
+        closeAnchoredDirectory(anchored);
+      }
+    },
+  );
+
   it("revokes a closed capability before its descriptor number can be recycled", () => {
     const root = workspace();
     const closed = openDirectoryNoFollow(join(root, "run"));
@@ -351,6 +364,16 @@ describe("platform anchoring", () => {
     } finally {
       closeAnchoredDirectory(replacement);
     }
+  });
+
+  it("stays revoked when close reports an already-invalid descriptor", () => {
+    const root = workspace();
+    const anchored = openDirectoryNoFollow(join(root, "run"));
+    closeSync(anchored.fd);
+
+    expect(() => closeAnchoredDirectory(anchored)).toThrow(/EBADF|bad file descriptor/i);
+    expect(() => anchoredChildPath(anchored, "x"))
+      .toThrow("was not produced by the no-follow filesystem boundary");
   });
 
   it("rejects unsupported runtimes before orchestration startup", () => {

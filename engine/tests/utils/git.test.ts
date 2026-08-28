@@ -145,6 +145,20 @@ describe("countNewTests (pure)", () => {
     expect(countAssertions(diff)).toBe(1);
   });
 
+  it("counts Rust tests colocated in ordinary source files", () => {
+    const diff = [
+      "diff --git a/src/lib.rs b/src/lib.rs",
+      "--- a/src/lib.rs",
+      "+++ b/src/lib.rs",
+      "@@ -0,0 +1,3 @@",
+      "+#[test]",
+      "+fn proves_behavior() { assert_eq!(actual, expected); }",
+    ].join("\n");
+
+    expect(countNewTests(diff).rust).toBe(1);
+    expect(countAssertions(diff)).toBe(1);
+  });
+
   it("returns zeros for no tests", () => {
     const diff = ["+const x = 42;", "+function doStuff() {}"].join("\n");
     const result = countNewTests(diff);
@@ -324,6 +338,23 @@ describe("countAssertions (pure)", () => {
       "+++ b/example.test.ts",
       "@@ -0,0 +1 @@",
       "+if (enabled) {} /test(fake) expect(fake)/.test(value);",
+    ].join("\n");
+
+    expect(countNewTests(diff).total).toBe(0);
+    expect(countAssertions(diff)).toBe(0);
+  });
+
+  it.each([
+    ["TypeScript", "example.test.ts", `const docs = "prose${String.fromCharCode(92)}`, 'test(fake) expect(fake)";'],
+    ["Python", "tests/test_evidence.py", `docs = "prose${String.fromCharCode(92)}`, 'def test_fake(): assert fabricated"'],
+  ])("does not expose evidence inside a %s line-continuation string", (_language, path, opener, content) => {
+    const diff = [
+      `diff --git a/${path} b/${path}`,
+      `--- a/${path}`,
+      `+++ b/${path}`,
+      "@@ -0,0 +1,2 @@",
+      `+${opener}`,
+      `+${content}`,
     ].join("\n");
 
     expect(countNewTests(diff).total).toBe(0);

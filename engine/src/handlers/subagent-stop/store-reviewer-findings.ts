@@ -6,7 +6,8 @@
  * transcript, find the task, write, log. `pi/extension.ts` is the same shell
  * over the same core, which is what keeps the two harnesses from drifting.
  *
- * Every early return that DISCARDS a reviewer's output logs and fails the hook.
+ * Every early return that DISCARDS a reviewer's output fails with a contextual
+ * error; discard paths reached after identity parsing also use the shared logger.
  * A reviewer whose findings vanish behind exit 0 is indistinguishable from one
  * that found nothing — the exact confusion `evidence_capture_failed` prevents.
  * The one silent return is the `!isReviewAgent` passthrough, which discards
