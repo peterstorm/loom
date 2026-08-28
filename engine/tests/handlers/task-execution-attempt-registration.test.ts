@@ -280,7 +280,10 @@ describe("modern implementation attempt registration", () => {
     ]);
   });
 
-  it("invalidates passed authority when an abandoned modern attempt changed declared bytes", async () => {
+  it.each([
+    ["declared", "src/a.ts"],
+    ["undeclared", "foreign.ts"],
+  ] as const)("invalidates passed authority when an abandoned modern attempt changed %s bytes", async (_scope, changedPath) => {
     const repo = repository();
     const baseline = [{ artifact: "src/a.ts", snapshot: { kind: "missing" as const } }];
     const reservedAt = parseIsoInstant("2020-01-01T00:00:00.000Z");
@@ -336,8 +339,8 @@ describe("modern implementation attempt registration", () => {
       },
     });
 
-    mkdirSync(join(repo.root, "src"), { recursive: true });
-    writeFileSync(join(repo.root, "src/a.ts"), "export const staleWrite = true;\n");
+    if (changedPath.includes("/")) mkdirSync(join(repo.root, "src"), { recursive: true });
+    writeFileSync(join(repo.root, changedPath), "export const staleWrite = true;\n");
 
     const result = await registerTaskExecutionBatch([spawn("T1")]);
     expect(result.kind).toBe("registered");
@@ -374,9 +377,9 @@ describe("modern implementation attempt registration", () => {
     const newId = parseReservationId("new");
     if (!instant.ok || !oldId.ok || !newId.ok) throw new Error("fixture parse failed");
     const oldBatch = createTaskExecutionAuthorityBatch(state, ["T1"], [oldId.value], "1".repeat(40), instant.value,
-      new Map([["T1", { proof: baseline, attempt: baseline, repositoryAttempt: [] }]]));
+      new Map([["T1", { proof: baseline, attempt: baseline, repositoryAttempt: [], repositoryObservation: [] }]]));
     const newBatch = createTaskExecutionAuthorityBatch(state, ["T1"], [newId.value], "1".repeat(40), instant.value,
-      new Map([["T1", { proof: baseline, attempt: baseline, repositoryAttempt: [] }]]));
+      new Map([["T1", { proof: baseline, attempt: baseline, repositoryAttempt: [], repositoryObservation: [] }]]));
     if (!oldBatch.ok || !newBatch.ok) throw new Error("authority fixture failed");
     const current: TaskGraph = {
       ...state,

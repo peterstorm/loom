@@ -146,6 +146,7 @@ export async function registerTaskExecutionBatch(
     proof: ReturnType<typeof captureDeclaredArtifactBaseline>;
     attempt: ReturnType<typeof captureDeclaredArtifactBaseline>;
     repositoryAttempt: ReturnType<typeof captureRepositoryChangeBaseline>;
+    repositoryObservation: ReturnType<typeof captureRepositoryChangeBaseline>;
   }>>();
   let repositoryAttempt: ReturnType<typeof captureRepositoryChangeBaseline>;
   try {
@@ -166,6 +167,7 @@ export async function registerTaskExecutionBatch(
         proof: captureDeclaredArtifactBaseline(repository.root, declared),
         attempt: captureDeclaredArtifactBaseline(repository.root, attemptScope),
         repositoryAttempt: task.repository_baseline ?? repositoryAttempt,
+        repositoryObservation: repositoryAttempt,
       });
     } catch (error) {
       return {

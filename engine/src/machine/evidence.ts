@@ -84,8 +84,9 @@ export function parseAgentId(raw: string): AgentId | null {
  * that id back off the `.active` roster; without this refusal a reported id
  * merely SHAPED like a grant identity would be indistinguishable from one the
  * grant flow minted, and would be granted Edit/Write with no grant ever having
- * been verified. Callers map the null to a non-authorizing placeholder — see
- * `rosterAgentId`.
+ * been verified. Harness-boundary callers map the null to a non-authorizing
+ * placeholder through `reportedRosterAgentId` in ledger.ts; `rosterAgentId`
+ * deliberately preserves legitimate engine-minted grant identities.
  */
 export function parseReportedAgentId(raw: string): AgentId | null {
   return raw.startsWith(WRITE_GRANT_AGENT_NAMESPACE) ? null : parseAgentId(raw);

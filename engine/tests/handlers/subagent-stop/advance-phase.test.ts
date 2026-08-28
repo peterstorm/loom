@@ -4,7 +4,7 @@ import advancePhaseHandler, {
   countMarkers,
 } from "../../../src/handlers/subagent-stop/advance-phase";
 import { findFile } from "../../../src/utils/find-file";
-import { CLARIFY_THRESHOLD, PHASE_AGENT_MAP, ARCH_PANEL_AGENTS } from "../../../src/config";
+import { CLARIFY_THRESHOLD, PHASE_AGENT_MAP, ARCH_PANEL_AGENTS, SUBAGENT_DIR } from "../../../src/config";
 import { stripNamespace } from "../../../src/utils/strip-namespace";
 import type { TaskGraph } from "../../../src/types";
 import { mkdtempSync, writeFileSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
@@ -45,8 +45,8 @@ describe("countMarkers", () => {
     expect(countMarkers(f)).toBe(0);
   });
 
-  it("returns CLARIFY_THRESHOLD + 1 for missing file (force clarify)", () => {
-    expect(countMarkers(join(tmpDir, "nope.md"))).toBe(CLARIFY_THRESHOLD + 1);
+  it("fails closed for a missing marker artifact", () => {
+    expect(() => countMarkers(join(tmpDir, "nope.md"))).toThrow(/cannot read phase artifact/);
   });
 
   it("returns 0 for empty file", () => {
@@ -405,6 +405,71 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
     for (const agent of ARCH_PANEL_AGENTS) {
       expect(PHASE_AGENT_MAP[stripNamespace(agent)]).toBeUndefined();
     }
+  });
+
+  const withPhaseState = async (
+    session: string,
+    state: TaskGraph,
+    run: () => Promise<void>,
+  ): Promise<void> => {
+    const statePath = join(tmpDir, `${session}.json`);
+    const pointerPath = join(SUBAGENT_DIR, `${session}.task_graph`);
+    writeFileSync(statePath, JSON.stringify(state));
+    mkdirSync(SUBAGENT_DIR, { recursive: true });
+    writeFileSync(pointerPath, statePath);
+    try {
+      await run();
+    } finally {
+      rmSync(pointerPath, { force: true });
+    }
+  };
+
+  it("the REAL handler fails closed when a known phase agent has no TaskGraph authority", async () => {
+    const result = await advancePhaseHandler(JSON.stringify({
+      session_id: `missing-phase-${process.pid}-${Date.now()}`,
+      agent_id: "phase-agent",
+      agent_type: "brainstorm-agent",
+    }), []);
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringContaining("session TaskGraph authority unavailable"),
+    });
+  });
+
+  it("the REAL handler fails closed when a phase transcript cannot be read", async () => {
+    const session = `phase-transcript-${process.pid}-${Date.now()}`;
+    const unreadableTranscript = join(tmpDir, "transcript-directory.jsonl");
+    mkdirSync(unreadableTranscript);
+    await withPhaseState(session, mkState({ current_phase: "brainstorm" }), async () => {
+      const result = await advancePhaseHandler(JSON.stringify({
+        session_id: session,
+        agent_id: "phase-agent",
+        agent_type: "brainstorm-agent",
+        agent_transcript_path: unreadableTranscript,
+      }), []);
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringContaining("failed to read or parse transcript"),
+      });
+    });
+  });
+
+  it("the REAL handler fails closed when phase artifact discovery fails", async () => {
+    const session = `phase-artifact-${process.pid}-${Date.now()}`;
+    const spec = join(tmpDir, ".claude", "specs", "loop.md");
+    mkdirSync(join(tmpDir, ".claude", "specs"), { recursive: true });
+    symlinkSync(spec, spec);
+    await withPhaseState(session, mkState({ current_phase: "specify", spec_file: spec }), async () => {
+      const result = await advancePhaseHandler(JSON.stringify({
+        session_id: session,
+        agent_id: "phase-agent",
+        agent_type: "specify-agent",
+      }), []);
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringContaining("phase artifact discovery failed"),
+      });
+    });
   });
 
   it.each(["null", "42", "[]", JSON.stringify({ session_id: "smoke", agent_type: 7 })])(

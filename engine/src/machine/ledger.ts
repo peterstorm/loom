@@ -122,8 +122,8 @@ export function sessionScopedPath(sessionId: SessionId, suffix: SessionFileSuffi
  * take no lock, so an in-place writeFileSync could expose a torn (partial)
  * file mid-write. rename(2) is atomic on the same filesystem — a reader
  * sees the old content or the new, never a prefix. Appends stay plain
- * appendFileSync (single O_APPEND writes; the parsers skip a torn tail
- * line loudly).
+ * appendFileSync (single O_APPEND writes); a torn ledger tail is corruption
+ * and readEvidence rejects the complete ledger rather than using a prefix.
  */
 function rewriteFileAtomic(path: string, content: string): void {
   const tmp = `${path}.tmp`;
@@ -181,9 +181,9 @@ function classifyBindingLines(sessionId: SessionId, nowMs: number): ClassifiedLi
 
 /**
  * Parse the binding file. Malformed lines — wrong field count, fields the
- * smart constructors reject, or a bad bind stamp — are skipped (and count as
- * noise, not bindings) loudly, mirroring readEvidence: a binding file that
- * silently parses to zero bindings would open the gate. Bindings whose last
+ * smart constructors reject, or a bad bind stamp — are logged and skipped as
+ * bindings while their raw rows remain on disk, keeping the gate armed. This
+ * differs from readEvidence, which rejects a corrupt ledger in full. Bindings whose last
  * activity exceeds the TTL are treated as ABSENT (their subagent plausibly
  * died without SubagentStop) — refreshBindingActivity reaps them.
  */

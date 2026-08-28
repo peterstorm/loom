@@ -164,24 +164,25 @@ export const runDispatch = async (
     `[loom] dispatch: no task graph resolvable for session ${JSON.stringify(input.session_id ?? "")}` +
     (cause === undefined ? "" : `: ${cause instanceof Error ? cause.message : String(cause)}`) +
     " — SubagentStop recorded NOTHING (task status, test evidence and findings all skipped)";
+  const taskGraphRequired = category !== "unknown" || resolvedAgentType === "";
+  const unresolvedTaskGraph = async (cause?: unknown): Promise<HookResult> => {
+    const graphFailure = noTaskGraphDiagnostic(cause);
+    if (taskGraphRequired) process.stderr.write(`${graphFailure}\n`);
+    const cleanupFailure = await runCleanup();
+    if (cleanupFailure !== null) {
+      return { kind: "error", message: `${graphFailure}; cleanup also failed: ${cleanupFailure}` };
+    }
+    return taskGraphRequired
+      ? { kind: "error", message: graphFailure }
+      : passthroughDiagnostic(`${graphFailure}\n`);
+  };
 
-  // No exact session TaskGraph authority → no orchestration Hooks.
-  let mgr: StateManager | null;
+  // Known Loom categories require exact TaskGraph authority. Only an explicitly
+  // named custom agent may legitimately have no graph and pass through.
   try {
-    mgr = StateManager.fromSession(input.session_id);
+    if (StateManager.fromSession(input.session_id) === null) return unresolvedTaskGraph();
   } catch (error) {
-    const graphFailure = noTaskGraphDiagnostic(error);
-    const cleanupFailure = await runCleanup();
-    return cleanupFailure === null
-      ? passthroughDiagnostic(`${graphFailure}\n`)
-      : { kind: "error", message: `${graphFailure}; cleanup also failed: ${cleanupFailure}` };
-  }
-  if (!mgr) {
-    const graphFailure = noTaskGraphDiagnostic();
-    const cleanupFailure = await runCleanup();
-    return cleanupFailure === null
-      ? passthroughDiagnostic(`${graphFailure}\n`)
-      : { kind: "error", message: `${graphFailure}; cleanup also failed: ${cleanupFailure}` };
+    return unresolvedTaskGraph(error);
   }
 
   const childFailure: HookResult | null = await match(category)

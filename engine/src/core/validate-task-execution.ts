@@ -321,6 +321,7 @@ export type TaskExecutionBaselines = ReadonlyMap<string, Readonly<{
   proof: readonly DeclaredArtifactBaseline[];
   attempt: readonly DeclaredArtifactBaseline[];
   repositoryAttempt: readonly DeclaredArtifactBaseline[];
+  repositoryObservation: readonly DeclaredArtifactBaseline[];
 }>>;
 
 export type TaskExecutionAuthorityPlan = Readonly<{
@@ -329,6 +330,7 @@ export type TaskExecutionAuthorityPlan = Readonly<{
     proof: readonly DeclaredArtifactBaseline[];
     attempt: readonly DeclaredArtifactBaseline[];
     repositoryAttempt: readonly DeclaredArtifactBaseline[];
+    repositoryObservation: readonly DeclaredArtifactBaseline[];
   }>;
 }>;
 
@@ -426,7 +428,7 @@ function canPreserveReclaimedEvidence(
     baselineMatchesAuthority(task.attempt_artifact_baseline, proof.authority.taskScopeBaselineDigest) &&
     baselineMatchesAuthority(replacement.baselines.attempt, proof.authority.taskScopeBaselineDigest) &&
     baselineMatchesAuthority(task.attempt_repository_baseline, proof.authority.dirtySetBaselineDigest) &&
-    baselineMatchesAuthority(replacement.baselines.repositoryAttempt, proof.authority.dirtySetBaselineDigest);
+    baselineMatchesAuthority(replacement.baselines.repositoryObservation, proof.authority.dirtySetBaselineDigest);
 }
 
 function invalidateReclaimedEvidence(task: Task): Task {

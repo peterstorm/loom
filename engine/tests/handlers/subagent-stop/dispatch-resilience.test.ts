@@ -207,6 +207,16 @@ describe("dispatch names what it discarded (audit diagnostics)", () => {
       session_id: sid("no-graph-at-all"),
       agent_id: "agent-no-graph",
       agent_type: "code-implementer-agent",
+    }, "error");
+    expect(text).toContain("no task graph resolvable");
+    expect(text).toContain("recorded NOTHING");
+  });
+
+  it("keeps a named custom agent as passthrough when no TaskGraph resolves", async () => {
+    const text = await stderrOf({
+      session_id: sid("custom-no-graph"),
+      agent_id: "agent-custom",
+      agent_type: "some-users-own-agent",
     });
     expect(text).toContain("no task graph resolvable");
     expect(text).toContain("recorded NOTHING");

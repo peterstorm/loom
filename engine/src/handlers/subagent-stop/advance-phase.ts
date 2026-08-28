@@ -41,13 +41,15 @@ function phaseArtifactExists(path: string): boolean {
   }
 }
 
-/** Count NEEDS CLARIFICATION markers in a file */
+/** Count NEEDS CLARIFICATION markers; unreadable authority fails the transition. */
 export function countMarkers(filePath: string): number {
   try {
     return (readFileSync(filePath, "utf-8").match(/NEEDS CLARIFICATION/g) ?? []).length;
-  } catch (e) {
-    process.stderr.write(`WARNING: countMarkers failed for ${filePath}: ${(e as Error).message}\n`);
-    return CLARIFY_THRESHOLD + 1; // force clarify on read failure
+  } catch (error) {
+    throw new Error(
+      `cannot read phase artifact ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   }
 }
 
@@ -160,14 +162,28 @@ const handler: HookHandler = async (stdin) => {
   try {
     mgr = StateManager.fromSession(input.session_id);
   } catch (error) {
-    return passthroughDiagnostic(
-      `advance-phase: session TaskGraph authority unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
-    );
+    return {
+      kind: "error",
+      message: `advance-phase: session TaskGraph authority unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
-  if (!mgr) return { kind: "passthrough" };
+  if (!mgr) {
+    return {
+      kind: "error",
+      message: `advance-phase: no TaskGraph authority for session ${JSON.stringify(input.session_id)}`,
+    };
+  }
 
   // Guard: skip if phase already advanced past this one
-  const currentState = mgr.load();
+  let currentState: TaskGraph;
+  try {
+    currentState = mgr.load();
+  } catch (error) {
+    return {
+      kind: "error",
+      message: `advance-phase: failed to read TaskGraph authority: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
   const currentIdx = PHASE_ORDER.indexOf(currentState.current_phase);
   const completedIdx = PHASE_ORDER.indexOf(completedPhase);
   if (completedIdx >= 0 && currentIdx > completedIdx) {
@@ -179,14 +195,23 @@ const handler: HookHandler = async (stdin) => {
   // sends no `agent_transcript_path` records no spec_file/plan_file here and
   // leans entirely on the filesystem sweep further down.
   const transcriptPath = resolveAgentTranscriptPath(input);
+  if (input.agent_transcript_path !== undefined && transcriptPath === null) {
+    return {
+      kind: "error",
+      message: `advance-phase: supplied transcript is unavailable: ${input.agent_transcript_path}`,
+    };
+  }
   if (transcriptPath) {
-    let transcriptContent: string;
+    let artifacts: ReturnType<typeof parsePhaseArtifacts>;
     try {
-      transcriptContent = readFileSync(transcriptPath, "utf-8");
+      const transcriptContent = readFileSync(transcriptPath, "utf-8");
+      artifacts = parsePhaseArtifacts(transcriptContent, currentState.spec_dir);
     } catch (e) {
-      return passthroughDiagnostic(`advance-phase: failed to read transcript at ${transcriptPath}: ${(e as Error).message}\n`);
+      return {
+        kind: "error",
+        message: `advance-phase: failed to read or parse transcript at ${transcriptPath}: ${e instanceof Error ? e.message : String(e)}`,
+      };
     }
-    const artifacts = parsePhaseArtifacts(transcriptContent, currentState.spec_dir);
 
     try {
       await mgr.update((s) => {
@@ -211,19 +236,31 @@ const handler: HookHandler = async (stdin) => {
         return Object.keys(updates).length > 0 ? { ...s, ...updates } : s;
       });
     } catch (e) {
-      return passthroughDiagnostic(`advance-phase: failed to persist artifacts: ${(e as Error).message}\n`);
+      return {
+        kind: "error",
+        message: `advance-phase: failed to persist artifacts: ${e instanceof Error ? e.message : String(e)}`,
+      };
     }
   }
 
   // Reload after potential artifact writes
-  const state = mgr.load();
+  let state: TaskGraph;
+  try {
+    state = mgr.load();
+  } catch (error) {
+    return {
+      kind: "error",
+      message: `advance-phase: failed to reload TaskGraph authority: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
   let transition: ReturnType<typeof resolveTransition>;
   try {
     transition = resolveTransition(completedPhase, state);
   } catch (error) {
-    return passthroughDiagnostic(
-      `advance-phase: phase artifact discovery failed: ${error instanceof Error ? error.message : String(error)}\n`,
-    );
+    return {
+      kind: "error",
+      message: `advance-phase: phase artifact discovery failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
   if (!transition) return { kind: "passthrough" };
 
@@ -240,7 +277,10 @@ const handler: HookHandler = async (stdin) => {
       updated_at: new Date().toISOString(),
     }));
   } catch (e) {
-    return passthroughDiagnostic(`advance-phase: failed to write phase transition: ${(e as Error).message}\n`);
+    return {
+      kind: "error",
+      message: `advance-phase: failed to write phase transition: ${e instanceof Error ? e.message : String(e)}`,
+    };
   }
 
   process.stderr.write(`Phase advanced: ${completedPhase} → ${nextPhase}\n`);

@@ -261,7 +261,7 @@ describe("validate-task-execution — exclusive ownership", () => {
       const baseline = [{ artifact: "src/a.ts", snapshot: { kind: "missing" as const } }];
       const baselines = new Map([[
         "T1",
-        { proof: baseline, attempt: baseline, repositoryAttempt: [] },
+        { proof: baseline, attempt: baseline, repositoryAttempt: [], repositoryObservation: [] },
       ]]);
       const state = mkState([scoped("T1", "src/a.ts")], {
         current_wave: 1,
@@ -304,7 +304,7 @@ describe("validate-task-execution — exclusive ownership", () => {
     const baseline = [{ artifact: "src/a.ts", snapshot: { kind: "missing" as const } }];
     const baselines = new Map([[
       "T1",
-      { proof: baseline, attempt: baseline, repositoryAttempt: [] },
+      { proof: baseline, attempt: baseline, repositoryAttempt: [], repositoryObservation: [] },
     ]]);
     const pending = scoped("T1", "src/a.ts");
 
