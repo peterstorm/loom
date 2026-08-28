@@ -117,6 +117,14 @@ describe("countNewTests (pure)", () => {
     expect(result.total).toBe(2);
   });
 
+  it.each([
+    "it.each(cases)('works', value => {})",
+    "test.concurrent('works', async () => {})",
+    "it.concurrent.each(cases)('works', value => {})",
+  ])("counts parameterized/concurrent TypeScript declaration: %s", (declaration) => {
+    expect(countNewTests(`+${declaration}`).ts).toBe(1);
+  });
+
   it("counts Python test functions and classes", () => {
     const diff = [
       "+def test_validates_input():",

@@ -3102,6 +3102,70 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
+  it("rejects a failed Pi reviewer after a newer Review Run replaces its reserved authority", async () => {
+    const planPath = join(temp, "stale-failed-reviewer-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    const reviewRun = (generation: number, marker: string) => ({
+      generation,
+      packet_id: marker.repeat(64),
+      head_sha: marker.repeat(40),
+      expected_agents: ["code-reviewer"],
+      prior_finding_ids: [],
+      evidence: [],
+      slot_authority: [{ agent: "code-reviewer", slot_id: `review-slot:${marker}`, attempted: 1 }],
+    });
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks: [{
+        ...initialGraph().tasks[0],
+        review_generation: 1,
+        review_run: reviewRun(1, "a"),
+      }],
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4f4";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-stale-failed-reviewer";
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: {
+        agent: "code-reviewer",
+        task: "Task ID: T1\nReview and emit Machine Summary findings.",
+        agentScope: "user",
+      },
+    }, context)).toEqual([undefined]);
+
+    const afterSpawn = JSON.parse(readFileSync(statePath, "utf8"));
+    writeState({
+      ...afterSpawn,
+      tasks: [{
+        ...afterSpawn.tasks[0],
+        review_generation: 2,
+        review_run: reviewRun(2, "b"),
+      }],
+    });
+    const responses = await pi.emit("tool_result", {
+      ...reviewResult("Task: T1", "stale failure must not land", { exitCode: 1 }),
+      toolCallId,
+    }, context);
+
+    const task = JSON.parse(readFileSync(statePath, "utf8")).tasks[0];
+    expect(task.review_generation).toBe(2);
+    expect(task.review_run.generation).toBe(2);
+    expect(task.review_status).toBe("pending");
+    expect(task.review_evidence_failures).toBeUndefined();
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({
+        text: expect.stringContaining("does not match exact current Task/Review Run slot authority"),
+      })],
+    }));
+  });
+
   it("ignores an unreserved failed reviewer while continuing with a healthy sibling", async () => {
     const pi = await extension();
     const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };

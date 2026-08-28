@@ -282,12 +282,81 @@ export type PiSpecCheckAttemptAuthority = Readonly<{
   attempt: WaveSpecCheckSlotAuthority["attempted"];
 }>;
 
+export type PiReviewAttemptAuthority = Readonly<{
+  taskId: string;
+  agentType: string;
+  generation: number;
+  packetId: string | null;
+  slotId: string | null;
+  attempted: 1 | 2 | null;
+}>;
+
+function reviewAuthorityForTask(
+  task: LoomTask,
+  agentType: string,
+): PiReviewAttemptAuthority | null {
+  const run = task.review_run;
+  if (run === undefined) {
+    return Object.freeze({
+      taskId: task.id,
+      agentType,
+      generation: task.review_generation ?? 0,
+      packetId: null,
+      slotId: null,
+      attempted: null,
+    });
+  }
+  const slot = run.slot_authority?.find((candidate) => candidate.agent === agentType);
+  if (slot === undefined) return null;
+  return Object.freeze({
+    taskId: task.id,
+    agentType,
+    generation: run.generation,
+    packetId: run.packet_id,
+    slotId: slot.slot_id,
+    attempted: slot.attempted,
+  });
+}
+
+/** Freeze exact current Task/Review Run authority for a Pi reviewer reservation. */
+export function currentPiReviewAuthority(
+  state: TaskGraph,
+  agentType: string,
+  taskId: string,
+): PiReviewAttemptAuthority | null {
+  const task = state.tasks.find((candidate) => candidate.id === taskId);
+  return task === undefined ? null : reviewAuthorityForTask(task, agentType);
+}
+
+/** Explain why failed reviewer evidence cannot mutate this locked Task. */
+export function piReviewAuthorityProblem(
+  task: LoomTask,
+  agentType: string,
+  reservedAuthority: PiReviewAttemptAuthority | null | undefined,
+): string | null {
+  const currentAuthority = reviewAuthorityForTask(task, agentType);
+  if (reservedAuthority == null) {
+    return task.review_run === undefined ? null : "failed reviewer has no exact current Review Run authority";
+  }
+  return currentAuthority !== null &&
+      currentAuthority.taskId === reservedAuthority.taskId &&
+      currentAuthority.agentType === reservedAuthority.agentType &&
+      currentAuthority.generation === reservedAuthority.generation &&
+      currentAuthority.packetId === reservedAuthority.packetId &&
+      currentAuthority.slotId === reservedAuthority.slotId &&
+      currentAuthority.attempted === reservedAuthority.attempted
+    ? null
+    : "failed reviewer reservation does not match exact current Task/Review Run slot authority";
+}
+
 /** The reserved slot this result answers for, including exact role authority. */
 export type ReservedSlot = Readonly<{
   agentType: string;
   taskId: string | null;
   /** Required on every modern implementation reservation; absent/null is legacy compatibility-only. */
   implementationAuthority?: ImplementationAttemptAuthority | null;
+  /** Required before failed modern reviewer evidence may mutate the current Review Run. */
+  reviewAuthority?: PiReviewAttemptAuthority | null;
   /** Required before a non-run-bound spec-check may mutate protected Wave state. */
   specCheckAuthority?: PiSpecCheckAttemptAuthority | null;
 }>;
@@ -422,6 +491,36 @@ async function applyFailedImplementationResult(args: FailedImplementationArgs): 
     : settleFailedExactImplementation(args, binding, authority);
 }
 
+type FailedReviewApplication =
+  | Readonly<{ kind: "missing" }>
+  | Readonly<{ kind: "unchanged" }>
+  | Readonly<{ kind: "authority-rejected"; problem: string }>
+  | Readonly<{ kind: "applied"; task: TaskGraph["tasks"][number] }>;
+
+function reduceFailedReviewResult(
+  state: TaskGraph,
+  taskId: string,
+  agentType: string,
+  reviewAuthority: PiReviewAttemptAuthority | null | undefined,
+  resolution: ReviewResolution,
+): Readonly<{ state: TaskGraph; value: FailedReviewApplication }> {
+  const target = state.tasks.find((task) => task.id === taskId);
+  if (target === undefined) return { state, value: { kind: "missing" } };
+  const authorityProblem = piReviewAuthorityProblem(target, agentType, reviewAuthority);
+  if (authorityProblem !== null) {
+    return { state, value: { kind: "authority-rejected", problem: authorityProblem } };
+  }
+  const appliedTask = applyReviewResolution(target, resolution);
+  if (appliedTask === target) return { state, value: { kind: "unchanged" } };
+  return {
+    state: {
+      ...state,
+      tasks: state.tasks.map((task) => task.id === taskId ? appliedTask : task),
+    },
+    value: { kind: "applied", task: appliedTask },
+  };
+}
+
 async function applyFailedReviewResult(args: Readonly<{
   store: TaskGraphStore;
   agentType: string;
@@ -442,26 +541,20 @@ async function applyFailedReviewResult(args: Readonly<{
   }
   const failedTaskId = reservedTaskId;
   const resolution = { kind: "evidence-failed" as const, agent: args.agentType, message: args.failure };
-  type FailedReviewApplication =
-    | Readonly<{ kind: "missing" }>
-    | Readonly<{ kind: "unchanged" }>
-    | Readonly<{ kind: "applied"; task: TaskGraph["tasks"][number] }>;
-  const application = await args.store.updateAndReturn<FailedReviewApplication>((state) => {
-    const target = state.tasks.find((task) => task.id === failedTaskId);
-    if (target === undefined) return { state, value: { kind: "missing" as const } };
-    const appliedTask = applyReviewResolution(target, resolution);
-    if (appliedTask === target) return { state, value: { kind: "unchanged" as const } };
-    return {
-      state: {
-        ...state,
-        tasks: state.tasks.map((task) => task.id === failedTaskId ? appliedTask : task),
-      },
-      value: { kind: "applied" as const, task: appliedTask },
-    };
-  });
+  const application = await args.store.updateAndReturn((state) =>
+    reduceFailedReviewResult(
+      state,
+      failedTaskId,
+      args.agentType,
+      args.reservedSlot?.reviewAuthority,
+      resolution,
+    ));
   if (application.kind !== "applied") {
+    let disposition = "rejected duplicate/stale failure evidence";
+    if (application.kind === "missing") disposition = "disappeared";
+    if (application.kind === "authority-rejected") disposition = application.problem;
     const message = `loom(pi): ${args.failure}; review task ${failedTaskId} ` +
-      `${application.kind === "missing" ? "disappeared" : "rejected duplicate/stale failure evidence"} under the state lock — review evidence NOT stored`;
+      `${disposition} under the state lock — review evidence NOT stored`;
     return outcome([message], [message]);
   }
   return outcome([reviewResolutionLog(failedTaskId, resolution, application.task, true)]);

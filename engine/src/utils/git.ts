@@ -354,7 +354,8 @@ export function countNewTests(diffContent: string): TestCount {
   for (const { path, code } of lines) {
     const language = languageOfTestSource(path);
     if ((language === null || language === "java") && /@(Test|Property|ParameterizedTest)\b/.test(code)) java++;
-    if ((language === null || language === "ts") && /(?:^|\s)(it|test)\(/.test(code)) ts++;
+    if ((language === null || language === "ts") &&
+        /(?:^|\s)(?:it|test)(?:\.(?:each|concurrent))*\s*\(/.test(code)) ts++;
     if ((language === null || language === "python") && /(def test_|class Test)/.test(code)) python++;
     if ((language === null || language === "rust") && /#\[test\]/.test(code)) rust++;
   }

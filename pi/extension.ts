@@ -52,13 +52,16 @@ import {
   applyPhaseAgentPiResult,
   applyReviewPiResult,
   applySpecCheckPiResult,
+  currentPiReviewAuthority,
   currentPiSpecCheckAuthority,
   piAllSlotsFailedNote,
+  piReviewAuthorityProblem,
   piSpecCheckAuthorityProblem,
   parsePiSubagentResults,
   piSubagentFailureSignals,
   piSubagentResultFailed,
   type PiResultOutcome,
+  type PiReviewAttemptAuthority,
   type PiSpecCheckAttemptAuthority,
   type PiSubagentResultEntry,
   type RepositoryProbe,
@@ -749,6 +752,7 @@ type PiSpawnReservation = Readonly<{
     rosterId: AgentId;
     taskId: string | null;
     implementationAuthority: ImplementationAttemptAuthority | null;
+    reviewAuthority: PiReviewAttemptAuthority | null;
     specCheckAuthority: PiSpecCheckAttemptAuthority | null;
     /** The closed lifecycle union, not an independent boolean pair: two
      *  booleans admitted the impossible {implementation: true, standalone:
@@ -866,6 +870,7 @@ function recoverPiSpawnReservation(
           rosterId: item.rosterId,
           taskId: null,
           implementationAuthority: null,
+          reviewAuthority: null,
           specCheckAuthority: null,
           kind: "standalone" as const,
         });
@@ -1262,6 +1267,7 @@ export default function (pi: ExtensionAPI) {
         const writeGrants: Array<{ index: number; token: string; task: string; originalTask: string; injected: boolean }> = [];
         let taskGraphPointerBinding: SessionTaskGraphPointerBinding | null = null;
         let orchestrationRunBinding: SessionRunBinding | null = null;
+        let reviewAuthorityGraph: TaskGraph | null = null;
         let specCheckAuthority: PiSpecCheckAttemptAuthority | null = null;
         const rollbackLifecycle = async (): Promise<readonly string[]> => {
           const actions: PiCleanupAction[] = [];
@@ -1338,6 +1344,21 @@ export default function (pi: ExtensionAPI) {
             specCheckAuthority = currentPiSpecCheckAuthority(manager.load());
             if (specCheckAuthority === null) {
               throw new Error("protected Pi spec-check spawn lacks exact current Wave slot/attempt authority");
+            }
+          }
+          const unboundReviewers = orchestrationRunBinding === null
+            ? parsedItems.filter(({ agent }, index) =>
+                isReviewAgent(agent) && taskExecutionSpawns[index]?.kind !== "standalone")
+            : [];
+          if (graphIsActive && unboundReviewers.length > 0) {
+            const manager = StateManager.fromLocalSession(safeSessionId);
+            if (manager === null) throw new Error("protected Pi reviewer spawn has no TaskGraph authority");
+            reviewAuthorityGraph = manager.load();
+            for (const reviewer of unboundReviewers) {
+              const taskId = extractTaskId(reviewer.task);
+              if (taskId === null || currentPiReviewAuthority(reviewAuthorityGraph, reviewer.agent, taskId) === null) {
+                throw new Error(`protected Pi reviewer ${reviewer.agent} lacks exact current Task/Review Run authority`);
+              }
             }
           }
           // Implementation items get the classic whole-session capability bound
@@ -1448,14 +1469,20 @@ export default function (pi: ExtensionAPI) {
           graphActiveAtSpawn: graphIsActive,
           orchestrationRunBinding,
           pointerBinding: taskGraphPointerBinding,
-          items: parsedItems.map((item, index) => ({
-            agentType: item.agent,
-            rosterId: rosterIds[index]!,
-            taskId: extractTaskId(item.task),
-            implementationAuthority: alignment.authoritiesBySlot[index] ?? null,
-            specCheckAuthority: item.agent === "spec-check-invoker" ? specCheckAuthority : null,
-            kind: taskExecutionSpawns[index]?.kind ?? "non-implementation",
-          })),
+          items: parsedItems.map((item, index) => {
+            const taskId = extractTaskId(item.task);
+            return {
+              agentType: item.agent,
+              rosterId: rosterIds[index]!,
+              taskId,
+              implementationAuthority: alignment.authoritiesBySlot[index] ?? null,
+              reviewAuthority: reviewAuthorityGraph !== null && isReviewAgent(item.agent) && taskId !== null
+                ? currentPiReviewAuthority(reviewAuthorityGraph, item.agent, taskId)
+                : null,
+              specCheckAuthority: item.agent === "spec-check-invoker" ? specCheckAuthority : null,
+              kind: taskExecutionSpawns[index]?.kind ?? "non-implementation",
+            };
+          }),
         });
       }
     } catch (err) {
@@ -1890,8 +1917,9 @@ export default function (pi: ExtensionAPI) {
             }),
           };
         });
-        // StateManager callbacks are side-effect free. Emit only after the
-        // protected-state commit proves the diagnostics describe durable state.
+        // The callback may accumulate in-memory diagnostics, but performs no
+        // external I/O. Emit only after the protected-state commit proves they
+        // describe durable state.
         for (const line of committed.logs) process.stderr.write(`loom(pi): ${line}\n`);
         return committed.diagnostics;
       } catch (error) {
@@ -1991,6 +2019,9 @@ export default function (pi: ExtensionAPI) {
               const tasks = state.tasks.map<Task>((task) => {
                 const failures = missingReviews.filter(({ item }) => item.taskId === task.id);
                 return failures.reduce<Task>((current, { item, index }) => {
+                  if (piReviewAuthorityProblem(current, item.agentType, item.reviewAuthority) !== null) {
+                    return current;
+                  }
                   const next = applyReviewResolution(current, {
                     kind: "evidence-failed" as const,
                     agent: item.agentType,
