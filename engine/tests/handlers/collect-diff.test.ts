@@ -153,7 +153,7 @@ describe("collectDiff", () => {
       value: {
         kind: "written",
         written: true,
-        evidence: "1 new test methods, 1 assertions (ts: 1 it/test/describe)",
+        evidence: "1 new test methods, 1 assertions (ts: 1 it/test)",
       },
     });
   });
@@ -187,7 +187,7 @@ describe("collectDiff", () => {
       value: {
         kind: "written",
         written: true,
-        evidence: "1 new test methods, 1 assertions (ts: 1 it/test/describe)",
+        evidence: "1 new test methods, 1 assertions (ts: 1 it/test)",
       },
     });
   });

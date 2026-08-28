@@ -638,7 +638,7 @@ describe("parseTaskGraph protected completion authority", () => {
 });
 
 // ---------------------------------------------------------------------------
-// wave_gates record-key domain (round-40: type-design-analyzer advisory)
+// wave_gates keys are persisted canonical Wave identities
 // ---------------------------------------------------------------------------
 
 const waveGateRecord = {

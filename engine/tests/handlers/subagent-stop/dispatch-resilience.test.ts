@@ -1,9 +1,9 @@
 /**
  * SubagentStop dispatch resilience:
  * - malformed stdin fails closed with a specific "bindings may leak" error
- * - a cleanupSubagentFlag crash still runs update-task-status (Advisory 4)
+ * - a cleanupSubagentFlag crash still runs update-task-status
  * - update-task-status judges the dispatcher's pre-unbind ledger snapshot,
- *   not whatever file is on disk when it runs (Advisory 7)
+ *   not whatever file is on disk when it runs
  */
 
 import { describe, it, expect, afterEach, vi } from "vitest";
@@ -146,7 +146,7 @@ describe("request-bound capture gates legacy dispatch", () => {
   });
 });
 
-describe("malformed hook input is caught, not crashed on (Advisory 4)", () => {
+describe("malformed hook input is caught instead of escaping cleanup", () => {
   it("dispatch: malformed stdin fails closed and names skipped cleanup", async () => {
     const result = await dispatch("{not json", []);
     expect(result).toMatchObject({ kind: "error" });
@@ -283,7 +283,7 @@ describe("dispatch names what it discarded (audit diagnostics)", () => {
   });
 });
 
-describe("a cleanupSubagentFlag crash still runs update-task-status (Advisory 4)", () => {
+describe("a cleanupSubagentFlag crash still runs update-task-status", () => {
   it("held cleanup lock reports cleanup failure after T1 quarantine still runs", async () => {
     const s = sid("cleanup-crash");
     const dir = tempDir();
@@ -347,7 +347,7 @@ describe("a cleanupSubagentFlag crash still runs update-task-status (Advisory 4)
   });
 });
 
-describe("update-task-status honors the pre-unbind evidence snapshot (Advisory 7)", () => {
+describe("update-task-status honors the pre-unbind evidence snapshot", () => {
   it("a trusted TestRun in the snapshot decides the verdict even with no ledger on disk", async () => {
     const s = sid("snapshot");
     const dir = tempDir();

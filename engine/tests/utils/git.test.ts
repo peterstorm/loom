@@ -105,7 +105,7 @@ describe("countNewTests (pure)", () => {
     expect(result.total).toBe(2);
   });
 
-  it("counts TypeScript it/test/describe blocks", () => {
+  it("counts TypeScript test cases but not describe-only suites", () => {
     const diff = [
       '+  it("should validate input", () => {',
       '+  test("handles edge case", () => {',
@@ -113,8 +113,8 @@ describe("countNewTests (pure)", () => {
       '-  it("old test", () => {',
     ].join("\n");
     const result = countNewTests(diff);
-    expect(result.ts).toBe(3);
-    expect(result.total).toBe(3);
+    expect(result.ts).toBe(2);
+    expect(result.total).toBe(2);
   });
 
   it("counts Python test functions and classes", () => {
@@ -273,25 +273,72 @@ describe("countAssertions (pure)", () => {
     expect(countAssertions(diff)).toBe(0);
   });
 
-  it("rejects assertion-shaped TSX text while retaining brace expressions", () => {
+  it("rejects multiline TSX prose while retaining operators and brace expressions", () => {
     const text = [
       "diff --git a/components/Panel.test.tsx b/components/Panel.test.tsx",
       "--- a/components/Panel.test.tsx",
       "+++ b/components/Panel.test.tsx",
-      "@@ -1 +1,2 @@",
-      "+const prose = <div>it(fake) expect(fake)</div>;",
+      "@@ -1 +1,5 @@",
+      "+const prose = <div>",
+      "+  it(fake) expect(fake)",
+      "+</div>;",
     ].join("\n");
     const expression = [
       "diff --git a/components/Panel.test.tsx b/components/Panel.test.tsx",
       "--- a/components/Panel.test.tsx",
       "+++ b/components/Panel.test.tsx",
-      "@@ -1 +1,2 @@",
+      "@@ -1 +1,3 @@",
+      "+test('comparison', () => expect(value > 0).toBe(true));",
       "+const result = <Panel value={expect(actual).toBe(expected)} />;",
     ].join("\n");
 
     expect(countNewTests(text).total).toBe(0);
     expect(countAssertions(text)).toBe(0);
-    expect(countAssertions(expression)).toBe(1);
+    expect(countNewTests(expression).ts).toBe(1);
+    expect(countAssertions(expression)).toBe(2);
+  });
+
+  it("rejects nested JSX text while retaining its surrounding expression", () => {
+    const diff = [
+      "diff --git a/components/Panel.test.tsx b/components/Panel.test.tsx",
+      "--- a/components/Panel.test.tsx",
+      "+++ b/components/Panel.test.tsx",
+      "@@ -1 +1,3 @@",
+      "+const result = <div>{condition ? <span>",
+      "+  expect(fabricated).toBe(true)",
+      "+</span> : expect(actual).toBe(expected)}</div>;",
+    ].join("\n");
+
+    expect(countAssertions(diff)).toBe(1);
+  });
+
+  it("rejects Rust raw-string and nested-comment contents as evidence", () => {
+    const rawString = [
+      "diff --git a/tests/evidence.rs b/tests/evidence.rs",
+      "--- a/tests/evidence.rs",
+      "+++ b/tests/evidence.rs",
+      "@@ -1 +1,5 @@",
+      "+let docs = r###\"",
+      "+#[test]",
+      "+assert!(fabricated);",
+      "+\"###;",
+    ].join("\n");
+    const nestedComment = [
+      "diff --git a/tests/evidence.rs b/tests/evidence.rs",
+      "--- a/tests/evidence.rs",
+      "+++ b/tests/evidence.rs",
+      "@@ -1 +1,6 @@",
+      "+/* outer",
+      "+   /* nested */",
+      "+   #[test]",
+      "+   assert_eq!(fabricated, true);",
+      "+*/",
+    ].join("\n");
+
+    expect(countNewTests(rawString).total).toBe(0);
+    expect(countAssertions(rawString)).toBe(0);
+    expect(countNewTests(nestedComment).total).toBe(0);
+    expect(countAssertions(nestedComment)).toBe(0);
   });
 
   it("resets multiline literal state at each file boundary", () => {

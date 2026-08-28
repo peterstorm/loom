@@ -2109,7 +2109,7 @@ export default function (pi: ExtensionAPI) {
         const sessionId = _ctx.sessionManager.getSessionId() ?? "unknown";
         const reservedItem = reservation?.items[resultIndex];
         const markers = orchestrationMarkers(
-          result.task ?? "",
+          result.task,
           `Pi result ${resultIndex + 1}/${agentType}`,
         );
         const durableRunBinding = reservation?.orchestrationRunBinding ??
@@ -2183,7 +2183,7 @@ export default function (pi: ExtensionAPI) {
             );
         if (captureOutcome.kind === "captured" && durableRunBinding !== null && resultSessionId !== null) {
           try {
-            rememberTrustedReviewCapture(resultSessionId, durableRunBinding, agentType, result.task ?? "", captureOutcome);
+            rememberTrustedReviewCapture(resultSessionId, durableRunBinding, agentType, result.task, captureOutcome);
           } catch (error) {
             const diagnostic = `cannot retain process-local review authority for ${agentType}: ${error instanceof Error ? error.message : String(error)}`;
             processingErrors.push(diagnostic);
@@ -2197,7 +2197,7 @@ export default function (pi: ExtensionAPI) {
         // active, however, capture is mandatory evidence: a rejection or missing
         // correlator must be surfaced rather than disguised as a harmless
         // task-state short-circuit.
-        if (runBound || reservedItem?.kind === "standalone" || hasStandaloneReviewContext(result.task ?? "")) {
+        if (runBound || reservedItem?.kind === "standalone" || hasStandaloneReviewContext(result.task)) {
           if (runBound && captureOutcome.kind !== "captured") {
             const detail = describeCaptureFailure(captureOutcome);
             const diagnostic = `standalone request-bound capture failed for ${agentType}: ${detail}`;

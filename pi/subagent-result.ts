@@ -408,7 +408,7 @@ async function applyFailedImplementationResult(args: FailedImplementationArgs): 
     agentType: args.agentType,
     reservedTaskId: args.reservedSlot?.taskId,
     reservedAuthority: args.reservedSlot?.implementationAuthority,
-    resultPrompt: args.result.task ?? "",
+    resultPrompt: args.result.task,
     parentPrompt: "",
     executingTasks,
   });
@@ -429,7 +429,7 @@ async function applyFailedReviewResult(args: Readonly<{
   reservedSlot: ReservedSlot | undefined;
   failure: string;
 }>): Promise<PiResultOutcome> {
-  const returnedTaskId = extractTaskId(args.result.task ?? "");
+  const returnedTaskId = extractTaskId(args.result.task);
   const reservedTaskId = args.reservedSlot?.taskId;
   if (reservedTaskId !== undefined && reservedTaskId !== null && returnedTaskId !== reservedTaskId) {
     const message = `loom(pi): ${args.failure}; returned Task ${returnedTaskId ?? "missing"} does not match ` +
@@ -731,7 +731,7 @@ async function resolveImplementationBindingForResult(args: Readonly<{
     agentType: args.agentType,
     reservedTaskId: args.reservedSlot?.taskId,
     reservedAuthority: args.reservedSlot?.implementationAuthority,
-    resultPrompt: args.result.task ?? "",
+    resultPrompt: args.result.task,
     parentPrompt: args.parentPrompt,
     executingTasks: args.store.load().executing_tasks ?? [],
   });
@@ -1227,7 +1227,7 @@ function resolveReviewTaskBinding(args: Readonly<{
   reservedSlot: ReservedSlot | undefined;
   parentPrompt: ParentPromptText;
 }>): ReviewTaskBinding {
-  const returnedTaskId = extractTaskId(args.result.task ?? "");
+  const returnedTaskId = extractTaskId(args.result.task);
   const reservedTaskId = args.reservedSlot?.taskId;
   if (reservedTaskId !== undefined && reservedTaskId !== null && returnedTaskId !== reservedTaskId) {
     const message = `WARNING: ${args.agentType} review result Task identity ${returnedTaskId ?? "missing"} ` +

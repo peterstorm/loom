@@ -139,6 +139,29 @@ describe("countAssertions — property tests", () => {
     );
   });
 
+  it("Rust raw strings never expose evidence-shaped contents", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 0, max: 24 }),
+        fc.constantFrom("#[test]", "assert!(fabricated);", "assert_eq!(left, right);"),
+        (hashCount, content) => {
+          const hashes = "#".repeat(hashCount);
+          const diff = [
+            "diff --git a/tests/evidence.rs b/tests/evidence.rs",
+            "--- a/tests/evidence.rs",
+            "+++ b/tests/evidence.rs",
+            "@@ -1 +1,3 @@",
+            `+let docs = r${hashes}\"`,
+            `+${content}`,
+            `+\"${hashes};`,
+          ].join("\n");
+          expect(countNewTests(diff).total).toBe(0);
+          expect(countAssertions(diff)).toBe(0);
+        },
+      ),
+    );
+  });
+
   it("max 1 assertion per line", () => {
     // Even if a line contains multiple assertion keywords, it should count at most 1
     fc.assert(

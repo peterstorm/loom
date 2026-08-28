@@ -342,7 +342,7 @@ const languageOfTestSource = (path: string | null): "java" | "ts" | "python" | "
   return "unknown";
 };
 
-/** Heuristically count added test and suite declarations in a diff string (pure). */
+/** Heuristically count added executable test declarations in a diff string (pure). */
 export function countNewTests(diffContent: string): TestCount {
   const lines = executableAddedLines(diffContent);
   let java = 0;
@@ -353,7 +353,7 @@ export function countNewTests(diffContent: string): TestCount {
   for (const { path, code } of lines) {
     const language = languageOfTestSource(path);
     if ((language === null || language === "java") && /@(Test|Property|ParameterizedTest)\b/.test(code)) java++;
-    if ((language === null || language === "ts") && /(?:^|\s)(it|test|describe)\(/.test(code)) ts++;
+    if ((language === null || language === "ts") && /(?:^|\s)(it|test)\(/.test(code)) ts++;
     if ((language === null || language === "python") && /(def test_|class Test)/.test(code)) python++;
     if ((language === null || language === "rust") && /#\[test\]/.test(code)) rust++;
   }
@@ -362,30 +362,142 @@ export function countNewTests(diffContent: string): TestCount {
 }
 
 type AssertionQuote = "'" | '"' | "`" | "'''" | '"""' | null;
+type JsxAttributeQuote = "'" | '"' | null;
 
 type AssertionLexicalState = Readonly<{
-  blockComment: boolean;
+  blockCommentDepth: number;
   quote: AssertionQuote;
+  rustRawStringHashes: number | null;
+  jsxDepth: number;
+  jsxInTag: boolean;
+  jsxTagClosing: boolean;
+  jsxAttributeQuote: JsxAttributeQuote;
+  jsxExpressionDepth: number;
+  jsxExpressionOwnerDepth: number;
 }>;
+
+const INITIAL_ASSERTION_STATE: AssertionLexicalState = Object.freeze({
+  blockCommentDepth: 0,
+  quote: null,
+  rustRawStringHashes: null,
+  jsxDepth: 0,
+  jsxInTag: false,
+  jsxTagClosing: false,
+  jsxAttributeQuote: null,
+  jsxExpressionDepth: 0,
+  jsxExpressionOwnerDepth: 0,
+});
 
 const isTripleQuote = (quote: AssertionQuote): quote is "'''" | '"""' =>
   quote === "'''" || quote === '"""';
 
-/** Remove comments and string contents, returning compact executable code. */
+const nonWhitespaceBefore = (line: string, index: number): string | null => {
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    if (!/\s/.test(line[cursor]!)) return line[cursor]!;
+  }
+  return null;
+};
+
+const nonWhitespaceAfter = (line: string, index: number): string | null => {
+  for (let cursor = index + 1; cursor < line.length; cursor += 1) {
+    if (!/\s/.test(line[cursor]!)) return line[cursor]!;
+  }
+  return null;
+};
+
+/** A root TSX tag can only begin where an expression may begin, never at an operator's `>`. */
+const beginsRootJsxTag = (line: string, index: number): boolean => {
+  if (line[index] !== "<") return false;
+  const next = nonWhitespaceAfter(line, index);
+  if (next === null || !/[A-Za-z_$>]/.test(next)) return false;
+  const previous = nonWhitespaceBefore(line, index);
+  return previous === null || /[=([{,:;!?]|>/.test(previous);
+};
+
+const beginsRustRawString = (line: string, index: number): Readonly<{ length: number; hashes: number }> | null => {
+  if (index > 0 && /[A-Za-z0-9_]/.test(line[index - 1]!)) return null;
+  const match = /^(?:br|rb|r)(#*)"/.exec(line.slice(index));
+  return match === null ? null : Object.freeze({ length: match[0].length, hashes: match[1]!.length });
+};
+
+/** Project executable code while retaining language lexical and TSX structure across lines. */
 function assertionCodeLine(
   line: string,
   initial: AssertionLexicalState,
+  path: string | null,
 ): Readonly<{ code: string; state: AssertionLexicalState }> {
-  let blockComment = initial.blockComment;
+  let blockCommentDepth = initial.blockCommentDepth;
   let quote = initial.quote;
+  let rustRawStringHashes = initial.rustRawStringHashes;
+  let jsxDepth = initial.jsxDepth;
+  let jsxInTag = initial.jsxInTag;
+  let jsxTagClosing = initial.jsxTagClosing;
+  let jsxAttributeQuote = initial.jsxAttributeQuote;
+  let jsxExpressionDepth = initial.jsxExpressionDepth;
+  let jsxExpressionOwnerDepth = initial.jsxExpressionOwnerDepth;
   let escaped = false;
   let code = "";
+  const isTsx = path !== null && /\.[jt]sx$/.test(path);
+  const language = languageOfTestSource(path);
+
   for (let index = 0; index < line.length; index += 1) {
     const char = line[index]!;
     const next = line[index + 1];
-    if (blockComment) {
-      if (char === "*" && next === "/") {
-        blockComment = false;
+    const inJsxStructure = isTsx && jsxDepth > 0 &&
+      (jsxExpressionDepth === 0 || jsxDepth > jsxExpressionOwnerDepth);
+
+    if (inJsxStructure) {
+      if (jsxInTag) {
+        if (jsxAttributeQuote !== null) {
+          if (char === jsxAttributeQuote && line[index - 1] !== "\\") jsxAttributeQuote = null;
+          continue;
+        }
+        if (char === "'" || char === '"') {
+          jsxAttributeQuote = char;
+          continue;
+        }
+        if (char === "{") {
+          jsxExpressionDepth = 1;
+          jsxExpressionOwnerDepth = jsxDepth;
+          code += char;
+          continue;
+        }
+        if (char === ">") {
+          const selfClosing = nonWhitespaceBefore(line, index) === "/";
+          if (jsxTagClosing || selfClosing) jsxDepth = Math.max(0, jsxDepth - 1);
+          jsxInTag = false;
+          jsxTagClosing = false;
+        }
+        continue;
+      }
+      if (char === "{") {
+        jsxExpressionDepth = 1;
+        jsxExpressionOwnerDepth = jsxDepth;
+        code += char;
+        continue;
+      }
+      if (char === "<") {
+        jsxTagClosing = nonWhitespaceAfter(line, index) === "/";
+        if (!jsxTagClosing) jsxDepth += 1;
+        jsxInTag = true;
+      }
+      continue;
+    }
+
+    if (rustRawStringHashes !== null) {
+      const closing = `"${"#".repeat(rustRawStringHashes)}`;
+      if (line.startsWith(closing, index)) {
+        rustRawStringHashes = null;
+        index += closing.length - 1;
+      }
+      continue;
+    }
+    if (blockCommentDepth > 0) {
+      if (char === "/" && next === "*") {
+        blockCommentDepth += 1;
+        index += 1;
+      } else if (char === "*" && next === "/") {
+        blockCommentDepth -= 1;
         index += 1;
       }
       continue;
@@ -406,43 +518,67 @@ function assertionCodeLine(
       continue;
     }
     if (char === "/" && next === "*") {
-      blockComment = true;
+      blockCommentDepth = 1;
       index += 1;
       continue;
     }
     if (char === "/" && next === "/") break;
-    if (char === "#" && next !== "[") break;
+    if ((language === null || language === "python") && char === "#" && next !== "[") break;
     const triple = line.slice(index, index + 3);
     if (triple === "'''" || triple === '"""') {
       quote = triple;
       index += 2;
       continue;
     }
+    if (language === "rust" || language === null) {
+      const rawString = beginsRustRawString(line, index);
+      if (rawString !== null) {
+        rustRawStringHashes = rawString.hashes;
+        index += rawString.length - 1;
+        continue;
+      }
+    }
     if (char === "'" || char === '"' || char === "`") {
       quote = char;
       continue;
+    }
+    if (isTsx && beginsRootJsxTag(line, index)) {
+      jsxDepth += 1;
+      jsxInTag = true;
+      jsxTagClosing = false;
+      continue;
+    }
+    if (isTsx && jsxExpressionDepth > 0) {
+      if (char === "{") jsxExpressionDepth += 1;
+      if (char === "}") jsxExpressionDepth -= 1;
     }
     code += char;
   }
   // Ordinary single/double quoted literals cannot cross a physical line.
   if (quote === "'" || quote === '"') quote = null;
-  return Object.freeze({ code, state: Object.freeze({ blockComment, quote }) });
-}
-
-function jsxExpressionCode(code: string, path: string | null): string {
-  if (path === null || !/\.[jt]sx$/.test(path) || !/[<>]/.test(code)) return code;
-  return [...code.matchAll(/\{([^{}]*)\}/g)].map((match) => match[1] ?? "").join(" ");
+  const state = Object.freeze({
+    blockCommentDepth,
+    quote,
+    rustRawStringHashes,
+    jsxDepth,
+    jsxInTag,
+    jsxTagClosing,
+    jsxAttributeQuote,
+    jsxExpressionDepth,
+    jsxExpressionOwnerDepth,
+  });
+  return Object.freeze({ code, state });
 }
 
 /** Project path-bound added executable code from complete-postimage patch bytes. */
 function executableAddedLines(diffContent: string): readonly AddedExecutableLine[] {
-  let state: AssertionLexicalState = Object.freeze({ blockComment: false, quote: null });
+  let state = INITIAL_ASSERTION_STATE;
   let path: string | null = null;
   let insidePatch = false;
   const lines: AddedExecutableLine[] = [];
   for (const diffLine of diffContent.split("\n")) {
     if (diffLine.startsWith("diff --git ")) {
-      state = Object.freeze({ blockComment: false, quote: null });
+      state = INITIAL_ASSERTION_STATE;
       path = null;
       insidePatch = true;
       continue;
@@ -455,10 +591,10 @@ function executableAddedLines(diffContent: string): readonly AddedExecutableLine
     // there, and each file boundary above starts an independent token stream.
     const isSourceLine = diffLine.startsWith("+") || diffLine.startsWith(" ");
     if (!isSourceLine) continue;
-    const parsed = assertionCodeLine(diffLine.slice(1), state);
+    const parsed = assertionCodeLine(diffLine.slice(1), state, path);
     state = parsed.state;
     if (diffLine.startsWith("+") && !diffLine.startsWith("+++") && (!insidePatch || path !== null)) {
-      lines.push(Object.freeze({ path, code: jsxExpressionCode(parsed.code, path) }));
+      lines.push(Object.freeze({ path, code: parsed.code }));
     }
   }
   return Object.freeze(lines);
@@ -482,10 +618,5 @@ export function countAssertions(diffContent: string): number {
 
 /** Pure filter: given a list of file paths, return those that look like test files */
 export function filterTestFiles(files: string[]): string[] {
-  return files.filter((f) =>
-    // Match files in test directories at any depth
-    /(?:^|\/)(?:tests?|__tests__|spec)\//.test(f) ||
-    // Match files with test/spec suffix (e.g. foo.test.ts, bar.spec.js)
-    /\.(?:test|spec)\.[jt]sx?$/.test(f)
-  );
+  return files.filter(isTestSourcePath);
 }
