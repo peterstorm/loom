@@ -411,6 +411,22 @@ describe("applyFailedPiResult", () => {
     expect(store.current().tasks[0]!.review_status).toBe("pending");
   });
 
+  it("stores nothing when an unreserved failed reviewer names an existing Task", async () => {
+    const store = fakeStore(graph());
+    const applied = await applyFailedPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ exitCode: 1, task: "Task: T1" }),
+      reservedSlot: undefined,
+      now: NOW,
+    });
+
+    expect(store.current().tasks[0]!.review_status).toBe("pending");
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("no reserved Task authority"),
+    ]);
+  });
+
   it("says so and stores nothing when the reviewer names no known task", async () => {
     const store = fakeStore(graph());
     const applied = await applyFailedPiResult({

@@ -75,12 +75,13 @@ const handler: HookHandler = async (stdin) => {
     return discarded(message);
   }
 
-  // Resolved, not read off the payload: a harness that sends no
-  // `agent_transcript_path` would otherwise lose every reviewer's findings —
-  // the wave gate would then read a clean review that never happened. Read the
+  // Resolve through the shared supplied-path-first locator, with canonical
+  // session/Agent derivation when the harness omits or loses its path. Without
+  // that fallback, findings disappear and the Wave Gate reads a clean review
+  // that never happened. Read the
   // trusted first-user prompt BEFORE requiring reviewer output: it carries the
   // task binding even when the assistant transcript is empty or malformed.
-  const rawPath = resolveAgentTranscriptPath(input) ?? input.agent_transcript_path ?? "";
+  const rawPath = resolveAgentTranscriptPath(input) ?? "";
   let trustedPrompt: string;
   try {
     const path = rawPath.replace(/^~/, process.env.HOME ?? "~");

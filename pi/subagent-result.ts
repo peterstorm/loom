@@ -431,16 +431,16 @@ async function applyFailedReviewResult(args: Readonly<{
 }>): Promise<PiResultOutcome> {
   const returnedTaskId = extractTaskId(args.result.task);
   const reservedTaskId = args.reservedSlot?.taskId;
-  if (reservedTaskId !== undefined && reservedTaskId !== null && returnedTaskId !== reservedTaskId) {
+  if (reservedTaskId === undefined || reservedTaskId === null) {
+    const message = `loom(pi): ${args.failure}; failed reviewer has no reserved Task authority — review evidence NOT stored`;
+    return outcome([message], [message]);
+  }
+  if (returnedTaskId !== reservedTaskId) {
     const message = `loom(pi): ${args.failure}; returned Task ${returnedTaskId ?? "missing"} does not match ` +
       `reserved Task ${reservedTaskId} — review evidence NOT stored`;
     return outcome([message], [message]);
   }
-  const failedTaskId = reservedTaskId ?? returnedTaskId;
-  if (failedTaskId === null || failedTaskId === undefined) {
-    const message = `loom(pi): ${args.failure}; trusted task binding is missing or unknown — review evidence NOT stored`;
-    return outcome([message], [message]);
-  }
+  const failedTaskId = reservedTaskId;
   const resolution = { kind: "evidence-failed" as const, agent: args.agentType, message: args.failure };
   type FailedReviewApplication =
     | Readonly<{ kind: "missing" }>
@@ -472,8 +472,9 @@ async function applyFailedReviewResult(args: Readonly<{
  *
  * A failed process may retain valid-looking assistant text; none of it is
  * parsed as evidence here. Under exact current reserved authority, the failure
- * is persisted for gate-owned agents so a healthy sibling or stale pass cannot
- * make the missing evidence disappear at the Wave Gate.
+ * is persisted only under the authority each category owns: exact attempt/slot
+ * authority for implementation and spec-check agents, and a matching reserved
+ * Task for reviewers. Unreserved failures remain diagnostic-only.
  */
 export async function applyFailedPiResult(args: Readonly<{
   store: TaskGraphStore;

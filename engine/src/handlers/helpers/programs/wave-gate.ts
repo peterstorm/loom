@@ -25,6 +25,7 @@ import { applyReviewResolution, constrainReviewResolutionToScope, resolveTaskRev
 import type { Finding, Task, TaskGraph } from '../../../types';
 import { anyActiveSubagent } from '../../../machine';
 import { parseSpecCheckOutput, reconcileSpecCheck } from '../../../core/spec-check';
+import { reconcileWaveBlock } from '../../../core/wave-gate-model';
 import { resolveAgentPolicy, resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
 import { parseTaskProof, parseTaskTestResult, type ProofTestResult, type TaskProof } from '../../../core/proof-obligations';
 import { durableCaptureRejection, durableRefutationRequests, exactObject, executableRefutationRequests, failed, parseRegisteredFacadeProgram, publicationResolver, publishInitialBatch, recoverOrPublishRefutationRetry, refutationRejectionDiagnostic, renderSpawnTask, type FacadeDriveResult, type RegisteredWaveGateProgram } from './helpers';
@@ -1200,7 +1201,14 @@ export function applyCurrentSpecCheckCaptureRejection(
       !specCheckSlotBelongsToWaveEpoch(graph, request, context)) {
     return Object.freeze({ state: graph, applied: false });
   }
-  return Object.freeze({ state: { ...graph, spec_check: specCheck }, applied: true });
+  return Object.freeze({
+    state: {
+      ...graph,
+      spec_check: specCheck,
+      wave_gates: reconcileWaveBlock(graph.wave_gates, graph.tasks, specCheck, context.wave),
+    },
+    applied: true,
+  });
 }
 
 export function waveRefutationPreparation(
@@ -1700,7 +1708,11 @@ export async function applyWaveFacadeSubmission(
           const expected = `${locked.current_wave}/${locked.active_wave_gate?.runId ?? "none"}/${locked.active_wave_gate?.authorityDigest ?? "none"}/${epoch?.runId ?? "none"}/${epoch?.wave ?? "none"}/${(epoch?.batchEpoch ?? "none").slice(0, 12)}`;
           throw new Error(`Wave spec-check request ${authority.requestId} does not belong to the exact current review epoch (expected current_wave/runId/digest/epoch-runId/epoch-wave/epoch-batch: ${expected}; request wave ${wave}, digest ${context.authorityDigest}, runId ${authority.runId}, batch ${batchEpoch.slice(0, 12)})`);
         }
-        return { ...locked, spec_check: resolution.specCheck };
+        return {
+          ...locked,
+          spec_check: resolution.specCheck,
+          wave_gates: reconcileWaveBlock(locked.wave_gates, locked.tasks, resolution.specCheck, wave),
+        };
       });
       return { ok: true };
     }
@@ -1727,10 +1739,12 @@ export async function applyWaveFacadeSubmission(
         resolveTaskReviewFindings(raw, authority.role, run, target.review_generation),
         [...(target.file_list ?? []), ...(target.files_modified ?? [])],
       );
+      const tasks = locked.tasks.map((task) =>
+        task.id === taskId ? applyReviewResolution(task, resolution, slot) : task);
       return {
         ...locked,
-        tasks: locked.tasks.map((task) =>
-          task.id === taskId ? applyReviewResolution(task, resolution, slot) : task),
+        tasks,
+        wave_gates: reconcileWaveBlock(locked.wave_gates, tasks, locked.spec_check, context.wave),
       };
     });
     return { ok: true };
@@ -2297,10 +2311,14 @@ export async function resumeWaveGateFacade(
         (outcome): outcome is Extract<FindingOutcome, { survives: false }> => !outcome.survives,
       );
       if (refutingOutcomes.length > 0) {
-        await manager.update((locked) => ({
-          ...locked,
-          tasks: locked.tasks.map((task) => applyFindingOutcomes(task, donePanel.decision.outcomes)),
-        }));
+        await manager.update((locked) => {
+          const tasks = locked.tasks.map((task) => applyFindingOutcomes(task, donePanel.decision.outcomes));
+          return {
+            ...locked,
+            tasks,
+            wave_gates: reconcileWaveBlock(locked.wave_gates, tasks, locked.spec_check, registration.input.wave!),
+          };
+        });
         // The tally retired at least one finding, so the derived snapshot
         // changed: re-derive readiness under it (the wave gate may now pass).
         return resumeWaveGateFacade(handle, registration, depth + 1);

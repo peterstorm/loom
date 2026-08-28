@@ -129,6 +129,22 @@ describe("countNewTests (pure)", () => {
     expect(result.total).toBe(3);
   });
 
+  it("counts executable Rust tests", () => {
+    const diff = [
+      "diff --git a/tests/evidence.rs b/tests/evidence.rs",
+      "--- a/tests/evidence.rs",
+      "+++ b/tests/evidence.rs",
+      "@@ -0,0 +1,4 @@",
+      "+#[test]",
+      "+fn proves_behavior() {",
+      "+  assert_eq!(actual, expected);",
+      "+}",
+    ].join("\n");
+
+    expect(countNewTests(diff).rust).toBe(1);
+    expect(countAssertions(diff)).toBe(1);
+  });
+
   it("returns zeros for no tests", () => {
     const diff = ["+const x = 42;", "+function doStuff() {}"].join("\n");
     const result = countNewTests(diff);
@@ -271,6 +287,33 @@ describe("countAssertions (pure)", () => {
 
     expect(countNewTests(diff).total).toBe(0);
     expect(countAssertions(diff)).toBe(0);
+  });
+
+  it("rejects JavaScript regex-literal contents as evidence", () => {
+    const diff = [
+      "diff --git a/example.test.ts b/example.test.ts",
+      "--- a/example.test.ts",
+      "+++ b/example.test.ts",
+      "@@ -0,0 +1,2 @@",
+      "+const pattern = / test(fake) expect(fake) \\/ [a-z/]+/gi;",
+    ].join("\n");
+
+    expect(countNewTests(diff).total).toBe(0);
+    expect(countAssertions(diff)).toBe(0);
+  });
+
+  it("retains tests after a TSX generic-arrow helper", () => {
+    const diff = [
+      "diff --git a/example.test.tsx b/example.test.tsx",
+      "--- a/example.test.tsx",
+      "+++ b/example.test.tsx",
+      "@@ -0,0 +1,2 @@",
+      "+const identity = <T,>(value: T) => value;",
+      "+test('works', () => expect(identity(1)).toBe(1));",
+    ].join("\n");
+
+    expect(countNewTests(diff).ts).toBe(1);
+    expect(countAssertions(diff)).toBe(1);
   });
 
   it("rejects multiline TSX prose while retaining operators and brace expressions", () => {

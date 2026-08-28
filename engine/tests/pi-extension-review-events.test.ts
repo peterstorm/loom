@@ -3102,7 +3102,7 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
-  it("records failed review capture while continuing with a healthy sibling", async () => {
+  it("ignores an unreserved failed reviewer while continuing with a healthy sibling", async () => {
     const pi = await extension();
     const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
     const failed = reviewResult("Task: T1", "failed result must not gate", { exitCode: 1 }).details.results[0];
@@ -3117,9 +3117,9 @@ describe("Pi extension review tool_result integration", () => {
     const taskState = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
     expect(taskState.critical_findings).toEqual(["healthy sibling stored"]);
     expect(taskState.critical_findings).not.toContain("failed result must not gate");
-    expect(taskState.review_status).toBe("evidence_capture_failed");
-    expect(taskState.review_evidence_failures).toEqual(["code-reviewer"]);
-    expect(taskState.review_error).toContain("failed before evidence capture completed");
+    expect(taskState.review_status).toBe("blocked");
+    expect(taskState.review_evidence_failures).toBeUndefined();
+    expect(taskState.review_error).toBeUndefined();
   });
 
   /**

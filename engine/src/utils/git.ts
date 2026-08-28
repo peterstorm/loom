@@ -368,6 +368,8 @@ type AssertionLexicalState = Readonly<{
   blockCommentDepth: number;
   quote: AssertionQuote;
   rustRawStringHashes: number | null;
+  regexLiteral: boolean;
+  regexCharacterClass: boolean;
   jsxDepth: number;
   jsxInTag: boolean;
   jsxTagClosing: boolean;
@@ -380,6 +382,8 @@ const INITIAL_ASSERTION_STATE: AssertionLexicalState = Object.freeze({
   blockCommentDepth: 0,
   quote: null,
   rustRawStringHashes: null,
+  regexLiteral: false,
+  regexCharacterClass: false,
   jsxDepth: 0,
   jsxInTag: false,
   jsxTagClosing: false,
@@ -406,12 +410,27 @@ const nonWhitespaceAfter = (line: string, index: number): string | null => {
 };
 
 /** A root TSX tag can only begin where an expression may begin, never at an operator's `>`. */
+const beginsTsxGenericParameters = (line: string, index: number): boolean => {
+  const tail = line.slice(index + 1);
+  const close = tail.indexOf(">");
+  const candidate = close < 0 ? tail : tail.slice(0, close);
+  if (!/^[A-Za-z_$][\w$]*(?:\s+extends\b|\s*,)/.test(candidate)) return false;
+  if (close < 0) return true;
+  return nonWhitespaceAfter(line, index + close + 1) === "(";
+};
+
 const beginsRootJsxTag = (line: string, index: number): boolean => {
-  if (line[index] !== "<") return false;
+  if (line[index] !== "<" || beginsTsxGenericParameters(line, index)) return false;
   const next = nonWhitespaceAfter(line, index);
   if (next === null || !/[A-Za-z_$>]/.test(next)) return false;
   const previous = nonWhitespaceBefore(line, index);
   return previous === null || /[=([{,:;!?]|>/.test(previous);
+};
+
+const canBeginRegexLiteral = (code: string): boolean => {
+  const trimmed = code.trimEnd();
+  if (trimmed === "" || /[([{,:;=!?&|+*%^~<>-]$/.test(trimmed)) return true;
+  return /(?:^|\s)(?:return|case|throw|else|do|yield|await|typeof|instanceof|in|of|delete|void|new)$/.test(trimmed);
 };
 
 const beginsRustRawString = (line: string, index: number): Readonly<{ length: number; hashes: number }> | null => {
@@ -429,6 +448,8 @@ function assertionCodeLine(
   let blockCommentDepth = initial.blockCommentDepth;
   let quote = initial.quote;
   let rustRawStringHashes = initial.rustRawStringHashes;
+  let regexLiteral = initial.regexLiteral;
+  let regexCharacterClass = initial.regexCharacterClass;
   let jsxDepth = initial.jsxDepth;
   let jsxInTag = initial.jsxInTag;
   let jsxTagClosing = initial.jsxTagClosing;
@@ -484,6 +505,20 @@ function assertionCodeLine(
       continue;
     }
 
+    if (regexLiteral) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "[") {
+        regexCharacterClass = true;
+      } else if (char === "]") {
+        regexCharacterClass = false;
+      } else if (char === "/" && !regexCharacterClass) {
+        regexLiteral = false;
+      }
+      continue;
+    }
     if (rustRawStringHashes !== null) {
       const closing = `"${"#".repeat(rustRawStringHashes)}`;
       if (line.startsWith(closing, index)) {
@@ -523,6 +558,11 @@ function assertionCodeLine(
       continue;
     }
     if (char === "/" && next === "/") break;
+    if ((language === "ts" || language === null) && char === "/" && canBeginRegexLiteral(code)) {
+      regexLiteral = true;
+      regexCharacterClass = false;
+      continue;
+    }
     if ((language === null || language === "python") && char === "#" && next !== "[") break;
     const triple = line.slice(index, index + 3);
     if (triple === "'''" || triple === '"""') {
@@ -556,10 +596,15 @@ function assertionCodeLine(
   }
   // Ordinary single/double quoted literals cannot cross a physical line.
   if (quote === "'" || quote === '"') quote = null;
+  // JavaScript regex literals cannot cross an unescaped physical newline.
+  regexLiteral = false;
+  regexCharacterClass = false;
   const state = Object.freeze({
     blockCommentDepth,
     quote,
     rustRawStringHashes,
+    regexLiteral,
+    regexCharacterClass,
     jsxDepth,
     jsxInTag,
     jsxTagClosing,
