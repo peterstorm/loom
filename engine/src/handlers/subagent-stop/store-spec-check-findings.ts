@@ -61,10 +61,10 @@ const handler: HookHandler = async (stdin) => {
   const rawPath = resolveAgentTranscriptPath(input) ?? input.agent_transcript_path ?? "";
   const transcript = await readTranscriptWithRetry(rawPath, /SPEC_CHECK_CRITICAL_COUNT:\s*\d+/);
   if (!transcript) {
-    // Fail CLOSED, mirroring the missing-count path below: recording nothing
-    // here would let wave-gate check 4 pass vacuously as "skipped (no
-    // spec-check data)" — an unreadable/empty transcript must read as a
-    // capture failure, never as a clean skip.
+    // Fail CLOSED, mirroring the missing-count path below. The wave gate also
+    // rejects absent spec-check data, but persisting this typed failure keeps
+    // the concrete unreadable-transcript cause instead of collapsing it into
+    // generic missing evidence.
     process.stderr.write(
       `WARNING: spec-check transcript empty or unreadable (path=${rawPath || "<unset>"}) — marking evidence_capture_failed\n`,
     );

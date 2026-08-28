@@ -279,9 +279,8 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
       tasks: [],
       wave_gates: {},
     }));
-    // A reported count of 0 alongside a listed CRITICAL finding — storing it
-    // as-is would let wave-gate check 4 pass on critical_count while the
-    // findings say otherwise.
+    // A reported count of 0 alongside a listed CRITICAL finding must become a
+    // typed capture failure rather than contradictory spec-check evidence.
     const transcriptPath = join(tmpDir, "transcript.jsonl");
     writeFileSync(transcriptPath, JSON.stringify({
       type: "assistant",
@@ -410,7 +409,8 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
       expect(text).toContain("marking evidence_capture_failed");
 
       const state = JSON.parse(readFileSync(statePath, "utf-8"));
-      // Wave-gate check 4 now sees a verdict, not a vacuous "no spec-check data".
+      // Preserve the concrete unreadable-transcript cause instead of generic
+      // missing spec-check evidence.
       expect(state.spec_check.verdict).toBe("EVIDENCE_CAPTURE_FAILED");
       expect(state.spec_check.wave).toBe(3);
       expect(state.spec_check.error).toContain("re-run /wave-gate");

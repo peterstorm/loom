@@ -27,8 +27,8 @@ const item = (over: Partial<ReservedResultItem> = {}): ReservedResultItem => ({
   ...over,
 });
 
-/** The envelope shape the harness returns for a result that DID arrive. */
-const returned = (agent: string) => ({ agent, exitCode: 0 });
+/** The parseable envelope shape required before a result DID arrive. */
+const returned = (agent: string) => ({ agent, task: "Task: T1", exitCode: 0, messages: [] });
 
 function authority(taskId: string, reservation: string) {
   const instant = parseIsoInstant("2026-08-24T00:00:00.000Z");
@@ -161,8 +161,14 @@ describe("classifyMissingReservedResults", () => {
       ["a non-object entry", "code-reviewer"],
       ["null", null],
       ["an array", []],
-      ["an envelope with no agent field", { exitCode: 0 }],
-      ["an envelope whose agent is not a string", { agent: 7 }],
+      ["an envelope with no agent field", { task: "Task: T1", exitCode: 0, messages: [] }],
+      ["an envelope whose agent is not a string", { ...returned("code-reviewer"), agent: 7 }],
+      ["a matching-agent envelope with no task", { agent: "code-reviewer", exitCode: 0, messages: [] }],
+      ["a matching-agent envelope whose task is not a string", { ...returned("code-reviewer"), task: 7 }],
+      ["a matching-agent envelope with no exit code", { agent: "code-reviewer", task: "Task: T1", messages: [] }],
+      ["a matching-agent envelope whose exit code is not a number", { ...returned("code-reviewer"), exitCode: "0" }],
+      ["a matching-agent envelope with no messages", { agent: "code-reviewer", task: "Task: T1", exitCode: 0 }],
+      ["a matching-agent envelope with an invalid stop reason", { ...returned("code-reviewer"), stopReason: 7 }],
     ])("treats %s as an absence rather than trusting the slot", (_label, raw) => {
       const missing = classifyMissingReservedResults([item()], [raw], false);
 

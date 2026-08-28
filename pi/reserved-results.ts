@@ -18,6 +18,7 @@ import { stripNamespace } from "../engine/src/utils/strip-namespace";
 import { type TaskExecutionSpawn } from "../engine/src/core/validate-task-execution";
 import type { ImplementationAttemptAuthority } from "../engine/src/core/implementation-completion";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
+import { parsePiSubagentResults, type PiSubagentResultEntry } from "./subagent-result";
 
 const REVIEW_AGENTS: ReadonlySet<string> = new Set(agentsOfKind("reviewer"));
 const isReviewAgent = (agentType: string): boolean => REVIEW_AGENTS.has(agentType);
@@ -99,15 +100,14 @@ export type MissingReservedResults<T extends ReservedResultItem> = Readonly<{
 }>;
 
 /**
- * The agent name the harness reported at this batch position, or `null` when
- * the position is absent or is not a result envelope at all. A mismatch is
- * treated exactly like an absence — a result from the wrong agent proves the
- * expected one did not report.
+ * The agent name from a parsed result envelope at this batch position, or
+ * `null` when the position is absent or its envelope was rejected. A mismatch
+ * is treated exactly like an absence — malformed or wrong-agent evidence does
+ * not prove that the expected Agent reported.
  */
-function returnedAgentAt(rawResults: readonly unknown[], index: number): string | null {
-  const raw = rawResults[index];
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw) || !("agent" in raw)) return null;
-  return typeof raw.agent === "string" ? stripNamespace(raw.agent) : null;
+function returnedAgentAt(entries: readonly PiSubagentResultEntry[], index: number): string | null {
+  const entry = entries[index];
+  return entry?.ok === true ? stripNamespace(entry.result.agent) : null;
 }
 
 export function classifyMissingReservedResults<T extends ReservedResultItem>(
@@ -115,9 +115,10 @@ export function classifyMissingReservedResults<T extends ReservedResultItem>(
   rawResults: readonly unknown[],
   orchestrationRunBound: boolean,
 ): MissingReservedResults<T> {
+  const entries = parsePiSubagentResults(rawResults);
   const missing = (predicate: (item: T) => boolean): readonly MissingReservedResult<T>[] =>
     Object.freeze(items.flatMap((item, index) =>
-      predicate(item) && returnedAgentAt(rawResults, index) !== item.agentType
+      predicate(item) && returnedAgentAt(entries, index) !== item.agentType
         ? [Object.freeze({ item, index })]
         : []));
 

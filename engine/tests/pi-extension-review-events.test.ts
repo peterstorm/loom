@@ -3156,6 +3156,47 @@ describe("Pi extension review tool_result integration", () => {
     expect(task.review_error).toContain("Pi review messages are malformed");
   });
 
+  it("replaces stale passing review evidence for a malformed matching-agent envelope", async () => {
+    const planPath = join(temp, "malformed-reserved-review-result-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks: [{ ...initialGraph().tasks[0], review_status: "passed" }],
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4c5";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-malformed-reserved-review-result";
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: {
+        agent: "code-reviewer",
+        task: "Task ID: T1\nReview and emit Machine Summary findings.",
+        agentScope: "user",
+      },
+    }, context)).toEqual([undefined]);
+
+    const responses = await pi.emit("tool_result", {
+      toolName: "subagent",
+      toolCallId,
+      content: [],
+      details: { results: [{ agent: "code-reviewer" }] },
+    }, context);
+
+    const task = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
+    expect(task.review_status).toBe("evidence_capture_failed");
+    expect(task.review_evidence_failures).toEqual(["code-reviewer"]);
+    expect(task.review_error).toContain("reserved reviewer result 1");
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({ text: expect.stringContaining("result 1 has an unrecognized shape") })],
+    }));
+  });
+
   it("marks an omitted reserved reviewer result as evidence_capture_failed", async () => {
     const planPath = join(temp, "truncated-review-results-plan.md");
     writeFileSync(planPath, "# Plan\n");
@@ -3244,6 +3285,7 @@ describe("Pi extension review tool_result integration", () => {
     ["mismatched agent", {
       results: [{ agent: "code-reviewer", task: "spec check", exitCode: 0, messages: [] }],
     }],
+    ["malformed matching envelope", { results: [{ agent: "spec-check-invoker" }] }],
   ])("replaces stale passing spec evidence for a reserved %s result", async (label, details) => {
     const planPath = join(temp, `reserved-spec-${label.replaceAll(" ", "-")}.md`);
     writeFileSync(planPath, "# Plan\n");
