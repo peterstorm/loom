@@ -338,7 +338,9 @@ export function piReviewAuthorityProblem(
 ): string | null {
   const currentAuthority = reviewAuthorityForTask(task, agentType);
   if (reservedAuthority == null) {
-    return task.review_run === undefined ? null : "failed reviewer has no exact current Review Run authority";
+    return task.review_run === undefined && task.review_generation === undefined
+      ? null
+      : "reviewer has no exact current or retained review-generation authority";
   }
   return currentAuthority !== null &&
       currentAuthority.taskId === reservedAuthority.taskId &&

@@ -870,6 +870,31 @@ describe("applyReviewPiResult", () => {
     ]);
   });
 
+  it("rejects authority-free malformed evidence for a retired generation-aware review", async () => {
+    const base = graph();
+    const retired = graph({
+      tasks: [{
+        ...base.tasks[0]!,
+        review_status: "passed",
+        review_generation: 2,
+      }],
+    });
+    const store = fakeStore(retired);
+
+    const applied = await applyReviewPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ messages: [{ role: 42 }] }),
+      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      parentPrompt: "",
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("no exact current or retained review-generation authority"),
+    ]);
+    expect(store.current()).toEqual(parsedGraph(retired));
+  });
+
   it("records an evidence failure for malformed reviewer messages", async () => {
     const store = fakeStore(graph());
     await applyReviewPiResult({

@@ -8,9 +8,10 @@
  * for a decision already taken.
  *
  * Capture is bound to REQUEST authority, not to the agent that happens to have
- * stopped. Claude's `session_id` + `agent_id` + `agent_type` locate the
- * pre-spawn reservation; the reservation names the request, and the request
- * names the run, slot, attempt, model, and context digest. With request-bound
+ * stopped. Exact Run Directory authority plus Claude's `agent_id` native
+ * correlator locate the pre-spawn reservation; the reservation names the
+ * request, and the request names the run, slot, attempt, model, and context
+ * digest. With request-bound
  * Run authority, a stop that matches no reservation is audited and rejected:
  * silently treating it as unrelated would strand the reserved slot.
  *

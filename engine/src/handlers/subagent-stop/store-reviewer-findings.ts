@@ -42,6 +42,22 @@ const discarded = (message: string): HookResult => {
   return { kind: "error", message: diagnostic };
 };
 
+/** Resolve unavailable transcript evidence without reviving retired review authority. */
+export function unavailableReviewerResolution(
+  task: Task,
+  agent: string,
+  message: string,
+): ReviewResolution {
+  const retiredGenerationAwareReview = task.review_run === undefined && (
+    task.review_generation !== undefined ||
+    task.accepted_review_authority !== undefined ||
+    (task.issued_review_packets?.length ?? 0) > 0
+  );
+  return retiredGenerationAwareReview
+    ? { kind: "ignored-stale", agent, message: `stale reviewer evidence ignored: ${message}` }
+    : { kind: "evidence-failed", agent, message };
+}
+
 const handler: HookHandler = async (stdin) => {
   const parsedInput = parseSubagentStopStdin(stdin);
   if (!parsedInput.ok) {
@@ -123,10 +139,11 @@ const handler: HookHandler = async (stdin) => {
   }
 
   const transcript = await readTranscriptWithRetry(rawPath, /\*{0,2}CRITICAL_COUNT:?\*{0,2}\s*\d+/);
+  const unavailableMessage = `review transcript empty or unreadable at ${rawPath || "<unset>"}`;
   let resolution: ReviewResolution = {
     kind: "evidence-failed",
     agent: agentType,
-    message: `review transcript empty or unreadable at ${rawPath || "<unset>"}`,
+    message: unavailableMessage,
   };
   let appliedTask: Task = targetTask;
   let applicationChanged = false;
@@ -146,7 +163,7 @@ const handler: HookHandler = async (stdin) => {
             ),
             [...(t.file_list ?? []), ...(t.files_modified ?? [])],
           )
-        : resolution;
+        : unavailableReviewerResolution(t, agentType, unavailableMessage);
       appliedTask = applyReviewResolution(t, resolution);
       applicationChanged = appliedTask !== t;
       return appliedTask;

@@ -24,8 +24,9 @@ import { describe, expect, it, vi } from "vitest";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import handler from "../../../src/handlers/subagent-stop/store-reviewer-findings";
+import handler, { unavailableReviewerResolution } from "../../../src/handlers/subagent-stop/store-reviewer-findings";
 import { SUBAGENT_DIR } from "../../../src/config";
+import type { Task } from "../../../src/types";
 
 const CLEAN = "### Machine Summary\nCRITICAL_COUNT: 0\nADVISORY_COUNT: 0";
 const BLOCKING = [
@@ -111,6 +112,21 @@ async function run(payload: Record<string, unknown>) {
 }
 
 describe("store-reviewer-findings — the Claude Code findings-ingestion shell", () => {
+  it("classifies unavailable evidence for a retired generation-aware review as stale", () => {
+    const retired = {
+      ...task("T1"),
+      review_status: "passed",
+      review_generation: 2,
+    } as unknown as Task;
+
+    expect(unavailableReviewerResolution(retired, "code-reviewer", "transcript unreadable"))
+      .toEqual({
+        kind: "ignored-stale",
+        agent: "code-reviewer",
+        message: "stale reviewer evidence ignored: transcript unreadable",
+      });
+  });
+
   it("leaves task state untouched for an explicitly marked standalone review", async () => {
     const f = fixture("standalone", BLOCKING, [task("T1")], "LOOM_REVIEW_CONTEXT: standalone\nReview the scope.");
     try {
