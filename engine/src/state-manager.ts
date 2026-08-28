@@ -371,6 +371,32 @@ function exactFieldsError(
 }
 
 const WAVE_REVIEW_EPOCH_FIELDS = ["runId", "wave", "batchEpoch"] as const;
+const WAVE_REVIEW_EPOCH_OPTIONAL_FIELDS = ["specCheckSlotAuthority"] as const;
+
+function parseWaveSpecCheckSlotAuthority(
+  raw: unknown,
+): ParseResult<WaveReviewEpochAuthority["specCheckSlotAuthority"]> {
+  if (raw === undefined) return parseOk(undefined);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return parseErr("wave_review_epoch.specCheckSlotAuthority must be an object when present");
+  }
+  const record = raw as Record<string, unknown>;
+  const fieldsError = exactFieldsError(
+    record,
+    ["slot_id", "attempted"],
+    [],
+    "wave_review_epoch.specCheckSlotAuthority",
+  );
+  if (fieldsError !== null) return parseErr(fieldsError);
+  const slotId = parseSlotId(record.slot_id);
+  if (!slotId.ok) {
+    return parseErr(`wave_review_epoch.specCheckSlotAuthority.slot_id: ${slotId.error.message}`);
+  }
+  if (record.attempted !== 1 && record.attempted !== 2) {
+    return parseErr("wave_review_epoch.specCheckSlotAuthority.attempted must be 1 or 2");
+  }
+  return parseOk(Object.freeze({ slot_id: slotId.value, attempted: record.attempted }));
+}
 
 /** Parse the exact request-batch authority persisted beside an active Wave Gate. */
 function parseWaveReviewEpoch(raw: unknown): ParseResult<WaveReviewEpochAuthority | undefined> {
@@ -379,7 +405,12 @@ function parseWaveReviewEpoch(raw: unknown): ParseResult<WaveReviewEpochAuthorit
     return parseErr("wave_review_epoch must be an object when present");
   }
   const record = raw as Record<string, unknown>;
-  const fieldsError = exactFieldsError(record, WAVE_REVIEW_EPOCH_FIELDS, [], "wave_review_epoch");
+  const fieldsError = exactFieldsError(
+    record,
+    WAVE_REVIEW_EPOCH_FIELDS,
+    WAVE_REVIEW_EPOCH_OPTIONAL_FIELDS,
+    "wave_review_epoch",
+  );
   if (fieldsError !== null) return parseErr(fieldsError);
   const runId = parseOrchestrationRunId(record.runId);
   if (!runId.ok) return parseErr(`wave_review_epoch.runId: ${runId.error.message}`);
@@ -388,10 +419,15 @@ function parseWaveReviewEpoch(raw: unknown): ParseResult<WaveReviewEpochAuthorit
   }
   const batchEpoch = parseArtifactDigest(record.batchEpoch);
   if (!batchEpoch.ok) return parseErr(`wave_review_epoch.batchEpoch: ${batchEpoch.error.message}`);
+  const specCheckSlotAuthority = parseWaveSpecCheckSlotAuthority(record.specCheckSlotAuthority);
+  if (!specCheckSlotAuthority.ok) return specCheckSlotAuthority;
   return parseOk(Object.freeze({
     runId: runId.value,
     wave: record.wave,
     batchEpoch: batchEpoch.value,
+    ...(specCheckSlotAuthority.value === undefined
+      ? {}
+      : { specCheckSlotAuthority: specCheckSlotAuthority.value }),
   }));
 }
 

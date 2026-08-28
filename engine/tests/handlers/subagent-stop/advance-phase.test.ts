@@ -114,8 +114,11 @@ describe("resolveTransition", () => {
     expect(r!.nextPhase).toBe("specify");
   });
 
-  it("brainstorm → null when brainstorm.md missing", () => {
-    expect(resolveTransition("brainstorm", mkState())).toBeNull();
+  it("brainstorm reports the missing artifact", () => {
+    expect(resolveTransition("brainstorm", mkState())).toEqual({
+      kind: "not-ready",
+      reason: expect.stringContaining("brainstorm.md was not found"),
+    });
   });
 
   // ── specify ──
@@ -144,12 +147,18 @@ describe("resolveTransition", () => {
     expect(r!.skipClarify).toBeUndefined();
   });
 
-  it("specify → null when spec_file is null", () => {
-    expect(resolveTransition("specify", mkState())).toBeNull();
+  it("specify reports absent spec authority", () => {
+    expect(resolveTransition("specify", mkState())).toMatchObject({
+      kind: "not-ready",
+      reason: expect.stringContaining("no readable spec.md"),
+    });
   });
 
-  it("specify → null when spec_file doesn't exist", () => {
-    expect(resolveTransition("specify", mkState({ spec_file: join(tmpDir, ".claude/specs/nope.md") }))).toBeNull();
+  it("specify reports a missing spec artifact", () => {
+    expect(resolveTransition("specify", mkState({ spec_file: join(tmpDir, ".claude/specs/nope.md") }))).toMatchObject({
+      kind: "not-ready",
+      reason: expect.stringContaining("no readable spec.md"),
+    });
   });
 
   it("surfaces an unreadable spec instead of advancing to clarify", () => {
@@ -161,10 +170,13 @@ describe("resolveTransition", () => {
       .toThrow(/cannot access phase artifact/);
   });
 
-  it("specify → null when spec_file not in .claude/specs/", () => {
+  it("specify reports an out-of-scope spec artifact", () => {
     const f = join(tmpDir, "random.md");
     writeFileSync(f, "x");
-    expect(resolveTransition("specify", mkState({ spec_file: f }))).toBeNull();
+    expect(resolveTransition("specify", mkState({ spec_file: f }))).toMatchObject({
+      kind: "not-ready",
+      reason: expect.stringContaining("no readable spec.md"),
+    });
   });
 
   it("specify with exactly CLARIFY_THRESHOLD markers → architecture", () => {
@@ -198,24 +210,33 @@ describe("resolveTransition", () => {
     expect(r!.nextPhase).toBe("architecture");
   });
 
-  it("clarify → null when markers still remain (even below trigger threshold)", () => {
+  it("clarify reports markers still remaining (even below trigger threshold)", () => {
     const specFile = join(tmpDir, ".claude", "specs", "feat", "spec.md");
     mkdirSync(join(tmpDir, ".claude", "specs", "feat"), { recursive: true });
     writeFileSync(specFile, Array.from({ length: CLARIFY_THRESHOLD }, () => "NEEDS CLARIFICATION").join("\n"));
 
-    expect(resolveTransition("clarify", mkState({ spec_file: specFile }))).toBeNull();
+    expect(resolveTransition("clarify", mkState({ spec_file: specFile }))).toMatchObject({
+      kind: "not-ready",
+      reason: expect.stringContaining("NEEDS CLARIFICATION marker(s) remain unresolved"),
+    });
   });
 
-  it("clarify → null when markers above threshold", () => {
+  it("clarify reports markers above threshold", () => {
     const specFile = join(tmpDir, ".claude", "specs", "feat", "spec.md");
     mkdirSync(join(tmpDir, ".claude", "specs", "feat"), { recursive: true });
     writeFileSync(specFile, Array.from({ length: CLARIFY_THRESHOLD + 1 }, () => "NEEDS CLARIFICATION").join("\n"));
 
-    expect(resolveTransition("clarify", mkState({ spec_file: specFile }))).toBeNull();
+    expect(resolveTransition("clarify", mkState({ spec_file: specFile }))).toMatchObject({
+      kind: "not-ready",
+      reason: expect.stringContaining("NEEDS CLARIFICATION marker(s) remain unresolved"),
+    });
   });
 
-  it("clarify → null when spec_file missing", () => {
-    expect(resolveTransition("clarify", mkState())).toBeNull();
+  it("clarify reports a missing spec artifact", () => {
+    expect(resolveTransition("clarify", mkState())).toMatchObject({
+      kind: "not-ready",
+      reason: expect.stringContaining("no readable spec.md"),
+    });
   });
 
   // ── architecture ──
@@ -242,14 +263,20 @@ describe("resolveTransition", () => {
     expect(r!.artifact).toBe(planFile);
   });
 
-  it("architecture → null when plan_file not in .claude/plans/", () => {
+  it("architecture reports an out-of-scope plan", () => {
     const f = join(tmpDir, "plan.md");
     writeFileSync(f, "plan");
-    expect(resolveTransition("architecture", mkState({ plan_file: f }))).toBeNull();
+    expect(resolveTransition("architecture", mkState({ plan_file: f }))).toMatchObject({
+      kind: "not-ready",
+      reason: expect.stringContaining("is outside"),
+    });
   });
 
-  it("architecture → null when plan_file is null", () => {
-    expect(resolveTransition("architecture", mkState())).toBeNull();
+  it("architecture reports a missing plan", () => {
+    expect(resolveTransition("architecture", mkState())).toMatchObject({
+      kind: "not-ready",
+      reason: expect.stringContaining("no readable plan artifact"),
+    });
   });
 
   it("surfaces an unreadable plan instead of treating it as missing", () => {
@@ -275,15 +302,21 @@ describe("resolveTransition", () => {
     expect(r!.artifact).toBe(gapReport);
   });
 
-  it("plan-alignment → null when gap report missing", () => {
+  it("plan-alignment reports a missing gap report", () => {
     const specDir = join(tmpDir, ".claude", "specs");
     mkdirSync(specDir, { recursive: true });
 
-    expect(resolveTransition("plan-alignment", mkState({ spec_dir: specDir }))).toBeNull();
+    expect(resolveTransition("plan-alignment", mkState({ spec_dir: specDir }))).toMatchObject({
+      kind: "not-ready",
+      reason: expect.stringContaining("plan-alignment.md was not found"),
+    });
   });
 
-  it("plan-alignment → null when spec_dir does not exist", () => {
-    expect(resolveTransition("plan-alignment", mkState({ spec_dir: join(tmpDir, "nonexistent") }))).toBeNull();
+  it("plan-alignment reports a missing spec directory", () => {
+    expect(resolveTransition("plan-alignment", mkState({ spec_dir: join(tmpDir, "nonexistent") }))).toMatchObject({
+      kind: "not-ready",
+      reason: expect.stringContaining("plan-alignment.md was not found"),
+    });
   });
 
   it("plan-alignment → decompose using default spec_dir when spec_dir is null", () => {
@@ -342,12 +375,18 @@ describe("resolveTransition", () => {
 
   // ── terminal / no-op phases ──
 
-  it("execute → null (terminal)", () => {
-    expect(resolveTransition("execute", mkState())).toBeNull();
+  it("execute reports its terminal state", () => {
+    expect(resolveTransition("execute", mkState())).toEqual({
+      kind: "not-ready",
+      reason: "execute is terminal and has no next phase",
+    });
   });
 
-  it("init → null (no transition)", () => {
-    expect(resolveTransition("init", mkState())).toBeNull();
+  it("init reports that no completed transition exists", () => {
+    expect(resolveTransition("init", mkState())).toEqual({
+      kind: "not-ready",
+      reason: "init has no completed phase transition",
+    });
   });
 });
 
@@ -468,6 +507,21 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
       expect(result).toMatchObject({
         kind: "error",
         message: expect.stringContaining("phase artifact discovery failed"),
+      });
+    });
+  });
+
+  it("the REAL handler reports a missing required artifact instead of silently passing through", async () => {
+    const session = `phase-not-ready-${process.pid}-${Date.now()}`;
+    await withPhaseState(session, mkState({ current_phase: "brainstorm" }), async () => {
+      const result = await advancePhaseHandler(JSON.stringify({
+        session_id: session,
+        agent_id: "phase-agent",
+        agent_type: "brainstorm-agent",
+      }), []);
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringMatching(/brainstorm.*brainstorm\.md was not found.*phase NOT advanced/),
       });
     });
   });

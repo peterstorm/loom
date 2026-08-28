@@ -140,6 +140,37 @@ describe("countAssertions (pure)", () => {
     ].join("\n");
     expect(countAssertions(diff)).toBe(0);
   });
+
+  it("does not launder empty tests through matcher text in titles or comments", () => {
+    const diff = [
+      '+  it("uses toBe and expect(", () => {});',
+      "+  // expect(value).toEqual(true)",
+      "+  /* assertThat(value).isTrue();",
+      "+     pytest.raises(ExpectedError) */",
+      "+  const note = `toThrow and .should.`;",
+    ].join("\n");
+
+    expect(countNewTests(diff).ts).toBe(1);
+    expect(countAssertions(diff)).toBe(0);
+  });
+
+  it("does not let removed lexical state hide an added assertion", () => {
+    const diff = [
+      "-  /* deleted unterminated comment",
+      "+  expect(result).toBe(true);",
+    ].join("\n");
+
+    expect(countAssertions(diff)).toBe(1);
+  });
+
+  it("still counts executable assertions containing string arguments", () => {
+    const diff = [
+      '+  expect(message).toBe("toEqual in a value");',
+      "+  assert reason == 'expect(fake)'",
+    ].join("\n");
+
+    expect(countAssertions(diff)).toBe(2);
+  });
 });
 
 import { filterTestFiles } from "../../src/utils/git";

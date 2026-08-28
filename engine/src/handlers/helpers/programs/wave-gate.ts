@@ -795,15 +795,24 @@ export async function installWaveReviewRuns(
   registration: RegisteredWaveGateProgram,
   batch: WaveRequestBatch,
 ): Promise<void> {
+  const specCheckAuthority = batch.requests.map(({ authority }) => authority as AgentRequestAuthority)
+    .find(({ role }) => role === "spec-check-invoker");
+  if (specCheckAuthority === undefined || specCheckAuthority.attempt !== 1) {
+    throw new Error("Wave review batch lacks exact spec-check attempt-1 authority");
+  }
   const reviewAuthorities = batch.requests.filter(({ authority }) =>
     (authority as AgentRequestAuthority).role !== "spec-check-invoker");
   await manager.update((locked) => ({
     ...locked,
     spec_check: undefined,
     wave_review_epoch: {
-      runId: (batch.requests[0]!.authority as AgentRequestAuthority).runId,
+      runId: specCheckAuthority.runId,
       wave: registration.input.wave ?? locked.current_wave ?? 0,
       batchEpoch: batch.batchEpoch,
+      specCheckSlotAuthority: {
+        slot_id: specCheckAuthority.slotId,
+        attempted: 1,
+      },
     },
     tasks: locked.tasks.map((task) => {
       if (!registration.taskIds.includes(task.id)) return task;
@@ -1592,6 +1601,34 @@ export async function startWaveGateFacade(
   }
 }
 
+export async function markWaveSpecCheckRetryIssued(
+  manager: StateManager,
+  authority: AgentRequestAuthority,
+  batchEpoch: string,
+): Promise<void> {
+  if (authority.role !== "spec-check-invoker" || authority.attempt !== 2) {
+    throw new Error("spec-check retry issuance requires exact attempt-2 authority");
+  }
+  await manager.update((locked) => {
+    const epoch = locked.wave_review_epoch;
+    const slot = epoch?.specCheckSlotAuthority;
+    if (epoch === undefined || epoch.runId !== authority.runId || epoch.batchEpoch !== batchEpoch ||
+        locked.current_phase !== "execute" || locked.current_wave !== epoch.wave ||
+        locked.active_wave_gate?.runId !== authority.runId || locked.active_wave_gate.wave !== epoch.wave ||
+        slot === undefined || slot.slot_id !== authority.slotId) {
+      throw new Error("spec-check retry authority does not match the exact current Wave review epoch slot");
+    }
+    if (slot.attempted === 2) return locked;
+    return {
+      ...locked,
+      wave_review_epoch: {
+        ...epoch,
+        specCheckSlotAuthority: { ...slot, attempted: 2 },
+      },
+    };
+  });
+}
+
 export async function applyWaveFacadeSubmission(
   handle: RunDirHandle,
   authority: AgentRequestAuthority,
@@ -1620,7 +1657,9 @@ export async function applyWaveFacadeSubmission(
         const epoch = locked.wave_review_epoch;
         if (locked.current_wave !== wave || locked.active_wave_gate?.runId !== authority.runId ||
             locked.active_wave_gate.authorityDigest !== context.authorityDigest ||
-            epoch?.runId !== authority.runId || epoch.wave !== wave || epoch.batchEpoch !== batchEpoch) {
+            epoch?.runId !== authority.runId || epoch.wave !== wave || epoch.batchEpoch !== batchEpoch ||
+            epoch.specCheckSlotAuthority?.slot_id !== authority.slotId ||
+            epoch.specCheckSlotAuthority.attempted !== authority.attempt) {
           const expected = `${locked.current_wave}/${locked.active_wave_gate?.runId ?? "none"}/${locked.active_wave_gate?.authorityDigest ?? "none"}/${epoch?.runId ?? "none"}/${epoch?.wave ?? "none"}/${(epoch?.batchEpoch ?? "none").slice(0, 12)}`;
           throw new Error(`Wave spec-check request ${authority.requestId} does not belong to the exact current review epoch (expected current_wave/runId/digest/epoch-runId/epoch-wave/epoch-batch: ${expected}; request wave ${wave}, digest ${context.authorityDigest}, runId ${authority.runId}, batch ${batchEpoch.slice(0, 12)})`);
         }
@@ -1871,10 +1910,14 @@ export async function resumeWaveGateFacade(
         continue;
       }
       if (authority.role === "spec-check-invoker") {
+        const epoch = refreshed.wave_review_epoch;
         currentPacketMembership.set(
           authority.requestId,
           currentRuns.length > 0 && currentRuns.every(({ review_run }) =>
-            review_run?.head_sha === context.value.batchEpoch),
+            review_run?.head_sha === context.value.batchEpoch) &&
+            epoch?.batchEpoch === context.value.batchEpoch &&
+            epoch.specCheckSlotAuthority?.slot_id === authority.slotId &&
+            epoch.specCheckSlotAuthority.attempted === authority.attempt,
         );
         continue;
       }
@@ -2081,7 +2124,9 @@ export async function resumeWaveGateFacade(
           }
         }
       }
-      if (attemptOne === undefined) return waveBlocked(handle, "current Wave spec-check has no issued attempt-1 authority");
+      if (attemptOne === undefined || epoch === undefined) {
+        return waveBlocked(handle, "current Wave spec-check has no issued attempt-1 authority");
+      }
       const retry = deriveWaveAttemptTwo(handle, attemptOne);
       const recovered = durableRefutationRequests(
         handle, [retry.request], publicationResolver(handle), "wave-gate-spec-retry",
@@ -2094,6 +2139,7 @@ export async function resumeWaveGateFacade(
         if (!published.ok) return failed(published.message);
         durable = published.requests[0]!;
       }
+      await markWaveSpecCheckRetryIssued(manager, durable.authority, epoch.batchEpoch);
       const captureRejection = await durableCaptureRejection(handle, durable.authority);
       if (captureRejection !== null) {
         return waveBlocked(handle, `Wave spec-check attempt 2 exhausted after capture rejection: ${captureRejection}`);

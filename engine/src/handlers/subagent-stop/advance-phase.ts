@@ -62,34 +62,55 @@ function readableSpecArtifact(state: TaskGraph): string | null {
   return spec && phaseArtifactExists(spec) ? spec : null;
 }
 
-/** Determine next phase + artifact after a phase completes */
+export type PhaseTransitionResolution =
+  | Readonly<{ kind: "ready"; nextPhase: Phase; artifact: string; skipClarify?: boolean }>
+  | Readonly<{ kind: "not-ready"; reason: string; nextPhase?: never; artifact?: never; skipClarify?: never }>;
+
+const transitionReady = (
+  nextPhase: Phase,
+  artifact: string,
+  skipClarify?: boolean,
+): PhaseTransitionResolution => ({
+  kind: "ready",
+  nextPhase,
+  artifact,
+  ...(skipClarify === undefined ? {} : { skipClarify }),
+});
+
+const transitionNotReady = (reason: string): PhaseTransitionResolution => ({ kind: "not-ready", reason });
+
+/** Determine the next phase or the exact artifact condition blocking it. */
 export function resolveTransition(
   completedPhase: Phase,
   state: TaskGraph,
-): { nextPhase: Phase; artifact: string; skipClarify?: boolean } | null {
+): PhaseTransitionResolution {
   return match(completedPhase)
     .with("brainstorm", () => {
       // Scope search to current run's spec_dir to avoid finding stale artifacts
       const searchDir = state.spec_dir ?? ".claude/specs";
       const file = findFile(searchDir, "brainstorm.md");
-      if (!file) return null;
-      return { nextPhase: "specify" as Phase, artifact: file };
+      if (!file) return transitionNotReady(`brainstorm.md was not found under ${searchDir}`);
+      return transitionReady("specify", file);
     })
     .with("specify", () => {
       const spec = readableSpecArtifact(state);
-      if (spec === null) return null;
-      const markers = countMarkers(spec);
-      if (markers > CLARIFY_THRESHOLD) {
-        return { nextPhase: "clarify" as Phase, artifact: spec };
+      if (spec === null) {
+        return transitionNotReady(`no readable spec.md is available inside ${SPEC_ARTIFACT_DIR}`);
       }
-      return { nextPhase: "architecture" as Phase, artifact: spec, skipClarify: true };
+      const markers = countMarkers(spec);
+      if (markers > CLARIFY_THRESHOLD) return transitionReady("clarify", spec);
+      return transitionReady("architecture", spec, true);
     })
     .with("clarify", () => {
       const spec = readableSpecArtifact(state);
-      if (spec === null) return null;
+      if (spec === null) {
+        return transitionNotReady(`no readable spec.md is available inside ${SPEC_ARTIFACT_DIR}`);
+      }
       const markers = countMarkers(spec);
-      if (markers > 0) return null; // All markers must be resolved before advancing
-      return { nextPhase: "architecture" as Phase, artifact: spec };
+      if (markers > 0) {
+        return transitionNotReady(`${markers} NEEDS CLARIFICATION marker(s) remain unresolved in ${spec}`);
+      }
+      return transitionReady("architecture", spec);
     })
     .with("architecture", () => {
       // Try state.plan_file first, fall back to deriving plan path from spec_dir slug
@@ -98,7 +119,7 @@ export function resolveTransition(
         // plan_file set but not in expected location — reject. Resolved
         // containment for the same reason as the spec branches: substring
         // containment carries `..` segments through unharmed.
-        return null;
+        return transitionNotReady(`plan_file ${plan} is outside ${PLAN_ARTIFACT_DIR}`);
       }
       if (!plan || !phaseArtifactExists(plan)) {
         // plan_file not set or file missing — try deriving from spec_dir slug
@@ -120,11 +141,12 @@ export function resolveTransition(
           }
         }
       }
-      if (!plan || !phaseArtifactExists(plan)) return null;
-      if (state.skipped_phases.includes("plan-alignment")) {
-        return { nextPhase: "decompose" as Phase, artifact: plan };
+      if (!plan || !phaseArtifactExists(plan)) {
+        return transitionNotReady(`no readable plan artifact is available inside ${PLAN_ARTIFACT_DIR}`);
       }
-      return { nextPhase: "plan-alignment" as Phase, artifact: plan };
+      return state.skipped_phases.includes("plan-alignment")
+        ? transitionReady("decompose", plan)
+        : transitionReady("plan-alignment", plan);
     })
     .with("plan-alignment", () => {
       // Loop-back (re-running architecture) is orchestrator-driven via `set-phase` helper,
@@ -132,16 +154,15 @@ export function resolveTransition(
       const specDir = state.spec_dir ?? ".claude/specs";
       const gapReport = findFile(specDir, "plan-alignment.md");
       if (!gapReport) {
-        process.stderr.write(`plan-alignment completed but no plan-alignment.md found in ${specDir}\n`);
-        return null;
+        return transitionNotReady(`plan-alignment.md was not found under ${specDir}`);
       }
-      return { nextPhase: "decompose" as Phase, artifact: gapReport };
+      return transitionReady("decompose", gapReport);
     })
     .with("decompose", () => {
-      return { nextPhase: "execute" as Phase, artifact: "task_graph" };
+      return transitionReady("execute", "task_graph");
     })
-    .with("init", () => null)
-    .with("execute", () => null)
+    .with("init", () => transitionNotReady("init has no completed phase transition"))
+    .with("execute", () => transitionNotReady("execute is terminal and has no next phase"))
     .exhaustive();
 }
 
@@ -262,7 +283,12 @@ const handler: HookHandler = async (stdin) => {
       message: `advance-phase: phase artifact discovery failed: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
-  if (!transition) return { kind: "passthrough" };
+  if (transition.kind === "not-ready") {
+    return {
+      kind: "error",
+      message: `advance-phase: ${completedPhase} completed but phase transition is not ready: ${transition.reason}; phase NOT advanced`,
+    };
+  }
 
   const { nextPhase, artifact, skipClarify } = transition;
 

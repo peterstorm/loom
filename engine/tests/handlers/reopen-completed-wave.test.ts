@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { checkImplementationProof, checkReviewedWorkspace } from "../../src/core/wave-gate-machine";
 import { reviewedWorkspaceObservation } from "../../src/core/reviewed-workspace";
-import {
+import reopenCompletedWaveHandler, {
   commitCompletedWaveReopening,
   deriveWaveReopeningProof,
   hasLaterWaveProgress,
@@ -178,6 +178,14 @@ describe("later-Wave progress refusal", () => {
 });
 
 describe("reopen completed Wave", () => {
+  it("retains the JSON parser cause for malformed reopening payloads", async () => {
+    const result = await reopenCompletedWaveHandler("{", []);
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/reopening payload must be valid JSON: .+/),
+    });
+  });
+
   it("returns the exact proof derived and committed from locked state", async () => {
     const locked = graph();
     let current = locked;

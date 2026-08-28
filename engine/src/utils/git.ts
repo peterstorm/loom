@@ -334,16 +334,73 @@ export function countNewTests(diffContent: string): TestCount {
   return { java, ts, python, rust, total: java + ts + python + rust };
 }
 
-/** Count assertions in a diff string (pure) */
+type AssertionLexicalState = Readonly<{
+  blockComment: boolean;
+  quote: "'" | '"' | "`" | null;
+}>;
+
+/** Remove comments and string contents while retaining executable token positions. */
+function assertionCodeLine(
+  line: string,
+  initial: AssertionLexicalState,
+): Readonly<{ code: string; state: AssertionLexicalState }> {
+  let blockComment = initial.blockComment;
+  let quote = initial.quote;
+  let escaped = false;
+  let code = "";
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index]!;
+    const next = line[index + 1];
+    if (blockComment) {
+      if (char === "*" && next === "/") {
+        blockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+    if (quote !== null) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      blockComment = true;
+      index += 1;
+      continue;
+    }
+    if ((char === "/" && next === "/") || char === "#") break;
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      continue;
+    }
+    code += char;
+  }
+  // Ordinary single/double quoted literals cannot cross a physical line.
+  if (quote === "'" || quote === '"') quote = null;
+  return Object.freeze({ code, state: Object.freeze({ blockComment, quote }) });
+}
+
+/** Count executable assertions in added diff lines (pure). */
 export function countAssertions(diffContent: string): number {
-  const lines = diffContent.split("\n");
+  let state: AssertionLexicalState = Object.freeze({ blockComment: false, quote: null });
   let count = 0;
 
-  for (const line of lines) {
-    if (!line.startsWith("+")) continue;
-    // Match at most one per line to avoid cross-language double-counting
-    if (/(assertThat|assertEquals|assertNotNull|assertThrows|verify\()/.test(line)) { count++; continue; }
-    if (/(expect\(|toEqual|toBe|toHaveBeenCalled|toThrow|\.should\.)/.test(line)) { count++; continue; }
+  for (const diffLine of diffContent.split("\n")) {
+    // Lexical state follows the postimage: removed lines do not exist there.
+    const isSourceLine = diffLine.startsWith("+") || diffLine.startsWith(" ");
+    if (!isSourceLine) continue;
+    const parsed = assertionCodeLine(diffLine.slice(1), state);
+    state = parsed.state;
+    if (!diffLine.startsWith("+") || diffLine.startsWith("+++")) continue;
+    const line = parsed.code;
+    // Match at most one per line to avoid cross-language double-counting.
+    if (/(assertThat|assertEquals|assertNotNull|assertThrows|verify)\s*\(/.test(line)) { count++; continue; }
+    if (/(expect\s*\(|\.should\.)/.test(line)) { count++; continue; }
     if (/(assert\w*\(|assert [^=]|self\.assert|pytest\.raises)/.test(line)) { count++; continue; }
     if (/(assert(_eq)?!|assert_ne!)/.test(line)) { count++; continue; }
   }

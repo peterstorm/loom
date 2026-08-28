@@ -2117,16 +2117,6 @@ function specCheckSlotResult(
   return spec.verdict === "EVIDENCE_CAPTURE_FAILED" ? "invalid" : "accepted";
 }
 
-/**
- * How one reviewer slot settled. `accepted` and `invalid` are proven mutually
- * exclusive by the caller before this is reached, so the order here decides
- * nothing the caller has not already established.
- */
-function reviewerSlotResult(accepted: boolean, invalid: boolean): WaveReviewSlotEvidence["result"] {
-  if (accepted) return "accepted";
-  return invalid ? "invalid" : "missing";
-}
-
 export type WaveReviewRecovery =
   | Readonly<{ kind: "complete"; affectedSlotIds: readonly [] }>
   | Readonly<{
@@ -2157,11 +2147,19 @@ function authoritativeWaveReviewSlotEvidence(
     if (!pair.ok) return preparationFailure("stored Wave preparation attempt authority is invalid");
     const subject = binding.subject;
     if (subject.kind === "spec-check") {
+      const epoch = activeSnapshot.graph.wave_review_epoch;
+      const slot = epoch?.specCheckSlotAuthority;
+      if (epoch === undefined || epoch.runId !== preparation.runId || epoch.wave !== preparation.wave) {
+        return preparationFailure("current Wave spec-check lacks exact review epoch authority");
+      }
+      if (slot === undefined || slot.slot_id !== pair.value.slotId) {
+        return preparationFailure("current Wave spec-check lacks engine-issued exact slot authority");
+      }
       const spec = activeSnapshot.graph.spec_check;
       evidence.push(canonicalRecord({
         slotId: pair.value.slotId,
         result: specCheckSlotResult(spec, preparation.wave),
-        attempted: 1 as const,
+        attempted: slot.attempted,
       }));
       continue;
     }
@@ -2188,9 +2186,12 @@ function authoritativeWaveReviewSlotEvidence(
     const accepted = run.evidence.some(({ agent }) => agent === subject.reviewer);
     const invalid = (task.review_evidence_failures ?? []).includes(subject.reviewer);
     if (accepted && invalid) return preparationFailure(`Task ${task.id}/${subject.reviewer} is both accepted and invalid in active Review Run authority`);
+    let result: WaveReviewSlotEvidence["result"] = "missing";
+    if (accepted) result = "accepted";
+    else if (invalid) result = "invalid";
     evidence.push(canonicalRecord({
       slotId: pair.value.slotId,
-      result: reviewerSlotResult(accepted, invalid),
+      result,
       attempted: slot.attempted,
     }));
   }

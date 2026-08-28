@@ -32,7 +32,13 @@ export type WaveReopeningProof = Readonly<{
 
 function parseRequest(raw: string): ReopenRequest {
   let value: unknown;
-  try { value = JSON.parse(raw); } catch { throw new Error("reopening payload must be valid JSON"); }
+  try {
+    value = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(
+      `reopening payload must be valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("reopening payload must be an object");
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record).sort();

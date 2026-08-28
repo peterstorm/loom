@@ -1927,7 +1927,16 @@ describe("authoritative Wave review preparation, recovery, panel, and advisory c
         }))),
       },
     };
-    const parsedActiveGraph = parseTaskGraph({ ...snapshot.graph, tasks: [task] });
+    const parsedActiveGraph = parseTaskGraph({
+      ...snapshot.graph,
+      tasks: [task],
+      wave_review_epoch: {
+        runId: preparation.runId,
+        wave: preparation.wave,
+        batchEpoch: "e".repeat(64),
+        specCheckSlotAuthority: { slot_id: slots[0], attempted: 1 },
+      },
+    });
     expect(parsedActiveGraph).toMatchObject({ ok: true });
     const activeSnapshot = authorityValue(deriveWaveReadiness(authorityValue(parsedActiveGraph), statusDeps));
     const claims = slots.map((slotId, index) => ({
@@ -1947,7 +1956,7 @@ describe("authoritative Wave review preparation, recovery, panel, and advisory c
     });
     expect(deriveWaveReviewRecovery(preparation, snapshot)).toMatchObject({
       ok: false,
-      error: { message: expect.stringContaining("no exact active Review Run") },
+      error: { message: expect.stringContaining("lacks exact review epoch authority") },
     });
 
     const exhaustedTask = {
@@ -1958,8 +1967,30 @@ describe("authoritative Wave review preparation, recovery, panel, and advisory c
           index === 1 ? { ...slot, attempted: 2 as const } : slot)),
       },
     };
-    const exhaustedSnapshot = authorityValue(deriveWaveReadiness({ ...snapshot.graph, tasks: [exhaustedTask] }, statusDeps));
+    const exhaustedSnapshot = authorityValue(deriveWaveReadiness({
+      ...snapshot.graph,
+      tasks: [exhaustedTask],
+      wave_review_epoch: activeSnapshot.graph.wave_review_epoch,
+    }, statusDeps));
     expect(deriveWaveReviewRecovery(preparation, exhaustedSnapshot)).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("exhausted semantic attempt 2") },
+    });
+
+    const specExhaustedSnapshot = authorityValue(deriveWaveReadiness({
+      ...activeSnapshot.graph,
+      spec_check: {
+        wave: preparation.wave,
+        run_at: "2026-08-28T00:00:00.000Z",
+        verdict: "EVIDENCE_CAPTURE_FAILED",
+        error: "attempt 2 was rejected",
+      },
+      wave_review_epoch: {
+        ...activeSnapshot.graph.wave_review_epoch!,
+        specCheckSlotAuthority: { slot_id: slots[0]!, attempted: 2 },
+      },
+    }, statusDeps));
+    expect(deriveWaveReviewRecovery(preparation, specExhaustedSnapshot)).toMatchObject({
       ok: false,
       error: { message: expect.stringContaining("exhausted semantic attempt 2") },
     });

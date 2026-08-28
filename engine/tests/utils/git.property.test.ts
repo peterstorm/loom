@@ -93,6 +93,24 @@ describe("countAssertions — property tests", () => {
     );
   });
 
+  it("assertion-like tokens inside titles and comments never count", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom("expect(", "toBe", "toEqual", "assertThat", "pytest.raises", ".should."),
+        fc.string({ maxLength: 40 }),
+        (token, suffix) => {
+          const escaped = `${token}${suffix}`.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+          const diff = [
+            `+  it("${escaped}", () => {});`,
+            `+  // ${token}${suffix}`,
+            `+  const label = "${escaped}";`,
+          ].join("\n");
+          expect(countAssertions(diff)).toBe(0);
+        },
+      ),
+    );
+  });
+
   it("max 1 assertion per line", () => {
     // Even if a line contains multiple assertion keywords, it should count at most 1
     fc.assert(

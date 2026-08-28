@@ -292,6 +292,7 @@ const waveReviewEpoch = (overrides: Record<string, unknown> = {}) => ({
   runId: "run.wave-epoch",
   wave: 1,
   batchEpoch: DIGEST("a"),
+  specCheckSlotAuthority: { slot_id: "wave-slot:spec-check", attempted: 1 },
   ...overrides,
 });
 
@@ -418,6 +419,14 @@ describe("parseTaskGraph wave_review_epoch authority", () => {
     expect(parsed.value.wave_review_epoch).toEqual(rawEpoch);
     expect(parsed.value.wave_review_epoch).not.toBe(rawEpoch);
     expect(Object.isFrozen(parsed.value.wave_review_epoch)).toBe(true);
+    expect(Object.isFrozen(parsed.value.wave_review_epoch?.specCheckSlotAuthority)).toBe(true);
+  });
+
+  it("keeps historical epochs readable without spec-check slot authority", () => {
+    const legacy = waveReviewEpoch();
+    const { specCheckSlotAuthority: _absent, ...withoutSlotAuthority } = legacy;
+    const parsed = parseTaskGraph(graph({ current_wave: 1, wave_review_epoch: withoutSlotAuthority }));
+    expect(parsed).toMatchObject({ ok: true });
   });
 
   it.each([
@@ -426,6 +435,10 @@ describe("parseTaskGraph wave_review_epoch authority", () => {
     ["zero Wave", waveReviewEpoch({ wave: 0 })],
     ["non-integer Wave", waveReviewEpoch({ wave: 1.5 })],
     ["bad batch digest", waveReviewEpoch({ batchEpoch: "not-a-digest" })],
+    ["malformed spec-check slot", waveReviewEpoch({ specCheckSlotAuthority: "forged" })],
+    ["bad spec-check slot id", waveReviewEpoch({ specCheckSlotAuthority: { slot_id: "../escape", attempted: 1 } })],
+    ["bad spec-check attempt", waveReviewEpoch({ specCheckSlotAuthority: { slot_id: "wave-slot:spec-check", attempted: 3 } })],
+    ["surplus spec-check slot field", waveReviewEpoch({ specCheckSlotAuthority: { slot_id: "wave-slot:spec-check", attempted: 1, forged: true } })],
     ["unknown field", waveReviewEpoch({ forged: true })],
   ])("refuses %s", (_label, epoch) => {
     expect(errorOf(graph({ wave_review_epoch: epoch }))).toContain("wave_review_epoch");

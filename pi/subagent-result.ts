@@ -478,7 +478,7 @@ export function writtenPathsOf(
   return Object.freeze(paths);
 }
 
-type PhaseTransition = NonNullable<ReturnType<typeof resolveTransition>>;
+type PhaseTransition = Extract<ReturnType<typeof resolveTransition>, { kind: "ready" }>;
 
 type PiPhasePreparation = Readonly<{
   state: TaskGraph;
@@ -505,10 +505,10 @@ function preparePiPhaseResult(
 function reducePiPhaseTransition(
   state: TaskGraph,
   completedPhase: Phase,
-  transition: PhaseTransition | null,
+  transition: PhaseTransition,
   now: string,
 ): TaskGraph {
-  if (transition === null || state.current_phase !== completedPhase) return state;
+  if (state.current_phase !== completedPhase) return state;
   const artifactUpdates = phaseArtifactUpdates([transition.artifact], state.spec_dir ?? undefined);
   return {
     ...state,
@@ -561,6 +561,13 @@ export async function applyPhaseAgentPiResult(args: Readonly<{
       if (!prepared.transitionEligible) return { state: prepared.state, value: outcome() };
       try {
         const transition = resolveTransition(args.completedPhase, prepared.state);
+        if (transition.kind === "not-ready") {
+          const diagnostic = `${args.agentType} completed but phase transition is not ready: ${transition.reason}`;
+          return {
+            state: prepared.state,
+            value: outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]),
+          };
+        }
         return {
           state: reducePiPhaseTransition(prepared.state, args.completedPhase, transition, args.now),
           value: outcome(),

@@ -217,7 +217,7 @@ describe("resolveImplementationTaskId", () => {
 });
 
 describe("applyPhaseAgentPiResult", () => {
-  it("records a spec written inside the run's spec_dir", async () => {
+  it("records the reported spec path but rejects advancement when the artifact is absent", async () => {
     const store = fakeStore(graph({ current_phase: "specify", spec_dir: ".claude/specs/run" } as Partial<TaskGraph>));
     const applied = await applyPhaseAgentPiResult({
       store,
@@ -227,7 +227,9 @@ describe("applyPhaseAgentPiResult", () => {
       now: NOW,
     });
 
-    expect(applied.processingErrors).toEqual([]);
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("phase transition is not ready: no readable spec.md"),
+    ]);
     expect(store.current().spec_file).toBe(".claude/specs/run/spec.md");
   });
 

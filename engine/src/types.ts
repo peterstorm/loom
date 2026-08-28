@@ -982,10 +982,18 @@ export type LoomStatus = Readonly<{
   next: NextActionDecision;
 }>;
 
+export type WaveSpecCheckSlotAuthority = Readonly<{
+  readonly slot_id: string;
+  readonly attempted: 1 | 2;
+}>;
+
 export interface WaveReviewEpochAuthority {
   readonly runId: OrchestrationRunId;
   readonly wave: number;
   readonly batchEpoch: ArtifactDigest;
+  /** Exact spec-check slot attempt issued for this epoch. Absent only on
+   * historical epochs; exact recovery refuses to infer it from evidence. */
+  readonly specCheckSlotAuthority?: WaveSpecCheckSlotAuthority;
 }
 
 export interface TaskGraph {
