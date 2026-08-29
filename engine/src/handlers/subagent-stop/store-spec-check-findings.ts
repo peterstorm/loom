@@ -3,52 +3,20 @@
  * Modern Wave evidence requires exact capture-correlated request authority.
  */
 
-import type { AgentRequestAuthority } from "../../core/orchestration-contract";
 import { reconcileWaveBlock } from "../../core/wave-gate-model";
-import { parseSpecCheckOutput, reconcileSpecCheck } from "../../core/spec-check";
+import {
+  parseSpecCheckOutput,
+  reconcileSpecCheck,
+  specCheckAuthorityProblem,
+  type SpecCheckRequestAuthority,
+} from "../../core/spec-check";
 import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 export { parseSpecCheckOutput } from "../../core/spec-check";
 import { StateManager } from "../../state-manager";
-import { passthroughResult, type HookHandler, type HookResult, type TaskGraph } from "../../types";
+import { passthroughResult, type HookHandler, type HookResult } from "../../types";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
 import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
 import { stripNamespace } from "../../utils/strip-namespace";
-
-type SpecCheckRequestAuthority = Pick<
-  AgentRequestAuthority,
-  "runId" | "slotId" | "attempt" | "role"
->;
-
-function specCheckAuthorityProblem(
-  state: TaskGraph,
-  authority: SpecCheckRequestAuthority | undefined,
-): string | null {
-  const epoch = state.wave_review_epoch;
-  const active = state.active_wave_gate;
-  if (epoch === undefined && active === undefined) {
-    const modernAuthorityHistory = state.spec_trace_version === 2 ||
-      state.verification_manifest !== undefined ||
-      state.active_wave_completion_suite !== undefined ||
-      (state.wave_gate_history?.length ?? 0) > 0 ||
-      (state.wave_reopening_history?.length ?? 0) > 0 ||
-      (state.orphaned_wave_gate_history?.length ?? 0) > 0 ||
-      (state.spec_trace_wave_gate_retirements?.length ?? 0) > 0;
-    if (authority !== undefined) {
-      return `captured spec-check request ${authority.runId}/${authority.slotId}/${authority.attempt} has no current Wave authority`;
-    }
-    return modernAuthorityHistory
-      ? "modern Wave spec-check has no current capture-correlated request authority"
-      : null;
-  }
-  if (authority === undefined) return "modern Wave spec-check has no capture-correlated request authority";
-  if (authority.role !== "spec-check-invoker") return `captured request belongs to ${authority.role}`;
-  const slot = epoch?.specCheckSlotAuthority;
-  return state.current_phase === "execute" && epoch !== undefined && active !== undefined &&
-      state.current_wave === epoch.wave && active.runId === authority.runId && active.wave === epoch.wave &&
-      epoch.runId === authority.runId && slot?.slot_id === authority.slotId && slot.attempted === authority.attempt
-    ? null
-    : `captured spec-check request ${authority.runId}/${authority.slotId}/${authority.attempt} does not match the exact current Wave epoch`;
-}
 
 export const runStoreSpecCheckFindings = async (
   stdin: string,

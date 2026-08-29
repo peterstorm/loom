@@ -30,7 +30,6 @@ import {
   applyCompletionInfrastructureFailure,
   applyUntrustedStopResolution,
   cumulativeModifiedPaths,
-  type NewTestEvidence,
 } from "../engine/src/core/implementation-application";
 import { extractTestEvidence, type TestEvidence } from "../engine/src/core/test-evidence";
 import { resolveTransition } from "../engine/src/handlers/subagent-stop/advance-phase";
@@ -481,8 +480,11 @@ async function cleanupFailedLegacyImplementation(
     const message = `loom(pi): ${args.failure}; modern attempt lacks exact ReservedSlot authority — current attempt preserved`;
     return outcome([message], [message]);
   }
-  const inference = binding.inferred ? " (inferred from the sole executing Task; legacy cleanup only)" : "";
-  return outcome([`loom(pi): ${args.failure} — released ${binding.taskId} legacy reservation${inference}; completion evidence ignored`]);
+  const inference = binding.inferred
+    ? `loom(pi): ${args.failure} — released ${binding.taskId} legacy reservation inferred from the sole executing ` +
+      "Task; completion evidence ignored and the attribution itself is unproven"
+    : `loom(pi): ${args.failure} — released ${binding.taskId} legacy reservation; completion evidence ignored`;
+  return binding.inferred ? outcome([inference], [inference]) : outcome([inference]);
 }
 
 async function applyFailedImplementationResult(args: FailedImplementationArgs): Promise<PiResultOutcome> {
@@ -831,7 +833,13 @@ type LoomTask = TaskGraph["tasks"][number];
 
 type ImplementationBindingResolution =
   | Readonly<{ kind: "unbound"; outcome: PiResultOutcome }>
-  | Readonly<{ kind: "bound"; taskId: string; log: readonly string[] }>;
+  | Readonly<{
+      kind: "bound";
+      taskId: string;
+      log: readonly string[];
+      /** Set when the Task was guessed from `executing_tasks`, never named by the result. */
+      inference: string | null;
+    }>;
 
 type ImplementationTestObservation =
   | Readonly<{ kind: "structured"; evidence: TestEvidence }>
@@ -883,10 +891,16 @@ async function resolveImplementationBindingForResult(args: Readonly<{
   if (binding.kind === "unbound") {
     return { kind: "unbound", outcome: outcome([binding.reason], [binding.reason]) };
   }
-  const log = binding.inferred
-    ? [`WARNING: ${args.agentType} task ID extraction failed, inferred task ${binding.taskId} from executing_tasks`]
-    : [];
-  return { kind: "bound", taskId: binding.taskId, log };
+  const inference = binding.inferred
+    ? `${args.agentType} named no Task: attribution was inferred because executing_tasks holds exactly one ` +
+      `Task, so ${binding.taskId} is credited on that guess and not on evidence`
+    : null;
+  return {
+    kind: "bound",
+    taskId: binding.taskId,
+    log: inference === null ? [] : [`WARNING: ${inference}`],
+    inference,
+  };
 }
 
 function missingStructuredEvidenceLog(taskId: string, messages: unknown): string | null {
@@ -1310,8 +1324,8 @@ async function applyLegacyImplementationPiResult(
   const transcript = observeImplementationTranscript(args.result, binding.taskId);
   log.push(...transcript.log);
   if (transcript.kind === "malformed") {
-    log.push(...await applyMalformedImplementationTranscript({ ...args, taskId: binding.taskId, ...transcript }));
-    return outcome(log);
+    const failures = await applyMalformedImplementationTranscript({ ...args, taskId: binding.taskId, ...transcript });
+    return outcome([...log, ...failures], failures);
   }
   const modified = readImplementationModifiedPaths(args.repository, transcript.resultMessages, binding.taskId);
   if (!modified.ok) {
@@ -1332,6 +1346,19 @@ async function applyLegacyImplementationPiResult(
 export async function applyImplementationPiResult(args: ImplementationPiResultArgs): Promise<PiResultOutcome> {
   const binding = await resolveImplementationBindingForResult(args);
   if (binding.kind === "unbound") return binding.outcome;
+  const result = await applyBoundImplementationPiResult(args, binding);
+  // An inferred attribution is never a clean processing: the result named no
+  // Task of its own, so the harness must see the verdict as unproven instead of
+  // reading a warning that only ever reached stderr.
+  return binding.inference === null
+    ? result
+    : outcome([...result.log], [...result.processingErrors, `loom(pi): ${binding.inference}`]);
+}
+
+async function applyBoundImplementationPiResult(
+  args: ImplementationPiResultArgs,
+  binding: ResultImplementationBinding,
+): Promise<PiResultOutcome> {
   const log = [...binding.log];
   const authority = args.reservedSlot?.implementationAuthority;
   const currentTask = args.store.load().tasks.find((task) => task.id === binding.taskId);

@@ -1,9 +1,25 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, vi } from "vitest";
-import { countNewTests, countAssertions, diffFiles, diffUntracked, mergeBase } from "../../src/utils/git";
+import { countNewTests, countAssertions, diffFiles, diffFilesSince, diffFilesStaged, diffUntracked, mergeBase, type GitDiffResult } from "../../src/utils/git";
+
+/**
+ * Wrap added lines in the exact patch shape Git emits: one `diff --git` entry,
+ * its `---`/`+++` prelude, and one hunk.
+ *
+ * Evidence is path-bound, so a bare `+line` is not a shape Git produces and is
+ * deliberately not counted. Fixtures use this instead of loose `+line` arrays so
+ * every fixture states which path its lines are attributed to.
+ */
+const patch = (path: string, ...lines: string[]): string => [
+  `diff --git a/${path} b/${path}`,
+  `--- a/${path}`,
+  `+++ b/${path}`,
+  "@@ -0,0 +1 @@",
+  ...lines,
+].join("\n");
 
 describe("git command diagnostics", () => {
   it("reports array-argument git failures instead of returning empty silently", () => {
@@ -90,28 +106,198 @@ describe("complete-postimage diff evidence", () => {
   });
 });
 
+describe("diff command authority over workspace-authored Git behaviour", () => {
+  /** A repository whose tracked file is modified and whose config defines a diff driver. */
+  const hostileRepository = (): Readonly<{ root: string; marker: string }> => {
+    const root = mkdtempSync(join(tmpdir(), "loom-diff-driver-"));
+    const marker = join(root, "EXECUTED");
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    writeFileSync(join(root, "data.dat"), "before\n");
+    execFileSync("git", ["add", "data.dat"], { cwd: root });
+    execFileSync("git", ["-c", "user.name=Loom Test", "-c", "user.email=loom@example.test", "commit", "--quiet", "-m", "base"], { cwd: root });
+    writeFileSync(join(root, "data.dat"), "after\n");
+    writeFileSync(join(root, ".gitattributes"), "*.dat diff=evil\n");
+    execFileSync("git", ["config", "diff.evil.textconv", `sh -c 'touch ${marker}; cat'`], { cwd: root });
+    return { root, marker };
+  };
+
+  const withProjectDir = <T>(root: string, run: () => T): T => {
+    const previous = process.env.CLAUDE_PROJECT_DIR;
+    process.env.CLAUDE_PROJECT_DIR = root;
+    try {
+      return run();
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = previous;
+    }
+  };
+
+  it("never executes a workspace-defined Git textconv driver", () => {
+    const { root, marker } = hostileRepository();
+    try {
+      const observed = withProjectDir(root, () => diffFiles(["data.dat"]));
+      expect(observed.ok).toBe(true);
+      // The patch is still real evidence; only the driver is gone.
+      if (observed.ok) expect(observed.diff).toContain("+after");
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a baseline argument in option position instead of writing to it", () => {
+    const { root, marker } = hostileRepository();
+    try {
+      const observed = withProjectDir(root, () =>
+        diffFilesSince(`--output=${marker}`, ["data.dat"]));
+      expect(observed.ok).toBe(false);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats an option-shaped untracked path as a path, not an option", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-diff-option-"));
+    try {
+      const observed = withProjectDir(root, () => diffUntracked("--output=INJECTED.txt"));
+      expect(observed.ok).toBe(false);
+      expect(existsSync(join(root, "INJECTED.txt"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("complete-postimage context on every diff entry point", () => {
+  /**
+   * A repository whose tracked Java file opens a text block far above the range
+   * a default three-line hunk would show. Only `--unified=<max>` carries that
+   * opener to the lexical scanner, so each entry point is pinned separately: an
+   * entry point that loses the flag silently reopens assertion laundering on
+   * committed-diff evidence, which is the dominant path because implementers
+   * commit before SubagentStop.
+   */
+  const postimageRepository = (): string => {
+    const repository = mkdtempSync(join(tmpdir(), "loom-postimage-entry-"));
+    const base = [
+      "class ExampleTest {",
+      '  String docs = """',
+      "    context one",
+      "    context two",
+      "    context three",
+      "    context four",
+      "    context five",
+      '    """;',
+      "}",
+      "",
+    ].join("\n");
+    execFileSync("git", ["init", "--quiet"], { cwd: repository });
+    writeFileSync(join(repository, "ExampleTest.java"), base);
+    execFileSync("git", ["add", "ExampleTest.java"], { cwd: repository });
+    execFileSync("git", ["-c", "user.name=Loom Test", "-c", "user.email=loom@example.test", "commit", "--quiet", "-m", "base"], { cwd: repository });
+    writeFileSync(join(repository, "ExampleTest.java"), base.replace(
+      '    """;',
+      '    assertThat(fake).isTrue();\n    """;\n\n  @Test void empty() {}',
+    ));
+    return repository;
+  };
+
+  const withProject = <T,>(repository: string, run: () => T): T => {
+    const previous = process.env.CLAUDE_PROJECT_DIR;
+    process.env.CLAUDE_PROJECT_DIR = repository;
+    try {
+      return run();
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = previous;
+    }
+  };
+
+  /** The postimage opener must reach the scanner, and prose must stay inert. */
+  const expectFullPostimage = (observed: GitDiffResult): void => {
+    expect(observed.ok).toBe(true);
+    if (!observed.ok) return;
+    expect(observed.diff).toContain('  String docs = """');
+    expect(countNewTests(observed.diff).java).toBe(1);
+    expect(countAssertions(observed.diff)).toBe(0);
+  };
+
+  const commit = (repository: string, message: string): void => {
+    execFileSync("git", ["add", "ExampleTest.java"], { cwd: repository });
+    execFileSync("git", ["-c", "user.name=Loom Test", "-c", "user.email=loom@example.test", "commit", "--quiet", "-m", message], { cwd: repository });
+  };
+
+  it("pins complete postimages on the staged index path", () => {
+    const repository = postimageRepository();
+    try {
+      execFileSync("git", ["add", "ExampleTest.java"], { cwd: repository });
+      expectFullPostimage(withProject(repository, () => diffFilesStaged(["ExampleTest.java"])));
+    } finally {
+      rmSync(repository, { recursive: true, force: true });
+    }
+  });
+
+  it("pins complete postimages on the committed-baseline path", () => {
+    const repository = postimageRepository();
+    try {
+      const baseline = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repository, encoding: "utf-8" }).trim();
+      commit(repository, "change");
+      expectFullPostimage(withProject(repository, () => diffFilesSince(baseline, ["ExampleTest.java"])));
+    } finally {
+      rmSync(repository, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a whole untracked file's lexical state inert", () => {
+    const repository = postimageRepository();
+    const untracked = join(repository, "UntrackedProbe.java");
+    try {
+      writeFileSync(untracked, [
+        "class UntrackedProbe {",
+        '  String docs = """',
+        "    context one",
+        "    context two",
+        "    context three",
+        "    context four",
+        "    assertThat(fake).isTrue();",
+        '    """;',
+        "}",
+      ].join("\n"));
+      const observed = withProject(repository, () => diffUntracked("UntrackedProbe.java"));
+      expect(observed.ok).toBe(true);
+      if (!observed.ok) return;
+      expect(countAssertions(observed.diff)).toBe(0);
+    } finally {
+      rmSync(repository, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("countNewTests (pure)", () => {
   it("counts Java @Test annotations", () => {
-    const diff = [
+    const diff = patch(
+      "ExampleTest.java",
       "+    @Test",
       "+    void shouldValidateOrder() {",
       "+    @Property",
       "+    void orderTotalInvariant() {",
       "-    @Test",
       "     void existingTest() {",
-    ].join("\n");
+    );
     const result = countNewTests(diff);
     expect(result.java).toBe(2);
     expect(result.total).toBe(2);
   });
 
   it("counts TypeScript test cases but not describe-only suites", () => {
-    const diff = [
+    const diff = patch(
+      "example.test.ts",
       '+  it("should validate input", () => {',
       '+  test("handles edge case", () => {',
       '+  describe("validation", () => {',
       '-  it("old test", () => {',
-    ].join("\n");
+    );
     const result = countNewTests(diff);
     expect(result.ts).toBe(2);
     expect(result.total).toBe(2);
@@ -122,16 +308,17 @@ describe("countNewTests (pure)", () => {
     "test.concurrent('works', async () => {})",
     "it.concurrent.each(cases)('works', value => {})",
   ])("counts parameterized/concurrent TypeScript declaration: %s", (declaration) => {
-    expect(countNewTests(`+${declaration}`).ts).toBe(1);
+    expect(countNewTests(patch("example.test.ts", `+${declaration}`)).ts).toBe(1);
   });
 
   it("counts Python test functions and methods, not their collection class", () => {
-    const diff = [
+    const diff = patch(
+      "tests/test_validation.py",
       "+def test_validates_input():",
       "+class TestValidation:",
       "+    def test_edge_case(self):",
       "-def test_old():",
-    ].join("\n");
+    );
     const result = countNewTests(diff);
     expect(result.python).toBe(2);
     expect(result.total).toBe(2);
@@ -198,16 +385,15 @@ describe("countNewTests (pure)", () => {
   });
 
   it("returns zeros for no tests", () => {
-    const diff = ["+const x = 42;", "+function doStuff() {}"].join("\n");
-    const result = countNewTests(diff);
+    const result = countNewTests(patch("example.test.ts", "+const x = 42;", "+function doStuff() {}"));
     expect(result.total).toBe(0);
   });
 
   it("handles mixed languages", () => {
     const diff = [
-      "+    @Test",
-      '+  it("foo", () => {',
-      "+def test_bar():",
+      patch("ExampleTest.java", "+    @Test"),
+      patch("example.test.ts", '+  it("foo", () => {'),
+      patch("tests/test_evidence.py", "+def test_bar():"),
     ].join("\n");
     const result = countNewTests(diff);
     expect(result.java).toBe(1);
@@ -215,64 +401,109 @@ describe("countNewTests (pure)", () => {
     expect(result.python).toBe(1);
     expect(result.total).toBe(3);
   });
+
+  it("refuses a +++ b/ header forged inside hunk content", () => {
+    // A source line whose text is `++ b/fake.test.ts` is rendered by Git as
+    // `+++ b/fake.test.ts`. Reading it as a path boundary let two lines in any
+    // non-test file claim a test-source language and fabricate new-test proof.
+    const diff = [
+      "diff --git a/src/helper.py b/src/helper.py",
+      "--- a/src/helper.py",
+      "+++ b/src/helper.py",
+      "@@ -1 +1,3 @@",
+      " x",
+      "++ b/fake.test.ts",
+      '+it("pwned", () => expect(1).toBe(1));',
+    ].join("\n");
+
+    expect(countNewTests(diff).total).toBe(0);
+    expect(countAssertions(diff)).toBe(0);
+  });
+
+  it("refuses a forged prelude for an entry that never began", () => {
+    const diff = [
+      "diff --git a/src/helper.py b/src/helper.py",
+      "--- a/src/helper.py",
+      "+++ b/src/helper.py",
+      "@@ -1 +1,2 @@",
+      " x",
+      "+x",
+      "+++ b/fake.test.ts",
+      "+it('pwned', () => {});",
+    ].join("\n");
+
+    expect(countNewTests(diff).total).toBe(0);
+  });
+
+  it("refuses additions with no Git path boundary at all", () => {
+    const diff = '+it("unattributed", () => expect(1).toBe(1));';
+
+    expect(countNewTests(diff).total).toBe(0);
+    expect(countAssertions(diff)).toBe(0);
+  });
 });
 
 describe("countAssertions (pure)", () => {
   it("counts Java assertions", () => {
-    const diff = [
+    expect(countAssertions(patch(
+      "ExampleTest.java",
       "+    assertThat(result).isEqualTo(expected);",
       "+    assertThrows(Exception.class, () -> run());",
       "+    verify(mock).someMethod();",
-    ].join("\n");
-    expect(countAssertions(diff)).toBe(3);
+    ))).toBe(3);
   });
 
   it("counts TypeScript assertions", () => {
-    const diff = [
+    expect(countAssertions(patch(
+      "example.test.ts",
       "+    expect(result).toBe(42);",
       "+    expect(fn).toThrow();",
       "+    expect(arr).toEqual([1, 2]);",
-    ].join("\n");
-    expect(countAssertions(diff)).toBe(3);
+    ))).toBe(3);
   });
 
   it("counts Python assertions", () => {
-    const diff = [
+    expect(countAssertions(patch(
+      "tests/test_evidence.py",
       "+    assert result == 42",
       "+    assertIn('key', data)",
-    ].join("\n");
-    expect(countAssertions(diff)).toBe(2);
+    ))).toBe(2);
   });
 
   it("ignores removed lines", () => {
-    const diff = [
+    const diff = patch(
+      "example.test.ts",
       "-    expect(old).toBe(true);",
       "+    const x = 1;",
-    ].join("\n");
+    );
     expect(countAssertions(diff)).toBe(0);
   });
 
   it("does not launder empty tests through matcher text in titles or comments", () => {
-    const diff = [
+    const diff = patch(
+      "example.test.ts",
       '+  it("uses toBe and expect(", () => {});',
       "+  // expect(value).toEqual(true)",
       "+  /* assertThat(value).isTrue();",
       "+     pytest.raises(ExpectedError) */",
       "+  const note = `toThrow and .should.`;",
-    ].join("\n");
+    );
 
     expect(countNewTests(diff).ts).toBe(1);
     expect(countAssertions(diff)).toBe(0);
   });
 
   it.each([
-    ["Python triple-quoted string", "'''", "+    assert result == 42"],
-    ["Java text block", '\"\"\"', "+    assertThat(result).isEqualTo(42);"],
-  ])("does not count assertion text inside a %s", (_name, delimiter, assertion) => {
+    ["Python triple-quoted string", "tests/test_evidence.py", "'''"],
+    ["Java text block", "ExampleTest.java", '"""'],
+  ])("does not count assertion text inside a %s", (_name, path, delimiter) => {
+    const assertion = path.endsWith(".py")
+      ? "+    assert result == 42"
+      : "+    assertThat(result).isEqualTo(42);";
     const diff = [
-      "diff --git a/tests/example.py b/tests/example.py",
-      "--- a/tests/example.py",
-      "+++ b/tests/example.py",
+      `diff --git a/${path} b/${path}`,
+      `--- a/${path}`,
+      `+++ b/${path}`,
       "@@ -1,8 +1,9 @@",
       ` ${delimiter}`,
       " context one",
@@ -281,10 +512,10 @@ describe("countAssertions (pure)", () => {
       " context four",
       assertion,
       ` ${delimiter}`,
-      "+def test_empty(): pass",
+      path.endsWith(".py") ? "+def test_empty(): pass" : "+@Test void empty() {}",
     ].join("\n");
 
-    expect(countNewTests(diff).python).toBe(1);
+    expect(countNewTests(diff).python + countNewTests(diff).java).toBe(1);
     expect(countAssertions(diff)).toBe(0);
   });
 
@@ -596,18 +827,19 @@ describe("countAssertions (pure)", () => {
   });
 
   it("does not let removed lexical state hide an added assertion", () => {
-    const diff = [
+    const diff = patch(
+      "example.test.ts",
       "-  /* deleted unterminated comment",
       "+  expect(result).toBe(true);",
-    ].join("\n");
+    );
 
     expect(countAssertions(diff)).toBe(1);
   });
 
   it("still counts executable assertions containing string arguments", () => {
     const diff = [
-      '+  expect(message).toBe("toEqual in a value");',
-      "+  assert reason == 'expect(fake)'",
+      patch("example.test.ts", '+  expect(message).toBe("toEqual in a value");'),
+      patch("tests/test_evidence.py", "+  assert reason == 'expect(fake)'"),
     ].join("\n");
 
     expect(countAssertions(diff)).toBe(2);

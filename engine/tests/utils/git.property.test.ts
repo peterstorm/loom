@@ -2,6 +2,28 @@ import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import { countNewTests, countAssertions } from "../../src/utils/git";
 
+/**
+ * Wrap generated lines in the patch shape Git actually emits: one entry, its
+ * `---`/`+++` prelude, one hunk.
+ *
+ * Evidence is path-bound, so an unattributed `+line` is never counted. Binding
+ * every generator to a real test-source path also makes the paths that were
+ * previously unreachable by generation reachable: with a header present,
+ * `matchingParenthesis` and per-language gating actually run instead of being
+ * short-circuited by a missing path.
+ */
+const patch = (path: string, ...lines: string[]): string => [
+  `diff --git a/${path} b/${path}`,
+  `--- a/${path}`,
+  `+++ b/${path}`,
+  "@@ -0,0 +1 @@",
+  ...lines,
+].join("\n");
+
+const JAVA = "ExampleTest.java";
+const TS = "example.test.ts";
+const PYTHON = "tests/test_evidence.py";
+
 describe("countNewTests — property tests", () => {
   it("adding more +@Test lines never decreases count", () => {
     fc.assert(
@@ -9,9 +31,10 @@ describe("countNewTests — property tests", () => {
         fc.integer({ min: 1, max: 30 }),
         fc.integer({ min: 1, max: 30 }),
         (base, extra) => {
-          const baseDiff = Array.from({ length: base }, () => "+    @Test").join("\n");
-          const moreDiff = Array.from({ length: base + extra }, () => "+    @Test").join("\n");
+          const baseDiff = patch(JAVA, ...Array.from({ length: base }, () => "+    @Test"));
+          const moreDiff = patch(JAVA, ...Array.from({ length: base + extra }, () => "+    @Test"));
           expect(countNewTests(moreDiff).total).toBeGreaterThanOrEqual(countNewTests(baseDiff).total);
+          expect(countNewTests(moreDiff).total).toBe(base + extra);
         },
       ),
     );
@@ -20,7 +43,7 @@ describe("countNewTests — property tests", () => {
   it("removed lines are never counted", () => {
     fc.assert(
       fc.property(fc.integer({ min: 1, max: 50 }), (n) => {
-        const diff = Array.from({ length: n }, () => "-    @Test").join("\n");
+        const diff = patch(JAVA, ...Array.from({ length: n }, () => "-    @Test"));
         expect(countNewTests(diff).total).toBe(0);
       }),
     );
@@ -29,7 +52,7 @@ describe("countNewTests — property tests", () => {
   it("context lines (no +/-) are never counted", () => {
     fc.assert(
       fc.property(fc.integer({ min: 1, max: 50 }), (n) => {
-        const diff = Array.from({ length: n }, () => "     @Test").join("\n");
+        const diff = patch(JAVA, ...Array.from({ length: n }, () => "     @Test"));
         expect(countNewTests(diff).total).toBe(0);
       }),
     );
@@ -41,9 +64,11 @@ describe("countNewTests — property tests", () => {
         fc.integer({ min: 0, max: 20 }),
         fc.integer({ min: 0, max: 20 }),
         (addCount, removeCount) => {
-          const added = Array.from({ length: addCount }, () => "+    @Test").join("\n");
-          const removed = Array.from({ length: removeCount }, () => "-    @Test").join("\n");
-          const diff = `${added}\n${removed}`;
+          const diff = patch(
+            JAVA,
+            ...Array.from({ length: addCount }, () => "+    @Test"),
+            ...Array.from({ length: removeCount }, () => "-    @Test"),
+          );
           expect(countNewTests(diff).java).toBe(addCount);
         },
       ),
@@ -53,7 +78,7 @@ describe("countNewTests — property tests", () => {
   it("TypeScript test patterns counted correctly", () => {
     fc.assert(
       fc.property(fc.integer({ min: 1, max: 20 }), (n) => {
-        const diff = Array.from({ length: n }, () => '+  it("works", () => {').join("\n");
+        const diff = patch(TS, ...Array.from({ length: n }, () => '+  it("works", () => {'));
         expect(countNewTests(diff).ts).toBe(n);
       }),
     );
@@ -62,8 +87,31 @@ describe("countNewTests — property tests", () => {
   it("Python test patterns counted correctly", () => {
     fc.assert(
       fc.property(fc.integer({ min: 1, max: 20 }), (n) => {
-        const diff = Array.from({ length: n }, () => "+def test_something():").join("\n");
+        const diff = patch(PYTHON, ...Array.from({ length: n }, () => "+def test_something():"));
         expect(countNewTests(diff).python).toBe(n);
+      }),
+    );
+  });
+
+  it("the same tokens in an ordinary source path never become evidence", () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 1, max: 10 }), (n) => {
+        const lines = Array.from({ length: n }, () => '+  it("works", () => {');
+        expect(countNewTests(patch("src/production.ts", ...lines)).total).toBe(0);
+        expect(countNewTests(patch(TS, ...lines)).ts).toBe(n);
+      }),
+    );
+  });
+
+  it("unattributed additions are never evidence for any language", () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 1, max: 10 }), (n) => {
+        const lines = Array.from(
+          { length: n },
+          () => '+  it("works", () => expect(x).toBe(1));\n+def test_something():\n+    @Test',
+        ).join("\n");
+        expect(countNewTests(lines).total).toBe(0);
+        expect(countAssertions(lines)).toBe(0);
       }),
     );
   });
@@ -73,14 +121,43 @@ describe("countNewTests — property tests", () => {
       fc.constantFrom("", "export ", "async ", "export async "),
       fc.stringMatching(/^[A-Za-z_$][A-Za-z0-9_$]{0,24}$/),
       (prefix, parameter) => {
-        const diff = [
-          "diff --git a/example.test.ts b/example.test.ts",
-          "--- a/example.test.ts",
-          "+++ b/example.test.ts",
-          "@@ -0,0 +1 @@",
+        const diff = patch(
+          TS,
           `+${prefix}function test(${parameter}: unknown) { return ${parameter}; }`,
-        ].join("\n");
+        );
         expect(countNewTests(diff).ts).toBe(0);
+      },
+    ));
+  });
+
+  it("class and object method shorthand named test never becomes a runner call", () => {
+    fc.assert(fc.property(
+      fc.stringMatching(/^[A-Za-z_$][A-Za-z0-9_$]{0,24}$/),
+      (parameter) => {
+        // The second suppression branch: no `function` keyword, so the grammar
+        // distinction is the body block that follows the closing parenthesis.
+        const diff = patch(
+          TS,
+          `+class Helper { test(${parameter}: unknown) { return ${parameter}; } }`,
+          `+const object = { test(${parameter}: unknown) { return ${parameter}; } };`,
+        );
+        expect(countNewTests(diff).ts).toBe(0);
+      },
+    ));
+  });
+
+  it("a real runner invocation stays evidence beside those declarations", () => {
+    fc.assert(fc.property(
+      fc.stringMatching(/^[A-Za-z_$][A-Za-z0-9_$]{0,24}$/),
+      (parameter) => {
+        const diff = patch(
+          TS,
+          `+function test(${parameter}: unknown) { return ${parameter}; }`,
+          `+class Helper { test(${parameter}: unknown) { return ${parameter}; } }`,
+          `+it("proves", () => expect(${parameter}).toBe(${parameter}));`,
+        );
+        expect(countNewTests(diff).ts).toBe(1);
+        expect(countAssertions(diff)).toBe(1);
       },
     ));
   });
@@ -112,8 +189,8 @@ describe("countAssertions — property tests", () => {
         fc.integer({ min: 1, max: 30 }),
         fc.integer({ min: 1, max: 30 }),
         (base, extra) => {
-          const baseDiff = Array.from({ length: base }, () => "+    assertThat(x).isTrue();").join("\n");
-          const moreDiff = Array.from({ length: base + extra }, () => "+    assertThat(x).isTrue();").join("\n");
+          const baseDiff = patch(JAVA, ...Array.from({ length: base }, () => "+    assertThat(x).isTrue();"));
+          const moreDiff = patch(JAVA, ...Array.from({ length: base + extra }, () => "+    assertThat(x).isTrue();"));
           expect(countAssertions(moreDiff)).toBeGreaterThanOrEqual(countAssertions(baseDiff));
         },
       ),
@@ -123,7 +200,7 @@ describe("countAssertions — property tests", () => {
   it("removed assertions never counted", () => {
     fc.assert(
       fc.property(fc.integer({ min: 1, max: 50 }), (n) => {
-        const diff = Array.from({ length: n }, () => "-    assertThat(x).isTrue();").join("\n");
+        const diff = patch(JAVA, ...Array.from({ length: n }, () => "-    assertThat(x).isTrue();"));
         expect(countAssertions(diff)).toBe(0);
       }),
     );
@@ -136,11 +213,12 @@ describe("countAssertions — property tests", () => {
         fc.string({ maxLength: 40 }),
         (token, suffix) => {
           const escaped = `${token}${suffix}`.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
-          const diff = [
+          const diff = patch(
+            TS,
             `+  it("${escaped}", () => {});`,
             `+  // ${token}${suffix}`,
             `+  const label = "${escaped}";`,
-          ].join("\n");
+          );
           expect(countAssertions(diff)).toBe(0);
         },
       ),
@@ -150,7 +228,10 @@ describe("countAssertions — property tests", () => {
   it("multiline string contents never become assertion evidence", () => {
     fc.assert(
       fc.property(
-        fc.constantFrom("'''", '\"\"\"'),
+        fc.constantFrom(
+          { path: PYTHON, delimiter: "'''", test: "+def test_laundered():" },
+          { path: JAVA, delimiter: '"""', test: "+@Test void laundered() {}" },
+        ),
         fc.constantFrom(
           "assert result == 42",
           "assertThat(result).isTrue();",
@@ -158,15 +239,17 @@ describe("countAssertions — property tests", () => {
           "pytest.raises(ExpectedError)",
         ),
         fc.array(fc.string({ maxLength: 30 }), { minLength: 4, maxLength: 12 }),
-        (delimiter, assertion, prefix) => {
+        (fixture, assertion, prefix) => {
           const diff = [
-            "diff --git a/example.test b/example.test",
+            `diff --git a/${fixture.path} b/${fixture.path}`,
+            `--- a/${fixture.path}`,
+            `+++ b/${fixture.path}`,
             "@@ -1,20 +1,21 @@",
-            ` ${delimiter}`,
-            ...prefix.map((line) => ` ${line.replaceAll("\n", " ").replaceAll(delimiter, "")}`),
-            "+def test_laundered():",
+            ` ${fixture.delimiter}`,
+            ...prefix.map((line) => ` ${line.replaceAll("\n", " ").replaceAll(fixture.delimiter, "")}`),
+            fixture.test,
             `+${assertion}`,
-            ` ${delimiter}`,
+            ` ${fixture.delimiter}`,
           ].join("\n");
           expect(countNewTests(diff).total).toBe(0);
           expect(countAssertions(diff)).toBe(0);
@@ -286,7 +369,7 @@ describe("countAssertions — property tests", () => {
       fc.property(
         fc.constantFrom(
           { path: "tests/test_evidence.py", delimiter: "'''", escaped: "\\'''", test: "def test_fabricated():", assertion: "assert fabricated" },
-          { path: "ExampleTest.java", delimiter: '\"\"\"', escaped: '\\\"\"\"', test: "@Test void fabricated() {}", assertion: "assertThat(fabricated).isTrue();" },
+          { path: "ExampleTest.java", delimiter: '"""', escaped: '\\"\"\"', test: "@Test void fabricated() {}", assertion: "assertThat(fabricated).isTrue();" },
         ),
         fc.integer({ min: 0, max: 10 }),
         (fixture, pairs) => {
@@ -376,10 +459,10 @@ describe("countAssertions — property tests", () => {
     // Even if a line contains multiple assertion keywords, it should count at most 1
     fc.assert(
       fc.property(fc.integer({ min: 1, max: 20 }), (n) => {
-        const diff = Array.from(
-          { length: n },
-          () => "+    assertThat(expect(x).toBe(42)).isTrue();",
-        ).join("\n");
+        const diff = patch(
+          JAVA,
+          ...Array.from({ length: n }, () => "+    assertThat(expect(x).toBe(42)).isTrue();"),
+        );
         // Each line has both assertThat AND expect, but should count max 1 per line
         expect(countAssertions(diff)).toBe(n);
       }),

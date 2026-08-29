@@ -638,7 +638,11 @@ describe("applyFailedPiResult", () => {
     });
 
     expect(store.current().executing_tasks).toEqual([]);
-    expect(applied.processingErrors).toEqual([]);
+    // The reservation WAS released, but the Task was guessed rather than named:
+    // an inference is reported to the harness, never logged and waved through.
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("inferred from the sole executing Task"),
+    ]);
     expect(applied.log.join("\n")).toContain("inferred from the sole executing Task");
   });
 
@@ -1308,10 +1312,36 @@ describe("applyImplementationPiResult", () => {
     // Not routed through the untrusted resolution: no verdict was minted.
     expect(task.test_result).toBeUndefined();
     expect(store.current().executing_tasks).toEqual([]);
-    // Reported on the log, not as a processing error: the capture failed but
-    // the orchestration step itself completed and left the task retryable.
-    expect(outcome.processingErrors).toEqual([]);
+    // Malformed evidence is a processing failure, not a completed step: the
+    // transcript produced no evidence at all, and reporting success here is how
+    // the parent ends up believing a Task's evidence had been captured.
+    expect(outcome.processingErrors).toEqual([expect.stringContaining("evidence was not accepted")]);
     expect(outcome.log.join("\n")).toContain("evidence was not accepted");
+  });
+
+  /**
+   * Attribution by inference is the one case where the engine could not tell
+   * which Task a result answers for. Crediting the sole executing Task may be
+   * the right guess, but a guess must never read as a clean processing.
+   */
+  it("reports an inferred Task attribution as a processing error even when the verdict applied", async () => {
+    const store = fakeStore(regressionWaivedRecoveryGraph());
+
+    const applied = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({
+        agent: "code-implementer-agent",
+        task: "implementation completed",
+        messages: assistantText("All requested work completed."),
+      }),
+      reservedSlot: undefined,
+      parentPrompt: "",
+    });
+
+    expect(applied.processingErrors).toEqual([expect.stringContaining("credited on that guess")]);
+    expect(store.current().executing_tasks).toEqual([]);
   });
 
   /**

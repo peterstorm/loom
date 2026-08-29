@@ -3,7 +3,7 @@
  * Uses node:child_process (bun-compatible) — execFileSync for user input, execSync for fixed commands
  */
 
-import { execSync, execFileSync } from "node:child_process";
+import { execSync, execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { isExactGitSha } from "../core/git-sha";
 
 /**
@@ -201,34 +201,74 @@ export function mergeBase(branch: string): string | null {
   return result || null;
 }
 
-/** Get git diff between two refs */
-export function diff(from?: string, to?: string): string {
-  if (from && to) return execArgs(["diff", from, to]);
-  if (from) return execArgs(["diff", from]);
-  return exec("git diff");
-}
-
 export type GitDiffResult =
   | Readonly<{ ok: true; diff: string }>
   | Readonly<{ ok: false; error: string }>;
 
-/** Git diff proof boundary: command failure is not an empty diff. */
+/**
+ * Git diff drivers are workspace-authored code. A `.gitattributes` entry plus a
+ * `diff.<driver>.textconv` (or `diff.external`) value in the repository's own
+ * config makes an ordinary `git diff` run that command inside the calling
+ * process, so an implementation Agent that writes two otherwise ordinary files
+ * would execute arbitrary code inside a hook process — the process holding
+ * descriptor authority over evidence, attribution, and the State File. Neither
+ * path is a guarded directory, so this suppression is the only boundary. It
+ * lives here rather than at the call sites because a per-call-site flag is a
+ * flag one call site will forget.
+ */
+const DIFF_DRIVER_SUPPRESSION = ["--no-textconv", "--no-ext-diff"] as const;
+
+/** System-level config and attributes are not evidence inputs either. */
+function diffEnvironment(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_ATTR_NOSYSTEM: "1",
+    GIT_TERMINAL_PROMPT: "0",
+  };
+}
+
+/**
+ * Complete-postimage context is unbounded by construction, so capture carries
+ * an explicit budget. `execFileSync` defaulted to 1 MiB, which made an
+ * ordinary large file fail as `ENOBUFS` — indistinguishable from a broken
+ * repository. The budget is named so the failure names itself.
+ */
+const DIFF_EVIDENCE_BUDGET_BYTES = 16 * 1024 * 1024;
+
+const isEvidenceBudgetFailure = (error: unknown): boolean =>
+  typeof error === "object" && error !== null &&
+  (error as NodeJS.ErrnoException).code === "ENOBUFS";
+
+const diffExecOptions = (root: string): ExecFileSyncOptionsWithStringEncoding => ({
+  encoding: "utf-8",
+  cwd: root,
+  env: diffEnvironment(),
+  maxBuffer: DIFF_EVIDENCE_BUDGET_BYTES,
+  stdio: ["pipe", "pipe", "pipe"],
+});
+
+/**
+ * Git diff proof boundary: command failure is not an empty diff.
+ *
+ * `args` always begins with the fixed `diff` subcommand; driver suppression is
+ * inserted here so no entry point can collect a diff without it.
+ */
 function diffArgs(args: readonly string[]): GitDiffResult {
+  const [subcommand, ...rest] = args;
+  if (subcommand === undefined) return { ok: false, error: "internal: diffArgs requires a git subcommand" };
+  const argv: readonly string[] = [subcommand, ...DIFF_DRIVER_SUPPRESSION, ...rest];
+  const argvText = argv.map((arg) => JSON.stringify(arg)).join(" ");
   const root = currentRepoRoot("diffArgs");
   if (root === undefined) return { ok: false, error: "cannot collect a diff outside a Git repository" };
   try {
-    return {
-      ok: true,
-      diff: execFileSync("git", [...args], {
-        encoding: "utf-8",
-        cwd: root,
-        stdio: ["pipe", "pipe", "pipe"],
-      }),
-    };
+    return { ok: true, diff: execFileSync("git", [...argv], diffExecOptions(root)) };
   } catch (error) {
     return {
       ok: false,
-      error: `git ${args.map((arg) => JSON.stringify(arg)).join(" ")} failed: ${commandFailure(error)}`,
+      error: isEvidenceBudgetFailure(error)
+        ? `git ${argvText} exceeded the ${DIFF_EVIDENCE_BUDGET_BYTES} byte diff evidence budget: ${commandFailure(error)}`
+        : `git ${argvText} failed: ${commandFailure(error)}`,
     };
   }
 }
@@ -252,11 +292,17 @@ export function diffFilesStaged(files: string[]): GitDiffResult {
     : diffArgs(["diff", "--cached", FULL_POSTIMAGE_CONTEXT, "--", ...files]);
 }
 
-/** Diff committed changes from one baseline, retaining complete postimages. */
+/**
+ * Diff committed changes from one baseline, retaining complete postimages.
+ *
+ * `--end-of-options` is load-bearing: `revision` reaches Git before the path
+ * separator, so without it a revision-shaped value beginning with `-` is parsed
+ * as an option and can redirect the diff's output to a caller-chosen path.
+ */
 export function diffFilesSince(revision: string, files: string[]): GitDiffResult {
   return files.length === 0
     ? { ok: true, diff: "" }
-    : diffArgs(["diff", FULL_POSTIMAGE_CONTEXT, revision, "HEAD", "--", ...files]);
+    : diffArgs(["diff", FULL_POSTIMAGE_CONTEXT, "--end-of-options", revision, "HEAD", "--", ...files]);
 }
 
 export type GitTrackedResult =
@@ -291,11 +337,11 @@ export function diffUntracked(file: string): GitDiffResult {
   try {
     return {
       ok: true,
-      diff: execFileSync("git", ["diff", "--no-index", FULL_POSTIMAGE_CONTEXT, "/dev/null", file], {
-        encoding: "utf-8",
-        cwd: root,
-        stdio: ["pipe", "pipe", "pipe"],
-      }),
+      // `--` separates options from the path so a filename shaped like an
+      // option cannot reach Git in option position.
+      diff: execFileSync("git", [
+        "diff", "--no-index", ...DIFF_DRIVER_SUPPRESSION, FULL_POSTIMAGE_CONTEXT, "/dev/null", "--", file,
+      ], diffExecOptions(root)),
     };
   } catch (error: unknown) {
     // git diff --no-index exits 1 both for a real difference and for some
@@ -333,8 +379,20 @@ const isTestSourcePath = (path: string): boolean =>
   /\.(?:test|spec)\.[jt]sx?$/.test(path) ||
   /\.rs$/.test(path);
 
+/**
+ * A path is evidence only when Git emitted a header boundary for it.
+ *
+ * `+++ b/` is not a content marker: a source line whose text is
+ * `++ b/x.test.ts` is rendered as `+++ b/x.test.ts`, indistinguishable from a
+ * real header. The parser below therefore accepts at most one header per
+ * `diff --git` entry and only inside that entry's prelude, and a line with no
+ * path at all is never counted. Without this, two lines in any non-test file
+ * fabricated `new_tests_written: true` for a Task.
+ */
+const isAttributedPath = (path: string | null): path is string => path !== null;
+
 const languageOfTestSource = (path: string | null): "java" | "ts" | "python" | "rust" | "unknown" | null => {
-  if (path === null) return null; // Headerless synthetic diff compatibility.
+  if (path === null) return null; // Lexical projection only; never evidence.
   if (!isTestSourcePath(path)) return "unknown";
   if (path.endsWith(".java")) return "java";
   if (/\.[jt]sx?$/.test(path)) return "ts";
@@ -385,14 +443,15 @@ export function countNewTests(diffContent: string): TestCount {
   let rust = 0;
 
   for (const { path, code } of lines) {
+    if (!isAttributedPath(path)) continue;
     const language = languageOfTestSource(path);
-    if ((language === null || language === "java") && /@(Test|Property|ParameterizedTest)\b/.test(code)) java++;
-    if ((language === null || language === "ts") && hasTypeScriptTestCall(code)) ts++;
+    if (language === "java" && /@(Test|Property|ParameterizedTest)\b/.test(code)) java++;
+    if (language === "ts" && hasTypeScriptTestCall(code)) ts++;
     // Python test classes are only collection containers; executable evidence
     // is a test_* function or method. Counting the class declaration itself
     // accepts an empty helper-only class that pytest collects as zero tests.
-    if ((language === null || language === "python") && /\bdef\s+test_/.test(code)) python++;
-    if ((language === null || language === "rust") && /#\[test\]/.test(code)) rust++;
+    if (language === "python" && /\bdef\s+test_/.test(code)) python++;
+    if (language === "rust" && /#\[test\]/.test(code)) rust++;
   }
 
   return { java, ts, python, rust, total: java + ts + python + rust };
@@ -703,16 +762,23 @@ function executableAddedLines(diffContent: string): readonly AddedExecutableLine
   let state = INITIAL_ASSERTION_STATE;
   let path: string | null = null;
   let insidePatch = false;
+  let headerClaimed = false;
   const lines: AddedExecutableLine[] = [];
   for (const diffLine of diffContent.split("\n")) {
     if (diffLine.startsWith("diff --git ")) {
       state = INITIAL_ASSERTION_STATE;
       path = null;
       insidePatch = true;
+      headerClaimed = false;
       continue;
     }
-    if (diffLine.startsWith("+++ b/") && !diffLine.includes("\t")) {
+    // One header per entry, and only while that entry's prelude is still open.
+    // A later `+++ b/` is added content that merely looks like a header; treating
+    // it as metadata let patch content decide which language its own lines were
+    // counted in.
+    if (!headerClaimed && path === null && diffLine.startsWith("+++ b/") && !diffLine.includes("\t")) {
       path = diffLine.slice("+++ b/".length);
+      headerClaimed = true;
       continue;
     }
     // Lexical state follows the complete postimage: removed lines do not exist
@@ -733,12 +799,13 @@ export function countAssertions(diffContent: string): number {
   let count = 0;
 
   for (const { path, code } of executableAddedLines(diffContent)) {
+    if (!isAttributedPath(path)) continue;
     const language = languageOfTestSource(path);
     // Match at most one per line to avoid cross-language double-counting.
-    if ((language === null || language === "java") && /(assertThat|assertEquals|assertNotNull|assertThrows|verify)\s*\(/.test(code)) { count++; continue; }
-    if ((language === null || language === "ts") && /(expect\s*\(|\.should\.)/.test(code)) { count++; continue; }
-    if ((language === null || language === "python") && /(assert\w*\(|assert [^=]|self\.assert|pytest\.raises)/.test(code)) { count++; continue; }
-    if ((language === null || language === "rust") && /(assert(_eq)?!|assert_ne!)/.test(code)) { count++; continue; }
+    if (language === "java" && /(assertThat|assertEquals|assertNotNull|assertThrows|verify)\s*\(/.test(code)) { count++; continue; }
+    if (language === "ts" && /(expect\s*\(|\.should\.)/.test(code)) { count++; continue; }
+    if (language === "python" && /(assert\w*\(|assert [^=]|self\.assert|pytest\.raises)/.test(code)) { count++; continue; }
+    if (language === "rust" && /(assert(_eq)?!|assert_ne!)/.test(code)) { count++; continue; }
   }
 
   return count;

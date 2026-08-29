@@ -465,12 +465,22 @@ const wait = (milliseconds: number): Promise<void> =>
 
 type LockOwner = Readonly<{ pid: number }>;
 
-function parseLockOwner(rawOwner: string, lockName: string): LockOwner {
-  if (!/^[1-9]\d*(?::\d+:[a-z0-9]+)?$/u.test(rawOwner)) {
-    throw new Error(`lock ${lockName} has malformed owner token: ${JSON.stringify(rawOwner)}`);
-  }
+/**
+ * The owner-token grammar, in one place: a pid, optionally followed by the
+ * claim time and randomness that make a token unique. A token that does not
+ * match is a claim whose bytes never landed, not a claimant to signal.
+ */
+const OWNER_TOKEN = /^[1-9]\d*(?::\d+:[a-z0-9]+)?$/u;
+
+function ownerPid(rawOwner: string): number | null {
+  if (!OWNER_TOKEN.test(rawOwner)) return null;
   const pid = Number(rawOwner.split(":", 1)[0]);
-  if (!Number.isSafeInteger(pid)) {
+  return Number.isSafeInteger(pid) ? pid : null;
+}
+
+function parseLockOwner(rawOwner: string, lockName: string): LockOwner {
+  const pid = ownerPid(rawOwner);
+  if (pid === null) {
     throw new Error(`lock ${lockName} has malformed owner token: ${JSON.stringify(rawOwner)}`);
   }
   return Object.freeze({ pid });
@@ -498,6 +508,55 @@ function directoryEntryExistsNoFollow(directory: AnchoredDirectory, name: string
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw error;
   }
+}
+
+/**
+ * A recovery guard is mutual exclusion, not a lease — so a claimant killed
+ * between claiming the guard and releasing it would lock the State File for
+ * every future process. Abandonment is therefore decidable from the guard
+ * itself and never guessed: a pid the kernel reports gone is proof, and a token
+ * that never landed (the guard was created and its writer killed before the
+ * bytes) is proof only once it is older than any real recovery could take.
+ */
+const RECOVERY_GUARD_ABANDONED_MS = 60_000;
+
+function reclaimAbandonedRecoveryGuard(
+  directory: AnchoredDirectory,
+  recoveryName: string,
+  now: number,
+): boolean {
+  let token: string;
+  try {
+    token = readDirectoryFileNoFollow(directory, recoveryName).toString("utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw new Error(
+      `cannot inspect recovery guard ${recoveryName}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  const claimedPid = ownerPid(token);
+  if (claimedPid !== null) {
+    if (processIsAlive({ pid: claimedPid })) return false;
+  } else {
+    const published = lstatSync(anchoredChildPath(directory, recoveryName)).ctimeMs;
+    if (now - published < RECOVERY_GUARD_ABANDONED_MS) return false;
+  }
+  try {
+    unlinkSync(anchoredChildPath(directory, recoveryName));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new Error(
+        `cannot reclaim recovery guard ${recoveryName}: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    }
+  }
+  process.stderr.write(
+    `loom: reclaimed the recovery guard ${recoveryName} of a dead or vanished claimant; ` +
+      "a prior lock recovery was interrupted\n",
+  );
+  return true;
 }
 
 function removeOwnedRecoveryGuard(
@@ -569,6 +628,10 @@ export function recoverStaleDirectoryLock(
         `cannot inspect lock ${lockName}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    // An exclusively-created lock is observable for a moment before its owner
+    // token lands. Such a claimant can become live at any instant, so its lock
+    // is never stale — recovery stands down and the caller retries.
+    if (observedOwner.trim().length === 0) return false;
     if (processIsAlive(parseLockOwner(observedOwner, lockName))) return false;
 
     const tomb = `${lockName}.tomb-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -636,6 +699,7 @@ async function acquireDirectoryLock(directory: AnchoredDirectory, lockName: stri
   const recoveryName = `${lockName}.recovery`;
   for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
     if (directoryEntryExistsNoFollow(directory, recoveryName)) {
+      if (reclaimAbandonedRecoveryGuard(directory, recoveryName, Date.now())) continue;
       await wait(LOCK_RETRY_MS);
       continue;
     }

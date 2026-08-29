@@ -17,10 +17,25 @@ function lastMatch(input: string, regex: RegExp): MatchWithIndex | null {
 
 type RunnerTally = Readonly<{
   label: string;
+  /** Group 1 is the executed-test count, when the runner reports one. */
   pass: RegExp;
   fail: RegExp;
   render: (match: MatchWithIndex) => string;
 }>;
+
+/**
+ * How many tests a tally says actually ran.
+ *
+ * A zero-test tally is not a passing run. `judgeTestRun` already treats a
+ * report with zero tests as a failure, while this transcript path read
+ * `0 passing` as success — the two evidence paths reached opposite verdicts for
+ * one run. A suite that collected nothing proves nothing.
+ */
+const tallyCount = (match: MatchWithIndex): number => {
+  const raw = match[1];
+  const count = raw === undefined ? 1 : Number(raw);
+  return Number.isSafeInteger(count) && count >= 0 ? count : 0;
+};
 
 /**
  * One source of truth for each runner's pass/fail tally shape. Order is
@@ -33,7 +48,7 @@ type RunnerTally = Readonly<{
 const RUNNER_TALLIES: readonly RunnerTally[] = Object.freeze([
   { label: "node", pass: /(\d+) passing/, fail: /(\d+) failing/, render: (match) => match[0] },
   // Match Vitest's test tally, not the sibling `Test Files` tally.
-  { label: "vitest", pass: /Tests?\s+\d+ passed/, fail: /Tests?\s+(\d+) failed/, render: (match) => match[0] },
+  { label: "vitest", pass: /Tests?\s+(\d+) passed/, fail: /Tests?\s+(\d+) failed/, render: (match) => match[0] },
   { label: "cargo", pass: /test result: ok\. (\d+) passed/, fail: /test result:.*(\d+) failed/, render: (match) => `${match[1]} passed` },
   // The timing suffix and line-start anchors prevent prose from minting passes.
   { label: "pytest", pass: /(\d+) passed\b[^\n]*\bin \d+(?:\.\d+)?s/, fail: /(\d+) failed/, render: (match) => match[0] },
@@ -41,10 +56,14 @@ const RUNNER_TALLIES: readonly RunnerTally[] = Object.freeze([
 ]);
 
 export function extractTestEvidence(bashOutput: string): TestEvidence {
+  // A runner that reported a tally of zero tests is recorded distinctly so the
+  // absence never reads as the absence of runner output.
+  let zeroTally: string | null = null;
+
   // Maven's pass tally already asserts zero failures and errors.
   if (/BUILD SUCCESS/.test(bashOutput)) {
     const stripped = bashOutput.replace(/\*\*/g, "");
-    const maven = lastMatch(stripped, /Tests run: \d+, Failures: 0, Errors: 0/);
+    const maven = lastMatch(stripped, /Tests run: (\d+), Failures: 0, Errors: 0/);
     if (maven !== null) {
       // A success tally is only the FINAL verdict when nothing worse follows it:
       // a later non-zero Failures:/Errors: tally (a broken re-run, or a later
@@ -59,7 +78,10 @@ export function extractTestEvidence(bashOutput: string): TestEvidence {
       const finalTally = lastMatch(tail, /Tests run: \d+, Failures: (\d+), Errors: (\d+)/);
       const tallyVetoes = finalTally !== null && (finalTally[1] !== "0" || finalTally[2] !== "0");
       if (!tallyVetoes && !/BUILD FAILURE/.test(tail)) {
-        return Object.freeze({ passed: true, evidence: `maven: ${maven[0]}` });
+        if (tallyCount(maven) > 0) {
+          return Object.freeze({ passed: true, evidence: `maven: ${maven[0]}` });
+        }
+        zeroTally = "maven: 0 tests executed";
       }
     }
   }
@@ -75,11 +97,15 @@ export function extractTestEvidence(bashOutput: string): TestEvidence {
       failed[1] !== "0" &&
       lineOf(bashOutput, failed.index) >= lineOf(bashOutput, passed.index);
     if (!vetoed) {
-      return Object.freeze({ passed: true, evidence: `${runner.label}: ${runner.render(passed)}` });
+      const executed = tallyCount(passed);
+      if (executed > 0) {
+        return Object.freeze({ passed: true, evidence: `${runner.label}: ${runner.render(passed)}` });
+      }
+      zeroTally ??= `${runner.label}: 0 tests executed`;
     }
   }
 
-  return Object.freeze({ passed: false, evidence: "" });
+  return Object.freeze({ passed: false, evidence: zeroTally ?? "" });
 }
 
 /** Zero-based line number of the character at `index`. */

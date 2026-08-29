@@ -1,10 +1,12 @@
 import { isNoFindingSentinel } from "../utils/no-finding-sentinel";
+import type { AgentRequestAuthority } from "./orchestration-contract";
 import {
   parseSpecCheckVerdict,
   type CapturedSpecCheck,
   type EvidenceFailedSpecCheck,
   type SpecCheck,
   type SpecCheckVerdict,
+  type TaskGraph,
 } from "../types";
 
 export interface ParsedSpecCheckOutput {
@@ -15,6 +17,12 @@ export interface ParsedSpecCheckOutput {
   readonly highCount: number | null;
   readonly verdict: SpecCheckVerdict | null;
   readonly wave: number | null;
+  /**
+   * Why an operator is overriding captured evidence by hand. `null` is a
+   * different answer from an empty string: an override is either deliberate and
+   * attributable, or it did not happen.
+   */
+  readonly overrideReason: string | null;
 }
 
 export type SpecCheckResolution =
@@ -62,6 +70,7 @@ export function parseSpecCheckOutput(output: string): ParsedSpecCheckOutput {
   const highCount = searchBlock.match(/SPEC_CHECK_HIGH_COUNT:\s*(\d+)/);
   const verdict = searchBlock.match(/SPEC_CHECK_VERDICT:\s*(PASSED|BLOCKED)/);
   const wave = searchBlock.match(/SPEC_CHECK_WAVE:\s*(\d+)/);
+  const overrideText = searchBlock.match(/^SPEC_CHECK_OVERRIDE:\s*(.*)$/m)?.[1]?.trim() ?? "";
   return {
     critical,
     high,
@@ -70,7 +79,85 @@ export function parseSpecCheckOutput(output: string): ParsedSpecCheckOutput {
     highCount: highCount ? Number(highCount[1]) : null,
     verdict: verdict ? parseSpecCheckVerdict(verdict[1]) : null,
     wave: wave ? Number(wave[1]) : null,
+    overrideReason: overrideText === "" ? null : overrideText,
   };
+}
+
+export type SpecCheckRequestAuthority = Pick<
+  AgentRequestAuthority,
+  "runId" | "slotId" | "attempt" | "role"
+>;
+
+/**
+ * One owner of the question "is this the current spec-check capability?"
+ *
+ * The same invariant was decided independently by the Wave Gate façade, the
+ * Claude SubagentStop hook, the Pi shell, and the manual `store-spec-check`
+ * helper, and the copies demanded different conjuncts — which is how a
+ * stdin-only helper call could flip a Wave's spec gate from
+ * `EVIDENCE_CAPTURE_FAILED` to `PASSED`. `null` means the evidence may be
+ * written; a string names the exact mismatch.
+ */
+export function specCheckAuthorityProblem(
+  state: TaskGraph,
+  authority: SpecCheckRequestAuthority | undefined,
+): string | null {
+  const epoch = state.wave_review_epoch;
+  const active = state.active_wave_gate;
+  if (epoch === undefined && active === undefined) {
+    const modernAuthorityHistory = state.spec_trace_version === 2 ||
+      state.verification_manifest !== undefined ||
+      state.active_wave_completion_suite !== undefined ||
+      (state.wave_gate_history?.length ?? 0) > 0 ||
+      (state.wave_reopening_history?.length ?? 0) > 0 ||
+      (state.orphaned_wave_gate_history?.length ?? 0) > 0 ||
+      (state.spec_trace_wave_gate_retirements?.length ?? 0) > 0;
+    if (authority !== undefined) {
+      return `captured spec-check request ${authority.runId}/${authority.slotId}/${authority.attempt} has no current Wave authority`;
+    }
+    return modernAuthorityHistory
+      ? "modern Wave spec-check has no current capture-correlated request authority"
+      : null;
+  }
+  if (authority === undefined) return "modern Wave spec-check has no capture-correlated request authority";
+  if (authority.role !== "spec-check-invoker") return `captured request belongs to ${authority.role}`;
+  const slot = epoch?.specCheckSlotAuthority;
+  return state.current_phase === "execute" && epoch !== undefined && active !== undefined &&
+      state.current_wave === epoch.wave && active.runId === authority.runId && active.wave === epoch.wave &&
+      epoch.runId === authority.runId && slot?.slot_id === authority.slotId && slot.attempted === authority.attempt
+    ? null
+    : `captured spec-check request ${authority.runId}/${authority.slotId}/${authority.attempt} does not match the exact current Wave epoch`;
+}
+
+export type SpecCheckManualOverride =
+  /** Legacy graph: the documented manual route is available as before. */
+  | Readonly<{ kind: "allowed"; reason: string | null }>
+  /** A registered Wave Gate owns this Wave; only its capture route may write. */
+  | Readonly<{ kind: "refused-active"; problem: string }>
+  /** Modern graph with no active run: allowed only as an attributable override. */
+  | Readonly<{ kind: "requires-reason"; problem: string }>;
+
+/**
+ * May `helper store-spec-check` write protected spec-check state at all?
+ *
+ * The helper is the documented, user-approved override for false positives, so
+ * it is not deleted — but it carries no capture-correlated request authority.
+ * While a registered run owns the Wave it must not write at all: doing so could
+ * flip a failed spec gate, clear the derived Wave block, and suppress that run's
+ * real spec-check spawn.
+ */
+export function decideSpecCheckManualOverride(
+  state: TaskGraph,
+  overrideReason: string | null,
+): SpecCheckManualOverride {
+  const problem = specCheckAuthorityProblem(state, undefined);
+  if (problem === null) return Object.freeze({ kind: "allowed", reason: overrideReason });
+  if (state.wave_review_epoch !== undefined || state.active_wave_gate !== undefined) {
+    return Object.freeze({ kind: "refused-active", problem });
+  }
+  return overrideReason === null
+    ? Object.freeze({ kind: "requires-reason", problem })
+    : Object.freeze({ kind: "allowed", reason: overrideReason });
 }
 
 const evidenceFailure = (wave: number, runAt: string, error: string): SpecCheckResolution => ({

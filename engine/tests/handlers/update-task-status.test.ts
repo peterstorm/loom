@@ -433,13 +433,27 @@ describe("resolveTestEvidence — snapshot-read-failed labeling (pure)", () => {
   });
 });
 
+/**
+ * New-test evidence is path-bound: every counted line must belong to a path Git
+ * named in that entry's header. These fixtures therefore carry the real patch
+ * shape rather than loose `+lines`.
+ */
+const patch = (path: string, ...lines: string[]): string => [
+  `diff --git a/${path} b/${path}`,
+  `--- a/${path}`,
+  `+++ b/${path}`,
+  "@@ -0,0 +1 @@",
+  ...lines,
+].join("\n");
+
 describe("analyzeNewTests (pure)", () => {
   it("detects Java @Test methods with assertions", () => {
-    const diff = [
+    const diff = patch(
+      "ExampleTest.java",
       "+    @Test",
       "+    void shouldWork() {",
       "+    assertThat(result).isEqualTo(42);",
-    ].join("\n");
+    );
     const result = analyzeNewTests(diff, undefined);
     expect(result.written).toBe(true);
     expect(result.evidence).toContain("1 new test");
@@ -447,18 +461,19 @@ describe("analyzeNewTests (pure)", () => {
   });
 
   it("rejects test stubs with no assertions", () => {
-    const diff = [
+    const diff = patch(
+      "ExampleTest.java",
       "+    @Test",
       "+    void stubTest() {",
       "+    }",
-    ].join("\n");
+    );
     const result = analyzeNewTests(diff, undefined);
     expect(result.written).toBe(false);
     expect(result.evidence).toContain("0 assertions");
   });
 
   it("records migration provenance when legacy new_tests_required=false waives new tests", () => {
-    const diff = "+    @Test\n+    assertThat(x).isTrue();";
+    const diff = patch("ExampleTest.java", "+    @Test", "+    assertThat(x).isTrue();");
     const result = analyzeNewTests(diff, false);
     expect(result.written).toBe(false);
     expect(result.evidence).toContain(
@@ -467,17 +482,53 @@ describe("analyzeNewTests (pure)", () => {
   });
 
   it("detects TypeScript tests with expect()", () => {
-    const diff = [
+    const diff = patch(
+      "example.test.ts",
       '+  it("works", () => {',
       "+    expect(result).toBe(42);",
-    ].join("\n");
+    );
     const result = analyzeNewTests(diff, undefined);
     expect(result.written).toBe(true);
     expect(result.evidence).toContain("ts");
   });
 
+  it("refuses an executable-looking diff in an ordinary source path", () => {
+    const diff = patch(
+      "src/production.ts",
+      '+  it("works", () => {',
+      "+    expect(result).toBe(42);",
+    );
+    const result = analyzeNewTests(diff, undefined);
+    expect(result.written).toBe(false);
+    expect(result.evidence).toBe("");
+  });
+
+  it("refuses a +++ b/ header forged inside patch content as a language switch", () => {
+    // Two lines added to any non-test file used to satisfy the whole new-test
+    // obligation: the forged header made Git's own rendering of the following
+    // line look like a test-source boundary.
+    const diff = [
+      "diff --git a/src/helper.py b/src/helper.py",
+      "--- a/src/helper.py",
+      "+++ b/src/helper.py",
+      "@@ -1 +1,3 @@",
+      " x",
+      "++ b/fake.test.ts",
+      '+it("pwned", () => expect(1).toBe(1));',
+    ].join("\n");
+
+    expect(analyzeNewTests(diff, undefined).written).toBe(false);
+  });
+
+  it("refuses unattributed additions with no Git path boundary", () => {
+    const diff = '+  it("works", () => {\n+    expect(result).toBe(42);';
+    const result = analyzeNewTests(diff, undefined);
+    expect(result.written).toBe(false);
+    expect(result.evidence).toBe("");
+  });
+
   it("returns empty for no tests in diff", () => {
-    const diff = "+const x = 42;\n+function foo() {}";
+    const diff = patch("example.test.ts", "+const x = 42;", "+function foo() {}");
     const result = analyzeNewTests(diff, undefined);
     expect(result.written).toBe(false);
     expect(result.evidence).toBe("");
