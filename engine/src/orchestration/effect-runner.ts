@@ -160,9 +160,37 @@ async function runCaptureRawTranscript(
  * adapter — a value crossing the port could impersonate the runner's own
  * control signal. A module-private class cannot be produced by anything but the
  * `catch` below.
+ *
+ * It carries the error's NAME and CAUSE, not just its message. The runner has
+ * no way to tell a transient port failure from a programming error — it cannot
+ * inspect what the adapter was trying to do — so it must not strip the two
+ * fields that make that distinction visible. `unreachablePort` thrown by a
+ * caller's own wiring otherwise reached the operator as the same bare,
+ * `retriable: true` infrastructure sentence as an ECONNRESET.
  */
 class PortThrew {
-  constructor(readonly message: string) {}
+  readonly name: string;
+  readonly cause: string | null;
+
+  private constructor(readonly message: string, name: string, cause: string | null) {
+    this.name = name;
+    this.cause = cause;
+  }
+
+  static from(error: unknown): PortThrew {
+    if (!(error instanceof Error)) return new PortThrew(String(error), "thrown", null);
+    const cause = error.cause;
+    return new PortThrew(
+      error.message,
+      error.name === "" ? "Error" : error.name,
+      cause === undefined ? null
+        : cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause),
+    );
+  }
+
+  describe(): string {
+    return `${this.name}: ${this.message}${this.cause === null ? "" : ` (caused by ${this.cause})`}`;
+  }
 }
 
 async function runThroughPort(
@@ -173,18 +201,27 @@ async function runThroughPort(
     try {
       return await port();
     } catch (error) {
-      return new PortThrew(error instanceof Error ? error.message : String(error));
+      return PortThrew.from(error);
     }
   })();
+  // `retriable: true` is the runner's honest limit of knowledge, not a
+  // diagnosis: any throw COULD be transient. What lets a reader decide is the
+  // error name and cause preserved above.
   return raw instanceof PortThrew
-    ? failure(intent.effectId, true, raw.message)
+    ? failure(intent.effectId, true, raw.describe())
     : reconcile(intent, raw);
 }
 
 /**
  * Build the runner. `handle` owns run-directory effects; `ports` own the ones
- * that reach outside it. The returned function is the ONLY way a program's
- * effect intent becomes a receipt.
+ * that reach outside it.
+ *
+ * This is the only path that EXECUTES an intent and reconciles its receipt, and
+ * the only one that enforces the read-before-run idempotency guard. It is not
+ * the only place a receipt file can appear: `standalone.ts` records one
+ * `artifact-set-published` receipt itself on the exclusive-publication collision
+ * path, where the effect already happened and re-running it is the very thing
+ * the guard exists to prevent.
  */
 export function createEffectRunner(args: Readonly<{
   handle: RunDirHandle;

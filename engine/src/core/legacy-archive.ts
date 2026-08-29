@@ -47,6 +47,7 @@ import {
 } from "./standalone-review";
 import { parseArtifactDigest, parseArtifactRef, parseOrchestrationRunId, parseRequestId, parseSlotId, type ArtifactDigest, type ArtifactRef, type DomainResult, type NonEmpty, type OrchestrationRunId } from "./orchestration-contract";
 import { findingsUnionError, parseStoredFindings } from "./findings";
+import { isCaptureRejectionAuditRecord } from "./harness-capture";
 import type { CompletedWaveGateRegistration, Finding, RefutedFinding, TaskGraph } from "../types";
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -541,6 +542,14 @@ export type LegacyJournalTranslation =
  * The caller-owned document and its event prefix are never rewritten. A
  * schemaVersion of 1 is accepted for forward-written compatibility copies;
  * absence is the original on-disk spelling.
+ *
+ * Capture-rejection audit records are CARRIED PAST the reducer rather than
+ * parsed as transitions: they are durable evidence of a refusal, not a machine
+ * event, and no panel reducer has a rule for one. Refusing them here is what
+ * permanently wedged a registered panel run after a single ordinary capture
+ * rejection, because the journal file is immutable and every later `resume`
+ * replayed the same refusal. Anything genuinely unknown still fails closed —
+ * only the exact audit shape `core/harness-capture` owns is carried.
  */
 export function translateLegacyPanelJournal(
   panel: LegacyPanelKind,
@@ -571,6 +580,7 @@ export function translateLegacyPanelJournal(
       }
       const events: ArchitectureProgramEvent[] = [];
       for (let index = 0; index < raw.events.length; index++) {
+        if (isCaptureRejectionAuditRecord(raw.events[index])) continue;
         const parsed = parseEvent("architecture", raw.events[index], index);
         if (typeof parsed === "string") return { ok: false, error: parsed };
         events.push(parsed);
@@ -601,6 +611,7 @@ export function translateLegacyPanelJournal(
     }
     const events: RefutationProgramEvent[] = [];
     for (let index = 0; index < raw.events.length; index++) {
+      if (isCaptureRejectionAuditRecord(raw.events[index])) continue;
       const parsed = parseEvent("refutation", raw.events[index], index);
       if (typeof parsed === "string") return { ok: false, error: parsed };
       events.push(parsed);

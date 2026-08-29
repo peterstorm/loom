@@ -34,7 +34,18 @@ import {
 
 export const CAPTURE_SCHEMA_VERSION = 1;
 
-/** Why a result could not be accepted. Every case is audited, never silent. */
+/**
+ * Why a result could not be accepted BY THESE RULES.
+ *
+ * This is the core vocabulary only. The adapters mint further reasons of their
+ * own that never pass through this module — `transcript-json`, `transcript-shape`,
+ * `transcript-locator`, `agent-failed` and `capture-crashed` on the Pi side,
+ * `run-authority`, `run-directory`, `correlator`, `requests`, `context`,
+ * `context-binding`, `transcript`, `wrong-agent-role` and `rejection-persistence`
+ * from the shared run-directory runtime — so `CaptureOutcome.reason` is a
+ * deliberately wider `string`, and an adapter reason is not a violation of this
+ * union.
+ */
 export type CaptureRejectionReason =
   | "no-final-payload"
   | "ambiguous-final-payload"
@@ -69,7 +80,7 @@ const accept = <T>(value: T): DomainResult<T, CaptureRejection> => ({ ok: true, 
  * provenance to explain an ambiguity rather than just reporting one.
  */
 export type FinalPayloadCandidate = Readonly<{
-  /** Where the adapter found it, e.g. "content[2].text" or "transcript.last". */
+  /** Where the adapter found it, e.g. `content[2].text` or `transcript.line[7]`. */
   origin: string;
   text: string;
 }>;
@@ -128,10 +139,14 @@ export function parseFinalPayload(
 /**
  * The harness-native identity an adapter resolved for a finished Agent.
  *
- * Pi derives it from `toolCallId` plus the result index and agent; Claude from
- * `session_id`, `agent_id`, and `agent_type` against its pre-spawn receipt.
- * Both must arrive here as an explicit claim, because a claim can be checked
- * against issued authority and an assumption cannot.
+ * Neither harness hands the request id back. Each supplies only its own native
+ * correlator — Pi a roster id built from `toolCallId`, the result index and the
+ * agent type; Claude the `agent_id` its SubagentStop payload carries — and
+ * `captureHarnessResult` reconstructs `requestId` and `attempt` from the durable
+ * correlator binding the spawn side recorded beside the reservation. So
+ * `requestId` and `attempt` are not claims the harness is trusted with: they are
+ * looked up from engine-written authority. What the adapter does claim is the
+ * native id, and the checks below re-verify that claim against issued authority.
  */
 export type HarnessResultIdentity = Readonly<{
   harness: "pi" | "claude";
@@ -181,8 +196,13 @@ export function bindCapture(input: Readonly<{
   issued: readonly AgentRequestAuthority[];
   identity: HarnessResultIdentity;
   payload: FinalPayload;
-  /** Exact semantic attempts that already accepted a capture in this run. */
-  alreadyCaptured?: ReadonlySet<CaptureKey>;
+  /**
+   * Exact semantic attempts that already accepted a capture in this run.
+   * Required, not optional: an omitted set silently disabled the
+   * duplicate-capture refusal, which is the one guard that stops an accepted
+   * transcript being replaced by a result that arrived twice.
+   */
+  alreadyCaptured: ReadonlySet<CaptureKey>;
 }>): DomainResult<CaptureReceipt, CaptureRejection> {
   const claimed = input.identity.requestId;
   const request = input.issued.find(({ requestId }) => requestId === claimed);
@@ -196,7 +216,7 @@ export function bindCapture(input: Readonly<{
       `result claims attempt ${input.identity.attempt} but request ${claimed} was issued for attempt ${request.attempt}`,
     );
   }
-  if (input.alreadyCaptured?.has(captureKey(request.slotId, request.attempt)) === true) {
+  if (input.alreadyCaptured.has(captureKey(request.slotId, request.attempt))) {
     return reject(
       "duplicate-capture",
       request.requestId,
@@ -218,6 +238,75 @@ export function bindCapture(input: Readonly<{
     byteLength: input.payload.byteLength,
     digest: input.payload.digest,
   }));
+}
+
+// ---------------------------------------------------------------------------
+// Rejection audit record
+// ---------------------------------------------------------------------------
+
+/**
+ * The journal record kind written beside a terminalised capture rejection.
+ *
+ * Named once, here, because more than one adapter writes it AND the legacy panel
+ * translator has to recognise it. It deliberately carries no `type` field: it is
+ * durable evidence of a refusal, not a machine transition, and no program
+ * reducer has a rule for it. Feeding it to a reducer instead is what wedged a
+ * registered panel run at every later `resume` — a record no machine can fold is
+ * exactly the corruption risk that keeps `RunAbandonment` out of this journal
+ * too.
+ */
+export const CAPTURE_REJECTION_EVENT_KIND = "request-capture-rejected";
+
+export type CaptureRejectionAuditRecord = Readonly<{
+  kind: typeof CAPTURE_REJECTION_EVENT_KIND;
+  requestId: RequestId;
+  slotId: AgentRequestAuthority["slotId"];
+  attempt: SemanticAttempt;
+  diagnostic: string;
+}>;
+
+/**
+ * Journal identity for one rejected attempt.
+ *
+ * Shared because it IS journal identity: derived differently on each side, one
+ * refused attempt journals twice under two keys and replay counts a refusal that
+ * happened once as two.
+ */
+export function captureRejectionDedupKey(requestId: RequestId, attempt: SemanticAttempt): string {
+  return `capture-rejected:${createHash("sha256").update(`${requestId}:${attempt}`).digest("hex")}`;
+}
+
+/** Build the one audit record a terminalised rejection is allowed to write. */
+export function captureRejectionAuditRecord(
+  request: Pick<AgentRequestAuthority, "requestId" | "slotId" | "attempt">,
+  diagnostic: string,
+): CaptureRejectionAuditRecord {
+  return canonicalRecord({
+    kind: CAPTURE_REJECTION_EVENT_KIND as typeof CAPTURE_REJECTION_EVENT_KIND,
+    requestId: request.requestId,
+    slotId: request.slotId,
+    attempt: request.attempt,
+    diagnostic,
+  });
+}
+
+/**
+ * True only for a record shaped EXACTLY like this module's audit record.
+ *
+ * The panel translator uses this to carry an audit record past the reducer, so a
+ * loose test here would quietly swallow real journal corruption: every field and
+ * the exact key set are checked, and anything else stays the error it was.
+ */
+export function isCaptureRejectionAuditRecord(raw: unknown): raw is CaptureRejectionAuditRecord {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
+  const record = raw as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  return keys.length === 5 && keys.join(",") === "attempt,diagnostic,kind,requestId,slotId" &&
+    record["kind"] === CAPTURE_REJECTION_EVENT_KIND &&
+    typeof record["requestId"] === "string" && record["requestId"].length > 0 &&
+    typeof record["slotId"] === "string" && record["slotId"].length > 0 &&
+    (record["attempt"] === 1 || record["attempt"] === 2) &&
+    typeof record["diagnostic"] === "string";
 }
 
 /**

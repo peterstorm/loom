@@ -17,22 +17,28 @@
  */
 
 import { match } from "ts-pattern";
-import { createHash } from "node:crypto";
 import {
   bindCapture,
+  captureRejectionAuditRecord,
+  captureRejectionDedupKey,
   parseFinalPayload,
-  type CaptureKey,
   type CaptureReceipt,
   type FinalPayloadCandidate,
   type HarnessResultIdentity,
 } from "../core/harness-capture";
 import type { AgentRequestAuthority } from "../core/orchestration-contract";
-import { openRunDirectory, type RunDirHandle } from "./run-directory-handle";
+import { openRunDirectory, type HarnessCorrelatorBinding, type RunDirHandle } from "./run-directory-handle";
 
 /**
- * Where a run directory is announced. Set by the spawn side; absent for every
- * agent that is not part of an orchestration run, which is the common case and
- * NOT an error.
+ * Where a run directory is announced.
+ *
+ * Operator/harness-supplied only: NO production code writes either variable.
+ * Pi's spawn side publishes a durable session run binding instead
+ * (`registerSessionRunBinding`, read back by `pi/extension`), and that binding —
+ * not the environment — is what carries capture authority across a process
+ * boundary today. These two names are the fallback for a supervisor or a test
+ * driving a harness with no binding registry; absent means "this agent is not
+ * part of an orchestration run", which is the common case and NOT an error.
  */
 export const RUNS_ROOT_ENV = "LOOM_ORCHESTRATION_RUNS_ROOT";
 export const RUN_DIR_ENV = "LOOM_ORCHESTRATION_RUN_DIR";
@@ -61,44 +67,161 @@ export function describeCaptureFailure(outcome: CaptureOutcome): string {
     .exhaustive();
 }
 
-/** Every request this run reserved, read through the anchored handle. */
-export function readIssuedRequests(handle: RunDirHandle): readonly AgentRequestAuthority[] {
-  const issued = handle.readIssuedRequests();
-  if (!issued.ok) throw new Error(issued.error.message);
-  return issued.value;
-}
-
-/** Exact semantic attempts whose transcript already landed. */
-export function alreadyCapturedAttempts(handle: RunDirHandle): ReadonlySet<CaptureKey> {
-  const captured = handle.readCapturedAttempts();
-  if (!captured.ok) throw new Error(captured.error.message);
-  return captured.value;
+/**
+ * Terminalise one refused capture and return what the operator must be told.
+ *
+ * ONE home for the whole protocol — tombstone, audit record, and the journal
+ * identity that record dedups by — because both adapters need it and two copies
+ * had already drifted: the engine copy let a journal-append failure throw out of
+ * a function whose stated contract is "refusals are returned, never thrown",
+ * while the Pi copy turned the identical fault into a string. One journal fault,
+ * two classifications, plus a shared dedup key only one side could change.
+ *
+ * The refusal arrives either split (`reason` + `message`, what the shared rules
+ * produce) or already composed (`diagnostic`, what the adapters' own authority
+ * checks produce); the durable text each harness writes today is preserved
+ * exactly, and only the failure handling is shared.
+ *
+ * It never throws, and it never loses the cause. When the tombstone cannot be
+ * written the returned message carries the ORIGINAL refusal as well as the
+ * persistence error, because at that point no on-disk trace of the reason exists
+ * at all and "rejection-persistence" alone would name the wrong component.
+ */
+export async function terminalizeCaptureRejection(
+  handle: RunDirHandle,
+  request: AgentRequestAuthority,
+  refusal: Readonly<{ reason: string; message: string }> | Readonly<{ diagnostic: string }>,
+): Promise<CaptureOutcome> {
+  const reason = "reason" in refusal ? refusal.reason : "capture-rejection";
+  const message = "message" in refusal ? refusal.message : refusal.diagnostic;
+  const diagnostic = "diagnostic" in refusal ? refusal.diagnostic : `${refusal.reason}: ${refusal.message}`;
+  const terminal = await handle.rejectCapture(request, diagnostic);
+  if (!terminal.ok) {
+    return {
+      kind: "rejected",
+      reason: "rejection-persistence",
+      message: `capture refused (${diagnostic}) and its rejection could not be persisted: ${terminal.error.message}`,
+    };
+  }
+  try {
+    await handle.appendEvent({
+      schemaVersion: 1,
+      sequence: 0,
+      dedupKey: captureRejectionDedupKey(request.requestId, request.attempt),
+      recordedAtMs: Date.now(),
+      event: captureRejectionAuditRecord(request, diagnostic),
+    });
+    return { kind: "rejected", reason, message };
+  } catch (error) {
+    return {
+      kind: "rejected",
+      reason: "rejection-audit-unsynchronized",
+      message: `capture refused (${diagnostic}); it was terminalised but its audit event could not be persisted: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
 }
 
 /**
- * Resolve the reservation a finished Agent answers for.
- *
- * Neither harness hands the request id back, so it is recovered by matching the
- * spawn-time correlator recorded in its immutable, descriptor-anchored binding
- * beside the reservation. A result with no binding belongs to some other agent
- * — a `no-reservation`, not a failure; an unreadable binding is a rejection.
+ * The issued request one native correlator resolves to, plus what a caller
+ * needs to act on it.
  */
-export function readCorrelatorIdentity(
-  handle: RunDirHandle,
-  harness: HarnessResultIdentity["harness"],
-  nativeId: string,
-): HarnessResultIdentity | null {
-  if (nativeId.length === 0) return null;
-  const resolved = handle.readHarnessCorrelator(harness, nativeId);
-  if (!resolved.ok) throw new Error(resolved.error.message);
-  return resolved.value === null
-    ? null
-    : Object.freeze({
-        harness: resolved.value.harness,
-        requestId: resolved.value.requestId,
-        attempt: resolved.value.attempt,
-        nativeId: resolved.value.nativeId,
-      });
+export type CorrelatedRequest = Readonly<{
+  handle: RunDirHandle;
+  /** The role the reservation recorded for this correlator — never the payload's say-so. */
+  correlatorRole: HarnessCorrelatorBinding["role"];
+  issued: readonly AgentRequestAuthority[];
+  identity: HarnessResultIdentity;
+  request: AgentRequestAuthority;
+}>;
+
+export type CorrelatedRequestResolution =
+  | Readonly<{ ok: true; value: CorrelatedRequest }>
+  | Readonly<{ ok: false; outcome: CaptureOutcome }>;
+
+/**
+ * Resolve "which request does this native correlator answer" in ONE place.
+ *
+ * Opening the run, reading its correlator binding, and loading the issued
+ * authority is the same three-step question for every consumer: the capture path
+ * below, and `subagent-stop/dispatch`, which must know the program a stop
+ * belongs to BEFORE it decides whether legacy TaskGraph settlement applies. Two
+ * copies of that question is how a harness ends up calling a stop "unrelated"
+ * while its own capture path still fills the slot, so the question has exactly
+ * one asker.
+ *
+ * Decisions only — nothing here terminalises, tombstones, or writes. What an
+ * unresolved correlator MEANS (refusal, tombstone, or silence for an agent in
+ * nobody's run) belongs to the caller, and `ok: false` carries the same typed
+ * `CaptureOutcome` the capture path already reports, so the caller that refuses
+ * and the caller that audits cannot disagree about the words.
+ */
+export function resolveCorrelatedRequest(args: Readonly<{
+  harness: HarnessResultIdentity["harness"];
+  runsRoot: string | undefined;
+  runDirectory: string | undefined;
+  nativeId: string;
+}>): CorrelatedRequestResolution {
+  if (args.runsRoot === undefined && args.runDirectory === undefined) {
+    return { ok: false, outcome: { kind: "not-an-orchestration-run" } };
+  }
+  if (args.runsRoot === undefined || args.runDirectory === undefined) {
+    return {
+      ok: false,
+      outcome: {
+        kind: "rejected",
+        reason: "run-authority",
+        message: "orchestration capture requires both runsRoot and runDirectory",
+      },
+    };
+  }
+
+  const opened = openRunDirectory(args.runsRoot, args.runDirectory);
+  if (!opened.ok) {
+    return { ok: false, outcome: { kind: "rejected", reason: "run-directory", message: opened.error.message } };
+  }
+  const handle = opened.value;
+
+  const correlator = handle.readHarnessCorrelator(args.harness, args.nativeId);
+  if (!correlator.ok) {
+    return { ok: false, outcome: { kind: "rejected", reason: "correlator", message: correlator.error.message } };
+  }
+  if (correlator.value === null) {
+    return {
+      ok: false,
+      outcome: {
+        kind: "no-reservation",
+        agentId: args.nativeId.length === 0 ? "(missing)" : args.nativeId,
+      },
+    };
+  }
+  const binding = correlator.value;
+
+  const issued = handle.readIssuedRequests();
+  if (!issued.ok) {
+    return { ok: false, outcome: { kind: "rejected", reason: "requests", message: issued.error.message } };
+  }
+  const request = issued.value.find(({ requestId }) => requestId === binding.requestId);
+  if (request === undefined) {
+    return {
+      ok: false,
+      outcome: {
+        kind: "rejected",
+        reason: "unknown-request",
+        message: "correlated request has no issued authority",
+      },
+    };
+  }
+
+  const identity: HarnessResultIdentity = Object.freeze({
+    harness: binding.harness,
+    requestId: binding.requestId,
+    attempt: binding.attempt,
+    nativeId: binding.nativeId,
+  });
+  return Object.freeze({
+    ok: true,
+    value: Object.freeze({ handle, correlatorRole: binding.role, issued: issued.value, identity, request }),
+  });
 }
 
 /**
@@ -108,9 +231,9 @@ export function readCorrelatorIdentity(
  * the caller audits rather than thrown or guessed at. What is written differs
  * by outcome, not whether anything is written at all — a refusal that reached a
  * real reservation and left it UNFILLED is itself durably recorded
- * (`rejectCapture` tombstones the attempt and a `request-capture-rejected`
- * event lands in the journal), because a rejected attempt that left no trace is
- * indistinguishable from an attempt that never happened.
+ * (`terminalizeCaptureRejection` tombstones the attempt and journals the audit
+ * record), because a rejected attempt that left no trace is indistinguishable
+ * from an attempt that never happened.
  *
  * Two families write nothing, both because they have nothing to write against.
  * The refusals that never resolved a reservation — `not-an-orchestration-run`,
@@ -135,61 +258,12 @@ export async function captureHarnessResult(args: Readonly<{
   nativeId: string;
   candidates: readonly FinalPayloadCandidate[];
 }>): Promise<CaptureOutcome> {
-  if (args.runsRoot === undefined && args.runDirectory === undefined) {
-    return { kind: "not-an-orchestration-run" };
-  }
-  if (args.runsRoot === undefined || args.runDirectory === undefined) {
-    return {
-      kind: "rejected",
-      reason: "run-authority",
-      message: "orchestration capture requires both runsRoot and runDirectory",
-    };
-  }
+  const resolved = resolveCorrelatedRequest(args);
+  if (!resolved.ok) return resolved.outcome;
+  const { handle, correlatorRole, issued, identity, request } = resolved.value;
 
-  const opened = openRunDirectory(args.runsRoot, args.runDirectory);
-  if (!opened.ok) return { kind: "rejected", reason: "run-directory", message: opened.error.message };
-  const handle = opened.value;
-
-  const correlator = handle.readHarnessCorrelator(args.harness, args.nativeId);
-  if (!correlator.ok) {
-    return { kind: "rejected", reason: "correlator", message: correlator.error.message };
-  }
-  if (correlator.value === null) {
-    return { kind: "no-reservation", agentId: args.nativeId.length === 0 ? "(missing)" : args.nativeId };
-  }
-  const identity: HarnessResultIdentity = Object.freeze({
-    harness: correlator.value.harness,
-    requestId: correlator.value.requestId,
-    attempt: correlator.value.attempt,
-    nativeId: correlator.value.nativeId,
-  });
-
-  const issued = handle.readIssuedRequests();
-  if (!issued.ok) return { kind: "rejected", reason: "requests", message: issued.error.message };
-  const request = issued.value.find(({ requestId }) => requestId === identity.requestId);
-  if (request === undefined) {
-    return { kind: "rejected", reason: "unknown-request", message: "correlated request has no issued authority" };
-  }
-  const reject = async (reason: string, message: string): Promise<CaptureOutcome> => {
-    const terminal = await handle.rejectCapture(request, `${reason}: ${message}`);
-    if (!terminal.ok) {
-      return { kind: "rejected", reason: "rejection-persistence", message: terminal.error.message };
-    }
-    await handle.appendEvent({
-      schemaVersion: 1,
-      sequence: 0,
-      dedupKey: `capture-rejected:${createHash("sha256").update(`${request.requestId}:${request.attempt}`).digest("hex")}`,
-      recordedAtMs: Date.now(),
-      event: {
-        kind: "request-capture-rejected",
-        requestId: request.requestId,
-        slotId: request.slotId,
-        attempt: request.attempt,
-        diagnostic: `${reason}: ${message}`,
-      },
-    });
-    return { kind: "rejected", reason, message };
-  };
+  const reject = (reason: string, message: string): Promise<CaptureOutcome> =>
+    terminalizeCaptureRejection(handle, request, { reason, message });
 
   const payload = parseFinalPayload(args.candidates);
   if (!payload.ok) return reject(payload.error.reason, payload.error.message);
@@ -197,7 +271,7 @@ export async function captureHarnessResult(args: Readonly<{
   const captured = handle.readCapturedAttempts();
   if (!captured.ok) return reject("transcripts", captured.error.message);
   const bound = bindCapture({
-    issued: issued.value,
+    issued,
     identity,
     payload: payload.value,
     alreadyCaptured: captured.value,
@@ -211,10 +285,10 @@ export async function captureHarnessResult(args: Readonly<{
       : reject(bound.error.reason, bound.error.message);
   }
 
-  if (correlator.value.role !== request.role) {
+  if (correlatorRole !== request.role) {
     return reject(
       "wrong-agent-role",
-      `native ${args.harness} result is bound as ${correlator.value.role}, not ${request.role}`,
+      `native ${args.harness} result is bound as ${correlatorRole}, not ${request.role}`,
     );
   }
   const context = handle.readContext(request.contextDigest);

@@ -50,6 +50,8 @@ import {
   type OrchestrationRunId,
 } from "../core/orchestration-contract";
 import { captureKey, type CaptureKey } from "../core/harness-capture";
+import { parseSemanticAttempt } from "../core/implementation-completion";
+import { canonicalJson, parseJsonValue } from "../core/review-packet";
 import type { ContextPacket } from "./context-packets";
 import { parseContextPacket } from "./context-packets";
 import {
@@ -320,8 +322,10 @@ export function inspectRunDirectoryEntry(
  * original pair, so resolution can never launder an unrelated directory into
  * looking like a child of the root.
  *
- * On Linux this is an identity: a runs root containing a symlink is already
- * refused by the anchored walk, so any root that works keeps working.
+ * The rebase happens BEFORE the anchored walk, so a runs root that traverses a
+ * symlink is rewritten to its real path here rather than refused by the walk:
+ * any root that worked before keeps working, and everything BELOW the resolved
+ * base is held to the strict no-symlink rule.
  */
 function rebasedOnRealRunsRoot(
   reference: RunDirectoryReference,
@@ -351,7 +355,7 @@ export function parseRunDirectoryIdentity(
   const reference = rebasedOnRealRunsRoot(lexical.value);
   if (!reference.ok) return reference;
   const directory = reference.value.runDirectory;
-  let stats: ReturnType<typeof statSync> | undefined;
+  let stats: ReturnType<typeof statSync>;
   try {
     stats = statSync(directory);
   } catch (error) {
@@ -368,7 +372,7 @@ export function parseRunDirectoryIdentity(
     }
     return failure("runDirectory", `cannot inspect run directory ${directory}: ${error instanceof Error ? error.message : String(error)}`);
   }
-  if (stats === undefined || !stats.isDirectory()) {
+  if (!stats.isDirectory()) {
     return failure("runDirectory", `run directory does not exist: ${directory}`);
   }
   return success(reference.value as RunDirectoryIdentity);
@@ -738,12 +742,32 @@ function claimIdempotentWrite(
   return success(undefined);
 }
 
+/**
+ * The registered program as CANONICAL bytes.
+ *
+ * This wrote `JSON.stringify(registration)` — the CALLER's key order — while
+ * the slot is claimed by byte comparison. Re-registering the same program built
+ * from a different literal order therefore failed that comparison and was
+ * reported as "already registered under different program authority": a
+ * non-idempotent replay of an immutable slot. Parsing to JSON data and
+ * re-serialising through `canonicalJson` makes the stored bytes a function of
+ * the program alone, and makes non-JSON input a refusal instead of a silently
+ * lossy `undefined` body.
+ */
+function canonicalProgramBody(registration: unknown): DomainResult<string, RunDirectoryError> {
+  const parsed = parseJsonValue(registration, "program");
+  return parsed.ok
+    ? success(canonicalJson(parsed.value))
+    : failure("program", `orchestration program registration is not JSON data: ${parsed.errors.join("; ")}`);
+}
+
 function programOperations(runId: OrchestrationRunId, directory: string) {
   return {
     async registerProgram(registration: unknown): Promise<DomainResult<OrchestrationRunId, RunDirectoryError>> {
-      const body = JSON.stringify(registration);
+      const canonical = canonicalProgramBody(registration);
+      if (!canonical.ok) return canonical;
       const path = join(directory, PROGRAM_FILE);
-      const claimed = claimIdempotentWrite(path, body, "program",
+      const claimed = claimIdempotentWrite(path, canonical.value, "program",
         (cause) => `cannot register orchestration program: ${cause}`,
         "run is already registered under different program authority");
       if (!claimed.ok) return claimed;
@@ -976,25 +1000,51 @@ function contextOperations(runId: OrchestrationRunId, directory: string) {
   };
 }
 
-function readReservedAuthority(
+/** The three answers a reservation lookup can give, kept distinct. */
+type ReservationLookup =
+  | Readonly<{ kind: "reserved"; authority: AgentRequestAuthority }>
+  | Readonly<{ kind: "unreserved" }>
+  | Readonly<{ kind: "unreadable"; message: string }>;
+
+function lookupReservation(
   directory: string,
   requestId: AgentRequestAuthority["requestId"],
-): DomainResult<AgentRequestAuthority, RunDirectoryError> {
+): ReservationLookup {
   const requestPath = join(directory, REQUESTS, `${requestId}.json`);
   let rawReservation: unknown;
   try {
     rawReservation = JSON.parse(readRunFileNoFollow(requestPath)) as unknown;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT"
-      ? failure("request", `request ${requestId} was never reserved`)
-      : failure("request", `request ${requestId} authority is unreadable: ${(error as Error).message}`);
+      ? { kind: "unreserved" }
+      : { kind: "unreadable", message: `request ${requestId} authority is unreadable: ${(error as Error).message}` };
   }
   const reserved = parseStoredAgentRequestAuthority(rawReservation);
   return reserved.ok
-    ? success(reserved.value)
-    : failure("request", `request ${requestId} authority is malformed: ${reserved.error.violations.map(({ message }) => message).join("; ")}`);
+    ? { kind: "reserved", authority: reserved.value }
+    : { kind: "unreadable", message: `request ${requestId} authority is malformed: ${reserved.error.violations.map(({ message }) => message).join("; ")}` };
 }
 
+function readReservedAuthority(
+  directory: string,
+  requestId: AgentRequestAuthority["requestId"],
+): DomainResult<AgentRequestAuthority, RunDirectoryError> {
+  const found = lookupReservation(directory, requestId);
+  return found.kind === "reserved" ? success(found.authority)
+    : found.kind === "unreserved"
+      ? failure("request", `request ${requestId} was never reserved`)
+      : failure("request", found.message);
+}
+
+/**
+ * THE verified-slot resolution every transcript-slot-addressing operation uses:
+ * parse the supplied authority, prove it is byte-identical to the reservation
+ * this run wrote, and only then name a path. `captureTranscript`,
+ * `rejectCapture`, `readTranscriptBytes`, and `readCaptureRejection` all cross
+ * this one function — a read that skipped it would offer "trust the caller and
+ * read" beside "verify then write" over the same slot, which is exactly the
+ * asymmetry a branded `SlotId` must not advertise.
+ */
 function verifiedReservedRequest(
   directory: string,
   runId: OrchestrationRunId,
@@ -1002,8 +1052,7 @@ function verifiedReservedRequest(
   malformed: string,
   foreignRun: string,
   mismatch: (requestId: string) => string,
-): DomainResult<AgentRequestAuthority, RunDirectoryError> {
-  const supplied = parseStoredAgentRequestAuthority(authority);
+): DomainResult<AgentRequestAuthority, RunDirectoryError> {  const supplied = parseStoredAgentRequestAuthority(authority);
   if (!supplied.ok) {
     return failure("request", `${malformed}: ${supplied.error.violations.map(({ message }) => message).join("; ")}`);
   }
@@ -1103,8 +1152,15 @@ function inspectCapturedSlot(
   try {
     slotDirectory = openChildDirectoryNoFollow(transcripts, slot);
     for (const name of listDirectoryNamesNoFollow(slotDirectory)) {
-      const match = /^attempt-(1|2)\.raw$/.exec(name);
-      if (match !== null) captured.add(captureKey(slot, Number(match[1]) as 1 | 2));
+      const match = /^attempt-([12])\.raw$/.exec(name);
+      if (match === null) continue;
+      // The ATTEMPT itself is parsed by the domain rule that owns the concept,
+      // not by a second type cast of the filename capture group.
+      const attempt = parseSemanticAttempt(Number(match[1]), `transcript slot ${slot}/${name}`);
+      if (!attempt.ok) {
+        return failure("transcript", `transcript slot ${slot} holds an unparsable attempt file ${name}`);
+      }
+      captured.add(captureKey(slot, attempt.value));
     }
     return success(undefined);
   } catch (error) {
@@ -1167,10 +1223,42 @@ function rejectCaptureOperation(runId: OrchestrationRunId, directory: string): R
   };
 }
 
-function readCaptureRejectionOperation(directory: string): RunDirHandle["readCaptureRejection"] {
+function readCaptureRejectionOperation(
+  runId: OrchestrationRunId,
+  directory: string,
+): RunDirHandle["readCaptureRejection"] {
   return (authority) => {
+    // VERIFIED, exactly like the write paths: a read that trusted the caller's
+    // `slotId`/`attempt` could point at any file under `transcripts/`, and the
+    // marker's own requestId check would still pass for a slot the supplied
+    // authority never named.
+    //
+    // A request this run never reserved is `success(null)` rather than a
+    // refusal, because that is the truth: a rejection marker can only exist in
+    // the slot a reservation names, and recovery asks this question about
+    // attempt-2 authority BEFORE attempt 2 is issued. A request that IS
+    // reserved still has to match its reservation byte-for-byte.
     const supplied = parseStoredAgentRequestAuthority(authority);
-    if (!supplied.ok) return failure("request", `capture rejection authority is malformed: ${supplied.error.violations.map(({ message }) => message).join("; ")}`);
+    if (!supplied.ok) {
+      return failure("request", `capture rejection authority is malformed: ${supplied.error.violations.map(({ message }) => message).join("; ")}`);
+    }
+    if (supplied.value.runId !== runId) {
+      return failure("request", "capture rejection authority belongs to a different run");
+    }
+    const reserved = lookupReservation(directory, supplied.value.requestId);
+    if (reserved.kind === "unreserved") return success(null);
+    if (reserved.kind === "unreadable") return failure("request", reserved.message);
+    // Deliberate difference from the write paths: this read is verified on the
+    // fields that ADDRESS the marker — the reservation's own `slotId`/`attempt`
+    // for this `requestId` — and the marker re-certifies the requestId inside.
+    // Byte-equality of the WHOLE authority would be over-strict here, because
+    // retry recovery asks "was this attempt rejected?" carrying a re-planned
+    // context digest for the retry it is about to publish. A forged `slotId`
+    // still cannot address another request's marker.
+    if (reserved.authority.slotId !== supplied.value.slotId ||
+        reserved.authority.attempt !== supplied.value.attempt) {
+      return failure("request", `request ${supplied.value.requestId} rejection authority does not match its immutable reservation`);
+    }
     try {
       const raw = JSON.parse(readRunFileNoFollow(join(
         directory, TRANSCRIPTS, supplied.value.slotId, `attempt-${supplied.value.attempt}.rejected`,
@@ -1290,15 +1378,7 @@ function publishTranscriptBytes(
     linkSync(anchoredChildPath(slotDirectory, stagedName), anchoredChildPath(slotDirectory, rawName));
     unlinkSync(anchoredChildPath(slotDirectory, stagedName));
   } catch (error) {
-    const stagedPath = anchoredChildPath(slotDirectory, stagedName);
-    const cleanupFailures: string[] = [];
-    try {
-      unlinkSync(stagedPath);
-    } catch (cleanupError) {
-      if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") {
-        cleanupFailures.push(`${stagedPath}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
-      }
-    }
+    const cleanupFailures = discardStaged([{ staged: anchoredChildPath(slotDirectory, stagedName) }]);
     const primary = publicationAttempted && (error as NodeJS.ErrnoException).code === "EEXIST"
       ? `attempt ${supplied.attempt} for slot ${supplied.slotId} is already captured`
       : `cannot capture transcript: ${(error as Error).message}`;
@@ -1342,10 +1422,37 @@ function captureTranscriptOperation(runId: OrchestrationRunId, directory: string
   };
 }
 
-function readTranscriptBytesOperation(directory: string): RunDirHandle["readTranscriptBytes"] {
+function readTranscriptBytesOperation(
+  runId: OrchestrationRunId,
+  directory: string,
+): RunDirHandle["readTranscriptBytes"] {
   return (authority) => {
+    // The transcript READ crosses the same reservation as the write, on the
+    // fields that ADDRESS the artifact: `slotId`/`attempt` name the file and
+    // `requestId` must be reserved by this run. It is deliberately NOT
+    // byte-equality with the stored authority — the WRITE paths keep that, because
+    // that is where bytes are committed — because recovery legitimately reads a
+    // slot while holding a re-planned retry authority (new contextDigest, new
+    // model profile) for the same slot and attempt. A forged `slotId` still
+    // cannot read (and thereby attest) another request's bytes.
+    const supplied = parseStoredAgentRequestAuthority(authority);
+    if (!supplied.ok) {
+      return failure("request", `transcript read authority is malformed: ${supplied.error.violations.map(({ message }) => message).join("; ")}`);
+    }
+    if (supplied.value.runId !== runId) {
+      return failure("request", "transcript read authority belongs to a different run");
+    }
+    const reserved = lookupReservation(directory, supplied.value.requestId);
+    if (reserved.kind === "unreserved") {
+      return failure("request", `request ${supplied.value.requestId} was never reserved`);
+    }
+    if (reserved.kind === "unreadable") return failure("request", reserved.message);
+    if (reserved.authority.slotId !== supplied.value.slotId ||
+        reserved.authority.attempt !== supplied.value.attempt) {
+      return failure("request", `request ${supplied.value.requestId} transcript read authority does not match its immutable reservation`);
+    }
     try {
-      return success(new Uint8Array(readRunBytesNoFollow(transcriptSlotPath(directory, authority))));
+      return success(new Uint8Array(readRunBytesNoFollow(transcriptSlotPath(directory, supplied.value))));
     } catch (error) {
       return failure("transcript", `cannot read captured transcript: ${(error as Error).message}`);
     }
@@ -1359,12 +1466,12 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
     readIssuedRequests: readIssuedRequestsOperation(runId, directory),
     readCapturedAttempts: readCapturedAttemptsOperation(directory),
     rejectCapture: rejectCaptureOperation(runId, directory),
-    readCaptureRejection: readCaptureRejectionOperation(directory),
+    readCaptureRejection: readCaptureRejectionOperation(runId, directory),
     isPristine: isPristineOperation(directory),
     recordHarnessCorrelator: recordHarnessCorrelatorOperation(directory),
     readHarnessCorrelator: readHarnessCorrelatorOperation(directory),
     captureTranscript: captureTranscriptOperation(runId, directory),
-    readTranscriptBytes: readTranscriptBytesOperation(directory),
+    readTranscriptBytes: readTranscriptBytesOperation(runId, directory),
   };
 }
 

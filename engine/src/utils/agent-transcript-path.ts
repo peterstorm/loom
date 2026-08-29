@@ -156,9 +156,16 @@ export interface TranscriptLocator {
  *
  * Precedence is the whole point: a supplied path that exists WINS, and the
  * derivation is consulted only when the harness gave nothing or gave a path
- * that is no longer there. Legacy status and phase handlers go through here;
- * request-bound Claude capture intentionally consumes the supplied transcript
- * path directly because its reservation already establishes run authority.
+ * that is no longer there.
+ *
+ * EVERY SubagentStop route goes through here, request-bound capture included.
+ * Run authority says a reserved slot must be filled; it says nothing about where
+ * the transcript is, and Claude Code stopped sending the field — a capture that
+ * read `agent_transcript_path` directly saw "" and reported the Agent as having
+ * produced no final payload, burning the slot for a harness omission. Routes
+ * that must tell "no transcript found" apart from a capture failure report their
+ * own refusal on the null (capture answers `transcript-locator`); the ones that
+ * only degrade stay silent, as before.
  */
 export function resolveAgentTranscriptPath(input: TranscriptLocator): string | null {
   const supplied = input.agent_transcript_path?.replace(/^~/, process.env.HOME ?? "~") ?? "";

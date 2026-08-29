@@ -6,12 +6,14 @@
 
 import { match } from "ts-pattern";
 import type { HookHandler, HookResult } from "../../types";
+import type { AgentRequestAuthority } from "../../core/orchestration-contract";
 import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_SUB_AGENTS } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { resolveAgentType } from "../../utils/agent-transcript-path";
 import { parseSessionId, readEvidence } from "../../machine";
 import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
+import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../orchestration/harness-capture-runtime";
 
 import captureOrchestrationResult, { resolveClaudeRequestAuthority } from "./capture-orchestration-result";
 import cleanupSubagentFlag from "./cleanup-subagent-flag";
@@ -150,17 +152,15 @@ export const runDispatch = async (
     }
   };
 
-  let requestAuthority: ReturnType<typeof resolveClaudeRequestAuthority> = null;
+  // Which PROGRAM a stop belongs to decides whether legacy category settlement
+  // applies at all, and it is decided from the same correlation the capture
+  // above used. The environment names come from the runtime that READS them, so
+  // a rename cannot leave the dispatcher asking a question nobody answers.
+  let requestAuthority: AgentRequestAuthority | null = null;
   if (captureFailure === null) {
-    try {
-      requestAuthority = resolveClaudeRequestAuthority(
-        input,
-        process.env.LOOM_ORCHESTRATION_RUNS_ROOT,
-        process.env.LOOM_ORCHESTRATION_RUN_DIR,
-      );
-    } catch (error) {
-      captureFailure = `request authority resolution failed: ${error instanceof Error ? error.message : String(error)}`;
-    }
+    const resolved = resolveClaudeRequestAuthority(input, process.env[RUNS_ROOT_ENV], process.env[RUN_DIR_ENV]);
+    if (resolved.ok) requestAuthority = resolved.request;
+    else captureFailure = `request authority resolution failed: ${resolved.message}`;
   }
 
   if (captureFailure !== null) {
