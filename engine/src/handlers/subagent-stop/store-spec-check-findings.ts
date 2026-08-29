@@ -89,7 +89,13 @@ export const runStoreSpecCheckFindings = async (
   }
 
   const rawPath = resolveAgentTranscriptPath(input) ?? input.agent_transcript_path ?? "";
-  const transcript = await readTranscriptWithRetry(rawPath, /SPEC_CHECK_CRITICAL_COUNT:\s*\d+/);
+  let transcript: string | null = null;
+  let transcriptFailure: string | null = null;
+  try {
+    transcript = await readTranscriptWithRetry(rawPath, /SPEC_CHECK_CRITICAL_COUNT:\s*\d+/);
+  } catch (error) {
+    transcriptFailure = `spec-check transcript is unreadable: ${error instanceof Error ? error.message : String(error)}`;
+  }
   const findings = parseSpecCheckOutput(transcript ?? "");
   const applied = await manager.updateAndReturn((state) => {
     const authorityProblem = specCheckAuthorityProblem(state, requestAuthority);
@@ -103,7 +109,17 @@ export const runStoreSpecCheckFindings = async (
       };
     }
     const wave = state.wave_review_epoch?.wave ?? findings.wave ?? state.current_wave ?? 1;
-    const resolution = reconcileSpecCheck(findings, wave, new Date().toISOString());
+    const resolution = transcriptFailure === null
+      ? reconcileSpecCheck(findings, wave, new Date().toISOString())
+      : {
+          kind: "evidence-failed" as const,
+          specCheck: {
+            wave,
+            run_at: new Date().toISOString(),
+            verdict: "EVIDENCE_CAPTURE_FAILED" as const,
+            error: `${transcriptFailure} - re-run /wave-gate`,
+          },
+        };
     const value = resolution.kind === "evidence-failed"
       ? passthroughResult(`WARNING: ${resolution.specCheck.error} — marking evidence_capture_failed`)
       : passthroughResult(

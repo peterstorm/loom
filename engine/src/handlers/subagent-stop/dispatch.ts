@@ -150,16 +150,16 @@ export const runDispatch = async (
     }
   };
 
-  let specCheckRequestAuthority: ReturnType<typeof resolveClaudeRequestAuthority> = null;
-  if (captureFailure === null && category === "spec-check") {
+  let requestAuthority: ReturnType<typeof resolveClaudeRequestAuthority> = null;
+  if (captureFailure === null) {
     try {
-      specCheckRequestAuthority = resolveClaudeRequestAuthority(
+      requestAuthority = resolveClaudeRequestAuthority(
         input,
         process.env.LOOM_ORCHESTRATION_RUNS_ROOT,
         process.env.LOOM_ORCHESTRATION_RUN_DIR,
       );
     } catch (error) {
-      captureFailure = `spec-check request authority resolution failed: ${error instanceof Error ? error.message : String(error)}`;
+      captureFailure = `request authority resolution failed: ${error instanceof Error ? error.message : String(error)}`;
     }
   }
 
@@ -172,6 +172,19 @@ export const runDispatch = async (
         : `${captureFailure}; cleanup also failed: ${cleanupFailure}`,
     };
   }
+
+  // Request-bound non-Wave programs own no TaskGraph mutation. A successful
+  // capture is their complete SubagentStop settlement; falling through would
+  // falsely require unrelated protected state and report an error after the
+  // Run Directory had already accepted the evidence. Wave Gate requests alone
+  // continue into legacy category settlement under exact graph authority.
+  if (requestAuthority !== null && requestAuthority.program !== "wave-gate") {
+    const cleanupFailure = await runCleanup();
+    return cleanupFailure === null
+      ? { kind: "passthrough" }
+      : { kind: "error", message: cleanupFailure };
+  }
+  const specCheckRequestAuthority = category === "spec-check" ? requestAuthority : null;
 
   const noTaskGraphDiagnostic = (cause?: unknown): string =>
     `[loom] dispatch: no task graph resolvable for session ${JSON.stringify(input.session_id ?? "")}` +

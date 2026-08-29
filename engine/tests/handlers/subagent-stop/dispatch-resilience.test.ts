@@ -18,6 +18,7 @@ import { parseEpoch } from "../../../src/machine";
 import type { EvidenceRecord } from "../../../src/machine";
 import { agentRequestAuthority } from "../../fixtures/agent-request-authority";
 import { openRunDirectory } from "../../../src/orchestration/run-directory-handle";
+import { buildContextPacket, encodeByteSection } from "../../../src/core/context-packets";
 import { reportSummary } from "../../machine/report-summary";
 
 const run = `dispatch-resilience-${process.pid}-${Date.now()}`;
@@ -137,6 +138,72 @@ describe("request-bound capture gates legacy dispatch", () => {
       if (result.kind === "error") expect(result.message).toContain("request-bound capture rejected");
       const task = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
       expect(task.critical_findings ?? []).toEqual([]);
+    } finally {
+      if (previousRoot === undefined) delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+      else process.env.LOOM_ORCHESTRATION_RUNS_ROOT = previousRoot;
+      if (previousRun === undefined) delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
+      else process.env.LOOM_ORCHESTRATION_RUN_DIR = previousRun;
+    }
+  });
+
+  it("terminates a successfully captured graphless standalone review without TaskGraph routing", async () => {
+    const dir = tempDir();
+    const runsRoot = join(dir, "runs");
+    const runDir = join(runsRoot, "run.graphless-standalone-capture");
+    mkdirSync(runDir, { recursive: true });
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const baseRequest = agentRequestAuthority("run.graphless-standalone-capture", {
+      program: "standalone-review",
+    });
+    const section = encodeByteSection("test", "graphless standalone capture context");
+    if (!section.ok) throw new Error(section.error.message);
+    const packet = buildContextPacket({
+      requestId: baseRequest.requestId,
+      role: baseRequest.role,
+      requiredSkill: "none",
+      outputContract: "emit exact standalone review bytes",
+      fixedContext: [section.value],
+      variableContext: [],
+    });
+    if (!packet.ok) throw new Error(packet.error.message);
+    expect((await opened.value.publishContext(packet.value)).ok).toBe(true);
+    const request = agentRequestAuthority("run.graphless-standalone-capture", {
+      program: "standalone-review",
+      contextDigest: packet.value.digest,
+    });
+    expect((await opened.value.reserveRequest(request)).ok).toBe(true);
+    expect((await opened.value.recordHarnessCorrelator({
+      schemaVersion: 1,
+      harness: "claude",
+      nativeId: "agent-graphless-standalone",
+      requestId: request.requestId,
+      role: request.role,
+      attempt: request.attempt,
+    })).ok).toBe(true);
+    const transcriptPath = join(dir, "graphless-standalone.jsonl");
+    const capturedBytes = "exact graphless standalone review result";
+    writeFileSync(transcriptPath, JSON.stringify({
+      message: { role: "assistant", content: [{ type: "text", text: capturedBytes }] },
+    }));
+    const cleanup = vi.fn(async () => ({ kind: "passthrough" as const }));
+    const previousRoot = process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+    const previousRun = process.env.LOOM_ORCHESTRATION_RUN_DIR;
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = runDir;
+    try {
+      const result = await runDispatch(JSON.stringify({
+        session_id: sid("graphless-standalone"),
+        agent_id: "agent-graphless-standalone",
+        agent_type: "code-reviewer",
+        agent_transcript_path: transcriptPath,
+      }), [], cleanup);
+
+      expect(result).toEqual({ kind: "passthrough" });
+      expect(cleanup).toHaveBeenCalledOnce();
+      const captured = opened.value.readTranscriptBytes(request);
+      expect(captured.ok).toBe(true);
+      if (captured.ok) expect(Buffer.from(captured.value).toString("utf8")).toBe(capturedBytes);
     } finally {
       if (previousRoot === undefined) delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
       else process.env.LOOM_ORCHESTRATION_RUNS_ROOT = previousRoot;

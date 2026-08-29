@@ -6,7 +6,7 @@
  */
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
-import { awaitUserAction, parseAgentRequestAuthority, parseStoredAgentRequestAuthority, canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, type AgentRequestAuthority, type ArtifactDigest, type AwaitUserAction, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
+import { awaitUserAction, parseAgentRequestAuthority, parseStoredAgentRequestAuthority, canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId, parseRequestId, type AgentRequestAuthority, type AwaitUserAction, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
 import { defaultRefutationThreshold } from '../../../core/review-panel';
 import { completePersistentRefutationPanel, deriveRefutationVerifierBinding, panelRequestIdentity, parseRefutationPanelAuthority, startPersistentRefutationPanel, submitRefutationVerdict } from '../../../core/panel-program';
 import type { FindingOutcome } from '../../../core/review-panel';
@@ -26,8 +26,15 @@ import type { Finding, Task, TaskGraph } from '../../../types';
 import { anyActiveSubagent } from '../../../machine';
 import { parseSpecCheckOutput, reconcileSpecCheck } from '../../../core/spec-check';
 import { reconcileWaveBlock } from '../../../core/wave-gate-model';
-import { resolveAgentPolicy, resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
+import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
 import { parseTaskProof, parseTaskTestResult, type ProofTestResult, type TaskProof } from '../../../core/proof-obligations';
+import {
+  prepareWaveReviewBatch,
+  waveSpecCheckScope,
+  type WaveRequestBatch,
+  type WaveSpecCheckTaskAuthority,
+  type WaveTaskRunAuthority,
+} from '../../../core/wave-review-authority';
 import { durableCaptureRejection, durableRefutationRequests, exactObject, executableRefutationRequests, failed, parseRegisteredFacadeProgram, publicationResolver, publishInitialBatch, recoverOrPublishRefutationRetry, refutationRejectionDiagnostic, renderSpawnTask, type FacadeDriveResult, type RegisteredWaveGateProgram } from './helpers';
 
 export const waveGateDeps = Object.freeze({
@@ -124,16 +131,6 @@ export function waveGateDecisionMismatch(
 export function waveBlocked(handle: RunDirHandle, message: string): FacadeDriveResult {
   return { ok: true, action: { kind: "blocked", runId: handle.runId, diagnostic: { kind: "wave-gate-blocked", message } } };
 }
-
-export type WaveTaskRunAuthority = Readonly<{
-  taskId: string;
-  generation: number;
-  packetId: string;
-  /** Existing batch epoch identity for reviewer-slot authority. */
-  headSha: string;
-  /** Exact declared-workspace byte snapshot for completion integrity. */
-  workspaceHeadSha?: string;
-}>;
 
 export function waveGateAuthorityDigest(wave: number, taskIds: readonly string[], graph: TaskGraph): string {
   return createHash("sha256").update(JSON.stringify({ wave, taskIds, graph })).digest("hex");
@@ -370,170 +367,33 @@ export function prepareOrphanedWaveGateRecovery(
   };
 }
 
-export type WaveRequestBatch = Readonly<{
-  batchEpoch: ArtifactDigest;
-  requests: readonly InitialSpawnRequestInput[];
-  packets: readonly ContextPacket[];
-  taskRuns: readonly WaveTaskRunAuthority[];
-}>;
+export { waveSpecCheckScope };
+export type { WaveRequestBatch, WaveSpecCheckTaskAuthority, WaveTaskRunAuthority };
 
-export type WaveSpecCheckTaskAuthority = Readonly<{
-  id: string;
-  description: string;
-  completionAnchors: readonly string[];
-  contributions: readonly string[];
-  declaredFiles: readonly string[];
-}>;
-
-/** Immutable current-Wave Requirement scope. Contributions are included for
- * traceability but only completionAnchors define spec-check authority. */
-export function waveSpecCheckScope(tasks: readonly Task[]): readonly WaveSpecCheckTaskAuthority[] {
-  return Object.freeze(tasks.map((task) => Object.freeze({
-    id: task.id,
-    description: task.description,
-    completionAnchors: Object.freeze([...(task.spec_anchors ?? [])]),
-    contributions: Object.freeze([...(task.spec_contributions ?? [])]),
-    declaredFiles: Object.freeze([...(task.file_list ?? [])]),
-  })));
-}
-
+/** Imperative shell: observe current bytes, then delegate every authority
+ * decision to the single pure Wave review preparation function. */
 export function waveRequests(
   handle: RunDirHandle,
   registration: RegisteredWaveGateProgram,
   graph: ReturnType<StateManager["load"]>,
   attempt: 1 | 2,
 ): WaveRequestBatch {
-  if (registration.input.wave === null) throw new Error("registered Wave review authority lacks an exact Wave");
-  const currentWaveTasks = graph.tasks.filter((task) => task.wave === registration.input.wave);
-  const tasks = registration.taskIds.map((taskId) => {
-    const task = graph.tasks.find((candidate) => candidate.id === taskId);
-    if (task === undefined) throw new Error(`registered Wave Task ${taskId} disappeared`);
-    return task;
-  });
-  if (tasks.some((task) => task.wave !== registration.input.wave) ||
-      currentWaveTasks.length !== tasks.length || currentWaveTasks.some((task, index) => task.id !== tasks[index]?.id)) {
-    throw new Error("registered Wave Task roster drifted from the exact protected current-Wave roster");
-  }
-  const specCheckScope = waveSpecCheckScope(tasks);
-  const workspace = observeReviewedWorkspace(tasks);
-  const workspaceHeadSha = (taskId: string): string | undefined =>
-    workspace.find((entry) => entry.taskId === taskId)?.headSha;
-  const parsedBatchEpoch = parseArtifactDigest(createHash("sha256").update(JSON.stringify({
-    runId: handle.runId,
-    wave: registration.input.wave,
-    authorityDigest: registration.authorityDigest,
-    tasks: tasks.map((task) => ({
-      id: task.id,
-      generation: task.review_generation ?? 0,
-      files: task.file_list ?? [],
-      modified: task.files_modified ?? [],
-      completionAnchors: task.spec_anchors ?? [],
-      contributions: task.spec_contributions ?? [],
-      priorFindingIds: task.review_run?.prior_finding_ids ?? (task.findings ?? []).map(({ id }) => id),
-      reviewedHeadSha: workspaceHeadSha(task.id) ?? null,
-    })),
-    specFile: graph.spec_file ?? null,
-    planFile: graph.plan_file ?? null,
-  })).digest("hex"));
-  if (!parsedBatchEpoch.ok) throw new Error(parsedBatchEpoch.error.message);
-  const batchEpoch = parsedBatchEpoch.value;
-  const taskRuns = tasks.map((task) => Object.freeze({
-    taskId: task.id,
-    generation: task.review_generation ?? 0,
-    packetId: createHash("sha256").update(`${batchEpoch}|packet|${task.id}`).digest("hex"),
-    headSha: batchEpoch,
-    workspaceHeadSha: workspaceHeadSha(task.id) ?? (() => { throw new Error(`Task ${task.id} workspace snapshot is missing`); })(),
-  }));
-  const subjects = [
-    { role: "spec-check-invoker" as const, taskId: null as string | null },
-    ...tasks.flatMap((task) => WAVE_REVIEW_AGENTS.map((role) => ({ role, taskId: task.id as string | null }))),
-  ];
-  const requests: InitialSpawnRequestInput[] = [];
-  const packets: ContextPacket[] = [];
-  for (const subject of subjects) {
-    const taskRun = subject.taskId === null ? null : taskRuns.find(({ taskId }) => taskId === subject.taskId) ?? null;
-    const identity = JSON.stringify({ runId: handle.runId, registration, batchEpoch, subject, taskRun });
-    const hash = createHash("sha256").update(identity).digest("hex");
-    const slotId = parseSlotId(`wave-slot:${hash.slice(0, 32)}`);
-    const requestId = parseRequestId(`wave-request:${hash.slice(0, 32)}:${attempt}`);
-    if (!slotId.ok) throw new Error(slotId.error.message);
-    if (!requestId.ok) throw new Error(requestId.error.message);
-    const policy = resolveAgentPolicy(subject.role);
-    if (!policy.ok) throw new Error(policy.error.message);
-    const profile = resolveModelProfile(policy.value.profile);
-    if (!profile.ok) throw new Error(profile.error.message);
-    const requiredSkill = policy.value.requiredSkill;
-    const section = encodeByteSection("wave-review-authority", JSON.stringify({
-      runId: handle.runId,
-      wave: registration.input.wave,
-      authorityDigest: registration.authorityDigest,
-      batchEpoch,
-      subject,
-      taskRun,
-      specCheckScope: subject.taskId === null ? specCheckScope : null,
-      task: subject.taskId === null ? null : (() => {
-        const task = tasks.find(({ id }) => id === subject.taskId);
-        return task === undefined ? null : {
-          id: task.id,
-          description: task.description,
-          agent: task.agent,
-          reviewGeneration: task.review_generation ?? 0,
-          planContext: task.plan_context ?? null,
-          specAnchors: task.spec_anchors ?? [],
-          specContributions: task.spec_contributions ?? [],
-          declaredFiles: task.file_list ?? [],
-          modifiedFiles: task.files_modified ?? [],
-          proof: task.proof ?? null,
-          testResult: task.test_result ?? null,
-          priorFindings: task.findings ?? [],
-        };
-      })(),
-      packetId: taskRun?.packetId ?? null,
-      specFile: graph.spec_file,
-      planFile: graph.plan_file,
-    }));
-    if (!section.ok) throw new Error(section.error.message);
-    const outputContract = subject.role === "spec-check-invoker"
-      ? `Run the Wave ${registration.input.wave} spec alignment check and emit its exact Machine Summary.`
-      : `Review Task ${subject.taskId} from the immutable packet and emit the exact Machine Summary and findings contract.`;
-    const packet = buildContextPacket({
-      requestId: requestId.value,
-      role: subject.role,
-      requiredSkill: requiredSkill ?? "none",
-      outputContract,
-      fixedContext: Object.freeze([section.value]),
-      variableContext: Object.freeze([]),
-    });
-    if (!packet.ok) throw new Error(packet.error.message);
-    const authority = parseAgentRequestAuthority({
-      runId: handle.runId,
-      requestId: requestId.value,
-      slotId: slotId.value,
-      program: "wave-gate",
-      role: subject.role,
-      attempt,
-      modelProfile: profile.value.id,
-      harnessBinding: {
-        pi: lowerModelProfile(profile.value, "pi"),
-        claude: lowerModelProfile(profile.value, "claude-code"),
-      },
-      requiredSkill,
-      contextDigest: packet.value.digest,
-      outputSlot: `transcripts/${slotId.value}/attempt-${attempt}.raw`,
-    });
-    if (!authority.ok) throw new Error(authority.error.violations.map(({ message }) => message).join("; "));
-    packets.push(packet.value);
-    requests.push(Object.freeze({ authority: authority.value, context: Object.freeze({
-      digest: packet.value.digest,
-      slot: Object.freeze({ kind: "fixed-artifact-slot" as const, path: `contexts/${packet.value.digest}.json` }),
-    }) }));
-  }
-  return Object.freeze({
-    batchEpoch,
-    requests: Object.freeze(requests),
-    packets: Object.freeze(packets),
-    taskRuns: Object.freeze(taskRuns),
-  });
+  const wave = registration.input.wave;
+  const tasks = wave === null
+    ? []
+    : registration.taskIds.flatMap((taskId) => {
+        const task = graph.tasks.find((candidate) => candidate.id === taskId);
+        return task === undefined ? [] : [task];
+      });
+  const prepared = prepareWaveReviewBatch(
+    handle.runId,
+    registration,
+    graph,
+    attempt,
+    observeReviewedWorkspace(tasks),
+  );
+  if (!prepared.ok) throw new Error(prepared.error.message);
+  return prepared.value;
 }
 
 export function resolveWaveReviewerTranscript(task: Task, agent: string, bytes: Uint8Array) {

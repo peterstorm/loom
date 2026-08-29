@@ -173,7 +173,6 @@ describe("handler reads file content (not path)", () => {
     tmpDir = join(tmpdir(), `spec-check-test-${Date.now()}`);
     mkdirSync(tmpDir, { recursive: true });
 
-    // Create a JSONL transcript file with spec-check output
     const transcriptPath = join(tmpDir, "transcript.jsonl");
     const transcriptLine = JSON.stringify({
       type: "assistant",
@@ -483,7 +482,7 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
     }
   });
 
-  it("empty/unreadable transcript → EVIDENCE_CAPTURE_FAILED recorded, never a silent skip", async () => {
+  it("absent transcript → EVIDENCE_CAPTURE_FAILED recorded, never a silent skip", async () => {
     const { SUBAGENT_DIR } = await import("../../src/config");
     const { mkdirSync: mkdir } = await import("node:fs");
     const tmpDir = join(tmpdir(), `spec-check-empty-${Date.now()}`);
@@ -525,6 +524,51 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
       stderrSpy.mockRestore();
       rmSync(tmpDir, { recursive: true, force: true });
       rmSync(pointer, { force: true });
+    }
+  });
+
+  it("existing unreadable transcript records its concrete EVIDENCE_CAPTURE_FAILED cause", async () => {
+    const { SUBAGENT_DIR } = await import("../../src/config");
+    const tmpDir = join(tmpdir(), `spec-check-unreadable-${Date.now()}`);
+    mkdirSync(tmpDir, { recursive: true });
+    const statePath = join(tmpDir, "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute",
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      current_wave: 4,
+      tasks: [],
+      wave_gates: {},
+    }));
+    const transcriptPath = join(tmpDir, "transcript.jsonl");
+    mkdirSync(transcriptPath);
+    const session = `spec-check-unreadable-${process.pid}-${Date.now()}`;
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
+    writeFileSync(pointer, statePath);
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    try {
+      const result = await handler(JSON.stringify({
+        session_id: session,
+        agent_type: "spec-check-invoker",
+        agent_transcript_path: transcriptPath,
+      }), []);
+
+      expect(result.kind).toBe("passthrough");
+      const state = JSON.parse(readFileSync(statePath, "utf8"));
+      expect(state.spec_check).toMatchObject({
+        wave: 4,
+        verdict: "EVIDENCE_CAPTURE_FAILED",
+        error: expect.stringContaining("spec-check transcript is unreadable"),
+      });
+      expect(state.spec_check.error).toContain("re-run /wave-gate");
+    } finally {
+      stderrSpy.mockRestore();
+      rmSync(pointer, { force: true });
+      rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 });

@@ -476,10 +476,10 @@ export const protectedDirPatterns = (): RegExp => new RegExp(
 
 /** Commands allowed to touch guarded state paths: deny-by-default allowlist.
  *
- * This replaced the WRITE_PATTERNS denylist after rounds 11-14 each shipped
- * a critical bypass of the same class ("write tool not yet enumerated" —
- * substitution escapes, `bun -e`, glob paths, `ln`/`truncate`). An allowlist
- * inverts the residual: instead of enumerating writers (unbounded), it
+ * This replaces a writer denylist because writer vocabulary and composition
+ * are unbounded (`bun -e`, substitutions, glob paths, wrappers, and future
+ * tools all create new write forms). An allowlist inverts the residual: instead
+ * of enumerating writers (unbounded), it
  * enumerates readers (small, stable), so an unknown command on a guarded
  * path blocks instead of slipping through.
  *

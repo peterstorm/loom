@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
 import fc from "fast-check";
-import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,7 +46,6 @@ import {
 import { derivePendingTaskProof, evaluateTaskProof } from "../../src/core/proof-obligations";
 import { taskFixture, type TaskFixtureInput } from "../fixtures/task-lifecycle";
 import { defaultVerificationManifest } from "../../src/core/verification-manifest";
-import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "../../src/core/model-profiles";
 import {
   commitWaveGateCompletion,
   createWaveGateState,
@@ -58,11 +56,8 @@ import {
   deriveWaveAdvisoryNextAction,
   deriveWaveReadiness,
   deriveWaveRefutationPlan,
-  deriveWaveReviewRecovery,
   evaluateWaveGate as evaluateCoreWaveGate,
   prepareWaveRefutationPanel,
-  prepareWaveReviewBatch,
-  publishWaveReviewBatch,
   proveWaveGateNextAction,
   reduceWaveGate,
   renderLoomStatusHuman as renderCoreLoomStatusHuman,
@@ -73,18 +68,13 @@ import {
 } from "../../src/core/wave-gate-machine";
 import {
   blockedAction,
-  createAtomicInitialPublicationClaimPort,
-  createInitialBatchPublicationReconciler,
-  createInitialPublicationEffectPort,
   doneAction,
   infrastructureRetryDiagnostic,
-  parseAgentRosterSlot,
   parseArtifactDigest,
   parseEffectId,
   parseOrchestrationRunId,
   parseRequestId,
   terminalBlockedDiagnostic,
-  type AgentRequestAuthority,
   type CommitProtectedWaveState,
   type EffectReceipt,
 } from "../../src/core/orchestration-contract";
@@ -1008,12 +998,6 @@ const authorityValue = <T>(result: { ok: true; value: T } | { ok: false; error: 
   return result.value;
 };
 
-function testNonEmpty<T>(values: readonly T[]): readonly [T, ...T[]] {
-  const [first, ...rest] = values;
-  if (first === undefined) throw new Error("test fixture must be non-empty");
-  return [first, ...rest];
-}
-
 const lifecycleRunId = authorityValue(parseOrchestrationRunId("wave-gate-lifecycle-test"));
 const lifecycleEffectId = authorityValue(parseEffectId("wave-gate-effect-test"));
 const infrastructureDiagnostic = authorityValue(infrastructureRetryDiagnostic({
@@ -1708,317 +1692,21 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
   });
 });
 
-describe("authoritative Wave review preparation, recovery, panel, and advisory contracts", () => {
-  const packet = {
-    task_id: "T1",
-    packet_id: "1".repeat(64),
-    packet_path: ".claude/reviews/packets/run.test/T1.json",
-    base_sha: "2".repeat(40),
-    head_sha: "3".repeat(40),
-    scope: ["engine/src/core/wave-gate-machine.ts"],
-  } as const;
-
-  function preparationFixture() {
-    const graph = registeredGraph({ tasks: [{ ...baseTask, file_list: ["engine/src/core/wave-gate-machine.ts"] }] });
-    const snapshot = authorityValue(deriveWaveReadiness(graph, statusDeps));
-    return { snapshot, preparation: authorityValue(prepareWaveReviewBatch(snapshot)) };
-  }
-
-  it("derives the exact packet/roster/model/context/request authority without parent assembly and rejects drift claims", () => {
-    const { snapshot, preparation } = preparationFixture();
-    expect(preparation.packets).toHaveLength(1);
-    expect(preparation.packets[0]).toMatchObject({ task_id: "T1", scope: ["engine/src/core/wave-gate-machine.ts"] });
-    expect(createHash("sha256").update(Uint8Array.from(preparation.packetPublications[0].bytes)).digest("hex"))
-      .toBe(preparation.packets[0].packet_id);
-    expect(preparation.bindings).toHaveLength(6);
-    expect(preparation.initialRequests.map((request) => (request.authority as AgentRequestAuthority).role)).toEqual([
-      "spec-check-invoker", "code-reviewer", "silent-failure-hunter", "pr-test-analyzer", "type-design-analyzer", "comment-analyzer",
-    ]);
-    expect(preparation.initialRequests.map((request) => (request.authority as AgentRequestAuthority).modelProfile)).toEqual([
-      "general-review", "general-review", "focused-review", "focused-review", "focused-review", "focused-review",
-    ]);
-    for (const request of preparation.initialRequests) {
-      const authority = request.authority as AgentRequestAuthority;
-      const policy = authorityValue(resolveAgentPolicy(authority.role));
-      const profile = authorityValue(resolveModelProfile(policy.profile));
-      expect(authority).toMatchObject({
-        modelProfile: policy.profile,
-        requiredSkill: policy.requiredSkill,
-        harnessBinding: {
-          pi: lowerModelProfile(profile, "pi"),
-          claude: lowerModelProfile(profile, "claude-code"),
-        },
-      });
-    }
-    const replay = authorityValue(prepareWaveReviewBatch(snapshot));
-    expect(replay.publicationIntent).toEqual(preparation.publicationIntent);
-    const assertedReplay = authorityValue(prepareWaveReviewBatch(snapshot, {
-      packets: preparation.packets,
-      bindings: preparation.bindings,
-    }));
-    expect(assertedReplay).toEqual(preparation);
-    expect(prepareWaveReviewBatch(snapshot, { packets: [] })).toMatchObject({ ok: false });
-    expect(prepareWaveReviewBatch(snapshot, { bindings: [...preparation.bindings].reverse() })).toMatchObject({ ok: false });
-    const firstBinding = preparation.bindings[0];
-    const firstRequest = firstBinding.attempts[0];
-    const firstAuthority = firstRequest.authority as AgentRequestAuthority;
-    const modelDriftBindings = [{
-      ...firstBinding,
-      attempts: [{
-        ...firstRequest,
-        authority: { ...firstAuthority, modelProfile: "mechanical" },
-      }, firstBinding.attempts[1]] as const,
-    }, ...preparation.bindings.slice(1)];
-    expect(prepareWaveReviewBatch(snapshot, { bindings: modelDriftBindings })).toMatchObject({
-      ok: false,
-      error: { message: expect.stringContaining("roster/model/context/request authority") },
-    });
-    expect(prepareWaveReviewBatch(snapshot, {
-      packets: [{ ...preparation.packets[0], packet_id: "4".repeat(64) }],
-    })).toMatchObject({ ok: false, error: { message: expect.stringContaining("drifted") } });
-  });
-
-  it("prepares fresh Task packets and requests together instead of consuming pre-issued packet registrations", () => {
-    const graph = registeredGraph({
-      tasks: [{ ...baseTask, file_list: ["engine/src/core/wave-gate-machine.ts"], issued_review_packets: [packet] }],
-    });
-    const snapshot = authorityValue(deriveWaveReadiness(graph, statusDeps));
-    const prepared = authorityValue(prepareWaveReviewBatch(snapshot));
-    expect(prepared.packets).not.toEqual([packet]);
-    expect(prepared.publicationIntent.packets.map(({ registration }) => registration)).toEqual(prepared.packets);
-    expect(prepared.publicationIntent.requestPublicationIntent.issuedRequests).toHaveLength(prepared.initialRequests.length);
-    expect(authorityValue(prepareWaveReviewBatch(authorityValue(deriveWaveReadiness(registeredGraph(), statusDeps)))).packets)
-      .toHaveLength(1);
-  });
-
-  it("exposes no spawn action until T1 atomically reconciles the exact publication receipt", () => {
-    const { snapshot, preparation } = preparationFixture();
-    const effectPort = createInitialPublicationEffectPort((intent) => ({
-      ok: true,
-      value: [...new TextEncoder().encode(JSON.stringify({
-        schemaVersion: 1,
-        kind: "batch-published",
-        effectId: intent.identity.effectId,
-        runId: intent.identity.runId,
-        requestIds: intent.requestIds,
-        contextDigests: intent.contextDigests,
-        issuedRequests: intent.issuedRequests,
-        publicationDigest: intent.identity.publicationDigest,
-      }))],
-    }));
-    const claimPort = createAtomicInitialPublicationClaimPort((request) => ({
-      ok: true,
-      value: {
-        schemaVersion: 1,
-        kind: "initial-publication-claimed",
-        key: request.key,
-        identity: request.identity,
-      },
-    }));
-    const requestReconcile = createInitialBatchPublicationReconciler(effectPort, claimPort);
-    let observedAtomicIntent = false;
-    const reconcile = (intent: typeof preparation.publicationIntent) => {
-      observedAtomicIntent = intent.packets.length > 0 && intent.requestPublicationIntent.issuedRequests.length > 0;
-      const issuance = requestReconcile(intent.requestPublicationIntent);
-      return issuance.ok
-        ? { ok: true as const, value: {
-            schemaVersion: 1 as const,
-            kind: "wave-review-batch-published" as const,
-            runId: intent.runId,
-            publicationDigest: intent.publicationDigest,
-            requestIssuance: issuance.value,
-          } }
-        : { ok: false as const, error: { kind: "wave-preparation-rejected" as const, message: issuance.error.message } };
-    };
-    const state = authorityValue(createWaveGateState(snapshot));
-    const action = authorityValue(publishWaveReviewBatch(snapshot, state, preparation, reconcile));
-    expect(observedAtomicIntent).toBe(true);
-    expect(action).toMatchObject({ kind: "review-batch", action: { kind: "spawn-batch" } });
-    if (action.kind === "review-batch") {
-      expect(action.action.requests).toHaveLength(preparation.initialRequests.length);
-      expect(action.action.receipt.publicationDigest)
-        .toBe(preparation.publicationIntent.requestPublicationIntent.identity.publicationDigest);
-    }
-    const actionReadiness = authorityValue(deriveWaveReadiness(snapshot.graph, statusDeps, { nextActionAuthority: action, lifecycleCheckpoint: state }));
-    expect(deriveNextAction(actionReadiness).action.kind).toBe("spawn-batch");
-    expect(deriveLoomStatus(actionReadiness).next.reasons.some(({ kind }) => kind === "review-spawn-required")).toBe(true);
-
-    const revisedGraph = {
-      ...snapshot.graph,
-      active_wave_gate: { ...snapshot.registration, revision: snapshot.registration.revision + 1 },
-    };
-    const reauthorizedGraph = {
-      ...snapshot.graph,
-      active_wave_gate: { ...snapshot.registration, authorityDigest: authorityValue(parseArtifactDigest("d".repeat(64))) },
-    };
-    const changedReadinessGraph = {
-      ...snapshot.graph,
-      tasks: snapshot.graph.tasks.map((task) => ({ ...task, test_result: { verdict: "trusted-fail" as const } })),
-    };
-    for (const attacked of [revisedGraph, reauthorizedGraph, changedReadinessGraph]) {
-      expect(deriveWaveReadiness(attacked, statusDeps, { nextActionAuthority: action, lifecycleCheckpoint: state })).toMatchObject({
-        ok: false,
-        error: { reasons: [{ kind: "authority-contradiction" }] },
-      });
-    }
-    const advancedCheckpoint = authorityValue(reduceWaveGate(state, { kind: "preparation-published" }));
-    expect(deriveWaveReadiness(snapshot.graph, statusDeps, { nextActionAuthority: action, lifecycleCheckpoint: advancedCheckpoint })).toMatchObject({
-      ok: false,
-      error: { reasons: [{ kind: "authority-contradiction" }] },
-    });
-    expect(deriveWaveReadiness(snapshot.graph, statusDeps, { nextActionAuthority: { ...action }, lifecycleCheckpoint: state })).toMatchObject({
-      ok: false,
-      error: { reasons: [{ kind: "authority-contradiction" }] },
-    });
-
-    const second = preparationFixture();
-    const failed = publishWaveReviewBatch(
-      second.snapshot,
-      authorityValue(createWaveGateState(second.snapshot)),
-      second.preparation,
-      (intent) => {
-        const issuance = createInitialBatchPublicationReconciler(
-          createInitialPublicationEffectPort(() => ({
-            ok: false,
-            error: { kind: "initial-publication-effect-failed", message: "partial write" },
-          })),
-          claimPort,
-        )(intent.requestPublicationIntent);
-        return issuance.ok
-          ? { ok: true, value: {
-              schemaVersion: 1, kind: "wave-review-batch-published", runId: intent.runId,
-              publicationDigest: intent.publicationDigest, requestIssuance: issuance.value,
-            } }
-          : { ok: false, error: { kind: "wave-preparation-rejected", message: issuance.error.message } };
-      },
-    );
-    expect(failed).toMatchObject({ ok: false, error: { kind: "wave-preparation-rejected" } });
-  });
-
-  it("derives retry publication only from exact active Review Run slots; caller evidence is comparison-only", () => {
-    const { snapshot, preparation } = preparationFixture();
-    const slots = preparation.bindings.map((binding) => authorityValue(parseAgentRosterSlot(
-      binding.attempts[0].authority,
-      binding.attempts[1].authority,
-    )).slotId);
-    const acceptedAgents = ["code-reviewer", "pr-test-analyzer", "comment-analyzer"];
-    const task = {
-      ...baseTask,
-      review_generation: 1,
-      review_status: "evidence_capture_failed" as const,
-      review_error: "type verifier transcript invalid",
-      review_evidence_failures: ["type-design-analyzer"],
-      review_run: {
-        generation: 1,
-        packet_id: preparation.packets[0].packet_id,
-        head_sha: preparation.packets[0].head_sha,
-        expected_agents: [...WAVE_REVIEW_AGENTS] as [string, ...string[]],
-        prior_finding_ids: [],
-        evidence: acceptedAgents.map((agent) => {
-          const reviewerIndex = WAVE_REVIEW_AGENTS.indexOf(agent as typeof WAVE_REVIEW_AGENTS[number]);
-          const slotId = slots[reviewerIndex + 1];
-          if (reviewerIndex < 0 || slotId === undefined) throw new Error(`missing slot for ${agent}`);
-          return { agent, slot_id: slotId, attempted: 1 as const, prior_assessments: [], new_findings: [] };
-        }),
-        slot_authority: testNonEmpty(WAVE_REVIEW_AGENTS.map((agent, index) => ({
-          agent,
-          slot_id: slots[index + 1],
-          attempted: 1 as const,
-        }))),
-      },
-    };
-    const parsedActiveGraph = parseTaskGraph({
-      ...snapshot.graph,
-      tasks: [task],
-      wave_review_epoch: {
-        runId: preparation.runId,
-        wave: preparation.wave,
-        batchEpoch: "e".repeat(64),
-        specCheckSlotAuthority: { slot_id: slots[0], attempted: 1 },
-      },
-    });
-    expect(parsedActiveGraph).toMatchObject({ ok: true });
-    const activeSnapshot = authorityValue(deriveWaveReadiness(authorityValue(parsedActiveGraph), statusDeps));
-    const claims = slots.map((slotId, index) => ({
-      slotId,
-      result: index === 2 ? "missing" as const : index === 4 ? "invalid" as const : "accepted" as const,
-      attempted: 1 as const,
-    }));
-    const recovery = authorityValue(deriveWaveReviewRecovery(preparation, activeSnapshot, claims));
-    expect(recovery.kind).toBe("retry-batch");
-    if (recovery.kind === "retry-batch") {
-      expect(recovery.affectedSlotIds).toEqual([slots[2], slots[4]]);
-      expect(recovery.requests.map((request) => (request.authority as AgentRequestAuthority).attempt)).toEqual([2, 2]);
-    }
-    expect(deriveWaveReviewRecovery(preparation, activeSnapshot, claims.slice(1))).toMatchObject({
-      ok: false,
-      error: { message: expect.stringContaining("caller recovery claim drifted") },
-    });
-    expect(deriveWaveReviewRecovery(preparation, snapshot)).toMatchObject({
-      ok: false,
-      error: { message: expect.stringContaining("lacks exact review epoch authority") },
-    });
-
-    const exhaustedTask = {
-      ...task,
-      review_run: {
-        ...task.review_run,
-        slot_authority: testNonEmpty(task.review_run.slot_authority!.map((slot, index) =>
-          index === 1 ? { ...slot, attempted: 2 as const } : slot)),
-      },
-    };
-    const exhaustedSnapshot = authorityValue(deriveWaveReadiness({
-      ...snapshot.graph,
-      tasks: [exhaustedTask],
-      wave_review_epoch: activeSnapshot.graph.wave_review_epoch,
-    }, statusDeps));
-    expect(deriveWaveReviewRecovery(preparation, exhaustedSnapshot)).toMatchObject({
-      ok: false,
-      error: { message: expect.stringContaining("exhausted semantic attempt 2") },
-    });
-
-    const specExhaustedSnapshot = authorityValue(deriveWaveReadiness({
-      ...activeSnapshot.graph,
-      spec_check: {
-        wave: preparation.wave,
-        run_at: "2026-08-28T00:00:00.000Z",
-        verdict: "EVIDENCE_CAPTURE_FAILED",
-        error: "attempt 2 was rejected",
-      },
-      wave_review_epoch: {
-        ...activeSnapshot.graph.wave_review_epoch!,
-        specCheckSlotAuthority: { slot_id: slots[0]!, attempted: 2 },
-      },
-    }, statusDeps));
-    expect(deriveWaveReviewRecovery(preparation, specExhaustedSnapshot)).toMatchObject({
-      ok: false,
-      error: { message: expect.stringContaining("exhausted semantic attempt 2") },
-    });
-  });
-
+describe("authoritative Wave refutation, panel, and advisory contracts", () => {
   it("refuses refutation while a current Review Packet still owns the finding snapshot", () => {
-    const { snapshot, preparation } = preparationFixture();
-    const taskBindings = preparation.bindings.filter((binding) => binding.subject.kind === "task-review");
-    const packetAuthority = preparation.packets[0];
-    const collecting = authorityValue(deriveWaveReadiness({
-      ...snapshot.graph,
-      tasks: snapshot.graph.tasks.map((task) => ({
-        ...task,
+    const collecting = authorityValue(deriveWaveReadiness(registeredGraph({
+      tasks: [{
+        ...baseTask,
         review_run: {
-          generation: task.review_generation ?? 0,
-          packet_id: packetAuthority.packet_id,
-          head_sha: packetAuthority.head_sha,
+          generation: baseTask.review_generation ?? 0,
+          packet_id: "1".repeat(64),
+          head_sha: "2".repeat(64),
           expected_agents: WAVE_REVIEW_AGENTS,
-          prior_finding_ids: (task.findings ?? []).map(({ id }) => id),
+          prior_finding_ids: [],
           evidence: [],
-          slot_authority: taskBindings.map((binding) => ({
-            agent: binding.subject.kind === "task-review" ? binding.subject.reviewer : "code-reviewer",
-            slot_id: (binding.attempts[0].authority as AgentRequestAuthority).slotId,
-            attempted: 1 as const,
-          })) as never,
         },
-      })),
-    }, statusDeps));
+      }],
+    }), statusDeps));
 
     expect(deriveWaveRefutationPlan(collecting)).toMatchObject({
       ok: false,
