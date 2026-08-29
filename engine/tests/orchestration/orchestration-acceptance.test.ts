@@ -14,10 +14,8 @@ import {
 } from "../../src/core/harness-capture";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import captureOrchestrationResult, {
-  alreadyCapturedAttempts,
   captureClaudeResult,
   claudeFinalPayloadCandidates,
-  readIssuedRequests,
 } from "../../src/handlers/subagent-stop/capture-orchestration-result";
 import { recordClaudeSpawnCorrelation } from "../../src/handlers/post-tool-use/record-orchestration-spawn";
 import { piFinalPayloadCandidates, piResultFinalPayloadCandidates } from "../../../pi/transcript-adapter";
@@ -156,11 +154,13 @@ describe("Pi and Claude reach the same result", () => {
       issued: [authority()],
       identity: identity({ harness: "pi", nativeId: "toolcall-7" }),
       payload: pi.value,
+      alreadyCaptured: new Set(),
     });
     const claudeReceipt = bindCapture({
       issued: [authority()],
       identity: identity({ harness: "claude", nativeId: "agent-abc" }),
       payload: claude.value,
+      alreadyCaptured: new Set(),
     });
 
     expect(piReceipt.ok && claudeReceipt.ok).toBe(true);
@@ -582,6 +582,7 @@ describe("invalid evidence is audited but never accepted", () => {
       issued: [authority()],
       identity: identity({ requestId: "request:someone-else:1" }),
       payload: payload(),
+      alreadyCaptured: new Set(),
     });
 
     expect(bound.ok).toBe(false);
@@ -594,6 +595,7 @@ describe("invalid evidence is audited but never accepted", () => {
       issued: [authority()],
       identity: identity({ attempt: 2 }),
       payload: payload(),
+      alreadyCaptured: new Set(),
     });
 
     expect(bound.ok).toBe(false);
@@ -635,6 +637,7 @@ describe("invalid evidence is audited but never accepted", () => {
       issued: [authority()],
       identity: identity({ nativeId: "" }),
       payload: payload(),
+      alreadyCaptured: new Set(),
     });
 
     expect(bound.ok).toBe(false);
@@ -648,11 +651,17 @@ describe("invalid evidence is audited but never accepted", () => {
       slotId: "slot-2" as AgentRequestAuthority["slotId"],
     })];
 
-    const refused = bindCapture({ issued, identity: identity({ requestId: "ghost" }), payload: payload() });
+    const refused = bindCapture({
+      issued,
+      identity: identity({ requestId: "ghost" }),
+      payload: payload(),
+      alreadyCaptured: new Set(),
+    });
     const accepted = bindCapture({
       issued,
       identity: identity({ requestId: "request:reviewer:2" }),
       payload: payload(),
+      alreadyCaptured: new Set(),
     });
 
     expect(refused.ok).toBe(false);
@@ -869,8 +878,13 @@ describe("Claude capture against a real run directory", () => {
     const opened = openRunDirectory(runsRoot, runDir);
     if (!opened.ok) throw new Error(opened.error.message);
 
-    expect(readIssuedRequests(opened.value).map(({ requestId }) => requestId)).toEqual(["request:reviewer:1"]);
-    expect([...alreadyCapturedAttempts(opened.value)]).toEqual([]);
+    const issued = opened.value.readIssuedRequests();
+    const capturedAttempts = opened.value.readCapturedAttempts();
+    if (!issued.ok) throw new Error(issued.error.message);
+    if (!capturedAttempts.ok) throw new Error(capturedAttempts.error.message);
+
+    expect(issued.value.map(({ requestId }) => requestId)).toEqual(["request:reviewer:1"]);
+    expect([...capturedAttempts.value]).toEqual([]);
   });
 
   it("refuses an ambiguous transcript rather than salvaging one block", async () => {
@@ -888,7 +902,9 @@ describe("Claude capture against a real run directory", () => {
 
     expect(outcome.kind).toBe("rejected");
     if (outcome.kind !== "rejected") return;
-    expect(outcome.reason).toBe("no-final-payload");
+    // One candidate PER text block, so a two-block final is named as the
+    // ambiguity it is instead of being silently downgraded to "no final".
+    expect(outcome.reason).toBe("ambiguous-final-payload");
   });
 
   it("reports an interrupted final transcript record without salvaging an earlier payload", async () => {
@@ -923,7 +939,10 @@ describe("Claude capture against a real run directory", () => {
 
     expect(outcome.kind).toBe("rejected");
     if (outcome.kind !== "rejected") return;
-    expect(outcome.reason).toBe("no-final-payload");
+    // An absent transcript is a LOCATOR fault (Claude Code stopped sending
+    // `agent_transcript_path`), and must not be reported as an Agent that said
+    // nothing — the caller terminalises refusals.
+    expect(outcome.reason).toBe("transcript-locator");
   });
 
   it("returns a hook error for partial or malformed Claude run authority", async () => {

@@ -151,7 +151,16 @@ const SHA256_HEX = /^[0-9a-f]{64}$/;
 const WINDOWS_ABSOLUTE = /^(?:[A-Za-z]:[\\/]|\\\\)/;
 const CANONICAL_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
-function parseJsonValue(raw: unknown, label: string): ParseResult<JsonValue> {
+/**
+ * Parse untrusted data into the JSON value it claims to be.
+ *
+ * EXPORTED because canonical bytes are a cross-module need: anything that
+ * stores a caller-supplied JSON document for later byte comparison must write
+ * `canonicalJson(parseJsonValue(x))`, not the caller's own `JSON.stringify`,
+ * or a semantically identical replay with different key order looks like a
+ * conflicting second claim. Rejects non-finite numbers, functions, and cycles.
+ */
+export function parseJsonValue(raw: unknown, label: string): ParseResult<JsonValue> {
   const visiting = new WeakSet<object>();
 
   const visit = (value: unknown, path: string): ParseResult<JsonValue> => {

@@ -8,11 +8,13 @@
  * for a decision already taken.
  *
  * Capture is bound to REQUEST authority, not to the agent that happens to have
- * stopped. Claude's `session_id` + `agent_id` + `agent_type` locate the
- * pre-spawn reservation; the reservation names the request, and the request
- * names the run, slot, attempt, model, and context digest. With request-bound
- * Run authority, a stop that matches no reservation is audited and rejected:
- * silently treating it as unrelated would strand the reserved slot.
+ * stopped. Claude supplies exactly ONE native correlator — the `agent_id` its
+ * SubagentStop payload carries — and the correlator binding the spawn side wrote
+ * into the run directory reconstructs the request it belongs to; the request
+ * names the run, slot, attempt, model, and context digest. `session_id` and
+ * `agent_type` play no part in that identity. With request-bound Run authority,
+ * a stop that matches no reservation is audited and rejected: silently treating
+ * it as unrelated would strand the reserved slot.
  *
  * This handler NEVER resolves an unrelated State File. It reads only the run
  * directory it was pointed at, so a standalone review running beside an active
@@ -28,6 +30,7 @@
 import { readFileSync } from "node:fs";
 import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
 import type { FinalPayloadCandidate } from "../../core/harness-capture";
+import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
 import {
   captureAuditLine,
   captureHarnessResult,
@@ -39,15 +42,19 @@ import {
 export type { CaptureOutcome };
 
 /**
- * Inspect the final non-empty Claude transcript line as the sole final-payload
- * candidate, accepting it only when it is an assistant message with exactly one
- * text block.
+ * Inspect the final non-empty Claude transcript line and hand over EVERY text
+ * block of its assistant message as a separate candidate.
  *
  * Claude's transcript is JSONL with one message per line. Unlike Pi, where a
  * result carries a list of blocks, no earlier line is searched as a fallback.
  * A syntactically malformed final line is reported as transcript corruption
- * with its line number. A well-formed non-assistant or ambiguous message yields
- * no candidate, so the payload rules still reject instead of accepting salvage.
+ * with its line number. A well-formed non-assistant message yields no candidate,
+ * so the payload rules still reject instead of accepting salvage.
+ *
+ * Multi-block messages are reported as the ambiguity they are rather than being
+ * collapsed here: choosing or joining blocks is the shared payload rule's
+ * decision, and pre-selecting one would turn `ambiguous-final-payload` into an
+ * unreachable refusal on this path.
  */
 export function claudeFinalPayloadCandidates(transcriptPath: string): readonly FinalPayloadCandidate[] {
   // One read, no pre-check: `existsSync` returns false for ELOOP/ENOTDIR too,
@@ -69,13 +76,15 @@ export function claudeFinalPayloadCandidates(transcriptPath: string): readonly F
 
   const finalIndex = lines.findLastIndex((line) => line.trim().length > 0);
   if (finalIndex < 0) return Object.freeze([]);
-  const text = assistantTextOf(lines[finalIndex], finalIndex);
-  return text === null
-    ? Object.freeze([])
-    : Object.freeze([{ origin: `transcript.line[${finalIndex}]`, text }]);
+  const blocks = assistantTextBlocksOf(lines[finalIndex], finalIndex);
+  if (blocks === null) return Object.freeze([]);
+  return Object.freeze(blocks.map((text, blockIndex) => Object.freeze({
+    origin: `transcript.line[${finalIndex}].block[${blockIndex}]`,
+    text,
+  })));
 }
 
-function assistantTextOf(line: string | undefined, zeroBasedLine: number): string | null {
+function assistantTextBlocksOf(line: string | undefined, zeroBasedLine: number): readonly string[] | null {
   if (line === undefined) return null;
   let parsed: unknown;
   try {
@@ -91,47 +100,60 @@ function assistantTextOf(line: string | undefined, zeroBasedLine: number): strin
   const record = message as Record<string, unknown>;
   if (record["role"] !== "assistant" || !Array.isArray(record["content"])) return null;
 
-  // Concatenating text blocks here would be the same normalisation the payload
-  // rules forbid, so a multi-block assistant message yields its blocks joined
-  // by nothing only when there is exactly one.
+  // Every text block is handed over as its own candidate. Concatenating them
+  // here would be the normalisation the payload rules forbid, and keeping only
+  // one would hide the ambiguity the engine is supposed to refuse.
   const texts = (record["content"] as readonly unknown[])
     .filter((block): block is Record<string, unknown> =>
       typeof block === "object" && block !== null && (block as Record<string, unknown>)["type"] === "text")
     .map((block) => block["text"])
     .filter((text): text is string => typeof text === "string");
-  return texts.length === 1 ? texts[0] ?? null : null;
+  return Object.freeze(texts);
 }
-
-/**
- * Re-exported so the Claude-side tests and callers keep one import site while
- * the implementations stay shared with Pi.
- */
-export {
-  alreadyCapturedAttempts,
-  readCorrelatorIdentity,
-  readIssuedRequests,
-} from "../../orchestration/harness-capture-runtime";
 
 /**
  * Capture one finished Claude agent. Pure with respect to decisions: every
  * refusal is returned as a typed outcome the caller audits. Accepted captures
  * write transcript evidence; refusals that reached a reservation may durably
  * record a rejection marker and journal event.
+ *
+ * The transcript is located the way every sibling handler locates it —
+ * `resolveAgentTranscriptPath`, because Claude Code stopped sending
+ * `agent_transcript_path`. Nothing found is its own `transcript-locator`
+ * refusal: an absent harness field must not be reported as an Agent that
+ * produced no final payload, because the caller terminalises refusals and the
+ * slot would be burned for a fault the Agent never committed.
  */
 export async function captureClaudeResult(
   input: SubagentStopInput,
   runsRoot: string | undefined,
   runDirectory: string | undefined,
 ): Promise<CaptureOutcome> {
-  let candidates: readonly FinalPayloadCandidate[];
-  try {
-    candidates = claudeFinalPayloadCandidates(input.agent_transcript_path ?? "");
-  } catch (error) {
-    return {
-      kind: "rejected",
-      reason: "transcript-json",
-      message: error instanceof Error ? error.message : String(error),
-    };
+  // Only a COMPLETE run authority makes a transcript worth locating: with one
+  // half missing the runtime below refuses with `run-authority`, and with
+  // neither there is no slot to fill at all. Locating a transcript in either
+  // case would turn an unrelated — or misconfigured — stop into a
+  // `transcript-locator` refusal, blaming the locator for someone else's fault.
+  const hasRunAuthority = runsRoot !== undefined && runDirectory !== undefined;
+  let candidates: readonly FinalPayloadCandidate[] = Object.freeze([]);
+  if (hasRunAuthority) {
+    const transcriptPath = resolveAgentTranscriptPath(input);
+    if (transcriptPath === null) {
+      return {
+        kind: "rejected",
+        reason: "transcript-locator",
+        message: `no transcript can be located for session ${JSON.stringify(input.session_id ?? "")} agent ${JSON.stringify(input.agent_id ?? "")}: none was supplied and the derived path does not exist`,
+      };
+    }
+    try {
+      candidates = claudeFinalPayloadCandidates(transcriptPath);
+    } catch (error) {
+      return {
+        kind: "rejected",
+        reason: "transcript-json",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
   return captureHarnessResult({
     harness: "claude",
@@ -165,8 +187,10 @@ const handler: HookHandler = async (stdin): Promise<HookResult> => {
     process.env[RUN_DIR_ENV],
   );
 
-  // Every non-capture is audited. A rejection must be visible: silence here
-  // would look exactly like a run that had nothing to capture.
+  // A capture, a refusal, and a stop that matched no reservation are all
+  // audited; only `not-an-orchestration-run` — an agent in nobody's run — stays
+  // silent. A missing rejection would look exactly like a run with nothing to
+  // capture.
   const audit = captureAuditLine("capture-orchestration-result", outcome);
   if (audit !== null) process.stderr.write(audit);
   if (hasAnyRunAuthority && outcome.kind === "no-reservation") {

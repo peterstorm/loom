@@ -105,6 +105,7 @@ import {
   RUN_DIR_ENV,
   describeCaptureFailure,
   RUNS_ROOT_ENV,
+  terminalizeCaptureRejection,
   type CaptureOutcome,
 } from "../engine/src/orchestration/harness-capture-runtime";
 import { openRunDirectory, type RunDirHandle } from "../engine/src/orchestration/run-directory-handle";
@@ -124,7 +125,13 @@ import {
   type SessionRunBinding,
 } from "../engine/src/orchestration/session-run-bindings";
 import { captureKey, type CaptureKey } from "../engine/src/core/harness-capture";
-import type { AgentRequestAuthority } from "../engine/src/core/orchestration-contract";
+import {
+  parseArtifactDigest,
+  parseContextDigest,
+  type AgentRequestAuthority,
+  type ArtifactDigest,
+  type ContextDigest,
+} from "../engine/src/core/orchestration-contract";
 import {
   parseIsoInstant,
   type ImplementationAttemptAuthority,
@@ -177,8 +184,12 @@ type TrustedReviewCapture = Readonly<{
   slotId: string;
   attempt: 1 | 2;
   role: string;
-  contextDigest: string;
-  digest: string;
+  /** Branded, because this proof compares two 64-hex fields: as plain strings
+   *  the context digest and the transcript digest were mutually interchangeable
+   *  at the construction site, which is the one place a swap must be impossible.
+   */
+  contextDigest: ContextDigest;
+  digest: ArtifactDigest;
   byteLength: number;
 }>;
 
@@ -208,7 +219,6 @@ type LoomReviewAuthorityReceipt = Readonly<{
 const trustedReviewRuns = new Map<string, Map<string, TrustedReviewRoot>>();
 const trustedRunIdentity = ({ runsRoot, runDirectory }: Pick<SessionRunBinding, "runsRoot" | "runDirectory">): string =>
   `${runsRoot}\0${runDirectory}`;
-const trustedCaptureIdentity = (slotId: string, attempt: 1 | 2): CaptureKey => captureKey(slotId, attempt);
 
 /**
  * Fail-closed path existence check. Returns `true` (assume active) for any
@@ -371,6 +381,14 @@ function rememberTrustedReviewCapture(
   if (markers === null || markers.requestId !== outcome.receipt.requestId) {
     throw new Error(`captured request ${outcome.receipt.requestId} is missing its exact task authority markers`);
   }
+  const contextDigest = parseContextDigest(markers.contextDigest);
+  if (!contextDigest.ok) {
+    throw new Error(`captured request ${outcome.receipt.requestId} carries an invalid context marker: ${contextDigest.error.message}`);
+  }
+  const digest = parseArtifactDigest(outcome.receipt.digest);
+  if (!digest.ok) {
+    throw new Error(`captured request ${outcome.receipt.requestId} carries an invalid receipt digest: ${digest.error.message}`);
+  }
   const sessionRoots = trustedReviewRuns.get(sessionId) ?? new Map<string, TrustedReviewRoot>();
   trustedReviewRuns.set(sessionId, sessionRoots);
   const rootIdentity = resolve(binding.runsRoot);
@@ -382,14 +400,14 @@ function rememberTrustedReviewCapture(
   const previousRun = root.runs.get(identity);
   const captures = new Map(previousRun?.captures ?? []);
   captures.set(
-    trustedCaptureIdentity(outcome.receipt.slotId, outcome.receipt.attempt),
+    captureKey(outcome.receipt.slotId, outcome.receipt.attempt),
     Object.freeze({
       requestId: outcome.receipt.requestId,
       slotId: outcome.receipt.slotId,
       attempt: outcome.receipt.attempt,
       role,
-      contextDigest: markers.contextDigest,
-      digest: outcome.receipt.digest,
+      contextDigest: contextDigest.value,
+      digest: digest.value,
       byteLength: outcome.receipt.byteLength,
     }),
   );
@@ -451,8 +469,15 @@ function sessionRunBinding(
  * Pi's native correlator is `piSpawnRosterId(toolCallId, index, agent)` — the
  * same stable per-spawn identity the lifecycle registry already uses, and the
  * only thing available on both the spawn and result sides of a Pi batch. The
- * spawn side records it beside the reservation; a result whose correlator is
- * absent belongs to some other agent and is ignored, not failed.
+ * spawn side records it beside the reservation.
+ *
+ * What an ABSENT correlator means then depends on whether this result is bound
+ * to a run at all. An unbound agent (no session run binding, no request markers)
+ * belongs to nobody's run and is left alone — that is the ordinary ad-hoc case,
+ * not a failure. A REQUEST-BOUND result whose correlator cannot be resolved is
+ * the opposite: `piResultAuthorityProblem` names it, the result loop records it
+ * as a processing error, and `persistCaptureRejection` terminalises the
+ * reservation, because a run directory exists precisely to collect that result.
  *
  * This is a fail-spawn boundary and therefore throws when exact run/request
  * authority cannot be recorded. The tool-call guard catches the failure,
@@ -550,6 +575,14 @@ function piRequestCorrelation(
     : { ok: true, handle: opened.value, request };
 }
 
+/**
+ * Terminalise one Pi-side capture refusal against its exact reservation.
+ *
+ * Only the CORRELATION step is Pi-specific here; the tombstone, the journal
+ * record, and the audit outcome come from `terminalizeCaptureRejection`, so the
+ * two harnesses cannot disagree about what a refusal durably means. Returns the
+ * operator-facing failure text, or null when the refusal was recorded cleanly.
+ */
 async function recordPiRequestCaptureRejection(
   runBinding: SessionRunBinding,
   toolCallId: unknown,
@@ -573,29 +606,11 @@ async function recordPiRequestCaptureRejection(
     }
   }
 
-  const { handle, request } = correlation;
-  const rejected = await handle.rejectCapture(request, diagnostic);
-  if (!rejected.ok) {
-    return `cannot persist capture rejection for ${agentType}[${resultIndex}]: ${rejected.error.message}`;
-  }
-  try {
-    await handle.appendEvent({
-      schemaVersion: 1,
-      sequence: 0,
-      dedupKey: `capture-rejected:${createHash("sha256").update(`${request.requestId}:${request.attempt}`).digest("hex")}`,
-      recordedAtMs: Date.now(),
-      event: {
-        kind: "request-capture-rejected",
-        requestId: request.requestId,
-        slotId: request.slotId,
-        attempt: request.attempt,
-        diagnostic,
-      },
-    });
-    return null;
-  } catch (error) {
-    return `capture rejection for ${agentType}[${resultIndex}] was terminalized but its audit event could not be persisted: ${error instanceof Error ? error.message : String(error)}`;
-  }
+  const outcome = await terminalizeCaptureRejection(correlation.handle, correlation.request, { diagnostic });
+  return outcome.kind === "rejected" &&
+      (outcome.reason === "rejection-persistence" || outcome.reason === "rejection-audit-unsynchronized")
+    ? `${agentType}[${resultIndex}] ${outcome.message}`
+    : null;
 }
 
 function piResultAuthorityProblem(
@@ -871,7 +886,7 @@ function trustedCaptureProblem(handle: RunDirHandle, run: TrustedReviewRun): str
   if (!captured.ok) return captured.error.message;
   for (const key of captured.value) {
     const authority = issued.value.find((request) =>
-      trustedCaptureIdentity(request.slotId, request.attempt) === key);
+      captureKey(request.slotId, request.attempt) === key);
     const trusted = run.captures.get(key);
     if (authority === undefined || trusted === undefined || authority.requestId !== trusted.requestId ||
         authority.role !== trusted.role || authority.contextDigest !== trusted.contextDigest) {
@@ -1188,7 +1203,7 @@ export default function (pi: ExtensionAPI) {
         // failure can now refuse the spawn without leaving executing_tasks or
         // artifact baselines claiming work began. The ids hash the tool call,
         // the batch ordinal, and the agent type — task text is deliberately
-        // excluded (see `piSpawnItem`) — so repeated verifier/designer types in
+        // excluded (see `piSpawnRosterId`) — so repeated verifier/designer types in
         // one batch remain distinct without the id moving when the prompt does.
         currentGuard = "subagent-tracking";
         const safeSessionId = parseSessionId(sessionId);
