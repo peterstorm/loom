@@ -1,9 +1,9 @@
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import { evaluateTaskProof, PI_STRUCTURED_EVIDENCE_POLICY } from "../../../src/core/proof-obligations";
 import { createReviewPacket, parseBaseSha, parseHeadSha, serializeReviewPacket, type BaseSha, type HeadSha } from "../../../src/core/review-packet";
@@ -24,7 +24,6 @@ import {
   reconcileTaskFromStoredEvidence,
   reconciliationFailureMessage,
 } from "../../../src/handlers/helpers/reconcile-implementation-proof";
-import { PostCommitStateProtectionError } from "../../../src/state-manager";
 import type { Task } from "../../../src/types";
 import { taskFixture } from "../../fixtures/task-lifecycle";
 
@@ -73,20 +72,6 @@ function failedTask(taskCompleted = true): Task {
 }
 
 describe("reconciliation failure diagnostics", () => {
-  it("never reports a post-commit protection failure as unchanged state", () => {
-    const error = new PostCommitStateProtectionError(
-      "/repo/.claude/state/active_task_graph.json",
-      undefined,
-      new Error("EACCES"),
-    );
-
-    const message = reconciliationFailureMessage(error);
-
-    expect(message).toContain("committed state");
-    expect(message).toContain("failed to restore read-only protection");
-    expect(message).not.toContain("without changing state");
-  });
-
   it("retains the pre-commit unchanged-state diagnostic", () => {
     expect(reconciliationFailureMessage(new Error("proof mismatch"))).toBe(
       "reconcile-implementation-proof failed without changing state: proof mismatch",
@@ -123,7 +108,7 @@ describe("recovery arguments", () => {
 
 describe("historical baseline recovery CLI", () => {
   it("atomically replaces poisoned boundaries with an audited ancestor commit", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-proof-recovery-"));
+    const root = canonicalTempDir("loom-proof-recovery-");
     cleanup.push(root);
     execFileSync("git", ["init", "--quiet"], { cwd: root });
     execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });

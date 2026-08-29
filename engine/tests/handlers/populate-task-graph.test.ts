@@ -3,15 +3,14 @@ import fc from "fast-check";
 import {
   chmodSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import populate from "../../src/handlers/helpers/populate-task-graph";
 import type { Task, TaskGraph } from "../../src/types";
 import { taskFixture } from "../fixtures/task-lifecycle";
@@ -43,7 +42,7 @@ afterEach(() => {
 });
 
 function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), "loom-populate-guard-"));
+  const dir = canonicalTempDir("loom-populate-guard-");
   dirs.push(dir);
   return dir;
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, readFileSync, chmodSync, renameSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync, readFileSync, chmodSync, renameSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { StateManager, parseTaskGraph, resolveTaskGraph } from "../src/state-manager";
@@ -10,7 +10,10 @@ import { derivePendingTaskProof, evaluateTaskProof } from "../src/core/proof-obl
 function makeTmpDir(): string {
   const dir = join(tmpdir(), `loom-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(dir, { recursive: true });
-  return dir;
+  // macOS tmpdir() sits behind the system /var → /private/var symlink; the
+  // anchored primitives resolve the base once (mirroring production's
+  // `ensureResolvedBaseDirectory`), so the fixture root must be canonical too.
+  return realpathSync.native(dir);
 }
 
 function minimalGraph(): TaskGraph {
@@ -37,7 +40,12 @@ describe("StateManager", () => {
   });
 
   afterEach(() => {
-    try { chmodSync(statePath, 0o644); } catch {}
+    try {
+      chmodSync(statePath, 0o644);
+    } catch (error) {
+      // ENOENT is the one idempotent absence; anything else is fixture damage.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
     rmSync(tmpDir, { recursive: true, force: true });
   });
 

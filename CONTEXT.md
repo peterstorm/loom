@@ -45,7 +45,7 @@ The pure decision that accepts or blocks one subagent spawn batch before any sta
 _Avoid_: Spawn gate (that is the Hook applying the decision), spawn validation
 
 **Interactive Phase Transport**:
-The Pi-only parent-relayed RPC child transport for one interactive phase Agent. It preserves the same child process and Agent turn while translating child `extension_ui_request` frames into parent-TUI dialogs and returning exactly correlated `extension_ui_response` frames. Headless Agents remain on the normal subagent transport.
+The Pi-only parent-relayed RPC child transport for one interactive phase Agent. It preserves the same child process and Agent turn while translating child `extension_ui_request` frames into parent-TUI dialogs and returning exactly correlated `extension_ui_response` frames. It resolves the same exact effective provider/model/thinking binding as the normal subagent transport and records that binding in its result. Headless Agents remain on the normal subagent transport.
 _Avoid_: Question-file fallback, parent interview, interactive subagent (that is the tool surface, not the transport contract)
 
 **Wire Contract**:

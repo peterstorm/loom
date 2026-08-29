@@ -1,8 +1,8 @@
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { describe, it, expect, vi } from "vitest";
 import fc from "fast-check";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import completeWaveGateHandler, {
   createCompleteWaveGateHandler,
   generateWaveGateSummary,
@@ -128,7 +128,7 @@ const taskState = (overrides: Partial<TaskFixtureInput> = {}): Task => taskFixtu
 
 describe("wave-gate durable summary fallback", () => {
   it("writes the documented fallback path", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-summary-")));
+    const root = canonicalTempDir("loom-wave-summary-");
     try {
       const path = persistWaveGateSummaryFallback(3, "wave summary\n", root);
       expect(path).toBe(join(root, ".claude", "reviews", "wave-3-review.md"));
@@ -139,8 +139,8 @@ describe("wave-gate durable summary fallback", () => {
   });
 
   it("rejects a symlinked fallback leaf without modifying its target", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-summary-root-")));
-    const outside = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-summary-outside-")));
+    const root = canonicalTempDir("loom-wave-summary-root-");
+    const outside = canonicalTempDir("loom-wave-summary-outside-");
     const sentinel = join(outside, "sentinel.md");
     writeFileSync(sentinel, "do not overwrite\n");
     mkdirSync(join(root, ".claude", "reviews"), { recursive: true });
@@ -224,7 +224,7 @@ describe("GitHub issue notification port", () => {
     expect(comments).toHaveLength(1);
     expect(comments[0]).toEqual([42, expect.stringContaining("Wave 1"), "owner/repo"]);
 
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-summary-port-")));
+    const root = canonicalTempDir("loom-wave-summary-port-");
     const failure: GitHubIssuePort = {
       readBody: () => "",
       editBody: () => {},
@@ -1960,7 +1960,7 @@ describe("protected active Wave Gate registration", () => {
   });
 
   it("explicitly migrates legacy authority and never invents a default registration", async () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-legacy-wave-")));
+    const root = canonicalTempDir("loom-legacy-wave-");
     const path = join(root, "active_task_graph.json");
     writeFileSync(path, JSON.stringify({
       current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
@@ -1987,7 +1987,7 @@ describe("protected active Wave Gate registration", () => {
   });
 
   it("registers atomically, replays idempotently, and refuses a competing active run", async () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-active-wave-")));
+    const root = canonicalTempDir("loom-active-wave-");
     const path = join(root, "active_task_graph.json");
     writeFileSync(path, JSON.stringify({
       current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
@@ -2008,7 +2008,7 @@ describe("protected active Wave Gate registration", () => {
   });
 
   it("rejects registration for a Wave already present in terminal history", async () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-terminal-wave-registration-")));
+    const root = canonicalTempDir("loom-terminal-wave-registration-");
     const path = join(root, "active_task_graph.json");
     writeFileSync(path, JSON.stringify(registeredGraph()));
     const manager = new StateManager(path);
@@ -2038,7 +2038,7 @@ describe("protected active Wave Gate registration", () => {
   });
 
   it("re-stats lifecycle artifacts inside the completion lock and rejects pre-lock deletion drift", async () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-lock-drift-")));
+    const root = canonicalTempDir("loom-wave-lock-drift-");
     const path = join(root, "active_task_graph.json");
     const relativeArtifact = `tests/.wave-lock-drift-${process.pid}.ts`;
     const artifact = join(root, relativeArtifact);
@@ -2151,7 +2151,7 @@ describe("protected active Wave Gate registration", () => {
   });
 
   it("atomically archives terminal receipt with Task/Wave advancement and allows compatibility to start the next Wave", async () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-complete-wave-")));
+    const root = canonicalTempDir("loom-complete-wave-");
     const path = join(root, "active_task_graph.json");
     const initial = registeredGraph({
       tasks: [baseTask, { ...baseTask, id: "T2", wave: 2 }],
@@ -2197,7 +2197,7 @@ describe("final-Wave compatibility completion replay", () => {
     run: (path: string) => Promise<T>,
     initial: TaskGraph = legacyFinalGraph(),
   ): Promise<T> {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-final-wave-replay-")));
+    const root = canonicalTempDir("loom-final-wave-replay-");
     const path = join(root, "active_task_graph.json");
     const planFile = join(root, "plan.md");
     const previous = process.env.LOOM_STATE_PATH;
@@ -2341,39 +2341,17 @@ describe("final-Wave compatibility completion replay", () => {
     }, registeredGraph());
   });
 
-  it("does not invoke the publish-mode port when the locked gate decision is blocked", async () => {
+  it("does not commit when the locked gate decision is blocked", async () => {
     const blockedGraph = registeredGraph({ tasks: [{ ...baseTask, review_status: "pending" }] });
     await withHandlerState(async (path) => {
-      const setMode = vi.fn((_fileDescriptor: number, _mode: number) => undefined);
-      const manager = new StateManager(path, setMode);
+      const manager = new StateManager(path);
       const result = await createCompleteWaveGateHandler(() => manager)("", []);
 
       expect(result).toMatchObject({ kind: "error" });
       if (result.kind !== "error") return;
       expect(result.message).toContain("Not all tasks have been reviewed");
-      expect(setMode).not.toHaveBeenCalled();
       expect(new StateManager(path).load().wave_gate_history).toBeUndefined();
     }, blockedGraph);
-  });
-
-  it("fails before commit when the staged graph cannot be made read-only", async () => {
-    await withHandlerState(async (path) => {
-      chmodSync(path, 0o444);
-      const before = readFileSync(path, "utf8");
-      const manager = new StateManager(path, (_fileDescriptor, mode) => {
-        if (mode === 0o444) throw new Error("simulated staged chmod 0444 failure");
-      });
-      const result = await createCompleteWaveGateHandler(() => manager)("", []);
-      const retained = new StateManager(path).load();
-
-      expect(result).toMatchObject({ kind: "error" });
-      if (result.kind !== "error") return;
-      expect(result.message).toContain("simulated staged chmod 0444 failure");
-      expect(readFileSync(path, "utf8")).toBe(before);
-      expect(statSync(path).mode & 0o777).toBe(0o444);
-      expect(retained.active_wave_gate).toBeDefined();
-      expect(retained.wave_gate_history).toBeUndefined();
-    }, registeredGraph());
   });
 
   it("fails conflicting or older terminal history instead of treating it as replay", async () => {
@@ -2420,7 +2398,7 @@ describe("final-Wave compatibility completion replay", () => {
       error: { message: expect.stringContaining("older than completed terminal Wave 2") },
     });
 
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-older-wave-migration-")));
+    const root = canonicalTempDir("loom-older-wave-migration-");
     const path = join(root, "active_task_graph.json");
     writeFileSync(path, JSON.stringify(older));
     try {

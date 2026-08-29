@@ -185,8 +185,11 @@ STATUS=$(echo "$FIXED4" | jq -r '.tasks[0].status')
 echo ""
 echo "--- populate-task-graph validates decompose input ---"
 
-PTEST_DIR=$(mktemp -d)
-PPI_DIR=$(mktemp -d)
+# Canonicalize: on macOS mktemp -d sits behind the /var → /private/var symlink,
+# and the CLI's anchored primitives resolve the base once while the process CWD
+# is always canonical — so the fixtures must be canonical too.
+PTEST_DIR="$(cd "$(mktemp -d)" && pwd -P)"
+PPI_DIR="$(cd "$(mktemp -d)" && pwd -P)"
 CLEANUP_DIRS="$PTEST_DIR $PPI_DIR"
 trap "rm -rf $CLEANUP_DIRS" EXIT
 

@@ -2,13 +2,12 @@ import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   evaluateWaveCompletionSuite,
@@ -118,7 +117,7 @@ type Fixture = Readonly<{
 }>;
 
 function fixture(mode: string, report = true): Fixture {
-  const root = mkdtempSync(join(tmpdir(), "loom-wave-suite-"));
+  const root = canonicalTempDir("loom-wave-suite-");
   roots.push(root);
   git(root, "init", "-q");
   git(root, "config", "user.email", "loom-tests@example.invalid");
@@ -297,7 +296,7 @@ afterEach(() => {
 
 describe("modern Wave completion suite shell", () => {
   it("treats only an absent completion counter as zero", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-wave-suite-counter-"));
+    const root = canonicalTempDir("loom-wave-suite-counter-");
     roots.push(root);
     expect(reportCount(root)).toBe(0);
     const path = join(root, ".loom/completion-reports/result.txt");
@@ -558,7 +557,7 @@ describe("modern Wave completion suite shell", () => {
 
   it("requires an authority start path for workspace observation", () => {
     const f = fixture("success");
-    const outside = mkdtempSync(join(tmpdir(), "loom-wave-suite-no-git-"));
+    const outside = canonicalTempDir("loom-wave-suite-no-git-");
     roots.push(outside);
     expect(observeCurrentWaveWorkspace(f.manager.load(), outside)).toMatchObject({
       kind: "unavailable",
@@ -571,7 +570,7 @@ describe("modern Wave completion suite shell", () => {
 
   it("fails closed when Run Directory and protected TaskGraph repository authority differ", async () => {
     const f = fixture("success");
-    const foreignRepository = mkdtempSync(join(tmpdir(), "loom-wave-suite-foreign-git-"));
+    const foreignRepository = canonicalTempDir("loom-wave-suite-foreign-git-");
     roots.push(foreignRepository);
     git(foreignRepository, "init", "-q");
     const foreignRunsRoot = join(foreignRepository, ".claude/reviews/wave-gate-runs");
@@ -601,7 +600,7 @@ describe("modern Wave completion suite shell", () => {
 
   it("fails closed when the protected TaskGraph path has no Git authority", async () => {
     const f = fixture("success");
-    const outside = mkdtempSync(join(tmpdir(), "loom-wave-suite-state-no-git-"));
+    const outside = canonicalTempDir("loom-wave-suite-state-no-git-");
     roots.push(outside);
     const statePath = join(outside, "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(f.manager.load(), null, 2));

@@ -5,6 +5,7 @@ import {
   parseModelRef,
   parseModelRoutingConfig,
   resolveEffectivePiBinding,
+  resolveEffectivePiBindingFromParent,
   unmatchablePatternReason,
   type EffectivePiBinding,
   type ModelRef,
@@ -30,6 +31,10 @@ const localConfigRaw = {
   schemaVersion: 1,
   defaultClass: "cloud",
   modelClasses: { local: ["desktop-vllm/*", "desktop-muse/*"] },
+  targets: {
+    qwen: { model: "desktop-vllm/qwen3.8-27b", thinkingLevel: "xhigh" },
+    glm: { model: "desktop-vllm/glm-5.3-flash-exl3-k4-vision-mtp", thinkingLevel: "max" },
+  },
   rules: [{ id: "local-parent", when: { parentClass: "local" }, use: { kind: "parent" } }],
 };
 
@@ -54,6 +59,7 @@ describe("parseModelRef", () => {
     ["empty provider", "/model"],
     ["empty model", "provider/"],
     ["whitespace", "provider/ model"],
+    ["wildcard", "provider/*"],
   ])("rejects %s", (_label, raw) => {
     const result = parseModelRef(raw);
     expect(result.ok).toBe(false);
@@ -68,6 +74,12 @@ describe("parseModelRoutingConfig", () => {
     if (result.ok) {
       expect(result.value.schemaVersion).toBe(1);
       expect(result.value.defaultClass).toBe("cloud");
+      expect(Object.keys(result.value.targets)).toEqual(["qwen", "glm"]);
+      expect(result.value.targets.qwen).toEqual({
+        provider: "desktop-vllm",
+        model: "qwen3.8-27b",
+        thinking: "xhigh",
+      });
       expect(Object.isFrozen(result.value)).toBe(true);
     }
   });
@@ -90,6 +102,7 @@ describe("parseModelRoutingConfig", () => {
 
   it("rejects a malformed rule", () => {
     expect(parseModelRoutingConfig({ ...localConfigRaw, rules: [{ id: "x", when: { parentClass: "local" }, use: { kind: "bogus" } }] }).ok).toBe(false);
+    expect(parseModelRoutingConfig({ ...localConfigRaw, rules: [{ id: "x", when: { parentClass: "local" }, use: { kind: "named", target: "missing" } }] }).ok).toBe(false);
     expect(parseModelRoutingConfig({ ...localConfigRaw, rules: [{ id: "", when: { parentClass: "local" }, use: { kind: "parent" } }] }).ok).toBe(false);
     expect(parseModelRoutingConfig({ ...localConfigRaw, rules: "nope" }).ok).toBe(false);
   });
@@ -195,8 +208,81 @@ describe("resolveEffectivePiBinding", () => {
     });
   });
 
-  it("keeps the declared thinking level when inheriting the parent model", () => {
+  it("keeps the declared thinking level when only a parent model ref is available", () => {
     expect(resolveEffectivePiBinding(declared55, qwenRef, localConfig).thinking).toBe("medium");
+  });
+
+  it("inherits the active parent's complete binding when its thinking level is available", () => {
+    expect(resolveEffectivePiBindingFromParent(declared, {
+      provider: "desktop-vllm",
+      model: "qwen3.8-27b",
+      thinking: "xhigh",
+    }, localConfig)).toEqual({
+      provider: "desktop-vllm",
+      model: "qwen3.8-27b",
+      thinking: "xhigh",
+    });
+  });
+
+  it("uses a named exact target including its thinking level", () => {
+    const named = parseModelRoutingConfig({
+      ...localConfigRaw,
+      rules: [{ id: "local-glm", when: { parentClass: "local" }, use: { kind: "named", target: "glm" } }],
+    });
+    if (!named.ok) throw new Error(named.error.message);
+    expect(resolveEffectivePiBindingFromParent(declared, {
+      provider: "desktop-vllm",
+      model: "qwen3.8-27b",
+      thinking: "xhigh",
+    }, named.value)).toEqual({
+      provider: "desktop-vllm",
+      model: "glm-5.3-flash-exl3-k4-vision-mtp",
+      thinking: "max",
+    });
+  });
+
+  it("lets a more-specific workload/profile rule select a named target", () => {
+    const specific = parseModelRoutingConfig({
+      ...localConfigRaw,
+      rules: [
+        { id: "local-parent", when: { parentClass: "local" }, use: { kind: "parent" } },
+        {
+          id: "local-review-glm",
+          when: { parentClass: "local", workload: "subagent", profile: "general-review" },
+          use: { kind: "named", target: "glm" },
+        },
+      ],
+    });
+    if (!specific.ok) throw new Error(specific.error.message);
+    expect(resolveEffectivePiBindingFromParent(declared, {
+      provider: "desktop-vllm",
+      model: "qwen3.8-27b",
+      thinking: "xhigh",
+    }, specific.value, {
+      workload: "subagent",
+      profile: "general-review",
+      agent: "code-reviewer",
+    }).model).toBe("glm-5.3-flash-exl3-k4-vision-mtp");
+  });
+
+  it("rejects equal-specificity rules that can match the same workload", () => {
+    const ambiguous = parseModelRoutingConfig({
+      ...localConfigRaw,
+      rules: [
+        {
+          id: "by-profile",
+          when: { parentClass: "local", profile: "general-review" },
+          use: { kind: "parent" },
+        },
+        {
+          id: "by-agent",
+          when: { parentClass: "local", agent: "code-reviewer" },
+          use: { kind: "named", target: "glm" },
+        },
+      ],
+    });
+    expect(ambiguous.ok).toBe(false);
+    if (!ambiguous.ok) expect(ambiguous.error.message).toContain("equal-specificity routing rules");
   });
 
   it("keeps the declared binding when a matching rule says 'declared'", () => {
@@ -204,6 +290,7 @@ describe("resolveEffectivePiBinding", () => {
       schemaVersion: 1,
       defaultClass: "cloud",
       modelClasses: Object.freeze({ local: Object.freeze(["desktop-vllm/*"]) }),
+      targets: Object.freeze({}),
       rules: Object.freeze([Object.freeze({ id: "r", when: Object.freeze({ parentClass: "local" }), use: Object.freeze({ kind: "declared" }) })]),
     });
     expect(resolveEffectivePiBinding(declared, qwenRef, config).model).toBe("gpt-5.6-sol");
@@ -214,6 +301,7 @@ describe("resolveEffectivePiBinding", () => {
       schemaVersion: 1,
       defaultClass: "cloud",
       modelClasses: Object.freeze({ local: Object.freeze(["desktop-vllm/*"]) }),
+      targets: Object.freeze({}),
       rules: Object.freeze([Object.freeze({ id: "r", when: Object.freeze({ parentClass: "other" }), use: Object.freeze({ kind: "parent" }) })]),
     });
     expect(resolveEffectivePiBinding(declared, qwenRef, config).model).toBe("gpt-5.6-sol");

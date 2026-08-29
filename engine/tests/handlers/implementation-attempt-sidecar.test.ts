@@ -1,20 +1,20 @@
 import { execFileSync } from "node:child_process";
 import {
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import markActive from "../../src/handlers/subagent-start/mark-subagent-active";
 import dispatch from "../../src/handlers/subagent-stop/dispatch";
 import cleanupSubagentFlag from "../../src/handlers/subagent-stop/cleanup-subagent-flag";
 import {
   implementationAttemptSidecarLeaf,
+  parseClaudeImplementationAttemptSidecar,
   publishImplementationAttemptSidecar,
   publishSidecarBytes,
   snapshotImplementationAttemptSidecar,
@@ -39,7 +39,7 @@ const SESSION_ID = parseSessionId(SESSION)!;
 const AGENT = "agent-sidecar";
 
 function root(): string {
-  const value = mkdtempSync(join(tmpdir(), "loom-sidecar-"));
+  const value = canonicalTempDir("loom-sidecar-");
   roots.push(value);
   process.env.LOOM_SUBAGENT_DIR = join(value, "subagents");
   process.env.CLAUDE_PROJECT_DIR = value;
@@ -652,7 +652,7 @@ describe("Claude implementation authority sidecar", () => {
 
     expect(result).toEqual({
       disposition: "published",
-      cleanupFailure: "temporary cleanup failed",
+      cleanupFailure: { message: "temporary cleanup failed", code: undefined },
     });
   });
 
@@ -733,7 +733,123 @@ describe("Claude implementation authority sidecar", () => {
     expect(dir).toBeTruthy();
   });
 
-  it("refuses sidecar leaf and directory symlinks without touching their targets", () => {
+  it("returns invalid-sidecar-identity for a garbage stop identity instead of throwing", () => {
+    const dir = root();
+    mkdirSync(process.env.LOOM_SUBAGENT_DIR!, { recursive: true });
+    expect(snapshotImplementationAttemptSidecar("../../escape", "bad agent")).toMatchObject({
+      kind: "authority-unavailable",
+      failure: {
+        kind: "invalid-sidecar-identity",
+        message: expect.stringContaining("cannot name an implementation sidecar"),
+      },
+    });
+    expect(dir).toBeTruthy();
+  });
+
+  it("reports a sidecar whose contents bind a foreign identity as malformed against its filename key", () => {
+    const dir = root();
+    mkdirSync(process.env.LOOM_SUBAGENT_DIR!, { recursive: true });
+    const leaf = implementationAttemptSidecarLeaf(SESSION, AGENT)!;
+    const foreignSession = "sidecar-foreign";
+    const foreign = {
+      schemaVersion: 1,
+      kind: "claude-implementation-attempt-sidecar",
+      sessionId: foreignSession,
+      agentId: AGENT,
+      canonicalTaskGraphPath: join(dir, "active_task_graph.json"),
+      authority: authority("T1", "sidecar-foreign-identity"),
+    };
+    writeFileSync(join(process.env.LOOM_SUBAGENT_DIR!, leaf), `${JSON.stringify(foreign)}\n`);
+    expect(snapshotImplementationAttemptSidecar(SESSION, AGENT)).toMatchObject({
+      kind: "authority-unavailable",
+      failure: {
+        kind: "malformed-sidecar",
+        message: expect.stringContaining("does not match its filename key"),
+      },
+    });
+    expect(dir).toBeTruthy();
+  });
+
+  it("reports a sidecar whose stored TaskGraph path fails realpath as unreadable at snapshot", () => {
+    const dir = root();
+    const statePath = join(dir, "vanishing-graph.json");
+    modernGraph(statePath);
+    mkdirSync(process.env.LOOM_SUBAGENT_DIR!, { recursive: true });
+    publishImplementationAttemptSidecar({
+      sessionId: SESSION,
+      agentId: AGENT,
+      taskGraphPath: statePath,
+      authority: authority("T1", "sidecar-vanishing-path"),
+    });
+    rmSync(statePath);
+    expect(snapshotImplementationAttemptSidecar(SESSION, AGENT)).toMatchObject({
+      kind: "authority-unavailable",
+      failure: {
+        kind: "unreadable-sidecar",
+        message: expect.stringContaining("TaskGraph path is unavailable"),
+      },
+    });
+  });
+
+  it.each([
+    {
+      name: "extra key",
+      mutate: (record: Record<string, unknown>) => ({ ...record, extra: true }),
+      error: "must contain exactly schemaVersion/kind/sessionId/agentId/canonicalTaskGraphPath/authority",
+    },
+    {
+      name: "wrong kind",
+      mutate: (record: Record<string, unknown>) => ({ ...record, kind: "other-sidecar" }),
+      error: "implementation sidecar tag is invalid",
+    },
+    {
+      name: "wrong schemaVersion",
+      mutate: (record: Record<string, unknown>) => ({ ...record, schemaVersion: 2 }),
+      error: "implementation sidecar tag is invalid",
+    },
+    {
+      name: "non-canonical TaskGraph path",
+      mutate: (record: Record<string, unknown>) => ({ ...record, canonicalTaskGraphPath: "relative/graph.json" }),
+      error: "implementation sidecar TaskGraph path is not canonical absolute syntax",
+    },
+    {
+      name: "path-unsafe sessionId",
+      mutate: (record: Record<string, unknown>) => ({ ...record, sessionId: "../escape" }),
+      error: "implementation sidecar sessionId/agentId is invalid",
+    },
+    {
+      name: "bad authority",
+      mutate: (record: Record<string, unknown>) => ({ ...record, authority: { nonsense: true } }),
+      error: "implementationAuthority.schemaVersion is required",
+    },
+  ])("parseClaudeImplementationAttemptSidecar rejects $name", ({ mutate, error }) => {
+    const attempt = authority("T1", "parse-adversarial");
+    const record = mutate({
+      schemaVersion: 1,
+      kind: "claude-implementation-attempt-sidecar",
+      sessionId: SESSION,
+      agentId: AGENT,
+      canonicalTaskGraphPath: "/tmp/loom-parse-adversarial/active_task_graph.json",
+      authority: attempt,
+    });
+    expect(parseClaudeImplementationAttemptSidecar(record)).toMatchObject({
+      ok: false,
+      error: expect.stringContaining(error),
+    });
+  });
+
+  it.each(["null", "42", "[]"] as const)(
+    "parseClaudeImplementationAttemptSidecar rejects %s input as a non-object",
+    (scalar) => {
+      const raw: unknown = scalar === "null" ? null : scalar === "42" ? 42 : [];
+      expect(parseClaudeImplementationAttemptSidecar(raw)).toMatchObject({
+        ok: false,
+        error: expect.stringContaining("implementation sidecar must be a plain object"),
+      });
+    },
+  );
+
+  it("refuses sidecar leaf symlinks without touching their targets and resolves a symlinked base", () => {
     const dir = root();
     const statePath = join(dir, "active_task_graph.json");
     modernGraph(statePath);
@@ -751,13 +867,20 @@ describe("Claude implementation authority sidecar", () => {
     rmSync(process.env.LOOM_SUBAGENT_DIR!, { recursive: true, force: true });
     const real = join(dir, "real-subagents");
     mkdirSync(real);
+    // A symlinked BASE is the one legitimate symlink — macOS resolves /tmp and
+    // /var through system links, so `ensureResolvedBaseDirectory` resolves the
+    // base once and the publish lands inside the REAL directory. Symlinks
+    // BELOW the base — the leaf case asserted above — stay refused.
     symlinkSync(real, process.env.LOOM_SUBAGENT_DIR!);
-    expect(() => publishImplementationAttemptSidecar({
+    const { sidecar } = publishImplementationAttemptSidecar({
       sessionId: SESSION,
       agentId: AGENT,
       taskGraphPath: statePath,
       authority: authority(),
-    })).toThrow();
+    });
+    expect(readFileSync(join(real, leaf), "utf8")).toContain(SESSION);
+    expect(sidecar.sessionId).toBe(SESSION);
+    expect(readFileSync(target, "utf8")).toBe("sentinel");
   });
 
   it("reports a non-directory sidecar root as an explicit filesystem failure", () => {

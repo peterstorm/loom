@@ -1,9 +1,9 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
-import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { canonicalTempDir } from "./fixtures/canonical-temp-dir";
 import { evaluateTaskProof } from "../src/core/proof-obligations";
 import { createImplementationAttemptAuthority } from "../src/core/implementation-completion";
 import type { AgentRequestAuthority } from "../src/core/orchestration-contract";
@@ -44,7 +44,7 @@ class FakePi {
 }
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
-const temp = mkdtempSync(join(tmpdir(), "loom-pi-review-events-"));
+const temp = canonicalTempDir("loom-pi-review-events-");
 const specCheckPlanPath = join(temp, "spec-check-authority-plan.md");
 writeFileSync(specCheckPlanPath, "# Plan\n");
 
@@ -298,7 +298,7 @@ describe("Pi extension review tool_result integration", () => {
 
   it("blocks post-edit lint when project rules are inaccessible", async () => {
     const pi = await extension();
-    const project = mkdtempSync(join(tmpdir(), "loom-pi-project-rules-"));
+    const project = canonicalTempDir("loom-pi-project-rules-");
     const previousCwd = process.cwd();
     try {
       writeFileSync(join(project, "edited.ts"), "export const edited = true;\n");
@@ -371,7 +371,7 @@ describe("Pi extension review tool_result integration", () => {
     // copy lives beside the repo with node_modules symlinked in, because
     // `captureLoomRuntimeIdentity` walks `engine/src` and `pi` only — a symlink
     // outside those roots is never visited, and one inside them is refused.
-    const skewRoot = mkdtempSync(join(tmpdir(), "loom-runtime-skew-"));
+    const skewRoot = canonicalTempDir("loom-runtime-skew-");
     const savedRuntimeRoot = process.env[PI_EXTENSION_RUNTIME_ROOT_ENV];
     const savedRuntimeRevision = process.env[PI_EXTENSION_RUNTIME_REVISION_ENV];
     try {

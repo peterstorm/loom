@@ -4,7 +4,7 @@ This guide covers status, persisted artifacts, recovery, validation, and contrib
 
 ## Prerequisites
 
-- Linux (`/proc/self/fd` descriptor-relative filesystem authority is required)
+- Linux or macOS 13+ (anchored filesystem authority: `/proc/self/fd` descriptor-relative on Linux, `O_NOFOLLOW_ANY` on macOS — the kernel refuses older darwin kernels at startup)
 - Bun (engine runtime and tests)
 - Git
 - Claude Code or Pi

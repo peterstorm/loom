@@ -2,17 +2,17 @@
  * Symlink-attack coverage for the READ and REMOVE primitives.
  *
  * The write/publish side of `no-follow-fs` has real symlink tests; the read and
- * remove side had none, even though it is the same anchor-then-`O_NOFOLLOW`
- * dance re-implemented per primitive and it backs `readAuthority`,
+ * remove side had none, even though it is the same anchor-then-no-follow dance
+ * (`O_NOFOLLOW` on Linux, `O_NOFOLLOW_ANY` on darwin) re-implemented per
+ * primitive and it backs `readAuthority`,
  * `readContext`, `readCheckpoint`, and `readReceipt`. A planted symlink at a
  * run-artifact path is precisely the attack these functions exist to refuse, so
  * dropping the flag from any one of them must fail a test rather than silently
  * start following links out of the run directory.
  */
-
-import { closeSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { closeSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import { openRunDirectory } from "../../src/orchestration/run-directory-handle";
 import {
@@ -20,9 +20,11 @@ import {
   assertAnchoredFilesystemPlatformSupported,
   closeAnchoredDirectory,
   ensureDirectoryNoFollow,
+  ensureRelativeDirectoryNoFollow,
   ensureResolvedBaseDirectory,
   listDirectoryNamesNoFollow,
   openDirectoryNoFollow,
+  publishStagedRunFile,
   readRunBytesNoFollow,
   readRunFileNoFollow,
   recoverStaleDirectoryLock,
@@ -45,7 +47,7 @@ afterEach(() => {
  * the operator's own path to it. On Linux this is an identity.
  */
 function workspace(): string {
-  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-no-follow-")));
+  const root = canonicalTempDir("loom-no-follow-");
   cleanup.push(root);
   mkdirSync(join(root, "run"), { recursive: true });
   return root;
@@ -68,6 +70,19 @@ describe("directory creation refuses symlinked ancestors", () => {
     expect(() => ensureDirectoryNoFollow(join(root, "run", "bindings", "session")))
       .toThrow(/ELOOP|too many symbolic|ENOTDIR/i);
     expect(() => readFileSync(join(outside, "session"))).toThrow();
+  });
+
+  it("refuses a subdirectory target that escapes the run directory before creating anything", () => {
+    const root = workspace();
+    const runDir = join(root, "run");
+    const anchored = openDirectoryNoFollow(runDir);
+    try {
+      expect(() => ensureRelativeDirectoryNoFollow(anchored, runDir, join(root, "elsewhere", "nested")))
+        .toThrow(/run subdirectory escapes run directory/);
+      expect(existsSync(join(root, "elsewhere"))).toBe(false);
+    } finally {
+      closeAnchoredDirectory(anchored);
+    }
   });
 });
 
@@ -262,6 +277,19 @@ describe("anchored lock ownership", () => {
 
     expect(maxActive).toBe(1);
   });
+
+  it("exhausts acquisition attempts when a recovery guard stays planted", async () => {
+    const root = workspace();
+    const directory = join(root, "run");
+    // A permanently-present recovery guard makes every acquisition attempt
+    // withdraw before entering, so the loop must give up with the named
+    // exhaustion error instead of spinning forever.
+    writeFileSync(join(directory, "guarded.lock.recovery"), "planted");
+
+    await expect(withAnchoredDirectoryLock(directory, "guarded.lock", () => undefined))
+      .rejects.toThrow(/Could not acquire anchored lock after 50 attempts: guarded\.lock/);
+    expect(existsSync(join(directory, "guarded.lock"))).toBe(false);
+  }, 10000);
 });
 
 describe("captured-attempt inspection fails closed", () => {
@@ -321,6 +349,19 @@ describe("removal refuses to follow a planted symlink", () => {
   });
 });
 
+describe("staged publication", () => {
+  it("refuses publication when staged and final artifacts live in different directories", () => {
+    const root = workspace();
+    const staged = join(root, "run", "staged.json");
+    mkdirSync(join(root, "elsewhere"));
+    writeRunFileNoFollow(staged, "{}");
+
+    expect(() => publishStagedRunFile(staged, join(root, "elsewhere", "final.json")))
+      .toThrow(/staged and final run artifacts must share one run directory/);
+    expect(readFileSync(staged, "utf-8")).toBe("{}");
+  });
+});
+
 describe("platform anchoring", () => {
   it("rejects direct and cloned descriptor capabilities not registered by the boundary", () => {
     expect(() => anchoredChildPath(
@@ -332,7 +373,7 @@ describe("platform anchoring", () => {
     const root = workspace();
     const anchored = openDirectoryNoFollow(join(root, "run"));
     try {
-      const clone = { ...anchored, fd: 0 };
+      const clone = { ...anchored };
       expect(() => anchoredChildPath(clone, "x"))
         .toThrow("was not produced by the no-follow filesystem boundary");
     } finally {
@@ -377,19 +418,26 @@ describe("platform anchoring", () => {
   });
 
   it("rejects unsupported runtimes before orchestration startup", () => {
-    expect(() => assertAnchoredFilesystemPlatformSupported("darwin"))
-      .toThrow(/requires Linux descriptor-relative filesystem operations.*darwin.*unsupported/i);
     expect(() => assertAnchoredFilesystemPlatformSupported("win32"))
-      .toThrow(/requires Linux descriptor-relative filesystem operations.*win32.*unsupported/i);
+      .toThrow(/requires POSIX anchored-filesystem operations.*win32.*unsupported/i);
     expect(() => assertAnchoredFilesystemPlatformSupported("linux")).not.toThrow();
+    expect(() => assertAnchoredFilesystemPlatformSupported("darwin")).not.toThrow();
   });
 
-  it("addresses every child through a retained Linux descriptor", () => {
+  it("addresses every child through the platform's anchor", () => {
     const root = workspace();
     const anchored = openDirectoryNoFollow(join(root, "run"));
     try {
-      expect(anchored.anchor).toBe("descriptor");
-      expect(anchoredChildPath(anchored, "x")).toMatch(/^\/proc\/self\/fd\/\d+\/x$/);
+      // Darwin carries the proven-real path (every child open through it
+      // carries O_NOFOLLOW_ANY); linux carries the retained descriptor.
+      const expectedAnchor = process.platform === "darwin" ? "real-path" : "descriptor";
+      expect(anchored.anchor).toBe(expectedAnchor);
+      const childPath = anchoredChildPath(anchored, "x");
+      if (anchored.anchor === "real-path") {
+        expect(childPath).toBe(join(anchored.path, "x"));
+      } else {
+        expect(childPath).toMatch(/^\/proc\/self\/fd\/\d+\/x$/);
+      }
     } finally {
       closeAnchoredDirectory(anchored);
     }

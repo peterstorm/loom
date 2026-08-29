@@ -3,15 +3,14 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
 import { freezeVerificationManifest } from "../../../../src/core/verification-manifest";
@@ -69,7 +68,7 @@ function repository(options: Readonly<{
   executing?: boolean;
   suiteOutcome?: "accepted" | "nonzero" | "missing-report";
 }> = { modern: true }): string {
-  const root = mkdtempSync(join(tmpdir(), "loom-wave-facade-suite-"));
+  const root = canonicalTempDir("loom-wave-facade-suite-");
   roots.push(root);
   git(root, "init", "-q");
   git(root, "config", "user.email", "loom-tests@example.invalid");
@@ -213,7 +212,7 @@ afterEach(() => {
 
 describe("Wave Gate façade completion-suite integration", () => {
   it("treats only an absent Wave Gate sentinel as zero", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-wave-facade-counter-"));
+    const root = canonicalTempDir("loom-wave-facade-counter-");
     roots.push(root);
     expect(sentinelCount(root)).toBe(0);
     const path = join(root, ".loom/completion-reports/sentinel.txt");
@@ -242,7 +241,7 @@ describe("Wave Gate façade completion-suite integration", () => {
 
   it("runs start, resume, and status from outside cwd against the authoritative target repository", () => {
     const root = repository({ modern: true });
-    const outside = mkdtempSync(join(tmpdir(), "loom-wave-facade-outside-"));
+    const outside = canonicalTempDir("loom-wave-facade-outside-");
     roots.push(outside);
     const runId = "run.quiescent";
     const action = start(root, runId, outside);
@@ -334,7 +333,7 @@ describe("Wave Gate façade completion-suite integration", () => {
 
   it("status observes accepted and stale target authority from outside cwd without rerunning commands", () => {
     const root = repository({ modern: true });
-    const outside = mkdtempSync(join(tmpdir(), "loom-wave-status-outside-"));
+    const outside = canonicalTempDir("loom-wave-status-outside-");
     roots.push(outside);
     const runId = "run.status-suite";
     start(root, runId, outside);
@@ -356,7 +355,7 @@ describe("Wave Gate façade completion-suite integration", () => {
   it("fails closed for a foreign Run Directory repository or a State File outside Git", () => {
     const root = repository({ modern: true });
     const foreign = repository({ modern: true });
-    const outside = mkdtempSync(join(tmpdir(), "loom-wave-authority-outside-"));
+    const outside = canonicalTempDir("loom-wave-authority-outside-");
     roots.push(outside);
 
     const foreignRun = start(
@@ -373,7 +372,7 @@ describe("Wave Gate façade completion-suite integration", () => {
     expect(sentinelCount(foreign)).toBe(0);
     expect(graph(root).active_wave_completion_suite).toBeUndefined();
 
-    const stateOutsideRoot = mkdtempSync(join(tmpdir(), "loom-wave-state-outside-git-"));
+    const stateOutsideRoot = canonicalTempDir("loom-wave-state-outside-git-");
     roots.push(stateOutsideRoot);
     const stateOutsideGit = join(stateOutsideRoot, "active_task_graph.json");
     writeFileSync(stateOutsideGit, JSON.stringify(graph(foreign), null, 2));

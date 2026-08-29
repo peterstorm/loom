@@ -1,6 +1,6 @@
-import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   parseAuthorizedWaveCompletionCheck,
@@ -20,7 +20,7 @@ type ProjectCommandCheck = Extract<AuthorizedWaveCompletionCheck, { readonly kin
 const roots: string[] = [];
 
 function fixtureRoot(): CanonicalRepositoryRoot {
-  const root = mkdtempSync(join(tmpdir(), "loom-completion-runner-"));
+  const root = canonicalTempDir("loom-completion-runner-");
   roots.push(root);
   cpSync(new URL("../fixtures/completion-process.mjs", import.meta.url), join(root, "completion-process.mjs"));
   const parsed = parseCanonicalRepositoryRoot(root);

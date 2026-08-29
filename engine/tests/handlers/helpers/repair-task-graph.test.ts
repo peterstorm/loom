@@ -2,15 +2,14 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import { prepareTaskGraphRepair } from "../../../src/handlers/helpers/repair-task-graph";
 import { parseTaskGraph, StateManager } from "../../../src/state-manager";
@@ -78,7 +77,7 @@ function fixtureState(
   raw: string,
   plan: string = NO_MODELS_PLAN,
 ): { readonly root: string; readonly statePath: string } {
-  const root = mkdtempSync(join(tmpdir(), "loom-repair-task-graph-"));
+  const root = canonicalTempDir("loom-repair-task-graph-");
   cleanup.push(root);
   const statePath = join(root, ".claude", "state", "active_task_graph.json");
   mkdirSync(join(root, ".claude", "state"), { recursive: true });

@@ -12,10 +12,12 @@ import { isAbsolute, resolve } from "node:path";
 import { subagentDir } from "./config";
 import {
   anchoredChildPath,
-  closeAnchoredDirectory,
-  ensureDirectoryNoFollow,
+  closeAnchorGuarded,
+  ensureResolvedBaseDirectory,
   openDirectoryNoFollow,
   readDirectoryFileNoFollow,
+  removeDirectoryFileNoFollow,
+  resolveBaseDirectory,
   writeDirectoryFileExclusiveNoFollow,
   type AnchoredDirectory,
 } from "./orchestration/no-follow-fs";
@@ -155,10 +157,17 @@ function sidecarPublicationOperations(
   });
 }
 
+/**
+ * A staged-temporary cleanup that failed after the live sidecar was already
+ * published. `code` carries the errno where one exists so callers can
+ * distinguish a benign ENOENT race from real corruption.
+ */
+export type SidecarCleanupFailure = Readonly<{ message: string; code: string | undefined }>;
+
 export type SidecarPublicationResult = Readonly<{
   disposition: "published" | "already-owned";
-  cleanupFailure: string | null;
-}>;
+  cleanupFailure: SidecarCleanupFailure | null;
+}>;;
 
 export function publishSidecarBytes(
   leaf: string,
@@ -205,20 +214,25 @@ export function publishSidecarBytes(
     disposition,
     cleanupFailure: cleanupError === null
       ? null
-      : (cleanupError instanceof Error ? cleanupError.message : String(cleanupError)),
+      : Object.freeze({
+          message: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+          code: (cleanupError as NodeJS.ErrnoException).code,
+        }),
   });
 }
+
+type PublishedImplementationSidecar = Readonly<{
+  sidecar: ClaudeImplementationAttemptSidecar;
+  disposition: "published" | "already-owned";
+  cleanupFailure: SidecarCleanupFailure | null;
+}>;
 
 export function publishImplementationAttemptSidecar(args: Readonly<{
   sessionId: string;
   agentId: string;
   taskGraphPath: string;
   authority: unknown;
-}>): Readonly<{
-  sidecar: ClaudeImplementationAttemptSidecar;
-  disposition: "published" | "already-owned";
-  cleanupFailure: string | null;
-}> {
+}>): PublishedImplementationSidecar {
   const identity = parsedIdentity(args.sessionId, args.agentId);
   if (identity === null) throw new Error("cannot publish implementation sidecar for invalid session/agent identity");
   const authority = parseImplementationAttemptAuthority(args.authority);
@@ -233,20 +247,32 @@ export function publishImplementationAttemptSidecar(args: Readonly<{
   const parsed = parseClaudeImplementationAttemptSidecar(sidecar);
   if (!parsed.ok) throw new Error(parsed.error);
 
-  const directory = subagentDir();
-  ensureDirectoryNoFollow(directory);
+  // The subagent directory is the BASE: its configured path may traverse a
+  // system symlink (macOS resolves `/tmp` to `/private/tmp`), so it is resolved
+  // once here — the same reason `registerSessionRunBinding` resolves its base.
+  // Every anchored open BELOW the resolved base is still held to the strict
+  // no-symlink rule by the anchored primitives.
+  const directory = ensureResolvedBaseDirectory(subagentDir());
   const anchored = openDirectoryNoFollow(directory);
   const leaf = sidecarLeaf(identity);
+  let publication: PublishedImplementationSidecar | null = null;
+  let primaryError: unknown = null;
   try {
-    const publication = publishSidecarBytes(
-      leaf,
-      Buffer.from(`${JSON.stringify(parsed.value)}\n`, "utf8"),
-      sidecarPublicationOperations(anchored),
-    );
-    return Object.freeze({ sidecar: parsed.value, ...publication });
-  } finally {
-    closeAnchoredDirectory(anchored);
+    publication = Object.freeze({
+      sidecar: parsed.value,
+      ...publishSidecarBytes(
+        leaf,
+        Buffer.from(`${JSON.stringify(parsed.value)}\n`, "utf8"),
+        sidecarPublicationOperations(anchored),
+      ),
+    });
+  } catch (error) {
+    primaryError = error;
   }
+  const closeOutcome = closeAnchorGuarded(anchored, primaryError, `publication of implementation sidecar ${leaf}`);
+  if (closeOutcome !== null) throw closeOutcome;
+  if (publication === null) throw new Error(`publication of implementation sidecar ${leaf} produced no result`);
+  return publication;
 }
 
 const unavailable = (
@@ -256,6 +282,45 @@ const unavailable = (
   kind: "authority-unavailable",
   failure: Object.freeze({ kind, message }),
 });
+
+/**
+ * Observe one anchored sidecar leaf. Total over its inputs: every failure the
+ * body can observe is returned as an `authority-unavailable` observation, so
+ * the caller only owes the anchor close.
+ */
+function observeAnchoredSidecarAuthority(
+  anchored: AnchoredDirectory,
+  identity: SidecarIdentity,
+  leaf: string,
+): ImplementationAuthorityObservation {
+  let bytes: Buffer;
+  try {
+    bytes = readDirectoryFileNoFollow(anchored, leaf);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? unavailable("missing-sidecar", `implementation sidecar ${leaf} is absent`)
+      : unavailable("unreadable-sidecar", `cannot read implementation sidecar ${leaf}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(bytes.toString("utf8"));
+  } catch (error) {
+    return unavailable("malformed-sidecar", `implementation sidecar JSON is malformed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const parsed = parseClaudeImplementationAttemptSidecar(raw);
+  if (!parsed.ok) return unavailable("malformed-sidecar", parsed.error);
+  if (parsed.value.sessionId !== identity.sessionId || parsed.value.agentId !== identity.agentId) {
+    return unavailable("malformed-sidecar", "implementation sidecar identity does not match its filename key");
+  }
+  try {
+    if (canonicalTaskGraphPath(parsed.value.canonicalTaskGraphPath) !== parsed.value.canonicalTaskGraphPath) {
+      return unavailable("malformed-sidecar", "implementation sidecar TaskGraph path is not canonical");
+    }
+  } catch (error) {
+    return unavailable("unreadable-sidecar", `implementation sidecar TaskGraph path is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return Object.freeze({ kind: "authority-observed", sidecar: parsed.value });
+}
 
 export function snapshotImplementationAttemptSidecar(
   rawSessionId: string,
@@ -268,44 +333,27 @@ export function snapshotImplementationAttemptSidecar(
   const leaf = sidecarLeaf(identity);
   let anchored;
   try {
-    anchored = openDirectoryNoFollow(subagentDir());
+    // Absent base is the one absent answer and propagates ENOENT from the
+    // resolve; the directory is inspected, never created, on this path.
+    anchored = openDirectoryNoFollow(resolveBaseDirectory(subagentDir()));
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     return code === "ENOENT"
       ? unavailable("missing-sidecar", "implementation sidecar directory is absent")
       : unavailable("unreadable-sidecar", `cannot open implementation sidecar directory without following links: ${error instanceof Error ? error.message : String(error)}`);
   }
+  let observation: ImplementationAuthorityObservation | null = null;
+  let primaryError: unknown = null;
   try {
-    let bytes: Buffer;
-    try {
-      bytes = readDirectoryFileNoFollow(anchored, leaf);
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code === "ENOENT"
-        ? unavailable("missing-sidecar", `implementation sidecar ${leaf} is absent`)
-        : unavailable("unreadable-sidecar", `cannot read implementation sidecar ${leaf}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    let raw: unknown;
-    try {
-      raw = JSON.parse(bytes.toString("utf8"));
-    } catch (error) {
-      return unavailable("malformed-sidecar", `implementation sidecar JSON is malformed: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    const parsed = parseClaudeImplementationAttemptSidecar(raw);
-    if (!parsed.ok) return unavailable("malformed-sidecar", parsed.error);
-    if (parsed.value.sessionId !== identity.sessionId || parsed.value.agentId !== identity.agentId) {
-      return unavailable("malformed-sidecar", "implementation sidecar identity does not match its filename key");
-    }
-    try {
-      if (canonicalTaskGraphPath(parsed.value.canonicalTaskGraphPath) !== parsed.value.canonicalTaskGraphPath) {
-        return unavailable("malformed-sidecar", "implementation sidecar TaskGraph path is not canonical");
-      }
-    } catch (error) {
-      return unavailable("unreadable-sidecar", `implementation sidecar TaskGraph path is unavailable: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    return Object.freeze({ kind: "authority-observed", sidecar: parsed.value });
-  } finally {
-    closeAnchoredDirectory(anchored);
+    observation = observeAnchoredSidecarAuthority(anchored, identity, leaf);
+  } catch (error) {
+    primaryError = error;
   }
+  const closeOutcome = closeAnchorGuarded(anchored, primaryError, `snapshot of implementation sidecar ${leaf}`);
+  if (closeOutcome !== null) throw closeOutcome;
+  // Unreachable while the observation body stays total over its inputs.
+  if (observation === null) throw new Error(`snapshot of implementation sidecar ${leaf} produced no observation`);
+  return observation;
 }
 
 export function removeImplementationAttemptSidecar(
@@ -317,18 +365,18 @@ export function removeImplementationAttemptSidecar(
   const leaf = sidecarLeaf(identity);
   let anchored;
   try {
-    anchored = openDirectoryNoFollow(subagentDir());
+    // ENOENT propagates: an absent base means there is nothing to remove.
+    anchored = openDirectoryNoFollow(resolveBaseDirectory(subagentDir()));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
+  let primaryError: unknown = null;
   try {
-    try {
-      unlinkSync(anchoredChildPath(anchored, leaf));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-  } finally {
-    closeAnchoredDirectory(anchored);
+    removeDirectoryFileNoFollow(anchored, leaf);
+  } catch (error) {
+    primaryError = error;
   }
+  const closeOutcome = closeAnchorGuarded(anchored, primaryError, `removal of implementation sidecar ${leaf}`);
+  if (closeOutcome !== null) throw closeOutcome;
 }

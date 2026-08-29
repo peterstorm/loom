@@ -17,7 +17,7 @@
  * all resolve to the declared binding.
  */
 
-import type { PiBinding, PiThinkingLevel } from "./model-profiles";
+import type { PiBinding } from "./model-profiles";
 
 /** A parsed `provider/model` reference, as a value object (not a raw string). */
 export type ModelRef = Readonly<{ provider: string; model: string }>;
@@ -27,17 +27,41 @@ export type ModelClass = string;
 
 /**
  * What a matching routing rule directs the child to use.
- * - `parent`: inherit the parent session's provider/model.
+ * - `parent`: inherit the parent session's provider/model/thinking.
  * - `declared`: explicitly keep the agent's declared (pinned) binding.
+ * - `named`: use one exact target declared in the routing config.
  */
 export type RoutingRuleUse =
   | Readonly<{ kind: "parent" }>
-  | Readonly<{ kind: "declared" }>;
+  | Readonly<{ kind: "declared" }>
+  | Readonly<{ kind: "named"; target: string }>;
+
+export type RoutingRuleSelector = Readonly<{
+  parentClass: ModelClass;
+  parentModel?: string;
+  workload?: string;
+  profile?: string;
+  agent?: string;
+}>;
 
 export type RoutingRule = Readonly<{
   id: string;
-  when: Readonly<{ parentClass: ModelClass }>;
+  when: RoutingRuleSelector;
   use: RoutingRuleUse;
+}>;
+
+export type RoutingWorkload = Readonly<{
+  workload?: string;
+  profile?: string;
+  agent?: string;
+}>;
+
+export type RoutedPiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+export type NamedPiTarget = Readonly<{
+  provider: string;
+  model: string;
+  thinking: RoutedPiThinkingLevel;
 }>;
 
 export type ModelRoutingConfig = Readonly<{
@@ -46,19 +70,25 @@ export type ModelRoutingConfig = Readonly<{
   /** Class → glob patterns over `provider/model`. A ref matching any pattern
    *  takes that class; otherwise it is `defaultClass`. */
   modelClasses: Readonly<Record<ModelClass, readonly string[]>>;
+  targets: Readonly<Record<string, NamedPiTarget>>;
   /** Evaluated in order; the first rule whose `when` matches decides the use. */
   rules: readonly RoutingRule[];
 }>;
 
 /**
  * The binding a child actually spawns with. Wider than `PiBinding`: when a
- * rule inherits the parent, the provider/model are the parent's, not one of
- * the pinned Codex models. `thinking` is always the declared profile's.
+ * rule inherits the parent, provider/model/thinking are the active parent's,
+ * not one of the pinned Codex bindings. Ref-only legacy callers retain the
+ * declared thinking level because they have no parent thinking value.
  */
+const isRoutedPiThinkingLevel = (value: unknown): value is RoutedPiThinkingLevel =>
+  value === "off" || value === "minimal" || value === "low" || value === "medium" ||
+  value === "high" || value === "xhigh" || value === "max";
+
 export type EffectivePiBinding = Readonly<{
   provider: string;
   model: string;
-  thinking: PiThinkingLevel;
+  thinking: RoutedPiThinkingLevel;
 }>;
 
 export type RoutingPolicyError = Readonly<{
@@ -82,6 +112,11 @@ const isNonEmptyString = (value: unknown): value is string =>
 
 const hasNoWhitespace = (value: string): boolean => !/\s/.test(value);
 
+const unknownFields = (record: Readonly<Record<string, unknown>>, allowed: readonly string[]): readonly string[] => {
+  const known = new Set(allowed);
+  return Object.keys(record).filter((key) => !known.has(key));
+};
+
 /**
  * Parse an untrusted `provider/model` reference into a value object. Requires
  * exactly one `/`, non-empty parts, and no whitespace. A ref that does not
@@ -94,8 +129,8 @@ export function parseModelRef(raw: unknown): RoutingPolicyResult<ModelRef> {
       message: `model ref must be a string; received ${JSON.stringify(raw)}`,
     });
   }
-  if (!hasNoWhitespace(raw)) {
-    return err({ kind: "invalid-model-ref", message: `model ref must not contain whitespace: ${JSON.stringify(raw)}` });
+  if (!hasNoWhitespace(raw) || raw.includes("*")) {
+    return err({ kind: "invalid-model-ref", message: `model ref must be exact and contain no whitespace or wildcard: ${JSON.stringify(raw)}` });
   }
   const parts = raw.split("/");
   if (parts.length !== 2 || parts[0].trim() === "" || parts[1].trim() === "") {
@@ -118,6 +153,13 @@ function globMatches(pattern: string, ref: ModelRef): boolean {
   if (segments.length !== 2) return false;
   return segmentMatches(segments[0], ref.provider) && segmentMatches(segments[1], ref.model);
 }
+
+const modelPatternsOverlap = (left: string, right: string): boolean => {
+  const [leftProvider, leftModel] = left.split("/");
+  const [rightProvider, rightModel] = right.split("/");
+  return (leftProvider === "*" || rightProvider === "*" || leftProvider === rightProvider) &&
+    (leftModel === "*" || rightModel === "*" || leftModel === rightModel);
+};
 
 /**
  * Why a pattern can NEVER match any model ref, or `null` when it can.
@@ -160,6 +202,17 @@ export function classifyModelRef(ref: ModelRef, config: ModelRoutingConfig): Mod
   return config.defaultClass;
 }
 
+const selectorsOverlap = (left: RoutingRuleSelector, right: RoutingRuleSelector): boolean => {
+  for (const field of ["parentClass", "workload", "profile", "agent"] as const) {
+    if (left[field] !== undefined && right[field] !== undefined && left[field] !== right[field]) return false;
+  }
+  if (left.parentModel !== undefined && right.parentModel !== undefined &&
+      !modelPatternsOverlap(left.parentModel, right.parentModel)) return false;
+  return true;
+};
+
+const selectorSpecificity = (selector: RoutingRuleSelector): number => Object.keys(selector).length;
+
 /**
  * Parse an untrusted routing config object. Fail-closed on any malformed
  * field: a config that cannot be parsed is a typed failure, so the shell can
@@ -168,6 +221,10 @@ export function classifyModelRef(ref: ModelRef, config: ModelRoutingConfig): Mod
 export function parseModelRoutingConfig(raw: unknown): RoutingPolicyResult<ModelRoutingConfig> {
   if (!isRecord(raw)) {
     return err({ kind: "invalid-routing-config", message: "routing config must be an object" });
+  }
+  const unknownTopLevel = unknownFields(raw, ["schemaVersion", "defaultClass", "modelClasses", "targets", "rules"]);
+  if (unknownTopLevel.length > 0) {
+    return err({ kind: "invalid-routing-config", message: `routing config contains unknown field ${unknownTopLevel[0]}` });
   }
   if (raw.schemaVersion !== 1) {
     return err({
@@ -186,8 +243,8 @@ export function parseModelRoutingConfig(raw: unknown): RoutingPolicyResult<Model
     if (!isNonEmptyString(modelClass)) {
       return err({ kind: "invalid-routing-config", message: "routing config modelClasses keys must be non-empty strings" });
     }
-    if (!Array.isArray(patterns)) {
-      return err({ kind: "invalid-routing-config", message: `routing config modelClasses['${modelClass}'] must be an array` });
+    if (!Array.isArray(patterns) || patterns.length === 0) {
+      return err({ kind: "invalid-routing-config", message: `routing config modelClasses['${modelClass}'] must be a non-empty array` });
     }
     const copy: string[] = [];
     for (const pattern of patterns) {
@@ -202,21 +259,76 @@ export function parseModelRoutingConfig(raw: unknown): RoutingPolicyResult<Model
     }
     modelClasses[modelClass] = copy;
   }
+  const classEntries = Object.entries(modelClasses);
+  for (let left = 0; left < classEntries.length; left++) {
+    for (let right = left + 1; right < classEntries.length; right++) {
+      for (const leftPattern of classEntries[left][1]) {
+        for (const rightPattern of classEntries[right][1]) {
+          if (modelPatternsOverlap(leftPattern, rightPattern)) {
+            return err({
+              kind: "invalid-routing-config",
+              message: `routing model classes ${classEntries[left][0]} and ${classEntries[right][0]} overlap`,
+            });
+          }
+        }
+      }
+    }
+  }
+  const targets: Record<string, NamedPiTarget> = {};
+  if (raw.targets !== undefined && !isRecord(raw.targets)) {
+    return err({ kind: "invalid-routing-config", message: "routing config targets must be an object" });
+  }
+  if (isRecord(raw.targets)) {
+    for (const [name, target] of Object.entries(raw.targets)) {
+      if (!isNonEmptyString(name) || !isRecord(target) || typeof target.model !== "string") {
+        return err({ kind: "invalid-routing-config", message: `routing config target ${JSON.stringify(name)} must contain an exact model ref` });
+      }
+      const unknownTarget = unknownFields(target, ["model", "thinkingLevel"]);
+      if (unknownTarget.length > 0) {
+        return err({ kind: "invalid-routing-config", message: `routing config target ${JSON.stringify(name)} contains unknown field ${unknownTarget[0]}` });
+      }
+      const model = parseModelRef(target.model);
+      if (!model.ok) {
+        return err({ kind: "invalid-routing-config", message: `routing config target ${JSON.stringify(name)}: ${model.error.message}` });
+      }
+      if (!isRoutedPiThinkingLevel(target.thinkingLevel)) {
+        return err({ kind: "invalid-routing-config", message: `routing config target ${JSON.stringify(name)} must have an exact thinkingLevel` });
+      }
+      targets[name] = Object.freeze({
+        provider: model.value.provider,
+        model: model.value.model,
+        thinking: target.thinkingLevel,
+      });
+    }
+  }
   if (!Array.isArray(raw.rules)) {
     return err({ kind: "invalid-routing-config", message: "routing config rules must be an array" });
   }
   const producibleClasses = new Set<ModelClass>([...Object.keys(modelClasses), raw.defaultClass]);
+  const ruleIds = new Set<string>();
   const rules: RoutingRule[] = [];
   for (let index = 0; index < raw.rules.length; index++) {
     const rule = raw.rules[index];
     if (!isRecord(rule)) {
       return err({ kind: "invalid-routing-config", message: `routing rule ${index} must be an object` });
     }
+    const unknownRule = unknownFields(rule, ["id", "when", "use"]);
+    if (unknownRule.length > 0) {
+      return err({ kind: "invalid-routing-config", message: `routing rule ${index} contains unknown field ${unknownRule[0]}` });
+    }
     if (!isNonEmptyString(rule.id)) {
       return err({ kind: "invalid-routing-config", message: `routing rule ${index} id must be a non-empty string` });
     }
+    if (ruleIds.has(rule.id)) {
+      return err({ kind: "invalid-routing-config", message: `duplicate routing rule id ${rule.id}` });
+    }
+    ruleIds.add(rule.id);
     if (!isRecord(rule.when) || !isNonEmptyString(rule.when.parentClass)) {
       return err({ kind: "invalid-routing-config", message: `routing rule ${index} when.parentClass must be a non-empty string` });
+    }
+    const unknownWhen = unknownFields(rule.when, ["parentClass", "parentModel", "workload", "profile", "agent"]);
+    if (unknownWhen.length > 0) {
+      return err({ kind: "invalid-routing-config", message: `routing rule ${index} when contains unknown field ${unknownWhen[0]}` });
     }
     if (!producibleClasses.has(rule.when.parentClass)) {
       return err({
@@ -224,22 +336,62 @@ export function parseModelRoutingConfig(raw: unknown): RoutingPolicyResult<Model
         message: `routing rule ${index} when.parentClass ${JSON.stringify(rule.when.parentClass)} is not produced by modelClasses or defaultClass`,
       });
     }
-    if (!isRecord(rule.use) || (rule.use.kind !== "parent" && rule.use.kind !== "declared")) {
-      return err({ kind: "invalid-routing-config", message: `routing rule ${index} use.kind must be 'parent' or 'declared'` });
+    const selector: Record<string, string> = { parentClass: rule.when.parentClass };
+    for (const field of ["parentModel", "workload", "profile", "agent"] as const) {
+      const value = rule.when[field];
+      if (value === undefined) continue;
+      if (!isNonEmptyString(value)) {
+        return err({ kind: "invalid-routing-config", message: `routing rule ${index} when.${field} must be a non-empty string` });
+      }
+      if (field === "parentModel") {
+        const dead = unmatchablePatternReason(value);
+        if (dead !== null) {
+          return err({ kind: "invalid-routing-config", message: `routing rule ${index} when.parentModel can never match: ${dead}` });
+        }
+      }
+      selector[field] = value;
     }
-    rules.push(
-      Object.freeze({
-        id: rule.id,
-        when: Object.freeze({ parentClass: rule.when.parentClass }),
-        use: Object.freeze({ kind: rule.use.kind }) as RoutingRuleUse,
-      }),
-    );
+    if (!isRecord(rule.use) ||
+        (rule.use.kind !== "parent" && rule.use.kind !== "declared" && rule.use.kind !== "named")) {
+      return err({ kind: "invalid-routing-config", message: `routing rule ${index} use.kind must be 'parent', 'declared', or 'named'` });
+    }
+    const allowedUseFields = rule.use.kind === "named" ? ["kind", "target"] : ["kind"];
+    const unknownUse = unknownFields(rule.use, allowedUseFields);
+    if (unknownUse.length > 0) {
+      return err({ kind: "invalid-routing-config", message: `routing rule ${index} use contains unknown field ${unknownUse[0]}` });
+    }
+    let use: RoutingRuleUse;
+    if (rule.use.kind === "named") {
+      if (!isNonEmptyString(rule.use.target) || targets[rule.use.target] === undefined) {
+        return err({ kind: "invalid-routing-config", message: `routing rule ${index} references an unknown named target` });
+      }
+      use = Object.freeze({ kind: "named", target: rule.use.target });
+    } else {
+      use = Object.freeze({ kind: rule.use.kind });
+    }
+    rules.push(Object.freeze({
+      id: rule.id,
+      when: Object.freeze(selector) as RoutingRuleSelector,
+      use,
+    }));
+  }
+  for (let left = 0; left < rules.length; left++) {
+    for (let right = left + 1; right < rules.length; right++) {
+      if (selectorSpecificity(rules[left].when) === selectorSpecificity(rules[right].when) &&
+          selectorsOverlap(rules[left].when, rules[right].when)) {
+        return err({
+          kind: "invalid-routing-config",
+          message: `equal-specificity routing rules ${rules[left].id} and ${rules[right].id} can match the same workload`,
+        });
+      }
+    }
   }
   return ok(
     Object.freeze({
       schemaVersion: 1,
       defaultClass: raw.defaultClass,
       modelClasses: Object.freeze(modelClasses),
+      targets: Object.freeze(targets),
       rules: Object.freeze(rules),
     }),
   );
@@ -250,9 +402,10 @@ export function parseModelRoutingConfig(raw: unknown): RoutingPolicyResult<Model
  *
  * - No parent ref or no config → the declared binding (inheritance is not
  *   implicit).
- * - Otherwise classify the parent; the first rule whose `when.parentClass`
- *   matches decides: `parent` inherits the parent's provider/model (keeping
- *   the declared thinking level), `declared` keeps the pinned binding.
+ * - Otherwise classify the parent and choose the uniquely most-specific
+ *   matching selector across parent model, workload, profile, and Agent.
+ * - `parent` inherits the complete active binding, `named` selects an exact
+ *   configured target, and `declared` keeps the pinned binding.
  * - No matching rule → the declared binding.
  */
 export function resolveEffectivePiBinding(
@@ -260,20 +413,52 @@ export function resolveEffectivePiBinding(
   parentRef: ModelRef | null,
   config: ModelRoutingConfig | null,
 ): EffectivePiBinding {
+  return resolveEffectivePiBindingFromParent(
+    declared,
+    parentRef === null
+      ? null
+      : Object.freeze({ provider: parentRef.provider, model: parentRef.model, thinking: declared.thinking }),
+    config,
+  );
+}
+
+/** Resolve the exact launch binding, including the active parent's thinking level. */
+export function resolveEffectivePiBindingFromParent(
+  declared: PiBinding,
+  parent: EffectivePiBinding | null,
+  config: ModelRoutingConfig | null,
+  workload: RoutingWorkload = Object.freeze({}),
+): EffectivePiBinding {
   const declaredEffective: EffectivePiBinding = Object.freeze({
     provider: declared.provider,
     model: declared.model,
     thinking: declared.thinking,
   });
-  if (parentRef === null || config === null) return declaredEffective;
+  if (parent === null || config === null) return declaredEffective;
 
-  const parentClass = classifyModelRef(parentRef, config);
-  for (const rule of config.rules) {
-    if (rule.when.parentClass !== parentClass) continue;
-    if (rule.use.kind === "parent") {
-      return Object.freeze({ provider: parentRef.provider, model: parentRef.model, thinking: declared.thinking });
-    }
-    return declaredEffective;
+  const parentClass = classifyModelRef(parent, config);
+  const matching = config.rules.filter((rule) => {
+    const selector = rule.when;
+    if (selector.parentClass !== parentClass) return false;
+    if (selector.parentModel !== undefined && !globMatches(selector.parentModel, parent)) return false;
+    if (selector.workload !== undefined && selector.workload !== workload.workload) return false;
+    if (selector.profile !== undefined && selector.profile !== workload.profile) return false;
+    return selector.agent === undefined || selector.agent === workload.agent;
+  });
+  const maxSpecificity = matching.reduce(
+    (maximum, rule) => Math.max(maximum, selectorSpecificity(rule.when)),
+    -1,
+  );
+  const rule = matching.find((candidate) => selectorSpecificity(candidate.when) === maxSpecificity);
+  if (rule !== undefined) {
+    if (rule.use.kind === "parent") return Object.freeze({ ...parent });
+    if (rule.use.kind === "declared") return declaredEffective;
+    const target = config.targets[rule.use.target];
+    return Object.freeze({
+      provider: target.provider,
+      model: target.model,
+      thinking: target.thinking,
+    });
   }
   return declaredEffective;
 }

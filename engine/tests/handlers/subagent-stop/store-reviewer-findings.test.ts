@@ -21,7 +21,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import handler, {
@@ -70,8 +70,12 @@ function fixture(
   tasks: unknown[] = [task("T1")],
   userPrompt?: string,
 ) {
-  const dir = join(tmpdir(), `store-reviewer-${name}-${process.pid}-${Date.now()}`);
+  let dir = join(tmpdir(), `store-reviewer-${name}-${process.pid}-${Date.now()}`);
   mkdirSync(dir, { recursive: true });
+  // macOS tmpdir() sits behind the system /var → /private/var symlink; the
+  // handler opens the state dir through the anchored primitives, so the
+  // fixture root must be canonical, mirroring production's base resolution.
+  dir = realpathSync.native(dir);
   const statePath = join(dir, "active_task_graph.json");
   writeFileSync(statePath, graph(tasks));
 

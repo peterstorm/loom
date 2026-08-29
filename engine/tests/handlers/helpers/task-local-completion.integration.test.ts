@@ -1,7 +1,7 @@
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import { createImplementationAttemptAuthority } from "../../../src/core/implementation-completion";
 import { derivePendingTaskProof } from "../../../src/core/proof-obligations";
@@ -15,7 +15,7 @@ import { taskFixture } from "../../fixtures/task-lifecycle";
 const roots: string[] = [];
 
 function repository() {
-  const root = mkdtempSync(join(tmpdir(), "loom-task-local-suite-"));
+  const root = canonicalTempDir("loom-task-local-suite-");
   roots.push(root);
   execFileSync("git", ["init", "--quiet"], { cwd: root });
   execFileSync("git", ["config", "user.email", "loom@example.test"], { cwd: root });

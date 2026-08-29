@@ -17,7 +17,6 @@ import {
   deriveLegacyWaveGateCompatibilityAuthority,
   findLegacyWaveGateCompletionReplay,
   findRegisteredWaveGateCompletionReplay,
-  PostCommitStateProtectionError,
   StateManager,
   type LegacyWaveGateCompatibilityAuthority,
 } from "../../state-manager";
@@ -329,30 +328,12 @@ function warnLegacyTestsPassed(tasks: readonly Task[], wave: number): void {
 }
 
 function completionCommitErrorMessage(error: Error): string {
-  if (error instanceof PostCommitStateProtectionError) return postCommitProtectionFailureMessage(error);
   if (error instanceof AggregateError) {
     const nested = [...error.errors].map((cause, index) =>
       `cause ${index + 1}: ${cause instanceof Error ? completionCommitErrorMessage(cause) : notificationCauseMessage(cause)}`);
     return nested.length === 0 ? error.message : `${error.message}; ${nested.join("; ")}`;
   }
   return notificationCauseMessage(error);
-}
-
-function postCommitProtectionFailureMessage(error: PostCommitStateProtectionError<unknown>): string {
-  const committed = typeof error.committedValue === "object" && error.committedValue !== null
-    ? error.committedValue as Record<string, unknown>
-    : null;
-  const receipt = committed !== null && typeof committed.receipt === "object" && committed.receipt !== null
-    ? committed.receipt as Record<string, unknown>
-    : null;
-  const effectId = typeof receipt?.effectId === "string" ? receipt.effectId : "<unavailable>";
-  const revision = typeof receipt?.committedRevision === "number" ? receipt.committedRevision : "<unavailable>";
-  return (
-    `[loom] complete-wave-gate: protected Wave state was committed with receipt ${effectId} at revision ${revision}, ` +
-    `but read-only permission restoration failed: ${notificationCauseMessage(error.permissionCause)}. ` +
-    `Remediation: restore protection with chmod 0444 ${JSON.stringify(error.statePath)}, then inspect ` +
-    `wave_gate_history for receipt ${effectId}; do not rerun completion as if this were an idempotent replay until protection is restored.`
-  );
 }
 
 function completionFailureMessage(decisionFailure: string | null, commitFailure: string | null): string {
@@ -545,9 +526,6 @@ async function runCompleteWaveGate(
     commitError = e instanceof Error ? e : new Error(String(e));
   }
 
-  if (commitError instanceof PostCommitStateProtectionError) {
-    return { kind: "error", message: postCommitProtectionFailureMessage(commitError) };
-  }
   const formattedCommitError = commitError === null ? null : completionCommitErrorMessage(commitError);
 
   if (formattedCommitError !== null) {

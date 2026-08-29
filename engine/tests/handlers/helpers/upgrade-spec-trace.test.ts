@@ -1,6 +1,6 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import upgradeSpecTrace from "../../../src/handlers/helpers/upgrade-spec-trace";
 import { prepareSpecTraceUpgrade } from "../../../src/core/spec-trace-migration";
@@ -142,7 +142,7 @@ describe("spec trace migration core", () => {
 
 describe("upgrade-spec-trace helper", () => {
   function fixture(): { root: string; statePath: string } {
-    const root = mkdtempSync(join(tmpdir(), "loom-upgrade-spec-trace-"));
+    const root = canonicalTempDir("loom-upgrade-spec-trace-");
     cleanup.push(root);
     const statePath = join(root, "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(legacyGraph()));

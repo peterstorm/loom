@@ -53,6 +53,10 @@ command -v bun >/dev/null || { echo "FATAL: bun not found (need it to run the ho
 command -v jq >/dev/null || { echo "FATAL: jq not found (needed by phase_now to read current_phase from state)"; exit 1; }
 
 TMP="$(mktemp -d)"
+# Canonicalize: on macOS mktemp -d sits behind the /var → /private/var symlink,
+# and the CLI's anchored primitives resolve the base once while the process CWD
+# is always canonical — so the fixture must be canonical too.
+TMP="$(cd "$TMP" && pwd -P)"
 cleanup() {
   local rc=$? cleanup_failed=0
   trap - EXIT
@@ -412,8 +416,10 @@ if [ "$rc" != "0" ]; then
 else
   # Read the criteria the ENGINE derived, and drive the judges off them. The
   # orchestrator never chooses these — that is the whole point of deriving them.
-  mapfile -t CRITERIA < <(jq -r '.[]' "$CONTRACT_OUT") \
-    || { echo "FATAL: could not read derived criteria" >&2; exit 1; }
+  # `mapfile` is bash 4+; macOS ships bash 3.2, so read line-by-line instead —
+  # the assertion below catches an empty or short read just as loudly.
+  CRITERIA=()
+  while IFS= read -r line; do CRITERIA+=("$line"); done < <(jq -r '.[]' "$CONTRACT_OUT")
   if [ "${#CRITERIA[@]}" = "3" ] \
     && [ "${CRITERIA[0]}" = "simplicity" ] \
     && [ "${CRITERIA[1]}" = "pure functional core" ]; then

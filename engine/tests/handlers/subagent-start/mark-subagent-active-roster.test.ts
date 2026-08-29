@@ -1,3 +1,4 @@
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 /**
  * Roster failure handling in mark-subagent-active: a markAgentActive
  * lock/fs failure means the agent is OFF the roster — soleActiveBinding
@@ -13,9 +14,8 @@
  */
 
 import { describe, it, expect, afterAll, beforeEach, vi } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { SUBAGENT_DIR } from "../../../src/config";
 import { shouldBlockDirectEdit } from "../../../src/core/block-direct-edits";
 import { activeRosterProbe } from "../../../src/handlers/pre-tool-use/block-direct-edits";
@@ -37,7 +37,7 @@ import { taskFixture } from "../../fixtures/task-lifecycle";
 import type { TaskGraph } from "../../../src/types";
 
 const uniq = `roster-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-const stateDir = mkdtempSync(join(tmpdir(), "loom-roster-state-"));
+const stateDir = canonicalTempDir("loom-roster-state-");
 const statePath = join(stateDir, "active_task_graph.json");
 const guardedReviewMachines = join(stateDir, "guarded-review-machines");
 mkdirSync(guardedReviewMachines);

@@ -1,7 +1,7 @@
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, rmSync, mkdtempSync, chmodSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import {
   detectPhase,
   checkArtifacts,
@@ -16,7 +16,7 @@ import { validatePhaseOrder } from "../../src/core/validate-phase-order";
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 function makeTmpDir(): string {
-  return mkdtempSync(join(tmpdir(), "loom-test-"));
+  return canonicalTempDir("loom-test-");
 }
 
 function writeFile(dir: string, filename: string, content = "content"): string {

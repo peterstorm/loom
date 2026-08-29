@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync, spawnSync } from "node:child_process";
@@ -21,6 +21,11 @@ describe("store-spec-check helper", () => {
 
   beforeEach(() => {
     tmpDir = join(tmpdir(), `loom-ssc-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(tmpDir, { recursive: true });
+    // macOS tmpdir() sits behind the system /var → /private/var symlink; the
+    // anchored primitives resolve the base once, so the fixture root must be
+    // canonical too.
+    tmpDir = realpathSync.native(tmpDir);
     const stateDir = join(tmpDir, ".claude", "state");
     mkdirSync(stateDir, { recursive: true });
     execSync("git init", { cwd: tmpDir, stdio: "ignore" });
