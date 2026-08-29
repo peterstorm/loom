@@ -109,6 +109,27 @@ function returnedAgentAt(entries: readonly PiSubagentResultEntry[], index: numbe
   return entry?.ok === true ? stripNamespace(entry.result.agent) : null;
 }
 
+/**
+ * What a reserved review/spec-check slot that never returned MEANS when no
+ * TaskGraph was active at spawn.
+ *
+ * The persistence arm in `extension.ts` cannot run without a State File, and
+ * that used to silence the entire reporting path: a reviewer that died without
+ * returning produced no diagnostic at all, for exactly the unorchestrated
+ * batches that have no other reporting route. Nothing can be recorded, so the
+ * fact gets reported instead — recorded evidence and reported evidence are the
+ * two outcomes, and neither one is silence.
+ */
+export function unrecordableMissingEvidenceDiagnostic(args: Readonly<{
+  sessionId: string;
+  reviews: number;
+  specChecks: number;
+}>): string {
+  return `${args.reviews} reserved review result(s) and ${args.specChecks} reserved spec-check result(s) ` +
+    `for session ${args.sessionId} never arrived and cannot be recorded as evidence_capture_failed: ` +
+    "no TaskGraph was active at spawn";
+}
+
 export function classifyMissingReservedResults<T extends ReservedResultItem>(
   items: readonly T[],
   rawResults: readonly unknown[],

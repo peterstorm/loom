@@ -95,6 +95,7 @@ import { stripNamespace } from "../engine/src/utils/strip-namespace";
 import {
   alignPiImplementationAuthorities,
   classifyMissingReservedResults,
+  unrecordableMissingEvidenceDiagnostic,
 } from "./reserved-results";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
 import * as git from "../engine/src/utils/git";
@@ -1969,8 +1970,22 @@ export default function (pi: ExtensionAPI) {
           await persistCaptureRejection(runBinding, index, item.agentType, diagnostic);
         }
       }
-      if (!spawnedWithoutTaskGraph(reservation) &&
-          (missingReviews.length > 0 || missingSpecChecks.length > 0)) {
+      // An ad-hoc batch has no State File to mark, so the persistence arm below
+      // cannot run — which used to skip the whole reporting block, and a reserved
+      // reviewer that died without returning left no trace anywhere. There is no
+      // protected state to record an evidence failure against, so this stays
+      // operator-visible rather than an orchestration failure; what must not
+      // happen is silence.
+      const missingGateOwned = missingReviews.length > 0 || missingSpecChecks.length > 0;
+      if (missingGateOwned && spawnedWithoutTaskGraph(reservation)) {
+        const diagnostic = unrecordableMissingEvidenceDiagnostic({
+          sessionId: reservation.sessionId,
+          reviews: missingReviews.length,
+          specChecks: missingSpecChecks.length,
+        });
+        process.stderr.write(`loom(pi): ${diagnostic}\n`);
+      }
+      if (missingGateOwned && !spawnedWithoutTaskGraph(reservation)) {
         let manager: StateManager | null = null;
         let pointerReadFailed = false;
         try {

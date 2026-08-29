@@ -20,6 +20,7 @@ import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-
 import {
   PLAN_ARTIFACT_DIR,
   SPEC_ARTIFACT_DIR,
+  classifyPhaseArtifact,
   resolvesWithin,
 } from "../../core/phase-artifact-paths";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
@@ -252,19 +253,23 @@ const handler: HookHandler = async (stdin) => {
         if (artifactPhaseRefusal !== null) return s;
         const updates: { spec_file?: string | null; plan_file?: string | null } = {};
 
-        // RESOLVED containment, not substring containment. These paths come
-        // from an agent's transcript and become the authoritative
-        // `spec_file`/`plan_file` every downstream phase transition reads, so
-        // `String.includes(".claude/specs/")` was the wrong test: a path like
-        // `.claude/specs/../../../../tmp/evil/spec.md` contains the substring
-        // while resolving well outside the tree, and both this check and the
-        // parser's used the same weak form.
-        if (artifacts.spec_file && phaseArtifactExists(artifacts.spec_file)
-            && resolvesWithin(artifacts.spec_file, SPEC_ARTIFACT_DIR)) {
+        // ONE classifier for both harnesses, scoped to the LOCKED run.
+        // `resolvesWithin(_, SPEC_ARTIFACT_DIR)` alone let a SIBLING run's
+        // spec.md become this run's authoritative `spec_file`, and the parser's
+        // `filePath.includes(specDir)` filter is the substring form this module
+        // already rejected elsewhere: `..` segments survive `includes` and are
+        // collapsed only by `resolve`. The Pi shell has answered from
+        // `phaseArtifactUpdates` since it adopted the shared rule; the hook now
+        // crosses the same seam, and classification runs BEFORE any filesystem
+        // probe so an out-of-scope path is never even stat'd.
+        const runScope = s.spec_dir ?? SPEC_ARTIFACT_DIR;
+        if (artifacts.spec_file && classifyPhaseArtifact(artifacts.spec_file, runScope) === "spec"
+            && phaseArtifactExists(artifacts.spec_file)) {
           updates.spec_file = artifacts.spec_file;
         }
-        if (!s.plan_file && artifacts.plan_file && phaseArtifactExists(artifacts.plan_file)
-            && resolvesWithin(artifacts.plan_file, PLAN_ARTIFACT_DIR)) {
+        if (!s.plan_file && artifacts.plan_file
+            && classifyPhaseArtifact(artifacts.plan_file, runScope) === "plan"
+            && phaseArtifactExists(artifacts.plan_file)) {
           updates.plan_file = artifacts.plan_file;
         }
 

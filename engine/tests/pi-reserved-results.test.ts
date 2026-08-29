@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import {
   alignPiImplementationAuthorities,
   classifyMissingReservedResults,
+  unrecordableMissingEvidenceDiagnostic,
   type ReservedResultItem,
 } from "../../pi/reserved-results";
 import {
@@ -195,5 +196,31 @@ describe("classifyMissingReservedResults", () => {
     expect(Object.isFrozen(missing)).toBe(true);
     expect(Object.isFrozen(missing.reviews)).toBe(true);
     expect(() => (missing.reviews as unknown as unknown[]).push({})).toThrow();
+  });
+});
+
+/**
+ * The ad-hoc arm. A batch spawned with no TaskGraph has no slot to mark, and
+ * `extension.ts` used to skip the whole reporting block in that case — so a
+ * reserved reviewer that died without returning left no trace anywhere. This is
+ * the report that replaced the silence.
+ */
+describe("unrecordableMissingEvidenceDiagnostic", () => {
+  it("names what was expected, for which session, and why nothing was recorded", () => {
+    const diagnostic = unrecordableMissingEvidenceDiagnostic({
+      sessionId: "session-adhoc",
+      reviews: 2,
+      specChecks: 1,
+    });
+
+    expect(diagnostic).toContain("2 reserved review result(s) and 1 reserved spec-check result(s)");
+    expect(diagnostic).toContain("session-adhoc");
+    expect(diagnostic).toContain("cannot be recorded as evidence_capture_failed");
+    expect(diagnostic).toContain("no TaskGraph was active at spawn");
+  });
+
+  it("counts a zero side honestly instead of dropping the sentence for it", () => {
+    expect(unrecordableMissingEvidenceDiagnostic({ sessionId: "s", reviews: 0, specChecks: 3 }))
+      .toContain("0 reserved review result(s) and 3 reserved spec-check result(s)");
   });
 });

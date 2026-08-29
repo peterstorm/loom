@@ -85,21 +85,49 @@ was discarded — including a live one in `pi/subagent-result.ts` (removed). Pat
 - `engine/tests/pi/subagent-result.test.ts` — inferred attribution reported as a processing error.
 
 ## Mandatory remaining (next round, before the PR)
-1. **`pi/extension.ts` graphless missing-result reporting.** The block at the
-   `if (!spawnedWithoutTaskGraph(reservation) && (missingReviews.length > 0 || missingSpecChecks.length > 0))`
-   guard skips the whole reporting arm when no TaskGraph was active at spawn: reserved reviewer and
-   spec-check slots that never arrive produce no diagnostic and no processing error. Nothing can be
-   persisted in that case, so the fix is to report the counted miss (diagnostic + processing error)
-   instead of dropping it. Needs Pi parity coverage with the Claude side.
-2. **`engine/src/handlers/subagent-stop/advance-phase.ts` artifact-update guard** (~line 251) has no
-   test; it can overwrite authoritative artifact paths from a transcript-supplied path.
-3. **`wave-gate.ts installWaveReviewRuns`** must re-prove its registration inside the state lock;
+1. **`wave-gate.ts installWaveReviewRuns`** must re-prove its registration inside the state lock;
    `core/wave-review-authority.ts` slot/request identity hashes the whole `registration` object rather
    than an explicit projection.
-4. **`store-reviewer-findings.ts` (~150)**: a transcript read failure consumes the only semantic
+2. **`store-reviewer-findings.ts` (~150)**: a transcript read failure consumes the only semantic
    reviewer retry.
-5. **Root-only tests** use `if (runningAsRoot) return;` and silently pass; replace with
-   `it.skipIf(root)` so the skip is visible.
+3. **Root-only tests** use `if (runningAsRoot) return;` and silently pass; replace with
+   `it.skipIf(root)` so the skip is visible (three sites:
+   `engine/tests/pi-extension-review-events.test.ts:1714, 2436, 2492`).
+4. **Pin the graphless miss in the real harness.** The arm added below is unit-tested at the pure
+   decision; its wiring inside `extension.ts`'s `tool_result` handler should be pinned by extending
+   the existing case `names a graphless spawn's missing review result without calling it an
+   orchestration failure` with
+   `expect(written).toContain("never arrived and cannot be recorded as evidence_capture_failed")`.
+   That fixture file is 4,988 lines and its harness read cost was not justified in this increment;
+   the file is also a candidate for splitting.
+
+## Fixed after the first round-35 pass (same review authority)
+
+### 8. Phase artifacts adopted a sibling run's spec — `engine/src/handlers/subagent-stop/advance-phase.ts`
+The hook judged a transcript-supplied `spec_file` with `resolvesWithin(path, ".claude/specs")` while
+the Pi shell judged the same field with `phaseArtifactUpdates(paths, state.spec_dir)`. The core
+module's own doc states the rule: *a run scoped to `.claude/specs/2026-08-16-thing` must not adopt a
+`spec.md` from a sibling run*. The hook's parser filtered by `filePath.includes(specDir)` — the
+substring form this codebase already rejected, defeated by `..` segments that only `resolve` collapses.
+The hook now crosses the same seam (`classifyPhaseArtifact(path, locked.spec_dir ?? SPEC_ARTIFACT_DIR)`)
+and classifies **before** any filesystem probe, so an out-of-scope path is never even stat'd.
+
+`engine/tests/handlers/subagent-stop/advance-phase-artifacts.test.ts` (4) enters the artifact-write
+block for the first time — the pre-existing "locked Phase advances" case never supplied
+`agent_transcript_path`, so the guarded branch it names was never executed. The traversal case was
+verified to fail against the previous condition before the fix was restored.
+
+### 9. A graphless batch reported nothing when reserved results never arrived — `pi/extension.ts`
+The whole reporting block was gated on `!spawnedWithoutTaskGraph(reservation)`, so an ad-hoc batch
+whose reserved reviewer never returned produced no diagnostic anywhere — while the integration case
+named *"names a graphless spawn's missing review result"* asserted only the per-result agent-mismatch
+line and never noticed the missing report. The decision is now a pure function
+(`unrecordableMissingEvidenceDiagnostic` in `pi/reserved-results.ts`, 2 tests) and the handler emits
+it on stderr. It deliberately stays out of `processingErrors`: the prior round recorded that there is
+no protected state to file an evidence failure against, and that reasoning holds — what was wrong was
+the silence, not the polarity.
+
+## Mandatory remaining (first draft, superseded by the two above)
 
 ## Deferred by decision (documented, not forgotten)
 - Runner-report **orthogonal facts** redesign (roadmap item 18): retire `analyzeNewTests`,
@@ -113,8 +141,12 @@ was discarded — including a live one in `pi/subagent-result.ts` (removed). Pat
   `docs/adr/` holds 0005..0007.
 
 ## Validation
-`npm run typecheck` (incl. the widened unused check) clean. Full bounded Vitest: **226 files, 5815
-tests passed** (baseline 5780; +35 this round). Focused re-run of the Pi, spec-check, lock-liveness and
-git suites: 522 passed. `git diff --check` clean. Smoke scripts not re-run this round (no harness-facing
-CLI surface changed); the commit is local — push and the fresh canonical review panel are pending the
-operator's go.
+`npm run typecheck` (incl. the widened unused check) clean. Full bounded Vitest after the first pass:
+**226 files, 5815 tests passed** (baseline 5780). After items 8–9: **227 files, 5821 tests passed**,
+including the full Pi extension `tool_result` integration suite and the 74 `pi-imports` resolution
+checks. `git diff --check` clean. Smoke scripts not re-run (no harness-facing CLI surface changed).
+
+One reproduction note worth keeping: the new artifact tests passed against the *unfixed* source until
+the traversal path was built by hand — `path.join` collapses `..` lexically, which silently produced
+the plain sibling path the parser already rejects. A regression test that passes both ways is worse
+than no test; both directions were re-run before committing.
