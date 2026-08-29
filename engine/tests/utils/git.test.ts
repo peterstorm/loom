@@ -125,7 +125,7 @@ describe("countNewTests (pure)", () => {
     expect(countNewTests(`+${declaration}`).ts).toBe(1);
   });
 
-  it("counts Python test functions and classes", () => {
+  it("counts Python test functions and methods, not their collection class", () => {
     const diff = [
       "+def test_validates_input():",
       "+class TestValidation:",
@@ -133,8 +133,38 @@ describe("countNewTests (pure)", () => {
       "-def test_old():",
     ].join("\n");
     const result = countNewTests(diff);
-    expect(result.python).toBe(3);
-    expect(result.total).toBe(3);
+    expect(result.python).toBe(2);
+    expect(result.total).toBe(2);
+  });
+
+  it("does not count TypeScript helpers named test as runner invocations", () => {
+    const diff = [
+      "diff --git a/example.test.ts b/example.test.ts",
+      "--- a/example.test.ts",
+      "+++ b/example.test.ts",
+      "@@ -0,0 +1,2 @@",
+      "+export function test(value: string) { return value; }",
+      "+class Helper { test(value: string) { return value; } }",
+      "+expect(test('helper')).toBe('helper');",
+    ].join("\n");
+
+    expect(countNewTests(diff).ts).toBe(0);
+    expect(countAssertions(diff)).toBe(1);
+  });
+
+  it("does not count a Python test collection class without test methods", () => {
+    const diff = [
+      "diff --git a/tests/test_support.py b/tests/test_support.py",
+      "--- a/tests/test_support.py",
+      "+++ b/tests/test_support.py",
+      "@@ -0,0 +1,3 @@",
+      "+class TestSupport:",
+      "+    def helper(self):",
+      "+        assert self is not None",
+    ].join("\n");
+
+    expect(countNewTests(diff).python).toBe(0);
+    expect(countAssertions(diff)).toBe(1);
   });
 
   it("counts executable Rust tests", () => {

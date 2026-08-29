@@ -343,6 +343,39 @@ const languageOfTestSource = (path: string | null): "java" | "ts" | "python" | "
   return "unknown";
 };
 
+const matchingParenthesis = (code: string, open: number): number | null => {
+  let depth = 1;
+  for (let index = open + 1; index < code.length; index += 1) {
+    if (code[index] === "(") depth += 1;
+    if (code[index] === ")") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return null;
+};
+
+const hasTypeScriptTestCall = (code: string): boolean => {
+  const calls = /(?:^|\s)(?:it|test)(?:\.(?:each|concurrent))*\s*\(/g;
+  for (const match of code.matchAll(calls)) {
+    const start = match.index ?? 0;
+    const prefix = code.slice(0, start).trimEnd();
+    // A declaration named `test` has the same local token shape as a call once
+    // strings/comments are projected away. Its preceding `function` keyword is
+    // the grammar distinction that prevents helper declarations becoming test
+    // evidence.
+    if (/\bfunction\s*\*?\s*$/.test(prefix)) continue;
+    const open = start + match[0].lastIndexOf("(");
+    const close = matchingParenthesis(code, open);
+    // Class/object method declarations are followed by a body block. Runner
+    // invocations end as expressions; their callback block is nested inside
+    // the invocation's parentheses.
+    if (close !== null && code.slice(close + 1).trimStart().startsWith("{")) continue;
+    return true;
+  }
+  return false;
+};
+
 /** Heuristically count added executable test declarations in a diff string (pure). */
 export function countNewTests(diffContent: string): TestCount {
   const lines = executableAddedLines(diffContent);
@@ -354,9 +387,11 @@ export function countNewTests(diffContent: string): TestCount {
   for (const { path, code } of lines) {
     const language = languageOfTestSource(path);
     if ((language === null || language === "java") && /@(Test|Property|ParameterizedTest)\b/.test(code)) java++;
-    if ((language === null || language === "ts") &&
-        /(?:^|\s)(?:it|test)(?:\.(?:each|concurrent))*\s*\(/.test(code)) ts++;
-    if ((language === null || language === "python") && /(def test_|class Test)/.test(code)) python++;
+    if ((language === null || language === "ts") && hasTypeScriptTestCall(code)) ts++;
+    // Python test classes are only collection containers; executable evidence
+    // is a test_* function or method. Counting the class declaration itself
+    // accepts an empty helper-only class that pytest collects as zero tests.
+    if ((language === null || language === "python") && /\bdef\s+test_/.test(code)) python++;
     if ((language === null || language === "rust") && /#\[test\]/.test(code)) rust++;
   }
 

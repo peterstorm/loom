@@ -184,7 +184,6 @@ describe("handler reads file content (not path)", () => {
     });
     writeFileSync(transcriptPath, transcriptLine);
 
-    // Create state file
     const statePath = join(tmpDir, "active_task_graph.json");
     const state = {
       current_phase: "execute",
@@ -198,7 +197,6 @@ describe("handler reads file content (not path)", () => {
     writeFileSync(statePath, JSON.stringify(state, null, 2));
     chmodSync(statePath, 0o444);
 
-    // Create subagent tracking file pointing to our state
     const subagentDir = join(tmpDir, "subagents");
     mkdirSync(subagentDir, { recursive: true });
     writeFileSync(join(subagentDir, "test-session.task_graph"), statePath);
@@ -212,7 +210,6 @@ describe("handler reads file content (not path)", () => {
     expect(transcript).toContain("SPEC_CHECK_CRITICAL_COUNT: 0");
     expect(transcript).toContain("SPEC_CHECK_VERDICT: PASSED");
 
-    // Verify that passing a file PATH (old bug) gives empty string
     const badResult = parseTranscript(transcriptPath);
     expect(badResult).toBe("");
 

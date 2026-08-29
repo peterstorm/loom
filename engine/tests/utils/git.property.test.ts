@@ -67,6 +67,42 @@ describe("countNewTests — property tests", () => {
       }),
     );
   });
+
+  it("TypeScript function declarations named test never become runner calls", () => {
+    fc.assert(fc.property(
+      fc.constantFrom("", "export ", "async ", "export async "),
+      fc.stringMatching(/^[A-Za-z_$][A-Za-z0-9_$]{0,24}$/),
+      (prefix, parameter) => {
+        const diff = [
+          "diff --git a/example.test.ts b/example.test.ts",
+          "--- a/example.test.ts",
+          "+++ b/example.test.ts",
+          "@@ -0,0 +1 @@",
+          `+${prefix}function test(${parameter}: unknown) { return ${parameter}; }`,
+        ].join("\n");
+        expect(countNewTests(diff).ts).toBe(0);
+      },
+    ));
+  });
+
+  it("Python Test* containers without test_* methods never count", () => {
+    fc.assert(fc.property(
+      fc.stringMatching(/^[A-Za-z][A-Za-z0-9]{0,24}$/),
+      fc.stringMatching(/^[a-z][a-z0-9_]{0,24}$/),
+      (classSuffix, helperName) => {
+        const diff = [
+          "diff --git a/tests/test_support.py b/tests/test_support.py",
+          "--- a/tests/test_support.py",
+          "+++ b/tests/test_support.py",
+          "@@ -0,0 +1,3 @@",
+          `+class Test${classSuffix}:`,
+          `+    def ${helperName}(self):`,
+          "+        assert self is not None",
+        ].join("\n");
+        expect(countNewTests(diff).python).toBe(0);
+      },
+    ));
+  });
 });
 
 describe("countAssertions — property tests", () => {

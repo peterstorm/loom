@@ -10,9 +10,10 @@
  * "which written path is the spec file", which was an inline
  * `filePath.includes(specDir)` sitting between two `mgr.update(...)` awaits.
  *
- * Here each concern is one named function with explicit parameters and two
- * injected ports — `TaskGraphStore` for protected state, `RepositoryProbe` for
- * git — so a test supplies plain objects instead of a working tree. Exported
+ * Here each concern is one named function with explicit parameters and only
+ * the ports it needs: every applier receives `TaskGraphStore` for protected
+ * state, while implementation paths additionally receive `RepositoryProbe`
+ * for git observations. A test supplies plain objects instead of a working tree. Exported
  * appliers are shell orchestrators: observe through ports, call pure reducers,
  * and persist. Parsing, classification, and lifecycle reducers remain pure and
  * testable as plain data transformations; shared engine rules live further in
