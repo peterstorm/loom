@@ -150,7 +150,26 @@ export function prepareWaveReviewBatch(
   const packets: ContextPacket[] = [];
   for (const subject of subjects) {
     const taskRun = subject.taskId === null ? null : taskRuns.find(({ taskId }) => taskId === subject.taskId) ?? null;
-    const identity = JSON.stringify({ runId, registration, batchEpoch: batchEpoch.value, subject, taskRun });
+    // Slot and request identity hash the AUTHORITY, never the registration
+    // object. Spreading `registration` here made every Wave slot depend on
+    // unrelated recovery bookkeeping (`restart`, `orphanRecovery`) and on the
+    // caller's JSON key order — either of which re-derives every slot id in the
+    // batch and orphans the captures already written against the old ones. What
+    // a slot represents is the reviewed Wave: run, Wave, roster, and the
+    // registration's own digest.
+    const identity = JSON.stringify({
+      runId,
+      registration: {
+        schemaVersion: registration.schemaVersion,
+        kind: registration.kind,
+        wave: registration.input.wave,
+        taskIds: registration.taskIds,
+        authorityDigest: registration.authorityDigest,
+      },
+      batchEpoch: batchEpoch.value,
+      subject,
+      taskRun,
+    });
     const hash = sha256Hex(identity);
     const slotId = parseSlotId(`wave-slot:${hash.slice(0, 32)}`);
     const requestId = parseRequestId(`wave-request:${hash.slice(0, 32)}:${attempt}`);

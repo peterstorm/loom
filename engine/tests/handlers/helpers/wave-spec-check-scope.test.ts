@@ -218,3 +218,80 @@ describe("registered Wave spec-check scope", () => {
     expect(run.head_sha).toBe(batch.batchEpoch);
   });
 });
+
+/**
+ * What a Wave reviewer slot IS an authority over.
+ *
+ * Slot and request identity used to hash the whole `registration` object, so
+ * adding recovery bookkeeping (`restart`, `orphanRecovery`) or merely re-ordering
+ * a caller's JSON keys re-derived every slot in the Wave — orphaning captures
+ * already written against the previous ids, and making a slot's identity depend
+ * on anything other than the reviewed Wave.
+ */
+describe("Wave reviewer slot identity projection", () => {
+  const graph = parseTaskGraph({
+    spec_trace_version: 2,
+    current_phase: "execute",
+    current_wave: 1,
+    phase_artifacts: {},
+    skipped_phases: [],
+    spec_file: "spec.md",
+    plan_file: "plan.md",
+    wave_gates: {},
+    tasks: [taskFixture({
+      id: "T1", description: "review exact authority", agent: "code-implementer-agent", wave: 1,
+      status: "implemented", depends_on: [], review_generation: 1, spec_anchors: ["FR-1"],
+      spec_contributions: [], file_list: ["engine/src/core/wave-review-authority.ts"],
+    })],
+  });
+  if (!graph.ok) throw new Error(`wave slot fixture rejected: ${graph.error}`);
+  const preparedGraph = graph.value;
+
+  const plain: RegisteredWaveGateProgram = {
+    schemaVersion: 1,
+    kind: "wave-gate",
+    input: { wave: 1 },
+    taskIds: ["T1"],
+    authorityDigest: "a".repeat(64),
+  };
+
+  function identitiesFor(registration: RegisteredWaveGateProgram, attempt: 1 | 2): readonly string[] {
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-slot-identity-"));
+    cleanup.push(runsRoot);
+    const created = createRunDirectory(runsRoot, "run.identity");
+    if (!created.ok) throw new Error(created.error.message);
+    return waveRequests(created.value, registration, preparedGraph, attempt).requests.map(({ authority }) =>
+      `${(authority as AgentRequestAuthority).slotId}@${(authority as AgentRequestAuthority).requestId}`);
+  }
+
+  it("is unchanged by recovery bookkeeping or by the caller's key order", () => {
+    const baseline = identitiesFor(plain, 1);
+
+    const restarted: RegisteredWaveGateProgram = {
+      ...plain,
+      restart: { previousRunId: "run.previous", exhaustedSlots: ["wave-slot:retired"] },
+    };
+    const orphanRecovered: RegisteredWaveGateProgram = {
+      ...plain,
+      orphanRecovery: { previousRunId: "run.previous", previousAuthorityDigest: "f".repeat(64) },
+    };
+    const reordered: RegisteredWaveGateProgram = {
+      authorityDigest: plain.authorityDigest,
+      taskIds: plain.taskIds,
+      input: plain.input,
+      kind: plain.kind,
+      schemaVersion: plain.schemaVersion,
+    } as RegisteredWaveGateProgram;
+
+    expect(identitiesFor(restarted, 1)).toEqual(baseline);
+    expect(identitiesFor(orphanRecovered, 1)).toEqual(baseline);
+    expect(identitiesFor(reordered, 1)).toEqual(baseline);
+  });
+
+  it("still moves when the reviewed authority itself moves", () => {
+    const baseline = identitiesFor(plain, 1);
+
+    expect(identitiesFor({ ...plain, authorityDigest: "b".repeat(64) }, 1)).not.toEqual(baseline);
+    expect(identitiesFor(plain, 2)).not.toEqual(baseline);
+  });
+});

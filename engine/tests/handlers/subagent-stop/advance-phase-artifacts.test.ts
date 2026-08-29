@@ -19,7 +19,7 @@ import advancePhaseHandler from "../../../src/handlers/subagent-stop/advance-pha
 import { SUBAGENT_DIR } from "../../../src/config";
 import { StateManager } from "../../../src/state-manager";
 import type { TaskGraph } from "../../../src/types";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -131,6 +131,9 @@ describe("advance-phase artifact authority", () => {
     writeFileSync(transcript, writeLine(disguised));
 
     await withPhaseState(session, mkState({ spec_dir: ownSpecDir }), async () => {
+      // The sibling spec really is readable, so the refusal is about scope and
+      // not about a missing file.
+      expect(existsSync(siblingSpec)).toBe(true);
       const result = await specifyResult(session, transcript);
       expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("no readable spec.md") });
       const persisted = JSON.parse(readFileSync(join(tmpDir, `${session}.json`), "utf-8"));

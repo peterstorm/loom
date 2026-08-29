@@ -85,11 +85,16 @@ was discarded — including a live one in `pi/subagent-result.ts` (removed). Pat
 - `engine/tests/pi/subagent-result.test.ts` — inferred attribution reported as a processing error.
 
 ## Mandatory remaining (next round, before the PR)
-1. **`wave-gate.ts installWaveReviewRuns`** must re-prove its registration inside the state lock;
-   `core/wave-review-authority.ts` slot/request identity hashes the whole `registration` object rather
-   than an explicit projection.
-2. **`store-reviewer-findings.ts` (~150)**: a transcript read failure consumes the only semantic
-   reviewer retry.
+1. **`installWaveReviewRuns` in-lock re-proof** (`engine/src/handlers/helpers/programs/wave-gate.ts`):
+   it installs a batch prepared *before* the state lock was taken. The existing
+   `installs the exact pure preparation roster, contexts, epoch, and reviewer slots` test pins the
+   happy path only — nothing proves the registration is still current at commit time.
+2. **Adjudicate the reviewer-retry finding** (`engine/src/handlers/subagent-stop/store-reviewer-findings.ts:143`):
+   an unreadable transcript resolves the slot as `evidence-failed` (`unavailableReviewerResolution`),
+   which the Wave epoch already counts as `attempted: 1`, so a hook-side read failure spends a
+   semantic attempt. Left unchanged deliberately: attempt 2 still exists, both harnesses agree, and
+   "capture failure should not consume a semantic attempt" is a semantics change that needs evidence
+   of a real stuck Wave before it is made — not a speculative authority edit.
 3. **Root-only tests** use `if (runningAsRoot) return;` and silently pass; replace with
    `it.skipIf(root)` so the skip is visible (three sites:
    `engine/tests/pi-extension-review-events.test.ts:1714, 2436, 2492`).
@@ -100,6 +105,15 @@ was discarded — including a live one in `pi/subagent-result.ts` (removed). Pat
    `expect(written).toContain("never arrived and cannot be recorded as evidence_capture_failed")`.
    That fixture file is 4,988 lines and its harness read cost was not justified in this increment;
    the file is also a candidate for splitting.
+
+### 10. Wave slot identity hashed the whole registration — `engine/src/core/wave-review-authority.ts`
+`prepareWaveReviewBatch` derived every slot/request id from
+`JSON.stringify({ runId, registration, batchEpoch, subject, taskRun })`. Spreading the registration
+object made slot identity depend on recovery bookkeeping (`restart`, `orphanRecovery`) and on a
+caller's JSON key order — either of which re-derives every slot in the Wave and orphans the captures
+already written against the previous ids. Identity is now an explicit projection of what the slot is
+actually an authority over: run, Wave, roster, and the registration digest. Two tests added; the
+invariance test was confirmed to fail against the previous derivation.
 
 ## Fixed after the first round-35 pass (same review authority)
 
@@ -142,11 +156,21 @@ the silence, not the polarity.
 
 ## Validation
 `npm run typecheck` (incl. the widened unused check) clean. Full bounded Vitest after the first pass:
-**226 files, 5815 tests passed** (baseline 5780). After items 8–9: **227 files, 5821 tests passed**,
-including the full Pi extension `tool_result` integration suite and the 74 `pi-imports` resolution
-checks. `git diff --check` clean. Smoke scripts not re-run (no harness-facing CLI surface changed).
+**226 files, 5815 tests passed** (baseline 5780). After items 8–9: **227 files, 5821 tests passed**.
+After item 10: **227 files, 5823 tests passed**, including the full Pi extension `tool_result`
+integration suite and the 74 `pi-imports` resolution checks. `git diff --check` clean. Smoke scripts
+not re-run (no harness-facing CLI surface changed).
 
 One reproduction note worth keeping: the new artifact tests passed against the *unfixed* source until
 the traversal path was built by hand — `path.join` collapses `..` lexically, which silently produced
 the plain sibling path the parser already rejects. A regression test that passes both ways is worse
-than no test; both directions were re-run before committing.
+than no test; both directions were re-run before committing, for the artifact suite and for the Wave
+slot identity test.
+
+## Panel status
+The independent panel could not be re-run after the reload: this Pi session's active Loom package is
+`loom-benchmark-runtime-3815f65`, whose `scripts/sync-pi-agents.sh` would have to overwrite the
+global `~/.pi/agent/agents` definitions before the review agents can spawn, and the CLI mutation
+guard refuses every `helper`/`orchestration` command from this worktree for the same reason. Both are
+one operator action away (sync agents + `/reload`, or restart Pi from this checkout); neither was
+taken unilaterally because they change the operator's environment, not the branch.
