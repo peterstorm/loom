@@ -32,7 +32,10 @@ import {
   type NewTestEvidence,
 } from "../engine/src/core/implementation-application";
 import { extractTestEvidence, type TestEvidence } from "../engine/src/core/test-evidence";
-import { resolveTransition } from "../engine/src/handlers/subagent-stop/advance-phase";
+import {
+  isPhaseResultEligible,
+  resolveTransition,
+} from "../engine/src/handlers/subagent-stop/advance-phase";
 import {
   applyReviewResolution,
   constrainReviewResolutionToScope,
@@ -491,7 +494,7 @@ function preparePiPhaseResult(
   completedPhase: Phase,
   writtenPaths: readonly string[],
 ): PiPhasePreparation {
-  if (state.current_phase !== completedPhase) {
+  if (!isPhaseResultEligible(state.current_phase, completedPhase)) {
     return Object.freeze({ state, transitionEligible: false });
   }
   const updates = phaseArtifactUpdates(writtenPaths, state.spec_dir ?? undefined);
@@ -508,7 +511,7 @@ function reducePiPhaseTransition(
   transition: PhaseTransition | null,
   now: string,
 ): TaskGraph {
-  if (transition === null || state.current_phase !== completedPhase) return state;
+  if (transition === null || !isPhaseResultEligible(state.current_phase, completedPhase)) return state;
   const artifactUpdates = phaseArtifactUpdates([transition.artifact], state.spec_dir ?? undefined);
   return {
     ...state,

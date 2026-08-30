@@ -10,7 +10,7 @@
 import { accessSync, constants as fsConstants, readFileSync, readdirSync } from "node:fs";
 import { match } from "ts-pattern";
 import type { HookHandler, SubagentStopInput, Phase, TaskGraph } from "../../types";
-import { PHASE_AGENT_MAP, PHASE_ORDER, CLARIFY_THRESHOLD } from "../../config";
+import { PHASE_AGENT_MAP, CLARIFY_THRESHOLD } from "../../config";
 import { StateManager } from "../../state-manager";
 import { parsePhaseArtifacts } from "../../parsers/parse-phase-artifacts";
 import { stripNamespace } from "../../utils/strip-namespace";
@@ -57,6 +57,22 @@ function readableSpecArtifact(state: TaskGraph): string | null {
     spec = findFile(state.spec_dir, "spec.md");
   }
   return spec && phaseArtifactExists(spec) ? spec : null;
+}
+
+/**
+ * Whether one completed phase Agent may apply its result to the current graph.
+ *
+ * `init` is the unarmed state created before the first Agent starts, so the
+ * first brainstorm result is its sole legal completion. Every later result
+ * must match the active Phase exactly; stale and future completions fail
+ * closed in both harnesses.
+ */
+export function isPhaseResultEligible(
+  currentPhase: Phase,
+  completedPhase: Phase,
+): boolean {
+  return currentPhase === completedPhase ||
+    (currentPhase === "init" && completedPhase === "brainstorm");
 }
 
 /** Determine next phase + artifact after a phase completes */
@@ -163,12 +179,13 @@ const handler: HookHandler = async (stdin) => {
   }
   if (!mgr) return { kind: "passthrough" };
 
-  // Guard: skip if phase already advanced past this one
+  // The initial graph is deliberately unarmed. Its brainstorm completion is
+  // the only legal non-equal pair; every later completion must match exactly.
   const currentState = mgr.load();
-  const currentIdx = PHASE_ORDER.indexOf(currentState.current_phase);
-  const completedIdx = PHASE_ORDER.indexOf(completedPhase);
-  if (completedIdx >= 0 && currentIdx > completedIdx) {
-    return passthroughDiagnostic(`Phase ${completedPhase} already past (current: ${currentState.current_phase}), skipping.\n`);
+  if (!isPhaseResultEligible(currentState.current_phase, completedPhase)) {
+    return passthroughDiagnostic(
+      `Phase ${completedPhase} result is not eligible while current phase is ${currentState.current_phase}, skipping.\n`,
+    );
   }
 
   // Extract artifacts from transcript before checking transition. Resolved,

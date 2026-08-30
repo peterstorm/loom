@@ -2,9 +2,10 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import advancePhaseHandler, {
   resolveTransition,
   countMarkers,
+  isPhaseResultEligible,
 } from "../../../src/handlers/subagent-stop/advance-phase";
 import { findFile } from "../../../src/utils/find-file";
-import { CLARIFY_THRESHOLD, PHASE_AGENT_MAP, ARCH_PANEL_AGENTS } from "../../../src/config";
+import { CLARIFY_THRESHOLD, PHASE_AGENT_MAP, PHASE_ORDER, ARCH_PANEL_AGENTS } from "../../../src/config";
 import { stripNamespace } from "../../../src/utils/strip-namespace";
 import type { TaskGraph } from "../../../src/types";
 import { mkdtempSync, writeFileSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
@@ -82,6 +83,27 @@ describe("findFile", () => {
 
   it("returns null for missing directory", () => {
     expect(findFile(join(tmpDir, "nope"), "f.md")).toBeNull();
+  });
+});
+
+// ── phase result eligibility ─────────────────────────────────────
+
+describe("isPhaseResultEligible", () => {
+  it("accepts every exact active-Phase completion and the initial brainstorm handoff", () => {
+    for (const phase of PHASE_ORDER) {
+      expect(isPhaseResultEligible(phase, phase)).toBe(true);
+    }
+    expect(isPhaseResultEligible("init", "brainstorm")).toBe(true);
+  });
+
+  it("rejects every other stale or future completion", () => {
+    for (const currentPhase of PHASE_ORDER) {
+      for (const completedPhase of PHASE_ORDER) {
+        if (currentPhase === completedPhase ||
+            (currentPhase === "init" && completedPhase === "brainstorm")) continue;
+        expect(isPhaseResultEligible(currentPhase, completedPhase)).toBe(false);
+      }
+    }
   });
 });
 
