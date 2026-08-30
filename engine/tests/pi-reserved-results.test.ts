@@ -29,7 +29,7 @@ const item = (over: Partial<ReservedResultItem> = {}): ReservedResultItem => ({
 });
 
 /** The parseable envelope shape required before a result DID arrive. */
-const returned = (agent: string) => ({ agent, task: "Task: T1", exitCode: 0, messages: [] });
+const returned = (agent: string, taskId = "T1") => ({ agent, task: `Task: ${taskId}`, exitCode: 0, messages: [] });
 
 function authority(taskId: string, reservation: string) {
   const instant = parseIsoInstant("2026-08-24T00:00:00.000Z");
@@ -156,6 +156,18 @@ describe("classifyMissingReservedResults", () => {
       const missing = classifyMissingReservedResults([item()], [returned("loom:code-reviewer")], false);
 
       expect(missing.reviews).toEqual([]);
+    });
+
+    it("treats a matching reviewer for the wrong Task as missing reserved evidence", () => {
+      const missing = classifyMissingReservedResults([item()], [returned("code-reviewer", "T2")], false);
+
+      expect(missing.reviews).toEqual([{ item: item(), index: 0 }]);
+    });
+
+    it("requires the reserved Task identity for Task-bound run reviewers too", () => {
+      const missing = classifyMissingReservedResults([item()], [returned("code-reviewer", "T2")], true);
+
+      expect(missing.runResults).toEqual([{ item: item(), index: 0 }]);
     });
 
     it.each([

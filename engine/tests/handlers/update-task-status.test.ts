@@ -538,9 +538,10 @@ describe("analyzeNewTests (pure)", () => {
 /**
  * Harness compatibility: SubagentStop without `agent_transcript_path`.
  *
- * This handler is the ONLY writer of task status, and it resolves the task id
- * from the transcript (falling back to a single-entry `executing_tasks`). A
- * harness that sends no transcript path therefore recorded NOTHING — tasks
+ * This handler owns task-status settlement for the SubagentStop implementation
+ * completion path, and it resolves the task id from the transcript (falling
+ * back to a single-entry `executing_tasks`). A harness that sends no transcript
+ * path therefore recorded NOTHING — tasks
  * stayed `pending`, `test_result` stayed null, and not one line reached stderr
  * saying so, while the transcript sat on disk the whole time.
  */

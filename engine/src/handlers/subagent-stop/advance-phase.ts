@@ -228,7 +228,7 @@ const handler: HookHandler = async (stdin) => {
   // sends no `agent_transcript_path` records no spec_file/plan_file here and
   // leans entirely on the filesystem sweep further down.
   const transcriptPath = resolveAgentTranscriptPath(input);
-  if (input.agent_transcript_path !== undefined && transcriptPath === null) {
+  if (input.agent_transcript_path?.trim() && transcriptPath === null) {
     return {
       kind: "error",
       message: `advance-phase: supplied transcript is unavailable: ${input.agent_transcript_path}`,
@@ -314,21 +314,35 @@ const handler: HookHandler = async (stdin) => {
     };
   }
 
-  const { nextPhase, artifact, skipClarify } = transition;
+  type LockedTransitionOutcome =
+    | PhaseTransitionResolution
+    | Readonly<{ kind: "refused"; result: HookResult }>;
 
-  let commitPhaseRefusal: HookResult | null = null;
+  let lockedOutcome: LockedTransitionOutcome;
   try {
-    await mgr.update((s) => {
-      commitPhaseRefusal = phaseAuthorityRefusal(s.current_phase, completedPhase);
-      if (commitPhaseRefusal !== null) return s;
+    lockedOutcome = await mgr.updateAndReturn<LockedTransitionOutcome>((s) => {
+      const refusal = phaseAuthorityRefusal(s.current_phase, completedPhase);
+      if (refusal !== null) return { state: s, value: { kind: "refused", result: refusal } };
+
+      // Transition-relevant authority can change while the Phase stays the
+      // same. Recompute from the locked TaskGraph so the artifact and target
+      // committed below come from one linearized observation.
+      const lockedTransition = resolveTransition(completedPhase, s);
+      if (lockedTransition.kind === "not-ready") {
+        return { state: s, value: lockedTransition };
+      }
+      const { nextPhase, artifact, skipClarify } = lockedTransition;
       return {
-        ...s,
-        current_phase: nextPhase,
-        phase_artifacts: { ...s.phase_artifacts, [completedPhase]: artifact },
-        skipped_phases: skipClarify
-          ? ([...new Set([...s.skipped_phases, "clarify" as Phase])] as Phase[])
-          : s.skipped_phases,
-        updated_at: new Date().toISOString(),
+        state: {
+          ...s,
+          current_phase: nextPhase,
+          phase_artifacts: { ...s.phase_artifacts, [completedPhase]: artifact },
+          skipped_phases: skipClarify
+            ? ([...new Set([...s.skipped_phases, "clarify" as Phase])] as Phase[])
+            : s.skipped_phases,
+          updated_at: new Date().toISOString(),
+        },
+        value: lockedTransition,
       };
     });
   } catch (e) {
@@ -337,10 +351,16 @@ const handler: HookHandler = async (stdin) => {
       message: `advance-phase: failed to write phase transition: ${e instanceof Error ? e.message : String(e)}`,
     };
   }
-  if (commitPhaseRefusal !== null) return commitPhaseRefusal;
+  if (lockedOutcome.kind === "refused") return lockedOutcome.result;
+  if (lockedOutcome.kind === "not-ready") {
+    return {
+      kind: "error",
+      message: `advance-phase: ${completedPhase} completed but locked phase transition is not ready: ${lockedOutcome.reason}; phase NOT advanced`,
+    };
+  }
 
-  process.stderr.write(`Phase advanced: ${completedPhase} → ${nextPhase}\n`);
-  if (skipClarify) {
+  process.stderr.write(`Phase advanced: ${completedPhase} → ${lockedOutcome.nextPhase}\n`);
+  if (lockedOutcome.skipClarify) {
     process.stderr.write(`  (clarify auto-skipped: markers ≤ ${CLARIFY_THRESHOLD})\n`);
   }
 

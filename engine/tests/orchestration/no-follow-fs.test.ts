@@ -10,7 +10,7 @@
  * dropping the flag from any one of them must fail a test rather than silently
  * start following links out of the run directory.
  */
-import { closeSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
@@ -18,6 +18,7 @@ import { openRunDirectory } from "../../src/orchestration/run-directory-handle";
 import {
   anchoredChildPath,
   assertAnchoredFilesystemPlatformSupported,
+  closeAnchorGuarded,
   closeAnchoredDirectory,
   ensureDirectoryNoFollow,
   ensureRelativeDirectoryNoFollow,
@@ -84,6 +85,27 @@ describe("directory creation refuses symlinked ancestors", () => {
       closeAnchoredDirectory(anchored);
     }
   });
+
+  it.skipIf(process.platform !== "darwin")(
+    "Darwin re-proves a swapped parent before mkdir can create through its replacement symlink",
+    () => {
+      const root = workspace();
+      const runDir = join(root, "run");
+      const movedRun = join(root, "moved-run");
+      const outside = join(root, "outside");
+      mkdirSync(outside);
+      const anchored = openDirectoryNoFollow(runDir);
+      try {
+        renameSync(runDir, movedRun);
+        symlinkSync(outside, runDir);
+        expect(() => ensureRelativeDirectoryNoFollow(anchored, runDir, join(runDir, "child")))
+          .toThrow(/ELOOP|too many symbolic|changed identity/i);
+        expect(existsSync(join(outside, "child"))).toBe(false);
+      } finally {
+        closeAnchoredDirectory(anchored);
+      }
+    },
+  );
 });
 
 describe("reads refuse to follow a planted symlink", () => {
@@ -415,6 +437,19 @@ describe("platform anchoring", () => {
     expect(() => closeAnchoredDirectory(anchored)).toThrow(/EBADF|bad file descriptor/i);
     expect(() => anchoredChildPath(anchored, "x"))
       .toThrow("was not produced by the no-follow filesystem boundary");
+  });
+
+  it("aggregates a primary operation failure with an anchored-directory close failure", () => {
+    const root = workspace();
+    const anchored = openDirectoryNoFollow(join(root, "run"));
+    closeSync(anchored.fd);
+
+    const failure = closeAnchorGuarded(anchored, new Error("state load failed"), "state load");
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors.map(String)).toEqual([
+      "Error: state load failed",
+      expect.stringMatching(/EBADF|bad file descriptor/i),
+    ]);
   });
 
   it("rejects unsupported runtimes before orchestration startup", () => {

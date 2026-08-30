@@ -1,10 +1,11 @@
 /**
  * Auto-store findings when review sub-agents complete — the Claude Code half.
  *
- * All parsing, reconciliation, and state transformation lives in
- * `core/review-output.ts`. This file is the imperative shell: read the
- * transcript, find the task, write, log. `pi/extension.ts` is the same shell
- * over the same core, which is what keeps the two harnesses from drifting.
+ * Review-output parsing, reconciliation, and state transformation lives in
+ * `core/review-output.ts`. This imperative shell parses SubagentStop identity
+ * and the trusted first prompt, then reads the transcript, finds the Task,
+ * writes, and logs. `pi/extension.ts` is the same shell over the shared review
+ * core, which is what keeps the two harnesses from drifting.
  *
  * Every early return that DISCARDS a reviewer's output fails with a contextual
  * error; discard paths reached after identity parsing also use the shared logger.

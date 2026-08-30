@@ -9,16 +9,45 @@
  * explicit `SPEC_CHECK_OVERRIDE:` reason for a modern graph.
  */
 
-import type { HookHandler } from "../../types";
+import type { HookHandler, HookResult } from "../../types";
 import { TASK_GRAPH_PATH } from "../../config";
-import { decideSpecCheckManualOverride, parseSpecCheckOutput, reconcileSpecCheck } from "../../core/spec-check";
+import {
+  decideSpecCheckManualOverride,
+  parseSpecCheckOutput,
+  reconcileSpecCheck,
+  type SpecCheckManualOverride,
+} from "../../core/spec-check";
 import { reconcileWaveBlock } from "../../core/wave-gate-model";
 import { StateManager } from "../../state-manager";
 
-const handler: HookHandler = async (stdin) => {
-  const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
-  if (!mgr) return { kind: "error", message: `No task graph at ${TASK_GRAPH_PATH}` };
+type SpecCheckStore = Pick<StateManager, "updateAndReturn">;
 
+type ManualStoreOutcome =
+  | Readonly<{ kind: "refused"; override: Exclude<SpecCheckManualOverride, { kind: "allowed" }> }>
+  | Readonly<{ kind: "invalid-evidence"; message: string }>
+  | Readonly<{
+      kind: "stored";
+      wave: number;
+      criticalCount: number;
+      verdict: string;
+      overrideReason: string | null;
+    }>;
+
+const overrideError = (override: Exclude<SpecCheckManualOverride, { kind: "allowed" }>): string =>
+  override.kind === "refused-active"
+    ? "store-spec-check: a registered Wave Gate owns this Wave, so only its captured " +
+      `spec-check evidence may write (${override.problem}) — persist the corrected findings and resume that ` +
+      "Run Directory with `helper orchestration resume`, or start a fresh /wave-gate run. spec_check NOT updated"
+    : "store-spec-check: a modern TaskGraph makes a manual spec-check write an operator " +
+      "override, which must be attributable — add a 'SPEC_CHECK_OVERRIDE: <reason>' line " +
+      `(${override.problem}). spec_check NOT updated`;
+
+/** Decide manual authority and commit its evidence under one StateManager lock. */
+export async function runStoreSpecCheck(
+  stdin: string,
+  manager: SpecCheckStore,
+  runAt: string = new Date().toISOString(),
+): Promise<HookResult> {
   const parsed = parseSpecCheckOutput(stdin);
   if (parsed.criticalCount === null) {
     return { kind: "error", message: "SPEC_CHECK_CRITICAL_COUNT marker required" };
@@ -27,42 +56,50 @@ const handler: HookHandler = async (stdin) => {
     return { kind: "error", message: "SPEC_CHECK_VERDICT marker required" };
   }
 
-  const state = mgr.load();
-  const override = decideSpecCheckManualOverride(state, parsed.overrideReason);
-  if (override.kind === "refused-active") {
-    return {
-      kind: "error",
-      message: "store-spec-check: a registered Wave Gate owns this Wave, so only its captured " +
-        `spec-check evidence may write (${override.problem}) — persist the corrected findings and resume that ` +
-        "Run Directory with `helper orchestration resume`, or start a fresh /wave-gate run. spec_check NOT updated",
-    };
-  }
-  if (override.kind === "requires-reason") {
-    return {
-      kind: "error",
-      message: "store-spec-check: a modern TaskGraph makes a manual spec-check write an operator " +
-        "override, which must be attributable — add a 'SPEC_CHECK_OVERRIDE: <reason>' line " +
-        `(${override.problem}). spec_check NOT updated`,
-    };
-  }
+  const outcome = await manager.updateAndReturn<ManualStoreOutcome>((state) => {
+    const override = decideSpecCheckManualOverride(state, parsed.overrideReason);
+    if (override.kind !== "allowed") {
+      return { state, value: Object.freeze({ kind: "refused", override }) };
+    }
 
-  const wave = parsed.wave ?? state.current_wave ?? 1;
-  const resolution = reconcileSpecCheck(parsed, wave, new Date().toISOString());
-  if (resolution.kind === "evidence-failed") {
-    return { kind: "error", message: resolution.specCheck.error };
-  }
+    const wave = parsed.wave ?? state.current_wave ?? 1;
+    const resolution = reconcileSpecCheck(parsed, wave, runAt);
+    if (resolution.kind === "evidence-failed") {
+      return {
+        state,
+        value: Object.freeze({ kind: "invalid-evidence", message: resolution.specCheck.error }),
+      };
+    }
+    return {
+      state: {
+        ...state,
+        spec_check: resolution.specCheck,
+        wave_gates: reconcileWaveBlock(state.wave_gates, state.tasks, resolution.specCheck, wave),
+      },
+      value: Object.freeze({
+        kind: "stored",
+        wave,
+        criticalCount: resolution.specCheck.critical_count,
+        verdict: resolution.specCheck.verdict,
+        overrideReason: override.reason,
+      }),
+    };
+  });
 
-  await mgr.update((state) => ({
-    ...state,
-    spec_check: resolution.specCheck,
-    wave_gates: reconcileWaveBlock(state.wave_gates, state.tasks, resolution.specCheck, wave),
-  }));
+  if (outcome.kind === "refused") return { kind: "error", message: overrideError(outcome.override) };
+  if (outcome.kind === "invalid-evidence") return { kind: "error", message: outcome.message };
   process.stderr.write(
-    `Spec-check stored: wave=${wave} critical=${resolution.specCheck.critical_count} ` +
-      `verdict=${resolution.specCheck.verdict}` +
-      `${override.reason === null ? "" : ` (manual operator override: ${override.reason})`}\n`,
+    `Spec-check stored: wave=${outcome.wave} critical=${outcome.criticalCount} verdict=${outcome.verdict}` +
+      `${outcome.overrideReason === null ? "" : ` (manual operator override: ${outcome.overrideReason})`}\n`,
   );
   return { kind: "passthrough" };
+}
+
+const handler: HookHandler = async (stdin) => {
+  const manager = StateManager.fromPath(TASK_GRAPH_PATH);
+  return manager === null
+    ? { kind: "error", message: `No task graph at ${TASK_GRAPH_PATH}` }
+    : runStoreSpecCheck(stdin, manager);
 };
 
 export default handler;

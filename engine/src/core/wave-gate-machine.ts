@@ -1217,13 +1217,40 @@ export type WaveGateNextActionError = Readonly<{
   message: string;
 }>;
 
+function lifecycleCheckpointIdentityIsExact(
+  state: WaveGateState,
+  registration: ActiveWaveGateRegistration,
+  readinessDigest: WaveReadinessSnapshot["readinessDigest"],
+): boolean {
+  return waveGateLifecycleProofs.has(state) &&
+    state.runId === registration.runId &&
+    state.registrationRevision === registration.revision &&
+    state.authorityDigest === registration.authorityDigest &&
+    state.readinessDigest === readinessDigest;
+}
+
 function lifecycleMatchesSnapshot(state: WaveGateState, snapshot: WaveReadinessSnapshot): boolean {
-  return waveGateLifecycleProofs.has(state) && waveReadinessProofs.has(snapshot) &&
+  return waveReadinessProofs.has(snapshot) &&
     snapshot.graph.active_wave_gate === snapshot.registration &&
-    state.runId === snapshot.registration.runId &&
-    state.registrationRevision === snapshot.registration.revision &&
-    state.authorityDigest === snapshot.registration.authorityDigest &&
-    state.readinessDigest === snapshot.readinessDigest;
+    lifecycleCheckpointIdentityIsExact(state, snapshot.registration, snapshot.readinessDigest);
+}
+
+function nextActionProofIdentityIsExact(
+  proof: WaveGateNextAction,
+  registration: ActiveWaveGateRegistration,
+  readinessDigest: WaveReadinessSnapshot["readinessDigest"],
+  lifecycle: WaveGateState["kind"],
+  checkpointDigest: WaveGateLifecycleCheckpoint["checkpointDigest"],
+): boolean {
+  const binding = proof.binding;
+  return waveNextActionProofs.has(proof) &&
+    proof.lifecycle === lifecycle &&
+    proof.action.runId === registration.runId &&
+    binding.runId === registration.runId &&
+    binding.registrationRevision === registration.revision &&
+    binding.authorityDigest === registration.authorityDigest &&
+    binding.readinessDigest === readinessDigest &&
+    binding.lifecycleCheckpointDigest === checkpointDigest;
 }
 
 function actionBinding(state: WaveGateState): WaveGateProtectedSnapshotBinding {
@@ -1565,20 +1592,17 @@ export function deriveWaveReadiness(
   );
   if (lifecycleProof !== null) {
     const { nextActionAuthority, lifecycleCheckpoint } = lifecycleProof;
-    const binding = nextActionAuthority.binding;
-    const exactBinding = waveNextActionProofs.has(nextActionAuthority) &&
-      waveGateLifecycleProofs.has(lifecycleCheckpoint) &&
-      nextActionAuthority.action.runId === registration.runId &&
-      binding.runId === registration.runId &&
-      binding.registrationRevision === registration.revision &&
-      binding.authorityDigest === registration.authorityDigest &&
-      binding.readinessDigest === completion.readinessDigest &&
-      binding.lifecycleCheckpointDigest === lifecycleCheckpoint.checkpointDigest &&
-      lifecycleCheckpoint.runId === registration.runId &&
-      lifecycleCheckpoint.registrationRevision === registration.revision &&
-      lifecycleCheckpoint.authorityDigest === registration.authorityDigest &&
-      lifecycleCheckpoint.readinessDigest === completion.readinessDigest &&
-      nextActionAuthority.lifecycle === lifecycleCheckpoint.kind;
+    const exactBinding = lifecycleCheckpointIdentityIsExact(
+      lifecycleCheckpoint,
+      registration,
+      completion.readinessDigest,
+    ) && nextActionProofIdentityIsExact(
+      nextActionAuthority,
+      registration,
+      completion.readinessDigest,
+      lifecycleCheckpoint.kind,
+      lifecycleCheckpoint.checkpointDigest,
+    );
     if (!exactBinding) {
       return canonicalRecord({
         ok: false,
@@ -1919,9 +1943,10 @@ const projectionFailure = (message: string): DomainResult<WaveGateState, WaveGat
  * interface, the whole stage decision behind it, callable by the façade and by
  * `status` alike.
  *
- * Every transition goes through `reduceWaveGate`, so a combination of facts
- * that no declared transition admits is a rejection rather than a stage nobody
- * checked. The order below IS the wave's order: publish, collect, adjudicate
+ * Every transition goes through the reducer's union replay entry point, so a
+ * combination of facts that no declared transition admits is a rejection rather
+ * than a stage nobody checked. The order below IS the wave's order: publish,
+ * collect, adjudicate
  * criticals, triage advisories, complete.
  */
 export function projectWaveGateLifecycle(
@@ -1995,15 +2020,31 @@ export type WaveAdvisoryDecisionRequest = Readonly<{
   advisories: NonEmpty<WaveAdvisoryArtifactMaterial>;
 }>;
 
-/** Strip publication bytes only after the same material produced every ref. */
-export function waveAdvisoryDecisionActionRequest(material: WaveAdvisoryDecisionRequest) {
-  return canonicalRecord({
+const waveAdvisoryDecisionMaterialProofs = new WeakSet<object>();
+
+/** Strip publication bytes only from the exact material set derived by core. */
+export function waveAdvisoryDecisionActionRequest(
+  material: WaveAdvisoryDecisionRequest,
+): DomainResult<Readonly<{
+  kind: "advisory-triage";
+  requestId: RequestId;
+  runId: OrchestrationRunId;
+  context: Readonly<{
+    digest: import("./orchestration-contract").ContextDigest;
+    slot: Readonly<{ kind: "fixed-artifact-slot"; path: string }>;
+  }>;
+  advisories: NonEmpty<ArtifactRef>;
+}>, WavePreparationError> {
+  if (!waveAdvisoryDecisionMaterialProofs.has(material) || material.decisionDigest !== material.context.digest) {
+    return preparationFailure("advisory action requires one exact core-derived decision material set");
+  }
+  return canonicalRecord({ ok: true, value: canonicalRecord({
     kind: "advisory-triage" as const,
     requestId: material.requestId,
     runId: material.advisories[0].reference.runId,
     context: canonicalRecord({ digest: material.context.digest, slot: material.context.slot }),
     advisories: Object.freeze(material.advisories.map(({ reference }) => reference)) as NonEmpty<ArtifactRef>,
-  });
+  }) });
 }
 
 /** One pure source for advisory bytes, references, and request identity. */
@@ -2057,16 +2098,18 @@ export function deriveWaveAdvisoryDecisionRequest(
   if (!contextDigest.ok) return preparationFailure(contextDigest.error.message);
   const requestId = parseRequestId(`advisory-decision:${contextDigest.value.slice(0, 32)}`);
   if (!requestId.ok) return preparationFailure(requestId.error.message);
-  return canonicalRecord({ ok: true, value: canonicalRecord({
+  const material = canonicalRecord({
     requestId: requestId.value,
     decisionDigest: contextDigest.value,
     context: canonicalRecord({
       digest: contextDigest.value,
-      slot: canonicalRecord({ kind: "fixed-artifact-slot", path: `contexts/${contextDigest.value}.json` }),
+      slot: canonicalRecord({ kind: "fixed-artifact-slot" as const, path: `contexts/${contextDigest.value}.json` }),
       bytes: contextBytes,
     }),
     advisories: Object.freeze(advisories) as NonEmpty<WaveAdvisoryArtifactMaterial>,
-  }) });
+  });
+  waveAdvisoryDecisionMaterialProofs.add(material);
+  return canonicalRecord({ ok: true, value: material });
 }
 
 export type WaveGateDriveStep =
@@ -2126,8 +2169,8 @@ export function deriveWaveGateDriveStep(
 }
 
 /** Advisory policy remains user-owned. The engine derives whether the action
- * exists from canonical advisory counts and only accepts the exact run-sized
- * T1 advisory request. */
+ * exists from canonical advisory counts and only accepts the exact Wave/run-
+ * scoped advisory request. */
 export function deriveWaveAdvisoryNextAction(
   snapshot: WaveReadinessSnapshot,
   state: Extract<WaveGateState, { kind: "awaiting-advisory-decision" }>,
@@ -2137,7 +2180,9 @@ export function deriveWaveAdvisoryNextAction(
   }
   const request = deriveWaveAdvisoryDecisionRequest(snapshot.registration.runId, snapshot.waveTasks);
   if (!request.ok) return request;
-  const built = awaitUserAction(waveAdvisoryDecisionActionRequest(request.value));
+  const actionRequest = waveAdvisoryDecisionActionRequest(request.value);
+  if (!actionRequest.ok) return actionRequest;
+  const built = awaitUserAction(actionRequest.value);
   if (!built.ok) return preparationFailure(built.error.message);
   const proven = proveWaveGateNextAction(snapshot, state, built.value);
   return proven.ok ? canonicalRecord({ ok: true, value: proven.value }) : preparationFailure(proven.error.message);
@@ -2210,16 +2255,17 @@ function engineResumeAction(runId: OrchestrationRunId): EngineResumeAction {
 function snapshotActionProofIsExact(snapshot: WaveReadinessSnapshot): boolean {
   const proof = snapshot.nextActionAuthority;
   if (proof === null) return snapshot.lifecycleCheckpointDigest === null;
-  const binding = proof.binding;
-  return waveReadinessProofs.has(snapshot) && waveNextActionProofs.has(proof) &&
+  return waveReadinessProofs.has(snapshot) &&
     snapshot.graph.active_wave_gate === snapshot.registration &&
     proof.kind !== "completed" &&
-    proof.action.runId === snapshot.registration.runId &&
-    binding.runId === snapshot.registration.runId &&
-    binding.registrationRevision === snapshot.registration.revision &&
-    binding.authorityDigest === snapshot.registration.authorityDigest &&
-    binding.readinessDigest === snapshot.readinessDigest &&
-    binding.lifecycleCheckpointDigest === snapshot.lifecycleCheckpointDigest;
+    snapshot.lifecycleCheckpointDigest !== null &&
+    nextActionProofIdentityIsExact(
+      proof,
+      snapshot.registration,
+      snapshot.readinessDigest,
+      proof.lifecycle,
+      snapshot.lifecycleCheckpointDigest,
+    );
 }
 
 /** Why the proven authority selected this action. One arm per authority kind. */
@@ -2519,23 +2565,31 @@ function unstartedWaveStatus(
  *
  * So status reduces LC-1 over the run's durable evidence and, only when the
  * stage is the advisory one, proves and reports the real await-user action.
- * Every other stage falls through to the ordinary readiness path — where
- * "resume the engine" is the correct answer, not a placeholder.
- *
- * `null` means "not the advisory stage, or it could not be proven" — the
- * caller continues, so a projection failure degrades to today's behaviour
- * rather than replacing a usable status with an error.
+ * Every other successfully projected stage falls through to the ordinary
+ * readiness path — where "resume the engine" is the correct answer, not a
+ * placeholder. A failed projection or proof returns explicit unavailable
+ * status; `null` is reserved for a successfully proven non-advisory stage.
  */
+function unavailableAdvisoryProjection(message: string): LoomStatus {
+  return deriveUnavailableLoomStatus(Object.freeze([
+    unavailableStatusReason(message),
+  ]) as NonEmpty<StatusReason>);
+}
+
 function projectedAdvisoryStatus(
   graph: TaskGraph,
   deps: GateDeps,
   runDirectory: ActiveRunDirectoryObservation,
 ): LoomStatus | null {
   const snapshot = deriveWaveReadiness(graph, deps);
-  if (!snapshot.ok) return null;
+  if (!snapshot.ok) return deriveUnavailableLoomStatus(snapshot.error.reasons);
   const counts = snapshot.value.facts.findingCounts;
   const runs = snapshot.value.facts.reviewRuns;
-  if (counts.kind !== "known" || runs.kind !== "known") return null;
+  if (counts.kind !== "known" || runs.kind !== "known") {
+    return unavailableAdvisoryProjection(
+      "LC-1 advisory projection requires canonical Finding and Review Run facts",
+    );
+  }
 
   const rosterComplete = runs.value.rosterGaps.length === 0 && runs.value.evidenceFailures.length === 0;
   const evidence: WaveGateLifecycleEvidence = canonicalRecord({
@@ -2553,15 +2607,24 @@ function projectedAdvisoryStatus(
   });
 
   const state = projectWaveGateLifecycle(snapshot.value, evidence);
-  if (!state.ok || state.value.kind !== "awaiting-advisory-decision") return null;
+  if (!state.ok) {
+    return unavailableAdvisoryProjection(`cannot project LC-1 advisory lifecycle: ${state.error.message}`);
+  }
+  if (state.value.kind !== "awaiting-advisory-decision") return null;
   const proven = deriveWaveAdvisoryNextAction(snapshot.value, state.value);
-  if (!proven.ok) return null;
+  if (!proven.ok) {
+    return unavailableAdvisoryProjection(`cannot prove LC-1 advisory action: ${proven.error.message}`);
+  }
 
   const bound = deriveWaveReadiness(graph, deps, canonicalRecord({
     nextActionAuthority: proven.value,
     lifecycleCheckpoint: state.value,
   }));
-  return bound.ok ? deriveLoomStatus(bound.value) : null;
+  return bound.ok
+    ? deriveLoomStatus(bound.value)
+    : unavailableAdvisoryProjection(
+        `cannot bind LC-1 advisory action to protected readiness: ${bound.error.reasons.map(({ message }) => message).join("; ")}`,
+      );
 }
 
 /** Anti-corruption adapter from the protected-state parser into the canonical status contract. */

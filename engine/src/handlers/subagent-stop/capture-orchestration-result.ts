@@ -60,19 +60,19 @@ export type { CaptureOutcome };
  * decision, and pre-selecting one would turn `ambiguous-final-payload` into an
  * unreachable refusal on this path.
  */
+class ClaudeTranscriptReadError extends Error {}
+
 export function claudeFinalPayloadCandidates(transcriptPath: string): readonly FinalPayloadCandidate[] {
   // One read, no pre-check: `existsSync` returns false for ELOOP/ENOTDIR too,
   // which would turn an unreadable transcript into a silent "no candidates"
-  // before readFileSync could surface the cause. Absence (ENOENT) keeps the
-  // documented "no transcript → no candidate" meaning; every other read
-  // failure (EACCES, ELOOP, EISDIR, ENOTDIR, EIO, ...) is a real cause the
-  // operator must see instead of a generic missing-payload rejection.
+  // before readFileSync could surface the cause. Once the locator selected this
+  // path, EVERY read failure — including ENOENT when the file disappeared — is
+  // filesystem evidence the operator must see, never a missing-payload claim.
   const lines = ((): readonly string[] => {
     try {
       return readFileSync(transcriptPath, "utf-8").split("\n");
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return Object.freeze([]);
-      throw new Error(
+      throw new ClaudeTranscriptReadError(
         `cannot read Claude transcript ${transcriptPath}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
@@ -175,31 +175,34 @@ export async function captureClaudeResult(
   runsRoot: string | undefined,
   runDirectory: string | undefined,
 ): Promise<CaptureOutcome> {
-  // Only a COMPLETE run authority makes a transcript worth locating: with one
-  // half missing the runtime below refuses with `run-authority`, and with
-  // neither there is no slot to fill at all. Locating a transcript in either
-  // case would turn an unrelated — or misconfigured — stop into a
-  // `transcript-locator` refusal, blaming the locator for someone else's fault.
-  const hasRunAuthority = runsRoot !== undefined && runDirectory !== undefined;
-  let candidates: readonly FinalPayloadCandidate[] = Object.freeze([]);
-  if (hasRunAuthority) {
-    const transcriptPath = resolveAgentTranscriptPath(input);
-    if (transcriptPath === null) {
-      return {
-        kind: "rejected",
-        reason: "transcript-locator",
-        message: `no transcript can be located for session ${JSON.stringify(input.session_id ?? "")} agent ${JSON.stringify(input.agent_id ?? "")}: none was supplied and the derived path does not exist`,
-      };
-    }
-    try {
-      candidates = claudeFinalPayloadCandidates(transcriptPath);
-    } catch (error) {
-      return {
-        kind: "rejected",
-        reason: "transcript-json",
-        message: error instanceof Error ? error.message : String(error),
-      };
-    }
+  // Prove this native id owns an issued reservation BEFORE transcript lookup or
+  // reads. An unreserved stop belongs to no slot and therefore cannot make an
+  // unrelated filesystem path authoritative enough to fail capture.
+  const resolved = resolveCorrelatedRequest({
+    harness: "claude",
+    runsRoot,
+    runDirectory,
+    nativeId: typeof input.agent_id === "string" ? input.agent_id : "",
+  });
+  if (!resolved.ok) return resolved.outcome;
+
+  const transcriptPath = resolveAgentTranscriptPath(input);
+  if (transcriptPath === null) {
+    return {
+      kind: "rejected",
+      reason: "transcript-locator",
+      message: `no transcript can be located for session ${JSON.stringify(input.session_id ?? "")} agent ${JSON.stringify(input.agent_id ?? "")}: none was supplied and the derived path does not exist`,
+    };
+  }
+  let candidates: readonly FinalPayloadCandidate[];
+  try {
+    candidates = claudeFinalPayloadCandidates(transcriptPath);
+  } catch (error) {
+    return {
+      kind: "rejected",
+      reason: error instanceof ClaudeTranscriptReadError ? "transcript-read" : "transcript-json",
+      message: error instanceof Error ? error.message : String(error),
+    };
   }
   return captureHarnessResult({
     harness: "claude",

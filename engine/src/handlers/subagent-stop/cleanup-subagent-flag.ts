@@ -19,6 +19,8 @@ import {
 import { removeImplementationAttemptSidecar } from "../../implementation-attempt-sidecar";
 import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 
+const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
+
 export const runCleanupSubagentFlag = async (
   stdin: string,
   registry: SessionRegistry = fsSessionRegistry,
@@ -81,7 +83,7 @@ export const runCleanupSubagentFlag = async (
         failures.push(`machine unbind identity is ambiguous for ${agent_id}/${sessionId}`);
       }
     } catch (error) {
-      failures.push(`machine binding lookup failed for ${agent_id}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+      failures.push(`machine binding lookup failed for ${agent_id}/${sessionId}: ${errorMessage(error)}`);
     }
   }
   if (boundAgentType !== null && boundAgentId !== null) {
@@ -91,7 +93,7 @@ export const runCleanupSubagentFlag = async (
         failures.push(`machine unbind lost exact ownership for ${agent_id}/${sessionId}`);
       }
     } catch (error) {
-      failures.push(`machine unbind failed for ${agent_id}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+      failures.push(`machine unbind failed for ${agent_id}/${sessionId}: ${errorMessage(error)}`);
     }
   }
 
@@ -99,7 +101,7 @@ export const runCleanupSubagentFlag = async (
     try {
       removeSidecar(sessionId, agent_id);
     } catch (error) {
-      failures.push(`implementation sidecar cleanup failed for ${agent_id}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+      failures.push(`implementation sidecar cleanup failed for ${agent_id}/${sessionId}: ${errorMessage(error)}`);
     }
   }
 
@@ -109,7 +111,7 @@ export const runCleanupSubagentFlag = async (
       failures.push(`task-graph pointer cleanup lost exact ownership for ${agent_id}/${sessionId}`);
     }
   } catch (error) {
-    failures.push(`task-graph pointer cleanup failed for ${agent_id}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+    failures.push(`task-graph pointer cleanup failed for ${agent_id}/${sessionId}: ${errorMessage(error)}`);
   }
 
   // Each cleanup capability is independent. Attempt roster removal even when
@@ -120,7 +122,7 @@ export const runCleanupSubagentFlag = async (
   try {
     await registry.removeActive(sessionId, reportedRosterAgentId(agent_id));
   } catch (error) {
-    failures.push(`roster cleanup failed for ${agent_id}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+    failures.push(`roster cleanup failed for ${agent_id}/${sessionId}: ${errorMessage(error)}`);
   }
 
   return failures.length === 0

@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 /**
  * `waveGateDecisionMismatch` is the guard that stops a Wave advisory decision
  * meant for one Wave Gate run from being applied to a stale or foreign one.
@@ -30,7 +30,12 @@ import {
 } from "../../../../src/core/wave-gate-machine";
 import { observedAdvisoryApproval } from "../../../../src/handlers/helpers/orchestration";
 import { derivePendingTaskProof } from "../../../../src/core/proof-obligations";
-import { parseRequestId } from "../../../../src/core/orchestration-contract";
+import {
+  parseRequestId,
+  type ArtifactDigest,
+  type OrchestrationRunId,
+} from "../../../../src/core/orchestration-contract";
+import type { WaveReviewRegistrationAuthority } from "../../../../src/core/wave-review-authority";
 import { buildContextPacket, encodeByteSection } from "../../../../src/orchestration/context-packets";
 import { openRunDirectory } from "../../../../src/orchestration/run-directory-handle";
 import type { RegisteredWaveGateProgram } from "../../../../src/handlers/helpers/programs/helpers";
@@ -96,6 +101,16 @@ const registration = (
 
 const pendingDecisionId = (): string => waveAdvisoryDecisionRequestId(RUN_ID, TASKS);
 
+describe("Wave review registration authority", () => {
+  it("requires an exact concrete Wave", () => {
+    type AllowsNull = null extends WaveReviewRegistrationAuthority["input"]["wave"] ? true : false;
+    const allowsNull: AllowsNull = false;
+
+    expect(allowsNull).toBe(false);
+    expect(registration().input.wave).toBe(1);
+  });
+});
+
 describe("wave review context authority", () => {
   const packetFor = (authority: unknown) => {
     const section = encodeByteSection("wave-review-authority", JSON.stringify(authority));
@@ -153,10 +168,22 @@ describe("wave review context authority", () => {
       specFile: null,
       planFile: null,
     });
-    expect(handleWaveReviewContext([packet], packet.digest)).toMatchObject({
+    const context = handleWaveReviewContext([packet], packet.digest);
+    expect(context).toMatchObject({
       kind: "loaded",
       value: { runId: RUN_ID, wave: 1, subject: { taskId: null }, taskRun: null },
     });
+    if (context.kind !== "loaded") return;
+    const brandedAuthority = (
+      runId: OrchestrationRunId,
+      authorityDigest: ArtifactDigest,
+      batchEpoch: ArtifactDigest,
+    ) => ({ runId, authorityDigest, batchEpoch });
+    expect(brandedAuthority(
+      context.value.runId,
+      context.value.authorityDigest,
+      context.value.batchEpoch,
+    )).toEqual({ runId: RUN_ID, authorityDigest: DIGEST, batchEpoch: "b".repeat(64) });
   });
 
   it("keeps exact spec-check packet membership after every reviewer run closes", () => {
@@ -467,6 +494,33 @@ describe("waveGateDecisionMismatch", () => {
         .toContain(`cannot determine advisory approval for ${RUN_ID}`);
     } finally {
       stderr.mockRestore();
+      rmSync(runsRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects copied advisory material before publishing any referenced bytes", async () => {
+    const runsRoot = canonicalTempDir("loom-wave-advisory-forged-");
+    const runDirectory = join(runsRoot, RUN_ID);
+    mkdirSync(runDirectory);
+    try {
+      const opened = openRunDirectory(runsRoot, runDirectory);
+      expect(opened.ok).toBe(true);
+      if (!opened.ok) return;
+      const material = deriveWaveAdvisoryDecisionRequest(RUN_ID, TASKS);
+      expect(material.ok).toBe(true);
+      if (!material.ok) return;
+
+      const published = await publishWaveAdvisoryDecisionRequest(opened.value, { ...material.value });
+
+      expect(published).toMatchObject({
+        ok: false,
+        message: expect.stringContaining("exact core-derived decision material set"),
+      });
+      expect(existsSync(join(runDirectory, material.value.context.slot.path))).toBe(false);
+      for (const advisory of material.value.advisories) {
+        expect(existsSync(join(runDirectory, advisory.reference.slot.path))).toBe(false);
+      }
+    } finally {
       rmSync(runsRoot, { recursive: true, force: true });
     }
   });

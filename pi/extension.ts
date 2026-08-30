@@ -112,9 +112,11 @@ import {
   captureHarnessResult,
   RUN_DIR_ENV,
   describeCaptureFailure,
+  resolveCorrelatedRequest,
   RUNS_ROOT_ENV,
   terminalizeCaptureRejection,
   type CaptureOutcome,
+  type CorrelatedRequestResolution,
 } from "../engine/src/orchestration/harness-capture-runtime";
 import { openRunDirectory, type RunDirHandle } from "../engine/src/orchestration/run-directory-handle";
 import {
@@ -136,7 +138,6 @@ import { captureKey, type CaptureKey } from "../engine/src/core/harness-capture"
 import {
   parseArtifactDigest,
   parseContextDigest,
-  type AgentRequestAuthority,
   type ArtifactDigest,
   type ContextDigest,
 } from "../engine/src/core/orchestration-contract";
@@ -155,6 +156,7 @@ import {
   revokePiWriteGrant,
   sweepExpiredPiWriteGrants,
   writeTargetViolatesScope,
+  type IssuedWriteGrant,
 } from "./write-grant";
 import {
   captureLoomRuntimeIdentity,
@@ -591,31 +593,19 @@ export async function recordPiSpawnCorrelators(
   return runBinding;
 }
 
-type PiRequestCorrelation =
-  | Readonly<{ ok: true; handle: RunDirHandle; request: AgentRequestAuthority }>
-  | Readonly<{ ok: false; kind: "run-directory" | "correlator" | "issued-requests"; message: string }>
-  | Readonly<{ ok: false; kind: "no-correlator" }>
-  | Readonly<{ ok: false; kind: "unknown-request"; requestId: string }>;
-
-/** Resolve one Pi result to the exact issued request its durable correlator names. */
+/** Resolve one Pi result through the shared harness correlation protocol. */
 function piRequestCorrelation(
   runBinding: SessionRunBinding,
   toolCallId: unknown,
   resultIndex: number,
   agentType: string,
-): PiRequestCorrelation {
-  const opened = openRunDirectory(runBinding.runsRoot, runBinding.runDirectory);
-  if (!opened.ok) return { ok: false, kind: "run-directory", message: opened.error.message };
-  const nativeId = piSpawnRosterId(toolCallId, resultIndex, agentType);
-  const correlator = opened.value.readHarnessCorrelator("pi", nativeId);
-  if (!correlator.ok) return { ok: false, kind: "correlator", message: correlator.error.message };
-  if (correlator.value === null) return { ok: false, kind: "no-correlator" };
-  const issued = opened.value.readIssuedRequests();
-  if (!issued.ok) return { ok: false, kind: "issued-requests", message: issued.error.message };
-  const request = issued.value.find(({ requestId }) => requestId === correlator.value?.requestId);
-  return request === undefined
-    ? { ok: false, kind: "unknown-request", requestId: correlator.value.requestId }
-    : { ok: true, handle: opened.value, request };
+): CorrelatedRequestResolution {
+  return resolveCorrelatedRequest({
+    harness: "pi",
+    runsRoot: runBinding.runsRoot,
+    runDirectory: runBinding.runDirectory,
+    nativeId: piSpawnRosterId(toolCallId, resultIndex, agentType),
+  });
 }
 
 /**
@@ -635,21 +625,35 @@ async function recordPiRequestCaptureRejection(
 ): Promise<string | null> {
   const correlation = piRequestCorrelation(runBinding, toolCallId, resultIndex, agentType);
   if (!correlation.ok) {
-    switch (correlation.kind) {
+    const unresolved = correlation.outcome;
+    if (unresolved.kind === "no-reservation") {
+      return `cannot resolve correlator for ${agentType}[${resultIndex}]: no binding found`;
+    }
+    if (unresolved.kind === "not-an-orchestration-run") {
+      return `cannot open run directory ${runBinding.runDirectory}: orchestration run authority was unavailable`;
+    }
+    if (unresolved.kind === "captured") {
+      return `cannot resolve correlator for ${agentType}[${resultIndex}]: correlation returned a capture receipt`;
+    }
+    switch (unresolved.reason) {
       case "run-directory":
-        return `cannot open run directory ${runBinding.runDirectory}: ${correlation.message}`;
+        return `cannot open run directory ${runBinding.runDirectory}: ${unresolved.message}`;
       case "correlator":
-        return `cannot resolve correlator for ${agentType}[${resultIndex}]: ${correlation.message}`;
-      case "no-correlator":
-        return `cannot resolve correlator for ${agentType}[${resultIndex}]: no binding found`;
-      case "issued-requests":
-        return `cannot read issued requests: ${correlation.message}`;
+        return `cannot resolve correlator for ${agentType}[${resultIndex}]: ${unresolved.message}`;
+      case "requests":
+        return `cannot read issued requests: ${unresolved.message}`;
       case "unknown-request":
-        return `correlator request ${correlation.requestId} has no issued authority`;
+        return unresolved.message;
+      default:
+        return describeCaptureFailure(unresolved);
     }
   }
 
-  const outcome = await terminalizeCaptureRejection(correlation.handle, correlation.request, { diagnostic });
+  const outcome = await terminalizeCaptureRejection(
+    correlation.value.handle,
+    correlation.value.request,
+    { diagnostic },
+  );
   return outcome.kind === "rejected" &&
       (outcome.reason === "rejection-persistence" || outcome.reason === "rejection-audit-unsynchronized")
     ? `${agentType}[${resultIndex}] ${outcome.message}`
@@ -665,18 +669,18 @@ function piResultAuthorityProblem(
 ): string | null {
   const correlation = piRequestCorrelation(runBinding, toolCallId, resultIndex, agentType);
   if (!correlation.ok) {
-    switch (correlation.kind) {
-      case "run-directory":
-      case "correlator":
-      case "issued-requests":
-        return correlation.message;
-      case "no-correlator":
-        return `no durable Pi correlator exists for result index ${resultIndex}`;
-      case "unknown-request":
-        return `correlated request ${correlation.requestId} is no longer issued`;
+    const unresolved = correlation.outcome;
+    if (unresolved.kind === "no-reservation") {
+      return `no durable Pi correlator exists for result index ${resultIndex}`;
     }
+    if (unresolved.kind === "not-an-orchestration-run") {
+      return "orchestration run authority was unavailable";
+    }
+    return unresolved.kind === "captured"
+      ? "correlation returned a capture receipt instead of request authority"
+      : unresolved.message;
   }
-  const { request } = correlation;
+  const { request } = correlation.value;
   if (request.requestId !== markers.requestId) {
     return `result marker ${markers.requestId} does not match correlated request ${request.requestId}`;
   }
@@ -742,6 +746,36 @@ export async function runPiCleanupActions(
 
 const cleanupFailureSuffix = (errors: readonly string[]): string =>
   errors.length === 0 ? "" : ` Cleanup failures: ${errors.join("; ")}`;
+
+type PiWriteGrantInjectionPorts = Readonly<{
+  inject(task: string, grant: IssuedWriteGrant): string;
+  revoke(token: string): void | Promise<void>;
+}>;
+
+/** Inject an issued capability without allowing failed direct revocation to hide the injection cause. */
+export async function injectPiWriteGrantWithRevocation(
+  task: string,
+  grant: IssuedWriteGrant,
+  spawnIndex: number,
+  ports: PiWriteGrantInjectionPorts = {
+    inject: injectPiWriteGrant,
+    revoke: revokePiWriteGrant,
+  },
+): Promise<string> {
+  try {
+    return ports.inject(task, grant);
+  } catch (injectionError) {
+    const cleanupErrors = await runPiCleanupActions([{
+      label: `directly revoke write grant for spawn item ${spawnIndex + 1}`,
+      run: () => ports.revoke(grant.token),
+    }]);
+    throw new Error(
+      `write-grant injection failed: ${injectionError instanceof Error ? injectionError.message : String(injectionError)}` +
+        cleanupFailureSuffix(cleanupErrors),
+      { cause: injectionError },
+    );
+  }
+}
 
 type PiSessionId = NonNullable<ReturnType<typeof parseSessionId>>;
 
@@ -1405,18 +1439,18 @@ export default function (pi: ExtensionAPI) {
               taskGraphPath: taskGraphPath(),
               ...(requirement.kind === "scoped" ? { scopeDirs: requirement.scopeDirs } : {}),
             });
-            try {
-              writeGrants.push({
-                index,
-                token: grant.token,
-                task: injectPiWriteGrant(item.task, grant),
-                originalTask: item.task,
-                injected: false,
-              });
-            } catch (error) {
-              revokePiWriteGrant(grant.token);
-              throw error;
-            }
+            // Track the issued token before prompt injection can fail. If its
+            // immediate revocation also fails, the outer rollback retries this
+            // exact token and reports both failures instead of orphaning it.
+            const trackedGrant = {
+              index,
+              token: grant.token,
+              task: item.task,
+              originalTask: item.task,
+              injected: false,
+            };
+            writeGrants.push(trackedGrant);
+            trackedGrant.task = await injectPiWriteGrantWithRevocation(item.task, grant, index);
           }
           // Mutate before task-state validation. Rollback restores prompts and
           // revokes grants, leaving no post-validation operation that can fail

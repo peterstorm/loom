@@ -527,6 +527,8 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
       // missing spec-check evidence.
       expect(state.spec_check.verdict).toBe("EVIDENCE_CAPTURE_FAILED");
       expect(state.spec_check.wave).toBe(3);
+      expect(state.spec_check.error).toContain("spec-check transcript is unreadable");
+      expect(state.spec_check.error).toContain("does-not-exist.jsonl");
       expect(state.spec_check.error).toContain("re-run /wave-gate");
     } finally {
       stderrSpy.mockRestore();

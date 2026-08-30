@@ -639,7 +639,7 @@ describe("applyFailedPiResult", () => {
 
     expect(store.current().executing_tasks).toEqual([]);
     // The reservation WAS released, but the Task was guessed rather than named:
-    // an inference is reported to the harness, never logged and waved through.
+    // an inference is reported to the harness and logged, never silently waved through.
     expect(applied.processingErrors).toEqual([
       expect.stringContaining("inferred from the sole executing Task"),
     ]);
@@ -853,7 +853,7 @@ describe("applyReviewPiResult", () => {
     expect(store.current().tasks[0]!.review_status).toBe("pending");
   });
 
-  it("reports a Task disappearing before malformed evidence application", async () => {
+  it("reports a Task disappearing through the shared locked evidence application", async () => {
     const initial = parsedGraph(graph());
     const withoutTask = parsedGraph({ ...initial, tasks: [] });
     const store: TaskGraphStore = {
@@ -871,7 +871,7 @@ describe("applyReviewPiResult", () => {
     });
 
     expect(applied.processingErrors).toEqual([
-      expect.stringContaining("disappeared before malformed evidence application"),
+      expect.stringContaining("disappeared before evidence application"),
     ]);
   });
 

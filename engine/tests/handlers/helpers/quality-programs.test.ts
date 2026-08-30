@@ -57,6 +57,30 @@ function routingIsolatedEnv(piAgentDir?: string): Record<string, string> {
   };
 }
 
+function writeReviewPacketTaskGraph(
+  statePath: string,
+  taskOverrides: Readonly<Record<string, unknown>>,
+): void {
+  writeFileSync(statePath, JSON.stringify({
+    current_phase: "execute",
+    phase_artifacts: {},
+    skipped_phases: [],
+    spec_file: null,
+    plan_file: null,
+    current_wave: 1,
+    tasks: [{
+      id: "T1",
+      description: "packet",
+      agent: "code-implementer-agent",
+      wave: 1,
+      status: "pending",
+      depends_on: [],
+      ...taskOverrides,
+    }],
+    wave_gates: {},
+  }));
+}
+
 describe("quality-program helper boundaries", () => {
   it("keeps the program-driver Public Surface limited to parent caller operations", async () => {
     const surface = await import("../../../src/handlers/helpers/programs");
@@ -237,33 +261,23 @@ describe("quality-program helper boundaries", () => {
     const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim();
     const state = join(dir, "state.json");
     const packet = join(dir, "packet.json");
-    writeFileSync(state, JSON.stringify({
-      current_phase: "execute",
-      phase_artifacts: {},
-      skipped_phases: [],
-      spec_file: null,
-      plan_file: null,
-      current_wave: 1,
-      tasks: [{
-        id: "T1", description: "packet", agent: "code-implementer-agent", wave: 1,
-        status: "pending", depends_on: [], start_sha: head,
-        file_list: ["engine/src/core/model-profiles.ts"],
-        // Pi and Claude tool APIs commonly record this as an absolute path.
-        // The packet boundary must canonicalize it to the same repo-relative
-        // identity as file_list instead of rejecting valid in-repo evidence.
-        files_modified: [join(ROOT, "engine/src/core/model-profiles.ts")],
-        review_status: "pending",
-        review_generation: 1,
-        // A pre-identity graph may carry only the derived views. Packet
-        // creation must mint the same identity into both packet and run before
-        // any reviewer is asked to assess it.
-        critical_findings: ["stale finding"],
-        advisory_findings: [],
-        refuted_findings: [],
-        resolved_findings: [],
-      }],
-      wave_gates: {},
-    }));
+    writeReviewPacketTaskGraph(state, {
+      start_sha: head,
+      file_list: ["engine/src/core/model-profiles.ts"],
+      // Pi and Claude tool APIs commonly record this as an absolute path.
+      // The packet boundary must canonicalize it to the same repo-relative
+      // identity as file_list instead of rejecting valid in-repo evidence.
+      files_modified: [join(ROOT, "engine/src/core/model-profiles.ts")],
+      review_status: "pending",
+      review_generation: 1,
+      // A pre-identity graph may carry only the derived views. Packet
+      // creation must mint the same identity into both packet and run before
+      // any reviewer is asked to assess it.
+      critical_findings: ["stale finding"],
+      advisory_findings: [],
+      refuted_findings: [],
+      resolved_findings: [],
+    });
     const id = cli(
       ["helper", "review-packet", "create", "--task", "T1", "--output", packet],
       "",
@@ -323,16 +337,14 @@ describe("quality-program helper boundaries", () => {
 
     const state = join(root, "state.json");
     const packet = join(root, ".claude", "reviews", "packet.json");
-    writeFileSync(state, JSON.stringify({
-      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, current_wave: 1, wave_gates: {},
-      tasks: [{
-        id: "T1", description: "delete", agent: "code-implementer-agent", wave: 1,
-        status: "pending", depends_on: [], start_sha: head,
-        file_list: ["src/deleted.ts"], files_modified: ["src/deleted.ts"],
-        review_status: "pending", review_generation: 0,
-      }],
-    }));
+    writeReviewPacketTaskGraph(state, {
+      description: "delete",
+      start_sha: head,
+      file_list: ["src/deleted.ts"],
+      files_modified: ["src/deleted.ts"],
+      review_status: "pending",
+      review_generation: 0,
+    });
 
     const id = execFileSync("bun", [
       CLI, "helper", "review-packet", "create", "--task", "T1", "--output", ".claude/reviews/packet.json",
@@ -360,15 +372,12 @@ describe("quality-program helper boundaries", () => {
     const imagePath = relative(ROOT, image);
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00, 0x80]);
     writeFileSync(image, png);
-    writeFileSync(state, JSON.stringify({
-      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, current_wave: 1, wave_gates: {},
-      tasks: [{
-        id: "T1", description: "binary packet", agent: "code-implementer-agent", wave: 1,
-        status: "pending", depends_on: [], start_sha: head,
-        file_list: [imagePath], files_modified: [imagePath],
-      }],
-    }));
+    writeReviewPacketTaskGraph(state, {
+      description: "binary packet",
+      start_sha: head,
+      file_list: [imagePath],
+      files_modified: [imagePath],
+    });
 
     const id = cli(
       ["helper", "review-packet", "create", "--task", "T1", "--output", packet],
@@ -389,16 +398,11 @@ describe("quality-program helper boundaries", () => {
     cleanup.push(dir);
     const state = join(dir, "state.json");
     const packet = join(dir, "packet.json");
-    writeFileSync(state, JSON.stringify({
-      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, current_wave: 1, wave_gates: {},
-      tasks: [{
-        id: "T1", description: "packet", agent: "code-implementer-agent", wave: 1,
-        status: "pending", depends_on: [],
-        start_sha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim(),
-        file_list: ["definitely-not-present-review-packet.ts"], files_modified: [],
-      }],
-    }));
+    writeReviewPacketTaskGraph(state, {
+      start_sha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim(),
+      file_list: ["definitely-not-present-review-packet.ts"],
+      files_modified: [],
+    });
 
     const run = spawnSync("bun", [CLI, "helper", "review-packet", "create", "--task", "T1", "--output", packet], {
       cwd: ROOT, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: state },
@@ -414,15 +418,11 @@ describe("quality-program helper boundaries", () => {
     const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim();
     const state = join(dir, "state.json");
     const packet = join(dir, "packet.json");
-    writeFileSync(state, JSON.stringify({
-      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, current_wave: 1, wave_gates: {},
-      tasks: [{
-        id: "T1", description: "packet", agent: "code-implementer-agent", wave: 1,
-        status: "pending", depends_on: [], start_sha: head,
-        file_list: ["engine/src/types.ts"], files_modified: ["engine/src/types.ts"],
-      }],
-    }));
+    writeReviewPacketTaskGraph(state, {
+      start_sha: head,
+      file_list: ["engine/src/types.ts"],
+      files_modified: ["engine/src/types.ts"],
+    });
 
     const fakeBin = join(dir, "bin");
     mkdirSync(fakeBin);
@@ -460,15 +460,11 @@ describe("quality-program helper boundaries", () => {
     const packet = join(dir, "packet.json");
     const external = join(outside, "secret.ts");
     writeFileSync(external, "secret\n");
-    writeFileSync(state, JSON.stringify({
-      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, current_wave: 1, wave_gates: {},
-      tasks: [{
-        id: "T1", description: "packet", agent: "code-implementer-agent", wave: 1,
-        status: "pending", depends_on: [], start_sha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim(),
-        file_list: ["engine/src/types.ts"], files_modified: [external],
-      }],
-    }));
+    writeReviewPacketTaskGraph(state, {
+      start_sha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim(),
+      file_list: ["engine/src/types.ts"],
+      files_modified: [external],
+    });
 
     const run = spawnSync("bun", [CLI, "helper", "review-packet", "create", "--task", "T1", "--output", packet], {
       cwd: ROOT, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: state },
@@ -485,15 +481,11 @@ describe("quality-program helper boundaries", () => {
     const state = join(dir, "state.json");
     const linked = join(dir, "linked-output");
     symlinkSync(outside, linked);
-    writeFileSync(state, JSON.stringify({
-      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, current_wave: 1, wave_gates: {},
-      tasks: [{
-        id: "T1", description: "packet", agent: "code-implementer-agent", wave: 1,
-        status: "pending", depends_on: [], start_sha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim(),
-        file_list: ["engine/src/types.ts"], files_modified: ["engine/src/types.ts"],
-      }],
-    }));
+    writeReviewPacketTaskGraph(state, {
+      start_sha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim(),
+      file_list: ["engine/src/types.ts"],
+      files_modified: ["engine/src/types.ts"],
+    });
 
     const run = spawnSync("bun", [CLI, "helper", "review-packet", "create", "--task", "T1", "--output", join(linked, "packet.json")], {
       cwd: ROOT, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: state },

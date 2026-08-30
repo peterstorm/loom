@@ -1,12 +1,12 @@
 /**
  * In-memory SessionRegistry fake — the port's test double. Mirrors the fs
- * adapter's nominal semantics exactly:
- *   - bind appends; it never truncates the ledger (see bindMachineAgent)
+ * adapter's observable decisions without claiming byte-for-byte storage parity:
+ *   - bind appends a novel (agentId, agentType) binding and skips exact repeats
  *   - unbind removes every binding matching (agentId, agentType)
  *   - soleActiveBinding: the SHARED pure decision (resolveSoleActiveBinding)
  *     — exactly one binding AND the roster is exactly the bound agent
- *   - appendEvidence stamps records with the given epoch; readEvidence
- *     returns an immutable snapshot
+ *   - readBindings returns frozen copied records; readEvidence returns a
+ *     shallow detached array whose nested evidence values remain shared
  *
  * No staleness/TTL: the fake models live sessions; liveness is an fs-layer
  * concern covered by binding-liveness.test.ts.
@@ -82,7 +82,9 @@ export function inMemorySessionRegistry(): SessionRegistry {
     // anchor is a no-op — liveness is an fs-layer concern (binding-liveness).
     refreshBindingActivity: async (): Promise<void> => {},
 
-    readBindings: (sessionId: string): readonly MachineBinding[] => bindings.get(sessionId) ?? [],
+    readBindings: (sessionId: string): readonly MachineBinding[] => Object.freeze(
+      (bindings.get(sessionId) ?? []).map((binding) => Object.freeze({ ...binding })),
+    ),
 
     appendEvidence: (
       sessionId: string,

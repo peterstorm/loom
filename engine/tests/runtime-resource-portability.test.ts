@@ -24,6 +24,7 @@ function markdownFiles(root: string): readonly string[] {
 }
 
 const FILES = RUNTIME_TREES.flatMap((tree) => markdownFiles(join(REPO_ROOT, tree)));
+const MARKDOWN_CASES = FILES.map((file) => [relative(REPO_ROOT, file), file] as const);
 const LEGACY_LOOM_CACHE = /\.claude\/plugins\/cache[^\n`]*loom|plugins\/cache\/plugins\/loom|LOOM_DIR=.*plugins\/cache/;
 
 describe("Pi harness detection", () => {
@@ -130,7 +131,7 @@ describe("TaskGraph repository-root discovery", () => {
     }
   });
 
-  it("rejects Git's non-repository diagnostic when ancestor metadata exists but is unreadable", () => {
+  it.skipIf(process.getuid?.() === 0)("rejects Git's non-repository diagnostic when ancestor metadata exists but is unreadable", () => {
     const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-unreadable-git-root-")));
     const gitDirectory = join(root, ".git");
     try {
@@ -236,14 +237,14 @@ describe("runtime markdown is portable across harnesses", () => {
     }
   });
 
-  it.each(FILES.map((file) => [relative(REPO_ROOT, file), file] as const))(
+  it.each(MARKDOWN_CASES)(
     "%s never discovers Loom through the Claude plugin cache",
     (_relativePath, file) => {
       expect(readFileSync(file, "utf-8")).not.toMatch(LEGACY_LOOM_CACHE);
     },
   );
 
-  it.each(FILES.map((file) => [relative(REPO_ROOT, file), file] as const))(
+  it.each(MARKDOWN_CASES)(
     "%s has no unresolved Claude root after Pi lowering",
     (_relativePath, file) => {
       const rendered = renderMarkdownForPi(readFileSync(file, "utf-8"), "/active/loom-package");

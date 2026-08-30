@@ -570,6 +570,15 @@ describe("Pi and Claude reach the same result", () => {
     expect(() => claudeFinalPayloadCandidates(transcript))
       .toThrow(/cannot read Claude transcript/);
   });
+
+  it("reports a resolved transcript that disappeared as a filesystem read failure", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-claude-disappeared-"));
+    cleanup.push(root);
+    const transcript = join(root, "disappeared.jsonl");
+
+    expect(() => claudeFinalPayloadCandidates(transcript))
+      .toThrow(/cannot read Claude transcript .*disappeared\.jsonl:.*ENOENT/);
+  });
 });
 
 // --- Invalid evidence classes -----------------------------------------------
@@ -785,11 +794,16 @@ describe("Claude capture against a real run directory", () => {
     expect(outcome.receipt.byteLength).toBe(Buffer.byteLength(text, "utf-8"));
   });
 
-  it("reports a stop that matches no reservation instead of capturing it", async () => {
+  it("reports a stop that matches no reservation before touching its missing transcript", async () => {
     const { runsRoot, runDir } = await stagedRun();
 
     const outcome = await captureClaudeResult(
-      { session_id: "s1", agent_id: "some-other-agent", agent_type: "code-reviewer", agent_transcript_path: transcript(runDir, "hello") },
+      {
+        session_id: "s1",
+        agent_id: "some-other-agent",
+        agent_type: "code-reviewer",
+        agent_transcript_path: join(runDir, "does-not-exist.jsonl"),
+      },
       runsRoot,
       runDir,
     );

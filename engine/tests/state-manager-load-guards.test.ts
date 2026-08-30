@@ -648,7 +648,7 @@ const waveGateRecord = {
   blocked: false,
 } as const;
 
-describe("parseTaskGraph wave_gates record-key validation", () => {
+describe("parseTaskGraph wave_gates load boundary", () => {
   it("accepts canonical positive integer keys (String(wave))", () => {
     expect(parseTaskGraph(graph({ wave_gates: { "1": waveGateRecord } })).ok).toBe(true);
   });
@@ -658,6 +658,21 @@ describe("parseTaskGraph wave_gates record-key validation", () => {
       const err = errorOf(graph({ wave_gates: { [wave]: waveGateRecord } }));
       expect(err).toContain("wave_gates key must be a canonical positive integer wave number");
     }
+  });
+
+  it.each([
+    ["impl_complete", "yes"],
+    ["tests_passed", "yes"],
+    ["reviews_complete", "no"],
+    ["blocked", 1],
+  ])("rejects malformed persisted %s before gate booleans can be consumed", (field, value) => {
+    const err = errorOf(graph({ wave_gates: { "1": { ...waveGateRecord, [field]: value } } }));
+    expect(err).toContain(`wave_gates["1"]: ${field}`);
+  });
+
+  it("rejects blocked:true when neither Task findings nor Spec-check findings supply a cause", () => {
+    const err = errorOf(graph({ wave_gates: { "1": { ...waveGateRecord, blocked: true } } }));
+    expect(err).toContain("blocked: true has no cause");
   });
 });
 

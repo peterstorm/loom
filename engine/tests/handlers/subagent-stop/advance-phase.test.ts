@@ -476,6 +476,26 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
     });
   });
 
+  it("an explicitly empty transcript path remains eligible for filesystem artifact discovery", async () => {
+    const session = `phase-empty-transcript-${process.pid}-${Date.now()}`;
+    const artifactDir = join(tmpDir, ".claude", "specs");
+    mkdirSync(artifactDir, { recursive: true });
+    writeFileSync(join(artifactDir, "brainstorm.md"), "ideas");
+    await withPhaseState(session, mkState({ current_phase: "brainstorm" }), async () => {
+      const result = await advancePhaseHandler(JSON.stringify({
+        session_id: session,
+        agent_type: "brainstorm-agent",
+        agent_transcript_path: "",
+      }), []);
+
+      expect(result).toEqual({ kind: "passthrough" });
+      expect(JSON.parse(readFileSync(join(tmpDir, `${session}.json`), "utf-8"))).toMatchObject({
+        current_phase: "specify",
+        phase_artifacts: { brainstorm: ".claude/specs/brainstorm.md" },
+      });
+    });
+  });
+
   it("the REAL handler fails closed when a phase transcript cannot be read", async () => {
     const session = `phase-transcript-${process.pid}-${Date.now()}`;
     const unreadableTranscript = join(tmpDir, "transcript-directory.jsonl");
@@ -535,15 +555,15 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
     mkdirSync(artifactDir, { recursive: true });
     writeFileSync(join(artifactDir, "brainstorm.md"), "ideas");
     await withPhaseState(session, mkState({ current_phase: "brainstorm" }), async () => {
-      const originalUpdate = StateManager.prototype.update;
-      const update = vi.spyOn(StateManager.prototype, "update").mockImplementationOnce(async function (
+      const originalUpdateAndReturn = StateManager.prototype.updateAndReturn;
+      const update = vi.spyOn(StateManager.prototype, "updateAndReturn").mockImplementationOnce(async function (
         this: StateManager,
         mutate,
       ) {
         const path = join(tmpDir, `${session}.json`);
         const current = JSON.parse(readFileSync(path, "utf-8"));
         writeFileSync(path, JSON.stringify({ ...current, current_phase: "specify" }));
-        return originalUpdate.call(this, mutate);
+        return originalUpdateAndReturn.call(this, mutate);
       });
       try {
         const result = await advancePhaseHandler(JSON.stringify({
@@ -565,6 +585,52 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
     });
   });
 
+  it("recomputes the transition when same-Phase artifact authority changes before the locked commit", async () => {
+    const session = `phase-authority-race-${process.pid}-${Date.now()}`;
+    const initialSpec = join(tmpDir, ".claude", "specs", "initial", "spec.md");
+    const lockedSpec = join(tmpDir, ".claude", "specs", "locked", "spec.md");
+    mkdirSync(join(tmpDir, ".claude", "specs", "initial"), { recursive: true });
+    mkdirSync(join(tmpDir, ".claude", "specs", "locked"), { recursive: true });
+    writeFileSync(initialSpec, "resolved spec");
+    writeFileSync(
+      lockedSpec,
+      Array.from({ length: CLARIFY_THRESHOLD + 1 }, () => "NEEDS CLARIFICATION").join("\n"),
+    );
+    await withPhaseState(
+      session,
+      mkState({ current_phase: "specify", spec_file: initialSpec }),
+      async () => {
+        const originalUpdateAndReturn = StateManager.prototype.updateAndReturn;
+        const update = vi.spyOn(StateManager.prototype, "updateAndReturn").mockImplementationOnce(async function (
+          this: StateManager,
+          mutate,
+        ) {
+          const path = join(tmpDir, `${session}.json`);
+          const current = JSON.parse(readFileSync(path, "utf-8"));
+          writeFileSync(path, JSON.stringify({ ...current, spec_file: lockedSpec }));
+          return originalUpdateAndReturn.call(this, mutate);
+        });
+        try {
+          const result = await advancePhaseHandler(JSON.stringify({
+            session_id: session,
+            agent_id: "racing-specify-agent",
+            agent_type: "specify-agent",
+          }), []);
+
+          expect(result).toEqual({ kind: "passthrough" });
+          expect(JSON.parse(readFileSync(join(tmpDir, `${session}.json`), "utf-8"))).toMatchObject({
+            current_phase: "clarify",
+            spec_file: lockedSpec,
+            phase_artifacts: { specify: lockedSpec },
+            skipped_phases: [],
+          });
+        } finally {
+          update.mockRestore();
+        }
+      },
+    );
+  });
+
   it("does not persist stale spec artifact authority after the locked Phase advances", async () => {
     const session = `phase-spec-artifact-race-${process.pid}-${Date.now()}`;
     const specFile = join(tmpDir, ".claude", "specs", "race", "spec.md");
@@ -572,15 +638,15 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
     writeFileSync(specFile, "resolved spec");
     const initial = mkState({ current_phase: "specify", spec_file: specFile });
     await withPhaseState(session, initial, async () => {
-      const originalUpdate = StateManager.prototype.update;
-      const update = vi.spyOn(StateManager.prototype, "update").mockImplementationOnce(async function (
+      const originalUpdateAndReturn = StateManager.prototype.updateAndReturn;
+      const update = vi.spyOn(StateManager.prototype, "updateAndReturn").mockImplementationOnce(async function (
         this: StateManager,
         mutate,
       ) {
         const path = join(tmpDir, `${session}.json`);
         const current = JSON.parse(readFileSync(path, "utf-8"));
         writeFileSync(path, JSON.stringify({ ...current, current_phase: "architecture" }));
-        return originalUpdate.call(this, mutate);
+        return originalUpdateAndReturn.call(this, mutate);
       });
       try {
         const result = await advancePhaseHandler(JSON.stringify({

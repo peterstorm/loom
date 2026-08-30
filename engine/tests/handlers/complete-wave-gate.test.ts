@@ -53,6 +53,7 @@ import {
   deriveLoomStatus,
   deriveLoomStatusFromParsedGraph,
   deriveNextAction,
+  deriveWaveAdvisoryDecisionRequest,
   deriveWaveAdvisoryNextAction,
   deriveWaveReadiness,
   deriveWaveRefutationPlan,
@@ -60,6 +61,7 @@ import {
   prepareWaveRefutationPanel,
   proveWaveGateNextAction,
   reduceWaveGate,
+  waveAdvisoryDecisionActionRequest,
   renderLoomStatusHuman as renderCoreLoomStatusHuman,
   renderLoomStatusJson as renderCoreLoomStatusJson,
   type GateDeps as CoreGateDeps,
@@ -1693,6 +1695,22 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
 });
 
 describe("authoritative Wave refutation, panel, and advisory contracts", () => {
+  it("rejects a structural copy of advisory material before it can publish an action", () => {
+    const graph = advisoryGraph();
+    const material = deriveWaveAdvisoryDecisionRequest(
+      graph.active_wave_gate!.runId,
+      graph.tasks,
+    );
+    expect(material.ok).toBe(true);
+    if (!material.ok) return;
+
+    expect(waveAdvisoryDecisionActionRequest(material.value)).toMatchObject({ ok: true });
+    expect(waveAdvisoryDecisionActionRequest({ ...material.value })).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("exact core-derived decision material set") },
+    });
+  });
+
   it("refuses refutation while a current Review Packet still owns the finding snapshot", () => {
     const collecting = authorityValue(deriveWaveReadiness(registeredGraph({
       tasks: [{
@@ -1860,6 +1878,25 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
     });
     const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps, null, observation);
     expect(status.next.action.kind).not.toBe("await-user");
+  });
+
+  it("preserves an advisory action proof failure as unavailable instead of fabricating engine resume", () => {
+    const graph = advisoryGraph();
+    const invalidRunId = "bad run id" as NonNullable<TaskGraph["active_wave_gate"]>["runId"];
+    const forgedParsedGraph: TaskGraph = {
+      ...graph,
+      active_wave_gate: { ...graph.active_wave_gate!, runId: invalidRunId },
+    };
+
+    const status = deriveLoomStatusFromParsedGraph({ ok: true, value: forgedParsedGraph }, statusDeps);
+
+    expect(Object.values(status.facts).every((fact) => fact.kind === "unavailable")).toBe(true);
+    expect(status.next.action).toMatchObject({
+      kind: "blocked",
+      diagnostic: { kind: "terminal-blocked", category: "invalid-authority" },
+    });
+    expect(status.next.reasons[0]?.message).toContain("cannot prove LC-1 advisory action");
+    expect(status.next.reasons[0]?.message).not.toContain("engine resume");
   });
 
   it("blocks status when advisory approval evidence is unavailable", () => {

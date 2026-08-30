@@ -185,6 +185,21 @@ export function reopenCompletedWave(
   if (hasLaterWaveProgress(graph, request.wave)) {
     throw new Error("reopening refuses because a later-Wave Task has progress evidence");
   }
+  const waveTasks = graph.tasks.filter((task) => task.wave === request.wave);
+  if (waveTasks.length === 0 || waveTasks.some((task) => task.status !== "completed")) {
+    throw new Error("reopening proof requires every Task in the completed Wave to remain completed");
+  }
+  const waveTaskIds = new Set(waveTasks.map(({ id }) => id));
+  if (proof.taskIds.length === 0) throw new Error("reopening proof requires at least one completed-Wave Task ID");
+  if (new Set(proof.taskIds).size !== proof.taskIds.length) {
+    throw new Error("reopening proof Task IDs must be unique");
+  }
+  const foreignProofTask = proof.taskIds.find((taskId) => !waveTaskIds.has(taskId));
+  if (foreignProofTask !== undefined) {
+    throw new Error(
+      `reopening proof Task ${foreignProofTask} does not belong to completed Wave ${request.wave}`,
+    );
+  }
   const completed = (graph.wave_gate_history ?? []).find((entry) => entry.runId === request.runId);
   if (completed === undefined || completed.wave !== request.wave || completed.authorityDigest !== request.authorityDigest) {
     throw new Error("reopening requires the exact completed run/wave/authority receipt");
@@ -192,7 +207,6 @@ export function reopenCompletedWave(
   if (!exactIds(request.taskIds, proof.taskIds)) {
     throw new Error(`reopening taskIds must exactly equal engine-derived ${proof.mode}: ${proof.taskIds.join(", ") || "none"}`);
   }
-  if (proof.taskIds.length === 0) throw new Error("reopening requires at least one engine-derived Task");
   const audit: WaveReopeningAudit = Object.freeze({
     schemaVersion: 1,
     kind: "completed-wave-reopened-for-review-integrity",
@@ -281,6 +295,24 @@ export function commitCompletedWaveReopening(
   });
 }
 
+function formatErrorDetail(error: unknown, seen: Set<unknown>): string {
+  if (!(error instanceof Error)) return String(error);
+  if (seen.has(error)) return `${error.message} (cyclic cause)`;
+  seen.add(error);
+  const details: string[] = [];
+  if (error instanceof AggregateError) {
+    details.push(...error.errors.map((child, index) =>
+      `cause ${index + 1}: ${formatErrorDetail(child, seen)}`));
+  }
+  if (error.cause !== undefined) details.push(`caused by: ${formatErrorDetail(error.cause, seen)}`);
+  return details.length === 0 ? error.message : `${error.message}; ${details.join("; ")}`;
+}
+
+/** Render aggregate children and cause chains at the user-facing helper boundary. */
+export function formatWaveReopeningError(error: unknown): string {
+  return formatErrorDetail(error, new Set());
+}
+
 const handler: HookHandler = async (stdin, args) => {
   try {
     const request = parseRequest(stdin);
@@ -301,7 +333,7 @@ const handler: HookHandler = async (stdin, args) => {
             `refresh review evidence for ${committed.proof.taskIds.join(", ")}`,
         };
   } catch (error) {
-    return { kind: "error", message: `[loom] reopen-completed-wave: ${error instanceof Error ? error.message : String(error)}` };
+    return { kind: "error", message: `[loom] reopen-completed-wave: ${formatWaveReopeningError(error)}` };
   }
 };
 

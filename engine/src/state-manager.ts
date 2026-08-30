@@ -86,7 +86,7 @@ import { parseTaskId, type TaskId } from "./core/task-id";
 import {
   anchoredDirectoryHasIdentity,
   anchoredDirectoryIdentity,
-  closeAnchoredDirectory,
+  closeAnchorGuarded,
   openDirectoryNoFollow,
   readDirectoryFileNoFollow,
   resolveBaseDirectory,
@@ -114,6 +114,53 @@ type TaskGraphFileAuthority = Readonly<{
   leaf: string;
 }>;
 
+type StateDirectoryOutcome<T> =
+  | Readonly<{ kind: "returned"; value: T }>
+  | Readonly<{ kind: "threw"; error: unknown }>;
+
+function finishStateDirectoryOperation<T>(
+  directory: AnchoredDirectory,
+  operation: string,
+  outcome: StateDirectoryOutcome<T>,
+): T {
+  const failure = closeAnchorGuarded(
+    directory,
+    outcome.kind === "threw" ? outcome.error : null,
+    operation,
+  );
+  if (failure !== null) throw failure;
+  if (outcome.kind === "threw") throw outcome.error;
+  return outcome.value;
+}
+
+function withStateDirectory<T>(
+  directory: AnchoredDirectory,
+  operation: string,
+  use: () => T,
+): T {
+  let outcome: StateDirectoryOutcome<T>;
+  try {
+    outcome = { kind: "returned", value: use() };
+  } catch (error) {
+    outcome = { kind: "threw", error };
+  }
+  return finishStateDirectoryOperation(directory, operation, outcome);
+}
+
+async function withStateDirectoryAsync<T>(
+  directory: AnchoredDirectory,
+  operation: string,
+  use: () => Promise<T>,
+): Promise<T> {
+  let outcome: StateDirectoryOutcome<T>;
+  try {
+    outcome = { kind: "returned", value: await use() };
+  } catch (error) {
+    outcome = { kind: "threw", error };
+  }
+  return finishStateDirectoryOperation(directory, operation, outcome);
+}
+
 /**
  * Read one session pointer through its subagent base, resolved once.
  *
@@ -127,11 +174,8 @@ type TaskGraphFileAuthority = Readonly<{
  */
 function readSessionPointerNoFollow(sessionFile: string): string {
   const directory = openDirectoryNoFollow(resolveBaseDirectory(dirname(sessionFile)));
-  try {
-    return readDirectoryFileNoFollow(directory, basename(sessionFile)).toString("utf8");
-  } finally {
-    closeAnchoredDirectory(directory);
-  }
+  return withStateDirectory(directory, `session pointer read of ${sessionFile}`, () =>
+    readDirectoryFileNoFollow(directory, basename(sessionFile)).toString("utf8"));
 }
 
 function captureTaskGraphFileAuthority(path: string, requireExisting: boolean): TaskGraphFileAuthority {
@@ -139,18 +183,16 @@ function captureTaskGraphFileAuthority(path: string, requireExisting: boolean): 
   if (!parsedPath.ok) throw new Error(parsedPath.error);
   const directoryPath = dirname(parsedPath.value);
   const directory = openDirectoryNoFollow(directoryPath);
-  try {
+  return withStateDirectory(directory, `TaskGraph authority capture for ${parsedPath.value}`, () => {
     if (requireExisting) readDirectoryFileNoFollow(directory, basename(parsedPath.value));
     return Object.freeze({
-      kind: "task-graph-file-authority",
+      kind: "task-graph-file-authority" as const,
       path: parsedPath.value,
       directoryPath,
       directoryIdentity: anchoredDirectoryIdentity(directory),
       leaf: basename(parsedPath.value),
     });
-  } finally {
-    closeAnchoredDirectory(directory);
-  }
+  });
 }
 
 function parseSessionPointerFile(sessionFile: string): string {
@@ -2236,8 +2278,10 @@ export class StateManager {
   private openAuthorityDirectory(): AnchoredDirectory {
     const directory = openDirectoryNoFollow(this.authority.directoryPath);
     if (anchoredDirectoryHasIdentity(directory, this.authority.directoryIdentity)) return directory;
-    closeAnchoredDirectory(directory);
-    throw new Error(`TaskGraph parent authority changed after capture: ${this.authority.directoryPath}`);
+    const authorityError = new Error(
+      `TaskGraph parent authority changed after capture: ${this.authority.directoryPath}`,
+    );
+    throw closeAnchorGuarded(directory, authorityError, "TaskGraph parent authority rejection");
   }
 
   private loadFrom(directory: AnchoredDirectory): ParsedTaskGraph {
@@ -2255,11 +2299,7 @@ export class StateManager {
 
   load(): ParsedTaskGraph {
     const directory = this.openAuthorityDirectory();
-    try {
-      return this.loadFrom(directory);
-    } finally {
-      closeAnchoredDirectory(directory);
-    }
+    return withStateDirectory(directory, `TaskGraph load of ${this.path}`, () => this.loadFrom(directory));
   }
 
   getPath(): string {
@@ -2399,7 +2439,7 @@ export class StateManager {
     await this.atomicWrite(() => ({ state, value: undefined }));
   }
 
-  /** lock → derive/parse → stage read-only bytes → descriptor-relative rename → unlock */
+  /** lock → derive/parse → stage read-only bytes → anchored pathname rename → unlock */
   private async atomicWrite<T>(
     produce: (directory: AnchoredDirectory) => Readonly<{ state: TaskGraph; value: T }>,
   ): Promise<T> {
@@ -2408,8 +2448,8 @@ export class StateManager {
     // protected graph byte-for-byte and metadata-for-metadata untouched.
     assertPiCliMutationCompatible(process.env, captureLoomRuntimeIdentity(PACKAGE_ROOT));
     const directory = this.openAuthorityDirectory();
-    try {
-      return await withAnchoredDirectoryHandleLock(directory, ".task_graph", () => {
+    return withStateDirectoryAsync(directory, `TaskGraph atomic write of ${this.path}`, () =>
+      withAnchoredDirectoryHandleLock(directory, ".task_graph", () => {
         const produced = produce(directory);
         const parsed = parseTaskGraph(produced.state);
         if (!parsed.ok) throw new Error(`Refusing to persist invalid task graph (${parsed.error}): ${this.path}`);
@@ -2420,9 +2460,6 @@ export class StateManager {
           0o444,
         );
         return produced.value;
-      });
-    } finally {
-      closeAnchoredDirectory(directory);
-    }
+      }));
   }
 }

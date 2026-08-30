@@ -6,10 +6,12 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { checkImplementationProof, checkReviewedWorkspace } from "../../src/core/wave-gate-machine";
+import { parseArtifactDigest, parseOrchestrationRunId } from "../../src/core/orchestration-contract";
 import { reviewedWorkspaceObservation } from "../../src/core/reviewed-workspace";
 import reopenCompletedWaveHandler, {
   commitCompletedWaveReopening,
   deriveWaveReopeningProof,
+  formatWaveReopeningError,
   hasLaterWaveProgress,
   hasLaterWaveTaskProgress,
   reopenCompletedWave,
@@ -32,6 +34,17 @@ const ENGINE = fileURLToPath(new URL("../../", import.meta.url));
 const CLI = join(ENGINE, "src", "cli.ts");
 const digest = "a".repeat(64);
 const head = "b".repeat(64);
+const orchestrationRunId = (raw: string) => {
+  const parsed = parseOrchestrationRunId(raw);
+  if (!parsed.ok) throw new Error(parsed.error.message);
+  return parsed.value;
+};
+const waveRunId = orchestrationRunId("wave-run");
+const artifactDigest = (raw: string) => {
+  const parsed = parseArtifactDigest(raw);
+  if (!parsed.ok) throw new Error(parsed.error.message);
+  return parsed.value;
+};
 const receipt = { kind: "protected-wave-state-committed" as const, effectId: "wave-completion:12345678901234567890123456789012", runId: "wave-run", committedRevision: 1, stateDigest: digest };
 const task = (id: string, wave: number, status: Task["status"] = "completed"): Task => taskFixture({
   id, description: id, agent: "code-implementer-agent", wave, status, depends_on: [], proof,
@@ -52,7 +65,7 @@ const request = { runId: "wave-run", wave: 3, authorityDigest: digest, taskIds: 
 function context(taskId: string, workspaceHeadSha?: string): WaveReviewContextAuthority {
   const taskRun = { taskId, generation: 7, packetId: digest, headSha: "legacy-batch-epoch".replace(/[^a-f0-9]/g, "a").padEnd(64, "a"), ...(workspaceHeadSha === undefined ? {} : { workspaceHeadSha }) };
   return {
-    runId: "wave-run", wave: 3, authorityDigest: digest, batchEpoch: head,
+    runId: waveRunId, wave: 3, authorityDigest: artifactDigest(digest), batchEpoch: artifactDigest(head),
     subject: { role: "code-reviewer", taskId }, taskRun,
     task: { id: taskId, description: taskId, agent: "code-implementer-agent", reviewGeneration: 7, planContext: null, specAnchors: [], specContributions: [], declaredFiles: ["src/a.ts"], modifiedFiles: [], proof, testResult: null, priorFindings: [] },
     specCheckScope: null, packetId: digest, specFile: null, planFile: null,
@@ -95,7 +108,9 @@ describe("completed Wave reopening proof", () => {
       { ...task("T19", 3), review_generation: 5 }, task("T22", 3), pendingTask("T23", 4),
     ]);
     const historicalContexts = [context("T19"), context("T22")].map((entry, index) => ({
-      ...entry, runId: chatbotRequest.runId, authorityDigest: chatbotRequest.authorityDigest,
+      ...entry,
+      runId: orchestrationRunId(chatbotRequest.runId),
+      authorityDigest: artifactDigest(chatbotRequest.authorityDigest),
       taskRun: { ...entry.taskRun, generation: index === 0 ? 5 : 7, headSha: "ac87a789948bb24b38ee850284f847e612ef30e743770e6ccdd5ff632bcadc60" },
     })) as WaveReviewContextAuthority[];
     let observed = false;
@@ -126,6 +141,17 @@ describe("completed Wave reopening proof", () => {
     const reopened = reopenCompletedWave(graph(), { ...request, taskIds: ["T22"] }, derived);
     expect(reopened.wave_reopening_history?.[0]).toMatchObject({ proofMode: "modern-exact-workspace-drift", reopenedTaskIds: ["T22"] });
     expect(() => deriveWaveReopeningProof(graph(), request, [context("T19", head), context("T22", head)], () => [])).toThrow("could not be observed");
+  });
+
+  it.each([
+    ["empty", modernProof([]), []],
+    ["forged", modernProof(["T999"]), ["T999"]],
+    ["wrong-Wave", modernProof(["T23"]), ["T23"]],
+  ] as const)("rejects %s structural proof Task IDs before changing terminal history", (_label, forged, taskIds) => {
+    const before = graph();
+    expect(() => reopenCompletedWave(before, { ...request, taskIds }, forged)).toThrow(/completed-Wave Task|belong to completed Wave/i);
+    expect(before.wave_gate_history).toHaveLength(1);
+    expect(before.wave_reopening_history).toBeUndefined();
   });
 });
 
@@ -184,6 +210,14 @@ describe("reopen completed Wave", () => {
       kind: "error",
       message: expect.stringMatching(/reopening payload must be valid JSON: .+/),
     });
+  });
+
+  it("renders aggregate children and nested causes in helper diagnostics", () => {
+    const nested = new Error("close failed", { cause: new Error("EBADF") });
+    const aggregate = new AggregateError([new Error("state parse failed"), nested], "load and close failed");
+    expect(formatWaveReopeningError(aggregate)).toBe(
+      "load and close failed; cause 1: state parse failed; cause 2: close failed; caused by: EBADF",
+    );
   });
 
   it("returns the exact proof derived and committed from locked state", async () => {
@@ -256,7 +290,7 @@ describe("reopen completed Wave", () => {
   });
 
   it("refuses actual missing drift and remains idempotent only through the immutable audit", () => {
-    expect(() => reopenCompletedWave(graph(), request, modernProof([]))).toThrow("exactly equal");
+    expect(() => reopenCompletedWave(graph(), request, modernProof([]))).toThrow("at least one completed-Wave Task ID");
     const reopened = reopenCompletedWave(graph(), request, legacyProof);
     expect(() => reopenCompletedWave(reopened, request, legacyProof)).toThrow("current_wave exactly");
   });

@@ -180,6 +180,21 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
     expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(false);
   });
 
+  it("roster write failure blocks a machine-less Agent before pointer publication", async () => {
+    const s = session("machine-less-fail");
+    process.env.LOOM_STATE_PATH = statePath;
+    mkdirSync(join(SUBAGENT_DIR, `${s}.active`), { recursive: true });
+
+    const result = await markActive(start(s, "reviewer-1", "loom:code-reviewer"), []);
+
+    expect(result).toMatchObject({
+      kind: "block",
+      message: expect.stringMatching(/roster update failed.*refusing spawn/),
+    });
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(false);
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.machine`))).toBe(false);
+  });
+
   it("machine binding failure blocks the Agent and rolls back the created .task_graph pointer", async () => {
     const s = session("bind-fail");
     process.env.LOOM_STATE_PATH = statePath;

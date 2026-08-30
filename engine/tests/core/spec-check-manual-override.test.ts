@@ -10,6 +10,8 @@
 
 import { describe, it, expect } from "vitest";
 import { parseOrchestrationRunId, parseSlotId } from "../../src/core/orchestration-contract";
+import { runStoreSpecCheck } from "../../src/handlers/helpers/store-spec-check";
+import type { ParsedTaskGraph } from "../../src/state-manager";
 import {
   decideSpecCheckManualOverride,
   specCheckAuthorityProblem,
@@ -115,5 +117,32 @@ describe("decideSpecCheckManualOverride", () => {
       kind: "allowed",
       reason: "FRs 12-14 land in wave 3",
     });
+  });
+
+  it("refuses authority acquired before the locked manual write decision", async () => {
+    let committed: TaskGraph = activeWave;
+    const manager = {
+      async updateAndReturn<T>(
+        decide: (state: ParsedTaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
+      ): Promise<T> {
+        // This is the state at lock acquisition. A pre-lock observation could
+        // have seen modernGraph before the Wave Gate registered this authority.
+        const result = decide(activeWave as ParsedTaskGraph);
+        committed = result.state;
+        return result.value;
+      },
+    };
+
+    const result = await runStoreSpecCheck([
+      "SPEC_CHECK_WAVE: 1",
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+      "SPEC_CHECK_OVERRIDE: stale operator observation",
+    ].join("\n"), manager, "2026-08-30T00:00:00.000Z");
+
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("registered Wave Gate owns") });
+    expect(committed).toBe(activeWave);
+    expect(committed.spec_check).toBeUndefined();
   });
 });

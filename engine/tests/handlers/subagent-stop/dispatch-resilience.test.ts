@@ -146,6 +146,113 @@ describe("request-bound capture gates legacy dispatch", () => {
     }
   });
 
+  it("captures and settles a successful request-bound Wave Gate spec-check", async () => {
+    const dir = tempDir();
+    const statePath = writeState(dir);
+    const session = sid("wave-gate-spec-check");
+    pointSessionAt(session, statePath);
+    const runsRoot = join(dir, "runs");
+    const runDir = join(runsRoot, "run.dispatch-wave-gate");
+    mkdirSync(runDir, { recursive: true });
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+
+    const baseRequest = agentRequestAuthority("run.dispatch-wave-gate", {
+      requestId: "wave-request:dispatch-spec-check:1",
+      slotId: "wave-slot:dispatch-spec-check",
+      role: "spec-check-invoker",
+      requiredSkill: "spec-check",
+      outputSlot: {
+        kind: "fixed-artifact-slot",
+        path: "transcripts/wave-slot:dispatch-spec-check/attempt-1.raw",
+      },
+    });
+    const section = encodeByteSection("test", "request-bound Wave Gate spec-check context");
+    if (!section.ok) throw new Error(section.error.message);
+    const packet = buildContextPacket({
+      requestId: baseRequest.requestId,
+      role: baseRequest.role,
+      requiredSkill: baseRequest.requiredSkill ?? "none",
+      outputContract: "emit exact Wave spec-check bytes",
+      fixedContext: [section.value],
+      variableContext: [],
+    });
+    if (!packet.ok) throw new Error(packet.error.message);
+    expect((await opened.value.publishContext(packet.value)).ok).toBe(true);
+    const request = agentRequestAuthority("run.dispatch-wave-gate", {
+      ...baseRequest,
+      contextDigest: packet.value.digest,
+    });
+    expect((await opened.value.reserveRequest(request)).ok).toBe(true);
+    expect((await opened.value.recordHarnessCorrelator({
+      schemaVersion: 1,
+      harness: "claude",
+      nativeId: "agent-wave-gate-spec-check",
+      requestId: request.requestId,
+      role: request.role,
+      attempt: request.attempt,
+    })).ok).toBe(true);
+
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    state.active_wave_gate = {
+      schemaVersion: 1,
+      kind: "active-wave-gate",
+      runId: request.runId,
+      wave: 1,
+      authorityDigest: "a".repeat(64),
+      revision: 0,
+      terminalOutcome: null,
+    };
+    state.wave_review_epoch = {
+      runId: request.runId,
+      wave: 1,
+      batchEpoch: "b".repeat(64),
+      specCheckSlotAuthority: { slot_id: request.slotId, attempted: request.attempt },
+    };
+    writeFileSync(statePath, JSON.stringify(state));
+
+    const transcriptPath = join(dir, "wave-gate-spec-check.jsonl");
+    const capturedBytes = [
+      "SPEC_CHECK_WAVE: 1",
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+    ].join("\n");
+    writeFileSync(transcriptPath, JSON.stringify({
+      message: { role: "assistant", content: [{ type: "text", text: capturedBytes }] },
+    }));
+    const cleanup = vi.fn(async () => ({ kind: "passthrough" as const }));
+    const previousRoot = process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+    const previousRun = process.env.LOOM_ORCHESTRATION_RUN_DIR;
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = runDir;
+    try {
+      const result = await runDispatch(JSON.stringify({
+        session_id: session,
+        agent_id: "agent-wave-gate-spec-check",
+        agent_type: "spec-check-invoker",
+        agent_transcript_path: transcriptPath,
+      }), [], cleanup);
+
+      expect(result).toEqual({ kind: "passthrough" });
+      expect(cleanup).toHaveBeenCalledOnce();
+      expect(JSON.parse(readFileSync(statePath, "utf8")).spec_check).toMatchObject({
+        wave: 1,
+        verdict: "PASSED",
+        critical_count: 0,
+        high_count: 0,
+      });
+      const captured = opened.value.readTranscriptBytes(request);
+      expect(captured.ok).toBe(true);
+      if (captured.ok) expect(Buffer.from(captured.value).toString("utf8")).toBe(capturedBytes);
+    } finally {
+      if (previousRoot === undefined) delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+      else process.env.LOOM_ORCHESTRATION_RUNS_ROOT = previousRoot;
+      if (previousRun === undefined) delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
+      else process.env.LOOM_ORCHESTRATION_RUN_DIR = previousRun;
+    }
+  });
+
   it("terminates a successfully captured graphless standalone review without TaskGraph routing", async () => {
     const dir = tempDir();
     const runsRoot = join(dir, "runs");

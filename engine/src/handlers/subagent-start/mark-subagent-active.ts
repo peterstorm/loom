@@ -223,26 +223,23 @@ const handler: HookHandler = async (stdin) => {
   //
   // A roster FAILURE (lock/fs error) makes attribution unsound: an agent
   // off the roster runs invisibly, so soleActiveBinding would cross-credit
-  // its tool calls into whatever binding exists. An unsound roster must not
-  // coexist with an armed binding. Machine-bearing roles are blocked; a
-  // machine-less role still writes the .task_graph path for SubagentStop.
+  // its tool calls into whatever binding exists. Every role fails closed;
+  // machine-less Agents must not continue merely because no binding is armed.
   //
   // The roster line also records the agent TYPE. PreToolUse authorizes writes
   // by ROLE, and on Claude Code `agent_id` is an opaque handle that no
   // agent-type name can match — identity alone cannot answer "may this agent
   // write?". Parsed here (not below) because the roster is written first.
-  let rosterSound = true;
   let rosterCreated = false;
   if (rosterId !== null) {
     try {
       const rosterAcquisition = await markAgentActive(sessionId, rosterId, rosterAgentType);
       rosterCreated = rosterAcquisition === "created";
     } catch (e) {
-      rosterSound = false;
-      const message = `mark-subagent-active: roster update failed — attribution unsound; refusing to arm machine binding for ${agent_id}/${sessionId}: ${e instanceof Error ? e.message : String(e)}`;
+      const message = `mark-subagent-active: roster update failed — attribution unsound; refusing spawn and refusing to arm machine binding for ${agent_id}/${sessionId}: ${e instanceof Error ? e.message : String(e)}`;
       process.stderr.write(`${message}\n`);
+      const rollbackFailures: string[] = [];
       if (modernImplementationAgent) {
-        const rollbackFailures: string[] = [];
         try {
           if (sidecarPublished && agentId !== null) removeImplementationAttemptSidecar(sessionId, agentId);
         } catch (rollbackError) {
@@ -250,9 +247,8 @@ const handler: HookHandler = async (stdin) => {
         }
         const registrationRollback = await rollbackIdentifiedRegistration();
         if (registrationRollback !== null) rollbackFailures.push(`exact registration rollback failed: ${registrationRollback}`);
-        return blockResult(rollbackFailures.length === 0 ? message : `${message}; ${rollbackFailures.join("; ")}`);
       }
-      if (guardedMachine.kind !== "none") return blockResult(message);
+      return blockResult(rollbackFailures.length === 0 ? message : `${message}; ${rollbackFailures.join("; ")}`);
     }
   }
 
@@ -265,14 +261,14 @@ const handler: HookHandler = async (stdin) => {
   // epoch key). machinesDir() is resolved at CALL time — the same
   // resolution the PreToolUse gate uses, so bind and gate can never see
   // different dirs.
-  if (rosterAgentTypeRaw && rosterAgentType === null && rosterSound) {
+  if (rosterAgentTypeRaw && rosterAgentType === null) {
     process.stderr.write(
       `mark-subagent-active: agent_type ${JSON.stringify(rosterAgentTypeRaw)} contains reserved or path-unsafe characters (whitespace/colon/slash/'..') — no machine looked up or bound; it will run UNGATED\n`,
     );
   }
   let bindingFailure: string | null = null;
   let machineBindingCreated = false;
-  if (rosterAgentType && rosterSound) {
+  if (rosterAgentType) {
     if (guardedMachine.kind !== "none") {
       if (agentId && rosterId !== null) {
         try {

@@ -296,6 +296,44 @@ describe("Pi extension review tool_result integration", () => {
     expect(process.env[PI_EXTENSION_RUNTIME_REVISION_ENV]).toBe(expected.revision);
   });
 
+  it("preserves write-grant injection failure when direct revocation also fails", async () => {
+    const extensionSpecifier = "../../pi/extension.ts";
+    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
+      injectPiWriteGrantWithRevocation: (
+        task: string,
+        grant: Readonly<{ token: string; marker: string }>,
+        spawnIndex: number,
+        ports: Readonly<{
+          inject(task: string, grant: Readonly<{ token: string; marker: string }>): string;
+          revoke(token: string): void;
+        }>,
+      ) => Promise<string>;
+    };
+    const injectionFailure = new Error("prompt mutation failed");
+    const revoke = vi.fn(() => { throw new Error("grant store unavailable"); });
+
+    let thrown: unknown;
+    try {
+      await module.injectPiWriteGrantWithRevocation(
+        "Task ID: T1",
+        { token: "a".repeat(64), marker: `<!-- LOOM_PI_WRITE_GRANT:${"a".repeat(64)} -->` },
+        1,
+        {
+          inject: () => { throw injectionFailure; },
+          revoke,
+        },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).cause).toBe(injectionFailure);
+    expect((thrown as Error).message).toContain("prompt mutation failed");
+    expect((thrown as Error).message).toContain("directly revoke write grant for spawn item 2: grant store unavailable");
+    expect(revoke).toHaveBeenCalledWith("a".repeat(64));
+  });
+
   it("blocks post-edit lint when project rules are inaccessible", async () => {
     const pi = await extension();
     const project = canonicalTempDir("loom-pi-project-rules-");
@@ -1024,7 +1062,7 @@ describe("Pi extension review tool_result integration", () => {
     expect(readFileSync(statePath, "utf-8")).toBe(before);
   });
 
-  it("rejects substituted review Task identity instead of misattributing findings to the reserved Task", async () => {
+  it("rejects substituted review Task identity and records the reserved evidence gap", async () => {
     const planPath = join(temp, "reserved-review-task-plan.md");
     writeFileSync(planPath, "# Plan\n");
     writeState({
@@ -1061,7 +1099,8 @@ describe("Pi extension review tool_result integration", () => {
 
     const [t1, t2] = JSON.parse(readFileSync(statePath, "utf-8")).tasks;
     expect(t1.critical_findings).toBeUndefined();
-    expect(t1.review_status).toBe("pending");
+    expect(t1.review_status).toBe("evidence_capture_failed");
+    expect(t1.review_evidence_failures).toEqual(["code-reviewer"]);
     expect(t2.critical_findings).toBeUndefined();
     expect(t2.review_status).toBe("pending");
     expect(responses).toContainEqual(expect.objectContaining({

@@ -1390,7 +1390,7 @@ async function applyBoundImplementationPiResult(
 
 type ReviewTaskBinding =
   | Readonly<{ kind: "blocked"; outcome: PiResultOutcome }>
-  | Readonly<{ kind: "bound"; taskId: string; reviewTask: LoomTask }>;
+  | Readonly<{ kind: "bound"; taskId: string }>;
 
 function resolveReviewTaskBinding(args: Readonly<{
   store: TaskGraphStore;
@@ -1417,87 +1417,98 @@ function resolveReviewTaskBinding(args: Readonly<{
     const message = `WARNING: ${args.agentType} review names task ${taskId}, which is not in the task graph — findings NOT stored`;
     return { kind: "blocked", outcome: outcome([message], [message]) };
   }
-  return { kind: "bound", taskId, reviewTask };
+  return { kind: "bound", taskId };
+}
+
+type LockedReviewEvidenceApplication =
+  | Readonly<{ kind: "missing" }>
+  | Readonly<{ kind: "authority-rejected"; problem: string }>
+  | Readonly<{
+      kind: "applied";
+      resolution: ReviewResolution;
+      task: LoomTask;
+      changed: boolean;
+    }>;
+
+/** Apply either parsed or malformed reviewer evidence under one locked protocol. */
+async function applyLockedReviewEvidence(args: Readonly<{
+  store: TaskGraphStore;
+  agentType: string;
+  taskId: string;
+  reviewAuthority: PiReviewAttemptAuthority | null | undefined;
+  resolutionFor(task: LoomTask): ReviewResolution;
+}>): Promise<PiResultOutcome> {
+  const result: { application: LockedReviewEvidenceApplication } = {
+    application: { kind: "missing" },
+  };
+  await args.store.update((state) => {
+    const task = state.tasks.find((candidate) => candidate.id === args.taskId);
+    if (task === undefined) return state;
+    const authorityProblem = piReviewAuthorityProblem(task, args.agentType, args.reviewAuthority);
+    if (authorityProblem !== null) {
+      result.application = { kind: "authority-rejected", problem: authorityProblem };
+      return state;
+    }
+    const resolution = args.resolutionFor(task);
+    const appliedTask = applyReviewResolution(task, resolution);
+    result.application = {
+      kind: "applied",
+      resolution,
+      task: appliedTask,
+      changed: appliedTask !== task,
+    };
+    return appliedTask === task
+      ? state
+      : {
+          ...state,
+          tasks: state.tasks.map((candidate) => candidate.id === args.taskId ? appliedTask : candidate),
+        };
+  });
+
+  const application = result.application;
+  if (application.kind === "missing") {
+    const message = `WARNING: ${args.agentType} review task ${args.taskId} disappeared before evidence application — findings NOT stored`;
+    return outcome([message], [message]);
+  }
+  if (application.kind === "authority-rejected") {
+    const message = `WARNING: ${args.agentType} review task ${args.taskId} ${application.problem} — findings NOT stored`;
+    return outcome([message], [message]);
+  }
+  return outcome([
+    reviewResolutionLog(args.taskId, application.resolution, application.task, application.changed),
+  ]);
 }
 
 async function applyMalformedReviewMessages(args: Readonly<{
   store: TaskGraphStore;
   agentType: string;
   taskId: string;
-  reviewTask: LoomTask;
   reviewAuthority: PiReviewAttemptAuthority | null | undefined;
   errors: readonly string[];
 }>): Promise<PiResultOutcome> {
-  const message = `Pi review messages are malformed: ${args.errors.join("; ")}`;
-  const resolution = { kind: "evidence-failed" as const, agent: args.agentType, message };
-  let appliedTask = args.reviewTask;
-  let taskFound = false;
-  let authorityProblem: string | null = null;
-  await args.store.update((state) => ({
-    ...state,
-    tasks: state.tasks.map((task) => {
-      if (task.id !== args.taskId) return task;
-      taskFound = true;
-      authorityProblem = piReviewAuthorityProblem(task, args.agentType, args.reviewAuthority);
-      if (authorityProblem !== null) return task;
-      appliedTask = applyReviewResolution(task, resolution);
-      return appliedTask;
-    }),
-  }));
-  if (!taskFound) {
-    const missing = `WARNING: ${args.agentType} review task ${args.taskId} disappeared before malformed evidence application — findings NOT stored`;
-    return outcome([missing], [missing]);
-  }
-  if (authorityProblem !== null) {
-    const stale = `WARNING: ${args.agentType} review task ${args.taskId} ${authorityProblem} — findings NOT stored`;
-    return outcome([stale], [stale]);
-  }
-  return outcome([reviewResolutionLog(args.taskId, resolution, appliedTask, true)]);
+  const resolution: ReviewResolution = {
+    kind: "evidence-failed",
+    agent: args.agentType,
+    message: `Pi review messages are malformed: ${args.errors.join("; ")}`,
+  };
+  return applyLockedReviewEvidence({ ...args, resolutionFor: () => resolution });
 }
 
 async function applyParsedReviewMessages(args: Readonly<{
   store: TaskGraphStore;
   agentType: string;
   taskId: string;
-  reviewTask: LoomTask;
   reviewAuthority: PiReviewAttemptAuthority | null | undefined;
   messages: readonly PiMessage[];
 }>): Promise<PiResultOutcome> {
-  let resolution: ReviewResolution = {
-    kind: "evidence-failed",
-    agent: args.agentType,
-    message: "review task disappeared before evidence could be applied",
-  };
-  let appliedTask = args.reviewTask;
-  let applicationChanged = false;
-  let taskFound = false;
-  let authorityProblem: string | null = null;
   const transcriptText = transcriptTextOf(args.messages);
-  await args.store.update((state) => ({
-    ...state,
-    tasks: state.tasks.map((task) => {
-      if (task.id !== args.taskId) return task;
-      taskFound = true;
-      authorityProblem = piReviewAuthorityProblem(task, args.agentType, args.reviewAuthority);
-      if (authorityProblem !== null) return task;
-      resolution = constrainReviewResolutionToScope(
-        resolveTaskReviewFindings(transcriptText, args.agentType, task.review_run, task.review_generation),
-        [...(task.file_list ?? []), ...(task.files_modified ?? [])],
-      );
-      appliedTask = applyReviewResolution(task, resolution);
-      applicationChanged = appliedTask !== task;
-      return appliedTask;
-    }),
-  }));
-  if (!taskFound) {
-    const message = `WARNING: ${args.agentType} review task ${args.taskId} disappeared before evidence application — findings NOT stored`;
-    return outcome([message], [message]);
-  }
-  if (authorityProblem !== null) {
-    const stale = `WARNING: ${args.agentType} review task ${args.taskId} ${authorityProblem} — findings NOT stored`;
-    return outcome([stale], [stale]);
-  }
-  return outcome([reviewResolutionLog(args.taskId, resolution, appliedTask, applicationChanged)]);
+  return applyLockedReviewEvidence({
+    ...args,
+    resolutionFor: (task) => constrainReviewResolutionToScope(
+      resolveTaskReviewFindings(transcriptText, args.agentType, task.review_run, task.review_generation),
+      [...(task.file_list ?? []), ...(task.files_modified ?? [])],
+    ),
+  });
 }
 
 /**

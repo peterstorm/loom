@@ -56,13 +56,18 @@ export const runStoreSpecCheckFindings = async (
     };
   }
 
-  const rawPath = resolveAgentTranscriptPath(input) ?? input.agent_transcript_path ?? "";
+  const resolvedTranscriptPath = resolveAgentTranscriptPath(input);
+  const rawPath = resolvedTranscriptPath ?? input.agent_transcript_path ?? "";
   let transcript: string | null = null;
-  let transcriptFailure: string | null = null;
-  try {
-    transcript = await readTranscriptWithRetry(rawPath, /SPEC_CHECK_CRITICAL_COUNT:\s*\d+/);
-  } catch (error) {
-    transcriptFailure = `spec-check transcript is unreadable: ${error instanceof Error ? error.message : String(error)}`;
+  let transcriptFailure: string | null = resolvedTranscriptPath === null
+    ? `spec-check transcript is unreadable: no transcript can be located at ${rawPath || "<unset>"}`
+    : null;
+  if (resolvedTranscriptPath !== null) {
+    try {
+      transcript = await readTranscriptWithRetry(resolvedTranscriptPath, /SPEC_CHECK_CRITICAL_COUNT:\s*\d+/);
+    } catch (error) {
+      transcriptFailure = `spec-check transcript is unreadable: ${error instanceof Error ? error.message : String(error)}`;
+    }
   }
   const findings = parseSpecCheckOutput(transcript ?? "");
   const applied = await manager.updateAndReturn((state) => {

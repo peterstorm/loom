@@ -9,8 +9,8 @@
  * that permanent.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -58,13 +58,50 @@ describe("anchored lock liveness", () => {
     }
   });
 
-  it("reclaims a recovery guard whose claimant is provably gone", async () => {
+  it("reclaims an abandoned recovery guard before entering the protected critical section", async () => {
     const anchored = openDirectoryNoFollow(dir);
     try {
       writeDirectoryFileExclusiveNoFollow(anchored, ".task_graph.recovery", `${deadPid()}:1:abandon`);
-      expect(await withAnchoredDirectoryHandleLock(anchored, ".task_graph", () => "entered")).toBe("entered");
+      const entered = await withAnchoredDirectoryHandleLock(anchored, ".task_graph", () => {
+        expect(listDirectoryNamesNoFollow(anchored)).toEqual([".task_graph"]);
+        return "entered";
+      });
+      expect(entered).toBe("entered");
       expect(listDirectoryNamesNoFollow(anchored)).toEqual([]);
     } finally {
+      closeAnchoredDirectory(anchored);
+    }
+  });
+
+  it("does not delete a replacement live recovery guard after observing an abandoned one", async () => {
+    const anchored = openDirectoryNoFollow(dir);
+    const recoveryPath = join(dir, ".task_graph.recovery");
+    const abandonedPid = deadPid();
+    const replacementToken = `${process.pid}:2:replacement-live`;
+    const originalKill = process.kill.bind(process);
+    let replacementSurvived = false;
+    let swapped = false;
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: NodeJS.Signals | number) => {
+      if (pid === abandonedPid && !swapped) {
+        swapped = true;
+        rmSync(recoveryPath, { force: true });
+        writeFileSync(recoveryPath, replacementToken);
+        setTimeout(() => {
+          replacementSurvived = readFileSync(recoveryPath, "utf8") === replacementToken;
+          rmSync(recoveryPath, { force: true });
+        }, 25);
+        const gone = new Error("gone") as NodeJS.ErrnoException;
+        gone.code = "ESRCH";
+        throw gone;
+      }
+      return originalKill(pid, signal ?? 0);
+    }) as typeof process.kill);
+    try {
+      writeDirectoryFileExclusiveNoFollow(anchored, ".task_graph.recovery", `${abandonedPid}:1:abandon`);
+      expect(await withAnchoredDirectoryHandleLock(anchored, ".task_graph", () => "entered")).toBe("entered");
+      expect(replacementSurvived).toBe(true);
+    } finally {
+      kill.mockRestore();
       closeAnchoredDirectory(anchored);
     }
   });

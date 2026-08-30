@@ -99,14 +99,19 @@ export type MissingReservedResults<T extends ReservedResultItem> = Readonly<{
 }>;
 
 /**
- * The agent name from a parsed result envelope at this batch position, or
- * `null` when the position is absent or its envelope was rejected. A mismatch
- * is treated exactly like an absence — malformed or wrong-agent evidence does
- * not prove that the expected Agent reported.
+ * Whether the parsed result at this batch position proves the reserved slot
+ * arrived. Agent identity is always exact; a Task-bound reviewer must also name
+ * the reserved Task. Wrong-Task review evidence is an absence for this slot so
+ * the shell durably reconciles its missing evidence instead of stranding it.
  */
-function returnedAgentAt(entries: readonly PiSubagentResultEntry[], index: number): string | null {
+function returnedResultMatchesReservation(
+  entries: readonly PiSubagentResultEntry[],
+  index: number,
+  item: ReservedResultItem,
+): boolean {
   const entry = entries[index];
-  return entry?.ok === true ? stripNamespace(entry.result.agent) : null;
+  if (entry?.ok !== true || stripNamespace(entry.result.agent) !== item.agentType) return false;
+  return !isReviewAgent(item.agentType) || item.taskId === null || extractTaskId(entry.result.task) === item.taskId;
 }
 
 /**
@@ -138,7 +143,7 @@ export function classifyMissingReservedResults<T extends ReservedResultItem>(
   const entries = parsePiSubagentResults(rawResults);
   const missing = (predicate: (item: T) => boolean): readonly MissingReservedResult<T>[] =>
     Object.freeze(items.flatMap((item, index) =>
-      predicate(item) && returnedAgentAt(entries, index) !== item.agentType
+      predicate(item) && !returnedResultMatchesReservation(entries, index, item)
         ? [Object.freeze({ item, index })]
         : []));
 
