@@ -39,6 +39,7 @@ import {
   describeCaptureFailure,
   resolveCorrelatedRequest,
   RUN_DIR_ENV,
+  terminalizeCaptureRejection,
   RUNS_ROOT_ENV,
   type CaptureOutcome,
 } from "../../orchestration/harness-capture-runtime";
@@ -186,23 +187,23 @@ export async function captureClaudeResult(
   });
   if (!resolved.ok) return resolved.outcome;
 
+  const reject = (reason: string, message: string): Promise<CaptureOutcome> =>
+    terminalizeCaptureRejection(resolved.value.handle, resolved.value.request, { reason, message });
   const transcriptPath = resolveAgentTranscriptPath(input);
   if (transcriptPath === null) {
-    return {
-      kind: "rejected",
-      reason: "transcript-locator",
-      message: `no transcript can be located for session ${JSON.stringify(input.session_id ?? "")} agent ${JSON.stringify(input.agent_id ?? "")}: none was supplied and the derived path does not exist`,
-    };
+    return reject(
+      "transcript-locator",
+      `no transcript can be located for session ${JSON.stringify(input.session_id ?? "")} agent ${JSON.stringify(input.agent_id ?? "")}: none was supplied and the derived path does not exist`,
+    );
   }
   let candidates: readonly FinalPayloadCandidate[];
   try {
     candidates = claudeFinalPayloadCandidates(transcriptPath);
   } catch (error) {
-    return {
-      kind: "rejected",
-      reason: error instanceof ClaudeTranscriptReadError ? "transcript-read" : "transcript-json",
-      message: error instanceof Error ? error.message : String(error),
-    };
+    return reject(
+      error instanceof ClaudeTranscriptReadError ? "transcript-read" : "transcript-json",
+      error instanceof Error ? error.message : String(error),
+    );
   }
   return captureHarnessResult({
     harness: "claude",

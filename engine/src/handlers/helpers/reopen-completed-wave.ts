@@ -67,7 +67,8 @@ function exactIds(left: readonly string[], right: readonly string[]): boolean {
 export function hasLaterWaveTaskProgress(task: Task, executingTaskIds: readonly string[]): boolean {
   return executingTaskIds.includes(task.id) ||
     task.status !== "pending" ||
-    task.reserved_at !== undefined || task.start_sha !== undefined ||
+    task.reserved_at !== undefined || task.active_implementation_attempt !== undefined ||
+    (task.implementation_attempt_history?.length ?? 0) > 0 || task.start_sha !== undefined ||
     task.files_modified !== undefined || task.test_result !== undefined ||
     task.test_evidence !== undefined || task.new_test_observation !== undefined ||
     (task.proof !== undefined && task.proof.state !== "pending") ||

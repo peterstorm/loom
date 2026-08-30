@@ -71,7 +71,7 @@ describe("pure call-start vocabulary", () => {
     expect(pruneCallStarts([], 3)).toEqual([]);
   });
 
-  it("callStartOf scans from the END so a duplicate id resolves to the most recent stamp", () => {
+  it("callStartOf resolves a duplicate id to the most recent stamp", () => {
     const entries = [
       { id: "t", startMs: 100 },
       { id: "other", startMs: 150 },

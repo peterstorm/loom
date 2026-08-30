@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { canonicalTempDir } from "./fixtures/canonical-temp-dir";
@@ -46,7 +47,8 @@ class FakePi {
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const temp = canonicalTempDir("loom-pi-review-events-");
 const specCheckPlanPath = join(temp, "spec-check-authority-plan.md");
-writeFileSync(specCheckPlanPath, "# Plan\n");
+const specCheckPlanBytes = "# Plan\n";
+writeFileSync(specCheckPlanPath, specCheckPlanBytes);
 
 /** chmod 0o500 denies nothing to root; skip the EACCES-based failure
  *  simulations there instead of asserting a permission the OS is not
@@ -96,31 +98,50 @@ const initialGraph = () => ({
   }],
 });
 
-const specCheckGraph = (overrides: Record<string, unknown> = {}) => ({
-  ...initialGraph(),
-  phase_artifacts: { architecture: specCheckPlanPath },
-  skipped_phases: ["plan-alignment"],
-  plan_file: specCheckPlanPath,
-  active_wave_gate: {
-    schemaVersion: 1,
-    kind: "active-wave-gate",
-    runId: "run.pi-spec-check",
-    wave: 1,
-    authorityDigest: "a".repeat(64),
-    revision: 1,
-    terminalOutcome: null,
-  },
-  wave_review_epoch: {
-    runId: "run.pi-spec-check",
-    wave: 1,
-    batchEpoch: "b".repeat(64),
-    specCheckSlotAuthority: { slot_id: "wave-slot:spec-check", attempted: 1 },
-  },
-  ...overrides,
-});
+const specCheckGraph = (overrides: Record<string, unknown> = {}) => {
+  const result = {
+    ...initialGraph(),
+    phase_artifacts: { architecture: specCheckPlanPath },
+    skipped_phases: ["plan-alignment"],
+    plan_file: specCheckPlanPath,
+    active_wave_gate: {
+      schemaVersion: 1,
+      kind: "active-wave-gate",
+      runId: "run.pi-spec-check",
+      wave: 1,
+      authorityDigest: "a".repeat(64),
+      revision: 1,
+      terminalOutcome: null,
+    },
+    wave_review_epoch: {
+      runId: "run.pi-spec-check",
+      wave: 1,
+      batchEpoch: "b".repeat(64),
+      specCheckSlotAuthority: { slot_id: "wave-slot:spec-check", attempted: 1 },
+    },
+    ...overrides,
+  };
+  const document = (path: unknown) => typeof path === "string"
+    ? { path, contentDigest: createHash("sha256").update(readFileSync(path)).digest("hex") }
+    : { path: null, contentDigest: null };
+  return {
+    ...result,
+    wave_review_epoch: {
+      ...result.wave_review_epoch,
+      specCheckDocuments: {
+        spec: document(result.spec_file),
+        plan: document(result.plan_file),
+      },
+    },
+  };
+};
 
 function writeState(state: unknown): void {
-  try { chmodSync(statePath, 0o644); } catch { /* first write */ }
+  try {
+    chmodSync(statePath, 0o644);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
   writeFileSync(statePath, JSON.stringify(state, null, 2));
 }
 
@@ -542,6 +563,53 @@ describe("Pi extension review tool_result integration", () => {
     expect(responses).toContainEqual(expect.objectContaining({
       isError: true,
       content: [expect.objectContaining({ text: expect.stringContaining("request-bound capture failed") })],
+    }));
+  });
+
+  it.each([
+    ["role", { role: "silent-failure-hunter", attempt: 1 }],
+    ["attempt", { role: "code-reviewer", attempt: 2 }],
+  ] as const)("rejects Pi review evidence when planted correlator %s disagrees with the request", async (field, mismatch) => {
+    const pi = await extension();
+    const staged = await piCaptureRun(`pi-correlator-${field}-mismatch`);
+    const toolCallId = `call-correlator-${field}-mismatch`;
+    const nativeId = await rosterId(toolCallId, 0, "code-reviewer");
+    const correlated = await staged.handle.recordHarnessCorrelator({
+      schemaVersion: 1,
+      harness: "pi",
+      nativeId,
+      requestId: staged.request.requestId,
+      role: staged.request.role,
+      attempt: staged.request.attempt,
+    });
+    expect(correlated.ok).toBe(true);
+    const correlatorPath = join(
+      staged.runDir,
+      "requests",
+      "correlators",
+      readdirSync(join(staged.runDir, "requests", "correlators"))[0]!,
+    );
+    writeFileSync(correlatorPath, JSON.stringify({
+      schemaVersion: 1,
+      harness: "pi",
+      nativeId,
+      requestId: staged.request.requestId,
+      ...mismatch,
+    }));
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = staged.runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = staged.runDir;
+
+    const responses = await pi.emit("tool_result", {
+      ...reviewResult("Task: T1", "must remain untrusted"),
+      toolCallId,
+    }, {
+      sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad496" },
+    });
+
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].critical_findings ?? []).toEqual([]);
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({ text: expect.stringContaining("correlator-authority") })],
     }));
   });
 
@@ -990,7 +1058,52 @@ describe("Pi extension review tool_result integration", () => {
 
       const written = stderr.mock.calls.map(([text]) => String(text)).join("");
       expect(written).toContain("does not match reserved \"code-reviewer\" — evidence ignored");
+      expect(written).toContain(
+        `1 reserved review result(s) and 0 reserved spec-check result(s) for session ${session} never arrived ` +
+        "and cannot be recorded as evidence_capture_failed: no TaskGraph was active at spawn",
+      );
       expect(written).not.toContain("cannot persist");
+      expect(existsSync(statePath)).toBe(false);
+    } finally {
+      stderr.mockRestore();
+      writeState(initialGraph());
+    }
+  });
+
+  it("reports a graphless missing spec-check result without inventing protected state", async () => {
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad472";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-ad-hoc-spec-check-missing";
+    rmSync(statePath, { force: true });
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: {
+          agent: "spec-check-invoker",
+          task: "Follow the preloaded spec-check skill with --wave 1 --tasks T1.",
+          agentScope: "user",
+        },
+      }, context)).toEqual([undefined]);
+
+      const responses = await pi.emit("tool_result", {
+        toolName: "subagent",
+        toolCallId,
+        isError: false,
+        input: {},
+        content: [],
+        details: { results: [] },
+      }, context);
+
+      const written = stderr.mock.calls.map(([text]) => String(text)).join("");
+      expect(written).toContain(
+        `0 reserved review result(s) and 1 reserved spec-check result(s) for session ${session} never arrived ` +
+        "and cannot be recorded as evidence_capture_failed: no TaskGraph was active at spawn",
+      );
+      expect(written).not.toContain("cannot persist");
+      expect(responses).not.toContainEqual(expect.objectContaining({ isError: true }));
       expect(existsSync(statePath)).toBe(false);
     } finally {
       stderr.mockRestore();
@@ -4855,13 +4968,10 @@ describe("Pi extension review tool_result integration", () => {
 /**
  * The Pi extension's fail-closed BACKSTOPS.
  *
- * Three refusals sit at the top of `tool_call` and had no test between them:
- * the outer catch that blocks the call when any loom guard throws, the
- * invalid-session-id spawn refusal, and the duplicate-`toolCallId` spawn
- * refusal. Each is the last thing standing between a malformed event and an
- * unguarded action, and each fails in the direction that matters only if it
- * actually runs — a regression turning any of them into a pass-through would
- * have been invisible.
+ * These tests cover the outer catch, invalid-session and duplicate-call spawn
+ * refusals, absent `toolCallId`, and malformed Bash guard input. Each is the
+ * last thing standing between a malformed event and an unguarded action, and
+ * each fails in the direction that matters only if it actually runs.
  */
 describe("Pi extension tool_call fail-closed backstops", () => {
   const extension = async () => {

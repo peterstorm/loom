@@ -82,6 +82,24 @@ describe("advance-phase artifact authority", () => {
     agent_transcript_path: transcriptPath,
   }), []);
 
+  it("rejects out-of-scope spec_dir before transcript discovery or persistence", async () => {
+    const session = `artifact-invalid-spec-dir-${process.pid}-${Date.now()}`;
+    const outside = join(tmpDir, "outside-specs");
+    const specPath = plantSpec("outside-specs");
+    const transcript = join(tmpDir, "transcript.jsonl");
+    writeFileSync(transcript, writeLine(specPath));
+    const initial = mkState({ spec_dir: outside });
+
+    await withPhaseState(session, initial, async () => {
+      const result = await specifyResult(session, transcript);
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringContaining("spec_dir"),
+      });
+      expect(JSON.parse(readFileSync(join(tmpDir, `${session}.json`), "utf8"))).toEqual(initial);
+    });
+  });
+
   it("records the run's own spec.md and advances on it", async () => {
     const session = `artifact-own-${process.pid}-${Date.now()}`;
     const specDir = ".claude/specs/2026-08-29-own";

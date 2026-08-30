@@ -118,6 +118,13 @@ describe("extractTestEvidence (pure)", () => {
     expect(result.evidence).toContain("node");
   });
 
+  it("requires Node/Mocha passing prose to occupy a complete summary line", () => {
+    expect(extractTestEvidence("Release note: 15 passing checks after cleanup")).toEqual({
+      passed: false,
+      evidence: "",
+    });
+  });
+
   it("rejects Node with failing tests", () => {
     const output = "  10 passing\n  3 failing";
     const result = extractTestEvidence(output);
@@ -207,6 +214,24 @@ describe("extractTestEvidence (pure)", () => {
   });
 
   // --- Tests for multiple test runs (T11 fix) ---
+
+  it.each([
+    ["pass before failure", "  2 passing (5ms)\nTests  1 failed"],
+    ["failure before pass", "Tests  1 failed\n  2 passing (5ms)"],
+  ])("aggregates recognized runners so a cross-runner failure dominates: %s", (_label, output) => {
+    const result = extractTestEvidence(output);
+    expect(result.passed).toBe(false);
+    expect(result.evidence).toContain("node: 2 passing (5ms)");
+    expect(result.evidence).toContain("vitest: Tests  1 failed");
+  });
+
+  it("aggregates passing evidence from every recognized runner", () => {
+    const result = extractTestEvidence("  2 passing (5ms)\nTests  3 passed (3)");
+    expect(result).toEqual({
+      passed: true,
+      evidence: "node: 2 passing (5ms); vitest: Tests  3 passed (3)",
+    });
+  });
 
   it("uses last match for bun: first fails, last passes", () => {
     const output = "3 pass\n2 fail\nRan 5 tests\n\n289 pass\n0 fail\nRan 289 tests";

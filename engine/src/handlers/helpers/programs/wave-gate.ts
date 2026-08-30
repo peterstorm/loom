@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { awaitUserAction, parseAgentRequestAuthority, parseStoredAgentRequestAuthority, canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId, parseRequestId, type AgentRequestAuthority, type AwaitUserAction, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
 import { defaultRefutationThreshold } from '../../../core/review-panel';
-import { completePersistentRefutationPanel, deriveRefutationVerifierBinding, panelRequestIdentity, parseRefutationPanelAuthority, startPersistentRefutationPanel, submitRefutationVerdict } from '../../../core/panel-program';
+import { completePersistentRefutationPanel, deriveRefutationVerifierBinding, panelRequestIdentity, parseRefutationPanelAuthority, startPersistentRefutationPanel, submitRefutationVerdict, type RefutationPanelAuthority } from '../../../core/panel-program';
 import type { FindingOutcome } from '../../../core/review-panel';
 import { buildContextPacket, encodeByteSection, type ContextPacket } from '../../../orchestration/context-packets';
 import { captureKey } from '../../../core/harness-capture';
@@ -20,9 +20,11 @@ import { inspectFilePresence, loadPlanModelsSource } from '../complete-wave-gate
 import { runFullTierWaveLint } from '../lint-wave-gate';
 import { ensureWaveCompletionSuite, observeCurrentWaveWorkspace } from '../wave-completion-suite';
 import { observeReviewedWorkspace } from '../reviewed-workspace';
+import { observeWaveSpecCheckDocuments } from '../../../orchestration/wave-spec-check-documents';
 import { applyFindingOutcomes, preserveAcceptedReviewRunFindings } from '../../../core/findings';
+import { buildFindingBrief } from '../../../core/review-panel';
 import { applyReviewResolution, constrainReviewResolutionToScope, resolveTaskReviewFindings } from '../../../core/review-output';
-import type { Task, TaskGraph } from '../../../types';
+import type { ReviewRunSlotAuthority, Task, TaskGraph } from '../../../types';
 import { anyActiveSubagent } from '../../../machine';
 import { parseSpecCheckOutput, reconcileSpecCheck } from '../../../core/spec-check';
 import { reconcileWaveBlock } from '../../../core/wave-gate-model';
@@ -30,8 +32,10 @@ import { resolveModelProfile, lowerModelProfile } from '../../../core/model-prof
 import {
   prepareWaveReviewBatch,
   readWaveReviewContext,
+  waveSpecCheckDocumentsMatch,
   waveSpecCheckScope,
   type WaveRequestBatch,
+  type WaveReviewContextAuthority,
   type WaveReviewContextRead,
   type WaveReviewRegistrationAuthority,
   type WaveSpecCheckTaskAuthority,
@@ -163,6 +167,48 @@ function retireActiveReviewRun(task: Task): Task {
   };
 }
 
+function resetWaveGateGraph(graph: TaskGraph, taskIds: readonly string[]): TaskGraph {
+  return {
+    ...graph,
+    tasks: graph.tasks.map((task) => taskIds.includes(task.id) && task.review_run !== undefined
+      ? retireActiveReviewRun(task)
+      : task),
+    spec_check: undefined,
+    wave_review_epoch: undefined,
+    active_wave_gate: undefined,
+  };
+}
+
+function replacementWaveGate(
+  resetGraph: TaskGraph,
+  wave: number,
+  taskIds: readonly string[],
+  nextRunId: string,
+  nextRunsRoot: string,
+): Readonly<{ ok: false; message: string }> | Readonly<{
+  ok: true;
+  active: NonNullable<TaskGraph["active_wave_gate"]>;
+}> {
+  const authorityDigest = waveGateAuthorityDigest(wave, taskIds, resetGraph);
+  const parsedNextRunId = parseOrchestrationRunId(nextRunId);
+  const parsedAuthorityDigest = parseArtifactDigest(authorityDigest);
+  if (!parsedNextRunId.ok) return { ok: false, message: parsedNextRunId.error.message };
+  if (!parsedAuthorityDigest.ok) return { ok: false, message: parsedAuthorityDigest.error.message };
+  return {
+    ok: true,
+    active: Object.freeze({
+      schemaVersion: 1,
+      kind: "active-wave-gate",
+      runId: parsedNextRunId.value,
+      wave,
+      authorityDigest: parsedAuthorityDigest.value,
+      revision: 0,
+      runsRoot: nextRunsRoot,
+      terminalOutcome: null,
+    }),
+  };
+}
+
 /**
  * Pure protected-state transition for replacing one exhausted Wave review run.
  * Existing findings survive as prior findings; only packet-bound evidence is
@@ -223,41 +269,21 @@ export function prepareExhaustedWaveGateRestart(
       message: `Wave Gate restart refused before final-attempt rejection for: ${nonExhausted.map(({ task, slot }) => `${task.id}/${slot.agent}`).join(", ")}`,
     };
   }
-  const resetGraph: TaskGraph = {
-    ...graph,
-    tasks: graph.tasks.map((task) => previous.taskIds.includes(task.id) && task.review_run !== undefined
-      ? retireActiveReviewRun(task)
-      : task),
-    spec_check: undefined,
-    wave_review_epoch: undefined,
-    active_wave_gate: undefined,
-  };
-  const authorityDigest = waveGateAuthorityDigest(wave, previous.taskIds, resetGraph);
+  const resetGraph = resetWaveGateGraph(graph, previous.taskIds);
+  const replacement = replacementWaveGate(resetGraph, wave, previous.taskIds, nextRunId, nextRunsRoot);
+  if (!replacement.ok) return replacement;
   const exhaustedSlots = Object.freeze(outstanding.map(({ task, slot }) => `${task.id}/${slot.agent}`));
   const registration: RegisteredWaveGateProgram = Object.freeze({
     schemaVersion: 1,
     kind: "wave-gate",
     input: Object.freeze({ wave }),
     taskIds: previous.taskIds,
-    authorityDigest,
+    authorityDigest: replacement.active.authorityDigest,
     restart: Object.freeze({ previousRunId, exhaustedSlots }),
   });
-  const parsedNextRunId = parseOrchestrationRunId(nextRunId);
-  const parsedAuthorityDigest = parseArtifactDigest(authorityDigest);
-  if (!parsedNextRunId.ok) return { ok: false, message: parsedNextRunId.error.message };
-  if (!parsedAuthorityDigest.ok) return { ok: false, message: parsedAuthorityDigest.error.message };
   const nextGraph: TaskGraph = {
     ...resetGraph,
-    active_wave_gate: {
-      schemaVersion: 1,
-      kind: "active-wave-gate",
-      runId: parsedNextRunId.value,
-      wave,
-      authorityDigest: parsedAuthorityDigest.value,
-      revision: 0,
-      runsRoot: nextRunsRoot,
-      terminalOutcome: null,
-    },
+    active_wave_gate: replacement.active,
   };
   return {
     ok: true,
@@ -311,20 +337,9 @@ export function prepareOrphanedWaveGateRecovery(
   const taskIds = Object.freeze(graph.tasks.filter(({ wave }) => wave === expected.wave).map(({ id }) => id));
   if (taskIds.length === 0) return { ok: false, message: `active Wave ${expected.wave} has no protected tasks` };
 
-  const resetGraph: TaskGraph = {
-    ...graph,
-    tasks: graph.tasks.map((task) => taskIds.includes(task.id) && task.review_run !== undefined
-      ? retireActiveReviewRun(task)
-      : task),
-    spec_check: undefined,
-    wave_review_epoch: undefined,
-    active_wave_gate: undefined,
-  };
-  const authorityDigest = waveGateAuthorityDigest(expected.wave, taskIds, resetGraph);
-  const parsedNextRunId = parseOrchestrationRunId(nextRunId);
-  const parsedAuthorityDigest = parseArtifactDigest(authorityDigest);
-  if (!parsedNextRunId.ok) return { ok: false, message: parsedNextRunId.error.message };
-  if (!parsedAuthorityDigest.ok) return { ok: false, message: parsedAuthorityDigest.error.message };
+  const resetGraph = resetWaveGateGraph(graph, taskIds);
+  const replacement = replacementWaveGate(resetGraph, expected.wave, taskIds, nextRunId, nextRunsRoot);
+  if (!replacement.ok) return replacement;
 
   const retirement = Object.freeze({
     schemaVersion: 1 as const,
@@ -336,15 +351,15 @@ export function prepareOrphanedWaveGateRecovery(
     reason: "authoritative-run-directory-missing" as const,
     runsRoot: authoritativeRunsRoot,
     runDirectory: join(authoritativeRunsRoot, active.runId),
-    replacementRunId: parsedNextRunId.value,
-    replacementAuthorityDigest: parsedAuthorityDigest.value,
+    replacementRunId: replacement.active.runId,
+    replacementAuthorityDigest: replacement.active.authorityDigest,
   });
   const registration: RegisteredWaveGateProgram = Object.freeze({
     schemaVersion: 1,
     kind: "wave-gate",
     input: Object.freeze({ wave: expected.wave }),
     taskIds,
-    authorityDigest,
+    authorityDigest: replacement.active.authorityDigest,
     orphanRecovery: Object.freeze({
       previousRunId: active.runId,
       previousAuthorityDigest: active.authorityDigest,
@@ -353,16 +368,7 @@ export function prepareOrphanedWaveGateRecovery(
   const nextGraph: TaskGraph = {
     ...resetGraph,
     orphaned_wave_gate_history: Object.freeze([...(graph.orphaned_wave_gate_history ?? []), retirement]),
-    active_wave_gate: Object.freeze({
-      schemaVersion: 1,
-      kind: "active-wave-gate",
-      runId: parsedNextRunId.value,
-      wave: expected.wave,
-      authorityDigest: parsedAuthorityDigest.value,
-      revision: 0,
-      runsRoot: nextRunsRoot,
-      terminalOutcome: null,
-    }),
+    active_wave_gate: replacement.active,
   };
   return {
     ok: true,
@@ -397,6 +403,7 @@ export function waveRequests(
     graph,
     attempt,
     observeReviewedWorkspace(tasks),
+    observeWaveSpecCheckDocuments(graph.spec_file, graph.plan_file),
   );
   if (!prepared.ok) throw new Error(prepared.error.message);
   return prepared.value;
@@ -659,6 +666,20 @@ export async function markWaveTaskReviewRetriesIssued(
   }));
 }
 
+function reviewSlotAuthorityRoster(
+  authorities: readonly AgentRequestAuthority[],
+): readonly [ReviewRunSlotAuthority, ...ReviewRunSlotAuthority[]] {
+  const slotFor = (agent: (typeof WAVE_REVIEW_AGENTS)[number]): ReviewRunSlotAuthority => {
+    const matches = authorities.filter((authority) => authority.role === agent);
+    if (matches.length !== 1) {
+      throw new Error(`current Review Packet requires exactly one ${agent} slot, got ${matches.length}`);
+    }
+    return Object.freeze({ agent, slot_id: matches[0]!.slotId, attempted: 1 as const });
+  };
+  const [firstAgent, ...remainingAgents] = WAVE_REVIEW_AGENTS;
+  return Object.freeze([slotFor(firstAgent), ...remainingAgents.map(slotFor)]);
+}
+
 export async function installWaveReviewRuns(
   manager: StateManager,
   registration: RegisteredWaveGateProgram,
@@ -671,23 +692,61 @@ export async function installWaveReviewRuns(
   }
   const reviewAuthorities = batch.requests.filter(({ authority }) =>
     (authority as AgentRequestAuthority).role !== "spec-check-invoker");
-  await manager.update((locked) => ({
-    ...locked,
-    spec_check: undefined,
-    wave_review_epoch: {
-      runId: specCheckAuthority.runId,
-      wave: registration.input.wave ?? locked.current_wave ?? 0,
-      batchEpoch: batch.batchEpoch,
-      specCheckSlotAuthority: {
-        slot_id: specCheckAuthority.slotId,
-        attempted: 1,
+  const preinstall = manager.load();
+  const observedWorkspaces = observeReviewedWorkspace(
+    preinstall.tasks.filter(({ id }) => registration.taskIds.includes(id)),
+  );
+  const workspaceByTask = new Map(observedWorkspaces.map((observation) => [observation.taskId, observation]));
+  const currentDocuments = observeWaveSpecCheckDocuments(
+    batch.specCheckDocuments.spec.path,
+    batch.specCheckDocuments.plan.path,
+  );
+  await manager.update((locked) => {
+    const wave = registration.input.wave;
+    const active = locked.active_wave_gate;
+    if (wave === null || locked.current_phase !== "execute" || locked.current_wave !== wave ||
+        active === undefined || active.terminalOutcome !== null || active.runId !== specCheckAuthority.runId ||
+        active.wave !== wave || active.authorityDigest !== registration.authorityDigest) {
+      throw new Error("Wave review batch no longer owns the exact active Wave Gate authority");
+    }
+    if (locked.spec_file !== batch.specCheckDocuments.spec.path ||
+        locked.plan_file !== batch.specCheckDocuments.plan.path ||
+        !waveSpecCheckDocumentsMatch(currentDocuments, batch.specCheckDocuments)) {
+      throw new Error("spec-check documents changed before the Wave review batch could be installed");
+    }
+    const existingEpoch = locked.wave_review_epoch;
+    const exactEpochReplay = existingEpoch !== undefined &&
+      existingEpoch.runId === specCheckAuthority.runId && existingEpoch.wave === wave &&
+      existingEpoch.batchEpoch === batch.batchEpoch &&
+      waveSpecCheckDocumentsMatch(existingEpoch.specCheckDocuments, batch.specCheckDocuments) &&
+      existingEpoch.specCheckSlotAuthority?.slot_id === specCheckAuthority.slotId;
+    if (existingEpoch !== undefined && !exactEpochReplay && locked.tasks.some((task) =>
+      registration.taskIds.includes(task.id) && task.review_run !== undefined)) {
+      throw new Error("Wave review batch differs from the exact installed Wave review epoch");
+    }
+    return {
+      ...locked,
+      // A first installation invalidates older Wave evidence. An exact replay
+      // is idempotent and must retain spec-check evidence captured meanwhile.
+      spec_check: exactEpochReplay ? locked.spec_check : undefined,
+      wave_review_epoch: exactEpochReplay ? existingEpoch : {
+        runId: specCheckAuthority.runId,
+        wave,
+        batchEpoch: batch.batchEpoch,
+        specCheckDocuments: batch.specCheckDocuments,
+        specCheckSlotAuthority: {
+          slot_id: specCheckAuthority.slotId,
+          attempted: 1,
+        },
       },
-    },
-    tasks: locked.tasks.map((task) => {
+      tasks: locked.tasks.map((task) => {
       if (!registration.taskIds.includes(task.id)) return task;
       const taskRun = batch.taskRuns.find(({ taskId }) => taskId === task.id);
-      const currentWorkspace = observeReviewedWorkspace([task])[0];
-      if (taskRun === undefined || taskRun.generation !== (task.review_generation ?? 0) ||
+      const currentWorkspace = workspaceByTask.get(task.id);
+      const lockedScope = [...new Set([...(task.file_list ?? []), ...(task.files_modified ?? [])])].sort();
+      const exactScope = currentWorkspace !== undefined && lockedScope.length === currentWorkspace.scope.length &&
+        lockedScope.every((path, index) => path === currentWorkspace.scope[index]);
+      if (taskRun === undefined || taskRun.generation !== (task.review_generation ?? 0) || !exactScope ||
           currentWorkspace === undefined || currentWorkspace.headSha !== (taskRun.workspaceHeadSha ?? taskRun.headSha)) {
         throw new Error(`Task ${task.id} changed before its current Review Packet could be installed`);
       }
@@ -702,8 +761,17 @@ export async function installWaveReviewRuns(
       if (authorities.length !== WAVE_REVIEW_AGENTS.length) {
         throw new Error(`Task ${task.id} current Review Packet lacks the exact reviewer roster`);
       }
+      const slotAuthority = reviewSlotAuthorityRoster(authorities);
       if (task.review_run !== undefined) {
-        const same = task.review_run.packet_id === taskRun.packetId && task.review_run.generation === taskRun.generation;
+        const run = task.review_run;
+        const same = run.packet_id === taskRun.packetId && run.generation === taskRun.generation &&
+          run.head_sha === taskRun.headSha && canonicalStructuralEquals(run.expected_agents, WAVE_REVIEW_AGENTS) &&
+          run.slot_authority?.length === slotAuthority.length && slotAuthority.every((slot, index) =>
+            run.slot_authority?.[index]?.agent === slot.agent && run.slot_authority[index]?.slot_id === slot.slot_id) &&
+          canonicalStructuralEquals(run.workspace_scope, currentWorkspace.scope) &&
+          run.workspace_head_sha === (taskRun.workspaceHeadSha ?? taskRun.headSha) &&
+          run.wave_gate_run_id === specCheckAuthority.runId &&
+          run.wave_gate_authority_digest === registration.authorityDigest;
         if (same) return task;
         throw new Error(`Task ${task.id} already has a different Review Packet in progress`);
       }
@@ -719,23 +787,25 @@ export async function installWaveReviewRuns(
           expected_agents: WAVE_REVIEW_AGENTS,
           prior_finding_ids: (task.findings ?? []).map(({ id }) => id),
           evidence: [],
-          slot_authority: authorities.map((authority) => ({
-            agent: authority.role,
-            slot_id: authority.slotId,
-            attempted: 1 as const,
-          })) as never,
+          slot_authority: slotAuthority,
           workspace_scope: currentWorkspace.scope,
           workspace_head_sha: taskRun.workspaceHeadSha ?? taskRun.headSha,
           wave_gate_run_id: registration.input.wave === null ? undefined : (batch.requests[0]!.authority as AgentRequestAuthority).runId,
           wave_gate_authority_digest: registration.authorityDigest,
         },
       };
-    }),
-  }));
+      }),
+    };
+  });
 }
 
 /** The façade preserves its public compatibility name while the producer-owned core codec parses the wire bytes. */
-export const handleWaveReviewContext = readWaveReviewContext;
+export function handleWaveReviewContext(
+  packets: readonly ContextPacket[],
+  digest: string,
+): WaveReviewContextRead {
+  return readWaveReviewContext(packets, digest);
+}
 export type { WaveReviewContextAuthority } from '../../../core/wave-review-authority';
 
 export function waveReviewContextTaskId(context: WaveReviewContextRead): string | null {
@@ -744,17 +814,16 @@ export function waveReviewContextTaskId(context: WaveReviewContextRead): string 
 
 /** Exact spec-check packet membership does not depend on open reviewer runs. */
 export function specCheckSlotBelongsToWaveEpoch(
-  graph: Readonly<{ wave_review_epoch?: Readonly<{
-    runId: string;
-    wave: number;
-    batchEpoch: string;
-    specCheckSlotAuthority?: Readonly<{ slot_id: string; attempted: 1 | 2 }>;
-  }> }>,
+  graph: Pick<TaskGraph, "wave_review_epoch" | "spec_file" | "plan_file">,
   request: Readonly<{ runId: string; slotId: string; attempt: 1 | 2 }>,
-  context: Readonly<{ wave: number; batchEpoch: string }>,
+  context: Pick<WaveReviewContextAuthority, "wave" | "batchEpoch" | "specCheckDocuments">,
 ): boolean {
   const epoch = graph.wave_review_epoch;
-  return epoch?.runId === request.runId && epoch.wave === context.wave &&
+  return context.specCheckDocuments !== null &&
+    graph.spec_file === context.specCheckDocuments.spec.path &&
+    graph.plan_file === context.specCheckDocuments.plan.path &&
+    waveSpecCheckDocumentsMatch(epoch?.specCheckDocuments, context.specCheckDocuments) &&
+    epoch?.runId === request.runId && epoch.wave === context.wave &&
     epoch.batchEpoch === context.batchEpoch &&
     epoch.specCheckSlotAuthority?.slot_id === request.slotId &&
     epoch.specCheckSlotAuthority.attempted === request.attempt;
@@ -764,7 +833,7 @@ export function specCheckSlotBelongsToWaveEpoch(
 export function applyCurrentSpecCheckCaptureRejection(
   graph: TaskGraph,
   request: Readonly<{ runId: string; slotId: string; attempt: 1 | 2 }>,
-  context: Readonly<{ wave: number; batchEpoch: string; authorityDigest: string }>,
+  context: Pick<WaveReviewContextAuthority, "wave" | "batchEpoch" | "authorityDigest" | "specCheckDocuments">,
   specCheck: NonNullable<TaskGraph["spec_check"]>,
 ): Readonly<{ state: TaskGraph; applied: boolean }> {
   const active = graph.active_wave_gate;
@@ -782,6 +851,38 @@ export function applyCurrentSpecCheckCaptureRejection(
     },
     applied: true,
   });
+}
+
+export function waveRefutationCommitProblem(
+  graph: TaskGraph,
+  registration: RegisteredWaveGateProgram,
+  expectedActive: Pick<NonNullable<TaskGraph["active_wave_gate"]>, "runId" | "wave" | "authorityDigest" | "revision">,
+  panel: Pick<RefutationPanelAuthority, "runId" | "findings">,
+): string | null {
+  const wave = registration.input.wave;
+  const active = graph.active_wave_gate;
+  if (wave === null || graph.current_phase !== "execute" || graph.current_wave !== wave ||
+      active === undefined || active.terminalOutcome !== null ||
+      active.runId !== expectedActive.runId || active.runId !== panel.runId ||
+      active.wave !== expectedActive.wave || active.wave !== wave ||
+      active.authorityDigest !== expectedActive.authorityDigest ||
+      active.authorityDigest !== registration.authorityDigest || active.revision !== expectedActive.revision) {
+    return "Refutation Panel no longer owns the exact active Wave Gate authority";
+  }
+  const waveTaskIds = graph.tasks.filter((task) => task.wave === wave).map(({ id }) => id);
+  if (!canonicalStructuralEquals(waveTaskIds, registration.taskIds)) {
+    return "Refutation Panel task authority differs from the locked current Wave";
+  }
+  const collecting = graph.tasks.some((task) => task.wave === wave && task.review_run !== undefined);
+  const unreviewed = graph.tasks.some((task) => task.wave === wave &&
+    task.review_status !== "passed" && task.review_status !== "blocked");
+  if (collecting || unreviewed) {
+    return "Refutation Panel cannot commit while locked current-Wave review evidence is incomplete";
+  }
+  const lockedFindings = buildFindingBrief(wave, graph.tasks).findings;
+  return canonicalStructuralEquals(lockedFindings, panel.findings)
+    ? null
+    : "Refutation Panel findings differ from the locked current-Wave Finding authority";
 }
 
 export function waveRefutationPreparation(
@@ -1264,6 +1365,13 @@ export async function applyWaveFacadeSubmission(
     }
     const manager = new StateManager(TASK_GRAPH_PATH);
     if (authority.role === "spec-check-invoker") {
+      if (context.specCheckDocuments === null) {
+        return { ok: false, message: "Wave spec-check request predates byte-bound document authority" };
+      }
+      const currentDocuments = observeWaveSpecCheckDocuments(
+        context.specCheckDocuments.spec.path,
+        context.specCheckDocuments.plan.path,
+      );
       const parsed = parseSpecCheckOutput(raw);
       const wave = context.wave;
       const batchEpoch = context.batchEpoch;
@@ -1273,6 +1381,10 @@ export async function applyWaveFacadeSubmission(
         if (locked.current_wave !== wave || locked.active_wave_gate?.runId !== authority.runId ||
             locked.active_wave_gate.authorityDigest !== context.authorityDigest ||
             epoch?.runId !== authority.runId || epoch.wave !== wave || epoch.batchEpoch !== batchEpoch ||
+            locked.spec_file !== context.specCheckDocuments?.spec.path ||
+            locked.plan_file !== context.specCheckDocuments?.plan.path ||
+            !waveSpecCheckDocumentsMatch(epoch.specCheckDocuments, context.specCheckDocuments) ||
+            !waveSpecCheckDocumentsMatch(currentDocuments, context.specCheckDocuments) ||
             epoch.specCheckSlotAuthority?.slot_id !== authority.slotId ||
             epoch.specCheckSlotAuthority.attempted !== authority.attempt) {
           const expected = `${locked.current_wave}/${locked.active_wave_gate?.runId ?? "none"}/${locked.active_wave_gate?.authorityDigest ?? "none"}/${epoch?.runId ?? "none"}/${epoch?.wave ?? "none"}/${(epoch?.batchEpoch ?? "none").slice(0, 12)}`;
@@ -1388,6 +1500,12 @@ export async function resumeWaveGateFacade(
     if (active === undefined || active.runId !== handle.runId || active.wave !== registration.input.wave ||
         active.authorityDigest !== registration.authorityDigest || active.terminalOutcome !== null) {
       return waveBlocked(handle, "protected active Wave Gate authority differs from the registered façade run");
+    }
+    if (graph.wave_review_epoch !== undefined) {
+      const currentDocuments = observeWaveSpecCheckDocuments(graph.spec_file, graph.plan_file);
+      if (!waveSpecCheckDocumentsMatch(graph.wave_review_epoch.specCheckDocuments, currentDocuments)) {
+        return waveBlocked(handle, "current spec/plan bytes differ from the active Wave spec-check authority; refresh spec-check evidence");
+      }
     }
     const readiness = deriveWaveReadiness(graph, currentWaveGateDeps(graph, handle.runDirectory));
     if (!readiness.ok) return waveBlocked(handle, readiness.error.reasons.map(({ message }) => message).join("; "));
@@ -1882,6 +2000,13 @@ export async function resumeWaveGateFacade(
       );
       if (refutingOutcomes.length > 0) {
         await manager.update((locked) => {
+          const authorityProblem = waveRefutationCommitProblem(
+            locked,
+            registration,
+            current.value.registration,
+            preparation.panel,
+          );
+          if (authorityProblem !== null) throw new Error(authorityProblem);
           const tasks = locked.tasks.map((task) => applyFindingOutcomes(task, donePanel.decision.outcomes));
           return {
             ...locked,
@@ -1932,7 +2057,18 @@ export async function resumeWaveGateFacade(
     }
     const lint = runFullTierWaveLint(current.value.waveTasks);
     if (lint.kind === "block") return waveBlocked(handle, lint.message);
+    const completionDocuments = observeWaveSpecCheckDocuments(refreshed.spec_file, refreshed.plan_file);
     const committed = await manager.commitActiveWaveGateCompletion((locked) => {
+      if (locked.spec_file !== refreshed.spec_file || locked.plan_file !== refreshed.plan_file ||
+          !waveSpecCheckDocumentsMatch(locked.wave_review_epoch?.specCheckDocuments, completionDocuments)) {
+        return {
+          ok: false as const,
+          error: {
+            kind: "wave-completion-commit-rejected" as const,
+            message: "spec/plan authority changed before Wave completion commit",
+          },
+        };
+      }
       const lockedReadiness = deriveWaveReadiness(locked, currentWaveGateDeps(locked, handle.runDirectory));
       return lockedReadiness.ok ? commitWaveGateCompletion(lockedReadiness.value) : {
         ok: false as const,

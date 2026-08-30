@@ -55,12 +55,18 @@ const authority: SpecCheckRequestAuthority = {
 const modernGraph = graph({ spec_trace_version: 2 });
 const legacyGraph = graph({});
 
+const documents = {
+  spec: { path: null, contentDigest: null },
+  plan: { path: null, contentDigest: null },
+} as const;
+
 const activeWave = graph({
   active_wave_gate: { runId, wave: 1, authorityDigest: "digest-one" },
   wave_review_epoch: {
     runId,
     wave: 1,
     batchEpoch: "epoch-one",
+    specCheckDocuments: documents,
     specCheckSlotAuthority: { slot_id: slotId, attempted: 1 },
   },
 });
@@ -81,16 +87,16 @@ describe("specCheckAuthorityProblem", () => {
   });
 
   it("accepts the exact current epoch slot and attempt", () => {
-    expect(specCheckAuthorityProblem(activeWave, authority)).toBeNull();
+    expect(specCheckAuthorityProblem(activeWave, authority, documents)).toBeNull();
   });
 
   it("refuses a retired attempt of the same slot", () => {
-    expect(specCheckAuthorityProblem(activeWave, { ...authority, attempt: 2 }))
+    expect(specCheckAuthorityProblem(activeWave, { ...authority, attempt: 2 }, documents))
       .toContain("does not match the exact current Wave epoch");
   });
 
   it("refuses a request belonging to another role", () => {
-    expect(specCheckAuthorityProblem(activeWave, { ...authority, role: "code-reviewer" }))
+    expect(specCheckAuthorityProblem(activeWave, { ...authority, role: "code-reviewer" }, documents))
       .toContain("belongs to code-reviewer");
   });
 });

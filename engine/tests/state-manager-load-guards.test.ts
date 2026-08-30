@@ -422,6 +422,37 @@ describe("parseTaskGraph wave_review_epoch authority", () => {
     expect(Object.isFrozen(parsed.value.wave_review_epoch?.specCheckSlotAuthority)).toBe(true);
   });
 
+  it("parses and deeply freezes byte-bound spec-check documents", () => {
+    const documents = {
+      spec: { path: "spec.md", contentDigest: DIGEST("c") },
+      plan: { path: "plan.md", contentDigest: DIGEST("d") },
+    };
+    const parsed = parseTaskGraph(graph({
+      current_wave: 1,
+      spec_file: "spec.md",
+      plan_file: "plan.md",
+      wave_review_epoch: waveReviewEpoch({ specCheckDocuments: documents }),
+    }));
+
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.value.wave_review_epoch?.specCheckDocuments).toEqual(documents);
+    expect(isDeeplyFrozen(parsed.value.wave_review_epoch?.specCheckDocuments)).toBe(true);
+  });
+
+  it("rejects document paths that disagree with protected graph authority", () => {
+    expect(errorOf(graph({
+      spec_file: "different-spec.md",
+      plan_file: "plan.md",
+      wave_review_epoch: waveReviewEpoch({
+        specCheckDocuments: {
+          spec: { path: "spec.md", contentDigest: DIGEST("c") },
+          plan: { path: "plan.md", contentDigest: DIGEST("d") },
+        },
+      }),
+    }))).toContain("paths must match spec_file/plan_file");
+  });
+
   it("keeps historical epochs readable without spec-check slot authority", () => {
     const legacy = waveReviewEpoch();
     const { specCheckSlotAuthority: _absent, ...withoutSlotAuthority } = legacy;
@@ -435,6 +466,9 @@ describe("parseTaskGraph wave_review_epoch authority", () => {
     ["zero Wave", waveReviewEpoch({ wave: 0 })],
     ["non-integer Wave", waveReviewEpoch({ wave: 1.5 })],
     ["bad batch digest", waveReviewEpoch({ batchEpoch: "not-a-digest" })],
+    ["malformed document digest", waveReviewEpoch({ specCheckDocuments: {
+      spec: { path: null, contentDigest: "bad" }, plan: { path: null, contentDigest: null },
+    } })],
     ["malformed spec-check slot", waveReviewEpoch({ specCheckSlotAuthority: "forged" })],
     ["bad spec-check slot id", waveReviewEpoch({ specCheckSlotAuthority: { slot_id: "../escape", attempted: 1 } })],
     ["bad spec-check attempt", waveReviewEpoch({ specCheckSlotAuthority: { slot_id: "wave-slot:spec-check", attempted: 3 } })],

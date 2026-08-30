@@ -152,64 +152,28 @@ async function runCaptureRawTranscript(
   }));
 }
 
-/**
- * A caught port exception, kept UNFORGEABLE by a port's own return value.
- *
- * The marker used to be a `{ __failed: string }` record, so a legitimate
- * payload that happened to carry a `__failed` string key was read as a thrown
- * adapter — a value crossing the port could impersonate the runner's own
- * control signal. A module-private class cannot be produced by anything but the
- * `catch` below.
- *
- * It carries the error's NAME and CAUSE, not just its message. The runner has
- * no way to tell a transient port failure from a programming error — it cannot
- * inspect what the adapter was trying to do — so it must not strip the two
- * fields that make that distinction visible. `unreachablePort` thrown by a
- * caller's own wiring otherwise reached the operator as the same bare,
- * `retriable: true` infrastructure sentence as an ECONNRESET.
- */
-class PortThrew {
-  readonly name: string;
-  readonly cause: string | null;
-
-  private constructor(readonly message: string, name: string, cause: string | null) {
-    this.name = name;
-    this.cause = cause;
-  }
-
-  static from(error: unknown): PortThrew {
-    if (!(error instanceof Error)) return new PortThrew(String(error), "thrown", null);
-    const cause = error.cause;
-    return new PortThrew(
-      error.message,
-      error.name === "" ? "Error" : error.name,
-      cause === undefined ? null
-        : cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause),
-    );
-  }
-
-  describe(): string {
-    return `${this.name}: ${this.message}${this.cause === null ? "" : ` (caused by ${this.cause})`}`;
-  }
+/** Preserve the diagnostic identity of an adapter throw at the shell boundary. */
+function describePortError(error: unknown): string {
+  if (!(error instanceof Error)) return `thrown: ${String(error)}`;
+  const name = error.name === "" ? "Error" : error.name;
+  const cause = error.cause === undefined ? ""
+    : ` (caused by ${error.cause instanceof Error ? `${error.cause.name}: ${error.cause.message}` : String(error.cause)})`;
+  return `${name}: ${error.message}${cause}`;
 }
 
 async function runThroughPort(
   intent: EffectIntent,
   port: () => Promise<unknown>,
 ): Promise<DomainResult<EffectReceipt, EffectRunnerError>> {
-  const raw = await (async (): Promise<unknown> => {
-    try {
-      return await port();
-    } catch (error) {
-      return PortThrew.from(error);
-    }
-  })();
-  // `retriable: true` is the runner's honest limit of knowledge, not a
-  // diagnosis: any throw COULD be transient. What lets a reader decide is the
-  // error name and cause preserved above.
-  return raw instanceof PortThrew
-    ? failure(intent.effectId, true, raw.describe())
-    : reconcile(intent, raw);
+  try {
+    const raw = await port();
+    return reconcile(intent, raw);
+  } catch (error) {
+    // `retriable: true` is the runner's honest limit of knowledge, not a
+    // diagnosis: any throw COULD be transient. Preserve its name and cause so
+    // the operator can distinguish wiring faults from transport failures.
+    return failure(intent.effectId, true, describePortError(error));
+  }
 }
 
 /**

@@ -234,14 +234,11 @@ export function pruneCallStarts(
   return entries.slice(Math.max(0, entries.length - cap));
 }
 
-/** The stamp for one tool call, or null when absent. Scanned from the END so
- *  a duplicate id (which recordCallStart never writes, but a hand-edited or
- *  merged file could) resolves to the most recent stamp. */
+/** The stamp for one tool call, or null when absent. A duplicate id (which
+ *  recordCallStart never writes, but a hand-edited or merged file could)
+ *  resolves to the most recent stamp. */
 export function callStartOf(entries: readonly CallStartEntry[], toolUseId: string): number | null {
-  for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i].id === toolUseId) return entries[i].startMs;
-  }
-  return null;
+  return entries.findLast((entry) => entry.id === toolUseId)?.startMs ?? null;
 }
 
 // --- Bindings (wire format: "<agent_id>\t<agent_type>\t<bound_at_ms>") ---

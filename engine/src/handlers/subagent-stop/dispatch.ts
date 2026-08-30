@@ -106,21 +106,10 @@ export const runDispatch = async (
   // implementation correlation is snapshotted here too — never reconstructed
   // from assistant text or executing_tasks after the sidecar is removed.
   const resolvedAgentType = resolveAgentType(input);
-  const reportedCategory = categorize(stripNamespace(resolvedAgentType));
   const sidecarObservation = snapshotImplementationAttemptSidecar(
     input.session_id ?? "",
     input.agent_id ?? "",
   );
-  // A valid sidecar is engine-issued implementation routing authority. Claude
-  // may omit or corrupt agent_type metadata, so routing cannot be conditional
-  // on that weaker field. Unavailable sidecars do not reclassify unrelated
-  // agents.
-  const category: AgentCategory = sidecarObservation.kind === "authority-observed"
-    ? "impl"
-    : reportedCategory;
-  const authorityObservation: ImplementationAuthorityObservation | undefined = category === "impl"
-    ? sidecarObservation
-    : undefined;
 
   // Request-bound capture runs BEFORE any legacy routing, and before the task
   // graph is resolved at all. Both orderings are load-bearing: the graph lookup
@@ -184,7 +173,51 @@ export const runDispatch = async (
       ? { kind: "passthrough" }
       : { kind: "error", message: cleanupFailure };
   }
+
+  // A request-bound Wave Gate stop is routed only by the exact engine-issued
+  // role that capture resolved from the correlator and immutable reservation.
+  // Reported/transcript metadata may be absent, but a contradictory role is a
+  // refusal rather than an opportunity to settle one request through another
+  // role's TaskGraph transition.
+  let category: AgentCategory;
+  if (requestAuthority !== null) {
+    const authorityRole = stripNamespace(requestAuthority.role);
+    const authorityCategory = categorize(authorityRole);
+    if (authorityCategory !== "review" && authorityCategory !== "spec-check") {
+      const cleanupFailure = await runCleanup();
+      const message = `Wave Gate request ${requestAuthority.requestId} has unroutable issued role ${JSON.stringify(requestAuthority.role)}`;
+      return {
+        kind: "error",
+        message: cleanupFailure === null ? message : `${message}; cleanup also failed: ${cleanupFailure}`,
+      };
+    }
+    const reportedRole = stripNamespace(resolvedAgentType);
+    if (reportedRole !== "" && reportedRole !== authorityRole) {
+      const cleanupFailure = await runCleanup();
+      const message = `Wave Gate request ${requestAuthority.requestId} is issued to ${JSON.stringify(requestAuthority.role)}, ` +
+        `but SubagentStop reported ${JSON.stringify(resolvedAgentType)}`;
+      return {
+        kind: "error",
+        message: cleanupFailure === null ? message : `${message}; cleanup also failed: ${cleanupFailure}`,
+      };
+    }
+    category = authorityCategory;
+  } else {
+    // A valid sidecar is engine-issued implementation routing authority. Claude
+    // may omit or corrupt agent_type metadata, so routing cannot be conditional
+    // on that weaker field. Unavailable sidecars do not reclassify unrelated
+    // agents.
+    category = sidecarObservation.kind === "authority-observed"
+      ? "impl"
+      : categorize(stripNamespace(resolvedAgentType));
+  }
+  const authorityObservation: ImplementationAuthorityObservation | undefined = category === "impl"
+    ? sidecarObservation
+    : undefined;
   const specCheckRequestAuthority = category === "spec-check" ? requestAuthority : null;
+  const settlementStdin = requestAuthority === null
+    ? stdin
+    : JSON.stringify({ ...input, agent_type: requestAuthority.role });
 
   const noTaskGraphDiagnostic = (cause?: unknown): string =>
     `[loom] dispatch: no task graph resolvable for session ${JSON.stringify(input.session_id ?? "")}` +
@@ -215,9 +248,9 @@ export const runDispatch = async (
     .with("phase", () => runChild("advancePhase", () => advancePhase(stdin, args)))
     .with("impl", () => runChild("updateTaskStatus", () =>
       runUpdateTaskStatus(stdin, args, evidenceSnapshot, authorityObservation)))
-    .with("review", () => runChild("storeReviewerFindings", () => storeReviewerFindings(stdin, args)))
+    .with("review", () => runChild("storeReviewerFindings", () => storeReviewerFindings(settlementStdin, args)))
     .with("spec-check", () => runChild("storeSpecCheckFindings", () =>
-      runStoreSpecCheckFindings(stdin, args, specCheckRequestAuthority ?? undefined)))
+      runStoreSpecCheckFindings(settlementStdin, args, specCheckRequestAuthority ?? undefined)))
     .with("unknown", async () => {
       // Genuinely-unknown agents (a user's own subagent) legitimately have no
       // orchestration hooks. An UNNAMEABLE one does not: it means neither the

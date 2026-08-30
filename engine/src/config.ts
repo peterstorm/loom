@@ -512,7 +512,7 @@ export const protectedDirPatterns = (): RegExp => new RegExp(
  * inherits the write capability of whatever it wraps. Heads match exactly
  * (no basename resolution): `./cat` or `/tmp/evil/jq` must not inherit the
  * trust of a PATH-resolved name. */
-export const READ_ONLY_STATE_COMMANDS: ReadonlySet<string> = new Set([
+export const READ_ONLY_STATE_COMMANDS: ReadonlySet<string> = frozenSet([
   "jq", "cat", "grep", "egrep", "fgrep",
   "head", "tail", "wc", "ls", "stat", "file",
   "diff", "cmp", "md5sum", "sha1sum", "sha256sum",

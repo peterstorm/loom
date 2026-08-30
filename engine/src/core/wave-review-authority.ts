@@ -1,5 +1,12 @@
 import { sha256Hex } from "./review-packet";
-import type { Finding, Task, TaskGraph } from "../types";
+import type {
+  Finding,
+  Task,
+  TaskGraph,
+  WaveSpecCheckDocumentAuthority,
+  WaveSpecCheckDocumentsAuthority,
+} from "../types";
+export type { WaveSpecCheckDocumentAuthority, WaveSpecCheckDocumentsAuthority } from "../types";
 import { parseStoredFindings } from "./findings";
 import {
   parseTaskProof,
@@ -36,15 +43,16 @@ export type WaveReviewRegistrationAuthority = Readonly<{
 export type WaveTaskRunAuthority = Readonly<{
   taskId: string;
   generation: number;
-  packetId: string;
+  packetId: ArtifactDigest;
   /** Existing batch epoch identity for reviewer-slot authority. */
-  headSha: string;
+  headSha: ArtifactDigest;
   /** Exact declared-workspace byte snapshot for completion integrity. */
-  workspaceHeadSha?: string;
+  workspaceHeadSha?: ArtifactDigest;
 }>;
 
 export type WaveRequestBatch = Readonly<{
   batchEpoch: ArtifactDigest;
+  specCheckDocuments: WaveSpecCheckDocumentsAuthority;
   requests: readonly InitialSpawnRequestInput[];
   packets: readonly ContextPacket[];
   taskRuns: readonly WaveTaskRunAuthority[];
@@ -73,6 +81,8 @@ type WaveReviewContextBase = Readonly<{
   batchEpoch: ArtifactDigest;
   specFile: string | null;
   planFile: string | null;
+  /** Null only for contexts published before byte-bound spec-check authority. */
+  specCheckDocuments: WaveSpecCheckDocumentsAuthority | null;
 }>;
 
 export type WaveReviewTaskAuthority = Readonly<{
@@ -103,7 +113,7 @@ export type WaveReviewContextAuthority =
       taskRun: WaveTaskRunAuthority;
       task: WaveReviewTaskAuthority;
       specCheckScope: null;
-      packetId: string;
+      packetId: ArtifactDigest;
     }>;
 
 export type WaveReviewContextRead =
@@ -122,6 +132,46 @@ const parseStringArray = (raw: unknown): readonly string[] | null =>
     ? Object.freeze([...raw])
     : null;
 
+function parseWaveSpecCheckDocument(raw: unknown): WaveSpecCheckDocumentAuthority | null {
+  if (!exactObject(raw, ["path", "contentDigest"]) ||
+      (raw.path !== null && typeof raw.path !== "string")) return null;
+  if ((raw.path === null) !== (raw.contentDigest === null)) return null;
+  const digest = raw.contentDigest === null ? null : parseArtifactDigest(raw.contentDigest);
+  if (digest !== null && !digest.ok) return null;
+  return Object.freeze({
+    path: raw.path as string | null,
+    contentDigest: digest === null ? null : digest.value,
+  });
+}
+
+function parseWaveSpecCheckDocuments(raw: unknown): WaveSpecCheckDocumentsAuthority | null {
+  if (!exactObject(raw, ["spec", "plan"])) return null;
+  const spec = parseWaveSpecCheckDocument(raw.spec);
+  const plan = parseWaveSpecCheckDocument(raw.plan);
+  return spec === null || plan === null ? null : Object.freeze({ spec, plan });
+}
+
+export function waveSpecCheckDocumentsMatch(
+  left: WaveSpecCheckDocumentsAuthority | null | undefined,
+  right: WaveSpecCheckDocumentsAuthority | null | undefined,
+): boolean {
+  if (left === null || left === undefined || right === null || right === undefined) return false;
+  return left.spec.path === right.spec.path && left.spec.contentDigest === right.spec.contentDigest &&
+    left.plan.path === right.plan.path && left.plan.contentDigest === right.plan.contentDigest;
+}
+
+function hasDuplicates(values: readonly string[]): boolean {
+  return new Set(values).size !== values.length;
+}
+
+function hasBlank(values: readonly string[]): boolean {
+  return values.some((value) => value.trim() === "");
+}
+
+function scopesOverlap(left: readonly string[], right: readonly string[]): boolean {
+  return left.some((value) => right.includes(value));
+}
+
 function parseWaveSpecCheckScope(raw: unknown): readonly WaveSpecCheckTaskAuthority[] | null {
   if (!Array.isArray(raw) || raw.length === 0) return null;
   const scope: WaveSpecCheckTaskAuthority[] = [];
@@ -134,11 +184,9 @@ function parseWaveSpecCheckScope(raw: unknown): readonly WaveSpecCheckTaskAuthor
     const declaredFiles = parseStringArray(entry.declaredFiles);
     if (typeof entry.id !== "string" || entry.id.trim() === "" ||
         typeof entry.description !== "string" || completionAnchors === null || contributions === null ||
-        declaredFiles === null || new Set(completionAnchors).size !== completionAnchors.length ||
-        new Set(contributions).size !== contributions.length || new Set(declaredFiles).size !== declaredFiles.length ||
-        completionAnchors.some((anchor) => anchor.trim() === "") ||
-        contributions.some((anchor) => anchor.trim() === "") || declaredFiles.some((path) => path.trim() === "") ||
-        completionAnchors.some((anchor) => contributions.includes(anchor))) return null;
+        declaredFiles === null || hasDuplicates(completionAnchors) || hasDuplicates(contributions) ||
+        hasDuplicates(declaredFiles) || hasBlank(completionAnchors) || hasBlank(contributions) ||
+        hasBlank(declaredFiles) || scopesOverlap(completionAnchors, contributions)) return null;
     scope.push(Object.freeze({
       id: entry.id,
       description: entry.description,
@@ -222,6 +270,12 @@ function parseWaveContextBase(record: Record<string, unknown>): WaveContextParse
       (record.planFile !== null && typeof record.planFile !== "string")) {
     return { ok: false, message: "wave-review-authority specFile/planFile is invalid" };
   }
+  const specCheckDocuments = record.specCheckDocuments === undefined
+    ? null
+    : parseWaveSpecCheckDocuments(record.specCheckDocuments);
+  if (record.specCheckDocuments !== undefined && specCheckDocuments === null) {
+    return { ok: false, message: "wave-review-authority specCheckDocuments is invalid" };
+  }
   return { ok: true, value: Object.freeze({
     runId: runId.value,
     wave: record.wave as number,
@@ -229,6 +283,7 @@ function parseWaveContextBase(record: Record<string, unknown>): WaveContextParse
     batchEpoch: batchEpoch.value,
     specFile: record.specFile as string | null,
     planFile: record.planFile as string | null,
+    specCheckDocuments,
   }) };
 }
 
@@ -304,10 +359,13 @@ function parseTaskReviewerContext(
 
 /** Parse the producer-owned wave-review-authority wire contract into branded authority. */
 function decodeWaveReviewContextAuthority(raw: unknown): WaveReviewContextRead {
-  if (!exactObject(raw, [
+  const legacyFields = [
     "runId", "wave", "authorityDigest", "batchEpoch", "subject", "taskRun", "task", "specCheckScope",
     "packetId", "specFile", "planFile",
-  ])) return corruptWaveContext("wave-review-authority section has an invalid top-level schema");
+  ] as const;
+  if (!exactObject(raw, legacyFields) && !exactObject(raw, [...legacyFields, "specCheckDocuments"])) {
+    return corruptWaveContext("wave-review-authority section has an invalid top-level schema");
+  }
   const common = parseWaveContextBase(raw);
   if (!common.ok) return corruptWaveContext(common.message);
   if (!exactObject(raw.subject, ["role", "taskId"])) {
@@ -382,6 +440,7 @@ export function prepareWaveReviewBatch(
   graph: TaskGraph,
   attempt: 1 | 2,
   workspace: readonly ReviewedWorkspaceObservation[],
+  specCheckDocuments: WaveSpecCheckDocumentsAuthority,
 ): DomainResult<WaveRequestBatch, WaveReviewPreparationError> {
   const currentWaveTasks = graph.tasks.filter((task) => task.wave === registration.input.wave);
   const tasks: Task[] = [];
@@ -404,6 +463,10 @@ export function prepareWaveReviewBatch(
   if (workspaceByTask.size !== tasks.length || tasks.some(({ id }) => !workspaceByTask.has(id))) {
     return failure("current Wave workspace observations differ from the exact registered Task roster");
   }
+  if (specCheckDocuments.spec.path !== (graph.spec_file ?? null) ||
+      specCheckDocuments.plan.path !== (graph.plan_file ?? null)) {
+    return failure("spec-check document observations do not match protected spec_file/plan_file authority");
+  }
 
   const specCheckScope = waveSpecCheckScope(tasks);
   const batchEpoch = parseArtifactDigest(sha256Hex(JSON.stringify({
@@ -422,6 +485,7 @@ export function prepareWaveReviewBatch(
     })),
     specFile: graph.spec_file ?? null,
     planFile: graph.plan_file ?? null,
+    specCheckDocuments,
   })));
   if (!batchEpoch.ok) return failure(batchEpoch.error.message);
 
@@ -429,12 +493,16 @@ export function prepareWaveReviewBatch(
   for (const task of tasks) {
     const observation = workspaceByTask.get(task.id);
     if (observation === undefined) return failure(`Task ${task.id} workspace snapshot is missing`);
+    const packetId = parseArtifactDigest(sha256Hex(`${batchEpoch.value}|packet|${task.id}`));
+    const workspaceHeadSha = parseArtifactDigest(observation.headSha);
+    if (!packetId.ok) return failure(packetId.error.message);
+    if (!workspaceHeadSha.ok) return failure(workspaceHeadSha.error.message);
     taskRuns.push(Object.freeze({
       taskId: task.id,
       generation: task.review_generation ?? 0,
-      packetId: sha256Hex(`${batchEpoch.value}|packet|${task.id}`),
+      packetId: packetId.value,
       headSha: batchEpoch.value,
-      workspaceHeadSha: observation.headSha,
+      workspaceHeadSha: workspaceHeadSha.value,
     }));
   }
 
@@ -501,6 +569,7 @@ export function prepareWaveReviewBatch(
       packetId: taskRun?.packetId ?? null,
       specFile: graph.spec_file,
       planFile: graph.plan_file,
+      specCheckDocuments,
     }));
     if (!section.ok) return failure(section.error.message);
     const packet = buildContextPacket({
@@ -547,6 +616,7 @@ export function prepareWaveReviewBatch(
     ok: true,
     value: Object.freeze({
       batchEpoch: batchEpoch.value,
+      specCheckDocuments,
       requests: Object.freeze(requests),
       packets: Object.freeze(packets),
       taskRuns: Object.freeze(taskRuns),

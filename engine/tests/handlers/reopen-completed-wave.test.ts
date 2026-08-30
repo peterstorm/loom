@@ -20,6 +20,11 @@ import reopenCompletedWaveHandler, {
 import { parseNewTestEvidence, type Task, type TaskGraph } from "../../src/types";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
 import { applyUntrustedStopResolution } from "../../src/core/implementation-application";
+import {
+  createImplementationAttemptAuthority,
+  createReclaimedImplementationAttemptReceipt,
+  type ImplementationAttemptAuthority,
+} from "../../src/core/implementation-completion";
 import type { WaveReviewContextAuthority } from "../../src/handlers/helpers/programs/wave-gate";
 import { taskFixture } from "../fixtures/task-lifecycle";
 
@@ -55,6 +60,20 @@ const task = (id: string, wave: number, status: Task["status"] = "completed"): T
 const pendingTask = (id: string, wave: number): Task => taskFixture({
   id, description: id, agent: "code-implementer-agent", wave, status: "pending", depends_on: [],
 });
+const resultValue = <T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T => {
+  if (!result.ok) throw new Error("fixture authority parse failed");
+  return result.value;
+};
+const laterWaveAttempt = (): ImplementationAttemptAuthority => resultValue(createImplementationAttemptAuthority({
+  taskId: "T23",
+  wave: 4,
+  semanticAttempt: 1,
+  reservationId: "later-wave-attempt",
+  headSha: "c".repeat(40),
+  reservedAt: "2026-08-24T00:00:00.000Z",
+  taskScopeBaseline: [],
+  dirtySetBaseline: [],
+}));
 const graph = (tasks: readonly Task[] = [task("T19", 3), task("T22", 3), pendingTask("T23", 4)]): TaskGraph => ({
   current_phase: "execute", current_wave: 4, phase_artifacts: {}, skipped_phases: [], spec_file: null, plan_file: null,
   tasks, wave_gates: { "3": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false } },
@@ -63,12 +82,19 @@ const graph = (tasks: readonly Task[] = [task("T19", 3), task("T22", 3), pending
 const request = { runId: "wave-run", wave: 3, authorityDigest: digest, taskIds: ["T19", "T22"] };
 
 function context(taskId: string, workspaceHeadSha?: string): WaveReviewContextAuthority {
-  const taskRun = { taskId, generation: 7, packetId: digest, headSha: "legacy-batch-epoch".replace(/[^a-f0-9]/g, "a").padEnd(64, "a"), ...(workspaceHeadSha === undefined ? {} : { workspaceHeadSha }) };
+  const taskRun = {
+    taskId,
+    generation: 7,
+    packetId: artifactDigest(digest),
+    headSha: artifactDigest("legacy-batch-epoch".replace(/[^a-f0-9]/g, "a").padEnd(64, "a")),
+    ...(workspaceHeadSha === undefined ? {} : { workspaceHeadSha: artifactDigest(workspaceHeadSha) }),
+  };
   return {
     runId: waveRunId, wave: 3, authorityDigest: artifactDigest(digest), batchEpoch: artifactDigest(head),
     subject: { role: "code-reviewer", taskId }, taskRun,
     task: { id: taskId, description: taskId, agent: "code-implementer-agent", reviewGeneration: 7, planContext: null, specAnchors: [], specContributions: [], declaredFiles: ["src/a.ts"], modifiedFiles: [], proof, testResult: null, priorFindings: [] },
-    specCheckScope: null, packetId: digest, specFile: null, planFile: null,
+    specCheckScope: null, packetId: artifactDigest(digest), specFile: null, planFile: null,
+    specCheckDocuments: null,
   } as WaveReviewContextAuthority;
 }
 
@@ -145,11 +171,12 @@ describe("completed Wave reopening proof", () => {
 
   it.each([
     ["empty", modernProof([]), []],
+    ["duplicate", modernProof(["T19", "T19"]), ["T19", "T19"]],
     ["forged", modernProof(["T999"]), ["T999"]],
     ["wrong-Wave", modernProof(["T23"]), ["T23"]],
   ] as const)("rejects %s structural proof Task IDs before changing terminal history", (_label, forged, taskIds) => {
     const before = graph();
-    expect(() => reopenCompletedWave(before, { ...request, taskIds }, forged)).toThrow(/completed-Wave Task|belong to completed Wave/i);
+    expect(() => reopenCompletedWave(before, { ...request, taskIds }, forged)).toThrow(/completed-Wave Task|unique|belong to completed Wave/i);
     expect(before.wave_gate_history).toHaveLength(1);
     expect(before.wave_reopening_history).toBeUndefined();
   });
@@ -159,6 +186,14 @@ describe("later-Wave progress refusal", () => {
   const progressMutations: readonly [(task: Task) => Task, string][] = [
     [(entry) => taskFixture({ ...entry, status: "implemented" }), "status"],
     [(entry) => ({ ...entry, reserved_at: "2026-08-22T00:00:00.000Z" }), "reservation"],
+    [(entry) => ({ ...entry, active_implementation_attempt: laterWaveAttempt() }), "active Implementation Attempt"],
+    [(entry) => ({
+      ...entry,
+      implementation_attempt_history: [resultValue(createReclaimedImplementationAttemptReceipt(
+        laterWaveAttempt(),
+        "2026-08-24T00:01:00.000Z",
+      ))],
+    }), "Implementation Attempt history"],
     [(entry) => ({ ...entry, start_sha: "a".repeat(40) }), "start SHA"],
     [(entry) => ({ ...entry, files_modified: [] }), "files"],
     [(entry) => taskFixture({ ...entry, status: "pending", proof, revalidation_required: true }), "proof"],

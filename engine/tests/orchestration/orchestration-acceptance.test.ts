@@ -20,7 +20,11 @@ import captureOrchestrationResult, {
 import { recordClaudeSpawnCorrelation } from "../../src/handlers/post-tool-use/record-orchestration-spawn";
 import { piFinalPayloadCandidates, piResultFinalPayloadCandidates } from "../../../pi/transcript-adapter";
 import { openRunDirectory } from "../../src/orchestration/run-directory-handle";
-import { captureAuditLine, captureHarnessResult } from "../../src/orchestration/harness-capture-runtime";
+import {
+  captureAuditLine,
+  captureHarnessResult,
+  resolveCorrelatedRequest,
+} from "../../src/orchestration/harness-capture-runtime";
 import { buildContextPacket, encodeByteSection } from "../../src/orchestration/context-packets";
 import {
   BENCHMARK_SCENARIOS,
@@ -349,12 +353,15 @@ describe("Pi and Claude reach the same result", () => {
       if (outcome.kind === "rejected") expect(outcome.reason).toBe("context-binding");
     });
 
-    it("rejects capture when a stored correlator names a role the issued request does not have", async () => {
+    it.each([
+      ["role", { role: "silent-failure-hunter", attempt: 1 }],
+      ["attempt", { role: "code-reviewer", attempt: 2 }],
+    ] as const)("rejects a planted correlator whose %s disagrees with issued authority", async (_field, mismatch) => {
       const { runsRoot, directory, request } = await stagedRun();
-      // A correlator planted directly into the run directory (bypassing the
-      // handle's record-time role check) is structurally valid; the capture
-      // boundary must still refuse it at read time.
-      const nativeId = "pi-native-wrong-role";
+      // Plant a structurally valid correlator behind the record-time guard.
+      // Resolution itself must reject it, before any caller can act on the
+      // request it names.
+      const nativeId = `pi-native-wrong-${_field}`;
       const digest = createHash("sha256").update(`pi\0${nativeId}`).digest("hex");
       writeFileSync(
         join(directory, "requests", "correlators", `${digest}.json`),
@@ -363,21 +370,25 @@ describe("Pi and Claude reach the same result", () => {
           harness: "pi",
           nativeId,
           requestId: request.requestId,
-          role: "silent-failure-hunter",
-          attempt: request.attempt,
+          ...mismatch,
         }),
       );
 
-      const outcome = await captureHarnessResult({
+      const resolved = resolveCorrelatedRequest({
         harness: "pi",
         runsRoot,
         runDirectory: directory,
         nativeId,
-        candidates: piCandidates(AGENT_OUTPUT),
       });
 
-      expect(outcome.kind).toBe("rejected");
-      if (outcome.kind === "rejected") expect(outcome.reason).toBe("wrong-agent-role");
+      expect(resolved).toEqual({
+        ok: false,
+        outcome: {
+          kind: "rejected",
+          reason: "correlator-authority",
+          message: expect.stringContaining("does not match issued request"),
+        },
+      });
     });
 
     it("writes byte-identical transcripts from either harness", async () => {
@@ -737,6 +748,27 @@ describe("Claude capture against a real run directory", () => {
     return path;
   }
 
+  async function expectTerminalCaptureRejection(
+    runsRoot: string,
+    runDir: string,
+    reason: string,
+  ): Promise<void> {
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const issued = opened.value.readIssuedRequests();
+    if (!issued.ok || issued.value[0] === undefined) throw new Error(issued.ok ? "missing issued request" : issued.error.message);
+    const marker = opened.value.readCaptureRejection(issued.value[0]);
+    expect(marker.ok).toBe(true);
+    if (!marker.ok) return;
+    expect(marker.value).toContain(reason);
+    const events = await opened.value.readEvents();
+    expect(events.some(({ event }) =>
+      typeof event === "object" && event !== null &&
+      (event as Record<string, unknown>).kind === "request-capture-rejected" &&
+      String((event as Record<string, unknown>).diagnostic).includes(reason),
+    )).toBe(true);
+  }
+
   it("persists exact Claude native-id/request/role authority at spawn acceptance", async () => {
     const { runsRoot, runDir } = await stagedRun();
     const opened = openRunDirectory(runsRoot, runDir);
@@ -940,6 +972,7 @@ describe("Claude capture against a real run directory", () => {
       reason: "transcript-json",
       message: expect.stringContaining("invalid final Claude transcript JSON at line 2"),
     });
+    await expectTerminalCaptureRejection(runsRoot, runDir, "transcript-json");
   });
 
   it("reports a missing transcript rather than capturing nothing silently", async () => {
@@ -957,6 +990,22 @@ describe("Claude capture against a real run directory", () => {
     // `agent_transcript_path`), and must not be reported as an Agent that said
     // nothing — the caller terminalises refusals.
     expect(outcome.reason).toBe("transcript-locator");
+    await expectTerminalCaptureRejection(runsRoot, runDir, "transcript-locator");
+  });
+
+  it("terminalises a reserved request whose located transcript cannot be read", async () => {
+    const { runsRoot, runDir } = await stagedRun();
+    const unreadable = join(runDir, "transcript-directory");
+    mkdirSync(unreadable);
+
+    const outcome = await captureClaudeResult(
+      { session_id: "s1", agent_id: "agent-abc", agent_type: "code-reviewer", agent_transcript_path: unreadable },
+      runsRoot,
+      runDir,
+    );
+
+    expect(outcome).toMatchObject({ kind: "rejected", reason: "transcript-read" });
+    await expectTerminalCaptureRejection(runsRoot, runDir, "transcript-read");
   });
 
   it("returns a hook error for partial or malformed Claude run authority", async () => {

@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { readFileSync } from "node:fs";
 import fc from "fast-check";
 import {
   createReviewPacket,
   canonicalJson,
+  parseJsonValue,
   parseReviewPacket,
   parseReviewPacketRecovery,
   serializeReviewPacket,
@@ -14,6 +15,7 @@ import {
   type BaseSha,
   type HeadSha,
   type ReviewPacketInput,
+  type ReviewPath,
 } from "../../src/core/review-packet";
 
 const base = (hex: string): BaseSha => {
@@ -86,6 +88,43 @@ describe("Review Packet", () => {
     expect(serializeReviewPacket(first.value)).toBe(serializeReviewPacket(second.value));
     expect(Object.isFrozen(first.value)).toBe(true);
     expect(Object.isFrozen(first.value.artifacts[0])).toBe(true);
+  });
+
+  it("preserves own __proto__ members at every JSON depth and in packet authority", () => {
+    const raw = JSON.parse(
+      '{"nested":{"value":1,"__proto__":{"deep":true}},"__proto__":{"root":true}}',
+    ) as unknown;
+    const parsed = parseJsonValue(raw, "authority");
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok || parsed.value === null || typeof parsed.value !== "object" || Array.isArray(parsed.value)) return;
+
+    expect(Object.prototype.hasOwnProperty.call(parsed.value, "__proto__")).toBe(true);
+    const nested: unknown = Reflect.get(parsed.value, "nested");
+    expect(nested !== null && typeof nested === "object" && !Array.isArray(nested) &&
+      Object.prototype.hasOwnProperty.call(nested, "__proto__")).toBe(true);
+    expect(canonicalJson(parsed.value)).toBe(
+      '{"__proto__":{"root":true},"nested":{"__proto__":{"deep":true},"value":1}}',
+    );
+
+    const withPrototypeData = createReviewPacket(input({
+      task: JSON.parse('{"id":"T1","__proto__":{"admin":true}}'),
+    }));
+    const withoutPrototypeData = createReviewPacket(input({ task: { id: "T1" } }));
+    expect(withPrototypeData.ok).toBe(true);
+    expect(withoutPrototypeData.ok).toBe(true);
+    if (!withPrototypeData.ok || !withoutPrototypeData.ok) return;
+    expect(withPrototypeData.value.packetId).not.toBe(withoutPrototypeData.value.packetId);
+    expect(serializeReviewPacket(withPrototypeData.value)).toContain('"__proto__"');
+  });
+
+  it("returns parser-branded canonical paths in packets", () => {
+    const created = createReviewPacket(input());
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    expectTypeOf(created.value.declaredPaths).toEqualTypeOf<readonly ReviewPath[]>();
+    expectTypeOf(created.value.modifiedPaths).toEqualTypeOf<readonly ReviewPath[]>();
+    expectTypeOf(created.value.artifacts[0]!.path).toEqualTypeOf<ReviewPath>();
   });
 
   it("changes packet identity for every review-relevant byte category", () => {

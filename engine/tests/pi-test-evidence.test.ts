@@ -130,7 +130,7 @@ describe("Pi test-evidence transcript adapter", () => {
     // structured FAIL — the gate rejects it either way, but it is not silent.
     expect(piStructuredTestResult(testRun("600 pass\n54 fail\n", "cd engine && bun test | tail -n 40"))).toEqual({
       ok: true,
-      value: { passed: false, evidence: "" },
+      value: { passed: false, evidence: "bun: 54 fail" },
     });
     // Arbitrary PIPE stages can also ignore stdin or select an unrelated file,
     // so only the narrow stdin-derived tail/tee grammar is relaxed. Sequenced

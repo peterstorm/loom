@@ -25,6 +25,28 @@ export const SPEC_ARTIFACT_DIR = ".claude/specs";
 /** Where a plan may live. Runs never narrow this one. */
 export const PLAN_ARTIFACT_DIR = ".claude/plans";
 
+declare const SPEC_ARTIFACT_DIRECTORY: unique symbol;
+/** Parser-minted phase-artifact search authority beneath `.claude/specs`. */
+export type SpecArtifactDirectory = string & { readonly [SPEC_ARTIFACT_DIRECTORY]: true };
+
+export type SpecArtifactDirectoryParse =
+  | Readonly<{ ok: true; value: SpecArtifactDirectory }>
+  | Readonly<{ ok: false; message: string }>;
+
+/** Parse untrusted persisted `spec_dir` before it can address the filesystem. */
+export function parseSpecArtifactDirectory(raw: string | null | undefined): SpecArtifactDirectoryParse {
+  const candidate = raw ?? SPEC_ARTIFACT_DIR;
+  const root = resolve(SPEC_ARTIFACT_DIR);
+  const resolvedCandidate = resolve(candidate);
+  if (resolvedCandidate !== root && !resolvesWithin(candidate, SPEC_ARTIFACT_DIR)) {
+    return Object.freeze({
+      ok: false,
+      message: `spec_dir ${candidate} is outside ${SPEC_ARTIFACT_DIR}`,
+    });
+  }
+  return Object.freeze({ ok: true, value: candidate as SpecArtifactDirectory });
+}
+
 /**
  * Does `candidate` RESOLVE inside `directory` (both taken relative to cwd)?
  *

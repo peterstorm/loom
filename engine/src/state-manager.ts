@@ -47,6 +47,8 @@ import type {
   Task,
   TaskGraph,
   WaveReviewEpochAuthority,
+  WaveSpecCheckDocumentAuthority,
+  WaveSpecCheckDocumentsAuthority,
 } from "./types";
 import type { DomainResult } from "./core/orchestration-contract";
 import type { WaveCompletionCommit, WaveCompletionCommitError } from "./core/wave-gate-machine";
@@ -425,7 +427,49 @@ function exactFieldsError(
 }
 
 const WAVE_REVIEW_EPOCH_FIELDS = ["runId", "wave", "batchEpoch"] as const;
-const WAVE_REVIEW_EPOCH_OPTIONAL_FIELDS = ["specCheckSlotAuthority"] as const;
+const WAVE_REVIEW_EPOCH_OPTIONAL_FIELDS = ["specCheckDocuments", "specCheckSlotAuthority"] as const;
+
+function parseWaveSpecCheckDocument(
+  raw: unknown,
+  label: string,
+): ParseResult<WaveSpecCheckDocumentAuthority> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return parseErr(`${label} must be an object`);
+  }
+  const record = raw as Record<string, unknown>;
+  const fieldsError = exactFieldsError(record, ["path", "contentDigest"], [], label);
+  if (fieldsError !== null) return parseErr(fieldsError);
+  if (record.path !== null && typeof record.path !== "string") {
+    return parseErr(`${label}.path must be a string or null`);
+  }
+  if ((record.path === null) !== (record.contentDigest === null)) {
+    return parseErr(`${label}.path and contentDigest must both be null or both be present`);
+  }
+  if (record.contentDigest === null) {
+    return parseOk(Object.freeze({ path: record.path as string | null, contentDigest: null }));
+  }
+  const digest = parseArtifactDigest(record.contentDigest);
+  return digest.ok
+    ? parseOk(Object.freeze({ path: record.path as string | null, contentDigest: digest.value }))
+    : parseErr(`${label}.contentDigest: ${digest.error.message}`);
+}
+
+function parseWaveSpecCheckDocuments(
+  raw: unknown,
+): ParseResult<WaveSpecCheckDocumentsAuthority | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return parseErr("wave_review_epoch.specCheckDocuments must be an object when present");
+  }
+  const record = raw as Record<string, unknown>;
+  const fieldsError = exactFieldsError(record, ["spec", "plan"], [], "wave_review_epoch.specCheckDocuments");
+  if (fieldsError !== null) return parseErr(fieldsError);
+  const spec = parseWaveSpecCheckDocument(record.spec, "wave_review_epoch.specCheckDocuments.spec");
+  if (!spec.ok) return spec;
+  const plan = parseWaveSpecCheckDocument(record.plan, "wave_review_epoch.specCheckDocuments.plan");
+  if (!plan.ok) return plan;
+  return parseOk(Object.freeze({ spec: spec.value, plan: plan.value }));
+}
 
 function parseWaveSpecCheckSlotAuthority(
   raw: unknown,
@@ -489,12 +533,15 @@ function parseWaveReviewEpoch(raw: unknown): ParseResult<WaveReviewEpochAuthorit
   if (!wave.ok) return parseErr(wave.error);
   const batchEpoch = parseArtifactDigest(record.batchEpoch);
   if (!batchEpoch.ok) return parseErr(`wave_review_epoch.batchEpoch: ${batchEpoch.error.message}`);
+  const specCheckDocuments = parseWaveSpecCheckDocuments(record.specCheckDocuments);
+  if (!specCheckDocuments.ok) return specCheckDocuments;
   const specCheckSlotAuthority = parseWaveSpecCheckSlotAuthority(record.specCheckSlotAuthority);
   if (!specCheckSlotAuthority.ok) return specCheckSlotAuthority;
   return parseOk(Object.freeze({
     runId: runId.value,
     wave: wave.value,
     batchEpoch: batchEpoch.value,
+    ...(specCheckDocuments.value === undefined ? {} : { specCheckDocuments: specCheckDocuments.value }),
     ...(specCheckSlotAuthority.value === undefined
       ? {}
       : { specCheckSlotAuthority: specCheckSlotAuthority.value }),
@@ -1663,6 +1710,24 @@ function frozenJsonCopy(value: unknown, copies = new WeakMap<object, unknown>())
   return Object.freeze(copy);
 }
 
+function parseExecutingTaskIds(raw: unknown): ParseResult<readonly TaskId[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (!Array.isArray(raw)) {
+    return parseErr("executing_tasks must be an array of distinct canonical Task IDs when present");
+  }
+  const parsed: TaskId[] = [];
+  const seen = new Set<TaskId>();
+  for (const entry of raw) {
+    const taskId = parseTaskId(entry, "executing_tasks entry");
+    if (!taskId.ok || seen.has(taskId.value)) {
+      return parseErr("executing_tasks must be an array of distinct canonical Task IDs when present");
+    }
+    seen.add(taskId.value);
+    parsed.push(taskId.value);
+  }
+  return parseOk(Object.freeze(parsed));
+}
+
 function taskGraphScalarFieldError(obj: Record<string, unknown>): string | null {
   for (const field of ["spec_dir", "spec_file", "plan_file"] as const) {
     if (obj[field] !== undefined && obj[field] !== null && typeof obj[field] !== "string") {
@@ -1677,12 +1742,6 @@ function taskGraphScalarFieldError(obj: Record<string, unknown>): string | null 
   if (obj.github_issue !== undefined &&
       (typeof obj.github_issue !== "number" || !Number.isInteger(obj.github_issue) || obj.github_issue < 1)) {
     return `github_issue must be an integer >= 1 when present, got ${JSON.stringify(obj.github_issue)}`;
-  }
-  if (obj.executing_tasks !== undefined &&
-      (!Array.isArray(obj.executing_tasks) ||
-        obj.executing_tasks.some((id) => !parseTaskId(id, "executing_tasks entry").ok) ||
-        new Set(obj.executing_tasks).size !== obj.executing_tasks.length)) {
-    return "executing_tasks must be an array of distinct canonical Task IDs when present";
   }
   if (obj.current_wave !== undefined &&
       (typeof obj.current_wave !== "number" || !Number.isInteger(obj.current_wave) || obj.current_wave < 1)) {
@@ -1782,10 +1841,13 @@ function migrateParsedTask(
   return parseOk(migrated);
 }
 
-function parseTaskGraphTasks(obj: Record<string, unknown>): ParseResult<readonly unknown[]> {
+function parseTaskGraphTasks(
+  obj: Record<string, unknown>,
+  executingTasks: readonly TaskId[],
+): ParseResult<readonly unknown[]> {
   const tasks = obj.tasks ?? [];
   if (!Array.isArray(tasks)) return parseErr("tasks must be an array");
-  const executing = new Set(Array.isArray(obj.executing_tasks) ? obj.executing_tasks.map(String) : []);
+  const executing = new Set<string>(executingTasks);
   const parsedTasks: Record<string, unknown>[] = [];
   for (let i = 0; i < tasks.length; i++) {
     const err = taskUnionError(tasks[i], i);
@@ -1930,6 +1992,11 @@ function parseTaskGraphAuthorityFields(obj: Record<string, unknown>): ParseResul
       `(expected ${activeWaveGate.runId}/Wave ${activeWaveGate.wave})`,
     );
   }
+  const documents = waveReviewEpoch.value?.specCheckDocuments;
+  if (documents !== undefined &&
+      (documents.spec.path !== (obj.spec_file ?? null) || documents.plan.path !== (obj.plan_file ?? null))) {
+    return parseErr("wave_review_epoch.specCheckDocuments paths must match spec_file/plan_file authority");
+  }
   const verificationManifest = parseVerificationManifestField(obj.verification_manifest);
   if (!verificationManifest.ok) return parseErr(verificationManifest.error);
   const activeWaveCompletionSuite = parseActiveWaveCompletionSuiteField(
@@ -2032,6 +2099,7 @@ type ParsedTaskGraphParts = Readonly<{
   phaseArtifacts: Readonly<Record<string, string>>;
   skippedPhases: readonly Phase[];
   tasks: readonly unknown[];
+  executingTasks: readonly TaskId[] | undefined;
   waveGates: Readonly<Record<string, unknown>>;
   specCheck: SpecCheck | undefined;
   authority: ParsedTaskGraphAuthorityFields;
@@ -2068,9 +2136,9 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     spec_file: obj.spec_file ?? null,
     plan_file: obj.plan_file ?? null,
     tasks: frozenTasks,
-    ...(obj.executing_tasks === undefined
+    ...(parts.executingTasks === undefined
       ? {}
-      : { executing_tasks: Object.freeze([...(obj.executing_tasks as string[])]) }),
+      : { executing_tasks: parts.executingTasks }),
     wave_gates: frozenWaveGates,
     ...(parts.specCheck === undefined ? {} : { spec_check: parts.specCheck }),
     ...(waveReviewEpoch === undefined ? {} : { wave_review_epoch: waveReviewEpoch }),
@@ -2105,7 +2173,9 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
   const skippedPhases = Object.freeze([...(Array.isArray(obj.skipped_phases) ? obj.skipped_phases : [])] as Phase[]);
   const scalarError = taskGraphScalarFieldError(obj);
   if (scalarError !== null) return parseErr(scalarError);
-  const tasks = parseTaskGraphTasks(obj);
+  const executingTasks = parseExecutingTaskIds(obj.executing_tasks);
+  if (!executingTasks.ok) return parseErr(executingTasks.error);
+  const tasks = parseTaskGraphTasks(obj, executingTasks.value ?? []);
   if (!tasks.ok) return parseErr(tasks.error);
   const waveGates = parseTaskGraphWaveGates(obj);
   if (!waveGates.ok) return parseErr(waveGates.error);
@@ -2126,6 +2196,7 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
     phaseArtifacts,
     skippedPhases,
     tasks: tasks.value,
+    executingTasks: executingTasks.value,
     waveGates: waveGates.value,
     specCheck: specCheck.value,
     authority: authority.value,

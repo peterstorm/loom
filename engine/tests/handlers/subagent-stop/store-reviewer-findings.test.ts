@@ -1,23 +1,6 @@
 /**
- * The SubagentStop handler that is the ONLY way a reviewer's findings enter the
- * task graph under Claude Code.
- *
- * Nothing executed this file before. `review-findings-parity.test.ts` asserted
- * on its SOURCE TEXT — that it contains the string `core/review-output"` and
- * three function names — which its own comment historically justified for
- * `pi/extension.ts` before the fake-runtime event test existed, and which the
- * directly-executable sibling inherited by proximity. The cost was measured:
- * six branches survived semantic
- * mutation with the whole suite green, including deleting the
- * `resolveAgentTranscriptPath` call, which reverts commit `0710b76` ("survive
- * the Task → Agent rename and stop failing silently"). A harness that sends no
- * `agent_transcript_path` then loses every reviewer's findings and the wave gate
- * reads a clean review that never happened.
- *
- * Every test here drives the real handler against a tmp state file and a planted
- * transcript, and asserts on the STATE it wrote plus the line it logged —
- * modelled on `store-spec-check-findings.test.ts`, which already does this for
- * the handler beside it.
+ * Drive the real Claude Code findings-ingestion handler against a temporary
+ * TaskGraph and planted transcript, then assert its durable state and stderr.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -29,7 +12,14 @@ import handler, {
   unavailableReviewerResolution,
 } from "../../../src/handlers/subagent-stop/store-reviewer-findings";
 import { SUBAGENT_DIR } from "../../../src/config";
+import { parseReviewPath } from "../../../src/core/review-packet";
 import type { Task } from "../../../src/types";
+
+const reviewPath = (raw: string) => {
+  const parsed = parseReviewPath(raw);
+  if (!parsed.ok) throw new Error(parsed.errors.join("; "));
+  return parsed.value;
+};
 
 const CLEAN = "### Machine Summary\nCRITICAL_COUNT: 0\nADVISORY_COUNT: 0";
 const BLOCKING = [
@@ -142,7 +132,7 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
       issued_review_packets: [{
         task_id: "T1",
         packet_id: "b".repeat(64),
-        packet_path: "packets/T1.json",
+        packet_path: reviewPath("packets/T1.json"),
         base_sha: "2".repeat(40),
         head_sha: "3".repeat(40),
         scope: [],

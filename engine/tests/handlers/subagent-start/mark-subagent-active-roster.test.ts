@@ -158,6 +158,29 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
     });
   });
 
+  it("blocks a machine-less custom Agent with no agent_id while another Agent owns attribution", async () => {
+    const s = session("missing-id-alongside-binding");
+    process.env.LOOM_STATE_PATH = statePath;
+    const previousMachines = process.env.LOOM_MACHINES_DIR;
+    process.env.LOOM_MACHINES_DIR = guardedReviewMachines;
+    try {
+      expect((await markActive(start(s, "reviewer-1", "loom:guarded-review-agent"), [])).kind)
+        .toBe("passthrough");
+
+      const result = await markActive(start(s, null, "custom-agent"), []);
+
+      expect(result).toMatchObject({
+        kind: "block",
+        message: expect.stringMatching(/missing agent_id.*exact roster attribution.*refusing spawn/i),
+      });
+      expect(readFileSync(join(SUBAGENT_DIR, `${s}.active`), "utf8").trim())
+        .toBe("reviewer-1\tguarded-review-agent");
+    } finally {
+      if (previousMachines === undefined) delete process.env.LOOM_MACHINES_DIR;
+      else process.env.LOOM_MACHINES_DIR = previousMachines;
+    }
+  });
+
   it("roster write failure blocks and rolls back every modern capability", async () => {
     const s = session("fail");
     process.env.LOOM_STATE_PATH = statePath;
@@ -383,9 +406,9 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
   });
 
   it.each([
-    ["missing", null],
-    ["invalid", "evil:id"],
-  ])("a machine-bearing review role with a %s agent_id is blocked before roster or pointer capability publication", async (_label, agentId) => {
+    ["missing", null, "missing agent_id"],
+    ["invalid", "evil:id", "Guarded Skill Machine"],
+  ])("a machine-bearing review role with a %s agent_id is blocked before roster or pointer capability publication", async (_label, agentId, diagnostic) => {
     const s = session(`review-${_label}`);
     process.env.LOOM_STATE_PATH = statePath;
     const previousMachines = process.env.LOOM_MACHINES_DIR;
@@ -394,7 +417,7 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
       const result = await markActive(start(s, agentId, "loom:guarded-review-agent"), []);
       expect(result).toMatchObject({
         kind: "block",
-        message: expect.stringContaining("Guarded Skill Machine"),
+        message: expect.stringContaining(diagnostic),
       });
     } finally {
       if (previousMachines === undefined) delete process.env.LOOM_MACHINES_DIR;

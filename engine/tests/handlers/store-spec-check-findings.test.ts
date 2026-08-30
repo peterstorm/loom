@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdirSync, realpathSync, writeFileSync, chmodSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { parseSpecCheckOutput } from "../../src/handlers/subagent-stop/store-spec-check-findings";
 import handler, { runStoreSpecCheckFindings } from "../../src/handlers/subagent-stop/store-spec-check-findings";
@@ -225,6 +226,80 @@ describe("handler reads file content (not path)", () => {
 });
 
 describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
+  async function withTaskGraphPointer<T>(
+    session: string,
+    statePath: string,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const { SUBAGENT_DIR } = await import("../../src/config");
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
+    writeFileSync(pointer, statePath);
+    try {
+      return await run();
+    } finally {
+      rmSync(pointer, { force: true });
+    }
+  }
+  it.each(["missing", "unreadable"] as const)(
+    "records exact modern Wave %s transcript capture as EVIDENCE_CAPTURE_FAILED",
+    async (failureKind) => {
+      const tmpRoot = join(tmpdir(), `spec-check-${failureKind}-modern-${Date.now()}`);
+      mkdirSync(tmpRoot, { recursive: true });
+      const tmpDir = realpathSync.native(tmpRoot);
+      const statePath = join(tmpDir, "active_task_graph.json");
+      const transcriptPath = join(tmpDir, "transcript.jsonl");
+      if (failureKind === "unreadable") mkdirSync(transcriptPath);
+      const runId = parseOrchestrationRunId(`run.spec-${failureKind}-transcript`);
+      const slotId = parseSlotId(`wave-slot:spec-${failureKind}-transcript`);
+      if (!runId.ok || !slotId.ok) throw new Error("invalid transcript failure authority fixture");
+      writeFileSync(statePath, JSON.stringify({
+        spec_trace_version: 2,
+        current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+        spec_file: null, plan_file: null, current_wave: 5, tasks: [], wave_gates: {},
+        active_wave_gate: {
+          schemaVersion: 1, kind: "active-wave-gate", runId: runId.value, wave: 5,
+          authorityDigest: "a".repeat(64), revision: 1, terminalOutcome: null,
+        },
+        wave_review_epoch: {
+          runId: runId.value, wave: 5, batchEpoch: "b".repeat(64),
+          specCheckDocuments: {
+            spec: { path: null, contentDigest: null },
+            plan: { path: null, contentDigest: null },
+          },
+          specCheckSlotAuthority: { slot_id: slotId.value, attempted: 1 },
+        },
+      }));
+      const session = `spec-check-${failureKind}-modern-${process.pid}-${Date.now()}`;
+      try {
+        await withTaskGraphPointer(session, statePath, async () => {
+          const result = await runStoreSpecCheckFindings(JSON.stringify({
+            session_id: session,
+            agent_type: "spec-check-invoker",
+            agent_transcript_path: transcriptPath,
+          }), [], {
+            runId: runId.value,
+            slotId: slotId.value,
+            attempt: 1,
+            role: "spec-check-invoker",
+          });
+
+          expect(result).toMatchObject({
+            kind: "passthrough",
+            systemMessage: expect.stringContaining("marking evidence_capture_failed"),
+          });
+          expect(JSON.parse(readFileSync(statePath, "utf8")).spec_check).toMatchObject({
+            wave: 5,
+            verdict: "EVIDENCE_CAPTURE_FAILED",
+            error: expect.stringMatching(/spec-check transcript is unreadable.*re-run \/wave-gate/),
+          });
+        });
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("malformed stdin → contextual error naming that findings were NOT stored (parity with update-task-status)", async () => {
     const result = await handler("{not json", []);
     expect(result.kind).toBe("error");
@@ -261,7 +336,6 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
   });
 
   it("rejects absent and stale request authority on a modern Wave without changing spec evidence", async () => {
-    const { SUBAGENT_DIR } = await import("../../src/config");
     const tmpDir = join(tmpdir(), `spec-check-authority-${Date.now()}`);
     mkdirSync(tmpDir, { recursive: true });
     const statePath = join(tmpDir, "active_task_graph.json");
@@ -277,6 +351,10 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
       },
       wave_review_epoch: {
         runId: runId.value, wave: 1, batchEpoch: "b".repeat(64),
+        specCheckDocuments: {
+          spec: { path: null, contentDigest: null },
+          plan: { path: null, contentDigest: null },
+        },
         specCheckSlotAuthority: { slot_id: slotId.value, attempted: 2 },
       },
     }));
@@ -286,31 +364,93 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
       message: { content: [{ type: "text", text: "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED" }] },
     }));
     const session = `spec-check-authority-${process.pid}-${Date.now()}`;
-    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
-    const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
-    writeFileSync(pointer, statePath);
     const stdin = JSON.stringify({
       session_id: session,
       agent_type: "spec-check-invoker",
       agent_transcript_path: transcriptPath,
     });
     try {
-      await expect(handler(stdin, [])).resolves.toMatchObject({
-        kind: "error",
-        message: expect.stringContaining("no capture-correlated request authority"),
+      await withTaskGraphPointer(session, statePath, async () => {
+        await expect(handler(stdin, [])).resolves.toMatchObject({
+          kind: "error",
+          message: expect.stringContaining("no capture-correlated request authority"),
+        });
+        await expect(runStoreSpecCheckFindings(stdin, [], {
+          runId: runId.value,
+          slotId: slotId.value,
+          attempt: 1,
+          role: "spec-check-invoker",
+        })).resolves.toMatchObject({
+          kind: "error",
+          message: expect.stringContaining("does not match the exact current Wave epoch"),
+        });
+        expect(JSON.parse(readFileSync(statePath, "utf-8")).spec_check).toBeUndefined();
       });
-      await expect(runStoreSpecCheckFindings(stdin, [], {
-        runId: runId.value,
-        slotId: slotId.value,
-        attempt: 1,
-        role: "spec-check-invoker",
-      })).resolves.toMatchObject({
-        kind: "error",
-        message: expect.stringContaining("does not match the exact current Wave epoch"),
-      });
-      expect(JSON.parse(readFileSync(statePath, "utf-8")).spec_check).toBeUndefined();
     } finally {
-      rmSync(pointer, { force: true });
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects exact request evidence after the bound specification bytes change", async () => {
+    const tmpRoot = join(tmpdir(), `spec-check-byte-drift-${Date.now()}`);
+    mkdirSync(tmpRoot, { recursive: true });
+    const tmpDir = realpathSync.native(tmpRoot);
+    const statePath = join(tmpDir, "active_task_graph.json");
+    const specPath = join(tmpDir, "spec.md");
+    const planPath = join(tmpDir, "plan.md");
+    const originalSpec = "spec before";
+    const plan = "plan";
+    writeFileSync(specPath, originalSpec);
+    writeFileSync(planPath, plan);
+    const runId = parseOrchestrationRunId("run.spec-byte-drift");
+    const slotId = parseSlotId("wave-slot:spec-byte-drift");
+    if (!runId.ok || !slotId.ok) throw new Error("invalid authority fixture");
+    writeFileSync(statePath, JSON.stringify({
+      spec_trace_version: 2,
+      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+      spec_file: specPath, plan_file: planPath, current_wave: 1, tasks: [], wave_gates: {},
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: runId.value, wave: 1,
+        authorityDigest: "a".repeat(64), revision: 1, terminalOutcome: null,
+      },
+      wave_review_epoch: {
+        runId: runId.value, wave: 1, batchEpoch: "b".repeat(64),
+        specCheckDocuments: {
+          spec: { path: specPath, contentDigest: createHash("sha256").update(originalSpec).digest("hex") },
+          plan: { path: planPath, contentDigest: createHash("sha256").update(plan).digest("hex") },
+        },
+        specCheckSlotAuthority: { slot_id: slotId.value, attempted: 1 },
+      },
+    }));
+    const transcriptPath = join(tmpDir, "transcript.jsonl");
+    writeFileSync(transcriptPath, JSON.stringify({
+      type: "assistant",
+      message: { content: [{
+        type: "text",
+        text: "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED",
+      }] },
+    }));
+    writeFileSync(specPath, "spec after");
+    const session = `spec-check-byte-drift-${process.pid}-${Date.now()}`;
+    try {
+      await withTaskGraphPointer(session, statePath, async () => {
+        const result = await runStoreSpecCheckFindings(JSON.stringify({
+          session_id: session,
+          agent_type: "spec-check-invoker",
+          agent_transcript_path: transcriptPath,
+        }), [], {
+          runId: runId.value,
+          slotId: slotId.value,
+          attempt: 1,
+          role: "spec-check-invoker",
+        });
+        expect(result).toMatchObject({
+          kind: "error",
+          message: expect.stringContaining("spec/plan bytes do not match"),
+        });
+        expect(JSON.parse(readFileSync(statePath, "utf8")).spec_check).toBeUndefined();
+      });
+    } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
   });

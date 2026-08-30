@@ -158,7 +158,7 @@ describe("resolveTransition", () => {
   it("specify reports a missing spec artifact", () => {
     expect(resolveTransition("specify", mkState({ spec_file: join(tmpDir, ".claude/specs/nope.md") }))).toMatchObject({
       kind: "not-ready",
-      reason: expect.stringContaining("no readable spec.md"),
+      reason: expect.stringContaining("recorded spec_file"),
     });
   });
 
@@ -171,12 +171,15 @@ describe("resolveTransition", () => {
       .toThrow(/cannot access phase artifact/);
   });
 
-  it("specify reports an out-of-scope spec artifact", () => {
+  it("specify reports an out-of-scope spec artifact without falling back", () => {
     const f = join(tmpDir, "random.md");
-    writeFileSync(f, "x");
+    const fallback = join(tmpDir, ".claude", "specs", "fallback", "spec.md");
+    mkdirSync(join(tmpDir, ".claude", "specs", "fallback"), { recursive: true });
+    writeFileSync(f, "corrupt authority");
+    writeFileSync(fallback, "fallback must not hide corruption");
     expect(resolveTransition("specify", mkState({ spec_file: f }))).toMatchObject({
       kind: "not-ready",
-      reason: expect.stringContaining("no readable spec.md"),
+      reason: expect.stringContaining("outside run spec_dir"),
     });
   });
 
@@ -313,10 +316,10 @@ describe("resolveTransition", () => {
     });
   });
 
-  it("plan-alignment reports a missing spec directory", () => {
+  it("plan-alignment rejects an out-of-scope spec directory before discovery", () => {
     expect(resolveTransition("plan-alignment", mkState({ spec_dir: join(tmpDir, "nonexistent") }))).toMatchObject({
       kind: "not-ready",
-      reason: expect.stringContaining("plan-alignment.md was not found"),
+      reason: expect.stringContaining("spec_dir"),
     });
   });
 
@@ -464,6 +467,22 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
     }
   };
 
+  const mutateBeforeLockedUpdate = (
+    session: string,
+    mutateState: (state: Record<string, unknown>) => Record<string, unknown>,
+  ) => {
+    const originalUpdateAndReturn = StateManager.prototype.updateAndReturn;
+    return vi.spyOn(StateManager.prototype, "updateAndReturn").mockImplementationOnce(async function (
+      this: StateManager,
+      mutate,
+    ) {
+      const path = join(tmpDir, `${session}.json`);
+      const current = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+      writeFileSync(path, JSON.stringify(mutateState(current)));
+      return originalUpdateAndReturn.call(this, mutate);
+    });
+  };
+
   it("the REAL handler fails closed when a known phase agent has no TaskGraph authority", async () => {
     const result = await advancePhaseHandler(JSON.stringify({
       session_id: `missing-phase-${process.pid}-${Date.now()}`,
@@ -555,16 +574,7 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
     mkdirSync(artifactDir, { recursive: true });
     writeFileSync(join(artifactDir, "brainstorm.md"), "ideas");
     await withPhaseState(session, mkState({ current_phase: "brainstorm" }), async () => {
-      const originalUpdateAndReturn = StateManager.prototype.updateAndReturn;
-      const update = vi.spyOn(StateManager.prototype, "updateAndReturn").mockImplementationOnce(async function (
-        this: StateManager,
-        mutate,
-      ) {
-        const path = join(tmpDir, `${session}.json`);
-        const current = JSON.parse(readFileSync(path, "utf-8"));
-        writeFileSync(path, JSON.stringify({ ...current, current_phase: "specify" }));
-        return originalUpdateAndReturn.call(this, mutate);
-      });
+      const update = mutateBeforeLockedUpdate(session, (current) => ({ ...current, current_phase: "specify" }));
       try {
         const result = await advancePhaseHandler(JSON.stringify({
           session_id: session,
@@ -585,7 +595,7 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
     });
   });
 
-  it("recomputes the transition when same-Phase artifact authority changes before the locked commit", async () => {
+  it("rejects same-Phase artifact authority drift instead of reading under the locked commit", async () => {
     const session = `phase-authority-race-${process.pid}-${Date.now()}`;
     const initialSpec = join(tmpDir, ".claude", "specs", "initial", "spec.md");
     const lockedSpec = join(tmpDir, ".claude", "specs", "locked", "spec.md");
@@ -600,16 +610,7 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
       session,
       mkState({ current_phase: "specify", spec_file: initialSpec }),
       async () => {
-        const originalUpdateAndReturn = StateManager.prototype.updateAndReturn;
-        const update = vi.spyOn(StateManager.prototype, "updateAndReturn").mockImplementationOnce(async function (
-          this: StateManager,
-          mutate,
-        ) {
-          const path = join(tmpDir, `${session}.json`);
-          const current = JSON.parse(readFileSync(path, "utf-8"));
-          writeFileSync(path, JSON.stringify({ ...current, spec_file: lockedSpec }));
-          return originalUpdateAndReturn.call(this, mutate);
-        });
+        const update = mutateBeforeLockedUpdate(session, (current) => ({ ...current, spec_file: lockedSpec }));
         try {
           const result = await advancePhaseHandler(JSON.stringify({
             session_id: session,
@@ -617,11 +618,14 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
             agent_type: "specify-agent",
           }), []);
 
-          expect(result).toEqual({ kind: "passthrough" });
+          expect(result).toMatchObject({
+            kind: "error",
+            message: expect.stringContaining("authority changed after filesystem observation"),
+          });
           expect(JSON.parse(readFileSync(join(tmpDir, `${session}.json`), "utf-8"))).toMatchObject({
-            current_phase: "clarify",
+            current_phase: "specify",
             spec_file: lockedSpec,
-            phase_artifacts: { specify: lockedSpec },
+            phase_artifacts: {},
             skipped_phases: [],
           });
         } finally {
@@ -638,16 +642,7 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
     writeFileSync(specFile, "resolved spec");
     const initial = mkState({ current_phase: "specify", spec_file: specFile });
     await withPhaseState(session, initial, async () => {
-      const originalUpdateAndReturn = StateManager.prototype.updateAndReturn;
-      const update = vi.spyOn(StateManager.prototype, "updateAndReturn").mockImplementationOnce(async function (
-        this: StateManager,
-        mutate,
-      ) {
-        const path = join(tmpDir, `${session}.json`);
-        const current = JSON.parse(readFileSync(path, "utf-8"));
-        writeFileSync(path, JSON.stringify({ ...current, current_phase: "architecture" }));
-        return originalUpdateAndReturn.call(this, mutate);
-      });
+      const update = mutateBeforeLockedUpdate(session, (current) => ({ ...current, current_phase: "architecture" }));
       try {
         const result = await advancePhaseHandler(JSON.stringify({
           session_id: session,

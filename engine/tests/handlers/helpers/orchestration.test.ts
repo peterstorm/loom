@@ -84,6 +84,13 @@ function modelFreePlan(root: string): string {
   return path;
 }
 
+function specCheckDocuments(specFile: string | null, planFile: string | null) {
+  const document = (path: string | null) => path === null
+    ? { path: null, contentDigest: null }
+    : { path, contentDigest: createHash("sha256").update(readFileSync(path)).digest("hex") };
+  return { spec: document(specFile), plan: document(planFile) };
+}
+
 function replayFromCapturedEvidence(handle: RunDirHandle) {
   const registration = handle.readProgramRegistration();
   if (!registration.ok || registration.value === null) throw new Error("expected standalone registration");
@@ -2638,7 +2645,10 @@ describe("orchestration CLI", () => {
     const graph = {
       current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {},
-      wave_review_epoch: { runId: "run.wave-upheld-tally", wave: 1, batchEpoch: "a".repeat(64) },
+      wave_review_epoch: {
+        runId: "run.wave-upheld-tally", wave: 1, batchEpoch: "a".repeat(64),
+        specCheckDocuments: specCheckDocuments(null, null),
+      },
       spec_check: {
         wave: 1, run_at: new Date().toISOString(), verdict: "PASSED", critical_count: 0, high_count: 0,
         critical_findings: [], high_findings: [], medium_findings: [],
@@ -2722,10 +2732,14 @@ describe("orchestration CLI", () => {
       id: "code-reviewer-7", agent: "code-reviewer", severity: "critical" as const,
       file: "src/x.ts", line: 1, claim: "relative imports bypass the check-imports boundary",
     };
+    const planFile = modelFreePlan(root);
     const graph = {
       current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: modelFreePlan(root), wave_gates: {},
-      wave_review_epoch: { runId: "run.wave-refuted-tally", wave: 1, batchEpoch: "b".repeat(64) },
+      spec_file: null, plan_file: planFile, wave_gates: {},
+      wave_review_epoch: {
+        runId: "run.wave-refuted-tally", wave: 1, batchEpoch: "b".repeat(64),
+        specCheckDocuments: specCheckDocuments(null, planFile),
+      },
       spec_check: {
         wave: 1, run_at: new Date().toISOString(), verdict: "PASSED", critical_count: 0, high_count: 0,
         critical_findings: [], high_findings: [], medium_findings: [],
@@ -2789,10 +2803,14 @@ describe("orchestration CLI", () => {
     mkdirSync(join(root, "src"));
     writeFileSync(join(root, "src", "x.ts"), "console.log('full-tier violation');\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    const planFile = modelFreePlan(root);
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: modelFreePlan(root), wave_gates: {},
-      wave_review_epoch: { runId: "run.wave-lint-block", wave: 1, batchEpoch: "b".repeat(64) },
+      spec_file: null, plan_file: planFile, wave_gates: {},
+      wave_review_epoch: {
+        runId: "run.wave-lint-block", wave: 1, batchEpoch: "b".repeat(64),
+        specCheckDocuments: specCheckDocuments(null, planFile),
+      },
       spec_check: {
         wave: 1, run_at: new Date().toISOString(), verdict: "PASSED", critical_count: 0, high_count: 0,
         critical_findings: [], high_findings: [], medium_findings: [],

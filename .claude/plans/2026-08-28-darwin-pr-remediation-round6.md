@@ -71,7 +71,7 @@ fixing and no refuted finding is being fixed.
 
 ## Remediation support paths (out of frozen scope; registered at remediation start)
 
-1. `.claude/plans/2026-08-28-pr-remediation-round6.md` (this plan)
+1. `.claude/plans/2026-08-28-darwin-pr-remediation-round6.md` (this plan)
 2. `engine/src/handlers/helpers/complete-wave-gate.ts` (C-18 branch deletion)
 3. `engine/src/handlers/helpers/reconcile-implementation-proof.ts` (C-18 branch deletion)
 4. `engine/tests/handlers/complete-wave-gate.test.ts` (C-18 seam assertion rework)

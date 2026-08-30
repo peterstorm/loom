@@ -146,7 +146,11 @@ describe("request-bound capture gates legacy dispatch", () => {
     }
   });
 
-  it("captures and settles a successful request-bound Wave Gate spec-check", async () => {
+  it.each([
+    ["matching metadata", "spec-check-invoker", true],
+    ["omitted metadata", undefined, true],
+    ["contradictory metadata", "code-reviewer", false],
+  ] as const)("routes a captured Wave Gate spec-check from request authority with %s", async (_label, reportedAgentType, settles) => {
     const dir = tempDir();
     const statePath = writeState(dir);
     const session = sid("wave-gate-spec-check");
@@ -207,6 +211,10 @@ describe("request-bound capture gates legacy dispatch", () => {
       runId: request.runId,
       wave: 1,
       batchEpoch: "b".repeat(64),
+      specCheckDocuments: {
+        spec: { path: state.spec_file, contentDigest: null },
+        plan: { path: state.plan_file, contentDigest: null },
+      },
       specCheckSlotAuthority: { slot_id: request.slotId, attempted: request.attempt },
     };
     writeFileSync(statePath, JSON.stringify(state));
@@ -230,18 +238,27 @@ describe("request-bound capture gates legacy dispatch", () => {
       const result = await runDispatch(JSON.stringify({
         session_id: session,
         agent_id: "agent-wave-gate-spec-check",
-        agent_type: "spec-check-invoker",
+        agent_type: reportedAgentType,
         agent_transcript_path: transcriptPath,
       }), [], cleanup);
 
-      expect(result).toEqual({ kind: "passthrough" });
       expect(cleanup).toHaveBeenCalledOnce();
-      expect(JSON.parse(readFileSync(statePath, "utf8")).spec_check).toMatchObject({
-        wave: 1,
-        verdict: "PASSED",
-        critical_count: 0,
-        high_count: 0,
-      });
+      const settledState = JSON.parse(readFileSync(statePath, "utf8"));
+      if (settles) {
+        expect(result).toEqual({ kind: "passthrough" });
+        expect(settledState.spec_check).toMatchObject({
+          wave: 1,
+          verdict: "PASSED",
+          critical_count: 0,
+          high_count: 0,
+        });
+      } else {
+        expect(result).toMatchObject({
+          kind: "error",
+          message: expect.stringMatching(/issued to.*spec-check-invoker.*reported.*code-reviewer/),
+        });
+        expect(settledState.spec_check).toBeUndefined();
+      }
       const captured = opened.value.readTranscriptBytes(request);
       expect(captured.ok).toBe(true);
       if (captured.ok) expect(Buffer.from(captured.value).toString("utf8")).toBe(capturedBytes);

@@ -18,10 +18,10 @@ export type JsonObject = Readonly<{ [key: string]: JsonValue }>;
 export interface IssuedReviewPacketRegistration {
   readonly task_id: string;
   readonly packet_id: string;
-  readonly packet_path: string;
+  readonly packet_path: ReviewPath;
   readonly base_sha: string;
   readonly head_sha: string;
-  readonly scope: readonly string[];
+  readonly scope: readonly ReviewPath[];
 }
 
 export const REVIEW_PACKET_SCHEMA_VERSION = 2 as const;
@@ -62,7 +62,7 @@ export function parseHeadSha(raw: unknown, label = "headSha"): ParseResult<HeadS
 export interface ReviewPacketArtifactInput {
   readonly path: string;
   readonly diff: string;
-  /** Original file bytes. Null means deletion at the packet's head revision. */
+  /** HEAD postimage bytes. Null means deletion at the packet's head revision. */
   readonly postimage: Uint8Array | null;
 }
 
@@ -86,7 +86,7 @@ declare const POSTIMAGE_DIGEST: unique symbol;
  *
  * All three are 64 lowercase hex characters over completely different inputs:
  * `PacketId` hashes the canonical packet body, `DiffDigest` hashes an artifact's
- * diff text, `PostimageDigest` hashes an artifact's original bytes. As plain
+ * diff text, `PostimageDigest` hashes an artifact's HEAD postimage bytes. As plain
  * strings, `{ sha256: packet.packetId, content: diffText }` type-checked as a
  * valid `HashedReviewArtifactContent` — a packet that re-hashes cleanly against
  * the wrong thing. Today every constructor happens to compute its digest inline;
@@ -108,7 +108,7 @@ export interface HashedReviewPostimage {
 }
 
 export interface ReviewPacketArtifact {
-  readonly path: string;
+  readonly path: ReviewPath;
   readonly diff: HashedReviewArtifactContent;
   readonly postimage: HashedReviewPostimage | null;
 }
@@ -119,8 +119,8 @@ export interface ReviewPacket {
   readonly task: JsonObject;
   readonly baseSha: BaseSha;
   readonly headSha: HeadSha;
-  readonly declaredPaths: readonly string[];
-  readonly modifiedPaths: readonly string[];
+  readonly declaredPaths: readonly ReviewPath[];
+  readonly modifiedPaths: readonly ReviewPath[];
   readonly artifacts: readonly ReviewPacketArtifact[];
   readonly planContext: JsonValue;
   readonly proofObligations: readonly JsonValue[];
@@ -139,10 +139,10 @@ export interface VerifiedReviewPacketRecovery {
   readonly taskId: string;
   readonly baseSha: BaseSha;
   readonly headSha: HeadSha;
-  readonly declaredPaths: readonly string[];
-  readonly modifiedPaths: readonly string[];
+  readonly declaredPaths: readonly ReviewPath[];
+  readonly modifiedPaths: readonly ReviewPath[];
   readonly artifacts: readonly Readonly<{
-    path: string;
+    path: ReviewPath;
     postimageSha256: PostimageDigest | null;
   }>[];
 }
@@ -185,7 +185,10 @@ export function parseJsonValue(raw: unknown, label: string): ParseResult<JsonVal
     }
 
     const record = value as Record<string, unknown>;
-    const result: Record<string, JsonValue> = {};
+    // JSON object keys are data, including the Annex B accessor name
+    // "__proto__". A null prototype makes assignment an own data-property
+    // write instead of silently invoking Object.prototype.__proto__.
+    const result = Object.create(null) as Record<string, JsonValue>;
     const errors: string[] = [];
     for (const key of Object.keys(record).sort(compareStrings)) {
       const parsed = visit(record[key], `${path}.${key}`);
@@ -264,9 +267,9 @@ export function parseIssuedReviewPacketRegistration(
   }));
 }
 
-function parsePathSet(raw: unknown, label: string): ParseResult<readonly string[]> {
+function parsePathSet(raw: unknown, label: string): ParseResult<readonly ReviewPath[]> {
   if (!Array.isArray(raw)) return fail([`${label} must be an array`]);
-  const paths: string[] = [];
+  const paths: ReviewPath[] = [];
   const errors: string[] = [];
   raw.forEach((entry, index) => {
     const parsed = parseReviewPath(entry, `${label}[${index}]`);
@@ -368,7 +371,7 @@ function freezeJson<T>(value: T): T {
   return value;
 }
 
-type ParsedArtifacts = { readonly artifacts: ReviewPacketArtifact[]; readonly paths: Set<string>; readonly errors: string[] };
+type ParsedArtifacts = { readonly artifacts: ReviewPacketArtifact[]; readonly paths: Set<ReviewPath>; readonly errors: string[] };
 
 /** Encode bytes as readable UTF-8 exactly when that representation is lossless. */
 function encodePostimage(bytes: Uint8Array): HashedReviewPostimage {
@@ -408,7 +411,7 @@ function decodePostimage(
 
 function parseArtifactInputs(raw: unknown): ParsedArtifacts {
   const artifacts: ReviewPacketArtifact[] = [];
-  const paths = new Set<string>();
+  const paths = new Set<ReviewPath>();
   const errors: string[] = [];
   if (!Array.isArray(raw)) return { artifacts, paths, errors: ["artifacts must be an array"] };
   raw.forEach((artifact, index) => {
@@ -435,7 +438,11 @@ function parseArtifactInputs(raw: unknown): ParsedArtifacts {
   return { artifacts, paths, errors };
 }
 
-function scopeErrors(declared: readonly string[], modified: readonly string[], artifactPaths: ReadonlySet<string>): string[] {
+function scopeErrors(
+  declared: readonly ReviewPath[],
+  modified: readonly ReviewPath[],
+  artifactPaths: ReadonlySet<ReviewPath>,
+): string[] {
   const errors: string[] = [];
   const scope = new Set([...declared, ...modified]);
   if (scope.size === 0) errors.push("review packet scope must be non-empty");
@@ -448,8 +455,25 @@ function scopeErrors(declared: readonly string[], modified: readonly string[], a
   return errors;
 }
 
-/** Construct a canonical packet from already-read data. */
-export function createReviewPacket(input: ReviewPacketInput): ParseResult<ReviewPacket> {
+type ParsedPacketEnvelope = Readonly<{
+  task: JsonObject;
+  planContext: JsonValue;
+  proofObligations: readonly JsonValue[];
+  baseSha: BaseSha;
+  headSha: HeadSha;
+  declaredPaths: readonly ReviewPath[];
+  modifiedPaths: readonly ReviewPath[];
+}>;
+
+function parsePacketEnvelope(input: Readonly<{
+  task: unknown;
+  planContext: unknown;
+  proofObligations: unknown;
+  baseSha: unknown;
+  headSha: unknown;
+  declaredPaths: unknown;
+  modifiedPaths: unknown;
+}>): ParseResult<ParsedPacketEnvelope> {
   const task = parseJsonObject(input.task, "task");
   const planContext = parseJsonValue(input.planContext, "planContext");
   const proofObligations = parseJsonValue(input.proofObligations, "proofObligations");
@@ -459,18 +483,38 @@ export function createReviewPacket(input: ReviewPacketInput): ParseResult<Review
   const modifiedPaths = parsePathSet(input.modifiedPaths, "modifiedPaths");
   const parsed = [task, planContext, proofObligations, baseSha, headSha, declaredPaths, modifiedPaths];
   const errors = parsed.flatMap((result) => result.ok ? [] : result.errors);
-  if (task.ok && (typeof task.value.id !== "string" || task.value.id.trim() === "")) errors.push("task.id must be a non-empty string");
-  if (proofObligations.ok && !Array.isArray(proofObligations.value)) errors.push("proofObligations must be an array");
-  const artifactResult = parseArtifactInputs(input.artifacts);
-  errors.push(...artifactResult.errors);
-  if (declaredPaths.ok && modifiedPaths.ok) errors.push(...scopeErrors(declaredPaths.value, modifiedPaths.value, artifactResult.paths));
+  if (task.ok && (typeof task.value.id !== "string" || task.value.id.trim() === "")) {
+    errors.push("task.id must be a non-empty string");
+  }
+  if (proofObligations.ok && !Array.isArray(proofObligations.value)) {
+    errors.push("proofObligations must be an array");
+  }
   if (errors.length > 0 || !task.ok || !planContext.ok || !proofObligations.ok || !baseSha.ok || !headSha.ok ||
       !declaredPaths.ok || !modifiedPaths.ok || !Array.isArray(proofObligations.value)) return fail(errors);
+  return ok({
+    task: task.value,
+    planContext: planContext.value,
+    proofObligations: proofObligations.value,
+    baseSha: baseSha.value,
+    headSha: headSha.value,
+    declaredPaths: declaredPaths.value,
+    modifiedPaths: modifiedPaths.value,
+  });
+}
+
+/** Construct a canonical packet from already-read data. */
+export function createReviewPacket(input: ReviewPacketInput): ParseResult<ReviewPacket> {
+  const envelope = parsePacketEnvelope(input);
+  const artifactResult = parseArtifactInputs(input.artifacts);
+  const errors = [...(envelope.ok ? [] : envelope.errors), ...artifactResult.errors];
+  if (envelope.ok) {
+    errors.push(...scopeErrors(envelope.value.declaredPaths, envelope.value.modifiedPaths, artifactResult.paths));
+  }
+  if (errors.length > 0 || !envelope.ok) return fail(errors);
   const body: PacketBody = {
-    schemaVersion: REVIEW_PACKET_SCHEMA_VERSION, task: task.value, baseSha: baseSha.value, headSha: headSha.value,
-    declaredPaths: declaredPaths.value, modifiedPaths: modifiedPaths.value,
+    schemaVersion: REVIEW_PACKET_SCHEMA_VERSION,
+    ...envelope.value,
     artifacts: [...artifactResult.artifacts].sort((left, right) => compareStrings(left.path, right.path)),
-    planContext: planContext.value, proofObligations: proofObligations.value,
   };
   return ok(freezeJson({ ...body, packetId: packetIdOf(canonicalJson(packetBodyJson(body))) }));
 }
@@ -567,30 +611,25 @@ function recoveryProjection(packet: ReviewPacket): VerifiedReviewPacketRecovery 
 }
 
 function parseLegacyRecoveryPacket(value: Record<string, unknown>): ParseResult<VerifiedReviewPacketRecovery> {
-  const task = parseJsonObject(value.task, "task");
-  const planContext = parseJsonValue(value.planContext, "planContext");
-  const proofObligations = parseJsonValue(value.proofObligations, "proofObligations");
-  const baseSha = parseBaseSha(value.baseSha);
-  const headSha = parseHeadSha(value.headSha);
-  const declaredPaths = parsePathSet(value.declaredPaths, "declaredPaths");
-  const modifiedPaths = parsePathSet(value.modifiedPaths, "modifiedPaths");
-  const errors = [task, planContext, proofObligations, baseSha, headSha, declaredPaths, modifiedPaths]
-    .flatMap((result) => result.ok ? [] : result.errors);
-  if (task.ok && (typeof task.value.id !== "string" || task.value.id.trim() === "")) {
-    errors.push("task.id must be a non-empty string");
-  }
-  if (proofObligations.ok && !Array.isArray(proofObligations.value)) {
-    errors.push("proofObligations must be an array");
-  }
+  const envelope = parsePacketEnvelope({
+    task: value.task,
+    planContext: value.planContext,
+    proofObligations: value.proofObligations,
+    baseSha: value.baseSha,
+    headSha: value.headSha,
+    declaredPaths: value.declaredPaths,
+    modifiedPaths: value.modifiedPaths,
+  });
+  const errors = envelope.ok ? [] : [...envelope.errors];
 
   const artifacts: Array<{
-    path: string;
+    path: ReviewPath;
     diff: HashedReviewArtifactContent;
     // v1 stored postimages as UTF-8 text only, so its digest covers exactly the
     // bytes of `content` — the same domain `PostimageDigest` brands in v2.
     postimage: Readonly<{ content: string; sha256: PostimageDigest }> | null;
   }> = [];
-  const artifactPaths = new Set<string>();
+  const artifactPaths = new Set<ReviewPath>();
   if (!Array.isArray(value.artifacts)) errors.push("artifacts must be an array");
   else value.artifacts.forEach((raw, index) => {
     if (!isRecord(raw) || !isRecord(raw.diff)) {
@@ -623,28 +662,26 @@ function parseLegacyRecoveryPacket(value: Record<string, unknown>): ParseResult<
     });
   });
 
-  if (declaredPaths.ok && modifiedPaths.ok) {
-    errors.push(...scopeErrors(declaredPaths.value, modifiedPaths.value, artifactPaths));
+  if (envelope.ok) {
+    errors.push(...scopeErrors(envelope.value.declaredPaths, envelope.value.modifiedPaths, artifactPaths));
   }
-  if (errors.length > 0 || !task.ok || !planContext.ok || !proofObligations.ok ||
-      !baseSha.ok || !headSha.ok || !declaredPaths.ok || !modifiedPaths.ok ||
-      !Array.isArray(proofObligations.value)) return fail(errors);
+  if (errors.length > 0 || !envelope.ok) return fail(errors);
 
   const sortedArtifacts = [...artifacts].sort((left, right) => compareStrings(left.path, right.path));
   const body: JsonObject = {
     schemaVersion: 1,
-    task: task.value,
-    baseSha: baseSha.value,
-    headSha: headSha.value,
-    declaredPaths: declaredPaths.value,
-    modifiedPaths: modifiedPaths.value,
+    task: envelope.value.task,
+    baseSha: envelope.value.baseSha,
+    headSha: envelope.value.headSha,
+    declaredPaths: envelope.value.declaredPaths,
+    modifiedPaths: envelope.value.modifiedPaths,
     artifacts: sortedArtifacts.map((artifact): JsonObject => ({
       path: artifact.path,
       diff: hashedContentJson(artifact.diff),
       postimage: artifact.postimage === null ? null : hashedContentJson(artifact.postimage),
     })),
-    planContext: planContext.value,
-    proofObligations: proofObligations.value,
+    planContext: envelope.value.planContext,
+    proofObligations: envelope.value.proofObligations,
   };
   const packetId = parsePacketId(value.packetId);
   if (packetId === null) {
@@ -656,11 +693,11 @@ function parseLegacyRecoveryPacket(value: Record<string, unknown>): ParseResult<
   return ok(freezeJson({
     schemaVersion: 1 as const,
     packetId,
-    taskId: task.value.id as string,
-    baseSha: baseSha.value,
-    headSha: headSha.value,
-    declaredPaths: declaredPaths.value,
-    modifiedPaths: modifiedPaths.value,
+    taskId: envelope.value.task.id as string,
+    baseSha: envelope.value.baseSha,
+    headSha: envelope.value.headSha,
+    declaredPaths: envelope.value.declaredPaths,
+    modifiedPaths: envelope.value.modifiedPaths,
     artifacts: sortedArtifacts.map((artifact) => ({
       path: artifact.path,
       postimageSha256: artifact.postimage?.sha256 ?? null,

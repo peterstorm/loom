@@ -12,6 +12,7 @@
  * single test failing).
  */
 
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,6 +32,9 @@ const HEX = (seed: string): string => {
   for (let i = 0; i < 64; i += 1) out += seed.charCodeAt(i % seed.length).toString(16).padStart(2, "0").slice(-2);
   return out.slice(0, 64);
 };
+
+const correlatorFile = (directory: string, harness: "pi" | "claude", nativeId: string): string =>
+  join(directory, "requests", "correlators", `${createHash("sha256").update(`${harness}\0${nativeId}`).digest("hex")}.json`);
 
 /** One run directory holding two RESERVED requests of different slots. */
 async function stagedRun(): Promise<Readonly<{
@@ -248,6 +252,35 @@ describe("harness correlator write-once discipline", () => {
     expect(wrongRole.error.message).toContain("does not match request");
   });
 
+  it("parses a correlator request id before it can address a request authority path", async () => {
+    const { handle, directory, first } = await stagedRun();
+    const nativeId = "pi-native-traversal-request";
+    writeFileSync(
+      correlatorFile(directory, "pi", nativeId),
+      JSON.stringify({ ...bindingFor(nativeId, first), requestId: "../../authority" }),
+    );
+
+    const read = handle.readHarnessCorrelator("pi", nativeId);
+
+    expect(read.ok).toBe(false);
+    if (read.ok) return;
+    expect(read.error.message).toContain("request-id must be a non-empty canonical authority id");
+  });
+
+  it("refuses a reservation whose filename request id disagrees with its parsed body", async () => {
+    const { handle, directory, first, second } = await stagedRun();
+    writeFileSync(
+      join(directory, "requests", `${first.requestId}.json`),
+      JSON.stringify(second),
+    );
+
+    const recorded = await handle.recordHarnessCorrelator(bindingFor("pi-native-body-mismatch", first));
+
+    expect(recorded.ok).toBe(false);
+    if (recorded.ok) return;
+    expect(recorded.error.message).toContain(`body belongs to ${second.requestId}`);
+  });
+
   it("refuses a stored binding that answers to a different lookup identity", async () => {
     const { handle, directory, first } = await stagedRun();
     await handle.recordHarnessCorrelator(bindingFor("pi-native-lookup", first));
@@ -256,10 +289,8 @@ describe("harness correlator write-once discipline", () => {
     // names a DIFFERENT native id while remaining a structurally valid, fully
     // reserved binding. The stored bytes must still be refused against the key
     // that addressed them.
-    const { createHash } = await import("node:crypto");
-    const digest = createHash("sha256").update(`pi\0pi-native-lookup`).digest("hex");
     writeFileSync(
-      join(directory, "requests", "correlators", `${digest}.json`),
+      correlatorFile(directory, "pi", "pi-native-lookup"),
       JSON.stringify({ ...bindingFor("pi-native-elsewhere", first), nativeId: "pi-native-elsewhere" }),
     );
 
@@ -279,13 +310,10 @@ describe("harness correlator write-once discipline", () => {
     await handle.recordHarnessCorrelator(bindingFor("pi-native-victim", first));
     await handle.recordHarnessCorrelator(bindingFor("pi-native-attacker", second));
 
-    const { createHash } = await import("node:crypto");
-    const correlatorDir = join(directory, "requests", "correlators");
-    const attackerName = `${createHash("sha256").update("pi\0pi-native-attacker").digest("hex")}.json`;
-    const victimName = `${createHash("sha256").update("pi\0pi-native-victim").digest("hex")}.json`;
-    const target = join(correlatorDir, attackerName);
-    rmSync(join(correlatorDir, victimName));
-    symlinkSync(target, join(correlatorDir, victimName));
+    const attacker = correlatorFile(directory, "pi", "pi-native-attacker");
+    const victim = correlatorFile(directory, "pi", "pi-native-victim");
+    rmSync(victim);
+    symlinkSync(attacker, victim);
 
     const read = handle.readHarnessCorrelator("pi", "pi-native-victim");
 

@@ -1382,12 +1382,12 @@ function reviewFacts(graph: TaskGraph): Readonly<{
   return canonicalRecord({ rosterGaps: Object.freeze(rosterGaps), evidenceFailures: Object.freeze(evidenceFailures) });
 }
 
-function deriveFindingCounts(graph: TaskGraph): FindingCounts {
+function deriveFindingCounts(tasks: readonly Task[]): FindingCounts {
   let activeCritical = 0;
   let advisory = 0;
   let resolved = 0;
   let refuted = 0;
-  for (const task of graph.tasks) {
+  for (const task of tasks) {
     if (task.findings !== undefined) {
       activeCritical += task.findings.filter((finding) => finding.severity === "critical").length;
       advisory += task.findings.filter((finding) => finding.severity === "advisory").length;
@@ -1555,7 +1555,7 @@ export function deriveWaveReadiness(
   const decision = evaluateWaveGate(graph, wave, deps);
   const reviews = reviewFacts(graph);
   const tests = deriveTestReadiness(graph, wave);
-  const findings = deriveFindingCounts(graph);
+  const findings = deriveFindingCounts(graph.tasks.filter((task) => task.wave === wave));
   const panel = panelNeed(graph, wave);
   const eligibility = completionEligibility(decision);
   const facts: CanonicalStatusFacts = canonicalRecord({
@@ -2371,7 +2371,7 @@ function deriveNonExecuteLoomStatus(
     failedProofObligations: canonicalRecord({ kind: "known", value: failedProofs(graph) }),
     testReadiness: canonicalRecord({ kind: "known", value: deriveTestReadinessForTasks(graph.tasks) }),
     reviewRuns: canonicalRecord({ kind: "known", value: reviews }),
-    findingCounts: canonicalRecord({ kind: "known", value: deriveFindingCounts(graph) }),
+    findingCounts: canonicalRecord({ kind: "known", value: deriveFindingCounts(graph.tasks) }),
     refutationPanelNeed: canonicalRecord({
       kind: "known",
       value: canonicalRecord({
@@ -2420,7 +2420,10 @@ function waveScopedStatusFacts(
     failedProofObligations: canonicalRecord({ kind: "known", value: failedProofs(graph) }),
     testReadiness: canonicalRecord({ kind: "known", value: deriveTestReadiness(graph, wave) }),
     reviewRuns: canonicalRecord({ kind: "known", value: reviews }),
-    findingCounts: canonicalRecord({ kind: "known", value: deriveFindingCounts(graph) }),
+    findingCounts: canonicalRecord({
+      kind: "known",
+      value: deriveFindingCounts(graph.tasks.filter((task) => task.wave === wave)),
+    }),
     refutationPanelNeed: canonicalRecord({ kind: "known", value: panelNeed(graph, wave) }),
     waveCompletionSuiteReadiness: canonicalRecord({
       kind: "known",
@@ -2438,7 +2441,11 @@ function persistedTerminalBlockedStatus(
   const registration = graph.active_wave_gate;
   if (registration?.terminalOutcome?.kind !== "terminal-blocked") return null;
   const built = blockedAction(registration.terminalOutcome.diagnostic);
-  if (!built.ok) return null;
+  if (!built.ok) {
+    return deriveUnavailableLoomStatus(Object.freeze([
+      unavailableStatusReason(`cannot construct persisted terminal-blocked action: ${built.error.message}`),
+    ]) as NonEmpty<StatusReason>);
+  }
   const blockedReason = reason("blocked-diagnostic", registration.terminalOutcome.diagnostic.message);
   return canonicalRecord({
     schemaVersion: 1,
@@ -2477,7 +2484,11 @@ function committedTerminalStatus(
     digest: receiptDigest,
     byteLength: receiptBytes.byteLength,
   });
-  if (!done.ok) return null;
+  if (!done.ok) {
+    return deriveUnavailableLoomStatus(Object.freeze([
+      unavailableStatusReason(`cannot construct committed terminal action: ${done.error.message}`),
+    ]) as NonEmpty<StatusReason>);
+  }
   const completeReason = reason("run-complete", `Wave Gate run ${terminal.runId} completed with committed revision ${terminal.revision}`);
   return canonicalRecord({
     schemaVersion: 1,

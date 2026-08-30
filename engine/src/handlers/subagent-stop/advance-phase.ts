@@ -19,9 +19,10 @@ import { findFile } from "../../utils/find-file";
 import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
 import {
   PLAN_ARTIFACT_DIR,
-  SPEC_ARTIFACT_DIR,
   classifyPhaseArtifact,
+  parseSpecArtifactDirectory,
   resolvesWithin,
+  type SpecArtifactDirectory,
 } from "../../core/phase-artifact-paths";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 
@@ -54,13 +55,23 @@ export function countMarkers(filePath: string): number {
   }
 }
 
-function readableSpecArtifact(state: TaskGraph): string | null {
-  let spec = state.spec_file;
-  if (spec && !resolvesWithin(spec, SPEC_ARTIFACT_DIR)) spec = null;
-  if ((!spec || !phaseArtifactExists(spec)) && state.spec_dir) {
-    spec = findFile(state.spec_dir, "spec.md");
+function readableSpecArtifact(
+  state: TaskGraph,
+  specDir: SpecArtifactDirectory,
+): PhaseTransitionResolution | string {
+  const recorded = state.spec_file;
+  if (recorded !== null) {
+    if (!resolvesWithin(recorded, specDir)) {
+      return transitionNotReady(`spec_file ${recorded} is outside run spec_dir ${specDir}`);
+    }
+    return phaseArtifactExists(recorded)
+      ? recorded
+      : transitionNotReady(`recorded spec_file ${recorded} is not readable`);
   }
-  return spec && phaseArtifactExists(spec) ? spec : null;
+  const discovered = findFile(specDir, "spec.md");
+  return discovered !== null && phaseArtifactExists(discovered)
+    ? discovered
+    : transitionNotReady(`no readable spec.md is available inside ${specDir}`);
 }
 
 export type PhaseTransitionResolution =
@@ -80,6 +91,42 @@ const transitionReady = (
 
 const transitionNotReady = (reason: string): PhaseTransitionResolution => ({ kind: "not-ready", reason });
 
+type PhaseTransitionAuthority = Readonly<{
+  currentPhase: Phase;
+  specDir: string | null;
+  specFile: string | null;
+  planFile: string | null;
+  skippedPhases: readonly Phase[];
+}>;
+
+export type PhaseTransitionObservation = Readonly<{
+  authority: PhaseTransitionAuthority;
+  resolution: PhaseTransitionResolution;
+}>;
+
+function transitionAuthority(state: TaskGraph): PhaseTransitionAuthority {
+  return Object.freeze({
+    currentPhase: state.current_phase,
+    specDir: state.spec_dir ?? null,
+    specFile: state.spec_file,
+    planFile: state.plan_file,
+    skippedPhases: Object.freeze([...state.skipped_phases]),
+  });
+}
+
+/** Pure exact authority recheck used inside the TaskGraph lock. */
+export function transitionAuthorityMatches(
+  state: TaskGraph,
+  authority: PhaseTransitionAuthority,
+): boolean {
+  return state.current_phase === authority.currentPhase &&
+    (state.spec_dir ?? null) === authority.specDir &&
+    state.spec_file === authority.specFile &&
+    state.plan_file === authority.planFile &&
+    state.skipped_phases.length === authority.skippedPhases.length &&
+    state.skipped_phases.every((phase, index) => phase === authority.skippedPhases[index]);
+}
+
 /** Exact phase capability check shared by every unlocked/locked observation. */
 function phaseAuthorityRefusal(current: Phase, completed: Phase): HookResult | null {
   if (current === completed) return null;
@@ -93,33 +140,29 @@ function phaseAuthorityRefusal(current: Phase, completed: Phase): HookResult | n
       };
 }
 
-/** Determine the next phase or the exact artifact condition blocking it. */
-export function resolveTransition(
+/** Imperative-shell observation of phase artifacts. Never call under the TaskGraph lock. */
+export function observePhaseTransition(
   completedPhase: Phase,
   state: TaskGraph,
-): PhaseTransitionResolution {
-  return match(completedPhase)
+  specDir: SpecArtifactDirectory,
+): PhaseTransitionObservation {
+  const resolution = match(completedPhase)
     .with("brainstorm", () => {
-      // Scope search to current run's spec_dir to avoid finding stale artifacts
-      const searchDir = state.spec_dir ?? ".claude/specs";
-      const file = findFile(searchDir, "brainstorm.md");
-      if (!file) return transitionNotReady(`brainstorm.md was not found under ${searchDir}`);
+      // The parser supplies the current run directory, or the legacy root fallback.
+      const file = findFile(specDir, "brainstorm.md");
+      if (!file) return transitionNotReady(`brainstorm.md was not found under ${specDir}`);
       return transitionReady("specify", file);
     })
     .with("specify", () => {
-      const spec = readableSpecArtifact(state);
-      if (spec === null) {
-        return transitionNotReady(`no readable spec.md is available inside ${SPEC_ARTIFACT_DIR}`);
-      }
+      const spec = readableSpecArtifact(state, specDir);
+      if (typeof spec !== "string") return spec;
       const markers = countMarkers(spec);
       if (markers > CLARIFY_THRESHOLD) return transitionReady("clarify", spec);
       return transitionReady("architecture", spec, true);
     })
     .with("clarify", () => {
-      const spec = readableSpecArtifact(state);
-      if (spec === null) {
-        return transitionNotReady(`no readable spec.md is available inside ${SPEC_ARTIFACT_DIR}`);
-      }
+      const spec = readableSpecArtifact(state, specDir);
+      if (typeof spec !== "string") return spec;
       const markers = countMarkers(spec);
       if (markers > 0) {
         return transitionNotReady(`${markers} NEEDS CLARIFICATION marker(s) remain unresolved in ${spec}`);
@@ -165,7 +208,6 @@ export function resolveTransition(
     .with("plan-alignment", () => {
       // Loop-back (re-running architecture) is orchestrator-driven via `set-phase` helper,
       // not handled in this hook. We only advance to decompose when the gap report exists.
-      const specDir = state.spec_dir ?? ".claude/specs";
       const gapReport = findFile(specDir, "plan-alignment.md");
       if (!gapReport) {
         return transitionNotReady(`plan-alignment.md was not found under ${specDir}`);
@@ -178,6 +220,18 @@ export function resolveTransition(
     .with("init", () => transitionNotReady("init has no completed phase transition"))
     .with("execute", () => transitionNotReady("execute is terminal and has no next phase"))
     .exhaustive();
+  return Object.freeze({ authority: transitionAuthority(state), resolution });
+}
+
+/** Compatibility shell for direct callers: parse scope, then observe. */
+export function resolveTransition(
+  completedPhase: Phase,
+  state: TaskGraph,
+): PhaseTransitionResolution {
+  const parsedSpecDir = parseSpecArtifactDirectory(state.spec_dir);
+  return parsedSpecDir.ok
+    ? observePhaseTransition(completedPhase, state, parsedSpecDir.value).resolution
+    : transitionNotReady(parsedSpecDir.message);
 }
 
 const handler: HookHandler = async (stdin) => {
@@ -222,6 +276,10 @@ const handler: HookHandler = async (stdin) => {
   }
   const initialPhaseRefusal = phaseAuthorityRefusal(currentState.current_phase, completedPhase);
   if (initialPhaseRefusal !== null) return initialPhaseRefusal;
+  const initialSpecDir = parseSpecArtifactDirectory(currentState.spec_dir);
+  if (!initialSpecDir.ok) {
+    return { kind: "error", message: `advance-phase: ${initialSpecDir.message}; phase NOT advanced` };
+  }
 
   // Extract artifacts from transcript before checking transition. Resolved,
   // not read off the payload: without the derived fallback a harness that
@@ -238,7 +296,7 @@ const handler: HookHandler = async (stdin) => {
     let artifacts: ReturnType<typeof parsePhaseArtifacts>;
     try {
       const transcriptContent = readFileSync(transcriptPath, "utf-8");
-      artifacts = parsePhaseArtifacts(transcriptContent, currentState.spec_dir);
+      artifacts = parsePhaseArtifacts(transcriptContent, initialSpecDir.value);
     } catch (e) {
       return {
         kind: "error",
@@ -246,33 +304,40 @@ const handler: HookHandler = async (stdin) => {
       };
     }
 
+    // Observe candidate artifact readability before taking the TaskGraph lock.
+    // Classification precedes every probe, so an out-of-scope path is never stat'd.
+    const updates: { spec_file?: string; plan_file?: string } = {};
+    try {
+      if (artifacts.spec_file &&
+          classifyPhaseArtifact(artifacts.spec_file, initialSpecDir.value) === "spec" &&
+          phaseArtifactExists(artifacts.spec_file)) {
+        updates.spec_file = artifacts.spec_file;
+      }
+      if (currentState.plan_file === null && artifacts.plan_file &&
+          classifyPhaseArtifact(artifacts.plan_file, initialSpecDir.value) === "plan" &&
+          phaseArtifactExists(artifacts.plan_file)) {
+        updates.plan_file = artifacts.plan_file;
+      }
+    } catch (e) {
+      return {
+        kind: "error",
+        message: `advance-phase: failed to observe phase artifacts: ${e instanceof Error ? e.message : String(e)}`,
+      };
+    }
+
+    const artifactAuthority = transitionAuthority(currentState);
     let artifactPhaseRefusal: HookResult | null = null;
     try {
       await mgr.update((s) => {
         artifactPhaseRefusal = phaseAuthorityRefusal(s.current_phase, completedPhase);
         if (artifactPhaseRefusal !== null) return s;
-        const updates: { spec_file?: string | null; plan_file?: string | null } = {};
-
-        // ONE classifier for both harnesses, scoped to the LOCKED run.
-        // `resolvesWithin(_, SPEC_ARTIFACT_DIR)` alone let a SIBLING run's
-        // spec.md become this run's authoritative `spec_file`, and the parser's
-        // `filePath.includes(specDir)` filter is the substring form this module
-        // already rejected elsewhere: `..` segments survive `includes` and are
-        // collapsed only by `resolve`. The Pi shell has answered from
-        // `phaseArtifactUpdates` since it adopted the shared rule; the hook now
-        // crosses the same seam, and classification runs BEFORE any filesystem
-        // probe so an out-of-scope path is never even stat'd.
-        const runScope = s.spec_dir ?? SPEC_ARTIFACT_DIR;
-        if (artifacts.spec_file && classifyPhaseArtifact(artifacts.spec_file, runScope) === "spec"
-            && phaseArtifactExists(artifacts.spec_file)) {
-          updates.spec_file = artifacts.spec_file;
+        if (!transitionAuthorityMatches(s, artifactAuthority)) {
+          artifactPhaseRefusal = {
+            kind: "error",
+            message: "advance-phase: TaskGraph artifact authority changed before persistence; phase artifacts NOT stored",
+          };
+          return s;
         }
-        if (!s.plan_file && artifacts.plan_file
-            && classifyPhaseArtifact(artifacts.plan_file, runScope) === "plan"
-            && phaseArtifactExists(artifacts.plan_file)) {
-          updates.plan_file = artifacts.plan_file;
-        }
-
         return Object.keys(updates).length > 0 ? { ...s, ...updates } : s;
       });
     } catch (e) {
@@ -297,20 +362,24 @@ const handler: HookHandler = async (stdin) => {
   }
   const reloadedPhaseRefusal = phaseAuthorityRefusal(state.current_phase, completedPhase);
   if (reloadedPhaseRefusal !== null) return reloadedPhaseRefusal;
+  const specDir = parseSpecArtifactDirectory(state.spec_dir);
+  if (!specDir.ok) {
+    return { kind: "error", message: `advance-phase: ${specDir.message}; phase NOT advanced` };
+  }
 
-  let transition: ReturnType<typeof resolveTransition>;
+  let observation: PhaseTransitionObservation;
   try {
-    transition = resolveTransition(completedPhase, state);
+    observation = observePhaseTransition(completedPhase, state, specDir.value);
   } catch (error) {
     return {
       kind: "error",
       message: `advance-phase: phase artifact discovery failed: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
-  if (transition.kind === "not-ready") {
+  if (observation.resolution.kind === "not-ready") {
     return {
       kind: "error",
-      message: `advance-phase: ${completedPhase} completed but phase transition is not ready: ${transition.reason}; phase NOT advanced`,
+      message: `advance-phase: ${completedPhase} completed but phase transition is not ready: ${observation.resolution.reason}; phase NOT advanced`,
     };
   }
 
@@ -324,13 +393,16 @@ const handler: HookHandler = async (stdin) => {
       const refusal = phaseAuthorityRefusal(s.current_phase, completedPhase);
       if (refusal !== null) return { state: s, value: { kind: "refused", result: refusal } };
 
-      // Transition-relevant authority can change while the Phase stays the
-      // same. Recompute from the locked TaskGraph so the artifact and target
-      // committed below come from one linearized observation.
-      const lockedTransition = resolveTransition(completedPhase, s);
-      if (lockedTransition.kind === "not-ready") {
-        return { state: s, value: lockedTransition };
+      // Filesystem observation happened before the lock. Commit only when the
+      // locked TaskGraph still names that exact phase/artifact authority.
+      if (!transitionAuthorityMatches(s, observation.authority)) {
+        return {
+          state: s,
+          value: transitionNotReady("TaskGraph phase artifact authority changed after filesystem observation"),
+        };
       }
+      const lockedTransition = observation.resolution;
+      if (lockedTransition.kind === "not-ready") return { state: s, value: lockedTransition };
       const { nextPhase, artifact, skipClarify } = lockedTransition;
       return {
         state: {

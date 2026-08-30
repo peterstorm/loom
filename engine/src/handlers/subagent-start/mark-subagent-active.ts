@@ -1,12 +1,14 @@
 /**
- * SubagentStart bookkeeping — three jobs:
+ * SubagentStart bookkeeping — four jobs:
  * 1. Track the agent on the session's `.active` roster so PreToolUse can
  *    allow Edit/Write from IMPLEMENTATION subagents AND contention can be
  *    counted. Roster membership alone is not a write grant — `shouldBlockDirectEdit`
  *    keeps review agents and refutation verifiers read-only while active.
  * 2. Bind the guarded skill machine for machine-gated agent types, minting
  *    the attribution epoch the recorder and gate key evidence by.
- * 3. Persist the task_graph absolute path for cross-repo SubagentStop access.
+ * 3. Publish exact Implementation Attempt sidecar authority for modern
+ *    implementation Agents.
+ * 4. Persist the task_graph absolute path for cross-repo SubagentStop access.
  */
 
 import { mkdirSync } from "node:fs";
@@ -115,6 +117,11 @@ const handler: HookHandler = async (stdin) => {
       `mark-subagent-active: invalid session_id ${JSON.stringify(input.session_id ?? "")} while a TaskGraph is active — exact authority cannot be bound; refusing spawn`,
     );
   }
+  if (agent_id === undefined || agent_id.length === 0) {
+    return blockResult(
+      `mark-subagent-active: missing agent_id for ${sessionId} while a TaskGraph is active — exact roster attribution and symmetric cleanup cannot be bound; refusing spawn`,
+    );
+  }
 
   try {
     mkdirSync(subagentDir(), { recursive: true, mode: 0o700 });
@@ -141,9 +148,9 @@ const handler: HookHandler = async (stdin) => {
   // reportedRosterAgentId mints a deterministic non-authorizing placeholder so
   // the running Agent still counts against sole-agent attribution. A guarded
   // role with no machine-capable identity is blocked before publication.
-  const agentId = agent_id ? parseReportedAgentId(agent_id) : null;
-  const rosterId = agent_id ? reportedRosterAgentId(agent_id) : null;
-  if (agent_id && agentId === null) {
+  const agentId = parseReportedAgentId(agent_id);
+  const rosterId = reportedRosterAgentId(agent_id);
+  if (agentId === null) {
     process.stderr.write(
       `mark-subagent-active: agent_id ${JSON.stringify(agent_id)} is reserved or path-unsafe (whitespace/colon/slash/'..', or the ${WRITE_GRANT_AGENT_NAMESPACE} write-grant namespace) — no machine identity can be bound\n`,
     );
@@ -154,7 +161,7 @@ const handler: HookHandler = async (stdin) => {
   const guardedMachine = rosterAgentType === null
     ? { kind: "none" as const }
     : loadMachine(machinesDir(), rosterAgentType);
-  if (guardedMachine.kind !== "none" && (agentId === null || rosterId === null)) {
+  if (guardedMachine.kind !== "none" && agentId === null) {
     return blockResult(
       `mark-subagent-active: ${rosterAgentType} has a Guarded Skill Machine but no valid agent_id; refusing to run it ungated`,
     );
@@ -170,7 +177,7 @@ const handler: HookHandler = async (stdin) => {
     return rolledBack.kind === "block" ? rolledBack.message : null;
   };
   if (modernImplementationAgent) {
-    if (agentId === null || rosterId === null || rosterAgentType === null) {
+    if (agentId === null || rosterAgentType === null) {
       return blockResult(
         `mark-subagent-active: implementation agent identity is invalid; exact attempt authority cannot be bound`,
       );
@@ -231,25 +238,23 @@ const handler: HookHandler = async (stdin) => {
   // agent-type name can match — identity alone cannot answer "may this agent
   // write?". Parsed here (not below) because the roster is written first.
   let rosterCreated = false;
-  if (rosterId !== null) {
-    try {
-      const rosterAcquisition = await markAgentActive(sessionId, rosterId, rosterAgentType);
-      rosterCreated = rosterAcquisition === "created";
-    } catch (e) {
-      const message = `mark-subagent-active: roster update failed — attribution unsound; refusing spawn and refusing to arm machine binding for ${agent_id}/${sessionId}: ${e instanceof Error ? e.message : String(e)}`;
-      process.stderr.write(`${message}\n`);
-      const rollbackFailures: string[] = [];
-      if (modernImplementationAgent) {
-        try {
-          if (sidecarPublished && agentId !== null) removeImplementationAttemptSidecar(sessionId, agentId);
-        } catch (rollbackError) {
-          rollbackFailures.push(`sidecar rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
-        }
-        const registrationRollback = await rollbackIdentifiedRegistration();
-        if (registrationRollback !== null) rollbackFailures.push(`exact registration rollback failed: ${registrationRollback}`);
+  try {
+    const rosterAcquisition = await markAgentActive(sessionId, rosterId, rosterAgentType);
+    rosterCreated = rosterAcquisition === "created";
+  } catch (e) {
+    const message = `mark-subagent-active: roster update failed — attribution unsound; refusing spawn and refusing to arm machine binding for ${agent_id}/${sessionId}: ${e instanceof Error ? e.message : String(e)}`;
+    process.stderr.write(`${message}\n`);
+    const rollbackFailures: string[] = [];
+    if (modernImplementationAgent) {
+      try {
+        if (sidecarPublished && agentId !== null) removeImplementationAttemptSidecar(sessionId, agentId);
+      } catch (rollbackError) {
+        rollbackFailures.push(`sidecar rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
       }
-      return blockResult(rollbackFailures.length === 0 ? message : `${message}; ${rollbackFailures.join("; ")}`);
+      const registrationRollback = await rollbackIdentifiedRegistration();
+      if (registrationRollback !== null) rollbackFailures.push(`exact registration rollback failed: ${registrationRollback}`);
     }
+    return blockResult(rollbackFailures.length === 0 ? message : `${message}; ${rollbackFailures.join("; ")}`);
   }
 
   // Bind guarded skill machine when this agent type ships one (opt-in per
@@ -270,7 +275,7 @@ const handler: HookHandler = async (stdin) => {
   let machineBindingCreated = false;
   if (rosterAgentType) {
     if (guardedMachine.kind !== "none") {
-      if (agentId && rosterId !== null) {
+      if (agentId) {
         try {
           const machineAcquisition = await bindMachineAgent(sessionId, rosterAgentType, agentId);
           machineBindingCreated = machineAcquisition === "created";
@@ -293,19 +298,14 @@ const handler: HookHandler = async (stdin) => {
   // taskGraphPath() resolves at CALL time (like machinesDir above) so the
   // path this handler persists can never drift from what the env says now.
   let pointerLeaseCreated = false;
-  if (rosterId !== null) {
-    try {
-      const claim = await claimPersistedSessionTaskGraphPointerBinding(sessionId, rosterId, activeGraphPath);
-      pointerLeaseCreated = claim.kind === "persisted";
-    } catch (error) {
-      const pointerFailure =
-        `mark-subagent-active: failed to persist task_graph pointer authority for ${sessionId}/${rosterId} — cross-repo SubagentStop cleanup is unavailable: ${error instanceof Error ? error.message : String(error)}`;
-      process.stderr.write(`${pointerFailure}\n`);
-      if (loomOwnedAgent) bindingFailure = bindingFailure ?? pointerFailure;
-    }
-  } else if (loomOwnedAgent) {
-    bindingFailure = bindingFailure ??
-      `mark-subagent-active: cannot bind task_graph pointer for Loom Agent without a cleanup-capable agent_id`;
+  try {
+    const claim = await claimPersistedSessionTaskGraphPointerBinding(sessionId, rosterId, activeGraphPath);
+    pointerLeaseCreated = claim.kind === "persisted";
+  } catch (error) {
+    const pointerFailure =
+      `mark-subagent-active: failed to persist task_graph pointer authority for ${sessionId}/${rosterId} — cross-repo SubagentStop cleanup is unavailable: ${error instanceof Error ? error.message : String(error)}`;
+    process.stderr.write(`${pointerFailure}\n`);
+    if (loomOwnedAgent) bindingFailure = bindingFailure ?? pointerFailure;
   }
 
   if (bindingFailure !== null && agentId !== null) {
@@ -317,7 +317,7 @@ const handler: HookHandler = async (stdin) => {
         rollbackFailures.push(`machine-binding rollback failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    if (rosterCreated && rosterId !== null) {
+    if (rosterCreated) {
       try {
         await removeActiveAgentStrict(sessionId, rosterId);
       } catch (error) {
@@ -331,7 +331,7 @@ const handler: HookHandler = async (stdin) => {
         rollbackFailures.push(`sidecar rollback failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    if (pointerLeaseCreated && rosterId !== null) {
+    if (pointerLeaseCreated) {
       try {
         const rolledBack = await releasePersistedSessionTaskGraphPointerBinding(sessionId, rosterId);
         if (rolledBack !== "rolled-back") {
@@ -344,7 +344,7 @@ const handler: HookHandler = async (stdin) => {
     const registrationRollback = await rollbackIdentifiedRegistration();
     if (registrationRollback !== null) rollbackFailures.push(`exact registration rollback failed: ${registrationRollback}`);
     if (rollbackFailures.length > 0) bindingFailure = `${bindingFailure}; ${rollbackFailures.join("; ")}`;
-  } else if (bindingFailure !== null && rosterCreated && rosterId !== null) {
+  } else if (bindingFailure !== null && rosterCreated) {
     try {
       await removeActiveAgentStrict(sessionId, rosterId);
     } catch (error) {

@@ -1,6 +1,8 @@
 /**
- * Remove agent from active subagent list when it completes.
- * Locked to prevent race with parallel completions.
+ * Release every completed Agent capability: guarded-machine binding,
+ * Implementation Attempt sidecar, session TaskGraph pointer lease, and active
+ * roster entry. Each owner performs its own lock-protected release so parallel
+ * completions cannot nest the non-reentrant session lock.
  */
 
 import type { HookHandler } from "../../types";

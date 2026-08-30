@@ -31,6 +31,8 @@ import {
   recoverStaleDirectoryLock,
   removeRunFileNoFollow,
   withAnchoredDirectoryLock,
+  writeDirectoryFileExclusiveNoFollow,
+  writeRunFileExclusiveNoFollow,
   writeRunFileNoFollow,
 } from "../../src/orchestration/no-follow-fs";
 
@@ -279,6 +281,32 @@ describe("anchored lock ownership", () => {
     }
   });
 
+  it("aggregates operation, lock-release, and directory-close failures without masking the primary", async () => {
+    const root = workspace();
+    const directory = join(root, "run");
+    let thrown: unknown;
+
+    try {
+      await withAnchoredDirectoryLock(directory, "close-failure.lock", (anchored) => {
+        closeSync(anchored.fd);
+        throw new Error("primary operation exploded");
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    const closeAggregate = thrown as AggregateError;
+    expect(closeAggregate.errors).toHaveLength(2);
+    expect(closeAggregate.errors[0]).toBeInstanceOf(AggregateError);
+    const operationAndRelease = closeAggregate.errors[0] as AggregateError;
+    expect(operationAndRelease.errors.map(String)).toEqual([
+      "Error: primary operation exploded",
+      expect.stringContaining("cannot release anchored lock close-failure.lock"),
+    ]);
+    expect(String(closeAggregate.errors[1])).toMatch(/EBADF|bad file descriptor/i);
+  });
+
   it("never overlaps critical sections while the recorded owner is alive", async () => {
     const root = workspace();
     const directory = join(root, "run");
@@ -368,6 +396,28 @@ describe("removal refuses to follow a planted symlink", () => {
     removeRunFileNoFollow(path);
 
     expect(() => readRunFileNoFollow(path)).toThrow();
+  });
+});
+
+describe("anchored leaf writes", () => {
+  it("preserves exclusive first-writer semantics through both write entry points", () => {
+    const root = workspace();
+    const directory = join(root, "run");
+    const anchored = openDirectoryNoFollow(directory);
+    try {
+      writeDirectoryFileExclusiveNoFollow(anchored, "direct.txt", "first-direct");
+      expect(() => writeDirectoryFileExclusiveNoFollow(anchored, "direct.txt", "second-direct"))
+        .toThrow(/EEXIST|file exists/i);
+    } finally {
+      closeAnchoredDirectory(anchored);
+    }
+
+    const runPath = join(directory, "run.txt");
+    writeRunFileExclusiveNoFollow(runPath, "first-run");
+    expect(() => writeRunFileExclusiveNoFollow(runPath, "second-run"))
+      .toThrow(/EEXIST|file exists/i);
+    expect(readFileSync(join(directory, "direct.txt"), "utf8")).toBe("first-direct");
+    expect(readFileSync(runPath, "utf8")).toBe("first-run");
   });
 });
 

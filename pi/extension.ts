@@ -1287,7 +1287,6 @@ export default function (pi: ExtensionAPI) {
         // excluded (see `piSpawnRosterId`) — so repeated verifier/designer types in
         // one batch remain distinct without the id moving when the prompt does.
         currentGuard = "subagent-tracking";
-        const safeSessionId = parseSessionId(sessionId);
         if (safeSessionId === null) {
           return {
             block: true,

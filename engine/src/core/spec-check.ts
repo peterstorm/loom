@@ -7,7 +7,9 @@ import {
   type SpecCheck,
   type SpecCheckVerdict,
   type TaskGraph,
+  type WaveSpecCheckDocumentsAuthority,
 } from "../types";
+import { waveSpecCheckDocumentsMatch } from "./wave-review-authority";
 
 export interface ParsedSpecCheckOutput {
   readonly critical: readonly string[];
@@ -33,6 +35,12 @@ export type SpecCheckParseResult =
   | Readonly<{ ok: true; value: SpecCheck }>
   | Readonly<{ ok: false; errors: readonly string[] }>;
 
+const SPEC_FINDING_MARKERS = Object.freeze([
+  Object.freeze({ prefix: "CRITICAL:", target: "critical" as const }),
+  Object.freeze({ prefix: "HIGH:", target: "high" as const }),
+  Object.freeze({ prefix: "MEDIUM:", target: "medium" as const }),
+]);
+
 /** Parse the last concrete spec-check block from an agent transcript. */
 export function parseSpecCheckOutput(output: string): ParsedSpecCheckOutput {
   const lastCritCountIdx = output.lastIndexOf("SPEC_CHECK_CRITICAL_COUNT:");
@@ -43,28 +51,18 @@ export function parseSpecCheckOutput(output: string): ParsedSpecCheckOutput {
   }
   const searchBlock = lastCritCountIdx >= 0 ? output.slice(blockStart) : output;
 
-  const critical: string[] = [];
-  const high: string[] = [];
-  const medium: string[] = [];
+  const findings = {
+    critical: [] as string[],
+    high: [] as string[],
+    medium: [] as string[],
+  };
   for (const line of searchBlock.split("\n")) {
-    const criticalMatch = line.match(/^CRITICAL:\s*(.*)/);
-    if (criticalMatch) {
-      const claim = criticalMatch[1].trim();
-      if (claim !== "" && !isNoFindingSentinel(claim)) critical.push(claim);
-      continue;
-    }
-    const highMatch = line.match(/^HIGH:\s*(.*)/);
-    if (highMatch) {
-      const claim = highMatch[1].trim();
-      if (claim !== "" && !isNoFindingSentinel(claim)) high.push(claim);
-      continue;
-    }
-    const mediumMatch = line.match(/^MEDIUM:\s*(.*)/);
-    if (mediumMatch) {
-      const claim = mediumMatch[1].trim();
-      if (claim !== "" && !isNoFindingSentinel(claim)) medium.push(claim);
-    }
+    const marker = SPEC_FINDING_MARKERS.find(({ prefix }) => line.startsWith(prefix));
+    if (marker === undefined) continue;
+    const claim = line.slice(marker.prefix.length).trim();
+    if (claim !== "" && !isNoFindingSentinel(claim)) findings[marker.target].push(claim);
   }
+  const { critical, high, medium } = findings;
 
   const criticalCount = searchBlock.match(/SPEC_CHECK_CRITICAL_COUNT:\s*(\d+)/);
   const highCount = searchBlock.match(/SPEC_CHECK_HIGH_COUNT:\s*(\d+)/);
@@ -101,6 +99,7 @@ export type SpecCheckRequestAuthority = Pick<
 export function specCheckAuthorityProblem(
   state: TaskGraph,
   authority: SpecCheckRequestAuthority | undefined,
+  documents?: WaveSpecCheckDocumentsAuthority,
 ): string | null {
   const epoch = state.wave_review_epoch;
   const active = state.active_wave_gate;
@@ -121,6 +120,10 @@ export function specCheckAuthorityProblem(
   }
   if (authority === undefined) return "modern Wave spec-check has no capture-correlated request authority";
   if (authority.role !== "spec-check-invoker") return `captured request belongs to ${authority.role}`;
+  if (documents === undefined || !waveSpecCheckDocumentsMatch(epoch?.specCheckDocuments, documents) ||
+      state.spec_file !== documents.spec.path || state.plan_file !== documents.plan.path) {
+    return "current spec/plan bytes do not match the exact Wave spec-check authority";
+  }
   const slot = epoch?.specCheckSlotAuthority;
   return state.current_phase === "execute" && epoch !== undefined && active !== undefined &&
       state.current_wave === epoch.wave && active.runId === authority.runId && active.wave === epoch.wave &&

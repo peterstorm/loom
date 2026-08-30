@@ -321,21 +321,18 @@ export function parseImplementationTaskBindings(
   return { ok: true, taskIds };
 }
 
-export type TaskExecutionBaselines = ReadonlyMap<string, Readonly<{
+type TaskExecutionBaselineBundle = Readonly<{
   proof: readonly DeclaredArtifactBaseline[];
   attempt: readonly DeclaredArtifactBaseline[];
   repositoryAttempt: readonly DeclaredArtifactBaseline[];
   repositoryObservation: readonly DeclaredArtifactBaseline[];
-}>>;
+}>;
+
+export type TaskExecutionBaselines = ReadonlyMap<string, TaskExecutionBaselineBundle>;
 
 export type TaskExecutionAuthorityPlan = Readonly<{
   authority: ImplementationAttemptAuthority;
-  baselines: Readonly<{
-    proof: readonly DeclaredArtifactBaseline[];
-    attempt: readonly DeclaredArtifactBaseline[];
-    repositoryAttempt: readonly DeclaredArtifactBaseline[];
-    repositoryObservation: readonly DeclaredArtifactBaseline[];
-  }>;
+  baselines: TaskExecutionBaselineBundle;
 }>;
 
 export type TaskExecutionAuthorityBatch =

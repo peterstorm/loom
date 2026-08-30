@@ -17,8 +17,9 @@
  *     evidence through standalone-review's canonical request-bound parsers.
  *   - No legacy reader may be extended to accept new shapes; a new on-disk
  *     form is a new canonical parser, not a new compatibility branch here.
- *   - Historical callers import this archive explicitly. Canonical modules do
- *     not re-export it, keeping the compatibility seam one-way and acyclic.
+ *   - Historical callers should import this archive explicitly. Temporary
+ *     compatibility façades still re-export these readers until the horizon
+ *     closes; canonical code must not add new dependencies on those exports.
  *
  * Pure module: no I/O, no clock, no randomness. (The façade's shell supplies
  * all bytes; these parsers only interpret them.)
@@ -515,6 +516,30 @@ function parseEvent(panel: LegacyPanelKind, raw: unknown, index: number): Archit
   return `events[${index}].type must be spawn-outcome or engine-outcome`;
 }
 
+function parseLegacyPanelEvents(
+  panel: "architecture",
+  rawEvents: readonly unknown[],
+): readonly ArchitectureProgramEvent[] | string;
+function parseLegacyPanelEvents(
+  panel: "refutation",
+  rawEvents: readonly unknown[],
+): readonly RefutationProgramEvent[] | string;
+function parseLegacyPanelEvents(
+  panel: LegacyPanelKind,
+  rawEvents: readonly unknown[],
+): readonly (ArchitectureProgramEvent | RefutationProgramEvent)[] | string {
+  const events: (ArchitectureProgramEvent | RefutationProgramEvent)[] = [];
+  for (const [index, rawEvent] of rawEvents.entries()) {
+    if (isCaptureRejectionAuditRecord(rawEvent)) continue;
+    const parsed = panel === "architecture"
+      ? parseEvent("architecture", rawEvent, index)
+      : parseEvent("refutation", rawEvent, index);
+    if (typeof parsed === "string") return parsed;
+    events.push(parsed);
+  }
+  return Object.freeze(events);
+}
+
 export type LegacyArchitecturePanelJournal = Readonly<{
   format: "legacy-panel-program";
   schemaVersion: 1;
@@ -578,13 +603,8 @@ export function translateLegacyPanelJournal(
           ? { ok: false, error: "architecture input requires exact PanelLens candidateLenses[] and judgeCriteria[]" }
           : { ok: false, error: `unknown architecture design lens: ${unknownLens}` };
       }
-      const events: ArchitectureProgramEvent[] = [];
-      for (let index = 0; index < raw.events.length; index++) {
-        if (isCaptureRejectionAuditRecord(raw.events[index])) continue;
-        const parsed = parseEvent("architecture", raw.events[index], index);
-        if (typeof parsed === "string") return { ok: false, error: parsed };
-        events.push(parsed);
-      }
+      const events = parseLegacyPanelEvents("architecture", raw.events);
+      if (typeof events === "string") return { ok: false, error: events };
       return {
         ok: true,
         value: Object.freeze({
@@ -595,7 +615,7 @@ export function translateLegacyPanelJournal(
             candidateLenses,
             judgeCriteria: Object.freeze([...raw.input.judgeCriteria]),
           }),
-          events: Object.freeze([...events]) as readonly ArchitectureProgramEvent[],
+          events,
         }),
       };
     }
@@ -609,13 +629,8 @@ export function translateLegacyPanelJournal(
         ? { ok: false, error: "refutation input requires criticalFindingIds[] and exact ReviewLens lenses[]" }
         : { ok: false, error: `unknown refutation lens: ${unknownLens}` };
     }
-    const events: RefutationProgramEvent[] = [];
-    for (let index = 0; index < raw.events.length; index++) {
-      if (isCaptureRejectionAuditRecord(raw.events[index])) continue;
-      const parsed = parseEvent("refutation", raw.events[index], index);
-      if (typeof parsed === "string") return { ok: false, error: parsed };
-      events.push(parsed);
-    }
+    const events = parseLegacyPanelEvents("refutation", raw.events);
+    if (typeof events === "string") return { ok: false, error: events };
     const criticalFindingIds = raw.input.criticalFindingIds.map(parseWaveFindingId);
     const malformedId = criticalFindingIds.findIndex((id) => id === null);
     if (malformedId >= 0) {
@@ -633,7 +648,7 @@ export function translateLegacyPanelJournal(
           )),
           lenses,
         }),
-        events: Object.freeze([...events]) as readonly RefutationProgramEvent[],
+        events,
       }),
     };
   } catch (error) {

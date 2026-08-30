@@ -31,7 +31,7 @@
 
 import { createHash } from "node:crypto";
 import { linkSync, lstatSync, realpathSync, statSync, unlinkSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, join, relative, resolve, sep } from "node:path";
 import {
   canonicalRecord,
   canonicalStructuralEquals,
@@ -40,6 +40,7 @@ import {
   parseArtifactByteLength,
   parseContextDigest,
   parseOrchestrationRunId,
+  parseRequestId,
   type AgentRequestAuthority,
   type ArtifactDigest,
   type ArtifactRef,
@@ -429,16 +430,17 @@ export interface RunDirHandle extends ProgramJournal {
 }
 
 /**
- * Create run subdirectories through descriptors anchored at the run directory.
+ * Create run subdirectories one proven component at a time.
  *
  * `mkdirSync(path, { recursive: true })` hands the whole path to the kernel,
  * which resolves every intermediate component with ordinary symlink-following
  * semantics. A component swapped to a symlink — the adversary this module's
- * O_NOFOLLOW primitives exist to refuse — would therefore have directories
- * created at the link's TARGET, and that side effect lands before the anchored
- * write that would have refused it. `ensureRelativeDirectoryNoFollow` walks one
- * component at a time under O_NOFOLLOW instead, so directory creation is held
- * to the same anchoring as every read and write here.
+ * no-follow primitives exist to refuse — would therefore have directories
+ * created at the link's TARGET before the anchored write refused it. On Linux,
+ * `ensureRelativeDirectoryNoFollow` addresses mkdir through the retained parent
+ * descriptor. On Darwin, where Node exposes no `mkdirat`, it proves the parent
+ * identity with `O_NOFOLLOW_ANY`, performs pathname mkdir, then no-follow opens
+ * the child before using it as the next parent.
  */
 function ensureRunSubdirectories(runDirectory: string, targets: readonly string[]): void {
   const root = openDirectoryNoFollow(runDirectory);
@@ -541,16 +543,17 @@ function parseHarnessCorrelatorBinding(raw: unknown): DomainResult<HarnessCorrel
   if (record["schemaVersion"] !== RUN_DIRECTORY_SCHEMA_VERSION ||
       (record["harness"] !== "pi" && record["harness"] !== "claude") ||
       typeof record["nativeId"] !== "string" || record["nativeId"].length === 0 ||
-      typeof record["requestId"] !== "string" || record["requestId"].length === 0 ||
       typeof record["role"] !== "string" || record["role"].length === 0 ||
       (record["attempt"] !== 1 && record["attempt"] !== 2)) {
     return failure("correlator", "harness correlator binding violates its field contract");
   }
+  const requestId = parseRequestId(record["requestId"]);
+  if (!requestId.ok) return failure("correlator", requestId.error.message);
   return success(canonicalRecord({
     schemaVersion: RUN_DIRECTORY_SCHEMA_VERSION,
     harness: record["harness"],
     nativeId: record["nativeId"],
-    requestId: record["requestId"] as AgentRequestAuthority["requestId"],
+    requestId: requestId.value,
     role: record["role"] as AgentRequestAuthority["role"],
     attempt: record["attempt"],
   }));
@@ -614,9 +617,10 @@ export function openRunDirectory(
  * The runs-root is never created. A run name is chosen fresh per run and a typo
  * costs one empty directory, but a mistyped ROOT would silently grow a whole
  * second tree of runs that no later command would look in, so it stays a loud
- * failure. Creation is anchored exactly like every other write here: the single
- * child component is made through a descriptor held on the root, and an entry
- * already occupied by a symlink is refused rather than followed.
+ * failure. Linux creates the child relative to the retained root descriptor.
+ * Darwin proves the retained root's pathname identity with `O_NOFOLLOW_ANY`,
+ * performs pathname mkdir, and no-follow opens the child; an entry already
+ * occupied by a symlink is refused rather than followed on both platforms.
  */
 export function createRunDirectory(
   runsRoot: string,
@@ -663,7 +667,7 @@ function buildHandle(
     ...journalOperations(directory),
     ...contextOperations(runId, directory),
     ...requestOperations(runId, directory),
-    ...artifactOperations(runId, directory),
+    ...artifactOperations(runId, identity.runsRoot, directory),
     ...receiptOperations(directory),
   });
 }
@@ -1020,9 +1024,12 @@ function lookupReservation(
       : { kind: "unreadable", message: `request ${requestId} authority is unreadable: ${(error as Error).message}` };
   }
   const reserved = parseStoredAgentRequestAuthority(rawReservation);
-  return reserved.ok
+  if (!reserved.ok) {
+    return { kind: "unreadable", message: `request ${requestId} authority is malformed: ${reserved.error.violations.map(({ message }) => message).join("; ")}` };
+  }
+  return reserved.value.requestId === requestId
     ? { kind: "reserved", authority: reserved.value }
-    : { kind: "unreadable", message: `request ${requestId} authority is malformed: ${reserved.error.violations.map(({ message }) => message).join("; ")}` };
+    : { kind: "unreadable", message: `request ${requestId} authority body belongs to ${reserved.value.requestId}` };
 }
 
 function readReservedAuthority(
@@ -1037,13 +1044,14 @@ function readReservedAuthority(
 }
 
 /**
- * THE verified-slot resolution every transcript-slot-addressing operation uses:
- * parse the supplied authority, prove it is byte-identical to the reservation
- * this run wrote, and only then name a path. `captureTranscript`,
- * `rejectCapture`, `readTranscriptBytes`, and `readCaptureRejection` all cross
- * this one function — a read that skipped it would offer "trust the caller and
- * read" beside "verify then write" over the same slot, which is exactly the
- * asymmetry a branded `SlotId` must not advertise.
+ * Verified reservation resolution for transcript-slot WRITES. It parses the
+ * supplied authority, proves it byte-identical to this run's reservation, and
+ * only then permits `captureTranscript` or `rejectCapture` to commit bytes.
+ *
+ * The two read operations intentionally use narrower identity: they parse the
+ * authority and require its requestId/slotId/attempt to match the reservation
+ * before addressing a path, while allowing retry recovery to carry re-planned
+ * context/model fields. Their call-site comments document that distinction.
  */
 function verifiedReservedRequest(
   directory: string,
@@ -1052,7 +1060,8 @@ function verifiedReservedRequest(
   malformed: string,
   foreignRun: string,
   mismatch: (requestId: string) => string,
-): DomainResult<AgentRequestAuthority, RunDirectoryError> {  const supplied = parseStoredAgentRequestAuthority(authority);
+): DomainResult<AgentRequestAuthority, RunDirectoryError> {
+  const supplied = parseStoredAgentRequestAuthority(authority);
   if (!supplied.ok) {
     return failure("request", `${malformed}: ${supplied.error.violations.map(({ message }) => message).join("; ")}`);
   }
@@ -1108,6 +1117,9 @@ function readIssuedRequestsOperation(runId: OrchestrationRunId, directory: strin
         const parsed = parseStoredAgentRequestAuthority(raw);
         if (!parsed.ok) {
           return failure("request", `request authority ${name} is malformed: ${parsed.error.violations.map(({ message }) => message).join("; ")}`);
+        }
+        if (name !== `${parsed.value.requestId}.json`) {
+          return failure("request", `request authority ${name} does not match body request id ${parsed.value.requestId}`);
         }
         if (parsed.value.runId !== runId) return failure("request", `request authority ${name} belongs to a different run`);
         issued.push(parsed.value);
@@ -1475,15 +1487,59 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
   };
 }
 
-type StagedPair = Readonly<{ staged: string; final: string }>;
+const STAGED_ARTIFACT_PROMOTION: unique symbol = Symbol("loom.staged-artifact-promotion");
+const MINTED_STAGED_ARTIFACT_PROMOTIONS = new WeakSet<object>();
 
-/** Write every member beside its final name; a fault discards the whole set. */
-function stageArtifactSet(
+/** Opaque authority to promote one parser-proven staged artifact within a Run Directory. */
+export type StagedArtifactPromotion = Readonly<{
+  staged: string;
+  final: string;
+  [STAGED_ARTIFACT_PROMOTION]: true;
+}>;
+
+/**
+ * Parse a staged/final pair into promotion authority. Both paths must be
+ * canonical absolute paths under this Run Directory's artifacts root, and the
+ * staged leaf must use the exact suffix shape produced by `stageArtifactSet`.
+ */
+export function parseStagedArtifactPromotion(
+  runsRoot: string,
   directory: string,
+  raw: unknown,
+): DomainResult<StagedArtifactPromotion, RunDirectoryError> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return failure("artifacts", "staged artifact promotion must be an object");
+  }
+  const record = raw as Record<string, unknown>;
+  if (typeof record["staged"] !== "string" || typeof record["final"] !== "string") {
+    return failure("artifacts", "staged artifact promotion paths must be strings");
+  }
+  const identity = parseRunDirectoryIdentity(runsRoot, directory);
+  if (!identity.ok) return identity;
+  const artifactsRoot = resolve(identity.value.runDirectory, ARTIFACTS);
+  const final = resolve(record["final"]);
+  const finalRelative = relative(artifactsRoot, final).split(sep).join("/");
+  const parsedRelative = parseArtifactRelativePath(finalRelative);
+  if (record["final"] !== final || !parsedRelative.ok || join(artifactsRoot, parsedRelative.ok ? parsedRelative.value : "") !== final) {
+    return failure("artifacts", "final artifact promotion path must be canonical and remain beneath the Run Directory artifacts root");
+  }
+  const staged = resolve(record["staged"]);
+  const stagedPrefix = `${final}.staged-`;
+  const stagedSuffix = staged.slice(stagedPrefix.length);
+  if (record["staged"] !== staged || !staged.startsWith(stagedPrefix) || !/^[A-Za-z0-9_-]+$/.test(stagedSuffix)) {
+    return failure("artifacts", "staged artifact promotion path must be the canonical sibling generated for its final artifact");
+  }
+  const promotion = Object.freeze({ staged, final, [STAGED_ARTIFACT_PROMOTION]: true as const });
+  MINTED_STAGED_ARTIFACT_PROMOTIONS.add(promotion);
+  return success(promotion);
+}
+
+/** Parse the complete publication set before any directory or staged file exists. */
+function parseStagedArtifactSet(
   staged: readonly StagedArtifactInput[],
-): DomainResult<readonly StagedPair[], RunDirectoryError> {
+): DomainResult<readonly StagedArtifact[], RunDirectoryError> {
   const parsedArtifacts: StagedArtifact[] = [];
-  const destinations = new Set<string>();
+  const destinations = new Set<ArtifactRelativePath>();
   for (const artifact of staged) {
     const parsed = createStagedArtifact(artifact.relativePath, artifact.bytes);
     if (!parsed.ok) return parsed;
@@ -1493,19 +1549,29 @@ function stageArtifactSet(
     destinations.add(parsed.value.relativePath);
     parsedArtifacts.push(parsed.value);
   }
+  return success(Object.freeze(parsedArtifacts));
+}
 
-  const stagedPaths: StagedPair[] = [];
+/** Write parser-minted members beside their final names; a fault discards the whole set. */
+function stageArtifactSet(
+  runsRoot: string,
+  directory: string,
+  artifacts: readonly StagedArtifact[],
+): DomainResult<readonly StagedArtifactPromotion[], RunDirectoryError> {
+  const stagedPaths: StagedArtifactPromotion[] = [];
   const publicationId = createHash("sha256")
-    .update(`${process.pid}:${Date.now()}:${Math.random()}:${parsedArtifacts.map(({ relativePath }) => relativePath).join("\0")}`)
+    .update(`${process.pid}:${Date.now()}:${Math.random()}:${artifacts.map(({ relativePath }) => relativePath).join("\0")}`)
     .digest("hex")
     .slice(0, 24);
   try {
-    for (const artifact of parsedArtifacts) {
+    for (const artifact of artifacts) {
       const final = join(directory, ARTIFACTS, artifact.relativePath);
       ensureRunSubdirectories(directory, [resolve(final, "..")]);
       const stagedPath = `${final}.staged-${publicationId}`;
       writeRunBytesExclusiveNoFollow(stagedPath, Uint8Array.from(artifact.bytes));
-      stagedPaths.push({ staged: stagedPath, final });
+      const promotion = parseStagedArtifactPromotion(runsRoot, directory, { staged: stagedPath, final });
+      if (!promotion.ok) throw new Error(promotion.error.message);
+      stagedPaths.push(promotion.value);
     }
   } catch (error) {
     const cleanupFailures = discardStaged(stagedPaths);
@@ -1552,7 +1618,7 @@ function stagedBytesMatch(stagedPath: string, occupied: Uint8Array): StagedBytes
 }
 
 function occupiedArtifactConflict(
-  entry: StagedPair,
+  entry: StagedArtifactPromotion,
   occupied: Uint8Array | Readonly<{ __unreadable: string }>,
 ): string | null {
   if (!(occupied instanceof Uint8Array)) {
@@ -1573,28 +1639,28 @@ function occupiedArtifactConflict(
 }
 
 /**
- * Promote a fully staged set. Every target is checked BEFORE any rename,
+ * Promote internal staged paths. Every target is checked BEFORE any rename,
  * because renaming is the one step that cannot be undone member-by-member —
- * ruling out the predictable failures while the set is still entirely staged
- * is what keeps "all or none" true rather than merely intended.
+ * ruling out predictable failures while the set is entirely staged keeps
+ * "all or none" true rather than merely intended.
+ *
+ * The fault-injection seam is exported, but structural path pairs are not
+ * authority: every member must carry the runtime mint issued by
+ * `parseStagedArtifactPromotion`, which proves both paths remain beneath one
+ * Run Directory's artifacts root. Production receives the same mint from
+ * `stageArtifactSet` after deriving its paths from parsed artifacts.
  *
  * `renameSync` replaces an existing regular file, so the O_EXCL immutability
  * this module promises has to be enforced here explicitly: an occupied slot is
  * refused unless its bytes are already identical to what would be written, in
  * which case the promotion is a no-op replay rather than a rewrite of history.
- *
- * EXPORTED for tests. The rename loop's recovery arm handles the failures the
- * pre-checks cannot rule out — a concurrently removed parent, an EIO — which by
- * construction cannot be provoked through the lock-protected
- * `publishArtifactSet` path: every failure reachable from outside is one the
- * pre-checks turn into an all-staged refusal first. Driving this function
- * directly with explicit staged pairs is therefore the only way to prove the
- * partial-promotion arm behaves, and an unproven recovery arm is how "all or
- * none" quietly stops being true.
  */
 export function promoteArtifactSet(
-  stagedPaths: readonly StagedPair[],
-): DomainResult<readonly StagedPair[], RunDirectoryError> {
+  stagedPaths: readonly StagedArtifactPromotion[],
+): DomainResult<readonly StagedArtifactPromotion[], RunDirectoryError> {
+  if (stagedPaths.some((entry) => !MINTED_STAGED_ARTIFACT_PROMOTIONS.has(entry))) {
+    return failure("artifacts", "artifact promotion requires parser-minted staged authority");
+  }
   const blocked = stagedPaths.find((entry) => isExistingDirectory(entry.final));
   if (blocked !== undefined) {
     const cleanupFailures = discardStaged(stagedPaths);
@@ -1624,6 +1690,18 @@ export function promoteArtifactSet(
     }
   }
   return success(stagedPaths);
+}
+
+/** Stage and promote only artifacts minted by `createStagedArtifact`. */
+function stageAndPromoteArtifactSet(
+  runsRoot: string,
+  directory: string,
+  artifacts: readonly StagedArtifact[],
+): DomainResult<readonly StagedArtifact[], RunDirectoryError> {
+  const stagedPaths = stageArtifactSet(runsRoot, directory, artifacts);
+  if (!stagedPaths.ok) return stagedPaths;
+  const promoted = promoteArtifactSet(stagedPaths.value);
+  return promoted.ok ? success(artifacts) : promoted;
 }
 
 function readArtifactBytesOperation(directory: string) {
@@ -1667,28 +1745,26 @@ function publishedArtifactRef(
 function publishedArtifactRefs(
   runId: OrchestrationRunId,
   directory: string,
-  staged: readonly StagedArtifactInput[],
+  artifacts: readonly StagedArtifact[],
 ): DomainResult<readonly ArtifactRef[], RunDirectoryError> {
   const refs: ArtifactRef[] = [];
-  for (const input of staged) {
-    const parsed = createStagedArtifact(input.relativePath, input.bytes);
-    if (!parsed.ok) return parsed;
-    const ref = publishedArtifactRef(runId, directory, parsed.value);
+  for (const artifact of artifacts) {
+    const ref = publishedArtifactRef(runId, directory, artifact);
     if (!ref.ok) return ref;
     refs.push(ref.value);
   }
   return success(Object.freeze(refs));
 }
 
-function publishArtifactSetOperation(runId: OrchestrationRunId, directory: string) {
+function publishArtifactSetOperation(runId: OrchestrationRunId, runsRoot: string, directory: string) {
   return async (staged: readonly StagedArtifactInput[]): Promise<DomainResult<readonly ArtifactRef[], RunDirectoryError>> => {
     if (staged.length === 0) return failure("artifacts", "an artifact set must not be empty");
+    const artifacts = parseStagedArtifactSet(staged);
+    if (!artifacts.ok) return artifacts;
     try {
       return await withAnchoredDirectoryLock(join(directory, ARTIFACTS), "publish.lock", async () => {
-        const stagedPaths = stageArtifactSet(directory, staged);
-        if (!stagedPaths.ok) return stagedPaths;
-        const promoted = promoteArtifactSet(stagedPaths.value);
-        return promoted.ok ? publishedArtifactRefs(runId, directory, staged) : promoted;
+        const promoted = stageAndPromoteArtifactSet(runsRoot, directory, artifacts.value);
+        return promoted.ok ? publishedArtifactRefs(runId, directory, promoted.value) : promoted;
       });
     } catch (error) {
       return failure("artifacts", `cannot lock artifact publication safely: ${(error as Error).message}`);
@@ -1697,10 +1773,10 @@ function publishArtifactSetOperation(runId: OrchestrationRunId, directory: strin
 }
 
 /** All-or-nothing artifact set publication. */
-function artifactOperations(runId: OrchestrationRunId, directory: string) {
+function artifactOperations(runId: OrchestrationRunId, runsRoot: string, directory: string) {
   return {
     readArtifactBytes: readArtifactBytesOperation(directory),
-    publishArtifactSet: publishArtifactSetOperation(runId, directory),
+    publishArtifactSet: publishArtifactSetOperation(runId, runsRoot, directory),
   };
 }
 

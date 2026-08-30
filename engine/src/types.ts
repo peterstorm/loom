@@ -988,10 +988,23 @@ export type WaveSpecCheckSlotAuthority = Readonly<{
   readonly attempted: 1 | 2;
 }>;
 
+export type WaveSpecCheckDocumentAuthority = Readonly<{
+  readonly path: string | null;
+  /** Null exactly when no document path is authoritative. */
+  readonly contentDigest: ArtifactDigest | null;
+}>;
+
+export type WaveSpecCheckDocumentsAuthority = Readonly<{
+  readonly spec: WaveSpecCheckDocumentAuthority;
+  readonly plan: WaveSpecCheckDocumentAuthority;
+}>;
+
 export interface WaveReviewEpochAuthority {
   readonly runId: OrchestrationRunId;
   readonly wave: number;
   readonly batchEpoch: ArtifactDigest;
+  /** Exact spec/plan paths and bytes. Absent only on historical epochs. */
+  readonly specCheckDocuments?: WaveSpecCheckDocumentsAuthority;
   /** Exact spec-check slot attempt issued for this epoch. Absent only on
    * historical epochs; exact recovery refuses to infer it from evidence. */
   readonly specCheckSlotAuthority?: WaveSpecCheckSlotAuthority;

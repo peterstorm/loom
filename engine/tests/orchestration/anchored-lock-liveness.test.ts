@@ -77,28 +77,45 @@ describe("anchored lock liveness", () => {
     const anchored = openDirectoryNoFollow(dir);
     const recoveryPath = join(dir, ".task_graph.recovery");
     const abandonedPid = deadPid();
-    const replacementToken = `${process.pid}:2:replacement-live`;
+    const replacementToken = `${process.pid}:2:replacementlive`;
     const originalKill = process.kill.bind(process);
     let replacementSurvived = false;
     let swapped = false;
+    let cleanupQueued = false;
+    let acknowledgeReplacement!: () => void;
+    const replacementObserved = new Promise<void>((resolve) => { acknowledgeReplacement = resolve; });
     const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: NodeJS.Signals | number) => {
       if (pid === abandonedPid && !swapped) {
         swapped = true;
         rmSync(recoveryPath, { force: true });
         writeFileSync(recoveryPath, replacementToken);
-        setTimeout(() => {
-          replacementSurvived = readFileSync(recoveryPath, "utf8") === replacementToken;
-          rmSync(recoveryPath, { force: true });
-        }, 25);
         const gone = new Error("gone") as NodeJS.ErrnoException;
         gone.code = "ESRCH";
         throw gone;
+      }
+      if (pid === process.pid && swapped && !cleanupQueued) {
+        cleanupQueued = true;
+        // The live-owner probe is the exact synchronization point after which
+        // the replacement tomb is restored. The microtask runs before the
+        // lock's retry timer, observes that restoration, then releases it.
+        queueMicrotask(() => {
+          try {
+            replacementSurvived = readFileSync(recoveryPath, "utf8") === replacementToken;
+          } catch {
+            replacementSurvived = false;
+          } finally {
+            rmSync(recoveryPath, { force: true });
+            acknowledgeReplacement();
+          }
+        });
       }
       return originalKill(pid, signal ?? 0);
     }) as typeof process.kill);
     try {
       writeDirectoryFileExclusiveNoFollow(anchored, ".task_graph.recovery", `${abandonedPid}:1:abandon`);
-      expect(await withAnchoredDirectoryHandleLock(anchored, ".task_graph", () => "entered")).toBe("entered");
+      const acquired = withAnchoredDirectoryHandleLock(anchored, ".task_graph", () => "entered");
+      await replacementObserved;
+      expect(await acquired).toBe("entered");
       expect(replacementSurvived).toBe(true);
     } finally {
       kill.mockRestore();

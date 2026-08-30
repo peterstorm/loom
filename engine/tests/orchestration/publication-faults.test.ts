@@ -26,8 +26,10 @@ import {
   openRunDirectory,
   parseRunDirectoryIdentity,
   parseRunDirectoryReference,
+  parseStagedArtifactPromotion,
   promoteArtifactSet,
   type RunDirHandle,
+  type StagedArtifactPromotion,
 } from "../../src/orchestration/run-directory-handle";
 
 const cleanup: string[] = [];
@@ -51,6 +53,12 @@ function freshRun(): Readonly<{ root: string; directory: string; handle: RunDirH
   const opened = openRunDirectory(root, directory);
   if (!opened.ok) throw new Error(opened.error.message);
   return { root, directory, handle: opened.value };
+}
+
+function promotion(root: string, directory: string, staged: string, final: string): StagedArtifactPromotion {
+  const parsed = parseStagedArtifactPromotion(root, directory, { staged, final });
+  if (!parsed.ok) throw new Error(parsed.error.message);
+  return parsed.value;
 }
 
 function section(label: string, text: string): ByteSection {
@@ -594,20 +602,49 @@ describe("artifact set publication", () => {
     expect(readFileSync(join(directory, "artifacts", "nested", "report.md"), "utf-8")).toBe("# report");
   });
 
-  it("reports every staged artifact it could not clean up", () => {
-    const { directory } = freshRun();
-    const staged = join(directory, "artifacts", "leftover.staged");
+  it("reports every parser-minted staged artifact it could not clean up", () => {
+    const { root, directory } = freshRun();
     const final = join(directory, "artifacts", "occupied");
+    const staged = `${final}.staged-cleanup-test`;
     mkdirSync(staged);
     mkdirSync(final);
 
-    const promoted = promoteArtifactSet([{ staged, final }]);
+    const promoted = promoteArtifactSet([promotion(root, directory, staged, final)]);
 
     expect(promoted.ok).toBe(false);
     if (promoted.ok) return;
     expect(promoted.error.message).toContain("artifact slot is occupied by a directory");
     expect(promoted.error.message).toContain("staged cleanup failed");
     expect(promoted.error.message).toContain(staged);
+  });
+
+  it("rejects a structurally forged promotion that carries no parser mint", () => {
+    const { directory } = freshRun();
+    const final = join(directory, "artifacts", "forged.json");
+    const staged = `${final}.staged-forged`;
+    writeFileSync(staged, "forged");
+    const forged = [{ staged, final }] as unknown as readonly StagedArtifactPromotion[];
+
+    const promoted = promoteArtifactSet(forged);
+
+    expect(promoted.ok).toBe(false);
+    if (promoted.ok) return;
+    expect(promoted.error.message).toContain("parser-minted staged authority");
+    expect(readFileSync(staged, "utf-8")).toBe("forged");
+  });
+
+  it("refuses to mint promotion authority for paths outside the exact Run Directory", () => {
+    const { root, directory } = freshRun();
+    const final = join(root, "outside.json");
+
+    const parsed = parseStagedArtifactPromotion(root, directory, {
+      final,
+      staged: `${final}.staged-outside`,
+    });
+
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error.message).toContain("beneath the Run Directory artifacts root");
   });
 
   it("refuses an empty artifact set rather than reporting a vacuous success", async () => {
@@ -700,13 +737,13 @@ describe("artifact set publication", () => {
       expect(readdirSync(join(directory, "artifacts")).some((name) => name.endsWith(".staged"))).toBe(false);
     });
 
-    it("reports a staged-file race cause instead of claiming the bytes differ", () => {
-      const { directory } = freshRun();
+    it("reports a parser-minted staged-file race cause instead of claiming the bytes differ", () => {
+      const { root, directory } = freshRun();
       const final = join(directory, "artifacts", "result.json");
-      const staged = join(directory, "artifacts", "result.json.staged-raced-away");
+      const staged = `${final}.staged-raced-away`;
       writeFileSync(final, "original");
 
-      const promoted = promoteArtifactSet([{ staged, final }]);
+      const promoted = promoteArtifactSet([promotion(root, directory, staged, final)]);
 
       expect(promoted.ok).toBe(false);
       if (promoted.ok) return;
@@ -746,24 +783,24 @@ describe("artifact set publication", () => {
       expect(readFileSync(join(directory, "artifacts", "taken.json"), "utf-8")).toBe("original");
     });
 
-    it("carries the read cause when an occupied slot is unreadable, so an ELOOP symlink race is not a generic refusal", () => {
-      const { directory } = freshRun();
+    it("carries the read cause when an occupied slot is unreadable, so an ELOOP symlink race is not a generic refusal", async () => {
+      const { directory, handle } = freshRun();
       const final = join(directory, "artifacts", "loop.json");
       // A self-symlink is an occupied slot the no-follow read can never read:
-      // the sentinel collects the ELOOP cause so the refusal names it instead
-      // of collapsing permission, symlink-race, and corruption into one string.
+      // the refusal preserves ELOOP instead of collapsing permission,
+      // symlink-race, and corruption into one generic result.
       symlinkSync(final, final);
-      const staged = join(directory, "artifacts", "loop.json.staged");
-      writeFileSync(staged, "new");
 
-      const promoted = promoteArtifactSet([{ staged, final }]);
+      const promoted = await handle.publishArtifactSet([
+        { relativePath: "loop.json", bytes: [...Buffer.from("new", "utf-8")] },
+      ]);
 
       expect(promoted.ok).toBe(false);
       if (promoted.ok) return;
       expect(promoted.error.message).toContain("artifact slot is occupied by unreadable bytes");
       expect(promoted.error.message).toContain(final);
       expect(promoted.error.message).toContain("ELOOP");
-      expect(readdirSync(join(directory, "artifacts")).some((name) => name.endsWith(".staged"))).toBe(false);
+      expect(readdirSync(join(directory, "artifacts")).some((name) => name.includes(".staged-"))).toBe(false);
     });
   });
 });
@@ -1111,29 +1148,28 @@ describe("event journal ordering", () => {
 describe("promoteArtifactSet partial-promotion recovery", () => {
   // Every failure reachable through publishArtifactSet is turned into an
   // all-staged refusal by the pre-checks, so this arm — a member that fails to
-  // rename AFTER an earlier member already promoted — is driven directly.
+  // rename AFTER an earlier member already promoted — uses parser-minted test
+  // authority for exact in-run paths rather than an exported structural pair.
   it("discards the unpromoted remainder and reports failure", () => {
-    const { directory } = freshRun();
+    const { root, directory } = freshRun();
     const artifacts = join(directory, "artifacts");
-    const firstStaged = join(artifacts, "first.json.staged");
+    const firstFinal = join(artifacts, "first.json");
+    const firstStaged = `${firstFinal}.staged-partial-test`;
     writeFileSync(firstStaged, "first");
-    // The second member's parent no longer exists, so its anchored rename
-    // throws ENOENT — the unpredictable class the pre-checks cannot rule out.
     const missing = join(artifacts, "vanished");
-    const secondStaged = join(missing, "second.json.staged");
+    const secondFinal = join(missing, "second.json");
+    const secondStaged = `${secondFinal}.staged-partial-test`;
 
     const promoted = promoteArtifactSet([
-      { staged: firstStaged, final: join(artifacts, "first.json") },
-      { staged: secondStaged, final: join(missing, "second.json") },
+      promotion(root, directory, firstStaged, firstFinal),
+      promotion(root, directory, secondStaged, secondFinal),
     ]);
 
     expect(promoted.ok).toBe(false);
     if (promoted.ok) return;
     expect(promoted.error.message).toContain("cannot publish artifact set");
-    // The earlier member stays on disk but inert: nothing treats a set as
-    // published until its receipt is recorded, and no receipt is written here.
-    expect(readFileSync(join(artifacts, "first.json"), "utf-8")).toBe("first");
-    expect(readdirSync(artifacts).some((name) => name.endsWith(".staged"))).toBe(false);
+    expect(readFileSync(firstFinal, "utf-8")).toBe("first");
+    expect(readdirSync(artifacts).some((name) => name.includes(".staged-"))).toBe(false);
   });
 });
 

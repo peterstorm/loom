@@ -21,6 +21,17 @@ const patch = (path: string, ...lines: string[]): string => [
   ...lines,
 ].join("\n");
 
+const withProjectDir = <T>(root: string, run: () => T): T => {
+  const previous = process.env.CLAUDE_PROJECT_DIR;
+  process.env.CLAUDE_PROJECT_DIR = root;
+  try {
+    return run();
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+    else process.env.CLAUDE_PROJECT_DIR = previous;
+  }
+};
+
 describe("git command diagnostics", () => {
   it("reports array-argument git failures instead of returning empty silently", () => {
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -68,7 +79,6 @@ describe("complete-postimage diff evidence", () => {
   it("keeps a multiline opener outside ordinary hunk range visible to assertion scanning", () => {
     const repository = mkdtempSync(join(tmpdir(), "loom-full-postimage-diff-"));
     const file = join(repository, "ExampleTest.java");
-    const previousProjectDir = process.env.CLAUDE_PROJECT_DIR;
     const base = [
       "class ExampleTest {",
       '  String docs = \"\"\"',
@@ -90,17 +100,13 @@ describe("complete-postimage diff evidence", () => {
         '    \"\"\";',
         '    assertThat(fake).isTrue();\n    \"\"\";\n\n  @Test void empty() {}',
       ));
-      process.env.CLAUDE_PROJECT_DIR = repository;
-
-      const observed = diffFiles(["ExampleTest.java"]);
+      const observed = withProjectDir(repository, () => diffFiles(["ExampleTest.java"]));
       expect(observed.ok).toBe(true);
       if (!observed.ok) return;
       expect(observed.diff).toContain('  String docs = \"\"\"');
       expect(countNewTests(observed.diff).java).toBe(1);
       expect(countAssertions(observed.diff)).toBe(0);
     } finally {
-      if (previousProjectDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
-      else process.env.CLAUDE_PROJECT_DIR = previousProjectDir;
       rmSync(repository, { recursive: true, force: true });
     }
   });
@@ -119,17 +125,6 @@ describe("diff command authority over workspace-authored Git behaviour", () => {
     writeFileSync(join(root, ".gitattributes"), "*.dat diff=evil\n");
     execFileSync("git", ["config", "diff.evil.textconv", `sh -c 'touch ${marker}; cat'`], { cwd: root });
     return { root, marker };
-  };
-
-  const withProjectDir = <T>(root: string, run: () => T): T => {
-    const previous = process.env.CLAUDE_PROJECT_DIR;
-    process.env.CLAUDE_PROJECT_DIR = root;
-    try {
-      return run();
-    } finally {
-      if (previous === undefined) delete process.env.CLAUDE_PROJECT_DIR;
-      else process.env.CLAUDE_PROJECT_DIR = previous;
-    }
   };
 
   it("never executes a workspace-defined Git textconv driver", () => {
@@ -203,17 +198,6 @@ describe("complete-postimage context on every diff entry point", () => {
     return repository;
   };
 
-  const withProject = <T,>(repository: string, run: () => T): T => {
-    const previous = process.env.CLAUDE_PROJECT_DIR;
-    process.env.CLAUDE_PROJECT_DIR = repository;
-    try {
-      return run();
-    } finally {
-      if (previous === undefined) delete process.env.CLAUDE_PROJECT_DIR;
-      else process.env.CLAUDE_PROJECT_DIR = previous;
-    }
-  };
-
   /** The postimage opener must reach the scanner, and prose must stay inert. */
   const expectFullPostimage = (observed: GitDiffResult): void => {
     expect(observed.ok).toBe(true);
@@ -232,7 +216,7 @@ describe("complete-postimage context on every diff entry point", () => {
     const repository = postimageRepository();
     try {
       execFileSync("git", ["add", "ExampleTest.java"], { cwd: repository });
-      expectFullPostimage(withProject(repository, () => diffFilesStaged(["ExampleTest.java"])));
+      expectFullPostimage(withProjectDir(repository, () => diffFilesStaged(["ExampleTest.java"])));
     } finally {
       rmSync(repository, { recursive: true, force: true });
     }
@@ -243,7 +227,7 @@ describe("complete-postimage context on every diff entry point", () => {
     try {
       const baseline = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repository, encoding: "utf-8" }).trim();
       commit(repository, "change");
-      expectFullPostimage(withProject(repository, () => diffFilesSince(baseline, ["ExampleTest.java"])));
+      expectFullPostimage(withProjectDir(repository, () => diffFilesSince(baseline, ["ExampleTest.java"])));
     } finally {
       rmSync(repository, { recursive: true, force: true });
     }
@@ -264,7 +248,7 @@ describe("complete-postimage context on every diff entry point", () => {
         '    """;',
         "}",
       ].join("\n"));
-      const observed = withProject(repository, () => diffUntracked("UntrackedProbe.java"));
+      const observed = withProjectDir(repository, () => diffUntracked("UntrackedProbe.java"));
       expect(observed.ok).toBe(true);
       if (!observed.ok) return;
       expect(countAssertions(observed.diff)).toBe(0);
@@ -400,6 +384,31 @@ describe("countNewTests (pure)", () => {
     expect(result.ts).toBe(1);
     expect(result.python).toBe(1);
     expect(result.total).toBe(3);
+  });
+
+  it("parses Git-quoted paths without letting hunk text forge a test-file header", () => {
+    const repository = mkdtempSync(join(tmpdir(), "loom-quoted-diff-path-"));
+    const production = "quoted\tproduction.ts";
+    const testFile = "quoted\tcase.test.ts";
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: repository });
+      writeFileSync(join(repository, production), "before\n");
+      writeFileSync(join(repository, testFile), "before\n");
+      execFileSync("git", ["add", "."], { cwd: repository });
+      execFileSync("git", ["-c", "user.name=Loom Test", "-c", "user.email=loom@example.test", "commit", "--quiet", "-m", "base"], { cwd: repository });
+      writeFileSync(join(repository, production), "before\n++ b/fake.test.ts\nit('forged', () => expect(1).toBe(1));\n");
+      writeFileSync(join(repository, testFile), "before\nit('real', () => expect(1).toBe(1));\n");
+
+      const observed = withProjectDir(repository, () => diffFiles([production, testFile]));
+
+      expect(observed.ok).toBe(true);
+      if (!observed.ok) return;
+      expect(observed.diff).toContain('+++ "b/quoted\\tproduction.ts"');
+      expect(countNewTests(observed.diff).ts).toBe(1);
+      expect(countAssertions(observed.diff)).toBe(1);
+    } finally {
+      rmSync(repository, { recursive: true, force: true });
+    }
   });
 
   it("refuses a +++ b/ header forged inside hunk content", () => {

@@ -28,8 +28,9 @@
  * root would refuse every real run directory.
  *
  * These live in the orchestration layer because both the panel helpers and the
- * anchored `RunDirHandle` need them; the handle is the consolidation point the
- * plan calls for, and the handlers import them back from here.
+ * anchored `RunDirHandle` need them. ADR-0004 assigns anchored filesystem
+ * effects to this narrow orchestration adapter; handlers import them from here
+ * rather than recreating no-follow authority at each call site.
  */
 
 import {
@@ -352,27 +353,39 @@ export function readDirectoryFileNoFollow(directory: AnchoredDirectory, name: st
   return bytes;
 }
 
+function writeDirectoryLeafNoFollow(
+  directory: AnchoredDirectory,
+  name: string,
+  data: string | Uint8Array,
+  flags: number,
+  operation: string,
+): void {
+  assertLeafName(name);
+  let fileFd: number | null = null;
+  let primaryError: unknown = null;
+  try {
+    fileFd = openSync(anchoredChildPath(directory, name), leafFlags(flags), 0o600);
+    writeFileSync(fileFd, data);
+  } catch (error) {
+    primaryError = error;
+  }
+  primaryError = closeFileDescriptor(fileFd, primaryError, operation);
+  if (primaryError !== null) throw primaryError;
+}
+
 /** Exclusively publish one leaf relative to an anchored directory. */
 export function writeDirectoryFileExclusiveNoFollow(
   directory: AnchoredDirectory,
   name: string,
   data: string | Uint8Array,
 ): void {
-  assertLeafName(name);
-  let fileFd: number | null = null;
-  let primaryError: unknown = null;
-  try {
-    fileFd = openSync(
-      anchoredChildPath(directory, name),
-      leafFlags(fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL),
-      0o600,
-    );
-    writeFileSync(fileFd, data);
-  } catch (error) {
-    primaryError = error;
-  }
-  primaryError = closeFileDescriptor(fileFd, primaryError, `exclusive write of ${name}`);
-  if (primaryError !== null) throw primaryError;
+  writeDirectoryLeafNoFollow(
+    directory,
+    name,
+    data,
+    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL,
+    `exclusive write of ${name}`,
+  );
 }
 
 function writeDirectoryFileAtomicPreparedNoFollow(
@@ -924,11 +937,23 @@ export async function withAnchoredDirectoryLock<T>(
   operation: (directory: AnchoredDirectory) => T | Promise<T>,
 ): Promise<T> {
   const anchored = openDirectoryNoFollow(directory);
+  let outcome: AnchoredOperation<T>;
   try {
-    return await withAnchoredDirectoryHandleLock(anchored, lockName, operation);
-  } finally {
-    closeAnchoredDirectory(anchored);
+    outcome = {
+      kind: "returned",
+      value: await withAnchoredDirectoryHandleLock(anchored, lockName, operation),
+    };
+  } catch (error) {
+    outcome = { kind: "threw", error };
   }
+  const failure = closeAnchorGuarded(
+    anchored,
+    outcome.kind === "threw" ? outcome.error : null,
+    `anchored lock ${lockName}`,
+  );
+  if (failure !== null) throw failure;
+  if (outcome.kind === "threw") throw outcome.error;
+  return outcome.value;
 }
 
 /**
@@ -1074,23 +1099,16 @@ function withOpenedDirectoryNoFollow<T>(
 }
 
 function writeAnchoredRunFile(path: string, data: string | Uint8Array, exclusive: boolean): void {
-  withOpenedDirectoryNoFollow(dirname(path), `write of ${basename(path)}`, (parent) => {
-    let fileFd: number | null = null;
-    let primaryError: unknown = null;
-    try {
-      fileFd = openSync(
-        anchoredChildPath(parent, basename(path)),
-        leafFlags(fsConstants.O_WRONLY | fsConstants.O_CREAT |
-          (exclusive ? fsConstants.O_EXCL : fsConstants.O_TRUNC)),
-        0o600,
-      );
-      writeFileSync(fileFd, data);
-    } catch (error) {
-      primaryError = error;
-    }
-    primaryError = closeFileDescriptor(fileFd, primaryError, `write of ${basename(path)}`);
-    if (primaryError !== null) throw primaryError;
-  });
+  const name = basename(path);
+  withOpenedDirectoryNoFollow(dirname(path), `write of ${name}`, (parent) =>
+    writeDirectoryLeafNoFollow(
+      parent,
+      name,
+      data,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT |
+        (exclusive ? fsConstants.O_EXCL : fsConstants.O_TRUNC),
+      `write of ${name}`,
+    ));
 }
 
 export function writeRunFileNoFollow(path: string, data: string): void {

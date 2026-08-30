@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 
 import { join } from "node:path";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   applyCurrentSpecCheckCaptureRejection,
   handleWaveReviewContext,
@@ -21,6 +21,7 @@ import {
   specCheckSlotBelongsToWaveEpoch,
   waveAdvisoryDecisionRequestId,
   waveGateDecisionMismatch,
+  waveRefutationCommitProblem,
 } from "../../../../src/handlers/helpers/programs/wave-gate";
 import {
   deriveLoomStatusFromParsedGraph,
@@ -30,6 +31,7 @@ import {
 } from "../../../../src/core/wave-gate-machine";
 import { observedAdvisoryApproval } from "../../../../src/handlers/helpers/orchestration";
 import { derivePendingTaskProof } from "../../../../src/core/proof-obligations";
+import { buildFindingBrief } from "../../../../src/core/review-panel";
 import {
   parseRequestId,
   type ArtifactDigest,
@@ -44,6 +46,10 @@ import type { TaskGraph } from "../../../../src/types";
 
 const RUN_ID = "run.wave-decision";
 const DIGEST = "a".repeat(64);
+const DOCUMENTS = {
+  spec: { path: null, contentDigest: null },
+  plan: { path: null, contentDigest: null },
+} as const;
 
 const task = (id: string, claim: string): TaskGraph["tasks"][number] => ({
   id,
@@ -103,10 +109,7 @@ const pendingDecisionId = (): string => waveAdvisoryDecisionRequestId(RUN_ID, TA
 
 describe("Wave review registration authority", () => {
   it("requires an exact concrete Wave", () => {
-    type AllowsNull = null extends WaveReviewRegistrationAuthority["input"]["wave"] ? true : false;
-    const allowsNull: AllowsNull = false;
-
-    expect(allowsNull).toBe(false);
+    expectTypeOf<WaveReviewRegistrationAuthority["input"]["wave"]>().toEqualTypeOf<number>();
     expect(registration().input.wave).toBe(1);
   });
 });
@@ -167,6 +170,7 @@ describe("wave review context authority", () => {
       packetId: null,
       specFile: null,
       planFile: null,
+      specCheckDocuments: DOCUMENTS,
     });
     const context = handleWaveReviewContext([packet], packet.digest);
     expect(context).toMatchObject({
@@ -203,18 +207,20 @@ describe("wave review context authority", () => {
       packetId: null,
       specFile: null,
       planFile: null,
+      specCheckDocuments: DOCUMENTS,
     });
     const context = handleWaveReviewContext([packet], packet.digest);
     expect(context.kind).toBe("loaded");
     if (context.kind !== "loaded") return;
-    const closedReviewGraph: Parameters<typeof specCheckSlotBelongsToWaveEpoch>[0] = {
+    const closedReviewGraph = graph({
       wave_review_epoch: {
         runId: RUN_ID,
         wave: 1,
         batchEpoch,
+        specCheckDocuments: DOCUMENTS,
         specCheckSlotAuthority: { slot_id: slotId, attempted: 1 },
-      },
-    };
+      } as TaskGraph["wave_review_epoch"],
+    });
 
     expect(specCheckSlotBelongsToWaveEpoch(
       closedReviewGraph,
@@ -247,6 +253,7 @@ describe("wave review context authority", () => {
         runId: RUN_ID,
         wave: 1,
         batchEpoch,
+        specCheckDocuments: DOCUMENTS,
         specCheckSlotAuthority: { slot_id: slotId, attempted: 2 },
       } as TaskGraph["wave_review_epoch"],
     });
@@ -260,7 +267,12 @@ describe("wave review context authority", () => {
     const transition = applyCurrentSpecCheckCaptureRejection(
       lockedAfterAttemptTwo,
       { runId: RUN_ID, slotId, attempt: 1 },
-      { wave: 1, batchEpoch, authorityDigest: DIGEST },
+      {
+        wave: 1,
+        batchEpoch: batchEpoch as ArtifactDigest,
+        authorityDigest: DIGEST as ArtifactDigest,
+        specCheckDocuments: DOCUMENTS,
+      },
       attemptOneFailure,
     );
 
@@ -290,6 +302,7 @@ describe("wave review context authority", () => {
         runId: RUN_ID,
         wave: 1,
         batchEpoch,
+        specCheckDocuments: DOCUMENTS,
         specCheckSlotAuthority: { slot_id: slotId, attempted: 1 },
       } as TaskGraph["wave_review_epoch"],
     });
@@ -303,7 +316,12 @@ describe("wave review context authority", () => {
     const transition = applyCurrentSpecCheckCaptureRejection(
       lockedAttemptOne,
       { runId: RUN_ID, slotId, attempt: 1 },
-      { wave: 1, batchEpoch, authorityDigest: DIGEST },
+      {
+        wave: 1,
+        batchEpoch: batchEpoch as ArtifactDigest,
+        authorityDigest: DIGEST as ArtifactDigest,
+        specCheckDocuments: DOCUMENTS,
+      },
       failure,
     );
 
@@ -421,6 +439,54 @@ describe("wave review context authority", () => {
       planFile: null,
     });
     expect(handleWaveReviewContext([packet], packet.digest).kind).toBe("corrupt");
+  });
+});
+
+describe("locked Refutation Panel authority", () => {
+  const criticalGraph = (): TaskGraph => {
+    const tasks = TASKS.map((entry, index) => index === 0
+      ? {
+          ...entry,
+          review_status: "blocked" as const,
+          findings: [{
+            id: "code-reviewer-1",
+            agent: "code-reviewer",
+            severity: "critical" as const,
+            file: "engine/src/example.ts",
+            line: 1,
+            claim: "exact critical",
+          }],
+          critical_findings: ["exact critical"],
+          advisory_findings: [],
+        }
+      : { ...entry, review_status: "passed" as const });
+    return graph({ tasks });
+  };
+
+  it("accepts only the panel bound to the locked active registration and Finding set", () => {
+    const current = criticalGraph();
+    const findings = buildFindingBrief(1, current.tasks).findings;
+    expect(findings).toHaveLength(1);
+    const panel = { runId: current.active_wave_gate!.runId, findings: [findings[0]!] as const };
+
+    expect(waveRefutationCommitProblem(
+      current,
+      registration(),
+      current.active_wave_gate!,
+      panel,
+    )).toBeNull();
+    expect(waveRefutationCommitProblem(
+      graph({ ...current, active_wave_gate: { ...current.active_wave_gate!, revision: 1 } }),
+      registration(),
+      current.active_wave_gate!,
+      panel,
+    )).toContain("exact active Wave Gate authority");
+    expect(waveRefutationCommitProblem(
+      criticalGraph(),
+      registration(),
+      current.active_wave_gate!,
+      { ...panel, findings: [{ ...panel.findings[0], claim: "stale critical" }] },
+    )).toContain("locked current-Wave Finding authority");
   });
 });
 

@@ -37,11 +37,12 @@ import {
  * The concerns the Pi `tool_result` handler used to hold inline, exercised
  * through their ports.
  *
- * Every case here runs with an in-memory `TaskGraphStore` and no repository:
- * that is the whole point of the split. Before it, asserting "a malformed
- * transcript does not advance the phase" meant standing up a real StateManager,
- * a real git root, and a ~980-line closure whose unrelated branches all had to
- * be survivable first.
+ * The parser and transition cases run through an in-memory `TaskGraphStore`;
+ * repository-backed regressions below add temporary Git roots only where byte
+ * scope and artifact-baseline behavior are the subject. Before this split,
+ * asserting "a malformed transcript does not advance the phase" required a real
+ * StateManager, a Git root, and a ~980-line closure whose unrelated branches all
+ * had to be survivable first.
  */
 
 const NOW = "2026-08-16T00:00:00.000Z";
@@ -103,6 +104,10 @@ function graphWithSpecCheckAuthority(wave = 1) {
       runId: WAVE_RUN_ID,
       wave,
       batchEpoch: WAVE_BATCH_EPOCH,
+      specCheckDocuments: {
+        spec: { path: null, contentDigest: null },
+        plan: { path: null, contentDigest: null },
+      },
       specCheckSlotAuthority: { slot_id: "wave-slot:spec-check", attempted: 1 },
     },
   }));
@@ -288,7 +293,7 @@ describe("applyPhaseAgentPiResult", () => {
     });
 
     expect(applied.processingErrors).toEqual([
-      expect.stringContaining("phase transition is not ready: no readable spec.md"),
+      expect.stringContaining("phase transition is not ready: recorded spec_file"),
     ]);
     expect(store.current().spec_file).toBe(".claude/specs/run/spec.md");
   });
@@ -353,7 +358,7 @@ describe("applyPhaseAgentPiResult", () => {
 
     expect(applied.processingErrors).toEqual([]);
     expect(applied.log).toEqual([expect.stringContaining("already past")]);
-    expect(loadCount).toBe(0);
+    expect(loadCount).toBe(1);
     expect(store.current().current_phase).toBe("architecture");
     expect(store.current().spec_file).toBeNull();
   });
@@ -1035,10 +1040,57 @@ describe("applySpecCheckPiResult", () => {
       now: NOW,
     });
 
-    expect(loadCount).toBe(0);
+    expect(loadCount).toBe(1);
     expect(store.current().spec_check).toMatchObject({ wave: 3, verdict: "BLOCKED" });
     expect(store.current().wave_gates["3"]).toMatchObject({ blocked: true });
     expect(store.current().wave_gates["1"]).toBeUndefined();
+  });
+
+  it("rejects exact reserved evidence after the bound plan bytes change", async () => {
+    const root = canonicalTempDir("loom-pi-spec-byte-drift-");
+    const specPath = join(root, "spec.md");
+    const planPath = join(root, "plan.md");
+    writeFileSync(specPath, "spec");
+    writeFileSync(planPath, "plan before");
+    const specDigest = parseArtifactDigest(createHash("sha256").update("spec").digest("hex"));
+    const planDigest = parseArtifactDigest(createHash("sha256").update("plan before").digest("hex"));
+    if (!specDigest.ok || !planDigest.ok) throw new Error("invalid document digest fixture");
+    const state = parsedGraph(graph({
+      spec_file: specPath,
+      plan_file: planPath,
+      current_wave: 1,
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: WAVE_RUN_ID, wave: 1,
+        authorityDigest: WAVE_AUTHORITY_DIGEST, revision: 1, terminalOutcome: null,
+      },
+      wave_review_epoch: {
+        runId: WAVE_RUN_ID, wave: 1, batchEpoch: WAVE_BATCH_EPOCH,
+        specCheckDocuments: {
+          spec: { path: specPath, contentDigest: specDigest.value },
+          plan: { path: planPath, contentDigest: planDigest.value },
+        },
+        specCheckSlotAuthority: { slot_id: "wave-slot:spec-check", attempted: 1 },
+      },
+    }));
+    const authority = currentPiSpecCheckAuthority(state);
+    if (authority === null) throw new Error("spec-check fixture lacks authority");
+    const store = fakeStore(state);
+    writeFileSync(planPath, "plan after");
+    try {
+      const applied = await applySpecCheckPiResult({
+        store,
+        result: result({ agent: "spec-check-invoker", messages: assistantText(specCheckText(0)) }),
+        reservedSlot: { agentType: "spec-check-invoker", taskId: null, specCheckAuthority: authority },
+        now: NOW,
+      });
+
+      expect(applied.processingErrors).toEqual([
+        expect.stringContaining("spec/plan bytes do not match"),
+      ]);
+      expect(store.current().spec_check).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("rejects a stale reserved slot/attempt without changing current Wave state", async () => {

@@ -55,6 +55,7 @@ import {
   deriveNextAction,
   deriveWaveAdvisoryDecisionRequest,
   deriveWaveAdvisoryNextAction,
+  deriveWaveGateDriveStep,
   deriveWaveReadiness,
   deriveWaveRefutationPlan,
   evaluateWaveGate as evaluateCoreWaveGate,
@@ -1306,19 +1307,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
   it("partitions every Task exactly once and reports roster/evidence/finding gaps", () => {
     const pendingProof = derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: [] });
     const tasks: Task[] = [
-      taskState({ id: "T1", wave: 1, status: "completed" }),
-      { ...taskState({ id: "T2", wave: 2, status: "pending", proof: pendingProof }), review_status: "pending",
-        review_generation: 1,
-        review_run: {
-          generation: 1, packet_id: "packet-2", head_sha: "head", prior_finding_ids: [],
-          expected_agents: ["code-reviewer", "comment-analyzer"],
-          evidence: [{ agent: "code-reviewer", prior_assessments: [], new_findings: [] }],
-        } },
-      { ...taskState({ id: "T3", wave: 2, status: "failed" }),
-        review_status: "evidence_capture_failed", review_error: "malformed summary",
-        review_evidence_failures: ["type-design-analyzer"] },
-      taskState({ id: "T4", wave: 2, status: "implemented" }),
-      { ...taskState({ id: "T5", wave: 2, status: "pending", proof: pendingProof }), review_status: "pending",
+      { ...taskState({ id: "T1", wave: 1, status: "completed" }),
         critical_findings: ["critical"], advisory_findings: ["advisory"],
         refuted_findings: [{
           finding: { id: "old-1", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "old" },
@@ -1332,6 +1321,18 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
             assessments: [{ agent: "code-reviewer", finding_id: "old-2", verdict: "resolved_by_remediation", reason: "fixed" }],
           },
         }] },
+      { ...taskState({ id: "T2", wave: 2, status: "pending", proof: pendingProof }), review_status: "pending",
+        review_generation: 1,
+        review_run: {
+          generation: 1, packet_id: "packet-2", head_sha: "head", prior_finding_ids: [],
+          expected_agents: ["code-reviewer", "comment-analyzer"],
+          evidence: [{ agent: "code-reviewer", prior_assessments: [], new_findings: [] }],
+        } },
+      { ...taskState({ id: "T3", wave: 2, status: "failed" }),
+        review_status: "evidence_capture_failed", review_error: "malformed summary",
+        review_evidence_failures: ["type-design-analyzer"] },
+      taskState({ id: "T4", wave: 2, status: "implemented" }),
+      { ...taskState({ id: "T5", wave: 2, status: "pending", proof: pendingProof }), review_status: "pending" },
     ];
     const graph = registeredGraph({ tasks, executing_tasks: ["T2"] });
     const readiness = deriveWaveReadiness(graph, statusDeps);
@@ -1578,6 +1579,52 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     });
   });
 
+  it("scopes lifecycle Finding counts and drive decisions to the active Wave", () => {
+    const laterWaveTask = taskState({
+      id: "T2",
+      wave: 2,
+      status: "pending",
+      review_status: "blocked",
+      findings: [
+        {
+          id: "code-reviewer-1",
+          agent: "code-reviewer",
+          severity: "critical",
+          file: null,
+          line: null,
+          claim: "retained later-Wave critical",
+        },
+        {
+          id: "code-reviewer-2",
+          agent: "code-reviewer",
+          severity: "advisory",
+          file: null,
+          line: null,
+          claim: "retained later-Wave advisory",
+        },
+      ],
+      critical_findings: ["retained later-Wave critical"],
+      advisory_findings: ["retained later-Wave advisory"],
+    });
+    const graph = registeredGraph({ tasks: [baseTask, laterWaveTask] });
+    const readiness = deriveWaveReadiness(graph, statusDeps);
+    expect(readiness.ok).toBe(true);
+    if (!readiness.ok) return;
+
+    expect(readiness.value.facts.findingCounts).toEqual({
+      kind: "known",
+      value: { activeCritical: 0, advisory: 0, resolved: 0, refuted: 0 },
+    });
+    expect(readiness.value.facts.refutationPanelNeed).toMatchObject({
+      kind: "known",
+      value: { kind: "not-needed" },
+    });
+    expect(deriveWaveGateDriveStep(readiness.value, false)).toMatchObject({
+      ok: true,
+      value: { kind: "ready-to-complete" },
+    });
+  });
+
   it("reports terminal blocked from persisted terminal authority", () => {
     const base = registeredGraph();
     const diagnostic = authorityValue(terminalBlockedDiagnostic({
@@ -1592,6 +1639,68 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
     expect(status.next.action).toMatchObject({ kind: "blocked", diagnostic: { message: "persisted terminal" } });
     expect(status.next.reasons).toEqual([{ kind: "blocked-diagnostic", message: "persisted terminal", taskId: null }]);
+  });
+
+  it("preserves terminal-blocked action construction failure as unavailable", () => {
+    const base = registeredGraph();
+    const diagnostic = authorityValue(terminalBlockedDiagnostic({
+      category: "invalid-authority",
+      runId: base.active_wave_gate!.runId,
+      message: "persisted terminal",
+    }));
+    const malformed = {
+      ...base,
+      active_wave_gate: {
+        ...base.active_wave_gate!,
+        terminalOutcome: {
+          kind: "terminal-blocked" as const,
+          diagnostic: { ...diagnostic, message: "" } as never,
+        },
+      },
+    };
+
+    const status = deriveLoomStatusFromParsedGraph({ ok: true, value: malformed }, statusDeps);
+
+    expect(Object.values(status.facts).every((entry) => entry.kind === "unavailable")).toBe(true);
+    expect(status.next.reasons[0]?.message).toContain(
+      "cannot construct persisted terminal-blocked action",
+    );
+  });
+
+  it("preserves committed done-action construction failure as unavailable", () => {
+    const base = registeredGraph();
+    const runId = authorityValue(parseOrchestrationRunId("completed-status-run"));
+    const effectId = authorityValue(parseEffectId("completed-status-effect"));
+    const { active_wave_gate: _active, ...withoutActive } = base;
+    const malformed: TaskGraph = {
+      ...withoutActive,
+      tasks: [taskState({ id: "T1", wave: 1, status: "completed" })],
+      wave_gates: {
+        "1": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
+      },
+      wave_gate_history: [{
+        schemaVersion: 1,
+        kind: "completed-wave-gate",
+        runId: "not a run id" as never,
+        wave: 1,
+        authorityDigest: authorityValue(parseArtifactDigest("f".repeat(64))),
+        revision: 1,
+        completionReceipt: {
+          kind: "protected-wave-state-committed",
+          effectId,
+          runId,
+          committedRevision: 1,
+          stateDigest: authorityValue(parseArtifactDigest("e".repeat(64))),
+        },
+      }],
+    };
+
+    const status = deriveLoomStatusFromParsedGraph({ ok: true, value: malformed }, statusDeps);
+
+    expect(Object.values(status.facts).every((entry) => entry.kind === "unavailable")).toBe(true);
+    expect(status.next.reasons[0]?.message).toContain(
+      "cannot construct committed terminal action",
+    );
   });
 
   it("directly rejects lifecycle-proven next-action authority from a foreign run", () => {

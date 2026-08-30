@@ -32,7 +32,11 @@ import {
   cumulativeModifiedPaths,
 } from "../engine/src/core/implementation-application";
 import { extractTestEvidence, type TestEvidence } from "../engine/src/core/test-evidence";
-import { resolveTransition } from "../engine/src/handlers/subagent-stop/advance-phase";
+import {
+  observePhaseTransition,
+  transitionAuthorityMatches,
+  type PhaseTransitionObservation,
+} from "../engine/src/handlers/subagent-stop/advance-phase";
 import {
   applyReviewResolution,
   constrainReviewResolutionToScope,
@@ -45,14 +49,20 @@ import {
   reconcileSpecCheck,
   type ParsedSpecCheckOutput,
 } from "../engine/src/core/spec-check";
+import { waveSpecCheckDocumentsMatch } from "../engine/src/core/wave-review-authority";
+import { observeWaveSpecCheckDocuments } from "../engine/src/orchestration/wave-spec-check-documents";
 import { reconcileWaveBlock } from "../engine/src/core/wave-gate-model";
-import { phaseArtifactUpdates } from "../engine/src/core/phase-artifact-paths";
+import {
+  parseSpecArtifactDirectory,
+  phaseArtifactUpdates,
+} from "../engine/src/core/phase-artifact-paths";
 import { agentsOfKind } from "../engine/src/core/model-profiles";
 import { PHASES } from "../engine/src/core/phases";
 import type {
   Phase,
   TaskGraph,
   WaveReviewEpochAuthority,
+  WaveSpecCheckDocumentsAuthority,
   WaveSpecCheckSlotAuthority,
 } from "../engine/src/types";
 import type { ParsedTaskGraph } from "../engine/src/state-manager";
@@ -603,13 +613,21 @@ export async function applyFailedPiResult(args: Readonly<{
   }
 
   if (agentType === "spec-check-invoker") {
-    return store.updateAndReturn((state) =>
-      reducePiSpecCheckResult(
-        state,
-        reservedSlot?.specCheckAuthority,
-        { kind: "capture-failed", error: failure },
-        args.now,
-      ));
+    try {
+      const observedState = store.load();
+      const documents = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
+      return store.updateAndReturn((state) =>
+        reducePiSpecCheckResult(
+          state,
+          reservedSlot?.specCheckAuthority,
+          { kind: "capture-failed", error: failure },
+          documents,
+          args.now,
+        ));
+    } catch (error) {
+      const diagnostic = `spec-check document observation failed: ${error instanceof Error ? error.message : String(error)}`;
+      return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);
+    }
   }
 
   // The dispatcher normally settled a reserved failure through
@@ -648,7 +666,7 @@ export function writtenPathsOf(
   return Object.freeze(paths);
 }
 
-type PhaseTransition = Extract<ReturnType<typeof resolveTransition>, { kind: "ready" }>;
+type PhaseTransition = Extract<PhaseTransitionObservation["resolution"], { kind: "ready" }>;
 
 type PiPhasePreparation =
   | Readonly<{ kind: "eligible"; state: TaskGraph }>
@@ -669,7 +687,9 @@ function preparePiPhaseResult(
       relation: currentIndex > completedIndex ? "past" : "future",
     });
   }
-  const updates = phaseArtifactUpdates(writtenPaths, state.spec_dir ?? undefined);
+  const specDir = parseSpecArtifactDirectory(state.spec_dir);
+  if (!specDir.ok) throw new Error(specDir.message);
+  const updates = phaseArtifactUpdates(writtenPaths, specDir.value);
   return Object.freeze({
     kind: "eligible",
     state: Object.keys(updates).length === 0 ? state : { ...state, ...updates },
@@ -715,6 +735,7 @@ function reduceLockedPiPhaseResult(
   locked: TaskGraph,
   args: Readonly<{ agentType: string; completedPhase: Phase; now: string }>,
   writtenPaths: readonly string[],
+  observation: PhaseTransitionObservation | null,
 ): Readonly<{ state: TaskGraph; value: PiResultOutcome }> {
   let prepared: PiPhasePreparation;
   try {
@@ -734,7 +755,14 @@ function reduceLockedPiPhaseResult(
     };
   }
   try {
-    const transition = resolveTransition(args.completedPhase, prepared.state);
+    if (observation === null || !transitionAuthorityMatches(prepared.state, observation.authority)) {
+      const diagnostic = `${args.agentType} phase artifact authority changed after filesystem observation`;
+      return {
+        state: locked,
+        value: outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]),
+      };
+    }
+    const transition = observation.resolution;
     if (transition.kind === "not-ready") {
       const diagnostic = `${args.agentType} completed but phase transition is not ready: ${transition.reason}`;
       return {
@@ -776,8 +804,17 @@ export async function applyPhaseAgentPiResult(args: Readonly<{
   }
   const writtenPaths = writtenPathsOf(parsed.value);
   try {
+    const observedState = args.store.load();
+    const prepared = preparePiPhaseResult(observedState, args.completedPhase, writtenPaths);
+    const observation = prepared.kind === "eligible"
+      ? (() => {
+          const specDir = parseSpecArtifactDirectory(prepared.state.spec_dir);
+          if (!specDir.ok) throw new Error(specDir.message);
+          return observePhaseTransition(args.completedPhase, prepared.state, specDir.value);
+        })()
+      : null;
     return await args.store.updateAndReturn((locked) =>
-      reduceLockedPiPhaseResult(locked, args, writtenPaths));
+      reduceLockedPiPhaseResult(locked, args, writtenPaths, observation));
   } catch (error) {
     const diagnostic = `phase state commit failed: ${error instanceof Error ? error.message : String(error)}`;
     return outcome([`loom: ${diagnostic}`], [diagnostic]);
@@ -1568,6 +1605,7 @@ type PiSpecCheckAuthorityDecision =
 function decidePiSpecCheckAuthority(
   state: TaskGraph,
   authority: PiSpecCheckAttemptAuthority | null | undefined,
+  documents?: WaveSpecCheckDocumentsAuthority,
 ): PiSpecCheckAuthorityDecision {
   if (authority == null) {
     return { kind: "rejected", problem: "spec-check result has no exact reserved Wave slot/attempt authority" };
@@ -1575,6 +1613,11 @@ function decidePiSpecCheckAuthority(
   const current = currentPiSpecCheckAuthority(state);
   if (current === null) {
     return { kind: "rejected", problem: "current TaskGraph has no active exact Wave spec-check authority" };
+  }
+  if (documents !== undefined &&
+      (!waveSpecCheckDocumentsMatch(state.wave_review_epoch?.specCheckDocuments, documents) ||
+       state.spec_file !== documents.spec.path || state.plan_file !== documents.plan.path)) {
+    return { kind: "rejected", problem: "current spec/plan bytes do not match exact Wave spec-check authority" };
   }
   return current.runId === authority.runId && current.wave === authority.wave &&
       current.batchEpoch === authority.batchEpoch && current.slotId === authority.slotId &&
@@ -1616,9 +1659,10 @@ function reducePiSpecCheckResult(
   state: TaskGraph,
   authority: PiSpecCheckAttemptAuthority | null | undefined,
   observation: PiSpecCheckObservation,
+  documents: WaveSpecCheckDocumentsAuthority,
   now: string,
 ): Readonly<{ state: TaskGraph; value: PiResultOutcome }> {
-  const authorityDecision = decidePiSpecCheckAuthority(state, authority);
+  const authorityDecision = decidePiSpecCheckAuthority(state, authority, documents);
   if (authorityDecision.kind === "rejected") {
     const diagnostic = `spec-check evidence rejected: ${authorityDecision.problem}; protected state unchanged`;
     return { state, value: outcome([`loom(pi): ${diagnostic}`], [diagnostic]) };
@@ -1670,8 +1714,10 @@ export async function applySpecCheckPiResult(args: Readonly<{
         error: `spec-check-invoker messages are malformed: ${parsedMessages.errors.join("; ")}`,
       };
   try {
+    const observedState = args.store.load();
+    const documents = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
     return await args.store.updateAndReturn((state) =>
-      reducePiSpecCheckResult(state, args.reservedSlot?.specCheckAuthority, observation, args.now));
+      reducePiSpecCheckResult(state, args.reservedSlot?.specCheckAuthority, observation, documents, args.now));
   } catch (error) {
     const diagnostic = `spec-check state commit failed: ${error instanceof Error ? error.message : String(error)}`;
     return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);

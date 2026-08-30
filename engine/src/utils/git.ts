@@ -384,12 +384,85 @@ const isTestSourcePath = (path: string): boolean =>
  *
  * `+++ b/` is not a content marker: a source line whose text is
  * `++ b/x.test.ts` is rendered as `+++ b/x.test.ts`, indistinguishable from a
- * real header. The parser below therefore accepts at most one header per
- * `diff --git` entry and only inside that entry's prelude, and a line with no
- * path at all is never counted. Without this, two lines in any non-test file
- * fabricated `new_tests_written: true` for a Task.
+ * real header. The parser below therefore accepts the ordered `---`/`+++`
+ * header pair only while a `diff --git` entry is in its prelude. The first hunk
+ * marker closes that prelude permanently, and malformed/quoted paths are parsed
+ * or rejected before any added line can become evidence. Without this, two
+ * lines in any non-test file fabricated `new_tests_written: true` for a Task.
  */
 const isAttributedPath = (path: string | null): path is string => path !== null;
+
+type GitPatchPath = Readonly<{ kind: "file"; path: string }> | Readonly<{ kind: "null" }>;
+
+type DiffEntryScanState =
+  | Readonly<{ kind: "outside" }>
+  | Readonly<{ kind: "prelude-old" }>
+  | Readonly<{ kind: "prelude-new" }>
+  | Readonly<{ kind: "prelude-hunk"; path: string | null }>
+  | Readonly<{ kind: "hunk"; path: string | null; lexical: AssertionLexicalState }>
+  | Readonly<{ kind: "invalid" }>;
+
+const GIT_ESCAPES: Readonly<Record<string, number>> = Object.freeze({
+  a: 0x07,
+  b: 0x08,
+  t: 0x09,
+  n: 0x0a,
+  v: 0x0b,
+  f: 0x0c,
+  r: 0x0d,
+  "\\": 0x5c,
+  '"': 0x22,
+});
+
+/** Decode Git's C-quoted path token to UTF-8, rejecting every unknown escape. */
+function decodeGitQuotedPath(token: string): string | null {
+  if (token.length < 2 || token[0] !== '"' || token[token.length - 1] !== '"') return null;
+  const bytes: number[] = [];
+  const encoder = new TextEncoder();
+  for (let index = 1; index < token.length - 1; index += 1) {
+    const char = token[index]!;
+    if (char !== "\\") {
+      const point = token.codePointAt(index);
+      if (point === undefined) return null;
+      bytes.push(...encoder.encode(String.fromCodePoint(point)));
+      if (point > 0xffff) index += 1;
+      continue;
+    }
+    const escaped = token[++index];
+    if (escaped === undefined || index >= token.length - 1) return null;
+    if (/[0-7]/.test(escaped)) {
+      const octal = token.slice(index).match(/^[0-7]{1,3}/)?.[0];
+      if (octal === undefined) return null;
+      const byte = Number.parseInt(octal, 8);
+      if (byte > 0xff) return null;
+      bytes.push(byte);
+      index += octal.length - 1;
+      continue;
+    }
+    const byte = GIT_ESCAPES[escaped];
+    if (byte === undefined) return null;
+    bytes.push(byte);
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes));
+  } catch {
+    return null;
+  }
+}
+
+/** Parse one complete `---`/`+++` path payload; no best-effort normalization. */
+function parseGitPatchPath(raw: string, prefix: "a/" | "b/"): GitPatchPath | null {
+  if (raw === "/dev/null") return Object.freeze({ kind: "null" });
+  const quoted = raw.startsWith('"');
+  if (!quoted && raw.includes("\t") && (!raw.endsWith("\t") || raw.slice(0, -1).includes("\t"))) return null;
+  const token = quoted ? raw : raw.endsWith("\t") ? raw.slice(0, -1) : raw;
+  const decoded = quoted ? decodeGitQuotedPath(token) : token;
+  if (decoded === null || !decoded.startsWith(prefix) || decoded.length === prefix.length) return null;
+  return Object.freeze({ kind: "file", path: decoded.slice(prefix.length) });
+}
+
+const isHunkHeader = (line: string): boolean =>
+  /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(?: .*)?$/.test(line);
 
 const languageOfTestSource = (path: string | null): "java" | "ts" | "python" | "rust" | "unknown" | null => {
   if (path === null) return null; // Lexical projection only; never evidence.
@@ -759,36 +832,54 @@ function assertionCodeLine(
 
 /** Project path-bound added executable code from complete-postimage patch bytes. */
 function executableAddedLines(diffContent: string): readonly AddedExecutableLine[] {
-  let state = INITIAL_ASSERTION_STATE;
-  let path: string | null = null;
-  let insidePatch = false;
-  let headerClaimed = false;
+  let entry: DiffEntryScanState = Object.freeze({ kind: "outside" });
   const lines: AddedExecutableLine[] = [];
   for (const diffLine of diffContent.split("\n")) {
     if (diffLine.startsWith("diff --git ")) {
-      state = INITIAL_ASSERTION_STATE;
-      path = null;
-      insidePatch = true;
-      headerClaimed = false;
+      entry = Object.freeze({ kind: "prelude-old" });
       continue;
     }
-    // One header per entry, and only while that entry's prelude is still open.
-    // A later `+++ b/` is added content that merely looks like a header; treating
-    // it as metadata let patch content decide which language its own lines were
-    // counted in.
-    if (!headerClaimed && path === null && diffLine.startsWith("+++ b/") && !diffLine.includes("\t")) {
-      path = diffLine.slice("+++ b/".length);
-      headerClaimed = true;
+    if (entry.kind === "outside" || entry.kind === "invalid") continue;
+
+    if (entry.kind === "prelude-old") {
+      if (diffLine.startsWith("--- ")) {
+        entry = parseGitPatchPath(diffLine.slice(4), "a/") === null
+          ? Object.freeze({ kind: "invalid" })
+          : Object.freeze({ kind: "prelude-new" });
+      } else if (diffLine.startsWith("+++ ") || diffLine.startsWith("@@")) {
+        entry = Object.freeze({ kind: "invalid" });
+      }
       continue;
     }
+
+    if (entry.kind === "prelude-new") {
+      if (!diffLine.startsWith("+++ ")) {
+        entry = Object.freeze({ kind: "invalid" });
+        continue;
+      }
+      const parsed = parseGitPatchPath(diffLine.slice(4), "b/");
+      entry = parsed === null
+        ? Object.freeze({ kind: "invalid" })
+        : Object.freeze({ kind: "prelude-hunk", path: parsed.kind === "file" ? parsed.path : null });
+      continue;
+    }
+
+    if (entry.kind === "prelude-hunk") {
+      entry = isHunkHeader(diffLine)
+        ? Object.freeze({ kind: "hunk", path: entry.path, lexical: INITIAL_ASSERTION_STATE })
+        : Object.freeze({ kind: "invalid" });
+      continue;
+    }
+
+    if (isHunkHeader(diffLine)) continue;
     // Lexical state follows the complete postimage: removed lines do not exist
     // there, and each file boundary above starts an independent token stream.
     const isSourceLine = diffLine.startsWith("+") || diffLine.startsWith(" ");
     if (!isSourceLine) continue;
-    const parsed = assertionCodeLine(diffLine.slice(1), state, path);
-    state = parsed.state;
-    if (diffLine.startsWith("+") && !diffLine.startsWith("+++") && (!insidePatch || path !== null)) {
-      lines.push(Object.freeze({ path, code: parsed.code }));
+    const parsed = assertionCodeLine(diffLine.slice(1), entry.lexical, entry.path);
+    entry = Object.freeze({ ...entry, lexical: parsed.state });
+    if (diffLine.startsWith("+")) {
+      lines.push(Object.freeze({ path: entry.path, code: parsed.code }));
     }
   }
   return Object.freeze(lines);

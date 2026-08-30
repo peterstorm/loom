@@ -250,10 +250,10 @@ export const runUpdateTaskStatus = async (
   }
 
   // Parse transcript (read file content, then parse). The path is RESOLVED,
-  // not read off the payload: a supplied `agent_transcript_path` wins, and a
-  // harness that sends none falls back to the derived on-disk location. This
-  // Exact modern Claude settlement requires this transcript, so an
-  // unlocatable path becomes an infrastructure receipt. Legacy compatibility
+  // not read off the payload: an available supplied `agent_transcript_path`
+  // wins; an unavailable or absent supplied path falls back to the derived
+  // on-disk location. Exact modern Claude settlement requires this transcript,
+  // so an unlocatable path becomes an infrastructure receipt. Legacy compatibility
   // may continue with empty content only to infer and quarantine one exact
   // executing Task — never to grant positive completion authority.
   const transcriptPath = resolveAgentTranscriptPath(input);

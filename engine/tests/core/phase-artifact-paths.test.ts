@@ -4,6 +4,7 @@ import {
   PLAN_ARTIFACT_DIR,
   SPEC_ARTIFACT_DIR,
   classifyPhaseArtifact,
+  parseSpecArtifactDirectory,
   phaseArtifactUpdates,
   resolvesWithin,
 } from "../../src/core/phase-artifact-paths";
@@ -62,6 +63,25 @@ describe("classifyPhaseArtifact", () => {
         return classified === null || resolvesWithin(candidate, SPEC_ARTIFACT_DIR);
       },
     ));
+  });
+});
+
+describe("parseSpecArtifactDirectory", () => {
+  it("mints only the default root or a nested run directory", () => {
+    expect(parseSpecArtifactDirectory(null)).toMatchObject({ ok: true, value: SPEC_ARTIFACT_DIR });
+    expect(parseSpecArtifactDirectory(".claude/specs/run"))
+      .toMatchObject({ ok: true, value: ".claude/specs/run" });
+  });
+
+  it.each([
+    ["absolute escape", "/tmp/foreign-specs"],
+    ["relative escape", ".claude/specs/../../foreign-specs"],
+    ["sibling prefix", ".claude/specs-foreign/run"],
+  ])("rejects %s before it can address the filesystem", (_label, path) => {
+    expect(parseSpecArtifactDirectory(path)).toMatchObject({
+      ok: false,
+      message: expect.stringContaining("outside .claude/specs"),
+    });
   });
 });
 

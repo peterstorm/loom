@@ -17,6 +17,7 @@ import { passthroughResult, type HookHandler, type HookResult } from "../../type
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
 import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
 import { stripNamespace } from "../../utils/strip-namespace";
+import { observeWaveSpecCheckDocuments } from "../../orchestration/wave-spec-check-documents";
 
 export const runStoreSpecCheckFindings = async (
   stdin: string,
@@ -70,8 +71,18 @@ export const runStoreSpecCheckFindings = async (
     }
   }
   const findings = parseSpecCheckOutput(transcript ?? "");
+  let documents;
+  try {
+    const observedState = manager.load();
+    documents = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
+  } catch (error) {
+    return {
+      kind: "error",
+      message: `store-spec-check-findings: spec/plan authority is unreadable — spec-check findings NOT stored: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
   const applied = await manager.updateAndReturn((state) => {
-    const authorityProblem = specCheckAuthorityProblem(state, requestAuthority);
+    const authorityProblem = specCheckAuthorityProblem(state, requestAuthority, documents);
     if (authorityProblem !== null) {
       return {
         state,

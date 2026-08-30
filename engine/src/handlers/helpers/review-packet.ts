@@ -16,6 +16,7 @@ import {
   parseBaseSha,
   parseHeadSha,
   parseReviewPacket,
+  parseReviewPath,
   serializeReviewPacket,
   type BaseSha,
   type HeadSha,
@@ -230,17 +231,24 @@ const handler: HookHandler = async (_stdin, args) => {
     // Transcript APIs commonly report absolute paths. Canonicalization and
     // packet identity are rebuilt under the lock before this packet is bound.
     const prepared = prepareTaskReviewPacket(root, task, baseSha, parsedHeadSha.value);
-    const { packet, scope } = prepared;
+    const { packet } = prepared;
     if (!packet.ok) return { kind: "error", message: `Review packet creation failed:\n${packet.errors.map((e) => `  - ${e}`).join("\n")}` };
     const outputPath = inspectRepositoryPath(root, output, "review packet output");
     const absoluteOutput = outputPath.absolute;
+    const packetPath = parseReviewPath(outputPath.relative, "review packet output");
+    if (!packetPath.ok) {
+      return { kind: "error", message: `Review packet output is invalid: ${packetPath.errors.join("; ")}` };
+    }
+    const registeredScope = Object.freeze([
+      ...new Set([...packet.value.declaredPaths, ...packet.value.modifiedPaths]),
+    ].sort());
     const registration = Object.freeze({
       task_id: task.id,
       packet_id: packet.value.packetId,
-      packet_path: outputPath.relative,
+      packet_path: packetPath.value,
       base_sha: baseSha,
       head_sha: headSha,
-      scope: Object.freeze(scope),
+      scope: registeredScope,
     });
     mkdirSync(dirname(absoluteOutput), { recursive: true });
     await persistReviewPacketAndBind(

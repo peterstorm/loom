@@ -23,9 +23,10 @@
  * DERIVATION IS A FALLBACK, NEVER AN OVERRIDE. A harness that supplies an
  * existing `agent_transcript_path` is always believed, so Pi (whose transcripts
  * live nowhere near this layout) and any future harness keep working untouched.
- * Every candidate is probed explicitly: `ENOENT` means absent, while other
- * filesystem failures are diagnosed before lookup continues. A derivation that
- * misses still returns null and never crashes a lifecycle hook.
+ * Every candidate is probed explicitly: `ENOENT` means absent and permits
+ * fallback; every other filesystem failure propagates so a lifecycle hook
+ * cannot silently consume different bytes. A derivation that only misses still
+ * returns null.
  */
 
 import { lstatSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
@@ -39,6 +40,9 @@ import { parseAgentId, parseSessionId } from "../machine/evidence";
  * a prefix scan past this boundary instead of guessing.
  */
 const SLUG_MAX = 200;
+
+const isMissingPathError = (error: unknown): boolean =>
+  (error as NodeJS.ErrnoException).code === "ENOENT";
 
 /** The project-directory → slug encoding, exactly as the harness writes it. */
 export function projectSlug(projectDir: string): string {
@@ -67,8 +71,9 @@ function candidateProjectDirs(): string[] {
     const real = realpathSync(start);
     if (real !== start) dirs.push(real);
   } catch (error) {
-    // Unresolvable (gone, or permission-denied): keep the stated fallback, but
-    // preserve the filesystem cause so a missing transcript is diagnosable.
+    if (!isMissingPathError(error)) throw error;
+    // A gone project may still have a harness directory under its stated slug.
+    // Diagnose the miss before retaining that one fallback candidate.
     process.stderr.write(
       `loom: cannot resolve transcript project directory ${start}: ${error instanceof Error ? error.message : String(error)}\n`,
     );
@@ -85,6 +90,7 @@ function projectDirCandidates(root: string, slug: string): string[] {
       .filter((e) => e.isDirectory() && e.name.startsWith(prefix))
       .map((e) => join(root, e.name));
   } catch (error) {
+    if (!isMissingPathError(error)) throw error;
     process.stderr.write(
       `loom: cannot scan transcript projects root ${root} for prefix ${prefix}: ${error instanceof Error ? error.message : String(error)}\n`,
     );
@@ -116,11 +122,8 @@ function derivedCandidateExists(path: string): boolean {
     statSync(path);
     return true;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    process.stderr.write(
-      `loom: cannot inspect derived subagent file candidate ${path}: ${error instanceof Error ? error.message : String(error)}\n`,
-    );
-    return false;
+    if (isMissingPathError(error)) return false;
+    throw error;
   }
 }
 
@@ -174,6 +177,7 @@ export function resolveAgentTranscriptPath(input: TranscriptLocator): string | n
       lstatSync(supplied);
       return supplied;
     } catch (error) {
+      if (!isMissingPathError(error)) throw error;
       process.stderr.write(
         `loom: supplied agent transcript path ${supplied} is unavailable: ${error instanceof Error ? error.message : String(error)} — falling back to derived lookup\n`,
       );

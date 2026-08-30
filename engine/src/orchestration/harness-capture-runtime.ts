@@ -211,6 +211,16 @@ export function resolveCorrelatedRequest(args: Readonly<{
       },
     };
   }
+  if (binding.role !== request.role || binding.attempt !== request.attempt) {
+    return {
+      ok: false,
+      outcome: {
+        kind: "rejected",
+        reason: "correlator-authority",
+        message: `correlator authority ${binding.role}/attempt-${binding.attempt} does not match issued request ${request.role}/attempt-${request.attempt}`,
+      },
+    };
+  }
 
   const identity: HarnessResultIdentity = Object.freeze({
     harness: binding.harness,
