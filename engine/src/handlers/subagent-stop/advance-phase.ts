@@ -91,6 +91,44 @@ const transitionReady = (
 
 const transitionNotReady = (reason: string): PhaseTransitionResolution => ({ kind: "not-ready", reason });
 
+/**
+ * `init` is deliberately unarmed; the first brainstorm result is its sole
+ * legal completion. Every later result must match the active Phase exactly.
+ */
+export function isPhaseResultEligible(
+  currentPhase: Phase,
+  completedPhase: Phase,
+): boolean {
+  return currentPhase === completedPhase ||
+    (currentPhase === "init" && completedPhase === "brainstorm");
+}
+
+type ReadyPhaseTransition = Readonly<
+  Omit<Extract<PhaseTransitionResolution, { kind: "ready" }>, "kind">
+>;
+
+/** Pure locked-state command: apply a ready transition only while eligible. */
+export function applyEligiblePhaseTransition(
+  state: TaskGraph,
+  completedPhase: Phase,
+  transition: ReadyPhaseTransition,
+  updatedAt: string,
+): TaskGraph {
+  if (!isPhaseResultEligible(state.current_phase, completedPhase)) return state;
+  return {
+    ...state,
+    current_phase: transition.nextPhase,
+    phase_artifacts: {
+      ...state.phase_artifacts,
+      [completedPhase]: transition.artifact,
+    },
+    skipped_phases: transition.skipClarify
+      ? ([...new Set([...state.skipped_phases, "clarify" as Phase])] as Phase[])
+      : state.skipped_phases,
+    updated_at: updatedAt,
+  };
+}
+
 type PhaseTransitionAuthority = Readonly<{
   currentPhase: Phase;
   specDir: string | null;
@@ -129,7 +167,7 @@ export function transitionAuthorityMatches(
 
 /** Exact phase capability check shared by every unlocked/locked observation. */
 function phaseAuthorityRefusal(current: Phase, completed: Phase): HookResult | null {
-  if (current === completed) return null;
+  if (isPhaseResultEligible(current, completed)) return null;
   const currentIdx = PHASE_ORDER.indexOf(current);
   const completedIdx = PHASE_ORDER.indexOf(completed);
   return currentIdx > completedIdx
@@ -403,17 +441,13 @@ const handler: HookHandler = async (stdin) => {
       }
       const lockedTransition = observation.resolution;
       if (lockedTransition.kind === "not-ready") return { state: s, value: lockedTransition };
-      const { nextPhase, artifact, skipClarify } = lockedTransition;
       return {
-        state: {
-          ...s,
-          current_phase: nextPhase,
-          phase_artifacts: { ...s.phase_artifacts, [completedPhase]: artifact },
-          skipped_phases: skipClarify
-            ? ([...new Set([...s.skipped_phases, "clarify" as Phase])] as Phase[])
-            : s.skipped_phases,
-          updated_at: new Date().toISOString(),
-        },
+        state: applyEligiblePhaseTransition(
+          s,
+          completedPhase,
+          lockedTransition,
+          new Date().toISOString(),
+        ),
         value: lockedTransition,
       };
     });

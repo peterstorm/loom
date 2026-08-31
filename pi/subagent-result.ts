@@ -33,6 +33,7 @@ import {
 } from "../engine/src/core/implementation-application";
 import { extractTestEvidence, type TestEvidence } from "../engine/src/core/test-evidence";
 import {
+  isPhaseResultEligible,
   observePhaseTransition,
   transitionAuthorityMatches,
   type PhaseTransitionObservation,
@@ -678,7 +679,7 @@ function preparePiPhaseResult(
   completedPhase: Phase,
   writtenPaths: readonly string[],
 ): PiPhasePreparation {
-  if (state.current_phase !== completedPhase) {
+  if (!isPhaseResultEligible(state.current_phase, completedPhase)) {
     const currentIndex = PHASES.indexOf(state.current_phase);
     const completedIndex = PHASES.indexOf(completedPhase);
     return Object.freeze({
@@ -703,7 +704,7 @@ function reducePiPhaseTransition(
   transition: PhaseTransition,
   now: string,
 ): TaskGraph {
-  if (state.current_phase !== completedPhase) return state;
+  if (!isPhaseResultEligible(state.current_phase, completedPhase)) return state;
   const artifactUpdates = phaseArtifactUpdates([transition.artifact], state.spec_dir ?? undefined);
   return {
     ...state,

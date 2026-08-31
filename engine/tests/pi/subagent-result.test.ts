@@ -282,6 +282,36 @@ describe("resolveImplementationTaskId", () => {
 });
 
 describe("applyPhaseAgentPiResult", () => {
+  it("advances the initial brainstorm completion without a manual set-phase recovery", async () => {
+    const root = canonicalTempDir("loom-pi-initial-brainstorm-");
+    const previousCwd = process.cwd();
+    const brainstorm = ".claude/specs/run/brainstorm.md";
+    mkdirSync(join(root, ".claude/specs/run"), { recursive: true });
+    writeFileSync(join(root, brainstorm), "# Brainstorm\n");
+    process.chdir(root);
+
+    try {
+      const store = fakeStore(graph({
+        current_phase: "init",
+        spec_dir: ".claude/specs/run",
+      } as Partial<TaskGraph>));
+      const applied = await applyPhaseAgentPiResult({
+        store,
+        agentType: "brainstorm-agent",
+        completedPhase: "brainstorm",
+        result: result({ agent: "brainstorm-agent", messages: [writeCall(brainstorm)] }),
+        now: NOW,
+      });
+
+      expect(applied.processingErrors).toEqual([]);
+      expect(store.current().current_phase).toBe("specify");
+      expect(store.current().phase_artifacts.brainstorm).toBe(brainstorm);
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("records the reported spec path but rejects advancement when the artifact is absent", async () => {
     const store = fakeStore(graph({ current_phase: "specify", spec_dir: ".claude/specs/run" } as Partial<TaskGraph>));
     const applied = await applyPhaseAgentPiResult({

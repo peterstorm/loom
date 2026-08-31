@@ -35,12 +35,14 @@ import type { FinalPayloadCandidate } from "../../core/harness-capture";
 import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
 import {
   captureAuditLine,
+  captureCandidates,
   captureHarnessResult,
   describeCaptureFailure,
   resolveCorrelatedRequest,
   RUN_DIR_ENV,
-  terminalizeCaptureRejection,
   RUNS_ROOT_ENV,
+  terminalCaptureRefusal,
+  type CaptureObservation,
   type CaptureOutcome,
 } from "../../orchestration/harness-capture-runtime";
 
@@ -176,35 +178,27 @@ export async function captureClaudeResult(
   runsRoot: string | undefined,
   runDirectory: string | undefined,
 ): Promise<CaptureOutcome> {
-  // Prove this native id owns an issued reservation BEFORE transcript lookup or
-  // reads. An unreserved stop belongs to no slot and therefore cannot make an
-  // unrelated filesystem path authoritative enough to fail capture.
-  const resolved = resolveCorrelatedRequest({
-    harness: "claude",
-    runsRoot,
-    runDirectory,
-    nativeId: typeof input.agent_id === "string" ? input.agent_id : "",
-  });
-  if (!resolved.ok) return resolved.outcome;
-
-  const reject = (reason: string, message: string): Promise<CaptureOutcome> =>
-    terminalizeCaptureRejection(resolved.value.handle, resolved.value.request, { reason, message });
-  const transcriptPath = resolveAgentTranscriptPath(input);
-  if (transcriptPath === null) {
-    return reject(
-      "transcript-locator",
-      `no transcript can be located for session ${JSON.stringify(input.session_id ?? "")} agent ${JSON.stringify(input.agent_id ?? "")}: none was supplied and the derived path does not exist`,
-    );
-  }
-  let candidates: readonly FinalPayloadCandidate[];
-  try {
-    candidates = claudeFinalPayloadCandidates(transcriptPath);
-  } catch (error) {
-    return reject(
-      error instanceof ClaudeTranscriptReadError ? "transcript-read" : "transcript-json",
-      error instanceof Error ? error.message : String(error),
-    );
-  }
+  // Observation stays lazy so the shared runtime resolves the correlator and
+  // immutable reservation first. An unrelated stop therefore remains
+  // `no-reservation`; a request-bound locator/read/JSON refusal can be durably
+  // terminalised against the exact request it failed to observe.
+  const observe = (): CaptureObservation => {
+    const transcriptPath = resolveAgentTranscriptPath(input);
+    if (transcriptPath === null) {
+      return terminalCaptureRefusal(
+        "transcript-locator",
+        `no transcript can be located for session ${JSON.stringify(input.session_id ?? "")} agent ${JSON.stringify(input.agent_id ?? "")}: none was supplied and the derived path does not exist`,
+      );
+    }
+    try {
+      return captureCandidates(claudeFinalPayloadCandidates(transcriptPath));
+    } catch (error) {
+      return terminalCaptureRefusal(
+        error instanceof ClaudeTranscriptReadError ? "transcript-read" : "transcript-json",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  };
   return captureHarnessResult({
     harness: "claude",
     runsRoot,
@@ -212,7 +206,7 @@ export async function captureClaudeResult(
     // Claude's native correlator is the agent id its SubagentStop payload
     // carries; the spawn side recorded it beside the reservation.
     nativeId: typeof input.agent_id === "string" ? input.agent_id : "",
-    candidates,
+    observe,
   });
 }
 
@@ -246,7 +240,8 @@ const handler: HookHandler = async (stdin): Promise<HookResult> => {
       message: `request-bound capture found no reservation for ${outcome.agentId}`,
     };
   }
-  if (hasAnyRunAuthority && outcome.kind === "rejected") {
+  if (hasAnyRunAuthority &&
+      (outcome.kind === "terminal-rejection" || outcome.kind === "retriable-failure")) {
     return {
       kind: "error",
       message: `request-bound capture rejected (${outcome.reason}): ${outcome.message}`,

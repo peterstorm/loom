@@ -502,6 +502,7 @@ describe("Pi extension review tool_result integration", () => {
   it("retains malformed Pi transcript diagnostics in the capture rejection", async () => {
     const extensionSpecifier = "../../pi/extension.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
+      piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
       capturePiSubagentResult: (
         toolCallId: unknown,
         resultIndex: number,
@@ -510,6 +511,15 @@ describe("Pi extension review tool_result integration", () => {
       ) => Promise<{ kind: string; reason?: string; message?: string }>;
     };
     const staged = await piCaptureRun("pi-malformed-transcript-shape");
+    const nativeId = module.piSpawnRosterId("call-malformed-transcript", 0, "code-reviewer");
+    expect((await staged.handle.recordHarnessCorrelator({
+      schemaVersion: 1,
+      harness: "pi",
+      nativeId,
+      requestId: staged.request.requestId,
+      role: staged.request.role,
+      attempt: staged.request.attempt,
+    })).ok).toBe(true);
     process.env.LOOM_ORCHESTRATION_RUNS_ROOT = staged.runsRoot;
     process.env.LOOM_ORCHESTRATION_RUN_DIR = staged.runDir;
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -522,9 +532,13 @@ describe("Pi extension review tool_result integration", () => {
       );
 
       expect(outcome).toEqual({
-        kind: "rejected",
+        kind: "terminal-rejection",
         reason: "transcript-shape",
         message: "messages[0] must be an object",
+      });
+      expect(staged.handle.readCaptureRejection(staged.request)).toMatchObject({
+        ok: true,
+        value: "transcript-shape: messages[0] must be an object",
       });
       expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
         .toContain("rejected (transcript-shape): messages[0] must be an object");
@@ -675,6 +689,7 @@ describe("Pi extension review tool_result integration", () => {
   it("preserves malformed Pi transcript extraction as an explicit capture rejection", async () => {
     const extensionSpecifier = "../../pi/extension.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
+      piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
       capturePiSubagentResult: (
         toolCallId: unknown,
         resultIndex: number,
@@ -684,6 +699,15 @@ describe("Pi extension review tool_result integration", () => {
       ) => Promise<unknown>;
     };
     const staged = await piCaptureRun("malformed-transcript");
+    const nativeId = module.piSpawnRosterId("call-malformed-transcript", 0, "code-reviewer");
+    expect((await staged.handle.recordHarnessCorrelator({
+      schemaVersion: 1,
+      harness: "pi",
+      nativeId,
+      requestId: staged.request.requestId,
+      role: staged.request.role,
+      attempt: staged.request.attempt,
+    })).ok).toBe(true);
     const binding = {
       ...staged.handle.identity,
       requestIds: [staged.request.requestId],
@@ -692,7 +716,7 @@ describe("Pi extension review tool_result integration", () => {
 
     expect(await module.capturePiSubagentResult("call-malformed-transcript", 0, "code-reviewer", "not-messages", binding))
       .toMatchObject({
-        kind: "rejected",
+        kind: "terminal-rejection",
         reason: "transcript-shape",
         message: expect.stringContaining("messages must be an array"),
       });

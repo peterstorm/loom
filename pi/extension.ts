@@ -109,14 +109,18 @@ import { parsePiMessages, piResultFinalPayloadCandidates } from "./transcript-ad
 // one runtime; only the native correlator and the payload observation differ.
 import {
   captureAuditLine,
+  captureCandidates,
   captureHarnessResult,
   RUN_DIR_ENV,
   describeCaptureFailure,
   resolveCorrelatedRequest,
   RUNS_ROOT_ENV,
+  terminalCaptureRefusal,
   terminalizeCaptureRejection,
+  type CaptureObservation,
   type CaptureOutcome,
   type CorrelatedRequestResolution,
+  type TerminalCaptureRefusal,
 } from "../engine/src/orchestration/harness-capture-runtime";
 import { openRunDirectory, type RunDirHandle } from "../engine/src/orchestration/run-directory-handle";
 import {
@@ -652,10 +656,10 @@ async function recordPiRequestCaptureRejection(
   const outcome = await terminalizeCaptureRejection(
     correlation.value.handle,
     correlation.value.request,
-    { diagnostic },
+    terminalCaptureRefusal("capture-rejection", diagnostic),
   );
-  return outcome.kind === "rejected" &&
-      (outcome.reason === "rejection-persistence" || outcome.reason === "rejection-audit-unsynchronized")
+  return outcome.kind === "retriable-failure" ||
+      (outcome.kind === "terminal-rejection" && outcome.reason === "rejection-audit-unsynchronized")
     ? `${agentType}[${resultIndex}] ${outcome.message}`
     : null;
 }
@@ -695,32 +699,32 @@ export async function capturePiSubagentResult(
   agentType: string,
   messages: unknown,
   runBinding: SessionRunBinding | null = null,
+  observationRefusal: TerminalCaptureRefusal | null = null,
 ): Promise<CaptureOutcome> {
   try {
-    const candidates = piResultFinalPayloadCandidates(messages ?? []);
     const runsRoot = runBinding?.runsRoot ?? process.env[RUNS_ROOT_ENV];
     const runDirectory = runBinding?.runDirectory ?? process.env[RUN_DIR_ENV];
-    const hasRunAuthority = runsRoot !== undefined || runDirectory !== undefined;
-    const outcome: CaptureOutcome = !candidates.ok && hasRunAuthority
-      ? {
-          kind: "rejected",
-          reason: "transcript-shape",
-          message: candidates.errors.join("; "),
-        }
-      : await captureHarnessResult({
-          harness: "pi",
-          runsRoot,
-          runDirectory,
-          nativeId: piSpawnRosterId(toolCallId, resultIndex, agentType),
-          candidates: candidates.ok ? candidates.value : [],
-        });
+    const observe = (): CaptureObservation => {
+      if (observationRefusal !== null) return observationRefusal;
+      const candidates = piResultFinalPayloadCandidates(messages ?? []);
+      return candidates.ok
+        ? captureCandidates(candidates.value)
+        : terminalCaptureRefusal("transcript-shape", candidates.errors.join("; "));
+    };
+    const outcome = await captureHarnessResult({
+      harness: "pi",
+      runsRoot,
+      runDirectory,
+      nativeId: piSpawnRosterId(toolCallId, resultIndex, agentType),
+      observe,
+    });
     const audit = captureAuditLine("loom(pi): capture-orchestration-result", outcome);
     if (audit !== null) process.stderr.write(audit);
     return outcome;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(`loom(pi): capture-orchestration-result crashed for ${agentType}: ${message}\n`);
-    return { kind: "rejected", reason: "capture-crashed", message };
+    return { kind: "retriable-failure", reason: "capture-crashed", message };
   }
 }
 
@@ -2270,19 +2274,20 @@ export default function (pi: ExtensionAPI) {
         // path serves; and capture must record evidence before any handler acts
         // on it. It reads only the run directory it is pointed at, never a State
         // File, so a run beside an active wave cannot cross into it.
-        const captureOutcome: CaptureOutcome = piSubagentResultFailed(result) && runBound
-          ? {
-              kind: "rejected",
-              reason: "agent-failed",
-              message: `${agentType} exited without a successful result (${piSubagentFailureSignals(result)})`,
-            }
-          : await capturePiSubagentResult(
-              toolCallId,
-              resultIndex,
-              agentType,
-              result.messages,
-              durableRunBinding,
-            );
+        const agentFailure = piSubagentResultFailed(result) && runBound
+          ? terminalCaptureRefusal(
+              "agent-failed",
+              `${agentType} exited without a successful result (${piSubagentFailureSignals(result)})`,
+            )
+          : null;
+        const captureOutcome = await capturePiSubagentResult(
+          toolCallId,
+          resultIndex,
+          agentType,
+          result.messages,
+          durableRunBinding,
+          agentFailure,
+        );
         if (captureOutcome.kind === "captured" && durableRunBinding !== null && resultSessionId !== null) {
           try {
             rememberTrustedReviewCapture(resultSessionId, durableRunBinding, agentType, result.task, captureOutcome);
@@ -2305,9 +2310,6 @@ export default function (pi: ExtensionAPI) {
             const diagnostic = `standalone request-bound capture failed for ${agentType}: ${detail}`;
             processingErrors.push(diagnostic);
             process.stderr.write(`loom(pi): ${diagnostic}; task state untouched\n`);
-            if (durableRunBinding !== null) {
-              await persistCaptureRejection(durableRunBinding, resultIndex, agentType, diagnostic);
-            }
           } else {
             process.stderr.write(
               piSubagentResultFailed(result)
@@ -2322,7 +2324,8 @@ export default function (pi: ExtensionAPI) {
         // request-bound evidence before protected state can change. Only truly
         // unrelated legacy agents may retain the no-reservation compatibility
         // path.
-        if (captureOutcome.kind === "rejected" ||
+        if (captureOutcome.kind === "terminal-rejection" ||
+            captureOutcome.kind === "retriable-failure" ||
             (runBound && isLoomOwnedResultAgent(agentType) && captureOutcome.kind !== "captured")) {
           const detail = describeCaptureFailure(captureOutcome);
           const diagnostic = `request-bound capture rejected for ${agentType}: ${detail}`;

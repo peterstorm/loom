@@ -1,10 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import advancePhaseHandler, {
+  applyEligiblePhaseTransition,
   resolveTransition,
   countMarkers,
+  isPhaseResultEligible,
 } from "../../../src/handlers/subagent-stop/advance-phase";
 import { findFile } from "../../../src/utils/find-file";
-import { CLARIFY_THRESHOLD, PHASE_AGENT_MAP, ARCH_PANEL_AGENTS, SUBAGENT_DIR } from "../../../src/config";
+import {
+  ARCH_PANEL_AGENTS,
+  CLARIFY_THRESHOLD,
+  PHASE_AGENT_MAP,
+  PHASE_ORDER,
+  SUBAGENT_DIR,
+} from "../../../src/config";
 import { stripNamespace } from "../../../src/utils/strip-namespace";
 import type { TaskGraph } from "../../../src/types";
 import { StateManager } from "../../../src/state-manager";
@@ -83,6 +91,62 @@ describe("findFile", () => {
 
   it("returns null for missing directory", () => {
     expect(findFile(join(tmpDir, "nope"), "f.md")).toBeNull();
+  });
+});
+
+// ── phase result eligibility ─────────────────────────────────────
+
+describe("isPhaseResultEligible", () => {
+  it("accepts every exact active-Phase completion and the initial brainstorm handoff", () => {
+    for (const phase of PHASE_ORDER) {
+      expect(isPhaseResultEligible(phase, phase)).toBe(true);
+    }
+    expect(isPhaseResultEligible("init", "brainstorm")).toBe(true);
+  });
+
+  it("rejects every other stale or future completion", () => {
+    for (const currentPhase of PHASE_ORDER) {
+      for (const completedPhase of PHASE_ORDER) {
+        if (currentPhase === completedPhase ||
+            (currentPhase === "init" && completedPhase === "brainstorm")) continue;
+        expect(isPhaseResultEligible(currentPhase, completedPhase)).toBe(false);
+      }
+    }
+  });
+});
+
+describe("applyEligiblePhaseTransition", () => {
+  it("returns the identical aggregate when a concurrent completion already advanced the Phase", () => {
+    const state = mkState({ current_phase: "architecture" });
+
+    const stale = applyEligiblePhaseTransition(
+      state,
+      "specify",
+      { nextPhase: "architecture", artifact: ".claude/specs/feature/spec.md" },
+      "2026-08-31T00:00:00.000Z",
+    );
+
+    expect(stale).toBe(state);
+  });
+
+  it("immutably applies an eligible transition", () => {
+    const state = mkState({ current_phase: "specify" });
+
+    const next = applyEligiblePhaseTransition(
+      state,
+      "specify",
+      { nextPhase: "architecture", artifact: ".claude/specs/feature/spec.md", skipClarify: true },
+      "2026-08-31T00:00:00.000Z",
+    );
+
+    expect(next).not.toBe(state);
+    expect(state.current_phase).toBe("specify");
+    expect(next).toMatchObject({
+      current_phase: "architecture",
+      phase_artifacts: { specify: ".claude/specs/feature/spec.md" },
+      skipped_phases: ["clarify"],
+      updated_at: "2026-08-31T00:00:00.000Z",
+    });
   });
 });
 

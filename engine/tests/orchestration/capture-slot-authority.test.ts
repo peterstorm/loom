@@ -27,11 +27,7 @@ afterEach(() => {
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-const HEX = (seed: string): string => {
-  let out = "";
-  for (let i = 0; i < 64; i += 1) out += seed.charCodeAt(i % seed.length).toString(16).padStart(2, "0").slice(-2);
-  return out.slice(0, 64);
-};
+const digest = (seed: string): string => createHash("sha256").update(seed).digest("hex");
 
 const correlatorFile = (directory: string, harness: "pi" | "claude", nativeId: string): string =>
   join(directory, "requests", "correlators", `${createHash("sha256").update(`${harness}\0${nativeId}`).digest("hex")}.json`);
@@ -55,14 +51,14 @@ async function stagedRun(): Promise<Readonly<{
     requestId: "request:reviewer:1",
     slotId: "slot-1",
     attempt: 1,
-    contextDigest: HEX("context-one"),
+    contextDigest: digest("context-one"),
   });
   const second = agentRequestAuthority("run.slot-authority", {
     requestId: "request:reviewer:2",
     slotId: "slot-2",
     attempt: 1,
     role: "silent-failure-hunter",
-    contextDigest: HEX("context-two"),
+    contextDigest: digest("context-two"),
     outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-2/attempt-1.raw" },
   });
   for (const request of [first, second]) {
@@ -152,7 +148,7 @@ describe("capture-rejection reads", () => {
       requestId: "request:reviewer:9",
       slotId: "slot-9",
       attempt: 2,
-      contextDigest: HEX("context-nine"),
+      contextDigest: digest("context-nine"),
       outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-9/attempt-2.raw" },
     });
 
@@ -173,6 +169,22 @@ describe("capture-rejection reads", () => {
     expect(marker.ok).toBe(true);
     if (!marker.ok) return;
     expect(marker.value).toContain("no-final-payload");
+  });
+
+  it("accepts an identical marker replay and refuses a conflicting diagnostic", async () => {
+    const { handle, second } = await stagedRun();
+
+    expect((await handle.rejectCapture(second, "no-final-payload: agent said nothing")).ok).toBe(true);
+    expect((await handle.rejectCapture(second, "no-final-payload: agent said nothing")).ok).toBe(true);
+    const conflict = await handle.rejectCapture(second, "agent-failed: endpoint disconnected");
+
+    expect(conflict.ok).toBe(false);
+    if (conflict.ok) return;
+    expect(conflict.error.message).toContain("conflicts with its immutable diagnostic");
+    expect(handle.readCaptureRejection(second)).toEqual({
+      ok: true,
+      value: "no-final-payload: agent said nothing",
+    });
   });
 
   it("refuses a rejection read whose slot addressing does not match the reservation", async () => {

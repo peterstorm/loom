@@ -116,7 +116,7 @@ export function assertAnchoredFilesystemPlatformSupported(
       `Loom orchestration requires POSIX anchored-filesystem operations; platform ${platform} is unsupported`,
     );
   }
-  if (platform === "darwin" && process.platform === "darwin") assertDarwinNoFollowAnyCapability();
+  if (platform === "darwin") assertDarwinNoFollowAnyCapability();
 }
 
 /**
