@@ -358,6 +358,13 @@ describe("guard-state-file — edge cases", () => {
     // trip the redirect pattern) — the quote-aware check is MORE precise.
     expect(guardDecision("cat active_task_graph.json 2>&1")).toBe("allow");
     expect(guardDecision("jq 'select(.count > 1)' active_task_graph.json")).toBe("allow");
+    // Exact stderr discard is not a state write. Optional guarded-directory
+    // probes need this without weakening any redirect that can name a file.
+    expect(guardDecision("ls .loom 2>/dev/null")).toBe("allow");
+    expect(guardDecision("cat active_task_graph.json 2> /dev/null")).toBe("allow");
+    expect(guardDecision("cat active_task_graph.json 2>/dev/null > active_task_graph.json")).toBe("block");
+    expect(guardDecision("cat active_task_graph.json 2>/dev/null-copy")).toBe("block");
+    expect(guardDecision("cat active_task_graph.json 2>>/dev/null")).toBe("block");
   });
 
   it("`>&file` redirects stdout+stderr TO THE FILE — not an fd dup (round-15 bypass)", () => {

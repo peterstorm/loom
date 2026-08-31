@@ -105,13 +105,19 @@ If gaps remain, the user either loops back to architecture with the report or ex
 - spec anchors;
 - executable lifecycle/pipeline/invariant bindings from the plan.
 
-The user approves the proposed Tasks/Waves. Loom creates a GitHub Issue and `populate-task-graph` atomically installs the validated graph. During that same operation, the engine reads the optional operator-owned `.loom/verification-manifest.json`, parses fixed executable/argument arrays, and freezes the resulting authority into the protected TaskGraph. Decompose JSON cannot provide or override it. An absent file selects the engine default with only reserved checks. The state file returns to mode `0444`.
+The user approves the proposed Tasks/Waves. Loom creates a GitHub Issue and `populate-task-graph` atomically installs the validated graph. Before population, optional operator-owned command authority is validated and installed through `helper write-verification-manifest`; direct writes to the guarded `.loom/verification-manifest.json` path are intentionally blocked. During population, the engine reads those exact bytes and freezes the resulting authority into the protected TaskGraph. Decompose JSON cannot provide or override it. An absent file selects the engine default with only reserved checks. The state file returns to mode `0444`.
 
 Typical guidance is 8–12 Tasks, 4–5 Waves, and 4–6 parallel Tasks per Wave. These are planning bounds, not a license to force a small feature into needless Tasks.
 
 ### Verification manifest
 
-Project-wide Wave checks are declared before Task population:
+Project-wide Wave checks are declared before Task population. Write the JSON to an unguarded temporary file, then install it through the sole validating write seam:
+
+```bash
+bun ${LOOM_DIR}/engine/src/cli.ts helper write-verification-manifest < /tmp/loom-verification-manifest.json
+```
+
+The helper validates before writing, refuses symlinked paths and conflicting replacement, and refuses all changes after Tasks are populated.
 
 ```json
 {

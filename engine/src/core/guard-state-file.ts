@@ -19,10 +19,10 @@
  *     for its OWN segment, and never for a protected-dir (ledger / machine
  *     definitions) write;
  *   - a read-only command: head token ∈ READ_ONLY_STATE_COMMANDS (commands
- *     that cannot write a file under any flag) with no output redirect
- *     (quote-aware: any unquoted `>` except an fd-dup — `>&` followed by a
- *     WHOLE word of digits or exactly `-` — so `>`, `>>`, `&>`, `3>`,
- *     `>&file`, and `>&2/../file` all count; `2>&1` / `>&2` / `>&-` do not).
+ *     that cannot write a file under any flag) with no output redirect except
+ *     the exact stderr discard `2>/dev/null` (quote-aware: any other unquoted
+ *     `>` except an fd-dup — `>&` followed by a WHOLE word of digits or exactly
+ *     `-` — counts; `2>&1` / `>&2` / `>&-` do not).
  *
  * Pattern tests (the front gate, chain scoping, protected-dir checks, and
  * placeholder classification) run against a QUOTE-COLLAPSED view of the
@@ -535,22 +535,59 @@ function hasReadOnlyHead(segment: string): boolean {
 }
 
 /**
- * Quote-aware output-redirect detection: every unquoted `>` counts as a
- * write channel UNLESS it is an fd dup — `>&` followed by a word that is
- * ENTIRELY digits or exactly `-` (`2>&1`, `>&2`, `>&-`), classified by the
- * shared classifyFdDupWord. A `>&` whose word merely starts with a digit
- * but continues into a path (`>&2/../file` — the round-16 bypass) or is any
- * other word (`>&file`, the round-15 bypass) is bash's `>&word` form, which
- * redirects stdout+stderr TO THE FILE `word`, so it counts as a write. This
- * catches `>`, `>>`, `&>`, fd-numbered forms (`3>file`), and the `>&word`
- * family that whitespace-anchored patterns miss, while leaving a `>` inside
- * a quoted argument (`jq 'select(.x > 1)' <state>`) alone.
+ * Remove the one output redirect that cannot mutate guarded authority:
+ * discarding stderr to the literal `/dev/null`. This is intentionally narrow
+ * (`2>` only, no append/clobber variants, expansions, or lookalike paths).
+ * Read-only probes routinely use this form for optional guarded directories;
+ * treating it as a state write made `ls .loom 2>/dev/null` impossible.
+ */
+function withoutSafeStderrDiscard(segment: string): string {
+  const ranges: Array<Readonly<{ start: number; end: number }>> = [];
+  const isBoundary = (char: string | undefined): boolean =>
+    char === undefined || /\s/.test(char) || ";&|(){}".includes(char);
+  scanUnquoted<never>(segment, 0, (char, index) => {
+    if (char !== "2" || !isBoundary(segment[index - 1]) || segment[index + 1] !== ">") {
+      return CONTINUE;
+    }
+    let cursor = index + 2;
+    if (segment[cursor] === ">" || segment[cursor] === "&" || segment[cursor] === "|") {
+      return CONTINUE;
+    }
+    while (segment[cursor] === " " || segment[cursor] === "\t") cursor += 1;
+    const target = "/dev/null";
+    if (!segment.startsWith(target, cursor) || !isBoundary(segment[cursor + target.length])) {
+      return CONTINUE;
+    }
+    const end = cursor + target.length;
+    ranges.push(Object.freeze({ start: index, end }));
+    return skip(end);
+  });
+  if (ranges.length === 0) return segment;
+  let result = "";
+  let cursor = 0;
+  for (const range of ranges) {
+    result += segment.slice(cursor, range.start) + " ";
+    cursor = range.end;
+  }
+  return result + segment.slice(cursor);
+}
+
+/**
+ * Quote-aware output-redirect detection after removing exact safe stderr
+ * discards. Every remaining unquoted `>` counts as a write channel UNLESS it
+ * is an fd dup — `>&` followed by a word that is ENTIRELY digits or exactly
+ * `-` (`2>&1`, `>&2`, `>&-`), classified by the shared
+ * classifyFdDupWord. A `>&` whose word merely starts with a digit but
+ * continues into a path (`>&2/../file` — the round-16 bypass) or is any other
+ * word (`>&file`, the round-15 bypass) redirects to a file and counts as a
+ * write. Quoted `>` characters remain ordinary argument text.
  */
 function hasOutputRedirect(segment: string): boolean {
-  return scanUnquoted<true>(segment, 0, (c, i) => {
+  const inspected = withoutSafeStderrDiscard(segment);
+  return scanUnquoted<true>(inspected, 0, (c, i) => {
     if (c !== ">") return CONTINUE;
-    if (segment[i + 1] !== "&") return halt(true);
-    const dup = classifyFdDupWord(segment, i + 2);
+    if (inspected[i + 1] !== "&") return halt(true);
+    const dup = classifyFdDupWord(inspected, i + 2);
     return dup.isFdDup
       ? skip(dup.end) // digits/`-`: nothing special inside the dup word
       : halt(true); // `>&word` writes the FILE `word`

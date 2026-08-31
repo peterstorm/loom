@@ -431,6 +431,13 @@ Substitute variables:
 - `{spec_file_path}` - Path to spec from Phase 1
 - `{plan_file_path}` - Path to plan from Phase 3
 
+Replace every occurrence before spawning, including paths shown in explanatory
+examples. The required-output example deliberately uses the non-template
+sentinels `ABSOLUTE_SPEC_FILE_PATH` / `ABSOLUTE_PLAN_FILE_PATH`; tell the Agent
+to replace those with the same concrete paths in its output. If any
+`{feature_description}`, `{spec_file_path}`, or `{plan_file_path}` token remains
+in the assembled prompt, do not spawn.
+
 **Spawn decompose-agent** with the substituted template as prompt.
 
 **Wait for agent completion.** Agent outputs pure JSON task graph.
@@ -482,7 +489,20 @@ Ask: "Proceed with this plan?"
 
 ### 4d. Create Artifacts
 
-On approval, establish operator-owned completion authority before populating Tasks. If the project needs whole-program commands beyond Loom's reserved full-tier lint, create `.loom/verification-manifest.json` using the exact schema in `docs/workflows.md`. Commands are fixed executable/argument arrays; never copy a model-authored shell string into the manifest. If no file exists, population freezes the engine default containing only reserved checks.
+On approval, establish operator-owned completion authority before populating Tasks. If the project needs whole-program commands beyond Loom's reserved full-tier lint, build the exact schema from `docs/workflows.md` in an unguarded temporary file, then install it through the validating helper:
+
+```bash
+cat > /tmp/loom-verification-manifest.json <<'JSON'
+{
+  "schemaVersion": 1,
+  "kind": "loom-verification-manifest",
+  "checks": []
+}
+JSON
+bun ${LOOM_DIR}/engine/src/cli.ts helper write-verification-manifest < /tmp/loom-verification-manifest.json
+```
+
+Replace the empty `checks` array with the operator-approved fixed executable/argument arrays. Never copy a model-authored shell string into the manifest. Direct Bash/Edit/Write access to `.loom/verification-manifest.json` is intentionally blocked after the State File activates; the helper is the sole installation seam, validates before writing, refuses symlinks and conflicting replacement, and becomes immutable once Tasks are populated. If no file exists, population freezes the engine default containing only reserved checks.
 
 **A. GitHub Issue:**
 ```bash
@@ -716,7 +736,7 @@ Hooks auto-activate when `active_task_graph.json` exists:
 
 **Do not call hook-owned state-writing helpers yourself.** The helpers that hooks/`/wave-gate` drive — `complete-wave-gate`, `StateManager`, `store-review-findings`/`store-spec-check` (except as a sanctioned override, below) — run automatically; calling them by hand races the hook that owns that write. A small set of DIRECT helper invocations IS sanctioned, used only where this document says to; they fall into two distinct classes:
 
-- **Whitelisted in the guard** (`engine/src/config.ts` `WHITELISTED_HELPERS`, so the guard permits them even on a guarded path): `populate-task-graph` (Phase 4d), `set-phase` loop-back, `mark-tests-passed` (read-only evidence status check, run during `/wave-gate` Step 2 — it reads persisted TaskGraph evidence and does NOT modify state), `repair-task-graph` (recovery only; it reads rejected JSON directly, applies `fixFull`, validates, and atomically replaces the graph without calling `StateManager.load()`), `review-packet create` (starts the packet-bound Review Run atomically while writing its immutable packet outside guarded state), and the `store-review-findings` / `store-spec-check` false-positive overrides.
+- **Whitelisted in the guard** (`engine/src/config.ts` `WHITELISTED_HELPERS`, so the guard permits them even on a guarded path): `write-verification-manifest` and `populate-task-graph` (Phase 4d), `set-phase` loop-back, `mark-tests-passed` (read-only evidence status check, run during `/wave-gate` Step 2 — it reads persisted TaskGraph evidence and does NOT modify state), `repair-task-graph` (recovery only; it reads rejected JSON directly, applies `fixFull`, validates, and atomically replaces the graph without calling `StateManager.load()`), `review-packet create` (starts the packet-bound Review Run atomically while writing its immutable packet outside guarded state), and the `store-review-findings` / `store-spec-check` false-positive overrides.
 - **Merely out of the guard's scope when invoked as documented** (NOT in `WHITELISTED_HELPERS`): `validate-task-graph` / `validate-lint-rules`; the explicit diagnostic helper `lint-wave-gate` (the registered Wave Gate invokes the same full-tier shell automatically); `orchestration status` (a pure read that derives the canonical status value and renders it); the two panel contract helpers `panel-contract` (this document, Phase 3 panel mode) and `review-panel` (the registered Wave Gate's Refutation Panel); and `standalone-review` (`skills/review-and-fix/SKILL.md`) — they pass only because their documented invocations name no guarded path, writing instead into a run directory under the runs-root each one is given — `.claude/specs/{date_slug}/panel-runs/` for the architecture panel, `.claude/reviews/panel-runs/` for the wave refutation panel, and `.claude/reviews/review-and-fix-runs/` for standalone review. Invoked against a guarded path they would be blocked like anything else.
 
   **One exception inside that class:** `review-panel tally` DOES write the task graph through `StateManager` — it moves refuted findings into `refuted_findings` and can demote `review_status` from `blocked` to `passed`. It is out of the guard's scope only because its arguments name the run directory rather than the state file. It is nonetheless the wave gate's own adjudication step, run exactly once per run directory at the point `wave-gate.md` says to, and it refuses a second tally on a run it has already adjudicated. Do not invoke it to "re-check" a wave.
