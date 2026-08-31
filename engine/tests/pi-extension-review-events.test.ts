@@ -4847,7 +4847,7 @@ describe("Pi extension review tool_result integration", () => {
             role: "assistant",
             content: [{
               type: "text",
-              text: "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED\nCRITICAL: hidden drift",
+              text: "SPEC_CHECK_WAVE: 1\nCRITICAL: hidden drift\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED",
             }],
           }],
         }],

@@ -41,7 +41,7 @@ describe("extractTestEvidence — property tests", () => {
   it("valid Maven output always detected", () => {
     fc.assert(
       fc.property(fc.integer({ min: 1, max: 1000 }), (n) => {
-        const output = `BUILD SUCCESS\nTests run: ${n}, Failures: 0, Errors: 0`;
+        const output = `Tests run: ${n}, Failures: 0, Errors: 0\nBUILD SUCCESS`;
         const result = extractTestEvidence(output);
         expect(result.passed).toBe(true);
         expect(result.evidence).toContain("maven");
@@ -55,10 +55,21 @@ describe("extractTestEvidence — property tests", () => {
         fc.integer({ min: 1, max: 100 }),
         fc.integer({ min: 1, max: 50 }),
         (total, failures) => {
-          const output = `BUILD SUCCESS\nTests run: ${total}, Failures: ${failures}, Errors: 0`;
+          const output = `Tests run: ${total}, Failures: ${failures}, Errors: 0\nBUILD FAILURE`;
           expect(extractTestEvidence(output).passed).toBe(false);
         },
       ),
+    );
+  });
+
+  it("a zero-failure Maven tally without a later terminal marker never passes", () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 1, max: 1000 }), (n) => {
+        const output = `Tests run: ${n}, Failures: 0, Errors: 0`;
+        const result = extractTestEvidence(output);
+        expect(result.passed).toBe(false);
+        expect(result.evidence).toContain("incomplete run");
+      }),
     );
   });
 
@@ -82,7 +93,7 @@ describe("extractTestEvidence — property tests", () => {
           "===== 0 passed in 0.5s =====",
           "test result: ok. 0 passed; 0 failed; 0 ignored",
           "\n0 pass\n",
-          "BUILD SUCCESS\nTests run: 0, Failures: 0, Errors: 0",
+          "Tests run: 0, Failures: 0, Errors: 0\nBUILD SUCCESS",
         ),
         (output) => {
           const result = extractTestEvidence(output);
@@ -137,6 +148,29 @@ describe("extractTestEvidence — property tests", () => {
           const result = extractTestEvidence(output);
           expect(result.passed).toBe(false);
           expect(result.evidence).toBe(`vitest: ${output}`);
+        },
+      ),
+    );
+  });
+
+  it("a later truncated Vitest failure never preserves an earlier pass", () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 1, max: 500 }), (failed) => {
+        const result = extractTestEvidence(`Tests  1 passed (1)\nTests ${failed} failed |`);
+        expect(result.passed).toBe(false);
+        expect(result.evidence).toContain("malformed summary");
+      }),
+    );
+  });
+
+  it("non-zero skipped/todo-only Vitest summaries never pass", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 500 }),
+        fc.constantFrom("skipped", "todo"),
+        (count, kind) => {
+          const result = extractTestEvidence(`Tests  ${count} ${kind} (${count})`);
+          expect(result).toEqual({ passed: false, evidence: "vitest: 0 tests executed" });
         },
       ),
     );

@@ -335,6 +335,7 @@ function shadowGitConfig(objectFormat: ShadowGitAuthority["objectFormat"]): stri
 function withShadowGit<T>(root: string, operation: (environment: NodeJS.ProcessEnv) => T): T {
   const authority = observeShadowGitAuthority(root);
   const shadow = mkdtempSync(join(tmpdir(), "loom-git-shadow-"));
+  let primaryError: unknown = null;
   try {
     mkdirSync(join(shadow, "refs", "heads"), { recursive: true });
     writeFileSync(join(shadow, "HEAD"), `${authority.headSha}\n`);
@@ -346,8 +347,22 @@ function withShadowGit<T>(root: string, operation: (environment: NodeJS.ProcessE
       GIT_INDEX_FILE: authority.indexPath,
       GIT_OBJECT_DIRECTORY: authority.objectDirectory,
     });
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    rmSync(shadow, { recursive: true, force: true });
+    try {
+      rmSync(shadow, { recursive: true, force: true });
+    } catch (cleanupError) {
+      if (primaryError !== null) {
+        throw new AggregateError(
+          [primaryError, cleanupError],
+          `shadow Git operation failed (${primaryError instanceof Error ? primaryError.message : String(primaryError)}) ` +
+            `and its administration directory could not be cleaned up (${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)})`,
+        );
+      }
+      throw cleanupError;
+    }
   }
 }
 

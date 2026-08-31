@@ -216,7 +216,7 @@ const handler: HookHandler = async (_stdin, args) => {
     const root = repoRoot();
     const headSha = git(["rev-parse", "HEAD"], root).trim();
     const remoteHead = optionalGit(
-      ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+      ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
       root,
       [1],
     );
@@ -229,11 +229,15 @@ const handler: HookHandler = async (_stdin, args) => {
     ) !== null;
     // Each revision is parsed through its OWN smart constructor: base and head
     // carry distinct brands precisely so the two cannot be transposed here.
-    const rawBaseSha = task.start_sha ?? (
-      hasRemoteBranch
-        ? git(["merge-base", "HEAD", remoteBranch], root).trim()
-        : git(["rev-parse", "HEAD^"], root).trim()
-    );
+    // A one-parent fallback is not authority for a Task that may span several
+    // commits: without a persisted start or proven remote base, fail closed.
+    if (task.start_sha === undefined && !hasRemoteBranch) {
+      return {
+        kind: "error",
+        message: "Review packet creation failed: no task start_sha or remote default branch can authorize the packet base",
+      };
+    }
+    const rawBaseSha = task.start_sha ?? git(["merge-base", "HEAD", remoteBranch], root).trim();
     const parsedBaseSha = parseBaseSha(rawBaseSha);
     const parsedHeadSha = parseHeadSha(headSha);
     if (!parsedBaseSha.ok || !parsedHeadSha.ok) {

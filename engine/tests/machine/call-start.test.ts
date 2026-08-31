@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect, afterAll, vi } from "vitest";
-import { unlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import {
   CALL_START_CAP,
   CALL_START_SUFFIX,
@@ -28,13 +28,11 @@ import { inMemorySessionRegistry } from "./fake-session-registry";
 
 const run = `call-start-${process.pid}-${Date.now()}`;
 const sid = (name: string) => parseSessionId(`${run}-${name}`)!;
-const sessions = ["roundtrip", "prune", "restamp", "corrupt"].map(sid);
+const sessions = ["roundtrip", "prune", "restamp", "corrupt", "unreadable"].map(sid);
 
 afterAll(() => {
   for (const s of sessions) {
-    try {
-      unlinkSync(`${SUBAGENT_DIR}/${s}${CALL_START_SUFFIX}`);
-    } catch {}
+    rmSync(`${SUBAGENT_DIR}/${s}${CALL_START_SUFFIX}`, { recursive: true, force: true });
   }
 });
 
@@ -126,6 +124,18 @@ registryContract("fs adapter", fsSessionRegistry);
 registryContract("in-memory fake", inMemorySessionRegistry());
 
 describe("call-start stamps — fs corruption handling", () => {
+  it("propagates a call-start inspection fault instead of replacing hidden authority", async () => {
+    const s = sid("unreadable");
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const path = `${SUBAGENT_DIR}/${s}${CALL_START_SUFFIX}`;
+    symlinkSync(path, path);
+
+    await expect(fsSessionRegistry.recordCallStart(s, "toolu_x", 777)).rejects.toThrow(
+      /cannot read call-start file.*ELOOP|too many levels of symbolic links/i,
+    );
+    expect(() => readFileSync(path)).toThrow();
+  });
+
   it("a corrupt stamp file reads as null (loudly) and is replaced by the next stamp", async () => {
     const s = sid("corrupt");
     mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });

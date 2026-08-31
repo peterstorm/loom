@@ -132,6 +132,7 @@ let darwinCapabilityVerified = false;
 function assertDarwinNoFollowAnyCapability(): void {
   if (darwinCapabilityVerified) return;
   const probeDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-anchor-probe-")));
+  let primaryError: unknown = null;
   try {
     symlinkSync(".", join(probeDir, "planted-link"));
     let refusedWithEloop = false;
@@ -152,10 +153,24 @@ function assertDarwinNoFollowAnyCapability(): void {
           "O_NOFOLLOW_ANY requires macOS 13 or newer; refusing unsafe anchored filesystem operations",
       );
     }
-    darwinCapabilityVerified = true;
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    rmSync(probeDir, { recursive: true, force: true });
+    try {
+      rmSync(probeDir, { recursive: true, force: true });
+    } catch (cleanupError) {
+      if (primaryError !== null) {
+        throw new AggregateError(
+          [primaryError, cleanupError],
+          `darwin O_NOFOLLOW_ANY capability probe failed (${primaryError instanceof Error ? primaryError.message : String(primaryError)}) ` +
+            `and its directory could not be cleaned up (${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)})`,
+        );
+      }
+      throw cleanupError;
+    }
   }
+  darwinCapabilityVerified = true;
 }
 
 function noFollowFlag(): number {

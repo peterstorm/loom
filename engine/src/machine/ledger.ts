@@ -43,7 +43,6 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import {
   appendFileSync,
-  existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -440,10 +439,11 @@ export async function markAgentActive(
   mkdirSync(subagentDir(), { recursive: true, mode: 0o700 });
   return withLock(bindingLock(sessionId), () => {
     const path = activeFlagPath(sessionId);
-    if (existsSync(path)) {
+    const roster = readOptionalTextFile(path, "active roster");
+    if (roster !== null) {
       // Identity is column 0: a re-marked agent must be recognised as a
       // duplicate whether or not the earlier line recorded a type.
-      const already = readFileSync(path, "utf-8")
+      const already = roster
         .split("\n")
         .filter((l) => l.trim() !== "")
         .some((l) => rosterLineAgentId(l) === agentId);
@@ -649,8 +649,9 @@ export async function recordCallStart(
   await withLock(bindingLock(sessionId), () => {
     const path = callStartPath(sessionId);
     let current: readonly CallStartEntry[] = [];
-    if (existsSync(path)) {
-      const parsed = parseCallStartEntries(readFileSync(path, "utf-8"));
+    const raw = readOptionalTextFile(path, "call-start file");
+    if (raw !== null) {
+      const parsed = parseCallStartEntries(raw);
       if (parsed === null) {
         process.stderr.write(
           `recordCallStart: corrupt call-start file for ${sessionId} — starting a fresh stamp list\n`,

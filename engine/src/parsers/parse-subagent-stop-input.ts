@@ -1,12 +1,10 @@
-import type { SubagentStopInput } from "../types";
 import {
   parseSubagentLifecycleInput,
   parseSubagentLifecycleStdin,
+  type ParsedSubagentLifecycleInput,
 } from "./parse-subagent-lifecycle-input";
 
-export type ParsedSubagentStopInput =
-  | Readonly<{ ok: true; value: Readonly<SubagentStopInput> }>
-  | Readonly<{ ok: false; error: string }>;
+export type ParsedSubagentStopInput = ParsedSubagentLifecycleInput;
 
 /** Parse the untrusted hook wire value before any caller can access identity fields. */
 export function parseSubagentStopInput(raw: unknown): ParsedSubagentStopInput {

@@ -35,7 +35,7 @@ type RunnerTally = Readonly<{
 
 type RunnerVerdict = Readonly<{
   label: string;
-  line: number;
+  position: number;
   kind: "passed" | "failed" | "zero";
   summary: string;
 }>;
@@ -101,7 +101,7 @@ function latestRunnerVerdict(input: string, runner: RunnerTally): RunnerVerdict 
     const executed = tallyCount(match);
     return Object.freeze({
       label: runner.label,
-      line: lineOf(input, match.index),
+      position: match.index,
       kind: executed === 0 ? "zero" : "passed",
       summary: executed === 0 ? "0 tests executed" : runner.renderPass(match),
     });
@@ -110,13 +110,13 @@ function latestRunnerVerdict(input: string, runner: RunnerTally): RunnerVerdict 
     .filter((match) => tallyCount(match) > 0)
     .map((match): RunnerVerdict => Object.freeze({
       label: runner.label,
-      line: lineOf(input, match.index),
+      position: match.index,
       kind: "failed",
       summary: runner.renderFail(match),
     }));
   return [...passes, ...failures].reduce<RunnerVerdict | null>((latest, candidate) => {
-    if (latest === null || candidate.line > latest.line) return candidate;
-    return candidate.line === latest.line && verdictPriority(candidate) > verdictPriority(latest)
+    if (latest === null || candidate.position > latest.position) return candidate;
+    return candidate.position === latest.position && verdictPriority(candidate) > verdictPriority(latest)
       ? candidate
       : latest;
   }, null);
@@ -157,25 +157,31 @@ function vitestVerdictKind(failed: number, passed: number): RunnerVerdict["kind"
 
 /** Parse each complete Vitest `Tests …` line as one indivisible verdict. */
 function latestVitestVerdict(input: string): RunnerVerdict | null {
-  const summaries = allMatches(input, /^[ \t]*Tests?[ \t]+([^\n]+?)[ \t]*$/m)
-    .flatMap((match): readonly RunnerVerdict[] => {
-      const summary = match[1];
-      if (summary === undefined) return [];
+  const summaries = allMatches(input, /^[ \t]*Tests?[ \t]+(\d+[^\n]*?)[ \t]*$/m)
+    .map((match): RunnerVerdict => {
+      const summary = match[1]!;
       const body = summary.replace(/[ \t]+\(\d+\)$/, "");
       const parsed = parseVitestSegments(body);
-      if (parsed === null) return [];
+      if (parsed === null) {
+        return Object.freeze({
+          label: "vitest",
+          position: match.index,
+          kind: "failed",
+          summary: `malformed summary: ${match[0].trim()}`,
+        });
+      }
       const failed = parsed.find(({ kind }) => kind === "failed")?.count ?? 0;
       const passed = parsed.find(({ kind }) => kind === "passed")?.count ?? 0;
       const kind = vitestVerdictKind(failed, passed);
-      return [Object.freeze({
+      return Object.freeze({
         label: "vitest",
-        line: lineOf(input, match.index),
+        position: match.index,
         kind,
         summary: kind === "zero" ? "0 tests executed" : match[0].trim(),
-      })];
+      });
     });
   return summaries.reduce<RunnerVerdict | null>((latest, candidate) =>
-    latest === null || candidate.line >= latest.line ? candidate : latest, null);
+    latest === null || candidate.position >= latest.position ? candidate : latest, null);
 }
 
 function mavenVerdictKind(executed: number, failed: boolean): RunnerVerdict["kind"] {
@@ -184,30 +190,53 @@ function mavenVerdictKind(executed: number, failed: boolean): RunnerVerdict["kin
   return "passed";
 }
 
+type MavenTerminal = Readonly<{
+  kind: "success" | "failure";
+  position: number;
+  summary: string;
+}>;
+
 function latestMavenVerdict(input: string): RunnerVerdict | null {
   const stripped = input.replace(/\*\*/g, "");
-  const hasBuildSuccess = /BUILD SUCCESS/.test(stripped);
-  const tallies = allMatches(stripped, /Tests run: (\d+), Failures: (\d+), Errors: (\d+)/)
-    .flatMap((match): readonly RunnerVerdict[] => {
-      const executed = tallyCount(match);
-      const failed = match[2] !== "0" || match[3] !== "0";
-      if (!failed && !hasBuildSuccess) return [];
-      return [Object.freeze({
-        label: "maven",
-        line: lineOf(stripped, match.index),
-        kind: mavenVerdictKind(executed, failed),
-        summary: executed === 0 && !failed ? "0 tests executed" : match[0],
-      })];
-    });
-  const buildFailures = allMatches(stripped, /^BUILD FAILURE[ \t]*$/m)
-    .map((match): RunnerVerdict => Object.freeze({
-      label: "maven",
-      line: lineOf(stripped, match.index),
-      kind: "failed",
+  const terminals = allMatches(stripped, /^BUILD (SUCCESS|FAILURE)[ \t]*$/m)
+    .map((match): MavenTerminal => Object.freeze({
+      kind: match[1] === "SUCCESS" ? "success" : "failure",
+      position: match.index,
       summary: match[0],
     }));
+  const tallies = allMatches(stripped, /Tests run: (\d+), Failures: (\d+), Errors: (\d+)/)
+    .map((match): RunnerVerdict => {
+      const executed = tallyCount(match);
+      const failed = match[2] !== "0" || match[3] !== "0";
+      const terminal = terminals.find(({ position }) => position > match.index);
+      if (failed) {
+        return Object.freeze({ label: "maven", position: match.index, kind: "failed", summary: match[0] });
+      }
+      if (terminal?.kind !== "success") {
+        return Object.freeze({
+          label: "maven",
+          position: match.index,
+          kind: "failed",
+          summary: terminal === undefined ? `incomplete run: ${match[0]}` : terminal.summary,
+        });
+      }
+      return Object.freeze({
+        label: "maven",
+        position: match.index,
+        kind: mavenVerdictKind(executed, false),
+        summary: executed === 0 ? "0 tests executed" : match[0],
+      });
+    });
+  const buildFailures = terminals
+    .filter(({ kind }) => kind === "failure")
+    .map((terminal): RunnerVerdict => Object.freeze({
+      label: "maven",
+      position: terminal.position,
+      kind: "failed",
+      summary: terminal.summary,
+    }));
   return [...tallies, ...buildFailures].reduce<RunnerVerdict | null>((latest, candidate) =>
-    latest === null || candidate.line >= latest.line ? candidate : latest, null);
+    latest === null || candidate.position >= latest.position ? candidate : latest, null);
 }
 
 export function extractTestEvidence(bashOutput: string): TestEvidence {
@@ -220,13 +249,4 @@ export function extractTestEvidence(bashOutput: string): TestEvidence {
   const evidence = verdicts.map(({ label, summary }) => `${label}: ${summary}`).join("; ");
   const passed = verdicts.length > 0 && verdicts.every(({ kind }) => kind === "passed");
   return testEvidenceOf(passed, evidence);
-}
-
-/** Zero-based line number of the character at `index`. */
-function lineOf(input: string, index: number): number {
-  let line = 0;
-  for (let i = 0; i < index; i += 1) {
-    if (input.charCodeAt(i) === 10) line += 1;
-  }
-  return line;
 }

@@ -228,12 +228,22 @@ describe("diff command authority over workspace-authored Git behaviour", () => {
       execFileSync("git", ["-c", "user.name=Loom Test", "-c", "user.email=loom@example.test", "commit", "--quiet", "-m", "base"], { cwd: repository });
       execFileSync("git", ["worktree", "add", "--quiet", "-b", "linked-fixture", linked], { cwd: repository });
       writeFileSync(join(linked, "data.dat"), "after\n");
+      writeFileSync(join(linked, "linked-only.dat"), "linked index bytes\n");
+      execFileSync("git", ["add", "linked-only.dat"], { cwd: linked });
 
       const observed = withProjectDir(linked, () => diffFiles(["data.dat"]));
+      const staged = withProjectDir(linked, () => diffFilesStaged(["linked-only.dat"]));
       const tracked = isTrackedAt(linked, "data.dat");
 
       expect(observed.ok).toBe(true);
       if (observed.ok) expect(observed.diff).toContain("+after");
+      expect(staged.ok).toBe(true);
+      if (staged.ok) expect(staged.diff).toContain("+linked index bytes");
+      expect(execFileSync("git", ["ls-files", "linked-only.dat"], {
+        cwd: repository,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      })).toBe("");
       expect(tracked).toEqual({ ok: true, tracked: true });
     } finally {
       rmSync(fixture, { recursive: true, force: true });

@@ -1953,6 +1953,9 @@ export function projectWaveGateLifecycle(
   snapshot: WaveReadinessSnapshot,
   evidence: WaveGateLifecycleEvidence,
 ): DomainResult<WaveGateState, WaveGateProjectionError> {
+  if (!Number.isSafeInteger(evidence.acceptedResults) || evidence.acceptedResults < 0) {
+    return projectionFailure("acceptedResults must be a non-negative safe integer");
+  }
   const initial = createWaveGateState(snapshot);
   if (!initial.ok) return projectionFailure(initial.error.message);
 

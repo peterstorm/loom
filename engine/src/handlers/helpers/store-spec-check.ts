@@ -6,7 +6,8 @@
  * This route carries no capture-correlated request authority, so
  * `decideSpecCheckManualOverride` decides whether it may write protected state
  * at all: never while a registered Wave Gate owns the Wave, and only with an
- * explicit `SPEC_CHECK_OVERRIDE:` reason for a modern graph.
+ * explicit `SPEC_CHECK_OVERRIDE:` reason inside the machine footer, before its
+ * terminal verdict, for a modern graph.
  */
 
 import type { HookHandler, HookResult } from "../../types";
@@ -39,7 +40,7 @@ const overrideError = (override: Exclude<SpecCheckManualOverride, { kind: "allow
       `spec-check evidence may write (${override.problem}) — persist the corrected findings and resume that ` +
       "Run Directory with `helper orchestration resume`, or start a fresh /wave-gate run. spec_check NOT updated"
     : "store-spec-check: a modern TaskGraph makes a manual spec-check write an operator " +
-      "override, which must be attributable — add a 'SPEC_CHECK_OVERRIDE: <reason>' line " +
+      "override, which must be attributable — add a 'SPEC_CHECK_OVERRIDE: <reason>' line before the terminal verdict " +
       `(${override.problem}). spec_check NOT updated`;
 
 /** Decide manual authority and commit its evidence under one StateManager lock. */

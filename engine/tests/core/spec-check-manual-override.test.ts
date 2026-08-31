@@ -141,10 +141,10 @@ describe("decideSpecCheckManualOverride", () => {
 
     const result = await runStoreSpecCheck([
       "SPEC_CHECK_WAVE: 1",
+      "SPEC_CHECK_OVERRIDE: stale operator observation",
       "SPEC_CHECK_CRITICAL_COUNT: 0",
       "SPEC_CHECK_HIGH_COUNT: 0",
       "SPEC_CHECK_VERDICT: PASSED",
-      "SPEC_CHECK_OVERRIDE: stale operator observation",
     ].join("\n"), manager, "2026-08-30T00:00:00.000Z");
 
     expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("registered Wave Gate owns") });

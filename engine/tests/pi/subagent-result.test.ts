@@ -983,10 +983,10 @@ describe("applyReviewPiResult", () => {
 describe("applySpecCheckPiResult", () => {
   const specCheckText = (critical: number, wave: number | null = 1) => [
     ...(wave === null ? [] : [`SPEC_CHECK_WAVE: ${wave}`]),
+    ...(critical > 0 ? ["CRITICAL: requirement R1 is unimplemented"] : []),
     `SPEC_CHECK_CRITICAL_COUNT: ${critical}`,
     "SPEC_CHECK_HIGH_COUNT: 0",
     `SPEC_CHECK_VERDICT: ${critical > 0 ? "BLOCKED" : "PASSED"}`,
-    ...(critical > 0 ? ["CRITICAL: requirement R1 is unimplemented"] : []),
   ].join("\n");
 
   it("derives blocked from the stored spec-check rather than asserting it", async () => {
@@ -1019,10 +1019,10 @@ describe("applySpecCheckPiResult", () => {
     ["malformed messages", [{ role: 42 }]],
     ["count-mismatched evidence", assistantText([
       "SPEC_CHECK_WAVE: 1",
+      "CRITICAL: uncounted blocker",
       "SPEC_CHECK_CRITICAL_COUNT: 0",
       "SPEC_CHECK_HIGH_COUNT: 0",
       "SPEC_CHECK_VERDICT: PASSED",
-      "CRITICAL: uncounted blocker",
     ].join("\n"))],
   ])("replaces a prior block with evidence_capture_failed for %s", async (_label, messages) => {
     const fixture = graphWithSpecCheckAuthority();

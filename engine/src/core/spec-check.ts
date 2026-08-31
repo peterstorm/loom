@@ -41,15 +41,25 @@ const SPEC_FINDING_MARKERS = Object.freeze([
   Object.freeze({ prefix: "MEDIUM:", target: "medium" as const }),
 ]);
 
-/** Parse the last concrete spec-check block from an agent transcript. */
+function lastMatch(input: string, regex: RegExp): RegExpMatchArray | null {
+  const matches = [...input.matchAll(regex)];
+  return matches.at(-1) ?? null;
+}
+
+/** Parse the last concrete, verdict-terminated spec-check footer from an agent transcript. */
 export function parseSpecCheckOutput(output: string): ParsedSpecCheckOutput {
-  const lastCritCountIdx = output.lastIndexOf("SPEC_CHECK_CRITICAL_COUNT:");
-  let blockStart = 0;
-  if (lastCritCountIdx >= 0) {
-    const lastWaveIdx = output.slice(0, lastCritCountIdx).lastIndexOf("SPEC_CHECK_WAVE:");
-    blockStart = lastWaveIdx >= 0 ? lastWaveIdx : 0;
-  }
-  const searchBlock = lastCritCountIdx >= 0 ? output.slice(blockStart) : output;
+  const criticalCountMarker = lastMatch(output, /^SPEC_CHECK_CRITICAL_COUNT:\s*\d+\s*$/gm);
+  const markerPosition = criticalCountMarker?.index ?? -1;
+  const waveMarker = markerPosition < 0
+    ? null
+    : lastMatch(output.slice(0, markerPosition), /^SPEC_CHECK_WAVE:\s*\d+\s*$/gm);
+  const blockStart = waveMarker?.index ?? 0;
+  const suffix = output.slice(markerPosition < 0 ? blockStart : markerPosition);
+  const verdictMarker = /^SPEC_CHECK_VERDICT:\s*(?:PASSED|BLOCKED)\s*$/m.exec(suffix);
+  const blockEnd = verdictMarker?.index === undefined
+    ? output.length
+    : (markerPosition < 0 ? blockStart : markerPosition) + verdictMarker.index + verdictMarker[0].length;
+  const searchBlock = output.slice(blockStart, blockEnd);
 
   const findings = {
     critical: [] as string[],

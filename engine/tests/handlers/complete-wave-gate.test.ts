@@ -60,6 +60,7 @@ import {
   deriveWaveRefutationPlan,
   evaluateWaveGate as evaluateCoreWaveGate,
   prepareWaveRefutationPanel,
+  projectWaveGateLifecycle,
   proveWaveGateNextAction,
   reduceWaveGate,
   waveAdvisoryDecisionActionRequest,
@@ -1105,6 +1106,30 @@ describe("LC-1 Wave Gate lifecycle reducer", () => {
       reduceWaveGate(preparing, lifecycleCompletionEvent());
     }
     expect(preparing.kind).toBe("preparing");
+  });
+
+  it("rejects every non-safe accepted-result count before lifecycle replay", () => {
+    fc.assert(fc.property(
+      fc.oneof(
+        fc.integer({ max: -1 }),
+        fc.double().filter((value) => !Number.isSafeInteger(value)),
+      ),
+      (acceptedResults) => {
+        expect(projectWaveGateLifecycle(lifecycleCompletionReadiness(), {
+          batchPublished: true,
+          acceptedResults,
+          rejectedAttempt: null,
+          rosterComplete: false,
+          activeCritical: 0,
+          advisoryCount: 0,
+          advisoryApproved: false,
+          committed: null,
+        })).toMatchObject({
+          ok: false,
+          error: { message: "acceptedResults must be a non-negative safe integer" },
+        });
+      },
+    ));
   });
 
   it("implements the exact declared transitions, including terminal attempt 2", () => {

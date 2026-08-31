@@ -91,7 +91,7 @@ describe("legacyTestsPassedNote (pure)", () => {
 
 describe("extractTestEvidence (pure)", () => {
   it("detects Maven BUILD SUCCESS", () => {
-    const output = "BUILD SUCCESS\nTests run: 42, Failures: 0, Errors: 0";
+    const output = "Tests run: 42, Failures: 0, Errors: 0\nBUILD SUCCESS";
     const result = extractTestEvidence(output);
     expect(result.passed).toBe(true);
     expect(result.evidence).toContain("maven");
@@ -99,14 +99,14 @@ describe("extractTestEvidence (pure)", () => {
   });
 
   it("strips markdown bold from Maven output", () => {
-    const output = "**BUILD SUCCESS**\n**Tests run: 5, Failures: 0, Errors: 0**";
+    const output = "**Tests run: 5, Failures: 0, Errors: 0**\n**BUILD SUCCESS**";
     const result = extractTestEvidence(output);
     expect(result.passed).toBe(true);
     expect(result.evidence).toContain("maven");
   });
 
   it("rejects Maven with failures", () => {
-    const output = "BUILD SUCCESS\nTests run: 10, Failures: 2, Errors: 0";
+    const output = "Tests run: 10, Failures: 2, Errors: 0\nBUILD FAILURE";
     const result = extractTestEvidence(output);
     expect(result.passed).toBe(false);
   });
@@ -157,6 +157,20 @@ describe("extractTestEvidence (pure)", () => {
       evidence: "vitest: Tests  2 failed | 28 passed (30)",
     });
   });
+
+  it("lets a later truncated Vitest failure supersede an earlier passing run", () => {
+    expect(extractTestEvidence("Tests  30 passed (30)\n\nTests 1 failed |")).toEqual({
+      passed: false,
+      evidence: "vitest: malformed summary: Tests 1 failed |",
+    });
+  });
+
+  it.each(["Tests  3 skipped (3)", "Tests  4 todo (4)"])(
+    "treats non-executed Vitest tests as zero-test evidence: %s",
+    (output) => {
+      expect(extractTestEvidence(output)).toEqual({ passed: false, evidence: "vitest: 0 tests executed" });
+    },
+  );
 
   it("makes empty passing evidence unrepresentable", () => {
     if (false) {
@@ -303,7 +317,7 @@ describe("extractTestEvidence (pure)", () => {
   });
 
   it("uses last match for maven: first fails, last passes", () => {
-    const output = "BUILD SUCCESS\nTests run: 10, Failures: 2, Errors: 0\n\nBUILD SUCCESS\nTests run: 15, Failures: 0, Errors: 0";
+    const output = "Tests run: 10, Failures: 2, Errors: 0\nBUILD FAILURE\n\nTests run: 15, Failures: 0, Errors: 0\nBUILD SUCCESS";
     const result = extractTestEvidence(output);
     expect(result.passed).toBe(true);
     expect(result.evidence).toContain("maven");
@@ -317,6 +331,14 @@ describe("extractTestEvidence (pure)", () => {
     const output = "Tests run: 15, Failures: 0, Errors: 0\nBUILD SUCCESS\n\nTests run: 10, Failures: 2, Errors: 0\nBUILD FAILURE";
     const result = extractTestEvidence(output);
     expect(result.passed).toBe(false);
+  });
+
+  it("lets a later incomplete Maven run supersede an earlier success", () => {
+    const output = "Tests run: 15, Failures: 0, Errors: 0\nBUILD SUCCESS\n\nTests run: 10, Failures: 0, Errors: 0";
+    expect(extractTestEvidence(output)).toEqual({
+      passed: false,
+      evidence: "maven: incomplete run: Tests run: 10, Failures: 0, Errors: 0",
+    });
   });
 
   it("a later non-zero maven Errors tally vetoes an earlier pass", () => {

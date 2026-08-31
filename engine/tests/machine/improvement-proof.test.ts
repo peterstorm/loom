@@ -36,7 +36,7 @@ function bashTranscript(command: string, output: string): string {
 }
 
 describe("R2 — real exit status beats happy output text", () => {
-  const lyingOutput = "BUILD SUCCESS\nTests run: 12, Failures: 0, Errors: 0";
+  const lyingOutput = "Tests run: 12, Failures: 0, Errors: 0\nBUILD SUCCESS";
   const transcript = bashTranscript("mvn test", lyingOutput);
   const bashOutput = parseBashTestOutput(transcript);
 

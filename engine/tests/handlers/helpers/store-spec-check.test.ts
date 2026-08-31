@@ -65,12 +65,12 @@ describe("store-spec-check helper", () => {
     const { exitCode } = runHelper(
       [
         "SPEC_CHECK_WAVE: 1",
-        "SPEC_CHECK_CRITICAL_COUNT: 1",
-        "SPEC_CHECK_HIGH_COUNT: 2",
-        "SPEC_CHECK_VERDICT: BLOCKED",
         "CRITICAL: requirement REQ-1 not implemented",
         "HIGH: partial coverage of REQ-2",
         "HIGH: missing error path for REQ-3",
+        "SPEC_CHECK_CRITICAL_COUNT: 1",
+        "SPEC_CHECK_HIGH_COUNT: 2",
+        "SPEC_CHECK_VERDICT: BLOCKED",
       ].join("\n"),
     );
     expect(exitCode).toBe(0);
@@ -110,10 +110,10 @@ describe("store-spec-check helper", () => {
   it("fails closed when CRITICAL_COUNT disagrees with the CRITICAL: lines (forged-zero shape)", () => {
     const { exitCode, stderr } = runHelper(
       [
+        "CRITICAL: requirement REQ-1 not implemented",
         "SPEC_CHECK_CRITICAL_COUNT: 0",
         "SPEC_CHECK_HIGH_COUNT: 0",
         "SPEC_CHECK_VERDICT: PASSED",
-        "CRITICAL: requirement REQ-1 not implemented",
       ].join("\n"),
     );
     expect(exitCode).not.toBe(0);
@@ -124,10 +124,10 @@ describe("store-spec-check helper", () => {
   it("fails closed when HIGH_COUNT disagrees with the HIGH: lines", () => {
     const { exitCode, stderr } = runHelper(
       [
+        "HIGH: partial coverage of REQ-2",
         "SPEC_CHECK_CRITICAL_COUNT: 0",
         "SPEC_CHECK_HIGH_COUNT: 3",
         "SPEC_CHECK_VERDICT: PASSED",
-        "HIGH: partial coverage of REQ-2",
       ].join("\n"),
     );
     expect(exitCode).not.toBe(0);
@@ -155,10 +155,10 @@ describe("store-spec-check helper", () => {
 
     const { exitCode, stderr } = runHelper([
       "SPEC_CHECK_WAVE: 1",
+      "SPEC_CHECK_OVERRIDE: FRs 12-14 are covered in wave 3",
       "SPEC_CHECK_CRITICAL_COUNT: 0",
       "SPEC_CHECK_HIGH_COUNT: 0",
       "SPEC_CHECK_VERDICT: PASSED",
-      "SPEC_CHECK_OVERRIDE: FRs 12-14 are covered in wave 3",
     ].join("\n"));
 
     expect(exitCode).toBe(0);

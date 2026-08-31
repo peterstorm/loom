@@ -63,7 +63,7 @@ import {
   openChildDirectoryNoFollow,
   openDirectoryNoFollow,
   anchoredChildPath,
-  closeAnchoredDirectory,
+  closeAnchorGuarded,
   type AnchoredDirectory,
   readDirectoryFileNoFollow,
   publishStagedRunFile,
@@ -117,6 +117,42 @@ const failure = <T>(field: string, message: string): DomainResult<T, RunDirector
   ({ ok: false, error: canonicalRecord({ kind: "invalid-run-directory" as const, field, message }) });
 
 const success = <T>(value: T): DomainResult<T, RunDirectoryError> => ({ ok: true, value });
+
+type AnchoredOutcome<T> =
+  | Readonly<{ kind: "returned"; value: T }>
+  | Readonly<{ kind: "threw"; error: unknown }>;
+
+function errorDetail(error: unknown): string {
+  if (error instanceof AggregateError) {
+    return `${error.message}: ${error.errors.map(errorDetail).join("; ")}`;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Own one anchor from acquisition through guarded release. */
+function withOwnedAnchor<T>(
+  acquire: () => AnchoredDirectory,
+  operation: string,
+  use: (directory: AnchoredDirectory) => T,
+): T {
+  const directory = acquire();
+  let outcome: AnchoredOutcome<T>;
+  try {
+    outcome = { kind: "returned", value: use(directory) };
+  } catch (error) {
+    outcome = { kind: "threw", error };
+  }
+  if (outcome.kind === "threw") {
+    const settled = closeAnchorGuarded(directory, outcome.error, operation);
+    if (settled instanceof AggregateError) {
+      throw new AggregateError(settled.errors, errorDetail(settled));
+    }
+    throw settled ?? outcome.error;
+  }
+  const closeError = closeAnchorGuarded(directory, null, operation);
+  if (closeError !== null) throw closeError;
+  return outcome.value;
+}
 
 /** Immutable run authority, written once when the directory is created. */
 export type RunAuthority = Readonly<{
@@ -456,12 +492,13 @@ export interface RunDirHandle extends ProgramJournal {
  * the child before using it as the next parent.
  */
 function ensureRunSubdirectories(runDirectory: string, targets: readonly string[]): void {
-  const root = openDirectoryNoFollow(runDirectory);
-  try {
-    for (const target of targets) ensureRelativeDirectoryNoFollow(root, runDirectory, target);
-  } finally {
-    closeAnchoredDirectory(root);
-  }
+  withOwnedAnchor(
+    () => openDirectoryNoFollow(runDirectory),
+    `subdirectory creation under ${runDirectory}`,
+    (root) => {
+      for (const target of targets) ensureRelativeDirectoryNoFollow(root, runDirectory, target);
+    },
+  );
 }
 
 function ensureFixedLayout(runDirectory: string): void {
@@ -593,7 +630,7 @@ export function openRunDirectory(
   // `openDirectoryNoFollow` supplies the no-symlink authority before any fixed
   // layout can be created through that child.
   try {
-    closeAnchoredDirectory(openDirectoryNoFollow(directory));
+    withOwnedAnchor(() => openDirectoryNoFollow(directory), `layout probe for ${directory}`, () => undefined);
     ensureFixedLayout(directory);
   } catch (error) {
     return failure(
@@ -651,14 +688,14 @@ export function createRunDirectory(
   const reference = rebasedOnRealRunsRoot(lexical.value);
   if (!reference.ok) return reference;
   const { runsRoot: root, runDirectory: directory } = reference.value;
-  let anchor: AnchoredDirectory | null = null;
   try {
-    anchor = openDirectoryNoFollow(root);
-    ensureRelativeDirectoryNoFollow(anchor, root, directory);
+    withOwnedAnchor(
+      () => openDirectoryNoFollow(root),
+      `run directory creation for ${directory}`,
+      (anchor) => ensureRelativeDirectoryNoFollow(anchor, root, directory),
+    );
   } catch (error) {
     return failure("runDirectory", `cannot create run directory ${directory}: ${error instanceof Error ? error.message : String(error)}`);
-  } finally {
-    if (anchor !== null) closeAnchoredDirectory(anchor);
   }
   return openRunDirectory(root, directory);
 }
@@ -1123,52 +1160,56 @@ function reserveRequestOperation(runId: OrchestrationRunId, directory: string): 
 
 function readIssuedRequestsOperation(runId: OrchestrationRunId, directory: string): RunDirHandle["readIssuedRequests"] {
   return () => {
-    let requests: AnchoredDirectory | null = null;
     try {
-      requests = openDirectoryNoFollow(join(directory, REQUESTS));
-      const issued: AgentRequestAuthority[] = [];
-      for (const name of listDirectoryNamesNoFollow(requests)) {
-        if (!name.endsWith(".json")) continue;
-        let raw: unknown;
-        try {
-          raw = JSON.parse(readDirectoryFileNoFollow(requests, name).toString("utf-8")) as unknown;
-        } catch (error) {
-          return failure("request", `request authority ${name} is unreadable: ${(error as Error).message}`);
-        }
-        const parsed = parseStoredAgentRequestAuthority(raw);
-        if (!parsed.ok) {
-          return failure("request", `request authority ${name} is malformed: ${parsed.error.violations.map(({ message }) => message).join("; ")}`);
-        }
-        if (name !== `${parsed.value.requestId}.json`) {
-          return failure("request", `request authority ${name} does not match body request id ${parsed.value.requestId}`);
-        }
-        if (parsed.value.runId !== runId) return failure("request", `request authority ${name} belongs to a different run`);
-        issued.push(parsed.value);
-      }
-      return success(Object.freeze(issued));
+      return withOwnedAnchor(
+        () => openDirectoryNoFollow(join(directory, REQUESTS)),
+        "issued-request inspection",
+        (requests) => {
+          const issued: AgentRequestAuthority[] = [];
+          for (const name of listDirectoryNamesNoFollow(requests)) {
+            if (!name.endsWith(".json")) continue;
+            let raw: unknown;
+            try {
+              raw = JSON.parse(readDirectoryFileNoFollow(requests, name).toString("utf-8")) as unknown;
+            } catch (error) {
+              throw new Error(`request authority ${name} is unreadable: ${(error as Error).message}`, { cause: error });
+            }
+            const parsed = parseStoredAgentRequestAuthority(raw);
+            if (!parsed.ok) {
+              throw new Error(`request authority ${name} is malformed: ${parsed.error.violations.map(({ message }) => message).join("; ")}`);
+            }
+            if (name !== `${parsed.value.requestId}.json`) {
+              throw new Error(`request authority ${name} does not match body request id ${parsed.value.requestId}`);
+            }
+            if (parsed.value.runId !== runId) throw new Error(`request authority ${name} belongs to a different run`);
+            issued.push(parsed.value);
+          }
+          return success(Object.freeze(issued));
+        },
+      );
     } catch (error) {
       return failure("request", `cannot inspect issued requests safely: ${(error as Error).message}`);
-    } finally {
-      if (requests !== null) closeAnchoredDirectory(requests);
     }
   };
 }
 
 function readCapturedAttemptsOperation(directory: string): RunDirHandle["readCapturedAttempts"] {
   return () => {
-    let transcripts: AnchoredDirectory | null = null;
     try {
-      transcripts = openDirectoryNoFollow(join(directory, TRANSCRIPTS));
-      const captured = new Set<CaptureKey>();
-      for (const slot of listDirectoryNamesNoFollow(transcripts)) {
-        const inspected = inspectCapturedSlot(transcripts, slot, captured);
-        if (!inspected.ok) return inspected;
-      }
-      return success(captured);
+      return withOwnedAnchor(
+        () => openDirectoryNoFollow(join(directory, TRANSCRIPTS)),
+        "captured-attempt inspection",
+        (transcripts) => {
+          const captured = new Set<CaptureKey>();
+          for (const slot of listDirectoryNamesNoFollow(transcripts)) {
+            const inspected = inspectCapturedSlot(transcripts, slot, captured);
+            if (!inspected.ok) throw new Error(inspected.error.message);
+          }
+          return success(captured);
+        },
+      );
     } catch (error) {
       return failure("transcript", `cannot inspect captured attempts safely: ${(error as Error).message}`);
-    } finally {
-      if (transcripts !== null) closeAnchoredDirectory(transcripts);
     }
   };
 }
@@ -1181,28 +1222,28 @@ function inspectCapturedSlot(
   if (slot === "capture.lock" || slot === "capture.lock.recovery" || slot.startsWith("capture.lock.tomb-")) {
     return success(undefined);
   }
-  let slotDirectory: AnchoredDirectory | null = null;
   try {
-    slotDirectory = openChildDirectoryNoFollow(transcripts, slot);
-    for (const name of listDirectoryNamesNoFollow(slotDirectory)) {
-      const match = /^attempt-([12])\.raw$/.exec(name);
-      if (match === null) continue;
-      // The ATTEMPT itself is parsed by the domain rule that owns the concept,
-      // not by a second type cast of the filename capture group.
-      const attempt = parseSemanticAttempt(Number(match[1]), `transcript slot ${slot}/${name}`);
-      if (!attempt.ok) {
-        return failure("transcript", `transcript slot ${slot} holds an unparsable attempt file ${name}`);
-      }
-      captured.add(captureKey(slot, attempt.value));
-    }
-    return success(undefined);
+    return withOwnedAnchor(
+      () => openChildDirectoryNoFollow(transcripts, slot),
+      `transcript-slot inspection for ${slot}`,
+      (slotDirectory) => {
+        for (const name of listDirectoryNamesNoFollow(slotDirectory)) {
+          const match = /^attempt-([12])\.raw$/.exec(name);
+          if (match === null) continue;
+          // The ATTEMPT itself is parsed by the domain rule that owns the concept,
+          // not by a second type cast of the filename capture group.
+          const attempt = parseSemanticAttempt(Number(match[1]), `transcript slot ${slot}/${name}`);
+          if (!attempt.ok) throw new Error(`transcript slot ${slot} holds an unparsable attempt file ${name}`);
+          captured.add(captureKey(slot, attempt.value));
+        }
+        return success(undefined);
+      },
+    );
   } catch (error) {
     return failure(
       "transcript",
       `cannot inspect transcript slot ${slot} safely: ${error instanceof Error ? error.message : String(error)}`,
     );
-  } finally {
-    if (slotDirectory !== null) closeAnchoredDirectory(slotDirectory);
   }
 }
 
@@ -1276,20 +1317,20 @@ function rejectCaptureOperation(runId: OrchestrationRunId, directory: string): R
     if (!supplied.ok) return supplied;
     const key = captureKey(supplied.value.slotId, supplied.value.attempt);
     try {
-      await withAnchoredDirectoryLock(join(directory, TRANSCRIPTS), "capture.lock", (transcriptsDirectory) => {
-        const slotDirectory = openChildDirectoryNoFollow(transcriptsDirectory, supplied.value.slotId);
-        try {
-          try {
-            readDirectoryFileNoFollow(slotDirectory, `attempt-${supplied.value.attempt}.raw`);
-            throw new Error(`attempt ${supplied.value.attempt} for slot ${supplied.value.slotId} is already captured`);
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-          }
-          writeCaptureRejectionMarker(slotDirectory, supplied.value, diagnostic);
-        } finally {
-          closeAnchoredDirectory(slotDirectory);
-        }
-      });
+      await withAnchoredDirectoryLock(join(directory, TRANSCRIPTS), "capture.lock", (transcriptsDirectory) =>
+        withOwnedAnchor(
+          () => openChildDirectoryNoFollow(transcriptsDirectory, supplied.value.slotId),
+          `capture rejection for ${supplied.value.slotId}`,
+          (slotDirectory) => {
+            try {
+              readDirectoryFileNoFollow(slotDirectory, `attempt-${supplied.value.attempt}.raw`);
+              throw new Error(`attempt ${supplied.value.attempt} for slot ${supplied.value.slotId} is already captured`);
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            }
+            writeCaptureRejectionMarker(slotDirectory, supplied.value, diagnostic);
+          },
+        ));
       return success(key);
     } catch (error) {
       return failure("transcript", `cannot reject capture safely: ${error instanceof Error ? error.message : String(error)}`);
@@ -1367,27 +1408,30 @@ function readCaptureRejectionOperation(
 
 function isPristineOperation(directory: string): RunDirHandle["isPristine"] {
   return () => {
-    let root: AnchoredDirectory | null = null;
     try {
-      root = openDirectoryNoFollow(directory);
-      const allowedRoot = new Set([AUTHORITY_FILE, PROGRAM_FILE, ...FIXED_SUBDIRECTORIES.map((path) => path.split("/")[0]!) ]);
-      const rootEntries = listDirectoryNamesNoFollow(root);
-      if (rootEntries.some((entry) => !allowedRoot.has(entry))) return success(false);
-      for (const relative of FIXED_SUBDIRECTORIES) {
-        let child: AnchoredDirectory | null = null;
-        try {
-          child = openDirectoryNoFollow(join(directory, relative));
-          const allowed = relative === REQUESTS ? new Set([CORRELATORS]) : new Set<string>();
-          if (listDirectoryNamesNoFollow(child).some((entry) => !allowed.has(entry))) return success(false);
-        } finally {
-          if (child !== null) closeAnchoredDirectory(child);
-        }
-      }
-      return success(true);
+      return withOwnedAnchor(
+        () => openDirectoryNoFollow(directory),
+        "pristine-run inspection",
+        (root) => {
+          const allowedRoot = new Set([AUTHORITY_FILE, PROGRAM_FILE, ...FIXED_SUBDIRECTORIES.map((path) => path.split("/")[0]!) ]);
+          const rootEntries = listDirectoryNamesNoFollow(root);
+          if (rootEntries.some((entry) => !allowedRoot.has(entry))) return success(false);
+          for (const relative of FIXED_SUBDIRECTORIES) {
+            const occupied = withOwnedAnchor(
+              () => openDirectoryNoFollow(join(directory, relative)),
+              `pristine child inspection for ${relative}`,
+              (child) => {
+                const allowed = relative === REQUESTS ? new Set([CORRELATORS]) : new Set<string>();
+                return listDirectoryNamesNoFollow(child).some((entry) => !allowed.has(entry));
+              },
+            );
+            if (occupied) return success(false);
+          }
+          return success(true);
+        },
+      );
     } catch (error) {
       return failure("pristine", `cannot prove replacement run pristine: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      if (root !== null) closeAnchoredDirectory(root);
     }
   };
 }
@@ -1506,15 +1550,18 @@ function captureTranscriptOperation(runId: OrchestrationRunId, directory: string
     );
     if (!supplied.ok) return supplied;
     try {
-      return await withAnchoredDirectoryLock(join(directory, TRANSCRIPTS), "capture.lock", (transcriptsDirectory) => {
-        const slotDirectory = openChildDirectoryNoFollow(transcriptsDirectory, supplied.value.slotId);
-        try {
-          const rejected = rejectedCaptureProblem(slotDirectory, supplied.value);
-          return rejected.ok ? publishTranscriptBytes(runId, slotDirectory, supplied.value, bytes) : rejected;
-        } finally {
-          closeAnchoredDirectory(slotDirectory);
-        }
-      });
+      return await withAnchoredDirectoryLock(join(directory, TRANSCRIPTS), "capture.lock", (transcriptsDirectory) =>
+        withOwnedAnchor(
+          () => openChildDirectoryNoFollow(transcriptsDirectory, supplied.value.slotId),
+          `transcript capture for ${supplied.value.slotId}`,
+          (slotDirectory) => {
+            const rejected = rejectedCaptureProblem(slotDirectory, supplied.value);
+            if (!rejected.ok) throw new Error(rejected.error.message);
+            const published = publishTranscriptBytes(runId, slotDirectory, supplied.value, bytes);
+            if (!published.ok) throw new Error(published.error.message);
+            return published;
+          },
+        ));
     } catch (error) {
       return failure("transcript", `cannot capture transcript safely: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -1709,9 +1756,10 @@ function occupiedArtifactConflict(
 
 /**
  * Promote internal staged paths. Every target is checked BEFORE any rename,
- * because renaming is the one step that cannot be undone member-by-member —
- * ruling out predictable failures while the set is entirely staged keeps
- * "all or none" true rather than merely intended.
+ * which rules out predictable conflicts while the set is entirely staged.
+ * An unexpected later rename fault can leave earlier final files in place;
+ * those bytes are inert because no successful result or Effect Receipt exists.
+ * Publication authority is all-or-none even though filesystem promotion is not.
  *
  * The fault-injection seam is exported, but structural path pairs are not
  * authority: every member must carry the runtime mint issued by
@@ -1846,7 +1894,7 @@ function publishArtifactSetOperation(runId: OrchestrationRunId, runsRoot: string
   };
 }
 
-/** All-or-nothing artifact set publication. */
+/** Receipt-gated artifact set publication; failed partial finals carry no publication authority. */
 function artifactOperations(runId: OrchestrationRunId, runsRoot: string, directory: string) {
   return {
     readArtifactBytes: readArtifactBytesOperation(directory),

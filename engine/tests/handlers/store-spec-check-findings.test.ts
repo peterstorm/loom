@@ -12,13 +12,13 @@ import { parseOrchestrationRunId, parseSlotId } from "../../src/core/orchestrati
 describe("parseSpecCheckOutput (pure)", () => {
   it("parses all severity levels", () => {
     const output = [
+      "SPEC_CHECK_WAVE: 2",
       "CRITICAL: Missing authentication on /api/admin",
       "HIGH: No rate limiting on public endpoints",
       "MEDIUM: Inconsistent error response format",
       "SPEC_CHECK_CRITICAL_COUNT: 1",
       "SPEC_CHECK_HIGH_COUNT: 1",
       "SPEC_CHECK_VERDICT: BLOCKED",
-      "SPEC_CHECK_WAVE: 2",
     ].join("\n");
 
     const result = parseSpecCheckOutput(output);
@@ -115,10 +115,10 @@ describe("parseSpecCheckOutput (pure)", () => {
 
   it("fails evidence reconciliation when the high count drifts from HIGH lines", () => {
     const parsed = parseSpecCheckOutput([
+      "HIGH: uncounted risk",
       "SPEC_CHECK_CRITICAL_COUNT: 0",
       "SPEC_CHECK_HIGH_COUNT: 0",
       "SPEC_CHECK_VERDICT: PASSED",
-      "HIGH: uncounted risk",
     ].join("\n"));
 
     const resolution = reconcileSpecCheck(parsed, 1, "now");
@@ -140,12 +140,12 @@ describe("parseSpecCheckOutput (pure)", () => {
       "Agent processing text...",
       "",
       "SPEC_CHECK_WAVE: 2",
-      "SPEC_CHECK_CRITICAL_COUNT: 2",
-      "SPEC_CHECK_HIGH_COUNT: 1",
-      "SPEC_CHECK_VERDICT: BLOCKED",
       "CRITICAL: Missing authentication on /api/admin",
       "CRITICAL: SQL injection vulnerability",
       "HIGH: No rate limiting on public endpoints",
+      "SPEC_CHECK_CRITICAL_COUNT: 2",
+      "SPEC_CHECK_HIGH_COUNT: 1",
+      "SPEC_CHECK_VERDICT: BLOCKED",
     ].join("\n");
 
     const result = parseSpecCheckOutput(output);
@@ -160,6 +160,36 @@ describe("parseSpecCheckOutput (pure)", () => {
     ]);
     expect(result.high).toEqual(["No rate limiting on public endpoints"]);
     expect(result.medium).toEqual([]);
+  });
+
+  it("ignores finding and override markers after the selected footer verdict", () => {
+    const result = parseSpecCheckOutput([
+      "SPEC_CHECK_WAVE: 2",
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+      "HIGH: trailing transcript prose",
+      "SPEC_CHECK_OVERRIDE: unauthorised trailing override",
+    ].join("\n"));
+
+    expect(result).toMatchObject({
+      critical: [], high: [], medium: [], criticalCount: 0, highCount: 0,
+      verdict: "PASSED", wave: 2, overrideReason: null,
+    });
+  });
+
+  it("does not let a later incomplete footer borrow an earlier verdict", () => {
+    const result = parseSpecCheckOutput([
+      "SPEC_CHECK_WAVE: 1",
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+      "SPEC_CHECK_WAVE: 2",
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+    ].join("\n"));
+
+    expect(result).toMatchObject({ criticalCount: 0, highCount: 0, verdict: null, wave: 2 });
   });
 });
 
@@ -538,7 +568,7 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
         content: [
           {
             type: "text",
-            text: "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED\nCRITICAL: smuggled unreconciled finding",
+            text: "SPEC_CHECK_WAVE: 1\nCRITICAL: smuggled unreconciled finding\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED",
           },
         ],
       },
