@@ -97,8 +97,8 @@ Output ONLY valid JSON. No markdown, no explanation, no code fences. Pure JSON:
 {
   "spec_trace_version": 2,
   "plan_title": "Short title for GH issue",
-  "spec_file": "{spec_file_path}",
-  "plan_file": "{plan_file_path}",
+  "spec_file": "ABSOLUTE_SPEC_FILE_PATH",
+  "plan_file": "ABSOLUTE_PLAN_FILE_PATH",
   "tasks": [
     {
       "id": "T1",
