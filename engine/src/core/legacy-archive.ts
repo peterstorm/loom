@@ -13,8 +13,9 @@
  * functions — and the re-export facades in their former homes — once the
  * oldest historical run directories have been consumed or migrated; the
  * horizon is tracked by the archive sections below. Until then the rule is:
- *   - New code NEVER calls into this module. The façade reads the same
- *     evidence through standalone-review's canonical request-bound parsers.
+ *   - Canonical publication never originates here. Compatibility entry points,
+ *     including the orchestration façade's legacy registration translation,
+ *     may call the archive only after detecting an historical on-disk format.
  *   - No legacy reader may be extended to accept new shapes; a new on-disk
  *     form is a new canonical parser, not a new compatibility branch here.
  *   - Historical callers import this archive explicitly. Canonical modules do

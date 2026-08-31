@@ -1,10 +1,8 @@
 import { describe, it, expect, afterEach } from "vitest";
 import fc from "fast-check";
 import {
-  realpathSync,
   chmodSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   symlinkSync,

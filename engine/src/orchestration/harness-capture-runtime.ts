@@ -43,11 +43,31 @@ import { openRunDirectory, type RunDirHandle } from "./run-directory-handle";
 export const RUNS_ROOT_ENV = "LOOM_ORCHESTRATION_RUNS_ROOT";
 export const RUN_DIR_ENV = "LOOM_ORCHESTRATION_RUN_DIR";
 
+export type TerminalCaptureRefusal = Readonly<{
+  kind: "terminal-refusal";
+  reason: string;
+  message: string;
+}>;
+
+export type CaptureObservation =
+  | Readonly<{ kind: "candidates"; candidates: readonly FinalPayloadCandidate[] }>
+  | TerminalCaptureRefusal;
+
 export type CaptureOutcome =
   | Readonly<{ kind: "not-an-orchestration-run" }>
   | Readonly<{ kind: "no-reservation"; agentId: string }>
   | Readonly<{ kind: "captured"; receipt: CaptureReceipt }>
-  | Readonly<{ kind: "rejected"; reason: string; message: string }>;
+  | Readonly<{ kind: "terminal-rejection"; reason: string; message: string }>
+  | Readonly<{ kind: "retriable-failure"; reason: string; message: string }>;
+
+export const terminalCaptureRefusal = (reason: string, message: string): TerminalCaptureRefusal =>
+  Object.freeze({ kind: "terminal-refusal", reason, message });
+
+export const captureCandidates = (candidates: readonly FinalPayloadCandidate[]): CaptureObservation =>
+  Object.freeze({ kind: "candidates", candidates });
+
+const retriableFailure = (reason: string, message: string): CaptureOutcome =>
+  Object.freeze({ kind: "retriable-failure", reason, message });
 
 /**
  * Why a capture did not happen, in operator-facing words.
@@ -60,7 +80,8 @@ export type CaptureOutcome =
  */
 export function describeCaptureFailure(outcome: CaptureOutcome): string {
   return match(outcome)
-    .with({ kind: "rejected" }, ({ reason, message }) => `${reason}: ${message}`)
+    .with({ kind: "terminal-rejection" }, ({ reason, message }) => `${reason}: ${message}`)
+    .with({ kind: "retriable-failure" }, ({ reason, message }) => `${reason}: ${message}`)
     .with({ kind: "no-reservation" }, ({ agentId }) => `no reservation for ${agentId}`)
     .with({ kind: "not-an-orchestration-run" }, () => "orchestration run authority was unavailable")
     .with({ kind: "captured" }, () => "capture succeeded")
@@ -77,10 +98,9 @@ export function describeCaptureFailure(outcome: CaptureOutcome): string {
  * while the Pi copy turned the identical fault into a string. One journal fault,
  * two classifications, plus a shared dedup key only one side could change.
  *
- * The refusal arrives either split (`reason` + `message`, what the shared rules
- * produce) or already composed (`diagnostic`, what the adapters' own authority
- * checks produce); the durable text each harness writes today is preserved
- * exactly, and only the failure handling is shared.
+ * The refusal is a parsed `TerminalCaptureRefusal`; infrastructure failures
+ * cannot inhabit that type and therefore cannot call this protocol accidentally.
+ * The durable diagnostic is derived once from its reason and message.
  *
  * It never throws, and it never loses the cause. When the tombstone cannot be
  * written the returned message carries the ORIGINAL refusal as well as the
@@ -90,18 +110,15 @@ export function describeCaptureFailure(outcome: CaptureOutcome): string {
 export async function terminalizeCaptureRejection(
   handle: RunDirHandle,
   request: AgentRequestAuthority,
-  refusal: Readonly<{ reason: string; message: string }> | Readonly<{ diagnostic: string }>,
+  refusal: TerminalCaptureRefusal,
 ): Promise<CaptureOutcome> {
-  const reason = "reason" in refusal ? refusal.reason : "capture-rejection";
-  const message = "message" in refusal ? refusal.message : refusal.diagnostic;
-  const diagnostic = "diagnostic" in refusal ? refusal.diagnostic : `${refusal.reason}: ${refusal.message}`;
+  const diagnostic = `${refusal.reason}: ${refusal.message}`;
   const terminal = await handle.rejectCapture(request, diagnostic);
   if (!terminal.ok) {
-    return {
-      kind: "rejected",
-      reason: "rejection-persistence",
-      message: `capture refused (${diagnostic}) and its rejection could not be persisted: ${terminal.error.message}`,
-    };
+    return retriableFailure(
+      "rejection-persistence",
+      `capture refused (${diagnostic}) and its rejection could not be persisted: ${terminal.error.message}`,
+    );
   }
   try {
     await handle.appendEvent({
@@ -111,10 +128,10 @@ export async function terminalizeCaptureRejection(
       recordedAtMs: Date.now(),
       event: captureRejectionAuditRecord(request, diagnostic),
     });
-    return { kind: "rejected", reason, message };
+    return { kind: "terminal-rejection", reason: refusal.reason, message: refusal.message };
   } catch (error) {
     return {
-      kind: "rejected",
+      kind: "terminal-rejection",
       reason: "rejection-audit-unsynchronized",
       message: `capture refused (${diagnostic}); it was terminalised but its audit event could not be persisted: ${error instanceof Error ? error.message : String(error)}`,
     };
@@ -125,14 +142,14 @@ export async function terminalizeCaptureRejection(
  * Capture one finished Agent's result into its reserved slot.
  *
  * Pure with respect to decisions: every refusal is returned as a typed outcome
- * the caller audits rather than thrown or guessed at. What is written differs
- * by outcome, not whether anything is written at all — a refusal that reached a
- * real reservation and left it UNFILLED is itself durably recorded
+ * the caller audits rather than guessed at. Terminal refusals that reached a
+ * real reservation and left it UNFILLED are durably recorded
  * (`terminalizeCaptureRejection` tombstones the attempt and journals the audit
  * record), because a rejected attempt that left no trace is indistinguishable
- * from an attempt that never happened.
+ * from an attempt that never happened. Retriable infrastructure failures never
+ * tombstone the attempt; environment repair may safely retry it.
  *
- * Two families write nothing, both because they have nothing to write against.
+ * Two other families write nothing, both because they have nothing to write against.
  * The refusals that never resolved a reservation — `not-an-orchestration-run`,
  * `no-reservation`, `run-authority`, `run-directory`, `correlator`,
  * `requests`, and `unknown-request` — never reached one. And
@@ -148,32 +165,33 @@ export async function terminalizeCaptureRejection(
  * exactly where "pick the last text block" hides an ambiguity the engine should
  * have refused.
  */
-export async function captureHarnessResult(args: Readonly<{
+type CaptureHarnessInput = Readonly<{
   harness: HarnessResultIdentity["harness"];
   runsRoot: string | undefined;
   runDirectory: string | undefined;
   nativeId: string;
-  candidates: readonly FinalPayloadCandidate[];
-}>): Promise<CaptureOutcome> {
+}> & (
+  | Readonly<{ observe: () => CaptureObservation; candidates?: never }>
+  | Readonly<{ candidates: readonly FinalPayloadCandidate[]; observe?: never }>
+);
+
+export async function captureHarnessResult(args: CaptureHarnessInput): Promise<CaptureOutcome> {
   if (args.runsRoot === undefined && args.runDirectory === undefined) {
     return { kind: "not-an-orchestration-run" };
   }
   if (args.runsRoot === undefined || args.runDirectory === undefined) {
-    return {
-      kind: "rejected",
-      reason: "run-authority",
-      message: "orchestration capture requires both runsRoot and runDirectory",
-    };
+    return retriableFailure(
+      "run-authority",
+      "orchestration capture requires both runsRoot and runDirectory",
+    );
   }
 
   const opened = openRunDirectory(args.runsRoot, args.runDirectory);
-  if (!opened.ok) return { kind: "rejected", reason: "run-directory", message: opened.error.message };
+  if (!opened.ok) return retriableFailure("run-directory", opened.error.message);
   const handle = opened.value;
 
   const correlator = handle.readHarnessCorrelator(args.harness, args.nativeId);
-  if (!correlator.ok) {
-    return { kind: "rejected", reason: "correlator", message: correlator.error.message };
-  }
+  if (!correlator.ok) return retriableFailure("correlator", correlator.error.message);
   if (correlator.value === null) {
     return { kind: "no-reservation", agentId: args.nativeId.length === 0 ? "(missing)" : args.nativeId };
   }
@@ -185,19 +203,25 @@ export async function captureHarnessResult(args: Readonly<{
   });
 
   const issued = handle.readIssuedRequests();
-  if (!issued.ok) return { kind: "rejected", reason: "requests", message: issued.error.message };
+  if (!issued.ok) return retriableFailure("requests", issued.error.message);
   const request = issued.value.find(({ requestId }) => requestId === identity.requestId);
   if (request === undefined) {
-    return { kind: "rejected", reason: "unknown-request", message: "correlated request has no issued authority" };
+    return retriableFailure("unknown-request", "correlated request has no issued authority");
   }
   const reject = (reason: string, message: string): Promise<CaptureOutcome> =>
-    terminalizeCaptureRejection(handle, request, { reason, message });
+    terminalizeCaptureRejection(handle, request, terminalCaptureRefusal(reason, message));
 
-  const payload = parseFinalPayload(args.candidates);
+  const observation = args.observe === undefined
+    ? captureCandidates(args.candidates)
+    : args.observe();
+  if (observation.kind === "terminal-refusal") {
+    return terminalizeCaptureRejection(handle, request, observation);
+  }
+  const payload = parseFinalPayload(observation.candidates);
   if (!payload.ok) return reject(payload.error.reason, payload.error.message);
 
   const captured = handle.readCapturedAttempts();
-  if (!captured.ok) return reject("transcripts", captured.error.message);
+  if (!captured.ok) return retriableFailure("transcripts", captured.error.message);
   const bound = bindCapture({
     issued: issued.value,
     identity,
@@ -209,7 +233,7 @@ export async function captureHarnessResult(args: Readonly<{
     // slot already holds accepted bytes, and `rejectCapture` refuses a captured
     // attempt. Every other bind refusal leaves the reservation unfilled.
     return bound.error.reason === "duplicate-capture"
-      ? { kind: "rejected", reason: bound.error.reason, message: bound.error.message }
+      ? { kind: "terminal-rejection", reason: bound.error.reason, message: bound.error.message }
       : reject(bound.error.reason, bound.error.message);
   }
 
@@ -220,7 +244,7 @@ export async function captureHarnessResult(args: Readonly<{
     );
   }
   const context = handle.readContext(request.contextDigest);
-  if (!context.ok) return reject("context", context.error.message);
+  if (!context.ok) return retriableFailure("context", context.error.message);
   if (context.value.requestId !== request.requestId || context.value.role !== request.role) {
     return reject(
       "context-binding",
@@ -228,7 +252,12 @@ export async function captureHarnessResult(args: Readonly<{
     );
   }
   const written = await handle.captureTranscript(request, payload.value.bytes);
-  if (!written.ok) return reject("transcript", written.error.message);
+  if (!written.ok) {
+    const rejection = handle.readCaptureRejection(request);
+    return rejection.ok && rejection.value !== null
+      ? { kind: "terminal-rejection", reason: "transcript", message: written.error.message }
+      : retriableFailure("transcript", written.error.message);
+  }
 
   return { kind: "captured", receipt: bound.value };
 }
@@ -239,8 +268,11 @@ export async function captureHarnessResult(args: Readonly<{
  * because silence here looks exactly like a run that had nothing to capture.
  */
 export function captureAuditLine(prefix: string, outcome: CaptureOutcome): string | null {
-  if (outcome.kind === "rejected") {
+  if (outcome.kind === "terminal-rejection") {
     return `${prefix}: rejected (${outcome.reason}): ${outcome.message}\n`;
+  }
+  if (outcome.kind === "retriable-failure") {
+    return `${prefix}: retriable failure (${outcome.reason}): ${outcome.message}\n`;
   }
   if (outcome.kind === "no-reservation") {
     return `${prefix}: no reservation for ${outcome.agentId}\n`;

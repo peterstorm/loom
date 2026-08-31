@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import advancePhaseHandler, {
+  applyEligiblePhaseTransition,
   resolveTransition,
   countMarkers,
   isPhaseResultEligible,
@@ -104,6 +105,41 @@ describe("isPhaseResultEligible", () => {
         expect(isPhaseResultEligible(currentPhase, completedPhase)).toBe(false);
       }
     }
+  });
+});
+
+describe("applyEligiblePhaseTransition", () => {
+  it("returns the identical aggregate when a concurrent completion already advanced the Phase", () => {
+    const state = mkState({ current_phase: "architecture" });
+
+    const stale = applyEligiblePhaseTransition(
+      state,
+      "specify",
+      { nextPhase: "architecture", artifact: ".claude/specs/feature/spec.md" },
+      "2026-08-31T00:00:00.000Z",
+    );
+
+    expect(stale).toBe(state);
+  });
+
+  it("immutably applies an eligible transition", () => {
+    const state = mkState({ current_phase: "specify" });
+
+    const next = applyEligiblePhaseTransition(
+      state,
+      "specify",
+      { nextPhase: "architecture", artifact: ".claude/specs/feature/spec.md", skipClarify: true },
+      "2026-08-31T00:00:00.000Z",
+    );
+
+    expect(next).not.toBe(state);
+    expect(state.current_phase).toBe("specify");
+    expect(next).toMatchObject({
+      current_phase: "architecture",
+      phase_artifacts: { specify: ".claude/specs/feature/spec.md" },
+      skipped_phases: ["clarify"],
+      updated_at: "2026-08-31T00:00:00.000Z",
+    });
   });
 });
 

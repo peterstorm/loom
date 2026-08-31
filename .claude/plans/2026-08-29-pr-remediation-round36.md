@@ -112,12 +112,19 @@ The live Pi session loaded Loom from `/home/peterstorm/dev/claude-plugins/loom-b
 
 ## Phase 4 — validation receipt
 
-Implemented and validated against the working tree at this plan's HEAD:
+Correction recorded by the 2026-08-31 remediation: this receipt's original
+claim that `bun run --cwd engine typecheck` was clean at the reviewed HEAD was
+false. The unused-code pass reported 14 dead imports across eight test files.
+Those imports are now removed and the exact gate has been rerun successfully.
+Fresh validation for the corrected working tree is:
 
-- `bun run --cwd engine typecheck` — clean.
-- `env -u PI_CODING_AGENT npx vitest run --testTimeout=120000` — **226 files,
-  5621 tests, 0 failures** (was 5603 before this round's two new suites).
-- `env -u PI_CODING_AGENT npm run test:smoke` — all smoke suites pass.
+- `bun run --cwd engine typecheck` — clean, including `noUnusedLocals` and
+  `noUnusedParameters`.
+- `env -u PI_CODING_AGENT bun run --cwd engine test:unit` — **226 files,
+  5651 tests, 0 failures**.
+- `env -u PI_CODING_AGENT bun run --cwd engine test:smoke` — all smoke suites
+  pass.
+- `git diff --check` — clean.
 
 New tests: `engine/tests/orchestration/capture-slot-authority.test.ts`
 (read-path reservation authority incl. forged-slot and traversal refusals;

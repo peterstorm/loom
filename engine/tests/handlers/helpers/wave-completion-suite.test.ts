@@ -1,9 +1,7 @@
 import { execFileSync } from "node:child_process";
 import {
-  realpathSync,
   chmodSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,

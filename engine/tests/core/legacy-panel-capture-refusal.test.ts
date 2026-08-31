@@ -79,6 +79,18 @@ describe("a panel replay carries a capture-refusal record past its reducer", () 
     expect(translated.error).toContain("events[0]");
   });
 
+  it.each([
+    ["requestId", "request:reviewer/escape"],
+    ["slotId", "../slot-escape"],
+  ] as const)("keeps malformed %s identity as journal corruption", (field, value) => {
+    const malformed = { ...refusal, [field]: value };
+
+    const translated = translateLegacyPanelJournal("refutation", refutationJournal([malformed]));
+
+    expect(translated.ok).toBe(false);
+    if (!translated.ok) expect(translated.error).toContain("events[0]");
+  });
+
   it("keys one refused attempt by one journal identity, for both harnesses", () => {
     const first = captureRejectionDedupKey(attemptOne.requestId, attemptOne.attempt);
     const replay = captureRejectionDedupKey(attemptOne.requestId, attemptOne.attempt);

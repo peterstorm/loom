@@ -1,7 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  realpathSync,
   existsSync,
   lstatSync,
   mkdirSync,

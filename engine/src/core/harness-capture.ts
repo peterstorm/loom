@@ -25,6 +25,8 @@
 import { createHash } from "node:crypto";
 import {
   canonicalRecord,
+  parseRequestId,
+  parseSlotId,
   type AgentRequestAuthority,
   type ArtifactDigest,
   type DomainResult,
@@ -37,14 +39,13 @@ export const CAPTURE_SCHEMA_VERSION = 1;
 /**
  * Why a result could not be accepted BY THESE RULES.
  *
- * This is the core vocabulary only. The adapters mint further reasons of their
- * own that never pass through this module — `transcript-json`, `transcript-shape`,
- * `transcript-locator`, `agent-failed` and `capture-crashed` on the Pi side,
- * `run-authority`, `run-directory`, `correlator`, `requests`, `context`,
- * `context-binding`, `transcript`, `wrong-agent-role` and `rejection-persistence`
- * from the shared run-directory runtime — so `CaptureOutcome.reason` is a
- * deliberately wider `string`, and an adapter reason is not a violation of this
- * union.
+ * This is the core vocabulary only. Harness adapters mint observation reasons:
+ * Claude owns `transcript-json` and `transcript-locator`; Pi owns
+ * `transcript-shape`, `agent-failed`, and `capture-crashed`. The shared
+ * run-directory runtime owns `run-authority`, `run-directory`, `correlator`,
+ * `requests`, `context`, `context-binding`, `transcript`, `wrong-agent-role`,
+ * and `rejection-persistence`. `CaptureOutcome.reason` is therefore a wider
+ * string, and an adapter/runtime reason is not a violation of this union.
  */
 export type CaptureRejectionReason =
   | "no-final-payload"
@@ -301,12 +302,11 @@ export function isCaptureRejectionAuditRecord(raw: unknown): raw is CaptureRejec
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
   const record = raw as Record<string, unknown>;
   const keys = Object.keys(record).sort();
-  return keys.length === 5 && keys.join(",") === "attempt,diagnostic,kind,requestId,slotId" &&
-    record["kind"] === CAPTURE_REJECTION_EVENT_KIND &&
-    typeof record["requestId"] === "string" && record["requestId"].length > 0 &&
-    typeof record["slotId"] === "string" && record["slotId"].length > 0 &&
-    (record["attempt"] === 1 || record["attempt"] === 2) &&
-    typeof record["diagnostic"] === "string";
+  if (keys.length !== 5 || keys.join(",") !== "attempt,diagnostic,kind,requestId,slotId" ||
+      record["kind"] !== CAPTURE_REJECTION_EVENT_KIND ||
+      (record["attempt"] !== 1 && record["attempt"] !== 2) ||
+      typeof record["diagnostic"] !== "string") return false;
+  return parseRequestId(record["requestId"]).ok && parseSlotId(record["slotId"]).ok;
 }
 
 /**

@@ -19,8 +19,13 @@ import captureOrchestrationResult, {
 } from "../../src/handlers/subagent-stop/capture-orchestration-result";
 import { recordClaudeSpawnCorrelation } from "../../src/handlers/post-tool-use/record-orchestration-spawn";
 import { piFinalPayloadCandidates, piResultFinalPayloadCandidates } from "../../../pi/transcript-adapter";
-import { openRunDirectory } from "../../src/orchestration/run-directory-handle";
-import { captureAuditLine, captureHarnessResult } from "../../src/orchestration/harness-capture-runtime";
+import { openRunDirectory, type RunDirHandle } from "../../src/orchestration/run-directory-handle";
+import {
+  captureAuditLine,
+  captureHarnessResult,
+  terminalCaptureRefusal,
+  terminalizeCaptureRejection,
+} from "../../src/orchestration/harness-capture-runtime";
 import { buildContextPacket, encodeByteSection } from "../../src/orchestration/context-packets";
 import {
   BENCHMARK_SCENARIOS,
@@ -298,8 +303,8 @@ describe("Pi and Claude reach the same result", () => {
         candidates: piCandidates(AGENT_OUTPUT),
       });
 
-      expect(outcome.kind).toBe("rejected");
-      if (outcome.kind === "rejected") expect(outcome.reason).toBe("context");
+      expect(outcome.kind).toBe("retriable-failure");
+      if (outcome.kind === "retriable-failure") expect(outcome.reason).toBe("context");
     });
 
     it("rejects capture when the reserved context describes a different request role", async () => {
@@ -345,8 +350,8 @@ describe("Pi and Claude reach the same result", () => {
         candidates: piCandidates(AGENT_OUTPUT),
       });
 
-      expect(outcome.kind).toBe("rejected");
-      if (outcome.kind === "rejected") expect(outcome.reason).toBe("context-binding");
+      expect(outcome.kind).toBe("terminal-rejection");
+      if (outcome.kind === "terminal-rejection") expect(outcome.reason).toBe("context-binding");
     });
 
     it("rejects capture when a stored correlator names a role the issued request does not have", async () => {
@@ -376,8 +381,8 @@ describe("Pi and Claude reach the same result", () => {
         candidates: piCandidates(AGENT_OUTPUT),
       });
 
-      expect(outcome.kind).toBe("rejected");
-      if (outcome.kind === "rejected") expect(outcome.reason).toBe("wrong-agent-role");
+      expect(outcome.kind).toBe("terminal-rejection");
+      if (outcome.kind === "terminal-rejection") expect(outcome.reason).toBe("wrong-agent-role");
     });
 
     it("writes byte-identical transcripts from either harness", async () => {
@@ -432,7 +437,7 @@ describe("Pi and Claude reach the same result", () => {
         runDirectory: directory,
         nativeId: "pi-native-1",
         candidates: ambiguous.value,
-      })).kind).toBe("rejected");
+      })).kind).toBe("terminal-rejection");
 
       // A semantically rejected attempt is terminal. Later bytes cannot
       // overwrite the rejection; recovery must use exact attempt-2 authority.
@@ -443,10 +448,50 @@ describe("Pi and Claude reach the same result", () => {
         nativeId: "pi-native-1",
         candidates: piCandidates(AGENT_OUTPUT),
       });
-      expect(late.kind).toBe("rejected");
-      if (late.kind !== "rejected") return;
+      expect(late.kind).toBe("terminal-rejection");
+      if (late.kind !== "terminal-rejection") return;
       expect(late.reason).toBe("transcript");
       expect(late.message).toContain("terminally rejected");
+    });
+
+    it("does not observe a transcript before resolving a reservation", async () => {
+      const { runsRoot, directory } = await stagedRun();
+      let observed = false;
+
+      const outcome = await captureHarnessResult({
+        harness: "pi",
+        runsRoot,
+        runDirectory: directory,
+        nativeId: "not-this-run",
+        observe: () => {
+          observed = true;
+          return terminalCaptureRefusal("transcript-shape", "must not be observed");
+        },
+      });
+
+      expect(outcome.kind).toBe("no-reservation");
+      expect(observed).toBe(false);
+    });
+
+    it("keeps captured-attempt read faults retriable without tombstoning the request", async () => {
+      const { runsRoot, directory, request } = await stagedRun();
+      await correlate(runsRoot, directory, "pi", "pi-native-transient", request);
+      const outside = join(runsRoot, "outside-slot");
+      mkdirSync(outside);
+      symlinkSync(outside, join(directory, "transcripts", "slot-corrupt"));
+
+      const outcome = await captureHarnessResult({
+        harness: "pi",
+        runsRoot,
+        runDirectory: directory,
+        nativeId: "pi-native-transient",
+        candidates: piCandidates(AGENT_OUTPUT),
+      });
+
+      expect(outcome).toMatchObject({ kind: "retriable-failure", reason: "transcripts" });
+      const opened = openRunDirectory(runsRoot, directory);
+      if (!opened.ok) throw new Error(opened.error.message);
+      expect(opened.value.readCaptureRejection(request)).toEqual({ ok: true, value: null });
     });
 
     it("is inert outside an orchestration run", async () => {
@@ -474,8 +519,8 @@ describe("Pi and Claude reach the same result", () => {
         candidates: piCandidates(AGENT_OUTPUT),
       });
 
-      expect(outcome.kind).toBe("rejected");
-      expect(captureAuditLine("capture", outcome)).toContain("rejected (correlator)");
+      expect(outcome.kind).toBe("retriable-failure");
+      expect(captureAuditLine("capture", outcome)).toContain("retriable failure (correlator)");
     });
 
     it("refuses a symlinked correlator without reading its target", async () => {
@@ -502,9 +547,80 @@ describe("Pi and Claude reach the same result", () => {
         candidates: piCandidates(AGENT_OUTPUT),
       });
 
-      expect(outcome.kind).toBe("rejected");
-      if (outcome.kind !== "rejected") return;
+      expect(outcome.kind).toBe("retriable-failure");
+      if (outcome.kind !== "retriable-failure") return;
       expect(outcome.reason).toBe("correlator");
+    });
+  });
+
+  describe("shared capture-rejection terminalization", () => {
+    it("preserves the original refusal when marker persistence fails", async () => {
+      const request = authority();
+      const handle = {
+        rejectCapture: async () => ({
+          ok: false,
+          error: { kind: "invalid-run-directory", field: "transcript", message: "disk is read-only" },
+        }),
+      } as unknown as RunDirHandle;
+
+      const outcome = await terminalizeCaptureRejection(
+        handle,
+        request,
+        terminalCaptureRefusal("no-final-payload", "agent said nothing"),
+      );
+
+      expect(outcome).toEqual({
+        kind: "retriable-failure",
+        reason: "rejection-persistence",
+        message: expect.stringContaining("no-final-payload: agent said nothing"),
+      });
+      expect(outcome).toMatchObject({ message: expect.stringContaining("disk is read-only") });
+    });
+
+    it("never throws when audit append fails after the tombstone lands", async () => {
+      const request = authority();
+      const handle = {
+        rejectCapture: async () => ({ ok: true, value: captureKey(request.slotId, request.attempt) }),
+        appendEvent: async () => { throw new Error("journal unavailable"); },
+      } as unknown as RunDirHandle;
+
+      await expect(terminalizeCaptureRejection(
+        handle,
+        request,
+        terminalCaptureRefusal("no-final-payload", "agent said nothing"),
+      )).resolves.toMatchObject({
+        kind: "terminal-rejection",
+        reason: "rejection-audit-unsynchronized",
+        message: expect.stringContaining("journal unavailable"),
+      });
+    });
+
+    it("replays one refusal as exactly one marker and one journal record", async () => {
+      const runsRoot = mkdtempSync(join(tmpdir(), "loom-capture-rejection-replay-"));
+      cleanup.push(runsRoot);
+      const directory = join(runsRoot, "run.acceptance-1");
+      mkdirSync(directory);
+      const opened = openRunDirectory(runsRoot, directory);
+      if (!opened.ok) throw new Error(opened.error.message);
+      const request = authority();
+      const reserved = await opened.value.reserveRequest(request);
+      if (!reserved.ok) throw new Error(reserved.error.message);
+      const refusal = terminalCaptureRefusal("no-final-payload", "agent said nothing");
+
+      expect((await terminalizeCaptureRejection(opened.value, request, refusal)).kind)
+        .toBe("terminal-rejection");
+      expect((await terminalizeCaptureRejection(opened.value, request, refusal)).kind)
+        .toBe("terminal-rejection");
+
+      expect(opened.value.readCaptureRejection(request)).toEqual({
+        ok: true,
+        value: "no-final-payload: agent said nothing",
+      });
+      const rejectionEvents = (await opened.value.readEvents())
+        .filter(({ event }) => (event as { kind?: string }).kind === "request-capture-rejected");
+      expect(rejectionEvents).toHaveLength(1);
+      expect(readdirSync(join(directory, "transcripts", request.slotId))
+        .filter((name) => name.endsWith(".rejected"))).toHaveLength(1);
     });
   });
 
@@ -847,7 +963,7 @@ describe("Claude capture against a real run directory", () => {
     });
 
     expect(outcome).toEqual({
-      kind: "rejected",
+      kind: "retriable-failure",
       reason: "run-authority",
       message: "orchestration capture requires both runsRoot and runDirectory",
     });
@@ -868,8 +984,8 @@ describe("Claude capture against a real run directory", () => {
       runDir,
     );
 
-    expect(second.kind).toBe("rejected");
-    if (second.kind !== "rejected") return;
+    expect(second.kind).toBe("terminal-rejection");
+    if (second.kind !== "terminal-rejection") return;
     expect(second.reason).toBe("duplicate-capture");
   });
 
@@ -900,8 +1016,8 @@ describe("Claude capture against a real run directory", () => {
       runDir,
     );
 
-    expect(outcome.kind).toBe("rejected");
-    if (outcome.kind !== "rejected") return;
+    expect(outcome.kind).toBe("terminal-rejection");
+    if (outcome.kind !== "terminal-rejection") return;
     // One candidate PER text block, so a two-block final is named as the
     // ambiguity it is instead of being silently downgraded to "no final".
     expect(outcome.reason).toBe("ambiguous-final-payload");
@@ -922,7 +1038,7 @@ describe("Claude capture against a real run directory", () => {
     // A malformed terminal record invalidates the final-payload boundary; an
     // earlier assistant message is never salvaged as canonical evidence.
     expect(outcome).toMatchObject({
-      kind: "rejected",
+      kind: "terminal-rejection",
       reason: "transcript-json",
       message: expect.stringContaining("invalid final Claude transcript JSON at line 2"),
     });
@@ -937,12 +1053,20 @@ describe("Claude capture against a real run directory", () => {
       runDir,
     );
 
-    expect(outcome.kind).toBe("rejected");
-    if (outcome.kind !== "rejected") return;
+    expect(outcome.kind).toBe("terminal-rejection");
+    if (outcome.kind !== "terminal-rejection") return;
     // An absent transcript is a LOCATOR fault (Claude Code stopped sending
     // `agent_transcript_path`), and must not be reported as an Agent that said
-    // nothing — the caller terminalises refusals.
+    // nothing.
     expect(outcome.reason).toBe("transcript-locator");
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    expect(opened.value.readCaptureRejection(authority())).toMatchObject({
+      ok: true,
+      value: expect.stringContaining("transcript-locator"),
+    });
+    expect((await opened.value.readEvents()).filter(({ event }) =>
+      (event as { kind?: string }).kind === "request-capture-rejected")).toHaveLength(1);
   });
 
   it("returns a hook error for partial or malformed Claude run authority", async () => {

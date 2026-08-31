@@ -120,6 +120,23 @@ describe("run directory identity", () => {
     expect(readdirSync(real)).toHaveLength(0);
   });
 
+  it("returns a typed failure when fixed-layout creation encounters a symlink", () => {
+    const root = runsRoot();
+    const directory = join(root, RUN_ID);
+    const outside = join(root, "outside-layout");
+    mkdirSync(directory);
+    mkdirSync(outside);
+    symlinkSync(outside, join(directory, "events"));
+
+    const opened = openRunDirectory(root, directory);
+
+    expect(opened).toMatchObject({
+      ok: false,
+      error: { field: "runDirectory", message: expect.stringContaining("layout is not safely reachable") },
+    });
+    expect(readdirSync(outside)).toEqual([]);
+  });
+
   it("returns a typed failure when an existing idempotent claim cannot be read", async () => {
     const { directory, handle } = freshRun();
     const programPath = join(directory, "program.json");
@@ -132,6 +149,28 @@ describe("run directory identity", () => {
       expect(registered.error.field).toBe("program");
       expect(registered.error.message).toContain("cannot register orchestration program");
     }
+  });
+
+  it("registers semantic JSON idempotently regardless of caller key order", async () => {
+    const { handle } = freshRun();
+
+    const first = await handle.registerProgram({ kind: "test", input: { alpha: 1, beta: 2 } });
+    const reordered = await handle.registerProgram({ input: { beta: 2, alpha: 1 }, kind: "test" });
+
+    expect(first.ok).toBe(true);
+    expect(reordered).toEqual(first);
+  });
+
+  it("refuses non-JSON program authority without claiming the slot", async () => {
+    const { directory, handle } = freshRun();
+
+    const rejected = await handle.registerProgram({ kind: "test", callback: () => undefined });
+
+    expect(rejected).toMatchObject({
+      ok: false,
+      error: { field: "program", message: expect.stringContaining("not JSON data") },
+    });
+    expect(existsSync(join(directory, "program.json"))).toBe(false);
   });
 
   it("claims immutable authority once and reads it back on re-open", () => {
@@ -878,6 +917,33 @@ describe("effect receipts", () => {
     if (result.ok) return;
     expect(result.error.retriable).toBe(true);
     expect(handle.readReceipt("effect:commit-1" as EffectReceipt["effectId"])).toEqual({ ok: true, value: null });
+  });
+
+  it("preserves an external port error name and cause", async () => {
+    const { handle } = freshRun();
+    const portError = new Error("commit failed", { cause: new Error("socket reset") });
+    portError.name = "DatabaseUnavailable";
+    const runner = createEffectRunner({
+      handle,
+      ports: ports({ commitProtectedWaveState: async () => { throw portError; } }),
+      resolveArtifacts: () => [],
+    });
+
+    const result = await runner({
+      kind: "commit-protected-wave-state",
+      effectId: "effect:commit-diagnostic",
+      runId: RUN_ID,
+      expectedRevision: 0,
+      stateDigest: "b".repeat(64),
+    } as EffectIntent);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        retriable: true,
+        message: "DatabaseUnavailable: commit failed (caused by Error: socket reset)",
+      },
+    });
   });
 
   it("refuses a receipt that answers a different effect", async () => {

@@ -12,7 +12,6 @@
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
@@ -369,7 +368,12 @@ describe("platform anchoring", () => {
     expect(() => assertAnchoredFilesystemPlatformSupported("win32"))
       .toThrow(/requires POSIX anchored-filesystem operations.*win32.*unsupported/i);
     expect(() => assertAnchoredFilesystemPlatformSupported("linux")).not.toThrow();
-    expect(() => assertAnchoredFilesystemPlatformSupported("darwin")).not.toThrow();
+    if (process.platform === "darwin") {
+      expect(() => assertAnchoredFilesystemPlatformSupported("darwin")).not.toThrow();
+    } else {
+      expect(() => assertAnchoredFilesystemPlatformSupported("darwin"))
+        .toThrow(/darwin kernel did not refuse.*O_NOFOLLOW_ANY/);
+    }
   });
 
   it("addresses every child through the platform's anchor", () => {

@@ -1,10 +1,8 @@
 import { spawnSync } from "node:child_process";
 import {
-  realpathSync,
   chmodSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,

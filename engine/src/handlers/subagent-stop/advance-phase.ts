@@ -75,11 +75,36 @@ export function isPhaseResultEligible(
     (currentPhase === "init" && completedPhase === "brainstorm");
 }
 
+type PhaseTransition = Readonly<{
+  nextPhase: Phase;
+  artifact: string;
+  skipClarify?: boolean;
+}>;
+
+/** Apply a discovered transition only while its completed Phase still owns the graph. */
+export function applyEligiblePhaseTransition(
+  state: TaskGraph,
+  completedPhase: Phase,
+  transition: PhaseTransition,
+  updatedAt: string,
+): TaskGraph {
+  if (!isPhaseResultEligible(state.current_phase, completedPhase)) return state;
+  return {
+    ...state,
+    current_phase: transition.nextPhase,
+    phase_artifacts: { ...state.phase_artifacts, [completedPhase]: transition.artifact },
+    skipped_phases: transition.skipClarify
+      ? ([...new Set([...state.skipped_phases, "clarify" as Phase])] as Phase[])
+      : state.skipped_phases,
+    updated_at: updatedAt,
+  };
+}
+
 /** Determine next phase + artifact after a phase completes */
 export function resolveTransition(
   completedPhase: Phase,
   state: TaskGraph,
-): { nextPhase: Phase; artifact: string; skipClarify?: boolean } | null {
+): PhaseTransition | null {
   return match(completedPhase)
     .with("brainstorm", () => {
       // Scope search to current run's spec_dir to avoid finding stale artifacts
@@ -204,6 +229,7 @@ const handler: HookHandler = async (stdin) => {
 
     try {
       await mgr.update((s) => {
+        if (!isPhaseResultEligible(s.current_phase, completedPhase)) return s;
         const updates: { spec_file?: string | null; plan_file?: string | null } = {};
 
         // RESOLVED containment, not substring containment. These paths come
@@ -241,20 +267,19 @@ const handler: HookHandler = async (stdin) => {
   }
   if (!transition) return { kind: "passthrough" };
 
-  const { nextPhase, artifact, skipClarify } = transition;
-
+  const { nextPhase, skipClarify } = transition;
+  let applied = false;
   try {
-    await mgr.update((s) => ({
-      ...s,
-      current_phase: nextPhase,
-      phase_artifacts: { ...s.phase_artifacts, [completedPhase]: artifact },
-      skipped_phases: skipClarify
-        ? ([...new Set([...s.skipped_phases, "clarify" as Phase])] as Phase[])
-        : s.skipped_phases,
-      updated_at: new Date().toISOString(),
-    }));
+    await mgr.update((s) => {
+      const next = applyEligiblePhaseTransition(s, completedPhase, transition, new Date().toISOString());
+      applied = next !== s;
+      return next;
+    });
   } catch (e) {
     return passthroughDiagnostic(`advance-phase: failed to write phase transition: ${(e as Error).message}\n`);
+  }
+  if (!applied) {
+    return passthroughDiagnostic(`Phase ${completedPhase} became stale before its transition could be committed, skipping.\n`);
   }
 
   process.stderr.write(`Phase advanced: ${completedPhase} → ${nextPhase}\n`);

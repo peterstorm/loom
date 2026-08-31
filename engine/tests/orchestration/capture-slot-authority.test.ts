@@ -12,6 +12,7 @@
  * single test failing).
  */
 
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,11 +27,7 @@ afterEach(() => {
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-const HEX = (seed: string): string => {
-  let out = "";
-  for (let i = 0; i < 64; i += 1) out += seed.charCodeAt(i % seed.length).toString(16).padStart(2, "0").slice(-2);
-  return out.slice(0, 64);
-};
+const digest = (seed: string): string => createHash("sha256").update(seed).digest("hex");
 
 /** One run directory holding two RESERVED requests of different slots. */
 async function stagedRun(): Promise<Readonly<{
@@ -51,14 +48,14 @@ async function stagedRun(): Promise<Readonly<{
     requestId: "request:reviewer:1",
     slotId: "slot-1",
     attempt: 1,
-    contextDigest: HEX("context-one"),
+    contextDigest: digest("context-one"),
   });
   const second = agentRequestAuthority("run.slot-authority", {
     requestId: "request:reviewer:2",
     slotId: "slot-2",
     attempt: 1,
     role: "silent-failure-hunter",
-    contextDigest: HEX("context-two"),
+    contextDigest: digest("context-two"),
     outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-2/attempt-1.raw" },
   });
   for (const request of [first, second]) {
@@ -148,7 +145,7 @@ describe("capture-rejection reads", () => {
       requestId: "request:reviewer:9",
       slotId: "slot-9",
       attempt: 2,
-      contextDigest: HEX("context-nine"),
+      contextDigest: digest("context-nine"),
       outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-9/attempt-2.raw" },
     });
 
@@ -169,6 +166,22 @@ describe("capture-rejection reads", () => {
     expect(marker.ok).toBe(true);
     if (!marker.ok) return;
     expect(marker.value).toContain("no-final-payload");
+  });
+
+  it("accepts an identical marker replay and refuses a conflicting diagnostic", async () => {
+    const { handle, second } = await stagedRun();
+
+    expect((await handle.rejectCapture(second, "no-final-payload: agent said nothing")).ok).toBe(true);
+    expect((await handle.rejectCapture(second, "no-final-payload: agent said nothing")).ok).toBe(true);
+    const conflict = await handle.rejectCapture(second, "agent-failed: endpoint disconnected");
+
+    expect(conflict.ok).toBe(false);
+    if (conflict.ok) return;
+    expect(conflict.error.message).toContain("conflicts with its immutable diagnostic");
+    expect(handle.readCaptureRejection(second)).toEqual({
+      ok: true,
+      value: "no-final-payload: agent said nothing",
+    });
   });
 
   it("refuses a rejection read whose slot addressing does not match the reservation", async () => {
@@ -256,10 +269,9 @@ describe("harness correlator write-once discipline", () => {
     // names a DIFFERENT native id while remaining a structurally valid, fully
     // reserved binding. The stored bytes must still be refused against the key
     // that addressed them.
-    const { createHash } = await import("node:crypto");
-    const digest = createHash("sha256").update(`pi\0pi-native-lookup`).digest("hex");
+    const correlatorDigest = digest(`pi\0pi-native-lookup`);
     writeFileSync(
-      join(directory, "requests", "correlators", `${digest}.json`),
+      join(directory, "requests", "correlators", `${correlatorDigest}.json`),
       JSON.stringify({ ...bindingFor("pi-native-elsewhere", first), nativeId: "pi-native-elsewhere" }),
     );
 
@@ -279,10 +291,9 @@ describe("harness correlator write-once discipline", () => {
     await handle.recordHarnessCorrelator(bindingFor("pi-native-victim", first));
     await handle.recordHarnessCorrelator(bindingFor("pi-native-attacker", second));
 
-    const { createHash } = await import("node:crypto");
     const correlatorDir = join(directory, "requests", "correlators");
-    const attackerName = `${createHash("sha256").update("pi\0pi-native-attacker").digest("hex")}.json`;
-    const victimName = `${createHash("sha256").update("pi\0pi-native-victim").digest("hex")}.json`;
+    const attackerName = `${digest("pi\0pi-native-attacker")}.json`;
+    const victimName = `${digest("pi\0pi-native-victim")}.json`;
     const target = join(correlatorDir, attackerName);
     rmSync(join(correlatorDir, victimName));
     symlinkSync(target, join(correlatorDir, victimName));
