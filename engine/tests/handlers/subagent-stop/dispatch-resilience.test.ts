@@ -337,6 +337,49 @@ describe("request-bound capture gates legacy dispatch", () => {
   });
 });
 
+describe("routing observation faults settle through cleanup", () => {
+  it("returns an ENOTDIR metadata fault after invoking cleanup", async () => {
+    const dir = tempDir();
+    const config = join(dir, "claude-config");
+    const project = join(dir, "project");
+    mkdirSync(config, { recursive: true });
+    mkdirSync(project, { recursive: true });
+    // projects must be a directory. Making it a file forces the derived
+    // metadata stat to fail with ENOTDIR rather than an ordinary absence.
+    writeFileSync(join(config, "projects"), "not a directory\n");
+    const cleanup = vi.fn(async () => ({ kind: "passthrough" as const }));
+    const environment = [
+      "CLAUDE_CONFIG_DIR",
+      "CLAUDE_PROJECT_DIR",
+      "LOOM_ORCHESTRATION_RUNS_ROOT",
+      "LOOM_ORCHESTRATION_RUN_DIR",
+    ] as const;
+    const previous = new Map(environment.map((name) => [name, process.env[name]]));
+    process.env.CLAUDE_CONFIG_DIR = config;
+    process.env.CLAUDE_PROJECT_DIR = project;
+    delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+    delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
+    try {
+      const result = await runDispatch(JSON.stringify({
+        session_id: sid("routing-enotdir"),
+        agent_id: "agent-routing-enotdir",
+      }), [], cleanup);
+
+      expect(cleanup).toHaveBeenCalledOnce();
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringMatching(/routing observation failed.*ENOTDIR|routing observation failed.*not a directory/i),
+      });
+    } finally {
+      for (const name of environment) {
+        const value = previous.get(name);
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+});
+
 describe("malformed hook input is caught instead of escaping cleanup", () => {
   it("dispatch: malformed stdin fails closed and names skipped cleanup", async () => {
     const result = await dispatch("{not json", []);

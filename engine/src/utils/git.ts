@@ -218,13 +218,33 @@ export type GitDiffResult =
  */
 const DIFF_DRIVER_SUPPRESSION = ["--no-textconv", "--no-ext-diff"] as const;
 
-/** System-level config and attributes are not evidence inputs either. */
+/**
+ * Diff children receive only process-launch essentials, never ambient Git
+ * authority such as GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, config injection,
+ * or executable diff overrides. Repository-local config remains readable, but
+ * the fixed argv below disables its executable diff features.
+ */
 function diffEnvironment(): NodeJS.ProcessEnv {
+  const inherited = [
+    "PATH", "HOME", "TMPDIR", "TEMP", "TMP",
+    "SystemRoot", "WINDIR", "PATHEXT",
+  ] as const;
+  const environment: NodeJS.ProcessEnv = {};
+  for (const name of inherited) {
+    const value = process.env[name];
+    if (value !== undefined) environment[name] = value;
+  }
   return {
-    ...process.env,
+    ...environment,
+    LANG: "C",
+    LC_ALL: "C",
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_ATTR_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_COUNT: "0",
     GIT_TERMINAL_PROMPT: "0",
+    GIT_PAGER: "cat",
+    GIT_OPTIONAL_LOCKS: "0",
   };
 }
 
@@ -251,26 +271,59 @@ const diffExecOptions = (root: string): ExecFileSyncOptionsWithStringEncoding =>
 /**
  * Git diff proof boundary: command failure is not an empty diff.
  *
- * `args` always begins with the fixed `diff` subcommand; driver suppression is
- * inserted here so no entry point can collect a diff without it.
+ * `args` always begins with the fixed `diff` subcommand; driver suppression and
+ * the restricted child environment are inserted here so no entry point can
+ * collect a diff without them. `acceptDifferenceExit` is reserved for
+ * `--no-index`: status 1 is evidence only when stdout is an actual patch.
  */
-function diffArgs(args: readonly string[]): GitDiffResult {
+function diffArgsAt(
+  root: string,
+  args: readonly string[],
+  acceptDifferenceExit = false,
+): GitDiffResult {
   const [subcommand, ...rest] = args;
-  if (subcommand === undefined) return { ok: false, error: "internal: diffArgs requires a git subcommand" };
+  if (subcommand !== "diff") return { ok: false, error: "internal: diffArgsAt requires the git diff subcommand" };
   const argv: readonly string[] = [subcommand, ...DIFF_DRIVER_SUPPRESSION, ...rest];
   const argvText = argv.map((arg) => JSON.stringify(arg)).join(" ");
-  const root = currentRepoRoot("diffArgs");
-  if (root === undefined) return { ok: false, error: "cannot collect a diff outside a Git repository" };
   try {
     return { ok: true, diff: execFileSync("git", [...argv], diffExecOptions(root)) };
   } catch (error) {
-    return {
-      ok: false,
-      error: isEvidenceBudgetFailure(error)
-        ? `git ${argvText} exceeded the ${DIFF_EVIDENCE_BUDGET_BYTES} byte diff evidence budget: ${commandFailure(error)}`
-        : `git ${argvText} failed: ${commandFailure(error)}`,
-    };
+    const detail = error && typeof error === "object"
+      ? error as { status?: unknown; stdout?: unknown }
+      : null;
+    const stdout = detail?.stdout === undefined ? "" : String(detail.stdout);
+    if (acceptDifferenceExit && detail?.status === 1 && /^diff --git /m.test(stdout)) {
+      return { ok: true, diff: stdout };
+    }
+    const failure = commandFailure(error);
+    if (isEvidenceBudgetFailure(error)) {
+      return {
+        ok: false,
+        error: `git ${argvText} exceeded the ${DIFF_EVIDENCE_BUDGET_BYTES} byte diff evidence budget: ${failure}`,
+      };
+    }
+    if (acceptDifferenceExit && detail?.status === 1) {
+      return { ok: false, error: `git diff --no-index returned status 1 without a valid patch: ${failure}` };
+    }
+    return { ok: false, error: `git ${argvText} failed: ${failure}` };
   }
+}
+
+function diffArgs(args: readonly string[]): GitDiffResult {
+  const root = currentRepoRoot("diffArgs");
+  return root === undefined
+    ? { ok: false, error: "cannot collect a diff outside a Git repository" }
+    : diffArgsAt(root, args);
+}
+
+/** Binary packet diff from a parsed revision through the hardened boundary. */
+export function diffBinaryFileFromRevision(root: string, revision: string, file: string): GitDiffResult {
+  return diffArgsAt(root, ["diff", "--binary", "--end-of-options", revision, "--", file]);
+}
+
+/** Binary packet diff for one untracked file; status 1 must carry a real patch. */
+export function diffBinaryUntrackedFile(root: string, file: string): GitDiffResult {
+  return diffArgsAt(root, ["diff", "--no-index", "--binary", "/dev/null", "--", file], true);
 }
 
 // Assertion evidence needs lexical state from the complete postimage. A normal
@@ -333,31 +386,9 @@ export function isTracked(file: string): GitTrackedResult {
 /** Diff untracked file against /dev/null without collapsing command failure. */
 export function diffUntracked(file: string): GitDiffResult {
   const root = currentRepoRoot("diffUntracked");
-  if (root === undefined) return { ok: false, error: "cannot diff an untracked file outside a Git repository" };
-  try {
-    return {
-      ok: true,
-      // `--` separates options from the path so a filename shaped like an
-      // option cannot reach Git in option position.
-      diff: execFileSync("git", [
-        "diff", "--no-index", ...DIFF_DRIVER_SUPPRESSION, FULL_POSTIMAGE_CONTEXT, "/dev/null", "--", file,
-      ], diffExecOptions(root)),
-    };
-  } catch (error: unknown) {
-    // git diff --no-index exits 1 both for a real difference and for some
-    // access failures. Only an actual patch is positive evidence.
-    const detail = error && typeof error === "object"
-      ? error as { status?: unknown; stdout?: unknown }
-      : null;
-    const stdout = detail?.stdout === undefined ? "" : String(detail.stdout);
-    if (detail?.status === 1 && /^diff --git /m.test(stdout)) {
-      return { ok: true, diff: stdout };
-    }
-    return {
-      ok: false,
-      error: `git diff --no-index ${JSON.stringify(file)} failed: ${commandFailure(error)}`,
-    };
-  }
+  return root === undefined
+    ? { ok: false, error: "cannot diff an untracked file outside a Git repository" }
+    : diffArgsAt(root, ["diff", "--no-index", FULL_POSTIMAGE_CONTEXT, "/dev/null", "--", file], true);
 }
 
 // --- Pure functions for test evidence (no git calls) ---

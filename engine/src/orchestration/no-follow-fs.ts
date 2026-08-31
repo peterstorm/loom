@@ -969,8 +969,9 @@ export function openDirectoryNoFollow(path: string): AnchoredDirectory {
     // Darwin has no usable fd→path bridge: `/dev/fd/<fd>` is an fdesc node,
     // not a directory, and Node exposes no `openat`. `O_NOFOLLOW_ANY` asks the
     // kernel for the same whole-path guarantee in ONE resolution — the open
-    // fails with ELOOP if ANY component is a symlink — so the returned real
-    // path is safe to address children through.
+    // fails with ELOOP if ANY component is a symlink. Child operations retain
+    // this proven pathname because Node exposes no openat; a component swapped
+    // after acquisition remains the accepted Darwin risk documented above.
     return anchorFor(openSync(absolute, dirFlags()), absolute);
   }
   const root = parse(absolute).root;
@@ -1157,8 +1158,10 @@ export function removeRunFileNoFollow(path: string): void {
 }
 
 /**
- * Publish staged bytes through one anchored parent directory. Both names are
- * resolved inside that directory, so neither can be redirected out of the run.
+ * Publish staged bytes through one anchored parent directory. Linux resolves
+ * both names through the retained descriptor, so a pathname swap cannot
+ * redirect them. Darwin uses the O_NOFOLLOW_ANY-proven parent pathname and
+ * retains the documented post-acquisition parent-swap risk.
  */
 export function publishStagedRunFile(stagedPath: string, finalPath: string): void {
   if (resolve(dirname(stagedPath)) !== resolve(dirname(finalPath))) {

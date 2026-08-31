@@ -12,7 +12,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
@@ -80,6 +80,47 @@ function writeReviewPacketTaskGraph(
     }],
     wave_gates: {},
   }));
+}
+
+function hostileReviewPacketRepository(
+  driver: "textconv" | "external",
+): Readonly<{ root: string; marker: string; packet: string }> {
+  const root = canonicalTempDir(`loom-review-packet-${driver}-`);
+  cleanup.push(root);
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });
+  execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
+  const marker = join(root, "DRIVER_EXECUTED");
+  writeFileSync(join(root, "data.dat"), "before\n");
+  if (driver === "textconv") {
+    writeFileSync(join(root, ".gitattributes"), "*.dat diff=evil\n");
+    execFileSync("git", ["config", "diff.evil.textconv", `sh -c 'touch ${marker}; cat'`], { cwd: root });
+  } else {
+    const executable = join(root, "external-diff.sh");
+    writeFileSync(executable, `#!/bin/sh\ntouch ${marker}\nexit 0\n`, { mode: 0o755 });
+    execFileSync("git", ["config", "diff.external", executable], { cwd: root });
+  }
+  execFileSync("git", ["add", "."], { cwd: root });
+  execFileSync("git", ["commit", "--quiet", "-m", "baseline"], { cwd: root });
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+  execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd: root });
+  execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], { cwd: root });
+  writeFileSync(join(root, "data.dat"), "after\n");
+  const state = join(root, "state.json");
+  const packet = join(root, ".claude", "reviews", "packet.json");
+  writeReviewPacketTaskGraph(state, {
+    start_sha: head,
+    file_list: ["data.dat"],
+    files_modified: ["data.dat"],
+  });
+  execFileSync("bun", [
+    CLI, "helper", "review-packet", "create", "--task", "T1", "--output", ".claude/reviews/packet.json",
+  ], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, LOOM_STATE_PATH: state },
+  });
+  return { root, marker, packet };
 }
 
 describe("quality-program helper boundaries", () => {
@@ -320,6 +361,57 @@ describe("quality-program helper boundaries", () => {
     expect(cli(["helper", "review-packet", "verify", "--packet", packet]).trim()).toBe(id);
   });
 
+  it.each(["textconv", "external"] as const)(
+    "does not execute a repository-controlled %s diff driver while creating a Review Packet",
+    (driver) => {
+      const fixture = hostileReviewPacketRepository(driver);
+      expect(existsSync(fixture.marker)).toBe(false);
+      const written = JSON.parse(readFileSync(fixture.packet, "utf8"));
+      expect(written.artifacts[0].diff.content).toContain("+after");
+      expect(written.artifacts[0].postimage.content).toBe("after\n");
+    },
+  );
+
+  it("treats an option-shaped untracked packet path as a path", () => {
+    const root = canonicalTempDir("loom-review-packet-option-path-");
+    cleanup.push(root);
+    const sideEffect = resolve(root, "..", `loom-packet-side-effect-${process.pid}-${Date.now()}.patch`);
+    cleanup.push(sideEffect);
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
+    writeFileSync(join(root, "README.md"), "baseline\n");
+    execFileSync("git", ["add", "README.md"], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "baseline"], { cwd: root });
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd: root });
+    execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], { cwd: root });
+    const optionPath = `--output=../${basename(sideEffect)}`;
+    mkdirSync(join(root, "--output=.."));
+    writeFileSync(join(root, optionPath), "reviewed bytes\n");
+    const state = join(root, "state.json");
+    const packet = join(root, ".claude", "reviews", "packet.json");
+    writeReviewPacketTaskGraph(state, {
+      start_sha: head,
+      file_list: [optionPath],
+      files_modified: [optionPath],
+    });
+
+    execFileSync("bun", [
+      CLI, "helper", "review-packet", "create", "--task", "T1", "--output", ".claude/reviews/packet.json",
+    ], {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...process.env, LOOM_STATE_PATH: state },
+    });
+
+    expect(existsSync(sideEffect)).toBe(false);
+    expect(readFileSync(join(root, optionPath), "utf8")).toBe("reviewed bytes\n");
+    const written = JSON.parse(readFileSync(packet, "utf8"));
+    expect(written.artifacts[0].path).toBe(optionPath);
+    expect(written.artifacts[0].diff.content).toContain("+reviewed bytes");
+  });
+
   it("captures a staged deletion with a null postimage", () => {
     const root = canonicalTempDir("loom-review-packet-deletion-");
     cleanup.push(root);
@@ -492,9 +584,13 @@ describe("quality-program helper boundaries", () => {
     mkdirSync(fakeBin);
     writeFileSync(join(fakeBin, "git"), [
       "#!/bin/sh",
-      "if [ \"$1\" = \"diff\" ] && [ \"$2\" = \"--no-index\" ]; then",
-      "  echo forced-no-index-access-failure >&2",
-      "  exit 1",
+      "if [ \"$1\" = \"diff\" ]; then",
+      "  for arg in \"$@\"; do",
+      "    if [ \"$arg\" = \"--no-index\" ]; then",
+      "      echo forced-no-index-access-failure >&2",
+      "      exit 1",
+      "    fi",
+      "  done",
       "fi",
       "exec \"$REAL_GIT\" \"$@\"",
       "",

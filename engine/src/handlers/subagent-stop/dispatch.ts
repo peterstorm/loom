@@ -72,6 +72,22 @@ export const runDispatch = async (
     }
   };
 
+  // Cleanup is available to every post-parse failure boundary. It never
+  // preempts the category's one chance to settle protected state, but routing,
+  // capture, and authority faults must all release their runtime capabilities.
+  const runCleanup = async (): Promise<string | null> => {
+    try {
+      const cleanupResult = await cleanup(stdin, args);
+      return cleanupResult.kind === "error" || cleanupResult.kind === "block"
+        ? cleanupResult.message
+        : null;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`ERROR in cleanupSubagentFlag: ${message}\n`);
+      return `cleanupSubagentFlag crashed: ${message}`;
+    }
+  };
+
   // Snapshot the ledger BEFORE cleanup unbinds: attribution runs through the
   // live binding, so once cleanup has unbound it update-task-status can no
   // longer tell this epoch's records apart from a sibling's in the file on
@@ -101,21 +117,11 @@ export const runDispatch = async (
     }
   }
 
-  // Resolve routing before cleanup: Claude's payload may omit agent_type, and
-  // the transcript metadata used by the fallback survives cleanup. Modern
-  // implementation correlation is snapshotted here too — never reconstructed
-  // from assistant text or executing_tasks after the sidecar is removed.
-  const resolvedAgentType = resolveAgentType(input);
-  const sidecarObservation = snapshotImplementationAttemptSidecar(
-    input.session_id ?? "",
-    input.agent_id ?? "",
-  );
-
   // Request-bound capture runs BEFORE any legacy routing, and before the task
   // graph is resolved at all. Both orderings are load-bearing: the graph lookup
   // below returns early when there is none, which would skip capture for every
-  // standalone run; and legacy handlers must not mutate task state after run
-  // authority rejected the same result.
+  // standalone run; and repository metadata is not request authority, so a
+  // metadata fault must not prevent a reserved result from being captured.
   let captureFailure: string | null = null;
   try {
     const capture = await captureOrchestrationResult(stdin, args);
@@ -124,22 +130,6 @@ export const runDispatch = async (
     captureFailure = `captureOrchestrationResult crashed: ${error instanceof Error ? error.message : String(error)}`;
     process.stderr.write(`ERROR in captureOrchestrationResult: ${captureFailure}\n`);
   }
-
-  // Cleanup always runs, but only after every consumer has resolved the
-  // pointer capability. A cleanup failure remains explicit without preempting
-  // the category's one chance to settle protected state.
-  const runCleanup = async (): Promise<string | null> => {
-    try {
-      const cleanupResult = await cleanup(stdin, args);
-      return cleanupResult.kind === "error" || cleanupResult.kind === "block"
-        ? cleanupResult.message
-        : null;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      process.stderr.write(`ERROR in cleanupSubagentFlag: ${message}\n`);
-      return `cleanupSubagentFlag crashed: ${message}`;
-    }
-  };
 
   // Which PROGRAM a stop belongs to decides whether legacy category settlement
   // applies at all, and it is decided from the same correlation the capture
@@ -165,13 +155,35 @@ export const runDispatch = async (
   // Request-bound non-Wave programs own no TaskGraph mutation. A successful
   // capture is their complete SubagentStop settlement; falling through would
   // falsely require unrelated protected state and report an error after the
-  // Run Directory had already accepted the evidence. Wave Gate requests alone
-  // continue into legacy category settlement under exact graph authority.
+  // Run Directory had already accepted the evidence. They never need weaker
+  // transcript metadata or implementation-sidecar routing observations.
   if (requestAuthority !== null && requestAuthority.program !== "wave-gate") {
     const cleanupFailure = await runCleanup();
     return cleanupFailure === null
       ? { kind: "passthrough" }
       : { kind: "error", message: cleanupFailure };
+  }
+
+  // Resolve legacy routing only after request authority. Claude may omit
+  // agent_type, so this can touch transcript metadata; every filesystem fault
+  // is converted to an explicit settlement failure and still runs cleanup.
+  let resolvedAgentType: string;
+  let sidecarObservation: ImplementationAuthorityObservation;
+  try {
+    resolvedAgentType = resolveAgentType(input);
+    sidecarObservation = snapshotImplementationAttemptSidecar(
+      input.session_id ?? "",
+      input.agent_id ?? "",
+    );
+  } catch (error) {
+    const routingFailure = `dispatch: routing observation failed: ${error instanceof Error ? error.message : String(error)}`;
+    const cleanupFailure = await runCleanup();
+    return {
+      kind: "error",
+      message: cleanupFailure === null
+        ? routingFailure
+        : `${routingFailure}; cleanup also failed: ${cleanupFailure}`,
+    };
   }
 
   // A request-bound Wave Gate stop is routed only by the exact engine-issued

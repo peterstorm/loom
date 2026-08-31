@@ -96,6 +96,31 @@ describe("cleanup-subagent-flag — malformed stdin", () => {
     ]);
   });
 
+  it("still releases every capability when reported agent type observation throws", async () => {
+    const { agentId, agentType, epoch } = cleanupBindingFixture();
+    const attempted: string[] = [];
+    const registry = {
+      ...fsSessionRegistry,
+      readBindings: () => [{ agentId, agentType, epoch }],
+      unbind: async () => { attempted.push("unbind"); return "released" as const; },
+      removeActive: async () => { attempted.push("roster"); },
+    };
+
+    const result = await runCleanupSubagentFlag(
+      JSON.stringify({ session_id: "cleanup-type-fault", agent_id: "agent-cleanup" }),
+      registry,
+      () => { attempted.push("sidecar"); },
+      async () => { attempted.push("pointer"); return "binding-missing"; },
+      () => { throw new Error("injected metadata ENOTDIR"); },
+    );
+
+    expect(attempted).toEqual(["unbind", "sidecar", "pointer", "roster"]);
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/reported agent type observation failed.*injected metadata ENOTDIR/),
+    });
+  });
+
   it("releases the persisted binding and reports a valid but conflicting agent_type", async () => {
     const { agentId, agentType: persistedType, epoch } = cleanupBindingFixture();
     const attempted: string[] = [];

@@ -21,12 +21,14 @@
  *   receipts/<effect-id>.json          typed effect/publication receipts
  *   artifacts/...                      domain artifacts and final outputs
  *
- * Immutable artifacts are written with O_EXCL through a descriptor anchored at
- * their parent, so republishing a slot fails loudly instead of silently
- * rewriting history. Two slots reach that guarantee by a different route and
- * say so at their own call sites: transcripts land via `linkSync` (EEXIST from
- * the link itself), and promoted artifacts via `renameSync` plus an explicit
- * byte comparison, because `rename` has no O_EXCL.
+ * On Linux, immutable artifacts are written with O_EXCL through a descriptor
+ * anchored at their parent. On Darwin, Node exposes no openat-style child API,
+ * so the same operations use an O_NOFOLLOW_ANY-proven parent pathname and retain
+ * the module's documented post-acquisition parent-swap risk. Two slots reach
+ * immutability by a different route and say so at their own call sites:
+ * transcripts land via `linkSync` (EEXIST from the link itself), and promoted
+ * artifacts via `renameSync` plus an explicit byte comparison, because
+ * `rename` has no O_EXCL.
  */
 
 import { createHash } from "node:crypto";
@@ -469,7 +471,7 @@ function digestOf(bytes: readonly number[]): ArtifactDigest {
 }
 
 function contextDigestOf(bytes: readonly number[]): ContextDigest {
-  const parsed = parseContextDigest(createHash("sha256").update(Uint8Array.from(bytes)).digest("hex"));
+  const parsed = parseContextDigest(digestOf(bytes));
   if (!parsed.ok) throw new Error("internal context digest construction failed");
   return parsed.value;
 }

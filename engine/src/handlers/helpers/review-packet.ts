@@ -23,6 +23,11 @@ import {
 } from "../../core/review-packet";
 import { reviewRunPriorFindings, startReviewRun } from "../../core/findings";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
+import {
+  diffBinaryFileFromRevision,
+  diffBinaryUntrackedFile,
+  type GitDiffResult,
+} from "../../utils/git";
 
 const OPERATIONS = ["create", "verify", "show"] as const;
 
@@ -76,23 +81,17 @@ export async function persistReviewPacketAndBind(
 const USAGE = `Usage: helper review-packet <${OPERATIONS.join("|")}> --task <id> --output <file> | --packet <file>`;
 
 
-function git(args: readonly string[], cwd: string, allowDiffExit = false): string {
-  try {
-    return execFileSync("git", [...args], { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
-  } catch (error) {
-    if (allowDiffExit && error && typeof error === "object" && "status" in error &&
-        (error as { status?: number }).status === 1) {
-      const stdout = String((error as { stdout?: unknown }).stdout ?? "");
-      if (/^diff --git /m.test(stdout)) return stdout;
-      const stderr = String((error as { stderr?: unknown }).stderr ?? "").trim();
-      const detail = stderr || stdout.trim() || "no diagnostic output";
-      throw new Error(
-        `git ${args.join(" ")} returned status 1 without a valid patch: ${detail}`,
-        { cause: error },
-      );
-    }
-    throw error;
-  }
+function git(args: readonly string[], cwd: string): string {
+  return execFileSync("git", [...args], {
+    cwd,
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+function requiredDiff(result: GitDiffResult): string {
+  if (!result.ok) throw new Error(result.error);
+  return result.diff;
 }
 
 function optionalGit(
@@ -132,9 +131,9 @@ function artifact(root: string, baseSha: BaseSha, path: string): ReviewPacketArt
   }
   let diff = "";
   if (trackedAtBase || tracked) {
-    diff = git(["diff", "--binary", baseSha, "--", path], root);
+    diff = requiredDiff(diffBinaryFileFromRevision(root, baseSha, path));
   } else if (present) {
-    diff = git(["diff", "--no-index", "--binary", "/dev/null", path], root, true);
+    diff = requiredDiff(diffBinaryUntrackedFile(root, path));
   }
   return {
     path,

@@ -28,6 +28,7 @@ export const runCleanupSubagentFlag = async (
   registry: SessionRegistry = fsSessionRegistry,
   removeSidecar: typeof removeImplementationAttemptSidecar = removeImplementationAttemptSidecar,
   releasePointer: typeof releasePersistedSessionTaskGraphPointerBinding = releasePersistedSessionTaskGraphPointerBinding,
+  resolveType: typeof resolveAgentType = resolveAgentType,
 ) => {
   // Guard the standalone CLI route: dispatch parses stdin before calling
   // handlers, but this handler is also registered directly (KNOWN_HANDLERS),
@@ -67,7 +68,12 @@ export const runCleanupSubagentFlag = async (
   // exact harmless no-op the old raw-string path produced, and branding both
   // params removes the adjacent-string argument-swap hazard.
   const failures: string[] = [];
-  const reportedAgentType = parseAgentType(stripNamespace(resolveAgentType(input)));
+  let reportedAgentType: ReturnType<typeof parseAgentType> = null;
+  try {
+    reportedAgentType = parseAgentType(stripNamespace(resolveType(input)));
+  } catch (error) {
+    failures.push(`reported agent type observation failed for ${agent_id}/${sessionId}: ${errorMessage(error)}`);
+  }
   const boundAgentId = parseAgentId(agent_id);
   let boundAgentType: ReturnType<typeof parseAgentType> = null;
   if (boundAgentId !== null) {
