@@ -176,7 +176,6 @@ export function headSha(): string | null {
   return result || null;
 }
 
-/** Check if in a git repo */
 export function isGitRepo(): boolean {
   const root = currentRepoRoot("isGitRepo");
   try {

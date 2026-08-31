@@ -178,10 +178,9 @@ function classifyBindingLines(sessionId: SessionId, nowMs: number): ClassifiedLi
   }
 }
 
-type BindingProjection = Readonly<{
-  bindings: readonly MachineBinding[];
-  corrupt: boolean;
-}>;
+type BindingProjection =
+  | Readonly<{ kind: "parsed"; bindings: readonly MachineBinding[] }>
+  | Readonly<{ kind: "corrupt"; bindings: readonly MachineBinding[] }>;
 
 function projectBindingAuthority(sessionId: SessionId, nowMs: number): BindingProjection {
   const lines = classifyBindingLines(sessionId, nowMs);
@@ -194,8 +193,8 @@ function projectBindingAuthority(sessionId: SessionId, nowMs: number): BindingPr
     process.stderr.write(`readBindings: ignored ${stale} stale binding(s) for ${sessionId} (no activity within TTL)\n`);
   }
   return Object.freeze({
+    kind: malformed > 0 ? "corrupt" : "parsed",
     bindings: Object.freeze(lines.flatMap((line) => line.kind === "fresh" ? [line.persisted.binding] : [])),
-    corrupt: malformed > 0,
   });
 }
 
@@ -334,17 +333,20 @@ export function anyActiveSubagent(taskGraphPath: string): boolean {
 }
 
 /**
- * The binding evidence may be attributed to, or null when attribution is
- * impossible. The decision itself is the pure resolveSoleActiveBinding
- * (evidence.ts) — exactly one fresh binding AND a roster of exactly the
- * bound agent; anything else (contention, a leaked binding over an empty
- * or foreign roster) stands down. This adapter only supplies the files.
+ * The binding evidence may be attributed to, or null when valid evidence
+ * proves attribution impossible. The decision itself is the pure
+ * resolveSoleActiveBinding (evidence.ts) — exactly one fresh binding AND a
+ * roster of exactly the bound agent; contention or a leaked binding over an
+ * empty/foreign roster stands down. Corrupt persisted authority is neither
+ * case and throws so gate boundaries fail closed instead of treating it as
+ * benign contention. This adapter only supplies the files.
  */
 export function soleActiveBinding(sessionId: SessionId, nowMs: number = Date.now()): MachineBinding | null {
   const authority = projectBindingAuthority(sessionId, nowMs);
-  return authority.corrupt
-    ? null
-    : resolveSoleActiveBinding(authority.bindings, readActiveAgents(sessionId));
+  if (authority.kind === "corrupt") {
+    throw new Error(`machine binding authority for ${sessionId} contains malformed rows`);
+  }
+  return resolveSoleActiveBinding(authority.bindings, readActiveAgents(sessionId));
 }
 
 /**

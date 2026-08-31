@@ -18,6 +18,7 @@
  *   requests/correlators/<digest>.json immutable native-id/request binding
  *   contexts/<digest>.json             complete immutable context packets
  *   transcripts/<slot>/attempt-<n>.raw exact harness bytes
+ *   transcripts/<slot>/attempt-<n>.rejected immutable terminal capture refusal
  *   receipts/<effect-id>.json          typed effect/publication receipts
  *   artifacts/...                      domain artifacts and final outputs
  *

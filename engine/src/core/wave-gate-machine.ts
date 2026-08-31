@@ -297,6 +297,24 @@ function activePredecessor(state: Exclude<WaveGateState, { kind: "done" } | { ki
   return state.kind === "recoverable-blocked" ? state.predecessor : state;
 }
 
+type CompleteRosterDestination = Extract<
+  WaveGateState,
+  { kind: "awaiting-advisory-decision" | "ready-to-complete" }
+>;
+
+function completeRosterTransition(
+  state: WaveGateLifecycleCheckpoint,
+  event: WaveGateEvent,
+): CompleteRosterDestination | null {
+  if (event.kind === "complete-roster-with-advisories") {
+    return checkpointState(state, "awaiting-advisory-decision", lifecycleEventIdentity(event));
+  }
+  if (event.kind === "complete-roster-clean") {
+    return checkpointState(state, "ready-to-complete", lifecycleEventIdentity(event));
+  }
+  return null;
+}
+
 /**
  * Total immutable LC-1 reducer. Expected failures are values. In particular,
  * terminal states reject late input and an attempt-2 rejection can only become
@@ -405,21 +423,18 @@ export function replayWaveGateTransition(
       if (event.kind === "complete-roster-with-criticals") {
         return transitionOk(checkpointState(state, "awaiting-refutation", lifecycleEventIdentity(event)));
       }
-      if (event.kind === "complete-roster-with-advisories") {
-        return transitionOk(checkpointState(state, "awaiting-advisory-decision", lifecycleEventIdentity(event)));
+      {
+        const complete = completeRosterTransition(state, event);
+        return complete === null
+          ? transitionRejected(state, event, "undeclared-transition", `${event.kind} is not declared from awaiting-review-results`)
+          : transitionOk(complete);
       }
-      if (event.kind === "complete-roster-clean") {
-        return transitionOk(checkpointState(state, "ready-to-complete", lifecycleEventIdentity(event)));
-      }
-      return transitionRejected(state, event, "undeclared-transition", `${event.kind} is not declared from awaiting-review-results`);
-    case "awaiting-refutation":
-      if (event.kind === "complete-roster-with-advisories") {
-        return transitionOk(checkpointState(state, "awaiting-advisory-decision", lifecycleEventIdentity(event)));
-      }
-      if (event.kind === "complete-roster-clean") {
-        return transitionOk(checkpointState(state, "ready-to-complete", lifecycleEventIdentity(event)));
-      }
-      return transitionRejected(state, event, "undeclared-transition", `${event.kind} is not declared from awaiting-refutation`);
+    case "awaiting-refutation": {
+      const complete = completeRosterTransition(state, event);
+      return complete === null
+        ? transitionRejected(state, event, "undeclared-transition", `${event.kind} is not declared from awaiting-refutation`)
+        : transitionOk(complete);
+    }
     case "awaiting-advisory-decision":
       return event.kind === "advisory-decision-accepted"
         ? transitionOk(checkpointState(state, "ready-to-complete", lifecycleEventIdentity(event)))

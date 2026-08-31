@@ -19,6 +19,7 @@ export interface ParsedSpecCheckOutput {
   readonly highCount: number | null;
   readonly verdict: SpecCheckVerdict | null;
   readonly wave: number | null;
+  readonly duplicateMarkers: readonly string[];
   /**
    * Why an operator is overriding captured evidence by hand. `null` is a
    * different answer from an empty string: an override is either deliberate and
@@ -41,9 +42,21 @@ const SPEC_FINDING_MARKERS = Object.freeze([
   Object.freeze({ prefix: "MEDIUM:", target: "medium" as const }),
 ]);
 
+function allMatches(input: string, regex: RegExp): readonly RegExpMatchArray[] {
+  return [...input.matchAll(regex)];
+}
+
 function lastMatch(input: string, regex: RegExp): RegExpMatchArray | null {
-  const matches = [...input.matchAll(regex)];
-  return matches.at(-1) ?? null;
+  return allMatches(input, regex).at(-1) ?? null;
+}
+
+type ScalarMarker = Readonly<{
+  name: string;
+  matches: readonly RegExpMatchArray[];
+}>;
+
+function scalarMarker(input: string, name: string, regex: RegExp): ScalarMarker {
+  return Object.freeze({ name, matches: Object.freeze(allMatches(input, regex)) });
 }
 
 /**
@@ -74,19 +87,31 @@ export function parseSpecCheckOutput(output: string): ParsedSpecCheckOutput {
   }
   const { critical, high, medium } = findings;
 
-  const criticalCount = searchBlock.match(/^SPEC_CHECK_CRITICAL_COUNT:\s*(\d+)\s*$/m);
-  const highCount = searchBlock.match(/^SPEC_CHECK_HIGH_COUNT:\s*(\d+)\s*$/m);
-  const verdict = searchBlock.match(/^SPEC_CHECK_VERDICT:\s*(PASSED|BLOCKED)\s*$/m);
-  const wave = searchBlock.match(/^SPEC_CHECK_WAVE:\s*(\d+)\s*$/m);
-  const overrideText = searchBlock.match(/^SPEC_CHECK_OVERRIDE:\s*(.*)$/m)?.[1]?.trim() ?? "";
+  const criticalCount = scalarMarker(searchBlock, "SPEC_CHECK_CRITICAL_COUNT", /^SPEC_CHECK_CRITICAL_COUNT:\s*(\d+)\s*$/gm);
+  const highCount = scalarMarker(searchBlock, "SPEC_CHECK_HIGH_COUNT", /^SPEC_CHECK_HIGH_COUNT:\s*(\d+)\s*$/gm);
+  const verdict = scalarMarker(searchBlock, "SPEC_CHECK_VERDICT", /^SPEC_CHECK_VERDICT:\s*(PASSED|BLOCKED)\s*$/gm);
+  const wave = scalarMarker(searchBlock, "SPEC_CHECK_WAVE", /^SPEC_CHECK_WAVE:\s*(\d+)\s*$/gm);
+  const override = scalarMarker(searchBlock, "SPEC_CHECK_OVERRIDE", /^SPEC_CHECK_OVERRIDE:\s*(.*)$/gm);
+  const uniqueValue = (marker: ScalarMarker): string | null =>
+    marker.matches.length === 1 ? (marker.matches[0]?.[1] ?? null) : null;
+  const criticalCountValue = uniqueValue(criticalCount);
+  const highCountValue = uniqueValue(highCount);
+  const verdictValue = uniqueValue(verdict);
+  const waveValue = uniqueValue(wave);
+  const overrideText = uniqueValue(override)?.trim() ?? "";
   return {
     critical,
     high,
     medium,
-    criticalCount: criticalCount ? Number(criticalCount[1]) : null,
-    highCount: highCount ? Number(highCount[1]) : null,
-    verdict: verdict ? parseSpecCheckVerdict(verdict[1]) : null,
-    wave: wave ? Number(wave[1]) : null,
+    criticalCount: criticalCountValue === null ? null : Number(criticalCountValue),
+    highCount: highCountValue === null ? null : Number(highCountValue),
+    verdict: verdictValue === null ? null : parseSpecCheckVerdict(verdictValue),
+    wave: waveValue === null ? null : Number(waveValue),
+    duplicateMarkers: Object.freeze(
+      [criticalCount, highCount, verdict, wave, override]
+        .filter((marker) => marker.matches.length > 1)
+        .map(({ name }) => name),
+    ),
     overrideReason: overrideText === "" ? null : overrideText,
   };
 }
@@ -188,6 +213,13 @@ export function reconcileSpecCheck(
   wave: number,
   runAt: string,
 ): SpecCheckResolution {
+  if (parsed.duplicateMarkers.length > 0) {
+    return evidenceFailure(
+      wave,
+      runAt,
+      `${parsed.duplicateMarkers.join(", ")} marker appears more than once in the authoritative footer - re-run /wave-gate`,
+    );
+  }
   if (parsed.criticalCount === null) {
     return evidenceFailure(wave, runAt, "SPEC_CHECK_CRITICAL_COUNT marker not found - re-run /wave-gate");
   }

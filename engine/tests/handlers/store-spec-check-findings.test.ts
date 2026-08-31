@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
+import fc from "fast-check";
 import { mkdirSync, realpathSync, writeFileSync, chmodSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -111,6 +112,55 @@ describe("parseSpecCheckOutput (pure)", () => {
     if (resolution.kind !== "captured") return;
     expect(resolution.specCheck.high_count).toBe(0);
     expect(resolution.specCheck.verdict).toBe("PASSED");
+  });
+
+  it("rejects contradictory duplicate count markers instead of selecting the first", () => {
+    const parsed = parseSpecCheckOutput([
+      "SPEC_CHECK_WAVE: 1",
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_CRITICAL_COUNT: 1",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+    ].join("\n"));
+
+    expect(parsed.duplicateMarkers).toEqual(["SPEC_CHECK_CRITICAL_COUNT"]);
+    expect(reconcileSpecCheck(parsed, 1, "now")).toMatchObject({
+      kind: "evidence-failed",
+      specCheck: {
+        verdict: "EVIDENCE_CAPTURE_FAILED",
+        error: expect.stringContaining("SPEC_CHECK_CRITICAL_COUNT marker appears more than once"),
+      },
+    });
+  });
+
+  it("property: duplicate footer scalars never reconcile to captured evidence", () => {
+    fc.assert(fc.property(
+      fc.constantFrom(
+        "SPEC_CHECK_CRITICAL_COUNT",
+        "SPEC_CHECK_HIGH_COUNT",
+        "SPEC_CHECK_OVERRIDE",
+      ),
+      fc.nat({ max: 10 }),
+      fc.nat({ max: 10 }),
+      (marker, first, second) => {
+        const value = marker === "SPEC_CHECK_OVERRIDE" ? (count: number) => `reason-${count}` : String;
+        const parsed = parseSpecCheckOutput([
+          "SPEC_CHECK_WAVE: 1",
+          "SPEC_CHECK_CRITICAL_COUNT: 0",
+          "SPEC_CHECK_HIGH_COUNT: 0",
+          `${marker}: ${value(first)}`,
+          `${marker}: ${value(second)}`,
+          "SPEC_CHECK_VERDICT: PASSED",
+        ].join("\n"));
+        const resolution = reconcileSpecCheck(parsed, 1, "now");
+
+        expect(parsed.duplicateMarkers).toContain(marker);
+        expect(resolution.kind).toBe("evidence-failed");
+        if (resolution.kind === "evidence-failed") {
+          expect(resolution.specCheck.error).toContain(`${marker} marker appears more than once`);
+        }
+      },
+    ));
   });
 
   it("fails evidence reconciliation when the high count drifts from HIGH lines", () => {

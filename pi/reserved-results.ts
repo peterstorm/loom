@@ -3,9 +3,10 @@
  *
  * A reservation is the authoritative expected batch. Pi may return a shorter or
  * reordered results array after a child disappears, so every gate-owned slot
- * has to be reconciled against what actually arrived — otherwise stale review
- * or spec-check evidence stays authoritative and the wave gate reads it as
- * green.
+ * has to be reconciled against what actually arrived. Matching is positional:
+ * reordered entries are missing or mismatched at their reserved slots, never
+ * re-associated by identity. Otherwise stale review or spec-check evidence
+ * stays authoritative and the wave gate reads it as green.
  *
  * Pure by construction: no state manager, no filesystem, no stderr. It grew
  * inline in `extension.ts`'s `tool_result` handler, where the only way to reach
