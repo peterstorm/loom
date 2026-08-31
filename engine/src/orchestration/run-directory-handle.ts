@@ -2,10 +2,10 @@
  * Anchored run-directory handle.
  *
  * The handle exposes a FIXED set of operations over one proven run directory
- * and has no arbitrary path API: a caller can publish a context, reserve a
- * transcript slot, or record a receipt, but it cannot ask the handle to write
- * "some path". That is the point — every write lands in a slot the layout
- * already names, so a compromised or buggy caller cannot redirect bytes.
+ * and no arbitrary filesystem-path API. Most writes land in slots the layout
+ * names; `publishArtifactSet` additionally accepts parser-proven relative
+ * destinations confined beneath the fixed `artifacts/` namespace. No caller
+ * can redirect bytes outside the run or into its protected authority slots.
  *
  * Layout:
  *   authority.json                     immutable run/roster/root authority
@@ -354,9 +354,10 @@ function rebasedOnRealRunsRoot(
 
 /**
  * A run directory must be a direct child of its runs-root and must already
- * exist. Both are resolved and compared as strings, and every later access
- * re-opens the path with no component followed, so a component swapped to a
- * symlink after this check still cannot be followed.
+ * exist. Both are resolved and compared as strings. Linux later accesses
+ * through retained descriptors, so a post-check pathname swap cannot redirect
+ * them. Darwin re-opens with O_NOFOLLOW_ANY through the proven pathname and
+ * retains the documented post-acquisition parent-swap risk.
  */
 export function parseRunDirectoryIdentity(
   runsRoot: string,
@@ -510,11 +511,15 @@ function readEventRecords(events: AnchoredDirectory): readonly ProgramEventRecor
   }));
 }
 
-function isExistingDirectory(path: string): boolean {
+function inspectExistingDirectory(path: string): DomainResult<boolean, RunDirectoryError> {
   try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
+    return success(statSync(path).isDirectory());
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return success(false);
+    return failure(
+      "artifacts",
+      `cannot inspect artifact slot ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -1720,10 +1725,15 @@ export function promoteArtifactSet(
   if (stagedPaths.some((entry) => !MINTED_STAGED_ARTIFACT_PROMOTIONS.has(entry))) {
     return failure("artifacts", "artifact promotion requires parser-minted staged authority");
   }
-  const blocked = stagedPaths.find((entry) => isExistingDirectory(entry.final));
-  if (blocked !== undefined) {
-    const cleanupFailures = discardStaged(stagedPaths);
-    return failure("artifacts", `artifact slot is occupied by a directory: ${blocked.final}${cleanupFailureSuffix(cleanupFailures)}`);
+  for (const entry of stagedPaths) {
+    const inspected = inspectExistingDirectory(entry.final);
+    if (!inspected.ok || inspected.value) {
+      const cleanupFailures = discardStaged(stagedPaths);
+      const reason = inspected.ok
+        ? `artifact slot is occupied by a directory: ${entry.final}`
+        : inspected.error.message;
+      return failure("artifacts", `${reason}${cleanupFailureSuffix(cleanupFailures)}`);
+    }
   }
 
   for (const entry of stagedPaths) {

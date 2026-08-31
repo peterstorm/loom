@@ -445,6 +445,13 @@ export type WaveTaskReviewRetry = Readonly<{
   packet: ContextPacket;
 }>;
 
+function matchesCaptureRejection(event: unknown, authority: AgentRequestAuthority): boolean {
+  if (typeof event !== "object" || event === null || Array.isArray(event)) return false;
+  const record = event as Record<string, unknown>;
+  return record.kind === "request-capture-rejected" && record.requestId === authority.requestId &&
+    record.slotId === authority.slotId && record.attempt === authority.attempt;
+}
+
 /**
  * The attempt-2 diagnostic a rejected reviewer sees. It names the parser's
  * exact complaint AND restates the exact wire schema, because the failure this
@@ -588,12 +595,7 @@ export async function currentWaveTaskReviewRetries(
 ): Promise<readonly WaveTaskReviewRetry[]> {
   const events = await handle.readEvents();
   const rejectionReason = (authority: AgentRequestAuthority): string | null => {
-    const found = events.find(({ event }) => {
-      if (typeof event !== "object" || event === null || Array.isArray(event)) return false;
-      const record = event as Record<string, unknown>;
-      return record.kind === "request-capture-rejected" && record.requestId === authority.requestId &&
-        record.slotId === authority.slotId && record.attempt === authority.attempt;
-    });
+    const found = events.find(({ event }) => matchesCaptureRejection(event, authority));
     if (found === undefined || typeof found.event !== "object" || found.event === null) return null;
     const diagnostic = (found.event as Record<string, unknown>).diagnostic;
     return typeof diagnostic === "string" && diagnostic.trim() !== "" ? diagnostic : "capture was rejected without a diagnostic";
@@ -1055,12 +1057,7 @@ export async function exhaustedWaveReviewerAttempts(
         exhausted.add(key);
         continue;
       }
-      const rejected = events.some(({ event }) => {
-        if (typeof event !== "object" || event === null || Array.isArray(event)) return false;
-        const record = event as Record<string, unknown>;
-        return record.kind === "request-capture-rejected" && record.requestId === authority.requestId &&
-          record.slotId === authority.slotId && record.attempt === authority.attempt;
-      });
+      const rejected = events.some(({ event }) => matchesCaptureRejection(event, authority));
       if (rejected) {
         const terminal = await handle.rejectCapture(authority);
         if (!terminal.ok) return { ok: false, message: terminal.error.message };

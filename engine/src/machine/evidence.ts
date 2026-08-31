@@ -195,11 +195,11 @@ export interface CallStartEntry {
  * recency order (oldest first) — an explicit ordering on the wire, not a
  * reliance on JS object key-ordering semantics. `id` is UNTRUSTED harness
  * text — it lives only inside the JSON payload, never in a filesystem path,
- * so any non-empty string is acceptable. Entries with a malformed id/stamp
- * are dropped (fail closed: a missing stamp only ever REJECTS artifacts); a
- * file that is not a JSON array at all — including the pre-array Record
- * shape — yields null so callers can log the corruption instead of silently
- * reading "no stamps".
+ * so any non-empty string is acceptable. The array is one authority value:
+ * any malformed entry or duplicate id makes the complete file corrupt. Dropping
+ * only a malformed newest duplicate would reveal its older timestamp and let a
+ * stale artifact vouch as fresh. Non-array shapes likewise yield null so callers
+ * log corruption instead of silently reading partial stamps.
  */
 export function parseCallStartEntries(raw: string): readonly CallStartEntry[] | null {
   let parsed: unknown;
@@ -209,17 +209,20 @@ export function parseCallStartEntries(raw: string): readonly CallStartEntry[] | 
     return null;
   }
   if (!Array.isArray(parsed)) return null;
-  return parsed.flatMap((entry): CallStartEntry[] => {
-    if (typeof entry !== "object" || entry === null) return [];
-    const o = entry as Record<string, unknown>;
-    return typeof o.id === "string" &&
-      o.id !== "" &&
-      typeof o.startMs === "number" &&
-      Number.isSafeInteger(o.startMs) &&
-      o.startMs >= 0
-      ? [{ id: o.id, startMs: o.startMs }]
-      : [];
-  });
+  const ids = new Set<string>();
+  const entries: CallStartEntry[] = [];
+  for (const entry of parsed) {
+    if (typeof entry !== "object" || entry === null) return null;
+    const candidate = entry as Record<string, unknown>;
+    if (typeof candidate.id !== "string" || candidate.id === "" ||
+        typeof candidate.startMs !== "number" || !Number.isSafeInteger(candidate.startMs) ||
+        candidate.startMs < 0 || ids.has(candidate.id)) {
+      return null;
+    }
+    ids.add(candidate.id);
+    entries.push(Object.freeze({ id: candidate.id, startMs: candidate.startMs }));
+  }
+  return Object.freeze(entries);
 }
 
 /**
@@ -234,11 +237,17 @@ export function pruneCallStarts(
   return entries.slice(Math.max(0, entries.length - cap));
 }
 
-/** The stamp for one tool call, or null when absent. A duplicate id (which
- *  recordCallStart never writes, but a hand-edited or merged file could)
- *  resolves to the most recent stamp. */
+/** The stamp for one tool call, or null when absent or duplicate. Parsed
+ * files cannot contain duplicates; this second fail-closed check protects
+ * in-memory adapters and direct callers from hand-constructed partial authority. */
 export function callStartOf(entries: readonly CallStartEntry[], toolUseId: string): number | null {
-  return entries.findLast((entry) => entry.id === toolUseId)?.startMs ?? null;
+  let found: number | null = null;
+  for (const entry of entries) {
+    if (entry.id !== toolUseId) continue;
+    if (found !== null) return null;
+    found = entry.startMs;
+  }
+  return found;
 }
 
 // --- Bindings (wire format: "<agent_id>\t<agent_type>\t<bound_at_ms>") ---

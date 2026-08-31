@@ -4,6 +4,9 @@
  */
 
 import { execSync, execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 import { isExactGitSha } from "../core/git-sha";
 
 /**
@@ -211,18 +214,19 @@ export type GitDiffResult =
  * config makes an ordinary `git diff` run that command inside the calling
  * process, so an implementation Agent that writes two otherwise ordinary files
  * would execute arbitrary code inside a hook process — the process holding
- * descriptor authority over evidence, attribution, and the State File. Neither
- * path is a guarded directory, so this suppression is the only boundary. It
- * lives here rather than at the call sites because a per-call-site flag is a
- * flag one call site will forget.
+ * descriptor authority over evidence, attribution, and the State File. Clean
+ * and process filters are another executable path with no disable flag, so the
+ * shadow Git directory below removes repository config entirely; these flags
+ * remain defense in depth. Both live here because per-call-site hardening is
+ * hardening one caller will eventually omit.
  */
 const DIFF_DRIVER_SUPPRESSION = ["--no-textconv", "--no-ext-diff"] as const;
 
 /**
- * Diff children receive only process-launch essentials, never ambient Git
+ * Git evidence children receive only process-launch essentials, never ambient
  * authority such as GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, config injection,
- * or executable diff overrides. Repository-local config remains readable, but
- * the fixed argv below disables its executable diff features.
+ * or executable diff overrides. The shadow administration directory below also
+ * excludes repository-local config, hooks, info/attributes, and fsmonitor.
  */
 function diffEnvironment(): NodeJS.ProcessEnv {
   const inherited = [
@@ -260,13 +264,92 @@ const isEvidenceBudgetFailure = (error: unknown): boolean =>
   typeof error === "object" && error !== null &&
   (error as NodeJS.ErrnoException).code === "ENOBUFS";
 
-const diffExecOptions = (root: string): ExecFileSyncOptionsWithStringEncoding => ({
+const diffExecOptions = (
+  root: string,
+  environment: NodeJS.ProcessEnv,
+): ExecFileSyncOptionsWithStringEncoding => ({
   encoding: "utf-8",
   cwd: root,
-  env: diffEnvironment(),
+  env: environment,
   maxBuffer: DIFF_EVIDENCE_BUDGET_BYTES,
   stdio: ["pipe", "pipe", "pipe"],
 });
+
+type ShadowGitAuthority = Readonly<{
+  indexPath: string;
+  objectDirectory: string;
+  objectFormat: "sha1" | "sha256";
+  headSha: string;
+}>;
+
+function gitProbe(root: string, args: readonly string[]): string {
+  return execFileSync("git", ["-c", "core.fsmonitor=false", ...args], {
+    cwd: root,
+    encoding: "utf8",
+    env: diffEnvironment(),
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+}
+
+function absoluteGitPath(root: string, observed: string, label: string): string {
+  if (observed === "") throw new Error(`git returned an empty ${label}`);
+  return isAbsolute(observed) ? observed : resolve(root, observed);
+}
+
+function observeShadowGitAuthority(root: string): ShadowGitAuthority {
+  const headSha = gitProbe(root, ["rev-parse", "--verify", "HEAD"]);
+  if (!isExactGitSha(headSha)) throw new Error(`git returned an invalid HEAD: ${JSON.stringify(headSha)}`);
+  const objectFormat = gitProbe(root, ["rev-parse", "--show-object-format"]);
+  if (objectFormat !== "sha1" && objectFormat !== "sha256") {
+    throw new Error(`git returned an unsupported object format: ${JSON.stringify(objectFormat)}`);
+  }
+  return Object.freeze({
+    indexPath: absoluteGitPath(
+      root,
+      gitProbe(root, ["rev-parse", "--path-format=absolute", "--git-path", "index"]),
+      "index path",
+    ),
+    objectDirectory: absoluteGitPath(
+      root,
+      gitProbe(root, ["rev-parse", "--path-format=absolute", "--git-path", "objects"]),
+      "object directory",
+    ),
+    objectFormat,
+    headSha,
+  });
+}
+
+function shadowGitConfig(objectFormat: ShadowGitAuthority["objectFormat"]): string {
+  const format = objectFormat === "sha256"
+    ? "\n[extensions]\n\tobjectFormat = sha256"
+    : "";
+  return `[core]\n\trepositoryFormatVersion = ${objectFormat === "sha256" ? 1 : 0}\n` +
+    `\tbare = false\n\tfsmonitor = false${format}\n`;
+}
+
+/**
+ * Execute with real object/index bytes but no repository-authored executable
+ * configuration. Worktree attributes may still name a filter or diff driver;
+ * the shadow config defines none, so Git treats those attributes as inert data.
+ */
+function withShadowGit<T>(root: string, operation: (environment: NodeJS.ProcessEnv) => T): T {
+  const authority = observeShadowGitAuthority(root);
+  const shadow = mkdtempSync(join(tmpdir(), "loom-git-shadow-"));
+  try {
+    mkdirSync(join(shadow, "refs", "heads"), { recursive: true });
+    writeFileSync(join(shadow, "HEAD"), `${authority.headSha}\n`);
+    writeFileSync(join(shadow, "config"), shadowGitConfig(authority.objectFormat));
+    return operation({
+      ...diffEnvironment(),
+      GIT_DIR: shadow,
+      GIT_WORK_TREE: root,
+      GIT_INDEX_FILE: authority.indexPath,
+      GIT_OBJECT_DIRECTORY: authority.objectDirectory,
+    });
+  } finally {
+    rmSync(shadow, { recursive: true, force: true });
+  }
+}
 
 /**
  * Git diff proof boundary: command failure is not an empty diff.
@@ -286,7 +369,11 @@ function diffArgsAt(
   const argv: readonly string[] = [subcommand, ...DIFF_DRIVER_SUPPRESSION, ...rest];
   const argvText = argv.map((arg) => JSON.stringify(arg)).join(" ");
   try {
-    return { ok: true, diff: execFileSync("git", [...argv], diffExecOptions(root)) };
+    return {
+      ok: true,
+      diff: withShadowGit(root, (environment) =>
+        execFileSync("git", [...argv], diffExecOptions(root, environment))),
+    };
   } catch (error) {
     const detail = error && typeof error === "object"
       ? error as { status?: unknown; stdout?: unknown }
@@ -367,11 +454,14 @@ export type GitTrackedResult =
  * "untracked". `ls-files --error-unmatch` uses exit 1 for the one expected
  * negative answer; every other failure leaves tracking authority unknown.
  */
-export function isTracked(file: string): GitTrackedResult {
-  const root = currentRepoRoot("isTracked");
-  if (root === undefined) return { ok: false, error: "cannot inspect tracking outside a Git repository" };
+export function isTrackedAt(root: string, file: string): GitTrackedResult {
   try {
-    execFileSync("git", ["ls-files", "--error-unmatch", "--", file], { cwd: root, stdio: "ignore" });
+    withShadowGit(root, (environment) =>
+      execFileSync("git", ["ls-files", "--error-unmatch", "--", file], {
+        cwd: root,
+        env: environment,
+        stdio: ["ignore", "ignore", "pipe"],
+      }));
     return { ok: true, tracked: true };
   } catch (error) {
     const status = typeof error === "object" && error !== null && "status" in error
@@ -381,6 +471,13 @@ export function isTracked(file: string): GitTrackedResult {
       ? { ok: true, tracked: false }
       : { ok: false, error: `cannot determine whether ${JSON.stringify(file)} is tracked: ${commandFailure(error)}` };
   }
+}
+
+export function isTracked(file: string): GitTrackedResult {
+  const root = currentRepoRoot("isTracked");
+  return root === undefined
+    ? { ok: false, error: "cannot inspect tracking outside a Git repository" }
+    : isTrackedAt(root, file);
 }
 
 /** Diff untracked file against /dev/null without collapsing command failure. */

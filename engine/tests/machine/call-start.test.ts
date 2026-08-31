@@ -39,29 +39,32 @@ afterAll(() => {
 });
 
 describe("pure call-start vocabulary", () => {
-  it("parseCallStartEntries accepts what recordCallStart writes and drops malformed entries", () => {
+  it("parseCallStartEntries accepts exactly what recordCallStart writes", () => {
     expect(
       parseCallStartEntries('[{"id":"toolu_1","startMs":1000},{"id":"toolu_2","startMs":2000}]'),
     ).toEqual([
       { id: "toolu_1", startMs: 1000 },
       { id: "toolu_2", startMs: 2000 },
     ]);
-    // Malformed ENTRIES are dropped one-by-one (fail closed: a dropped
-    // stamp only ever rejects artifacts)…
-    expect(
-      parseCallStartEntries(
-        '[{"id":"a","startMs":1},{"id":"neg","startMs":-5},{"id":"frac","startMs":1.5},' +
-          '{"id":"str","startMs":"9"},{"id":"","startMs":3},{"id":"huge","startMs":9007199254740993},' +
-          '1,"x",null,{"startMs":4},{"id":"nostamp"}]',
-      ),
-    ).toEqual([{ id: "a", startMs: 1 }]);
-    // …while a non-array file is corruption the caller must log — INCLUDING
-    // the pre-array Record shape, which fails closed instead of being read
-    // through JS key-ordering semantics.
-    expect(parseCallStartEntries('{"toolu_1":1000,"toolu_2":2000}')).toBeNull();
-    expect(parseCallStartEntries("not json")).toBeNull();
-    expect(parseCallStartEntries('"str"')).toBeNull();
-    expect(parseCallStartEntries("null")).toBeNull();
+  });
+
+  it.each([
+    '[{"id":"a","startMs":1},{"id":"neg","startMs":-5}]',
+    '[{"id":"a","startMs":1},{"id":"frac","startMs":1.5}]',
+    '[{"id":"a","startMs":1},{"id":"str","startMs":"9"}]',
+    '[{"id":"a","startMs":1},{"id":"","startMs":3}]',
+    '[{"id":"a","startMs":1},{"id":"huge","startMs":9007199254740993}]',
+    '[{"id":"a","startMs":1},1]',
+    '[{"id":"a","startMs":1},null]',
+    '[{"id":"a","startMs":1},{"startMs":4}]',
+    '[{"id":"a","startMs":1},{"id":"nostamp"}]',
+    '[{"id":"a","startMs":1},{"id":"a","startMs":2}]',
+    '{"toolu_1":1000,"toolu_2":2000}',
+    "not json",
+    '"str"',
+    "null",
+  ])("rejects the complete call-start authority when any member or shape is corrupt: %s", (raw) => {
+    expect(parseCallStartEntries(raw)).toBeNull();
   });
 
   it("pruneCallStarts keeps the LAST cap entries in order (oldest dropped first)", () => {
@@ -71,13 +74,13 @@ describe("pure call-start vocabulary", () => {
     expect(pruneCallStarts([], 3)).toEqual([]);
   });
 
-  it("callStartOf resolves a duplicate id to the most recent stamp", () => {
+  it("callStartOf rejects duplicate in-memory authority", () => {
     const entries = [
       { id: "t", startMs: 100 },
       { id: "other", startMs: 150 },
       { id: "t", startMs: 200 },
     ];
-    expect(callStartOf(entries, "t")).toBe(200);
+    expect(callStartOf(entries, "t")).toBeNull();
     expect(callStartOf(entries, "other")).toBe(150);
     expect(callStartOf(entries, "missing")).toBeNull();
     expect(callStartOf([], "t")).toBeNull();
@@ -138,6 +141,24 @@ describe("call-start stamps — fs corruption handling", () => {
       stderrSpy.mockRestore();
     }
     expect(fsSessionRegistry.callStartFor(s, "toolu_x")).toBe(777);
+  });
+
+  it("a malformed newer duplicate cannot reveal an older stamp", async () => {
+    const s = sid("corrupt");
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(`${SUBAGENT_DIR}/${s}${CALL_START_SUFFIX}`,
+      '[{"id":"toolu_same","startMs":100},{"id":"toolu_same","startMs":"newer-corrupt"}]');
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(fsSessionRegistry.callStartFor(s, "toolu_same")).toBeNull();
+      await fsSessionRegistry.recordCallStart(s, "toolu_same", 300);
+      expect(stderrSpy.mock.calls.map((c) => String(c[0])).join(""))
+        .toContain("corrupt call-start file");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+    expect(fsSessionRegistry.callStartFor(s, "toolu_same")).toBe(300);
   });
 
   it("an old Record-shaped stamp file fails closed as corruption and is replaced by the next stamp", async () => {

@@ -26,6 +26,7 @@ import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/rep
 import {
   diffBinaryFileFromRevision,
   diffBinaryUntrackedFile,
+  isTrackedAt,
   type GitDiffResult,
 } from "../../utils/git";
 
@@ -124,7 +125,9 @@ export function readReviewPacketPostimage(
 function artifact(root: string, baseSha: BaseSha, path: string): ReviewPacketArtifactInput {
   const inspected = inspectRepositoryPath(root, path, "review packet path", { mustBeFile: true });
   const present = inspected.exists;
-  const tracked = optionalGit(["ls-files", "--error-unmatch", "--", path], root, [1]) !== null;
+  const trackedResult = isTrackedAt(root, path);
+  if (!trackedResult.ok) throw new Error(trackedResult.error);
+  const tracked = trackedResult.tracked;
   const trackedAtBase = git(["ls-tree", "-z", "--full-tree", baseSha, "--", path], root) !== "";
   if (!trackedAtBase && !tracked && !present) {
     throw new Error(`review packet path is neither tracked nor present at its base: ${path}`);

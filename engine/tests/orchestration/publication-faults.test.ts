@@ -855,7 +855,7 @@ describe("artifact set publication", () => {
 
       expect(promoted.ok).toBe(false);
       if (promoted.ok) return;
-      expect(promoted.error.message).toContain("artifact slot is occupied by unreadable bytes");
+      expect(promoted.error.message).toContain("cannot inspect artifact slot");
       expect(promoted.error.message).toContain(final);
       expect(promoted.error.message).toContain("ELOOP");
       expect(readdirSync(join(directory, "artifacts")).some((name) => name.includes(".staged-"))).toBe(false);

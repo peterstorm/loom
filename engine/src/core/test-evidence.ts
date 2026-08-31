@@ -120,6 +120,12 @@ function latestRunnerVerdict(input: string, runner: RunnerTally): RunnerVerdict 
   }, null);
 }
 
+function mavenVerdictKind(executed: number, failed: boolean): RunnerVerdict["kind"] {
+  if (failed) return "failed";
+  if (executed === 0) return "zero";
+  return "passed";
+}
+
 function latestMavenVerdict(input: string): RunnerVerdict | null {
   const stripped = input.replace(/\*\*/g, "");
   const hasBuildSuccess = /BUILD SUCCESS/.test(stripped);
@@ -131,7 +137,7 @@ function latestMavenVerdict(input: string): RunnerVerdict | null {
       return [Object.freeze({
         label: "maven",
         line: lineOf(stripped, match.index),
-        kind: failed ? "failed" : executed === 0 ? "zero" : "passed",
+        kind: mavenVerdictKind(executed, failed),
         summary: executed === 0 && !failed ? "0 tests executed" : match[0],
       })];
     });

@@ -8,11 +8,12 @@
  * model that the façade replaced additively. These readers exist so historical
  * runs remain consumable and auditable; they are NOT domain logic.
  *
- * Deprecation horizon (A11, round-42): freeze every legacy reader behind this
- * single documented archive module, out of the active core files. Delete these
- * functions — and the re-export facades in their former homes — once the
- * oldest historical run directories have been consumed or migrated; the
- * horizon is tracked by the archive sections below. Until then the rule is:
+ * Deprecation horizon: freeze every legacy reader behind this single archive
+ * module, out of the active core files. Delete a section and its compatibility
+ * re-exports only when repository fixtures and supported persisted runs no
+ * longer contain that section's documented historical format, or an explicit
+ * migration has rewritten all such bytes. Each section names its own format
+ * and callers below. Until those observable criteria hold, the rule is:
  *   - Canonical publication never originates here. Compatibility entry points,
  *     including the orchestration façade's legacy registration translation,
  *     may call the archive only after detecting an historical on-disk format.

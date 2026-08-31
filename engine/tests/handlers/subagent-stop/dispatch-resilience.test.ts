@@ -270,7 +270,7 @@ describe("request-bound capture gates legacy dispatch", () => {
     }
   });
 
-  it("terminates a successfully captured graphless standalone review without TaskGraph routing", async () => {
+  it("terminates a captured graphless standalone review without consulting faulting agent metadata", async () => {
     const dir = tempDir();
     const runsRoot = join(dir, "runs");
     const runDir = join(runsRoot, "run.graphless-standalone-capture");
@@ -311,15 +311,23 @@ describe("request-bound capture gates legacy dispatch", () => {
       message: { role: "assistant", content: [{ type: "text", text: capturedBytes }] },
     }));
     const cleanup = vi.fn(async () => ({ kind: "passthrough" as const }));
+    const config = join(dir, "faulting-claude-config");
+    const project = join(dir, "project");
+    mkdirSync(config, { recursive: true });
+    mkdirSync(project, { recursive: true });
+    writeFileSync(join(config, "projects"), "not a directory\n");
     const previousRoot = process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
     const previousRun = process.env.LOOM_ORCHESTRATION_RUN_DIR;
+    const previousConfig = process.env.CLAUDE_CONFIG_DIR;
+    const previousProject = process.env.CLAUDE_PROJECT_DIR;
     process.env.LOOM_ORCHESTRATION_RUNS_ROOT = runsRoot;
     process.env.LOOM_ORCHESTRATION_RUN_DIR = runDir;
+    process.env.CLAUDE_CONFIG_DIR = config;
+    process.env.CLAUDE_PROJECT_DIR = project;
     try {
       const result = await runDispatch(JSON.stringify({
         session_id: sid("graphless-standalone"),
         agent_id: "agent-graphless-standalone",
-        agent_type: "code-reviewer",
         agent_transcript_path: transcriptPath,
       }), [], cleanup);
 
@@ -333,6 +341,10 @@ describe("request-bound capture gates legacy dispatch", () => {
       else process.env.LOOM_ORCHESTRATION_RUNS_ROOT = previousRoot;
       if (previousRun === undefined) delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
       else process.env.LOOM_ORCHESTRATION_RUN_DIR = previousRun;
+      if (previousConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousConfig;
+      if (previousProject === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = previousProject;
     }
   });
 });

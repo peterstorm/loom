@@ -2373,12 +2373,17 @@ export class StateManager {
     return this.path;
   }
 
-  /** Atomically update state via pure transform: (state) => state */
+  /**
+   * Atomically update state under the TaskGraph lock. The callback runs while
+   * that lock is held: ordinary reducers should stay pure, while authority-
+   * sensitive callers may re-observe external evidence there to compare and
+   * commit one exact snapshot. Keep such observations bounded and fail closed.
+   */
   async update(fn: (state: ParsedTaskGraph) => TaskGraph): Promise<void> {
     await this.updateAndReturn((state) => ({ state: fn(state), value: undefined }));
   }
 
-  /** Atomic shell primitive for effects that must return the locked decision they committed. */
+  /** Atomic shell primitive returning the exact lock-time decision committed. */
   async updateAndReturn<T>(
     fn: (state: ParsedTaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
   ): Promise<T> {

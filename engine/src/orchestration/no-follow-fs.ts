@@ -733,9 +733,11 @@ function removeOwnedRecoveryGuard(
 }
 
 /**
- * Recover one stale descriptor-relative lock without ever removing a lock that
- * may still have a live owner. The owner is inspected while the canonical lock
- * name remains occupied; only a proven-dead owner may be moved aside. The
+ * Recover one stale anchored lock without ever removing a lock that may still
+ * have a live owner. Child names are descriptor-relative on Linux and relative
+ * to the O_NOFOLLOW_ANY-proven pathname on Darwin. The owner is inspected
+ * while the canonical lock name remains occupied; only a proven-dead owner may
+ * be moved aside. The
  * tombstone is then re-read to close the release/reacquire race between the
  * first observation and the rename.
  *

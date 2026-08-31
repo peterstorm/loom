@@ -83,7 +83,7 @@ function writeReviewPacketTaskGraph(
 }
 
 function hostileReviewPacketRepository(
-  driver: "textconv" | "external",
+  driver: "textconv" | "external" | "clean",
 ): Readonly<{ root: string; marker: string; packet: string }> {
   const root = canonicalTempDir(`loom-review-packet-${driver}-`);
   cleanup.push(root);
@@ -91,17 +91,22 @@ function hostileReviewPacketRepository(
   execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });
   execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
   const marker = join(root, "DRIVER_EXECUTED");
+  const executable = join(root, "external-diff.sh");
   writeFileSync(join(root, "data.dat"), "before\n");
-  if (driver === "textconv") {
-    writeFileSync(join(root, ".gitattributes"), "*.dat diff=evil\n");
-    execFileSync("git", ["config", "diff.evil.textconv", `sh -c 'touch ${marker}; cat'`], { cwd: root });
-  } else {
-    const executable = join(root, "external-diff.sh");
+  if (driver === "textconv") writeFileSync(join(root, ".gitattributes"), "*.dat diff=evil\n");
+  if (driver === "clean") writeFileSync(join(root, ".gitattributes"), "*.dat filter=evil\n");
+  if (driver === "external") {
     writeFileSync(executable, `#!/bin/sh\ntouch ${marker}\nexit 0\n`, { mode: 0o755 });
-    execFileSync("git", ["config", "diff.external", executable], { cwd: root });
   }
   execFileSync("git", ["add", "."], { cwd: root });
   execFileSync("git", ["commit", "--quiet", "-m", "baseline"], { cwd: root });
+  if (driver === "textconv") {
+    execFileSync("git", ["config", "diff.evil.textconv", `sh -c 'touch ${marker}; cat'`], { cwd: root });
+  }
+  if (driver === "clean") {
+    execFileSync("git", ["config", "filter.evil.clean", `sh -c 'touch ${marker}; cat'`], { cwd: root });
+  }
+  if (driver === "external") execFileSync("git", ["config", "diff.external", executable], { cwd: root });
   const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
   execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd: root });
   execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], { cwd: root });
@@ -361,7 +366,7 @@ describe("quality-program helper boundaries", () => {
     expect(cli(["helper", "review-packet", "verify", "--packet", packet]).trim()).toBe(id);
   });
 
-  it.each(["textconv", "external"] as const)(
+  it.each(["textconv", "external", "clean"] as const)(
     "does not execute a repository-controlled %s diff driver while creating a Review Packet",
     (driver) => {
       const fixture = hostileReviewPacketRepository(driver);
@@ -371,6 +376,40 @@ describe("quality-program helper boundaries", () => {
       expect(written.artifacts[0].postimage.content).toBe("after\n");
     },
   );
+
+  it("does not execute a clean filter for an untracked Review Packet artifact", () => {
+    const root = canonicalTempDir("loom-review-packet-untracked-clean-");
+    cleanup.push(root);
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
+    writeFileSync(join(root, "README.md"), "baseline\n");
+    writeFileSync(join(root, ".gitattributes"), "*.dat filter=evil\n");
+    execFileSync("git", ["add", "."], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "baseline"], { cwd: root });
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd: root });
+    execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], { cwd: root });
+    const marker = join(root, "CLEAN_EXECUTED");
+    execFileSync("git", ["config", "filter.evil.clean", `sh -c 'touch ${marker}; cat'`], { cwd: root });
+    writeFileSync(join(root, "new.dat"), "untracked bytes\n");
+    const state = join(root, "state.json");
+    const packet = join(root, ".claude", "reviews", "packet.json");
+    writeReviewPacketTaskGraph(state, {
+      start_sha: head,
+      file_list: ["new.dat"],
+      files_modified: ["new.dat"],
+    });
+
+    execFileSync("bun", [
+      CLI, "helper", "review-packet", "create", "--task", "T1", "--output", ".claude/reviews/packet.json",
+    ], { cwd: root, encoding: "utf8", env: { ...process.env, LOOM_STATE_PATH: state } });
+
+    expect(existsSync(marker)).toBe(false);
+    const written = JSON.parse(readFileSync(packet, "utf8"));
+    expect(written.artifacts[0].diff.content).toContain("+untracked bytes");
+    expect(written.artifacts[0].postimage.content).toBe("untracked bytes\n");
+  });
 
   it("treats an option-shaped untracked packet path as a path", () => {
     const root = canonicalTempDir("loom-review-packet-option-path-");
@@ -533,13 +572,14 @@ describe("quality-program helper boundaries", () => {
     const fakeBin = join(dir, "bin");
     mkdirSync(fakeBin);
     const fakeGit = join(fakeBin, "git");
+    const realGit = execFileSync("which", ["git"], { encoding: "utf-8" }).trim();
     writeFileSync(fakeGit, [
       "#!/bin/sh",
       "if [ \"$1\" = \"ls-files\" ]; then",
       "  echo forced-ls-files-failure >&2",
       "  exit 2",
       "fi",
-      "exec \"$REAL_GIT\" \"$@\"",
+      `exec ${JSON.stringify(realGit)} \"$@\"`,
       "",
     ].join("\n"), { mode: 0o755 });
 
@@ -549,7 +589,6 @@ describe("quality-program helper boundaries", () => {
       env: {
         ...process.env,
         LOOM_STATE_PATH: state,
-        REAL_GIT: execFileSync("which", ["git"], { encoding: "utf-8" }).trim(),
         PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
       },
     });
@@ -582,6 +621,7 @@ describe("quality-program helper boundaries", () => {
     });
     const fakeBin = join(root, "bin");
     mkdirSync(fakeBin);
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
     writeFileSync(join(fakeBin, "git"), [
       "#!/bin/sh",
       "if [ \"$1\" = \"diff\" ]; then",
@@ -592,7 +632,7 @@ describe("quality-program helper boundaries", () => {
       "    fi",
       "  done",
       "fi",
-      "exec \"$REAL_GIT\" \"$@\"",
+      `exec ${JSON.stringify(realGit)} \"$@\"`,
       "",
     ].join("\n"), { mode: 0o755 });
 
@@ -604,7 +644,6 @@ describe("quality-program helper boundaries", () => {
       env: {
         ...process.env,
         LOOM_STATE_PATH: state,
-        REAL_GIT: execFileSync("which", ["git"], { encoding: "utf8" }).trim(),
         PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
       },
     });

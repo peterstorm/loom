@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -127,6 +128,59 @@ describe("diff command authority over workspace-authored Git behaviour", () => {
     return { root, marker };
   };
 
+  it("never executes a workspace-defined Git clean filter", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-clean-filter-"));
+    const marker = join(root, "CLEAN_EXECUTED");
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: root });
+      writeFileSync(join(root, ".gitattributes"), "*.dat filter=evil\n");
+      writeFileSync(join(root, "data.dat"), "before\n");
+      execFileSync("git", ["add", "."], { cwd: root });
+      execFileSync("git", ["-c", "user.name=Loom Test", "-c", "user.email=loom@example.test", "commit", "--quiet", "-m", "base"], { cwd: root });
+      execFileSync("git", ["config", "filter.evil.clean", `sh -c 'touch ${marker}; cat'`], { cwd: root });
+      writeFileSync(join(root, "data.dat"), "after\n");
+      writeFileSync(join(root, "new.dat"), "untracked\n");
+
+      const tracked = withProjectDir(root, () => diffFiles(["data.dat"]));
+      const untracked = withProjectDir(root, () => diffUntracked("new.dat"));
+
+      expect(tracked.ok).toBe(true);
+      if (tracked.ok) expect(tracked.diff).toContain("+after");
+      expect(untracked.ok).toBe(true);
+      if (untracked.ok) expect(untracked.diff).toContain("+untracked");
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores ambient Git directory, index, and config injection", () => {
+    const { root } = hostileRepository();
+    const marker = join(root, "AMBIENT_EXECUTED");
+    const keys = [
+      "GIT_DIR", "GIT_INDEX_FILE", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+    ] as const;
+    const previous = new Map(keys.map((key) => [key, process.env[key]]));
+    process.env.GIT_DIR = join(root, "missing-attacker-git-dir");
+    process.env.GIT_INDEX_FILE = join(root, "missing-attacker-index");
+    process.env.GIT_CONFIG_COUNT = "1";
+    process.env.GIT_CONFIG_KEY_0 = "diff.external";
+    process.env.GIT_CONFIG_VALUE_0 = `sh -c 'touch ${marker}'`;
+    try {
+      const observed = withProjectDir(root, () => diffFiles(["data.dat"]));
+      expect(observed.ok).toBe(true);
+      if (observed.ok) expect(observed.diff).toContain("+after");
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      for (const key of keys) {
+        const value = previous.get(key);
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("never executes a workspace-defined Git textconv driver", () => {
     const { root, marker } = hostileRepository();
     try {
@@ -162,6 +216,30 @@ describe("diff command authority over workspace-authored Git behaviour", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+});
+
+describe("diff evidence budget", () => {
+  it("accepts multi-megabyte evidence and names over-budget output", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-diff-budget-"));
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: root });
+      writeFileSync(join(root, "README.md"), "baseline\n");
+      execFileSync("git", ["add", "README.md"], { cwd: root });
+      execFileSync("git", ["-c", "user.name=Loom Test", "-c", "user.email=loom@example.test", "commit", "--quiet", "-m", "base"], { cwd: root });
+      writeFileSync(join(root, "within.txt"), randomBytes(1024 * 1024).toString("hex"));
+      writeFileSync(join(root, "over.txt"), randomBytes(9 * 1024 * 1024).toString("hex"));
+
+      const within = withProjectDir(root, () => diffUntracked("within.txt"));
+      expect(within.ok).toBe(true);
+      if (within.ok) expect(within.diff.length).toBeGreaterThan(2 * 1024 * 1024);
+
+      const over = withProjectDir(root, () => diffUntracked("over.txt"));
+      expect(over.ok).toBe(false);
+      if (!over.ok) expect(over.error).toMatch(/exceeded the 16777216 byte diff evidence budget/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 120000);
 });
 
 describe("complete-postimage context on every diff entry point", () => {
