@@ -328,18 +328,15 @@ describe("anchored lock ownership", () => {
     expect(maxActive).toBe(1);
   });
 
-  it("exhausts acquisition attempts when a recovery guard stays planted", async () => {
+  it("surfaces a malformed planted recovery guard without entering", async () => {
     const root = workspace();
     const directory = join(root, "run");
-    // A permanently-present recovery guard makes every acquisition attempt
-    // withdraw before entering, so the loop must give up with the named
-    // exhaustion error instead of spinning forever.
     writeFileSync(join(directory, "guarded.lock.recovery"), "planted");
 
     await expect(withAnchoredDirectoryLock(directory, "guarded.lock", () => undefined))
-      .rejects.toThrow(/Could not acquire anchored lock after 50 attempts: guarded\.lock/);
+      .rejects.toThrow(/recovery guard has malformed owner token/);
     expect(existsSync(join(directory, "guarded.lock"))).toBe(false);
-  }, 10000);
+  });
 });
 
 describe("captured-attempt inspection fails closed", () => {

@@ -415,8 +415,12 @@ export function readWaveReviewContext(
   }
 }
 
-/** Immutable current-Wave Requirement scope. Contributions are included for
- * traceability but only completionAnchors define spec-check authority. */
+/**
+ * Immutable current-Wave spec-check scope. Only `completionAnchors` assert
+ * Requirement Completion Claims; every serialized field remains part of the
+ * content-addressed packet, batch epoch, and request identity so drift in
+ * descriptions, contributions, or declared files invalidates stale authority.
+ */
 export function waveSpecCheckScope(tasks: readonly Task[]): readonly WaveSpecCheckTaskAuthority[] {
   return Object.freeze(tasks.map((task) => Object.freeze({
     id: task.id,

@@ -46,20 +46,20 @@ function lastMatch(input: string, regex: RegExp): RegExpMatchArray | null {
   return matches.at(-1) ?? null;
 }
 
-/** Parse the last concrete, verdict-terminated spec-check footer from an agent transcript. */
+/**
+ * Parse the final concrete spec-check footer, bounded by its verdict when one
+ * landed. A final incomplete footer remains authoritative and reconciles to
+ * evidence failure; it never lends an earlier footer's counts or verdict.
+ */
 export function parseSpecCheckOutput(output: string): ParsedSpecCheckOutput {
-  const criticalCountMarker = lastMatch(output, /^SPEC_CHECK_CRITICAL_COUNT:\s*\d+\s*$/gm);
-  const markerPosition = criticalCountMarker?.index ?? -1;
-  const waveMarker = markerPosition < 0
-    ? null
-    : lastMatch(output.slice(0, markerPosition), /^SPEC_CHECK_WAVE:\s*\d+\s*$/gm);
-  const blockStart = waveMarker?.index ?? 0;
-  const suffix = output.slice(markerPosition < 0 ? blockStart : markerPosition);
-  const verdictMarker = /^SPEC_CHECK_VERDICT:\s*(?:PASSED|BLOCKED)\s*$/m.exec(suffix);
+  const finalWaveMarker = lastMatch(output, /^SPEC_CHECK_WAVE:\s*.*$/gm);
+  const blockStart = finalWaveMarker?.index ?? 0;
+  const footer = output.slice(blockStart);
+  const verdictMarker = /^SPEC_CHECK_VERDICT:\s*(?:PASSED|BLOCKED)\s*$/m.exec(footer);
   const blockEnd = verdictMarker?.index === undefined
-    ? output.length
-    : (markerPosition < 0 ? blockStart : markerPosition) + verdictMarker.index + verdictMarker[0].length;
-  const searchBlock = output.slice(blockStart, blockEnd);
+    ? footer.length
+    : verdictMarker.index + verdictMarker[0].length;
+  const searchBlock = footer.slice(0, blockEnd);
 
   const findings = {
     critical: [] as string[],

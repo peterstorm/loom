@@ -647,10 +647,19 @@ const hasTypeScriptTestCall = (code: string): boolean => {
     if (/\bfunction\s*\*?\s*$/.test(prefix)) continue;
     const open = start + match[0].lastIndexOf("(");
     const close = matchingParenthesis(code, open);
-    // Class/object method declarations are followed by a body block. Runner
-    // invocations end as expressions; their callback block is nested inside
-    // the invocation's parentheses.
-    if (close !== null && code.slice(close + 1).trimStart().startsWith("{")) continue;
+    // Evidence requires a complete call expression on this projected line.
+    // A method declaration either opens its body after the parameters or adds
+    // a return-type annotation (`test(): void {}` / interface overload `;`).
+    // Runner callback blocks are nested inside the invocation's parentheses.
+    if (close === null) {
+      // Multiline runner callbacks commonly close on a later added line. Their
+      // title literal is projected away, leaving a leading comma; an unfinished
+      // method signature has no argument separator and proves no test call.
+      if (code.slice(open + 1).trimStart().startsWith(",")) return true;
+      continue;
+    }
+    const suffix = code.slice(close + 1).trimStart();
+    if (suffix.startsWith("{") || suffix.startsWith(":")) continue;
     return true;
   }
   return false;

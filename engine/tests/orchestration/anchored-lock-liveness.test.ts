@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -117,6 +117,44 @@ describe("anchored lock liveness", () => {
       await replacementObserved;
       expect(await acquired).toBe("entered");
       expect(replacementSurvived).toBe(true);
+    } finally {
+      kill.mockRestore();
+      closeAnchoredDirectory(anchored);
+    }
+  });
+
+  it("never reclaims a malformed recovery guard based only on age", async () => {
+    const anchored = openDirectoryNoFollow(dir);
+    const recoveryPath = join(dir, ".task_graph.recovery");
+    try {
+      writeDirectoryFileExclusiveNoFollow(anchored, ".task_graph.recovery", "malformed-owner");
+      utimesSync(recoveryPath, new Date(0), new Date(0));
+
+      await expect(withAnchoredDirectoryHandleLock(anchored, ".task_graph", () => "entered"))
+        .rejects.toThrow(/recovery guard has malformed owner token/);
+      expect(readFileSync(recoveryPath, "utf8")).toBe("malformed-owner");
+    } finally {
+      closeAnchoredDirectory(anchored);
+    }
+  });
+
+  it("surfaces unexpected process-liveness probe errors and removes its own guard", () => {
+    const anchored = openDirectoryNoFollow(dir);
+    const stalePid = deadPid();
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number) => {
+      if (pid === stalePid) {
+        const failure = new Error("liveness probe unavailable") as NodeJS.ErrnoException;
+        failure.code = "EIO";
+        throw failure;
+      }
+      return true;
+    }) as typeof process.kill);
+    try {
+      writeDirectoryFileExclusiveNoFollow(anchored, ".task_graph", `${stalePid}:1:stale`);
+
+      expect(() => recoverStaleDirectoryLock(anchored, ".task_graph"))
+        .toThrow(/cannot determine whether lock owner pid.*liveness probe unavailable/i);
+      expect(listDirectoryNamesNoFollow(anchored)).toEqual([".task_graph"]);
     } finally {
       kill.mockRestore();
       closeAnchoredDirectory(anchored);

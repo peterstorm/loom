@@ -1668,7 +1668,11 @@ function parseStagedArtifactSet(
   return success(Object.freeze(parsedArtifacts));
 }
 
-/** Write parser-minted members beside their final names; a fault discards the whole set. */
+/**
+ * Write parser-minted members beside their final names. A fault attempts to
+ * discard every staged member; cleanup failures are reported and may leave
+ * inert staged files that carry no publication receipt.
+ */
 function stageArtifactSet(
   runsRoot: string,
   directory: string,

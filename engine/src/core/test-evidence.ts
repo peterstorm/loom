@@ -96,6 +96,11 @@ const OTHER_RUNNER_TALLIES: readonly RunnerTally[] = Object.freeze([
 
 const verdictPriority = (verdict: RunnerVerdict): number => verdict.kind === "failed" ? 1 : 0;
 
+function latestPositionVerdict(candidates: readonly RunnerVerdict[]): RunnerVerdict | null {
+  return candidates.reduce<RunnerVerdict | null>((latest, candidate) =>
+    latest === null || candidate.position >= latest.position ? candidate : latest, null);
+}
+
 function latestRunnerVerdict(input: string, runner: RunnerTally): RunnerVerdict | null {
   const passes = allMatches(input, runner.pass).map((match): RunnerVerdict => {
     const executed = tallyCount(match);
@@ -180,14 +185,16 @@ function latestVitestVerdict(input: string): RunnerVerdict | null {
         summary: kind === "zero" ? "0 tests executed" : match[0].trim(),
       });
     });
-  return summaries.reduce<RunnerVerdict | null>((latest, candidate) =>
-    latest === null || candidate.position >= latest.position ? candidate : latest, null);
-}
-
-function mavenVerdictKind(executed: number, failed: boolean): RunnerVerdict["kind"] {
-  if (failed) return "failed";
-  if (executed === 0) return "zero";
-  return "passed";
+  const latestSummary = latestPositionVerdict(summaries);
+  const latestStart = allMatches(input, /^[ \t]*RUN[ \t]+v\d+(?:\.\d+)*\b[^\n]*$/m).at(-1);
+  return latestStart !== undefined && (latestSummary === null || latestStart.index > latestSummary.position)
+    ? Object.freeze({
+        label: "vitest",
+        position: latestStart.index,
+        kind: "failed",
+        summary: `incomplete run: ${latestStart[0].trim()}`,
+      })
+    : latestSummary;
 }
 
 type MavenTerminal = Readonly<{
@@ -198,35 +205,41 @@ type MavenTerminal = Readonly<{
 
 function latestMavenVerdict(input: string): RunnerVerdict | null {
   const stripped = input.replace(/\*\*/g, "");
+  const starts = allMatches(
+    stripped,
+    /^(?:\[INFO\][ \t]+Scanning for projects\.\.\.|Apache Maven \d[^\n]*)[ \t]*$/m,
+  );
   const terminals = allMatches(stripped, /^BUILD (SUCCESS|FAILURE)[ \t]*$/m)
     .map((match): MavenTerminal => Object.freeze({
       kind: match[1] === "SUCCESS" ? "success" : "failure",
       position: match.index,
       summary: match[0],
     }));
-  const tallies = allMatches(stripped, /Tests run: (\d+), Failures: (\d+), Errors: (\d+)/)
-    .map((match): RunnerVerdict => {
-      const executed = tallyCount(match);
-      const failed = match[2] !== "0" || match[3] !== "0";
-      const terminal = terminals.find(({ position }) => position > match.index);
-      if (failed) {
-        return Object.freeze({ label: "maven", position: match.index, kind: "failed", summary: match[0] });
-      }
-      if (terminal?.kind !== "success") {
-        return Object.freeze({
-          label: "maven",
-          position: match.index,
-          kind: "failed",
-          summary: terminal === undefined ? `incomplete run: ${match[0]}` : terminal.summary,
-        });
-      }
+  const tallyMatches = allMatches(stripped, /Tests run: (\d+), Failures: (\d+), Errors: (\d+)/);
+  const tallies = tallyMatches.map((match): RunnerVerdict => {
+    const executed = tallyCount(match);
+    const failed = match[2] !== "0" || match[3] !== "0";
+    const terminal = terminals.find(({ position }) => position > match.index);
+    const supersedingStart = starts.find(({ index }) =>
+      index > match.index && (terminal === undefined || index < terminal.position));
+    if (failed) {
+      return Object.freeze({ label: "maven", position: match.index, kind: "failed", summary: match[0] });
+    }
+    if (terminal?.kind !== "success" || supersedingStart !== undefined) {
       return Object.freeze({
         label: "maven",
         position: match.index,
-        kind: mavenVerdictKind(executed, false),
-        summary: executed === 0 ? "0 tests executed" : match[0],
+        kind: "failed",
+        summary: `incomplete run: ${match[0]}`,
       });
+    }
+    return Object.freeze({
+      label: "maven",
+      position: match.index,
+      kind: executed === 0 ? "zero" : "passed",
+      summary: executed === 0 ? "0 tests executed" : match[0],
     });
+  });
   const buildFailures = terminals
     .filter(({ kind }) => kind === "failure")
     .map((terminal): RunnerVerdict => Object.freeze({
@@ -235,8 +248,28 @@ function latestMavenVerdict(input: string): RunnerVerdict | null {
       kind: "failed",
       summary: terminal.summary,
     }));
-  return [...tallies, ...buildFailures].reduce<RunnerVerdict | null>((latest, candidate) =>
-    latest === null || candidate.position >= latest.position ? candidate : latest, null);
+  const emptyOrIncompleteRuns = starts.flatMap((start): readonly RunnerVerdict[] => {
+    const terminal = terminals.find(({ position }) => position > start.index);
+    const nextStart = starts.find(({ index }) => index > start.index);
+    if (terminal === undefined || (nextStart !== undefined && nextStart.index < terminal.position)) {
+      return [Object.freeze({
+        label: "maven",
+        position: start.index,
+        kind: "failed" as const,
+        summary: `incomplete run: ${start[0].trim()}`,
+      })];
+    }
+    const hasTally = tallyMatches.some(({ index }) => index > start.index && index < terminal.position);
+    return terminal.kind === "success" && !hasTally
+      ? [Object.freeze({
+          label: "maven",
+          position: terminal.position,
+          kind: "zero" as const,
+          summary: "0 tests executed",
+        })]
+      : [];
+  });
+  return latestPositionVerdict([...tallies, ...buildFailures, ...emptyOrIncompleteRuns]);
 }
 
 export function extractTestEvidence(bashOutput: string): TestEvidence {

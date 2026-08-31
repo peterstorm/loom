@@ -298,22 +298,38 @@ describe("resolveAgentType", () => {
     expect(resolveAgentType({})).toBe("");
   });
 
-  it("says so when the metadata cannot be parsed", () => {
+  it("fails closed when the first existing metadata candidate cannot be parsed", () => {
     const { session, agentId } = plantedSession("{ not json");
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    try {
-      expect(resolveAgentType({ session_id: session, agent_id: agentId })).toBe("");
-      expect(stderr.mock.calls.map(([t]) => String(t)).join("")).toContain("cannot read agent metadata");
-    } finally {
-      stderr.mockRestore();
+
+    expect(() => resolveAgentType({ session_id: session, agent_id: agentId }))
+      .toThrow(/cannot read agent metadata/);
+  });
+
+  it("fails closed when existing metadata has no usable agentType", () => {
+    for (const body of [JSON.stringify({}), JSON.stringify({ agentType: "" }), JSON.stringify({ agentType: 7 })]) {
+      const { session, agentId } = plantedSession(body);
+      expect(() => resolveAgentType({ session_id: session, agent_id: agentId }), body)
+        .toThrow(/does not contain a non-empty agentType/);
     }
   });
 
-  it("reports an empty type for metadata with no usable agentType", () => {
-    for (const body of [JSON.stringify({}), JSON.stringify({ agentType: "" }), JSON.stringify({ agentType: 7 })]) {
-      const { session, agentId } = plantedSession(body);
-      expect(resolveAgentType({ session_id: session, agent_id: agentId }), body).toBe("");
-    }
+  it("does not fall through malformed higher-priority metadata to a lower-priority role", () => {
+    const configDir = tmp("loom-config");
+    const realProject = tmp("loom-real-project");
+    const linkedProject = join(tmp("loom-linked-project"), "project");
+    symlinkSync(realProject, linkedProject);
+    setEnv("CLAUDE_CONFIG_DIR", configDir);
+    setEnv("CLAUDE_PROJECT_DIR", linkedProject);
+    const relative = join("sess-type", "subagents", "agent-agenttype1.meta.json");
+    const highPriority = join(configDir, "projects", projectSlug(linkedProject), relative);
+    const lowerPriority = join(configDir, "projects", projectSlug(realProject), relative);
+    mkdirSync(join(highPriority, ".."), { recursive: true });
+    mkdirSync(join(lowerPriority, ".."), { recursive: true });
+    writeFileSync(highPriority, "{ malformed");
+    writeFileSync(lowerPriority, JSON.stringify({ agentType: "loom:code-reviewer" }));
+
+    expect(() => deriveAgentType("sess-type", "agenttype1"))
+      .toThrow(/cannot read agent metadata/);
   });
 
   it("refuses ids that would address a file outside the session directory", () => {

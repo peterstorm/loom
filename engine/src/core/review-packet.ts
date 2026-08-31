@@ -594,6 +594,18 @@ export function parseReviewPacket(raw: unknown): ParseResult<ReviewPacket> {
   return declared === rebuilt.value.packetId ? rebuilt : fail(["packetId does not match canonical packet content"]);
 }
 
+function recoveryArtifactProjection(
+  artifacts: readonly Readonly<{
+    path: ReviewPath;
+    postimage: Readonly<{ sha256: PostimageDigest }> | null;
+  }>[],
+): VerifiedReviewPacketRecovery["artifacts"] {
+  return artifacts.map((artifact) => ({
+    path: artifact.path,
+    postimageSha256: artifact.postimage?.sha256 ?? null,
+  }));
+}
+
 function recoveryProjection(packet: ReviewPacket): VerifiedReviewPacketRecovery {
   return freezeJson({
     schemaVersion: packet.schemaVersion,
@@ -603,10 +615,7 @@ function recoveryProjection(packet: ReviewPacket): VerifiedReviewPacketRecovery 
     headSha: packet.headSha,
     declaredPaths: packet.declaredPaths,
     modifiedPaths: packet.modifiedPaths,
-    artifacts: packet.artifacts.map((artifact) => ({
-      path: artifact.path,
-      postimageSha256: artifact.postimage?.sha256 ?? null,
-    })),
+    artifacts: recoveryArtifactProjection(packet.artifacts),
   });
 }
 
@@ -698,10 +707,7 @@ function parseLegacyRecoveryPacket(value: Record<string, unknown>): ParseResult<
     headSha: envelope.value.headSha,
     declaredPaths: envelope.value.declaredPaths,
     modifiedPaths: envelope.value.modifiedPaths,
-    artifacts: sortedArtifacts.map((artifact) => ({
-      path: artifact.path,
-      postimageSha256: artifact.postimage?.sha256 ?? null,
-    })),
+    artifacts: recoveryArtifactProjection(sortedArtifacts),
   }));
 }
 

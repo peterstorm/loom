@@ -11,10 +11,11 @@
  * `filePath.includes(specDir)` sitting between two `mgr.update(...)` awaits.
  *
  * Here each concern is one named function with explicit parameters and only
- * the ports it needs: every applier receives `TaskGraphStore` for protected
- * state, while implementation paths additionally receive `RepositoryProbe`
- * for git observations. A test supplies plain objects instead of a working tree. Exported
- * appliers are shell orchestrators: observe through ports, call pure reducers,
+ * the protected-state/repository ports it needs: every applier receives
+ * `TaskGraphStore`, while implementation paths additionally receive
+ * `RepositoryProbe`. Phase and spec-check appliers still observe their
+ * explicitly supplied filesystem artifacts directly. Exported appliers are
+ * shell orchestrators: observe through ports, call pure reducers,
  * and persist. Parsing, classification, and lifecycle reducers remain pure and
  * testable as plain data transformations; shared engine rules live further in
  * under `engine/src/core` (see `core/phase-artifact-paths`).

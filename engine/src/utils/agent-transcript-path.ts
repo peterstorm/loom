@@ -210,19 +210,20 @@ export function deriveAgentType(sessionIdRaw: string, agentIdRaw: string): strin
 
   for (const path of subagentFileCandidates(sessionId, agentId, ".meta.json")) {
     if (!derivedCandidateExists(path)) continue;
+    let meta: unknown;
     try {
-      const meta: unknown = JSON.parse(readFileSync(path, "utf-8"));
-      const agentType = typeof meta === "object" && meta !== null && "agentType" in meta
-        ? (meta as { agentType: unknown }).agentType
-        : null;
-      if (typeof agentType === "string" && agentType.trim() !== "") return agentType.trim();
+      meta = JSON.parse(readFileSync(path, "utf-8"));
     } catch (error) {
-      // A metadata file we cannot parse names no role — say so, then keep
-      // looking. Silence here reproduces the very defect this closes.
-      process.stderr.write(
-        `loom: cannot read agent metadata at ${path}: ${error instanceof Error ? error.message : String(error)}\n`,
+      throw new Error(
+        `cannot read agent metadata at ${path}: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
       );
     }
+    const agentType = typeof meta === "object" && meta !== null && "agentType" in meta
+      ? (meta as { agentType: unknown }).agentType
+      : null;
+    if (typeof agentType === "string" && agentType.trim() !== "") return agentType.trim();
+    throw new Error(`agent metadata at ${path} does not contain a non-empty agentType`);
   }
   return null;
 }

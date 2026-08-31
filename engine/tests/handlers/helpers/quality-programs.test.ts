@@ -582,6 +582,30 @@ describe("quality-program helper boundaries", () => {
     expect(existsSync(packet)).toBe(false);
   });
 
+  it("does not treat origin/main existence as remote default-branch authority", () => {
+    const root = canonicalTempDir("loom-review-packet-unproven-main-");
+    cleanup.push(root);
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
+    writeFileSync(join(root, "data.dat"), "content\n");
+    execFileSync("git", ["add", "data.dat"], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "baseline"], { cwd: root });
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd: root });
+    const state = join(root, "state.json");
+    const packet = join(root, ".claude", "reviews", "packet.json");
+    writeReviewPacketTaskGraph(state, { file_list: ["data.dat"], files_modified: ["data.dat"] });
+
+    const run = spawnSync("bun", [
+      CLI, "helper", "review-packet", "create", "--task", "T1", "--output", ".claude/reviews/packet.json",
+    ], { cwd: root, encoding: "utf8", env: { ...process.env, LOOM_STATE_PATH: state } });
+
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("no task start_sha or remote default branch");
+    expect(existsSync(packet)).toBe(false);
+  });
+
   it("fails review-packet creation on an unexpected git probe error", () => {
     const dir = mkdtempSync(join(ROOT, ".tmp-review-packet-git-failure-test-"));
     cleanup.push(dir);

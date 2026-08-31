@@ -43,9 +43,9 @@ export type ContextPacket = Readonly<{
   role: string;
   requiredSkill: string;
   outputContract: string;
-  /** Rules and other context identical across every request in a batch. */
+  /** Authority and rules fixed across every retry of this request lineage. */
   fixedContext: readonly ByteSection[];
-  /** Task/plan/spec/manifest data specific to this request. */
+  /** Task/plan/spec/manifest data variable within the request lineage. */
   variableContext: readonly ByteSection[];
 }>;
 
