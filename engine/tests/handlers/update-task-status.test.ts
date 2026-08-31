@@ -7,7 +7,7 @@ import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import updateTaskStatus, { isMachineBound } from "../../src/handlers/subagent-stop/update-task-status";
 import { resolveTestEvidence } from "../../src/core/implementation-evidence";
 import { analyzeNewTests } from "../../src/handlers/helpers/task-local-completion";
-import { extractTestEvidence } from "../../src/core/test-evidence";
+import { extractTestEvidence, type TestEvidence } from "../../src/core/test-evidence";
 import { legacyTestsPassedNote } from "../../src/types";
 import type { TaskGraph } from "../../src/types";
 import { captureDeclaredArtifactBaseline } from "../../src/utils/artifact-baseline";
@@ -142,6 +142,29 @@ describe("extractTestEvidence (pure)", () => {
     const output = "Tests  30 passed\n Tests  2 failed";
     const result = extractTestEvidence(output);
     expect(result.passed).toBe(false);
+  });
+
+  it("treats a pipe-delimited mixed Vitest summary as one failed verdict", () => {
+    expect(extractTestEvidence("Tests  1 failed | 29 passed (30)")).toEqual({
+      passed: false,
+      evidence: "vitest: Tests  1 failed | 29 passed (30)",
+    });
+  });
+
+  it("lets a later mixed Vitest failure supersede an earlier passing run", () => {
+    expect(extractTestEvidence("Tests  30 passed (30)\n\nTests  2 failed | 28 passed (30)")).toEqual({
+      passed: false,
+      evidence: "vitest: Tests  2 failed | 28 passed (30)",
+    });
+  });
+
+  it("makes empty passing evidence unrepresentable", () => {
+    if (false) {
+      // @ts-expect-error A passing verdict must carry parser-minted non-empty evidence.
+      const impossible: TestEvidence = { passed: true, evidence: "" };
+      void impossible;
+    }
+    expect(extractTestEvidence("Tests  1 passed (1)").evidence).not.toBe("");
   });
 
   it("detects pytest passing", () => {

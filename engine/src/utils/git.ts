@@ -456,20 +456,25 @@ export type GitTrackedResult =
  */
 export function isTrackedAt(root: string, file: string): GitTrackedResult {
   try {
-    withShadowGit(root, (environment) =>
-      execFileSync("git", ["ls-files", "--error-unmatch", "--", file], {
-        cwd: root,
-        env: environment,
-        stdio: ["ignore", "ignore", "pipe"],
-      }));
-    return { ok: true, tracked: true };
+    const tracked = withShadowGit(root, (environment) => {
+      try {
+        execFileSync("git", ["ls-files", "--error-unmatch", "--", file], {
+          cwd: root,
+          env: environment,
+          stdio: ["ignore", "ignore", "pipe"],
+        });
+        return true;
+      } catch (error) {
+        const status = typeof error === "object" && error !== null && "status" in error
+          ? (error as { status?: unknown }).status
+          : undefined;
+        if (status === 1) return false;
+        throw error;
+      }
+    });
+    return { ok: true, tracked };
   } catch (error) {
-    const status = typeof error === "object" && error !== null && "status" in error
-      ? (error as { status?: unknown }).status
-      : undefined;
-    return status === 1
-      ? { ok: true, tracked: false }
-      : { ok: false, error: `cannot determine whether ${JSON.stringify(file)} is tracked: ${commandFailure(error)}` };
+    return { ok: false, error: `cannot determine whether ${JSON.stringify(file)} is tracked: ${commandFailure(error)}` };
   }
 }
 
@@ -583,7 +588,8 @@ function parseGitPatchPath(raw: string, prefix: "a/" | "b/"): GitPatchPath | nul
   if (raw === "/dev/null") return Object.freeze({ kind: "null" });
   const quoted = raw.startsWith('"');
   if (!quoted && raw.includes("\t") && (!raw.endsWith("\t") || raw.slice(0, -1).includes("\t"))) return null;
-  const token = quoted ? raw : raw.endsWith("\t") ? raw.slice(0, -1) : raw;
+  let token = raw;
+  if (!quoted && raw.endsWith("\t")) token = raw.slice(0, -1);
   const decoded = quoted ? decodeGitQuotedPath(token) : token;
   if (decoded === null || !decoded.startsWith(prefix) || decoded.length === prefix.length) return null;
   return Object.freeze({ kind: "file", path: decoded.slice(prefix.length) });

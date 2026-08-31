@@ -31,7 +31,7 @@ import {
   applyUntrustedStopResolution,
   cumulativeModifiedPaths,
 } from "../engine/src/core/implementation-application";
-import { extractTestEvidence, type TestEvidence } from "../engine/src/core/test-evidence";
+import { extractTestEvidence, testEvidenceOf, type TestEvidence } from "../engine/src/core/test-evidence";
 import {
   isPhaseResultEligible,
   observePhaseTransition,
@@ -980,7 +980,10 @@ function observeImplementationTranscript(result: PiSubagentResult, taskId: strin
   const transcriptEvidence = extractTestEvidence(parseBashTestOutput(adaptedTranscript.value));
   const test: ImplementationTestObservation = structuredEvidence.value === null
     ? { kind: "fallback", evidence: transcriptEvidence }
-    : { kind: "structured", evidence: structuredEvidence.value };
+    : {
+        kind: "structured",
+        evidence: testEvidenceOf(structuredEvidence.value.passed, structuredEvidence.value.evidence),
+      };
   return {
     kind: "accepted",
     resultMessages: parsedMessages.value,

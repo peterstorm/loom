@@ -5,8 +5,9 @@
  * `handlers/subagent-stop/advance-phase` on Claude Code, `pi/extension`'s
  * `tool_result` handler on Pi. A recorded spec becomes the run authority;
  * architecture-plan transitions normally use the recorded plan but retain a
- * documented slug/date filesystem fallback when that field is absent or
- * unreadable. Both harnesses used to spell the classification rule inline, and
+ * documented slug/date filesystem fallback when that field is absent or names
+ * a missing file. Other access failures fail closed. Both harnesses used to
+ * spell the classification rule inline, and
  * both spelled it as `String.includes(".claude/specs/")`:
  * a path like `.claude/specs/../../../../tmp/evil/spec.md` CONTAINS the
  * directory name while resolving well outside the tree, so the substring form

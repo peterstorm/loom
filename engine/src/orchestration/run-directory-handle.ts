@@ -354,10 +354,11 @@ function rebasedOnRealRunsRoot(
 
 /**
  * A run directory must be a direct child of its runs-root and must already
- * exist. Both are resolved and compared as strings. Linux later accesses
- * through retained descriptors, so a post-check pathname swap cannot redirect
- * them. Darwin re-opens with O_NOFOLLOW_ANY through the proven pathname and
- * retains the documented post-acquisition parent-swap risk.
+ * exist. Both are resolved and compared as strings. This parser retains only
+ * pathname identity: each Linux operation becomes descriptor-anchored after
+ * acquisition, but a pathname replacement between operations can redirect a
+ * later acquisition. Darwin re-opens with O_NOFOLLOW_ANY through the proven
+ * pathname and retains the documented post-acquisition parent-swap risk.
  */
 export function parseRunDirectoryIdentity(
   runsRoot: string,
@@ -1057,10 +1058,14 @@ function readReservedAuthority(
   requestId: AgentRequestAuthority["requestId"],
 ): DomainResult<AgentRequestAuthority, RunDirectoryError> {
   const found = lookupReservation(directory, requestId);
-  return found.kind === "reserved" ? success(found.authority)
-    : found.kind === "unreserved"
-      ? failure("request", `request ${requestId} was never reserved`)
-      : failure("request", found.message);
+  switch (found.kind) {
+    case "reserved":
+      return success(found.authority);
+    case "unreserved":
+      return failure("request", `request ${requestId} was never reserved`);
+    case "unreadable":
+      return failure("request", found.message);
+  }
 }
 
 /**

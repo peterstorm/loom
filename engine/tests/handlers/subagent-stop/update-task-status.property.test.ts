@@ -126,6 +126,22 @@ describe("extractTestEvidence — property tests", () => {
     );
   });
 
+  it("every mixed Vitest summary with a non-zero failure count fails", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 500 }),
+        fc.integer({ min: 0, max: 500 }),
+        (failed, passed) => {
+          const total = failed + passed;
+          const output = `Tests  ${failed} failed | ${passed} passed (${total})`;
+          const result = extractTestEvidence(output);
+          expect(result.passed).toBe(false);
+          expect(result.evidence).toBe(`vitest: ${output}`);
+        },
+      ),
+    );
+  });
+
   it("valid pytest output always detected", () => {
     fc.assert(
       fc.property(fc.integer({ min: 1, max: 500 }), (n) => {

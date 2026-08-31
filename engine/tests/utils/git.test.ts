@@ -1,10 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, vi } from "vitest";
-import { countNewTests, countAssertions, diffFiles, diffFilesSince, diffFilesStaged, diffUntracked, mergeBase, type GitDiffResult } from "../../src/utils/git";
+import { countNewTests, countAssertions, diffFiles, diffFilesSince, diffFilesStaged, diffUntracked, isTrackedAt, mergeBase, type GitDiffResult } from "../../src/utils/git";
 
 /**
  * Wrap added lines in the exact patch shape Git emits: one `diff --git` entry,
@@ -114,6 +114,28 @@ describe("complete-postimage diff evidence", () => {
 });
 
 describe("diff command authority over workspace-authored Git behaviour", () => {
+  it("does not reinterpret status 1 from shadow-authority discovery as untracked", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "loom-git-probe-status-"));
+    const bin = join(fixture, "bin");
+    const previousPath = process.env.PATH;
+    try {
+      mkdirSync(bin);
+      const fakeGit = join(bin, "git");
+      writeFileSync(fakeGit, "#!/bin/sh\nexit 1\n");
+      chmodSync(fakeGit, 0o755);
+      process.env.PATH = previousPath === undefined ? bin : `${bin}:${previousPath}`;
+
+      const tracked = isTrackedAt(fixture, "tracked.ts");
+
+      expect(tracked.ok).toBe(false);
+      if (!tracked.ok) expect(tracked.error).toContain("exit 1");
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+
   /** A repository whose tracked file is modified and whose config defines a diff driver. */
   const hostileRepository = (): Readonly<{ root: string; marker: string }> => {
     const root = mkdtempSync(join(tmpdir(), "loom-diff-driver-"));
@@ -189,6 +211,58 @@ describe("diff command authority over workspace-authored Git behaviour", () => {
       // The patch is still real evidence; only the driver is gone.
       if (observed.ok) expect(observed.diff).toContain("+after");
       expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reconstructs linked-worktree index and common-object authority", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "loom-linked-worktree-"));
+    const repository = join(fixture, "repository");
+    const linked = join(fixture, "linked");
+    try {
+      mkdirSync(repository);
+      execFileSync("git", ["init", "--quiet"], { cwd: repository });
+      writeFileSync(join(repository, "data.dat"), "before\n");
+      execFileSync("git", ["add", "data.dat"], { cwd: repository });
+      execFileSync("git", ["-c", "user.name=Loom Test", "-c", "user.email=loom@example.test", "commit", "--quiet", "-m", "base"], { cwd: repository });
+      execFileSync("git", ["worktree", "add", "--quiet", "-b", "linked-fixture", linked], { cwd: repository });
+      writeFileSync(join(linked, "data.dat"), "after\n");
+
+      const observed = withProjectDir(linked, () => diffFiles(["data.dat"]));
+      const tracked = isTrackedAt(linked, "data.dat");
+
+      expect(observed.ok).toBe(true);
+      if (observed.ok) expect(observed.diff).toContain("+after");
+      expect(tracked).toEqual({ ok: true, tracked: true });
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it("reconstructs SHA-256 repository authority when Git supports that object format", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-sha256-repository-"));
+    try {
+      try {
+        execFileSync("git", ["init", "--quiet", "--object-format=sha256"], { cwd: root, stdio: ["ignore", "ignore", "pipe"] });
+      } catch (error) {
+        const stderr = typeof error === "object" && error !== null && "stderr" in error
+          ? String((error as { stderr?: unknown }).stderr)
+          : String(error);
+        if (/unknown option|unsupported|not supported/i.test(stderr)) return;
+        throw error;
+      }
+      writeFileSync(join(root, "data.dat"), "before\n");
+      execFileSync("git", ["add", "data.dat"], { cwd: root });
+      execFileSync("git", ["-c", "user.name=Loom Test", "-c", "user.email=loom@example.test", "commit", "--quiet", "-m", "base"], { cwd: root });
+      writeFileSync(join(root, "data.dat"), "after\n");
+
+      const observed = withProjectDir(root, () => diffFiles(["data.dat"]));
+      const tracked = isTrackedAt(root, "data.dat");
+
+      expect(observed.ok).toBe(true);
+      if (observed.ok) expect(observed.diff).toContain("+after");
+      expect(tracked).toEqual({ ok: true, tracked: true });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

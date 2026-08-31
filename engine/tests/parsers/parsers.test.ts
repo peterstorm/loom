@@ -4,6 +4,48 @@ import { parseFirstUserPrompt, parseTranscript } from "../../src/parsers/parse-t
 import { parseFilesModified } from "../../src/parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../src/parsers/parse-bash-test-output";
 import { parsePhaseArtifacts } from "../../src/parsers/parse-phase-artifacts";
+import { parseSubagentStartInput, parseSubagentStartStdin } from "../../src/parsers/parse-subagent-start-input";
+import { parseSubagentStopInput, parseSubagentStopStdin } from "../../src/parsers/parse-subagent-stop-input";
+
+describe("Subagent lifecycle input parsers", () => {
+  const valid = {
+    session_id: "session-1",
+    agent_id: "agent-1",
+    agent_type: "code-reviewer",
+    agent_transcript_path: "/tmp/transcript.jsonl",
+  };
+
+  it("projects the same immutable wire fields through both public wrappers", () => {
+    const start = parseSubagentStartInput({ ...valid, ignored: true });
+    const stop = parseSubagentStopInput({ ...valid, ignored: true });
+
+    expect(start).toEqual({ ok: true, value: valid });
+    expect(stop).toEqual({ ok: true, value: valid });
+    expect(start.ok && Object.isFrozen(start.value)).toBe(true);
+    expect(stop.ok && Object.isFrozen(stop.value)).toBe(true);
+  });
+
+  it.each([
+    ["SubagentStart", parseSubagentStartInput],
+    ["SubagentStop", parseSubagentStopInput],
+  ] as const)("retains event-specific diagnostics for malformed %s fields", (event, parse) => {
+    expect(parse({ session_id: "session-1", agent_id: 42 })).toEqual({
+      ok: false,
+      error: `${event} agent_id must be a string when present`,
+    });
+  });
+
+  it("retains event-specific malformed-JSON diagnostics at the stdin boundary", () => {
+    expect(parseSubagentStartStdin("{broken")).toEqual({
+      ok: false,
+      error: expect.stringContaining("SubagentStart input is malformed JSON"),
+    });
+    expect(parseSubagentStopStdin("{broken")).toEqual({
+      ok: false,
+      error: expect.stringContaining("SubagentStop input is malformed JSON"),
+    });
+  });
+});
 
 describe("parseFirstUserPrompt", () => {
   it("returns trusted user prompt and ignores an assistant-emitted lifecycle marker", () => {

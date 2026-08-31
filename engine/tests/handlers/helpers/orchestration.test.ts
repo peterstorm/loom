@@ -507,26 +507,6 @@ describe("orchestration CLI", () => {
     return `${Array.from({ length: count }, (_, index) => `${prefix}-${index}`).join("\n")}\n`;
   }
 
-  function refutationOutput(handle: RunDirHandle, authority: AgentRequestAuthority): string {
-    const context = handle.readContext(authority.contextDigest);
-    if (!context.ok) throw new Error(context.error.message);
-    const section = context.value.fixedContext.find(({ label }) =>
-      label === "wave-refutation-authority" || label === "refutation-authority");
-    if (section === undefined) throw new Error("refutation context lacks semantic authority");
-    const semantic = JSON.parse(Buffer.from(section.bytes).toString("utf8")) as {
-      lens: string;
-      findings: readonly { id: string }[];
-    };
-    return JSON.stringify({
-      criterion: semantic.lens,
-      verdicts: semantic.findings.map(({ id }) => ({
-        finding_id: id,
-        verdict: "upheld",
-        reasoning: "The current immutable packet still exhibits the finding",
-      })),
-    });
-  }
-
   /** A refutation verdict transcript with a caller-chosen vote direction. */
   function refutationVerdicts(handle: RunDirHandle, authority: AgentRequestAuthority, verdict: "upheld" | "refuted"): string {
     const context = handle.readContext(authority.contextDigest);
@@ -1490,7 +1470,9 @@ describe("orchestration CLI", () => {
       authority.role === "review-verifier-agent")).toBe(true);
     expect((JSON.parse(readFileSync(statePath, "utf8")) as { tasks: readonly { review_run?: unknown }[] }).tasks[0]?.review_run).toBeUndefined();
     for (const [index, request] of freshPanel.requests.entries()) {
-      const raw = index === 0 ? "not valid refutation JSON" : refutationOutput(opened.value, request.authority);
+      const raw = index === 0
+        ? "not valid refutation JSON"
+        : refutationVerdicts(opened.value, request.authority, "upheld");
       expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
     const retriedPanel = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
@@ -2874,7 +2856,9 @@ describe("orchestration CLI", () => {
     };
     expect(panel.kind).toBe("spawn-batch");
     for (const [index, request] of panel.requests.entries()) {
-      const raw = index === 0 ? "malformed" : refutationOutput(opened.value, request.authority);
+      const raw = index === 0
+        ? "malformed"
+        : refutationVerdicts(opened.value, request.authority, "upheld");
       expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
 
@@ -2906,7 +2890,7 @@ describe("orchestration CLI", () => {
     // only be reconstructed from the full event prefix, not from the
     // accepted-only completed-state projection.
     const retryRequest = retry.requests[0]!;
-    const valid = refutationOutput(opened.value, retryRequest.authority);
+    const valid = refutationVerdicts(opened.value, retryRequest.authority, "upheld");
     expect((await opened.value.captureTranscript(retryRequest.authority, [...Buffer.from(valid)])).ok).toBe(true);
     const doneResult = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
     expect(doneResult.status, doneResult.stderr).toBe(0);

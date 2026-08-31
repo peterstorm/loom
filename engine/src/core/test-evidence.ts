@@ -1,9 +1,18 @@
 /** Pure classification of supported test-runner summaries. */
 
-export type TestEvidence = Readonly<{
-  passed: boolean;
-  evidence: string;
-}>;
+declare const NON_EMPTY_TEST_EVIDENCE: unique symbol;
+type NonEmptyTestEvidence = string & { readonly [NON_EMPTY_TEST_EVIDENCE]: true };
+
+export type TestEvidence =
+  | Readonly<{ passed: true; evidence: NonEmptyTestEvidence }>
+  | Readonly<{ passed: false; evidence: string }>;
+
+/** Mint test evidence while refusing an empty string as passing authority. */
+export function testEvidenceOf(passed: boolean, evidence: string): TestEvidence {
+  return passed && evidence !== ""
+    ? Object.freeze({ passed: true, evidence: evidence as NonEmptyTestEvidence })
+    : Object.freeze({ passed: false, evidence });
+}
 
 /** Regex match with its position in concatenated test output. */
 type MatchWithIndex = RegExpMatchArray & Readonly<{ index: number }>;
@@ -52,22 +61,15 @@ const tallyCount = (match: MatchWithIndex): number => {
  * not supersede one another: every latest runner verdict is aggregated, and
  * any failure or zero-test verdict dominates every pass.
  */
-const RUNNER_TALLIES: readonly RunnerTally[] = Object.freeze([
-  {
-    label: "node",
-    pass: /^[ \t]*(\d+) passing(?:[ \t]+\([^)]+\))?[ \t]*$/m,
-    fail: /^[ \t]*(\d+) failing(?:[ \t]+\([^)]+\))?[ \t]*$/m,
-    renderPass: (match) => match[0].trim(),
-    renderFail: (match) => match[0].trim(),
-  },
-  // Match Vitest's test tally, not the sibling `Test Files` tally.
-  {
-    label: "vitest",
-    pass: /^[ \t]*Tests?[ \t]+(\d+) passed(?:[ \t]+\(\d+\))?[ \t]*$/m,
-    fail: /^[ \t]*Tests?[ \t]+(\d+) failed(?:[ \t]+\(\d+\))?[ \t]*$/m,
-    renderPass: (match) => match[0].trim(),
-    renderFail: (match) => match[0].trim(),
-  },
+const NODE_TALLY: RunnerTally = Object.freeze({
+  label: "node",
+  pass: /^[ \t]*(\d+) passing(?:[ \t]+\([^)]+\))?[ \t]*$/m,
+  fail: /^[ \t]*(\d+) failing(?:[ \t]+\([^)]+\))?[ \t]*$/m,
+  renderPass: (match) => match[0].trim(),
+  renderFail: (match) => match[0].trim(),
+});
+
+const OTHER_RUNNER_TALLIES: readonly RunnerTally[] = Object.freeze([
   {
     label: "cargo",
     pass: /^test result: ok\. (\d+) passed;[^\n]*$/m,
@@ -120,6 +122,62 @@ function latestRunnerVerdict(input: string, runner: RunnerTally): RunnerVerdict 
   }, null);
 }
 
+type VitestSegment = Readonly<{
+  count: number;
+  kind: "failed" | "passed" | "skipped" | "todo";
+}>;
+
+function parseVitestSegment(raw: string): VitestSegment | null {
+  const match = /^(\d+) (failed|passed|skipped|todo)$/.exec(raw);
+  const countText = match?.[1];
+  const kind = match?.[2];
+  if (countText === undefined ||
+      (kind !== "failed" && kind !== "passed" && kind !== "skipped" && kind !== "todo")) return null;
+  const count = Number(countText);
+  return Number.isSafeInteger(count) ? Object.freeze({ count, kind }) : null;
+}
+
+function parseVitestSegments(body: string): readonly VitestSegment[] | null {
+  const parsed: VitestSegment[] = [];
+  const kinds = new Set<VitestSegment["kind"]>();
+  for (const raw of body.split(/[ \t]+\|[ \t]+/)) {
+    const segment = parseVitestSegment(raw);
+    if (segment === null || kinds.has(segment.kind)) return null;
+    parsed.push(segment);
+    kinds.add(segment.kind);
+  }
+  return parsed.length === 0 ? null : Object.freeze(parsed);
+}
+
+function vitestVerdictKind(failed: number, passed: number): RunnerVerdict["kind"] {
+  if (failed > 0) return "failed";
+  if (passed > 0) return "passed";
+  return "zero";
+}
+
+/** Parse each complete Vitest `Tests …` line as one indivisible verdict. */
+function latestVitestVerdict(input: string): RunnerVerdict | null {
+  const summaries = allMatches(input, /^[ \t]*Tests?[ \t]+([^\n]+?)[ \t]*$/m)
+    .flatMap((match): readonly RunnerVerdict[] => {
+      const summary = match[1];
+      if (summary === undefined) return [];
+      const body = summary.replace(/[ \t]+\(\d+\)$/, "");
+      const parsed = parseVitestSegments(body);
+      if (parsed === null) return [];
+      const failed = parsed.find(({ kind }) => kind === "failed")?.count ?? 0;
+      const passed = parsed.find(({ kind }) => kind === "passed")?.count ?? 0;
+      const kind = vitestVerdictKind(failed, passed);
+      return [Object.freeze({
+        label: "vitest",
+        line: lineOf(input, match.index),
+        kind,
+        summary: kind === "zero" ? "0 tests executed" : match[0].trim(),
+      })];
+    });
+  return summaries.reduce<RunnerVerdict | null>((latest, candidate) =>
+    latest === null || candidate.line >= latest.line ? candidate : latest, null);
+}
+
 function mavenVerdictKind(executed: number, failed: boolean): RunnerVerdict["kind"] {
   if (failed) return "failed";
   if (executed === 0) return "zero";
@@ -155,11 +213,13 @@ function latestMavenVerdict(input: string): RunnerVerdict | null {
 export function extractTestEvidence(bashOutput: string): TestEvidence {
   const verdicts = Object.freeze([
     latestMavenVerdict(bashOutput),
-    ...RUNNER_TALLIES.map((runner) => latestRunnerVerdict(bashOutput, runner)),
+    latestRunnerVerdict(bashOutput, NODE_TALLY),
+    latestVitestVerdict(bashOutput),
+    ...OTHER_RUNNER_TALLIES.map((runner) => latestRunnerVerdict(bashOutput, runner)),
   ].filter((verdict): verdict is RunnerVerdict => verdict !== null));
   const evidence = verdicts.map(({ label, summary }) => `${label}: ${summary}`).join("; ");
   const passed = verdicts.length > 0 && verdicts.every(({ kind }) => kind === "passed");
-  return Object.freeze({ passed, evidence });
+  return testEvidenceOf(passed, evidence);
 }
 
 /** Zero-based line number of the character at `index`. */
