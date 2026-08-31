@@ -98,6 +98,17 @@ describe("extractTestEvidence (pure)", () => {
     expect(result.evidence).toContain("Tests run: 42");
   });
 
+  it("accepts standard Maven INFO-prefixed build terminals", () => {
+    const result = extractTestEvidence([
+      "[INFO] Scanning for projects...",
+      "[INFO] Tests run: 42, Failures: 0, Errors: 0, Skipped: 0",
+      "[INFO] BUILD SUCCESS",
+    ].join("\n"));
+
+    expect(result.passed).toBe(true);
+    expect(result.evidence).toContain("Tests run: 42");
+  });
+
   it("strips markdown bold from Maven output", () => {
     const output = "**Tests run: 5, Failures: 0, Errors: 0**\n**BUILD SUCCESS**";
     const result = extractTestEvidence(output);
@@ -109,6 +120,17 @@ describe("extractTestEvidence (pure)", () => {
     const output = "Tests run: 10, Failures: 2, Errors: 0\nBUILD FAILURE";
     const result = extractTestEvidence(output);
     expect(result.passed).toBe(false);
+  });
+
+  it("rejects standard Maven INFO-prefixed build failures", () => {
+    const result = extractTestEvidence([
+      "[INFO] Scanning for projects...",
+      "[INFO] Tests run: 10, Failures: 1, Errors: 0, Skipped: 0",
+      "[INFO] BUILD FAILURE",
+    ].join("\n"));
+
+    expect(result.passed).toBe(false);
+    expect(result.evidence).toContain("BUILD FAILURE");
   });
 
   it("detects Node/Mocha passing", () => {

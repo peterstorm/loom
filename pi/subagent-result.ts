@@ -1,28 +1,11 @@
 /**
- * What one finished Pi subagent result DOES to protected state.
+ * Apply one finished Pi subagent result through narrow protected-state and
+ * repository ports. Phase and spec-check appliers additionally observe their
+ * explicitly supplied filesystem artifacts. Parsing and lifecycle decisions
+ * remain pure; exported appliers orchestrate observation and persistence.
  *
- * `extension.ts`'s `tool_result` handler used to hold all of this inline: one
- * ~980-line closure that reconciled request authority, advanced phases, resolved
- * implementation evidence, stored review findings, and reconciled spec-checks,
- * with every decision written between the `StateManager` and git calls that
- * carried it out. Nothing in it could be exercised without a live filesystem, a
- * real git repository, and a real State File — including rules as small as
- * "which written path is the spec file", which was an inline
- * `filePath.includes(specDir)` sitting between two `mgr.update(...)` awaits.
- *
- * Here each concern is one named function with explicit parameters and only
- * the protected-state/repository ports it needs: every applier receives
- * `TaskGraphStore`, while implementation paths additionally receive
- * `RepositoryProbe`. Phase and spec-check appliers still observe their
- * explicitly supplied filesystem artifacts directly. Exported appliers are
- * shell orchestrators: observe through ports, call pure reducers,
- * and persist. Parsing, classification, and lifecycle reducers remain pure and
- * testable as plain data transformations; shared engine rules live further in
- * under `engine/src/core` (see `core/phase-artifact-paths`).
- *
- * Diagnostics are RETURNED, never written. `extension.ts` owns stderr and owns
- * which diagnostics become orchestration processing errors; an applier that
- * wrote its own log could not be asserted against without capturing a stream.
+ * Diagnostics are returned, never written. `extension.ts` owns stderr and the
+ * decision about which diagnostics become orchestration processing errors.
  */
 
 import { parseFilesModified } from "../engine/src/parsers/parse-files-modified";

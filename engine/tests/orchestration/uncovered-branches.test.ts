@@ -100,6 +100,30 @@ describe("context packet required fields", () => {
     expect(built.error.message).toContain("non-empty string");
   });
 
+  it("refuses duplicate section labels across fixed and variable context", () => {
+    const duplicate = section("rules", "a second authority body");
+    const built = buildContextPacket({ ...valid, variableContext: [duplicate] });
+
+    expect(built.ok).toBe(false);
+    if (!built.ok) {
+      expect(built.error.field).toBe("variableContext[0].label");
+      expect(built.error.message).toContain("must be unique");
+    }
+
+    const parsed = parseContextPacket({
+      schemaVersion: 1,
+      digest: "irrelevant",
+      requestId: valid.requestId,
+      role: valid.role,
+      requiredSkill: valid.requiredSkill,
+      outputContract: valid.outputContract,
+      fixedContext: valid.fixedContext,
+      variableContext: [duplicate],
+    });
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error.field).toBe("variableContext[0].label");
+  });
+
   it("takes immutable ownership of caller-supplied section bytes", () => {
     const encoded = section("mutable", "abc");
     const callerBytes = [...encoded.bytes];

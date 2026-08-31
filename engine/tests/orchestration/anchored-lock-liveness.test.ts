@@ -161,6 +161,28 @@ describe("anchored lock liveness", () => {
     }
   });
 
+  it("treats EPERM from the owner probe as proof the process may still be alive", () => {
+    const anchored = openDirectoryNoFollow(dir);
+    const ownerPid = deadPid();
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number) => {
+      if (pid === ownerPid) {
+        const denied = new Error("operation not permitted") as NodeJS.ErrnoException;
+        denied.code = "EPERM";
+        throw denied;
+      }
+      return true;
+    }) as typeof process.kill);
+    try {
+      writeDirectoryFileExclusiveNoFollow(anchored, ".task_graph", `${ownerPid}:1:permissiondenied`);
+
+      expect(recoverStaleDirectoryLock(anchored, ".task_graph")).toBe(false);
+      expect(listDirectoryNamesNoFollow(anchored)).toEqual([".task_graph"]);
+    } finally {
+      kill.mockRestore();
+      closeAnchoredDirectory(anchored);
+    }
+  });
+
   it("obeys a recovery guard whose claimant is still alive", async () => {
     const anchored = openDirectoryNoFollow(dir);
     try {

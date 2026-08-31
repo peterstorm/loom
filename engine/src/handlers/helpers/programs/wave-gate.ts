@@ -825,6 +825,27 @@ export function handleWaveReviewContext(
 }
 export type { WaveReviewContextAuthority } from '../../../core/wave-review-authority';
 
+type ReadableWaveReviewContext = Exclude<WaveReviewContextRead, Readonly<{ kind: "corrupt" }>>;
+
+type WaveRequestContextRead =
+  | Readonly<{ ok: true; packet: ContextPacket; context: ReadableWaveReviewContext }>
+  | Readonly<{ ok: false; result: FacadeDriveResult }>;
+
+function readWaveRequestContext(
+  handle: RunDirHandle,
+  authority: AgentRequestAuthority,
+  identifyRequest = true,
+): WaveRequestContextRead {
+  const packet = handle.readContext(authority.contextDigest);
+  if (!packet.ok) return { ok: false, result: waveBlocked(handle, packet.error.message) };
+  const context = handleWaveReviewContext([packet.value], authority.contextDigest);
+  if (context.kind === "corrupt") {
+    const suffix = identifyRequest ? ` (request ${authority.requestId})` : "";
+    return { ok: false, result: waveBlocked(handle, `${context.message}${suffix}`) };
+  }
+  return { ok: true, packet: packet.value, context };
+}
+
 export function waveReviewContextTaskId(context: WaveReviewContextRead): string | null {
   return context.kind === "loaded" ? (context.value.taskRun?.taskId ?? null) : null;
 }
@@ -1590,16 +1611,12 @@ export async function resumeWaveGateFacade(
       if (epoch?.runId !== handle.runId || epoch.wave !== registration.input.wave) {
         return waveBlocked(handle, "active Wave Review Packets lack exact persisted batch epoch authority");
       }
-      const candidates: { authority: AgentRequestAuthority; packet: ContextPacket; context: WaveReviewContextRead }[] = [];
+      const candidates: { authority: AgentRequestAuthority; packet: ContextPacket; context: ReadableWaveReviewContext }[] = [];
       for (const authority of issued.value.filter((request) => request.program === "wave-gate" && request.attempt === 1)) {
-        const read = handle.readContext(authority.contextDigest);
-        if (!read.ok) return waveBlocked(handle, read.error.message);
-        const context = handleWaveReviewContext([read.value], authority.contextDigest);
-        if (context.kind === "corrupt") {
-          return waveBlocked(handle, `${context.message} (request ${authority.requestId})`);
-        }
-        if (context.kind === "loaded" && context.value.batchEpoch === epoch.batchEpoch) {
-          candidates.push({ authority, packet: read.value, context });
+        const read = readWaveRequestContext(handle, authority);
+        if (!read.ok) return read.result;
+        if (read.context.kind === "loaded" && read.context.value.batchEpoch === epoch.batchEpoch) {
+          candidates.push({ authority, packet: read.packet, context: read.context });
         }
       }
       const rank = (candidate: typeof candidates[number]): number => {
@@ -1650,12 +1667,9 @@ export async function resumeWaveGateFacade(
     // `absent` or racing a second read against the pre-scan.
     const currentPacketMembership = new Map<string, boolean>();
     for (const authority of currentIssued.filter((request) => request.program === "wave-gate")) {
-      const contextRead = handle.readContext(authority.contextDigest);
-      if (!contextRead.ok) return waveBlocked(handle, contextRead.error.message);
-      const context = handleWaveReviewContext([contextRead.value], authority.contextDigest);
-      if (context.kind === "corrupt") {
-        return waveBlocked(handle, `${context.message} (request ${authority.requestId})`);
-      }
+      const read = readWaveRequestContext(handle, authority);
+      if (!read.ok) return read.result;
+      const context = read.context;
       if (context.kind === "absent") {
         currentPacketMembership.set(authority.requestId, false);
         continue;
@@ -1687,12 +1701,9 @@ export async function resumeWaveGateFacade(
       const now = manager.load();
       if (request.role === "spec-check-invoker" && now.spec_check?.wave === registration.input.wave &&
           now.spec_check.verdict !== "EVIDENCE_CAPTURE_FAILED") continue;
-      const contextRead = handle.readContext(request.contextDigest);
-      if (!contextRead.ok) return waveBlocked(handle, contextRead.error.message);
-      const context = handleWaveReviewContext([contextRead.value], request.contextDigest);
-      if (context.kind === "corrupt") {
-        return waveBlocked(handle, `${context.message} (request ${request.requestId})`);
-      }
+      const read = readWaveRequestContext(handle, request);
+      if (!read.ok) return read.result;
+      const context = read.context;
       const taskId = context.kind === "loaded" ? context.value.taskRun?.taskId : undefined;
       if (request.role !== "spec-check-invoker") {
         const task = now.tasks.find(({ id }) => id === taskId);
@@ -1714,12 +1725,9 @@ export async function resumeWaveGateFacade(
       if (rejection === null) continue;
       const terminal = await handle.rejectCapture(request);
       if (!terminal.ok) return waveBlocked(handle, terminal.error.message);
-      const contextRead = handle.readContext(request.contextDigest);
-      if (!contextRead.ok) return waveBlocked(handle, contextRead.error.message);
-      const context = handleWaveReviewContext([contextRead.value], request.contextDigest);
-      if (context.kind === "corrupt") {
-        return waveBlocked(handle, `${context.message} (request ${request.requestId})`);
-      }
+      const read = readWaveRequestContext(handle, request);
+      if (!read.ok) return read.result;
+      const context = read.context;
       if (request.role === "spec-check-invoker") {
         if (context.kind !== "loaded") {
           return waveBlocked(handle, "rejected spec-check request lacks exact Wave authority");
@@ -1896,10 +1904,9 @@ export async function resumeWaveGateFacade(
       if (epoch !== undefined) {
         for (const authority of currentIssued) {
           if (authority.program !== "wave-gate" || authority.attempt !== 1 || authority.role !== "spec-check-invoker") continue;
-          const contextRead = handle.readContext(authority.contextDigest);
-          if (!contextRead.ok) return waveBlocked(handle, contextRead.error.message);
-          const context = handleWaveReviewContext([contextRead.value], authority.contextDigest);
-          if (context.kind === "corrupt") return waveBlocked(handle, context.message);
+          const read = readWaveRequestContext(handle, authority, false);
+          if (!read.ok) return read.result;
+          const context = read.context;
           if (context.kind === "loaded" && context.value.batchEpoch === epoch.batchEpoch) {
             attemptOne = authority;
             break;

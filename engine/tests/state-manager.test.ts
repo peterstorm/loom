@@ -143,7 +143,6 @@ describe("StateManager", () => {
     // current_wave is a positive domain value; start at one.
     await mgr.update((s) => ({ ...s, current_wave: 1 }));
 
-    // Run 5 concurrent updates
     await Promise.all(
       Array.from({ length: 5 }, () =>
         mgr.update((s) => ({ ...s, current_wave: (s.current_wave ?? 0) + 1 }))

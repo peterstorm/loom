@@ -127,6 +127,7 @@ export function buildContextPacket(input: ContextPacketInput): DomainResult<Cont
   // whose digest/byteLength do not match its bytes would otherwise let a
   // packet's content-addressed identity disagree with its content.
   const canonicalSections: ByteSection[] = [];
+  const labels = new Set<string>();
   for (const [index, section] of [...input.fixedContext, ...input.variableContext].entries()) {
     const field = index < input.fixedContext.length
       ? `fixedContext[${index}]`
@@ -134,6 +135,10 @@ export function buildContextPacket(input: ContextPacketInput): DomainResult<Cont
     if (typeof section.label !== "string" || section.label.length === 0) {
       return failure(`${field}.label`, "a context section label must be a non-empty string");
     }
+    if (labels.has(section.label)) {
+      return failure(`${field}.label`, `a context section label must be unique: ${section.label}`);
+    }
+    labels.add(section.label);
     // Array.from materializes sparse holes as `undefined`; Array#every on the
     // caller's array would skip them and incorrectly accept a non-byte value.
     const bytes = Array.from(section.bytes);

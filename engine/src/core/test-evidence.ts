@@ -26,7 +26,7 @@ function allMatches(input: string, regex: RegExp): readonly MatchWithIndex[] {
 
 type RunnerTally = Readonly<{
   label: string;
-  /** Group 1 is the executed-test count, when the runner reports one. */
+  /** Group 1 is the decisive tally count: executed on passes, failed on failures. */
   pass: RegExp;
   fail: RegExp;
   renderPass: (match: MatchWithIndex) => string;
@@ -57,9 +57,9 @@ const tallyCount = (match: MatchWithIndex): number => {
 /**
  * One source of truth for each runner's bounded pass/fail tally shape.
  *
- * A runner's later run supersedes its own earlier run. Different runners do
- * not supersede one another: every latest runner verdict is aggregated, and
- * any failure or zero-test verdict dominates every pass.
+ * A runner's later matching summary supersedes its own earlier summary.
+ * Different runners do not supersede one another: every latest runner verdict
+ * is aggregated, and any failure or zero-test verdict dominates every pass.
  */
 const NODE_TALLY: RunnerTally = Object.freeze({
   label: "node",
@@ -209,7 +209,7 @@ function latestMavenVerdict(input: string): RunnerVerdict | null {
     stripped,
     /^(?:\[INFO\][ \t]+Scanning for projects\.\.\.|Apache Maven \d[^\n]*)[ \t]*$/m,
   );
-  const terminals = allMatches(stripped, /^BUILD (SUCCESS|FAILURE)[ \t]*$/m)
+  const terminals = allMatches(stripped, /^(?:\[INFO\][ \t]+)?BUILD (SUCCESS|FAILURE)[ \t]*$/m)
     .map((match): MavenTerminal => Object.freeze({
       kind: match[1] === "SUCCESS" ? "success" : "failure",
       position: match.index,

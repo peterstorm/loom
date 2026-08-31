@@ -351,9 +351,10 @@ export function sha256Hex(text: string): string {
  *
  * The `*Of` minters take the domain's OWN input and hash it here, so a brand
  * can never be claimed for a digest computed over something else. The `parse*`
- * pair is for untrusted documents, where the digest arrives already computed and
- * only its shape can be checked — every caller re-verifies the value against the
- * content it claims to cover immediately afterwards.
+ * pair is for untrusted documents, where the digest arrives already computed
+ * and only its shape can be checked. Content-owning packet parse paths reverify
+ * it against the bytes it claims to cover; registration parsing can prove only
+ * the stored identity's shape and relies on issued registration authority.
  */
 export const packetIdOf = (canonicalBody: string): PacketId => sha256Hex(canonicalBody) as PacketId;
 export const diffDigestOf = (diff: string): DiffDigest => sha256Hex(diff) as DiffDigest;

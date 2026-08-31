@@ -10,7 +10,7 @@
  * dropping the flag from any one of them must fail a test rather than silently
  * start following links out of the run directory.
  */
-import { closeSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
@@ -37,6 +37,7 @@ import {
 } from "../../src/orchestration/no-follow-fs";
 
 const cleanup: string[] = [];
+const runningAsRoot = typeof process.getuid === "function" && process.getuid() === 0;
 
 afterEach(() => {
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
@@ -170,6 +171,29 @@ describe("anchored lock ownership", () => {
     expect(entered).toBe(true);
     expect(() => readFileSync(join(directory, "stale.lock"))).toThrow();
   });
+
+  it.skipIf(runningAsRoot)(
+    "never exposes a canonical recovery guard when prepared publication cannot start",
+    () => {
+      const root = workspace();
+      const directory = join(root, "run");
+      const lockPath = join(directory, "publication-failure.lock");
+      const recoveryPath = `${lockPath}.recovery`;
+      writeFileSync(lockPath, "999999999");
+      const anchored = openDirectoryNoFollow(directory);
+      try {
+        chmodSync(directory, 0o500);
+        expect(() => recoverStaleDirectoryLock(anchored, "publication-failure.lock"))
+          .toThrow(/EACCES|EPERM|permission denied/i);
+      } finally {
+        chmodSync(directory, 0o700);
+        closeAnchoredDirectory(anchored);
+      }
+
+      expect(existsSync(recoveryPath)).toBe(false);
+      expect(readFileSync(lockPath, "utf8")).toBe("999999999");
+    },
+  );
 
   it("refuses stale recovery when the tombstone owner changes after rename", () => {
     const root = workspace();

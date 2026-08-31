@@ -299,6 +299,16 @@ describe("Pi extension review tool_result integration", () => {
     resultDigest: null,
   });
 
+  const reviewRunFixture = (generation: number, marker: string) => ({
+    generation,
+    packet_id: marker.repeat(64),
+    head_sha: marker.repeat(40),
+    expected_agents: ["code-reviewer"],
+    prior_finding_ids: [],
+    evidence: [],
+    slot_authority: [{ agent: "code-reviewer", slot_id: `review-slot:${marker}`, attempted: 1 }],
+  });
+
   const extension = async () => {
     const extensionSpecifier = "../../pi/extension.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
@@ -3372,15 +3382,6 @@ describe("Pi extension review tool_result integration", () => {
   it("rejects a failed Pi reviewer after a newer Review Run replaces its reserved authority", async () => {
     const planPath = join(temp, "stale-failed-reviewer-plan.md");
     writeFileSync(planPath, "# Plan\n");
-    const reviewRun = (generation: number, marker: string) => ({
-      generation,
-      packet_id: marker.repeat(64),
-      head_sha: marker.repeat(40),
-      expected_agents: ["code-reviewer"],
-      prior_finding_ids: [],
-      evidence: [],
-      slot_authority: [{ agent: "code-reviewer", slot_id: `review-slot:${marker}`, attempted: 1 }],
-    });
     writeState({
       ...initialGraph(),
       phase_artifacts: { architecture: planPath },
@@ -3389,7 +3390,7 @@ describe("Pi extension review tool_result integration", () => {
       tasks: [{
         ...initialGraph().tasks[0],
         review_generation: 1,
-        review_run: reviewRun(1, "a"),
+        review_run: reviewRunFixture(1, "a"),
       }],
     });
     const pi = await extension();
@@ -3412,7 +3413,7 @@ describe("Pi extension review tool_result integration", () => {
       tasks: [{
         ...afterSpawn.tasks[0],
         review_generation: 2,
-        review_run: reviewRun(2, "b"),
+        review_run: reviewRunFixture(2, "b"),
       }],
     });
     const responses = await pi.emit("tool_result", {
@@ -3436,15 +3437,6 @@ describe("Pi extension review tool_result integration", () => {
   it("rejects an omitted Pi reviewer after a newer Review Run replaces its reserved authority", async () => {
     const planPath = join(temp, "stale-missing-reviewer-plan.md");
     writeFileSync(planPath, "# Plan\n");
-    const reviewRun = (generation: number, marker: string) => ({
-      generation,
-      packet_id: marker.repeat(64),
-      head_sha: marker.repeat(40),
-      expected_agents: ["code-reviewer"],
-      prior_finding_ids: [],
-      evidence: [],
-      slot_authority: [{ agent: "code-reviewer", slot_id: `review-slot:${marker}`, attempted: 1 }],
-    });
     writeState({
       ...initialGraph(),
       phase_artifacts: { architecture: planPath },
@@ -3453,7 +3445,7 @@ describe("Pi extension review tool_result integration", () => {
       tasks: [{
         ...initialGraph().tasks[0],
         review_generation: 1,
-        review_run: reviewRun(1, "c"),
+        review_run: reviewRunFixture(1, "c"),
       }],
     });
     const pi = await extension();
@@ -3476,7 +3468,7 @@ describe("Pi extension review tool_result integration", () => {
       tasks: [{
         ...afterSpawn.tasks[0],
         review_generation: 2,
-        review_run: reviewRun(2, "d"),
+        review_run: reviewRunFixture(2, "d"),
       }],
     });
     const responses = await pi.emit("tool_result", {

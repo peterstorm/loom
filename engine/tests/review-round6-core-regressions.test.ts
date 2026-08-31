@@ -35,6 +35,22 @@ describe("round-six evidence authority regressions", () => {
     });
   });
 
+  it("requires spec-check count authority to occupy its own complete line", () => {
+    const parsed = parseSpecCheckOutput([
+      "SPEC_CHECK_WAVE: 2",
+      "I omitted SPEC_CHECK_CRITICAL_COUNT: 0 from the footer.",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+    ].join("\n"));
+    const resolution = reconcileSpecCheck(parsed, 2, "2026-08-31T00:00:00.000Z");
+
+    expect(parsed.criticalCount).toBeNull();
+    expect(resolution).toMatchObject({
+      kind: "evidence-failed",
+      specCheck: { error: expect.stringContaining("SPEC_CHECK_CRITICAL_COUNT marker not found") },
+    });
+  });
+
   it("lets a summary-less later Vitest invocation supersede an earlier pass", () => {
     const evidence = extractTestEvidence([
       " RUN  v3.2.4 /repo",

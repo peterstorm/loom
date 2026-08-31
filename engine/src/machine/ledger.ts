@@ -178,25 +178,38 @@ function classifyBindingLines(sessionId: SessionId, nowMs: number): ClassifiedLi
   }
 }
 
-/**
- * Parse the binding file. Malformed lines — wrong field count, fields the
- * smart constructors reject, or a bad bind stamp — are logged and skipped as
- * bindings while their raw rows remain on disk, keeping the gate armed. This
- * differs from readEvidence, which rejects a corrupt ledger in full. Bindings whose last
- * activity exceeds the TTL are treated as ABSENT (their subagent plausibly
- * died without SubagentStop) — refreshBindingActivity reaps them.
- */
-export function readBindings(sessionId: SessionId, nowMs: number = Date.now()): readonly MachineBinding[] {
+type BindingProjection = Readonly<{
+  bindings: readonly MachineBinding[];
+  corrupt: boolean;
+}>;
+
+function projectBindingAuthority(sessionId: SessionId, nowMs: number): BindingProjection {
   const lines = classifyBindingLines(sessionId, nowMs);
-  const malformed = lines.filter((l) => l.kind === "malformed").length;
+  const malformed = lines.filter((line) => line.kind === "malformed").length;
   if (malformed > 0) {
     process.stderr.write(`readBindings: skipped ${malformed} malformed binding line(s) for ${sessionId}\n`);
   }
-  const stale = lines.filter((l) => l.kind === "stale").length;
+  const stale = lines.filter((line) => line.kind === "stale").length;
   if (stale > 0) {
     process.stderr.write(`readBindings: ignored ${stale} stale binding(s) for ${sessionId} (no activity within TTL)\n`);
   }
-  return lines.flatMap((l) => (l.kind === "fresh" ? [l.persisted.binding] : []));
+  return Object.freeze({
+    bindings: Object.freeze(lines.flatMap((line) => line.kind === "fresh" ? [line.persisted.binding] : [])),
+    corrupt: malformed > 0,
+  });
+}
+
+/**
+ * Parse the binding file for diagnostics and liveness maintenance. Malformed
+ * rows remain on disk and are omitted from this projection; authority callers
+ * use the projection's explicit corruption fact and fail closed.
+ *
+ * Bindings whose last activity exceeds the TTL are treated as ABSENT (their
+ * subagent plausibly died without SubagentStop) — refreshBindingActivity reaps
+ * them.
+ */
+export function readBindings(sessionId: SessionId, nowMs: number = Date.now()): readonly MachineBinding[] {
+  return projectBindingAuthority(sessionId, nowMs).bindings;
 }
 
 /**
@@ -328,7 +341,10 @@ export function anyActiveSubagent(taskGraphPath: string): boolean {
  * or foreign roster) stands down. This adapter only supplies the files.
  */
 export function soleActiveBinding(sessionId: SessionId, nowMs: number = Date.now()): MachineBinding | null {
-  return resolveSoleActiveBinding(readBindings(sessionId, nowMs), readActiveAgents(sessionId));
+  const authority = projectBindingAuthority(sessionId, nowMs);
+  return authority.corrupt
+    ? null
+    : resolveSoleActiveBinding(authority.bindings, readActiveAgents(sessionId));
 }
 
 /**

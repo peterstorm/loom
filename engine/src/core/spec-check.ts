@@ -74,10 +74,10 @@ export function parseSpecCheckOutput(output: string): ParsedSpecCheckOutput {
   }
   const { critical, high, medium } = findings;
 
-  const criticalCount = searchBlock.match(/SPEC_CHECK_CRITICAL_COUNT:\s*(\d+)/);
-  const highCount = searchBlock.match(/SPEC_CHECK_HIGH_COUNT:\s*(\d+)/);
-  const verdict = searchBlock.match(/SPEC_CHECK_VERDICT:\s*(PASSED|BLOCKED)/);
-  const wave = searchBlock.match(/SPEC_CHECK_WAVE:\s*(\d+)/);
+  const criticalCount = searchBlock.match(/^SPEC_CHECK_CRITICAL_COUNT:\s*(\d+)\s*$/m);
+  const highCount = searchBlock.match(/^SPEC_CHECK_HIGH_COUNT:\s*(\d+)\s*$/m);
+  const verdict = searchBlock.match(/^SPEC_CHECK_VERDICT:\s*(PASSED|BLOCKED)\s*$/m);
+  const wave = searchBlock.match(/^SPEC_CHECK_WAVE:\s*(\d+)\s*$/m);
   const overrideText = searchBlock.match(/^SPEC_CHECK_OVERRIDE:\s*(.*)$/m)?.[1]?.trim() ?? "";
   return {
     critical,

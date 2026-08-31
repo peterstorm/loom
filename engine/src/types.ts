@@ -180,7 +180,7 @@ export interface DraftFinding {
   readonly claim: string;
 }
 
-/** A draft plus derived identity. Only `attributeFindings` produces these. */
+/** A draft plus derived identity. `attributeFindings` mints new identities; parsers rehydrate persisted ones. */
 export interface Finding extends DraftFinding {
   /** `${agent}-${ordinal}`, derived — never agent-chosen. */
   readonly id: string;
