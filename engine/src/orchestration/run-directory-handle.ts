@@ -206,16 +206,25 @@ export function parseArtifactRelativePath(raw: unknown): DomainResult<ArtifactRe
   return success(raw as ArtifactRelativePath);
 }
 
+function copiedBytes(bytes: readonly number[]): readonly number[] | null {
+  if (!Array.isArray(bytes)) return null;
+  const copy = Array.from(bytes);
+  return copy.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)
+    ? Object.freeze(copy)
+    : null;
+}
+
 export function createStagedArtifact(
   relativePath: unknown,
   bytes: readonly number[],
 ): DomainResult<StagedArtifact, RunDirectoryError> {
   const parsedPath = parseArtifactRelativePath(relativePath);
   if (!parsedPath.ok) return parsedPath;
-  if (!Array.isArray(bytes) || !bytes.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
+  const parsedBytes = copiedBytes(bytes);
+  if (parsedBytes === null) {
     return failure("artifacts", "staged artifact bytes must be integers from 0 through 255");
   }
-  return success(Object.freeze({ relativePath: parsedPath.value, bytes: Object.freeze([...bytes]) }));
+  return success(Object.freeze({ relativePath: parsedPath.value, bytes: parsedBytes }));
 }
 
 // ---------------------------------------------------------------------------
@@ -963,14 +972,15 @@ function readContextPacket(directory: string, digest: ContextPacket["digest"]): 
 function decisionContextBody(rawDigest: ContextDigest, bytes: readonly number[]): DomainResult<Readonly<{ digest: ContextDigest; body: string }>, RunDirectoryError> {
   const digest = parseContextDigest(rawDigest);
   if (!digest.ok) return failure("context", digest.error.message);
-  if (!Array.isArray(bytes) || !bytes.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
+  const parsedBytes = copiedBytes(bytes);
+  if (parsedBytes === null) {
     return failure("context", "decision context bytes must be integers from 0 through 255");
   }
-  if (contextDigestOf(bytes) !== digest.value) {
+  if (contextDigestOf(parsedBytes) !== digest.value) {
     return failure("context", "decision context digest does not match its exact bytes");
   }
   try {
-    const body = new TextDecoder("utf8", { fatal: true }).decode(Uint8Array.from(bytes));
+    const body = new TextDecoder("utf8", { fatal: true }).decode(Uint8Array.from(parsedBytes));
     JSON.parse(body);
     return success(Object.freeze({ digest: digest.value, body }));
   } catch (error) {

@@ -204,6 +204,17 @@ describe("registered Wave spec-check scope", () => {
     await expect(installWaveReviewRuns(new StateManager(staleAuthorityPath), registration, batch))
       .rejects.toThrow("exact active Wave Gate authority");
 
+    const staleContextPath = join(root, "stale_packet_context_task_graph.json");
+    writeFileSync(staleContextPath, JSON.stringify({
+      ...parsed.value,
+      tasks: parsed.value.tasks.map((task) => ({
+        ...task,
+        test_result: { verdict: "trusted-pass" },
+      })),
+    }));
+    await expect(installWaveReviewRuns(new StateManager(staleContextPath), registration, batch))
+      .rejects.toThrow("packet context changed");
+
     await installWaveReviewRuns(manager, registration, batch);
 
     const installed = manager.load();
@@ -257,7 +268,7 @@ describe("registered Wave spec-check scope", () => {
     const conflictingBatch = waveRequests(created.value, registration, conflictingGraph.value, 1);
     expect(conflictingBatch.batchEpoch).not.toBe(batch.batchEpoch);
     await expect(installWaveReviewRuns(manager, registration, conflictingBatch))
-      .rejects.toThrow("differs from the exact installed Wave review epoch");
+      .rejects.toThrow("packet context changed");
     expect(manager.load().spec_check).toEqual(acceptedSpecCheck);
     expect(manager.load().wave_review_epoch?.batchEpoch).toBe(batch.batchEpoch);
   });

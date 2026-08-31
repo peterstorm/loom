@@ -12,11 +12,34 @@ import handler, {
   unavailableReviewerResolution,
 } from "../../../src/handlers/subagent-stop/store-reviewer-findings";
 import { SUBAGENT_DIR } from "../../../src/config";
-import { parseReviewPath } from "../../../src/core/review-packet";
+import {
+  parseBaseSha,
+  parseHeadSha,
+  parsePacketId,
+  parseReviewPath,
+} from "../../../src/core/review-packet";
 import type { Task } from "../../../src/types";
 
 const reviewPath = (raw: string) => {
   const parsed = parseReviewPath(raw);
+  if (!parsed.ok) throw new Error(parsed.errors.join("; "));
+  return parsed.value;
+};
+
+const packetId = (raw: string) => {
+  const parsed = parsePacketId(raw);
+  if (parsed === null) throw new Error("invalid packet id fixture");
+  return parsed;
+};
+
+const baseSha = (raw: string) => {
+  const parsed = parseBaseSha(raw);
+  if (!parsed.ok) throw new Error(parsed.errors.join("; "));
+  return parsed.value;
+};
+
+const headSha = (raw: string) => {
+  const parsed = parseHeadSha(raw);
   if (!parsed.ok) throw new Error(parsed.errors.join("; "));
   return parsed.value;
 };
@@ -131,10 +154,10 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
       review_generation: undefined,
       issued_review_packets: [{
         task_id: "T1",
-        packet_id: "b".repeat(64),
+        packet_id: packetId("b".repeat(64)),
         packet_path: reviewPath("packets/T1.json"),
-        base_sha: "2".repeat(40),
-        head_sha: "3".repeat(40),
+        base_sha: baseSha("2".repeat(40)),
+        head_sha: headSha("3".repeat(40)),
         scope: [],
       }],
     })).toBe(0);

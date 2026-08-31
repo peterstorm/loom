@@ -16,6 +16,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
+import { readReviewPacketPostimage } from "../../../src/handlers/helpers/review-packet";
 
 const ENGINE = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const ROOT = resolve(ENGINE, "..");
@@ -393,6 +394,19 @@ describe("quality-program helper boundaries", () => {
     expect(cli(["helper", "review-packet", "verify", "--packet", packet]).trim()).toBe(id);
   });
 
+  it("propagates a post-inspection artifact read fault instead of recording a deletion", () => {
+    const inspected = { absolute: "/repo/src/reviewed.ts", exists: true };
+
+    expect(() => readReviewPacketPostimage(inspected, () => {
+      const failure = new Error("too many symbolic links");
+      Object.assign(failure, { code: "ELOOP" });
+      throw failure;
+    })).toThrow(/too many symbolic links/);
+    expect(readReviewPacketPostimage({ ...inspected, exists: false }, () => {
+      throw new Error("absent paths must not be read");
+    })).toBeNull();
+  });
+
   it("rejects a scoped path that is neither tracked nor present", () => {
     const dir = mkdtempSync(join(ROOT, ".tmp-review-packet-absent-test-"));
     cleanup.push(dir);
@@ -449,6 +463,59 @@ describe("quality-program helper boundaries", () => {
     });
     expect(run.status).not.toBe(0);
     expect(run.stderr).toContain("forced-ls-files-failure");
+    expect(existsSync(packet)).toBe(false);
+  });
+
+  it("rejects git diff status 1 when stdout is not a patch", () => {
+    const root = canonicalTempDir("loom-review-packet-no-index-failure-");
+    cleanup.push(root);
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
+    writeFileSync(join(root, "README.md"), "baseline\n");
+    execFileSync("git", ["add", "README.md"], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "baseline"], { cwd: root });
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd: root });
+    execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], { cwd: root });
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "untracked.ts"), "export const value = 1;\n");
+
+    const state = join(root, "state.json");
+    const packet = join(root, ".claude", "reviews", "packet.json");
+    writeReviewPacketTaskGraph(state, {
+      start_sha: head,
+      file_list: ["src/untracked.ts"],
+      files_modified: ["src/untracked.ts"],
+    });
+    const fakeBin = join(root, "bin");
+    mkdirSync(fakeBin);
+    writeFileSync(join(fakeBin, "git"), [
+      "#!/bin/sh",
+      "if [ \"$1\" = \"diff\" ] && [ \"$2\" = \"--no-index\" ]; then",
+      "  echo forced-no-index-access-failure >&2",
+      "  exit 1",
+      "fi",
+      "exec \"$REAL_GIT\" \"$@\"",
+      "",
+    ].join("\n"), { mode: 0o755 });
+
+    const run = spawnSync("bun", [
+      CLI, "helper", "review-packet", "create", "--task", "T1", "--output", ".claude/reviews/packet.json",
+    ], {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        LOOM_STATE_PATH: state,
+        REAL_GIT: execFileSync("which", ["git"], { encoding: "utf8" }).trim(),
+        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      },
+    });
+
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("returned status 1 without a valid patch");
+    expect(run.stderr).toContain("forced-no-index-access-failure");
     expect(existsSync(packet)).toBe(false);
   });
 

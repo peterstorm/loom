@@ -14,6 +14,8 @@ import {
   parseHeadSha,
   type BaseSha,
   type HeadSha,
+  type IssuedReviewPacketRegistration,
+  type PacketId,
   type ReviewPacketInput,
   type ReviewPath,
 } from "../../src/core/review-packet";
@@ -115,6 +117,12 @@ describe("Review Packet", () => {
     if (!withPrototypeData.ok || !withoutPrototypeData.ok) return;
     expect(withPrototypeData.value.packetId).not.toBe(withoutPrototypeData.value.packetId);
     expect(serializeReviewPacket(withPrototypeData.value)).toContain('"__proto__"');
+  });
+
+  it("keeps issued packet provenance in distinct branded domains", () => {
+    expectTypeOf<IssuedReviewPacketRegistration["packet_id"]>().toEqualTypeOf<PacketId>();
+    expectTypeOf<IssuedReviewPacketRegistration["base_sha"]>().toEqualTypeOf<BaseSha>();
+    expectTypeOf<IssuedReviewPacketRegistration["head_sha"]>().toEqualTypeOf<HeadSha>();
   });
 
   it("returns parser-branded canonical paths in packets", () => {

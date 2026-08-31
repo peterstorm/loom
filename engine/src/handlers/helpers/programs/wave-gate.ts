@@ -714,6 +714,21 @@ export async function installWaveReviewRuns(
         !waveSpecCheckDocumentsMatch(currentDocuments, batch.specCheckDocuments)) {
       throw new Error("spec-check documents changed before the Wave review batch could be installed");
     }
+    const lockedAuthority: WaveReviewRegistrationAuthority = Object.freeze({
+      ...registration,
+      input: Object.freeze({ wave }),
+    });
+    const lockedPreparation = prepareWaveReviewBatch(
+      specCheckAuthority.runId,
+      lockedAuthority,
+      locked,
+      1,
+      observedWorkspaces,
+      currentDocuments,
+    );
+    if (!lockedPreparation.ok || !canonicalStructuralEquals(lockedPreparation.value, batch)) {
+      throw new Error("Wave review packet context changed before the batch could be installed");
+    }
     const existingEpoch = locked.wave_review_epoch;
     const exactEpochReplay = existingEpoch !== undefined &&
       existingEpoch.runId === specCheckAuthority.runId && existingEpoch.wave === wave &&

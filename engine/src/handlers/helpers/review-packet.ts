@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { argumentValue } from "./cli-args";
 import {
-  existsSync,
   mkdirSync,
   readFileSync,
   unlinkSync,
@@ -81,8 +80,16 @@ function git(args: readonly string[], cwd: string, allowDiffExit = false): strin
   try {
     return execFileSync("git", [...args], { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
   } catch (error) {
-    if (allowDiffExit && error && typeof error === "object" && "status" in error && (error as { status?: number }).status === 1) {
-      return String((error as { stdout?: unknown }).stdout ?? "");
+    if (allowDiffExit && error && typeof error === "object" && "status" in error &&
+        (error as { status?: number }).status === 1) {
+      const stdout = String((error as { stdout?: unknown }).stdout ?? "");
+      if (/^diff --git /m.test(stdout)) return stdout;
+      const stderr = String((error as { stderr?: unknown }).stderr ?? "").trim();
+      const detail = stderr || stdout.trim() || "no diagnostic output";
+      throw new Error(
+        `git ${args.join(" ")} returned status 1 without a valid patch: ${detail}`,
+        { cause: error },
+      );
     }
     throw error;
   }
@@ -108,10 +115,16 @@ function repoRoot(): string {
   return git(["rev-parse", "--show-toplevel"], process.cwd()).trim();
 }
 
+export function readReviewPacketPostimage(
+  inspected: Readonly<{ absolute: string; exists: boolean }>,
+  read: (path: string) => Uint8Array = readFileSync,
+): Uint8Array | null {
+  return inspected.exists ? read(inspected.absolute) : null;
+}
+
 function artifact(root: string, baseSha: BaseSha, path: string): ReviewPacketArtifactInput {
   const inspected = inspectRepositoryPath(root, path, "review packet path", { mustBeFile: true });
-  const absolute = inspected.absolute;
-  const present = existsSync(absolute);
+  const present = inspected.exists;
   const tracked = optionalGit(["ls-files", "--error-unmatch", "--", path], root, [1]) !== null;
   const trackedAtBase = git(["ls-tree", "-z", "--full-tree", baseSha, "--", path], root) !== "";
   if (!trackedAtBase && !tracked && !present) {
@@ -126,7 +139,7 @@ function artifact(root: string, baseSha: BaseSha, path: string): ReviewPacketArt
   return {
     path,
     diff,
-    postimage: present ? readFileSync(absolute) : null,
+    postimage: readReviewPacketPostimage(inspected),
   };
 }
 
@@ -247,7 +260,7 @@ const handler: HookHandler = async (_stdin, args) => {
       packet_id: packet.value.packetId,
       packet_path: packetPath.value,
       base_sha: baseSha,
-      head_sha: headSha,
+      head_sha: parsedHeadSha.value,
       scope: registeredScope,
     });
     mkdirSync(dirname(absoluteOutput), { recursive: true });

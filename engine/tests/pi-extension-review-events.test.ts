@@ -1886,8 +1886,7 @@ describe("Pi extension review tool_result integration", () => {
       .toContain('exitCode=0, stopReason=error, errorMessage="Connection error."');
   });
 
-  it("surfaces a durable capture-rejection journal failure", async () => {
-    if (runningAsRoot) return; // a 0o500 events dir still admits root's journal write
+  it.skipIf(runningAsRoot)("surfaces a durable capture-rejection journal failure", async () => {
     const pi = await extension();
     const staged = await piCaptureRun("pi-session-binding-rejection-journal-failure");
     const session = "019fca39-f989-7510-8e62-50dadbcad441";
@@ -2608,8 +2607,7 @@ describe("Pi extension review tool_result integration", () => {
     expect(existsSync(grantDir) ? readdirSync(grantDir).filter((name) => name.endsWith(".json")) : []).toEqual([]);
   });
 
-  it("continues result reconciliation when write-grant revocation fails", async () => {
-    if (runningAsRoot) return; // a 0o500 grants dir still admits root's revocation write
+  it.skipIf(runningAsRoot)("continues result reconciliation when write-grant revocation fails", async () => {
     const planPath = join(temp, "result-revocation-failure-plan.md");
     writeFileSync(planPath, "# Plan\n");
     writeState({
@@ -2664,8 +2662,7 @@ describe("Pi extension review tool_result integration", () => {
     expect(readdirSync(grantDir).filter((name) => name.endsWith(".json"))).toEqual([]);
   });
 
-  it("revokes every outstanding grant when its parent session shutdown roster cleanup fails", async () => {
-    if (runningAsRoot) return; // a 0o500 subagent dir still admits root's roster write
+  it.skipIf(runningAsRoot)("revokes every outstanding grant when its parent session shutdown roster cleanup fails", async () => {
     const planPath = join(temp, "shutdown-revocation-plan.md");
     writeFileSync(planPath, "# Plan\n");
     writeState({

@@ -2209,17 +2209,20 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
  *  Wave Gate authority (active_wave_gate); this type + derive path survive
  *  only for graphs that predate registration. Deprecation horizon: retire
  *  once no pre-registration graph can still be completed. */
+import {
+  deriveLegacyWaveGateCompatibilityAuthority,
+  findLegacyWaveGateCompletionReplay,
+  type LegacyWaveGateCompatibilityAuthority,
+  type LegacyWaveGateCompletionReplayError,
+} from "./core/legacy-archive";
 export {
   deriveLegacyWaveGateCompatibilityAuthority,
-  type LegacyWaveGateCompatibilityAuthority,
-} from "./core/legacy-archive";
-// Local use inside state-manager itself: the re-export above does not bind
-// the names locally, so import them (aliased to avoid the TS duplicate-name
-// conflict with the re-export) for the completion-replay call site.
-import {
   findLegacyWaveGateCompletionReplay,
-  type LegacyWaveGateCompatibilityAuthority as LegacyWaveGateCompatibilityAuthorityLocal,
-} from "./core/legacy-archive";
+};
+export type {
+  LegacyWaveGateCompatibilityAuthority,
+  LegacyWaveGateCompletionReplayError,
+};
 
 export type RegisteredWaveGateCompletionReplayError = Readonly<{
   kind: "registered-wave-gate-completion-replay-rejected";
@@ -2261,16 +2264,9 @@ export function findRegisteredWaveGateCompletionReplay(
   return Object.freeze({ ok: true, value: candidate });
 }
 
-/** @deprecated Legacy terminal-history replay — archived in ./core/legacy-archive
- *  (Section C); findRegisteredWaveGateCompletionReplay is canonical. */
-export {
-  findLegacyWaveGateCompletionReplay,
-  type LegacyWaveGateCompletionReplayError,
-} from "./core/legacy-archive";
-
 type ParsedLegacyWaveGateMigrationAuthority = Readonly<{
   registration: ActiveWaveGateRegistration;
-  compatibility: LegacyWaveGateCompatibilityAuthorityLocal;
+  compatibility: LegacyWaveGateCompatibilityAuthority;
 }>;
 
 function parseLegacyWaveGateMigrationAuthority(raw: unknown): ParseResult<ParsedLegacyWaveGateMigrationAuthority> {
@@ -2301,7 +2297,7 @@ function parseLegacyWaveGateMigrationAuthority(raw: unknown): ParseResult<Parsed
     revision: 0,
     terminalOutcome: null,
   });
-  const compatibility: LegacyWaveGateCompatibilityAuthorityLocal = Object.freeze({
+  const compatibility: LegacyWaveGateCompatibilityAuthority = Object.freeze({
     schemaVersion: 1,
     kind: "legacy-wave-gate-compatibility",
     runId: registration.runId,

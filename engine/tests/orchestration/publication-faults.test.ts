@@ -430,6 +430,25 @@ describe("context packets", () => {
     expect(nonBytes).toMatchObject({ ok: false, error: { message: expect.stringContaining("integers from 0 through 255") } });
   });
 
+  it("refuses sparse staged and decision-context byte arrays", async () => {
+    const sparse = new Array<number>(2);
+    sparse[1] = 1;
+    expect(createStagedArtifact("result.json", sparse)).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("integers from 0 through 255") },
+    });
+
+    const { handle } = freshRun();
+    const coercedDigest = parseContextDigest(
+      createHash("sha256").update(Uint8Array.from(sparse)).digest("hex"),
+    );
+    if (!coercedDigest.ok) throw new Error(coercedDigest.error.message);
+    await expect(handle.publishDecisionContext(coercedDigest.value, sparse)).resolves.toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("integers from 0 through 255") },
+    });
+  });
+
   it.each([
     ["invalid UTF-8", [0xff], "valid UTF-8 JSON"],
     ["invalid JSON", [...Buffer.from("{truncated", "utf8")], "valid UTF-8 JSON"],

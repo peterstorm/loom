@@ -17,10 +17,10 @@ export type JsonObject = Readonly<{ [key: string]: JsonValue }>;
 /** Persisted provenance binding for one engine-issued Review Packet. */
 export interface IssuedReviewPacketRegistration {
   readonly task_id: string;
-  readonly packet_id: string;
+  readonly packet_id: PacketId;
   readonly packet_path: ReviewPath;
-  readonly base_sha: string;
-  readonly head_sha: string;
+  readonly base_sha: BaseSha;
+  readonly head_sha: HeadSha;
   readonly scope: readonly ReviewPath[];
 }
 
@@ -248,9 +248,9 @@ export function parseIssuedReviewPacketRegistration(
   if (packetId === null) errors.push(`${label}.packet_id must be a lowercase SHA-256 digest`);
   const packetPath = parseReviewPath(raw.packet_path, `${label}.packet_path`);
   if (!packetPath.ok) errors.push(...packetPath.errors);
-  const baseSha = parseGitSha(raw.base_sha, `${label}.base_sha`);
+  const baseSha = parseBaseSha(raw.base_sha, `${label}.base_sha`);
   if (!baseSha.ok) errors.push(...baseSha.errors);
-  const headSha = parseGitSha(raw.head_sha, `${label}.head_sha`);
+  const headSha = parseHeadSha(raw.head_sha, `${label}.head_sha`);
   if (!headSha.ok) errors.push(...headSha.errors);
   const scope = parsePathSet(raw.scope, `${label}.scope`);
   if (!scope.ok) errors.push(...scope.errors);
