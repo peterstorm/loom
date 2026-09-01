@@ -288,10 +288,6 @@ describe("bounded implementation retry admission", () => {
     expect(deriveImplementationRetryDisposition({
       id: "T1",
       implementation_attempt_history: [retry, implemented],
-    })).toEqual({ kind: "initial", semanticAttempt: 1 });
-    expect(deriveImplementationRetryDisposition({
-      id: "T1",
-      implementation_attempt_history: [retry, implemented],
       implementation_retry_protocol: 2,
       implementation_retry_history_start: 0,
     })).toEqual({ kind: "initial", semanticAttempt: 1 });
@@ -328,6 +324,15 @@ describe("bounded implementation retry admission", () => {
     ];
     for (const history of contradictory) {
       expect(deriveImplementationRetryDisposition(retryTask(history))).toMatchObject({ kind: "invalid" });
+    }
+    for (const receipt of [attempt2Infrastructure, escalation]) {
+      expect(deriveImplementationRetryDisposition({
+        id: "T1",
+        implementation_attempt_history: [receipt],
+      })).toMatchObject({
+        kind: "invalid",
+        errors: [expect.stringContaining("pre-protocol Slice-3 compatibility")],
+      });
     }
   });
 

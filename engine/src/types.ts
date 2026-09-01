@@ -538,8 +538,8 @@ interface TaskCommonMetadataBase {
   readonly start_sha?: string;
   readonly failure_reason?: string;
   readonly retry_count?: number;
-  /** Strict bounded-retry lineage marker. Absent histories use the read-only
-   * Slice-3 compatibility projection until their next engine registration. */
+  /** Strict bounded-retry lineage marker. Histories without protocol-2 metadata
+   * use the read-only Slice-3 compatibility projection until their next engine registration. */
   readonly implementation_retry_protocol?: 2;
   readonly implementation_retry_history_start?: number;
   readonly implementation_retry_predecessor_receipt_id?: ImplementationSettlementReceiptId;
@@ -1018,9 +1018,9 @@ export type WaveImplementationAction = Readonly<{
 }>;
 
 export type NextActionDecision = Readonly<{
-  /** Exactly one of the fixed four transport tags. Engine resume and the
-   * implementation window are typed, retryable blocked actions rather than
-   * terminal invalid authority. */
+  /** Exactly one of the fixed four transport tags. `blocked` is a transport
+   * tag: engine resume and healthy implementation actions are retryable, while
+   * implementation escalation is terminal with `retry.eligible: false`. */
   action: WaveGateNextAction["action"] | EngineResumeAction | WaveImplementationAction;
   reasons: OrchestrationNonEmpty<StatusReason>;
 }>;

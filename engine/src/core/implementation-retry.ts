@@ -199,14 +199,12 @@ export function renderImplementationRetryContext(context: ImplementationRetryCon
   return `${IMPLEMENTATION_RETRY_CONTEXT_LABEL}: ${canonicalJson(context as unknown as JsonValue)}`;
 }
 
-function contextLines(prompt: string): readonly string[] {
-  return prompt.split(/\r?\n/u).filter((line) => line.startsWith(`${IMPLEMENTATION_RETRY_CONTEXT_LABEL}:`));
-}
-
 function parsePromptRetryContext(prompt: string):
   | Readonly<{ ok: true; value: ImplementationRetryContext | null; sourceLine: string | null }>
   | Readonly<{ ok: false; error: string }> {
-  const lines = contextLines(prompt);
+  const lines = prompt
+    .split(/\r?\n/u)
+    .filter((line) => line.startsWith(`${IMPLEMENTATION_RETRY_CONTEXT_LABEL}:`));
   if (lines.length === 0) return { ok: true, value: null, sourceLine: null };
   if (lines.length !== 1) return { ok: false, error: "implementation prompt must contain at most one retry context" };
   const prefix = `${IMPLEMENTATION_RETRY_CONTEXT_LABEL}: `;
@@ -271,21 +269,13 @@ function projectedDisposition(lineage: ImplementationRetryLineage): Implementati
 function legacyRetryDisposition(
   history: readonly ImplementationAttemptSettlementReceipt[],
 ): ImplementationRetryDisposition {
-  const escalationIndex = history.findIndex((receipt) => receipt.transition === "escalation-required");
-  if (escalationIndex >= 0) {
-    const escalation = history[escalationIndex]!;
-    if (escalationIndex !== history.length - 1 || escalation.transition !== "escalation-required") {
-      return invalidLineage(
-        escalationIndex + 1,
-        history[escalationIndex + 1]!,
-        `receipt appears after terminal escalation ${escalation.receiptId}`,
-      );
-    }
-    return projectedDisposition(freeze({
-      kind: "escalated",
-      receiptId: escalation.receiptId,
-      failureKinds: escalation.failureKinds,
-    }));
+  const unsupportedIndex = history.findIndex((receipt) => receipt.semanticAttempt !== 1);
+  if (unsupportedIndex >= 0) {
+    return invalidLineage(
+      unsupportedIndex,
+      history[unsupportedIndex]!,
+      "pre-protocol Slice-3 compatibility accepts only semantic attempt 1 receipts",
+    );
   }
   const lastImplemented = history.findLastIndex((receipt) => receipt.transition === "implemented");
   const current = history.slice(lastImplemented + 1);
@@ -296,7 +286,8 @@ function legacyRetryDisposition(
     : projectedDisposition(freeze({ kind: "retry", predecessor: retry }));
 }
 
-/** Derive the only legal next semantic attempt from immutable settlement history. */
+/** Derive the only legal next semantic attempt from settlement history plus
+ * persisted protocol, history-start, and predecessor authority. */
 export function deriveImplementationRetryDisposition(
   task: RetryableImplementationTask,
 ): ImplementationRetryDisposition {

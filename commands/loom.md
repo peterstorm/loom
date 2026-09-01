@@ -546,7 +546,7 @@ If user continues: Proceed to Phase 5 normally.
 For each wave:
 
 1. Read `helper orchestration status --json` and execute only its implementation-window recovery:
-   - `spawn-wave-implementation`: build each listed Task prompt and append that dispatch's exact `promptAppendix` when non-null. `retry-implementation` is the one engine-authorized semantic attempt 2; never rewrite or summarize its appendix.
+   - `spawn-wave-implementation`: build each listed Task prompt by substituting that dispatch's exact `promptAppendix` into `{implementation_retry_context}` when non-null; do not append it a second time. `retry-implementation` is the one engine-authorized semantic attempt 2; never rewrite or summarize its appendix.
    - `await-wave-implementation`: spawn nothing; wait for the listed active Tasks to settle, then re-read status.
    - `escalate-wave-implementation`: STOP and present every Task/receipt/failure kind to the user. Attempt 2 is terminal; manually re-spawning would be an unauthorized attempt 3 and the spawn gate refuses it.
    - `start-wave-gate`: proceed to the Wave Gate.
@@ -721,7 +721,7 @@ Hooks auto-activate when `active_task_graph.json` exists:
 | `block-direct-edits.sh` | PreToolUse: Edit/Write/MultiEdit | Forces the subagent-spawn tool |
 | `enforce-phase-tools.sh` | PreToolUse: Edit/Write/MultiEdit | Guarded-skill-machine gate: denies enforced tools the bound agent's phase doesn't allow (fails closed) |
 | `guard-state-file.sh` | PreToolUse: Bash | Deny-by-default on guarded state paths: only read-only commands (`jq`, `cat`, `grep`, …) and whitelisted helpers pass — covers task graph + subagent evidence/binding files + machine definitions |
-| `validate-task-execution.sh` | PreToolUse: Agent/Task/subagent | Validates wave order |
+| `validate-task-execution.sh` | PreToolUse: Agent/Task/subagent | Validates wave/dependency order and path ownership, reclaims only policy-eligible exact reservations, captures baselines, and atomically registers attempt/retry authority |
 | `validate-phase-order.sh` | PreToolUse: Agent/Task/subagent | Enforces phase sequencing |
 | `validate-template-substitution.sh` | PreToolUse: Agent/Task/subagent | Blocks unsubstituted `{variable}` patterns |
 | `validate-agent-model.sh` | PreToolUse: Agent/Task/subagent | Validates agent model assignment |

@@ -65,7 +65,7 @@ It is protected Task state while the attempt is active. Settlement, exact rollba
 
 ### Retry admission
 
-The pure command validates the complete history in wire order; each legal `implemented` receipt resets the current lineage to attempt 1:
+The pure command projects pre-protocol Slice-3 attempt-1 history for read compatibility, then strictly validates the protocol-2 suffix in wire order from its persisted history-start and predecessor authority. Each legal `implemented` receipt in that strict suffix resets the current lineage to attempt 1:
 
 - no semantic-consuming receipt → attempt 1;
 - one `retry-required` receipt and no later escalation → attempt 2, exact appendix required;

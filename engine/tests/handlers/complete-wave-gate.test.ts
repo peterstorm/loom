@@ -1780,6 +1780,8 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
         tasks: [{
           ...taskState({ id: "T1", wave: 1, status: "pending" }),
           implementation_attempt_history: [retry, escalation],
+          implementation_retry_protocol: 2,
+          implementation_retry_history_start: 0,
           failure_reason: `escalation-required: ${escalation.failureKinds.join(", ")}`,
           retry_count: 2,
         }, taskState({ id: "T2", wave: 1, status: "pending" })],
