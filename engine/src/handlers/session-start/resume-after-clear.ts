@@ -55,7 +55,6 @@ export function buildContextOutput(state: TaskGraph, loomDir: string): string {
   lines.push("");
   lines.push("## Instructions");
 
-  // Check if wave-gate needs running before spawning tasks
   const currentWaveGate = state.wave_gates?.[String(currentWave)];
   const prevWaveGate = currentWave > 1 ? state.wave_gates?.[String(currentWave - 1)] : null;
   const needsWaveGate = currentWaveGate?.impl_complete && !currentWaveGate?.reviews_complete;

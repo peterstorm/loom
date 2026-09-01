@@ -178,7 +178,7 @@ async function withStateDirectoryAsync<T>(
  * The subagent directory is the BASE for session-scoped files: its configured
  * path may traverse a system symlink (macOS resolves `/tmp` to
  * `/private/tmp`), so it is resolved here rather than walked strictly from the
- * filesystem root — the same reason `ensureResolvedBaseDirectory` resolves a
+ * filesystem root — the same reason `resolveBaseDirectory` resolves a
  * run base. ENOENT propagates: an absent base is the one absent answer, the
  * same one an absent pointer produces. The leaf itself is still read with no
  * component followed.
