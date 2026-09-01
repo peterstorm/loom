@@ -10,8 +10,9 @@ import {
 import {
   createTaskExecutionAuthorityBatch,
   rollbackTaskExecutionAuthorityBatch,
+  taskExecutionRegistrationError,
 } from "../../src/core/validate-task-execution";
-import { evaluateTaskProof, TRUSTED_LEDGER_ONLY_POLICY } from "../../src/core/proof-obligations";
+import { derivePendingTaskProof, evaluateTaskProof, TRUSTED_LEDGER_ONLY_POLICY } from "../../src/core/proof-obligations";
 import { settleUnavailableImplementation } from "../../src/core/implementation-application";
 import {
   productionExactSettlementPorts,
@@ -19,9 +20,12 @@ import {
 } from "../../src/handlers/helpers/exact-implementation-settlement";
 import { StateManager } from "../../src/state-manager";
 import {
+  TASK_BYTE_SCOPE_CHECK_ID_TEXT,
   createImplementationAttemptAuthority,
+  createTaskCompletionSuiteAuthority,
   parseIsoInstant,
   parseReservationId,
+  settleImplementationAttempt,
   type ImplementationAttemptAuthority,
 } from "../../src/core/implementation-completion";
 import { taskFixture, graphFixture } from "../fixtures/task-lifecycle";
@@ -295,6 +299,89 @@ describe("modern implementation attempt registration", () => {
     expect(manager.load().tasks[0]?.files_modified).not.toContain("sibling.ts");
     expect(manager.load().tasks[0]?.repository_baseline).toBeUndefined();
     expect(readFileSync(join(repo.root, "sibling.ts"), "utf8")).toBe("parallel T2 bytes\n");
+  });
+
+  it("rejects a preflight authority plan when locked settlement history advances the semantic attempt", () => {
+    const state = graph([taskFixture({
+      id: "T1", description: "one", agent: "code-implementer-agent",
+      wave: 1, status: "pending", depends_on: [], file_list: ["src/a.ts"],
+    })]);
+    const artifactBaseline = [{ artifact: "src/a.ts", snapshot: { kind: "missing" as const } }];
+    const baselines = new Map([["T1", {
+      proof: artifactBaseline,
+      attempt: artifactBaseline,
+      repositoryAttempt: [],
+      repositoryObservation: [],
+    }]]);
+    const reservedAt = parseIsoInstant("2026-01-01T00:00:00.000Z");
+    const reservationId = parseReservationId("stale-preflight-plan");
+    if (!reservedAt.ok || !reservationId.ok) throw new Error("plan fixture failed");
+    const batch = createTaskExecutionAuthorityBatch(
+      state,
+      [spawn("T1")],
+      ["T1"],
+      [reservationId.value],
+      "1".repeat(40),
+      reservedAt.value,
+      baselines,
+    );
+    if (!batch.ok) throw new Error(batch.error);
+    const plannedAuthority = batch.plans[0]!.authority;
+    const suite = createTaskCompletionSuiteAuthority(plannedAuthority);
+    if (!suite.ok) throw new Error(suite.error.errors.join("; "));
+    const settled = settleImplementationAttempt(
+      {
+        ...state.tasks[0]!,
+        proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: ["src/a.ts"] }),
+        active_implementation_attempt: plannedAuthority,
+      },
+      plannedAuthority,
+      plannedAuthority,
+      {
+        schemaVersion: 1,
+        kind: "implementation-observed",
+        observedAt: "2026-01-01T00:01:00.000Z",
+        evidence: {
+          taskCompleted: false,
+          testResult: { verdict: "trusted-pass" },
+          filesModified: [],
+          newTestsWritten: false,
+          newTestEvidence: "waived",
+        },
+        proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
+      },
+      {
+        schemaVersion: 1,
+        kind: "task-completion-suite-result",
+        implementationAuthorityDigest: suite.value.implementationAuthorityDigest,
+        suiteDigest: suite.value.suiteDigest,
+        checks: [{
+          checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
+          scope: "task",
+          outcome: { kind: "accepted", changedPaths: [] },
+        }],
+      },
+    );
+    if (!settled.ok || settled.value.kind !== "retry-required") {
+      throw new Error("retry receipt fixture failed");
+    }
+    const lockedState: TaskGraph = {
+      ...state,
+      tasks: [{
+        ...state.tasks[0]!,
+        implementation_attempt_history: [settled.value.receipt],
+      }],
+    };
+
+    expect(taskExecutionRegistrationError(
+      lockedState,
+      [spawn("T1")],
+      ["T1"],
+      "parallel",
+      baselines,
+      new Set(),
+      batch.plans,
+    )).toBe("Task T1 implementation authority changed before execution registration.");
   });
 
   it("writes no TaskGraph bytes when any sibling makes the batch invalid", async () => {

@@ -476,7 +476,7 @@ Task id in executing_tasks
   iff stored attempt baselines hash to that authority's two baseline digests
 ```
 
-Legacy `executing_tasks` entries without active authority remain readable as legacy reservations, but are cleanup/invalidation-only. A stale reservation becomes policy-eligible after the bounded grace and liveness checks; reclamation removes only that exact active authority. Exact identity prevents releasing a replacement, but the policy does not prove process death because transport latency has no hard upper bound.
+Legacy `executing_tasks` entries without active authority remain readable as legacy reservations, but are cleanup/invalidation-only. Timestamped reservations become policy-eligible after bounded grace and liveness checks; missing or invalid legacy timestamps are the explicit immediate, availability-biased compatibility exception. Reclamation removes only the exact selected authority. Exact identity prevents releasing a replacement, but the policy does not prove process death because transport latency has no hard upper bound.
 
 Registration captures baselines and reservation ids in the shell, then revalidates and atomically installs baselines, digests, authority, `reserved_at`, and `executing_tasks` under one StateManager lock. The returned authority is the only result correlation capability.
 

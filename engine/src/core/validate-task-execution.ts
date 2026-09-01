@@ -174,9 +174,9 @@ export const RESERVATION_GRACE_MS = 10 * 60_000;
  * its task is not `completed`; no agent is active for this graph; and it has
  * aged past `graceMs`. A reservation whose `reserved_at` is missing or
  * unparseable predates the timestamp (or is corrupt) and stays eligible so
- * legacy stranded entries still recover. This is an availability-biased
- * compatibility exception that releases uncertain ownership; the grace only
- * delays that recovery.
+ * legacy stranded entries still recover immediately. This is an
+ * availability-biased compatibility exception that releases uncertain
+ * ownership; only timestamped reservations observe the grace period.
  *
  * Status is deliberately NOT narrowed to `pending`. A spawn vetoed by a
  * sibling PreToolUse gate strands its reservation whatever the task's status
@@ -248,9 +248,9 @@ function declaredPathOverlap(left: Task, right: Task): string | undefined {
 }
 
 /**
- * Pure ownership invariant for one execution reservation. Active tasks own
- * their declared paths until stop cleanup. One reservation captures all task
- * baselines before dispatch, so even sequential siblings must be disjoint;
+ * Pure ownership invariant for one execution reservation. Non-reclaimable
+ * reservations own their declared paths until exact cleanup or policy-authorized
+ * reclamation. One reservation captures all task baselines before dispatch, so even sequential siblings must be disjoint;
  * path handoff requires separate calls so each task gets a fresh baseline.
  *
  * `staleReservations` names reservations the bounded policy permits reclaiming;

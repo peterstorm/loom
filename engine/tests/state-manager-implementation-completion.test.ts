@@ -270,6 +270,11 @@ describe("Task attempt authority StateManager lockstep", () => {
       ...valid,
       active_implementation_context: { ...context, contextDigest: "f".repeat(64) },
     }, { executing_tasks: ["T1"] }))).toContain("contextDigest does not match");
+    const foreign = authority("foreign-context-authority");
+    expect(errorOf(graph({
+      ...valid,
+      active_implementation_context: initialContext(foreign),
+    }, { executing_tasks: ["T1"] }))).toContain("must match active_implementation_attempt");
   });
 
   it("rejects a digest-valid attempt-2 context bound to a stale predecessor receipt", () => {
