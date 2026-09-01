@@ -21,6 +21,7 @@ import {
   type RetryRequiredSettlementReceipt,
   type SemanticAttempt,
 } from "./implementation-completion";
+import { compareStrings } from "./ordering";
 import { canonicalJson, sha256Hex, type JsonValue } from "./review-packet";
 import { parseTaskId, type TaskId } from "./task-id";
 
@@ -131,7 +132,7 @@ function failureKinds(raw: unknown, path: string):
     }
   }
   if (values.length === 0) errors.push(`${path} must be non-empty`);
-  const sorted = [...values].sort();
+  const sorted = [...values].sort(compareStrings);
   if (new Set(values).size !== values.length || values.some((value, index) => value !== sorted[index])) {
     errors.push(`${path} must be sorted and unique`);
   }

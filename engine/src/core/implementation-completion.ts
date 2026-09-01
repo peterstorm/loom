@@ -451,7 +451,7 @@ function parseTaskRoster(raw: unknown, path: string): Parsed<readonly [Authorize
   return success(Object.freeze([checks.value[0]!]));
 }
 
-/** Initial Phase-1 Task suite: one non-empty engine-owned byte-scope roster. */
+/** Initial Task-local suite: one non-empty engine-owned byte-scope roster. */
 export function createTaskCompletionSuiteAuthority(
   rawAuthority: unknown,
 ): Parsed<TaskCompletionSuiteAuthority> {

@@ -289,6 +289,12 @@ describe("bounded implementation retry admission", () => {
       id: "T1",
       implementation_attempt_history: [retry, implemented],
     })).toEqual({ kind: "initial", semanticAttempt: 1 });
+    expect(deriveImplementationRetryDisposition({
+      id: "T1",
+      implementation_attempt_history: [retry, implemented],
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
+    })).toEqual({ kind: "initial", semanticAttempt: 1 });
   });
 
   it("rejects every contradictory settlement transition in wire order", () => {

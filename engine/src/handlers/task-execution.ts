@@ -57,26 +57,25 @@ export async function registerTaskExecutionBatch(
       spawn.kind === "implementation",
   );
   if (inputs.length === 0) return { kind: "registered", authorities: Object.freeze([]) };
-  const statePath = taskGraphPath();
-  // Fail CLOSED on an unreadable graph: `existsSync` collapses EACCES/ELOOP/
-  // ENOTDIR/EIO into `false`, which would wave the whole implementation batch
-  // through with no ownership, staleness, or baseline check and no trace.
-  if (!pathExistsFailClosed(statePath)) return { kind: "registered", authorities: Object.freeze([]) };
-  // Past the fail-closed probe the graph is PRESENT-or-unprovable, so every
-  // remaining failure to read it is a refusal, never a pass: returning "allow"
-  // here is the same fail-open the probe above was introduced to close.
-  const manager = StateManager.fromPath(statePath);
-  if (!manager) {
-    return { kind: "block", message: `BLOCKED: task graph at ${statePath} could not be opened; refusing to spawn implementation tasks unchecked` };
-  }
-
+  let statePath = "<unresolved>";
+  let manager: StateManager;
   let state: TaskGraph;
   try {
+    statePath = taskGraphPath();
+    // Fail CLOSED on an unreadable graph: `existsSync` collapses EACCES/ELOOP/
+    // ENOTDIR/EIO into `false`, which would wave the whole implementation batch
+    // through with no ownership, staleness, or baseline check and no trace.
+    if (!pathExistsFailClosed(statePath)) return { kind: "registered", authorities: Object.freeze([]) };
+    const candidate = StateManager.fromPath(statePath);
+    if (candidate === null) {
+      return { kind: "block", message: `BLOCKED: task graph at ${statePath} disappeared during registration; refusing to spawn implementation tasks unchecked` };
+    }
+    manager = candidate;
     state = manager.load();
   } catch (error) {
     return {
       kind: "block",
-      message: `BLOCKED: cannot read the task graph at ${statePath}: ${error instanceof Error ? error.message : String(error)}`,
+      message: `BLOCKED: cannot establish task graph authority at ${statePath}: ${error instanceof Error ? error.message : String(error)}; refusing unchecked implementation spawn`,
     };
   }
   const bindings = parseImplementationTaskBindings(state, inputs);
@@ -211,20 +210,21 @@ export async function rollbackTaskExecutionRegistration(
   authorities: readonly ImplementationAttemptAuthority[],
 ): Promise<HookResult> {
   if (authorities.length === 0) return { kind: "allow" };
-  const statePath = taskGraphPath();
-  const manager = StateManager.fromPath(statePath);
-  if (manager === null) {
-    return { kind: "block", message: `BLOCKED: Cannot roll back implementation registration; task graph ${statePath} is unavailable.` };
-  }
-  const rolledBackAt = parseIsoInstant(new Date().toISOString(), "rollback instant");
-  if (!rolledBackAt.ok) return { kind: "block", message: `BLOCKED: ${rolledBackAt.error.errors.join("; ")}` };
+  let statePath = "<unresolved>";
   try {
+    statePath = taskGraphPath();
+    const manager = StateManager.fromPath(statePath);
+    if (manager === null) {
+      return { kind: "block", message: `BLOCKED: Cannot roll back implementation registration; task graph ${statePath} is unavailable.` };
+    }
+    const rolledBackAt = parseIsoInstant(new Date().toISOString(), "rollback instant");
+    if (!rolledBackAt.ok) return { kind: "block", message: `BLOCKED: ${rolledBackAt.error.errors.join("; ")}` };
     await manager.update((state) => rollbackTaskExecutionAuthorityBatch(state, authorities, rolledBackAt.value));
     return { kind: "allow" };
   } catch (error) {
     return {
       kind: "block",
-      message: `BLOCKED: Cannot roll back implementation registration: ${error instanceof Error ? error.message : String(error)}`,
+      message: `BLOCKED: Cannot roll back implementation registration at ${statePath}: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
 }

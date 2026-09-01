@@ -1136,17 +1136,18 @@ function taskAttemptAuthorityError(
   id: string,
 ): string | null {
   const label = `tasks[${index}] ("${id}")`;
-  const history = t.implementation_attempt_history === undefined
+  const parsedHistory = t.implementation_attempt_history === undefined
     ? undefined
     : parseImplementationAttemptHistory(
         t.implementation_attempt_history,
         `${label}: implementation_attempt_history`,
       );
-  if (history !== undefined) {
-    if (!history.ok) return history.error.errors.join("; ");
-    if (history.value.some((receipt) => receipt.taskId !== id)) {
-      return `${label}: implementation_attempt_history receipt taskId must equal ${id}`;
-    }
+  if (parsedHistory !== undefined && !parsedHistory.ok) {
+    return parsedHistory.error.errors.join("; ");
+  }
+  const history = parsedHistory?.value;
+  if (history?.some((receipt) => receipt.taskId !== id)) {
+    return `${label}: implementation_attempt_history receipt taskId must equal ${id}`;
   }
   const protocolPresent = t.implementation_retry_protocol !== undefined ||
     t.implementation_retry_history_start !== undefined ||
@@ -1159,7 +1160,7 @@ function taskAttemptAuthorityError(
         typeof t.implementation_retry_history_start !== "number" ||
         !Number.isSafeInteger(t.implementation_retry_history_start) ||
         t.implementation_retry_history_start < 0 ||
-        t.implementation_retry_history_start > (history?.ok ? history.value.length : 0)) {
+        t.implementation_retry_history_start > (history?.length ?? 0)) {
       return `${label}: implementation retry protocol 2 requires a valid history start index`;
     }
     if (t.implementation_retry_predecessor_receipt_id !== undefined) {
@@ -1175,7 +1176,7 @@ function taskAttemptAuthorityError(
   }
   const retryDisposition = deriveImplementationRetryDisposition({
     id,
-    implementation_attempt_history: history?.ok ? history.value : undefined,
+    implementation_attempt_history: history,
     implementation_retry_protocol: retryProtocol,
     implementation_retry_history_start: retryHistoryStart,
     implementation_retry_predecessor_receipt_id: retryPredecessorReceiptId,
@@ -1205,6 +1206,9 @@ function taskAttemptAuthorityError(
   if (retryDisposition.kind === "escalated") {
     return `${label}: escalated implementation lineage cannot carry an active attempt`;
   }
+  if (retryProtocol === undefined && authority.value.semanticAttempt === 2) {
+    return `${label}: semantic attempt 2 requires protocol-2 retry lineage`;
+  }
   if (retryProtocol === 2 && authority.value.semanticAttempt !== retryDisposition.semanticAttempt) {
     return `${label}: active_implementation_attempt semantic attempt contradicts settlement history`;
   }
@@ -1228,7 +1232,7 @@ function taskAttemptAuthorityError(
       return `${label}: active retry context must match the current retry-required receipt`;
     }
   }
-  if (history?.ok && history.value.some((receipt) =>
+  if (history?.some((receipt) =>
     receipt.authorityDigest === authority.value.authorityDigest ||
     receipt.reservationId === authority.value.reservationId)) {
     return `${label}: active_implementation_attempt authorityDigest and reservationId must be absent from implementation_attempt_history`;

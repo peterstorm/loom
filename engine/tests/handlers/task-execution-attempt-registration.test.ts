@@ -1,10 +1,11 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   registerTaskExecutionBatch,
+  rollbackTaskExecutionRegistration,
 } from "../../src/handlers/task-execution";
 import {
   createTaskExecutionAuthorityBatch,
@@ -95,6 +96,38 @@ afterEach(() => {
 });
 
 describe("modern implementation attempt registration", () => {
+  it("returns blocking outcomes when StateManager authority capture rejects the TaskGraph parent", async () => {
+    const repo = repository();
+    writeGraph(repo.statePath, graph());
+    const symlinkedStateDirectory = join(repo.root, "state-link");
+    symlinkSync(join(repo.root, ".loom-state"), symlinkedStateDirectory, "dir");
+    process.env.LOOM_STATE_PATH = join(symlinkedStateDirectory, "active_task_graph.json");
+
+    await expect(registerTaskExecutionBatch([spawn("T1")])).resolves.toMatchObject({
+      kind: "block",
+      message: expect.stringContaining("cannot establish task graph authority"),
+    });
+
+    const reservedAt = parseIsoInstant("2026-01-01T00:00:00.000Z");
+    const reservationId = parseReservationId("rollback-capture-refusal");
+    if (!reservedAt.ok || !reservationId.ok) throw new Error("authority fixture failed");
+    const authority = createImplementationAttemptAuthority({
+      taskId: "T1",
+      wave: 1,
+      semanticAttempt: 1,
+      reservationId: reservationId.value,
+      headSha: repo.headSha,
+      reservedAt: reservedAt.value,
+      taskScopeBaseline: [],
+      dirtySetBaseline: [],
+    });
+    if (!authority.ok) throw new Error(authority.error.errors.join("; "));
+    await expect(rollbackTaskExecutionRegistration([authority.value])).resolves.toMatchObject({
+      kind: "block",
+      message: expect.stringContaining("Cannot roll back implementation registration"),
+    });
+  });
+
   it("atomically returns ordered cryptographically unique authorities in baseline lockstep", async () => {
     const repo = repository();
     writeGraph(repo.statePath, graph());

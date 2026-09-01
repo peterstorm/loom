@@ -303,9 +303,18 @@ describe("Task attempt authority StateManager lockstep", () => {
     }, { executing_tasks: ["T1"] }))).toContain("active retry context must match the current retry-required receipt");
   });
 
-  it("requires exact active context for semantic attempt 2", () => {
+  it("requires exact protocol-2 lineage and active context for semantic attempt 2", () => {
     const retry = receiptFor(authority("retry-source"), false);
     const active = authority("retry-active", 2);
+    expect(errorOf(graph({
+      ...baseTask(),
+      proof: pendingProof(),
+      active_implementation_attempt: active,
+      attempt_artifact_baseline: attemptBaseline,
+      attempt_repository_baseline: repositoryBaseline,
+      reserved_at: active.reservedAt,
+    }, { executing_tasks: ["T1"] }))).toContain("semantic attempt 2 requires protocol-2 retry lineage");
+
     expect(errorOf(graph({
       ...baseTask(),
       proof: pendingProof(),
