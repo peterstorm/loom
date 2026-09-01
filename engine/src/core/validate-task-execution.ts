@@ -14,6 +14,7 @@ import {
   createReclaimedImplementationAttemptReceipt,
   type ImplementationAttemptAuthority,
   type IsoInstant,
+  type ImplementationSettlementReceiptId,
   type ReservationId,
 } from "./implementation-completion";
 import {
@@ -342,6 +343,7 @@ export type TaskExecutionAuthorityPlan = Readonly<{
   authority: ImplementationAttemptAuthority;
   context: ImplementationAttemptContext;
   retryHistoryStart: number;
+  retryLineagePredecessorReceiptId: ImplementationSettlementReceiptId | null;
   baselines: TaskExecutionBaselineBundle;
 }>;
 
@@ -395,6 +397,7 @@ export function createTaskExecutionAuthorityBatch(
       authority: authority.value,
       context,
       retryHistoryStart: admission.historyStart,
+      retryLineagePredecessorReceiptId: admission.lineagePredecessorReceiptId,
       baselines: taskBaselines,
     }));
   }
@@ -541,6 +544,7 @@ export function applyTaskExecutionAuthorityBatch(
       active_implementation_context: plan.context,
       implementation_retry_protocol: 2,
       implementation_retry_history_start: plan.retryHistoryStart,
+      implementation_retry_predecessor_receipt_id: plan.retryLineagePredecessorReceiptId ?? undefined,
       reserved_at: plan.authority.reservedAt,
       legacy_execution_reservation: undefined,
     };
@@ -654,6 +658,7 @@ export function taskExecutionRegistrationError(
       const admission = authorizeImplementationSpawn(task, input.prompt);
       if (!admission.ok || plan.authority.semanticAttempt !== admission.semanticAttempt ||
           plan.retryHistoryStart !== admission.historyStart ||
+          plan.retryLineagePredecessorReceiptId !== admission.lineagePredecessorReceiptId ||
           !implementationAttemptContextMatchesAuthority(plan.context, plan.authority)) {
         return `Task ${taskId} implementation authority changed before execution registration.`;
       }

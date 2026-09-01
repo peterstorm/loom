@@ -316,7 +316,21 @@ describe("Task attempt authority StateManager lockstep", () => {
       implementation_attempt_history: [retry],
       implementation_retry_protocol: 2,
       implementation_retry_history_start: 0,
-    }, { executing_tasks: ["T1"] }))).toContain("semantic attempt 2 requires active_implementation_context");
+    }, { executing_tasks: ["T1"] }))).toContain("protocol-2 active implementation requires active_implementation_context");
+
+    const initial = authority("protocol-two-initial", 1);
+    expect(errorOf(graph({
+      ...baseTask(),
+      proof: pendingProof(),
+      active_implementation_attempt: initial,
+      attempt_artifact_baseline: attemptBaseline,
+      attempt_repository_baseline: repositoryBaseline,
+      reserved_at: initial.reservedAt,
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
+    }, { executing_tasks: ["T1"] }))).toContain(
+      "protocol-2 active implementation requires active_implementation_context",
+    );
   });
 
   it("loads pre-protocol Slice-3 attempt-1 histories without rewriting receipts", () => {

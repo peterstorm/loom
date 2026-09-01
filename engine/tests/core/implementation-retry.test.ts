@@ -347,14 +347,50 @@ describe("bounded implementation retry admission", () => {
       id: "T1",
       implementation_attempt_history: [retry, implemented],
     })).toEqual({ kind: "initial", semanticAttempt: 1 });
-    expect(deriveImplementationRetryDisposition({
+    const legacyInfrastructureTask = {
       id: "T1",
       implementation_attempt_history: [retry, infrastructure],
+    };
+    const legacyInfrastructureDisposition = deriveImplementationRetryDisposition(legacyInfrastructureTask);
+    expect(legacyInfrastructureDisposition).toMatchObject({
+      kind: "retry",
+      predecessor: { receiptId: retry.receiptId },
+    });
+    if (legacyInfrastructureDisposition.kind !== "retry") throw new Error("legacy retry projection failed");
+    const migrationPrompt = `Task ID: T1\n${legacyInfrastructureDisposition.promptAppendix}`;
+    const migrationAdmission = authorizeImplementationSpawn(legacyInfrastructureTask, migrationPrompt);
+    if (!migrationAdmission.ok) throw new Error(migrationAdmission.error);
+    expect(migrationAdmission).toMatchObject({
+      historyStart: 2,
+      lineagePredecessorReceiptId: retry.receiptId,
+    });
+    expect(deriveImplementationRetryDisposition({
+      ...legacyInfrastructureTask,
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: migrationAdmission.historyStart,
+      implementation_retry_predecessor_receipt_id: migrationAdmission.lineagePredecessorReceiptId ?? undefined,
     })).toMatchObject({ kind: "retry", predecessor: { receiptId: retry.receiptId } });
     expect(deriveImplementationRetryDisposition({
       id: "T1",
       implementation_attempt_history: [retry, repeatedRetry],
     })).toMatchObject({ kind: "retry", predecessor: { receiptId: repeatedRetry.receiptId } });
+
+    const attempt2 = authority(2, "legacy-terminal", 9);
+    const escalation = settle(
+      attempt2,
+      [retry],
+      observation("2026-09-01T00:09:00.000Z", false),
+    );
+    expect(deriveImplementationRetryDisposition({
+      id: "T1",
+      implementation_attempt_history: [retry, escalation, implemented],
+    })).toMatchObject({ kind: "invalid" });
+    expect(deriveImplementationRetryDisposition({
+      id: "T1",
+      implementation_attempt_history: [retry, escalation],
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 2,
+    })).toMatchObject({ kind: "invalid" });
   });
 
   it("infrastructure receipts never consume the semantic attempt budget", () => {

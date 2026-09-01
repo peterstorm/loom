@@ -84,6 +84,8 @@ import {
   canonicalArtifactBaselineDigest,
   parseImplementationAttemptAuthority,
   parseImplementationAttemptHistory,
+  parseImplementationSettlementReceiptId,
+  type ImplementationSettlementReceiptId,
 } from "./core/implementation-completion";
 import {
   deriveImplementationRetryDisposition,
@@ -1147,9 +1149,11 @@ function taskAttemptAuthorityError(
     }
   }
   const protocolPresent = t.implementation_retry_protocol !== undefined ||
-    t.implementation_retry_history_start !== undefined;
+    t.implementation_retry_history_start !== undefined ||
+    t.implementation_retry_predecessor_receipt_id !== undefined;
   let retryProtocol: 2 | undefined;
   let retryHistoryStart: number | undefined;
+  let retryPredecessorReceiptId: ImplementationSettlementReceiptId | undefined;
   if (protocolPresent) {
     if (t.implementation_retry_protocol !== 2 ||
         typeof t.implementation_retry_history_start !== "number" ||
@@ -1157,6 +1161,14 @@ function taskAttemptAuthorityError(
         t.implementation_retry_history_start < 0 ||
         t.implementation_retry_history_start > (history?.ok ? history.value.length : 0)) {
       return `${label}: implementation retry protocol 2 requires a valid history start index`;
+    }
+    if (t.implementation_retry_predecessor_receipt_id !== undefined) {
+      const predecessor = parseImplementationSettlementReceiptId(
+        t.implementation_retry_predecessor_receipt_id,
+        `${label}: implementation_retry_predecessor_receipt_id`,
+      );
+      if (!predecessor.ok) return predecessor.error.errors.join("; ");
+      retryPredecessorReceiptId = predecessor.value;
     }
     retryProtocol = 2;
     retryHistoryStart = t.implementation_retry_history_start;
@@ -1166,6 +1178,7 @@ function taskAttemptAuthorityError(
     implementation_attempt_history: history?.ok ? history.value : undefined,
     implementation_retry_protocol: retryProtocol,
     implementation_retry_history_start: retryHistoryStart,
+    implementation_retry_predecessor_receipt_id: retryPredecessorReceiptId,
   });
   if (retryDisposition.kind === "invalid") {
     return `${label}: invalid implementation retry lineage: ${retryDisposition.errors.join("; ")}`;
@@ -1195,8 +1208,8 @@ function taskAttemptAuthorityError(
   if (retryProtocol === 2 && authority.value.semanticAttempt !== retryDisposition.semanticAttempt) {
     return `${label}: active_implementation_attempt semantic attempt contradicts settlement history`;
   }
-  if (retryProtocol === 2 && retryDisposition.kind === "retry" && t.active_implementation_context === undefined) {
-    return `${label}: semantic attempt 2 requires active_implementation_context`;
+  if (retryProtocol === 2 && t.active_implementation_context === undefined) {
+    return `${label}: protocol-2 active implementation requires active_implementation_context`;
   }
   if (t.active_implementation_context !== undefined) {
     const context = parseImplementationAttemptContext(

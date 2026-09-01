@@ -300,7 +300,13 @@ export function applyCompletionInfrastructureFailure(
   if (target?.active_implementation_attempt !== undefined || expectedAuthority !== undefined) return state;
   const clearedExecuting = (state.executing_tasks ?? []).filter((id) => id !== taskId);
   if (target === undefined || target.status === "completed" || target.legacy_missing_proof === true) {
-    return { ...state, executing_tasks: clearedExecuting };
+    return {
+      ...state,
+      executing_tasks: clearedExecuting,
+      tasks: state.tasks.map((task) => task.id === taskId
+        ? { ...task, reserved_at: undefined, legacy_execution_reservation: undefined }
+        : task),
+    };
   }
   return applyResolvedTask(
     state,
@@ -319,6 +325,7 @@ export function applyCompletionInfrastructureFailure(
       attempt_artifact_baseline: undefined,
       attempt_repository_baseline: undefined,
       reserved_at: undefined,
+      legacy_execution_reservation: undefined,
     }),
   );
 }

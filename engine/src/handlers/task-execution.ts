@@ -42,9 +42,12 @@ import { anyActiveSubagent } from "../machine";
  * remediation re-spawns against `implemented` and `failed` tasks routinely —
  * so recovery cannot be limited to tasks still `pending`.
  *
- * A reservation becomes policy-eligible for reclamation only when its task is
- * not `completed`, no subagent is observed active FOR THIS GRAPH, AND it has
- * aged past the grace window. This is a bounded operational assumption, not
+ * A timestamped reservation becomes policy-eligible for reclamation only when
+ * its task is not `completed`, no subagent is observed active FOR THIS GRAPH,
+ * AND it has aged past the grace window. Timestamp-less/malformed legacy
+ * reservations are the explicit immediate availability-biased exception on
+ * ordinary registration; Pi's pre-roster observation excludes that exception.
+ * This is a bounded operational assumption, not
  * proof of process death: transport start latency has no hard upper bound.
  * All three matter: a `completed` task can never be re-executed;
  * `anyActiveSubagent` fails closed, so an unreadable roster or any live agent

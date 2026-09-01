@@ -1328,6 +1328,25 @@ describe("applyImplementationPiResult", () => {
     return { ...recovered, executing_tasks: ["T1"] };
   };
 
+  it("clears legacy reservation marker with infrastructure cleanup", () => {
+    const initial = implementationGraph();
+    const reserved: TaskGraph = {
+      ...initial,
+      executing_tasks: ["T1"],
+      tasks: initial.tasks.map((task) => taskFixture({
+        ...task,
+        legacy_execution_reservation: true,
+        reserved_at: "2020-01-01T00:00:00.000Z",
+      })),
+    };
+
+    const recovered = applyCompletionInfrastructureFailure(reserved, "T1", false);
+
+    expect(recovered.executing_tasks).toEqual([]);
+    expect(recovered.tasks[0]?.legacy_execution_reservation).toBeUndefined();
+    expect(recovered.tasks[0]?.reserved_at).toBeUndefined();
+  });
+
   it("preserves parallel execution authority and reports an unbound successful result", async () => {
     const base = implementationGraph();
     const second = { ...base.tasks[0]!, id: "T2" };

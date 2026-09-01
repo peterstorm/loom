@@ -11,6 +11,7 @@ import type {
 import type {
   ImplementationAttemptAuthority,
   ImplementationAttemptSettlementReceipt,
+  ImplementationSettlementReceiptId,
 } from "./core/implementation-completion";
 import type { ImplementationAttemptContext } from "./core/implementation-retry";
 import type { StoredVerificationPolicy } from "./core/verification-policy";
@@ -509,7 +510,7 @@ interface TaskCommonMetadataBase {
    * attempt 1 may omit context, but semantic attempt 2 may not. */
   readonly active_implementation_attempt?: ImplementationAttemptAuthority;
   /** Exact prompt/retry authority frozen before the active Agent dispatch.
-   * Historical attempt 1 may omit it; attempt 2 and every current-protocol registration require it. */
+   * Unversioned historical attempts may omit it; every protocol-2 registration requires it. */
   readonly active_implementation_context?: ImplementationAttemptContext;
   readonly attempt_artifact_baseline?: readonly DeclaredArtifactBaseline[];
   readonly attempt_repository_baseline?: readonly DeclaredArtifactBaseline[];
@@ -541,6 +542,7 @@ interface TaskCommonMetadataBase {
    * Slice-3 compatibility projection until their next engine registration. */
   readonly implementation_retry_protocol?: 2;
   readonly implementation_retry_history_start?: number;
+  readonly implementation_retry_predecessor_receipt_id?: ImplementationSettlementReceiptId;
   /** Immutable exact receipts; append-only settlement audit in wire order. */
   readonly implementation_attempt_history?: readonly ImplementationAttemptSettlementReceipt[];
 }
