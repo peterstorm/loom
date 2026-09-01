@@ -9,6 +9,7 @@
 import { readDenseDataArray, readExactDataRecord } from "./orchestration-contract/bytes";
 import { parseArtifactDigest, type ArtifactDigest } from "./orchestration-contract";
 import {
+  MAX_IMPLEMENTATION_FAILURE_KINDS,
   parseImplementationAttemptHistory,
   parseImplementationAuthorityDigest,
   parseImplementationSettlementReceiptId,
@@ -23,7 +24,6 @@ import {
 import { canonicalJson, sha256Hex, type JsonValue } from "./review-packet";
 import { parseTaskId, type TaskId } from "./task-id";
 
-const MAX_FAILURE_KINDS = 64;
 const MAX_FAILURE_KIND_LENGTH = 4_096;
 export const IMPLEMENTATION_RETRY_CONTEXT_LABEL = "LOOM_IMPLEMENTATION_RETRY_CONTEXT";
 
@@ -112,7 +112,7 @@ function sha256(text: string): ArtifactDigest {
 function failureKinds(raw: unknown, path: string):
   | Readonly<{ ok: true; value: readonly [string, ...string[]] }>
   | Readonly<{ ok: false; errors: readonly string[] }> {
-  const array = readDenseDataArray(raw, path, MAX_FAILURE_KINDS);
+  const array = readDenseDataArray(raw, path, MAX_IMPLEMENTATION_FAILURE_KINDS);
   if (!array.ok) return { ok: false, errors: [array.error.message] };
   const errors: string[] = [];
   const values: string[] = [];
@@ -410,12 +410,19 @@ export function createImplementationAttemptContext(args: Readonly<{
       `${args.authority.semanticAttempt}, but spawn admission authorizes ${args.admission.semanticAttempt}`,
     );
   }
-  if (sha256(args.prompt) !== args.admission.promptDigest) {
+  const promptDigest = sha256(args.prompt);
+  if (promptDigest !== args.admission.promptDigest) {
     throw new Error(`implementation attempt prompt does not match admitted prompt bytes for Task ${args.authority.taskId}`);
+  }
+  if (args.admission.kind === "retry" && (
+    args.admission.retryContext.taskId !== args.admission.taskId ||
+    args.admission.retryContext.predecessorReceiptId !== args.admission.predecessorReceiptId
+  )) {
+    throw new Error(`implementation retry admission carries contradictory nested authority for Task ${args.admission.taskId}`);
   }
   const body = attemptContextBody({
     authority: args.authority,
-    promptDigest: sha256(args.prompt),
+    promptDigest,
     predecessorReceiptId: args.admission.predecessorReceiptId,
     retryContext: args.admission.retryContext,
   });

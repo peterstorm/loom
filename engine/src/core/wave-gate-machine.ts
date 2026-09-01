@@ -2582,6 +2582,15 @@ function unstartedWaveStatus(
   const outstanding = waveTasks.filter((task) => task.status !== "implemented" && task.status !== "completed");
   const executing = new Set(graph.executing_tasks ?? []);
   const observation = deps.implementationReservations;
+  const reservationCandidates = outstanding.filter((task) =>
+    executing.has(task.id) || task.active_implementation_attempt !== undefined);
+  if (reservationCandidates.length > 0 && observation?.kind === "unavailable") {
+    return deriveUnavailableLoomStatus(Object.freeze([
+      unavailableStatusReason(
+        `cannot determine implementation reservation liveness: ${observation.reason}`,
+      ),
+    ]) as NonEmpty<StatusReason>);
+  }
   const reclaimable = observation?.kind === "observed"
     ? staleReservationsForRosterObservation(
         graph,

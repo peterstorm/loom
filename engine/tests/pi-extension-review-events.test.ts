@@ -5303,8 +5303,14 @@ describe("Pi extension review tool_result integration", () => {
     }, context)).toEqual([undefined]);
 
     const { StateManager } = await import("../src/state-manager");
-    const update = vi.spyOn(StateManager.prototype, "update")
-      .mockRejectedValueOnce(new Error("injected reserved application failure"));
+    const originalUpdateAndReturn = StateManager.prototype.updateAndReturn;
+    let updateAndReturnCalls = 0;
+    const updateAndReturn = vi.spyOn(StateManager.prototype, "updateAndReturn")
+      .mockImplementation(async function (this: typeof StateManager.prototype, mutate) {
+        updateAndReturnCalls++;
+        if (updateAndReturnCalls === 2) throw new Error("injected reserved application failure");
+        return originalUpdateAndReturn.call(this, mutate);
+      });
     try {
       const responses = await pi.emit("tool_result", {
         toolName: "subagent", toolCallId, content: [],
@@ -5325,7 +5331,7 @@ describe("Pi extension review tool_result integration", () => {
         implementation_attempt_history: [{ transition: "infrastructure-blocked" }],
       });
     } finally {
-      update.mockRestore();
+      updateAndReturn.mockRestore();
     }
   });
 
@@ -5355,14 +5361,13 @@ describe("Pi extension review tool_result integration", () => {
     }, context)).toEqual([undefined]);
 
     const { StateManager } = await import("../src/state-manager");
-    const update = vi.spyOn(StateManager.prototype, "update")
-      .mockRejectedValueOnce(new Error("injected result application failure"));
     const originalUpdateAndReturn = StateManager.prototype.updateAndReturn;
     let updateAndReturnCalls = 0;
     const updateAndReturn = vi.spyOn(StateManager.prototype, "updateAndReturn")
       .mockImplementation(async function (this: typeof StateManager.prototype, mutate) {
         updateAndReturnCalls++;
-        if (updateAndReturnCalls === 2) throw new Error("injected fallback settlement failure");
+        if (updateAndReturnCalls === 2) throw new Error("injected result application failure");
+        if (updateAndReturnCalls === 3) throw new Error("injected fallback settlement failure");
         return originalUpdateAndReturn.call(this, mutate);
       });
     try {
@@ -5382,7 +5387,6 @@ describe("Pi extension review tool_result integration", () => {
       });
     } finally {
       updateAndReturn.mockRestore();
-      update.mockRestore();
     }
   });
 

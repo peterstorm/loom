@@ -96,6 +96,16 @@ describe("resume-after-clear handler", () => {
     expect(stderr).toMatch(/ELOOP|symbolic link/i);
   });
 
+  it("fails closed when the Task Graph JSON is corrupt", () => {
+    writeFileSync(statePath, "{not json");
+
+    const { exitCode, stderr } = runHandler();
+
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("cannot access Task Graph");
+    expect(stderr).toContain("invalid JSON");
+  });
+
   it("passthrough when phase is not execute", () => {
     writeState(makeGraph({ current_phase: "architecture" }));
     const { exitCode, stdout } = runHandler();

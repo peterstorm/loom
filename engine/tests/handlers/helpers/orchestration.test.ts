@@ -223,6 +223,40 @@ describe("orchestration status", () => {
     expect(parsed.next.action.kind).toBe("blocked");
   });
 
+  it("reports unavailable reservation liveness instead of inventing an active Agent", async () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-status-roster-unavailable-")));
+    cleanup.push(root);
+    const statePath = join(root, "active_task_graph.json");
+    const rosterDir = join(root, "subagents");
+    mkdirSync(rosterDir);
+    writeFileSync(join(rosterDir, "session.active"), "agent\tcode-implementer-agent\n");
+    writeFileSync(join(rosterDir, "session.task_graph"), "not a canonical pointer\n");
+    writeFileSync(statePath, JSON.stringify(executeGraph({
+      executing_tasks: ["T2"],
+      tasks: [
+        { id: "T1", description: "d", agent: "code-implementer-agent", wave: 1, status: "implemented", depends_on: [] },
+        {
+          id: "T2", description: "d", agent: "code-implementer-agent", wave: 1,
+          status: "pending", depends_on: [], reserved_at: "2026-09-01T00:00:00.000Z",
+        },
+      ],
+    })));
+    const previous = process.env.LOOM_SUBAGENT_DIR;
+    process.env.LOOM_SUBAGENT_DIR = rosterDir;
+    try {
+      const status = JSON.parse(await currentOrchestrationStatus(["--json"], statePath)) as {
+        facts: Record<string, { kind: string }>;
+        next: { reasons: readonly { message: string }[] };
+      };
+      expect(Object.values(status.facts).every(({ kind }) => kind === "unavailable")).toBe(true);
+      expect(status.next.reasons[0]?.message).toContain("cannot determine implementation reservation liveness");
+      expect(status.next.reasons[0]?.message).toContain("malformed task-graph pointer");
+    } finally {
+      if (previous === undefined) delete process.env.LOOM_SUBAGENT_DIR;
+      else process.env.LOOM_SUBAGENT_DIR = previous;
+    }
+  });
+
   it("reports an unreadable state file as unavailable rather than crashing", () => {
     const parsed = JSON.parse(renderStatus({ __unreadable: "ENOENT" }, deps, true)) as {
       next: { action: { kind: string } };

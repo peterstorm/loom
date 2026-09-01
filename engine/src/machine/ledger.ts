@@ -293,48 +293,68 @@ export function countActiveAgents(sessionId: SessionId): number {
  * The ENOENT-vs-error split is load-bearing: absence is evidence, failure is
  * not. A directory that cannot be read at all is likewise fail-closed.
  */
-export function anyActiveSubagent(taskGraphPath: string): boolean {
+export type ActiveSubagentObservation =
+  | Readonly<{ kind: "observed"; anyActiveForGraph: boolean }>
+  | Readonly<{ kind: "unavailable"; reason: string }>;
+
+export function observeAnyActiveSubagent(taskGraphPath: string): ActiveSubagentObservation {
   const wanted = resolve(taskGraphPath);
   let entries: readonly string[];
   try {
     entries = readdirSync(subagentDir());
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
-    process.stderr.write(
-      `anyActiveSubagent: cannot read ${subagentDir()} (${e instanceof Error ? e.message : String(e)}) — assuming a subagent is active (fail closed)\n`,
-    );
-    return true;
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
+      return Object.freeze({ kind: "observed", anyActiveForGraph: false });
+    }
+    return Object.freeze({
+      kind: "unavailable",
+      reason: `cannot read ${subagentDir()} (${cause instanceof Error ? cause.message : String(cause)})`,
+    });
   }
-  return entries.filter((name) => name.endsWith(".active")).some((name) => {
+  for (const name of entries.filter((entry) => entry.endsWith(".active"))) {
     const session = name.slice(0, -".active".length);
     try {
-      if (statSync(`${subagentDir()}/${name}`).size === 0) return false;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
-      process.stderr.write(
-        `anyActiveSubagent: cannot stat roster ${name} (${e instanceof Error ? e.message : String(e)}) — assuming a subagent is active (fail closed)\n`,
-      );
-      return true;
+      if (statSync(`${subagentDir()}/${name}`).size === 0) continue;
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") continue;
+      return Object.freeze({
+        kind: "unavailable",
+        reason: `cannot stat roster ${name} (${cause instanceof Error ? cause.message : String(cause)})`,
+      });
     }
     try {
       const parsedPointer = parseCanonicalTaskGraphPointer(
         readFileSync(`${subagentDir()}/${session}.task_graph`, "utf-8"),
       );
       if (!parsedPointer.ok) {
-        process.stderr.write(
-          `anyActiveSubagent: malformed task-graph pointer for ${session} — assuming it serves this graph (fail closed)\n`,
-        );
-        return true;
+        return Object.freeze({
+          kind: "unavailable",
+          reason: `malformed task-graph pointer for ${session}: ${parsedPointer.error}`,
+        });
       }
-      return parsedPointer.value === wanted;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
-      process.stderr.write(
-        `anyActiveSubagent: cannot read the task-graph pointer for ${session} (${e instanceof Error ? e.message : String(e)}) — assuming it serves this graph (fail closed)\n`,
-      );
-      return true;
+      if (parsedPointer.value === wanted) {
+        return Object.freeze({ kind: "observed", anyActiveForGraph: true });
+      }
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") continue;
+      return Object.freeze({
+        kind: "unavailable",
+        reason: `cannot read the task-graph pointer for ${session} ` +
+          `(${cause instanceof Error ? cause.message : String(cause)})`,
+      });
     }
-  });
+  }
+  return Object.freeze({ kind: "observed", anyActiveForGraph: false });
+}
+
+export function anyActiveSubagent(taskGraphPath: string): boolean {
+  const observation = observeAnyActiveSubagent(taskGraphPath);
+  if (observation.kind === "observed") return observation.anyActiveForGraph;
+  const assumption = observation.reason.startsWith("malformed task-graph pointer")
+    ? "assuming it serves this graph"
+    : "assuming a subagent is active";
+  process.stderr.write(`anyActiveSubagent: ${observation.reason} — ${assumption} (fail closed)\n`);
+  return true;
 }
 
 /**

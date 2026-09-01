@@ -550,7 +550,7 @@ For each wave:
    - `await-wave-implementation`: spawn nothing; wait for the listed active Tasks to settle, then re-read status.
    - `escalate-wave-implementation`: STOP and present every Task/receipt/failure kind to the user. Attempt 2 is terminal; manually re-spawning would be an unauthorized attempt 3 and the spawn gate refuses it.
    - `start-wave-gate`: proceed to the Wave Gate.
-2. Spawn only the Tasks in `recovery.dispatches`, in parallel when more than one is listed. Status excludes Tasks already in `executing_tasks` or carrying active attempt authority.
+2. Spawn only the Tasks in `recovery.dispatches`, in parallel when more than one is listed. Status excludes non-reclaimable Tasks already in `executing_tasks` or carrying active attempt authority; a policy-expired reservation with observed-empty roster authority is deliberately reissued so registration can reclaim it atomically.
 3. Wait for all to settle. Infrastructure-blocked attempts reuse the initial/retry dispatch arm for their preserved current semantic attempt; they never consume the budget or introduce another semantic dispatch kind. Semantic attempt 1 failure produces exactly one retry dispatch.
 4. Re-read canonical status. Do not infer retry count from `pending`, `retry_count`, or `failure_reason`; immutable settlement history owns the budget.
 5. **RUN `/wave-gate` — MANDATORY, via subagents** (see below)
@@ -762,7 +762,7 @@ Set `LOOM_STATE_PATH` only when repairing a non-default graph. The helper fails 
 pending → implemented    (exact attempt satisfies Proof and Task-local suite)
 pending → pending        (infrastructure block: same semantic attempt remains eligible)
 pending → pending        (attempt 1 semantic failure: one exact attempt-2 retry is issued)
-pending → escalation     (attempt 2 semantic failure: terminal user-visible escalation; no attempt 3)
+pending → pending        (attempt 2 semantic failure: Task stays pending while status publishes terminal escalation; no attempt 3)
 implemented → completed  (wave gate passed: tests + review + no critical findings)
 ```
 

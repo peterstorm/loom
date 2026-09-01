@@ -512,7 +512,7 @@ interface TaskCommonMetadataBase {
    * attempt 1 may omit context, but semantic attempt 2 may not. */
   readonly active_implementation_attempt?: ImplementationAttemptAuthority;
   /** Exact prompt/retry authority frozen before the active Agent dispatch.
-   * Historical attempt 1 may omit it; attempt 2 and every Slice-4 registration require it. */
+   * Historical attempt 1 may omit it; attempt 2 and every current-protocol registration require it. */
   readonly active_implementation_context?: ImplementationAttemptContext;
   readonly attempt_artifact_baseline?: readonly DeclaredArtifactBaseline[];
   readonly attempt_repository_baseline?: readonly DeclaredArtifactBaseline[];

@@ -49,6 +49,7 @@ const GIT_SHA_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const ISO_INSTANT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const MAX_REASON_LENGTH = 4_096;
+export const MAX_IMPLEMENTATION_FAILURE_KINDS = 64;
 export const TASK_BYTE_SCOPE_CHECK_ID_TEXT = "loom:task-byte-scope" as const;
 
 // Brands prevent adjacent authority fields with identical runtime primitives
@@ -964,6 +965,9 @@ function receiptId(body: ReceiptBody): ImplementationSettlementReceiptId {
 function parseFailureKinds(raw: unknown, path: string): Parsed<readonly string[]> {
   const array = parseDenseArray(raw, path);
   if (!array.ok) return array;
+  if (array.value.length > MAX_IMPLEMENTATION_FAILURE_KINDS) {
+    return failure([`${path} must contain at most ${MAX_IMPLEMENTATION_FAILURE_KINDS} entries`]);
+  }
   const values: string[] = [];
   const errors: string[] = [];
   array.value.forEach((value, index) => {

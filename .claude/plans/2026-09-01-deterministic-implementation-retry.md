@@ -106,7 +106,7 @@ The pure command validates the complete history in wire order; each legal `imple
 3. At most one semantic retry exists per lineage.
 4. Attempt-2 semantic failure is terminal escalation and cannot be manually re-spawned.
 5. Infrastructure failure never changes semantic attempt.
-6. Active authority and Attempt Context agree on Task, attempt, authority digest, and prompt digest.
+6. Attempt Context matches active authority on Task, semantic attempt, and authority digest, and separately records the exact admitted prompt digest.
 7. Pi and Claude use the same admission and registration functions.
 8. Late/duplicate results cannot clear a replacement Attempt Context.
 9. A newly accepted implementation receipt starts a fresh remediation lineage at attempt 1 when the non-completed Task is deliberately re-executed.

@@ -440,17 +440,13 @@ async function settleFailedExactImplementation(
 ): Promise<PiResultOutcome> {
   const observedAt = parseIsoInstant(args.now, "Pi failed-result instant");
   if (!observedAt.ok) return outcome(observedAt.error.errors, observedAt.error.errors);
-  const settled: { value?: ImplementationSettlementApplicationResult } = {};
-  await args.store.update((state) => {
-    const settlement = settleUnavailableImplementation(state, authority, observedAt.value, args.failure);
-    settled.value = settlement;
-    return settlement.kind === "error" ? state : settlement.state;
+  const settlement = await args.store.updateAndReturn((state) => {
+    const applied = settleUnavailableImplementation(state, authority, observedAt.value, args.failure);
+    return {
+      state: applied.kind === "error" ? state : applied.state,
+      value: applied,
+    };
   });
-  const settlement = settled.value;
-  if (settlement === undefined) {
-    const message = `loom(pi): ${args.failure}; exact Oracle settlement produced no transition — current attempt preserved`;
-    return processingFailure(message);
-  }
   if (settlement.kind === "error") {
     const message = `loom(pi): ${args.failure}; exact Oracle settlement failed: ${JSON.stringify(settlement.error)} — current attempt preserved`;
     return processingFailure(message);
@@ -1296,13 +1292,9 @@ function applicationState(state: TaskGraph, application: ImplementationSettlemen
 
 function renderExactPiSettlement(
   args: ExactPiSettlementArgs,
-  settled: LockedPiSettlement | undefined,
+  settled: LockedPiSettlement,
 ): PiResultOutcome {
-  const applied = settled?.application;
-  if (applied === undefined) {
-    const diagnostic = `loom(pi): exact Oracle settlement produced no transition for ${args.binding.taskId} — current attempt preserved`;
-    return outcome([...args.log, diagnostic], [diagnostic]);
-  }
+  const applied = settled.application;
   if (applied.kind === "error") {
     const diagnostic = `loom(pi): exact Oracle settlement failed for ${args.binding.taskId}: ${JSON.stringify(applied.error)} — current attempt preserved`;
     return outcome([...args.log, diagnostic], [diagnostic]);
@@ -1310,7 +1302,7 @@ function renderExactPiSettlement(
   if (applied.kind === "ignored") {
     return outcome([...args.log, `loom(pi): ${args.binding.taskId} result ignored (${applied.reason})`]);
   }
-  const reason = settled?.infrastructureReason;
+  const reason = settled.infrastructureReason;
   const log = [...args.log, `loom(pi): ${args.binding.taskId} settlement: ${applied.transition.kind}`];
   if (applied.transition.kind === "infrastructure-blocked" && reason !== undefined) {
     log.push(`loom(pi): ${reason}`);
@@ -1322,13 +1314,14 @@ async function settleExactPiInfrastructure(
   args: ExactPiSettlementArgs,
   reason: string,
 ): Promise<PiResultOutcome> {
-  const settled: { value?: LockedPiSettlement } = {};
-  await args.store.update((state) => {
+  const settled = await args.store.updateAndReturn((state) => {
     const application = settleUnavailableImplementation(state, args.authority, args.observedAt, reason);
-    settled.value = { application, infrastructureReason: reason };
-    return applicationState(state, application);
+    return {
+      state: applicationState(state, application),
+      value: { application, infrastructureReason: reason },
+    };
   });
-  return renderExactPiSettlement(args, settled.value);
+  return renderExactPiSettlement(args, settled);
 }
 
 function piExactSettlementPorts(args: ExactPiSettlementArgs): ExactImplementationSettlementPorts {
@@ -1375,13 +1368,14 @@ async function applyExactImplementationPiResult(args: ExactPiSettlementArgs): Pr
   if (transcript.kind === "malformed") return settleExactPiInfrastructure(args, transcript.failureReason);
   const modified = readImplementationModifiedPaths(args.repository, transcript.resultMessages, args.binding.taskId);
   if (!modified.ok) return settleExactPiInfrastructure(args, modified.message);
-  const settled: { value?: LockedPiSettlement } = {};
-  await args.store.update((state) => {
+  const settled = await args.store.updateAndReturn((state) => {
     const application = settleLockedPiResult(state, args, transcript, modified.filesModified);
-    settled.value = application;
-    return applicationState(state, application.application);
+    return {
+      state: applicationState(state, application.application),
+      value: application,
+    };
   });
-  return renderExactPiSettlement(args, settled.value);
+  return renderExactPiSettlement(args, settled);
 }
 
 async function applyLegacyImplementationPiResult(

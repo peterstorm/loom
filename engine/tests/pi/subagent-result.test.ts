@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -757,6 +757,34 @@ describe("applyFailedPiResult", () => {
     expect(failedPersistence.processingErrors).toEqual([
       "spec-check settlement persistence failed: injected settlement write failure",
     ]);
+  });
+
+  it("names failed spec-check document observation separately", async () => {
+    const fixture = graphWithSpecCheckAuthority();
+    const root = canonicalTempDir("loom-failed-spec-observation-");
+    const loop = join(root, "spec-loop.md");
+    symlinkSync(loop, loop);
+    const observed = { ...fixture.state, spec_file: loop } as ParsedTaskGraph;
+    const store: TaskGraphStore = {
+      load: () => observed,
+      update: async () => {},
+      updateAndReturn: async () => { throw new Error("must not persist after observation failure"); },
+    };
+    try {
+      const applied = await applyFailedPiResult({
+        store,
+        agentType: "spec-check-invoker",
+        result: result({ agent: "spec-check-invoker", exitCode: 1 }),
+        reservedSlot: fixture.reservedSlot,
+        now: NOW,
+      });
+      expect(applied.processingErrors).toEqual([
+        expect.stringContaining("spec-check document observation failed"),
+      ]);
+      expect(applied.processingErrors[0]).toMatch(/ELOOP|symbolic link/i);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("rejects an unreserved failed spec-check without changing current Wave evidence", async () => {

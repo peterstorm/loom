@@ -453,7 +453,7 @@ function transitionFailureKinds(transition: Exclude<ImplementationCompletionTran
   });
 }
 
-function clearAttempt(task: Task): Omit<Task, "status" | "proof" | "revalidation_required" | "legacy_missing_proof"> {
+function clearAttempt(task: Task): Task {
   return {
     ...task,
     active_implementation_attempt: undefined,

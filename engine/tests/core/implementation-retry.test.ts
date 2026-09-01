@@ -4,6 +4,7 @@ import {
   TASK_BYTE_SCOPE_CHECK_ID_TEXT,
   createImplementationAttemptAuthority,
   createTaskCompletionSuiteAuthority,
+  parseImplementationAttemptSettlementReceipt,
   settleImplementationAttempt,
   type ImplementationAttemptAuthority,
   type ImplementationAttemptSettlementReceipt,
@@ -16,6 +17,7 @@ import {
   parseImplementationRetryContext,
   renderImplementationRetryContext,
 } from "../../src/core/implementation-retry";
+import { canonicalJson, sha256Hex, type JsonValue } from "../../src/core/review-packet";
 import {
   TRUSTED_LEDGER_ONLY_POLICY,
   derivePendingTaskProof,
@@ -187,7 +189,7 @@ describe("bounded implementation retry admission", () => {
     const attempt = authority(2, "attempt-two", 2);
     const prompt = `Task ID: T1\n${disposition.promptAppendix}`;
     const admission = authorizeImplementationSpawn(retryTask([receipt]), prompt);
-    if (!admission.ok) throw new Error("retry admission fixture failed");
+    if (!admission.ok || admission.kind !== "retry") throw new Error("retry admission fixture failed");
     const context = createImplementationAttemptContext({
       authority: attempt,
       prompt,
@@ -216,6 +218,30 @@ describe("bounded implementation retry admission", () => {
       prompt: `${prompt}\nrepresentation drift`,
       admission,
     })).toThrow("does not match admitted prompt bytes");
+    expect(() => createImplementationAttemptContext({
+      authority: attempt,
+      prompt,
+      admission: {
+        ...admission,
+        retryContext: { ...admission.retryContext, taskId: "T2" as typeof admission.taskId },
+      },
+    })).toThrow("contradictory nested authority");
+  });
+
+  it("rejects settlement failure kinds that cannot inhabit Retry Context", () => {
+    const receipt = retryReceipt();
+    const { receiptId: _receiptId, ...body } = receipt;
+    const oversized = {
+      ...body,
+      failureKinds: Array.from({ length: 65 }, (_, index) => `failure-${String(index).padStart(2, "0")}`),
+    };
+    expect(parseImplementationAttemptSettlementReceipt({
+      ...oversized,
+      receiptId: sha256Hex(canonicalJson(oversized as unknown as JsonValue)),
+    })).toMatchObject({
+      ok: false,
+      error: { errors: [expect.stringContaining("must contain at most 64 entries")] },
+    });
   });
 
   it("terminalizes attempt-2 semantic failure as explicit escalation", () => {

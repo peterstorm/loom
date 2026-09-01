@@ -11,6 +11,7 @@ import {
   rollbackTaskExecutionAuthorityBatch,
 } from "../../src/core/validate-task-execution";
 import { evaluateTaskProof, TRUSTED_LEDGER_ONLY_POLICY } from "../../src/core/proof-obligations";
+import { settleUnavailableImplementation } from "../../src/core/implementation-application";
 import {
   productionExactSettlementPorts,
   settleExactImplementation,
@@ -221,7 +222,27 @@ describe("modern implementation attempt registration", () => {
       predecessorReceiptId: manager.load().tasks[0]?.implementation_attempt_history?.[0]?.receiptId,
       retryContext: expect.objectContaining({ semanticAttempt: 2 }),
     });
-    await settle(second.authorities[0]!, [], "2026-08-25T00:02:00.000Z");
+    const infrastructureAt = parseIsoInstant("2026-08-25T00:02:00.000Z");
+    if (!infrastructureAt.ok) throw new Error("infrastructure instant fixture failed");
+    await manager.update((state) => {
+      const applied = settleUnavailableImplementation(
+        state,
+        second.authorities[0]!,
+        infrastructureAt.value,
+        "temporary model transport failure",
+      );
+      if (applied.kind === "error") throw new Error(JSON.stringify(applied.error));
+      return applied.state;
+    });
+    expect(manager.load().tasks[0]?.implementation_attempt_history).toEqual([
+      expect.objectContaining({ semanticAttempt: 1, transition: "retry-required" }),
+      expect.objectContaining({ semanticAttempt: 2, transition: "infrastructure-blocked" }),
+    ]);
+
+    const third = await registerTaskExecutionBatch([nextSpawn(manager.load(), "T1")]);
+    if (third.kind !== "registered") throw new Error(third.message);
+    expect(third.authorities[0]?.semanticAttempt).toBe(2);
+    await settle(third.authorities[0]!, [], "2026-08-25T00:03:00.000Z");
     expect(manager.load().tasks[0]).toMatchObject({ status: "implemented" });
     expect(manager.load().tasks[0]?.files_modified).not.toContain("sibling.ts");
     expect(manager.load().tasks[0]?.repository_baseline).toBeUndefined();

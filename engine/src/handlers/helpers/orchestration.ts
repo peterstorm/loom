@@ -72,7 +72,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
 import { parseTaskGraph } from "../../state-manager";
-import { anyActiveSubagent } from "../../machine";
+import { observeAnyActiveSubagent } from "../../machine";
 import type {
   ActiveWaveGateRegistration,
   HookHandler,
@@ -462,16 +462,20 @@ function implementationReservationObservation(
   parsedGraph: ReturnType<typeof parseStatusGraph>,
   statePath: string,
 ): ImplementationReservationStatusObservation {
-  return parsedGraph.ok
+  if (!parsedGraph.ok) {
+    return Object.freeze({
+      kind: "unavailable",
+      reason: `protected graph unavailable before roster observation: ${parsedGraph.error}`,
+    });
+  }
+  const roster = observeAnyActiveSubagent(statePath);
+  return roster.kind === "observed"
     ? Object.freeze({
-        kind: "observed" as const,
+        kind: "observed",
         observedAtMs: Date.now(),
-        anyActiveForGraph: anyActiveSubagent(statePath),
+        anyActiveForGraph: roster.anyActiveForGraph,
       })
-    : Object.freeze({
-        kind: "unavailable" as const,
-        reason: `protected graph unavailable before roster observation: ${parsedGraph.error}`,
-      });
+    : roster;
 }
 
 export async function currentOrchestrationStatus(

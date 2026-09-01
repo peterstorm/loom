@@ -173,8 +173,9 @@ export const RESERVATION_GRACE_MS = 10 * 60_000;
  * its task is not `completed`; no agent is active for this graph; and it has
  * aged past `graceMs`. A reservation whose `reserved_at` is missing or
  * unparseable predates the timestamp (or is corrupt) and stays eligible so
- * legacy stranded entries still recover — the fail-closed direction is to keep
- * recovering deadlocks, which the grace only ever DELAYS.
+ * legacy stranded entries still recover. This is an availability-biased
+ * compatibility exception that releases uncertain ownership; the grace only
+ * delays that recovery.
  *
  * Status is deliberately NOT narrowed to `pending`. A spawn vetoed by a
  * sibling PreToolUse gate strands its reservation whatever the task's status
