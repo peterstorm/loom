@@ -46,7 +46,8 @@ export function resolveRepositoryRoot(context = "repository root"): string | und
 }
 
 /**
- * The resolution this module's own git commands run from, resolved FRESH.
+ * The resolution this module's own git commands run from, memoized by the
+ * current `CLAUDE_PROJECT_DIR` or cwd key.
  *
  * It used to be `const repoRoot = resolveRepositoryRoot()` — one resolution
  * captured at import time, inherited by every helper here for the life of the

@@ -585,6 +585,26 @@ describe("Pi and Claude reach the same result", () => {
       expect(outcome).toMatchObject({ message: expect.stringContaining("disk is read-only") });
     });
 
+    it("never throws when rejection persistence itself throws", async () => {
+      const request = authority();
+      const handle = {
+        rejectCapture: async () => { throw new Error("marker store unavailable"); },
+      } as unknown as RunDirHandle;
+
+      const outcome = await terminalizeCaptureRejection(
+        handle,
+        request,
+        terminalCaptureRefusal("no-final-payload", "agent said nothing"),
+      );
+
+      expect(outcome).toEqual({
+        kind: "retriable-failure",
+        reason: "rejection-persistence",
+        message: expect.stringContaining("capture refused (no-final-payload: agent said nothing)"),
+      });
+      expect(outcome).toMatchObject({ message: expect.stringContaining("marker store unavailable") });
+    });
+
     it("never throws when audit append fails after the tombstone lands", async () => {
       const request = authority();
       const handle = {

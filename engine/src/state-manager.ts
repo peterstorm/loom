@@ -445,12 +445,12 @@ function parseWaveSpecCheckDocument(
   if ((record.path === null) !== (record.contentDigest === null)) {
     return parseErr(`${label}.path and contentDigest must both be null or both be present`);
   }
-  if (record.contentDigest === null) {
-    return parseOk(Object.freeze({ path: record.path as string | null, contentDigest: null }));
+  if (record.path === null) {
+    return parseOk(Object.freeze({ path: null, contentDigest: null }));
   }
   const digest = parseArtifactDigest(record.contentDigest);
   return digest.ok
-    ? parseOk(Object.freeze({ path: record.path as string | null, contentDigest: digest.value }))
+    ? parseOk(Object.freeze({ path: record.path, contentDigest: digest.value }))
     : parseErr(`${label}.contentDigest: ${digest.error.message}`);
 }
 

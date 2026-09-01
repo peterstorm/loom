@@ -135,13 +135,12 @@ const parseStringArray = (raw: unknown): readonly string[] | null =>
 function parseWaveSpecCheckDocument(raw: unknown): WaveSpecCheckDocumentAuthority | null {
   if (!exactObject(raw, ["path", "contentDigest"]) ||
       (raw.path !== null && typeof raw.path !== "string")) return null;
-  if ((raw.path === null) !== (raw.contentDigest === null)) return null;
-  const digest = raw.contentDigest === null ? null : parseArtifactDigest(raw.contentDigest);
-  if (digest !== null && !digest.ok) return null;
-  return Object.freeze({
-    path: raw.path as string | null,
-    contentDigest: digest === null ? null : digest.value,
-  });
+  if (raw.path === null) {
+    return raw.contentDigest === null ? Object.freeze({ path: null, contentDigest: null }) : null;
+  }
+  if (raw.contentDigest === null) return null;
+  const digest = parseArtifactDigest(raw.contentDigest);
+  return digest.ok ? Object.freeze({ path: raw.path, contentDigest: digest.value }) : null;
 }
 
 function parseWaveSpecCheckDocuments(raw: unknown): WaveSpecCheckDocumentsAuthority | null {
@@ -389,11 +388,10 @@ function decodeWaveReviewContextAuthority(raw: unknown): WaveReviewContextRead {
 /**
  * Read one request's persisted wave-review-authority section as a tri-state.
  *
- * Absent and corrupt are OPPOSITE facts: absent means the packet legitimately
- * carries no Wave authority (a foreign or stale request); corrupt means the
- * engine-published packet bytes are damaged under a valid digest, and the
- * caller must fail loudly instead of silently treating captured evidence as
- * not belonging to the current packet.
+ * Absent and corrupt are OPPOSITE facts: absent means either no packet matches
+ * the requested digest or the matching packet carries no Wave authority;
+ * corrupt means engine-published authority bytes are damaged, and the caller
+ * must fail loudly instead of silently treating captured evidence as unrelated.
  */
 export function readWaveReviewContext(
   packets: readonly ContextPacket[],

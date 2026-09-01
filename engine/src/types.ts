@@ -988,11 +988,9 @@ export type WaveSpecCheckSlotAuthority = Readonly<{
   readonly attempted: 1 | 2;
 }>;
 
-export type WaveSpecCheckDocumentAuthority = Readonly<{
-  readonly path: string | null;
-  /** Null exactly when no document path is authoritative. */
-  readonly contentDigest: ArtifactDigest | null;
-}>;
+export type WaveSpecCheckDocumentAuthority =
+  | Readonly<{ path: null; contentDigest: null }>
+  | Readonly<{ path: string; contentDigest: ArtifactDigest }>;
 
 export type WaveSpecCheckDocumentsAuthority = Readonly<{
   readonly spec: WaveSpecCheckDocumentAuthority;

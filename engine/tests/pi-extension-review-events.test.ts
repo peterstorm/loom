@@ -770,6 +770,15 @@ describe("Pi extension review tool_result integration", () => {
         }),
       }));
       expect(JSON.stringify(rejected)).toContain("injected partial roster cleanup failure");
+
+      rmSync(pointer, { recursive: true, force: true });
+      const retried = await pi.emit("session_shutdown", {}, {
+        cwd: ROOT,
+        sessionManager: { getSessionId: () => childSession },
+      });
+      expect(retried.every((result) => result === undefined)).toBe(true);
+      expect(cleanup).toHaveBeenCalledTimes(2);
+      expect(() => readFileSync(join(subagentDir, `${childSession}.active`), "utf8")).toThrow();
     } finally {
       cleanup.mockRestore();
       rmSync(pointer, { recursive: true, force: true });
@@ -2966,6 +2975,52 @@ describe("Pi extension review tool_result integration", () => {
     expect(readFileSync(statePath, "utf-8")).toBe(before);
     expect(() => readFileSync(join(subagentDir, `${session}.active`), "utf-8")).toThrow();
     expect(() => readFileSync(join(subagentDir, `${session}.task_graph`), "utf-8")).toThrow();
+  });
+
+  it("retains failed result-time roster cleanup after its sibling pointer release succeeds", async () => {
+    const planPath = join(temp, "roster-cleanup-retry-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4d2";
+    const toolCallId = "call-roster-cleanup-retry";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const prompt = "Task ID: T1\nReview the implementation.";
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent", toolCallId,
+      input: { agent: "code-reviewer", task: prompt, agentScope: "user" },
+    }, context)).toEqual([undefined]);
+
+    const pointer = join(subagentDir, `${session}.task_graph`);
+    const registry = join(subagentDir, `${session}${TASK_GRAPH_POINTER_LEASES_SUFFIX}`);
+    const removeActive = vi.spyOn(fsSessionRegistry, "removeActive")
+      .mockRejectedValueOnce(new Error("injected result-time roster cleanup failure"));
+    try {
+      const responses = await pi.emit("tool_result", {
+        ...reviewResult(prompt, "review completed"),
+        toolCallId,
+      }, context);
+
+      expect(responses).toContainEqual(expect.objectContaining({
+        isError: true,
+        content: [expect.objectContaining({ text: expect.stringContaining("result-time roster cleanup failure") })],
+      }));
+      expect(existsSync(pointer)).toBe(false);
+      expect(existsSync(registry)).toBe(false);
+      expect(readFileSync(join(subagentDir, `${session}.active`), "utf8").trim()).not.toBe("");
+
+      const retried = await pi.emit("session_shutdown", {}, context);
+      expect(retried.every((result) => result === undefined)).toBe(true);
+      expect(removeActive).toHaveBeenCalledTimes(2);
+      expect(() => readFileSync(join(subagentDir, `${session}.active`), "utf8")).toThrow();
+    } finally {
+      removeActive.mockRestore();
+    }
   });
 
   it("retains parent pointer cleanup authority after result-time failure and retries it on shutdown", async () => {

@@ -87,6 +87,15 @@ export const runDispatch = async (
       return `cleanupSubagentFlag crashed: ${message}`;
     }
   };
+  const errorAfterCleanup = async (failure: string): Promise<HookResult> => {
+    const cleanupFailure = await runCleanup();
+    return {
+      kind: "error",
+      message: cleanupFailure === null
+        ? failure
+        : `${failure}; cleanup also failed: ${cleanupFailure}`,
+    };
+  };
 
   // Snapshot the ledger BEFORE cleanup unbinds: attribution runs through the
   // live binding, so once cleanup has unbound it update-task-status can no
@@ -142,15 +151,7 @@ export const runDispatch = async (
     else captureFailure = `request authority resolution failed: ${resolved.message}`;
   }
 
-  if (captureFailure !== null) {
-    const cleanupFailure = await runCleanup();
-    return {
-      kind: "error",
-      message: cleanupFailure === null
-        ? captureFailure
-        : `${captureFailure}; cleanup also failed: ${cleanupFailure}`,
-    };
-  }
+  if (captureFailure !== null) return errorAfterCleanup(captureFailure);
 
   // Request-bound non-Wave programs own no TaskGraph mutation. A successful
   // capture is their complete SubagentStop settlement; falling through would
@@ -177,13 +178,7 @@ export const runDispatch = async (
     );
   } catch (error) {
     const routingFailure = `dispatch: routing observation failed: ${error instanceof Error ? error.message : String(error)}`;
-    const cleanupFailure = await runCleanup();
-    return {
-      kind: "error",
-      message: cleanupFailure === null
-        ? routingFailure
-        : `${routingFailure}; cleanup also failed: ${cleanupFailure}`,
-    };
+    return errorAfterCleanup(routingFailure);
   }
 
   // A request-bound Wave Gate stop is routed only by the exact engine-issued
@@ -196,22 +191,14 @@ export const runDispatch = async (
     const authorityRole = stripNamespace(requestAuthority.role);
     const authorityCategory = categorize(authorityRole);
     if (authorityCategory !== "review" && authorityCategory !== "spec-check") {
-      const cleanupFailure = await runCleanup();
       const message = `Wave Gate request ${requestAuthority.requestId} has unroutable issued role ${JSON.stringify(requestAuthority.role)}`;
-      return {
-        kind: "error",
-        message: cleanupFailure === null ? message : `${message}; cleanup also failed: ${cleanupFailure}`,
-      };
+      return errorAfterCleanup(message);
     }
     const reportedRole = stripNamespace(resolvedAgentType);
     if (reportedRole !== "" && reportedRole !== authorityRole) {
-      const cleanupFailure = await runCleanup();
       const message = `Wave Gate request ${requestAuthority.requestId} is issued to ${JSON.stringify(requestAuthority.role)}, ` +
         `but SubagentStop reported ${JSON.stringify(resolvedAgentType)}`;
-      return {
-        kind: "error",
-        message: cleanupFailure === null ? message : `${message}; cleanup also failed: ${cleanupFailure}`,
-      };
+      return errorAfterCleanup(message);
     }
     category = authorityCategory;
   } else {

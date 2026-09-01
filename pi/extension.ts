@@ -962,6 +962,18 @@ const emptyParentSessionRuntime = (): PiParentSessionRuntime => ({
   spawnReservations: new Map(),
 });
 
+const retainSpawnCleanupDebt = (
+  runtime: PiParentSessionRuntime,
+  toolCallId: string,
+  reservation: PiSpawnReservation,
+): void => {
+  if (reservation.items.length === 0 && reservation.pointerBinding === null) {
+    runtime.spawnReservations.delete(toolCallId);
+  } else {
+    runtime.spawnReservations.set(toolCallId, Object.freeze(reservation));
+  }
+};
+
 export function standaloneCompletionCheckpointProblem(checkpoint: string): string | null {
   try {
     const parsed = JSON.parse(checkpoint) as { kind?: unknown };
@@ -1633,6 +1645,13 @@ export default function (pi: ExtensionAPI) {
       for (const cleanupError of cleanupErrors) {
         process.stderr.write(`loom(pi): child write-grant cleanup failed: ${cleanupError}\n`);
       }
+      if (orphanedBinding !== null && cleanupErrors.length > 0) {
+        activeChildWriteGrants.set(orphanedBinding.sessionId, {
+          kind: "roster-cleanup-pending",
+          agentId: orphanedBinding.agentId,
+          pointerBinding: null,
+        });
+      }
       const message = `loom(pi): child write grant rejected — edits remain blocked: ${error instanceof Error ? error.message : String(error)}` +
         cleanupFailureSuffix(cleanupErrors);
       process.stderr.write(message + "\n");
@@ -1729,15 +1748,11 @@ export default function (pi: ExtensionAPI) {
         const pointerBinding = reservation.pointerBinding !== null && releasedPointers.has(reservation.pointerBinding)
           ? null
           : reservation.pointerBinding;
-        if (items.length === 0 && pointerBinding === null) {
-          parentRuntime.spawnReservations.delete(toolCallId);
-        } else {
-          parentRuntime.spawnReservations.set(toolCallId, Object.freeze({
-            ...reservation,
-            items: Object.freeze(items),
-            pointerBinding,
-          }));
-        }
+        retainSpawnCleanupDebt(parentRuntime, toolCallId, {
+          ...reservation,
+          items: Object.freeze(items),
+          pointerBinding,
+        });
       }
       pruneRuntime(sessionId, parentRuntime);
     }
@@ -1870,7 +1885,7 @@ export default function (pi: ExtensionAPI) {
     const toolCallId = (event as { toolCallId?: unknown }).toolCallId;
     const rawSessionId = _ctx.sessionManager.getSessionId() ?? "";
     const resultSessionId = parseSessionId(rawSessionId);
-    const sessionRuntime = resultSessionId === null
+    let sessionRuntime = resultSessionId === null
       ? undefined
       : parentSessionRuntimes.get(resultSessionId);
     const inMemoryReservation = typeof toolCallId === "string"
@@ -1881,6 +1896,10 @@ export default function (pi: ExtensionAPI) {
     if (reservation === undefined && typeof toolCallId === "string" && resultSessionId !== null) {
       try {
         reservation = recoverPiSpawnReservation(resultSessionId, toolCallId) ?? undefined;
+        if (reservation !== undefined) {
+          sessionRuntime = runtimeFor(resultSessionId);
+          sessionRuntime.spawnReservations.set(toolCallId, reservation);
+        }
       } catch (error) {
         reservationRecoveryFailed = true;
         const diagnostic = `durable Pi orchestration reservation recovery failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -1892,12 +1911,17 @@ export default function (pi: ExtensionAPI) {
       ? sessionRuntime?.issuedWriteGrants.get(toolCallId) ?? []
       : [];
 
-    // Roster and grant cleanup may consume immediately, but the reservation is
-    // the retry capability for its pointer lease. Retain it until exact pointer
-    // release succeeds; shutdown can retry a transient result-time failure.
+    // Retire successful grant, roster, and pointer cleanup independently. The
+    // session aggregate keeps only failed authority so shutdown can retry a
+    // transient result-time failure without replaying released capabilities.
+    const revokedGrantTokens = new Set<string>();
+    const removedRosterIds = new Set<AgentId>();
     const cleanupActions: PiCleanupAction[] = grantTokens.map((token, index) => ({
       label: `revoke write grant ${index + 1}`,
-      run: () => revokePiWriteGrant(token),
+      run: () => {
+        revokePiWriteGrant(token);
+        revokedGrantTokens.add(token);
+      },
     }));
     // Same reason as the write-grant cleanup above: `reservation` is a mutable
     // `let`, so the optional-chain guard on the loop header does not narrow it
@@ -1908,7 +1932,10 @@ export default function (pi: ExtensionAPI) {
       for (const item of cleanedReservation.items) {
         cleanupActions.push({
           label: `remove reserved roster entry for ${item.agentType}`,
-          run: () => fsSessionRegistry.removeActive(reservedSessionId, item.rosterId),
+          run: async () => {
+            await fsSessionRegistry.removeActive(reservedSessionId, item.rosterId);
+            removedRosterIds.add(item.rosterId);
+          },
         });
       }
     }
@@ -1917,12 +1944,19 @@ export default function (pi: ExtensionAPI) {
     for (const cleanupError of cleanupErrors) {
       process.stderr.write(`loom(pi): reserved subagent cleanup failed: ${cleanupError}\n`);
     }
-    if (typeof toolCallId === "string" && sessionRuntime &&
-        !cleanupErrors.some((error) => error.startsWith("revoke write grant "))) {
-      sessionRuntime.issuedWriteGrants.delete(toolCallId);
-    }
-    if (typeof toolCallId === "string" && sessionRuntime && reservation?.pointerBinding === null) {
-      sessionRuntime.spawnReservations.delete(toolCallId);
+    if (typeof toolCallId === "string" && sessionRuntime) {
+      const remainingGrantTokens = grantTokens.filter((token) => !revokedGrantTokens.has(token));
+      if (remainingGrantTokens.length === 0) sessionRuntime.issuedWriteGrants.delete(toolCallId);
+      else sessionRuntime.issuedWriteGrants.set(toolCallId, Object.freeze(remainingGrantTokens));
+
+      const storedReservation = sessionRuntime.spawnReservations.get(toolCallId);
+      if (storedReservation !== undefined) {
+        const remainingItems = storedReservation.items.filter((item) => !removedRosterIds.has(item.rosterId));
+        retainSpawnCleanupDebt(sessionRuntime, toolCallId, {
+          ...storedReservation,
+          items: Object.freeze(remainingItems),
+        });
+      }
     }
     if (resultSessionId && sessionRuntime) pruneRuntime(resultSessionId, sessionRuntime);
     const processingErrorResponse = () => processingErrors.length === 0
@@ -1968,7 +2002,13 @@ export default function (pi: ExtensionAPI) {
       processingErrors.push(...errors);
       for (const error of errors) process.stderr.write(`loom(pi): reserved subagent cleanup failed: ${error}\n`);
       if (errors.length === 0 && typeof toolCallId === "string" && sessionRuntime) {
-        sessionRuntime.spawnReservations.delete(toolCallId);
+        const storedReservation = sessionRuntime.spawnReservations.get(toolCallId);
+        if (storedReservation !== undefined) {
+          retainSpawnCleanupDebt(sessionRuntime, toolCallId, {
+            ...storedReservation,
+            pointerBinding: null,
+          });
+        }
       }
       if (sessionRuntime) pruneRuntime(resultSessionId, sessionRuntime);
     };

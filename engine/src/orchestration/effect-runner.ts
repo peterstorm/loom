@@ -7,12 +7,13 @@
  * `reconcileEffectReceipt` — the runner never decides for itself that an
  * effect succeeded.
  *
- * Receipts make effects idempotent across resumes. Before running anything,
- * the runner asks the run directory whether this effect id already recorded a
- * receipt; if so it reconciles against the stored one and performs no second
- * effect. That is what lets a crashed run resume without republishing, and it
- * is why a receipt is written under the effect's own id rather than a fresh
- * one.
+ * A durable receipt suppresses an effect on later resumes. Before running
+ * anything, the runner asks the run directory whether this effect id already
+ * recorded a receipt; if so it reconciles against the stored one and performs
+ * no second effect. Execution necessarily precedes receipt persistence, so a
+ * crash in that interval may retry the adapter; operation-level reconciliation
+ * or idempotency must make that retry safe. The receipt closes every later
+ * resume once persisted and is therefore written under the effect's own id.
  */
 
 import { createHash } from "node:crypto";

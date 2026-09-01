@@ -113,7 +113,15 @@ export async function terminalizeCaptureRejection(
   refusal: TerminalCaptureRefusal,
 ): Promise<CaptureOutcome> {
   const diagnostic = `${refusal.reason}: ${refusal.message}`;
-  const terminal = await handle.rejectCapture(request, diagnostic);
+  let terminal: Awaited<ReturnType<RunDirHandle["rejectCapture"]>>;
+  try {
+    terminal = await handle.rejectCapture(request, diagnostic);
+  } catch (error) {
+    return retriableFailure(
+      "rejection-persistence",
+      `capture refused (${diagnostic}) and its rejection persistence crashed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   if (!terminal.ok) {
     return retriableFailure(
       "rejection-persistence",
