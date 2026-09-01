@@ -269,6 +269,28 @@ describe("machine binding lifecycle", () => {
     }
   });
 
+  it("refuses sole-active authority when any binding row is malformed", () => {
+    const s = sid("s6-corrupt-authority");
+    writeFileSync(
+      ledger.machineBindingPath(s),
+      `malformed-row\na-1\tcode-implementer-agent\t${Date.now()}\n`,
+    );
+    roster(s, "a-1");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(ledger.readBindings(s)).toHaveLength(1);
+      expect(ledger.readBindingAuthority(s)).toMatchObject({
+        kind: "corrupt",
+        bindings: [{ agentId: "a-1", agentType: "code-implementer-agent" }],
+      });
+      expect(() => ledger.soleActiveBinding(s)).toThrow(/binding authority.*malformed rows/i);
+      expect(stderrSpy.mock.calls.map(([text]) => String(text)).join(""))
+        .toContain("skipped 1 malformed binding line(s)");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
   it("a leaked binding — the sole active agent is NOT the bound one — voids attribution", async () => {
     const s = sid("s7");
     await bind(s, "code-implementer-agent", "a-1");

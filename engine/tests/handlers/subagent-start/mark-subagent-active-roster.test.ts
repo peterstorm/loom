@@ -19,7 +19,9 @@ import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { SUBAGENT_DIR } from "../../../src/config";
 import { shouldBlockDirectEdit } from "../../../src/core/block-direct-edits";
 import { activeRosterProbe } from "../../../src/handlers/pre-tool-use/block-direct-edits";
-import markActive from "../../../src/handlers/subagent-start/mark-subagent-active";
+import markActive, {
+  observeActiveTaskGraph,
+} from "../../../src/handlers/subagent-start/mark-subagent-active";
 import { runCleanupSubagentFlag } from "../../../src/handlers/subagent-stop/cleanup-subagent-flag";
 import {
   parseSessionId,
@@ -95,9 +97,11 @@ afterAll(() => {
     ]) {
       rmSync(join(SUBAGENT_DIR, `${s}.${suffix}`), { recursive: true, force: true });
     }
-    const encodedAgent = Buffer.from("a-1", "utf8").toString("hex");
-    rmSync(join(SUBAGENT_DIR, `${s}.${encodedAgent}.implementation-attempt.json`), { force: true });
-    rmSync(join(SUBAGENT_DIR, `${s}.${encodedAgent}${TASK_GRAPH_POINTER_BINDING_SUFFIX}`), { force: true });
+    for (const agentId of ["a-1", "reviewer-1"]) {
+      const encodedAgent = Buffer.from(agentId, "utf8").toString("hex");
+      rmSync(join(SUBAGENT_DIR, `${s}.${encodedAgent}.implementation-attempt.json`), { force: true });
+      rmSync(join(SUBAGENT_DIR, `${s}.${encodedAgent}${TASK_GRAPH_POINTER_BINDING_SUFFIX}`), { force: true });
+    }
   }
   rmSync(stateDir, { recursive: true, force: true });
 });
@@ -114,6 +118,18 @@ const start = (s: string, agentId: string | null = "a-1", agentType = "loom:code
 };
 
 describe("mark-subagent-active — roster failure is contained, never silent", () => {
+  it("classifies TaskGraph path-discovery failure as unavailable authority", () => {
+    const observation = observeActiveTaskGraph(() => {
+      throw new Error("git metadata cannot be inspected");
+    });
+
+    expect(observation).toEqual({
+      kind: "unavailable",
+      path: null,
+      reason: "git metadata cannot be inspected",
+    });
+  });
+
   it("blocks malformed hook input while a TaskGraph is active", async () => {
     process.env.LOOM_STATE_PATH = statePath;
 
@@ -121,6 +137,48 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
 
     expect(result).toMatchObject({ kind: "block" });
     if (result.kind === "block") expect(result.message).toContain("malformed SubagentStart input");
+  });
+
+  it.each([
+    ["null", null],
+    ["array", []],
+    ["number", 42],
+    ["numeric session", { session_id: 42 }],
+    ["numeric agent id", { session_id: "session", agent_id: 42 }],
+    ["numeric agent type", { session_id: "session", agent_type: 42 }],
+    ["numeric transcript path", { session_id: "session", agent_transcript_path: 42 }],
+  ])("blocks a %s SubagentStart domain shape before capability publication", async (_label, input) => {
+    process.env.LOOM_STATE_PATH = statePath;
+
+    const result = await markActive(JSON.stringify(input), []);
+
+    expect(result).toMatchObject({
+      kind: "block",
+      message: expect.stringContaining("malformed SubagentStart input"),
+    });
+  });
+
+  it("blocks a machine-less custom Agent with no agent_id while another Agent owns attribution", async () => {
+    const s = session("missing-id-alongside-binding");
+    process.env.LOOM_STATE_PATH = statePath;
+    const previousMachines = process.env.LOOM_MACHINES_DIR;
+    process.env.LOOM_MACHINES_DIR = guardedReviewMachines;
+    try {
+      expect((await markActive(start(s, "reviewer-1", "loom:guarded-review-agent"), [])).kind)
+        .toBe("passthrough");
+
+      const result = await markActive(start(s, null, "custom-agent"), []);
+
+      expect(result).toMatchObject({
+        kind: "block",
+        message: expect.stringMatching(/missing agent_id.*exact roster attribution.*refusing spawn/i),
+      });
+      expect(readFileSync(join(SUBAGENT_DIR, `${s}.active`), "utf8").trim())
+        .toBe("reviewer-1\tguarded-review-agent");
+    } finally {
+      if (previousMachines === undefined) delete process.env.LOOM_MACHINES_DIR;
+      else process.env.LOOM_MACHINES_DIR = previousMachines;
+    }
   });
 
   it("roster write failure blocks and rolls back every modern capability", async () => {
@@ -143,6 +201,21 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
 
     expect(existsSync(join(SUBAGENT_DIR, `${s}.machine`))).toBe(false);
     expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(false);
+  });
+
+  it("roster write failure blocks a machine-less Agent before pointer publication", async () => {
+    const s = session("machine-less-fail");
+    process.env.LOOM_STATE_PATH = statePath;
+    mkdirSync(join(SUBAGENT_DIR, `${s}.active`), { recursive: true });
+
+    const result = await markActive(start(s, "reviewer-1", "loom:code-reviewer"), []);
+
+    expect(result).toMatchObject({
+      kind: "block",
+      message: expect.stringMatching(/roster update failed.*refusing spawn/),
+    });
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(false);
+    expect(existsSync(join(SUBAGENT_DIR, `${s}.machine`))).toBe(false);
   });
 
   it("machine binding failure blocks the Agent and rolls back the created .task_graph pointer", async () => {
@@ -241,6 +314,33 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
     });
   });
 
+  it("rolls back only newly acquired capabilities when a prior pointer lease already exists", async () => {
+    const s = session("mixed-duplicate");
+    process.env.LOOM_STATE_PATH = statePath;
+    const previousMachines = process.env.LOOM_MACHINES_DIR;
+    process.env.LOOM_MACHINES_DIR = guardedReviewMachines;
+    try {
+      const payload = start(s, "reviewer-1", "loom:guarded-review-agent");
+      expect((await markActive(payload, [])).kind).toBe("passthrough");
+
+      // Preserve the prior pointer lease, but simulate partial capability loss:
+      // the roster is absent and the machine slot is now unwritable. The retry
+      // creates a roster row, observes the old pointer, then fails machine bind.
+      rmSync(join(SUBAGENT_DIR, `${s}.active`));
+      rmSync(join(SUBAGENT_DIR, `${s}.machine`));
+      mkdirSync(join(SUBAGENT_DIR, `${s}.machine`));
+
+      const retry = await markActive(payload, []);
+
+      expect(retry).toMatchObject({ kind: "block", message: expect.stringContaining("bindMachineAgent failed") });
+      expect(existsSync(join(SUBAGENT_DIR, `${s}.active`))).toBe(false);
+      expect(existsSync(join(SUBAGENT_DIR, `${s}.task_graph`))).toBe(true);
+    } finally {
+      if (previousMachines === undefined) delete process.env.LOOM_MACHINES_DIR;
+      else process.env.LOOM_MACHINES_DIR = previousMachines;
+    }
+  });
+
   it("task_graph pointer write failure blocks a non-implementation Loom Agent", async () => {
     const s = session("review-pointer-eloop");
     const pointer = join(SUBAGENT_DIR, `${s}.task_graph`);
@@ -306,9 +406,9 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
   });
 
   it.each([
-    ["missing", null],
-    ["invalid", "evil:id"],
-  ])("a machine-bearing review role with a %s agent_id is blocked before roster or pointer capability publication", async (_label, agentId) => {
+    ["missing", null, "missing agent_id"],
+    ["invalid", "evil:id", "Guarded Skill Machine"],
+  ])("a machine-bearing review role with a %s agent_id is blocked before roster or pointer capability publication", async (_label, agentId, diagnostic) => {
     const s = session(`review-${_label}`);
     process.env.LOOM_STATE_PATH = statePath;
     const previousMachines = process.env.LOOM_MACHINES_DIR;
@@ -317,7 +417,7 @@ describe("mark-subagent-active — roster failure is contained, never silent", (
       const result = await markActive(start(s, agentId, "loom:guarded-review-agent"), []);
       expect(result).toMatchObject({
         kind: "block",
-        message: expect.stringContaining("Guarded Skill Machine"),
+        message: expect.stringContaining(diagnostic),
       });
     } finally {
       if (previousMachines === undefined) delete process.env.LOOM_MACHINES_DIR;

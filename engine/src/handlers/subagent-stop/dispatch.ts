@@ -5,19 +5,22 @@
  */
 
 import { match } from "ts-pattern";
-import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
+import type { HookHandler, HookResult } from "../../types";
+import type { AgentRequestAuthority } from "../../core/orchestration-contract";
 import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_SUB_AGENTS } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { resolveAgentType } from "../../utils/agent-transcript-path";
 import { parseSessionId, readEvidence } from "../../machine";
+import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
+import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../orchestration/harness-capture-runtime";
 
-import captureOrchestrationResult from "./capture-orchestration-result";
+import captureOrchestrationResult, { resolveClaudeRequestAuthority } from "./capture-orchestration-result";
 import cleanupSubagentFlag from "./cleanup-subagent-flag";
 import advancePhase from "./advance-phase";
 import { runUpdateTaskStatus, type EvidenceSnapshot } from "./update-task-status";
 import storeReviewerFindings from "./store-reviewer-findings";
-import storeSpecCheckFindings from "./store-spec-check-findings";
+import { runStoreSpecCheckFindings } from "./store-spec-check-findings";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 import {
   snapshotImplementationAttemptSidecar,
@@ -39,18 +42,17 @@ export const runDispatch = async (
   args: string[],
   cleanup: HookHandler = cleanupSubagentFlag,
 ): Promise<HookResult> => {
-  let input: SubagentStopInput;
-  try {
-    input = JSON.parse(stdin);
-  } catch (e) {
+  const parsedInput = parseSubagentStopStdin(stdin);
+  if (!parsedInput.ok) {
     // No trustworthy session or Agent identity exists, so cleanup cannot be
     // named. Fail closed rather than reporting a successful stop that settled
     // nothing and may have leaked runtime authority.
     return {
       kind: "error",
-      message: `dispatch: malformed SubagentStop input — cleanup skipped, bindings may leak: ${e instanceof Error ? e.message : String(e)}`,
+      message: `dispatch: invalid SubagentStop input — cleanup skipped, bindings may leak: ${parsedInput.error}`,
     };
   }
+  const input = parsedInput.value;
 
   // Category handlers are evidence boundaries, not best-effort side effects:
   // a child that reports an error (e.g. storeReviewerFindings could not read
@@ -68,6 +70,31 @@ export const runDispatch = async (
       process.stderr.write(`ERROR in ${name}: ${message}\n`);
       return { kind: "error", message };
     }
+  };
+
+  // Cleanup is available to every post-parse failure boundary. It never
+  // preempts the category's one chance to settle protected state, but routing,
+  // capture, and authority faults must all release their runtime capabilities.
+  const runCleanup = async (): Promise<string | null> => {
+    try {
+      const cleanupResult = await cleanup(stdin, args);
+      return cleanupResult.kind === "error" || cleanupResult.kind === "block"
+        ? cleanupResult.message
+        : null;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`ERROR in cleanupSubagentFlag: ${message}\n`);
+      return `cleanupSubagentFlag crashed: ${message}`;
+    }
+  };
+  const errorAfterCleanup = async (failure: string): Promise<HookResult> => {
+    const cleanupFailure = await runCleanup();
+    return {
+      kind: "error",
+      message: cleanupFailure === null
+        ? failure
+        : `${failure}; cleanup also failed: ${cleanupFailure}`,
+    };
   };
 
   // Snapshot the ledger BEFORE cleanup unbinds: attribution runs through the
@@ -99,32 +126,11 @@ export const runDispatch = async (
     }
   }
 
-  // Resolve routing before cleanup: Claude's payload may omit agent_type, and
-  // the transcript metadata used by the fallback survives cleanup. Modern
-  // implementation correlation is snapshotted here too — never reconstructed
-  // from assistant text or executing_tasks after the sidecar is removed.
-  const resolvedAgentType = resolveAgentType(input);
-  const reportedCategory = categorize(stripNamespace(resolvedAgentType));
-  const sidecarObservation = snapshotImplementationAttemptSidecar(
-    input.session_id ?? "",
-    input.agent_id ?? "",
-  );
-  // A valid sidecar is engine-issued implementation routing authority. Claude
-  // may omit or corrupt agent_type metadata, so routing cannot be conditional
-  // on that weaker field. Unavailable sidecars do not reclassify unrelated
-  // agents.
-  const category: AgentCategory = sidecarObservation.kind === "authority-observed"
-    ? "impl"
-    : reportedCategory;
-  const authorityObservation: ImplementationAuthorityObservation | undefined = category === "impl"
-    ? sidecarObservation
-    : undefined;
-
   // Request-bound capture runs BEFORE any legacy routing, and before the task
   // graph is resolved at all. Both orderings are load-bearing: the graph lookup
   // below returns early when there is none, which would skip capture for every
-  // standalone run; and legacy handlers must not mutate task state after run
-  // authority rejected the same result.
+  // standalone run; and repository metadata is not request authority, so a
+  // metadata fault must not prevent a reserved result from being captured.
   let captureFailure: string | null = null;
   try {
     const capture = await captureOrchestrationResult(stdin, args);
@@ -134,62 +140,116 @@ export const runDispatch = async (
     process.stderr.write(`ERROR in captureOrchestrationResult: ${captureFailure}\n`);
   }
 
-  // Cleanup always runs, but only after every consumer has resolved the
-  // pointer capability. A cleanup failure remains explicit without preempting
-  // the category's one chance to settle protected state.
-  const runCleanup = async (): Promise<string | null> => {
-    try {
-      const cleanupResult = await cleanup(stdin, args);
-      return cleanupResult.kind === "error" || cleanupResult.kind === "block"
-        ? cleanupResult.message
-        : null;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      process.stderr.write(`ERROR in cleanupSubagentFlag: ${message}\n`);
-      return `cleanupSubagentFlag crashed: ${message}`;
-    }
-  };
-
-  if (captureFailure !== null) {
-    const cleanupFailure = await runCleanup();
-    return {
-      kind: "error",
-      message: cleanupFailure === null
-        ? captureFailure
-        : `${captureFailure}; cleanup also failed: ${cleanupFailure}`,
-    };
+  // Which PROGRAM a stop belongs to decides whether legacy category settlement
+  // applies at all, and it is decided from the same correlation the capture
+  // above used. The environment names come from the runtime that READS them, so
+  // a rename cannot leave the dispatcher asking a question nobody answers.
+  let requestAuthority: AgentRequestAuthority | null = null;
+  if (captureFailure === null) {
+    const resolved = resolveClaudeRequestAuthority(input, process.env[RUNS_ROOT_ENV], process.env[RUN_DIR_ENV]);
+    if (resolved.ok) requestAuthority = resolved.request;
+    else captureFailure = `request authority resolution failed: ${resolved.message}`;
   }
+
+  if (captureFailure !== null) return errorAfterCleanup(captureFailure);
+
+  // Request-bound non-Wave programs own no TaskGraph mutation. A successful
+  // capture is their complete SubagentStop settlement; falling through would
+  // falsely require unrelated protected state and report an error after the
+  // Run Directory had already accepted the evidence. They never need weaker
+  // transcript metadata or implementation-sidecar routing observations.
+  if (requestAuthority !== null && requestAuthority.program !== "wave-gate") {
+    const cleanupFailure = await runCleanup();
+    return cleanupFailure === null
+      ? { kind: "passthrough" }
+      : { kind: "error", message: cleanupFailure };
+  }
+
+  // Resolve legacy routing only after request authority. Claude may omit
+  // agent_type, so this can touch transcript metadata; every filesystem fault
+  // is converted to an explicit settlement failure and still runs cleanup.
+  let resolvedAgentType: string;
+  let sidecarObservation: ImplementationAuthorityObservation;
+  try {
+    resolvedAgentType = resolveAgentType(input);
+    sidecarObservation = snapshotImplementationAttemptSidecar(
+      input.session_id ?? "",
+      input.agent_id ?? "",
+    );
+  } catch (error) {
+    const routingFailure = `dispatch: routing observation failed: ${error instanceof Error ? error.message : String(error)}`;
+    return errorAfterCleanup(routingFailure);
+  }
+
+  // A request-bound Wave Gate stop is routed only by the exact engine-issued
+  // role that capture resolved from the correlator and immutable reservation.
+  // Reported/transcript metadata may be absent, but a contradictory role is a
+  // refusal rather than an opportunity to settle one request through another
+  // role's TaskGraph transition.
+  let category: AgentCategory;
+  if (requestAuthority !== null) {
+    const authorityRole = stripNamespace(requestAuthority.role);
+    const authorityCategory = categorize(authorityRole);
+    if (authorityCategory !== "review" && authorityCategory !== "spec-check") {
+      const message = `Wave Gate request ${requestAuthority.requestId} has unroutable issued role ${JSON.stringify(requestAuthority.role)}`;
+      return errorAfterCleanup(message);
+    }
+    const reportedRole = stripNamespace(resolvedAgentType);
+    if (reportedRole !== "" && reportedRole !== authorityRole) {
+      const message = `Wave Gate request ${requestAuthority.requestId} is issued to ${JSON.stringify(requestAuthority.role)}, ` +
+        `but SubagentStop reported ${JSON.stringify(resolvedAgentType)}`;
+      return errorAfterCleanup(message);
+    }
+    category = authorityCategory;
+  } else {
+    // A valid sidecar is engine-issued implementation routing authority. Claude
+    // may omit or corrupt agent_type metadata, so routing cannot be conditional
+    // on that weaker field. Unavailable sidecars do not reclassify unrelated
+    // agents.
+    category = sidecarObservation.kind === "authority-observed"
+      ? "impl"
+      : categorize(stripNamespace(resolvedAgentType));
+  }
+  const authorityObservation: ImplementationAuthorityObservation | undefined = category === "impl"
+    ? sidecarObservation
+    : undefined;
+  const specCheckRequestAuthority = category === "spec-check" ? requestAuthority : null;
+  const settlementStdin = requestAuthority === null
+    ? stdin
+    : JSON.stringify({ ...input, agent_type: requestAuthority.role });
 
   const noTaskGraphDiagnostic = (cause?: unknown): string =>
     `[loom] dispatch: no task graph resolvable for session ${JSON.stringify(input.session_id ?? "")}` +
     (cause === undefined ? "" : `: ${cause instanceof Error ? cause.message : String(cause)}`) +
     " — SubagentStop recorded NOTHING (task status, test evidence and findings all skipped)";
+  const taskGraphRequired = category !== "unknown" || resolvedAgentType === "";
+  const unresolvedTaskGraph = async (cause?: unknown): Promise<HookResult> => {
+    const graphFailure = noTaskGraphDiagnostic(cause);
+    if (taskGraphRequired) process.stderr.write(`${graphFailure}\n`);
+    const cleanupFailure = await runCleanup();
+    if (cleanupFailure !== null) {
+      return { kind: "error", message: `${graphFailure}; cleanup also failed: ${cleanupFailure}` };
+    }
+    return taskGraphRequired
+      ? { kind: "error", message: graphFailure }
+      : passthroughDiagnostic(`${graphFailure}\n`);
+  };
 
-  // No exact session TaskGraph authority → no orchestration Hooks.
-  let mgr: StateManager | null;
+  // Known Loom categories require exact TaskGraph authority. Only an explicitly
+  // named custom agent may legitimately have no graph and pass through.
   try {
-    mgr = StateManager.fromSession(input.session_id);
+    if (StateManager.fromSession(input.session_id) === null) return unresolvedTaskGraph();
   } catch (error) {
-    const graphFailure = noTaskGraphDiagnostic(error);
-    const cleanupFailure = await runCleanup();
-    return cleanupFailure === null
-      ? passthroughDiagnostic(`${graphFailure}\n`)
-      : { kind: "error", message: `${graphFailure}; cleanup also failed: ${cleanupFailure}` };
-  }
-  if (!mgr) {
-    const graphFailure = noTaskGraphDiagnostic();
-    const cleanupFailure = await runCleanup();
-    return cleanupFailure === null
-      ? passthroughDiagnostic(`${graphFailure}\n`)
-      : { kind: "error", message: `${graphFailure}; cleanup also failed: ${cleanupFailure}` };
+    return unresolvedTaskGraph(error);
   }
 
   const childFailure: HookResult | null = await match(category)
     .with("phase", () => runChild("advancePhase", () => advancePhase(stdin, args)))
     .with("impl", () => runChild("updateTaskStatus", () =>
       runUpdateTaskStatus(stdin, args, evidenceSnapshot, authorityObservation)))
-    .with("review", () => runChild("storeReviewerFindings", () => storeReviewerFindings(stdin, args)))
-    .with("spec-check", () => runChild("storeSpecCheckFindings", () => storeSpecCheckFindings(stdin, args)))
+    .with("review", () => runChild("storeReviewerFindings", () => storeReviewerFindings(settlementStdin, args)))
+    .with("spec-check", () => runChild("storeSpecCheckFindings", () =>
+      runStoreSpecCheckFindings(settlementStdin, args, specCheckRequestAuthority ?? undefined)))
     .with("unknown", async () => {
       // Genuinely-unknown agents (a user's own subagent) legitimately have no
       // orchestration hooks. An UNNAMEABLE one does not: it means neither the

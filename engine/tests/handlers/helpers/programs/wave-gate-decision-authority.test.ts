@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 /**
  * `waveGateDecisionMismatch` is the guard that stops a Wave advisory decision
  * meant for one Wave Gate run from being applied to a stale or foreign one.
@@ -13,12 +13,15 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
 import { join } from "node:path";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
+  applyCurrentSpecCheckCaptureRejection,
   handleWaveReviewContext,
   publishWaveAdvisoryDecisionRequest,
+  specCheckSlotBelongsToWaveEpoch,
   waveAdvisoryDecisionRequestId,
   waveGateDecisionMismatch,
+  waveRefutationCommitProblem,
 } from "../../../../src/handlers/helpers/programs/wave-gate";
 import {
   deriveLoomStatusFromParsedGraph,
@@ -28,7 +31,13 @@ import {
 } from "../../../../src/core/wave-gate-machine";
 import { observedAdvisoryApproval } from "../../../../src/handlers/helpers/orchestration";
 import { derivePendingTaskProof } from "../../../../src/core/proof-obligations";
-import { parseRequestId } from "../../../../src/core/orchestration-contract";
+import { buildFindingBrief } from "../../../../src/core/review-panel";
+import {
+  parseRequestId,
+  type ArtifactDigest,
+  type OrchestrationRunId,
+} from "../../../../src/core/orchestration-contract";
+import type { WaveReviewRegistrationAuthority } from "../../../../src/core/wave-review-authority";
 import { buildContextPacket, encodeByteSection } from "../../../../src/orchestration/context-packets";
 import { openRunDirectory } from "../../../../src/orchestration/run-directory-handle";
 import type { RegisteredWaveGateProgram } from "../../../../src/handlers/helpers/programs/helpers";
@@ -37,6 +46,10 @@ import type { TaskGraph } from "../../../../src/types";
 
 const RUN_ID = "run.wave-decision";
 const DIGEST = "a".repeat(64);
+const DOCUMENTS = {
+  spec: { path: null, contentDigest: null },
+  plan: { path: null, contentDigest: null },
+} as const;
 
 const task = (id: string, claim: string): TaskGraph["tasks"][number] => ({
   id,
@@ -94,6 +107,13 @@ const registration = (
 
 const pendingDecisionId = (): string => waveAdvisoryDecisionRequestId(RUN_ID, TASKS);
 
+describe("Wave review registration authority", () => {
+  it("requires an exact concrete Wave", () => {
+    expectTypeOf<WaveReviewRegistrationAuthority["input"]["wave"]>().toEqualTypeOf<number>();
+    expect(registration().input.wave).toBe(1);
+  });
+});
+
 describe("wave review context authority", () => {
   const packetFor = (authority: unknown) => {
     const section = encodeByteSection("wave-review-authority", JSON.stringify(authority));
@@ -150,11 +170,164 @@ describe("wave review context authority", () => {
       packetId: null,
       specFile: null,
       planFile: null,
+      specCheckDocuments: DOCUMENTS,
     });
-    expect(handleWaveReviewContext([packet], packet.digest)).toMatchObject({
+    const context = handleWaveReviewContext([packet], packet.digest);
+    expect(context).toMatchObject({
       kind: "loaded",
       value: { runId: RUN_ID, wave: 1, subject: { taskId: null }, taskRun: null },
     });
+    if (context.kind !== "loaded") return;
+    const brandedAuthority = (
+      runId: OrchestrationRunId,
+      authorityDigest: ArtifactDigest,
+      batchEpoch: ArtifactDigest,
+    ) => ({ runId, authorityDigest, batchEpoch });
+    expect(brandedAuthority(
+      context.value.runId,
+      context.value.authorityDigest,
+      context.value.batchEpoch,
+    )).toEqual({ runId: RUN_ID, authorityDigest: DIGEST, batchEpoch: "b".repeat(64) });
+  });
+
+  it("keeps exact spec-check packet membership after every reviewer run closes", () => {
+    const batchEpoch = "b".repeat(64);
+    const slotId = "wave-slot:spec-check";
+    const packet = packetFor({
+      runId: RUN_ID,
+      wave: 1,
+      authorityDigest: DIGEST,
+      batchEpoch,
+      subject: { role: "spec-check-invoker", taskId: null },
+      taskRun: null,
+      task: null,
+      specCheckScope: [{
+        id: "T1", description: "review T1", completionAnchors: ["FR-1"], contributions: [], declaredFiles: [],
+      }],
+      packetId: null,
+      specFile: null,
+      planFile: null,
+      specCheckDocuments: DOCUMENTS,
+    });
+    const context = handleWaveReviewContext([packet], packet.digest);
+    expect(context.kind).toBe("loaded");
+    if (context.kind !== "loaded") return;
+    const closedReviewGraph = graph({
+      wave_review_epoch: {
+        runId: RUN_ID,
+        wave: 1,
+        batchEpoch,
+        specCheckDocuments: DOCUMENTS,
+        specCheckSlotAuthority: { slot_id: slotId, attempted: 1 },
+      } as TaskGraph["wave_review_epoch"],
+    });
+
+    expect(specCheckSlotBelongsToWaveEpoch(
+      closedReviewGraph,
+      { runId: RUN_ID, slotId, attempt: 1 },
+      context.value,
+    )).toBe(true);
+    expect(specCheckSlotBelongsToWaveEpoch(
+      closedReviewGraph,
+      { runId: RUN_ID, slotId, attempt: 2 },
+      context.value,
+    )).toBe(false);
+  });
+
+  it("does not let a paused attempt-1 rejection overwrite accepted attempt-2 evidence", () => {
+    const batchEpoch = "b".repeat(64);
+    const slotId = "wave-slot:spec-check";
+    const acceptedAttemptTwo = {
+      wave: 1,
+      run_at: "2026-08-28T00:00:02.000Z",
+      verdict: "PASSED" as const,
+      critical_count: 0,
+      high_count: 0,
+      critical_findings: [],
+      high_findings: [],
+      medium_findings: [],
+    };
+    const lockedAfterAttemptTwo = graph({
+      spec_check: acceptedAttemptTwo,
+      wave_review_epoch: {
+        runId: RUN_ID,
+        wave: 1,
+        batchEpoch,
+        specCheckDocuments: DOCUMENTS,
+        specCheckSlotAuthority: { slot_id: slotId, attempted: 2 },
+      } as TaskGraph["wave_review_epoch"],
+    });
+    const attemptOneFailure = {
+      wave: 1,
+      run_at: "2026-08-28T00:00:01.000Z",
+      verdict: "EVIDENCE_CAPTURE_FAILED" as const,
+      error: "attempt 1 capture rejected",
+    };
+
+    const transition = applyCurrentSpecCheckCaptureRejection(
+      lockedAfterAttemptTwo,
+      { runId: RUN_ID, slotId, attempt: 1 },
+      {
+        wave: 1,
+        batchEpoch: batchEpoch as ArtifactDigest,
+        authorityDigest: DIGEST as ArtifactDigest,
+        specCheckDocuments: DOCUMENTS,
+      },
+      attemptOneFailure,
+    );
+
+    expect(transition.applied).toBe(false);
+    expect(transition.state).toBe(lockedAfterAttemptTwo);
+    expect(transition.state.spec_check).toEqual(acceptedAttemptTwo);
+  });
+
+  it("applies a capture rejection while attempt 1 still owns the exact slot", () => {
+    const batchEpoch = "b".repeat(64);
+    const slotId = "wave-slot:spec-check";
+    const lockedAttemptOne = graph({
+      spec_check: {
+        wave: 1,
+        run_at: "2026-08-28T00:00:00.000Z",
+        verdict: "BLOCKED",
+        critical_count: 1,
+        high_count: 0,
+        critical_findings: ["earlier blocker"],
+        high_findings: [],
+        medium_findings: [],
+      },
+      wave_gates: {
+        "1": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: true },
+      },
+      wave_review_epoch: {
+        runId: RUN_ID,
+        wave: 1,
+        batchEpoch,
+        specCheckDocuments: DOCUMENTS,
+        specCheckSlotAuthority: { slot_id: slotId, attempted: 1 },
+      } as TaskGraph["wave_review_epoch"],
+    });
+    const failure = {
+      wave: 1,
+      run_at: "2026-08-28T00:00:01.000Z",
+      verdict: "EVIDENCE_CAPTURE_FAILED" as const,
+      error: "attempt 1 capture rejected",
+    };
+
+    const transition = applyCurrentSpecCheckCaptureRejection(
+      lockedAttemptOne,
+      { runId: RUN_ID, slotId, attempt: 1 },
+      {
+        wave: 1,
+        batchEpoch: batchEpoch as ArtifactDigest,
+        authorityDigest: DIGEST as ArtifactDigest,
+        specCheckDocuments: DOCUMENTS,
+      },
+      failure,
+    );
+
+    expect(transition.applied).toBe(true);
+    expect(transition.state.spec_check).toEqual(failure);
+    expect(transition.state.wave_gates["1"]?.blocked).toBe(false);
   });
 
   it("loads a Task reviewer only with complete matching Task authority", () => {
@@ -269,6 +442,54 @@ describe("wave review context authority", () => {
   });
 });
 
+describe("locked Refutation Panel authority", () => {
+  const criticalGraph = (): TaskGraph => {
+    const tasks = TASKS.map((entry, index) => index === 0
+      ? {
+          ...entry,
+          review_status: "blocked" as const,
+          findings: [{
+            id: "code-reviewer-1",
+            agent: "code-reviewer",
+            severity: "critical" as const,
+            file: "engine/src/example.ts",
+            line: 1,
+            claim: "exact critical",
+          }],
+          critical_findings: ["exact critical"],
+          advisory_findings: [],
+        }
+      : { ...entry, review_status: "passed" as const });
+    return graph({ tasks });
+  };
+
+  it("accepts only the panel bound to the locked active registration and Finding set", () => {
+    const current = criticalGraph();
+    const findings = buildFindingBrief(1, current.tasks).findings;
+    expect(findings).toHaveLength(1);
+    const panel = { runId: current.active_wave_gate!.runId, findings: [findings[0]!] as const };
+
+    expect(waveRefutationCommitProblem(
+      current,
+      registration(),
+      current.active_wave_gate!,
+      panel,
+    )).toBeNull();
+    expect(waveRefutationCommitProblem(
+      graph({ ...current, active_wave_gate: { ...current.active_wave_gate!, revision: 1 } }),
+      registration(),
+      current.active_wave_gate!,
+      panel,
+    )).toContain("exact active Wave Gate authority");
+    expect(waveRefutationCommitProblem(
+      criticalGraph(),
+      registration(),
+      current.active_wave_gate!,
+      { ...panel, findings: [{ ...panel.findings[0], claim: "stale critical" }] },
+    )).toContain("locked current-Wave Finding authority");
+  });
+});
+
 describe("waveGateDecisionMismatch", () => {
   it("derives post-review advisory intent from LC-1 rather than shell predicates", () => {
     const snapshot = deriveWaveReadiness(
@@ -339,6 +560,33 @@ describe("waveGateDecisionMismatch", () => {
         .toContain(`cannot determine advisory approval for ${RUN_ID}`);
     } finally {
       stderr.mockRestore();
+      rmSync(runsRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects copied advisory material before publishing any referenced bytes", async () => {
+    const runsRoot = canonicalTempDir("loom-wave-advisory-forged-");
+    const runDirectory = join(runsRoot, RUN_ID);
+    mkdirSync(runDirectory);
+    try {
+      const opened = openRunDirectory(runsRoot, runDirectory);
+      expect(opened.ok).toBe(true);
+      if (!opened.ok) return;
+      const material = deriveWaveAdvisoryDecisionRequest(RUN_ID, TASKS);
+      expect(material.ok).toBe(true);
+      if (!material.ok) return;
+
+      const published = await publishWaveAdvisoryDecisionRequest(opened.value, { ...material.value });
+
+      expect(published).toMatchObject({
+        ok: false,
+        message: expect.stringContaining("exact core-derived decision material set"),
+      });
+      expect(existsSync(join(runDirectory, material.value.context.slot.path))).toBe(false);
+      for (const advisory of material.value.advisories) {
+        expect(existsSync(join(runDirectory, advisory.reference.slot.path))).toBe(false);
+      }
+    } finally {
       rmSync(runsRoot, { recursive: true, force: true });
     }
   });

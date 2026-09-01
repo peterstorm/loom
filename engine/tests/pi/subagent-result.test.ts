@@ -12,6 +12,7 @@ import { applyCompletionInfrastructureFailure } from "../../src/core/implementat
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { createImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import { taskVerificationPolicy } from "../../src/core/verification-policy";
+import { parseArtifactDigest, parseOrchestrationRunId } from "../../src/core/orchestration-contract";
 import {
   captureDeclaredArtifactBaseline,
   captureRepositoryChangeBaseline,
@@ -22,6 +23,8 @@ import {
   applyPhaseAgentPiResult,
   applyReviewPiResult,
   applySpecCheckPiResult,
+  currentPiReviewAuthority,
+  currentPiSpecCheckAuthority,
   piSubagentFailureSignals,
   parsePiSubagentResults,
   resolveImplementationTaskId,
@@ -34,14 +37,24 @@ import {
  * The concerns the Pi `tool_result` handler used to hold inline, exercised
  * through their ports.
  *
- * Every case here runs with an in-memory `TaskGraphStore` and no repository:
- * that is the whole point of the split. Before it, asserting "a malformed
- * transcript does not advance the phase" meant standing up a real StateManager,
- * a real git root, and a ~980-line closure whose unrelated branches all had to
- * be survivable first.
+ * The parser and transition cases run through an in-memory `TaskGraphStore`;
+ * repository-backed regressions below add temporary Git roots only where byte
+ * scope and artifact-baseline behavior are the subject. Before this split,
+ * asserting "a malformed transcript does not advance the phase" required a real
+ * StateManager, a Git root, and a ~980-line closure whose unrelated branches all
+ * had to be survivable first.
  */
 
 const NOW = "2026-08-16T00:00:00.000Z";
+const parsedWaveRunId = parseOrchestrationRunId("run.pi-spec-check");
+const parsedWaveAuthorityDigest = parseArtifactDigest("a".repeat(64));
+const parsedWaveBatchEpoch = parseArtifactDigest("b".repeat(64));
+if (!parsedWaveRunId.ok || !parsedWaveAuthorityDigest.ok || !parsedWaveBatchEpoch.ok) {
+  throw new Error("invalid spec-check authority fixture constants");
+}
+const WAVE_RUN_ID = parsedWaveRunId.value;
+const WAVE_AUTHORITY_DIGEST = parsedWaveAuthorityDigest.value;
+const WAVE_BATCH_EPOCH = parsedWaveBatchEpoch.value;
 
 function graph(overrides: Partial<TaskGraph> = {}): TaskGraph {
   return {
@@ -73,6 +86,41 @@ function parsedGraph(graph: TaskGraph): ParsedTaskGraph {
   const parsed = parseTaskGraph(graph);
   if (!parsed.ok) throw new Error(`invalid parsed graph fixture: ${parsed.error}`);
   return parsed.value;
+}
+
+function graphWithSpecCheckAuthority(wave = 1) {
+  const state = parsedGraph(graph({
+    current_wave: wave,
+    active_wave_gate: {
+      schemaVersion: 1,
+      kind: "active-wave-gate",
+      runId: WAVE_RUN_ID,
+      wave,
+      authorityDigest: WAVE_AUTHORITY_DIGEST,
+      revision: 1,
+      terminalOutcome: null,
+    },
+    wave_review_epoch: {
+      runId: WAVE_RUN_ID,
+      wave,
+      batchEpoch: WAVE_BATCH_EPOCH,
+      specCheckDocuments: {
+        spec: { path: null, contentDigest: null },
+        plan: { path: null, contentDigest: null },
+      },
+      specCheckSlotAuthority: { slot_id: "wave-slot:spec-check", attempted: 1 },
+    },
+  }));
+  const authority = currentPiSpecCheckAuthority(state);
+  if (authority === null) throw new Error("spec-check fixture lacks exact authority");
+  return Object.freeze({
+    state,
+    reservedSlot: Object.freeze({
+      agentType: "spec-check-invoker",
+      taskId: null,
+      specCheckAuthority: authority,
+    }),
+  });
 }
 
 /** An in-memory stand-in for StateManager: every persisted update is reparsed. */
@@ -148,6 +196,23 @@ describe("parsePiSubagentResults", () => {
       result: { agent: "code-reviewer" },
     });
   });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0.5, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects non-safe-integer exitCode %s",
+    (exitCode) => {
+      const [parsed] = parsePiSubagentResults([{
+        agent: "code-reviewer",
+        task: "Task: T1",
+        exitCode,
+        messages: [],
+      }]);
+
+      expect(parsed).toMatchObject({
+        ok: false,
+        problem: expect.stringContaining("exitCode must be a finite safe integer"),
+      });
+    },
+  );
 
   it("rejects null transcript evidence rather than accepting it as empty", async () => {
     const [parsed] = parsePiSubagentResults([
@@ -247,7 +312,7 @@ describe("applyPhaseAgentPiResult", () => {
     }
   });
 
-  it("records a spec written inside the run's spec_dir", async () => {
+  it("records the reported spec path but rejects advancement when the artifact is absent", async () => {
     const store = fakeStore(graph({ current_phase: "specify", spec_dir: ".claude/specs/run" } as Partial<TaskGraph>));
     const applied = await applyPhaseAgentPiResult({
       store,
@@ -257,7 +322,9 @@ describe("applyPhaseAgentPiResult", () => {
       now: NOW,
     });
 
-    expect(applied.processingErrors).toEqual([]);
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("phase transition is not ready: recorded spec_file"),
+    ]);
     expect(store.current().spec_file).toBe(".claude/specs/run/spec.md");
   });
 
@@ -308,7 +375,7 @@ describe("applyPhaseAgentPiResult", () => {
       current: () => current,
     };
 
-    await applyPhaseAgentPiResult({
+    const applied = await applyPhaseAgentPiResult({
       store,
       agentType: "specify-agent",
       completedPhase: "specify",
@@ -319,13 +386,48 @@ describe("applyPhaseAgentPiResult", () => {
       now: NOW,
     });
 
-    expect(loadCount).toBe(0);
+    expect(applied.processingErrors).toEqual([]);
+    expect(applied.log).toEqual([expect.stringContaining("already past")]);
+    expect(loadCount).toBe(1);
     expect(store.current().current_phase).toBe("architecture");
     expect(store.current().spec_file).toBeNull();
+  });
+
+  it("reports a future phase result as an exact-authority processing error", async () => {
+    const store = fakeStore(graph({ current_phase: "specify" }));
+
+    const applied = await applyPhaseAgentPiResult({
+      store,
+      agentType: "architecture-agent",
+      completedPhase: "architecture",
+      result: result({ agent: "architecture-agent", messages: [] }),
+      now: NOW,
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("cannot advance current Phase specify"),
+    ]);
+    expect(applied.log).toEqual([expect.stringContaining("exact Phase authority required")]);
+    expect(store.current().current_phase).toBe("specify");
   });
 });
 
 describe("applyFailedPiResult", () => {
+  it("reports a failed phase agent as a processing error without advancing", async () => {
+    const store = fakeStore(graph({ current_phase: "architecture" }));
+
+    const applied = await applyFailedPiResult({
+      store,
+      agentType: "architecture-agent",
+      result: result({ agent: "architecture-agent", exitCode: 1 }),
+      reservedSlot: { agentType: "architecture-agent", taskId: null },
+      now: NOW,
+    });
+
+    expect(applied.processingErrors).toEqual([expect.stringContaining("phase was not advanced")]);
+    expect(store.current().current_phase).toBe("architecture");
+  });
+
   it("stores an evidence failure against the reviewer's task", async () => {
     const store = fakeStore(graph());
     const applied = await applyFailedPiResult({
@@ -339,6 +441,29 @@ describe("applyFailedPiResult", () => {
     expect(store.current().tasks[0]!.review_status).toBe("evidence_capture_failed");
     expect(applied.processingErrors).toEqual([]);
     expect(applied.log.join("\n")).toContain("T1");
+  });
+
+  it("reports a reviewer task that disappears before locked failure settlement", async () => {
+    const initial = parsedGraph(graph());
+    const withoutTask = parsedGraph({ ...initial, tasks: [] });
+    const store: TaskGraphStore = {
+      load: () => initial,
+      update: async (mutate) => { mutate(withoutTask); },
+      updateAndReturn: async (mutate) => mutate(withoutTask).value,
+    };
+
+    const applied = await applyFailedPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ exitCode: 1 }),
+      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      now: NOW,
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("review task T1 disappeared under the state lock"),
+    ]);
+    expect(applied.log.join("\n")).toContain("review evidence NOT stored");
   });
 
   it("rejects a failed reviewer whose returned Task does not match its reservation", async () => {
@@ -355,6 +480,147 @@ describe("applyFailedPiResult", () => {
       expect.stringContaining("does not match reserved Task T1"),
     ]);
     expect(store.current().tasks[0]!.review_status).toBe("pending");
+  });
+
+  it("rejects a stale failed reviewer reservation after a newer Review Run replaces it", async () => {
+    const base = graph();
+    const current = graph({
+      tasks: [{
+        ...base.tasks[0]!,
+        review_generation: 2,
+        review_run: {
+          generation: 2,
+          packet_id: "b".repeat(64),
+          head_sha: "2".repeat(40),
+          expected_agents: ["code-reviewer"],
+          prior_finding_ids: [],
+          evidence: [],
+          slot_authority: [{ agent: "code-reviewer", slot_id: "review-slot:new", attempted: 1 }],
+        },
+      }],
+    });
+    const store = fakeStore(current);
+    const applied = await applyFailedPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ exitCode: 1 }),
+      reservedSlot: {
+        agentType: "code-reviewer",
+        taskId: "T1",
+        reviewAuthority: {
+          taskId: "T1",
+          agentType: "code-reviewer",
+          generation: 1,
+          packetId: "a".repeat(64),
+          slotId: "review-slot:old",
+          attempted: 1,
+        },
+      },
+      now: NOW,
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("does not match exact current Task/Review Run slot authority"),
+    ]);
+    expect(store.current()).toEqual(parsedGraph(current));
+  });
+
+  it("rejects a stale successful reviewer reservation after a newer Review Run replaces it", async () => {
+    const base = graph();
+    const current = graph({
+      tasks: [{
+        ...base.tasks[0]!,
+        review_generation: 2,
+        review_run: {
+          generation: 2,
+          packet_id: "b".repeat(64),
+          head_sha: "2".repeat(40),
+          expected_agents: ["code-reviewer"],
+          prior_finding_ids: [],
+          evidence: [],
+          slot_authority: [{ agent: "code-reviewer", slot_id: "review-slot:new", attempted: 1 }],
+        },
+      }],
+    });
+    const store = fakeStore(current);
+    const applied = await applyReviewPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ messages: assistantText("review output without required markers") }),
+      reservedSlot: {
+        agentType: "code-reviewer",
+        taskId: "T1",
+        reviewAuthority: {
+          taskId: "T1",
+          agentType: "code-reviewer",
+          generation: 1,
+          packetId: "a".repeat(64),
+          slotId: "review-slot:old",
+          attempted: 1,
+        },
+      },
+      parentPrompt: "",
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("does not match exact current Task/Review Run slot authority"),
+    ]);
+    expect(store.current()).toEqual(parsedGraph(current));
+  });
+
+  it("rejects stale malformed reviewer messages after a newer Review Run replaces the reservation", async () => {
+    const base = graph();
+    const current = graph({
+      tasks: [{
+        ...base.tasks[0]!,
+        review_generation: 2,
+        review_run: {
+          generation: 2,
+          packet_id: "d".repeat(64),
+          head_sha: "4".repeat(40),
+          expected_agents: ["code-reviewer"],
+          prior_finding_ids: [],
+          evidence: [],
+          slot_authority: [{ agent: "code-reviewer", slot_id: "review-slot:new-malformed", attempted: 1 }],
+        },
+      }],
+    });
+    const store = fakeStore(current);
+    const applied = await applyReviewPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ messages: [{ role: 42 }] }),
+      reservedSlot: {
+        agentType: "code-reviewer",
+        taskId: "T1",
+        reviewAuthority: {
+          taskId: "T1", agentType: "code-reviewer", generation: 1,
+          packetId: "c".repeat(64), slotId: "review-slot:old-malformed", attempted: 1,
+        },
+      },
+      parentPrompt: "",
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("does not match exact current Task/Review Run slot authority"),
+    ]);
+    expect(store.current()).toEqual(parsedGraph(current));
+  });
+
+  it("stores nothing when an unreserved failed reviewer names an existing Task", async () => {
+    const store = fakeStore(graph());
+    const applied = await applyFailedPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ exitCode: 1, task: "Task: T1" }),
+      reservedSlot: undefined,
+      now: NOW,
+    });
+
+    expect(store.current().tasks[0]!.review_status).toBe("pending");
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("no reserved Task authority"),
+    ]);
   });
 
   it("says so and stores nothing when the reviewer names no known task", async () => {
@@ -407,7 +673,11 @@ describe("applyFailedPiResult", () => {
     });
 
     expect(store.current().executing_tasks).toEqual([]);
-    expect(applied.processingErrors).toEqual([]);
+    // The reservation WAS released, but the Task was guessed rather than named:
+    // an inference is reported to the harness and logged, never silently waved through.
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("inferred from the sole executing Task"),
+    ]);
     expect(applied.log.join("\n")).toContain("inferred from the sole executing Task");
   });
 
@@ -430,9 +700,35 @@ describe("applyFailedPiResult", () => {
     expect(applied.processingErrors[0]).toContain("ambiguous");
   });
 
-  it("marks a failed spec-check as evidence_capture_failed", async () => {
-    const store = fakeStore(graph());
+  it("marks an exactly reserved failed spec-check as evidence_capture_failed and clears its obsolete block", async () => {
+    const fixture = graphWithSpecCheckAuthority();
+    const store = fakeStore({
+      ...fixture.state,
+      spec_check: {
+        wave: 1, run_at: "earlier", verdict: "BLOCKED", critical_count: 1, high_count: 0,
+        critical_findings: ["earlier blocker"], high_findings: [], medium_findings: [],
+      },
+      wave_gates: {
+        "1": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: true },
+      },
+    });
     await applyFailedPiResult({
+      store,
+      agentType: "spec-check-invoker",
+      result: result({ agent: "spec-check-invoker", exitCode: 1 }),
+      reservedSlot: fixture.reservedSlot,
+      now: NOW,
+    });
+
+    expect(store.current().spec_check).toMatchObject({ verdict: "EVIDENCE_CAPTURE_FAILED", wave: 1 });
+    expect(store.current().wave_gates["1"]?.blocked).toBe(false);
+  });
+
+  it("rejects an unreserved failed spec-check without changing current Wave evidence", async () => {
+    const fixture = graphWithSpecCheckAuthority();
+    const store = fakeStore(fixture.state);
+
+    const applied = await applyFailedPiResult({
       store,
       agentType: "spec-check-invoker",
       result: result({ agent: "spec-check-invoker", exitCode: 1 }),
@@ -440,7 +736,10 @@ describe("applyFailedPiResult", () => {
       now: NOW,
     });
 
-    expect(store.current().spec_check).toMatchObject({ verdict: "EVIDENCE_CAPTURE_FAILED", wave: 1 });
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("no exact reserved Wave slot/attempt authority"),
+    ]);
+    expect(store.current()).toEqual(fixture.state);
   });
 
   it("carries the harness failure signals into the stored diagnostic", async () => {
@@ -589,7 +888,7 @@ describe("applyReviewPiResult", () => {
     expect(store.current().tasks[0]!.review_status).toBe("pending");
   });
 
-  it("reports a Task disappearing before malformed evidence application", async () => {
+  it("reports a Task disappearing through the shared locked evidence application", async () => {
     const initial = parsedGraph(graph());
     const withoutTask = parsedGraph({ ...initial, tasks: [] });
     const store: TaskGraphStore = {
@@ -607,8 +906,64 @@ describe("applyReviewPiResult", () => {
     });
 
     expect(applied.processingErrors).toEqual([
-      expect.stringContaining("disappeared before malformed evidence application"),
+      expect.stringContaining("disappeared before evidence application"),
     ]);
+  });
+
+  it("rejects authority-free malformed evidence for a retired generation-aware review", async () => {
+    const base = graph();
+    const retired = graph({
+      tasks: [{
+        ...base.tasks[0]!,
+        review_status: "passed",
+        review_generation: 2,
+      }],
+    });
+    const store = fakeStore(retired);
+
+    const applied = await applyReviewPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ messages: [{ role: 42 }] }),
+      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      parentPrompt: "",
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("no exact current or retained review-generation authority"),
+    ]);
+    expect(store.current()).toEqual(parsedGraph(retired));
+  });
+
+  it("rejects authority-free malformed evidence when accepted review authority is retained", async () => {
+    const base = graph();
+    const accepted = graph({
+      tasks: [{
+        ...base.tasks[0]!,
+        review_status: "passed",
+        accepted_review_authority: {
+          generation: 2,
+          packet_id: "e".repeat(64),
+          head_sha: "5".repeat(40),
+          scope: ["engine/src/x.ts"],
+        },
+      }],
+    });
+    const store = fakeStore(accepted);
+    expect(currentPiReviewAuthority(store.current(), "code-reviewer", "T1")).toBeNull();
+
+    const applied = await applyReviewPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ messages: [{ role: 42 }] }),
+      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      parentPrompt: "",
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("no exact current or retained review-generation authority"),
+    ]);
+    expect(store.current()).toEqual(parsedGraph(accepted));
   });
 
   it("records an evidence failure for malformed reviewer messages", async () => {
@@ -628,17 +983,19 @@ describe("applyReviewPiResult", () => {
 describe("applySpecCheckPiResult", () => {
   const specCheckText = (critical: number, wave: number | null = 1) => [
     ...(wave === null ? [] : [`SPEC_CHECK_WAVE: ${wave}`]),
+    ...(critical > 0 ? ["CRITICAL: requirement R1 is unimplemented"] : []),
     `SPEC_CHECK_CRITICAL_COUNT: ${critical}`,
     "SPEC_CHECK_HIGH_COUNT: 0",
     `SPEC_CHECK_VERDICT: ${critical > 0 ? "BLOCKED" : "PASSED"}`,
-    ...(critical > 0 ? ["CRITICAL: requirement R1 is unimplemented"] : []),
   ].join("\n");
 
   it("derives blocked from the stored spec-check rather than asserting it", async () => {
-    const store = fakeStore(graph());
+    const fixture = graphWithSpecCheckAuthority();
+    const store = fakeStore(fixture.state);
     await applySpecCheckPiResult({
       store,
       result: result({ agent: "spec-check-invoker", messages: assistantText(specCheckText(1)) }),
+      reservedSlot: fixture.reservedSlot,
       now: NOW,
     });
 
@@ -646,30 +1003,54 @@ describe("applySpecCheckPiResult", () => {
   });
 
   it("leaves the gate unblocked when the spec-check reports no critical", async () => {
-    const store = fakeStore(graph());
+    const fixture = graphWithSpecCheckAuthority();
+    const store = fakeStore(fixture.state);
     await applySpecCheckPiResult({
       store,
       result: result({ agent: "spec-check-invoker", messages: assistantText(specCheckText(0)) }),
+      reservedSlot: fixture.reservedSlot,
       now: NOW,
     });
 
     expect(store.current().wave_gates["1"]?.blocked ?? false).toBe(false);
   });
 
-  it("marks malformed spec-check messages as evidence_capture_failed", async () => {
-    const store = fakeStore(graph());
+  it.each([
+    ["malformed messages", [{ role: 42 }]],
+    ["count-mismatched evidence", assistantText([
+      "SPEC_CHECK_WAVE: 1",
+      "CRITICAL: uncounted blocker",
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+    ].join("\n"))],
+  ])("replaces a prior block with evidence_capture_failed for %s", async (_label, messages) => {
+    const fixture = graphWithSpecCheckAuthority();
+    const store = fakeStore({
+      ...fixture.state,
+      spec_check: {
+        wave: 1, run_at: "earlier", verdict: "BLOCKED", critical_count: 1, high_count: 0,
+        critical_findings: ["earlier blocker"], high_findings: [], medium_findings: [],
+      },
+      wave_gates: {
+        "1": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: true },
+      },
+    });
     await applySpecCheckPiResult({
       store,
-      result: result({ agent: "spec-check-invoker", messages: [{ role: 42 }] }),
+      result: result({ agent: "spec-check-invoker", messages }),
+      reservedSlot: fixture.reservedSlot,
       now: NOW,
     });
 
     expect(store.current().spec_check).toMatchObject({ verdict: "EVIDENCE_CAPTURE_FAILED" });
+    expect(store.current().wave_gates["1"]?.blocked).toBe(false);
   });
 
   it("uses locked current_wave when the transcript omits its Wave despite a stale load", async () => {
-    const stale = parsedGraph(graph({ current_wave: 1 }));
-    let current = parsedGraph(graph({ current_wave: 3, wave_gates: {} }));
+    const stale = graphWithSpecCheckAuthority(1).state;
+    const currentFixture = graphWithSpecCheckAuthority(3);
+    let current = currentFixture.state;
     let loadCount = 0;
     const store: TaskGraphStore & { current(): TaskGraph } = {
       load: () => { loadCount += 1; return stale; },
@@ -685,13 +1066,96 @@ describe("applySpecCheckPiResult", () => {
     await applySpecCheckPiResult({
       store,
       result: result({ agent: "spec-check-invoker", messages: assistantText(specCheckText(1, null)) }),
+      reservedSlot: currentFixture.reservedSlot,
       now: NOW,
     });
 
-    expect(loadCount).toBe(0);
+    expect(loadCount).toBe(1);
     expect(store.current().spec_check).toMatchObject({ wave: 3, verdict: "BLOCKED" });
     expect(store.current().wave_gates["3"]).toMatchObject({ blocked: true });
     expect(store.current().wave_gates["1"]).toBeUndefined();
+  });
+
+  it("rejects exact reserved evidence after the bound plan bytes change", async () => {
+    const root = canonicalTempDir("loom-pi-spec-byte-drift-");
+    const specPath = join(root, "spec.md");
+    const planPath = join(root, "plan.md");
+    writeFileSync(specPath, "spec");
+    writeFileSync(planPath, "plan before");
+    const specDigest = parseArtifactDigest(createHash("sha256").update("spec").digest("hex"));
+    const planDigest = parseArtifactDigest(createHash("sha256").update("plan before").digest("hex"));
+    if (!specDigest.ok || !planDigest.ok) throw new Error("invalid document digest fixture");
+    const state = parsedGraph(graph({
+      spec_file: specPath,
+      plan_file: planPath,
+      current_wave: 1,
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: WAVE_RUN_ID, wave: 1,
+        authorityDigest: WAVE_AUTHORITY_DIGEST, revision: 1, terminalOutcome: null,
+      },
+      wave_review_epoch: {
+        runId: WAVE_RUN_ID, wave: 1, batchEpoch: WAVE_BATCH_EPOCH,
+        specCheckDocuments: {
+          spec: { path: specPath, contentDigest: specDigest.value },
+          plan: { path: planPath, contentDigest: planDigest.value },
+        },
+        specCheckSlotAuthority: { slot_id: "wave-slot:spec-check", attempted: 1 },
+      },
+    }));
+    const authority = currentPiSpecCheckAuthority(state);
+    if (authority === null) throw new Error("spec-check fixture lacks authority");
+    const store = fakeStore(state);
+    writeFileSync(planPath, "plan after");
+    try {
+      const applied = await applySpecCheckPiResult({
+        store,
+        result: result({ agent: "spec-check-invoker", messages: assistantText(specCheckText(0)) }),
+        reservedSlot: { agentType: "spec-check-invoker", taskId: null, specCheckAuthority: authority },
+        now: NOW,
+      });
+
+      expect(applied.processingErrors).toEqual([
+        expect.stringContaining("spec/plan bytes do not match"),
+      ]);
+      expect(store.current().spec_check).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a stale reserved slot/attempt without changing current Wave state", async () => {
+    const stale = graphWithSpecCheckAuthority(1);
+    const current = graphWithSpecCheckAuthority(2);
+    const store = fakeStore(current.state);
+
+    const applied = await applySpecCheckPiResult({
+      store,
+      result: result({ agent: "spec-check-invoker", messages: assistantText(specCheckText(1, 2)) }),
+      reservedSlot: stale.reservedSlot,
+      now: NOW,
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("does not match current"),
+    ]);
+    expect(store.current()).toEqual(current.state);
+  });
+
+  it("rejects unreserved spec-check evidence without mutating protected state", async () => {
+    const current = graphWithSpecCheckAuthority();
+    const store = fakeStore(current.state);
+
+    const applied = await applySpecCheckPiResult({
+      store,
+      result: result({ agent: "spec-check-invoker", messages: assistantText(specCheckText(0)) }),
+      reservedSlot: undefined,
+      now: NOW,
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("no exact reserved Wave slot/attempt authority"),
+    ]);
+    expect(store.current()).toEqual(current.state);
   });
 });
 
@@ -930,10 +1394,36 @@ describe("applyImplementationPiResult", () => {
     // Not routed through the untrusted resolution: no verdict was minted.
     expect(task.test_result).toBeUndefined();
     expect(store.current().executing_tasks).toEqual([]);
-    // Reported on the log, not as a processing error: the capture failed but
-    // the orchestration step itself completed and left the task retryable.
-    expect(outcome.processingErrors).toEqual([]);
+    // Malformed evidence is a processing failure, not a completed step: the
+    // transcript produced no evidence at all, and reporting success here is how
+    // the parent ends up believing a Task's evidence had been captured.
+    expect(outcome.processingErrors).toEqual([expect.stringContaining("evidence was not accepted")]);
     expect(outcome.log.join("\n")).toContain("evidence was not accepted");
+  });
+
+  /**
+   * Attribution by inference is the one case where the engine could not tell
+   * which Task a result answers for. Crediting the sole executing Task may be
+   * the right guess, but a guess must never read as a clean processing.
+   */
+  it("reports an inferred Task attribution as a processing error even when the verdict applied", async () => {
+    const store = fakeStore(regressionWaivedRecoveryGraph());
+
+    const applied = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({
+        agent: "code-implementer-agent",
+        task: "implementation completed",
+        messages: assistantText("All requested work completed."),
+      }),
+      reservedSlot: undefined,
+      parentPrompt: "",
+    });
+
+    expect(applied.processingErrors).toEqual([expect.stringContaining("credited on that guess")]);
+    expect(store.current().executing_tasks).toEqual([]);
   });
 
   /**

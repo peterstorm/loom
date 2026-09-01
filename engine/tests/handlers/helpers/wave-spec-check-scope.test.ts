@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -6,14 +6,16 @@ import fc from "fast-check";
 import { createRunDirectory } from "../../../src/orchestration/run-directory-handle";
 import {
   handleWaveReviewContext,
+  installWaveReviewRuns,
   waveRequests,
   waveSpecCheckScope,
 } from "../../../src/handlers/helpers/programs/wave-gate";
 import type { RegisteredWaveGateProgram } from "../../../src/handlers/helpers/programs/helpers";
 import type { TaskGraph } from "../../../src/types";
-import { parseTaskGraph } from "../../../src/state-manager";
+import { parseTaskGraph, StateManager } from "../../../src/state-manager";
 import type { AgentRequestAuthority } from "../../../src/core/orchestration-contract";
 import { taskFixture } from "../../fixtures/task-lifecycle";
+import { WAVE_REVIEW_AGENTS } from "../../../src/core/model-profiles";
 
 const cleanup: string[] = [];
 afterEach(() => { for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true }); });
@@ -55,8 +57,8 @@ describe("registered Wave spec-check scope", () => {
       current_wave: 1,
       phase_artifacts: {},
       skipped_phases: [],
-      spec_file: "spec.md",
-      plan_file: "plan.md",
+      spec_file: null,
+      plan_file: null,
       wave_gates: {},
       tasks: [
         taskFixture({
@@ -116,5 +118,332 @@ describe("registered Wave spec-check scope", () => {
     expect(scope[0]?.declaredFiles).toEqual(["src/contribution.ts"]);
     expect(scope[1]?.completionAnchors).toEqual(["FR-1"]);
     expect(Object.isFrozen(scope)).toBe(true);
+  });
+
+  it("installs the exact pure preparation roster, contexts, epoch, and reviewer slots", async () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-wave-authority-install-"));
+    cleanup.push(root);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot);
+    const created = createRunDirectory(runsRoot, "run.authority-install");
+    if (!created.ok) throw new Error(created.error.message);
+    const registration: RegisteredWaveGateProgram = {
+      schemaVersion: 1,
+      kind: "wave-gate",
+      input: { wave: 1 },
+      taskIds: ["T1"],
+      authorityDigest: "a".repeat(64),
+    };
+    const parsed = parseTaskGraph({
+      spec_trace_version: 2,
+      current_phase: "execute",
+      current_wave: 1,
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      wave_gates: {},
+      active_wave_gate: {
+        schemaVersion: 1,
+        kind: "active-wave-gate",
+        runId: created.value.runId,
+        wave: 1,
+        authorityDigest: registration.authorityDigest,
+        revision: 0,
+        terminalOutcome: null,
+      },
+      tasks: [taskFixture({
+        id: "T1",
+        description: "review exact authority",
+        agent: "code-implementer-agent",
+        wave: 1,
+        status: "implemented",
+        depends_on: [],
+        review_generation: 3,
+        spec_anchors: ["FR-1"],
+        spec_contributions: [],
+        file_list: ["engine/src/core/wave-review-authority.ts"],
+      })],
+    });
+    if (!parsed.ok) throw new Error(parsed.error);
+    const statePath = join(root, "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify(parsed.value));
+    const manager = new StateManager(statePath);
+
+    const batch = waveRequests(created.value, registration, parsed.value, 1);
+    const authorities = batch.requests.map(({ authority }) => authority as AgentRequestAuthority);
+    expect(authorities.map(({ role }) => role)).toEqual([
+      "spec-check-invoker",
+      ...WAVE_REVIEW_AGENTS,
+    ]);
+    expect(authorities.map(({ modelProfile }) => modelProfile)).toEqual([
+      "general-review",
+      "general-review",
+      "focused-review",
+      "focused-review",
+      "focused-review",
+      "focused-review",
+    ]);
+    for (const authority of authorities) {
+      const context = handleWaveReviewContext(batch.packets, authority.contextDigest);
+      expect(context.kind).toBe("loaded");
+      if (context.kind !== "loaded") continue;
+      expect(context.value.runId).toBe(created.value.runId);
+      expect(context.value.batchEpoch).toBe(batch.batchEpoch);
+      expect(context.value.subject.role).toBe(authority.role);
+      expect(context.value.taskRun?.taskId ?? null).toBe(
+        authority.role === "spec-check-invoker" ? null : "T1",
+      );
+    }
+
+    const staleAuthorityPath = join(root, "stale_active_task_graph.json");
+    writeFileSync(staleAuthorityPath, JSON.stringify({
+      ...parsed.value,
+      active_wave_gate: { ...parsed.value.active_wave_gate!, authorityDigest: "b".repeat(64) },
+    }));
+    await expect(installWaveReviewRuns(new StateManager(staleAuthorityPath), registration, batch))
+      .rejects.toThrow("exact active Wave Gate authority");
+
+    const staleContextPath = join(root, "stale_packet_context_task_graph.json");
+    writeFileSync(staleContextPath, JSON.stringify({
+      ...parsed.value,
+      tasks: parsed.value.tasks.map((task) => ({
+        ...task,
+        test_result: { verdict: "trusted-pass" },
+      })),
+    }));
+    await expect(installWaveReviewRuns(new StateManager(staleContextPath), registration, batch))
+      .rejects.toThrow("packet context changed");
+
+    await installWaveReviewRuns(manager, registration, batch);
+
+    const installed = manager.load();
+    const specAuthority = authorities[0]!;
+    expect(installed.wave_review_epoch).toEqual({
+      runId: created.value.runId,
+      wave: 1,
+      batchEpoch: batch.batchEpoch,
+      specCheckDocuments: batch.specCheckDocuments,
+      specCheckSlotAuthority: { slot_id: specAuthority.slotId, attempted: 1 },
+    });
+    const run = installed.tasks[0]!.review_run!;
+    expect(run.generation).toBe(3);
+    expect(run.expected_agents).toEqual(WAVE_REVIEW_AGENTS);
+    expect(run.slot_authority).toEqual(WAVE_REVIEW_AGENTS.map((agent) => ({
+      agent,
+      slot_id: authorities.find(({ role }) => role === agent)!.slotId,
+      attempted: 1,
+    })));
+    expect(run.packet_id).toBe(batch.taskRuns[0]!.packetId);
+    expect(run.head_sha).toBe(batch.batchEpoch);
+
+    const acceptedSpecCheck = {
+      wave: 1,
+      run_at: "2026-08-30T00:00:00.000Z",
+      verdict: "PASSED" as const,
+      critical_count: 0,
+      high_count: 0,
+      critical_findings: [],
+      high_findings: [],
+      medium_findings: [],
+    };
+    await manager.update((locked) => ({
+      ...locked,
+      spec_check: acceptedSpecCheck,
+      wave_review_epoch: {
+        ...locked.wave_review_epoch!,
+        specCheckSlotAuthority: { ...locked.wave_review_epoch!.specCheckSlotAuthority!, attempted: 2 },
+      },
+    }));
+
+    await installWaveReviewRuns(manager, registration, batch);
+    expect(manager.load().spec_check).toEqual(acceptedSpecCheck);
+    expect(manager.load().wave_review_epoch?.specCheckSlotAuthority?.attempted).toBe(2);
+
+    const conflictingGraph = parseTaskGraph({
+      ...parsed.value,
+      tasks: parsed.value.tasks.map((task) => ({ ...task, review_generation: (task.review_generation ?? 0) + 1 })),
+    });
+    if (!conflictingGraph.ok) throw new Error(conflictingGraph.error);
+    const conflictingBatch = waveRequests(created.value, registration, conflictingGraph.value, 1);
+    expect(conflictingBatch.batchEpoch).not.toBe(batch.batchEpoch);
+    await expect(installWaveReviewRuns(manager, registration, conflictingBatch))
+      .rejects.toThrow("packet context changed");
+    expect(manager.load().spec_check).toEqual(acceptedSpecCheck);
+    expect(manager.load().wave_review_epoch?.batchEpoch).toBe(batch.batchEpoch);
+  });
+
+  it("moves the batch epoch after either exact spec or plan bytes change", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-wave-document-bytes-"));
+    cleanup.push(root);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot);
+    const created = createRunDirectory(runsRoot, "run.document-bytes");
+    if (!created.ok) throw new Error(created.error.message);
+    const specFile = join(root, "spec.md");
+    const planFile = join(root, "plan.md");
+    writeFileSync(specFile, "spec one");
+    writeFileSync(planFile, "plan one");
+    const parsed = parseTaskGraph({
+      spec_trace_version: 2,
+      current_phase: "execute",
+      current_wave: 1,
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: specFile,
+      plan_file: planFile,
+      wave_gates: {},
+      tasks: [taskFixture({
+        id: "T1", description: "bind documents", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", depends_on: [], spec_anchors: ["FR-1"], spec_contributions: [], file_list: [],
+      })],
+    });
+    if (!parsed.ok) throw new Error(parsed.error);
+    const registration: RegisteredWaveGateProgram = {
+      schemaVersion: 1,
+      kind: "wave-gate",
+      input: { wave: 1 },
+      taskIds: ["T1"],
+      authorityDigest: "a".repeat(64),
+    };
+
+    const first = waveRequests(created.value, registration, parsed.value, 1);
+    writeFileSync(specFile, "spec two");
+    const specChanged = waveRequests(created.value, registration, parsed.value, 1);
+    writeFileSync(specFile, "spec one");
+    writeFileSync(planFile, "plan two");
+    const planChanged = waveRequests(created.value, registration, parsed.value, 1);
+
+    expect(specChanged.batchEpoch).not.toBe(first.batchEpoch);
+    expect(specChanged.specCheckDocuments.spec.contentDigest)
+      .not.toBe(first.specCheckDocuments.spec.contentDigest);
+    expect(planChanged.batchEpoch).not.toBe(first.batchEpoch);
+    expect(planChanged.specCheckDocuments.plan.contentDigest)
+      .not.toBe(first.specCheckDocuments.plan.contentDigest);
+  });
+
+  it("rejects installation when document bytes drift after unlocked observation", async () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-wave-document-install-"));
+    cleanup.push(root);
+    const runsRoot = join(root, "runs");
+    mkdirSync(runsRoot);
+    const created = createRunDirectory(runsRoot, "run.document-install");
+    if (!created.ok) throw new Error(created.error.message);
+    const specFile = join(root, "spec.md");
+    const planFile = join(root, "plan.md");
+    writeFileSync(specFile, "spec");
+    writeFileSync(planFile, "plan before");
+    const registration: RegisteredWaveGateProgram = {
+      schemaVersion: 1,
+      kind: "wave-gate",
+      input: { wave: 1 },
+      taskIds: ["T1"],
+      authorityDigest: "a".repeat(64),
+    };
+    const parsed = parseTaskGraph({
+      spec_trace_version: 2,
+      current_phase: "execute",
+      current_wave: 1,
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: specFile,
+      plan_file: planFile,
+      wave_gates: {},
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: created.value.runId,
+        wave: 1, authorityDigest: registration.authorityDigest, revision: 0, terminalOutcome: null,
+      },
+      tasks: [taskFixture({
+        id: "T1", description: "reject stale documents", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", depends_on: [], spec_anchors: ["FR-1"], spec_contributions: [], file_list: [],
+      })],
+    });
+    if (!parsed.ok) throw new Error(parsed.error);
+    const statePath = join(root, "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify(parsed.value));
+    const manager = new StateManager(statePath);
+    const batch = waveRequests(created.value, registration, parsed.value, 1);
+    writeFileSync(planFile, "plan after");
+
+    await expect(installWaveReviewRuns(manager, registration, batch))
+      .rejects.toThrow("spec-check documents changed");
+    expect(manager.load().wave_review_epoch).toBeUndefined();
+  });
+});
+
+/**
+ * What a Wave reviewer slot IS an authority over.
+ *
+ * Slot and request identity used to hash the whole `registration` object, so
+ * adding recovery bookkeeping (`restart`, `orphanRecovery`) or merely re-ordering
+ * a caller's JSON keys re-derived every slot in the Wave — orphaning captures
+ * already written against the previous ids, and making a slot's identity depend
+ * on anything other than the reviewed Wave.
+ */
+describe("Wave reviewer slot identity projection", () => {
+  const graph = parseTaskGraph({
+    spec_trace_version: 2,
+    current_phase: "execute",
+    current_wave: 1,
+    phase_artifacts: {},
+    skipped_phases: [],
+    spec_file: null,
+    plan_file: null,
+    wave_gates: {},
+    tasks: [taskFixture({
+      id: "T1", description: "review exact authority", agent: "code-implementer-agent", wave: 1,
+      status: "implemented", depends_on: [], review_generation: 1, spec_anchors: ["FR-1"],
+      spec_contributions: [], file_list: ["engine/src/core/wave-review-authority.ts"],
+    })],
+  });
+  if (!graph.ok) throw new Error(`wave slot fixture rejected: ${graph.error}`);
+  const preparedGraph = graph.value;
+
+  const plain: RegisteredWaveGateProgram = {
+    schemaVersion: 1,
+    kind: "wave-gate",
+    input: { wave: 1 },
+    taskIds: ["T1"],
+    authorityDigest: "a".repeat(64),
+  };
+
+  function identitiesFor(registration: RegisteredWaveGateProgram, attempt: 1 | 2): readonly string[] {
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-slot-identity-"));
+    cleanup.push(runsRoot);
+    const created = createRunDirectory(runsRoot, "run.identity");
+    if (!created.ok) throw new Error(created.error.message);
+    return waveRequests(created.value, registration, preparedGraph, attempt).requests.map(({ authority }) =>
+      `${(authority as AgentRequestAuthority).slotId}@${(authority as AgentRequestAuthority).requestId}`);
+  }
+
+  it("is unchanged by recovery bookkeeping or by the caller's key order", () => {
+    const baseline = identitiesFor(plain, 1);
+
+    const restarted: RegisteredWaveGateProgram = {
+      ...plain,
+      restart: { previousRunId: "run.previous", exhaustedSlots: ["wave-slot:retired"] },
+    };
+    const orphanRecovered: RegisteredWaveGateProgram = {
+      ...plain,
+      orphanRecovery: { previousRunId: "run.previous", previousAuthorityDigest: "f".repeat(64) },
+    };
+    const reordered: RegisteredWaveGateProgram = {
+      authorityDigest: plain.authorityDigest,
+      taskIds: plain.taskIds,
+      input: plain.input,
+      kind: plain.kind,
+      schemaVersion: plain.schemaVersion,
+    } as RegisteredWaveGateProgram;
+
+    expect(identitiesFor(restarted, 1)).toEqual(baseline);
+    expect(identitiesFor(orphanRecovered, 1)).toEqual(baseline);
+    expect(identitiesFor(reordered, 1)).toEqual(baseline);
+  });
+
+  it("still moves when the reviewed authority itself moves", () => {
+    const baseline = identitiesFor(plain, 1);
+
+    expect(identitiesFor({ ...plain, authorityDigest: "b".repeat(64) }, 1)).not.toEqual(baseline);
+    expect(identitiesFor(plain, 2)).not.toEqual(baseline);
   });
 });

@@ -1,96 +1,129 @@
 /**
  * Auto-store spec-check findings when spec-check-invoker completes.
- * Extracts CRITICAL/HIGH/MEDIUM findings and severity counts.
- * Blocks wave if CRITICAL_COUNT > 0.
+ * Modern Wave evidence requires exact capture-correlated request authority.
  */
 
-import type { HookHandler, SubagentStopInput } from "../../types";
 import { reconcileWaveBlock } from "../../core/wave-gate-model";
-import { parseSpecCheckOutput, reconcileSpecCheck } from "../../core/spec-check";
+import {
+  parseSpecCheckOutput,
+  reconcileSpecCheck,
+  specCheckAuthorityProblem,
+  type SpecCheckRequestAuthority,
+} from "../../core/spec-check";
+import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 export { parseSpecCheckOutput } from "../../core/spec-check";
 import { StateManager } from "../../state-manager";
+import { passthroughResult, type HookHandler, type HookResult } from "../../types";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
-import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
-import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
+import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
 import { stripNamespace } from "../../utils/strip-namespace";
+import { observeWaveSpecCheckDocuments } from "../../orchestration/wave-spec-check-documents";
 
-const handler: HookHandler = async (stdin) => {
-  // Guard the standalone CLI route: dispatch parses stdin before calling
-  // handlers, but this handler is also registered directly (KNOWN_HANDLERS),
-  // where a bare JSON.parse throw would surface as an uncontextualized
-  // "Hook error" (mirrors cleanup-subagent-flag / update-task-status).
-  let input: SubagentStopInput;
-  try {
-    input = JSON.parse(stdin);
-  } catch (e) {
+export const runStoreSpecCheckFindings = async (
+  stdin: string,
+  _args: string[],
+  requestAuthority?: SpecCheckRequestAuthority,
+): Promise<HookResult> => {
+  const parsedInput = parseSubagentStopStdin(stdin);
+  if (!parsedInput.ok) {
     return {
       kind: "error",
-      message: `store-spec-check-findings: malformed SubagentStop input — spec-check findings NOT stored: ${e instanceof Error ? e.message : String(e)}`,
+      message: `store-spec-check-findings: invalid SubagentStop input — spec-check findings NOT stored: ${parsedInput.error}`,
+    };
+  }
+  const input = parsedInput.value;
+  const agentType = stripNamespace(resolveAgentType(input));
+  if (agentType === "") {
+    return {
+      kind: "error",
+      message: "store-spec-check-findings: SubagentStop Agent identity is unavailable — spec-check findings NOT stored",
+    };
+  }
+  if (agentType !== "spec-check-invoker") return { kind: "passthrough" };
+
+  let manager: StateManager | null;
+  try {
+    manager = StateManager.fromSession(input.session_id);
+  } catch (error) {
+    return {
+      kind: "error",
+      message: `store-spec-check-findings: session TaskGraph authority unavailable — spec-check findings NOT stored: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  if (manager === null) {
+    return {
+      kind: "error",
+      message: `store-spec-check-findings: no TaskGraph authority for session ${JSON.stringify(input.session_id)} — spec-check findings NOT stored`,
     };
   }
 
-  const agentType = stripNamespace(input.agent_type ?? "");
-  if (agentType !== "spec-check-invoker") return { kind: "passthrough" };
-
-  let mgr: StateManager | null;
+  const resolvedTranscriptPath = resolveAgentTranscriptPath(input);
+  const rawPath = resolvedTranscriptPath ?? input.agent_transcript_path ?? "";
+  let transcript: string | null = null;
+  let transcriptFailure: string | null = resolvedTranscriptPath === null
+    ? `spec-check transcript is unreadable: no transcript can be located at ${rawPath || "<unset>"}`
+    : null;
+  if (resolvedTranscriptPath !== null) {
+    try {
+      transcript = await readTranscriptWithRetry(resolvedTranscriptPath, /SPEC_CHECK_CRITICAL_COUNT:\s*\d+/);
+    } catch (error) {
+      transcriptFailure = `spec-check transcript is unreadable: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+  const findings = parseSpecCheckOutput(transcript ?? "");
+  let documents;
   try {
-    mgr = StateManager.fromSession(input.session_id);
+    const observedState = manager.load();
+    documents = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
   } catch (error) {
-    return passthroughDiagnostic(
-      `store-spec-check-findings: session TaskGraph authority unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
-    );
+    return {
+      kind: "error",
+      message: `store-spec-check-findings: spec/plan authority is unreadable — spec-check findings NOT stored: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
-  if (!mgr) return { kind: "passthrough" };
-
-  // Resolved, not read off the payload: on a harness that sends no
-  // `agent_transcript_path` every spec-check would otherwise land in the
-  // evidence_capture_failed arm below, blocking every wave gate on a
-  // capture failure rather than on the spec.
-  const rawPath = resolveAgentTranscriptPath(input) ?? input.agent_transcript_path ?? "";
-  const transcript = await readTranscriptWithRetry(rawPath, /SPEC_CHECK_CRITICAL_COUNT:\s*\d+/);
-  if (!transcript) {
-    // Fail CLOSED, mirroring the missing-count path below: recording nothing
-    // here would let wave-gate check 4 pass vacuously as "skipped (no
-    // spec-check data)" — an unreadable/empty transcript must read as a
-    // capture failure, never as a clean skip.
-    process.stderr.write(
-      `WARNING: spec-check transcript empty or unreadable (path=${rawPath || "<unset>"}) — marking evidence_capture_failed\n`,
-    );
-    const state = mgr.load();
-    await mgr.update((s) => ({
-      ...s,
-      spec_check: {
-        wave: state.current_wave ?? 1,
-        run_at: new Date().toISOString(),
-        verdict: "EVIDENCE_CAPTURE_FAILED",
-        error: "spec-check agent transcript empty or unreadable - re-run /wave-gate",
+  const applied = await manager.updateAndReturn((state) => {
+    const authorityProblem = specCheckAuthorityProblem(state, requestAuthority, documents);
+    if (authorityProblem !== null) {
+      return {
+        state,
+        value: {
+          kind: "error" as const,
+          message: `store-spec-check-findings: ${authorityProblem} — spec-check findings NOT stored`,
+        },
+      };
+    }
+    const wave = state.wave_review_epoch?.wave ?? findings.wave ?? state.current_wave ?? 1;
+    const resolution = transcriptFailure === null
+      ? reconcileSpecCheck(findings, wave, new Date().toISOString())
+      : {
+          kind: "evidence-failed" as const,
+          specCheck: {
+            wave,
+            run_at: new Date().toISOString(),
+            verdict: "EVIDENCE_CAPTURE_FAILED" as const,
+            error: `${transcriptFailure} - re-run /wave-gate`,
+          },
+        };
+    const value = resolution.kind === "evidence-failed"
+      ? passthroughResult(`WARNING: ${resolution.specCheck.error} — marking evidence_capture_failed`)
+      : passthroughResult(
+          `Spec-check: ${resolution.specCheck.critical_count} critical, ${resolution.specCheck.high_count} high`,
+        );
+    return {
+      state: {
+        ...state,
+        spec_check: resolution.specCheck,
+        wave_gates: reconcileWaveBlock(state.wave_gates, state.tasks, resolution.specCheck, wave),
       },
-    }));
-    return { kind: "passthrough" };
+      value,
+    };
+  });
+  if (applied.kind === "passthrough" && applied.systemMessage !== undefined) {
+    process.stderr.write(`${applied.systemMessage}\n`);
   }
-
-  const findings = parseSpecCheckOutput(transcript);
-  const state = mgr.load();
-  const wave = findings.wave ?? state.current_wave ?? 1;
-
-  const resolution = reconcileSpecCheck(findings, wave, new Date().toISOString());
-  if (resolution.kind === "evidence-failed") {
-    process.stderr.write(`WARNING: ${resolution.specCheck.error} — marking evidence_capture_failed\n`);
-    await mgr.update((s) => ({ ...s, spec_check: resolution.specCheck }));
-    return { kind: "passthrough" };
-  }
-
-  // `blocked` is DERIVED from the freshly stored spec-check, never asserted:
-  // `wave-gate-model.waveHasBlockCause` is documented as the only copy of the
-  // rule, and a literal `blocked: true` here was a second copy that could not
-  // clear the flag when the cause went away.
-  await mgr.update((s) => ({
-    ...s,
-    spec_check: resolution.specCheck,
-    wave_gates: reconcileWaveBlock(s.wave_gates, s.tasks, resolution.specCheck, wave),
-  }));
-
-  return passthroughDiagnostic(`Spec-check: ${resolution.specCheck.critical_count} critical, ${resolution.specCheck.high_count} high\n`);
+  return applied;
 };
+
+const handler: HookHandler = (stdin, args) => runStoreSpecCheckFindings(stdin, args);
 
 export default handler;

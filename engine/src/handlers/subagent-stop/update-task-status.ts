@@ -11,7 +11,7 @@
  */
 
 import { readFileSync, realpathSync } from "node:fs";
-import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
+import type { HookHandler, HookResult } from "../../types";
 import { legacyTestsPassedNote } from "../../types";
 import { IMPL_AGENTS, machinesDir } from "../../config";
 import { StateManager } from "../../state-manager";
@@ -25,6 +25,7 @@ import {
 import { parseTranscript } from "../../parsers/parse-transcript";
 import { parseFilesModified } from "../../parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../parsers/parse-bash-test-output";
+import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 import * as git from "../../utils/git";
 import {
   epochOf,
@@ -156,20 +157,25 @@ export const runUpdateTaskStatus = async (
   // handlers, but this handler is also registered directly (KNOWN_HANDLERS),
   // where a bare JSON.parse throw would surface as an uncontextualized
   // "Hook error" (mirrors cleanup-subagent-flag).
-  let input: SubagentStopInput;
-  try {
-    input = JSON.parse(stdin);
-  } catch (e) {
+  const parsedInput = parseSubagentStopStdin(stdin);
+  if (!parsedInput.ok) {
     return {
       kind: "error",
-      message: `update-task-status: malformed SubagentStop input — task status and test evidence NOT updated: ${e instanceof Error ? e.message : String(e)}`,
+      message: `update-task-status: invalid SubagentStop input — task status and test evidence NOT updated: ${parsedInput.error}`,
     };
   }
+  const input = parsedInput.value;
   // Claude Code does not send agent_type; fall back to the metadata the
   // harness writes beside the transcript. This handler is also registered
   // standalone (KNOWN_HANDLERS), so it cannot assume the dispatcher already
   // resolved it.
   const agentType = stripNamespace(resolveAgentType(input));
+  if (agentType === "" && authorityObservation?.kind !== "authority-observed") {
+    return {
+      kind: "error",
+      message: "update-task-status: SubagentStop Agent identity is unavailable — task status and test evidence NOT updated",
+    };
+  }
 
   // A parsed sidecar is stronger routing authority than optional Claude
   // agent_type metadata. Dispatch passes the retained snapshot before cleanup;
@@ -187,7 +193,12 @@ export const runUpdateTaskStatus = async (
       message: `update-task-status: session TaskGraph authority unavailable: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
-  if (!mgr) return { kind: "passthrough" };
+  if (!mgr) {
+    return {
+      kind: "error",
+      message: `update-task-status: no TaskGraph authority for session ${JSON.stringify(input.session_id)} — task status and test evidence NOT updated`,
+    };
+  }
 
   const authority = authorityObservation?.kind === "authority-observed"
     ? authorityObservation.sidecar.authority
@@ -239,10 +250,12 @@ export const runUpdateTaskStatus = async (
   }
 
   // Parse transcript (read file content, then parse). The path is RESOLVED,
-  // not read off the payload: a supplied `agent_transcript_path` wins, and a
-  // harness that sends none falls back to the derived on-disk location. This
-  // Claude's SubagentStop settlement requires this transcript, so an
-  // unlocatable path costs the whole record — see utils/agent-transcript-path.
+  // not read off the payload: an available supplied `agent_transcript_path`
+  // wins; an unavailable or absent supplied path falls back to the derived
+  // on-disk location. Exact modern Claude settlement requires this transcript,
+  // so an unlocatable path becomes an infrastructure receipt. Legacy compatibility
+  // may continue with empty content only to infer and quarantine one exact
+  // executing Task — never to grant positive completion authority.
   const transcriptPath = resolveAgentTranscriptPath(input);
   if (authority !== null && transcriptPath === null) {
     return settleModernTranscriptUnavailable(
@@ -420,7 +433,7 @@ export const runUpdateTaskStatus = async (
   // A failed dispatcher snapshot means ledger contents are UNKNOWN — say so
   // and let resolveTestEvidence label the verdict snapshot-read-failed
   // instead of pretending the ledger was empty ("degraded").
-  const snapshotFailed = evidenceSnapshot?.kind === "snapshot-failed";
+  let snapshotFailed = evidenceSnapshot?.kind === "snapshot-failed";
   if (snapshotFailed) {
     process.stderr.write(
       `update-task-status: evidence snapshot for ${input.session_id} failed — ledger unavailable; verdict will be labeled snapshot-read-failed\n`,
@@ -436,14 +449,23 @@ export const runUpdateTaskStatus = async (
   // would be mislabeled "degraded"/"fallback" instead of reflecting that the
   // ledger was never read. Say so once, mirroring dispatch.ts.
   if (evidenceSnapshot === undefined && input.session_id && standaloneSessionId === null) {
+    snapshotFailed = true;
     process.stderr.write(
-      `update-task-status: invalid session id ${input.session_id} — ledger not read; verdict may be mislabeled\n`,
+      `update-task-status: invalid session id ${input.session_id} — ledger not read; verdict labeled snapshot-read-failed\n`,
     );
   }
   let records: readonly EvidenceRecord[] = [];
-  if (evidenceSnapshot === undefined) {
-    records = standaloneSessionId === null ? [] : readEvidence(standaloneSessionId);
-  } else if (evidenceSnapshot.kind === "snapshot") {
+  if (evidenceSnapshot === undefined && standaloneSessionId !== null) {
+    try {
+      records = readEvidence(standaloneSessionId);
+    } catch (error) {
+      snapshotFailed = true;
+      process.stderr.write(
+        `update-task-status: evidence ledger read failed for ${standaloneSessionId}: ` +
+        `${error instanceof Error ? error.message : String(error)}; verdict labeled snapshot-read-failed\n`,
+      );
+    }
+  } else if (evidenceSnapshot?.kind === "snapshot") {
     records = evidenceSnapshot.events;
   }
   const epochEvents = epochAgentId && epochAgentType

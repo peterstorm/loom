@@ -1,31 +1,48 @@
 /**
- * The SubagentStop handler that is the ONLY way a reviewer's findings enter the
- * task graph under Claude Code.
- *
- * Nothing executed this file before. `review-findings-parity.test.ts` asserted
- * on its SOURCE TEXT — that it contains the string `core/review-output"` and
- * three function names — which its own comment historically justified for
- * `pi/extension.ts` before the fake-runtime event test existed, and which the
- * directly-executable sibling inherited by proximity. The cost was measured:
- * six branches survived semantic
- * mutation with the whole suite green, including deleting the
- * `resolveAgentTranscriptPath` call, which reverts commit `0710b76` ("survive
- * the Task → Agent rename and stop failing silently"). A harness that sends no
- * `agent_transcript_path` then loses every reviewer's findings and the wave gate
- * reads a clean review that never happened.
- *
- * Every test here drives the real handler against a tmp state file and a planted
- * transcript, and asserts on the STATE it wrote plus the line it logged —
- * modelled on `store-spec-check-findings.test.ts`, which already does this for
- * the handler beside it.
+ * Drive the real Claude Code findings-ingestion handler against a temporary
+ * TaskGraph and planted transcript, then assert its durable state and stderr.
  */
 
 import { describe, expect, it, vi } from "vitest";
 import { mkdirSync, realpathSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import handler from "../../../src/handlers/subagent-stop/store-reviewer-findings";
+import handler, {
+  retainedReviewGeneration,
+  unavailableReviewerResolution,
+} from "../../../src/handlers/subagent-stop/store-reviewer-findings";
 import { SUBAGENT_DIR } from "../../../src/config";
+import {
+  parseBaseSha,
+  parseHeadSha,
+  parsePacketId,
+  parseReviewPath,
+} from "../../../src/core/review-packet";
+import type { Task } from "../../../src/types";
+
+const reviewPath = (raw: string) => {
+  const parsed = parseReviewPath(raw);
+  if (!parsed.ok) throw new Error(parsed.errors.join("; "));
+  return parsed.value;
+};
+
+const packetId = (raw: string) => {
+  const parsed = parsePacketId(raw);
+  if (parsed === null) throw new Error("invalid packet id fixture");
+  return parsed;
+};
+
+const baseSha = (raw: string) => {
+  const parsed = parseBaseSha(raw);
+  if (!parsed.ok) throw new Error(parsed.errors.join("; "));
+  return parsed.value;
+};
+
+const headSha = (raw: string) => {
+  const parsed = parseHeadSha(raw);
+  if (!parsed.ok) throw new Error(parsed.errors.join("; "));
+  return parsed.value;
+};
 
 const CLEAN = "### Machine Summary\nCRITICAL_COUNT: 0\nADVISORY_COUNT: 0";
 const BLOCKING = [
@@ -115,6 +132,43 @@ async function run(payload: Record<string, unknown>) {
 }
 
 describe("store-reviewer-findings — the Claude Code findings-ingestion shell", () => {
+  it("classifies unavailable evidence for a retired generation-aware review as stale", () => {
+    const retired = {
+      ...task("T1"),
+      review_status: "passed",
+      review_generation: 2,
+    } as unknown as Task;
+
+    expect(retainedReviewGeneration({
+      ...retired,
+      review_generation: undefined,
+      accepted_review_authority: {
+        generation: 3,
+        packet_id: "a".repeat(64),
+        head_sha: "1".repeat(40),
+        scope: [],
+      },
+    })).toBe(3);
+    expect(retainedReviewGeneration({
+      ...retired,
+      review_generation: undefined,
+      issued_review_packets: [{
+        task_id: "T1",
+        packet_id: packetId("b".repeat(64)),
+        packet_path: reviewPath("packets/T1.json"),
+        base_sha: baseSha("2".repeat(40)),
+        head_sha: headSha("3".repeat(40)),
+        scope: [],
+      }],
+    })).toBe(0);
+    expect(unavailableReviewerResolution(retired, "code-reviewer", "transcript unreadable"))
+      .toEqual({
+        kind: "ignored-stale",
+        agent: "code-reviewer",
+        message: "stale reviewer evidence ignored: transcript unreadable",
+      });
+  });
+
   it("leaves task state untouched for an explicitly marked standalone review", async () => {
     const f = fixture("standalone", BLOCKING, [task("T1")], "LOOM_REVIEW_CONTEXT: standalone\nReview the scope.");
     try {
@@ -379,11 +433,12 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
     // while stderr reported them recorded.
     const f = fixture("unknown-task", BLOCKING.replace(/T1/g, "T97"));
     try {
-      const { stderr } = await run({
+      const { result, stderr } = await run({
         session_id: f.session,
         agent_type: "code-reviewer",
         agent_transcript_path: f.transcriptPath,
       });
+      expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("not in the task graph") });
       expect(stderr).toContain("not in the task graph");
       expect(stderr).toContain("findings NOT stored");
       expect(f.state().tasks[0].review_status).toBe("pending");
@@ -413,11 +468,10 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
 
       const { result, stderr } = await pending;
 
-      // Discarded reviewer output must reach the operator, and on an exit-0
-      // hook only systemMessage does — so it carries the line stderr carries.
+      // Discarded reviewer output is a failed evidence command, never exit 0.
       expect(result).toEqual({
-        kind: "passthrough",
-        systemMessage: "[loom] store-reviewer-findings: code-reviewer review task T1 disappeared before evidence application — findings NOT stored",
+        kind: "error",
+        message: "[loom] store-reviewer-findings: code-reviewer review task T1 disappeared before evidence application — findings NOT stored",
       });
       expect(stderr).toContain("disappeared before evidence application");
       expect(stderr).toContain("findings NOT stored");
@@ -454,13 +508,49 @@ describe("store-reviewer-findings — the Claude Code findings-ingestion shell",
       agent_type: "code-reviewer",
       agent_transcript_path: "/nonexistent/transcript.jsonl",
     });
-    expect(result.kind).toBe("passthrough");
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/no task graph.*code-reviewer findings NOT stored/),
+    });
+    expect(stderr).toContain("findings NOT stored");
+  });
+
+  it("fails closed when a reviewer carries malformed session authority", async () => {
+    const { result, stderr } = await run({
+      session_id: "../../invalid reviewer session",
+      agent_type: "code-reviewer",
+      agent_transcript_path: "/nonexistent/transcript.jsonl",
+    });
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/no task graph.*findings NOT stored/),
+    });
+    expect(stderr).toContain("invalid session id");
     expect(stderr).toContain("findings NOT stored");
   });
 
   it("reports invalid stdin as an error rather than parsing nothing", async () => {
     const { result } = await run_raw("{ not json");
     expect(result.kind).toBe("error");
+  });
+
+  it.each(["null", "42", "[]", JSON.stringify({ session_id: "session-1", agent_type: 7 })])(
+    "rejects valid JSON outside the SubagentStop domain: %s",
+    async (stdin) => {
+      const { result } = await run_raw(stdin);
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringMatching(/invalid SubagentStop input.*findings NOT stored/),
+      });
+    },
+  );
+
+  it("rejects an unnameable direct result instead of treating it as a non-reviewer", async () => {
+    const { result } = await run_raw(JSON.stringify({ session_id: "session-1" }));
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/Agent identity is unavailable.*findings NOT stored/),
+    });
   });
 
   it("does not touch the other tasks in the wave", async () => {

@@ -3,14 +3,13 @@
  *
  * A reservation is the authoritative expected batch. Pi may return a shorter or
  * reordered results array after a child disappears, so every gate-owned slot
- * has to be reconciled against what actually arrived — otherwise stale review
- * or spec-check evidence stays authoritative and the wave gate reads it as
- * green.
+ * has to be reconciled against what actually arrived. Matching is positional:
+ * reordered entries are missing or mismatched at their reserved slots, never
+ * re-associated by identity. Otherwise stale review or spec-check evidence
+ * stays authoritative and the wave gate reads it as green.
  *
- * Pure by construction: no state manager, no filesystem, no stderr. It grew
- * inline in `extension.ts`'s `tool_result` handler, where the only way to reach
- * these rules was through a full fake-harness integration fixture; the shell
- * now keeps the I/O and calls this for the decision.
+ * Pure by construction: no state manager, no filesystem, no stderr. The shell
+ * owns result I/O and delegates only positional reconciliation to this module.
  */
 
 import { agentsOfKind } from "../engine/src/core/model-profiles";
@@ -18,6 +17,7 @@ import { stripNamespace } from "../engine/src/utils/strip-namespace";
 import { type TaskExecutionSpawn } from "../engine/src/core/validate-task-execution";
 import type { ImplementationAttemptAuthority } from "../engine/src/core/implementation-completion";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
+import { parsePiSubagentResults, type PiSubagentResultEntry } from "./subagent-result";
 
 const REVIEW_AGENTS: ReadonlySet<string> = new Set(agentsOfKind("reviewer"));
 const isReviewAgent = (agentType: string): boolean => REVIEW_AGENTS.has(agentType);
@@ -25,11 +25,10 @@ const isReviewAgent = (agentType: string): boolean => REVIEW_AGENTS.has(agentTyp
 /**
  * The reservation fields the classification actually reads.
  *
- * `kind` is the closed lifecycle union, not a bare `string`: every construction
- * site already supplies a `TaskExecutionSpawn["kind"]`, and the predicates below
- * test it against the `"standalone"` member. Typed as `string`, a typo in that
- * comparison — or a new lifecycle arm — would silently reclassify every
- * reservation with no compile error at the site that did it.
+ * `kind` is the current closed lifecycle union, not a bare `string`: this
+ * prevents misspelled construction values. The classifier deliberately groups
+ * every existing non-`standalone` arm; adding a lifecycle arm therefore requires
+ * explicit review of that grouping rather than relying on exhaustiveness here.
  */
 export type ReservedResultItem = Readonly<{
   agentType: string;
@@ -99,15 +98,40 @@ export type MissingReservedResults<T extends ReservedResultItem> = Readonly<{
 }>;
 
 /**
- * The agent name the harness reported at this batch position, or `null` when
- * the position is absent or is not a result envelope at all. A mismatch is
- * treated exactly like an absence — a result from the wrong agent proves the
- * expected one did not report.
+ * Whether the parsed result at this batch position proves the reserved slot
+ * arrived. Agent identity is always exact; a Task-bound reviewer must also name
+ * the reserved Task. Wrong-Task review evidence is an absence for this slot so
+ * the shell durably reconciles its missing evidence instead of stranding it.
  */
-function returnedAgentAt(rawResults: readonly unknown[], index: number): string | null {
-  const raw = rawResults[index];
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw) || !("agent" in raw)) return null;
-  return typeof raw.agent === "string" ? stripNamespace(raw.agent) : null;
+function returnedResultMatchesReservation(
+  entries: readonly PiSubagentResultEntry[],
+  index: number,
+  item: ReservedResultItem,
+): boolean {
+  const entry = entries[index];
+  if (entry?.ok !== true || stripNamespace(entry.result.agent) !== item.agentType) return false;
+  return !isReviewAgent(item.agentType) || item.taskId === null || extractTaskId(entry.result.task) === item.taskId;
+}
+
+/**
+ * What a reserved review/spec-check slot that never returned MEANS when no
+ * TaskGraph was active at spawn.
+ *
+ * The persistence arm in `extension.ts` cannot run without a State File, and
+ * that used to silence the entire reporting path: a reviewer that died without
+ * returning produced no diagnostic at all, for exactly the unorchestrated
+ * batches that have no other reporting route. Nothing can be recorded, so the
+ * fact gets reported instead — recorded evidence and reported evidence are the
+ * two outcomes, and neither one is silence.
+ */
+export function unrecordableMissingEvidenceDiagnostic(args: Readonly<{
+  sessionId: string;
+  reviews: number;
+  specChecks: number;
+}>): string {
+  return `${args.reviews} reserved review result(s) and ${args.specChecks} reserved spec-check result(s) ` +
+    `for session ${args.sessionId} never arrived and cannot be recorded as evidence_capture_failed: ` +
+    "no TaskGraph was active at spawn";
 }
 
 export function classifyMissingReservedResults<T extends ReservedResultItem>(
@@ -115,9 +139,10 @@ export function classifyMissingReservedResults<T extends ReservedResultItem>(
   rawResults: readonly unknown[],
   orchestrationRunBound: boolean,
 ): MissingReservedResults<T> {
+  const entries = parsePiSubagentResults(rawResults);
   const missing = (predicate: (item: T) => boolean): readonly MissingReservedResult<T>[] =>
     Object.freeze(items.flatMap((item, index) =>
-      predicate(item) && returnedAgentAt(rawResults, index) !== item.agentType
+      predicate(item) && !returnedResultMatchesReservation(entries, index, item)
         ? [Object.freeze({ item, index })]
         : []));
 

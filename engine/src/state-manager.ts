@@ -1,10 +1,11 @@
 /**
  * Anchored atomic State File manager.
  *
- * The State File stays mode 0444 at rest. Hooks and whitelisted helpers stage
- * validated bytes, set mode 0444 before publication, and rename through the
- * anchored parent capability and lock — the retained parent descriptor on
- * Linux, the `O_NOFOLLOW_ANY`-proven real path on darwin.
+ * Successful State File publications install mode 0444. Hooks and whitelisted
+ * helpers stage validated bytes, set that mode before publication, and rename
+ * through the anchored parent capability and lock — the retained parent
+ * descriptor on Linux, the `O_NOFOLLOW_ANY`-proven real path on darwin. Loading
+ * re-proves path and content authority; it does not attest the current file mode.
  * Replaces: state-file-write.sh, resolve-task-graph.sh, loom-config.sh
  */
 
@@ -47,6 +48,8 @@ import type {
   Task,
   TaskGraph,
   WaveReviewEpochAuthority,
+  WaveSpecCheckDocumentAuthority,
+  WaveSpecCheckDocumentsAuthority,
 } from "./types";
 import type { DomainResult } from "./core/orchestration-contract";
 import type { WaveCompletionCommit, WaveCompletionCommitError } from "./core/wave-gate-machine";
@@ -86,7 +89,7 @@ import { parseTaskId, type TaskId } from "./core/task-id";
 import {
   anchoredDirectoryHasIdentity,
   anchoredDirectoryIdentity,
-  closeAnchoredDirectory,
+  closeAnchorGuarded,
   openDirectoryNoFollow,
   readDirectoryFileNoFollow,
   resolveBaseDirectory,
@@ -114,6 +117,53 @@ type TaskGraphFileAuthority = Readonly<{
   leaf: string;
 }>;
 
+type StateDirectoryOutcome<T> =
+  | Readonly<{ kind: "returned"; value: T }>
+  | Readonly<{ kind: "threw"; error: unknown }>;
+
+function finishStateDirectoryOperation<T>(
+  directory: AnchoredDirectory,
+  operation: string,
+  outcome: StateDirectoryOutcome<T>,
+): T {
+  const failure = closeAnchorGuarded(
+    directory,
+    outcome.kind === "threw" ? outcome.error : null,
+    operation,
+  );
+  if (failure !== null) throw failure;
+  if (outcome.kind === "threw") throw outcome.error;
+  return outcome.value;
+}
+
+function withStateDirectory<T>(
+  directory: AnchoredDirectory,
+  operation: string,
+  use: () => T,
+): T {
+  let outcome: StateDirectoryOutcome<T>;
+  try {
+    outcome = { kind: "returned", value: use() };
+  } catch (error) {
+    outcome = { kind: "threw", error };
+  }
+  return finishStateDirectoryOperation(directory, operation, outcome);
+}
+
+async function withStateDirectoryAsync<T>(
+  directory: AnchoredDirectory,
+  operation: string,
+  use: () => Promise<T>,
+): Promise<T> {
+  let outcome: StateDirectoryOutcome<T>;
+  try {
+    outcome = { kind: "returned", value: await use() };
+  } catch (error) {
+    outcome = { kind: "threw", error };
+  }
+  return finishStateDirectoryOperation(directory, operation, outcome);
+}
+
 /**
  * Read one session pointer through its subagent base, resolved once.
  *
@@ -127,11 +177,8 @@ type TaskGraphFileAuthority = Readonly<{
  */
 function readSessionPointerNoFollow(sessionFile: string): string {
   const directory = openDirectoryNoFollow(resolveBaseDirectory(dirname(sessionFile)));
-  try {
-    return readDirectoryFileNoFollow(directory, basename(sessionFile)).toString("utf8");
-  } finally {
-    closeAnchoredDirectory(directory);
-  }
+  return withStateDirectory(directory, `session pointer read of ${sessionFile}`, () =>
+    readDirectoryFileNoFollow(directory, basename(sessionFile)).toString("utf8"));
 }
 
 function captureTaskGraphFileAuthority(path: string, requireExisting: boolean): TaskGraphFileAuthority {
@@ -139,18 +186,16 @@ function captureTaskGraphFileAuthority(path: string, requireExisting: boolean): 
   if (!parsedPath.ok) throw new Error(parsedPath.error);
   const directoryPath = dirname(parsedPath.value);
   const directory = openDirectoryNoFollow(directoryPath);
-  try {
+  return withStateDirectory(directory, `TaskGraph authority capture for ${parsedPath.value}`, () => {
     if (requireExisting) readDirectoryFileNoFollow(directory, basename(parsedPath.value));
     return Object.freeze({
-      kind: "task-graph-file-authority",
+      kind: "task-graph-file-authority" as const,
       path: parsedPath.value,
       directoryPath,
       directoryIdentity: anchoredDirectoryIdentity(directory),
       leaf: basename(parsedPath.value),
     });
-  } finally {
-    closeAnchoredDirectory(directory);
-  }
+  });
 }
 
 function parseSessionPointerFile(sessionFile: string): string {
@@ -310,11 +355,11 @@ function parseSpecCheckField(v: unknown):
  * `blocked` is an orthogonal veto — it legitimately coexists with
  * `impl_complete`/`reviews_complete` (see `WaveGate`), so no combination of the
  * flags is contradictory on its own. What IS meaningless is a veto with no
- * reason behind it: the flag has exactly two causes, and `updateTaskFindings`
- * — driven by `store-review-findings` and `store-spec-check-findings` against
- * `core/wave-gate-model.ts` `waveHasBlockCause` — already clears it when the
- * last cause dies, using the writers' own predicate so the load boundary
- * cannot disagree with them. Its absence is not cosmetic:
+ * reason behind it: the flag has exactly two causes, and the finding/spec-check
+ * callers invoke `reconcileWaveBlock` against `core/wave-gate-model.ts`
+ * `waveHasBlockCause` after rewriting their evidence. That reconciliation
+ * clears the flag when the last cause dies, using the writers' own predicate so
+ * the load boundary cannot disagree with them. Its absence is not cosmetic:
  * `validate-task-execution` renders a causeless gate as
  *
  *     BLOCKED: Wave N review gate not passed.
@@ -383,6 +428,74 @@ function exactFieldsError(
 }
 
 const WAVE_REVIEW_EPOCH_FIELDS = ["runId", "wave", "batchEpoch"] as const;
+const WAVE_REVIEW_EPOCH_OPTIONAL_FIELDS = ["specCheckDocuments", "specCheckSlotAuthority"] as const;
+
+function parseWaveSpecCheckDocument(
+  raw: unknown,
+  label: string,
+): ParseResult<WaveSpecCheckDocumentAuthority> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return parseErr(`${label} must be an object`);
+  }
+  const record = raw as Record<string, unknown>;
+  const fieldsError = exactFieldsError(record, ["path", "contentDigest"], [], label);
+  if (fieldsError !== null) return parseErr(fieldsError);
+  if (record.path !== null && typeof record.path !== "string") {
+    return parseErr(`${label}.path must be a string or null`);
+  }
+  if ((record.path === null) !== (record.contentDigest === null)) {
+    return parseErr(`${label}.path and contentDigest must both be null or both be present`);
+  }
+  if (record.path === null) {
+    return parseOk(Object.freeze({ path: null, contentDigest: null }));
+  }
+  const digest = parseArtifactDigest(record.contentDigest);
+  return digest.ok
+    ? parseOk(Object.freeze({ path: record.path, contentDigest: digest.value }))
+    : parseErr(`${label}.contentDigest: ${digest.error.message}`);
+}
+
+function parseWaveSpecCheckDocuments(
+  raw: unknown,
+): ParseResult<WaveSpecCheckDocumentsAuthority | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return parseErr("wave_review_epoch.specCheckDocuments must be an object when present");
+  }
+  const record = raw as Record<string, unknown>;
+  const fieldsError = exactFieldsError(record, ["spec", "plan"], [], "wave_review_epoch.specCheckDocuments");
+  if (fieldsError !== null) return parseErr(fieldsError);
+  const spec = parseWaveSpecCheckDocument(record.spec, "wave_review_epoch.specCheckDocuments.spec");
+  if (!spec.ok) return spec;
+  const plan = parseWaveSpecCheckDocument(record.plan, "wave_review_epoch.specCheckDocuments.plan");
+  if (!plan.ok) return plan;
+  return parseOk(Object.freeze({ spec: spec.value, plan: plan.value }));
+}
+
+function parseWaveSpecCheckSlotAuthority(
+  raw: unknown,
+): ParseResult<WaveReviewEpochAuthority["specCheckSlotAuthority"]> {
+  if (raw === undefined) return parseOk(undefined);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return parseErr("wave_review_epoch.specCheckSlotAuthority must be an object when present");
+  }
+  const record = raw as Record<string, unknown>;
+  const fieldsError = exactFieldsError(
+    record,
+    ["slot_id", "attempted"],
+    [],
+    "wave_review_epoch.specCheckSlotAuthority",
+  );
+  if (fieldsError !== null) return parseErr(fieldsError);
+  const slotId = parseSlotId(record.slot_id);
+  if (!slotId.ok) {
+    return parseErr(`wave_review_epoch.specCheckSlotAuthority.slot_id: ${slotId.error.message}`);
+  }
+  if (record.attempted !== 1 && record.attempted !== 2) {
+    return parseErr("wave_review_epoch.specCheckSlotAuthority.attempted must be 1 or 2");
+  }
+  return parseOk(Object.freeze({ slot_id: slotId.value, attempted: record.attempted }));
+}
 
 /** Parse the exact request-batch authority persisted beside an active Wave Gate. */
 function parseWaveNumber(value: unknown, label: string): { ok: true; value: number } | { ok: false; error: string } {
@@ -408,7 +521,12 @@ function parseWaveReviewEpoch(raw: unknown): ParseResult<WaveReviewEpochAuthorit
     return parseErr("wave_review_epoch must be an object when present");
   }
   const record = raw as Record<string, unknown>;
-  const fieldsError = exactFieldsError(record, WAVE_REVIEW_EPOCH_FIELDS, [], "wave_review_epoch");
+  const fieldsError = exactFieldsError(
+    record,
+    WAVE_REVIEW_EPOCH_FIELDS,
+    WAVE_REVIEW_EPOCH_OPTIONAL_FIELDS,
+    "wave_review_epoch",
+  );
   if (fieldsError !== null) return parseErr(fieldsError);
   const runId = parseOrchestrationRunId(record.runId);
   if (!runId.ok) return parseErr(`wave_review_epoch.runId: ${runId.error.message}`);
@@ -416,10 +534,18 @@ function parseWaveReviewEpoch(raw: unknown): ParseResult<WaveReviewEpochAuthorit
   if (!wave.ok) return parseErr(wave.error);
   const batchEpoch = parseArtifactDigest(record.batchEpoch);
   if (!batchEpoch.ok) return parseErr(`wave_review_epoch.batchEpoch: ${batchEpoch.error.message}`);
+  const specCheckDocuments = parseWaveSpecCheckDocuments(record.specCheckDocuments);
+  if (!specCheckDocuments.ok) return specCheckDocuments;
+  const specCheckSlotAuthority = parseWaveSpecCheckSlotAuthority(record.specCheckSlotAuthority);
+  if (!specCheckSlotAuthority.ok) return specCheckSlotAuthority;
   return parseOk(Object.freeze({
     runId: runId.value,
     wave: wave.value,
     batchEpoch: batchEpoch.value,
+    ...(specCheckDocuments.value === undefined ? {} : { specCheckDocuments: specCheckDocuments.value }),
+    ...(specCheckSlotAuthority.value === undefined
+      ? {}
+      : { specCheckSlotAuthority: specCheckSlotAuthority.value }),
   }));
 }
 
@@ -1585,6 +1711,24 @@ function frozenJsonCopy(value: unknown, copies = new WeakMap<object, unknown>())
   return Object.freeze(copy);
 }
 
+function parseExecutingTaskIds(raw: unknown): ParseResult<readonly TaskId[] | undefined> {
+  if (raw === undefined) return parseOk(undefined);
+  if (!Array.isArray(raw)) {
+    return parseErr("executing_tasks must be an array of distinct canonical Task IDs when present");
+  }
+  const parsed: TaskId[] = [];
+  const seen = new Set<TaskId>();
+  for (const entry of raw) {
+    const taskId = parseTaskId(entry, "executing_tasks entry");
+    if (!taskId.ok || seen.has(taskId.value)) {
+      return parseErr("executing_tasks must be an array of distinct canonical Task IDs when present");
+    }
+    seen.add(taskId.value);
+    parsed.push(taskId.value);
+  }
+  return parseOk(Object.freeze(parsed));
+}
+
 function taskGraphScalarFieldError(obj: Record<string, unknown>): string | null {
   for (const field of ["spec_dir", "spec_file", "plan_file"] as const) {
     if (obj[field] !== undefined && obj[field] !== null && typeof obj[field] !== "string") {
@@ -1599,12 +1743,6 @@ function taskGraphScalarFieldError(obj: Record<string, unknown>): string | null 
   if (obj.github_issue !== undefined &&
       (typeof obj.github_issue !== "number" || !Number.isInteger(obj.github_issue) || obj.github_issue < 1)) {
     return `github_issue must be an integer >= 1 when present, got ${JSON.stringify(obj.github_issue)}`;
-  }
-  if (obj.executing_tasks !== undefined &&
-      (!Array.isArray(obj.executing_tasks) ||
-        obj.executing_tasks.some((id) => !parseTaskId(id, "executing_tasks entry").ok) ||
-        new Set(obj.executing_tasks).size !== obj.executing_tasks.length)) {
-    return "executing_tasks must be an array of distinct canonical Task IDs when present";
   }
   if (obj.current_wave !== undefined &&
       (typeof obj.current_wave !== "number" || !Number.isInteger(obj.current_wave) || obj.current_wave < 1)) {
@@ -1704,10 +1842,13 @@ function migrateParsedTask(
   return parseOk(migrated);
 }
 
-function parseTaskGraphTasks(obj: Record<string, unknown>): ParseResult<readonly unknown[]> {
+function parseTaskGraphTasks(
+  obj: Record<string, unknown>,
+  executingTasks: readonly TaskId[],
+): ParseResult<readonly unknown[]> {
   const tasks = obj.tasks ?? [];
   if (!Array.isArray(tasks)) return parseErr("tasks must be an array");
-  const executing = new Set(Array.isArray(obj.executing_tasks) ? obj.executing_tasks.map(String) : []);
+  const executing = new Set<string>(executingTasks);
   const parsedTasks: Record<string, unknown>[] = [];
   for (let i = 0; i < tasks.length; i++) {
     const err = taskUnionError(tasks[i], i);
@@ -1852,6 +1993,11 @@ function parseTaskGraphAuthorityFields(obj: Record<string, unknown>): ParseResul
       `(expected ${activeWaveGate.runId}/Wave ${activeWaveGate.wave})`,
     );
   }
+  const documents = waveReviewEpoch.value?.specCheckDocuments;
+  if (documents !== undefined &&
+      (documents.spec.path !== (obj.spec_file ?? null) || documents.plan.path !== (obj.plan_file ?? null))) {
+    return parseErr("wave_review_epoch.specCheckDocuments paths must match spec_file/plan_file authority");
+  }
   const verificationManifest = parseVerificationManifestField(obj.verification_manifest);
   if (!verificationManifest.ok) return parseErr(verificationManifest.error);
   const activeWaveCompletionSuite = parseActiveWaveCompletionSuiteField(
@@ -1954,6 +2100,7 @@ type ParsedTaskGraphParts = Readonly<{
   phaseArtifacts: Readonly<Record<string, string>>;
   skippedPhases: readonly Phase[];
   tasks: readonly unknown[];
+  executingTasks: readonly TaskId[] | undefined;
   waveGates: Readonly<Record<string, unknown>>;
   specCheck: SpecCheck | undefined;
   authority: ParsedTaskGraphAuthorityFields;
@@ -1990,9 +2137,9 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     spec_file: obj.spec_file ?? null,
     plan_file: obj.plan_file ?? null,
     tasks: frozenTasks,
-    ...(obj.executing_tasks === undefined
+    ...(parts.executingTasks === undefined
       ? {}
-      : { executing_tasks: Object.freeze([...(obj.executing_tasks as string[])]) }),
+      : { executing_tasks: parts.executingTasks }),
     wave_gates: frozenWaveGates,
     ...(parts.specCheck === undefined ? {} : { spec_check: parts.specCheck }),
     ...(waveReviewEpoch === undefined ? {} : { wave_review_epoch: waveReviewEpoch }),
@@ -2027,7 +2174,9 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
   const skippedPhases = Object.freeze([...(Array.isArray(obj.skipped_phases) ? obj.skipped_phases : [])] as Phase[]);
   const scalarError = taskGraphScalarFieldError(obj);
   if (scalarError !== null) return parseErr(scalarError);
-  const tasks = parseTaskGraphTasks(obj);
+  const executingTasks = parseExecutingTaskIds(obj.executing_tasks);
+  if (!executingTasks.ok) return parseErr(executingTasks.error);
+  const tasks = parseTaskGraphTasks(obj, executingTasks.value ?? []);
   if (!tasks.ok) return parseErr(tasks.error);
   const waveGates = parseTaskGraphWaveGates(obj);
   if (!waveGates.ok) return parseErr(waveGates.error);
@@ -2048,6 +2197,7 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
     phaseArtifacts,
     skippedPhases,
     tasks: tasks.value,
+    executingTasks: executingTasks.value,
     waveGates: waveGates.value,
     specCheck: specCheck.value,
     authority: authority.value,
@@ -2060,17 +2210,20 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
  *  Wave Gate authority (active_wave_gate); this type + derive path survive
  *  only for graphs that predate registration. Deprecation horizon: retire
  *  once no pre-registration graph can still be completed. */
+import {
+  deriveLegacyWaveGateCompatibilityAuthority,
+  findLegacyWaveGateCompletionReplay,
+  type LegacyWaveGateCompatibilityAuthority,
+  type LegacyWaveGateCompletionReplayError,
+} from "./core/legacy-archive";
 export {
   deriveLegacyWaveGateCompatibilityAuthority,
-  type LegacyWaveGateCompatibilityAuthority,
-} from "./core/legacy-archive";
-// Local use inside state-manager itself: the re-export above does not bind
-// the names locally, so import them (aliased to avoid the TS duplicate-name
-// conflict with the re-export) for the completion-replay call site.
-import {
   findLegacyWaveGateCompletionReplay,
-  type LegacyWaveGateCompatibilityAuthority as LegacyWaveGateCompatibilityAuthorityLocal,
-} from "./core/legacy-archive";
+};
+export type {
+  LegacyWaveGateCompatibilityAuthority,
+  LegacyWaveGateCompletionReplayError,
+};
 
 export type RegisteredWaveGateCompletionReplayError = Readonly<{
   kind: "registered-wave-gate-completion-replay-rejected";
@@ -2112,16 +2265,9 @@ export function findRegisteredWaveGateCompletionReplay(
   return Object.freeze({ ok: true, value: candidate });
 }
 
-/** @deprecated Legacy terminal-history replay — archived in ./core/legacy-archive
- *  (Section C); findRegisteredWaveGateCompletionReplay is canonical. */
-export {
-  findLegacyWaveGateCompletionReplay,
-  type LegacyWaveGateCompletionReplayError,
-} from "./core/legacy-archive";
-
 type ParsedLegacyWaveGateMigrationAuthority = Readonly<{
   registration: ActiveWaveGateRegistration;
-  compatibility: LegacyWaveGateCompatibilityAuthorityLocal;
+  compatibility: LegacyWaveGateCompatibilityAuthority;
 }>;
 
 function parseLegacyWaveGateMigrationAuthority(raw: unknown): ParseResult<ParsedLegacyWaveGateMigrationAuthority> {
@@ -2152,7 +2298,7 @@ function parseLegacyWaveGateMigrationAuthority(raw: unknown): ParseResult<Parsed
     revision: 0,
     terminalOutcome: null,
   });
-  const compatibility: LegacyWaveGateCompatibilityAuthorityLocal = Object.freeze({
+  const compatibility: LegacyWaveGateCompatibilityAuthority = Object.freeze({
     schemaVersion: 1,
     kind: "legacy-wave-gate-compatibility",
     runId: registration.runId,
@@ -2200,8 +2346,10 @@ export class StateManager {
   private openAuthorityDirectory(): AnchoredDirectory {
     const directory = openDirectoryNoFollow(this.authority.directoryPath);
     if (anchoredDirectoryHasIdentity(directory, this.authority.directoryIdentity)) return directory;
-    closeAnchoredDirectory(directory);
-    throw new Error(`TaskGraph parent authority changed after capture: ${this.authority.directoryPath}`);
+    const authorityError = new Error(
+      `TaskGraph parent authority changed after capture: ${this.authority.directoryPath}`,
+    );
+    throw closeAnchorGuarded(directory, authorityError, "TaskGraph parent authority rejection");
   }
 
   private loadFrom(directory: AnchoredDirectory): ParsedTaskGraph {
@@ -2219,23 +2367,24 @@ export class StateManager {
 
   load(): ParsedTaskGraph {
     const directory = this.openAuthorityDirectory();
-    try {
-      return this.loadFrom(directory);
-    } finally {
-      closeAnchoredDirectory(directory);
-    }
+    return withStateDirectory(directory, `TaskGraph load of ${this.path}`, () => this.loadFrom(directory));
   }
 
   getPath(): string {
     return this.path;
   }
 
-  /** Atomically update state via pure transform: (state) => state */
+  /**
+   * Atomically update state under the TaskGraph lock. The callback runs while
+   * that lock is held: ordinary reducers should stay pure, while authority-
+   * sensitive callers may re-observe external evidence there to compare and
+   * commit one exact snapshot. Keep such observations bounded and fail closed.
+   */
   async update(fn: (state: ParsedTaskGraph) => TaskGraph): Promise<void> {
     await this.updateAndReturn((state) => ({ state: fn(state), value: undefined }));
   }
 
-  /** Atomic shell primitive for effects that must return the locked decision they committed. */
+  /** Atomic shell primitive returning the exact lock-time decision committed. */
   async updateAndReturn<T>(
     fn: (state: ParsedTaskGraph) => Readonly<{ state: TaskGraph; value: T }>,
   ): Promise<T> {
@@ -2363,7 +2512,7 @@ export class StateManager {
     await this.atomicWrite(() => ({ state, value: undefined }));
   }
 
-  /** lock → derive/parse → stage read-only bytes → descriptor-relative rename → unlock */
+  /** lock → derive/parse → stage read-only bytes → anchored pathname rename → unlock */
   private async atomicWrite<T>(
     produce: (directory: AnchoredDirectory) => Readonly<{ state: TaskGraph; value: T }>,
   ): Promise<T> {
@@ -2372,8 +2521,8 @@ export class StateManager {
     // protected graph byte-for-byte and metadata-for-metadata untouched.
     assertPiCliMutationCompatible(process.env, captureLoomRuntimeIdentity(PACKAGE_ROOT));
     const directory = this.openAuthorityDirectory();
-    try {
-      return await withAnchoredDirectoryHandleLock(directory, ".task_graph", () => {
+    return withStateDirectoryAsync(directory, `TaskGraph atomic write of ${this.path}`, () =>
+      withAnchoredDirectoryHandleLock(directory, ".task_graph", () => {
         const produced = produce(directory);
         const parsed = parseTaskGraph(produced.state);
         if (!parsed.ok) throw new Error(`Refusing to persist invalid task graph (${parsed.error}): ${this.path}`);
@@ -2384,9 +2533,6 @@ export class StateManager {
           0o444,
         );
         return produced.value;
-      });
-    } finally {
-      closeAnchoredDirectory(directory);
-    }
+      }));
   }
 }

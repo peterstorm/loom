@@ -50,7 +50,7 @@ import { anyActiveSubagent } from "../machine";
  * committed reservation whose agent has not yet reached its SubagentStart
  * roster mark — without it, a parallel wave batch reclaims a live sibling that
  * is merely mid-startup (it has no roster entry, indistinguishable from a
- * vetoed spawn on that instant alone). See staleReservationsFromState.
+ * vetoed spawn on that instant alone). See staleReservationsForRosterObservation.
  *
  * The graph scope is not a detail. SUBAGENT_DIR is shared by every project on
  * the machine, so a project-blind probe lets another repo's live agent — or
@@ -146,6 +146,7 @@ export async function registerTaskExecutionBatch(
     proof: ReturnType<typeof captureDeclaredArtifactBaseline>;
     attempt: ReturnType<typeof captureDeclaredArtifactBaseline>;
     repositoryAttempt: ReturnType<typeof captureRepositoryChangeBaseline>;
+    repositoryObservation: ReturnType<typeof captureRepositoryChangeBaseline>;
   }>>();
   let repositoryAttempt: ReturnType<typeof captureRepositoryChangeBaseline>;
   try {
@@ -166,6 +167,7 @@ export async function registerTaskExecutionBatch(
         proof: captureDeclaredArtifactBaseline(repository.root, declared),
         attempt: captureDeclaredArtifactBaseline(repository.root, attemptScope),
         repositoryAttempt: task.repository_baseline ?? repositoryAttempt,
+        repositoryObservation: repositoryAttempt,
       });
     } catch (error) {
       return {

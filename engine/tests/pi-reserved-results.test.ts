@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import {
   alignPiImplementationAuthorities,
   classifyMissingReservedResults,
+  unrecordableMissingEvidenceDiagnostic,
   type ReservedResultItem,
 } from "../../pi/reserved-results";
 import {
@@ -27,8 +28,8 @@ const item = (over: Partial<ReservedResultItem> = {}): ReservedResultItem => ({
   ...over,
 });
 
-/** The envelope shape the harness returns for a result that DID arrive. */
-const returned = (agent: string) => ({ agent, exitCode: 0 });
+/** The parseable envelope shape required before a result DID arrive. */
+const returned = (agent: string, taskId = "T1") => ({ agent, task: `Task: ${taskId}`, exitCode: 0, messages: [] });
 
 function authority(taskId: string, reservation: string) {
   const instant = parseIsoInstant("2026-08-24T00:00:00.000Z");
@@ -157,12 +158,30 @@ describe("classifyMissingReservedResults", () => {
       expect(missing.reviews).toEqual([]);
     });
 
+    it("treats a matching reviewer for the wrong Task as missing reserved evidence", () => {
+      const missing = classifyMissingReservedResults([item()], [returned("code-reviewer", "T2")], false);
+
+      expect(missing.reviews).toEqual([{ item: item(), index: 0 }]);
+    });
+
+    it("requires the reserved Task identity for Task-bound run reviewers too", () => {
+      const missing = classifyMissingReservedResults([item()], [returned("code-reviewer", "T2")], true);
+
+      expect(missing.runResults).toEqual([{ item: item(), index: 0 }]);
+    });
+
     it.each([
       ["a non-object entry", "code-reviewer"],
       ["null", null],
       ["an array", []],
-      ["an envelope with no agent field", { exitCode: 0 }],
-      ["an envelope whose agent is not a string", { agent: 7 }],
+      ["an envelope with no agent field", { task: "Task: T1", exitCode: 0, messages: [] }],
+      ["an envelope whose agent is not a string", { ...returned("code-reviewer"), agent: 7 }],
+      ["a matching-agent envelope with no task", { agent: "code-reviewer", exitCode: 0, messages: [] }],
+      ["a matching-agent envelope whose task is not a string", { ...returned("code-reviewer"), task: 7 }],
+      ["a matching-agent envelope with no exit code", { agent: "code-reviewer", task: "Task: T1", messages: [] }],
+      ["a matching-agent envelope whose exit code is not a number", { ...returned("code-reviewer"), exitCode: "0" }],
+      ["a matching-agent envelope with no messages", { agent: "code-reviewer", task: "Task: T1", exitCode: 0 }],
+      ["a matching-agent envelope with an invalid stop reason", { ...returned("code-reviewer"), stopReason: 7 }],
     ])("treats %s as an absence rather than trusting the slot", (_label, raw) => {
       const missing = classifyMissingReservedResults([item()], [raw], false);
 
@@ -189,5 +208,31 @@ describe("classifyMissingReservedResults", () => {
     expect(Object.isFrozen(missing)).toBe(true);
     expect(Object.isFrozen(missing.reviews)).toBe(true);
     expect(() => (missing.reviews as unknown as unknown[]).push({})).toThrow();
+  });
+});
+
+/**
+ * The ad-hoc arm. A batch spawned with no TaskGraph has no slot to mark, and
+ * `extension.ts` used to skip the whole reporting block in that case — so a
+ * reserved reviewer that died without returning left no trace anywhere. This is
+ * the report that replaced the silence.
+ */
+describe("unrecordableMissingEvidenceDiagnostic", () => {
+  it("names what was expected, for which session, and why nothing was recorded", () => {
+    const diagnostic = unrecordableMissingEvidenceDiagnostic({
+      sessionId: "session-adhoc",
+      reviews: 2,
+      specChecks: 1,
+    });
+
+    expect(diagnostic).toContain("2 reserved review result(s) and 1 reserved spec-check result(s)");
+    expect(diagnostic).toContain("session-adhoc");
+    expect(diagnostic).toContain("cannot be recorded as evidence_capture_failed");
+    expect(diagnostic).toContain("no TaskGraph was active at spawn");
+  });
+
+  it("counts a zero side honestly instead of dropping the sentence for it", () => {
+    expect(unrecordableMissingEvidenceDiagnostic({ sessionId: "s", reviews: 0, specChecks: 3 }))
+      .toContain("0 reserved review result(s) and 3 reserved spec-check result(s)");
   });
 });

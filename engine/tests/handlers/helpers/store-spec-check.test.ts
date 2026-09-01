@@ -65,12 +65,12 @@ describe("store-spec-check helper", () => {
     const { exitCode } = runHelper(
       [
         "SPEC_CHECK_WAVE: 1",
-        "SPEC_CHECK_CRITICAL_COUNT: 1",
-        "SPEC_CHECK_HIGH_COUNT: 2",
-        "SPEC_CHECK_VERDICT: BLOCKED",
         "CRITICAL: requirement REQ-1 not implemented",
         "HIGH: partial coverage of REQ-2",
         "HIGH: missing error path for REQ-3",
+        "SPEC_CHECK_CRITICAL_COUNT: 1",
+        "SPEC_CHECK_HIGH_COUNT: 2",
+        "SPEC_CHECK_VERDICT: BLOCKED",
       ].join("\n"),
     );
     expect(exitCode).toBe(0);
@@ -82,13 +82,38 @@ describe("store-spec-check helper", () => {
     expect(spec!.critical_findings).toEqual(["requirement REQ-1 not implemented"]);
   });
 
+  it("replaces a prior critical spec-check and clears its derived Wave block", () => {
+    const blocked: TaskGraph = {
+      ...readState(),
+      spec_check: {
+        wave: 1, run_at: "earlier", verdict: "BLOCKED", critical_count: 1, high_count: 0,
+        critical_findings: ["earlier blocker"], high_findings: [], medium_findings: [],
+      },
+      wave_gates: {
+        "1": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: true },
+      },
+    };
+    writeFileSync(statePath, JSON.stringify(blocked, null, 2));
+
+    const { exitCode } = runHelper([
+      "SPEC_CHECK_WAVE: 1",
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+    ].join("\n"));
+
+    expect(exitCode).toBe(0);
+    expect(readState().spec_check?.verdict).toBe("PASSED");
+    expect(readState().wave_gates["1"]?.blocked).toBe(false);
+  });
+
   it("fails closed when CRITICAL_COUNT disagrees with the CRITICAL: lines (forged-zero shape)", () => {
     const { exitCode, stderr } = runHelper(
       [
+        "CRITICAL: requirement REQ-1 not implemented",
         "SPEC_CHECK_CRITICAL_COUNT: 0",
         "SPEC_CHECK_HIGH_COUNT: 0",
         "SPEC_CHECK_VERDICT: PASSED",
-        "CRITICAL: requirement REQ-1 not implemented",
       ].join("\n"),
     );
     expect(exitCode).not.toBe(0);
@@ -99,15 +124,46 @@ describe("store-spec-check helper", () => {
   it("fails closed when HIGH_COUNT disagrees with the HIGH: lines", () => {
     const { exitCode, stderr } = runHelper(
       [
+        "HIGH: partial coverage of REQ-2",
         "SPEC_CHECK_CRITICAL_COUNT: 0",
         "SPEC_CHECK_HIGH_COUNT: 3",
         "SPEC_CHECK_VERDICT: PASSED",
-        "HIGH: partial coverage of REQ-2",
       ].join("\n"),
     );
     expect(exitCode).not.toBe(0);
     expect(stderr).toContain("counts must match the findings");
     expect(readState().spec_check).toBeUndefined();
+  });
+
+  it("refuses a manual write on a modern graph unless it is an attributable override", () => {
+    writeFileSync(statePath, JSON.stringify({ ...readState(), spec_trace_version: 2 }, null, 2));
+
+    const { exitCode, stderr } = runHelper([
+      "SPEC_CHECK_WAVE: 1",
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+    ].join("\n"));
+
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("which must be attributable");
+    expect(readState().spec_check).toBeUndefined();
+  });
+
+  it("accepts a named operator override on a modern graph and says so", () => {
+    writeFileSync(statePath, JSON.stringify({ ...readState(), spec_trace_version: 2 }, null, 2));
+
+    const { exitCode, stderr } = runHelper([
+      "SPEC_CHECK_WAVE: 1",
+      "SPEC_CHECK_OVERRIDE: FRs 12-14 are covered in wave 3",
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+    ].join("\n"));
+
+    expect(exitCode).toBe(0);
+    expect(stderr).toContain("manual operator override: FRs 12-14 are covered in wave 3");
+    expect(readState().spec_check?.verdict).toBe("PASSED");
   });
 
   it("fails when the required CRITICAL_COUNT marker is absent", () => {

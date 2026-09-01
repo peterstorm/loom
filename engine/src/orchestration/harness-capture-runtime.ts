@@ -27,7 +27,7 @@ import {
   type HarnessResultIdentity,
 } from "../core/harness-capture";
 import type { AgentRequestAuthority } from "../core/orchestration-contract";
-import { openRunDirectory, type RunDirHandle } from "./run-directory-handle";
+import { openRunDirectory, type HarnessCorrelatorBinding, type RunDirHandle } from "./run-directory-handle";
 
 /**
  * Where a run directory is announced.
@@ -113,7 +113,15 @@ export async function terminalizeCaptureRejection(
   refusal: TerminalCaptureRefusal,
 ): Promise<CaptureOutcome> {
   const diagnostic = `${refusal.reason}: ${refusal.message}`;
-  const terminal = await handle.rejectCapture(request, diagnostic);
+  let terminal: Awaited<ReturnType<RunDirHandle["rejectCapture"]>>;
+  try {
+    terminal = await handle.rejectCapture(request, diagnostic);
+  } catch (error) {
+    return retriableFailure(
+      "rejection-persistence",
+      `capture refused (${diagnostic}) and its rejection persistence crashed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   if (!terminal.ok) {
     return retriableFailure(
       "rejection-persistence",
@@ -136,6 +144,117 @@ export async function terminalizeCaptureRejection(
       message: `capture refused (${diagnostic}); it was terminalised but its audit event could not be persisted: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
+}
+
+/**
+ * The issued request one native correlator resolves to, plus what a caller
+ * needs to act on it.
+ */
+export type CorrelatedRequest = Readonly<{
+  handle: RunDirHandle;
+  /** The role the reservation recorded for this correlator — never the payload's say-so. */
+  correlatorRole: HarnessCorrelatorBinding["role"];
+  issued: readonly AgentRequestAuthority[];
+  identity: HarnessResultIdentity;
+  request: AgentRequestAuthority;
+}>;
+
+export type CorrelatedRequestResolution =
+  | Readonly<{ ok: true; value: CorrelatedRequest }>
+  | Readonly<{ ok: false; outcome: CaptureOutcome }>;
+
+/**
+ * Resolve "which request does this native correlator answer" in ONE place.
+ *
+ * Opening the run, reading its correlator binding, and loading the issued
+ * authority is the same three-step question for every consumer: the capture path
+ * below, and `subagent-stop/dispatch`, which must know the program a stop
+ * belongs to BEFORE it decides whether legacy TaskGraph settlement applies. Two
+ * copies of that question is how a harness ends up calling a stop "unrelated"
+ * while its own capture path still fills the slot, so the question has exactly
+ * one asker.
+ *
+ * Decisions only — nothing here terminalises, tombstones, or writes. What an
+ * unresolved correlator MEANS (refusal, tombstone, or silence for an agent in
+ * nobody's run) belongs to the caller, and `ok: false` carries the same typed
+ * `CaptureOutcome` the capture path already reports, so the caller that refuses
+ * and the caller that audits cannot disagree about the words.
+ */
+export function resolveCorrelatedRequest(args: Readonly<{
+  harness: HarnessResultIdentity["harness"];
+  runsRoot: string | undefined;
+  runDirectory: string | undefined;
+  nativeId: string;
+}>): CorrelatedRequestResolution {
+  if (args.runsRoot === undefined && args.runDirectory === undefined) {
+    return { ok: false, outcome: { kind: "not-an-orchestration-run" } };
+  }
+  if (args.runsRoot === undefined || args.runDirectory === undefined) {
+    return {
+      ok: false,
+      outcome: retriableFailure(
+        "run-authority",
+        "orchestration capture requires both runsRoot and runDirectory",
+      ),
+    };
+  }
+
+  const opened = openRunDirectory(args.runsRoot, args.runDirectory);
+  if (!opened.ok) {
+    return { ok: false, outcome: retriableFailure("run-directory", opened.error.message) };
+  }
+  const handle = opened.value;
+
+  const correlator = handle.readHarnessCorrelator(args.harness, args.nativeId);
+  if (!correlator.ok) {
+    return { ok: false, outcome: retriableFailure("correlator", correlator.error.message) };
+  }
+  if (correlator.value === null) {
+    return {
+      ok: false,
+      outcome: {
+        kind: "no-reservation",
+        agentId: args.nativeId.length === 0 ? "(missing)" : args.nativeId,
+      },
+    };
+  }
+  const binding = correlator.value;
+
+  const issued = handle.readIssuedRequests();
+  if (!issued.ok) {
+    return { ok: false, outcome: retriableFailure("requests", issued.error.message) };
+  }
+  const request = issued.value.find(({ requestId }) => requestId === binding.requestId);
+  if (request === undefined) {
+    return {
+      ok: false,
+      outcome: retriableFailure(
+        "unknown-request",
+        "correlated request has no issued authority",
+      ),
+    };
+  }
+  if (binding.role !== request.role || binding.attempt !== request.attempt) {
+    return {
+      ok: false,
+      outcome: {
+        kind: "terminal-rejection",
+        reason: "correlator-authority",
+        message: `correlator authority ${binding.role}/attempt-${binding.attempt} does not match issued request ${request.role}/attempt-${request.attempt}`,
+      },
+    };
+  }
+
+  const identity: HarnessResultIdentity = Object.freeze({
+    harness: binding.harness,
+    requestId: binding.requestId,
+    attempt: binding.attempt,
+    nativeId: binding.nativeId,
+  });
+  return Object.freeze({
+    ok: true,
+    value: Object.freeze({ handle, correlatorRole: binding.role, issued: issued.value, identity, request }),
+  });
 }
 
 /**
@@ -176,38 +295,10 @@ type CaptureHarnessInput = Readonly<{
 );
 
 export async function captureHarnessResult(args: CaptureHarnessInput): Promise<CaptureOutcome> {
-  if (args.runsRoot === undefined && args.runDirectory === undefined) {
-    return { kind: "not-an-orchestration-run" };
-  }
-  if (args.runsRoot === undefined || args.runDirectory === undefined) {
-    return retriableFailure(
-      "run-authority",
-      "orchestration capture requires both runsRoot and runDirectory",
-    );
-  }
+  const resolved = resolveCorrelatedRequest(args);
+  if (!resolved.ok) return resolved.outcome;
+  const { handle, correlatorRole, issued, identity, request } = resolved.value;
 
-  const opened = openRunDirectory(args.runsRoot, args.runDirectory);
-  if (!opened.ok) return retriableFailure("run-directory", opened.error.message);
-  const handle = opened.value;
-
-  const correlator = handle.readHarnessCorrelator(args.harness, args.nativeId);
-  if (!correlator.ok) return retriableFailure("correlator", correlator.error.message);
-  if (correlator.value === null) {
-    return { kind: "no-reservation", agentId: args.nativeId.length === 0 ? "(missing)" : args.nativeId };
-  }
-  const identity: HarnessResultIdentity = Object.freeze({
-    harness: correlator.value.harness,
-    requestId: correlator.value.requestId,
-    attempt: correlator.value.attempt,
-    nativeId: correlator.value.nativeId,
-  });
-
-  const issued = handle.readIssuedRequests();
-  if (!issued.ok) return retriableFailure("requests", issued.error.message);
-  const request = issued.value.find(({ requestId }) => requestId === identity.requestId);
-  if (request === undefined) {
-    return retriableFailure("unknown-request", "correlated request has no issued authority");
-  }
   const reject = (reason: string, message: string): Promise<CaptureOutcome> =>
     terminalizeCaptureRejection(handle, request, terminalCaptureRefusal(reason, message));
 
@@ -223,7 +314,7 @@ export async function captureHarnessResult(args: CaptureHarnessInput): Promise<C
   const captured = handle.readCapturedAttempts();
   if (!captured.ok) return retriableFailure("transcripts", captured.error.message);
   const bound = bindCapture({
-    issued: issued.value,
+    issued,
     identity,
     payload: payload.value,
     alreadyCaptured: captured.value,
@@ -237,10 +328,10 @@ export async function captureHarnessResult(args: CaptureHarnessInput): Promise<C
       : reject(bound.error.reason, bound.error.message);
   }
 
-  if (correlator.value.role !== request.role) {
+  if (correlatorRole !== request.role) {
     return reject(
       "wrong-agent-role",
-      `native ${args.harness} result is bound as ${correlator.value.role}, not ${request.role}`,
+      `native ${args.harness} result is bound as ${correlatorRole}, not ${request.role}`,
     );
   }
   const context = handle.readContext(request.contextDigest);

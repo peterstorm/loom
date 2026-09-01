@@ -23,6 +23,7 @@ import { openRunDirectory, type RunDirHandle } from "../../src/orchestration/run
 import {
   captureAuditLine,
   captureHarnessResult,
+  resolveCorrelatedRequest,
   terminalCaptureRefusal,
   terminalizeCaptureRejection,
 } from "../../src/orchestration/harness-capture-runtime";
@@ -354,12 +355,15 @@ describe("Pi and Claude reach the same result", () => {
       if (outcome.kind === "terminal-rejection") expect(outcome.reason).toBe("context-binding");
     });
 
-    it("rejects capture when a stored correlator names a role the issued request does not have", async () => {
+    it.each([
+      ["role", { role: "silent-failure-hunter", attempt: 1 }],
+      ["attempt", { role: "code-reviewer", attempt: 2 }],
+    ] as const)("rejects a planted correlator whose %s disagrees with issued authority", async (_field, mismatch) => {
       const { runsRoot, directory, request } = await stagedRun();
-      // A correlator planted directly into the run directory (bypassing the
-      // handle's record-time role check) is structurally valid; the capture
-      // boundary must still refuse it at read time.
-      const nativeId = "pi-native-wrong-role";
+      // Plant a structurally valid correlator behind the record-time guard.
+      // Resolution itself must reject it, before any caller can act on the
+      // request it names.
+      const nativeId = `pi-native-wrong-${_field}`;
       const digest = createHash("sha256").update(`pi\0${nativeId}`).digest("hex");
       writeFileSync(
         join(directory, "requests", "correlators", `${digest}.json`),
@@ -368,21 +372,25 @@ describe("Pi and Claude reach the same result", () => {
           harness: "pi",
           nativeId,
           requestId: request.requestId,
-          role: "silent-failure-hunter",
-          attempt: request.attempt,
+          ...mismatch,
         }),
       );
 
-      const outcome = await captureHarnessResult({
+      const resolved = resolveCorrelatedRequest({
         harness: "pi",
         runsRoot,
         runDirectory: directory,
         nativeId,
-        candidates: piCandidates(AGENT_OUTPUT),
       });
 
-      expect(outcome.kind).toBe("terminal-rejection");
-      if (outcome.kind === "terminal-rejection") expect(outcome.reason).toBe("wrong-agent-role");
+      expect(resolved).toEqual({
+        ok: false,
+        outcome: {
+          kind: "terminal-rejection",
+          reason: "correlator-authority",
+          message: expect.stringContaining("does not match issued request"),
+        },
+      });
     });
 
     it("writes byte-identical transcripts from either harness", async () => {
@@ -577,6 +585,26 @@ describe("Pi and Claude reach the same result", () => {
       expect(outcome).toMatchObject({ message: expect.stringContaining("disk is read-only") });
     });
 
+    it("never throws when rejection persistence itself throws", async () => {
+      const request = authority();
+      const handle = {
+        rejectCapture: async () => { throw new Error("marker store unavailable"); },
+      } as unknown as RunDirHandle;
+
+      const outcome = await terminalizeCaptureRejection(
+        handle,
+        request,
+        terminalCaptureRefusal("no-final-payload", "agent said nothing"),
+      );
+
+      expect(outcome).toEqual({
+        kind: "retriable-failure",
+        reason: "rejection-persistence",
+        message: expect.stringContaining("capture refused (no-final-payload: agent said nothing)"),
+      });
+      expect(outcome).toMatchObject({ message: expect.stringContaining("marker store unavailable") });
+    });
+
     it("never throws when audit append fails after the tombstone lands", async () => {
       const request = authority();
       const handle = {
@@ -685,6 +713,15 @@ describe("Pi and Claude reach the same result", () => {
 
     expect(() => claudeFinalPayloadCandidates(transcript))
       .toThrow(/cannot read Claude transcript/);
+  });
+
+  it("reports a resolved transcript that disappeared as a filesystem read failure", () => {
+    const root = mkdtempSync(join(tmpdir(), "loom-claude-disappeared-"));
+    cleanup.push(root);
+    const transcript = join(root, "disappeared.jsonl");
+
+    expect(() => claudeFinalPayloadCandidates(transcript))
+      .toThrow(/cannot read Claude transcript .*disappeared\.jsonl:.*ENOENT/);
   });
 });
 
@@ -844,6 +881,27 @@ describe("Claude capture against a real run directory", () => {
     return path;
   }
 
+  async function expectTerminalCaptureRejection(
+    runsRoot: string,
+    runDir: string,
+    reason: string,
+  ): Promise<void> {
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const issued = opened.value.readIssuedRequests();
+    if (!issued.ok || issued.value[0] === undefined) throw new Error(issued.ok ? "missing issued request" : issued.error.message);
+    const marker = opened.value.readCaptureRejection(issued.value[0]);
+    expect(marker.ok).toBe(true);
+    if (!marker.ok) return;
+    expect(marker.value).toContain(reason);
+    const events = await opened.value.readEvents();
+    const matching = events.filter(({ event }) =>
+      typeof event === "object" && event !== null &&
+      (event as Record<string, unknown>).kind === "request-capture-rejected" &&
+      String((event as Record<string, unknown>).diagnostic).includes(reason));
+    expect(matching).toHaveLength(1);
+  }
+
   it("persists exact Claude native-id/request/role authority at spawn acceptance", async () => {
     const { runsRoot, runDir } = await stagedRun();
     const opened = openRunDirectory(runsRoot, runDir);
@@ -901,11 +959,16 @@ describe("Claude capture against a real run directory", () => {
     expect(outcome.receipt.byteLength).toBe(Buffer.byteLength(text, "utf-8"));
   });
 
-  it("reports a stop that matches no reservation instead of capturing it", async () => {
+  it("reports a stop that matches no reservation before touching its missing transcript", async () => {
     const { runsRoot, runDir } = await stagedRun();
 
     const outcome = await captureClaudeResult(
-      { session_id: "s1", agent_id: "some-other-agent", agent_type: "code-reviewer", agent_transcript_path: transcript(runDir, "hello") },
+      {
+        session_id: "s1",
+        agent_id: "some-other-agent",
+        agent_type: "code-reviewer",
+        agent_transcript_path: join(runDir, "does-not-exist.jsonl"),
+      },
       runsRoot,
       runDir,
     );
@@ -1042,6 +1105,29 @@ describe("Claude capture against a real run directory", () => {
       reason: "transcript-json",
       message: expect.stringContaining("invalid final Claude transcript JSON at line 2"),
     });
+    await expectTerminalCaptureRejection(runsRoot, runDir, "transcript-json");
+  });
+
+  it("rethrows an unexpected payload-reader defect without terminalizing request authority", async () => {
+    const { runsRoot, runDir } = await stagedRun();
+    const path = transcript(runDir, "unobserved payload");
+    const engineFault = new Error("payload reader invariant failed");
+
+    await expect(captureClaudeResult(
+      { session_id: "s1", agent_id: "agent-abc", agent_type: "code-reviewer", agent_transcript_path: path },
+      runsRoot,
+      runDir,
+      () => { throw engineFault; },
+    )).rejects.toBe(engineFault);
+
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const issued = opened.value.readIssuedRequests();
+    if (!issued.ok || issued.value[0] === undefined) throw new Error(issued.ok ? "missing request" : issued.error.message);
+    expect(opened.value.readCaptureRejection(issued.value[0])).toEqual({ ok: true, value: null });
+    const captured = opened.value.readCapturedAttempts();
+    if (!captured.ok) throw new Error(captured.error.message);
+    expect([...captured.value]).toEqual([]);
   });
 
   it("reports a missing transcript rather than capturing nothing silently", async () => {
@@ -1059,14 +1145,22 @@ describe("Claude capture against a real run directory", () => {
     // `agent_transcript_path`), and must not be reported as an Agent that said
     // nothing.
     expect(outcome.reason).toBe("transcript-locator");
-    const opened = openRunDirectory(runsRoot, runDir);
-    if (!opened.ok) throw new Error(opened.error.message);
-    expect(opened.value.readCaptureRejection(authority())).toMatchObject({
-      ok: true,
-      value: expect.stringContaining("transcript-locator"),
-    });
-    expect((await opened.value.readEvents()).filter(({ event }) =>
-      (event as { kind?: string }).kind === "request-capture-rejected")).toHaveLength(1);
+    await expectTerminalCaptureRejection(runsRoot, runDir, "transcript-locator");
+  });
+
+  it("terminalises a reserved request whose located transcript cannot be read", async () => {
+    const { runsRoot, runDir } = await stagedRun();
+    const unreadable = join(runDir, "transcript-directory");
+    mkdirSync(unreadable);
+
+    const outcome = await captureClaudeResult(
+      { session_id: "s1", agent_id: "agent-abc", agent_type: "code-reviewer", agent_transcript_path: unreadable },
+      runsRoot,
+      runDir,
+    );
+
+    expect(outcome).toMatchObject({ kind: "terminal-rejection", reason: "transcript-read" });
+    await expectTerminalCaptureRejection(runsRoot, runDir, "transcript-read");
   });
 
   it("returns a hook error for partial or malformed Claude run authority", async () => {
@@ -1082,6 +1176,13 @@ describe("Claude capture against a real run directory", () => {
 
       const malformed = await captureOrchestrationResult("{broken", []);
       expect(malformed).toMatchObject({ kind: "error", message: expect.stringContaining("malformed SubagentStop JSON") });
+      for (const stdin of ["null", "42", "[]", JSON.stringify({ session_id: "s1", agent_type: 7 })]) {
+        const wrongShape = await captureOrchestrationResult(stdin, []);
+        expect(wrongShape).toMatchObject({
+          kind: "error",
+          message: expect.stringContaining("malformed SubagentStop JSON or domain shape"),
+        });
+      }
     } finally {
       if (previousRoot === undefined) delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
       else process.env.LOOM_ORCHESTRATION_RUNS_ROOT = previousRoot;

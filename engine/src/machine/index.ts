@@ -68,6 +68,7 @@ export {
   type SessionFileSuffix,
   type SessionId,
   type MachineBinding,
+  type MachineBindingAuthority,
   type PersistedBinding,
   type SessionRegistry,
 } from "./evidence";
@@ -84,6 +85,7 @@ export {
   recordCallStart,
   callStartFor,
   readBindings,
+  readBindingAuthority,
   soleActiveBinding,
   countActiveAgents,
   anyActiveSubagent,

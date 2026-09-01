@@ -4,8 +4,8 @@
  * update the docs if changed.
  */
 
-import { execSync } from "node:child_process";
-import { accessSync, constants as fsConstants } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { accessSync, constants as fsConstants, lstatSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PHASES, type Phase } from "./types";
@@ -14,8 +14,8 @@ import { PHASES, type Phase } from "./types";
 import { PANEL_BASELINE_LENSES, PANEL_LENSES } from "./core/panel-contract";
 // The Agent Catalog is the single identity source for every Loom-owned agent
 // (kind, profile, required Skill). model-profiles is a pure leaf module — this
-// import adds no cycle. Every agent set and phase map below is a DERIVED
-// projection of the catalog, never a second source.
+// import adds no cycle. Every Loom-owned agent set and phase map below is a
+// DERIVED projection of the catalog; harness compatibility utilities are not.
 import {
   AGENT_POLICIES,
   agentsOfKind,
@@ -130,8 +130,9 @@ export const ARCH_PANEL_PHASE: Phase = "architecture";
  *  agent reaching it may be the stored suffixed name (`arch-designer-agent`) OR
  *  its bare form (`arch-designer`). The union of keys those probes hit is
  *  {bare, name, name + "-agent"}. The disjointness guard must forbid ALL of
- *  them — the single-source ARCHITECTURE_AGENTS map already rules out the exact
- *  name appearing in both roles, but NOT a de-suffixed phase agent (`arch-designer`)
+ *  them — the single-source Agent Catalog projection into ARCH_PANEL_AGENTS
+ *  already rules out the exact name appearing in both roles, but NOT a
+ *  de-suffixed phase agent (`arch-designer`)
  *  or a doubly-suffixed one (`arch-designer-agent-agent`) that captures the panel
  *  invocation through detectPhase's other two probes. */
 function phaseLookupKeys(panelAgent: string): string[] {
@@ -261,7 +262,7 @@ export function isReviewAgent(agentType: string): boolean {
   return REVIEW_SUB_AGENTS.has(agentType);
 }
 
-/** All review-related agents (sub-agents + spec-check invoker) */
+/** Finding-producing review agents plus the spec-check invoker. */
 export const REVIEW_AGENTS: ReadonlySet<string> = frozenSet([
   ...REVIEW_SUB_AGENTS,
   ...agentsOfKind("spec-check"),
@@ -281,8 +282,9 @@ export const REVIEW_AGENTS: ReadonlySet<string> = frozenSet([
 export const REVIEW_PANEL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("review-verifier"));
 
 /** Review-panel agents that would be MISROUTED by colliding with a phase,
- *  architecture-panel, impl, review, or utility agent — detectPhase probes bare and `-agent`-
- *  suffixed forms and reaches those sets first. Must always be empty. Exported
+ *  architecture-panel, impl, review, or utility agent — validatePhaseOrder
+ *  passes utility agents through before detectPhase; detectPhase probes bare
+ *  and `-agent`-suffixed forms and reaches the remaining sets first. Must always be empty. Exported
  *  so the guard can be driven with a synthetic overlap in tests. */
 export function reviewPanelOverlap(
   panel: ReadonlySet<string> = REVIEW_PANEL_AGENTS,
@@ -318,10 +320,10 @@ assertReviewPanelDisjoint();
 export const EXECUTE_AGENTS: ReadonlySet<string> = frozenSet([...IMPL_AGENTS, ...REVIEW_AGENTS]);
 
 /** Panel agents that would be MISROUTED away from architecture classification
- *  by colliding with an execute-phase or utility agent. detectPhase
- *  (validate-phase-order.ts) classifies IMPL/REVIEW agents as "execute" — and
- *  short-circuits UTILITY agents to passthrough — BEFORE it reaches the panel
- *  branch, probing both the bare and `-agent`-suffixed forms. So a panel agent
+ *  by colliding with an execute-phase or utility agent. validatePhaseOrder
+ *  short-circuits UTILITY agents to passthrough before detectPhase runs;
+ *  detectPhase classifies IMPL/REVIEW agents as "execute" before reaching the
+ *  panel branch, probing both the bare and `-agent`-suffixed forms. So a panel agent
  *  whose name (or any phaseLookupKeys variant of it) is also an
  *  IMPL/REVIEW/UTILITY agent would never be recognized as architecture work, and
  *  no PHASE_AGENT_MAP entry exists for it — so assertPanelPhaseDisjoint above,
@@ -347,15 +349,15 @@ export function assertPanelExecuteDisjoint(
   assertNoOverlap(
     overlap,
     `loom config invariant violated: panel agents must not also be execute-phase ` +
-      `or utility agents, but these collide: ${overlap.join(", ")}. detectPhase would ` +
-      `classify them as "execute" (or pass them through as utility) before reaching ` +
+      `or utility agents, but these collide: ${overlap.join(", ")}. validatePhaseOrder would ` +
+      `pass them through as utility, or detectPhase would classify them as "execute", before reaching ` +
       `the panel branch, so they would never be recognized as architecture work.`,
   );
 }
 
 // Fail at module load if a panel agent collides with an execute/utility agent —
-// same rationale as assertPanelPhaseDisjoint above, but for the sets detectPhase
-// consults BEFORE the panel branch. Runs once per process at first import.
+// same rationale as assertPanelPhaseDisjoint above, but for the utility check
+// and detectPhase sets reached BEFORE the panel branch. Runs once per process.
 assertPanelExecuteDisjoint();
 
 /** Tool vocabulary (defined in core/tool-vocabulary — re-exported here, config stays the documented home) */
@@ -475,10 +477,10 @@ export const protectedDirPatterns = (): RegExp => new RegExp(
 
 /** Commands allowed to touch guarded state paths: deny-by-default allowlist.
  *
- * This replaced the WRITE_PATTERNS denylist after rounds 11-14 each shipped
- * a critical bypass of the same class ("write tool not yet enumerated" —
- * substitution escapes, `bun -e`, glob paths, `ln`/`truncate`). An allowlist
- * inverts the residual: instead of enumerating writers (unbounded), it
+ * This replaces a writer denylist because writer vocabulary and composition
+ * are unbounded (`bun -e`, substitutions, glob paths, wrappers, and future
+ * tools all create new write forms). An allowlist inverts the residual: instead
+ * of enumerating writers (unbounded), it
  * enumerates readers (small, stable), so an unknown command on a guarded
  * path blocks instead of slipping through.
  *
@@ -511,7 +513,7 @@ export const protectedDirPatterns = (): RegExp => new RegExp(
  * inherits the write capability of whatever it wraps. Heads match exactly
  * (no basename resolution): `./cat` or `/tmp/evil/jq` must not inherit the
  * trust of a PATH-resolved name. */
-export const READ_ONLY_STATE_COMMANDS: ReadonlySet<string> = new Set([
+export const READ_ONLY_STATE_COMMANDS: ReadonlySet<string> = frozenSet([
   "jq", "cat", "grep", "egrep", "fgrep",
   "head", "tail", "wc", "ls", "stat", "file",
   "diff", "cmp", "md5sum", "sha1sum", "sha256sum",
@@ -598,6 +600,52 @@ export function pathExistsFailClosed(path: string): boolean {
     `loom: cannot access ${p}: ${cause} — assuming present (fail closed)`);
 }
 
+const NOT_A_GIT_REPOSITORY = /^fatal: not a git repository(?: \(or any of the parent directories\))?:/m;
+
+/** Prove no ancestor contains repository metadata; only ENOENT is absence. */
+function proveNoGitMetadataInAncestors(): void {
+  let directory = process.cwd();
+  while (true) {
+    const candidate = join(directory, ".git");
+    try {
+      lstatSync(candidate);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new Error(
+          `cannot inspect repository metadata candidate ${candidate}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const parent = dirname(directory);
+      if (parent === directory) return;
+      directory = parent;
+      continue;
+    }
+    throw new Error(`git reported no repository, but repository metadata exists at ${candidate}`);
+  }
+}
+
+/** Resolve Git root without conflating an absent repository with an unavailable probe. */
+function gitRepositoryRoot(): string | null {
+  const probe = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+    encoding: "utf-8",
+    env: { ...process.env, LANG: "C", LC_ALL: "C" },
+  });
+  if (probe.error !== undefined) {
+    throw new Error(`git rev-parse could not start: ${probe.error.message}`);
+  }
+  if (probe.status === 0) {
+    const root = probe.stdout.trim();
+    if (root === "") throw new Error("git rev-parse returned an empty repository root");
+    return root;
+  }
+  if (probe.status === 128 && NOT_A_GIT_REPOSITORY.test(probe.stderr)) {
+    proveNoGitMetadataInAncestors();
+    return null;
+  }
+  const outcome = probe.signal === null ? `exit ${probe.status ?? "unknown"}` : `signal ${probe.signal}`;
+  throw new Error(`git rev-parse failed (${outcome}): ${probe.stderr.trim() || "no diagnostic"}`);
+}
+
 /** Find task graph by walking up from cwd to git root. */
 function findTaskGraphPath(): string {
   const relatives = taskGraphRelatives();
@@ -611,18 +659,15 @@ function findTaskGraphPath(): string {
   }
 
   // Walk up via git rev-parse and preserve candidate priority at the root.
-  try {
-    const root = execSync("git rev-parse --show-toplevel", { encoding: "utf-8" }).trim();
+  // Only a proven non-repository permits fallback. Missing Git, permission,
+  // safe-directory, I/O, and malformed-output failures throw so callers cannot
+  // mistake an unobservable repository-root graph for no graph.
+  const root = gitRepositoryRoot();
+  if (root !== null) {
     for (const relative of relatives) {
       const absolute = join(root, relative);
       if (pathExistsFailClosed(absolute)) return absolute;
     }
-  } catch (e) {
-    // Not a git repo (or git missing): the walk-up is skipped and only the
-    // cwd-relative candidates can resolve.
-    process.stderr.write(
-      `loom: git rev-parse walk-up failed while locating ${relatives.join(" or ")} — falling back to cwd-relative: ${e instanceof Error ? e.message : String(e)}\n`,
-    );
   }
 
   // No graph exists yet: retain the harness-native creation path.

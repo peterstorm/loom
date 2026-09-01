@@ -84,6 +84,13 @@ function modelFreePlan(root: string): string {
   return path;
 }
 
+function specCheckDocuments(specFile: string | null, planFile: string | null) {
+  const document = (path: string | null) => path === null
+    ? { path: null, contentDigest: null }
+    : { path, contentDigest: createHash("sha256").update(readFileSync(path)).digest("hex") };
+  return { spec: document(specFile), plan: document(planFile) };
+}
+
 function replayFromCapturedEvidence(handle: RunDirHandle) {
   const registration = handle.readProgramRegistration();
   if (!registration.ok || registration.value === null) throw new Error("expected standalone registration");
@@ -498,26 +505,6 @@ describe("orchestration CLI", () => {
 
   function lines(count: number, prefix: string): string {
     return `${Array.from({ length: count }, (_, index) => `${prefix}-${index}`).join("\n")}\n`;
-  }
-
-  function refutationOutput(handle: RunDirHandle, authority: AgentRequestAuthority): string {
-    const context = handle.readContext(authority.contextDigest);
-    if (!context.ok) throw new Error(context.error.message);
-    const section = context.value.fixedContext.find(({ label }) =>
-      label === "wave-refutation-authority" || label === "refutation-authority");
-    if (section === undefined) throw new Error("refutation context lacks semantic authority");
-    const semantic = JSON.parse(Buffer.from(section.bytes).toString("utf8")) as {
-      lens: string;
-      findings: readonly { id: string }[];
-    };
-    return JSON.stringify({
-      criterion: semantic.lens,
-      verdicts: semantic.findings.map(({ id }) => ({
-        finding_id: id,
-        verdict: "upheld",
-        reasoning: "The current immutable packet still exhibits the finding",
-      })),
-    });
   }
 
   /** A refutation verdict transcript with a caller-chosen vote direction. */
@@ -1483,7 +1470,9 @@ describe("orchestration CLI", () => {
       authority.role === "review-verifier-agent")).toBe(true);
     expect((JSON.parse(readFileSync(statePath, "utf8")) as { tasks: readonly { review_run?: unknown }[] }).tasks[0]?.review_run).toBeUndefined();
     for (const [index, request] of freshPanel.requests.entries()) {
-      const raw = index === 0 ? "not valid refutation JSON" : refutationOutput(opened.value, request.authority);
+      const raw = index === 0
+        ? "not valid refutation JSON"
+        : refutationVerdicts(opened.value, request.authority, "upheld");
       expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
     const retriedPanel = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
@@ -2638,7 +2627,10 @@ describe("orchestration CLI", () => {
     const graph = {
       current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {},
-      wave_review_epoch: { runId: "run.wave-upheld-tally", wave: 1, batchEpoch: "a".repeat(64) },
+      wave_review_epoch: {
+        runId: "run.wave-upheld-tally", wave: 1, batchEpoch: "a".repeat(64),
+        specCheckDocuments: specCheckDocuments(null, null),
+      },
       spec_check: {
         wave: 1, run_at: new Date().toISOString(), verdict: "PASSED", critical_count: 0, high_count: 0,
         critical_findings: [], high_findings: [], medium_findings: [],
@@ -2722,10 +2714,14 @@ describe("orchestration CLI", () => {
       id: "code-reviewer-7", agent: "code-reviewer", severity: "critical" as const,
       file: "src/x.ts", line: 1, claim: "relative imports bypass the check-imports boundary",
     };
+    const planFile = modelFreePlan(root);
     const graph = {
       current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: modelFreePlan(root), wave_gates: {},
-      wave_review_epoch: { runId: "run.wave-refuted-tally", wave: 1, batchEpoch: "b".repeat(64) },
+      spec_file: null, plan_file: planFile, wave_gates: {},
+      wave_review_epoch: {
+        runId: "run.wave-refuted-tally", wave: 1, batchEpoch: "b".repeat(64),
+        specCheckDocuments: specCheckDocuments(null, planFile),
+      },
       spec_check: {
         wave: 1, run_at: new Date().toISOString(), verdict: "PASSED", critical_count: 0, high_count: 0,
         critical_findings: [], high_findings: [], medium_findings: [],
@@ -2789,10 +2785,14 @@ describe("orchestration CLI", () => {
     mkdirSync(join(root, "src"));
     writeFileSync(join(root, "src", "x.ts"), "console.log('full-tier violation');\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    const planFile = modelFreePlan(root);
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: modelFreePlan(root), wave_gates: {},
-      wave_review_epoch: { runId: "run.wave-lint-block", wave: 1, batchEpoch: "b".repeat(64) },
+      spec_file: null, plan_file: planFile, wave_gates: {},
+      wave_review_epoch: {
+        runId: "run.wave-lint-block", wave: 1, batchEpoch: "b".repeat(64),
+        specCheckDocuments: specCheckDocuments(null, planFile),
+      },
       spec_check: {
         wave: 1, run_at: new Date().toISOString(), verdict: "PASSED", critical_count: 0, high_count: 0,
         critical_findings: [], high_findings: [], medium_findings: [],
@@ -2856,7 +2856,9 @@ describe("orchestration CLI", () => {
     };
     expect(panel.kind).toBe("spawn-batch");
     for (const [index, request] of panel.requests.entries()) {
-      const raw = index === 0 ? "malformed" : refutationOutput(opened.value, request.authority);
+      const raw = index === 0
+        ? "malformed"
+        : refutationVerdicts(opened.value, request.authority, "upheld");
       expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
 
@@ -2888,7 +2890,7 @@ describe("orchestration CLI", () => {
     // only be reconstructed from the full event prefix, not from the
     // accepted-only completed-state projection.
     const retryRequest = retry.requests[0]!;
-    const valid = refutationOutput(opened.value, retryRequest.authority);
+    const valid = refutationVerdicts(opened.value, retryRequest.authority, "upheld");
     expect((await opened.value.captureTranscript(retryRequest.authority, [...Buffer.from(valid)])).ok).toBe(true);
     const doneResult = runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root);
     expect(doneResult.status, doneResult.stderr).toBe(0);

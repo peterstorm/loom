@@ -122,7 +122,7 @@ describe("deriveAgentTranscriptPath", () => {
     expect(deriveAgentTranscriptPath("sess", "agent")).toBeNull();
   });
 
-  it("diagnoses an unreadable derived candidate instead of collapsing it into absence", () => {
+  it("propagates an unreadable derived candidate instead of collapsing it into absence", () => {
     const config = tmp("loom-cfg");
     const project = tmp("loom-proj");
     setEnv("CLAUDE_CONFIG_DIR", config);
@@ -131,19 +131,14 @@ describe("deriveAgentTranscriptPath", () => {
     const candidate = join(parent, "agent-agent1.jsonl");
     mkdirSync(parent, { recursive: true });
     symlinkSync(candidate, candidate);
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    try {
-      expect(deriveAgentTranscriptPath("sess-loop", "agent1")).toBeNull();
-      expect(stderr.mock.calls.map(([text]) => String(text)).join(""))
-        .toMatch(/cannot inspect derived subagent file candidate.*(?:ELOOP|too many levels of symbolic links)/i);
-    } finally {
-      stderr.mockRestore();
-    }
+
+    expect(() => deriveAgentTranscriptPath("sess-loop", "agent1"))
+      .toThrow(/(?:ELOOP|too many levels of symbolic links)/i);
   });
 
   it("returns null while preserving realpath and long-slug scan diagnostics", () => {
     const missingRoot = join(tmp("loom-missing-root-parent"), "missing-config");
-    const longMissingProject = `/${"missing-project-segment".repeat(12)}`;
+    const longMissingProject = `/${Array.from({ length: 12 }, () => "missing-project-segment").join("/")}`;
     setEnv("CLAUDE_CONFIG_DIR", missingRoot);
     setEnv("CLAUDE_PROJECT_DIR", longMissingProject);
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -212,6 +207,22 @@ describe("resolveAgentTranscriptPath — precedence", () => {
     } finally {
       stderr.mockRestore();
     }
+  });
+
+  it("propagates a non-ENOENT supplied-path failure instead of using derivable bytes", () => {
+    const config = tmp("loom-cfg");
+    const project = tmp("loom-proj");
+    setEnv("CLAUDE_CONFIG_DIR", config);
+    setEnv("CLAUDE_PROJECT_DIR", project);
+    plantTranscript(config, project, "sess-loop", "agent1");
+    const loop = join(tmp("loom-loop-parent"), "loop");
+    symlinkSync(loop, loop);
+
+    expect(() => resolveAgentTranscriptPath({
+      session_id: "sess-loop",
+      agent_id: "agent1",
+      agent_transcript_path: join(loop, "transcript.jsonl"),
+    })).toThrow(/(?:ELOOP|too many levels of symbolic links)/i);
   });
 
   it("expands a tilde-prefixed supplied path before believing it", () => {
@@ -287,22 +298,38 @@ describe("resolveAgentType", () => {
     expect(resolveAgentType({})).toBe("");
   });
 
-  it("says so when the metadata cannot be parsed", () => {
+  it("fails closed when the first existing metadata candidate cannot be parsed", () => {
     const { session, agentId } = plantedSession("{ not json");
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    try {
-      expect(resolveAgentType({ session_id: session, agent_id: agentId })).toBe("");
-      expect(stderr.mock.calls.map(([t]) => String(t)).join("")).toContain("cannot read agent metadata");
-    } finally {
-      stderr.mockRestore();
+
+    expect(() => resolveAgentType({ session_id: session, agent_id: agentId }))
+      .toThrow(/cannot read agent metadata/);
+  });
+
+  it("fails closed when existing metadata has no usable agentType", () => {
+    for (const body of [JSON.stringify({}), JSON.stringify({ agentType: "" }), JSON.stringify({ agentType: 7 })]) {
+      const { session, agentId } = plantedSession(body);
+      expect(() => resolveAgentType({ session_id: session, agent_id: agentId }), body)
+        .toThrow(/does not contain a non-empty agentType/);
     }
   });
 
-  it("reports an empty type for metadata with no usable agentType", () => {
-    for (const body of [JSON.stringify({}), JSON.stringify({ agentType: "" }), JSON.stringify({ agentType: 7 })]) {
-      const { session, agentId } = plantedSession(body);
-      expect(resolveAgentType({ session_id: session, agent_id: agentId }), body).toBe("");
-    }
+  it("does not fall through malformed higher-priority metadata to a lower-priority role", () => {
+    const configDir = tmp("loom-config");
+    const realProject = tmp("loom-real-project");
+    const linkedProject = join(tmp("loom-linked-project"), "project");
+    symlinkSync(realProject, linkedProject);
+    setEnv("CLAUDE_CONFIG_DIR", configDir);
+    setEnv("CLAUDE_PROJECT_DIR", linkedProject);
+    const relative = join("sess-type", "subagents", "agent-agenttype1.meta.json");
+    const highPriority = join(configDir, "projects", projectSlug(linkedProject), relative);
+    const lowerPriority = join(configDir, "projects", projectSlug(realProject), relative);
+    mkdirSync(join(highPriority, ".."), { recursive: true });
+    mkdirSync(join(lowerPriority, ".."), { recursive: true });
+    writeFileSync(highPriority, "{ malformed");
+    writeFileSync(lowerPriority, JSON.stringify({ agentType: "loom:code-reviewer" }));
+
+    expect(() => deriveAgentType("sess-type", "agenttype1"))
+      .toThrow(/cannot read agent metadata/);
   });
 
   it("refuses ids that would address a file outside the session directory", () => {

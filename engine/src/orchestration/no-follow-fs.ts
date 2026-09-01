@@ -1,10 +1,10 @@
 /**
  * Anchored filesystem primitives shared by every run directory.
  *
- * Every path below a run's base directory must be refused if ANY component of
- * it is a symlink — that is the attack these primitives exist to stop, and it
- * is enforced identically on both supported platforms. How the kernel is asked
- * for that guarantee differs, because the two systems expose different tools:
+ * No open below a run's base directory may follow any symlink component.
+ * Leaf symlinks may be safely removed or atomically replaced because those
+ * pathname operations act on the link itself. The opening guarantee is
+ * enforced on both supported platforms through different kernel facilities:
  *
  * - **Linux — anchored to a descriptor.** Each absolute path is opened one
  *   component at a time relative to the descriptor for its parent, addressed
@@ -28,8 +28,9 @@
  * root would refuse every real run directory.
  *
  * These live in the orchestration layer because both the panel helpers and the
- * anchored `RunDirHandle` need them; the handle is the consolidation point the
- * plan calls for, and the handlers import them back from here.
+ * anchored `RunDirHandle` need them. ADR-0004 assigns anchored filesystem
+ * effects to this narrow orchestration adapter; handlers import them from here
+ * rather than recreating no-follow authority at each call site.
  */
 
 import {
@@ -37,6 +38,7 @@ import {
   constants as fsConstants,
   fchmodSync,
   fstatSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -53,29 +55,47 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 
-/**
- * A descriptor that `openDirectoryNoFollow`/`openChildDirectoryNoFollow` hold
- * open for anchored access. The brand makes a live anchor unforgeable outside
- * this module: callers pass handles around, but only `anchorFor` can mint one,
- * so a fabricated `{ anchor, fd }` (or a raw fd number) is a type error.
- */
+const ANCHORED_DIRECTORY_CAPABILITY: unique symbol = Symbol("loom.anchored-directory");
+const LIVE_ANCHORED_DIRECTORIES = new WeakSet<object>();
+const REVOKED_ANCHORED_DIRECTORIES = new WeakSet<object>();
+
 declare const anchoredFdBrand: unique symbol;
 export type AnchoredDirectoryFd = number & { readonly [anchoredFdBrand]: "anchored-directory-fd" };
 
 /**
- * A directory held open for anchored access, carrying whatever the platform
- * needs to address its children. Linux addresses them through the retained
- * descriptor; darwin has no such bridge and must re-state the real path, which
- * `openDirectoryNoFollow` has already proven symlink-free.
+ * A live, runtime-authenticated directory capability. Linux addresses children
+ * through the retained descriptor; Darwin uses the proven-real path while
+ * retaining the descriptor for identity and lifetime authority.
  */
 export type AnchoredDirectory =
-  | Readonly<{ anchor: "descriptor"; fd: AnchoredDirectoryFd }>
-  | Readonly<{ anchor: "real-path"; fd: AnchoredDirectoryFd; path: string }>;
+  | Readonly<{
+      anchor: "descriptor";
+      fd: AnchoredDirectoryFd;
+      [ANCHORED_DIRECTORY_CAPABILITY]: true;
+    }>
+  | Readonly<{
+      anchor: "real-path";
+      fd: AnchoredDirectoryFd;
+      path: string;
+      [ANCHORED_DIRECTORY_CAPABILITY]: true;
+    }>;
+
+function assertAnchoredDirectory(directory: AnchoredDirectory): void {
+  const candidate = directory as unknown as Record<PropertyKey, unknown>;
+  const validAnchor = candidate.anchor === "descriptor" ||
+    (candidate.anchor === "real-path" && typeof candidate.path === "string" && isAbsolute(candidate.path));
+  if (!LIVE_ANCHORED_DIRECTORIES.has(directory) || REVOKED_ANCHORED_DIRECTORIES.has(directory) ||
+      candidate[ANCHORED_DIRECTORY_CAPABILITY] !== true || !validAnchor ||
+      typeof candidate.fd !== "number" || !Number.isSafeInteger(candidate.fd) || candidate.fd < 0) {
+    throw new Error("anchored directory capability was not produced by the no-follow filesystem boundary");
+  }
+}
 
 /** Stable identity used to reject a pathname that was rebound after capture. */
 export type AnchoredDirectoryIdentity = Readonly<{ device: bigint; inode: bigint }>;
 
 export function anchoredDirectoryIdentity(directory: AnchoredDirectory): AnchoredDirectoryIdentity {
+  assertAnchoredDirectory(directory);
   const stat = fstatSync(directory.fd, { bigint: true });
   return Object.freeze({ device: stat.dev, inode: stat.ino });
 }
@@ -112,13 +132,25 @@ let darwinCapabilityVerified = false;
 function assertDarwinNoFollowAnyCapability(): void {
   if (darwinCapabilityVerified) return;
   const probeDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-anchor-probe-")));
+  let primaryError: unknown = null;
   try {
     symlinkSync(".", join(probeDir, "planted-link"));
     let refusedWithEloop = false;
     try {
-      openSync(join(probeDir, "planted-link"), fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | DARWIN_O_NOFOLLOW_ANY);
+      const unexpectedFd = openSync(
+        join(probeDir, "planted-link"),
+        fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | DARWIN_O_NOFOLLOW_ANY,
+      );
+      const closeError = closeFileDescriptor(unexpectedFd, null, "darwin O_NOFOLLOW_ANY capability probe");
+      if (closeError !== null) throw closeError;
     } catch (error) {
-      refusedWithEloop = (error as NodeJS.ErrnoException).code === "ELOOP";
+      if ((error as NodeJS.ErrnoException).code === "ELOOP") refusedWithEloop = true;
+      else {
+        throw new Error(
+          `darwin O_NOFOLLOW_ANY capability probe failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
+      }
     }
     if (!refusedWithEloop) {
       throw new Error(
@@ -126,10 +158,24 @@ function assertDarwinNoFollowAnyCapability(): void {
           "O_NOFOLLOW_ANY requires macOS 13 or newer; refusing unsafe anchored filesystem operations",
       );
     }
-    darwinCapabilityVerified = true;
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    rmSync(probeDir, { recursive: true, force: true });
+    try {
+      rmSync(probeDir, { recursive: true, force: true });
+    } catch (cleanupError) {
+      if (primaryError !== null) {
+        throw new AggregateError(
+          [primaryError, cleanupError],
+          `darwin O_NOFOLLOW_ANY capability probe failed (${primaryError instanceof Error ? primaryError.message : String(primaryError)}) ` +
+            `and its directory could not be cleaned up (${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)})`,
+        );
+      }
+      throw cleanupError;
+    }
   }
+  darwinCapabilityVerified = true;
 }
 
 function noFollowFlag(): number {
@@ -178,13 +224,6 @@ const leafFlags = (extra: number): number => extra | noFollowMask();
 const dirFlags = (): number => fsConstants.O_RDONLY | directoryFlag() | noFollowMask();
 
 /**
- * The path that names `child` inside an already-anchored directory. On Linux
- * this routes through the retained descriptor, so an ancestor swapped after
- * the anchor was opened cannot redirect it. On darwin it re-states the
- * proven-real directory path, and every open through it carries
- * `O_NOFOLLOW_ANY` so a planted symlink is still refused by the kernel.
- */
-/**
  * The path that addresses an anchored directory's children: the retained
  * descriptor on Linux, the proven-real path on darwin. One enforcement point
  * for the descriptor-versus-real-path addressing decision.
@@ -194,19 +233,40 @@ function anchoredDirectoryPath(directory: AnchoredDirectory): string {
 }
 
 export function anchoredChildPath(directory: AnchoredDirectory, child: string): string {
+  assertAnchoredDirectory(directory);
+  assertLeafName(child);
   return join(anchoredDirectoryPath(directory), child);
 }
 
 /** Release a directory anchor. The descriptor is the only owned resource. */
+function revokeAnchoredDirectory(directory: AnchoredDirectory): void {
+  assertAnchoredDirectory(directory);
+  REVOKED_ANCHORED_DIRECTORIES.add(directory);
+  LIVE_ANCHORED_DIRECTORIES.delete(directory);
+}
+
 export function closeAnchoredDirectory(directory: AnchoredDirectory): void {
+  revokeAnchoredDirectory(directory);
   closeSync(directory.fd);
 }
 
 const anchorFor = (fd: number, path: string): AnchoredDirectory => {
   const branded = fd as AnchoredDirectoryFd;
-  return process.platform === "darwin"
-    ? Object.freeze({ anchor: "real-path" as const, fd: branded, path })
-    : Object.freeze({ anchor: "descriptor" as const, fd: branded });
+  const directory = process.platform === "darwin"
+    ? {
+        anchor: "real-path" as const,
+        fd: branded,
+        path,
+        [ANCHORED_DIRECTORY_CAPABILITY]: true as const,
+      }
+    : {
+        anchor: "descriptor" as const,
+        fd: branded,
+        [ANCHORED_DIRECTORY_CAPABILITY]: true as const,
+      };
+  Object.defineProperty(directory, ANCHORED_DIRECTORY_CAPABILITY, { enumerable: false });
+  LIVE_ANCHORED_DIRECTORIES.add(directory);
+  return Object.freeze(directory);
 };
 
 /**
@@ -219,8 +279,9 @@ const anchorFor = (fd: number, path: string): AnchoredDirectory => {
  * documented point — after this returns, every path built under the result can
  * be, and is, held to the strict rule.
  *
- * On Linux this is an identity: a base containing a symlink is already refused
- * by the anchored walk today, so any base that works keeps working unchanged.
+ * This canonicalization contract is platform-independent: a configured base
+ * may itself contain symlinks and is returned as their real target. Strict
+ * no-follow traversal begins below that resolved base.
  */
 export function ensureResolvedBaseDirectory(path: string): string {
   const absolute = resolve(path);
@@ -257,6 +318,7 @@ function assertLeafName(name: string): void {
  * checked when the anchor was opened.
  */
 export function listDirectoryNamesNoFollow(directory: AnchoredDirectory): readonly string[] {
+  assertAnchoredDirectory(directory);
   return Object.freeze(readdirSync(anchoredDirectoryPath(directory)).sort());
 }
 
@@ -283,25 +345,14 @@ function closeFileDescriptor(
   }
 }
 
-/**
- * Release a directory anchor without ever masking a primary error or skipping
- * a still-owed close: close success returns the primary error unchanged, a
- * throwing close alone propagates, and both failing aggregate — the same
- * discipline `closeFileDescriptor` applies to file descriptors.
- */
+/** Release an anchor without masking a primary failure or leaking its fd. */
 export function closeAnchorGuarded(
   directory: AnchoredDirectory,
   primaryError: unknown,
   operation: string,
 ): unknown {
-  try {
-    closeAnchoredDirectory(directory);
-    return primaryError;
-  } catch (closeError) {
-    return primaryError === null
-      ? closeError
-      : new AggregateError([primaryError, closeError], `${operation} and directory close both failed`);
-  }
+  revokeAnchoredDirectory(directory);
+  return closeFileDescriptor(directory.fd, primaryError, `${operation} and directory close`);
 }
 
 /** Read one leaf relative to an anchored directory, following no component. */
@@ -322,27 +373,69 @@ export function readDirectoryFileNoFollow(directory: AnchoredDirectory, name: st
   return bytes;
 }
 
+function writeDirectoryLeafNoFollow(
+  directory: AnchoredDirectory,
+  name: string,
+  data: string | Uint8Array,
+  flags: number,
+  operation: string,
+): void {
+  assertLeafName(name);
+  let fileFd: number | null = null;
+  let primaryError: unknown = null;
+  try {
+    fileFd = openSync(anchoredChildPath(directory, name), leafFlags(flags), 0o600);
+    writeFileSync(fileFd, data);
+  } catch (error) {
+    primaryError = error;
+  }
+  primaryError = closeFileDescriptor(fileFd, primaryError, operation);
+  if (primaryError !== null) throw primaryError;
+}
+
 /** Exclusively publish one leaf relative to an anchored directory. */
 export function writeDirectoryFileExclusiveNoFollow(
   directory: AnchoredDirectory,
   name: string,
   data: string | Uint8Array,
 ): void {
-  assertLeafName(name);
-  let fileFd: number | null = null;
+  writeDirectoryLeafNoFollow(
+    directory,
+    name,
+    data,
+    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL,
+    `exclusive write of ${name}`,
+  );
+}
+
+/** Publish complete prepared bytes without ever exposing a partial final leaf. */
+function publishDirectoryFileExclusiveNoFollow(
+  directory: AnchoredDirectory,
+  name: string,
+  data: string | Uint8Array,
+): void {
+  const prepared = `${name}.claim-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   let primaryError: unknown = null;
   try {
-    fileFd = openSync(
-      anchoredChildPath(directory, name),
-      leafFlags(fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL),
-      0o600,
-    );
-    writeFileSync(fileFd, data);
+    writeDirectoryFileExclusiveNoFollow(directory, prepared, data);
+    linkSync(anchoredChildPath(directory, prepared), anchoredChildPath(directory, name));
   } catch (error) {
     primaryError = error;
   }
-  primaryError = closeFileDescriptor(fileFd, primaryError, `exclusive write of ${name}`);
+  let cleanupError: unknown = null;
+  try {
+    removeDirectoryFileNoFollow(directory, prepared);
+  } catch (error) {
+    cleanupError = error;
+  }
+  if (primaryError !== null && cleanupError !== null) {
+    throw new AggregateError(
+      [primaryError, cleanupError],
+      `exclusive publication of ${name} and prepared-file cleanup both failed`,
+    );
+  }
   if (primaryError !== null) throw primaryError;
+  if (cleanupError !== null) throw cleanupError;
 }
 
 function writeDirectoryFileAtomicPreparedNoFollow(
@@ -407,7 +500,9 @@ export function writeDirectoryFileAtomicNoFollow(
  * Publish one replacement whose final mode is installed before rename.
  *
  * The target never needs to become writable: bytes and mode are prepared on an
- * exclusively-created leaf, then one descriptor-relative rename commits both.
+ * exclusively-created leaf, then one anchored pathname rename commits both.
+ * Linux addresses that pathname through the retained descriptor; Darwin uses
+ * the parent path previously proved with `O_NOFOLLOW_ANY`.
  */
 export function writeDirectoryFileAtomicModeNoFollow(
   directory: AnchoredDirectory,
@@ -436,12 +531,23 @@ const wait = (milliseconds: number): Promise<void> =>
 
 type LockOwner = Readonly<{ pid: number }>;
 
-function parseLockOwner(rawOwner: string, lockName: string): LockOwner {
-  if (!/^[1-9]\d*(?::\d+:[a-z0-9]+)?$/u.test(rawOwner)) {
-    throw new Error(`lock ${lockName} has malformed owner token: ${JSON.stringify(rawOwner)}`);
-  }
+/**
+ * The owner-token grammar, in one place: a pid, optionally followed by the
+ * claim time and randomness that make a token unique. Canonical guard names
+ * are hard-linked only after these complete bytes are prepared, so a token
+ * that does not match is corruption, never an incomplete claimant to reclaim.
+ */
+const OWNER_TOKEN = /^[1-9]\d*(?::\d+:[a-z0-9]+)?$/u;
+
+function ownerPid(rawOwner: string): number | null {
+  if (!OWNER_TOKEN.test(rawOwner)) return null;
   const pid = Number(rawOwner.split(":", 1)[0]);
-  if (!Number.isSafeInteger(pid)) {
+  return Number.isSafeInteger(pid) ? pid : null;
+}
+
+function parseLockOwner(rawOwner: string, lockName: string): LockOwner {
+  const pid = ownerPid(rawOwner);
+  if (pid === null) {
     throw new Error(`lock ${lockName} has malformed owner token: ${JSON.stringify(rawOwner)}`);
   }
   return Object.freeze({ pid });
@@ -452,14 +558,20 @@ function processIsAlive(owner: LockOwner): boolean {
     process.kill(owner.pid, 0);
     return true;
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return true;
+    throw new Error(
+      `cannot determine whether lock owner pid ${owner.pid} is alive: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   }
 }
 
 /**
- * Does `name` exist as a directory entry under `directory`, without following
- * a symlink? ENOENT is the ONE absent answer; every other errno is rethrown, so
- * an unreadable entry never reads as a missing one.
+ * Does `name` exist as a readable file-like entry under `directory`, without
+ * following a symlink? ENOENT is the ONE absent answer; every other errno —
+ * including EISDIR — is rethrown, so an unreadable entry never reads as missing.
  */
 function directoryEntryExistsNoFollow(directory: AnchoredDirectory, name: string): boolean {
   try {
@@ -471,37 +583,210 @@ function directoryEntryExistsNoFollow(directory: AnchoredDirectory, name: string
   }
 }
 
-function removeOwnedRecoveryGuard(
+/**
+ * A recovery guard is mutual exclusion, not a lease. Publication exposes only
+ * a complete owner token, so abandonment requires a parsed pid the kernel
+ * reports gone. Malformed canonical bytes are corruption and fail closed.
+ */
+type RecoveryGuardSnapshot = Readonly<{
+  token: string;
+  device: bigint;
+  inode: bigint;
+}>;
+
+function readRecoveryGuardSnapshot(
+  directory: AnchoredDirectory,
+  name: string,
+): RecoveryGuardSnapshot {
+  let fileFd: number | null = null;
+  let snapshot: RecoveryGuardSnapshot | null = null;
+  let primaryError: unknown = null;
+  try {
+    fileFd = openSync(anchoredChildPath(directory, name), leafFlags(fsConstants.O_RDONLY));
+    const stat = fstatSync(fileFd, { bigint: true });
+    snapshot = Object.freeze({
+      token: readFileSync(fileFd).toString("utf-8"),
+      device: stat.dev,
+      inode: stat.ino,
+    });
+  } catch (error) {
+    primaryError = error;
+  }
+  primaryError = closeFileDescriptor(fileFd, primaryError, `read of recovery guard ${name}`);
+  if (primaryError !== null) throw primaryError;
+  if (snapshot === null) throw new Error(`read of recovery guard ${name} produced no snapshot`);
+  return snapshot;
+}
+
+function sameRecoveryGuard(left: RecoveryGuardSnapshot, right: RecoveryGuardSnapshot): boolean {
+  return left.token === right.token && left.device === right.device && left.inode === right.inode;
+}
+
+function recoveryGuardIsAbandoned(snapshot: RecoveryGuardSnapshot): boolean {
+  const claimedPid = ownerPid(snapshot.token);
+  if (claimedPid === null) {
+    throw new Error(`recovery guard has malformed owner token: ${JSON.stringify(snapshot.token)}`);
+  }
+  return !processIsAlive({ pid: claimedPid });
+}
+
+const recoveryTombPrefix = (recoveryName: string): string => `${recoveryName}.tomb-`;
+
+function recoveryTombName(directory: AnchoredDirectory, recoveryName: string): string | null {
+  return listDirectoryNamesNoFollow(directory)
+    .find((name) => name.startsWith(recoveryTombPrefix(recoveryName))) ?? null;
+}
+
+/**
+ * Finish an atomically claimed recovery guard.
+ *
+ * The tomb pathname owns one exact inode. A live guard moved by a race is
+ * restored with a hard link that cannot replace a newer canonical guard; an
+ * abandoned guard is deleted only at its unique tomb name. Acquirers treat a
+ * tomb as recovery in progress, so the canonical-name gap cannot admit another
+ * stale-lock recovery.
+ */
+function settleRecoveryGuardTomb(
   directory: AnchoredDirectory,
   recoveryName: string,
-  recoveryToken: string,
-): void {
-  let observed: string;
+  tombName: string,
+): boolean {
+  let tomb: RecoveryGuardSnapshot;
   try {
-    observed = readDirectoryFileNoFollow(directory, recoveryName).toString("utf-8");
+    tomb = readRecoveryGuardSnapshot(directory, tombName);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw new Error(
+      `cannot inspect recovery guard tomb ${tombName}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+
+  if (!recoveryGuardIsAbandoned(tomb)) {
+    try {
+      linkSync(anchoredChildPath(directory, tombName), anchoredChildPath(directory, recoveryName));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw new Error(
+          `cannot restore live recovery guard ${recoveryName}: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
+      }
+      try {
+        const canonical = readRecoveryGuardSnapshot(directory, recoveryName);
+        if (!sameRecoveryGuard(canonical, tomb)) return false;
+      } catch (readError) {
+        if ((readError as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw readError;
+      }
+    }
+    removeDirectoryFileNoFollow(directory, tombName);
+    return true;
+  }
+
+  // Re-read the tomb immediately before unlink. This narrows the pathname race
+  // and revalidates the exact abandoned token/inode just before removal; Node
+  // exposes no unlinkat-by-retained-fd primitive, so it is not an atomic proof
+  // of which inode the following pathname unlink will remove.
+  const confirmed = readRecoveryGuardSnapshot(directory, tombName);
+  if (!sameRecoveryGuard(confirmed, tomb) || !recoveryGuardIsAbandoned(confirmed)) return false;
+  removeDirectoryFileNoFollow(directory, tombName);
+  process.stderr.write(
+    `loom: reclaimed the recovery guard ${recoveryName} of a dead or vanished claimant; ` +
+      "a prior lock recovery was interrupted\n",
+  );
+  return true;
+}
+
+function reclaimAbandonedRecoveryGuard(
+  directory: AnchoredDirectory,
+  recoveryName: string,
+): boolean {
+  const existingTomb = recoveryTombName(directory, recoveryName);
+  if (existingTomb !== null) return settleRecoveryGuardTomb(directory, recoveryName, existingTomb);
+
+  let observed: RecoveryGuardSnapshot;
+  try {
+    observed = readRecoveryGuardSnapshot(directory, recoveryName);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw new Error(
       `cannot inspect recovery guard ${recoveryName}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
     );
   }
-  if (observed !== recoveryToken) return;
+  if (!recoveryGuardIsAbandoned(observed)) return false;
+
+  const tombName = `${recoveryTombPrefix(recoveryName)}${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   try {
-    unlinkSync(anchoredChildPath(directory, recoveryName));
+    renameSync(anchoredChildPath(directory, recoveryName), anchoredChildPath(directory, tombName));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw new Error(
+      `cannot claim abandoned recovery guard ${recoveryName}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  return settleRecoveryGuardTomb(directory, recoveryName, tombName);
+}
+
+function removeOwnedRecoveryEntry(
+  directory: AnchoredDirectory,
+  name: string,
+  recoveryToken: string,
+): void {
+  let observed: string;
+  try {
+    observed = readDirectoryFileNoFollow(directory, name).toString("utf-8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw new Error(
-      `cannot remove recovery guard ${recoveryName}: ${error instanceof Error ? error.message : String(error)}`,
+      `cannot inspect recovery guard ${name}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  if (observed !== recoveryToken) return;
+  try {
+    unlinkSync(anchoredChildPath(directory, name));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new Error(
+      `cannot remove recovery guard ${name}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
     );
   }
 }
 
+function removeOwnedRecoveryGuard(
+  directory: AnchoredDirectory,
+  recoveryName: string,
+  recoveryToken: string,
+): void {
+  const ownedNames = [
+    recoveryName,
+    ...listDirectoryNamesNoFollow(directory)
+      .filter((name) => name.startsWith(recoveryTombPrefix(recoveryName))),
+  ];
+  const failures: unknown[] = [];
+  for (const name of ownedNames) {
+    try {
+      removeOwnedRecoveryEntry(directory, name, recoveryToken);
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) {
+    throw new AggregateError(failures, `multiple owned recovery entries for ${recoveryName} could not be cleaned up`);
+  }
+}
+
 /**
- * Recover one stale descriptor-relative lock without ever removing a lock that
- * may still have a live owner. The owner is inspected while the canonical lock
- * name remains occupied; only a proven-dead owner may be moved aside. The
+ * Recover one stale anchored lock without ever removing a lock that may still
+ * have a live owner. Child names are descriptor-relative on Linux and relative
+ * to the O_NOFOLLOW_ANY-proven pathname on Darwin. The owner is inspected
+ * while the canonical lock name remains occupied; only a proven-dead owner may
+ * be moved aside. The
  * tombstone is then re-read to close the release/reacquire race between the
  * first observation and the rename.
  *
@@ -518,11 +803,19 @@ export function recoverStaleDirectoryLock(
 ): boolean {
   const recoveryName = `${lockName}.recovery`;
   const recoveryToken = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2, 12)}`;
+  if (recoveryTombName(directory, recoveryName) !== null) return false;
   try {
-    writeDirectoryFileExclusiveNoFollow(directory, recoveryName, recoveryToken);
+    publishDirectoryFileExclusiveNoFollow(directory, recoveryName, recoveryToken);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
     throw error;
+  }
+  // A reclaimer may have atomically tombstoned the preceding guard between
+  // our pre-check and exclusive publication. Withdraw this exact replacement
+  // before it can authorize a concurrent stale-lock recovery.
+  if (recoveryTombName(directory, recoveryName) !== null) {
+    removeOwnedRecoveryGuard(directory, recoveryName, recoveryToken);
+    return false;
   }
 
   let primaryFailed = false;
@@ -540,6 +833,10 @@ export function recoverStaleDirectoryLock(
         `cannot inspect lock ${lockName}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    // An exclusively-created lock is observable for a moment before its owner
+    // token lands. Such a claimant can become live at any instant, so its lock
+    // is never stale — recovery stands down and the caller retries.
+    if (observedOwner.trim().length === 0) return false;
     if (processIsAlive(parseLockOwner(observedOwner, lockName))) return false;
 
     const tomb = `${lockName}.tomb-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -606,7 +903,8 @@ async function acquireDirectoryLock(directory: AnchoredDirectory, lockName: stri
   const ownerToken = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2, 12)}`;
   const recoveryName = `${lockName}.recovery`;
   for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
-    if (directoryEntryExistsNoFollow(directory, recoveryName)) {
+    if (directoryEntryExistsNoFollow(directory, recoveryName) || recoveryTombName(directory, recoveryName) !== null) {
+      if (reclaimAbandonedRecoveryGuard(directory, recoveryName)) continue;
       await wait(LOCK_RETRY_MS);
       continue;
     }
@@ -615,7 +913,7 @@ async function acquireDirectoryLock(directory: AnchoredDirectory, lockName: stri
       // Recovery may have claimed its guard between the pre-check and our
       // exclusive create. Withdraw this exact token before entering; the
       // recovery owner will either reclaim the prior stale file or stand down.
-      if (directoryEntryExistsNoFollow(directory, recoveryName)) {
+      if (directoryEntryExistsNoFollow(directory, recoveryName) || recoveryTombName(directory, recoveryName) !== null) {
         releaseDirectoryLock(directory, lockName, ownerToken);
         await wait(LOCK_RETRY_MS);
         continue;
@@ -690,18 +988,24 @@ export async function withAnchoredDirectoryLock<T>(
   operation: (directory: AnchoredDirectory) => T | Promise<T>,
 ): Promise<T> {
   const anchored = openDirectoryNoFollow(directory);
+  let outcome: AnchoredOperation<T>;
   try {
-    return await withAnchoredDirectoryHandleLock(anchored, lockName, operation);
-  } finally {
-    closeAnchoredDirectory(anchored);
+    outcome = {
+      kind: "returned",
+      value: await withAnchoredDirectoryHandleLock(anchored, lockName, operation),
+    };
+  } catch (error) {
+    outcome = { kind: "threw", error };
   }
+  return finishAnchoredOperation(anchored, outcome, `anchored lock ${lockName}`);
 }
 
 /**
- * Anchor an absolute directory path, refusing it if any component is a symlink.
+ * Anchor an absolute directory path without following a symlink component.
  *
- * Every component is opened relative to the descriptor for its parent, so
- * `O_NOFOLLOW` protects every hop and the returned descriptor is the authority.
+ * Linux walks each component relative to a retained parent descriptor with
+ * `O_NOFOLLOW`. Darwin performs one whole-path open with `O_NOFOLLOW_ANY` and
+ * retains both that descriptor and the proven pathname.
  */
 export function openDirectoryNoFollow(path: string): AnchoredDirectory {
   const absolute = resolve(path);
@@ -709,8 +1013,9 @@ export function openDirectoryNoFollow(path: string): AnchoredDirectory {
     // Darwin has no usable fd→path bridge: `/dev/fd/<fd>` is an fdesc node,
     // not a directory, and Node exposes no `openat`. `O_NOFOLLOW_ANY` asks the
     // kernel for the same whole-path guarantee in ONE resolution — the open
-    // fails with ELOOP if ANY component is a symlink — so the returned real
-    // path is safe to address children through.
+    // fails with ELOOP if ANY component is a symlink. Child operations retain
+    // this proven pathname because Node exposes no openat; a component swapped
+    // after acquisition remains the accepted Darwin risk documented above.
     return anchorFor(openSync(absolute, dirFlags()), absolute);
   }
   const root = parse(absolute).root;
@@ -753,10 +1058,30 @@ export function ensureDirectoryNoFollow(path: string): void {
  * with ordinary symlink-following semantics, so a swapped component would have
  * directories created at the link's TARGET. Walking one component at a time
  * refuses that instead: on Linux both mkdir and open resolve relative to a
- * retained parent descriptor; on darwin each open re-checks the whole path
- * under `O_NOFOLLOW_ANY`, so a symlinked ancestor is caught before the next
- * component is created.
+ * retained parent descriptor. On Darwin the retained parent identity is
+ * re-proved through `O_NOFOLLOW_ANY` immediately before mkdir, and the child is
+ * then opened with `O_NOFOLLOW_ANY`. That refuses an ancestor already swapped
+ * at either proof; Node exposes no `mkdirat`, so the pathname-only Darwin branch
+ * cannot claim descriptor-relative creation between those adjacent checks.
  */
+function proveDarwinParentPath(directory: AnchoredDirectory): void {
+  if (directory.anchor !== "real-path") return;
+  const expected = anchoredDirectoryIdentity(directory);
+  let proofFd: number | null = null;
+  let primaryError: unknown = null;
+  try {
+    proofFd = openSync(directory.path, dirFlags());
+    const observed = fstatSync(proofFd, { bigint: true });
+    if (observed.dev !== expected.device || observed.ino !== expected.inode) {
+      throw new Error(`darwin anchored parent path changed identity before directory creation: ${directory.path}`);
+    }
+  } catch (error) {
+    primaryError = error;
+  }
+  primaryError = closeFileDescriptor(proofFd, primaryError, `darwin parent proof of ${directory.path}`);
+  if (primaryError !== null) throw primaryError;
+}
+
 export function ensureRelativeDirectoryNoFollow(
   rootDirectory: AnchoredDirectory,
   runDir: string,
@@ -773,14 +1098,15 @@ export function ensureRelativeDirectoryNoFollow(
   try {
     for (const component of components) {
       const child = anchoredChildPath(current, component);
+      proveDarwinParentPath(current);
       try {
         mkdirSync(child, { mode: 0o700 });
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       }
-      // On darwin `child` names the just-created directory through its real
-      // path (the root anchor's path is the resolved runDir, so every hop
-      // extends it); on Linux the path argument is ignored.
+      // The no-follow open checks the created/existing child before it becomes
+      // the parent authority for another mkdir. On Darwin it also re-checks
+      // every ancestor in the whole pathname after creation.
       const next = anchorFor(openSync(child, dirFlags()), child);
       if (ownsCurrent) closeAnchoredDirectory(current);
       current = next;
@@ -791,24 +1117,51 @@ export function ensureRelativeDirectoryNoFollow(
   }
 }
 
-function writeAnchoredRunFile(path: string, data: string | Uint8Array, exclusive: boolean): void {
-  const parent = openDirectoryNoFollow(dirname(path));
-  let fileFd: number | null = null;
-  let primaryError: unknown = null;
+type AnchoredOperation<T> =
+  | Readonly<{ kind: "returned"; value: T }>
+  | Readonly<{ kind: "threw"; error: unknown }>;
+
+function finishAnchoredOperation<T>(
+  directory: AnchoredDirectory,
+  outcome: AnchoredOperation<T>,
+  operation: string,
+): T {
+  const failure = closeAnchorGuarded(
+    directory,
+    outcome.kind === "threw" ? outcome.error : null,
+    operation,
+  );
+  if (failure !== null) throw failure;
+  if (outcome.kind === "threw") throw outcome.error;
+  return outcome.value;
+}
+
+function withOpenedDirectoryNoFollow<T>(
+  path: string,
+  operation: string,
+  use: (directory: AnchoredDirectory) => T,
+): T {
+  const directory = openDirectoryNoFollow(path);
+  let outcome: AnchoredOperation<T>;
   try {
-    fileFd = openSync(
-      anchoredChildPath(parent, basename(path)),
-      leafFlags(fsConstants.O_WRONLY | fsConstants.O_CREAT |
-        (exclusive ? fsConstants.O_EXCL : fsConstants.O_TRUNC)),
-      0o600,
-    );
-    writeFileSync(fileFd, data);
+    outcome = { kind: "returned", value: use(directory) };
   } catch (error) {
-    primaryError = error;
+    outcome = { kind: "threw", error };
   }
-  primaryError = closeFileDescriptor(fileFd, primaryError, `write of ${basename(path)}`);
-  primaryError = closeAnchorGuarded(parent, primaryError, `write of ${basename(path)}`);
-  if (primaryError !== null) throw primaryError;
+  return finishAnchoredOperation(directory, outcome, operation);
+}
+
+function writeAnchoredRunFile(path: string, data: string | Uint8Array, exclusive: boolean): void {
+  const name = basename(path);
+  withOpenedDirectoryNoFollow(dirname(path), `write of ${name}`, (parent) =>
+    writeDirectoryLeafNoFollow(
+      parent,
+      name,
+      data,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT |
+        (exclusive ? fsConstants.O_EXCL : fsConstants.O_TRUNC),
+      `write of ${name}`,
+    ));
 }
 
 export function writeRunFileNoFollow(path: string, data: string): void {
@@ -841,21 +1194,8 @@ export function readRunBytesNoFollow(path: string): Buffer {
 }
 
 function readAnchoredRunFile(path: string): Buffer {
-  const parent = openDirectoryNoFollow(dirname(path));
-  let fileFd: number | null = null;
-  let bytes: Buffer | null = null;
-  let primaryError: unknown = null;
-  try {
-    fileFd = openSync(anchoredChildPath(parent, basename(path)), leafFlags(fsConstants.O_RDONLY));
-    bytes = readFileSync(fileFd);
-  } catch (error) {
-    primaryError = error;
-  }
-  primaryError = closeFileDescriptor(fileFd, primaryError, `read of ${basename(path)}`);
-  primaryError = closeAnchorGuarded(parent, primaryError, `read of ${basename(path)}`);
-  if (primaryError !== null) throw primaryError;
-  if (bytes === null) throw new Error(`read of ${basename(path)} produced no bytes`);
-  return bytes;
+  return withOpenedDirectoryNoFollow(dirname(path), `read of ${basename(path)}`, (parent) =>
+    readDirectoryFileNoFollow(parent, basename(path)));
 }
 
 /**
@@ -865,35 +1205,23 @@ function readAnchoredRunFile(path: string): Buffer {
  * itself and never its target (unlink(2) never follows the final component).
  */
 export function removeRunFileNoFollow(path: string): void {
-  const parent = openDirectoryNoFollow(dirname(path));
-  let primaryError: unknown = null;
-  try {
-    unlinkSync(anchoredChildPath(parent, basename(path)));
-  } catch (error) {
-    primaryError = error;
-  }
-  const closeError = closeAnchorGuarded(parent, primaryError, `removal of ${basename(path)}`);
-  if (closeError !== null) throw closeError;
+  withOpenedDirectoryNoFollow(dirname(path), `remove of ${basename(path)}`, (parent) =>
+    unlinkSync(anchoredChildPath(parent, basename(path))));
 }
 
 /**
- * Publish staged bytes through one anchored parent directory. Both names are
- * resolved inside that directory, so neither can be redirected out of the run.
+ * Publish staged bytes through one anchored parent directory. Linux resolves
+ * both names through the retained descriptor, so a pathname swap cannot
+ * redirect them. Darwin uses the O_NOFOLLOW_ANY-proven parent pathname and
+ * retains the documented post-acquisition parent-swap risk.
  */
 export function publishStagedRunFile(stagedPath: string, finalPath: string): void {
   if (resolve(dirname(stagedPath)) !== resolve(dirname(finalPath))) {
     throw new Error("staged and final run artifacts must share one run directory");
   }
-  const parent = openDirectoryNoFollow(dirname(stagedPath));
-  let primaryError: unknown = null;
-  try {
+  withOpenedDirectoryNoFollow(dirname(stagedPath), `publish of ${basename(finalPath)}`, (parent) =>
     renameSync(
       anchoredChildPath(parent, basename(stagedPath)),
       anchoredChildPath(parent, basename(finalPath)),
-    );
-  } catch (error) {
-    primaryError = error;
-  }
-  const closeError = closeAnchorGuarded(parent, primaryError, `staged publication of ${basename(finalPath)}`);
-  if (closeError !== null) throw closeError;
+    ));
 }

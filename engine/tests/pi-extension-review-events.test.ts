@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { canonicalTempDir } from "./fixtures/canonical-temp-dir";
@@ -43,8 +44,21 @@ class FakePi {
   }
 }
 
+const extension = async (): Promise<FakePi> => {
+  const extensionSpecifier = "../../pi/extension.ts";
+  const module = await import(/* @vite-ignore */ extensionSpecifier) as {
+    default: (pi: unknown) => void;
+  };
+  const pi = new FakePi();
+  module.default(pi as never);
+  return pi;
+};
+
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const temp = canonicalTempDir("loom-pi-review-events-");
+const specCheckPlanPath = join(temp, "spec-check-authority-plan.md");
+const specCheckPlanBytes = "# Plan\n";
+writeFileSync(specCheckPlanPath, specCheckPlanBytes);
 
 /** chmod 0o500 denies nothing to root; skip the EACCES-based failure
  *  simulations there instead of asserting a permission the OS is not
@@ -94,8 +108,50 @@ const initialGraph = () => ({
   }],
 });
 
+const specCheckGraph = (overrides: Record<string, unknown> = {}) => {
+  const result = {
+    ...initialGraph(),
+    phase_artifacts: { architecture: specCheckPlanPath },
+    skipped_phases: ["plan-alignment"],
+    plan_file: specCheckPlanPath,
+    active_wave_gate: {
+      schemaVersion: 1,
+      kind: "active-wave-gate",
+      runId: "run.pi-spec-check",
+      wave: 1,
+      authorityDigest: "a".repeat(64),
+      revision: 1,
+      terminalOutcome: null,
+    },
+    wave_review_epoch: {
+      runId: "run.pi-spec-check",
+      wave: 1,
+      batchEpoch: "b".repeat(64),
+      specCheckSlotAuthority: { slot_id: "wave-slot:spec-check", attempted: 1 },
+    },
+    ...overrides,
+  };
+  const document = (path: unknown) => typeof path === "string"
+    ? { path, contentDigest: createHash("sha256").update(readFileSync(path)).digest("hex") }
+    : { path: null, contentDigest: null };
+  return {
+    ...result,
+    wave_review_epoch: {
+      ...result.wave_review_epoch,
+      specCheckDocuments: {
+        spec: document(result.spec_file),
+        plan: document(result.plan_file),
+      },
+    },
+  };
+};
+
 function writeState(state: unknown): void {
-  try { chmodSync(statePath, 0o644); } catch { /* first write */ }
+  try {
+    chmodSync(statePath, 0o644);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
   writeFileSync(statePath, JSON.stringify(state, null, 2));
 }
 
@@ -253,15 +309,15 @@ describe("Pi extension review tool_result integration", () => {
     resultDigest: null,
   });
 
-  const extension = async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
-    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
-      default: (pi: unknown) => void;
-    };
-    const pi = new FakePi();
-    module.default(pi as never);
-    return pi;
-  };
+  const reviewRunFixture = (generation: number, marker: string) => ({
+    generation,
+    packet_id: marker.repeat(64),
+    head_sha: marker.repeat(40),
+    expected_agents: ["code-reviewer"],
+    prior_finding_ids: [],
+    evidence: [],
+    slot_authority: [{ agent: "code-reviewer", slot_id: `review-slot:${marker}`, attempted: 1 }],
+  });
 
   it("publishes the exact loaded runtime identity for fresh CLI mutation handshakes", async () => {
     await extension();
@@ -269,6 +325,44 @@ describe("Pi extension review tool_result integration", () => {
 
     expect(process.env[PI_EXTENSION_RUNTIME_ROOT_ENV]).toBe(expected.packageRoot);
     expect(process.env[PI_EXTENSION_RUNTIME_REVISION_ENV]).toBe(expected.revision);
+  });
+
+  it("preserves write-grant injection failure when direct revocation also fails", async () => {
+    const extensionSpecifier = "../../pi/extension.ts";
+    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
+      injectPiWriteGrantWithRevocation: (
+        task: string,
+        grant: Readonly<{ token: string; marker: string }>,
+        spawnIndex: number,
+        ports: Readonly<{
+          inject(task: string, grant: Readonly<{ token: string; marker: string }>): string;
+          revoke(token: string): void;
+        }>,
+      ) => Promise<string>;
+    };
+    const injectionFailure = new Error("prompt mutation failed");
+    const revoke = vi.fn(() => { throw new Error("grant store unavailable"); });
+
+    let thrown: unknown;
+    try {
+      await module.injectPiWriteGrantWithRevocation(
+        "Task ID: T1",
+        { token: "a".repeat(64), marker: `<!-- LOOM_PI_WRITE_GRANT:${"a".repeat(64)} -->` },
+        1,
+        {
+          inject: () => { throw injectionFailure; },
+          revoke,
+        },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).cause).toBe(injectionFailure);
+    expect((thrown as Error).message).toContain("prompt mutation failed");
+    expect((thrown as Error).message).toContain("directly revoke write grant for spawn item 2: grant store unavailable");
+    expect(revoke).toHaveBeenCalledWith("a".repeat(64));
   });
 
   it("blocks post-edit lint when project rules are inaccessible", async () => {
@@ -496,6 +590,53 @@ describe("Pi extension review tool_result integration", () => {
     }));
   });
 
+  it.each([
+    ["role", { role: "silent-failure-hunter", attempt: 1 }],
+    ["attempt", { role: "code-reviewer", attempt: 2 }],
+  ] as const)("rejects Pi review evidence when planted correlator %s disagrees with the request", async (field, mismatch) => {
+    const pi = await extension();
+    const staged = await piCaptureRun(`pi-correlator-${field}-mismatch`);
+    const toolCallId = `call-correlator-${field}-mismatch`;
+    const nativeId = await rosterId(toolCallId, 0, "code-reviewer");
+    const correlated = await staged.handle.recordHarnessCorrelator({
+      schemaVersion: 1,
+      harness: "pi",
+      nativeId,
+      requestId: staged.request.requestId,
+      role: staged.request.role,
+      attempt: staged.request.attempt,
+    });
+    expect(correlated.ok).toBe(true);
+    const correlatorPath = join(
+      staged.runDir,
+      "requests",
+      "correlators",
+      readdirSync(join(staged.runDir, "requests", "correlators"))[0]!,
+    );
+    writeFileSync(correlatorPath, JSON.stringify({
+      schemaVersion: 1,
+      harness: "pi",
+      nativeId,
+      requestId: staged.request.requestId,
+      ...mismatch,
+    }));
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = staged.runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = staged.runDir;
+
+    const responses = await pi.emit("tool_result", {
+      ...reviewResult("Task: T1", "must remain untrusted"),
+      toolCallId,
+    }, {
+      sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad496" },
+    });
+
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].critical_findings ?? []).toEqual([]);
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({ text: expect.stringContaining("correlator-authority") })],
+    }));
+  });
+
   it("does not mutate protected state for a run-bound Loom result with no correlator", async () => {
     const pi = await extension();
     const staged = await piCaptureRun("pi-missing-correlator");
@@ -589,6 +730,60 @@ describe("Pi extension review tool_result integration", () => {
         reason: "transcript-shape",
         message: expect.stringContaining("messages must be an array"),
       });
+  });
+
+  it("includes partial child-roster cleanup failure in the actionable grant rejection", async () => {
+    const planPath = join(temp, "partial-child-cleanup-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const parentSession = "019fca39-f989-7510-8e62-50dadbcad490";
+    const childSession = "019fca39-f989-7510-8e62-50dadbcad491";
+    const input = {
+      agent: "code-implementer-agent",
+      task: "Task ID: T1\nUse the code-implementer skill. Implement and test.",
+      agentScope: "user",
+    };
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent", toolCallId: "call-partial-child-cleanup", input,
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => parentSession } })).toEqual([undefined]);
+
+    const pointer = join(subagentDir, `${childSession}.task_graph`);
+    mkdirSync(pointer, { recursive: true });
+    const cleanup = vi.spyOn(fsSessionRegistry, "removeActive")
+      .mockRejectedValueOnce(new Error("injected partial roster cleanup failure"));
+    try {
+      const rejected = await pi.emit("before_agent_start", {
+        prompt: input.task,
+        systemPrompt: "<!-- LOOM_PI_AGENT_ID:code-implementer-agent -->",
+      }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
+
+      expect(rejected).toContainEqual(expect.objectContaining({
+        message: expect.objectContaining({
+          customType: "loom-write-grant-error",
+          content: expect.stringContaining("Cleanup failures: remove partial child roster entry"),
+        }),
+      }));
+      expect(JSON.stringify(rejected)).toContain("injected partial roster cleanup failure");
+
+      rmSync(pointer, { recursive: true, force: true });
+      const retried = await pi.emit("session_shutdown", {}, {
+        cwd: ROOT,
+        sessionManager: { getSessionId: () => childSession },
+      });
+      expect(retried.every((result) => result === undefined)).toBe(true);
+      expect(cleanup).toHaveBeenCalledTimes(2);
+      expect(() => readFileSync(join(subagentDir, `${childSession}.active`), "utf8")).toThrow();
+    } finally {
+      cleanup.mockRestore();
+      rmSync(pointer, { recursive: true, force: true });
+      rmSync(join(subagentDir, `${childSession}.active`), { force: true });
+    }
   });
 
   it("blocks later Edit and Write calls in the child session after grant rejection", async () => {
@@ -786,6 +981,98 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
+  it("does not let a graphless reviewer mutate a TaskGraph created after spawn", async () => {
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4f6";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-graph-created-after-review-spawn";
+    const taskPrompt = "Task: T1\nReview the implementation.";
+    rmSync(statePath, { force: true });
+    try {
+      expect(await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: { agent: "code-reviewer", task: taskPrompt, agentScope: "user" },
+      }, context)).toEqual([undefined]);
+
+      writeState(initialGraph());
+      const before = readFileSync(statePath, "utf8");
+      const responses = await pi.emit("tool_result", {
+        ...reviewResult(taskPrompt, "must remain ad-hoc"),
+        toolCallId,
+      }, context);
+
+      expect(readFileSync(statePath, "utf8")).toBe(before);
+      expect(responses).not.toContainEqual(expect.objectContaining({ isError: true }));
+    } finally {
+      writeState(initialGraph());
+    }
+  });
+
+  it("does not reconcile a missing graphless reviewer into a TaskGraph created after spawn", async () => {
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4f7";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-graph-created-after-missing-review";
+    rmSync(statePath, { force: true });
+    try {
+      expect(await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: { agent: "code-reviewer", task: "Task: T1\nReview it.", agentScope: "user" },
+      }, context)).toEqual([undefined]);
+
+      writeState(initialGraph());
+      const before = readFileSync(statePath, "utf8");
+      const responses = await pi.emit("tool_result", {
+        toolName: "subagent",
+        toolCallId,
+        content: [],
+        details: { results: [] },
+      }, context);
+
+      expect(readFileSync(statePath, "utf8")).toBe(before);
+      expect(responses).not.toContainEqual(expect.objectContaining({ isError: true }));
+    } finally {
+      writeState(initialGraph());
+    }
+  });
+
+  it("does not finalize a graphless implementation into a TaskGraph created after spawn", async () => {
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4f8";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-graph-created-after-implementation-spawn";
+    const prompt = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+    rmSync(statePath, { force: true });
+    try {
+      expect(await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: { agent: "code-implementer-agent", task: prompt, agentScope: "user" },
+      }, context)).toEqual([undefined]);
+
+      writeState(initialGraph());
+      const before = readFileSync(statePath, "utf8");
+      const responses = await pi.emit("tool_result", {
+        toolName: "subagent",
+        toolCallId,
+        content: [],
+        details: { results: [{
+          agent: "code-implementer-agent",
+          task: prompt,
+          exitCode: 1,
+          messages: [],
+        }] },
+      }, context);
+
+      expect(readFileSync(statePath, "utf8")).toBe(before);
+      expect(responses).not.toContainEqual(expect.objectContaining({ isError: true }));
+    } finally {
+      writeState(initialGraph());
+    }
+  });
+
   it("treats a graphless implementation spawn as a no-op instead of a finalization failure", async () => {
     // The result-side site the two-commit sequence exists for: an ad-hoc
     // code-implementer-agent spawned with no task graph has no attempt record to
@@ -818,7 +1105,7 @@ describe("Pi extension review tool_result integration", () => {
       }, context);
 
       const written = stderr.mock.calls.map(([text]) => String(text)).join("");
-      expect(written).toContain("no task graph to finalize");
+      expect(written).toContain("no TaskGraph existed at spawn, protected state untouched");
       expect(written).not.toContain("cannot finalize reserved implementation attempts");
       expect(responses).not.toContainEqual(expect.objectContaining({ isError: true }));
       expect(existsSync(statePath)).toBe(false);
@@ -858,8 +1145,53 @@ describe("Pi extension review tool_result integration", () => {
       }, context);
 
       const written = stderr.mock.calls.map(([text]) => String(text)).join("");
-      expect(written).toContain("no task graph to record them against");
+      expect(written).toContain("does not match reserved \"code-reviewer\" — evidence ignored");
+      expect(written).toContain(
+        `1 reserved review result(s) and 0 reserved spec-check result(s) for session ${session} never arrived ` +
+        "and cannot be recorded as evidence_capture_failed: no TaskGraph was active at spawn",
+      );
       expect(written).not.toContain("cannot persist");
+      expect(existsSync(statePath)).toBe(false);
+    } finally {
+      stderr.mockRestore();
+      writeState(initialGraph());
+    }
+  });
+
+  it("reports a graphless missing spec-check result without inventing protected state", async () => {
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad472";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-ad-hoc-spec-check-missing";
+    rmSync(statePath, { force: true });
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: {
+          agent: "spec-check-invoker",
+          task: "Follow the preloaded spec-check skill with --wave 1 --tasks T1.",
+          agentScope: "user",
+        },
+      }, context)).toEqual([undefined]);
+
+      const responses = await pi.emit("tool_result", {
+        toolName: "subagent",
+        toolCallId,
+        isError: false,
+        input: {},
+        content: [],
+        details: { results: [] },
+      }, context);
+
+      const written = stderr.mock.calls.map(([text]) => String(text)).join("");
+      expect(written).toContain(
+        `0 reserved review result(s) and 1 reserved spec-check result(s) for session ${session} never arrived ` +
+        "and cannot be recorded as evidence_capture_failed: no TaskGraph was active at spawn",
+      );
+      expect(written).not.toContain("cannot persist");
+      expect(responses).not.toContainEqual(expect.objectContaining({ isError: true }));
       expect(existsSync(statePath)).toBe(false);
     } finally {
       stderr.mockRestore();
@@ -931,7 +1263,7 @@ describe("Pi extension review tool_result integration", () => {
     expect(readFileSync(statePath, "utf-8")).toBe(before);
   });
 
-  it("rejects substituted review Task identity instead of misattributing findings to the reserved Task", async () => {
+  it("rejects substituted review Task identity and records the reserved evidence gap", async () => {
     const planPath = join(temp, "reserved-review-task-plan.md");
     writeFileSync(planPath, "# Plan\n");
     writeState({
@@ -968,7 +1300,8 @@ describe("Pi extension review tool_result integration", () => {
 
     const [t1, t2] = JSON.parse(readFileSync(statePath, "utf-8")).tasks;
     expect(t1.critical_findings).toBeUndefined();
-    expect(t1.review_status).toBe("pending");
+    expect(t1.review_status).toBe("evidence_capture_failed");
+    expect(t1.review_evidence_failures).toEqual(["code-reviewer"]);
     expect(t2.critical_findings).toBeUndefined();
     expect(t2.review_status).toBe("pending");
     expect(responses).toContainEqual(expect.objectContaining({
@@ -1030,6 +1363,22 @@ describe("Pi extension review tool_result integration", () => {
       restoreEnv("LOOM_STATE_PATH", previous);
       rmSync(latePath, { force: true });
     }
+  });
+
+  it("classifies resume TaskGraph path-discovery failure as unavailable", async () => {
+    const extensionSpecifier = "../../pi/extension.ts";
+    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
+      observePiResumeTaskGraph: (
+        resolvePath: () => string,
+      ) => Readonly<{ kind: string; reason?: string }>;
+    };
+
+    expect(module.observePiResumeTaskGraph(() => {
+      throw new Error("git metadata cannot be inspected");
+    })).toEqual({
+      kind: "unavailable",
+      reason: "task graph path could not be resolved: git metadata cannot be inspected",
+    });
   });
 
   it("surfaces task-graph access failure in resume context and loom-status", async () => {
@@ -1601,8 +1950,7 @@ describe("Pi extension review tool_result integration", () => {
       .toContain('exitCode=0, stopReason=error, errorMessage="Connection error."');
   });
 
-  it("surfaces a durable capture-rejection journal failure", async () => {
-    if (runningAsRoot) return; // a 0o500 events dir still admits root's journal write
+  it.skipIf(runningAsRoot)("surfaces a durable capture-rejection journal failure", async () => {
     const pi = await extension();
     const staged = await piCaptureRun("pi-session-binding-rejection-journal-failure");
     const session = "019fca39-f989-7510-8e62-50dadbcad441";
@@ -1652,6 +2000,7 @@ describe("Pi extension review tool_result integration", () => {
       "Review the exact issued request",
     ].join("\n");
     expect((await bindSession(session, staged)).ok).toBe(true);
+    rmSync(statePath, { force: true });
     expect(await pi.emit("tool_call", {
       toolName: "subagent",
       toolCallId,
@@ -1681,6 +2030,7 @@ describe("Pi extension review tool_result integration", () => {
         diagnostic: expect.stringContaining("was missing or mismatched"),
       }),
     })]);
+    writeState(initialGraph());
   });
 
   it("terminalizes a missing Pi result so Standalone Review resumes at attempt 2", async () => {
@@ -2321,8 +2671,7 @@ describe("Pi extension review tool_result integration", () => {
     expect(existsSync(grantDir) ? readdirSync(grantDir).filter((name) => name.endsWith(".json")) : []).toEqual([]);
   });
 
-  it("continues result reconciliation when write-grant revocation fails", async () => {
-    if (runningAsRoot) return; // a 0o500 grants dir still admits root's revocation write
+  it.skipIf(runningAsRoot)("continues result reconciliation when write-grant revocation fails", async () => {
     const planPath = join(temp, "result-revocation-failure-plan.md");
     writeFileSync(planPath, "# Plan\n");
     writeState({
@@ -2377,8 +2726,95 @@ describe("Pi extension review tool_result integration", () => {
     expect(readdirSync(grantDir).filter((name) => name.endsWith(".json"))).toEqual([]);
   });
 
-  it("revokes every outstanding grant when its parent session shutdown roster cleanup fails", async () => {
-    if (runningAsRoot) return; // a 0o500 subagent dir still admits root's roster write
+  it("retires successful result-time grant revocations while retaining only failed authority", async () => {
+    const planPath = join(temp, "mixed-result-revocation-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks: [
+        { ...initialGraph().tasks[0], id: "T1", file_list: ["pi/extension.ts"] },
+        { ...initialGraph().tasks[0], id: "T2", file_list: ["README.md"] },
+      ],
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4a3";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-mixed-result-revocation";
+    const tasks = ["T1", "T2"].map((taskId) => ({
+      agent: "code-implementer-agent",
+      task: `Task ID: ${taskId}\nUse the code-implementer skill. Implement and test.`,
+    }));
+    const grantDir = join(subagentDir, "pi-write-grants");
+    const before = new Set(existsSync(grantDir) ? readdirSync(grantDir) : []);
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent", toolCallId,
+      input: { agentScope: "user", tasks },
+    }, context)).toEqual([undefined]);
+
+    const issued = readdirSync(grantDir).filter((name) => !before.has(name));
+    expect(issued).toHaveLength(2);
+    const failedPath = join(grantDir, issued[0]!);
+    rmSync(failedPath);
+    mkdirSync(failedPath);
+
+    const responses = await pi.emit("tool_result", {
+      toolName: "subagent", toolCallId, content: [],
+      details: { results: tasks.map(({ agent, task }) => ({ agent, task, exitCode: 1, messages: [] })) },
+    }, context);
+
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({ text: expect.stringContaining("revoke write grant") })],
+    }));
+    expect(issued.filter((name) => existsSync(join(grantDir, name)))).toEqual([issued[0]]);
+
+    rmSync(failedPath, { recursive: true });
+    const retried = await pi.emit("session_shutdown", {}, context);
+    expect(retried.every((result) => result === undefined)).toBe(true);
+    expect(issued.filter((name) => existsSync(join(grantDir, name)))).toEqual([]);
+  });
+
+  it.skipIf(runningAsRoot)("rejects shutdown until outstanding write-grant revocation succeeds", async () => {
+    const planPath = join(temp, "shutdown-grant-revocation-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad492";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-shutdown-grant-revocation",
+      input: {
+        agent: "code-implementer-agent",
+        task: "Task ID: T1\nUse the code-implementer skill. Implement and test.",
+        agentScope: "user",
+      },
+    }, context)).toEqual([undefined]);
+
+    const grantDir = join(subagentDir, "pi-write-grants");
+    try {
+      chmodSync(grantDir, 0o500);
+      await expect(pi.emit("session_shutdown", {}, context))
+        .rejects.toThrow(/session shutdown cleanup failed.*revoke outstanding write grant/i);
+    } finally {
+      chmodSync(grantDir, 0o700);
+    }
+    expect(readdirSync(grantDir).filter((name) => name.endsWith(".json"))).toHaveLength(1);
+
+    const retried = await pi.emit("session_shutdown", {}, context);
+    expect(retried.every((result) => result === undefined)).toBe(true);
+    expect(readdirSync(grantDir).filter((name) => name.endsWith(".json"))).toEqual([]);
+  });
+
+  it.skipIf(runningAsRoot)("revokes every outstanding grant when its parent session shutdown roster cleanup fails", async () => {
     const planPath = join(temp, "shutdown-revocation-plan.md");
     writeFileSync(planPath, "# Plan\n");
     writeState({
@@ -2418,10 +2854,10 @@ describe("Pi extension review tool_result integration", () => {
     let shutdownDiagnostic = "";
     try {
       chmodSync(subagentDir, 0o500);
-      await pi.emit("session_shutdown", {}, {
+      await expect(pi.emit("session_shutdown", {}, {
         cwd: ROOT,
         sessionManager: { getSessionId: () => parentSession },
-      });
+      })).rejects.toThrow(/session shutdown cleanup failed/i);
       shutdownDiagnostic = stderr.mock.calls.map(([text]) => String(text)).join("");
     } finally {
       chmodSync(subagentDir, 0o700);
@@ -2590,6 +3026,252 @@ describe("Pi extension review tool_result integration", () => {
     expect(readFileSync(statePath, "utf-8")).toBe(before);
     expect(() => readFileSync(join(subagentDir, `${session}.active`), "utf-8")).toThrow();
     expect(() => readFileSync(join(subagentDir, `${session}.task_graph`), "utf-8")).toThrow();
+  });
+
+  it("retains failed admission rollback authority for shutdown retry", async () => {
+    const planPath = join(temp, "admission-rollback-retry-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4a4";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const grantDir = join(subagentDir, "pi-write-grants");
+    const before = new Set(existsSync(grantDir) ? readdirSync(grantDir) : []);
+    let task = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+    let failedGrantPath: string | null = null;
+    const input: Record<string, unknown> = {
+      agent: "code-implementer-agent",
+      agentScope: "user",
+    };
+    Object.defineProperty(input, "task", {
+      enumerable: true,
+      get: () => task,
+      set: (next: string) => {
+        task = next;
+        const issued = readdirSync(grantDir).filter((name) => !before.has(name));
+        expect(issued).toHaveLength(1);
+        failedGrantPath = join(grantDir, issued[0]!);
+        rmSync(failedGrantPath);
+        mkdirSync(failedGrantPath);
+        throw new Error("injected admission prompt mutation failure");
+      },
+    });
+
+    const blocked = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-admission-rollback-retry",
+      input,
+    }, context);
+
+    expect(blocked).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("revoke write grant for spawn item 1"),
+    }));
+    expect(failedGrantPath).not.toBeNull();
+    await expect(pi.emit("session_shutdown", {}, context))
+      .rejects.toThrow(/session shutdown cleanup failed.*revoke outstanding write grant/i);
+
+    rmSync(failedGrantPath!, { recursive: true });
+    const retried = await pi.emit("session_shutdown", {}, context);
+    expect(retried.every((result) => result === undefined)).toBe(true);
+    expect(existsSync(failedGrantPath!)).toBe(false);
+  });
+
+  it("retires successful admission revocations while retaining only the failed grant", async () => {
+    const planPath = join(temp, "partial-admission-grant-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks: [
+        { ...initialGraph().tasks[0], id: "T1", file_list: ["pi/extension.ts"] },
+        { ...initialGraph().tasks[0], id: "T2", file_list: ["README.md"] },
+      ],
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4a6";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const grantDir = join(subagentDir, "pi-write-grants");
+    const before = new Set(existsSync(grantDir) ? readdirSync(grantDir) : []);
+    let secondTask = "Task ID: T2\nUse the code-implementer skill. Implement and test.";
+    let failedGrantPath: string | null = null;
+    const second: Record<string, unknown> = { agent: "code-implementer-agent" };
+    Object.defineProperty(second, "task", {
+      enumerable: true,
+      get: () => secondTask,
+      set: (next: string) => {
+        secondTask = next;
+        const issued = readdirSync(grantDir).filter((name) => !before.has(name));
+        expect(issued).toHaveLength(2);
+        failedGrantPath = join(grantDir, issued[0]!);
+        rmSync(failedGrantPath);
+        mkdirSync(failedGrantPath);
+        throw new Error("injected second prompt mutation failure");
+      },
+    });
+
+    const blocked = await pi.emit("tool_call", {
+      toolName: "subagent", toolCallId: "call-partial-admission-grants",
+      input: {
+        agentScope: "user",
+        tasks: [
+          { agent: "code-implementer-agent", task: "Task ID: T1\nUse the code-implementer skill. Implement and test." },
+          second,
+        ],
+      },
+    }, context);
+
+    expect(blocked).toContainEqual(expect.objectContaining({ block: true }));
+    const retainedPath = failedGrantPath;
+    if (retainedPath === null) throw new Error("admission fault did not retain a grant path");
+    const remaining = readdirSync(grantDir).filter((name) => !before.has(name));
+    expect(remaining.map((name) => join(grantDir, name))).toEqual([retainedPath]);
+    await expect(pi.emit("session_shutdown", {}, context)).rejects.toThrow(/revoke outstanding write grant 1/i);
+    rmSync(retainedPath, { recursive: true });
+    expect((await pi.emit("session_shutdown", {}, context)).every((result) => result === undefined)).toBe(true);
+  });
+
+  it("retains failed admission roster cleanup for shutdown retry", async () => {
+    const planPath = join(temp, "admission-roster-retry-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4a7";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const removeActive = vi.spyOn(fsSessionRegistry, "removeActive")
+      .mockRejectedValueOnce(new Error("injected admission roster cleanup failure"));
+    let task = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+    const input: Record<string, unknown> = { agent: "code-implementer-agent", agentScope: "user" };
+    Object.defineProperty(input, "task", {
+      enumerable: true,
+      get: () => task,
+      set: (next: string) => {
+        task = next;
+        throw new Error("injected admission prompt mutation failure");
+      },
+    });
+    try {
+      const blocked = await pi.emit("tool_call", {
+        toolName: "subagent", toolCallId: "call-admission-roster-retry", input,
+      }, context);
+
+      expect(blocked).toContainEqual(expect.objectContaining({
+        block: true,
+        reason: expect.stringContaining("admission roster cleanup failure"),
+      }));
+      expect(readFileSync(join(subagentDir, `${session}.active`), "utf8").trim()).not.toBe("");
+      expect((await pi.emit("session_shutdown", {}, context)).every((result) => result === undefined)).toBe(true);
+      expect(removeActive).toHaveBeenCalledTimes(2);
+      expect(existsSync(join(subagentDir, `${session}.active`))).toBe(false);
+    } finally {
+      removeActive.mockRestore();
+    }
+  });
+
+  it("retains failed admission pointer rollback for shutdown retry", async () => {
+    const planPath = join(temp, "admission-pointer-retry-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4a8";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const pointer = join(subagentDir, `${session}.task_graph`);
+    const registry = join(subagentDir, `${session}${TASK_GRAPH_POINTER_LEASES_SUFFIX}`);
+    let registryBytes = "";
+    let task = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+    const input: Record<string, unknown> = { agent: "code-implementer-agent", agentScope: "user" };
+    Object.defineProperty(input, "task", {
+      enumerable: true,
+      get: () => task,
+      set: (next: string) => {
+        task = next;
+        registryBytes = readFileSync(registry, "utf8");
+        writeFileSync(registry, "{malformed");
+        throw new Error("injected admission prompt mutation failure");
+      },
+    });
+    try {
+      const blocked = await pi.emit("tool_call", {
+        toolName: "subagent", toolCallId: "call-admission-pointer-retry", input,
+      }, context);
+
+      expect(blocked).toContainEqual(expect.objectContaining({
+        block: true,
+        reason: expect.stringContaining("roll back task-graph pointer"),
+      }));
+      expect(existsSync(pointer)).toBe(true);
+      writeFileSync(registry, registryBytes);
+      expect((await pi.emit("session_shutdown", {}, context)).every((result) => result === undefined)).toBe(true);
+      expect(existsSync(pointer)).toBe(false);
+      expect(existsSync(registry)).toBe(false);
+    } finally {
+      if (registryBytes !== "" && existsSync(registry)) writeFileSync(registry, registryBytes);
+      rmSync(pointer, { force: true });
+      rmSync(registry, { force: true });
+    }
+  });
+
+  it("retains failed result-time roster cleanup after its sibling pointer release succeeds", async () => {
+    const planPath = join(temp, "roster-cleanup-retry-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4d2";
+    const toolCallId = "call-roster-cleanup-retry";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const prompt = "Task ID: T1\nReview the implementation.";
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent", toolCallId,
+      input: { agent: "code-reviewer", task: prompt, agentScope: "user" },
+    }, context)).toEqual([undefined]);
+
+    const pointer = join(subagentDir, `${session}.task_graph`);
+    const registry = join(subagentDir, `${session}${TASK_GRAPH_POINTER_LEASES_SUFFIX}`);
+    const removeActive = vi.spyOn(fsSessionRegistry, "removeActive")
+      .mockRejectedValueOnce(new Error("injected result-time roster cleanup failure"));
+    try {
+      const responses = await pi.emit("tool_result", {
+        ...reviewResult(prompt, "review completed"),
+        toolCallId,
+      }, context);
+
+      expect(responses).toContainEqual(expect.objectContaining({
+        isError: true,
+        content: [expect.objectContaining({ text: expect.stringContaining("result-time roster cleanup failure") })],
+      }));
+      expect(existsSync(pointer)).toBe(false);
+      expect(existsSync(registry)).toBe(false);
+      expect(readFileSync(join(subagentDir, `${session}.active`), "utf8").trim()).not.toBe("");
+
+      const retried = await pi.emit("session_shutdown", {}, context);
+      expect(retried.every((result) => result === undefined)).toBe(true);
+      expect(removeActive).toHaveBeenCalledTimes(2);
+      expect(() => readFileSync(join(subagentDir, `${session}.active`), "utf8")).toThrow();
+    } finally {
+      removeActive.mockRestore();
+    }
   });
 
   it("retains parent pointer cleanup authority after result-time failure and retries it on shutdown", async () => {
@@ -3085,7 +3767,119 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
-  it("records failed review capture while continuing with a healthy sibling", async () => {
+  it("rejects a failed Pi reviewer after a newer Review Run replaces its reserved authority", async () => {
+    const planPath = join(temp, "stale-failed-reviewer-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks: [{
+        ...initialGraph().tasks[0],
+        review_generation: 1,
+        review_run: reviewRunFixture(1, "a"),
+      }],
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4f4";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-stale-failed-reviewer";
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: {
+        agent: "code-reviewer",
+        task: "Task ID: T1\nReview and emit Machine Summary findings.",
+        agentScope: "user",
+      },
+    }, context)).toEqual([undefined]);
+
+    const afterSpawn = JSON.parse(readFileSync(statePath, "utf8"));
+    writeState({
+      ...afterSpawn,
+      tasks: [{
+        ...afterSpawn.tasks[0],
+        review_generation: 2,
+        review_run: reviewRunFixture(2, "b"),
+      }],
+    });
+    const responses = await pi.emit("tool_result", {
+      ...reviewResult("Task: T1", "stale failure must not land", { exitCode: 1 }),
+      toolCallId,
+    }, context);
+
+    const task = JSON.parse(readFileSync(statePath, "utf8")).tasks[0];
+    expect(task.review_generation).toBe(2);
+    expect(task.review_run.generation).toBe(2);
+    expect(task.review_status).toBe("pending");
+    expect(task.review_evidence_failures).toBeUndefined();
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({
+        text: expect.stringContaining("does not match exact current Task/Review Run slot authority"),
+      })],
+    }));
+  });
+
+  it("rejects an omitted Pi reviewer after a newer Review Run replaces its reserved authority", async () => {
+    const planPath = join(temp, "stale-missing-reviewer-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks: [{
+        ...initialGraph().tasks[0],
+        review_generation: 1,
+        review_run: reviewRunFixture(1, "c"),
+      }],
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4f5";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-stale-missing-reviewer";
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: {
+        agent: "code-reviewer",
+        task: "Task ID: T1\nReview and emit Machine Summary findings.",
+        agentScope: "user",
+      },
+    }, context)).toEqual([undefined]);
+
+    const afterSpawn = JSON.parse(readFileSync(statePath, "utf8"));
+    writeState({
+      ...afterSpawn,
+      tasks: [{
+        ...afterSpawn.tasks[0],
+        review_generation: 2,
+        review_run: reviewRunFixture(2, "d"),
+      }],
+    });
+    const responses = await pi.emit("tool_result", {
+      toolName: "subagent",
+      toolCallId,
+      content: [],
+      details: { results: [] },
+    }, context);
+
+    const task = JSON.parse(readFileSync(statePath, "utf8")).tasks[0];
+    expect(task.review_generation).toBe(2);
+    expect(task.review_run.generation).toBe(2);
+    expect(task.review_status).toBe("pending");
+    expect(task.review_evidence_failures).toBeUndefined();
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({
+        text: expect.stringContaining("was not applied under locked current review authority"),
+      })],
+    }));
+  });
+
+  it("ignores an unreserved failed reviewer while continuing with a healthy sibling", async () => {
     const pi = await extension();
     const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
     const failed = reviewResult("Task: T1", "failed result must not gate", { exitCode: 1 }).details.results[0];
@@ -3100,9 +3894,9 @@ describe("Pi extension review tool_result integration", () => {
     const taskState = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
     expect(taskState.critical_findings).toEqual(["healthy sibling stored"]);
     expect(taskState.critical_findings).not.toContain("failed result must not gate");
-    expect(taskState.review_status).toBe("evidence_capture_failed");
-    expect(taskState.review_evidence_failures).toEqual(["code-reviewer"]);
-    expect(taskState.review_error).toContain("failed before evidence capture completed");
+    expect(taskState.review_status).toBe("blocked");
+    expect(taskState.review_evidence_failures).toBeUndefined();
+    expect(taskState.review_error).toBeUndefined();
   });
 
   /**
@@ -3180,6 +3974,47 @@ describe("Pi extension review tool_result integration", () => {
     expect(task.review_error).toContain("Pi review messages are malformed");
   });
 
+  it("replaces stale passing review evidence for a malformed matching-agent envelope", async () => {
+    const planPath = join(temp, "malformed-reserved-review-result-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks: [{ ...initialGraph().tasks[0], review_status: "passed" }],
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4c5";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-malformed-reserved-review-result";
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: {
+        agent: "code-reviewer",
+        task: "Task ID: T1\nReview and emit Machine Summary findings.",
+        agentScope: "user",
+      },
+    }, context)).toEqual([undefined]);
+
+    const responses = await pi.emit("tool_result", {
+      toolName: "subagent",
+      toolCallId,
+      content: [],
+      details: { results: [{ agent: "code-reviewer" }] },
+    }, context);
+
+    const task = JSON.parse(readFileSync(statePath, "utf-8")).tasks[0];
+    expect(task.review_status).toBe("evidence_capture_failed");
+    expect(task.review_evidence_failures).toEqual(["code-reviewer"]);
+    expect(task.review_error).toContain("reserved reviewer result 1");
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({ text: expect.stringContaining("result 1 has an unrecognized shape") })],
+    }));
+  });
+
   it("marks an omitted reserved reviewer result as evidence_capture_failed", async () => {
     const planPath = join(temp, "truncated-review-results-plan.md");
     writeFileSync(planPath, "# Plan\n");
@@ -3218,6 +4053,47 @@ describe("Pi extension review tool_result integration", () => {
     expect(task.review_status).toBe("evidence_capture_failed");
     expect(task.review_evidence_failures).toEqual(["silent-failure-hunter"]);
     expect(task.review_error).toContain("reserved reviewer result 2");
+  });
+
+  it("reports a missing reserved reviewer whose Task disappeared before locked settlement", async () => {
+    const planPath = join(temp, "missing-review-disappeared-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4f3";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-missing-review-disappeared";
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: {
+        agent: "code-reviewer",
+        task: "Task ID: T1\nReview and emit Machine Summary findings.",
+        agentScope: "user",
+      },
+    }, context)).toEqual([undefined]);
+    const afterSpawn = JSON.parse(readFileSync(statePath, "utf8"));
+    writeState({ ...afterSpawn, tasks: [] });
+
+    const responses = await pi.emit("tool_result", {
+      toolName: "subagent",
+      toolCallId,
+      content: [],
+      details: { results: [] },
+    }, context);
+
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({
+        text: expect.stringContaining("was not applied under locked current review authority"),
+      })],
+    }));
+    expect(JSON.parse(readFileSync(statePath, "utf8")).tasks).toEqual([]);
   });
 
   it("rejects surplus reserved results instead of applying them through compatibility dispatch", async () => {
@@ -3268,19 +4144,22 @@ describe("Pi extension review tool_result integration", () => {
     ["mismatched agent", {
       results: [{ agent: "code-reviewer", task: "spec check", exitCode: 0, messages: [] }],
     }],
-  ])("replaces stale passing spec evidence for a reserved %s result", async (label, details) => {
+    ["malformed matching envelope", { results: [{ agent: "spec-check-invoker" }] }],
+  ])("replaces stale blocking spec evidence for a reserved %s result", async (label, details) => {
     const planPath = join(temp, `reserved-spec-${label.replaceAll(" ", "-")}.md`);
     writeFileSync(planPath, "# Plan\n");
-    writeState({
-      ...initialGraph(),
+    writeState(specCheckGraph({
       phase_artifacts: { architecture: planPath },
       skipped_phases: ["plan-alignment"],
       plan_file: planPath,
       spec_check: {
-        wave: 1, run_at: "earlier", verdict: "PASSED", critical_count: 0, high_count: 0,
-        critical_findings: [], high_findings: [], medium_findings: [],
+        wave: 1, run_at: "earlier", verdict: "BLOCKED", critical_count: 1, high_count: 0,
+        critical_findings: ["earlier blocker"], high_findings: [], medium_findings: [],
       },
-    });
+      wave_gates: {
+        "1": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: true },
+      },
+    }));
     const pi = await extension();
     const session = "019fca39-f989-7510-8e62-50dadbcad432";
     const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
@@ -3302,11 +4181,13 @@ describe("Pi extension review tool_result integration", () => {
       details,
     }, context);
 
-    expect(JSON.parse(readFileSync(statePath, "utf-8")).spec_check).toMatchObject({
+    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(state.spec_check).toMatchObject({
       wave: 1,
       verdict: "EVIDENCE_CAPTURE_FAILED",
       error: expect.stringContaining("reserved spec-check result 1"),
     });
+    expect(state.wave_gates["1"].blocked).toBe(false);
   });
 
   it("does not advance a failed phase agent even when its messages contain a valid artifact", async () => {
@@ -3369,20 +4250,35 @@ describe("Pi extension review tool_result integration", () => {
     }));
   });
 
-  it("replaces stale spec evidence after an abort and clears failed implementation execution", async () => {
-    writeState({
-      ...initialGraph(),
-      executing_tasks: ["T1"],
-      tasks: [{ ...initialGraph().tasks[0], status: "pending" }],
+  it("replaces stale spec evidence after an exactly reserved abort and clears failed implementation execution", async () => {
+    const planPath = join(temp, "reserved-aborted-spec-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState(specCheckGraph({
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
       spec_check: {
         wave: 1, run_at: "earlier", verdict: "PASSED", critical_count: 0, high_count: 0,
         critical_findings: [], high_findings: [], medium_findings: [],
       },
-    });
+    }));
     const pi = await extension();
-    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    const toolCallId = "call-reserved-aborted-spec";
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: {
+        agentScope: "user",
+        tasks: [
+          { agent: "code-implementer-agent", task: "Task ID: T1\nUse the code-implementer skill. Implement and test." },
+          { agent: "spec-check-invoker", task: "Follow the preloaded spec-check skill with --wave 1 --tasks T1." },
+        ],
+      },
+    }, context)).toEqual([undefined]);
     await pi.emit("tool_result", {
       toolName: "subagent",
+      toolCallId,
       content: [],
       details: {
         results: [
@@ -4230,6 +5126,109 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
+  it("infrastructure-settles a reserved implementation when result application throws", async () => {
+    const planPath = join(temp, "reserved-application-crash-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4a5";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-reserved-application-crash";
+    const prompt = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent", toolCallId,
+      input: { agent: "code-implementer-agent", task: prompt, agentScope: "user" },
+    }, context)).toEqual([undefined]);
+
+    const { StateManager } = await import("../src/state-manager");
+    const update = vi.spyOn(StateManager.prototype, "update")
+      .mockRejectedValueOnce(new Error("injected reserved application failure"));
+    try {
+      const responses = await pi.emit("tool_result", {
+        toolName: "subagent", toolCallId, content: [],
+        details: { results: [{
+          agent: "code-implementer-agent", task: prompt, exitCode: 0, messages: [],
+        }] },
+      }, context);
+
+      expect(responses).toContainEqual(expect.objectContaining({
+        isError: true,
+        content: [expect.objectContaining({ text: expect.stringContaining("injected reserved application failure") })],
+      }));
+      const state = JSON.parse(readFileSync(statePath, "utf8"));
+      expect(state.executing_tasks).toEqual([]);
+      expect(state.tasks[0]).toMatchObject({
+        status: "pending",
+        revalidation_required: true,
+        implementation_attempt_history: [{ transition: "infrastructure-blocked" }],
+      });
+    } finally {
+      update.mockRestore();
+    }
+  });
+
+  it("preserves application and fallback-settlement failures while processing a sibling", async () => {
+    const planPath = join(temp, "dual-result-settlement-failure-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks: [
+        { ...initialGraph().tasks[0], id: "T1", file_list: ["pi/extension.ts"] },
+        { ...initialGraph().tasks[0], id: "T2", file_list: ["README.md"] },
+      ],
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4a9";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-dual-result-settlement-failure";
+    const tasks = ["T1", "T2"].map((taskId) => ({
+      agent: "code-implementer-agent",
+      task: `Task ID: ${taskId}\nUse the code-implementer skill. Implement and test.`,
+    }));
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent", toolCallId, input: { agentScope: "user", tasks },
+    }, context)).toEqual([undefined]);
+
+    const { StateManager } = await import("../src/state-manager");
+    const update = vi.spyOn(StateManager.prototype, "update")
+      .mockRejectedValueOnce(new Error("injected result application failure"));
+    const originalUpdateAndReturn = StateManager.prototype.updateAndReturn;
+    let updateAndReturnCalls = 0;
+    const updateAndReturn = vi.spyOn(StateManager.prototype, "updateAndReturn")
+      .mockImplementation(async function (this: typeof StateManager.prototype, mutate) {
+        updateAndReturnCalls++;
+        if (updateAndReturnCalls === 2) throw new Error("injected fallback settlement failure");
+        return originalUpdateAndReturn.call(this, mutate);
+      });
+    try {
+      const responses = await pi.emit("tool_result", {
+        toolName: "subagent", toolCallId, content: [],
+        details: { results: tasks.map(({ agent, task }) => ({ agent, task, exitCode: 0, messages: [] })) },
+      }, context);
+
+      const rendered = JSON.stringify(responses);
+      expect(rendered).toContain("injected result application failure");
+      expect(rendered).toContain("injected fallback settlement failure");
+      const state = JSON.parse(readFileSync(statePath, "utf8"));
+      expect(state.executing_tasks).toEqual(["T1"]);
+      expect(state.tasks.find((task: { id: string }) => task.id === "T2")).toMatchObject({
+        status: "pending",
+        implementation_attempt_history: [expect.objectContaining({ transition: "retry-required" })],
+      });
+    } finally {
+      updateAndReturn.mockRestore();
+      update.mockRestore();
+    }
+  });
+
   it("continues processing later Pi results when the first result throws", async () => {
     // A well-formed element that throws DOWNSTREAM — the case the loop's own
     // per-result try/catch exists for, and the one the malformed-shape test
@@ -4263,19 +5262,29 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
-  it("replaces stale passing spec evidence when successful Pi messages are malformed", async () => {
-    writeState({
-      ...initialGraph(),
+  it("replaces stale passing spec evidence when exactly reserved Pi messages are malformed", async () => {
+    writeState(specCheckGraph({
       spec_check: {
         wave: 1, run_at: "earlier", verdict: "PASSED", critical_count: 0, high_count: 0,
         critical_findings: [], high_findings: [], medium_findings: [],
       },
-    });
+    }));
     const pi = await extension();
-    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    const toolCallId = "call-reserved-malformed-spec";
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: {
+        agent: "spec-check-invoker",
+        task: "Follow the preloaded spec-check skill with --wave 1 --tasks T1.",
+        agentScope: "user",
+      },
+    }, context)).toEqual([undefined]);
 
     await pi.emit("tool_result", {
       toolName: "subagent",
+      toolCallId,
       content: [],
       details: {
         results: [{
@@ -4294,11 +5303,23 @@ describe("Pi extension review tool_result integration", () => {
     });
   });
 
-  it("marks a Pi spec-check count/findings mismatch as evidence capture failed", async () => {
+  it("marks an exactly reserved Pi spec-check count/findings mismatch as evidence capture failed", async () => {
+    writeState(specCheckGraph());
     const pi = await extension();
-    const context = { sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad40a" } };
+    const toolCallId = "call-reserved-mismatched-spec";
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: {
+        agent: "spec-check-invoker",
+        task: "Follow the preloaded spec-check skill with --wave 1 --tasks T1.",
+        agentScope: "user",
+      },
+    }, context)).toEqual([undefined]);
     await pi.emit("tool_result", {
       toolName: "subagent",
+      toolCallId,
       content: [],
       details: {
         results: [{
@@ -4309,7 +5330,7 @@ describe("Pi extension review tool_result integration", () => {
             role: "assistant",
             content: [{
               type: "text",
-              text: "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED\nCRITICAL: hidden drift",
+              text: "SPEC_CHECK_WAVE: 1\nCRITICAL: hidden drift\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED",
             }],
           }],
         }],
@@ -4451,25 +5472,12 @@ describe("Pi extension review tool_result integration", () => {
 /**
  * The Pi extension's fail-closed BACKSTOPS.
  *
- * Three refusals sit at the top of `tool_call` and had no test between them:
- * the outer catch that blocks the call when any loom guard throws, the
- * invalid-session-id spawn refusal, and the duplicate-`toolCallId` spawn
- * refusal. Each is the last thing standing between a malformed event and an
- * unguarded action, and each fails in the direction that matters only if it
- * actually runs — a regression turning any of them into a pass-through would
- * have been invisible.
+ * These tests cover the outer catch, invalid-session and duplicate-call spawn
+ * refusals, absent `toolCallId`, and malformed Bash guard input. Each is the
+ * last thing standing between a malformed event and an unguarded action, and
+ * each fails in the direction that matters only if it actually runs.
  */
 describe("Pi extension tool_call fail-closed backstops", () => {
-  const extension = async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
-    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
-      default: (pi: unknown) => void;
-    };
-    const pi = new FakePi();
-    module.default(pi as never);
-    return pi;
-  };
-
   const SESSION = "019fca39-f989-7510-8e62-50dadbcad4a1";
 
   it("BLOCKS the call when a guard throws, naming the guard", async () => {

@@ -10,8 +10,7 @@
  * dropping the flag from any one of them must fail a test rather than silently
  * start following links out of the run directory.
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-
+import { chmodSync, closeSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
@@ -19,6 +18,7 @@ import { openRunDirectory } from "../../src/orchestration/run-directory-handle";
 import {
   anchoredChildPath,
   assertAnchoredFilesystemPlatformSupported,
+  closeAnchorGuarded,
   closeAnchoredDirectory,
   ensureDirectoryNoFollow,
   ensureRelativeDirectoryNoFollow,
@@ -31,10 +31,13 @@ import {
   recoverStaleDirectoryLock,
   removeRunFileNoFollow,
   withAnchoredDirectoryLock,
+  writeDirectoryFileExclusiveNoFollow,
+  writeRunFileExclusiveNoFollow,
   writeRunFileNoFollow,
 } from "../../src/orchestration/no-follow-fs";
 
 const cleanup: string[] = [];
+const runningAsRoot = typeof process.getuid === "function" && process.getuid() === 0;
 
 afterEach(() => {
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
@@ -85,6 +88,27 @@ describe("directory creation refuses symlinked ancestors", () => {
       closeAnchoredDirectory(anchored);
     }
   });
+
+  it.skipIf(process.platform !== "darwin")(
+    "Darwin re-proves a swapped parent before mkdir can create through its replacement symlink",
+    () => {
+      const root = workspace();
+      const runDir = join(root, "run");
+      const movedRun = join(root, "moved-run");
+      const outside = join(root, "outside");
+      mkdirSync(outside);
+      const anchored = openDirectoryNoFollow(runDir);
+      try {
+        renameSync(runDir, movedRun);
+        symlinkSync(outside, runDir);
+        expect(() => ensureRelativeDirectoryNoFollow(anchored, runDir, join(runDir, "child")))
+          .toThrow(/ELOOP|too many symbolic|changed identity/i);
+        expect(existsSync(join(outside, "child"))).toBe(false);
+      } finally {
+        closeAnchoredDirectory(anchored);
+      }
+    },
+  );
 });
 
 describe("reads refuse to follow a planted symlink", () => {
@@ -147,6 +171,29 @@ describe("anchored lock ownership", () => {
     expect(entered).toBe(true);
     expect(() => readFileSync(join(directory, "stale.lock"))).toThrow();
   });
+
+  it.skipIf(runningAsRoot)(
+    "never exposes a canonical recovery guard when prepared publication cannot start",
+    () => {
+      const root = workspace();
+      const directory = join(root, "run");
+      const lockPath = join(directory, "publication-failure.lock");
+      const recoveryPath = `${lockPath}.recovery`;
+      writeFileSync(lockPath, "999999999");
+      const anchored = openDirectoryNoFollow(directory);
+      try {
+        chmodSync(directory, 0o500);
+        expect(() => recoverStaleDirectoryLock(anchored, "publication-failure.lock"))
+          .toThrow(/EACCES|EPERM|permission denied/i);
+      } finally {
+        chmodSync(directory, 0o700);
+        closeAnchoredDirectory(anchored);
+      }
+
+      expect(existsSync(recoveryPath)).toBe(false);
+      expect(readFileSync(lockPath, "utf8")).toBe("999999999");
+    },
+  );
 
   it("refuses stale recovery when the tombstone owner changes after rename", () => {
     const root = workspace();
@@ -258,6 +305,32 @@ describe("anchored lock ownership", () => {
     }
   });
 
+  it("aggregates operation, lock-release, and directory-close failures without masking the primary", async () => {
+    const root = workspace();
+    const directory = join(root, "run");
+    let thrown: unknown;
+
+    try {
+      await withAnchoredDirectoryLock(directory, "close-failure.lock", (anchored) => {
+        closeSync(anchored.fd);
+        throw new Error("primary operation exploded");
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    const closeAggregate = thrown as AggregateError;
+    expect(closeAggregate.errors).toHaveLength(2);
+    expect(closeAggregate.errors[0]).toBeInstanceOf(AggregateError);
+    const operationAndRelease = closeAggregate.errors[0] as AggregateError;
+    expect(operationAndRelease.errors.map(String)).toEqual([
+      "Error: primary operation exploded",
+      expect.stringContaining("cannot release anchored lock close-failure.lock"),
+    ]);
+    expect(String(closeAggregate.errors[1])).toMatch(/EBADF|bad file descriptor/i);
+  });
+
   it("never overlaps critical sections while the recorded owner is alive", async () => {
     const root = workspace();
     const directory = join(root, "run");
@@ -279,18 +352,15 @@ describe("anchored lock ownership", () => {
     expect(maxActive).toBe(1);
   });
 
-  it("exhausts acquisition attempts when a recovery guard stays planted", async () => {
+  it("surfaces a malformed planted recovery guard without entering", async () => {
     const root = workspace();
     const directory = join(root, "run");
-    // A permanently-present recovery guard makes every acquisition attempt
-    // withdraw before entering, so the loop must give up with the named
-    // exhaustion error instead of spinning forever.
     writeFileSync(join(directory, "guarded.lock.recovery"), "planted");
 
     await expect(withAnchoredDirectoryLock(directory, "guarded.lock", () => undefined))
-      .rejects.toThrow(/Could not acquire anchored lock after 50 attempts: guarded\.lock/);
+      .rejects.toThrow(/recovery guard has malformed owner token/);
     expect(existsSync(join(directory, "guarded.lock"))).toBe(false);
-  }, 10000);
+  });
 });
 
 describe("captured-attempt inspection fails closed", () => {
@@ -350,6 +420,28 @@ describe("removal refuses to follow a planted symlink", () => {
   });
 });
 
+describe("anchored leaf writes", () => {
+  it("preserves exclusive first-writer semantics through both write entry points", () => {
+    const root = workspace();
+    const directory = join(root, "run");
+    const anchored = openDirectoryNoFollow(directory);
+    try {
+      writeDirectoryFileExclusiveNoFollow(anchored, "direct.txt", "first-direct");
+      expect(() => writeDirectoryFileExclusiveNoFollow(anchored, "direct.txt", "second-direct"))
+        .toThrow(/EEXIST|file exists/i);
+    } finally {
+      closeAnchoredDirectory(anchored);
+    }
+
+    const runPath = join(directory, "run.txt");
+    writeRunFileExclusiveNoFollow(runPath, "first-run");
+    expect(() => writeRunFileExclusiveNoFollow(runPath, "second-run"))
+      .toThrow(/EEXIST|file exists/i);
+    expect(readFileSync(join(directory, "direct.txt"), "utf8")).toBe("first-direct");
+    expect(readFileSync(runPath, "utf8")).toBe("first-run");
+  });
+});
+
 describe("staged publication", () => {
   it("refuses publication when staged and final artifacts live in different directories", () => {
     const root = workspace();
@@ -364,6 +456,73 @@ describe("staged publication", () => {
 });
 
 describe("platform anchoring", () => {
+  it("rejects direct and cloned descriptor capabilities not registered by the boundary", () => {
+    expect(() => anchoredChildPath(
+      // @ts-expect-error only no-follow constructors can produce the private capability brand
+      { anchor: "descriptor", fd: 0 },
+      "x",
+    )).toThrow("was not produced by the no-follow filesystem boundary");
+
+    const root = workspace();
+    const anchored = openDirectoryNoFollow(join(root, "run"));
+    try {
+      const clone = { ...anchored };
+      expect(() => anchoredChildPath(clone, "x"))
+        .toThrow("was not produced by the no-follow filesystem boundary");
+    } finally {
+      closeAnchoredDirectory(anchored);
+    }
+  });
+
+  it.each(["", ".", "..", "../escaped", "nested/escaped", "nested\\escaped"])(
+    "rejects unsafe anchored child %j",
+    (child) => {
+      const root = workspace();
+      const anchored = openDirectoryNoFollow(join(root, "run"));
+      try {
+        expect(() => anchoredChildPath(anchored, child)).toThrow("one safe leaf name");
+      } finally {
+        closeAnchoredDirectory(anchored);
+      }
+    },
+  );
+
+  it("revokes a closed capability before its descriptor number can be recycled", () => {
+    const root = workspace();
+    const closed = openDirectoryNoFollow(join(root, "run"));
+    closeAnchoredDirectory(closed);
+    const replacement = openDirectoryNoFollow(root);
+    try {
+      expect(() => anchoredChildPath(closed, "x"))
+        .toThrow("was not produced by the no-follow filesystem boundary");
+    } finally {
+      closeAnchoredDirectory(replacement);
+    }
+  });
+
+  it("stays revoked when close reports an already-invalid descriptor", () => {
+    const root = workspace();
+    const anchored = openDirectoryNoFollow(join(root, "run"));
+    closeSync(anchored.fd);
+
+    expect(() => closeAnchoredDirectory(anchored)).toThrow(/EBADF|bad file descriptor/i);
+    expect(() => anchoredChildPath(anchored, "x"))
+      .toThrow("was not produced by the no-follow filesystem boundary");
+  });
+
+  it("aggregates a primary operation failure with an anchored-directory close failure", () => {
+    const root = workspace();
+    const anchored = openDirectoryNoFollow(join(root, "run"));
+    closeSync(anchored.fd);
+
+    const failure = closeAnchorGuarded(anchored, new Error("state load failed"), "state load");
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors.map(String)).toEqual([
+      "Error: state load failed",
+      expect.stringMatching(/EBADF|bad file descriptor/i),
+    ]);
+  });
+
   it("rejects unsupported runtimes before orchestration startup", () => {
     expect(() => assertAnchoredFilesystemPlatformSupported("win32"))
       .toThrow(/requires POSIX anchored-filesystem operations.*win32.*unsupported/i);

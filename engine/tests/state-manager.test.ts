@@ -6,6 +6,7 @@ import { StateManager, parseTaskGraph, resolveTaskGraph } from "../src/state-man
 import { SUBAGENT_DIR } from "../src/config";
 import { parseNewTestEvidence, type TaskGraph } from "../src/types";
 import { derivePendingTaskProof, evaluateTaskProof } from "../src/core/proof-obligations";
+import type { TaskId } from "../src/core/task-id";
 
 function makeTmpDir(): string {
   const dir = join(tmpdir(), `loom-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -142,7 +143,6 @@ describe("StateManager", () => {
     // current_wave is a positive domain value; start at one.
     await mgr.update((s) => ({ ...s, current_wave: 1 }));
 
-    // Run 5 concurrent updates
     await Promise.all(
       Array.from({ length: 5 }, () =>
         mgr.update((s) => ({ ...s, current_wave: (s.current_wave ?? 0) + 1 }))
@@ -461,6 +461,8 @@ describe("parseTaskGraph — disk unions are proven, not cast (parse, don't vali
     const taskMetadata = task.metadata as Readonly<{ labels: readonly string[] }>;
     const gate = parsed.value.wave_gates["1"] as unknown as Record<string, unknown>;
     const gateMetadata = gate.metadata as Readonly<{ notes: readonly string[] }>;
+    const executingTaskId: TaskId = parsed.value.executing_tasks![0]!;
+    expect(executingTaskId).toBe("T1");
     expect(parsed.value.executing_tasks).toEqual(["T1"]);
     expect(task.depends_on).toEqual([]);
     expect(task.file_list).toEqual(["src/a.ts"]);

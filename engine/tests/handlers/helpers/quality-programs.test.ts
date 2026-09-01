@@ -12,10 +12,11 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
+import { readReviewPacketPostimage } from "../../../src/handlers/helpers/review-packet";
 
 const ENGINE = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const ROOT = resolve(ENGINE, "..");
@@ -55,6 +56,76 @@ function routingIsolatedEnv(piAgentDir?: string): Record<string, string> {
     HOME: home,
     PI_CODING_AGENT_DIR: piAgentDir ?? home,
   };
+}
+
+function writeReviewPacketTaskGraph(
+  statePath: string,
+  taskOverrides: Readonly<Record<string, unknown>>,
+): void {
+  writeFileSync(statePath, JSON.stringify({
+    current_phase: "execute",
+    phase_artifacts: {},
+    skipped_phases: [],
+    spec_file: null,
+    plan_file: null,
+    current_wave: 1,
+    tasks: [{
+      id: "T1",
+      description: "packet",
+      agent: "code-implementer-agent",
+      wave: 1,
+      status: "pending",
+      depends_on: [],
+      ...taskOverrides,
+    }],
+    wave_gates: {},
+  }));
+}
+
+function hostileReviewPacketRepository(
+  driver: "textconv" | "external" | "clean",
+): Readonly<{ root: string; marker: string; packet: string }> {
+  const root = canonicalTempDir(`loom-review-packet-${driver}-`);
+  cleanup.push(root);
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });
+  execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
+  const marker = join(root, "DRIVER_EXECUTED");
+  const executable = join(root, "external-diff.sh");
+  writeFileSync(join(root, "data.dat"), "before\n");
+  if (driver === "textconv") writeFileSync(join(root, ".gitattributes"), "*.dat diff=evil\n");
+  if (driver === "clean") writeFileSync(join(root, ".gitattributes"), "*.dat filter=evil\n");
+  if (driver === "external") {
+    writeFileSync(executable, `#!/bin/sh\ntouch ${marker}\nexit 0\n`, { mode: 0o755 });
+  }
+  execFileSync("git", ["add", "."], { cwd: root });
+  execFileSync("git", ["commit", "--quiet", "-m", "baseline"], { cwd: root });
+  if (driver === "textconv") {
+    execFileSync("git", ["config", "diff.evil.textconv", `sh -c 'touch ${marker}; cat'`], { cwd: root });
+  }
+  if (driver === "clean") {
+    execFileSync("git", ["config", "filter.evil.clean", `sh -c 'touch ${marker}; cat'`], { cwd: root });
+  }
+  if (driver === "external") execFileSync("git", ["config", "diff.external", executable], { cwd: root });
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+  execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd: root });
+  execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], { cwd: root });
+  writeFileSync(join(root, "data.dat"), "after\n");
+  const state = join(root, "state.json");
+  const packet = join(root, ".claude", "reviews", "packet.json");
+  writeReviewPacketTaskGraph(state, {
+    start_sha: head,
+    file_list: ["data.dat"],
+    files_modified: ["data.dat"],
+  });
+  execFileSync("bun", [
+    CLI, "helper", "review-packet", "create", "--task", "T1", "--output", ".claude/reviews/packet.json",
+  ], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, LOOM_STATE_PATH: state },
+  });
+  return { root, marker, packet };
 }
 
 describe("quality-program helper boundaries", () => {
@@ -237,33 +308,23 @@ describe("quality-program helper boundaries", () => {
     const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim();
     const state = join(dir, "state.json");
     const packet = join(dir, "packet.json");
-    writeFileSync(state, JSON.stringify({
-      current_phase: "execute",
-      phase_artifacts: {},
-      skipped_phases: [],
-      spec_file: null,
-      plan_file: null,
-      current_wave: 1,
-      tasks: [{
-        id: "T1", description: "packet", agent: "code-implementer-agent", wave: 1,
-        status: "pending", depends_on: [], start_sha: head,
-        file_list: ["engine/src/core/model-profiles.ts"],
-        // Pi and Claude tool APIs commonly record this as an absolute path.
-        // The packet boundary must canonicalize it to the same repo-relative
-        // identity as file_list instead of rejecting valid in-repo evidence.
-        files_modified: [join(ROOT, "engine/src/core/model-profiles.ts")],
-        review_status: "pending",
-        review_generation: 1,
-        // A pre-identity graph may carry only the derived views. Packet
-        // creation must mint the same identity into both packet and run before
-        // any reviewer is asked to assess it.
-        critical_findings: ["stale finding"],
-        advisory_findings: [],
-        refuted_findings: [],
-        resolved_findings: [],
-      }],
-      wave_gates: {},
-    }));
+    writeReviewPacketTaskGraph(state, {
+      start_sha: head,
+      file_list: ["engine/src/core/model-profiles.ts"],
+      // Pi and Claude tool APIs commonly record this as an absolute path.
+      // The packet boundary must canonicalize it to the same repo-relative
+      // identity as file_list instead of rejecting valid in-repo evidence.
+      files_modified: [join(ROOT, "engine/src/core/model-profiles.ts")],
+      review_status: "pending",
+      review_generation: 1,
+      // A pre-identity graph may carry only the derived views. Packet
+      // creation must mint the same identity into both packet and run before
+      // any reviewer is asked to assess it.
+      critical_findings: ["stale finding"],
+      advisory_findings: [],
+      refuted_findings: [],
+      resolved_findings: [],
+    });
     const id = cli(
       ["helper", "review-packet", "create", "--task", "T1", "--output", packet],
       "",
@@ -305,6 +366,91 @@ describe("quality-program helper boundaries", () => {
     expect(cli(["helper", "review-packet", "verify", "--packet", packet]).trim()).toBe(id);
   });
 
+  it.each(["textconv", "external", "clean"] as const)(
+    "does not execute a repository-controlled %s diff driver while creating a Review Packet",
+    (driver) => {
+      const fixture = hostileReviewPacketRepository(driver);
+      expect(existsSync(fixture.marker)).toBe(false);
+      const written = JSON.parse(readFileSync(fixture.packet, "utf8"));
+      expect(written.artifacts[0].diff.content).toContain("+after");
+      expect(written.artifacts[0].postimage.content).toBe("after\n");
+    },
+  );
+
+  it("does not execute a clean filter for an untracked Review Packet artifact", () => {
+    const root = canonicalTempDir("loom-review-packet-untracked-clean-");
+    cleanup.push(root);
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
+    writeFileSync(join(root, "README.md"), "baseline\n");
+    writeFileSync(join(root, ".gitattributes"), "*.dat filter=evil\n");
+    execFileSync("git", ["add", "."], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "baseline"], { cwd: root });
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd: root });
+    execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], { cwd: root });
+    const marker = join(root, "CLEAN_EXECUTED");
+    execFileSync("git", ["config", "filter.evil.clean", `sh -c 'touch ${marker}; cat'`], { cwd: root });
+    writeFileSync(join(root, "new.dat"), "untracked bytes\n");
+    const state = join(root, "state.json");
+    const packet = join(root, ".claude", "reviews", "packet.json");
+    writeReviewPacketTaskGraph(state, {
+      start_sha: head,
+      file_list: ["new.dat"],
+      files_modified: ["new.dat"],
+    });
+
+    execFileSync("bun", [
+      CLI, "helper", "review-packet", "create", "--task", "T1", "--output", ".claude/reviews/packet.json",
+    ], { cwd: root, encoding: "utf8", env: { ...process.env, LOOM_STATE_PATH: state } });
+
+    expect(existsSync(marker)).toBe(false);
+    const written = JSON.parse(readFileSync(packet, "utf8"));
+    expect(written.artifacts[0].diff.content).toContain("+untracked bytes");
+    expect(written.artifacts[0].postimage.content).toBe("untracked bytes\n");
+  });
+
+  it("treats an option-shaped untracked packet path as a path", () => {
+    const root = canonicalTempDir("loom-review-packet-option-path-");
+    cleanup.push(root);
+    const sideEffect = resolve(root, "..", `loom-packet-side-effect-${process.pid}-${Date.now()}.patch`);
+    cleanup.push(sideEffect);
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
+    writeFileSync(join(root, "README.md"), "baseline\n");
+    execFileSync("git", ["add", "README.md"], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "baseline"], { cwd: root });
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd: root });
+    execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], { cwd: root });
+    const optionPath = `--output=../${basename(sideEffect)}`;
+    mkdirSync(join(root, "--output=.."));
+    writeFileSync(join(root, optionPath), "reviewed bytes\n");
+    const state = join(root, "state.json");
+    const packet = join(root, ".claude", "reviews", "packet.json");
+    writeReviewPacketTaskGraph(state, {
+      start_sha: head,
+      file_list: [optionPath],
+      files_modified: [optionPath],
+    });
+
+    execFileSync("bun", [
+      CLI, "helper", "review-packet", "create", "--task", "T1", "--output", ".claude/reviews/packet.json",
+    ], {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...process.env, LOOM_STATE_PATH: state },
+    });
+
+    expect(existsSync(sideEffect)).toBe(false);
+    expect(readFileSync(join(root, optionPath), "utf8")).toBe("reviewed bytes\n");
+    const written = JSON.parse(readFileSync(packet, "utf8"));
+    expect(written.artifacts[0].path).toBe(optionPath);
+    expect(written.artifacts[0].diff.content).toContain("+reviewed bytes");
+  });
+
   it("captures a staged deletion with a null postimage", () => {
     const root = canonicalTempDir("loom-review-packet-deletion-");
     cleanup.push(root);
@@ -323,16 +469,14 @@ describe("quality-program helper boundaries", () => {
 
     const state = join(root, "state.json");
     const packet = join(root, ".claude", "reviews", "packet.json");
-    writeFileSync(state, JSON.stringify({
-      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, current_wave: 1, wave_gates: {},
-      tasks: [{
-        id: "T1", description: "delete", agent: "code-implementer-agent", wave: 1,
-        status: "pending", depends_on: [], start_sha: head,
-        file_list: ["src/deleted.ts"], files_modified: ["src/deleted.ts"],
-        review_status: "pending", review_generation: 0,
-      }],
-    }));
+    writeReviewPacketTaskGraph(state, {
+      description: "delete",
+      start_sha: head,
+      file_list: ["src/deleted.ts"],
+      files_modified: ["src/deleted.ts"],
+      review_status: "pending",
+      review_generation: 0,
+    });
 
     const id = execFileSync("bun", [
       CLI, "helper", "review-packet", "create", "--task", "T1", "--output", ".claude/reviews/packet.json",
@@ -360,15 +504,12 @@ describe("quality-program helper boundaries", () => {
     const imagePath = relative(ROOT, image);
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0x00, 0x80]);
     writeFileSync(image, png);
-    writeFileSync(state, JSON.stringify({
-      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, current_wave: 1, wave_gates: {},
-      tasks: [{
-        id: "T1", description: "binary packet", agent: "code-implementer-agent", wave: 1,
-        status: "pending", depends_on: [], start_sha: head,
-        file_list: [imagePath], files_modified: [imagePath],
-      }],
-    }));
+    writeReviewPacketTaskGraph(state, {
+      description: "binary packet",
+      start_sha: head,
+      file_list: [imagePath],
+      files_modified: [imagePath],
+    });
 
     const id = cli(
       ["helper", "review-packet", "create", "--task", "T1", "--output", packet],
@@ -384,21 +525,29 @@ describe("quality-program helper boundaries", () => {
     expect(cli(["helper", "review-packet", "verify", "--packet", packet]).trim()).toBe(id);
   });
 
+  it("propagates a post-inspection artifact read fault instead of recording a deletion", () => {
+    const inspected = { absolute: "/repo/src/reviewed.ts", exists: true };
+
+    expect(() => readReviewPacketPostimage(inspected, () => {
+      const failure = new Error("too many symbolic links");
+      Object.assign(failure, { code: "ELOOP" });
+      throw failure;
+    })).toThrow(/too many symbolic links/);
+    expect(readReviewPacketPostimage({ ...inspected, exists: false }, () => {
+      throw new Error("absent paths must not be read");
+    })).toBeNull();
+  });
+
   it("rejects a scoped path that is neither tracked nor present", () => {
     const dir = mkdtempSync(join(ROOT, ".tmp-review-packet-absent-test-"));
     cleanup.push(dir);
     const state = join(dir, "state.json");
     const packet = join(dir, "packet.json");
-    writeFileSync(state, JSON.stringify({
-      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, current_wave: 1, wave_gates: {},
-      tasks: [{
-        id: "T1", description: "packet", agent: "code-implementer-agent", wave: 1,
-        status: "pending", depends_on: [],
-        start_sha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim(),
-        file_list: ["definitely-not-present-review-packet.ts"], files_modified: [],
-      }],
-    }));
+    writeReviewPacketTaskGraph(state, {
+      start_sha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim(),
+      file_list: ["definitely-not-present-review-packet.ts"],
+      files_modified: [],
+    });
 
     const run = spawnSync("bun", [CLI, "helper", "review-packet", "create", "--task", "T1", "--output", packet], {
       cwd: ROOT, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: state },
@@ -408,32 +557,78 @@ describe("quality-program helper boundaries", () => {
     expect(existsSync(packet)).toBe(false);
   });
 
+  it("refuses to guess HEAD^ when neither Task nor remote authority supplies a packet base", () => {
+    const root = canonicalTempDir("loom-review-packet-no-base-authority-");
+    cleanup.push(root);
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
+    writeFileSync(join(root, "data.dat"), "before\n");
+    execFileSync("git", ["add", "data.dat"], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "first"], { cwd: root });
+    writeFileSync(join(root, "data.dat"), "after\n");
+    execFileSync("git", ["add", "data.dat"], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "second"], { cwd: root });
+    const state = join(root, "state.json");
+    const packet = join(root, ".claude", "reviews", "packet.json");
+    writeReviewPacketTaskGraph(state, { file_list: ["data.dat"], files_modified: ["data.dat"] });
+
+    const run = spawnSync("bun", [
+      CLI, "helper", "review-packet", "create", "--task", "T1", "--output", ".claude/reviews/packet.json",
+    ], { cwd: root, encoding: "utf8", env: { ...process.env, LOOM_STATE_PATH: state } });
+
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("no task start_sha or remote default branch");
+    expect(existsSync(packet)).toBe(false);
+  });
+
+  it("does not treat origin/main existence as remote default-branch authority", () => {
+    const root = canonicalTempDir("loom-review-packet-unproven-main-");
+    cleanup.push(root);
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
+    writeFileSync(join(root, "data.dat"), "content\n");
+    execFileSync("git", ["add", "data.dat"], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "baseline"], { cwd: root });
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd: root });
+    const state = join(root, "state.json");
+    const packet = join(root, ".claude", "reviews", "packet.json");
+    writeReviewPacketTaskGraph(state, { file_list: ["data.dat"], files_modified: ["data.dat"] });
+
+    const run = spawnSync("bun", [
+      CLI, "helper", "review-packet", "create", "--task", "T1", "--output", ".claude/reviews/packet.json",
+    ], { cwd: root, encoding: "utf8", env: { ...process.env, LOOM_STATE_PATH: state } });
+
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("no task start_sha or remote default branch");
+    expect(existsSync(packet)).toBe(false);
+  });
+
   it("fails review-packet creation on an unexpected git probe error", () => {
     const dir = mkdtempSync(join(ROOT, ".tmp-review-packet-git-failure-test-"));
     cleanup.push(dir);
     const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim();
     const state = join(dir, "state.json");
     const packet = join(dir, "packet.json");
-    writeFileSync(state, JSON.stringify({
-      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, current_wave: 1, wave_gates: {},
-      tasks: [{
-        id: "T1", description: "packet", agent: "code-implementer-agent", wave: 1,
-        status: "pending", depends_on: [], start_sha: head,
-        file_list: ["engine/src/types.ts"], files_modified: ["engine/src/types.ts"],
-      }],
-    }));
+    writeReviewPacketTaskGraph(state, {
+      start_sha: head,
+      file_list: ["engine/src/types.ts"],
+      files_modified: ["engine/src/types.ts"],
+    });
 
     const fakeBin = join(dir, "bin");
     mkdirSync(fakeBin);
     const fakeGit = join(fakeBin, "git");
+    const realGit = execFileSync("which", ["git"], { encoding: "utf-8" }).trim();
     writeFileSync(fakeGit, [
       "#!/bin/sh",
       "if [ \"$1\" = \"ls-files\" ]; then",
       "  echo forced-ls-files-failure >&2",
       "  exit 2",
       "fi",
-      "exec \"$REAL_GIT\" \"$@\"",
+      `exec ${JSON.stringify(realGit)} \"$@\"`,
       "",
     ].join("\n"), { mode: 0o755 });
 
@@ -443,12 +638,68 @@ describe("quality-program helper boundaries", () => {
       env: {
         ...process.env,
         LOOM_STATE_PATH: state,
-        REAL_GIT: execFileSync("which", ["git"], { encoding: "utf-8" }).trim(),
         PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
       },
     });
     expect(run.status).not.toBe(0);
     expect(run.stderr).toContain("forced-ls-files-failure");
+    expect(existsSync(packet)).toBe(false);
+  });
+
+  it("rejects git diff status 1 when stdout is not a patch", () => {
+    const root = canonicalTempDir("loom-review-packet-no-index-failure-");
+    cleanup.push(root);
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
+    writeFileSync(join(root, "README.md"), "baseline\n");
+    execFileSync("git", ["add", "README.md"], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "baseline"], { cwd: root });
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    execFileSync("git", ["update-ref", "refs/remotes/origin/main", head], { cwd: root });
+    execFileSync("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], { cwd: root });
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "untracked.ts"), "export const value = 1;\n");
+
+    const state = join(root, "state.json");
+    const packet = join(root, ".claude", "reviews", "packet.json");
+    writeReviewPacketTaskGraph(state, {
+      start_sha: head,
+      file_list: ["src/untracked.ts"],
+      files_modified: ["src/untracked.ts"],
+    });
+    const fakeBin = join(root, "bin");
+    mkdirSync(fakeBin);
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    writeFileSync(join(fakeBin, "git"), [
+      "#!/bin/sh",
+      "if [ \"$1\" = \"diff\" ]; then",
+      "  for arg in \"$@\"; do",
+      "    if [ \"$arg\" = \"--no-index\" ]; then",
+      "      echo forced-no-index-access-failure >&2",
+      "      exit 1",
+      "    fi",
+      "  done",
+      "fi",
+      `exec ${JSON.stringify(realGit)} \"$@\"`,
+      "",
+    ].join("\n"), { mode: 0o755 });
+
+    const run = spawnSync("bun", [
+      CLI, "helper", "review-packet", "create", "--task", "T1", "--output", ".claude/reviews/packet.json",
+    ], {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        LOOM_STATE_PATH: state,
+        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      },
+    });
+
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("returned status 1 without a valid patch");
+    expect(run.stderr).toContain("forced-no-index-access-failure");
     expect(existsSync(packet)).toBe(false);
   });
 
@@ -460,15 +711,11 @@ describe("quality-program helper boundaries", () => {
     const packet = join(dir, "packet.json");
     const external = join(outside, "secret.ts");
     writeFileSync(external, "secret\n");
-    writeFileSync(state, JSON.stringify({
-      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, current_wave: 1, wave_gates: {},
-      tasks: [{
-        id: "T1", description: "packet", agent: "code-implementer-agent", wave: 1,
-        status: "pending", depends_on: [], start_sha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim(),
-        file_list: ["engine/src/types.ts"], files_modified: [external],
-      }],
-    }));
+    writeReviewPacketTaskGraph(state, {
+      start_sha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim(),
+      file_list: ["engine/src/types.ts"],
+      files_modified: [external],
+    });
 
     const run = spawnSync("bun", [CLI, "helper", "review-packet", "create", "--task", "T1", "--output", packet], {
       cwd: ROOT, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: state },
@@ -485,15 +732,11 @@ describe("quality-program helper boundaries", () => {
     const state = join(dir, "state.json");
     const linked = join(dir, "linked-output");
     symlinkSync(outside, linked);
-    writeFileSync(state, JSON.stringify({
-      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, current_wave: 1, wave_gates: {},
-      tasks: [{
-        id: "T1", description: "packet", agent: "code-implementer-agent", wave: 1,
-        status: "pending", depends_on: [], start_sha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim(),
-        file_list: ["engine/src/types.ts"], files_modified: ["engine/src/types.ts"],
-      }],
-    }));
+    writeReviewPacketTaskGraph(state, {
+      start_sha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim(),
+      file_list: ["engine/src/types.ts"],
+      files_modified: ["engine/src/types.ts"],
+    });
 
     const run = spawnSync("bun", [CLI, "helper", "review-packet", "create", "--task", "T1", "--output", join(linked, "packet.json")], {
       cwd: ROOT, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: state },

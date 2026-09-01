@@ -7,6 +7,18 @@ import { judgeTestRun } from "../../../src/machine";
 import type { Evidence } from "../../../src/machine";
 import { reportSummary } from "../../machine/report-summary";
 
+/**
+ * Wrap added lines in the patch shape Git emits. New-test evidence is
+ * path-bound, so an unattributed `+line` proves nothing.
+ */
+const patch = (path: string, ...lines: string[]): string => [
+  `diff --git a/${path} b/${path}`,
+  `--- a/${path}`,
+  `+++ b/${path}`,
+  "@@ -0,0 +1 @@",
+  ...lines,
+].join("\n");
+
 describe("extractTestEvidence — property tests", () => {
   it("random strings without test keywords → passed: false", () => {
     fc.assert(
@@ -29,7 +41,7 @@ describe("extractTestEvidence — property tests", () => {
   it("valid Maven output always detected", () => {
     fc.assert(
       fc.property(fc.integer({ min: 1, max: 1000 }), (n) => {
-        const output = `BUILD SUCCESS\nTests run: ${n}, Failures: 0, Errors: 0`;
+        const output = `Tests run: ${n}, Failures: 0, Errors: 0\nBUILD SUCCESS`;
         const result = extractTestEvidence(output);
         expect(result.passed).toBe(true);
         expect(result.evidence).toContain("maven");
@@ -43,10 +55,21 @@ describe("extractTestEvidence — property tests", () => {
         fc.integer({ min: 1, max: 100 }),
         fc.integer({ min: 1, max: 50 }),
         (total, failures) => {
-          const output = `BUILD SUCCESS\nTests run: ${total}, Failures: ${failures}, Errors: 0`;
+          const output = `Tests run: ${total}, Failures: ${failures}, Errors: 0\nBUILD FAILURE`;
           expect(extractTestEvidence(output).passed).toBe(false);
         },
       ),
+    );
+  });
+
+  it("a zero-failure Maven tally without a later terminal marker never passes", () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 1, max: 1000 }), (n) => {
+        const output = `Tests run: ${n}, Failures: 0, Errors: 0`;
+        const result = extractTestEvidence(output);
+        expect(result.passed).toBe(false);
+        expect(result.evidence).toContain("incomplete run");
+      }),
     );
   });
 
@@ -59,6 +82,35 @@ describe("extractTestEvidence — property tests", () => {
         expect(result.evidence).toContain("node");
       }),
     );
+  });
+
+  it("a zero-test tally is never a pass for any supported runner", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(
+          "  0 passing (3ms)",
+          "Tests  0 passed (1)",
+          "===== 0 passed in 0.5s =====",
+          "test result: ok. 0 passed; 0 failed; 0 ignored",
+          "\n0 pass\n",
+          "Tests run: 0, Failures: 0, Errors: 0\nBUILD SUCCESS",
+        ),
+        (output) => {
+          const result = extractTestEvidence(output);
+          expect(result.passed).toBe(false);
+          // Distinct from "no runner output at all": the tally is named.
+          expect(result.evidence).toContain("0 tests executed");
+        },
+      ),
+    );
+  });
+
+  it("the transcript tally path agrees with the report path on zero tests", () => {
+    // Both paths judge the same run shape. Before this rule they disagreed:
+    // `0 passing` read as success while `judgeTestRun` reported a failure.
+    const reportRun = judgeTestRun(0, reportSummary(0, 0));
+    expect(reportRun.verdict).toBe("trusted-fail");
+    expect(extractTestEvidence("  0 passing (3ms)").passed).toBe(false);
   });
 
   it("Mocha with failures → passed: false", () => {
@@ -85,6 +137,45 @@ describe("extractTestEvidence — property tests", () => {
     );
   });
 
+  it("every mixed Vitest summary with a non-zero failure count fails", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 500 }),
+        fc.integer({ min: 0, max: 500 }),
+        (failed, passed) => {
+          const total = failed + passed;
+          const output = `Tests  ${failed} failed | ${passed} passed (${total})`;
+          const result = extractTestEvidence(output);
+          expect(result.passed).toBe(false);
+          expect(result.evidence).toBe(`vitest: ${output}`);
+        },
+      ),
+    );
+  });
+
+  it("a later truncated Vitest failure never preserves an earlier pass", () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 1, max: 500 }), (failed) => {
+        const result = extractTestEvidence(`Tests  1 passed (1)\nTests ${failed} failed |`);
+        expect(result.passed).toBe(false);
+        expect(result.evidence).toContain("malformed summary");
+      }),
+    );
+  });
+
+  it("non-zero skipped/todo-only Vitest summaries never pass", () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 500 }),
+        fc.constantFrom("skipped", "todo"),
+        (count, kind) => {
+          const result = extractTestEvidence(`Tests  ${count} ${kind} (${count})`);
+          expect(result).toEqual({ passed: false, evidence: "vitest: 0 tests executed" });
+        },
+      ),
+    );
+  });
+
   it("valid pytest output always detected", () => {
     fc.assert(
       fc.property(fc.integer({ min: 1, max: 500 }), (n) => {
@@ -104,8 +195,10 @@ describe("analyzeNewTests — property tests", () => {
         fc.integer({ min: 1, max: 20 }),
         fc.integer({ min: 1, max: 20 }),
         (base, extra) => {
-          const baseDiff = Array.from({ length: base }, () => "+    @Test\n+    assertThat(x).isTrue();").join("\n");
-          const moreDiff = Array.from({ length: base + extra }, () => "+    @Test\n+    assertThat(x).isTrue();").join("\n");
+          const lines = (n: number): string[] =>
+            Array.from({ length: n }, () => "+    @Test\n+    assertThat(x).isTrue();");
+          const baseDiff = patch("ExampleTest.java", ...lines(base));
+          const moreDiff = patch("ExampleTest.java", ...lines(base + extra));
 
           const baseResult = analyzeNewTests(baseDiff, undefined);
           const moreResult = analyzeNewTests(moreDiff, undefined);
@@ -121,7 +214,23 @@ describe("analyzeNewTests — property tests", () => {
   it("removed lines (-@Test) are never counted as new tests", () => {
     fc.assert(
       fc.property(fc.integer({ min: 1, max: 20 }), (n) => {
-        const diff = Array.from({ length: n }, () => "-    @Test\n-    assertThat(x).isTrue();").join("\n");
+        const diff = patch(
+          "ExampleTest.java",
+          ...Array.from({ length: n }, () => "-    @Test\n-    assertThat(x).isTrue();"),
+        );
+        const result = analyzeNewTests(diff, undefined);
+        expect(result.written).toBe(false);
+      }),
+    );
+  });
+
+  it("evidence-shaped lines with no Git path boundary are never accepted", () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 1, max: 10 }), (n) => {
+        const diff = Array.from(
+          { length: n },
+          () => "+    @Test\n+    assertThat(x).isTrue();",
+        ).join("\n");
         const result = analyzeNewTests(diff, undefined);
         expect(result.written).toBe(false);
       }),

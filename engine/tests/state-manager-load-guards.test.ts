@@ -292,6 +292,7 @@ const waveReviewEpoch = (overrides: Record<string, unknown> = {}) => ({
   runId: "run.wave-epoch",
   wave: 1,
   batchEpoch: DIGEST("a"),
+  specCheckSlotAuthority: { slot_id: "wave-slot:spec-check", attempted: 1 },
   ...overrides,
 });
 
@@ -418,6 +419,45 @@ describe("parseTaskGraph wave_review_epoch authority", () => {
     expect(parsed.value.wave_review_epoch).toEqual(rawEpoch);
     expect(parsed.value.wave_review_epoch).not.toBe(rawEpoch);
     expect(Object.isFrozen(parsed.value.wave_review_epoch)).toBe(true);
+    expect(Object.isFrozen(parsed.value.wave_review_epoch?.specCheckSlotAuthority)).toBe(true);
+  });
+
+  it("parses and deeply freezes byte-bound spec-check documents", () => {
+    const documents = {
+      spec: { path: "spec.md", contentDigest: DIGEST("c") },
+      plan: { path: "plan.md", contentDigest: DIGEST("d") },
+    };
+    const parsed = parseTaskGraph(graph({
+      current_wave: 1,
+      spec_file: "spec.md",
+      plan_file: "plan.md",
+      wave_review_epoch: waveReviewEpoch({ specCheckDocuments: documents }),
+    }));
+
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.value.wave_review_epoch?.specCheckDocuments).toEqual(documents);
+    expect(isDeeplyFrozen(parsed.value.wave_review_epoch?.specCheckDocuments)).toBe(true);
+  });
+
+  it("rejects document paths that disagree with protected graph authority", () => {
+    expect(errorOf(graph({
+      spec_file: "different-spec.md",
+      plan_file: "plan.md",
+      wave_review_epoch: waveReviewEpoch({
+        specCheckDocuments: {
+          spec: { path: "spec.md", contentDigest: DIGEST("c") },
+          plan: { path: "plan.md", contentDigest: DIGEST("d") },
+        },
+      }),
+    }))).toContain("paths must match spec_file/plan_file");
+  });
+
+  it("keeps historical epochs readable without spec-check slot authority", () => {
+    const legacy = waveReviewEpoch();
+    const { specCheckSlotAuthority: _absent, ...withoutSlotAuthority } = legacy;
+    const parsed = parseTaskGraph(graph({ current_wave: 1, wave_review_epoch: withoutSlotAuthority }));
+    expect(parsed).toMatchObject({ ok: true });
   });
 
   it.each([
@@ -426,6 +466,13 @@ describe("parseTaskGraph wave_review_epoch authority", () => {
     ["zero Wave", waveReviewEpoch({ wave: 0 })],
     ["non-integer Wave", waveReviewEpoch({ wave: 1.5 })],
     ["bad batch digest", waveReviewEpoch({ batchEpoch: "not-a-digest" })],
+    ["malformed document digest", waveReviewEpoch({ specCheckDocuments: {
+      spec: { path: null, contentDigest: "bad" }, plan: { path: null, contentDigest: null },
+    } })],
+    ["malformed spec-check slot", waveReviewEpoch({ specCheckSlotAuthority: "forged" })],
+    ["bad spec-check slot id", waveReviewEpoch({ specCheckSlotAuthority: { slot_id: "../escape", attempted: 1 } })],
+    ["bad spec-check attempt", waveReviewEpoch({ specCheckSlotAuthority: { slot_id: "wave-slot:spec-check", attempted: 3 } })],
+    ["surplus spec-check slot field", waveReviewEpoch({ specCheckSlotAuthority: { slot_id: "wave-slot:spec-check", attempted: 1, forged: true } })],
     ["unknown field", waveReviewEpoch({ forged: true })],
   ])("refuses %s", (_label, epoch) => {
     expect(errorOf(graph({ wave_review_epoch: epoch }))).toContain("wave_review_epoch");
@@ -625,7 +672,7 @@ describe("parseTaskGraph protected completion authority", () => {
 });
 
 // ---------------------------------------------------------------------------
-// wave_gates record-key domain (round-40: type-design-analyzer advisory)
+// wave_gates keys are persisted canonical Wave identities
 // ---------------------------------------------------------------------------
 
 const waveGateRecord = {
@@ -635,7 +682,7 @@ const waveGateRecord = {
   blocked: false,
 } as const;
 
-describe("parseTaskGraph wave_gates record-key validation", () => {
+describe("parseTaskGraph wave_gates load boundary", () => {
   it("accepts canonical positive integer keys (String(wave))", () => {
     expect(parseTaskGraph(graph({ wave_gates: { "1": waveGateRecord } })).ok).toBe(true);
   });
@@ -645,6 +692,21 @@ describe("parseTaskGraph wave_gates record-key validation", () => {
       const err = errorOf(graph({ wave_gates: { [wave]: waveGateRecord } }));
       expect(err).toContain("wave_gates key must be a canonical positive integer wave number");
     }
+  });
+
+  it.each([
+    ["impl_complete", "yes"],
+    ["tests_passed", "yes"],
+    ["reviews_complete", "no"],
+    ["blocked", 1],
+  ])("rejects malformed persisted %s before gate booleans can be consumed", (field, value) => {
+    const err = errorOf(graph({ wave_gates: { "1": { ...waveGateRecord, [field]: value } } }));
+    expect(err).toContain(`wave_gates["1"]: ${field}`);
+  });
+
+  it("rejects blocked:true when neither Task findings nor Spec-check findings supply a cause", () => {
+    const err = errorOf(graph({ wave_gates: { "1": { ...waveGateRecord, blocked: true } } }));
+    expect(err).toContain("blocked: true has no cause");
   });
 });
 

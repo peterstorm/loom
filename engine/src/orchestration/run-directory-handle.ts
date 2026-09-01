@@ -2,10 +2,10 @@
  * Anchored run-directory handle.
  *
  * The handle exposes a FIXED set of operations over one proven run directory
- * and has no arbitrary path API: a caller can publish a context, reserve a
- * transcript slot, or record a receipt, but it cannot ask the handle to write
- * "some path". That is the point — every write lands in a slot the layout
- * already names, so a compromised or buggy caller cannot redirect bytes.
+ * and no arbitrary filesystem-path API. Most writes land in slots the layout
+ * names; `publishArtifactSet` additionally accepts parser-proven relative
+ * destinations confined beneath the fixed `artifacts/` namespace. No caller
+ * can redirect bytes outside the run or into its protected authority slots.
  *
  * Layout:
  *   authority.json                     immutable run/roster/root authority
@@ -18,20 +18,23 @@
  *   requests/correlators/<digest>.json immutable native-id/request binding
  *   contexts/<digest>.json             complete immutable context packets
  *   transcripts/<slot>/attempt-<n>.raw exact harness bytes
+ *   transcripts/<slot>/attempt-<n>.rejected immutable terminal capture refusal
  *   receipts/<effect-id>.json          typed effect/publication receipts
  *   artifacts/...                      domain artifacts and final outputs
  *
- * Immutable artifacts are written with O_EXCL through a descriptor anchored at
- * their parent, so republishing a slot fails loudly instead of silently
- * rewriting history. Two slots reach that guarantee by a different route and
- * say so at their own call sites: transcripts land via `linkSync` (EEXIST from
- * the link itself), and promoted artifacts via `renameSync` plus an explicit
- * byte comparison, because `rename` has no O_EXCL.
+ * On Linux, immutable artifacts are written with O_EXCL through a descriptor
+ * anchored at their parent. On Darwin, Node exposes no openat-style child API,
+ * so the same operations use an O_NOFOLLOW_ANY-proven parent pathname and retain
+ * the module's documented post-acquisition parent-swap risk. Two slots reach
+ * immutability by a different route and say so at their own call sites:
+ * transcripts land via `linkSync` (EEXIST from the link itself), and promoted
+ * artifacts via `renameSync` plus an explicit byte comparison, because
+ * `rename` has no O_EXCL.
  */
 
 import { createHash } from "node:crypto";
 import { linkSync, lstatSync, realpathSync, statSync, unlinkSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, join, relative, resolve, sep } from "node:path";
 import {
   canonicalRecord,
   canonicalStructuralEquals,
@@ -39,8 +42,8 @@ import {
   parseStoredAgentRequestAuthority,
   parseArtifactByteLength,
   parseContextDigest,
-  parseRequestId,
   parseOrchestrationRunId,
+  parseRequestId,
   type AgentRequestAuthority,
   type ArtifactDigest,
   type ArtifactRef,
@@ -61,7 +64,7 @@ import {
   openChildDirectoryNoFollow,
   openDirectoryNoFollow,
   anchoredChildPath,
-  closeAnchoredDirectory,
+  closeAnchorGuarded,
   type AnchoredDirectory,
   readDirectoryFileNoFollow,
   publishStagedRunFile,
@@ -115,6 +118,42 @@ const failure = <T>(field: string, message: string): DomainResult<T, RunDirector
   ({ ok: false, error: canonicalRecord({ kind: "invalid-run-directory" as const, field, message }) });
 
 const success = <T>(value: T): DomainResult<T, RunDirectoryError> => ({ ok: true, value });
+
+type AnchoredOutcome<T> =
+  | Readonly<{ kind: "returned"; value: T }>
+  | Readonly<{ kind: "threw"; error: unknown }>;
+
+function errorDetail(error: unknown): string {
+  if (error instanceof AggregateError) {
+    return `${error.message}: ${error.errors.map(errorDetail).join("; ")}`;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Own one anchor from acquisition through guarded release. */
+function withOwnedAnchor<T>(
+  acquire: () => AnchoredDirectory,
+  operation: string,
+  use: (directory: AnchoredDirectory) => T,
+): T {
+  const directory = acquire();
+  let outcome: AnchoredOutcome<T>;
+  try {
+    outcome = { kind: "returned", value: use(directory) };
+  } catch (error) {
+    outcome = { kind: "threw", error };
+  }
+  if (outcome.kind === "threw") {
+    const settled = closeAnchorGuarded(directory, outcome.error, operation);
+    if (settled instanceof AggregateError) {
+      throw new AggregateError(settled.errors, errorDetail(settled));
+    }
+    throw settled ?? outcome.error;
+  }
+  const closeError = closeAnchorGuarded(directory, null, operation);
+  if (closeError !== null) throw closeError;
+  return outcome.value;
+}
 
 /** Immutable run authority, written once when the directory is created. */
 export type RunAuthority = Readonly<{
@@ -206,16 +245,25 @@ export function parseArtifactRelativePath(raw: unknown): DomainResult<ArtifactRe
   return success(raw as ArtifactRelativePath);
 }
 
+function copiedBytes(bytes: readonly number[]): readonly number[] | null {
+  if (!Array.isArray(bytes)) return null;
+  const copy = Array.from(bytes);
+  return copy.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)
+    ? Object.freeze(copy)
+    : null;
+}
+
 export function createStagedArtifact(
   relativePath: unknown,
   bytes: readonly number[],
 ): DomainResult<StagedArtifact, RunDirectoryError> {
   const parsedPath = parseArtifactRelativePath(relativePath);
   if (!parsedPath.ok) return parsedPath;
-  if (!Array.isArray(bytes) || !bytes.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
+  const parsedBytes = copiedBytes(bytes);
+  if (parsedBytes === null) {
     return failure("artifacts", "staged artifact bytes must be integers from 0 through 255");
   }
-  return success(Object.freeze({ relativePath: parsedPath.value, bytes: Object.freeze([...bytes]) }));
+  return success(Object.freeze({ relativePath: parsedPath.value, bytes: parsedBytes }));
 }
 
 // ---------------------------------------------------------------------------
@@ -343,9 +391,11 @@ function rebasedOnRealRunsRoot(
 
 /**
  * A run directory must be a direct child of its runs-root and must already
- * exist. Both are resolved and compared as strings, and every later access
- * re-opens the path with no component followed, so a component swapped to a
- * symlink after this check still cannot be followed.
+ * exist. Both are resolved and compared as strings. This parser retains only
+ * pathname identity: each Linux operation becomes descriptor-anchored after
+ * acquisition, but a pathname replacement between operations can redirect a
+ * later acquisition. Darwin re-opens with O_NOFOLLOW_ANY through the proven
+ * pathname and retains the documented post-acquisition parent-swap risk.
  */
 export function parseRunDirectoryIdentity(
   runsRoot: string,
@@ -430,24 +480,26 @@ export interface RunDirHandle extends ProgramJournal {
 }
 
 /**
- * Create run subdirectories through descriptors anchored at the run directory.
+ * Create run subdirectories one proven component at a time.
  *
  * `mkdirSync(path, { recursive: true })` hands the whole path to the kernel,
  * which resolves every intermediate component with ordinary symlink-following
  * semantics. A component swapped to a symlink — the adversary this module's
- * O_NOFOLLOW primitives exist to refuse — would therefore have directories
- * created at the link's TARGET, and that side effect lands before the anchored
- * write that would have refused it. `ensureRelativeDirectoryNoFollow` walks one
- * component at a time under O_NOFOLLOW instead, so directory creation is held
- * to the same anchoring as every read and write here.
+ * no-follow primitives exist to refuse — would therefore have directories
+ * created at the link's TARGET before the anchored write refused it. On Linux,
+ * `ensureRelativeDirectoryNoFollow` addresses mkdir through the retained parent
+ * descriptor. On Darwin, where Node exposes no `mkdirat`, it proves the parent
+ * identity with `O_NOFOLLOW_ANY`, performs pathname mkdir, then no-follow opens
+ * the child before using it as the next parent.
  */
 function ensureRunSubdirectories(runDirectory: string, targets: readonly string[]): void {
-  const root = openDirectoryNoFollow(runDirectory);
-  try {
-    for (const target of targets) ensureRelativeDirectoryNoFollow(root, runDirectory, target);
-  } finally {
-    closeAnchoredDirectory(root);
-  }
+  withOwnedAnchor(
+    () => openDirectoryNoFollow(runDirectory),
+    `subdirectory creation under ${runDirectory}`,
+    (root) => {
+      for (const target of targets) ensureRelativeDirectoryNoFollow(root, runDirectory, target);
+    },
+  );
 }
 
 function ensureFixedLayout(runDirectory: string): void {
@@ -459,7 +511,7 @@ function digestOf(bytes: readonly number[]): ArtifactDigest {
 }
 
 function contextDigestOf(bytes: readonly number[]): ContextDigest {
-  const parsed = parseContextDigest(createHash("sha256").update(Uint8Array.from(bytes)).digest("hex"));
+  const parsed = parseContextDigest(digestOf(bytes));
   if (!parsed.ok) throw new Error("internal context digest construction failed");
   return parsed.value;
 }
@@ -498,11 +550,15 @@ function readEventRecords(events: AnchoredDirectory): readonly ProgramEventRecor
   }));
 }
 
-function isExistingDirectory(path: string): boolean {
+function inspectExistingDirectory(path: string): DomainResult<boolean, RunDirectoryError> {
   try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
+    return success(statSync(path).isDirectory());
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return success(false);
+    return failure(
+      "artifacts",
+      `cannot inspect artifact slot ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -542,16 +598,17 @@ function parseHarnessCorrelatorBinding(raw: unknown): DomainResult<HarnessCorrel
   if (record["schemaVersion"] !== RUN_DIRECTORY_SCHEMA_VERSION ||
       (record["harness"] !== "pi" && record["harness"] !== "claude") ||
       typeof record["nativeId"] !== "string" || record["nativeId"].length === 0 ||
-      typeof record["requestId"] !== "string" || record["requestId"].length === 0 ||
       typeof record["role"] !== "string" || record["role"].length === 0 ||
       (record["attempt"] !== 1 && record["attempt"] !== 2)) {
     return failure("correlator", "harness correlator binding violates its field contract");
   }
+  const requestId = parseRequestId(record["requestId"]);
+  if (!requestId.ok) return failure("correlator", requestId.error.message);
   return success(canonicalRecord({
     schemaVersion: RUN_DIRECTORY_SCHEMA_VERSION,
     harness: record["harness"],
     nativeId: record["nativeId"],
-    requestId: record["requestId"] as AgentRequestAuthority["requestId"],
+    requestId: requestId.value,
     role: record["role"] as AgentRequestAuthority["role"],
     attempt: record["attempt"],
   }));
@@ -574,7 +631,7 @@ export function openRunDirectory(
   // `openDirectoryNoFollow` supplies the no-symlink authority before any fixed
   // layout can be created through that child.
   try {
-    closeAnchoredDirectory(openDirectoryNoFollow(directory));
+    withOwnedAnchor(() => openDirectoryNoFollow(directory), `layout probe for ${directory}`, () => undefined);
     ensureFixedLayout(directory);
   } catch (error) {
     return failure(
@@ -618,9 +675,10 @@ export function openRunDirectory(
  * The runs-root is never created. A run name is chosen fresh per run and a typo
  * costs one empty directory, but a mistyped ROOT would silently grow a whole
  * second tree of runs that no later command would look in, so it stays a loud
- * failure. Creation is anchored exactly like every other write here: the single
- * child component is made through a descriptor held on the root, and an entry
- * already occupied by a symlink is refused rather than followed.
+ * failure. Linux creates the child relative to the retained root descriptor.
+ * Darwin proves the retained root's pathname identity with `O_NOFOLLOW_ANY`,
+ * performs pathname mkdir, and no-follow opens the child; an entry already
+ * occupied by a symlink is refused rather than followed on both platforms.
  */
 export function createRunDirectory(
   runsRoot: string,
@@ -631,14 +689,14 @@ export function createRunDirectory(
   const reference = rebasedOnRealRunsRoot(lexical.value);
   if (!reference.ok) return reference;
   const { runsRoot: root, runDirectory: directory } = reference.value;
-  let anchor: AnchoredDirectory | null = null;
   try {
-    anchor = openDirectoryNoFollow(root);
-    ensureRelativeDirectoryNoFollow(anchor, root, directory);
+    withOwnedAnchor(
+      () => openDirectoryNoFollow(root),
+      `run directory creation for ${directory}`,
+      (anchor) => ensureRelativeDirectoryNoFollow(anchor, root, directory),
+    );
   } catch (error) {
     return failure("runDirectory", `cannot create run directory ${directory}: ${error instanceof Error ? error.message : String(error)}`);
-  } finally {
-    if (anchor !== null) closeAnchoredDirectory(anchor);
   }
   return openRunDirectory(root, directory);
 }
@@ -667,7 +725,7 @@ function buildHandle(
     ...journalOperations(directory),
     ...contextOperations(runId, directory),
     ...requestOperations(runId, directory),
-    ...artifactOperations(runId, directory),
+    ...artifactOperations(runId, identity.runsRoot, directory),
     ...receiptOperations(directory),
   });
 }
@@ -960,14 +1018,15 @@ function readContextPacket(directory: string, digest: ContextPacket["digest"]): 
 function decisionContextBody(rawDigest: ContextDigest, bytes: readonly number[]): DomainResult<Readonly<{ digest: ContextDigest; body: string }>, RunDirectoryError> {
   const digest = parseContextDigest(rawDigest);
   if (!digest.ok) return failure("context", digest.error.message);
-  if (!Array.isArray(bytes) || !bytes.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
+  const parsedBytes = copiedBytes(bytes);
+  if (parsedBytes === null) {
     return failure("context", "decision context bytes must be integers from 0 through 255");
   }
-  if (contextDigestOf(bytes) !== digest.value) {
+  if (contextDigestOf(parsedBytes) !== digest.value) {
     return failure("context", "decision context digest does not match its exact bytes");
   }
   try {
-    const body = new TextDecoder("utf8", { fatal: true }).decode(Uint8Array.from(bytes));
+    const body = new TextDecoder("utf8", { fatal: true }).decode(Uint8Array.from(parsedBytes));
     JSON.parse(body);
     return success(Object.freeze({ digest: digest.value, body }));
   } catch (error) {
@@ -1024,9 +1083,12 @@ function lookupReservation(
       : { kind: "unreadable", message: `request ${requestId} authority is unreadable: ${(error as Error).message}` };
   }
   const reserved = parseStoredAgentRequestAuthority(rawReservation);
-  return reserved.ok
+  if (!reserved.ok) {
+    return { kind: "unreadable", message: `request ${requestId} authority is malformed: ${reserved.error.violations.map(({ message }) => message).join("; ")}` };
+  }
+  return reserved.value.requestId === requestId
     ? { kind: "reserved", authority: reserved.value }
-    : { kind: "unreadable", message: `request ${requestId} authority is malformed: ${reserved.error.violations.map(({ message }) => message).join("; ")}` };
+    : { kind: "unreadable", message: `request ${requestId} authority body belongs to ${reserved.value.requestId}` };
 }
 
 function readReservedAuthority(
@@ -1034,10 +1096,14 @@ function readReservedAuthority(
   requestId: AgentRequestAuthority["requestId"],
 ): DomainResult<AgentRequestAuthority, RunDirectoryError> {
   const found = lookupReservation(directory, requestId);
-  return found.kind === "reserved" ? success(found.authority)
-    : found.kind === "unreserved"
-      ? failure("request", `request ${requestId} was never reserved`)
-      : failure("request", found.message);
+  switch (found.kind) {
+    case "reserved":
+      return success(found.authority);
+    case "unreserved":
+      return failure("request", `request ${requestId} was never reserved`);
+    case "unreadable":
+      return failure("request", found.message);
+  }
 }
 
 /**
@@ -1095,49 +1161,56 @@ function reserveRequestOperation(runId: OrchestrationRunId, directory: string): 
 
 function readIssuedRequestsOperation(runId: OrchestrationRunId, directory: string): RunDirHandle["readIssuedRequests"] {
   return () => {
-    let requests: AnchoredDirectory | null = null;
     try {
-      requests = openDirectoryNoFollow(join(directory, REQUESTS));
-      const issued: AgentRequestAuthority[] = [];
-      for (const name of listDirectoryNamesNoFollow(requests)) {
-        if (!name.endsWith(".json")) continue;
-        let raw: unknown;
-        try {
-          raw = JSON.parse(readDirectoryFileNoFollow(requests, name).toString("utf-8")) as unknown;
-        } catch (error) {
-          return failure("request", `request authority ${name} is unreadable: ${(error as Error).message}`);
-        }
-        const parsed = parseStoredAgentRequestAuthority(raw);
-        if (!parsed.ok) {
-          return failure("request", `request authority ${name} is malformed: ${parsed.error.violations.map(({ message }) => message).join("; ")}`);
-        }
-        if (parsed.value.runId !== runId) return failure("request", `request authority ${name} belongs to a different run`);
-        issued.push(parsed.value);
-      }
-      return success(Object.freeze(issued));
+      return withOwnedAnchor(
+        () => openDirectoryNoFollow(join(directory, REQUESTS)),
+        "issued-request inspection",
+        (requests) => {
+          const issued: AgentRequestAuthority[] = [];
+          for (const name of listDirectoryNamesNoFollow(requests)) {
+            if (!name.endsWith(".json")) continue;
+            let raw: unknown;
+            try {
+              raw = JSON.parse(readDirectoryFileNoFollow(requests, name).toString("utf-8")) as unknown;
+            } catch (error) {
+              throw new Error(`request authority ${name} is unreadable: ${(error as Error).message}`, { cause: error });
+            }
+            const parsed = parseStoredAgentRequestAuthority(raw);
+            if (!parsed.ok) {
+              throw new Error(`request authority ${name} is malformed: ${parsed.error.violations.map(({ message }) => message).join("; ")}`);
+            }
+            if (name !== `${parsed.value.requestId}.json`) {
+              throw new Error(`request authority ${name} does not match body request id ${parsed.value.requestId}`);
+            }
+            if (parsed.value.runId !== runId) throw new Error(`request authority ${name} belongs to a different run`);
+            issued.push(parsed.value);
+          }
+          return success(Object.freeze(issued));
+        },
+      );
     } catch (error) {
       return failure("request", `cannot inspect issued requests safely: ${(error as Error).message}`);
-    } finally {
-      if (requests !== null) closeAnchoredDirectory(requests);
     }
   };
 }
 
 function readCapturedAttemptsOperation(directory: string): RunDirHandle["readCapturedAttempts"] {
   return () => {
-    let transcripts: AnchoredDirectory | null = null;
     try {
-      transcripts = openDirectoryNoFollow(join(directory, TRANSCRIPTS));
-      const captured = new Set<CaptureKey>();
-      for (const slot of listDirectoryNamesNoFollow(transcripts)) {
-        const inspected = inspectCapturedSlot(transcripts, slot, captured);
-        if (!inspected.ok) return inspected;
-      }
-      return success(captured);
+      return withOwnedAnchor(
+        () => openDirectoryNoFollow(join(directory, TRANSCRIPTS)),
+        "captured-attempt inspection",
+        (transcripts) => {
+          const captured = new Set<CaptureKey>();
+          for (const slot of listDirectoryNamesNoFollow(transcripts)) {
+            const inspected = inspectCapturedSlot(transcripts, slot, captured);
+            if (!inspected.ok) throw new Error(inspected.error.message);
+          }
+          return success(captured);
+        },
+      );
     } catch (error) {
       return failure("transcript", `cannot inspect captured attempts safely: ${(error as Error).message}`);
-    } finally {
-      if (transcripts !== null) closeAnchoredDirectory(transcripts);
     }
   };
 }
@@ -1150,28 +1223,28 @@ function inspectCapturedSlot(
   if (slot === "capture.lock" || slot === "capture.lock.recovery" || slot.startsWith("capture.lock.tomb-")) {
     return success(undefined);
   }
-  let slotDirectory: AnchoredDirectory | null = null;
   try {
-    slotDirectory = openChildDirectoryNoFollow(transcripts, slot);
-    for (const name of listDirectoryNamesNoFollow(slotDirectory)) {
-      const match = /^attempt-([12])\.raw$/.exec(name);
-      if (match === null) continue;
-      // The ATTEMPT itself is parsed by the domain rule that owns the concept,
-      // not by a second type cast of the filename capture group.
-      const attempt = parseSemanticAttempt(Number(match[1]), `transcript slot ${slot}/${name}`);
-      if (!attempt.ok) {
-        return failure("transcript", `transcript slot ${slot} holds an unparsable attempt file ${name}`);
-      }
-      captured.add(captureKey(slot, attempt.value));
-    }
-    return success(undefined);
+    return withOwnedAnchor(
+      () => openChildDirectoryNoFollow(transcripts, slot),
+      `transcript-slot inspection for ${slot}`,
+      (slotDirectory) => {
+        for (const name of listDirectoryNamesNoFollow(slotDirectory)) {
+          const match = /^attempt-([12])\.raw$/.exec(name);
+          if (match === null) continue;
+          // The ATTEMPT itself is parsed by the domain rule that owns the concept,
+          // not by a second type cast of the filename capture group.
+          const attempt = parseSemanticAttempt(Number(match[1]), `transcript slot ${slot}/${name}`);
+          if (!attempt.ok) throw new Error(`transcript slot ${slot} holds an unparsable attempt file ${name}`);
+          captured.add(captureKey(slot, attempt.value));
+        }
+        return success(undefined);
+      },
+    );
   } catch (error) {
     return failure(
       "transcript",
       `cannot inspect transcript slot ${slot} safely: ${error instanceof Error ? error.message : String(error)}`,
     );
-  } finally {
-    if (slotDirectory !== null) closeAnchoredDirectory(slotDirectory);
   }
 }
 
@@ -1245,20 +1318,20 @@ function rejectCaptureOperation(runId: OrchestrationRunId, directory: string): R
     if (!supplied.ok) return supplied;
     const key = captureKey(supplied.value.slotId, supplied.value.attempt);
     try {
-      await withAnchoredDirectoryLock(join(directory, TRANSCRIPTS), "capture.lock", (transcriptsDirectory) => {
-        const slotDirectory = openChildDirectoryNoFollow(transcriptsDirectory, supplied.value.slotId);
-        try {
-          try {
-            readDirectoryFileNoFollow(slotDirectory, `attempt-${supplied.value.attempt}.raw`);
-            throw new Error(`attempt ${supplied.value.attempt} for slot ${supplied.value.slotId} is already captured`);
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-          }
-          writeCaptureRejectionMarker(slotDirectory, supplied.value, diagnostic);
-        } finally {
-          closeAnchoredDirectory(slotDirectory);
-        }
-      });
+      await withAnchoredDirectoryLock(join(directory, TRANSCRIPTS), "capture.lock", (transcriptsDirectory) =>
+        withOwnedAnchor(
+          () => openChildDirectoryNoFollow(transcriptsDirectory, supplied.value.slotId),
+          `capture rejection for ${supplied.value.slotId}`,
+          (slotDirectory) => {
+            try {
+              readDirectoryFileNoFollow(slotDirectory, `attempt-${supplied.value.attempt}.raw`);
+              throw new Error(`attempt ${supplied.value.attempt} for slot ${supplied.value.slotId} is already captured`);
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            }
+            writeCaptureRejectionMarker(slotDirectory, supplied.value, diagnostic);
+          },
+        ));
       return success(key);
     } catch (error) {
       return failure("transcript", `cannot reject capture safely: ${error instanceof Error ? error.message : String(error)}`);
@@ -1336,27 +1409,30 @@ function readCaptureRejectionOperation(
 
 function isPristineOperation(directory: string): RunDirHandle["isPristine"] {
   return () => {
-    let root: AnchoredDirectory | null = null;
     try {
-      root = openDirectoryNoFollow(directory);
-      const allowedRoot = new Set([AUTHORITY_FILE, PROGRAM_FILE, ...FIXED_SUBDIRECTORIES.map((path) => path.split("/")[0]!) ]);
-      const rootEntries = listDirectoryNamesNoFollow(root);
-      if (rootEntries.some((entry) => !allowedRoot.has(entry))) return success(false);
-      for (const relative of FIXED_SUBDIRECTORIES) {
-        let child: AnchoredDirectory | null = null;
-        try {
-          child = openDirectoryNoFollow(join(directory, relative));
-          const allowed = relative === REQUESTS ? new Set([CORRELATORS]) : new Set<string>();
-          if (listDirectoryNamesNoFollow(child).some((entry) => !allowed.has(entry))) return success(false);
-        } finally {
-          if (child !== null) closeAnchoredDirectory(child);
-        }
-      }
-      return success(true);
+      return withOwnedAnchor(
+        () => openDirectoryNoFollow(directory),
+        "pristine-run inspection",
+        (root) => {
+          const allowedRoot = new Set([AUTHORITY_FILE, PROGRAM_FILE, ...FIXED_SUBDIRECTORIES.map((path) => path.split("/")[0]!) ]);
+          const rootEntries = listDirectoryNamesNoFollow(root);
+          if (rootEntries.some((entry) => !allowedRoot.has(entry))) return success(false);
+          for (const relative of FIXED_SUBDIRECTORIES) {
+            const occupied = withOwnedAnchor(
+              () => openDirectoryNoFollow(join(directory, relative)),
+              `pristine child inspection for ${relative}`,
+              (child) => {
+                const allowed = relative === REQUESTS ? new Set([CORRELATORS]) : new Set<string>();
+                return listDirectoryNamesNoFollow(child).some((entry) => !allowed.has(entry));
+              },
+            );
+            if (occupied) return success(false);
+          }
+          return success(true);
+        },
+      );
     } catch (error) {
       return failure("pristine", `cannot prove replacement run pristine: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      if (root !== null) closeAnchoredDirectory(root);
     }
   };
 }
@@ -1475,15 +1551,18 @@ function captureTranscriptOperation(runId: OrchestrationRunId, directory: string
     );
     if (!supplied.ok) return supplied;
     try {
-      return await withAnchoredDirectoryLock(join(directory, TRANSCRIPTS), "capture.lock", (transcriptsDirectory) => {
-        const slotDirectory = openChildDirectoryNoFollow(transcriptsDirectory, supplied.value.slotId);
-        try {
-          const rejected = rejectedCaptureProblem(slotDirectory, supplied.value);
-          return rejected.ok ? publishTranscriptBytes(runId, slotDirectory, supplied.value, bytes) : rejected;
-        } finally {
-          closeAnchoredDirectory(slotDirectory);
-        }
-      });
+      return await withAnchoredDirectoryLock(join(directory, TRANSCRIPTS), "capture.lock", (transcriptsDirectory) =>
+        withOwnedAnchor(
+          () => openChildDirectoryNoFollow(transcriptsDirectory, supplied.value.slotId),
+          `transcript capture for ${supplied.value.slotId}`,
+          (slotDirectory) => {
+            const rejected = rejectedCaptureProblem(slotDirectory, supplied.value);
+            if (!rejected.ok) throw new Error(rejected.error.message);
+            const published = publishTranscriptBytes(runId, slotDirectory, supplied.value, bytes);
+            if (!published.ok) throw new Error(published.error.message);
+            return published;
+          },
+        ));
     } catch (error) {
       return failure("transcript", `cannot capture transcript safely: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -1525,15 +1604,59 @@ function requestOperations(runId: OrchestrationRunId, directory: string) {
   };
 }
 
-type StagedPair = Readonly<{ staged: string; final: string }>;
+const STAGED_ARTIFACT_PROMOTION: unique symbol = Symbol("loom.staged-artifact-promotion");
+const MINTED_STAGED_ARTIFACT_PROMOTIONS = new WeakSet<object>();
 
-/** Write every member beside its final name; a fault discards the whole set. */
-function stageArtifactSet(
+/** Opaque authority to promote one parser-proven staged artifact within a Run Directory. */
+export type StagedArtifactPromotion = Readonly<{
+  staged: string;
+  final: string;
+  [STAGED_ARTIFACT_PROMOTION]: true;
+}>;
+
+/**
+ * Parse a staged/final pair into promotion authority. Both paths must be
+ * canonical absolute paths under this Run Directory's artifacts root, and the
+ * staged leaf must use the exact suffix shape produced by `stageArtifactSet`.
+ */
+export function parseStagedArtifactPromotion(
+  runsRoot: string,
   directory: string,
+  raw: unknown,
+): DomainResult<StagedArtifactPromotion, RunDirectoryError> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return failure("artifacts", "staged artifact promotion must be an object");
+  }
+  const record = raw as Record<string, unknown>;
+  if (typeof record["staged"] !== "string" || typeof record["final"] !== "string") {
+    return failure("artifacts", "staged artifact promotion paths must be strings");
+  }
+  const identity = parseRunDirectoryIdentity(runsRoot, directory);
+  if (!identity.ok) return identity;
+  const artifactsRoot = resolve(identity.value.runDirectory, ARTIFACTS);
+  const final = resolve(record["final"]);
+  const finalRelative = relative(artifactsRoot, final).split(sep).join("/");
+  const parsedRelative = parseArtifactRelativePath(finalRelative);
+  if (record["final"] !== final || !parsedRelative.ok || join(artifactsRoot, parsedRelative.ok ? parsedRelative.value : "") !== final) {
+    return failure("artifacts", "final artifact promotion path must be canonical and remain beneath the Run Directory artifacts root");
+  }
+  const staged = resolve(record["staged"]);
+  const stagedPrefix = `${final}.staged-`;
+  const stagedSuffix = staged.slice(stagedPrefix.length);
+  if (record["staged"] !== staged || !staged.startsWith(stagedPrefix) || !/^[0-9a-f]{24}$/.test(stagedSuffix)) {
+    return failure("artifacts", "staged artifact promotion path must be the canonical sibling generated for its final artifact");
+  }
+  const promotion = Object.freeze({ staged, final, [STAGED_ARTIFACT_PROMOTION]: true as const });
+  MINTED_STAGED_ARTIFACT_PROMOTIONS.add(promotion);
+  return success(promotion);
+}
+
+/** Parse the complete publication set before any directory or staged file exists. */
+function parseStagedArtifactSet(
   staged: readonly StagedArtifactInput[],
-): DomainResult<readonly StagedPair[], RunDirectoryError> {
+): DomainResult<readonly StagedArtifact[], RunDirectoryError> {
   const parsedArtifacts: StagedArtifact[] = [];
-  const destinations = new Set<string>();
+  const destinations = new Set<ArtifactRelativePath>();
   for (const artifact of staged) {
     const parsed = createStagedArtifact(artifact.relativePath, artifact.bytes);
     if (!parsed.ok) return parsed;
@@ -1543,19 +1666,33 @@ function stageArtifactSet(
     destinations.add(parsed.value.relativePath);
     parsedArtifacts.push(parsed.value);
   }
+  return success(Object.freeze(parsedArtifacts));
+}
 
-  const stagedPaths: StagedPair[] = [];
+/**
+ * Write parser-minted members beside their final names. A fault attempts to
+ * discard every staged member; cleanup failures are reported and may leave
+ * inert staged files that carry no publication receipt.
+ */
+function stageArtifactSet(
+  runsRoot: string,
+  directory: string,
+  artifacts: readonly StagedArtifact[],
+): DomainResult<readonly StagedArtifactPromotion[], RunDirectoryError> {
+  const stagedPaths: StagedArtifactPromotion[] = [];
   const publicationId = createHash("sha256")
-    .update(`${process.pid}:${Date.now()}:${Math.random()}:${parsedArtifacts.map(({ relativePath }) => relativePath).join("\0")}`)
+    .update(`${process.pid}:${Date.now()}:${Math.random()}:${artifacts.map(({ relativePath }) => relativePath).join("\0")}`)
     .digest("hex")
     .slice(0, 24);
   try {
-    for (const artifact of parsedArtifacts) {
+    for (const artifact of artifacts) {
       const final = join(directory, ARTIFACTS, artifact.relativePath);
       ensureRunSubdirectories(directory, [resolve(final, "..")]);
       const stagedPath = `${final}.staged-${publicationId}`;
       writeRunBytesExclusiveNoFollow(stagedPath, Uint8Array.from(artifact.bytes));
-      stagedPaths.push({ staged: stagedPath, final });
+      const promotion = parseStagedArtifactPromotion(runsRoot, directory, { staged: stagedPath, final });
+      if (!promotion.ok) throw new Error(promotion.error.message);
+      stagedPaths.push(promotion.value);
     }
   } catch (error) {
     const cleanupFailures = discardStaged(stagedPaths);
@@ -1602,7 +1739,7 @@ function stagedBytesMatch(stagedPath: string, occupied: Uint8Array): StagedBytes
 }
 
 function occupiedArtifactConflict(
-  entry: StagedPair,
+  entry: StagedArtifactPromotion,
   occupied: Uint8Array | Readonly<{ __unreadable: string }>,
 ): string | null {
   if (!(occupied instanceof Uint8Array)) {
@@ -1623,32 +1760,40 @@ function occupiedArtifactConflict(
 }
 
 /**
- * Promote a fully staged set. Every target is checked BEFORE any rename,
- * because renaming is the one step that cannot be undone member-by-member —
- * ruling out the predictable failures while the set is still entirely staged
- * is what keeps "all or none" true rather than merely intended.
+ * Promote internal staged paths. Every target is checked BEFORE any rename,
+ * which rules out predictable conflicts while the set is entirely staged.
+ * An unexpected later rename fault can leave earlier final files in place.
+ * Those bytes carry no publication authority because no successful result or
+ * Effect Receipt exists; the low-level `readArtifactBytes` operation is not
+ * receipt-gated, so consumers must follow only successful publication refs.
+ * Publication authority is all-or-none even though filesystem promotion is not.
+ *
+ * The fault-injection seam is exported, but structural path pairs are not
+ * authority: every member must carry the runtime mint issued by
+ * `parseStagedArtifactPromotion`, which proves both paths remain beneath one
+ * Run Directory's artifacts root. Production receives the same mint from
+ * `stageArtifactSet` after deriving its paths from parsed artifacts.
  *
  * `renameSync` replaces an existing regular file, so the O_EXCL immutability
  * this module promises has to be enforced here explicitly: an occupied slot is
  * refused unless its bytes are already identical to what would be written, in
  * which case the promotion is a no-op replay rather than a rewrite of history.
- *
- * EXPORTED for tests. The rename loop's recovery arm handles the failures the
- * pre-checks cannot rule out — a concurrently removed parent, an EIO — which by
- * construction cannot be provoked through the lock-protected
- * `publishArtifactSet` path: every failure reachable from outside is one the
- * pre-checks turn into an all-staged refusal first. Driving this function
- * directly with explicit staged pairs is therefore the only way to prove the
- * partial-promotion arm behaves, and an unproven recovery arm is how "all or
- * none" quietly stops being true.
  */
 export function promoteArtifactSet(
-  stagedPaths: readonly StagedPair[],
-): DomainResult<readonly StagedPair[], RunDirectoryError> {
-  const blocked = stagedPaths.find((entry) => isExistingDirectory(entry.final));
-  if (blocked !== undefined) {
-    const cleanupFailures = discardStaged(stagedPaths);
-    return failure("artifacts", `artifact slot is occupied by a directory: ${blocked.final}${cleanupFailureSuffix(cleanupFailures)}`);
+  stagedPaths: readonly StagedArtifactPromotion[],
+): DomainResult<readonly StagedArtifactPromotion[], RunDirectoryError> {
+  if (stagedPaths.some((entry) => !MINTED_STAGED_ARTIFACT_PROMOTIONS.has(entry))) {
+    return failure("artifacts", "artifact promotion requires parser-minted staged authority");
+  }
+  for (const entry of stagedPaths) {
+    const inspected = inspectExistingDirectory(entry.final);
+    if (!inspected.ok || inspected.value) {
+      const cleanupFailures = discardStaged(stagedPaths);
+      const reason = inspected.ok
+        ? `artifact slot is occupied by a directory: ${entry.final}`
+        : inspected.error.message;
+      return failure("artifacts", `${reason}${cleanupFailureSuffix(cleanupFailures)}`);
+    }
   }
 
   for (const entry of stagedPaths) {
@@ -1662,9 +1807,9 @@ export function promoteArtifactSet(
   }
 
   // A failure here must still not report success. Any member already promoted
-  // stays on disk but is inert: nothing treats a set as published until its
-  // receipt is recorded, and the effect runner records that receipt only on a
-  // successful return.
+  // stays on disk but carries no publication authority: the effect runner
+  // records a receipt only on a successful return. Low-level path reads remain
+  // possible, so callers must consume only refs from successful publication.
   for (const [index, entry] of stagedPaths.entries()) {
     try {
       publishStagedRunFile(entry.staged, entry.final);
@@ -1674,6 +1819,18 @@ export function promoteArtifactSet(
     }
   }
   return success(stagedPaths);
+}
+
+/** Stage and promote only artifacts minted by `createStagedArtifact`. */
+function stageAndPromoteArtifactSet(
+  runsRoot: string,
+  directory: string,
+  artifacts: readonly StagedArtifact[],
+): DomainResult<readonly StagedArtifact[], RunDirectoryError> {
+  const stagedPaths = stageArtifactSet(runsRoot, directory, artifacts);
+  if (!stagedPaths.ok) return stagedPaths;
+  const promoted = promoteArtifactSet(stagedPaths.value);
+  return promoted.ok ? success(artifacts) : promoted;
 }
 
 function readArtifactBytesOperation(directory: string) {
@@ -1717,28 +1874,26 @@ function publishedArtifactRef(
 function publishedArtifactRefs(
   runId: OrchestrationRunId,
   directory: string,
-  staged: readonly StagedArtifactInput[],
+  artifacts: readonly StagedArtifact[],
 ): DomainResult<readonly ArtifactRef[], RunDirectoryError> {
   const refs: ArtifactRef[] = [];
-  for (const input of staged) {
-    const parsed = createStagedArtifact(input.relativePath, input.bytes);
-    if (!parsed.ok) return parsed;
-    const ref = publishedArtifactRef(runId, directory, parsed.value);
+  for (const artifact of artifacts) {
+    const ref = publishedArtifactRef(runId, directory, artifact);
     if (!ref.ok) return ref;
     refs.push(ref.value);
   }
   return success(Object.freeze(refs));
 }
 
-function publishArtifactSetOperation(runId: OrchestrationRunId, directory: string) {
+function publishArtifactSetOperation(runId: OrchestrationRunId, runsRoot: string, directory: string) {
   return async (staged: readonly StagedArtifactInput[]): Promise<DomainResult<readonly ArtifactRef[], RunDirectoryError>> => {
     if (staged.length === 0) return failure("artifacts", "an artifact set must not be empty");
+    const artifacts = parseStagedArtifactSet(staged);
+    if (!artifacts.ok) return artifacts;
     try {
       return await withAnchoredDirectoryLock(join(directory, ARTIFACTS), "publish.lock", async () => {
-        const stagedPaths = stageArtifactSet(directory, staged);
-        if (!stagedPaths.ok) return stagedPaths;
-        const promoted = promoteArtifactSet(stagedPaths.value);
-        return promoted.ok ? publishedArtifactRefs(runId, directory, staged) : promoted;
+        const promoted = stageAndPromoteArtifactSet(runsRoot, directory, artifacts.value);
+        return promoted.ok ? publishedArtifactRefs(runId, directory, promoted.value) : promoted;
       });
     } catch (error) {
       return failure("artifacts", `cannot lock artifact publication safely: ${(error as Error).message}`);
@@ -1746,11 +1901,11 @@ function publishArtifactSetOperation(runId: OrchestrationRunId, directory: strin
   };
 }
 
-/** All-or-nothing artifact set publication. */
-function artifactOperations(runId: OrchestrationRunId, directory: string) {
+/** Receipt-gated artifact set publication; failed partial finals carry no publication authority. */
+function artifactOperations(runId: OrchestrationRunId, runsRoot: string, directory: string) {
   return {
     readArtifactBytes: readArtifactBytesOperation(directory),
-    publishArtifactSet: publishArtifactSetOperation(runId, directory),
+    publishArtifactSet: publishArtifactSetOperation(runId, runsRoot, directory),
   };
 }
 

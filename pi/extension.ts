@@ -21,6 +21,7 @@ import { shouldBlockDirectEdit } from "../engine/src/core/block-direct-edits";
 import { activeRosterProbe } from "../engine/src/handlers/pre-tool-use/block-direct-edits";
 import { guardStateFileDecision } from "../engine/src/core/guard-state-file";
 import { validatePhaseOrder } from "../engine/src/core/validate-phase-order";
+import { reconcileWaveBlock } from "../engine/src/core/wave-gate-model";
 // Both harnesses share ONE protected-state read seam, so a Pi gate and a
 // Claude gate cannot disagree about what "no active plan" means.
 import { realPhaseOrderDeps } from "../engine/src/handlers/pre-tool-use/validate-phase-order";
@@ -51,11 +52,17 @@ import {
   applyPhaseAgentPiResult,
   applyReviewPiResult,
   applySpecCheckPiResult,
+  currentPiReviewAuthority,
+  currentPiSpecCheckAuthority,
   piAllSlotsFailedNote,
+  piReviewAuthorityProblem,
+  piSpecCheckAuthorityProblem,
   parsePiSubagentResults,
   piSubagentFailureSignals,
   piSubagentResultFailed,
   type PiResultOutcome,
+  type PiReviewAttemptAuthority,
+  type PiSpecCheckAttemptAuthority,
   type PiSubagentResultEntry,
   type RepositoryProbe,
   type TaskGraphStore,
@@ -88,6 +95,7 @@ import { stripNamespace } from "../engine/src/utils/strip-namespace";
 import {
   alignPiImplementationAuthorities,
   classifyMissingReservedResults,
+  unrecordableMissingEvidenceDiagnostic,
 } from "./reserved-results";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
 import * as git from "../engine/src/utils/git";
@@ -105,11 +113,13 @@ import {
   captureHarnessResult,
   RUN_DIR_ENV,
   describeCaptureFailure,
+  resolveCorrelatedRequest,
   RUNS_ROOT_ENV,
   terminalCaptureRefusal,
   terminalizeCaptureRejection,
   type CaptureObservation,
   type CaptureOutcome,
+  type CorrelatedRequestResolution,
   type TerminalCaptureRefusal,
 } from "../engine/src/orchestration/harness-capture-runtime";
 import { openRunDirectory, type RunDirHandle } from "../engine/src/orchestration/run-directory-handle";
@@ -132,7 +142,6 @@ import { captureKey, type CaptureKey } from "../engine/src/core/harness-capture"
 import {
   parseArtifactDigest,
   parseContextDigest,
-  type AgentRequestAuthority,
   type ArtifactDigest,
   type ContextDigest,
 } from "../engine/src/core/orchestration-contract";
@@ -151,6 +160,7 @@ import {
   revokePiWriteGrant,
   sweepExpiredPiWriteGrants,
   writeTargetViolatesScope,
+  type IssuedWriteGrant,
 } from "./write-grant";
 import {
   captureLoomRuntimeIdentity,
@@ -235,6 +245,41 @@ const trustedRunIdentity = ({ runsRoot, runDirectory }: Pick<SessionRunBinding, 
 function pathExistsFailClosed(path: string): boolean {
   return probePathFailClosed(path, (p, cause) =>
     `loom(pi): pathExistsFailClosed cannot access ${p}: ${cause} — assuming active (fail closed)`);
+}
+
+export type PiResumeTaskGraphObservation =
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "loaded"; state: ReturnType<StateManager["load"]> }>
+  | Readonly<{ kind: "unavailable"; reason: string }>;
+
+/** Observe resume authority once; only a proven missing State File is absent. */
+export function observePiResumeTaskGraph(
+  resolvePath: () => string = taskGraphPath,
+  exists: (path: string) => boolean = pathExistsFailClosed,
+  open: (path: string) => StateManager | null = StateManager.fromPath,
+): PiResumeTaskGraphObservation {
+  let path: string;
+  try {
+    path = resolvePath();
+  } catch (error) {
+    return Object.freeze({
+      kind: "unavailable",
+      reason: `task graph path could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
+  try {
+    if (!exists(path)) return Object.freeze({ kind: "absent" });
+    const manager = open(path);
+    if (manager === null) {
+      return Object.freeze({ kind: "unavailable", reason: `task graph could not be opened at ${path}` });
+    }
+    return Object.freeze({ kind: "loaded", state: manager.load() });
+  } catch (error) {
+    return Object.freeze({
+      kind: "unavailable",
+      reason: `task graph unreadable: ${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
 }
 
 const isLoomOwnedResultAgent = (agentType: string): boolean =>
@@ -552,31 +597,19 @@ export async function recordPiSpawnCorrelators(
   return runBinding;
 }
 
-type PiRequestCorrelation =
-  | Readonly<{ ok: true; handle: RunDirHandle; request: AgentRequestAuthority }>
-  | Readonly<{ ok: false; kind: "run-directory" | "correlator" | "issued-requests"; message: string }>
-  | Readonly<{ ok: false; kind: "no-correlator" }>
-  | Readonly<{ ok: false; kind: "unknown-request"; requestId: string }>;
-
-/** Resolve one Pi result to the exact issued request its durable correlator names. */
+/** Resolve one Pi result through the shared harness correlation protocol. */
 function piRequestCorrelation(
   runBinding: SessionRunBinding,
   toolCallId: unknown,
   resultIndex: number,
   agentType: string,
-): PiRequestCorrelation {
-  const opened = openRunDirectory(runBinding.runsRoot, runBinding.runDirectory);
-  if (!opened.ok) return { ok: false, kind: "run-directory", message: opened.error.message };
-  const nativeId = piSpawnRosterId(toolCallId, resultIndex, agentType);
-  const correlator = opened.value.readHarnessCorrelator("pi", nativeId);
-  if (!correlator.ok) return { ok: false, kind: "correlator", message: correlator.error.message };
-  if (correlator.value === null) return { ok: false, kind: "no-correlator" };
-  const issued = opened.value.readIssuedRequests();
-  if (!issued.ok) return { ok: false, kind: "issued-requests", message: issued.error.message };
-  const request = issued.value.find(({ requestId }) => requestId === correlator.value?.requestId);
-  return request === undefined
-    ? { ok: false, kind: "unknown-request", requestId: correlator.value.requestId }
-    : { ok: true, handle: opened.value, request };
+): CorrelatedRequestResolution {
+  return resolveCorrelatedRequest({
+    harness: "pi",
+    runsRoot: runBinding.runsRoot,
+    runDirectory: runBinding.runDirectory,
+    nativeId: piSpawnRosterId(toolCallId, resultIndex, agentType),
+  });
 }
 
 /**
@@ -596,23 +629,33 @@ async function recordPiRequestCaptureRejection(
 ): Promise<string | null> {
   const correlation = piRequestCorrelation(runBinding, toolCallId, resultIndex, agentType);
   if (!correlation.ok) {
-    switch (correlation.kind) {
+    const unresolved = correlation.outcome;
+    if (unresolved.kind === "no-reservation") {
+      return `cannot resolve correlator for ${agentType}[${resultIndex}]: no binding found`;
+    }
+    if (unresolved.kind === "not-an-orchestration-run") {
+      return `cannot open run directory ${runBinding.runDirectory}: orchestration run authority was unavailable`;
+    }
+    if (unresolved.kind === "captured") {
+      return `cannot resolve correlator for ${agentType}[${resultIndex}]: correlation returned a capture receipt`;
+    }
+    switch (unresolved.reason) {
       case "run-directory":
-        return `cannot open run directory ${runBinding.runDirectory}: ${correlation.message}`;
+        return `cannot open run directory ${runBinding.runDirectory}: ${unresolved.message}`;
       case "correlator":
-        return `cannot resolve correlator for ${agentType}[${resultIndex}]: ${correlation.message}`;
-      case "no-correlator":
-        return `cannot resolve correlator for ${agentType}[${resultIndex}]: no binding found`;
-      case "issued-requests":
-        return `cannot read issued requests: ${correlation.message}`;
+        return `cannot resolve correlator for ${agentType}[${resultIndex}]: ${unresolved.message}`;
+      case "requests":
+        return `cannot read issued requests: ${unresolved.message}`;
       case "unknown-request":
-        return `correlator request ${correlation.requestId} has no issued authority`;
+        return unresolved.message;
+      default:
+        return describeCaptureFailure(unresolved);
     }
   }
 
   const outcome = await terminalizeCaptureRejection(
-    correlation.handle,
-    correlation.request,
+    correlation.value.handle,
+    correlation.value.request,
     terminalCaptureRefusal("capture-rejection", diagnostic),
   );
   return outcome.kind === "retriable-failure" ||
@@ -630,18 +673,18 @@ function piResultAuthorityProblem(
 ): string | null {
   const correlation = piRequestCorrelation(runBinding, toolCallId, resultIndex, agentType);
   if (!correlation.ok) {
-    switch (correlation.kind) {
-      case "run-directory":
-      case "correlator":
-      case "issued-requests":
-        return correlation.message;
-      case "no-correlator":
-        return `no durable Pi correlator exists for result index ${resultIndex}`;
-      case "unknown-request":
-        return `correlated request ${correlation.requestId} is no longer issued`;
+    const unresolved = correlation.outcome;
+    if (unresolved.kind === "no-reservation") {
+      return `no durable Pi correlator exists for result index ${resultIndex}`;
     }
+    if (unresolved.kind === "not-an-orchestration-run") {
+      return "orchestration run authority was unavailable";
+    }
+    return unresolved.kind === "captured"
+      ? "correlation returned a capture receipt instead of request authority"
+      : unresolved.message;
   }
-  const { request } = correlation;
+  const { request } = correlation.value;
   if (request.requestId !== markers.requestId) {
     return `result marker ${markers.requestId} does not match correlated request ${request.requestId}`;
   }
@@ -658,31 +701,25 @@ export async function capturePiSubagentResult(
   runBinding: SessionRunBinding | null = null,
   observationRefusal: TerminalCaptureRefusal | null = null,
 ): Promise<CaptureOutcome> {
-  try {
-    const runsRoot = runBinding?.runsRoot ?? process.env[RUNS_ROOT_ENV];
-    const runDirectory = runBinding?.runDirectory ?? process.env[RUN_DIR_ENV];
-    const observe = (): CaptureObservation => {
-      if (observationRefusal !== null) return observationRefusal;
-      const candidates = piResultFinalPayloadCandidates(messages ?? []);
-      return candidates.ok
-        ? captureCandidates(candidates.value)
-        : terminalCaptureRefusal("transcript-shape", candidates.errors.join("; "));
-    };
-    const outcome = await captureHarnessResult({
-      harness: "pi",
-      runsRoot,
-      runDirectory,
-      nativeId: piSpawnRosterId(toolCallId, resultIndex, agentType),
-      observe,
-    });
-    const audit = captureAuditLine("loom(pi): capture-orchestration-result", outcome);
-    if (audit !== null) process.stderr.write(audit);
-    return outcome;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`loom(pi): capture-orchestration-result crashed for ${agentType}: ${message}\n`);
-    return { kind: "retriable-failure", reason: "capture-crashed", message };
-  }
+  const runsRoot = runBinding?.runsRoot ?? process.env[RUNS_ROOT_ENV];
+  const runDirectory = runBinding?.runDirectory ?? process.env[RUN_DIR_ENV];
+  const observe = (): CaptureObservation => {
+    if (observationRefusal !== null) return observationRefusal;
+    const candidates = piResultFinalPayloadCandidates(messages ?? []);
+    return candidates.ok
+      ? captureCandidates(candidates.value)
+      : terminalCaptureRefusal("transcript-shape", candidates.errors.join("; "));
+  };
+  const outcome = await captureHarnessResult({
+    harness: "pi",
+    runsRoot,
+    runDirectory,
+    nativeId: piSpawnRosterId(toolCallId, resultIndex, agentType),
+    observe,
+  });
+  const audit = captureAuditLine("loom(pi): capture-orchestration-result", outcome);
+  if (audit !== null) process.stderr.write(audit);
+  return outcome;
 }
 
 export interface PiCleanupAction {
@@ -708,6 +745,36 @@ export async function runPiCleanupActions(
 const cleanupFailureSuffix = (errors: readonly string[]): string =>
   errors.length === 0 ? "" : ` Cleanup failures: ${errors.join("; ")}`;
 
+type PiWriteGrantInjectionPorts = Readonly<{
+  inject(task: string, grant: IssuedWriteGrant): string;
+  revoke(token: string): void | Promise<void>;
+}>;
+
+/** Inject an issued capability without allowing failed direct revocation to hide the injection cause. */
+export async function injectPiWriteGrantWithRevocation(
+  task: string,
+  grant: IssuedWriteGrant,
+  spawnIndex: number,
+  ports: PiWriteGrantInjectionPorts = {
+    inject: injectPiWriteGrant,
+    revoke: revokePiWriteGrant,
+  },
+): Promise<string> {
+  try {
+    return ports.inject(task, grant);
+  } catch (injectionError) {
+    const cleanupErrors = await runPiCleanupActions([{
+      label: `directly revoke write grant for spawn item ${spawnIndex + 1}`,
+      run: () => ports.revoke(grant.token),
+    }]);
+    throw new Error(
+      `write-grant injection failed: ${injectionError instanceof Error ? injectionError.message : String(injectionError)}` +
+        cleanupFailureSuffix(cleanupErrors),
+      { cause: injectionError },
+    );
+  }
+}
+
 type PiSessionId = NonNullable<ReturnType<typeof parseSessionId>>;
 
 type PiSpawnReservation = Readonly<{
@@ -732,6 +799,8 @@ type PiSpawnReservation = Readonly<{
     rosterId: AgentId;
     taskId: string | null;
     implementationAuthority: ImplementationAttemptAuthority | null;
+    reviewAuthority: PiReviewAttemptAuthority | null;
+    specCheckAuthority: PiSpecCheckAttemptAuthority | null;
     /** The closed lifecycle union, not an independent boolean pair: two
      *  booleans admitted the impossible {implementation: true, standalone:
      *  true} and left the third lifecycle state nameless. The source union's
@@ -848,6 +917,8 @@ function recoverPiSpawnReservation(
           rosterId: item.rosterId,
           taskId: null,
           implementationAuthority: null,
+          reviewAuthority: null,
+          specCheckAuthority: null,
           kind: "standalone" as const,
         });
       })),
@@ -869,10 +940,33 @@ interface PiParentSessionRuntime {
   readonly spawnReservations: Map<string, PiSpawnReservation>;
 }
 
+type ActiveChildWriteGrantScope = Readonly<{
+  scopeDirs?: readonly string[];
+  grantCwd?: string;
+}>;
+
+type ActiveChildWriteGrant = ActiveChildWriteGrantScope & (
+  | Readonly<{ kind: "active"; agentId: AgentId; pointerBinding: SessionTaskGraphPointerBinding }>
+  | Readonly<{ kind: "roster-cleanup-pending"; agentId: AgentId; pointerBinding: null }>
+  | Readonly<{ kind: "pointer-cleanup-pending"; agentId: null; pointerBinding: SessionTaskGraphPointerBinding }>
+);
+
 const emptyParentSessionRuntime = (): PiParentSessionRuntime => ({
   issuedWriteGrants: new Map(),
   spawnReservations: new Map(),
 });
+
+const retainSpawnCleanupDebt = (
+  runtime: PiParentSessionRuntime,
+  toolCallId: string,
+  reservation: PiSpawnReservation,
+): void => {
+  if (reservation.items.length === 0 && reservation.pointerBinding === null) {
+    runtime.spawnReservations.delete(toolCallId);
+  } else {
+    runtime.spawnReservations.set(toolCallId, Object.freeze(reservation));
+  }
+};
 
 export function standaloneCompletionCheckpointProblem(checkpoint: string): string | null {
   try {
@@ -1007,16 +1101,8 @@ export default function (pi: ExtensionAPI) {
       parentSessionRuntimes.delete(sessionId);
     }
   };
-  const activeChildWriteGrants = new Map<string, {
-    agentId: AgentId;
-    pointerBinding: SessionTaskGraphPointerBinding;
-    /** Present only on scoped (phase/panel) grants: Edit/Write targets must
-     *  fall inside one of these artifact dirs. Scopes resolve against
-     *  `grantCwd` (the spawn cwd), which is also the base relative targets
-     *  are judged against. */
-    scopeDirs?: readonly string[];
-    grantCwd?: string;
-  }>();
+  /** Scoped write policy plus exact outstanding child cleanup authority. */
+  const activeChildWriteGrants = new Map<string, ActiveChildWriteGrant>();
   const rejectedChildWriteGrantSessions = new Set<string>();
 
   // ─── Resource Discovery ───────────────────────────────────────────────
@@ -1214,7 +1300,6 @@ export default function (pi: ExtensionAPI) {
         // excluded (see `piSpawnRosterId`) — so repeated verifier/designer types in
         // one batch remain distinct without the id moving when the prompt does.
         currentGuard = "subagent-tracking";
-        const safeSessionId = parseSessionId(sessionId);
         if (safeSessionId === null) {
           return {
             block: true,
@@ -1243,12 +1328,21 @@ export default function (pi: ExtensionAPI) {
         const writeGrants: Array<{ index: number; token: string; task: string; originalTask: string; injected: boolean }> = [];
         let taskGraphPointerBinding: SessionTaskGraphPointerBinding | null = null;
         let orchestrationRunBinding: SessionRunBinding | null = null;
+        let reviewAuthoritiesBySlot: readonly (PiReviewAttemptAuthority | null)[] =
+          Object.freeze(parsedItems.map(() => null));
+        let specCheckAuthority: PiSpecCheckAttemptAuthority | null = null;
         const rollbackLifecycle = async (): Promise<readonly string[]> => {
           const actions: PiCleanupAction[] = [];
+          const revokedGrantTokens = new Set<string>();
+          const removedRosterIds = new Set<AgentId>();
+          let pointerReleased = false;
           for (const grant of writeGrants) {
             actions.push({
               label: `revoke write grant for spawn item ${grant.index + 1}`,
-              run: () => revokePiWriteGrant(grant.token),
+              run: () => {
+                revokePiWriteGrant(grant.token);
+                revokedGrantTokens.add(grant.token);
+              },
             });
             if (grant.injected) {
               actions.push({
@@ -1260,7 +1354,10 @@ export default function (pi: ExtensionAPI) {
           for (const agentId of [...reserved].reverse()) {
             actions.push({
               label: `remove active roster entry ${agentId}`,
-              run: () => fsSessionRegistry.removeActive(safeSessionId, agentId),
+              run: async () => {
+                await fsSessionRegistry.removeActive(safeSessionId, agentId);
+                removedRosterIds.add(agentId);
+              },
             });
           }
           if (taskGraphPointerBinding !== null) {
@@ -1270,10 +1367,44 @@ export default function (pi: ExtensionAPI) {
               run: async () => {
                 const result = await rollbackSessionTaskGraphPointer(ownedPointer);
                 if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
+                pointerReleased = true;
               },
             });
           }
-          return runPiCleanupActions(actions);
+          const errors = await runPiCleanupActions(actions);
+          const remainingGrantTokens = writeGrants
+            .map(({ token }) => token)
+            .filter((token) => !revokedGrantTokens.has(token));
+          const remainingRosterIds = new Set(reserved.filter((agentId) => !removedRosterIds.has(agentId)));
+          const remainingPointerBinding = pointerReleased ? null : taskGraphPointerBinding;
+          if (remainingGrantTokens.length > 0 || remainingRosterIds.size > 0 || remainingPointerBinding !== null) {
+            const runtime = runtimeFor(safeSessionId);
+            if (remainingGrantTokens.length > 0) {
+              runtime.issuedWriteGrants.set(toolCallId, Object.freeze(remainingGrantTokens));
+            }
+            retainSpawnCleanupDebt(runtime, toolCallId, {
+              sessionId: safeSessionId,
+              needsTaskGraphLifecycle,
+              graphActiveAtSpawn: graphIsActive,
+              orchestrationRunBinding,
+              pointerBinding: remainingPointerBinding,
+              items: Object.freeze(parsedItems.flatMap((item, index) => {
+                const rosterId = rosterIds[index]!;
+                return remainingRosterIds.has(rosterId)
+                  ? [Object.freeze({
+                      agentType: item.agent,
+                      rosterId,
+                      taskId: extractTaskId(item.task),
+                      implementationAuthority: null,
+                      reviewAuthority: null,
+                      specCheckAuthority: null,
+                      kind: taskExecutionSpawns[index]?.kind ?? "non-implementation",
+                    })]
+                  : [];
+              })),
+            });
+          }
+          return errors;
         };
         // Observe graph activity before this prospective batch writes its own
         // roster rows. Those rows prove only that admission is in progress;
@@ -1306,6 +1437,38 @@ export default function (pi: ExtensionAPI) {
           // directory, not the in-memory lifecycle map below, owns capture
           // authority for both Pi and Claude.
           orchestrationRunBinding = await recordPiSpawnCorrelators(parsedItems, rosterIds, safeSessionId, event.input);
+          const unboundSpecChecks = orchestrationRunBinding === null
+            ? parsedItems.filter(({ agent }) => agent === "spec-check-invoker")
+            : [];
+          if (graphIsActive && unboundSpecChecks.length > 0) {
+            if (unboundSpecChecks.length !== 1) {
+              throw new Error("a protected Pi spawn may reserve exactly one unbound spec-check slot");
+            }
+            const manager = StateManager.fromLocalSession(safeSessionId);
+            if (manager === null) throw new Error("protected Pi spec-check spawn has no TaskGraph authority");
+            specCheckAuthority = currentPiSpecCheckAuthority(manager.load());
+            if (specCheckAuthority === null) {
+              throw new Error("protected Pi spec-check spawn lacks exact current Wave slot/attempt authority");
+            }
+          }
+          const unboundReviewers = orchestrationRunBinding === null
+            ? parsedItems.filter(({ agent }, index) =>
+                isReviewAgent(agent) && taskExecutionSpawns[index]?.kind !== "standalone")
+            : [];
+          if (graphIsActive && unboundReviewers.length > 0) {
+            const manager = StateManager.fromLocalSession(safeSessionId);
+            if (manager === null) throw new Error("protected Pi reviewer spawn has no TaskGraph authority");
+            const reviewGraph = manager.load();
+            reviewAuthoritiesBySlot = Object.freeze(parsedItems.map((item, index) => {
+              if (!isReviewAgent(item.agent) || taskExecutionSpawns[index]?.kind === "standalone") return null;
+              const taskId = extractTaskId(item.task);
+              const authority = taskId === null ? null : currentPiReviewAuthority(reviewGraph, item.agent, taskId);
+              if (authority === null) {
+                throw new Error(`protected Pi reviewer ${item.agent} lacks exact current Task/Review Run authority`);
+              }
+              return authority;
+            }));
+          }
           // Implementation items get the classic whole-session capability bound
           // to their task-graph Task ID. Phase/panel agents (non-implementation)
           // get a SCOPED capability bound to their prompt-derived artifact dirs
@@ -1331,18 +1494,18 @@ export default function (pi: ExtensionAPI) {
               taskGraphPath: taskGraphPath(),
               ...(requirement.kind === "scoped" ? { scopeDirs: requirement.scopeDirs } : {}),
             });
-            try {
-              writeGrants.push({
-                index,
-                token: grant.token,
-                task: injectPiWriteGrant(item.task, grant),
-                originalTask: item.task,
-                injected: false,
-              });
-            } catch (error) {
-              revokePiWriteGrant(grant.token);
-              throw error;
-            }
+            // Track the issued token before prompt injection can fail. If its
+            // immediate revocation also fails, the outer rollback retries this
+            // exact token and reports both failures instead of orphaning it.
+            const trackedGrant = {
+              index,
+              token: grant.token,
+              task: item.task,
+              originalTask: item.task,
+              injected: false,
+            };
+            writeGrants.push(trackedGrant);
+            trackedGrant.task = await injectPiWriteGrantWithRevocation(item.task, grant, index);
           }
           // Mutate before task-state validation. Rollback restores prompts and
           // revokes grants, leaving no post-validation operation that can fail
@@ -1366,11 +1529,13 @@ export default function (pi: ExtensionAPI) {
               Array.isArray((event.input as { chain?: unknown }).chain)
             ? "sequential" as const
             : "parallel" as const;
-          taskRegistration = await registerTaskExecutionBatch(
-            taskExecutionSpawns,
-            executionMode,
-            rosterObservation,
-          );
+          taskRegistration = graphIsActive
+            ? await registerTaskExecutionBatch(
+                taskExecutionSpawns,
+                executionMode,
+                rosterObservation,
+              )
+            : { kind: "registered" as const, authorities: Object.freeze([]) };
         } catch (error) {
           const cleanupErrors = await rollbackLifecycle();
           throw new Error(
@@ -1414,13 +1579,18 @@ export default function (pi: ExtensionAPI) {
           graphActiveAtSpawn: graphIsActive,
           orchestrationRunBinding,
           pointerBinding: taskGraphPointerBinding,
-          items: parsedItems.map((item, index) => ({
-            agentType: item.agent,
-            rosterId: rosterIds[index]!,
-            taskId: extractTaskId(item.task),
-            implementationAuthority: alignment.authoritiesBySlot[index] ?? null,
-            kind: taskExecutionSpawns[index]?.kind ?? "non-implementation",
-          })),
+          items: parsedItems.map((item, index) => {
+            const taskId = extractTaskId(item.task);
+            return {
+              agentType: item.agent,
+              rosterId: rosterIds[index]!,
+              taskId,
+              implementationAuthority: alignment.authoritiesBySlot[index] ?? null,
+              reviewAuthority: reviewAuthoritiesBySlot[index] ?? null,
+              specCheckAuthority: item.agent === "spec-check-invoker" ? specCheckAuthority : null,
+              kind: taskExecutionSpawns[index]?.kind ?? "non-implementation",
+            };
+          }),
         });
       }
     } catch (err) {
@@ -1486,7 +1656,13 @@ export default function (pi: ExtensionAPI) {
       await fsSessionRegistry.markActive(sessionId, agentId);
       partialBinding = { sessionId, agentId };
       const pointerBinding = await bindSessionTaskGraphPointer(sessionId, grant.taskGraphPath);
-      activeChildWriteGrants.set(sessionId, { agentId, pointerBinding, scopeDirs: grant.scopeDirs, grantCwd: grant.cwd });
+      activeChildWriteGrants.set(sessionId, {
+        kind: "active",
+        agentId,
+        pointerBinding,
+        scopeDirs: grant.scopeDirs,
+        grantCwd: grant.cwd,
+      });
       partialBinding = null;
       process.stderr.write(`loom(pi): activated child write grant for ${grant.taskId}/${sessionId}\n`);
     } catch (error) {
@@ -1497,16 +1673,24 @@ export default function (pi: ExtensionAPI) {
       // into the deferred `run`, and the cleanup would dereference whatever the
       // variable held when it finally ran rather than what was checked.
       const orphanedBinding = partialBinding;
-      if (orphanedBinding !== null) {
-        const cleanupErrors = await runPiCleanupActions([{
-          label: `remove partial child roster entry ${orphanedBinding.agentId}`,
-          run: () => fsSessionRegistry.removeActive(orphanedBinding.sessionId, orphanedBinding.agentId),
-        }]);
-        for (const cleanupError of cleanupErrors) {
-          process.stderr.write(`loom(pi): child write-grant cleanup failed: ${cleanupError}\n`);
-        }
+      const cleanupErrors: readonly string[] = orphanedBinding === null
+        ? Object.freeze([])
+        : await runPiCleanupActions([{
+            label: `remove partial child roster entry ${orphanedBinding.agentId}`,
+            run: () => fsSessionRegistry.removeActive(orphanedBinding.sessionId, orphanedBinding.agentId),
+          }]);
+      for (const cleanupError of cleanupErrors) {
+        process.stderr.write(`loom(pi): child write-grant cleanup failed: ${cleanupError}\n`);
       }
-      const message = `loom(pi): child write grant rejected — edits remain blocked: ${error instanceof Error ? error.message : String(error)}`;
+      if (orphanedBinding !== null && cleanupErrors.length > 0) {
+        activeChildWriteGrants.set(orphanedBinding.sessionId, {
+          kind: "roster-cleanup-pending",
+          agentId: orphanedBinding.agentId,
+          pointerBinding: null,
+        });
+      }
+      const message = `loom(pi): child write grant rejected — edits remain blocked: ${error instanceof Error ? error.message : String(error)}` +
+        cleanupFailureSuffix(cleanupErrors);
       process.stderr.write(message + "\n");
       return {
         message: { customType: "loom-write-grant-error", content: message, display: false },
@@ -1521,6 +1705,9 @@ export default function (pi: ExtensionAPI) {
     const sessionId = parseSessionId(rawSessionId);
     const binding = activeChildWriteGrants.get(rawSessionId);
     const actions: PiCleanupAction[] = [];
+    const revokedTokens = new Set<string>();
+    const removedRosterIds = new Set<AgentId>();
+    const releasedPointers = new Set<SessionTaskGraphPointerBinding>();
 
     // Capabilities are the security boundary: schedule this session's every
     // revocation before fallible roster/pointer housekeeping, then execute all
@@ -1532,20 +1719,31 @@ export default function (pi: ExtensionAPI) {
         grantOrdinal++;
         actions.push({
           label: `revoke outstanding write grant ${grantOrdinal}`,
-          run: () => revokePiWriteGrant(token),
+          run: () => {
+            revokePiWriteGrant(token);
+            revokedTokens.add(token);
+          },
         });
       }
     }
-    if (sessionId && binding) {
+    const childAgentId = binding?.agentId ?? null;
+    if (sessionId && childAgentId !== null) {
       actions.push({
-        label: `remove child roster entry ${binding.agentId}`,
-        run: () => fsSessionRegistry.removeActive(sessionId, binding.agentId),
+        label: `remove child roster entry ${childAgentId}`,
+        run: async () => {
+          await fsSessionRegistry.removeActive(sessionId, childAgentId);
+          removedRosterIds.add(childAgentId);
+        },
       });
+    }
+    const childPointer = binding?.pointerBinding ?? null;
+    if (sessionId && childPointer !== null) {
       actions.push({
         label: `roll back child task-graph pointer for ${sessionId}`,
         run: async () => {
-          const result = await rollbackSessionTaskGraphPointer(binding.pointerBinding);
+          const result = await rollbackSessionTaskGraphPointer(childPointer);
           if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
+          releasedPointers.add(childPointer);
         },
       });
     }
@@ -1553,7 +1751,10 @@ export default function (pi: ExtensionAPI) {
       for (const item of reservation.items) {
         actions.push({
           label: `remove shutdown roster entry for ${item.agentType}`,
-          run: () => fsSessionRegistry.removeActive(reservation.sessionId, item.rosterId),
+          run: async () => {
+            await fsSessionRegistry.removeActive(reservation.sessionId, item.rosterId);
+            removedRosterIds.add(item.rosterId);
+          },
         });
       }
       if (reservation.pointerBinding !== null) {
@@ -1563,22 +1764,72 @@ export default function (pi: ExtensionAPI) {
           run: async () => {
             const result = await rollbackSessionTaskGraphPointer(pointerBinding);
             if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
+            releasedPointers.add(pointerBinding);
           },
         });
       }
     }
 
     const cleanupErrors = await runPiCleanupActions(actions);
-    // Failed revocation/cleanup remains retryable on the next shutdown event.
-    // Dropping these maps after a failure would orphan the capability while
-    // erasing the only in-process record that can revoke it.
-    if (cleanupErrors.length === 0) {
-      if (sessionId) parentSessionRuntimes.delete(sessionId);
-      activeChildWriteGrants.delete(rawSessionId);
+    // Retire each successfully released capability independently. Retaining an
+    // entire aggregate after one failure retries already-released pointer
+    // leases as `not-owned`, turning a recoverable cleanup debt permanent.
+    if (sessionId && parentRuntime !== undefined) {
+      for (const [toolCallId, tokens] of parentRuntime.issuedWriteGrants) {
+        const remaining = tokens.filter((token) => !revokedTokens.has(token));
+        if (remaining.length === 0) parentRuntime.issuedWriteGrants.delete(toolCallId);
+        else parentRuntime.issuedWriteGrants.set(toolCallId, Object.freeze(remaining));
+      }
+      for (const [toolCallId, reservation] of parentRuntime.spawnReservations) {
+        const items = reservation.items.filter((item) => !removedRosterIds.has(item.rosterId));
+        const pointerBinding = reservation.pointerBinding !== null && releasedPointers.has(reservation.pointerBinding)
+          ? null
+          : reservation.pointerBinding;
+        retainSpawnCleanupDebt(parentRuntime, toolCallId, {
+          ...reservation,
+          items: Object.freeze(items),
+          pointerBinding,
+        });
+      }
+      pruneRuntime(sessionId, parentRuntime);
+    }
+    if (binding !== undefined) {
+      const agentId = binding.agentId !== null && removedRosterIds.has(binding.agentId) ? null : binding.agentId;
+      const pointerBinding = binding.pointerBinding !== null && releasedPointers.has(binding.pointerBinding)
+        ? null
+        : binding.pointerBinding;
+      if (agentId === null && pointerBinding === null) {
+        activeChildWriteGrants.delete(rawSessionId);
+      } else if (agentId !== null && pointerBinding !== null) {
+        activeChildWriteGrants.set(rawSessionId, { ...binding, kind: "active", agentId, pointerBinding });
+      } else if (agentId !== null) {
+        activeChildWriteGrants.set(rawSessionId, {
+          ...binding,
+          kind: "roster-cleanup-pending",
+          agentId,
+          pointerBinding: null,
+        });
+      } else if (pointerBinding !== null) {
+        activeChildWriteGrants.set(rawSessionId, {
+          ...binding,
+          kind: "pointer-cleanup-pending",
+          agentId: null,
+          pointerBinding,
+        });
+      }
+    }
+    const parentCleanupComplete = sessionId === null || !parentSessionRuntimes.has(sessionId);
+    if (!activeChildWriteGrants.has(rawSessionId) && parentCleanupComplete) {
       rejectedChildWriteGrantSessions.delete(rawSessionId);
     }
     for (const cleanupError of cleanupErrors) {
       process.stderr.write(`loom(pi): shutdown cleanup failed: ${cleanupError}\n`);
+    }
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        cleanupErrors.map((error) => new Error(error)),
+        `Loom Pi session shutdown cleanup failed: ${cleanupErrors.join("; ")}`,
+      );
     }
   });
 
@@ -1587,9 +1838,6 @@ export default function (pi: ExtensionAPI) {
   // so the LLM knows where we are (equivalent of resume-after-clear).
 
   pi.on("before_agent_start", async (_event, ctx) => {
-    const activeTaskGraphPath = taskGraphPath();
-    if (!pathExistsFailClosed(activeTaskGraphPath)) return;
-
     const failResumeContext = (reason: string) => {
       const message = `Loom resume context unavailable: ${reason}`;
       process.stderr.write(`loom(pi): ${message}\n`);
@@ -1604,16 +1852,10 @@ export default function (pi: ExtensionAPI) {
       };
     };
 
-    const sm = StateManager.fromPath(activeTaskGraphPath);
-    if (!sm) return failResumeContext(`task graph could not be opened at ${activeTaskGraphPath}`);
-
-    let state;
-    try {
-      state = sm.load();
-    } catch (error) {
-      return failResumeContext(`task graph unreadable: ${error instanceof Error ? error.message : String(error)}`);
-    }
-
+    const observation = observePiResumeTaskGraph();
+    if (observation.kind === "absent") return;
+    if (observation.kind === "unavailable") return failResumeContext(observation.reason);
+    const state = observation.state;
     if (state.current_phase !== "execute" || state.tasks.length === 0) return;
 
     const output = buildContextOutput(state, PACKAGE_ROOT);
@@ -1627,7 +1869,7 @@ export default function (pi: ExtensionAPI) {
   });
 
 
-  // ─── PostEdit Lint (tool_result event for edit/write) ─────────────────
+  // ─── PostEdit Lint (tool_result event for edit/write/multi_edit) ──────
   // After edit/write lands on disk, run immediate-tier lint.
   // If violations: report error content so the agent can remediate the landed edit.
   // If pass: return undefined (no injection).
@@ -1680,7 +1922,7 @@ export default function (pi: ExtensionAPI) {
     const toolCallId = (event as { toolCallId?: unknown }).toolCallId;
     const rawSessionId = _ctx.sessionManager.getSessionId() ?? "";
     const resultSessionId = parseSessionId(rawSessionId);
-    const sessionRuntime = resultSessionId === null
+    let sessionRuntime = resultSessionId === null
       ? undefined
       : parentSessionRuntimes.get(resultSessionId);
     const inMemoryReservation = typeof toolCallId === "string"
@@ -1691,6 +1933,10 @@ export default function (pi: ExtensionAPI) {
     if (reservation === undefined && typeof toolCallId === "string" && resultSessionId !== null) {
       try {
         reservation = recoverPiSpawnReservation(resultSessionId, toolCallId) ?? undefined;
+        if (reservation !== undefined) {
+          sessionRuntime = runtimeFor(resultSessionId);
+          sessionRuntime.spawnReservations.set(toolCallId, reservation);
+        }
       } catch (error) {
         reservationRecoveryFailed = true;
         const diagnostic = `durable Pi orchestration reservation recovery failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -1702,12 +1948,17 @@ export default function (pi: ExtensionAPI) {
       ? sessionRuntime?.issuedWriteGrants.get(toolCallId) ?? []
       : [];
 
-    // Roster and grant cleanup may consume immediately, but the reservation is
-    // the retry capability for its pointer lease. Retain it until exact pointer
-    // release succeeds; shutdown can retry a transient result-time failure.
+    // Retire successful grant, roster, and pointer cleanup independently. The
+    // session aggregate keeps only failed authority so shutdown can retry a
+    // transient result-time failure without replaying released capabilities.
+    const revokedGrantTokens = new Set<string>();
+    const removedRosterIds = new Set<AgentId>();
     const cleanupActions: PiCleanupAction[] = grantTokens.map((token, index) => ({
       label: `revoke write grant ${index + 1}`,
-      run: () => revokePiWriteGrant(token),
+      run: () => {
+        revokePiWriteGrant(token);
+        revokedGrantTokens.add(token);
+      },
     }));
     // Same reason as the write-grant cleanup above: `reservation` is a mutable
     // `let`, so the optional-chain guard on the loop header does not narrow it
@@ -1718,7 +1969,10 @@ export default function (pi: ExtensionAPI) {
       for (const item of cleanedReservation.items) {
         cleanupActions.push({
           label: `remove reserved roster entry for ${item.agentType}`,
-          run: () => fsSessionRegistry.removeActive(reservedSessionId, item.rosterId),
+          run: async () => {
+            await fsSessionRegistry.removeActive(reservedSessionId, item.rosterId);
+            removedRosterIds.add(item.rosterId);
+          },
         });
       }
     }
@@ -1727,12 +1981,19 @@ export default function (pi: ExtensionAPI) {
     for (const cleanupError of cleanupErrors) {
       process.stderr.write(`loom(pi): reserved subagent cleanup failed: ${cleanupError}\n`);
     }
-    if (typeof toolCallId === "string" && sessionRuntime &&
-        !cleanupErrors.some((error) => error.startsWith("revoke write grant "))) {
-      sessionRuntime.issuedWriteGrants.delete(toolCallId);
-    }
-    if (typeof toolCallId === "string" && sessionRuntime && reservation?.pointerBinding === null) {
-      sessionRuntime.spawnReservations.delete(toolCallId);
+    if (typeof toolCallId === "string" && sessionRuntime) {
+      const remainingGrantTokens = grantTokens.filter((token) => !revokedGrantTokens.has(token));
+      if (remainingGrantTokens.length === 0) sessionRuntime.issuedWriteGrants.delete(toolCallId);
+      else sessionRuntime.issuedWriteGrants.set(toolCallId, Object.freeze(remainingGrantTokens));
+
+      const storedReservation = sessionRuntime.spawnReservations.get(toolCallId);
+      if (storedReservation !== undefined) {
+        const remainingItems = storedReservation.items.filter((item) => !removedRosterIds.has(item.rosterId));
+        retainSpawnCleanupDebt(sessionRuntime, toolCallId, {
+          ...storedReservation,
+          items: Object.freeze(remainingItems),
+        });
+      }
     }
     if (resultSessionId && sessionRuntime) pruneRuntime(resultSessionId, sessionRuntime);
     const processingErrorResponse = () => processingErrors.length === 0
@@ -1778,9 +2039,49 @@ export default function (pi: ExtensionAPI) {
       processingErrors.push(...errors);
       for (const error of errors) process.stderr.write(`loom(pi): reserved subagent cleanup failed: ${error}\n`);
       if (errors.length === 0 && typeof toolCallId === "string" && sessionRuntime) {
-        sessionRuntime.spawnReservations.delete(toolCallId);
+        const storedReservation = sessionRuntime.spawnReservations.get(toolCallId);
+        if (storedReservation !== undefined) {
+          retainSpawnCleanupDebt(sessionRuntime, toolCallId, {
+            ...storedReservation,
+            pointerBinding: null,
+          });
+        }
       }
       if (sessionRuntime) pruneRuntime(resultSessionId, sessionRuntime);
+    };
+
+    const settleReservedImplementationCrash = async (
+      item: PiSpawnReservation["items"][number] | undefined,
+      diagnostic: string,
+    ): Promise<readonly string[]> => {
+      if (item?.kind !== "implementation" || item.implementationAuthority === null) return [];
+      const finalizedAt = parseIsoInstant(new Date().toISOString(), "Pi crash-settlement instant");
+      if (!finalizedAt.ok) return [finalizedAt.error.errors.join("; ")];
+      try {
+        const manager = StateManager.fromLocalSession(reservation?.sessionId ?? "");
+        if (manager === null) return [`cannot settle crashed reserved implementation ${item.taskId ?? "unknown"}: task graph unavailable`];
+        const applied = await manager.updateAndReturn((state) => {
+          const settlement = settleUnavailableImplementation(
+            state,
+            item.implementationAuthority!,
+            finalizedAt.value,
+            diagnostic,
+          );
+          if (settlement.kind === "error") throw new Error(JSON.stringify(settlement.error));
+          return { state: settlement.state, value: settlement };
+        });
+        if (applied.kind === "ignored") {
+          process.stderr.write(
+            `loom(pi): crashed result for ${item.taskId ?? "unknown"} was ${applied.reason}; current authority preserved\n`,
+          );
+        }
+        return [];
+      } catch (error) {
+        return [
+          `cannot settle crashed reserved implementation ${item.taskId ?? "unknown"}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        ];
+      }
     };
 
     const finalizeReservedImplementations = async (
@@ -1864,8 +2165,9 @@ export default function (pi: ExtensionAPI) {
             }),
           };
         });
-        // StateManager callbacks are side-effect free. Emit only after the
-        // protected-state commit proves the diagnostics describe durable state.
+        // The callback may accumulate in-memory diagnostics, but performs no
+        // external I/O. Emit only after the protected-state commit proves they
+        // describe durable state.
         for (const line of committed.logs) process.stderr.write(`loom(pi): ${line}\n`);
         return committed.diagnostics;
       } catch (error) {
@@ -1883,7 +2185,9 @@ export default function (pi: ExtensionAPI) {
     // shell is not a successful implementation envelope until transcript shape
     // and exact returned Task identity have both parsed.
     const entries = parsePiSubagentResults(rawResults);
-    processingErrors.push(...await finalizeReservedImplementations(entries));
+    if (!spawnedWithoutTaskGraph(reservation)) {
+      processingErrors.push(...await finalizeReservedImplementations(entries));
+    }
 
     // A reservation is the authoritative expected batch. Pi may return a
     // shorter or reordered results array after a child disappears. Reconcile
@@ -1909,7 +2213,22 @@ export default function (pi: ExtensionAPI) {
           await persistCaptureRejection(runBinding, index, item.agentType, diagnostic);
         }
       }
-      if (missingReviews.length > 0 || missingSpecChecks.length > 0) {
+      // An ad-hoc batch has no State File to mark, so the persistence arm below
+      // cannot run — which used to skip the whole reporting block, and a reserved
+      // reviewer that died without returning left no trace anywhere. There is no
+      // protected state to record an evidence failure against, so this stays
+      // operator-visible rather than an orchestration failure; what must not
+      // happen is silence.
+      const missingGateOwned = missingReviews.length > 0 || missingSpecChecks.length > 0;
+      if (missingGateOwned && spawnedWithoutTaskGraph(reservation)) {
+        const diagnostic = unrecordableMissingEvidenceDiagnostic({
+          sessionId: reservation.sessionId,
+          reviews: missingReviews.length,
+          specChecks: missingSpecChecks.length,
+        });
+        process.stderr.write(`loom(pi): ${diagnostic}\n`);
+      }
+      if (missingGateOwned && !spawnedWithoutTaskGraph(reservation)) {
         let manager: StateManager | null = null;
         let pointerReadFailed = false;
         try {
@@ -1935,14 +2254,6 @@ export default function (pi: ExtensionAPI) {
           // present-but-unreadable, not absent, so the ad-hoc and
           // "task graph unavailable" arms do not apply. The batch continues
           // to the per-result evidence loop below.
-        } else if (!manager && spawnedWithoutTaskGraph(reservation)) {
-          // Ad-hoc: the missing result is still worth naming, but there is no
-          // protected state to record an evidence failure against, so it is
-          // not an orchestration processing error.
-          process.stderr.write(
-            `loom(pi): ad-hoc spawn for session ${reservation.sessionId} returned ${missingReviews.length} missing ` +
-            `review result(s) and ${missingSpecChecks.length} missing spec-check result(s) — no task graph to record them against\n`,
-          );
         } else if (!manager) {
           const diagnostic = `cannot persist ${missingReviews.length} missing reserved review result(s) and ` +
             `${missingSpecChecks.length} missing reserved spec-check result(s) for session ${reservation.sessionId} — task graph unavailable`;
@@ -1960,39 +2271,79 @@ export default function (pi: ExtensionAPI) {
           // `processingErrors` and zero stderr. The throw now becomes a
           // diagnostic and the batch continues.
           try {
-            await manager.update((state): TaskGraph => ({
-              ...state,
-              tasks: state.tasks.map<Task>((task) => {
+            const settled = await manager.updateAndReturn((state) => {
+              const appliedReviewIndexes: number[] = [];
+              const tasks = state.tasks.map<Task>((task) => {
                 const failures = missingReviews.filter(({ item }) => item.taskId === task.id);
-                return failures.reduce<Task>((current, { item, index }) => applyReviewResolution(current, {
-                  kind: "evidence-failed" as const,
-                  agent: item.agentType,
-                  message: `reserved reviewer result ${index + 1} for ${item.agentType} was missing or mismatched`,
-                }), task);
-              }),
-              ...(missingSpecChecks.length === 0
-                ? {}
-                : {
+                return failures.reduce<Task>((current, { item, index }) => {
+                  if (piReviewAuthorityProblem(current, item.agentType, item.reviewAuthority) !== null) {
+                    return current;
+                  }
+                  const next = applyReviewResolution(current, {
+                    kind: "evidence-failed" as const,
+                    agent: item.agentType,
+                    message: `reserved reviewer result ${index + 1} for ${item.agentType} was missing or mismatched`,
+                  });
+                  if (next !== current) appliedReviewIndexes.push(index);
+                  return next;
+                }, task);
+              });
+              const specAuthorityProblems: string[] = [];
+              let specCheckPatch: Pick<TaskGraph, "spec_check"> | undefined;
+              if (missingSpecChecks.length > 1) {
+                specAuthorityProblems.push("multiple reserved spec-check slots were missing; no unique authority exists");
+              } else if (missingSpecChecks.length === 1) {
+                const missing = missingSpecChecks[0]!;
+                const authority = missing.item.specCheckAuthority;
+                const problem = piSpecCheckAuthorityProblem(state, authority);
+                if (problem !== null || authority === null) {
+                  specAuthorityProblems.push(problem ?? "reserved spec-check authority is absent");
+                } else {
+                  specCheckPatch = {
                     spec_check: {
-                      wave: state.current_wave ?? 1,
+                      wave: authority.wave,
                       run_at: runAt,
                       verdict: "EVIDENCE_CAPTURE_FAILED" as const,
-                      error: missingSpecChecks.map(({ index }) =>
-                        `reserved spec-check result ${index + 1} for spec-check-invoker was missing or mismatched`
-                      ).join("; "),
+                      error: `reserved spec-check result ${missing.index + 1} for spec-check-invoker was missing or mismatched`,
                     },
-                  }),
-            }));
+                  };
+                }
+              }
+              const specCheck = specCheckPatch?.spec_check;
+              return {
+                state: {
+                  ...state,
+                  tasks,
+                  ...(specCheckPatch ?? {}),
+                  ...(specCheck === undefined
+                    ? {}
+                    : { wave_gates: reconcileWaveBlock(state.wave_gates, tasks, specCheck, specCheck.wave) }),
+                },
+                value: Object.freeze({
+                  appliedReviewIndexes: Object.freeze(appliedReviewIndexes),
+                  specAuthorityProblems: Object.freeze(specAuthorityProblems),
+                }),
+              };
+            });
             for (const { item, index } of missingReviews) {
-              process.stderr.write(
-                `loom(pi): reserved reviewer result ${index + 1} for ${item.agentType}/${item.taskId} was missing or mismatched — marking evidence_capture_failed\n`,
-              );
+              if (settled.appliedReviewIndexes.includes(index)) {
+                process.stderr.write(
+                  `loom(pi): reserved reviewer result ${index + 1} for ${item.agentType}/${item.taskId} was missing or mismatched — marking evidence_capture_failed\n`,
+                );
+              } else {
+                const diagnostic = `reserved reviewer result ${index + 1} for ${item.agentType}/${item.taskId} was not applied under locked current review authority`;
+                processingErrors.push(diagnostic);
+                process.stderr.write(`loom(pi): ${diagnostic}\n`);
+              }
             }
             for (const { index } of missingSpecChecks) {
               process.stderr.write(
-                `loom(pi): reserved spec-check result ${index + 1} for spec-check-invoker was missing or mismatched — marking evidence_capture_failed\n`,
+                settled.specAuthorityProblems.length === 0
+                  ? `loom(pi): reserved spec-check result ${index + 1} for spec-check-invoker was missing or mismatched — marking evidence_capture_failed\n`
+                  : `loom(pi): reserved spec-check result ${index + 1} was not applied: ${settled.specAuthorityProblems.join("; ")}\n`,
               );
             }
+            processingErrors.push(...settled.specAuthorityProblems);
           } catch (error) {
             // The per-item lines above stay inside the `try`: they announce
             // evidence that was RECORDED, and printing them after a failed
@@ -2056,7 +2407,7 @@ export default function (pi: ExtensionAPI) {
         const sessionId = _ctx.sessionManager.getSessionId() ?? "unknown";
         const reservedItem = reservation?.items[resultIndex];
         const markers = orchestrationMarkers(
-          result.task ?? "",
+          result.task,
           `Pi result ${resultIndex + 1}/${agentType}`,
         );
         const durableRunBinding = reservation?.orchestrationRunBinding ??
@@ -2131,7 +2482,7 @@ export default function (pi: ExtensionAPI) {
         );
         if (captureOutcome.kind === "captured" && durableRunBinding !== null && resultSessionId !== null) {
           try {
-            rememberTrustedReviewCapture(resultSessionId, durableRunBinding, agentType, result.task ?? "", captureOutcome);
+            rememberTrustedReviewCapture(resultSessionId, durableRunBinding, agentType, result.task, captureOutcome);
           } catch (error) {
             const diagnostic = `cannot retain process-local review authority for ${agentType}: ${error instanceof Error ? error.message : String(error)}`;
             processingErrors.push(diagnostic);
@@ -2145,7 +2496,7 @@ export default function (pi: ExtensionAPI) {
         // active, however, capture is mandatory evidence: a rejection or missing
         // correlator must be surfaced rather than disguised as a harmless
         // task-state short-circuit.
-        if (runBound || reservedItem?.kind === "standalone" || hasStandaloneReviewContext(result.task ?? "")) {
+        if (runBound || reservedItem?.kind === "standalone" || hasStandaloneReviewContext(result.task)) {
           if (runBound && captureOutcome.kind !== "captured") {
             const detail = describeCaptureFailure(captureOutcome);
             const diagnostic = `standalone request-bound capture failed for ${agentType}: ${detail}`;
@@ -2175,18 +2526,16 @@ export default function (pi: ExtensionAPI) {
           continue;
         }
 
+        if (spawnedWithoutTaskGraph(reservation)) {
+          process.stderr.write(
+            `loom(pi): ad-hoc ${agentType} completion — no TaskGraph existed at spawn, protected state untouched\n`,
+          );
+          continue;
+        }
+
         const mgr = StateManager.fromLocalSession(sessionId);
         if (!mgr) {
-          // An ad-hoc spawn had no task graph to begin with, so "completion was
-          // NOT applied" describes nothing that was lost: the agent's answer is
-          // its return value, and there is no protected state it was ever going
-          // to update. Reporting it as an evidence-processing failure made every
-          // graphless Loom agent look broken to the caller.
-          if (spawnedWithoutTaskGraph(reservation)) {
-            process.stderr.write(
-              `loom(pi): ad-hoc ${agentType} completion — no task graph for session ${JSON.stringify(sessionId)}, nothing to apply\n`,
-            );
-          } else if (isLoomOwnedResultAgent(agentType)) {
+          if (isLoomOwnedResultAgent(agentType)) {
             const diagnostic = `no task graph for session ${JSON.stringify(sessionId)}; ${agentType} completion was NOT applied`;
             processingErrors.push(diagnostic);
             process.stderr.write(`loom(pi): ${diagnostic}\n`);
@@ -2213,9 +2562,9 @@ export default function (pi: ExtensionAPI) {
         };
 
         // A failed process may retain valid-looking assistant text. Never parse
-        // that text as completion/review/spec evidence, but do persist the
-        // failed CAPTURE for gate-owned agents so a healthy sibling or stale pass
-        // cannot make the missing evidence disappear.
+        // that text as completion/review/spec evidence. Persist gate-owned
+        // failure only under exact current reserved authority, so stale evidence
+        // cannot overwrite a newer slot while a healthy sibling remains visible.
         if (piSubagentResultFailed(result)) {
           emit(await applyFailedPiResult({
             store,
@@ -2267,7 +2616,12 @@ export default function (pi: ExtensionAPI) {
 
         // --- Spec-check invoker → store spec-check findings ---
         if (agentType === "spec-check-invoker") {
-          emit(await applySpecCheckPiResult({ store, result, now: new Date().toISOString() }));
+          emit(await applySpecCheckPiResult({
+            store,
+            result,
+            reservedSlot: reservedItem,
+            now: new Date().toISOString(),
+          }));
           continue;
         }
       } catch (err) {
@@ -2281,10 +2635,17 @@ export default function (pi: ExtensionAPI) {
           taskIdFailure = `; task-id extraction failed: ${error instanceof Error ? error.message : String(error)}`;
         }
         const diagnostic = `result ${resultIndex + 1} for agent ${String(result?.agent ?? "<unknown>")} (task ${taskIdForLog}${taskIdFailure}): ${err instanceof Error ? err.message : String(err)}`;
-        processingErrors.push(diagnostic);
+        const settlementErrors = await settleReservedImplementationCrash(
+          reservation?.items[resultIndex],
+          diagnostic,
+        );
+        processingErrors.push(diagnostic, ...settlementErrors);
         process.stderr.write(
           `loom(pi): subagent-stop processing failed for ${diagnostic} — continuing with remaining results\n`,
         );
+        for (const settlementError of settlementErrors) {
+          process.stderr.write(`loom(pi): ${settlementError}\n`);
+        }
       }
     }
 

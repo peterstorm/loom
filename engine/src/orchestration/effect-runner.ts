@@ -7,12 +7,13 @@
  * `reconcileEffectReceipt` — the runner never decides for itself that an
  * effect succeeded.
  *
- * Receipts make effects idempotent across resumes. Before running anything,
- * the runner asks the run directory whether this effect id already recorded a
- * receipt; if so it reconciles against the stored one and performs no second
- * effect. That is what lets a crashed run resume without republishing, and it
- * is why a receipt is written under the effect's own id rather than a fresh
- * one.
+ * A durable receipt suppresses an effect on later resumes. Before running
+ * anything, the runner asks the run directory whether this effect id already
+ * recorded a receipt; if so it reconciles against the stored one and performs
+ * no second effect. Execution necessarily precedes receipt persistence, so a
+ * crash in that interval may retry the adapter; operation-level reconciliation
+ * or idempotency must make that retry safe. The receipt closes every later
+ * resume once persisted and is therefore written under the effect's own id.
  */
 
 import { createHash } from "node:crypto";
@@ -152,76 +153,46 @@ async function runCaptureRawTranscript(
   }));
 }
 
-/**
- * A caught port exception, kept UNFORGEABLE by a port's own return value.
- *
- * The marker used to be a `{ __failed: string }` record, so a legitimate
- * payload that happened to carry a `__failed` string key was read as a thrown
- * adapter — a value crossing the port could impersonate the runner's own
- * control signal. A module-private class cannot be produced by anything but the
- * `catch` below.
- *
- * It carries the error's NAME and CAUSE, not just its message. The runner has
- * no way to tell a transient port failure from a programming error — it cannot
- * inspect what the adapter was trying to do — so it must not strip the two
- * fields that make that distinction visible. `unreachablePort` thrown by a
- * caller's own wiring otherwise reached the operator as the same bare,
- * `retriable: true` infrastructure sentence as an ECONNRESET.
- */
-class PortThrew {
-  readonly name: string;
-  readonly cause: string | null;
-
-  private constructor(readonly message: string, name: string, cause: string | null) {
-    this.name = name;
-    this.cause = cause;
-  }
-
-  static from(error: unknown): PortThrew {
-    if (!(error instanceof Error)) return new PortThrew(String(error), "thrown", null);
-    const cause = error.cause;
-    return new PortThrew(
-      error.message,
-      error.name === "" ? "Error" : error.name,
-      cause === undefined ? null
-        : cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause),
-    );
-  }
-
-  describe(): string {
-    return `${this.name}: ${this.message}${this.cause === null ? "" : ` (caused by ${this.cause})`}`;
-  }
+/** Preserve the diagnostic identity of an adapter throw at the shell boundary. */
+function describePortError(error: unknown): string {
+  if (!(error instanceof Error)) return `thrown: ${String(error)}`;
+  const name = error.name === "" ? "Error" : error.name;
+  if (error.cause === undefined) return `${name}: ${error.message}`;
+  const cause = error.cause instanceof Error
+    ? `${error.cause.name}: ${error.cause.message}`
+    : String(error.cause);
+  return `${name}: ${error.message} (caused by ${cause})`;
 }
 
 async function runThroughPort(
   intent: EffectIntent,
   port: () => Promise<unknown>,
 ): Promise<DomainResult<EffectReceipt, EffectRunnerError>> {
-  const raw = await (async (): Promise<unknown> => {
-    try {
-      return await port();
-    } catch (error) {
-      return PortThrew.from(error);
-    }
-  })();
-  // `retriable: true` is the runner's honest limit of knowledge, not a
-  // diagnosis: any throw COULD be transient. What lets a reader decide is the
-  // error name and cause preserved above.
-  return raw instanceof PortThrew
-    ? failure(intent.effectId, true, raw.describe())
-    : reconcile(intent, raw);
+  let raw: unknown;
+  try {
+    raw = await port();
+  } catch (error) {
+    // `retriable: true` is the runner's honest limit of knowledge, not a
+    // diagnosis: any PORT throw COULD be transient. Preserve its name and cause
+    // so the operator can distinguish wiring faults from transport failures.
+    return failure(intent.effectId, true, describePortError(error));
+  }
+  // Pure reconciliation defects are engine bugs, not adapter failures. Keep
+  // this outside the port catch so they cannot be mislabeled as retriable I/O.
+  return reconcile(intent, raw);
 }
 
 /**
  * Build the runner. `handle` owns run-directory effects; `ports` own the ones
  * that reach outside it.
  *
- * This is the only path that EXECUTES an intent and reconciles its receipt, and
- * the only one that enforces the read-before-run idempotency guard. It is not
- * the only place a receipt file can appear: `standalone.ts` records one
- * `artifact-set-published` receipt itself on the exclusive-publication collision
- * path, where the effect already happened and re-running it is the very thing
- * the guard exists to prevent.
+ * This is the general path that executes an intent and reconciles its receipt,
+ * and the only one that enforces the read-before-run idempotency guard.
+ * Standalone finalization is the explicit alternative: `finalizeStandaloneState`
+ * publishes `result.json`, records its publication receipt, and reconciles that
+ * receipt after either a fresh exclusive write or a byte-identical collision.
+ * Its exclusive-write protocol owns idempotency because result publication and
+ * terminal state reduction are one standalone-specific operation.
  */
 export function createEffectRunner(args: Readonly<{
   handle: RunDirHandle;

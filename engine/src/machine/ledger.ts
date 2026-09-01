@@ -43,7 +43,6 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import {
   appendFileSync,
-  existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -60,6 +59,8 @@ import {
   type AgentId,
   type AgentType,
   type MachineBinding,
+  type MachineBindingAuthority,
+  type MachineBindingRelease,
   type PersistedBinding,
   type SessionFileSuffix,
   type SessionId,
@@ -121,8 +122,8 @@ export function sessionScopedPath(sessionId: SessionId, suffix: SessionFileSuffi
  * take no lock, so an in-place writeFileSync could expose a torn (partial)
  * file mid-write. rename(2) is atomic on the same filesystem — a reader
  * sees the old content or the new, never a prefix. Appends stay plain
- * appendFileSync (single O_APPEND writes; the parsers skip a torn tail
- * line loudly).
+ * appendFileSync (single O_APPEND writes); a torn ledger tail is corruption
+ * and readEvidence rejects the complete ledger rather than using a prefix.
  */
 function rewriteFileAtomic(path: string, content: string): void {
   const tmp = `${path}.tmp`;
@@ -141,6 +142,9 @@ function readOptionalTextFile(path: string, label: string): string | null {
 }
 
 // --- Bindings ---
+
+/** Whether this invocation minted the capability or merely observed its exact owner. */
+export type CapabilityAcquisition = "created" | "already-owned";
 
 /** One raw binding-file line classified for liveness decisions. */
 type ClassifiedLine =
@@ -175,25 +179,41 @@ function classifyBindingLines(sessionId: SessionId, nowMs: number): ClassifiedLi
   }
 }
 
-/**
- * Parse the binding file. Malformed lines — wrong field count, fields the
- * smart constructors reject, or a bad bind stamp — are skipped (and count as
- * noise, not bindings) loudly, mirroring readEvidence: a binding file that
- * silently parses to zero bindings would open the gate. Bindings whose last
- * activity exceeds the TTL are treated as ABSENT (their subagent plausibly
- * died without SubagentStop) — refreshBindingActivity reaps them.
- */
-export function readBindings(sessionId: SessionId, nowMs: number = Date.now()): readonly MachineBinding[] {
+function projectBindingAuthority(sessionId: SessionId, nowMs: number): MachineBindingAuthority {
   const lines = classifyBindingLines(sessionId, nowMs);
-  const malformed = lines.filter((l) => l.kind === "malformed").length;
+  const malformed = lines.filter((line) => line.kind === "malformed").length;
   if (malformed > 0) {
     process.stderr.write(`readBindings: skipped ${malformed} malformed binding line(s) for ${sessionId}\n`);
   }
-  const stale = lines.filter((l) => l.kind === "stale").length;
+  const stale = lines.filter((line) => line.kind === "stale").length;
   if (stale > 0) {
     process.stderr.write(`readBindings: ignored ${stale} stale binding(s) for ${sessionId} (no activity within TTL)\n`);
   }
-  return lines.flatMap((l) => (l.kind === "fresh" ? [l.persisted.binding] : []));
+  return Object.freeze({
+    kind: malformed > 0 ? "corrupt" : "parsed",
+    bindings: Object.freeze(lines.flatMap((line) => line.kind === "fresh" ? [line.persisted.binding] : [])),
+  });
+}
+
+/**
+ * Parse the binding file for diagnostics and liveness maintenance. Malformed
+ * rows remain on disk and are omitted from this projection; authority callers
+ * use the projection's explicit corruption fact and fail closed.
+ *
+ * Bindings whose last activity exceeds the TTL are treated as ABSENT (their
+ * subagent plausibly died without SubagentStop) — refreshBindingActivity reaps
+ * them.
+ */
+export function readBindings(sessionId: SessionId, nowMs: number = Date.now()): readonly MachineBinding[] {
+  return projectBindingAuthority(sessionId, nowMs).bindings;
+}
+
+/** Parse persisted binding authority without collapsing malformed rows. */
+export function readBindingAuthority(
+  sessionId: SessionId,
+  nowMs: number = Date.now(),
+): MachineBindingAuthority {
+  return projectBindingAuthority(sessionId, nowMs);
 }
 
 /**
@@ -318,14 +338,20 @@ export function anyActiveSubagent(taskGraphPath: string): boolean {
 }
 
 /**
- * The binding evidence may be attributed to, or null when attribution is
- * impossible. The decision itself is the pure resolveSoleActiveBinding
- * (evidence.ts) — exactly one fresh binding AND a roster of exactly the
- * bound agent; anything else (contention, a leaked binding over an empty
- * or foreign roster) stands down. This adapter only supplies the files.
+ * The binding evidence may be attributed to, or null when valid evidence
+ * proves attribution impossible. The decision itself is the pure
+ * resolveSoleActiveBinding (evidence.ts) — exactly one fresh binding AND a
+ * roster of exactly the bound agent; contention or a leaked binding over an
+ * empty/foreign roster stands down. Corrupt persisted authority is neither
+ * case and throws so gate boundaries fail closed instead of treating it as
+ * benign contention. This adapter only supplies the files.
  */
 export function soleActiveBinding(sessionId: SessionId, nowMs: number = Date.now()): MachineBinding | null {
-  return resolveSoleActiveBinding(readBindings(sessionId, nowMs), readActiveAgents(sessionId));
+  const authority = projectBindingAuthority(sessionId, nowMs);
+  if (authority.kind === "corrupt") {
+    throw new Error(`machine binding authority for ${sessionId} contains malformed rows`);
+  }
+  return resolveSoleActiveBinding(authority.bindings, readActiveAgents(sessionId));
 }
 
 /**
@@ -432,14 +458,15 @@ export async function markAgentActive(
   sessionId: SessionId,
   agentId: AgentId,
   agentType: AgentType | null = null,
-): Promise<void> {
+): Promise<CapabilityAcquisition> {
   mkdirSync(subagentDir(), { recursive: true, mode: 0o700 });
-  await withLock(bindingLock(sessionId), () => {
+  return withLock(bindingLock(sessionId), () => {
     const path = activeFlagPath(sessionId);
-    if (existsSync(path)) {
+    const roster = readOptionalTextFile(path, "active roster");
+    if (roster !== null) {
       // Identity is column 0: a re-marked agent must be recognised as a
       // duplicate whether or not the earlier line recorded a type.
-      const already = readFileSync(path, "utf-8")
+      const already = roster
         .split("\n")
         .filter((l) => l.trim() !== "")
         .some((l) => rosterLineAgentId(l) === agentId);
@@ -447,13 +474,14 @@ export async function markAgentActive(
         process.stderr.write(
           `markAgentActive: ${agentId} already on the roster for ${sessionId} — duplicate SubagentStart ignored\n`,
         );
-        return;
+        return "already-owned";
       }
     }
     // The type column is what lets PreToolUse authorize by ROLE. Omitting it
     // (unknown type) is safe but downgrades the agent to identity-only
     // authorization, which only the `pi-grant-` prefix satisfies.
     appendFileSync(path, agentType === null ? `${agentId}\n` : `${agentId}\t${agentType}\n`);
+    return "created";
   });
 }
 
@@ -520,9 +548,9 @@ export async function bindMachineAgent(
   agentType: AgentType,
   agentId: AgentId,
   nowMs: number = Date.now(),
-): Promise<void> {
+): Promise<CapabilityAcquisition> {
   mkdirSync(subagentDir(), { recursive: true, mode: 0o700 });
-  await withLock(bindingLock(sessionId), () => {
+  return withLock(bindingLock(sessionId), () => {
     const lines = classifyBindingLines(sessionId, nowMs);
     const kept = lines.filter((l) => l.kind !== "stale");
     // Idempotent on (agentId, agentType): a duplicated SubagentStart must
@@ -541,12 +569,13 @@ export async function bindMachineAgent(
       process.stderr.write(
         `bindMachineAgent: ${agentId}/${agentType} already bound for ${sessionId} — duplicate SubagentStart ignored\n`,
       );
-      return;
+      return "already-owned";
     }
     const binding: MachineBinding = { agentId, agentType, epoch: epochOf(agentId, agentType) };
     const content =
       [...kept.map((l) => l.raw), formatBindingLine(binding, nowMs)].join("\n") + "\n";
     rewriteFileAtomic(machineBindingPath(sessionId), content);
+    return "created";
   });
 }
 
@@ -560,33 +589,40 @@ export async function bindMachineAgent(
  *  MALFORMED lines are preserved (mirroring refreshBindingActivity and
  *  bindMachineAgent) — they are the fail-closed evidence of a corrupt binding
  *  file, and while any remain the file must survive so the gate's
- *  file-present-but-zero-bindings check still fires. Failures are logged — a
- *  leaked binding disables gating silently otherwise. */
+ *  file-present-but-zero-bindings check still fires. Non-ENOENT failures are
+ *  thrown so the cleanup caller can surface a leaked binding. */
 export async function unbindMachineAgent(
   sessionId: SessionId,
   agentType: AgentType,
   agentId: AgentId,
   nowMs: number = Date.now(),
-): Promise<void> {
+): Promise<MachineBindingRelease> {
   const path = machineBindingPath(sessionId);
-  await withLock(bindingLock(sessionId), () => {
+  return withLock(bindingLock(sessionId), () => {
     try {
-      const remaining = classifyBindingLines(sessionId, nowMs).filter(
-        (l) =>
-          l.kind === "malformed" ||
-          (l.kind === "fresh" &&
-            !(l.persisted.binding.agentId === agentId && l.persisted.binding.agentType === agentType)),
+      const lines = classifyBindingLines(sessionId, nowMs);
+      const released = lines.some(
+        (line) => line.kind === "fresh" &&
+          line.persisted.binding.agentId === agentId &&
+          line.persisted.binding.agentType === agentType,
+      );
+      const remaining = lines.filter(
+        (line) =>
+          line.kind === "malformed" ||
+          (line.kind === "fresh" &&
+            !(line.persisted.binding.agentId === agentId && line.persisted.binding.agentType === agentType)),
       );
       if (remaining.length === 0) {
         unlinkSync(path);
       } else {
-        rewriteFileAtomic(path, remaining.map((l) => l.raw).join("\n") + "\n");
+        rewriteFileAtomic(path, remaining.map((line) => line.raw).join("\n") + "\n");
       }
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+      return released ? "released" : "not-owned";
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return "not-owned";
       throw new Error(
-        `unbindMachineAgent failed for ${agentId}/${sessionId}: ${e instanceof Error ? e.message : String(e)}`,
-        { cause: e },
+        `unbindMachineAgent failed for ${agentId}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
       );
     }
   });
@@ -636,8 +672,9 @@ export async function recordCallStart(
   await withLock(bindingLock(sessionId), () => {
     const path = callStartPath(sessionId);
     let current: readonly CallStartEntry[] = [];
-    if (existsSync(path)) {
-      const parsed = parseCallStartEntries(readFileSync(path, "utf-8"));
+    const raw = readOptionalTextFile(path, "call-start file");
+    if (raw !== null) {
+      const parsed = parseCallStartEntries(raw);
       if (parsed === null) {
         process.stderr.write(
           `recordCallStart: corrupt call-start file for ${sessionId} — starting a fresh stamp list\n`,

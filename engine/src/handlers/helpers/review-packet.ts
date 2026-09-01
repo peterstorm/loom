@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { argumentValue } from "./cli-args";
 import {
-  existsSync,
   mkdirSync,
   readFileSync,
   unlinkSync,
@@ -16,6 +15,7 @@ import {
   parseBaseSha,
   parseHeadSha,
   parseReviewPacket,
+  parseReviewPath,
   serializeReviewPacket,
   type BaseSha,
   type HeadSha,
@@ -23,6 +23,12 @@ import {
 } from "../../core/review-packet";
 import { reviewRunPriorFindings, startReviewRun } from "../../core/findings";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
+import {
+  diffBinaryFileFromRevision,
+  diffBinaryUntrackedFile,
+  isTrackedAt,
+  type GitDiffResult,
+} from "../../utils/git";
 
 const OPERATIONS = ["create", "verify", "show"] as const;
 
@@ -76,15 +82,17 @@ export async function persistReviewPacketAndBind(
 const USAGE = `Usage: helper review-packet <${OPERATIONS.join("|")}> --task <id> --output <file> | --packet <file>`;
 
 
-function git(args: readonly string[], cwd: string, allowDiffExit = false): string {
-  try {
-    return execFileSync("git", [...args], { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
-  } catch (error) {
-    if (allowDiffExit && error && typeof error === "object" && "status" in error && (error as { status?: number }).status === 1) {
-      return String((error as { stdout?: unknown }).stdout ?? "");
-    }
-    throw error;
-  }
+function git(args: readonly string[], cwd: string): string {
+  return execFileSync("git", [...args], {
+    cwd,
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+function requiredDiff(result: GitDiffResult): string {
+  if (!result.ok) throw new Error(result.error);
+  return result.diff;
 }
 
 function optionalGit(
@@ -107,25 +115,33 @@ function repoRoot(): string {
   return git(["rev-parse", "--show-toplevel"], process.cwd()).trim();
 }
 
+export function readReviewPacketPostimage(
+  inspected: Readonly<{ absolute: string; exists: boolean }>,
+  read: (path: string) => Uint8Array = readFileSync,
+): Uint8Array | null {
+  return inspected.exists ? read(inspected.absolute) : null;
+}
+
 function artifact(root: string, baseSha: BaseSha, path: string): ReviewPacketArtifactInput {
   const inspected = inspectRepositoryPath(root, path, "review packet path", { mustBeFile: true });
-  const absolute = inspected.absolute;
-  const present = existsSync(absolute);
-  const tracked = optionalGit(["ls-files", "--error-unmatch", "--", path], root, [1]) !== null;
+  const present = inspected.exists;
+  const trackedResult = isTrackedAt(root, path);
+  if (!trackedResult.ok) throw new Error(trackedResult.error);
+  const tracked = trackedResult.tracked;
   const trackedAtBase = git(["ls-tree", "-z", "--full-tree", baseSha, "--", path], root) !== "";
   if (!trackedAtBase && !tracked && !present) {
     throw new Error(`review packet path is neither tracked nor present at its base: ${path}`);
   }
   let diff = "";
   if (trackedAtBase || tracked) {
-    diff = git(["diff", "--binary", baseSha, "--", path], root);
+    diff = requiredDiff(diffBinaryFileFromRevision(root, baseSha, path));
   } else if (present) {
-    diff = git(["diff", "--no-index", "--binary", "/dev/null", path], root, true);
+    diff = requiredDiff(diffBinaryUntrackedFile(root, path));
   }
   return {
     path,
     diff,
-    postimage: present ? readFileSync(absolute) : null,
+    postimage: readReviewPacketPostimage(inspected),
   };
 }
 
@@ -200,24 +216,33 @@ const handler: HookHandler = async (_stdin, args) => {
     const root = repoRoot();
     const headSha = git(["rev-parse", "HEAD"], root).trim();
     const remoteHead = optionalGit(
-      ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+      ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
       root,
       [1],
     );
-    const defaultBranch = remoteHead?.trim().replace(/^origin\//, "") || "main";
-    const remoteBranch = `origin/${defaultBranch}`;
-    const hasRemoteBranch = optionalGit(
+    const defaultBranch = remoteHead?.trim().replace(/^origin\//, "") ?? null;
+    const remoteBranch = defaultBranch === null ? null : `origin/${defaultBranch}`;
+    const hasRemoteBranch = remoteBranch !== null && optionalGit(
       ["show-ref", "--verify", "--quiet", `refs/remotes/${remoteBranch}`],
       root,
       [1],
     ) !== null;
     // Each revision is parsed through its OWN smart constructor: base and head
     // carry distinct brands precisely so the two cannot be transposed here.
-    const rawBaseSha = task.start_sha ?? (
-      hasRemoteBranch
-        ? git(["merge-base", "HEAD", remoteBranch], root).trim()
-        : git(["rev-parse", "HEAD^"], root).trim()
-    );
+    // A one-parent fallback is not authority for a Task that may span several
+    // commits: without a persisted start or proven remote base, fail closed.
+    let rawBaseSha: string;
+    if (task.start_sha !== undefined) {
+      rawBaseSha = task.start_sha;
+    } else {
+      if (remoteBranch === null || !hasRemoteBranch) {
+        return {
+          kind: "error",
+          message: "Review packet creation failed: no task start_sha or remote default branch can authorize the packet base",
+        };
+      }
+      rawBaseSha = git(["merge-base", "HEAD", remoteBranch], root).trim();
+    }
     const parsedBaseSha = parseBaseSha(rawBaseSha);
     const parsedHeadSha = parseHeadSha(headSha);
     if (!parsedBaseSha.ok || !parsedHeadSha.ok) {
@@ -230,17 +255,24 @@ const handler: HookHandler = async (_stdin, args) => {
     // Transcript APIs commonly report absolute paths. Canonicalization and
     // packet identity are rebuilt under the lock before this packet is bound.
     const prepared = prepareTaskReviewPacket(root, task, baseSha, parsedHeadSha.value);
-    const { packet, scope } = prepared;
+    const { packet } = prepared;
     if (!packet.ok) return { kind: "error", message: `Review packet creation failed:\n${packet.errors.map((e) => `  - ${e}`).join("\n")}` };
     const outputPath = inspectRepositoryPath(root, output, "review packet output");
     const absoluteOutput = outputPath.absolute;
+    const packetPath = parseReviewPath(outputPath.relative, "review packet output");
+    if (!packetPath.ok) {
+      return { kind: "error", message: `Review packet output is invalid: ${packetPath.errors.join("; ")}` };
+    }
+    const registeredScope = Object.freeze([
+      ...new Set([...packet.value.declaredPaths, ...packet.value.modifiedPaths]),
+    ].sort());
     const registration = Object.freeze({
       task_id: task.id,
       packet_id: packet.value.packetId,
-      packet_path: outputPath.relative,
+      packet_path: packetPath.value,
       base_sha: baseSha,
-      head_sha: headSha,
-      scope: Object.freeze(scope),
+      head_sha: parsedHeadSha.value,
+      scope: registeredScope,
     });
     mkdirSync(dirname(absoluteOutput), { recursive: true });
     await persistReviewPacketAndBind(

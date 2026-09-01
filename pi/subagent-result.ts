@@ -1,26 +1,11 @@
 /**
- * What one finished Pi subagent result DOES to protected state.
+ * Apply one finished Pi subagent result through narrow protected-state and
+ * repository ports. Phase and spec-check appliers additionally observe their
+ * explicitly supplied filesystem artifacts. Parsing and lifecycle decisions
+ * remain pure; exported appliers orchestrate observation and persistence.
  *
- * `extension.ts`'s `tool_result` handler used to hold all of this inline: one
- * ~980-line closure that reconciled request authority, advanced phases, resolved
- * implementation evidence, stored review findings, and reconciled spec-checks,
- * with every decision written between the `StateManager` and git calls that
- * carried it out. Nothing in it could be exercised without a live filesystem, a
- * real git repository, and a real State File — including rules as small as
- * "which written path is the spec file", which was an inline
- * `filePath.includes(specDir)` sitting between two `mgr.update(...)` awaits.
- *
- * Here each concern is one named function with explicit parameters and two
- * injected ports — `TaskGraphStore` for protected state, `RepositoryProbe` for
- * git — so a test supplies plain objects instead of a working tree. Exported
- * appliers are shell orchestrators: observe through ports, call pure reducers,
- * and persist. Parsing, classification, and lifecycle reducers remain pure and
- * testable as plain data transformations; shared engine rules live further in
- * under `engine/src/core` (see `core/phase-artifact-paths`).
- *
- * Diagnostics are RETURNED, never written. `extension.ts` owns stderr and owns
- * which diagnostics become orchestration processing errors; an applier that
- * wrote its own log could not be asserted against without capturing a stream.
+ * Diagnostics are returned, never written. `extension.ts` owns stderr and the
+ * decision about which diagnostics become orchestration processing errors.
  */
 
 import { parseFilesModified } from "../engine/src/parsers/parse-files-modified";
@@ -29,12 +14,13 @@ import {
   applyCompletionInfrastructureFailure,
   applyUntrustedStopResolution,
   cumulativeModifiedPaths,
-  type NewTestEvidence,
 } from "../engine/src/core/implementation-application";
-import { extractTestEvidence, type TestEvidence } from "../engine/src/core/test-evidence";
+import { extractTestEvidence, testEvidenceOf, type TestEvidence } from "../engine/src/core/test-evidence";
 import {
   isPhaseResultEligible,
-  resolveTransition,
+  observePhaseTransition,
+  transitionAuthorityMatches,
+  type PhaseTransitionObservation,
 } from "../engine/src/handlers/subagent-stop/advance-phase";
 import {
   applyReviewResolution,
@@ -48,10 +34,22 @@ import {
   reconcileSpecCheck,
   type ParsedSpecCheckOutput,
 } from "../engine/src/core/spec-check";
+import { waveSpecCheckDocumentsMatch } from "../engine/src/core/wave-review-authority";
+import { observeWaveSpecCheckDocuments } from "../engine/src/orchestration/wave-spec-check-documents";
 import { reconcileWaveBlock } from "../engine/src/core/wave-gate-model";
-import { phaseArtifactUpdates } from "../engine/src/core/phase-artifact-paths";
+import {
+  parseSpecArtifactDirectory,
+  phaseArtifactUpdates,
+} from "../engine/src/core/phase-artifact-paths";
 import { agentsOfKind } from "../engine/src/core/model-profiles";
-import type { Phase, TaskGraph } from "../engine/src/types";
+import { PHASES } from "../engine/src/core/phases";
+import type {
+  Phase,
+  TaskGraph,
+  WaveReviewEpochAuthority,
+  WaveSpecCheckDocumentsAuthority,
+  WaveSpecCheckSlotAuthority,
+} from "../engine/src/types";
 import type { ParsedTaskGraph } from "../engine/src/state-manager";
 import {
   parseIsoInstant,
@@ -87,6 +85,7 @@ import {
 } from "./transcript-adapter";
 
 const IMPL_AGENTS: ReadonlySet<string> = new Set(agentsOfKind("impl"));
+const PHASE_AGENTS: ReadonlySet<string> = new Set(agentsOfKind("phase"));
 const REVIEW_AGENTS: ReadonlySet<string> = new Set(agentsOfKind("reviewer"));
 const isReviewAgent = (agentType: string): boolean => REVIEW_AGENTS.has(agentType);
 
@@ -131,6 +130,8 @@ const outcome = (
   log: readonly string[] = [],
   processingErrors: readonly string[] = [],
 ): PiResultOutcome => Object.freeze({ processingErrors: Object.freeze(processingErrors), log: Object.freeze(log) });
+
+const processingFailure = (message: string): PiResultOutcome => outcome([message], [message]);
 
 /** One Pi subagent result, in the shape the appliers actually read. */
 export type PiSubagentResult = Readonly<{
@@ -193,7 +194,9 @@ export function parsePiSubagentResults(raw: readonly unknown[]): readonly PiSuba
     const record = entry as Record<string, unknown>;
     if (typeof record.agent !== "string") return reject(`agent is ${typeof record.agent}, expected string`);
     if (typeof record.task !== "string") return reject(`task is ${typeof record.task}, expected string`);
-    if (typeof record.exitCode !== "number") return reject(`exitCode is ${typeof record.exitCode}, expected number`);
+    if (typeof record.exitCode !== "number" || !Number.isSafeInteger(record.exitCode)) {
+      return reject(`exitCode must be a finite safe integer, got ${String(record.exitCode)}`);
+    }
     if (!("messages" in record)) return reject("messages is missing, expected transcript evidence");
     const stopReasonProblem = optionalString(record.stopReason);
     if (stopReasonProblem !== null) return reject(`stopReason is ${stopReasonProblem}, expected string or absent`);
@@ -220,12 +223,15 @@ export function piSubagentResultFailed(result: {
 }
 
 /**
- * A failure that hit EVERY slot at once is a shared-infrastructure signature,
- * not N independent agent faults — and it is invisible from inside any single
- * slot's rejection. Reported once per batch, beside the per-slot diagnostics,
+ * A failure that hit EVERY slot at once is consistent with shared
+ * infrastructure rather than N independent agent faults — a hypothesis that
+ * is invisible from inside any single slot's rejection. Reported once per
+ * batch, beside the per-slot diagnostics,
  * so the operator reads the pattern where the symptoms are. `null` below two
  * results or when any slot survived: one slot is not a pattern, and a surviving
- * sibling refutes the shared-fault reading outright.
+ * sibling removes the all-slot failure signature this helper reports. Partial or
+ * intermittent shared infrastructure faults remain possible but are not inferred
+ * from this batch-level heuristic.
  */
 export function piAllSlotsFailedNote(
   results: readonly {
@@ -270,11 +276,102 @@ export function piSubagentFailureSignals(result: {
 }
 
 /** The reserved slot this result answers for, when the spawn reserved one. */
+export type PiSpecCheckAttemptAuthority = Readonly<{
+  runId: WaveReviewEpochAuthority["runId"];
+  wave: number;
+  batchEpoch: WaveReviewEpochAuthority["batchEpoch"];
+  slotId: WaveSpecCheckSlotAuthority["slot_id"];
+  attempt: WaveSpecCheckSlotAuthority["attempted"];
+}>;
+
+export type PiReviewAttemptAuthority = Readonly<{
+  taskId: string;
+  agentType: string;
+  generation: number;
+  packetId: string | null;
+  slotId: string | null;
+  attempted: 1 | 2 | null;
+}>;
+
+function reviewAuthorityForTask(
+  task: LoomTask,
+  agentType: string,
+): PiReviewAttemptAuthority | null {
+  const run = task.review_run;
+  if (run === undefined) {
+    const explicitlyLegacy = task.review_generation === undefined &&
+      task.accepted_review_authority === undefined &&
+      (task.issued_review_packets?.length ?? 0) === 0;
+    return explicitlyLegacy
+      ? Object.freeze({
+          taskId: task.id,
+          agentType,
+          generation: 0,
+          packetId: null,
+          slotId: null,
+          attempted: null,
+        })
+      : null;
+  }
+  const slot = run.slot_authority?.find((candidate) => candidate.agent === agentType);
+  if (slot === undefined) return null;
+  return Object.freeze({
+    taskId: task.id,
+    agentType,
+    generation: run.generation,
+    packetId: run.packet_id,
+    slotId: slot.slot_id,
+    attempted: slot.attempted,
+  });
+}
+
+/** Freeze exact current Task/Review Run authority for a Pi reviewer reservation. */
+export function currentPiReviewAuthority(
+  state: TaskGraph,
+  agentType: string,
+  taskId: string,
+): PiReviewAttemptAuthority | null {
+  const task = state.tasks.find((candidate) => candidate.id === taskId);
+  return task === undefined ? null : reviewAuthorityForTask(task, agentType);
+}
+
+/** Explain why failed reviewer evidence cannot mutate this locked Task. */
+export function piReviewAuthorityProblem(
+  task: LoomTask,
+  agentType: string,
+  reservedAuthority: PiReviewAttemptAuthority | null | undefined,
+): string | null {
+  const currentAuthority = reviewAuthorityForTask(task, agentType);
+  if (reservedAuthority == null) {
+    const explicitlyLegacy = task.review_run === undefined &&
+      task.review_generation === undefined &&
+      task.accepted_review_authority === undefined &&
+      (task.issued_review_packets?.length ?? 0) === 0;
+    return explicitlyLegacy
+      ? null
+      : "reviewer has no exact current or retained review-generation authority";
+  }
+  return currentAuthority !== null &&
+      currentAuthority.taskId === reservedAuthority.taskId &&
+      currentAuthority.agentType === reservedAuthority.agentType &&
+      currentAuthority.generation === reservedAuthority.generation &&
+      currentAuthority.packetId === reservedAuthority.packetId &&
+      currentAuthority.slotId === reservedAuthority.slotId &&
+      currentAuthority.attempted === reservedAuthority.attempted
+    ? null
+    : "failed reviewer reservation does not match exact current Task/Review Run slot authority";
+}
+
+/** The reserved slot this result answers for, including exact role authority. */
 export type ReservedSlot = Readonly<{
   agentType: string;
   taskId: string | null;
   /** Required on every modern implementation reservation; absent/null is legacy compatibility-only. */
   implementationAuthority?: ImplementationAttemptAuthority | null;
+  /** Required before failed modern reviewer evidence may mutate the current Review Run. */
+  reviewAuthority?: PiReviewAttemptAuthority | null;
+  /** Required before a non-run-bound spec-check may mutate protected Wave state. */
+  specCheckAuthority?: PiSpecCheckAttemptAuthority | null;
 }>;
 
 /** Text of the parent's own tool-call content, the last task-id fallback. */
@@ -349,9 +446,13 @@ async function settleFailedExactImplementation(
     return settlement.kind === "error" ? state : settlement.state;
   });
   const settlement = settled.value;
-  if (settlement === undefined || settlement.kind === "error") {
-    const message = `loom(pi): ${args.failure}; exact Oracle settlement failed — current attempt preserved`;
-    return outcome([message], [message]);
+  if (settlement === undefined) {
+    const message = `loom(pi): ${args.failure}; exact Oracle settlement produced no transition — current attempt preserved`;
+    return processingFailure(message);
+  }
+  if (settlement.kind === "error") {
+    const message = `loom(pi): ${args.failure}; exact Oracle settlement failed: ${JSON.stringify(settlement.error)} — current attempt preserved`;
+    return processingFailure(message);
   }
   return settlement.kind === "ignored"
     ? outcome([`loom(pi): ${args.failure}; exact result ignored (${settlement.reason})`])
@@ -377,10 +478,13 @@ async function cleanupFailedLegacyImplementation(
   });
   if (!released) {
     const message = `loom(pi): ${args.failure}; modern attempt lacks exact ReservedSlot authority — current attempt preserved`;
-    return outcome([message], [message]);
+    return processingFailure(message);
   }
-  const inference = binding.inferred ? " (inferred from the sole executing Task; legacy cleanup only)" : "";
-  return outcome([`loom(pi): ${args.failure} — released ${binding.taskId} legacy reservation${inference}; completion evidence ignored`]);
+  const inference = binding.inferred
+    ? `loom(pi): ${args.failure} — released ${binding.taskId} legacy reservation inferred from the sole executing ` +
+      "Task; completion evidence ignored and the attribution itself is unproven"
+    : `loom(pi): ${args.failure} — released ${binding.taskId} legacy reservation; completion evidence ignored`;
+  return binding.inferred ? outcome([inference], [inference]) : outcome([inference]);
 }
 
 async function applyFailedImplementationResult(args: FailedImplementationArgs): Promise<PiResultOutcome> {
@@ -389,7 +493,7 @@ async function applyFailedImplementationResult(args: FailedImplementationArgs): 
     agentType: args.agentType,
     reservedTaskId: args.reservedSlot?.taskId,
     reservedAuthority: args.reservedSlot?.implementationAuthority,
-    resultPrompt: args.result.task ?? "",
+    resultPrompt: args.result.task,
     parentPrompt: "",
     executingTasks,
   });
@@ -403,13 +507,95 @@ async function applyFailedImplementationResult(args: FailedImplementationArgs): 
     : settleFailedExactImplementation(args, binding, authority);
 }
 
+type FailedReviewApplication =
+  | Readonly<{ kind: "missing" }>
+  | Readonly<{ kind: "unchanged" }>
+  | Readonly<{ kind: "authority-rejected"; problem: string }>
+  | Readonly<{ kind: "applied"; task: TaskGraph["tasks"][number] }>;
+
+function reduceFailedReviewResult(
+  state: TaskGraph,
+  taskId: string,
+  agentType: string,
+  reviewAuthority: PiReviewAttemptAuthority | null | undefined,
+  resolution: ReviewResolution,
+): Readonly<{ state: TaskGraph; value: FailedReviewApplication }> {
+  const target = state.tasks.find((task) => task.id === taskId);
+  if (target === undefined) return { state, value: { kind: "missing" } };
+  const authorityProblem = piReviewAuthorityProblem(target, agentType, reviewAuthority);
+  if (authorityProblem !== null) {
+    return { state, value: { kind: "authority-rejected", problem: authorityProblem } };
+  }
+  const appliedTask = applyReviewResolution(target, resolution);
+  if (appliedTask === target) return { state, value: { kind: "unchanged" } };
+  return {
+    state: {
+      ...state,
+      tasks: state.tasks.map((task) => task.id === taskId ? appliedTask : task),
+    },
+    value: { kind: "applied", task: appliedTask },
+  };
+}
+
+async function applyFailedReviewResult(args: Readonly<{
+  store: TaskGraphStore;
+  agentType: string;
+  result: PiSubagentResult;
+  reservedSlot: ReservedSlot | undefined;
+  failure: string;
+}>): Promise<PiResultOutcome> {
+  const returnedTaskId = extractTaskId(args.result.task);
+  const reservedTaskId = args.reservedSlot?.taskId;
+  if (reservedTaskId === undefined || reservedTaskId === null) {
+    const message = `loom(pi): ${args.failure}; failed reviewer has no reserved Task authority — review evidence NOT stored`;
+    return processingFailure(message);
+  }
+  if (returnedTaskId !== reservedTaskId) {
+    const message = `loom(pi): ${args.failure}; returned Task ${returnedTaskId ?? "missing"} does not match ` +
+      `reserved Task ${reservedTaskId} — review evidence NOT stored`;
+    return processingFailure(message);
+  }
+  const failedTaskId = reservedTaskId;
+  const resolution = { kind: "evidence-failed" as const, agent: args.agentType, message: args.failure };
+  const application = await args.store.updateAndReturn((state) =>
+    reduceFailedReviewResult(
+      state,
+      failedTaskId,
+      args.agentType,
+      args.reservedSlot?.reviewAuthority,
+      resolution,
+    ));
+  switch (application.kind) {
+    case "applied":
+      return outcome([reviewResolutionLog(failedTaskId, resolution, application.task, true)]);
+    case "missing": {
+      const message = `loom(pi): ${args.failure}; review task ${failedTaskId} disappeared ` +
+        "under the state lock — review evidence NOT stored";
+      return processingFailure(message);
+    }
+    case "unchanged": {
+      const message = `loom(pi): ${args.failure}; review task ${failedTaskId} rejected duplicate/stale failure evidence ` +
+        "under the state lock — review evidence NOT stored";
+      return processingFailure(message);
+    }
+    case "authority-rejected": {
+      const message = `loom(pi): ${args.failure}; review task ${failedTaskId} ${application.problem} ` +
+        "under the state lock — review evidence NOT stored";
+      return processingFailure(message);
+    }
+  }
+}
+
 /**
  * Record the failure of an agent whose process did not succeed.
  *
  * A failed process may retain valid-looking assistant text; none of it is
- * parsed as evidence here. The failure is nonetheless PERSISTED for gate-owned
- * agents, so a healthy sibling or a stale pass cannot make the missing evidence
- * disappear at the wave gate.
+ * parsed as evidence here. Under exact current reserved authority, the failure
+ * is persisted only under the authority each category owns: exact attempt/slot
+ * authority for implementation and spec-check agents. Reviewers require a
+ * matching Task and, for active Review Runs, exact generation/packet/slot/attempt
+ * authority. Unreserved failures never store positive evidence; a proven
+ * legacy implementation reservation may still be released during cleanup.
  */
 export async function applyFailedPiResult(args: Readonly<{
   store: TaskGraphStore;
@@ -423,30 +609,25 @@ export async function applyFailedPiResult(args: Readonly<{
     `${agentType} failed before evidence capture completed (${piSubagentFailureSignals(result)})`;
 
   if (isReviewAgent(agentType)) {
-    const returnedTaskId = extractTaskId(result.task ?? "");
-    const reservedTaskId = reservedSlot?.taskId;
-    if (reservedTaskId !== undefined && reservedTaskId !== null && returnedTaskId !== reservedTaskId) {
-      const message = `loom(pi): ${failure}; returned Task ${returnedTaskId ?? "missing"} does not match ` +
-        `reserved Task ${reservedTaskId} — review evidence NOT stored`;
-      return outcome([message], [message]);
-    }
-    const failedTaskId = reservedTaskId ?? returnedTaskId;
-    if (failedTaskId === null || failedTaskId === undefined ||
-        !store.load().tasks.some((task) => task.id === failedTaskId)) {
-      const message = `loom(pi): ${failure}; trusted task binding is missing or unknown — review evidence NOT stored`;
-      return outcome([message], [message]);
-    }
-    const resolution = { kind: "evidence-failed" as const, agent: agentType, message: failure };
-    await store.update((state) => ({
-      ...state,
-      tasks: state.tasks.map((task) => task.id === failedTaskId ? applyReviewResolution(task, resolution) : task),
-    }));
-    return outcome([reviewResolutionLog(failedTaskId, resolution)]);
+    return applyFailedReviewResult({ store, agentType, result, reservedSlot, failure });
   }
 
   if (agentType === "spec-check-invoker") {
-    return store.updateAndReturn((state) =>
-      reducePiSpecCheckResult(state, { kind: "capture-failed", error: failure }, args.now));
+    try {
+      const observedState = store.load();
+      const documents = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
+      return store.updateAndReturn((state) =>
+        reducePiSpecCheckResult(
+          state,
+          reservedSlot?.specCheckAuthority,
+          { kind: "capture-failed", error: failure },
+          documents,
+          args.now,
+        ));
+    } catch (error) {
+      const diagnostic = `spec-check document observation failed: ${error instanceof Error ? error.message : String(error)}`;
+      return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);
+    }
   }
 
   // The dispatcher normally settled a reserved failure through
@@ -454,6 +635,10 @@ export async function applyFailedPiResult(args: Readonly<{
   // applier correct in isolation without overwriting that richer proof.
   if (IMPL_AGENTS.has(agentType)) {
     return applyFailedImplementationResult({ store, agentType, result, reservedSlot, failure, now: args.now });
+  }
+  if (PHASE_AGENTS.has(agentType)) {
+    const message = `loom(pi): ${failure} — phase was not advanced`;
+    return processingFailure(message);
   }
   return outcome([`loom(pi): ${failure} — completion evidence ignored`]);
 }
@@ -481,12 +666,11 @@ export function writtenPathsOf(
   return Object.freeze(paths);
 }
 
-type PhaseTransition = NonNullable<ReturnType<typeof resolveTransition>>;
+type PhaseTransition = Extract<PhaseTransitionObservation["resolution"], { kind: "ready" }>;
 
-type PiPhasePreparation = Readonly<{
-  state: TaskGraph;
-  transitionEligible: boolean;
-}>;
+type PiPhasePreparation =
+  | Readonly<{ kind: "eligible"; state: TaskGraph }>
+  | Readonly<{ kind: "mismatch"; state: TaskGraph; relation: "past" | "future" }>;
 
 /** Pure locked-state reducer: stale/future phase results cannot route artifacts or advance. */
 function preparePiPhaseResult(
@@ -495,12 +679,20 @@ function preparePiPhaseResult(
   writtenPaths: readonly string[],
 ): PiPhasePreparation {
   if (!isPhaseResultEligible(state.current_phase, completedPhase)) {
-    return Object.freeze({ state, transitionEligible: false });
+    const currentIndex = PHASES.indexOf(state.current_phase);
+    const completedIndex = PHASES.indexOf(completedPhase);
+    return Object.freeze({
+      kind: "mismatch",
+      state,
+      relation: currentIndex > completedIndex ? "past" : "future",
+    });
   }
-  const updates = phaseArtifactUpdates(writtenPaths, state.spec_dir ?? undefined);
+  const specDir = parseSpecArtifactDirectory(state.spec_dir);
+  if (!specDir.ok) throw new Error(specDir.message);
+  const updates = phaseArtifactUpdates(writtenPaths, specDir.value);
   return Object.freeze({
+    kind: "eligible",
     state: Object.keys(updates).length === 0 ? state : { ...state, ...updates },
-    transitionEligible: true,
   });
 }
 
@@ -508,10 +700,10 @@ function preparePiPhaseResult(
 function reducePiPhaseTransition(
   state: TaskGraph,
   completedPhase: Phase,
-  transition: PhaseTransition | null,
+  transition: PhaseTransition,
   now: string,
 ): TaskGraph {
-  if (transition === null || !isPhaseResultEligible(state.current_phase, completedPhase)) return state;
+  if (!isPhaseResultEligible(state.current_phase, completedPhase)) return state;
   const artifactUpdates = phaseArtifactUpdates([transition.artifact], state.spec_dir ?? undefined);
   return {
     ...state,
@@ -523,6 +715,69 @@ function reducePiPhaseTransition(
       : state.skipped_phases,
     updated_at: now,
   };
+}
+
+function phaseMismatchOutcome(
+  prepared: Extract<PiPhasePreparation, { kind: "mismatch" }>,
+  agentType: string,
+  completedPhase: Phase,
+): PiResultOutcome {
+  const diagnostic = prepared.relation === "past"
+    ? `Phase ${completedPhase} is already past (current: ${prepared.state.current_phase}); stale result ignored`
+    : `${agentType} result cannot advance current Phase ${prepared.state.current_phase}; exact Phase authority required`;
+  return outcome(
+    [`loom(pi): ${diagnostic}`],
+    prepared.relation === "future" ? [diagnostic] : [],
+  );
+}
+
+function reduceLockedPiPhaseResult(
+  locked: TaskGraph,
+  args: Readonly<{ agentType: string; completedPhase: Phase; now: string }>,
+  writtenPaths: readonly string[],
+  observation: PhaseTransitionObservation | null,
+): Readonly<{ state: TaskGraph; value: PiResultOutcome }> {
+  let prepared: PiPhasePreparation;
+  try {
+    prepared = preparePiPhaseResult(locked, args.completedPhase, writtenPaths);
+  } catch (error) {
+    const diagnostic = `${args.agentType} phase artifact extraction failed: ` +
+      `${error instanceof Error ? error.message : String(error)}`;
+    return {
+      state: locked,
+      value: outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]),
+    };
+  }
+  if (prepared.kind === "mismatch") {
+    return {
+      state: prepared.state,
+      value: phaseMismatchOutcome(prepared, args.agentType, args.completedPhase),
+    };
+  }
+  try {
+    if (observation === null || !transitionAuthorityMatches(prepared.state, observation.authority)) {
+      const diagnostic = `${args.agentType} phase artifact authority changed after filesystem observation`;
+      return {
+        state: locked,
+        value: outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]),
+      };
+    }
+    const transition = observation.resolution;
+    if (transition.kind === "not-ready") {
+      const diagnostic = `${args.agentType} completed but phase transition is not ready: ${transition.reason}`;
+      return {
+        state: prepared.state,
+        value: outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]),
+      };
+    }
+    return {
+      state: reducePiPhaseTransition(prepared.state, args.completedPhase, transition, args.now),
+      value: outcome(),
+    };
+  } catch (error) {
+    const diagnostic = `phase advancement failed: ${error instanceof Error ? error.message : String(error)}`;
+    return { state: prepared.state, value: outcome([`loom: ${diagnostic}`], [diagnostic]) };
+  }
 }
 
 /**
@@ -549,30 +804,17 @@ export async function applyPhaseAgentPiResult(args: Readonly<{
   }
   const writtenPaths = writtenPathsOf(parsed.value);
   try {
-    return await args.store.updateAndReturn((locked) => {
-      let prepared: PiPhasePreparation;
-      try {
-        prepared = preparePiPhaseResult(locked, args.completedPhase, writtenPaths);
-      } catch (error) {
-        const diagnostic = `${args.agentType} phase artifact extraction failed: ` +
-          `${error instanceof Error ? error.message : String(error)}`;
-        return {
-          state: locked,
-          value: outcome([`loom(pi): ${diagnostic} — phase was not advanced`], [diagnostic]),
-        };
-      }
-      if (!prepared.transitionEligible) return { state: prepared.state, value: outcome() };
-      try {
-        const transition = resolveTransition(args.completedPhase, prepared.state);
-        return {
-          state: reducePiPhaseTransition(prepared.state, args.completedPhase, transition, args.now),
-          value: outcome(),
-        };
-      } catch (error) {
-        const diagnostic = `phase advancement failed: ${error instanceof Error ? error.message : String(error)}`;
-        return { state: prepared.state, value: outcome([`loom: ${diagnostic}`], [diagnostic]) };
-      }
-    });
+    const observedState = args.store.load();
+    const prepared = preparePiPhaseResult(observedState, args.completedPhase, writtenPaths);
+    const observation = prepared.kind === "eligible"
+      ? (() => {
+          const specDir = parseSpecArtifactDirectory(prepared.state.spec_dir);
+          if (!specDir.ok) throw new Error(specDir.message);
+          return observePhaseTransition(args.completedPhase, prepared.state, specDir.value);
+        })()
+      : null;
+    return await args.store.updateAndReturn((locked) =>
+      reduceLockedPiPhaseResult(locked, args, writtenPaths, observation));
   } catch (error) {
     const diagnostic = `phase state commit failed: ${error instanceof Error ? error.message : String(error)}`;
     return outcome([`loom: ${diagnostic}`], [diagnostic]);
@@ -628,7 +870,13 @@ type LoomTask = TaskGraph["tasks"][number];
 
 type ImplementationBindingResolution =
   | Readonly<{ kind: "unbound"; outcome: PiResultOutcome }>
-  | Readonly<{ kind: "bound"; taskId: string; log: readonly string[] }>;
+  | Readonly<{
+      kind: "bound";
+      taskId: string;
+      log: readonly string[];
+      /** Set when the Task was guessed from `executing_tasks`, never named by the result. */
+      inference: string | null;
+    }>;
 
 type ImplementationTestObservation =
   | Readonly<{ kind: "structured"; evidence: TestEvidence }>
@@ -673,17 +921,23 @@ async function resolveImplementationBindingForResult(args: Readonly<{
     agentType: args.agentType,
     reservedTaskId: args.reservedSlot?.taskId,
     reservedAuthority: args.reservedSlot?.implementationAuthority,
-    resultPrompt: args.result.task ?? "",
+    resultPrompt: args.result.task,
     parentPrompt: args.parentPrompt,
     executingTasks: args.store.load().executing_tasks ?? [],
   });
   if (binding.kind === "unbound") {
     return { kind: "unbound", outcome: outcome([binding.reason], [binding.reason]) };
   }
-  const log = binding.inferred
-    ? [`WARNING: ${args.agentType} task ID extraction failed, inferred task ${binding.taskId} from executing_tasks`]
-    : [];
-  return { kind: "bound", taskId: binding.taskId, log };
+  const inference = binding.inferred
+    ? `${args.agentType} named no Task: attribution was inferred because executing_tasks holds exactly one ` +
+      `Task, so ${binding.taskId} is credited on that guess and not on evidence`
+    : null;
+  return {
+    kind: "bound",
+    taskId: binding.taskId,
+    log: inference === null ? [] : [`WARNING: ${inference}`],
+    inference,
+  };
 }
 
 function missingStructuredEvidenceLog(taskId: string, messages: unknown): string | null {
@@ -725,7 +979,10 @@ function observeImplementationTranscript(result: PiSubagentResult, taskId: strin
   const transcriptEvidence = extractTestEvidence(parseBashTestOutput(adaptedTranscript.value));
   const test: ImplementationTestObservation = structuredEvidence.value === null
     ? { kind: "fallback", evidence: transcriptEvidence }
-    : { kind: "structured", evidence: structuredEvidence.value };
+    : {
+        kind: "structured",
+        evidence: testEvidenceOf(structuredEvidence.value.passed, structuredEvidence.value.evidence),
+      };
   return {
     kind: "accepted",
     resultMessages: parsedMessages.value,
@@ -1011,8 +1268,12 @@ function renderExactPiSettlement(
   settled: LockedPiSettlement | undefined,
 ): PiResultOutcome {
   const applied = settled?.application;
-  if (applied === undefined || applied.kind === "error") {
-    const diagnostic = `loom(pi): exact Oracle settlement failed for ${args.binding.taskId} — current attempt preserved`;
+  if (applied === undefined) {
+    const diagnostic = `loom(pi): exact Oracle settlement produced no transition for ${args.binding.taskId} — current attempt preserved`;
+    return outcome([...args.log, diagnostic], [diagnostic]);
+  }
+  if (applied.kind === "error") {
+    const diagnostic = `loom(pi): exact Oracle settlement failed for ${args.binding.taskId}: ${JSON.stringify(applied.error)} — current attempt preserved`;
     return outcome([...args.log, diagnostic], [diagnostic]);
   }
   if (applied.kind === "ignored") {
@@ -1103,8 +1364,8 @@ async function applyLegacyImplementationPiResult(
   const transcript = observeImplementationTranscript(args.result, binding.taskId);
   log.push(...transcript.log);
   if (transcript.kind === "malformed") {
-    log.push(...await applyMalformedImplementationTranscript({ ...args, taskId: binding.taskId, ...transcript }));
-    return outcome(log);
+    const failures = await applyMalformedImplementationTranscript({ ...args, taskId: binding.taskId, ...transcript });
+    return outcome([...log, ...failures], failures);
   }
   const modified = readImplementationModifiedPaths(args.repository, transcript.resultMessages, binding.taskId);
   if (!modified.ok) {
@@ -1125,6 +1386,19 @@ async function applyLegacyImplementationPiResult(
 export async function applyImplementationPiResult(args: ImplementationPiResultArgs): Promise<PiResultOutcome> {
   const binding = await resolveImplementationBindingForResult(args);
   if (binding.kind === "unbound") return binding.outcome;
+  const result = await applyBoundImplementationPiResult(args, binding);
+  // An inferred attribution is never a clean processing: the result named no
+  // Task of its own, so the harness must see the verdict as unproven instead of
+  // reading a warning that only ever reached stderr.
+  return binding.inference === null
+    ? result
+    : outcome([...result.log], [...result.processingErrors, `loom(pi): ${binding.inference}`]);
+}
+
+async function applyBoundImplementationPiResult(
+  args: ImplementationPiResultArgs,
+  binding: ResultImplementationBinding,
+): Promise<PiResultOutcome> {
   const log = [...binding.log];
   const authority = args.reservedSlot?.implementationAuthority;
   const currentTask = args.store.load().tasks.find((task) => task.id === binding.taskId);
@@ -1156,7 +1430,7 @@ export async function applyImplementationPiResult(args: ImplementationPiResultAr
 
 type ReviewTaskBinding =
   | Readonly<{ kind: "blocked"; outcome: PiResultOutcome }>
-  | Readonly<{ kind: "bound"; taskId: string; reviewTask: LoomTask }>;
+  | Readonly<{ kind: "bound"; taskId: string }>;
 
 function resolveReviewTaskBinding(args: Readonly<{
   store: TaskGraphStore;
@@ -1165,89 +1439,116 @@ function resolveReviewTaskBinding(args: Readonly<{
   reservedSlot: ReservedSlot | undefined;
   parentPrompt: ParentPromptText;
 }>): ReviewTaskBinding {
-  const returnedTaskId = extractTaskId(args.result.task ?? "");
+  const returnedTaskId = extractTaskId(args.result.task);
   const reservedTaskId = args.reservedSlot?.taskId;
   if (reservedTaskId !== undefined && reservedTaskId !== null && returnedTaskId !== reservedTaskId) {
     const message = `WARNING: ${args.agentType} review result Task identity ${returnedTaskId ?? "missing"} ` +
       `does not match reserved Task ${reservedTaskId} — findings NOT stored`;
-    return { kind: "blocked", outcome: outcome([message], [message]) };
+    return { kind: "blocked", outcome: processingFailure(message) };
   }
   const taskId = reservedTaskId ?? returnedTaskId ?? extractTaskId(args.parentPrompt);
   if (!taskId) {
     const message = `WARNING: ${args.agentType} review completed without an extractable task ID — findings NOT stored`;
-    return { kind: "blocked", outcome: outcome([message], [message]) };
+    return { kind: "blocked", outcome: processingFailure(message) };
   }
 
   const reviewTask = args.store.load().tasks.find((task) => task.id === taskId);
   if (!reviewTask) {
     const message = `WARNING: ${args.agentType} review names task ${taskId}, which is not in the task graph — findings NOT stored`;
-    return { kind: "blocked", outcome: outcome([message], [message]) };
+    return { kind: "blocked", outcome: processingFailure(message) };
   }
-  return { kind: "bound", taskId, reviewTask };
+  return { kind: "bound", taskId };
+}
+
+type LockedReviewEvidenceApplication =
+  | Readonly<{ kind: "missing" }>
+  | Readonly<{ kind: "authority-rejected"; problem: string }>
+  | Readonly<{
+      kind: "applied";
+      resolution: ReviewResolution;
+      task: LoomTask;
+      changed: boolean;
+    }>;
+
+/** Apply either parsed or malformed reviewer evidence under one locked protocol. */
+async function applyLockedReviewEvidence(args: Readonly<{
+  store: TaskGraphStore;
+  agentType: string;
+  taskId: string;
+  reviewAuthority: PiReviewAttemptAuthority | null | undefined;
+  resolutionFor(task: LoomTask): ReviewResolution;
+}>): Promise<PiResultOutcome> {
+  const result: { application: LockedReviewEvidenceApplication } = {
+    application: { kind: "missing" },
+  };
+  await args.store.update((state) => {
+    const task = state.tasks.find((candidate) => candidate.id === args.taskId);
+    if (task === undefined) return state;
+    const authorityProblem = piReviewAuthorityProblem(task, args.agentType, args.reviewAuthority);
+    if (authorityProblem !== null) {
+      result.application = { kind: "authority-rejected", problem: authorityProblem };
+      return state;
+    }
+    const resolution = args.resolutionFor(task);
+    const appliedTask = applyReviewResolution(task, resolution);
+    result.application = {
+      kind: "applied",
+      resolution,
+      task: appliedTask,
+      changed: appliedTask !== task,
+    };
+    return appliedTask === task
+      ? state
+      : {
+          ...state,
+          tasks: state.tasks.map((candidate) => candidate.id === args.taskId ? appliedTask : candidate),
+        };
+  });
+
+  const application = result.application;
+  if (application.kind === "missing") {
+    const message = `WARNING: ${args.agentType} review task ${args.taskId} disappeared before evidence application — findings NOT stored`;
+    return processingFailure(message);
+  }
+  if (application.kind === "authority-rejected") {
+    const message = `WARNING: ${args.agentType} review task ${args.taskId} ${application.problem} — findings NOT stored`;
+    return processingFailure(message);
+  }
+  return outcome([
+    reviewResolutionLog(args.taskId, application.resolution, application.task, application.changed),
+  ]);
 }
 
 async function applyMalformedReviewMessages(args: Readonly<{
   store: TaskGraphStore;
   agentType: string;
   taskId: string;
-  reviewTask: LoomTask;
+  reviewAuthority: PiReviewAttemptAuthority | null | undefined;
   errors: readonly string[];
 }>): Promise<PiResultOutcome> {
-  const message = `Pi review messages are malformed: ${args.errors.join("; ")}`;
-  const resolution = { kind: "evidence-failed" as const, agent: args.agentType, message };
-  let appliedTask = args.reviewTask;
-  let taskFound = false;
-  await args.store.update((state) => ({
-    ...state,
-    tasks: state.tasks.map((task) => {
-      if (task.id !== args.taskId) return task;
-      taskFound = true;
-      appliedTask = applyReviewResolution(task, resolution);
-      return appliedTask;
-    }),
-  }));
-  if (!taskFound) {
-    const missing = `WARNING: ${args.agentType} review task ${args.taskId} disappeared before malformed evidence application — findings NOT stored`;
-    return outcome([missing], [missing]);
-  }
-  return outcome([reviewResolutionLog(args.taskId, resolution, appliedTask, true)]);
+  const resolution: ReviewResolution = {
+    kind: "evidence-failed",
+    agent: args.agentType,
+    message: `Pi review messages are malformed: ${args.errors.join("; ")}`,
+  };
+  return applyLockedReviewEvidence({ ...args, resolutionFor: () => resolution });
 }
 
 async function applyParsedReviewMessages(args: Readonly<{
   store: TaskGraphStore;
   agentType: string;
   taskId: string;
-  reviewTask: LoomTask;
+  reviewAuthority: PiReviewAttemptAuthority | null | undefined;
   messages: readonly PiMessage[];
 }>): Promise<PiResultOutcome> {
-  let resolution: ReviewResolution = {
-    kind: "evidence-failed",
-    agent: args.agentType,
-    message: "review task disappeared before evidence could be applied",
-  };
-  let appliedTask = args.reviewTask;
-  let applicationChanged = false;
-  let taskFound = false;
   const transcriptText = transcriptTextOf(args.messages);
-  await args.store.update((state) => ({
-    ...state,
-    tasks: state.tasks.map((task) => {
-      if (task.id !== args.taskId) return task;
-      taskFound = true;
-      resolution = constrainReviewResolutionToScope(
-        resolveTaskReviewFindings(transcriptText, args.agentType, task.review_run, task.review_generation),
-        [...(task.file_list ?? []), ...(task.files_modified ?? [])],
-      );
-      appliedTask = applyReviewResolution(task, resolution);
-      applicationChanged = appliedTask !== task;
-      return appliedTask;
-    }),
-  }));
-  if (!taskFound) {
-    const message = `WARNING: ${args.agentType} review task ${args.taskId} disappeared before evidence application — findings NOT stored`;
-    return outcome([message], [message]);
-  }
-  return outcome([reviewResolutionLog(args.taskId, resolution, appliedTask, applicationChanged)]);
+  return applyLockedReviewEvidence({
+    ...args,
+    resolutionFor: (task) => constrainReviewResolutionToScope(
+      resolveTaskReviewFindings(transcriptText, args.agentType, task.review_run, task.review_generation),
+      [...(task.file_list ?? []), ...(task.files_modified ?? [])],
+    ),
+  });
 }
 
 /**
@@ -1269,10 +1570,11 @@ export async function applyReviewPiResult(args: Readonly<{
   if (binding.kind === "blocked") return binding.outcome;
 
   const parsedMessages = parsePiMessages(args.result.messages);
+  const reviewAuthority = args.reservedSlot?.reviewAuthority;
   if (!parsedMessages.ok) {
-    return applyMalformedReviewMessages({ ...args, ...binding, errors: parsedMessages.errors });
+    return applyMalformedReviewMessages({ ...args, ...binding, reviewAuthority, errors: parsedMessages.errors });
   }
-  return applyParsedReviewMessages({ ...args, ...binding, messages: parsedMessages.value });
+  return applyParsedReviewMessages({ ...args, ...binding, reviewAuthority, messages: parsedMessages.value });
 }
 
 // ---------------------------------------------------------------------------
@@ -1283,45 +1585,115 @@ type PiSpecCheckObservation =
   | Readonly<{ kind: "capture-failed"; error: string }>
   | Readonly<{ kind: "parsed"; findings: ParsedSpecCheckOutput }>;
 
-/** Pure spec-check command. An omitted Wave is selected only from locked state. */
+/** Freeze the exact current Wave/spec-check capability for a Pi reservation. */
+export function currentPiSpecCheckAuthority(state: TaskGraph): PiSpecCheckAttemptAuthority | null {
+  const epoch = state.wave_review_epoch;
+  const slot = epoch?.specCheckSlotAuthority;
+  if (state.current_phase !== "execute" || epoch === undefined || slot === undefined ||
+      state.current_wave !== epoch.wave || state.active_wave_gate?.runId !== epoch.runId ||
+      state.active_wave_gate.wave !== epoch.wave) return null;
+  return Object.freeze({
+    runId: epoch.runId,
+    wave: epoch.wave,
+    batchEpoch: epoch.batchEpoch,
+    slotId: slot.slot_id,
+    attempt: slot.attempted,
+  });
+}
+
+type PiSpecCheckAuthorityDecision =
+  | Readonly<{ kind: "accepted"; authority: PiSpecCheckAttemptAuthority }>
+  | Readonly<{ kind: "rejected"; problem: string }>;
+
+function decidePiSpecCheckAuthority(
+  state: TaskGraph,
+  authority: PiSpecCheckAttemptAuthority | null | undefined,
+  documents?: WaveSpecCheckDocumentsAuthority,
+): PiSpecCheckAuthorityDecision {
+  if (authority == null) {
+    return { kind: "rejected", problem: "spec-check result has no exact reserved Wave slot/attempt authority" };
+  }
+  const current = currentPiSpecCheckAuthority(state);
+  if (current === null) {
+    return { kind: "rejected", problem: "current TaskGraph has no active exact Wave spec-check authority" };
+  }
+  if (documents !== undefined &&
+      (!waveSpecCheckDocumentsMatch(state.wave_review_epoch?.specCheckDocuments, documents) ||
+       state.spec_file !== documents.spec.path || state.plan_file !== documents.plan.path)) {
+    return { kind: "rejected", problem: "current spec/plan bytes do not match exact Wave spec-check authority" };
+  }
+  return current.runId === authority.runId && current.wave === authority.wave &&
+      current.batchEpoch === authority.batchEpoch && current.slotId === authority.slotId &&
+      current.attempt === authority.attempt
+    ? { kind: "accepted", authority }
+    : {
+        kind: "rejected",
+        problem: `reserved spec-check authority ${authority.runId}/${authority.wave}/${authority.slotId}/${authority.attempt} ` +
+          `does not match current ${current.runId}/${current.wave}/${current.slotId}/${current.attempt}`,
+      };
+}
+
+/** Explain why a reserved spec-check capability cannot mutate this snapshot. */
+export function piSpecCheckAuthorityProblem(
+  state: TaskGraph,
+  authority: PiSpecCheckAttemptAuthority | null | undefined,
+): string | null {
+  const decision = decidePiSpecCheckAuthority(state, authority);
+  return decision.kind === "accepted" ? null : decision.problem;
+}
+
+function commitPiSpecCheck(
+  state: TaskGraph,
+  specCheck: NonNullable<TaskGraph["spec_check"]>,
+  value: PiResultOutcome,
+): Readonly<{ state: TaskGraph; value: PiResultOutcome }> {
+  return {
+    state: {
+      ...state,
+      spec_check: specCheck,
+      wave_gates: reconcileWaveBlock(state.wave_gates, state.tasks, specCheck, specCheck.wave),
+    },
+    value,
+  };
+}
+
+/** Pure spec-check command under exact locked Wave slot authority. */
 function reducePiSpecCheckResult(
   state: TaskGraph,
+  authority: PiSpecCheckAttemptAuthority | null | undefined,
   observation: PiSpecCheckObservation,
+  documents: WaveSpecCheckDocumentsAuthority,
   now: string,
 ): Readonly<{ state: TaskGraph; value: PiResultOutcome }> {
-  const wave = observation.kind === "parsed"
-    ? observation.findings.wave ?? state.current_wave ?? 1
-    : state.current_wave ?? 1;
+  const authorityDecision = decidePiSpecCheckAuthority(state, authority, documents);
+  if (authorityDecision.kind === "rejected") {
+    const diagnostic = `spec-check evidence rejected: ${authorityDecision.problem}; protected state unchanged`;
+    return { state, value: outcome([`loom(pi): ${diagnostic}`], [diagnostic]) };
+  }
+  const wave = authorityDecision.authority.wave;
   if (observation.kind === "capture-failed") {
-    return {
-      state: {
-        ...state,
-        spec_check: {
-          wave,
-          run_at: now,
-          verdict: "EVIDENCE_CAPTURE_FAILED",
-          error: observation.error,
-        },
-      },
-      value: outcome([`loom(pi): ${observation.error} — marking spec-check evidence_capture_failed`]),
+    const specCheck = {
+      wave,
+      run_at: now,
+      verdict: "EVIDENCE_CAPTURE_FAILED" as const,
+      error: observation.error,
     };
+    return commitPiSpecCheck(
+      state,
+      specCheck,
+      outcome([`loom(pi): ${observation.error} — marking spec-check evidence_capture_failed`]),
+    );
   }
 
   const resolution = reconcileSpecCheck(observation.findings, wave, now);
   if (resolution.kind === "evidence-failed") {
-    return {
-      state: { ...state, spec_check: resolution.specCheck },
-      value: outcome([`loom(pi): ${resolution.specCheck.error} — marking spec-check evidence_capture_failed`]),
-    };
+    return commitPiSpecCheck(
+      state,
+      resolution.specCheck,
+      outcome([`loom(pi): ${resolution.specCheck.error} — marking spec-check evidence_capture_failed`]),
+    );
   }
-  return {
-    state: {
-      ...state,
-      spec_check: resolution.specCheck,
-      wave_gates: reconcileWaveBlock(state.wave_gates, state.tasks, resolution.specCheck, wave),
-    },
-    value: outcome(),
-  };
+  return commitPiSpecCheck(state, resolution.specCheck, outcome());
 }
 
 /**
@@ -1334,6 +1706,7 @@ function reducePiSpecCheckResult(
 export async function applySpecCheckPiResult(args: Readonly<{
   store: TaskGraphStore;
   result: PiSubagentResult;
+  reservedSlot: ReservedSlot | undefined;
   now: string;
 }>): Promise<PiResultOutcome> {
   const parsedMessages = parsePiMessages(args.result.messages);
@@ -1344,8 +1717,10 @@ export async function applySpecCheckPiResult(args: Readonly<{
         error: `spec-check-invoker messages are malformed: ${parsedMessages.errors.join("; ")}`,
       };
   try {
+    const observedState = args.store.load();
+    const documents = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
     return await args.store.updateAndReturn((state) =>
-      reducePiSpecCheckResult(state, observation, args.now));
+      reducePiSpecCheckResult(state, args.reservedSlot?.specCheckAuthority, observation, documents, args.now));
   } catch (error) {
     const diagnostic = `spec-check state commit failed: ${error instanceof Error ? error.message : String(error)}`;
     return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);

@@ -7,7 +7,20 @@
 
 import { describe, it, expect } from "vitest";
 import cleanup, { runCleanupSubagentFlag } from "../../../src/handlers/subagent-stop/cleanup-subagent-flag";
-import { fsSessionRegistry } from "../../../src/machine";
+import {
+  fsSessionRegistry,
+  parseAgentId,
+  parseAgentType,
+  parseEpoch,
+} from "../../../src/machine";
+
+function cleanupBindingFixture() {
+  const agentId = parseAgentId("agent-cleanup");
+  const agentType = parseAgentType("code-implementer-agent");
+  const epoch = parseEpoch("agent-cleanup:code-implementer-agent");
+  if (agentId === null || agentType === null || epoch === null) throw new Error("fixture identity failed");
+  return { agentId, agentType, epoch };
+}
 
 describe("cleanup-subagent-flag — malformed stdin", () => {
   it("returns a contextual error instead of throwing", async () => {
@@ -20,6 +33,17 @@ describe("cleanup-subagent-flag — malformed stdin", () => {
       expect(result.message).toContain("TTL");
     }
   });
+
+  it.each(["null", "42", "[]", JSON.stringify({ session_id: "session-1", agent_type: false })])(
+    "rejects valid JSON with an invalid domain shape: %s",
+    async (stdin) => {
+      const result = await cleanup(stdin, []);
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringMatching(/invalid SubagentStop input.*NOT released.*TTL/),
+      });
+    },
+  );
 
   it("fails closed when agent_id is missing because cleanup identity is unknown", async () => {
     const result = await cleanup(JSON.stringify({ session_id: "s-none" }), []);
@@ -43,10 +67,157 @@ describe("cleanup-subagent-flag — malformed stdin", () => {
     expect(result.message).toContain("machine binding");
   });
 
-  it("attempts machine unbind, sidecar deletion, and roster cleanup and returns every failure", async () => {
+  it("recovers the exact machine-binding identity when agent_type is omitted", async () => {
+    const { agentId, agentType, epoch } = cleanupBindingFixture();
     const attempted: string[] = [];
     const registry = {
       ...fsSessionRegistry,
+      readBindingAuthority: () => ({ kind: "parsed" as const, bindings: [{ agentId, agentType, epoch }] }),
+      unbind: async (_sessionId: unknown, observedType: unknown, observedId: unknown) => {
+        attempted.push(`unbind:${String(observedType)}:${String(observedId)}`);
+        return "released" as const;
+      },
+      removeActive: async () => { attempted.push("roster"); },
+    };
+
+    const result = await runCleanupSubagentFlag(
+      JSON.stringify({ session_id: "cleanup-derived-binding", agent_id: "agent-cleanup" }),
+      registry,
+      () => { attempted.push("sidecar"); },
+      async () => { attempted.push("pointer"); return "binding-missing"; },
+    );
+
+    expect(result).toEqual({ kind: "passthrough" });
+    expect(attempted).toEqual([
+      "unbind:code-implementer-agent:agent-cleanup",
+      "sidecar",
+      "pointer",
+      "roster",
+    ]);
+  });
+
+  it("still releases every capability when reported agent type observation throws", async () => {
+    const { agentId, agentType, epoch } = cleanupBindingFixture();
+    const attempted: string[] = [];
+    const registry = {
+      ...fsSessionRegistry,
+      readBindingAuthority: () => ({ kind: "parsed" as const, bindings: [{ agentId, agentType, epoch }] }),
+      unbind: async () => { attempted.push("unbind"); return "released" as const; },
+      removeActive: async () => { attempted.push("roster"); },
+    };
+
+    const result = await runCleanupSubagentFlag(
+      JSON.stringify({ session_id: "cleanup-type-fault", agent_id: "agent-cleanup" }),
+      registry,
+      () => { attempted.push("sidecar"); },
+      async () => { attempted.push("pointer"); return "binding-missing"; },
+      () => { throw new Error("injected metadata ENOTDIR"); },
+    );
+
+    expect(attempted).toEqual(["unbind", "sidecar", "pointer", "roster"]);
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/reported agent type observation failed.*injected metadata ENOTDIR/),
+    });
+  });
+
+  it("releases the persisted binding and reports a valid but conflicting agent_type", async () => {
+    const { agentId, agentType: persistedType, epoch } = cleanupBindingFixture();
+    const attempted: string[] = [];
+    const registry = {
+      ...fsSessionRegistry,
+      readBindingAuthority: () => ({
+        kind: "parsed" as const,
+        bindings: [{ agentId, agentType: persistedType, epoch }],
+      }),
+      unbind: async (_sessionId: unknown, observedType: unknown) => {
+        attempted.push(`unbind:${String(observedType)}`);
+        return "released" as const;
+      },
+      removeActive: async () => {},
+    };
+
+    const result = await runCleanupSubagentFlag(
+      JSON.stringify({
+        session_id: "cleanup-conflicting-binding",
+        agent_id: "agent-cleanup",
+        agent_type: "code-reviewer",
+      }),
+      registry,
+      () => {},
+      async () => "binding-missing",
+    );
+
+    expect(attempted).toEqual(["unbind:code-implementer-agent"]);
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/reported agent_type code-reviewer disagrees with persisted binding code-implementer-agent/),
+    });
+  });
+
+  it("fails closed on corrupt binding authority while releasing independent capabilities", async () => {
+    const { agentId, agentType, epoch } = cleanupBindingFixture();
+    const attempted: string[] = [];
+    const registry = {
+      ...fsSessionRegistry,
+      readBindingAuthority: () => ({
+        kind: "corrupt" as const,
+        bindings: [{ agentId, agentType, epoch }],
+      }),
+      unbind: async () => { attempted.push("unbind"); return "released" as const; },
+      removeActive: async () => { attempted.push("roster"); },
+    };
+
+    const result = await runCleanupSubagentFlag(
+      JSON.stringify({
+        session_id: "cleanup-corrupt-binding",
+        agent_id: "agent-cleanup",
+        agent_type: "code-implementer-agent",
+      }),
+      registry,
+      () => { attempted.push("sidecar"); },
+      async () => { attempted.push("pointer"); return "binding-missing"; },
+    );
+
+    expect(attempted).toEqual(["sidecar", "pointer", "roster"]);
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/machine binding authority .*cleanup-corrupt-binding\.machine.*corrupt.*binding NOT released/i),
+    });
+  });
+
+  it("reports when exact machine-binding ownership changes before release", async () => {
+    const { agentId, agentType, epoch } = cleanupBindingFixture();
+    const registry = {
+      ...fsSessionRegistry,
+      readBindingAuthority: () => ({ kind: "parsed" as const, bindings: [{ agentId, agentType, epoch }] }),
+      unbind: async () => "not-owned" as const,
+      removeActive: async () => {},
+    };
+
+    const result = await runCleanupSubagentFlag(
+      JSON.stringify({
+        session_id: "cleanup-lost-binding",
+        agent_id: "agent-cleanup",
+        agent_type: "code-implementer-agent",
+      }),
+      registry,
+      () => {},
+      async () => "binding-missing",
+    );
+
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringContaining("machine unbind lost exact ownership"),
+    });
+  });
+
+  it("attempts machine unbind, sidecar deletion, and roster cleanup and returns every failure", async () => {
+    const { agentId, agentType, epoch } = cleanupBindingFixture();
+    const attempted: string[] = [];
+    const registry = {
+      ...fsSessionRegistry,
+      readBindingAuthority: () => ({ kind: "parsed" as const, bindings: [{ agentId, agentType, epoch }] }),
       unbind: async () => {
         attempted.push("unbind");
         throw new Error("unbind unavailable");

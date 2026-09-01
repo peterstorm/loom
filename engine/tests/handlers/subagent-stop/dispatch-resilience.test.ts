@@ -2,9 +2,9 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 /**
  * SubagentStop dispatch resilience:
  * - malformed stdin fails closed with a specific "bindings may leak" error
- * - a cleanupSubagentFlag crash still runs update-task-status (Advisory 4)
+ * - a cleanupSubagentFlag crash still runs update-task-status
  * - update-task-status judges the dispatcher's pre-unbind ledger snapshot,
- *   not whatever file is on disk when it runs (Advisory 7)
+ *   not whatever file is on disk when it runs
  */
 
 import { describe, it, expect, afterEach, vi } from "vitest";
@@ -18,6 +18,7 @@ import { parseEpoch } from "../../../src/machine";
 import type { EvidenceRecord } from "../../../src/machine";
 import { agentRequestAuthority } from "../../fixtures/agent-request-authority";
 import { openRunDirectory } from "../../../src/orchestration/run-directory-handle";
+import { buildContextPacket, encodeByteSection } from "../../../src/core/context-packets";
 import { reportSummary } from "../../machine/report-summary";
 
 const run = `dispatch-resilience-${process.pid}-${Date.now()}`;
@@ -144,15 +145,278 @@ describe("request-bound capture gates legacy dispatch", () => {
       else process.env.LOOM_ORCHESTRATION_RUN_DIR = previousRun;
     }
   });
+
+  it.each([
+    ["matching metadata", "spec-check-invoker", true],
+    ["omitted metadata", undefined, true],
+    ["contradictory metadata", "code-reviewer", false],
+  ] as const)("routes a captured Wave Gate spec-check from request authority with %s", async (_label, reportedAgentType, settles) => {
+    const dir = tempDir();
+    const statePath = writeState(dir);
+    const session = sid("wave-gate-spec-check");
+    pointSessionAt(session, statePath);
+    const runsRoot = join(dir, "runs");
+    const runDir = join(runsRoot, "run.dispatch-wave-gate");
+    mkdirSync(runDir, { recursive: true });
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+
+    const baseRequest = agentRequestAuthority("run.dispatch-wave-gate", {
+      requestId: "wave-request:dispatch-spec-check:1",
+      slotId: "wave-slot:dispatch-spec-check",
+      role: "spec-check-invoker",
+      requiredSkill: "spec-check",
+      outputSlot: {
+        kind: "fixed-artifact-slot",
+        path: "transcripts/wave-slot:dispatch-spec-check/attempt-1.raw",
+      },
+    });
+    const section = encodeByteSection("test", "request-bound Wave Gate spec-check context");
+    if (!section.ok) throw new Error(section.error.message);
+    const packet = buildContextPacket({
+      requestId: baseRequest.requestId,
+      role: baseRequest.role,
+      requiredSkill: baseRequest.requiredSkill ?? "none",
+      outputContract: "emit exact Wave spec-check bytes",
+      fixedContext: [section.value],
+      variableContext: [],
+    });
+    if (!packet.ok) throw new Error(packet.error.message);
+    expect((await opened.value.publishContext(packet.value)).ok).toBe(true);
+    const request = agentRequestAuthority("run.dispatch-wave-gate", {
+      ...baseRequest,
+      contextDigest: packet.value.digest,
+    });
+    expect((await opened.value.reserveRequest(request)).ok).toBe(true);
+    expect((await opened.value.recordHarnessCorrelator({
+      schemaVersion: 1,
+      harness: "claude",
+      nativeId: "agent-wave-gate-spec-check",
+      requestId: request.requestId,
+      role: request.role,
+      attempt: request.attempt,
+    })).ok).toBe(true);
+
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    state.active_wave_gate = {
+      schemaVersion: 1,
+      kind: "active-wave-gate",
+      runId: request.runId,
+      wave: 1,
+      authorityDigest: "a".repeat(64),
+      revision: 0,
+      terminalOutcome: null,
+    };
+    state.wave_review_epoch = {
+      runId: request.runId,
+      wave: 1,
+      batchEpoch: "b".repeat(64),
+      specCheckDocuments: {
+        spec: { path: state.spec_file, contentDigest: null },
+        plan: { path: state.plan_file, contentDigest: null },
+      },
+      specCheckSlotAuthority: { slot_id: request.slotId, attempted: request.attempt },
+    };
+    writeFileSync(statePath, JSON.stringify(state));
+
+    const transcriptPath = join(dir, "wave-gate-spec-check.jsonl");
+    const capturedBytes = [
+      "SPEC_CHECK_WAVE: 1",
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+    ].join("\n");
+    writeFileSync(transcriptPath, JSON.stringify({
+      message: { role: "assistant", content: [{ type: "text", text: capturedBytes }] },
+    }));
+    const cleanup = vi.fn(async () => ({ kind: "passthrough" as const }));
+    const previousRoot = process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+    const previousRun = process.env.LOOM_ORCHESTRATION_RUN_DIR;
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = runDir;
+    try {
+      const result = await runDispatch(JSON.stringify({
+        session_id: session,
+        agent_id: "agent-wave-gate-spec-check",
+        agent_type: reportedAgentType,
+        agent_transcript_path: transcriptPath,
+      }), [], cleanup);
+
+      expect(cleanup).toHaveBeenCalledOnce();
+      const settledState = JSON.parse(readFileSync(statePath, "utf8"));
+      if (settles) {
+        expect(result).toEqual({ kind: "passthrough" });
+        expect(settledState.spec_check).toMatchObject({
+          wave: 1,
+          verdict: "PASSED",
+          critical_count: 0,
+          high_count: 0,
+        });
+      } else {
+        expect(result).toMatchObject({
+          kind: "error",
+          message: expect.stringMatching(/issued to.*spec-check-invoker.*reported.*code-reviewer/),
+        });
+        expect(settledState.spec_check).toBeUndefined();
+      }
+      const captured = opened.value.readTranscriptBytes(request);
+      expect(captured.ok).toBe(true);
+      if (captured.ok) expect(Buffer.from(captured.value).toString("utf8")).toBe(capturedBytes);
+    } finally {
+      if (previousRoot === undefined) delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+      else process.env.LOOM_ORCHESTRATION_RUNS_ROOT = previousRoot;
+      if (previousRun === undefined) delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
+      else process.env.LOOM_ORCHESTRATION_RUN_DIR = previousRun;
+    }
+  });
+
+  it("terminates a captured graphless standalone review without consulting faulting agent metadata", async () => {
+    const dir = tempDir();
+    const runsRoot = join(dir, "runs");
+    const runDir = join(runsRoot, "run.graphless-standalone-capture");
+    mkdirSync(runDir, { recursive: true });
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const baseRequest = agentRequestAuthority("run.graphless-standalone-capture", {
+      program: "standalone-review",
+    });
+    const section = encodeByteSection("test", "graphless standalone capture context");
+    if (!section.ok) throw new Error(section.error.message);
+    const packet = buildContextPacket({
+      requestId: baseRequest.requestId,
+      role: baseRequest.role,
+      requiredSkill: "none",
+      outputContract: "emit exact standalone review bytes",
+      fixedContext: [section.value],
+      variableContext: [],
+    });
+    if (!packet.ok) throw new Error(packet.error.message);
+    expect((await opened.value.publishContext(packet.value)).ok).toBe(true);
+    const request = agentRequestAuthority("run.graphless-standalone-capture", {
+      program: "standalone-review",
+      contextDigest: packet.value.digest,
+    });
+    expect((await opened.value.reserveRequest(request)).ok).toBe(true);
+    expect((await opened.value.recordHarnessCorrelator({
+      schemaVersion: 1,
+      harness: "claude",
+      nativeId: "agent-graphless-standalone",
+      requestId: request.requestId,
+      role: request.role,
+      attempt: request.attempt,
+    })).ok).toBe(true);
+    const transcriptPath = join(dir, "graphless-standalone.jsonl");
+    const capturedBytes = "exact graphless standalone review result";
+    writeFileSync(transcriptPath, JSON.stringify({
+      message: { role: "assistant", content: [{ type: "text", text: capturedBytes }] },
+    }));
+    const cleanup = vi.fn(async () => ({ kind: "passthrough" as const }));
+    const config = join(dir, "faulting-claude-config");
+    const project = join(dir, "project");
+    mkdirSync(config, { recursive: true });
+    mkdirSync(project, { recursive: true });
+    writeFileSync(join(config, "projects"), "not a directory\n");
+    const previousRoot = process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+    const previousRun = process.env.LOOM_ORCHESTRATION_RUN_DIR;
+    const previousConfig = process.env.CLAUDE_CONFIG_DIR;
+    const previousProject = process.env.CLAUDE_PROJECT_DIR;
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = runDir;
+    process.env.CLAUDE_CONFIG_DIR = config;
+    process.env.CLAUDE_PROJECT_DIR = project;
+    try {
+      const result = await runDispatch(JSON.stringify({
+        session_id: sid("graphless-standalone"),
+        agent_id: "agent-graphless-standalone",
+        agent_transcript_path: transcriptPath,
+      }), [], cleanup);
+
+      expect(result).toEqual({ kind: "passthrough" });
+      expect(cleanup).toHaveBeenCalledOnce();
+      const captured = opened.value.readTranscriptBytes(request);
+      expect(captured.ok).toBe(true);
+      if (captured.ok) expect(Buffer.from(captured.value).toString("utf8")).toBe(capturedBytes);
+    } finally {
+      if (previousRoot === undefined) delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+      else process.env.LOOM_ORCHESTRATION_RUNS_ROOT = previousRoot;
+      if (previousRun === undefined) delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
+      else process.env.LOOM_ORCHESTRATION_RUN_DIR = previousRun;
+      if (previousConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousConfig;
+      if (previousProject === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = previousProject;
+    }
+  });
 });
 
-describe("malformed hook input is caught, not crashed on (Advisory 4)", () => {
+describe("routing observation faults settle through cleanup", () => {
+  it("returns an ENOTDIR metadata fault after invoking cleanup", async () => {
+    const dir = tempDir();
+    const config = join(dir, "claude-config");
+    const project = join(dir, "project");
+    mkdirSync(config, { recursive: true });
+    mkdirSync(project, { recursive: true });
+    // projects must be a directory. Making it a file forces the derived
+    // metadata stat to fail with ENOTDIR rather than an ordinary absence.
+    writeFileSync(join(config, "projects"), "not a directory\n");
+    const cleanup = vi.fn(async () => ({ kind: "passthrough" as const }));
+    const environment = [
+      "CLAUDE_CONFIG_DIR",
+      "CLAUDE_PROJECT_DIR",
+      "LOOM_ORCHESTRATION_RUNS_ROOT",
+      "LOOM_ORCHESTRATION_RUN_DIR",
+    ] as const;
+    const previous = new Map(environment.map((name) => [name, process.env[name]]));
+    process.env.CLAUDE_CONFIG_DIR = config;
+    process.env.CLAUDE_PROJECT_DIR = project;
+    delete process.env.LOOM_ORCHESTRATION_RUNS_ROOT;
+    delete process.env.LOOM_ORCHESTRATION_RUN_DIR;
+    try {
+      const result = await runDispatch(JSON.stringify({
+        session_id: sid("routing-enotdir"),
+        agent_id: "agent-routing-enotdir",
+      }), [], cleanup);
+
+      expect(cleanup).toHaveBeenCalledOnce();
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringMatching(/routing observation failed.*ENOTDIR|routing observation failed.*not a directory/i),
+      });
+    } finally {
+      for (const name of environment) {
+        const value = previous.get(name);
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+});
+
+describe("malformed hook input is caught instead of escaping cleanup", () => {
   it("dispatch: malformed stdin fails closed and names skipped cleanup", async () => {
     const result = await dispatch("{not json", []);
     expect(result).toMatchObject({ kind: "error" });
     if (result.kind !== "error") return;
     expect(result.message).toContain("cleanup skipped");
     expect(result.message).toContain("bindings may leak");
+  });
+
+  it.each([
+    ["null", "null"],
+    ["scalar", "42"],
+    ["array", "[]"],
+    ["missing session identity", JSON.stringify({ agent_id: "agent-1" })],
+    ["non-string Agent identity", JSON.stringify({ session_id: "session-1", agent_id: 7 })],
+  ])("dispatch: valid JSON with an invalid %s shape fails before cleanup", async (_label, stdin) => {
+    const cleanup = vi.fn(async () => ({ kind: "passthrough" as const }));
+
+    const result = await runDispatch(stdin, [], cleanup);
+
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/invalid SubagentStop input.*cleanup skipped.*bindings may leak/),
+    });
+    expect(cleanup).not.toHaveBeenCalled();
   });
 
   it("mark-subagent-active: malformed stdin → passthrough + loud stderr", async () => {
@@ -189,6 +453,16 @@ describe("dispatch names what it discarded (audit diagnostics)", () => {
       session_id: sid("no-graph-at-all"),
       agent_id: "agent-no-graph",
       agent_type: "code-implementer-agent",
+    }, "error");
+    expect(text).toContain("no task graph resolvable");
+    expect(text).toContain("recorded NOTHING");
+  });
+
+  it("keeps a named custom agent as passthrough when no TaskGraph resolves", async () => {
+    const text = await stderrOf({
+      session_id: sid("custom-no-graph"),
+      agent_id: "agent-custom",
+      agent_type: "some-users-own-agent",
     });
     expect(text).toContain("no task graph resolvable");
     expect(text).toContain("recorded NOTHING");
@@ -255,7 +529,7 @@ describe("dispatch names what it discarded (audit diagnostics)", () => {
   });
 });
 
-describe("a cleanupSubagentFlag crash still runs update-task-status (Advisory 4)", () => {
+describe("a cleanupSubagentFlag crash still runs update-task-status", () => {
   it("held cleanup lock reports cleanup failure after T1 quarantine still runs", async () => {
     const s = sid("cleanup-crash");
     const dir = tempDir();
@@ -319,7 +593,7 @@ describe("a cleanupSubagentFlag crash still runs update-task-status (Advisory 4)
   });
 });
 
-describe("update-task-status honors the pre-unbind evidence snapshot (Advisory 7)", () => {
+describe("update-task-status honors the pre-unbind evidence snapshot", () => {
   it("a trusted TestRun in the snapshot decides the verdict even with no ledger on disk", async () => {
     const s = sid("snapshot");
     const dir = tempDir();

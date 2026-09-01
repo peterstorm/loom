@@ -1,13 +1,16 @@
 /**
- * Remove agent from active subagent list when it completes.
- * Locked to prevent race with parallel completions.
+ * Release every completed Agent capability: guarded-machine binding,
+ * Implementation Attempt sidecar, session TaskGraph pointer lease, and active
+ * roster entry. Each owner performs its own lock-protected release so parallel
+ * completions cannot nest the non-reentrant session lock.
  */
 
-import type { HookHandler, SubagentStopInput } from "../../types";
+import type { HookHandler } from "../../types";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { resolveAgentType } from "../../utils/agent-transcript-path";
 import {
   fsSessionRegistry,
+  machineBindingPath,
   parseAgentId,
   parseAgentType,
   parseReportedAgentId,
@@ -17,27 +20,30 @@ import {
   type SessionRegistry,
 } from "../../machine";
 import { removeImplementationAttemptSidecar } from "../../implementation-attempt-sidecar";
+import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
+
+const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
 export const runCleanupSubagentFlag = async (
   stdin: string,
   registry: SessionRegistry = fsSessionRegistry,
   removeSidecar: typeof removeImplementationAttemptSidecar = removeImplementationAttemptSidecar,
   releasePointer: typeof releasePersistedSessionTaskGraphPointerBinding = releasePersistedSessionTaskGraphPointerBinding,
+  resolveType: typeof resolveAgentType = resolveAgentType,
 ) => {
   // Guard the standalone CLI route: dispatch parses stdin before calling
   // handlers, but this handler is also registered directly (KNOWN_HANDLERS),
   // where a bare JSON.parse throw would surface as an uncontextualized
   // "Hook error". Malformed input means the roster entry and any binding
   // cannot be released — say so; the liveness TTL eventually reaps them.
-  let input: SubagentStopInput;
-  try {
-    input = JSON.parse(stdin);
-  } catch (e) {
+  const parsedInput = parseSubagentStopStdin(stdin);
+  if (!parsedInput.ok) {
     return {
       kind: "error" as const,
-      message: `cleanup-subagent-flag: malformed SubagentStop input — roster entry and machine binding NOT released (liveness TTL will reap them): ${e instanceof Error ? e.message : String(e)}`,
+      message: `cleanup-subagent-flag: invalid SubagentStop input — roster, sidecar, task-graph pointer, and machine binding NOT released (liveness TTL will reap them): ${parsedInput.error}`,
     };
   }
+  const input = parsedInput.value;
   const { agent_id } = input;
   // Parse the session id once. An unparseable id can address no session file,
   // so nothing can be released here — the liveness TTL reaps it.
@@ -56,32 +62,54 @@ export const runCleanupSubagentFlag = async (
   }
 
   // Release guarded-machine binding. unbind locks internally (same lock file)
-  // and logs its own failures — do NOT nest it inside another withLock here,
+  // and throws failures for this handler to aggregate — do NOT nest it inside another withLock here,
   // the mkdir lock is not reentrant. Parse the identity to the SAME branded
   // types bind used: unbind only compares against already-parsed bindings, so
   // an unparseable id could never have been bound — skipping the call is the
   // exact harmless no-op the old raw-string path produced, and branding both
   // params removes the adjacent-string argument-swap hazard.
   const failures: string[] = [];
-  let boundAgentType = agent_id ? parseAgentType(stripNamespace(resolveAgentType(input))) : null;
-  const boundAgentId = agent_id ? parseAgentId(agent_id) : null;
-  if (boundAgentType === null && boundAgentId !== null) {
+  let reportedAgentType: ReturnType<typeof parseAgentType> = null;
+  try {
+    reportedAgentType = parseAgentType(stripNamespace(resolveType(input)));
+  } catch (error) {
+    failures.push(`reported agent type observation failed for ${agent_id}/${sessionId}: ${errorMessage(error)}`);
+  }
+  const boundAgentId = parseAgentId(agent_id);
+  let boundAgentType: ReturnType<typeof parseAgentType> = null;
+  if (boundAgentId !== null) {
     try {
-      const matchingBindings = registry.readBindings(sessionId)
-        .filter((binding) => binding.agentId === boundAgentId);
-      if (matchingBindings.length === 1) boundAgentType = matchingBindings[0]!.agentType;
-      else if (matchingBindings.length > 1) {
-        failures.push(`machine unbind identity is ambiguous for ${agent_id}/${sessionId}`);
+      const authority = registry.readBindingAuthority(sessionId);
+      if (authority.kind === "corrupt") {
+        failures.push(
+          `machine binding authority ${machineBindingPath(sessionId)} is corrupt; binding NOT released for ${agent_id}/${sessionId} — repair or remove the corrupt file`,
+        );
+      } else {
+        const matchingBindings = authority.bindings
+          .filter((binding) => binding.agentId === boundAgentId);
+        if (matchingBindings.length === 1) {
+          boundAgentType = matchingBindings[0]!.agentType;
+          if (reportedAgentType !== null && reportedAgentType !== boundAgentType) {
+            failures.push(
+              `reported agent_type ${reportedAgentType} disagrees with persisted binding ${boundAgentType} for ${agent_id}/${sessionId}`,
+            );
+          }
+        } else if (matchingBindings.length > 1) {
+          failures.push(`machine unbind identity is ambiguous for ${agent_id}/${sessionId}`);
+        }
       }
     } catch (error) {
-      failures.push(`machine binding lookup failed for ${agent_id}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+      failures.push(`machine binding lookup failed for ${agent_id}/${sessionId}: ${errorMessage(error)}`);
     }
   }
-  if (boundAgentType && boundAgentId) {
+  if (boundAgentType !== null && boundAgentId !== null) {
     try {
-      await registry.unbind(sessionId, boundAgentType, boundAgentId);
+      const release = await registry.unbind(sessionId, boundAgentType, boundAgentId);
+      if (release === "not-owned") {
+        failures.push(`machine unbind lost exact ownership for ${agent_id}/${sessionId}`);
+      }
     } catch (error) {
-      failures.push(`machine unbind failed for ${agent_id}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+      failures.push(`machine unbind failed for ${agent_id}/${sessionId}: ${errorMessage(error)}`);
     }
   }
 
@@ -89,7 +117,7 @@ export const runCleanupSubagentFlag = async (
     try {
       removeSidecar(sessionId, agent_id);
     } catch (error) {
-      failures.push(`implementation sidecar cleanup failed for ${agent_id}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+      failures.push(`implementation sidecar cleanup failed for ${agent_id}/${sessionId}: ${errorMessage(error)}`);
     }
   }
 
@@ -99,7 +127,7 @@ export const runCleanupSubagentFlag = async (
       failures.push(`task-graph pointer cleanup lost exact ownership for ${agent_id}/${sessionId}`);
     }
   } catch (error) {
-    failures.push(`task-graph pointer cleanup failed for ${agent_id}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+    failures.push(`task-graph pointer cleanup failed for ${agent_id}/${sessionId}: ${errorMessage(error)}`);
   }
 
   // Each cleanup capability is independent. Attempt roster removal even when
@@ -110,7 +138,7 @@ export const runCleanupSubagentFlag = async (
   try {
     await registry.removeActive(sessionId, reportedRosterAgentId(agent_id));
   } catch (error) {
-    failures.push(`roster cleanup failed for ${agent_id}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+    failures.push(`roster cleanup failed for ${agent_id}/${sessionId}: ${errorMessage(error)}`);
   }
 
   return failures.length === 0

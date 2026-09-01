@@ -260,6 +260,21 @@ describe("empty roster + one binding = leaked binding → no attribution", () =>
 });
 
 describe("duplicate SubagentStart deliveries are idempotent on the fake (round-10 Fix 4)", () => {
+  it("returns a frozen defensive bindings snapshot", async () => {
+    const reg = inMemorySessionRegistry();
+    const session = parseSessionId("bindings-snapshot")!;
+    const bound = bindingOf(POOL[0]);
+    await reg.bind(session, bound.agentType, bound.agentId);
+
+    const first = reg.readBindings(session);
+    const second = reg.readBindings(session);
+    expect(first).toEqual([bound]);
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(Object.isFrozen(first[0])).toBe(true);
+    expect(first).not.toBe(second);
+    expect(first[0]).not.toBe(second[0]);
+  });
+
   it("property: any number of duplicate start deliveries never disarms soleActiveBinding", async () => {
     await fc.assert(
       fc.asyncProperty(fc.integer({ min: 2, max: 6 }), async (deliveries) => {

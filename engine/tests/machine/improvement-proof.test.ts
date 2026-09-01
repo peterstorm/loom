@@ -36,7 +36,7 @@ function bashTranscript(command: string, output: string): string {
 }
 
 describe("R2 — real exit status beats happy output text", () => {
-  const lyingOutput = "BUILD SUCCESS\nTests run: 12, Failures: 0, Errors: 0";
+  const lyingOutput = "Tests run: 12, Failures: 0, Errors: 0\nBUILD SUCCESS";
   const transcript = bashTranscript("mvn test", lyingOutput);
   const bashOutput = parseBashTestOutput(transcript);
 
@@ -103,29 +103,20 @@ describe("R2 — the spoofs the review found are dead", () => {
     expect(extractEvidence("Bash", { command: cmd }, { exit_code: 1, stdout: "" }, () => null)).toEqual([]);
   });
 
-  it("plain echo spoof: still labeled low-trust in the fallback, never trusted, machine never satisfied", () => {
+  it("plain echo spoof: unanchored Node/Mocha prose mints no pass", () => {
     const spoofCmd = 'echo "npm test: 5 passing"';
     const transcript = bashTranscript(spoofCmd, "npm test: 5 passing");
     const bashOutput = parseBashTestOutput(transcript);
 
-    // OLD: silent pass with clean-looking evidence
-    const old = extractTestEvidence(bashOutput);
-    expect(old.passed).toBe(true);
-    expect(old.evidence).toBe("node: 5 passing");
-
-    // NEW: no ledger TestRun (echo never classifies); the transcript fallback
-    // still passes — honest tiering, not prevention — but the verdict is
-    // "untrusted" with its weakness labeled IN the data, so wave gates can tell.
+    expect(extractTestEvidence(bashOutput)).toEqual({ passed: false, evidence: "" });
     const ledger = extractEvidence("Bash", { command: spoofCmd }, { exit_code: 0, stdout: "npm test: 5 passing" }, () => null);
     expect(ledger).toEqual([]);
-    const resolved = resolveTestEvidence(ledger, bashOutput, true);
-    expect(resolved.result).toEqual({
+    expect(resolveTestEvidence(ledger, bashOutput, true).result).toEqual({
       verdict: "untrusted",
-      passed: true, // documented residual: reporterless fallback
+      passed: false,
       label: "degraded (machine bound, no ledger evidence; transcript-regex)",
       provenance: "unverified",
     });
-    expect(resolved.evidence).toContain("degraded (machine bound, no ledger evidence");
   });
 
   it("recorder failure is visible: machine bound + empty ledger → degraded label", () => {

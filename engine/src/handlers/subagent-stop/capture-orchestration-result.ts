@@ -16,9 +16,11 @@
  * a stop that matches no reservation is audited and rejected: silently treating
  * it as unrelated would strand the reserved slot.
  *
- * This handler NEVER resolves an unrelated State File. It reads only the run
- * directory it was pointed at, so a standalone review running beside an active
- * wave cannot capture into the wave's graph or vice versa.
+ * This handler NEVER resolves an unrelated State File. Orchestration authority
+ * comes only from the Run Directory it was pointed at; payload observation also
+ * reads the external Claude transcript selected by the harness locator. A
+ * standalone review beside an active wave therefore cannot capture into the
+ * wave's graph or vice versa.
  *
  * Only the two genuinely harness-native facts live here — how to read Claude's
  * final payload, and what its native correlator is. Everything the run
@@ -29,15 +31,19 @@
 
 import { readFileSync } from "node:fs";
 import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
+import type { AgentRequestAuthority } from "../../core/orchestration-contract";
+import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 import type { FinalPayloadCandidate } from "../../core/harness-capture";
 import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
 import {
   captureAuditLine,
   captureCandidates,
   captureHarnessResult,
-  terminalCaptureRefusal,
+  describeCaptureFailure,
+  resolveCorrelatedRequest,
   RUN_DIR_ENV,
   RUNS_ROOT_ENV,
+  terminalCaptureRefusal,
   type CaptureObservation,
   type CaptureOutcome,
 } from "../../orchestration/harness-capture-runtime";
@@ -59,19 +65,22 @@ export type { CaptureOutcome };
  * decision, and pre-selecting one would turn `ambiguous-final-payload` into an
  * unreachable refusal on this path.
  */
+class ClaudeTranscriptReadError extends Error {}
+class ClaudeTranscriptJsonError extends Error {}
+
+export type ClaudePayloadReader = (transcriptPath: string) => readonly FinalPayloadCandidate[];
+
 export function claudeFinalPayloadCandidates(transcriptPath: string): readonly FinalPayloadCandidate[] {
   // One read, no pre-check: `existsSync` returns false for ELOOP/ENOTDIR too,
   // which would turn an unreadable transcript into a silent "no candidates"
-  // before readFileSync could surface the cause. Absence (ENOENT) keeps the
-  // documented "no transcript → no candidate" meaning; every other read
-  // failure (EACCES, ELOOP, EISDIR, ENOTDIR, EIO, ...) is a real cause the
-  // operator must see instead of a generic missing-payload rejection.
+  // before readFileSync could surface the cause. Once the locator selected this
+  // path, EVERY read failure — including ENOENT when the file disappeared — is
+  // filesystem evidence the operator must see, never a missing-payload claim.
   const lines = ((): readonly string[] => {
     try {
       return readFileSync(transcriptPath, "utf-8").split("\n");
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return Object.freeze([]);
-      throw new Error(
+      throw new ClaudeTranscriptReadError(
         `cannot read Claude transcript ${transcriptPath}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
@@ -93,7 +102,7 @@ function assistantTextBlocksOf(line: string | undefined, zeroBasedLine: number):
   try {
     parsed = JSON.parse(line) as unknown;
   } catch (error) {
-    throw new Error(
+    throw new ClaudeTranscriptJsonError(
       `invalid final Claude transcript JSON at line ${zeroBasedLine + 1}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
@@ -115,6 +124,48 @@ function assistantTextBlocksOf(line: string | undefined, zeroBasedLine: number):
 }
 
 /**
+ * What a Claude SubagentStop's request authority resolution concluded.
+ *
+ * `request: null` means the stop is in nobody's orchestration run — the ordinary
+ * ad-hoc agent, which the caller must leave alone. A `false` branch is a fault
+ * in the authority itself (half a run authority, an unreadable run, a corrupt
+ * correlation) and must fail closed: reading it as "unrelated" would settle a
+ * stop whose reserved slot is still waiting.
+ */
+export type ClaudeRequestAuthority =
+  | Readonly<{ ok: true; request: AgentRequestAuthority | null }>
+  | Readonly<{ ok: false; message: string }>;
+
+/**
+ * Resolve the issued request this Claude SubagentStop correlator belongs to.
+ *
+ * `dispatch.ts` needs the request BEFORE it settles the rest of the stop: a
+ * request-bound program that is not Wave Gate owns no TaskGraph, and settling it
+ * as though it did would demand unrelated protected state after the Run
+ * Directory had already accepted the evidence. It asks the SAME
+ * `resolveCorrelatedRequest` the capture path below asks, so the two can never
+ * disagree about which request a stop answers — and it returns an Either rather
+ * than throwing, because a caller that turns a refusal into a diagnostic should
+ * not have to catch it first.
+ */
+export function resolveClaudeRequestAuthority(
+  input: SubagentStopInput,
+  runsRoot: string | undefined,
+  runDirectory: string | undefined,
+): ClaudeRequestAuthority {
+  const resolved = resolveCorrelatedRequest({
+    harness: "claude",
+    runsRoot,
+    runDirectory,
+    nativeId: typeof input.agent_id === "string" ? input.agent_id : "",
+  });
+  if (resolved.ok) return { ok: true, request: resolved.value.request };
+  return resolved.outcome.kind === "not-an-orchestration-run"
+    ? { ok: true, request: null }
+    : { ok: false, message: describeCaptureFailure(resolved.outcome) };
+}
+
+/**
  * Capture one finished Claude agent. Pure with respect to decisions: every
  * refusal is returned as a typed outcome the caller audits. Accepted captures
  * write transcript evidence; refusals that reached a reservation may durably
@@ -131,10 +182,11 @@ export async function captureClaudeResult(
   input: SubagentStopInput,
   runsRoot: string | undefined,
   runDirectory: string | undefined,
+  readPayload: ClaudePayloadReader = claudeFinalPayloadCandidates,
 ): Promise<CaptureOutcome> {
   // Observation stays lazy so the shared runtime resolves the correlator and
   // immutable reservation first. An unrelated stop therefore remains
-  // `no-reservation`; a request-bound locator/JSON refusal can be durably
+  // `no-reservation`; a request-bound locator/read/JSON refusal can be durably
   // terminalised against the exact request it failed to observe.
   const observe = (): CaptureObservation => {
     const transcriptPath = resolveAgentTranscriptPath(input);
@@ -145,12 +197,15 @@ export async function captureClaudeResult(
       );
     }
     try {
-      return captureCandidates(claudeFinalPayloadCandidates(transcriptPath));
+      return captureCandidates(readPayload(transcriptPath));
     } catch (error) {
-      return terminalCaptureRefusal(
-        "transcript-json",
-        error instanceof Error ? error.message : String(error),
-      );
+      if (error instanceof ClaudeTranscriptReadError || error instanceof ClaudeTranscriptJsonError) {
+        return terminalCaptureRefusal(
+          error instanceof ClaudeTranscriptReadError ? "transcript-read" : "transcript-json",
+          error.message,
+        );
+      }
+      throw error;
     }
   };
   return captureHarnessResult({
@@ -165,22 +220,19 @@ export async function captureClaudeResult(
 }
 
 const handler: HookHandler = async (stdin): Promise<HookResult> => {
-  const input = ((): SubagentStopInput | null => {
-    try {
-      return JSON.parse(stdin) as SubagentStopInput;
-    } catch {
-      return null;
-    }
-  })();
+  const parsedInput = parseSubagentStopStdin(stdin);
   const hasAnyRunAuthority = process.env[RUNS_ROOT_ENV] !== undefined || process.env[RUN_DIR_ENV] !== undefined;
-  if (input === null) {
+  if (!parsedInput.ok) {
     return hasAnyRunAuthority
-      ? { kind: "error", message: "request-bound capture rejected: malformed SubagentStop JSON" }
+      ? {
+          kind: "error",
+          message: `request-bound capture rejected: malformed SubagentStop JSON or domain shape: ${parsedInput.error}`,
+        }
       : { kind: "passthrough" };
   }
 
   const outcome = await captureClaudeResult(
-    input,
+    parsedInput.value,
     process.env[RUNS_ROOT_ENV],
     process.env[RUN_DIR_ENV],
   );

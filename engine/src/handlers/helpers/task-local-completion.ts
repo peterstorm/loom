@@ -177,7 +177,7 @@ export function analyzeNewTests(
   if (tests.total > 0 && assertions > 0) {
     const details = [
       tests.java > 0 ? `java: ${tests.java} @Test/@Property` : "",
-      tests.ts > 0 ? `ts: ${tests.ts} it/test/describe` : "",
+      tests.ts > 0 ? `ts: ${tests.ts} it/test` : "",
       tests.python > 0 ? `python: ${tests.python} test functions` : "",
       tests.rust > 0 ? `rust: ${tests.rust} #[test]` : "",
     ].filter(Boolean).join("; ");

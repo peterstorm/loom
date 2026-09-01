@@ -84,8 +84,9 @@ export function parseAgentId(raw: string): AgentId | null {
  * that id back off the `.active` roster; without this refusal a reported id
  * merely SHAPED like a grant identity would be indistinguishable from one the
  * grant flow minted, and would be granted Edit/Write with no grant ever having
- * been verified. Callers map the null to a non-authorizing placeholder — see
- * `rosterAgentId`.
+ * been verified. Harness-boundary callers map the null to a non-authorizing
+ * placeholder through `reportedRosterAgentId` in ledger.ts; `rosterAgentId`
+ * deliberately preserves legitimate engine-minted grant identities.
  */
 export function parseReportedAgentId(raw: string): AgentId | null {
   return raw.startsWith(WRITE_GRANT_AGENT_NAMESPACE) ? null : parseAgentId(raw);
@@ -194,11 +195,11 @@ export interface CallStartEntry {
  * recency order (oldest first) — an explicit ordering on the wire, not a
  * reliance on JS object key-ordering semantics. `id` is UNTRUSTED harness
  * text — it lives only inside the JSON payload, never in a filesystem path,
- * so any non-empty string is acceptable. Entries with a malformed id/stamp
- * are dropped (fail closed: a missing stamp only ever REJECTS artifacts); a
- * file that is not a JSON array at all — including the pre-array Record
- * shape — yields null so callers can log the corruption instead of silently
- * reading "no stamps".
+ * so any non-empty string is acceptable. The array is one authority value:
+ * any malformed entry or duplicate id makes the complete file corrupt. Dropping
+ * only a malformed newest duplicate would reveal its older timestamp and let a
+ * stale artifact vouch as fresh. Non-array shapes likewise yield null so callers
+ * log corruption instead of silently reading partial stamps.
  */
 export function parseCallStartEntries(raw: string): readonly CallStartEntry[] | null {
   let parsed: unknown;
@@ -208,17 +209,20 @@ export function parseCallStartEntries(raw: string): readonly CallStartEntry[] | 
     return null;
   }
   if (!Array.isArray(parsed)) return null;
-  return parsed.flatMap((entry): CallStartEntry[] => {
-    if (typeof entry !== "object" || entry === null) return [];
-    const o = entry as Record<string, unknown>;
-    return typeof o.id === "string" &&
-      o.id !== "" &&
-      typeof o.startMs === "number" &&
-      Number.isSafeInteger(o.startMs) &&
-      o.startMs >= 0
-      ? [{ id: o.id, startMs: o.startMs }]
-      : [];
-  });
+  const ids = new Set<string>();
+  const entries: CallStartEntry[] = [];
+  for (const entry of parsed) {
+    if (typeof entry !== "object" || entry === null) return null;
+    const candidate = entry as Record<string, unknown>;
+    if (typeof candidate.id !== "string" || candidate.id === "" ||
+        typeof candidate.startMs !== "number" || !Number.isSafeInteger(candidate.startMs) ||
+        candidate.startMs < 0 || ids.has(candidate.id)) {
+      return null;
+    }
+    ids.add(candidate.id);
+    entries.push(Object.freeze({ id: candidate.id, startMs: candidate.startMs }));
+  }
+  return Object.freeze(entries);
 }
 
 /**
@@ -233,14 +237,17 @@ export function pruneCallStarts(
   return entries.slice(Math.max(0, entries.length - cap));
 }
 
-/** The stamp for one tool call, or null when absent. Scanned from the END so
- *  a duplicate id (which recordCallStart never writes, but a hand-edited or
- *  merged file could) resolves to the most recent stamp. */
+/** The stamp for one tool call, or null when absent or duplicate. Parsed
+ * files cannot contain duplicates; this second fail-closed check protects
+ * in-memory adapters and direct callers from hand-constructed partial authority. */
 export function callStartOf(entries: readonly CallStartEntry[], toolUseId: string): number | null {
-  for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i].id === toolUseId) return entries[i].startMs;
+  let found: number | null = null;
+  for (const entry of entries) {
+    if (entry.id !== toolUseId) continue;
+    if (found !== null) return null;
+    found = entry.startMs;
   }
-  return null;
+  return found;
 }
 
 // --- Bindings (wire format: "<agent_id>\t<agent_type>\t<bound_at_ms>") ---
@@ -438,6 +445,14 @@ export function resolveSoleActiveBinding(
 
 // --- SessionRegistry port ---
 
+/** Exact outcome of an attempted machine-binding capability release. */
+export type MachineBindingRelease = "released" | "not-owned";
+
+/** Parsed persisted binding authority, including explicit corruption evidence. */
+export type MachineBindingAuthority =
+  | Readonly<{ kind: "parsed"; bindings: readonly MachineBinding[] }>
+  | Readonly<{ kind: "corrupt"; bindings: readonly MachineBinding[] }>;
+
 /**
  * The binding/active-roster/ledger lifecycle as a port, owned by the core.
  * The fs adapter (session-registry.ts) wraps the ledger's fs code; an
@@ -453,13 +468,20 @@ export function resolveSoleActiveBinding(
  */
 export interface SessionRegistry {
   readonly bind: (sessionId: SessionId, agentType: AgentType, agentId: AgentId) => Promise<void>;
-  readonly unbind: (sessionId: SessionId, agentType: AgentType, agentId: AgentId) => Promise<void>;
+  readonly unbind: (
+    sessionId: SessionId,
+    agentType: AgentType,
+    agentId: AgentId,
+  ) => Promise<MachineBindingRelease>;
   readonly markActive: (sessionId: SessionId, agentId: AgentId) => Promise<void>;
   readonly removeActive: (sessionId: SessionId, agentId: AgentId) => Promise<void>;
   readonly countActiveAgents: (sessionId: SessionId) => number;
   readonly soleActiveBinding: (sessionId: SessionId) => MachineBinding | null;
   readonly refreshBindingActivity: (sessionId: SessionId) => Promise<void>;
+  /** Diagnostic/liveness projection that omits malformed rows. */
   readonly readBindings: (sessionId: SessionId) => readonly MachineBinding[];
+  /** Authority projection; callers must not act on bindings when corrupt. */
+  readonly readBindingAuthority: (sessionId: SessionId) => MachineBindingAuthority;
   readonly appendEvidence: (
     sessionId: SessionId,
     epoch: Epoch,

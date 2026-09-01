@@ -7,10 +7,11 @@ import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import updateTaskStatus, { isMachineBound } from "../../src/handlers/subagent-stop/update-task-status";
 import { resolveTestEvidence } from "../../src/core/implementation-evidence";
 import { analyzeNewTests } from "../../src/handlers/helpers/task-local-completion";
-import { extractTestEvidence } from "../../src/core/test-evidence";
+import { extractTestEvidence, type TestEvidence } from "../../src/core/test-evidence";
 import { legacyTestsPassedNote } from "../../src/types";
 import type { TaskGraph } from "../../src/types";
 import { captureDeclaredArtifactBaseline } from "../../src/utils/artifact-baseline";
+import { derivePendingTaskProof } from "../../src/core/proof-obligations";
 import { StateManager } from "../../src/state-manager";
 
 describe("update-task-status — malformed stdin guard (directly-registered route)", () => {
@@ -18,9 +19,42 @@ describe("update-task-status — malformed stdin guard (directly-registered rout
     const result = await updateTaskStatus("this is not json", []);
     expect(result.kind).toBe("error");
     if (result.kind === "error") {
-      expect(result.message).toContain("malformed SubagentStop input");
+      expect(result.message).toContain("invalid SubagentStop input");
       expect(result.message).toContain("NOT updated");
     }
+  });
+
+  it.each(["null", "42", "[]", JSON.stringify({ session_id: "session-1", agent_type: 7 })])(
+    "rejects valid JSON outside the SubagentStop domain: %s",
+    async (stdin) => {
+      const result = await updateTaskStatus(stdin, []);
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringMatching(/invalid SubagentStop input.*NOT updated/),
+      });
+    },
+  );
+
+  it.each([
+    ["absent", `missing-implementation-session-${process.pid}-${Date.now()}`],
+    ["malformed", "../../invalid implementation session"],
+  ])("fails closed for a recognized implementation stop with %s TaskGraph authority", async (_label, sessionId) => {
+    const result = await updateTaskStatus(JSON.stringify({
+      session_id: sessionId,
+      agent_type: "code-implementer-agent",
+    }), []);
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/TaskGraph authority unavailable.*task status and test evidence NOT updated|session TaskGraph authority unavailable/),
+    });
+  });
+
+  it("rejects an unnameable direct implementation result", async () => {
+    const result = await updateTaskStatus(JSON.stringify({ session_id: "session-1" }), []);
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/Agent identity is unavailable.*NOT updated/),
+    });
   });
 });
 import { parseMachineJson } from "../../src/machine";
@@ -57,24 +91,46 @@ describe("legacyTestsPassedNote (pure)", () => {
 
 describe("extractTestEvidence (pure)", () => {
   it("detects Maven BUILD SUCCESS", () => {
-    const output = "BUILD SUCCESS\nTests run: 42, Failures: 0, Errors: 0";
+    const output = "Tests run: 42, Failures: 0, Errors: 0\nBUILD SUCCESS";
     const result = extractTestEvidence(output);
     expect(result.passed).toBe(true);
     expect(result.evidence).toContain("maven");
     expect(result.evidence).toContain("Tests run: 42");
   });
 
+  it("accepts standard Maven INFO-prefixed build terminals", () => {
+    const result = extractTestEvidence([
+      "[INFO] Scanning for projects...",
+      "[INFO] Tests run: 42, Failures: 0, Errors: 0, Skipped: 0",
+      "[INFO] BUILD SUCCESS",
+    ].join("\n"));
+
+    expect(result.passed).toBe(true);
+    expect(result.evidence).toContain("Tests run: 42");
+  });
+
   it("strips markdown bold from Maven output", () => {
-    const output = "**BUILD SUCCESS**\n**Tests run: 5, Failures: 0, Errors: 0**";
+    const output = "**Tests run: 5, Failures: 0, Errors: 0**\n**BUILD SUCCESS**";
     const result = extractTestEvidence(output);
     expect(result.passed).toBe(true);
     expect(result.evidence).toContain("maven");
   });
 
   it("rejects Maven with failures", () => {
-    const output = "BUILD SUCCESS\nTests run: 10, Failures: 2, Errors: 0";
+    const output = "Tests run: 10, Failures: 2, Errors: 0\nBUILD FAILURE";
     const result = extractTestEvidence(output);
     expect(result.passed).toBe(false);
+  });
+
+  it("rejects standard Maven INFO-prefixed build failures", () => {
+    const result = extractTestEvidence([
+      "[INFO] Scanning for projects...",
+      "[INFO] Tests run: 10, Failures: 1, Errors: 0, Skipped: 0",
+      "[INFO] BUILD FAILURE",
+    ].join("\n"));
+
+    expect(result.passed).toBe(false);
+    expect(result.evidence).toContain("BUILD FAILURE");
   });
 
   it("detects Node/Mocha passing", () => {
@@ -82,6 +138,13 @@ describe("extractTestEvidence (pure)", () => {
     const result = extractTestEvidence(output);
     expect(result.passed).toBe(true);
     expect(result.evidence).toContain("node");
+  });
+
+  it("requires Node/Mocha passing prose to occupy a complete summary line", () => {
+    expect(extractTestEvidence("Release note: 15 passing checks after cleanup")).toEqual({
+      passed: false,
+      evidence: "",
+    });
   });
 
   it("rejects Node with failing tests", () => {
@@ -101,6 +164,43 @@ describe("extractTestEvidence (pure)", () => {
     const output = "Tests  30 passed\n Tests  2 failed";
     const result = extractTestEvidence(output);
     expect(result.passed).toBe(false);
+  });
+
+  it("treats a pipe-delimited mixed Vitest summary as one failed verdict", () => {
+    expect(extractTestEvidence("Tests  1 failed | 29 passed (30)")).toEqual({
+      passed: false,
+      evidence: "vitest: Tests  1 failed | 29 passed (30)",
+    });
+  });
+
+  it("lets a later mixed Vitest failure supersede an earlier passing run", () => {
+    expect(extractTestEvidence("Tests  30 passed (30)\n\nTests  2 failed | 28 passed (30)")).toEqual({
+      passed: false,
+      evidence: "vitest: Tests  2 failed | 28 passed (30)",
+    });
+  });
+
+  it("lets a later truncated Vitest failure supersede an earlier passing run", () => {
+    expect(extractTestEvidence("Tests  30 passed (30)\n\nTests 1 failed |")).toEqual({
+      passed: false,
+      evidence: "vitest: malformed summary: Tests 1 failed |",
+    });
+  });
+
+  it.each(["Tests  3 skipped (3)", "Tests  4 todo (4)"])(
+    "treats non-executed Vitest tests as zero-test evidence: %s",
+    (output) => {
+      expect(extractTestEvidence(output)).toEqual({ passed: false, evidence: "vitest: 0 tests executed" });
+    },
+  );
+
+  it("makes empty passing evidence unrepresentable", () => {
+    if (false) {
+      // @ts-expect-error A passing verdict must carry parser-minted non-empty evidence.
+      const impossible: TestEvidence = { passed: true, evidence: "" };
+      void impossible;
+    }
+    expect(extractTestEvidence("Tests  1 passed (1)").evidence).not.toBe("");
   });
 
   it("detects pytest passing", () => {
@@ -174,6 +274,24 @@ describe("extractTestEvidence (pure)", () => {
 
   // --- Tests for multiple test runs (T11 fix) ---
 
+  it.each([
+    ["pass before failure", "  2 passing (5ms)\nTests  1 failed"],
+    ["failure before pass", "Tests  1 failed\n  2 passing (5ms)"],
+  ])("aggregates recognized runners so a cross-runner failure dominates: %s", (_label, output) => {
+    const result = extractTestEvidence(output);
+    expect(result.passed).toBe(false);
+    expect(result.evidence).toContain("node: 2 passing (5ms)");
+    expect(result.evidence).toContain("vitest: Tests  1 failed");
+  });
+
+  it("aggregates passing evidence from every recognized runner", () => {
+    const result = extractTestEvidence("  2 passing (5ms)\nTests  3 passed (3)");
+    expect(result).toEqual({
+      passed: true,
+      evidence: "node: 2 passing (5ms); vitest: Tests  3 passed (3)",
+    });
+  });
+
   it("uses last match for bun: first fails, last passes", () => {
     const output = "3 pass\n2 fail\nRan 5 tests\n\n289 pass\n0 fail\nRan 289 tests";
     const result = extractTestEvidence(output);
@@ -221,7 +339,7 @@ describe("extractTestEvidence (pure)", () => {
   });
 
   it("uses last match for maven: first fails, last passes", () => {
-    const output = "BUILD SUCCESS\nTests run: 10, Failures: 2, Errors: 0\n\nBUILD SUCCESS\nTests run: 15, Failures: 0, Errors: 0";
+    const output = "Tests run: 10, Failures: 2, Errors: 0\nBUILD FAILURE\n\nTests run: 15, Failures: 0, Errors: 0\nBUILD SUCCESS";
     const result = extractTestEvidence(output);
     expect(result.passed).toBe(true);
     expect(result.evidence).toContain("maven");
@@ -235,6 +353,14 @@ describe("extractTestEvidence (pure)", () => {
     const output = "Tests run: 15, Failures: 0, Errors: 0\nBUILD SUCCESS\n\nTests run: 10, Failures: 2, Errors: 0\nBUILD FAILURE";
     const result = extractTestEvidence(output);
     expect(result.passed).toBe(false);
+  });
+
+  it("lets a later incomplete Maven run supersede an earlier success", () => {
+    const output = "Tests run: 15, Failures: 0, Errors: 0\nBUILD SUCCESS\n\nTests run: 10, Failures: 0, Errors: 0";
+    expect(extractTestEvidence(output)).toEqual({
+      passed: false,
+      evidence: "maven: incomplete run: Tests run: 10, Failures: 0, Errors: 0",
+    });
   });
 
   it("a later non-zero maven Errors tally vetoes an earlier pass", () => {
@@ -399,13 +525,27 @@ describe("resolveTestEvidence — snapshot-read-failed labeling (pure)", () => {
   });
 });
 
+/**
+ * New-test evidence is path-bound: every counted line must belong to a path Git
+ * named in that entry's header. These fixtures therefore carry the real patch
+ * shape rather than loose `+lines`.
+ */
+const patch = (path: string, ...lines: string[]): string => [
+  `diff --git a/${path} b/${path}`,
+  `--- a/${path}`,
+  `+++ b/${path}`,
+  "@@ -0,0 +1 @@",
+  ...lines,
+].join("\n");
+
 describe("analyzeNewTests (pure)", () => {
   it("detects Java @Test methods with assertions", () => {
-    const diff = [
+    const diff = patch(
+      "ExampleTest.java",
       "+    @Test",
       "+    void shouldWork() {",
       "+    assertThat(result).isEqualTo(42);",
-    ].join("\n");
+    );
     const result = analyzeNewTests(diff, undefined);
     expect(result.written).toBe(true);
     expect(result.evidence).toContain("1 new test");
@@ -413,18 +553,19 @@ describe("analyzeNewTests (pure)", () => {
   });
 
   it("rejects test stubs with no assertions", () => {
-    const diff = [
+    const diff = patch(
+      "ExampleTest.java",
       "+    @Test",
       "+    void stubTest() {",
       "+    }",
-    ].join("\n");
+    );
     const result = analyzeNewTests(diff, undefined);
     expect(result.written).toBe(false);
     expect(result.evidence).toContain("0 assertions");
   });
 
   it("records migration provenance when legacy new_tests_required=false waives new tests", () => {
-    const diff = "+    @Test\n+    assertThat(x).isTrue();";
+    const diff = patch("ExampleTest.java", "+    @Test", "+    assertThat(x).isTrue();");
     const result = analyzeNewTests(diff, false);
     expect(result.written).toBe(false);
     expect(result.evidence).toContain(
@@ -433,17 +574,53 @@ describe("analyzeNewTests (pure)", () => {
   });
 
   it("detects TypeScript tests with expect()", () => {
-    const diff = [
+    const diff = patch(
+      "example.test.ts",
       '+  it("works", () => {',
       "+    expect(result).toBe(42);",
-    ].join("\n");
+    );
     const result = analyzeNewTests(diff, undefined);
     expect(result.written).toBe(true);
     expect(result.evidence).toContain("ts");
   });
 
+  it("refuses an executable-looking diff in an ordinary source path", () => {
+    const diff = patch(
+      "src/production.ts",
+      '+  it("works", () => {',
+      "+    expect(result).toBe(42);",
+    );
+    const result = analyzeNewTests(diff, undefined);
+    expect(result.written).toBe(false);
+    expect(result.evidence).toBe("");
+  });
+
+  it("refuses a +++ b/ header forged inside patch content as a language switch", () => {
+    // Two lines added to any non-test file used to satisfy the whole new-test
+    // obligation: the forged header made Git's own rendering of the following
+    // line look like a test-source boundary.
+    const diff = [
+      "diff --git a/src/helper.py b/src/helper.py",
+      "--- a/src/helper.py",
+      "+++ b/src/helper.py",
+      "@@ -1 +1,3 @@",
+      " x",
+      "++ b/fake.test.ts",
+      '+it("pwned", () => expect(1).toBe(1));',
+    ].join("\n");
+
+    expect(analyzeNewTests(diff, undefined).written).toBe(false);
+  });
+
+  it("refuses unattributed additions with no Git path boundary", () => {
+    const diff = '+  it("works", () => {\n+    expect(result).toBe(42);';
+    const result = analyzeNewTests(diff, undefined);
+    expect(result.written).toBe(false);
+    expect(result.evidence).toBe("");
+  });
+
   it("returns empty for no tests in diff", () => {
-    const diff = "+const x = 42;\n+function foo() {}";
+    const diff = patch("example.test.ts", "+const x = 42;", "+function foo() {}");
     const result = analyzeNewTests(diff, undefined);
     expect(result.written).toBe(false);
     expect(result.evidence).toBe("");
@@ -453,9 +630,10 @@ describe("analyzeNewTests (pure)", () => {
 /**
  * Harness compatibility: SubagentStop without `agent_transcript_path`.
  *
- * This handler is the ONLY writer of task status, and it resolves the task id
- * from the transcript (falling back to a single-entry `executing_tasks`). A
- * harness that sends no transcript path therefore recorded NOTHING — tasks
+ * This handler owns task-status settlement for the SubagentStop implementation
+ * completion path, and it resolves the task id from the transcript (falling
+ * back to a single-entry `executing_tasks`). A harness that sends no transcript
+ * path therefore recorded NOTHING — tasks
  * stayed `pending`, `test_result` stayed null, and not one line reached stderr
  * saying so, while the transcript sat on disk the whole time.
  */
@@ -476,6 +654,7 @@ describe("update-task-status — transcript path resolution", () => {
     transcriptTaskId?: string;
     failedReview?: boolean;
     executingTasks?: readonly string[];
+    proof?: TaskGraph["tasks"][number]["proof"];
   }): Promise<{
     session: string;
     agentId: string;
@@ -519,6 +698,7 @@ describe("update-task-status — transcript path resolution", () => {
       tasks: [
         {
           id: "T1", description: "a task", agent: "code-implementer-agent", status: "pending", wave: 1, depends_on: [],
+          ...(opts.proof === undefined ? {} : { proof: opts.proof }),
           ...(opts.failedReview ? {
             review_status: "evidence_capture_failed",
             review_error: "review transcript missing evidence",
@@ -639,8 +819,10 @@ describe("update-task-status — transcript path resolution", () => {
     }));
   });
 
-  it("quarantines the sole executing Task when a resolved transcript becomes unreadable", async () => {
-    const s = await makeSession({ plantTranscript: false, executingTasks: ["T1"] });
+  it("quarantines the sole proof-bearing executing Task when its resolved transcript becomes unreadable", async () => {
+    const proof = derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: [] });
+    const s = await makeSession({ plantTranscript: false, executingTasks: ["T1"], proof });
+    expect(s.read().tasks[0]?.proof).toEqual(proof);
     const unreadableTranscript = canonicalTempDir("loom-unreadable-transcript-");
     try {
       const result = await updateTaskStatus(JSON.stringify({

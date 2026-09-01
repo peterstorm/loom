@@ -3,9 +3,12 @@
  *
  * Two harnesses record `spec_file`/`plan_file` from an agent's own write calls —
  * `handlers/subagent-stop/advance-phase` on Claude Code, `pi/extension`'s
- * `tool_result` handler on Pi — and the value they store becomes the
- * authoritative artifact every later phase transition reads. Both used to spell
- * the rule inline, and both spelled it as `String.includes(".claude/specs/")`:
+ * `tool_result` handler on Pi. A recorded spec becomes the run authority;
+ * architecture-plan transitions normally use the recorded plan but retain a
+ * documented slug/date filesystem fallback when that field is absent or names
+ * a missing file. Other access failures fail closed. Both harnesses used to
+ * spell the classification rule inline, and
+ * both spelled it as `String.includes(".claude/specs/")`:
  * a path like `.claude/specs/../../../../tmp/evil/spec.md` CONTAINS the
  * directory name while resolving well outside the tree, so the substring form
  * admits exactly the traversal it looks like it rejects.
@@ -24,6 +27,28 @@ import { basename, extname, relative, resolve, sep } from "node:path";
 export const SPEC_ARTIFACT_DIR = ".claude/specs";
 /** Where a plan may live. Runs never narrow this one. */
 export const PLAN_ARTIFACT_DIR = ".claude/plans";
+
+declare const SPEC_ARTIFACT_DIRECTORY: unique symbol;
+/** Parser-minted phase-artifact search authority beneath `.claude/specs`. */
+export type SpecArtifactDirectory = string & { readonly [SPEC_ARTIFACT_DIRECTORY]: true };
+
+export type SpecArtifactDirectoryParse =
+  | Readonly<{ ok: true; value: SpecArtifactDirectory }>
+  | Readonly<{ ok: false; message: string }>;
+
+/** Parse untrusted persisted `spec_dir` before it can address the filesystem. */
+export function parseSpecArtifactDirectory(raw: string | null | undefined): SpecArtifactDirectoryParse {
+  const candidate = raw ?? SPEC_ARTIFACT_DIR;
+  const root = resolve(SPEC_ARTIFACT_DIR);
+  const resolvedCandidate = resolve(candidate);
+  if (resolvedCandidate !== root && !resolvesWithin(candidate, SPEC_ARTIFACT_DIR)) {
+    return Object.freeze({
+      ok: false,
+      message: `spec_dir ${candidate} is outside ${SPEC_ARTIFACT_DIR}`,
+    });
+  }
+  return Object.freeze({ ok: true, value: candidate as SpecArtifactDirectory });
+}
 
 /**
  * Does `candidate` RESOLVE inside `directory` (both taken relative to cwd)?

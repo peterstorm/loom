@@ -7,7 +7,6 @@ import type {
   EngineResumeAction,
   FailedProofObligation,
   FindingCounts,
-  IssuedReviewPacketRegistration,
   LoomStatus,
   NextActionDecision,
   PlanModels,
@@ -40,7 +39,6 @@ import {
   parseAcceptedWaveCompletionReceipt,
   type AcceptedWaveCompletionReceipt,
   type CompletionAuthorityFailure,
-  type CompletionCheckId,
   type CompletionInfrastructureFailure,
 } from "./completion-suite";
 import { compareStrings } from "./ordering";
@@ -48,12 +46,7 @@ import {
   authorizeWaveCompletionSuite,
   defaultVerificationManifest,
 } from "./verification-manifest";
-import {
-  WAVE_REVIEW_AGENTS,
-  lowerModelProfile,
-  resolveAgentPolicy,
-  resolveModelProfile,
-} from "./model-profiles";
+import { WAVE_REVIEW_AGENTS } from "./model-profiles";
 import {
   awaitUserAction,
   blockedAction,
@@ -68,10 +61,7 @@ import {
   parseEffectId,
   parseOrchestrationRunId,
   parseRequestId,
-  parseSlotId,
-  prepareInitialBatchPublicationIntent,
   reconcileEffectReceipt,
-  spawnBatchAction,
   terminalBlockedDiagnostic,
   type AgentRosterSlot,
   type ArtifactRef,
@@ -81,14 +71,10 @@ import {
   type EffectReceipt,
   type ExternalAction,
   type InfrastructureRetryDiagnostic,
-  type InitialBatchPublicationIntent,
-  type InitialPublicationIssuanceAuthority,
-  type InitialSpawnRequestInput,
   type NonEmpty,
   type OrchestrationRunId,
   type RequestId,
   type ProtectedWaveStateCommitted,
-  type SlotId,
 } from "./orchestration-contract";
 import {
   buildFindingBrief,
@@ -311,6 +297,24 @@ function activePredecessor(state: Exclude<WaveGateState, { kind: "done" } | { ki
   return state.kind === "recoverable-blocked" ? state.predecessor : state;
 }
 
+type CompleteRosterDestination = Extract<
+  WaveGateState,
+  { kind: "awaiting-advisory-decision" | "ready-to-complete" }
+>;
+
+function completeRosterTransition(
+  state: WaveGateLifecycleCheckpoint,
+  event: WaveGateEvent,
+): CompleteRosterDestination | null {
+  if (event.kind === "complete-roster-with-advisories") {
+    return checkpointState(state, "awaiting-advisory-decision", lifecycleEventIdentity(event));
+  }
+  if (event.kind === "complete-roster-clean") {
+    return checkpointState(state, "ready-to-complete", lifecycleEventIdentity(event));
+  }
+  return null;
+}
+
 /**
  * Total immutable LC-1 reducer. Expected failures are values. In particular,
  * terminal states reject late input and an attempt-2 rejection can only become
@@ -419,21 +423,18 @@ export function replayWaveGateTransition(
       if (event.kind === "complete-roster-with-criticals") {
         return transitionOk(checkpointState(state, "awaiting-refutation", lifecycleEventIdentity(event)));
       }
-      if (event.kind === "complete-roster-with-advisories") {
-        return transitionOk(checkpointState(state, "awaiting-advisory-decision", lifecycleEventIdentity(event)));
+      {
+        const complete = completeRosterTransition(state, event);
+        return complete === null
+          ? transitionRejected(state, event, "undeclared-transition", `${event.kind} is not declared from awaiting-review-results`)
+          : transitionOk(complete);
       }
-      if (event.kind === "complete-roster-clean") {
-        return transitionOk(checkpointState(state, "ready-to-complete", lifecycleEventIdentity(event)));
-      }
-      return transitionRejected(state, event, "undeclared-transition", `${event.kind} is not declared from awaiting-review-results`);
-    case "awaiting-refutation":
-      if (event.kind === "complete-roster-with-advisories") {
-        return transitionOk(checkpointState(state, "awaiting-advisory-decision", lifecycleEventIdentity(event)));
-      }
-      if (event.kind === "complete-roster-clean") {
-        return transitionOk(checkpointState(state, "ready-to-complete", lifecycleEventIdentity(event)));
-      }
-      return transitionRejected(state, event, "undeclared-transition", `${event.kind} is not declared from awaiting-refutation`);
+    case "awaiting-refutation": {
+      const complete = completeRosterTransition(state, event);
+      return complete === null
+        ? transitionRejected(state, event, "undeclared-transition", `${event.kind} is not declared from awaiting-refutation`)
+        : transitionOk(complete);
+    }
     case "awaiting-advisory-decision":
       return event.kind === "advisory-decision-accepted"
         ? transitionOk(checkpointState(state, "ready-to-complete", lifecycleEventIdentity(event)))
@@ -787,6 +788,12 @@ function completionSuiteReadinessSource(
       });
 }
 
+function sortedUniqueNonEmpty<T extends string>(head: T, tail: readonly T[]): NonEmpty<T> {
+  const [first, ...rest] = [...new Set([head, ...tail])].sort(compareStrings);
+  if (first === undefined) throw new Error("non-empty completion failure set became empty");
+  return Object.freeze([first, ...rest]);
+}
+
 function completionEvaluationFailureDetail(
   authorityFailures: readonly CompletionAuthorityFailure[],
   infrastructureFailures: readonly CompletionInfrastructureFailure[],
@@ -815,6 +822,35 @@ function requiredWaveCompletionSuite(
   });
 }
 
+function parseWorkspaceObservation(
+  currentWorkspace: WaveWorkspaceObservation | undefined,
+  manifestDigest: RequiredWaveCompletionSuite["verificationManifestDigest"],
+  acceptedResultDigest: RequiredWaveCompletionSuite["acceptedResultDigest"] = null,
+): DomainResult<Extract<WaveWorkspaceObservation, { kind: "observed" }>, RequiredWaveCompletionSuite> {
+  if (currentWorkspace === undefined) {
+    return canonicalRecord({
+      ok: false,
+      error: requiredWaveCompletionSuite(
+        "workspace-observation-missing",
+        "current Wave workspace observation is missing",
+        manifestDigest,
+        acceptedResultDigest,
+      ),
+    });
+  }
+  return currentWorkspace.kind === "unavailable"
+    ? canonicalRecord({
+        ok: false,
+        error: requiredWaveCompletionSuite(
+          "workspace-observation-unavailable",
+          currentWorkspace.reason,
+          manifestDigest,
+          acceptedResultDigest,
+        ),
+      })
+    : canonicalRecord({ ok: true, value: currentWorkspace });
+}
+
 /** Pure canonical status for active or terminal Wave completion-suite evidence. */
 export function deriveWaveCompletionSuiteReadiness(
   graph: TaskGraph,
@@ -836,20 +872,8 @@ export function deriveWaveCompletionSuiteReadiness(
         manifestDigest,
       );
     }
-    if (currentWorkspace === undefined) {
-      return requiredWaveCompletionSuite(
-        "workspace-observation-missing",
-        "current Wave workspace observation is missing",
-        manifestDigest,
-      );
-    }
-    if (currentWorkspace.kind === "unavailable") {
-      return requiredWaveCompletionSuite(
-        "workspace-observation-unavailable",
-        currentWorkspace.reason,
-        manifestDigest,
-      );
-    }
+    const workspace = parseWorkspaceObservation(currentWorkspace, manifestDigest);
+    if (!workspace.ok) return workspace.error;
     if (currentResult === undefined || currentResult.kind === "absent") {
       return requiredWaveCompletionSuite(
         "accepted-suite-missing",
@@ -867,7 +891,7 @@ export function deriveWaveCompletionSuiteReadiness(
     const authorized = authorizeWaveCompletionSuite(
       manifest,
       source.registration,
-      currentWorkspace.workspaceDigest,
+      workspace.value.workspaceDigest,
     );
     if (!authorized.ok) {
       return requiredWaveCompletionSuite(
@@ -884,8 +908,9 @@ export function deriveWaveCompletionSuiteReadiness(
         manifestDigest,
       );
     }
+    const firstSemanticFailure = evaluation.semanticFailures[0];
     if (evaluation.authorityFailures.length > 0 || evaluation.infrastructureFailures.length > 0 ||
-        evaluation.semanticFailures.length === 0) {
+        firstSemanticFailure === undefined) {
       return requiredWaveCompletionSuite(
         "completion-result-invalid",
         completionEvaluationFailureDetail(
@@ -895,10 +920,15 @@ export function deriveWaveCompletionSuiteReadiness(
         manifestDigest,
       );
     }
-    const failureKinds = [...new Set(evaluation.semanticFailures.map((failure) => failure.kind))]
-      .sort(compareStrings);
-    const checkIds = [...new Set(evaluation.semanticFailures.map((failure) => failure.checkId))]
-      .sort(compareStrings) as readonly CompletionCheckId[];
+    const remainingSemanticFailures = evaluation.semanticFailures.slice(1);
+    const failureKinds = sortedUniqueNonEmpty(
+      firstSemanticFailure.kind,
+      remainingSemanticFailures.map((failure) => failure.kind),
+    );
+    const checkIds = sortedUniqueNonEmpty(
+      firstSemanticFailure.checkId,
+      remainingSemanticFailures.map((failure) => failure.checkId),
+    );
     return canonicalRecord({
       kind: "rejected",
       verificationManifestDigest: manifest.manifestDigest,
@@ -937,30 +967,20 @@ export function deriveWaveCompletionSuiteReadiness(
       checkCount: source.receipt.checks.length,
     });
   }
-  if (currentWorkspace === undefined) {
-    return requiredWaveCompletionSuite(
-      "workspace-observation-missing",
-      "current Wave workspace observation is missing",
-      manifestDigest,
-      source.receipt.resultDigest,
-    );
-  }
-  if (currentWorkspace.kind === "unavailable") {
-    return requiredWaveCompletionSuite(
-      "workspace-observation-unavailable",
-      currentWorkspace.reason,
-      manifestDigest,
-      source.receipt.resultDigest,
-    );
-  }
-  if (currentWorkspace.workspaceDigest !== source.receipt.workspaceDigest) {
+  const workspace = parseWorkspaceObservation(
+    currentWorkspace,
+    manifestDigest,
+    source.receipt.resultDigest,
+  );
+  if (!workspace.ok) return workspace.error;
+  if (workspace.value.workspaceDigest !== source.receipt.workspaceDigest) {
     return canonicalRecord({
       kind: "stale",
       verificationManifestDigest: manifestDigest,
       suiteDigest: source.receipt.suiteDigest,
       resultDigest: source.receipt.resultDigest,
       acceptedWorkspaceDigest: source.receipt.workspaceDigest,
-      currentWorkspaceDigest: currentWorkspace.workspaceDigest,
+      currentWorkspaceDigest: workspace.value.workspaceDigest,
       checkCount: source.receipt.checks.length,
     });
   }
@@ -1219,13 +1239,40 @@ export type WaveGateNextActionError = Readonly<{
   message: string;
 }>;
 
+function lifecycleCheckpointIdentityIsExact(
+  state: WaveGateState,
+  registration: ActiveWaveGateRegistration,
+  readinessDigest: WaveReadinessSnapshot["readinessDigest"],
+): boolean {
+  return waveGateLifecycleProofs.has(state) &&
+    state.runId === registration.runId &&
+    state.registrationRevision === registration.revision &&
+    state.authorityDigest === registration.authorityDigest &&
+    state.readinessDigest === readinessDigest;
+}
+
 function lifecycleMatchesSnapshot(state: WaveGateState, snapshot: WaveReadinessSnapshot): boolean {
-  return waveGateLifecycleProofs.has(state) && waveReadinessProofs.has(snapshot) &&
+  return waveReadinessProofs.has(snapshot) &&
     snapshot.graph.active_wave_gate === snapshot.registration &&
-    state.runId === snapshot.registration.runId &&
-    state.registrationRevision === snapshot.registration.revision &&
-    state.authorityDigest === snapshot.registration.authorityDigest &&
-    state.readinessDigest === snapshot.readinessDigest;
+    lifecycleCheckpointIdentityIsExact(state, snapshot.registration, snapshot.readinessDigest);
+}
+
+function nextActionProofIdentityIsExact(
+  proof: WaveGateNextAction,
+  registration: ActiveWaveGateRegistration,
+  readinessDigest: WaveReadinessSnapshot["readinessDigest"],
+  lifecycle: WaveGateState["kind"],
+  checkpointDigest: WaveGateLifecycleCheckpoint["checkpointDigest"],
+): boolean {
+  const binding = proof.binding;
+  return waveNextActionProofs.has(proof) &&
+    proof.lifecycle === lifecycle &&
+    proof.action.runId === registration.runId &&
+    binding.runId === registration.runId &&
+    binding.registrationRevision === registration.revision &&
+    binding.authorityDigest === registration.authorityDigest &&
+    binding.readinessDigest === readinessDigest &&
+    binding.lifecycleCheckpointDigest === checkpointDigest;
 }
 
 function actionBinding(state: WaveGateState): WaveGateProtectedSnapshotBinding {
@@ -1357,12 +1404,12 @@ function reviewFacts(graph: TaskGraph): Readonly<{
   return canonicalRecord({ rosterGaps: Object.freeze(rosterGaps), evidenceFailures: Object.freeze(evidenceFailures) });
 }
 
-function deriveFindingCounts(graph: TaskGraph): FindingCounts {
+function deriveFindingCounts(tasks: readonly Task[]): FindingCounts {
   let activeCritical = 0;
   let advisory = 0;
   let resolved = 0;
   let refuted = 0;
-  for (const task of graph.tasks) {
+  for (const task of tasks) {
     if (task.findings !== undefined) {
       activeCritical += task.findings.filter((finding) => finding.severity === "critical").length;
       advisory += task.findings.filter((finding) => finding.severity === "advisory").length;
@@ -1530,7 +1577,7 @@ export function deriveWaveReadiness(
   const decision = evaluateWaveGate(graph, wave, deps);
   const reviews = reviewFacts(graph);
   const tests = deriveTestReadiness(graph, wave);
-  const findings = deriveFindingCounts(graph);
+  const findings = deriveFindingCounts(graph.tasks.filter((task) => task.wave === wave));
   const panel = panelNeed(graph, wave);
   const eligibility = completionEligibility(decision);
   const facts: CanonicalStatusFacts = canonicalRecord({
@@ -1567,20 +1614,17 @@ export function deriveWaveReadiness(
   );
   if (lifecycleProof !== null) {
     const { nextActionAuthority, lifecycleCheckpoint } = lifecycleProof;
-    const binding = nextActionAuthority.binding;
-    const exactBinding = waveNextActionProofs.has(nextActionAuthority) &&
-      waveGateLifecycleProofs.has(lifecycleCheckpoint) &&
-      nextActionAuthority.action.runId === registration.runId &&
-      binding.runId === registration.runId &&
-      binding.registrationRevision === registration.revision &&
-      binding.authorityDigest === registration.authorityDigest &&
-      binding.readinessDigest === completion.readinessDigest &&
-      binding.lifecycleCheckpointDigest === lifecycleCheckpoint.checkpointDigest &&
-      lifecycleCheckpoint.runId === registration.runId &&
-      lifecycleCheckpoint.registrationRevision === registration.revision &&
-      lifecycleCheckpoint.authorityDigest === registration.authorityDigest &&
-      lifecycleCheckpoint.readinessDigest === completion.readinessDigest &&
-      nextActionAuthority.lifecycle === lifecycleCheckpoint.kind;
+    const exactBinding = lifecycleCheckpointIdentityIsExact(
+      lifecycleCheckpoint,
+      registration,
+      completion.readinessDigest,
+    ) && nextActionProofIdentityIsExact(
+      nextActionAuthority,
+      registration,
+      completion.readinessDigest,
+      lifecycleCheckpoint.kind,
+      lifecycleCheckpoint.checkpointDigest,
+    );
     if (!exactBinding) {
       return canonicalRecord({
         ok: false,
@@ -1745,68 +1789,6 @@ export function commitWaveGateCompletion(
 
 export { WAVE_REVIEW_AGENTS };
 
-type WaveReviewAgent = (typeof WAVE_REVIEW_AGENTS)[number];
-
-export type WaveReviewRequestBinding = Readonly<{
-  subject: Readonly<{ kind: "spec-check" }> | Readonly<{ kind: "task-review"; taskId: string; reviewer: WaveReviewAgent }>;
-  attempts: readonly [InitialSpawnRequestInput, InitialSpawnRequestInput];
-}>;
-
-/** Optional anti-drift assertions for compatibility callers. These values can
- * reject preparation but never select packet, roster, model, context, request,
- * or slot authority. New callers supply only the canonical readiness snapshot. */
-export type WaveReviewAuthorityClaims = Readonly<{
-  packets?: readonly IssuedReviewPacketRegistration[];
-  bindings?: readonly WaveReviewRequestBinding[];
-}>;
-
-export type WaveReviewPacketPublication = Readonly<{
-  registration: IssuedReviewPacketRegistration;
-  /** Exact immutable UTF-8 packet bytes. */
-  bytes: readonly number[];
-}>;
-
-/** One effect boundary owns both packet artifacts and request/context
- * publication. The nested T1 intent is inert outside this aggregate. */
-export type WaveReviewBatchPublicationIntent = Readonly<{
-  schemaVersion: 1;
-  kind: "wave-review-batch-publication-intent";
-  runId: OrchestrationRunId;
-  packetSetDigest: import("./orchestration-contract").ArtifactDigest;
-  publicationDigest: import("./orchestration-contract").ArtifactDigest;
-  packets: NonEmpty<WaveReviewPacketPublication>;
-  requestPublicationIntent: InitialBatchPublicationIntent;
-}>;
-
-export type WaveReviewBatchPublished = Readonly<{
-  schemaVersion: 1;
-  kind: "wave-review-batch-published";
-  runId: OrchestrationRunId;
-  publicationDigest: import("./orchestration-contract").ArtifactDigest;
-  requestIssuance: InitialPublicationIssuanceAuthority;
-}>;
-
-export type WaveReviewBatchPublicationReconciler = (
-  intent: WaveReviewBatchPublicationIntent,
-) => DomainResult<WaveReviewBatchPublished, WavePreparationError>;
-
-export type WaveReviewPreparation = Readonly<{
-  schemaVersion: 1;
-  kind: "wave-review-preparation";
-  runId: OrchestrationRunId;
-  wave: number;
-  registrationRevision: number;
-  authorityDigest: import("./orchestration-contract").ArtifactDigest;
-  readinessDigest: import("./orchestration-contract").ArtifactDigest;
-  packets: NonEmpty<IssuedReviewPacketRegistration>;
-  packetPublications: NonEmpty<WaveReviewPacketPublication>;
-  bindings: NonEmpty<WaveReviewRequestBinding>;
-  initialRequests: NonEmpty<InitialSpawnRequestInput>;
-  publicationIntent: WaveReviewBatchPublicationIntent;
-}>;
-
-const waveReviewPreparationProofs = new WeakSet<object>();
-
 export type WavePreparationError = Readonly<{
   kind: "wave-preparation-rejected";
   message: string;
@@ -1814,436 +1796,6 @@ export type WavePreparationError = Readonly<{
 
 const preparationFailure = <T>(message: string): DomainResult<T, WavePreparationError> =>
   canonicalRecord({ ok: false, error: canonicalRecord({ kind: "wave-preparation-rejected", message }) });
-
-function samePacket(left: IssuedReviewPacketRegistration, right: IssuedReviewPacketRegistration): boolean {
-  return left.task_id === right.task_id && left.packet_id === right.packet_id &&
-    left.packet_path === right.packet_path && left.base_sha === right.base_sha &&
-    left.head_sha === right.head_sha && left.scope.length === right.scope.length &&
-    left.scope.every((path, index) => path === right.scope[index]);
-}
-
-function expectedReviewSubjects(snapshot: WaveReadinessSnapshot): readonly WaveReviewRequestBinding["subject"][] {
-  return [
-    canonicalRecord({ kind: "spec-check" as const }),
-    ...snapshot.waveTasks.flatMap((task) => WAVE_REVIEW_AGENTS.map((reviewer) =>
-      canonicalRecord({ kind: "task-review" as const, taskId: task.id, reviewer }))),
-  ];
-}
-
-function subjectMatches(
-  actual: WaveReviewRequestBinding["subject"],
-  expected: WaveReviewRequestBinding["subject"],
-): boolean {
-  return actual.kind === expected.kind && (actual.kind === "spec-check" || (
-    expected.kind === "task-review" && actual.taskId === expected.taskId && actual.reviewer === expected.reviewer
-  ));
-}
-
-type WaveReviewRole = "spec-check-invoker" | (typeof WAVE_REVIEW_AGENTS)[number];
-
-function prepareReviewPacketForTask(
-  snapshot: WaveReadinessSnapshot,
-  task: Task,
-): WaveReviewPacketPublication {
-  const scope = Object.freeze([...new Set(task.file_list ?? [])].sort());
-  const body = canonicalRecord({
-    schemaVersion: 1 as const,
-    kind: "wave-task-review-packet" as const,
-    runId: snapshot.registration.runId,
-    wave: snapshot.wave,
-    task: canonicalRecord({
-      id: task.id,
-      description: task.description,
-      agent: task.agent,
-      generation: task.review_generation ?? 0,
-      planContext: task.plan_context ?? null,
-      specAnchors: Object.freeze([...(task.spec_anchors ?? [])]),
-      specContributions: Object.freeze([...(task.spec_contributions ?? [])]),
-      declaredFiles: Object.freeze([...(task.file_list ?? [])]),
-      modifiedFiles: Object.freeze([...(task.files_modified ?? [])]),
-      proof: task.proof ?? null,
-      testResult: task.test_result ?? null,
-    }),
-    specFile: snapshot.graph.spec_file,
-    planFile: snapshot.graph.plan_file,
-    readinessDigest: snapshot.readinessDigest,
-  });
-  const bytes = Object.freeze([...new TextEncoder().encode(JSON.stringify(body))]);
-  const packetId = createHash("sha256").update(Uint8Array.from(bytes)).digest("hex");
-  const taskPathId = createHash("sha256").update(task.id).digest("hex").slice(0, 16);
-  const registration = canonicalRecord({
-    task_id: task.id,
-    packet_id: packetId,
-    packet_path: `.claude/reviews/packets/${snapshot.registration.runId}/${taskPathId}-${packetId.slice(0, 16)}.json`,
-    // Wave preparation receives no Git capability. These 64-character
-    // protected snapshot identities are immutable packet anchors; the later
-    // packet materialization DAG replaces them with repository witnesses.
-    base_sha: snapshot.registration.authorityDigest,
-    head_sha: snapshot.readinessDigest,
-    scope,
-  });
-  return canonicalRecord({ registration, bytes });
-}
-
-function deriveWaveReviewBinding(
-  snapshot: WaveReadinessSnapshot,
-  subject: WaveReviewRequestBinding["subject"],
-  packet: IssuedReviewPacketRegistration | null,
-): DomainResult<WaveReviewRequestBinding, WavePreparationError> {
-  const role: WaveReviewRole = subject.kind === "spec-check" ? "spec-check-invoker" : subject.reviewer;
-  const subjectAuthority = JSON.stringify({
-    runId: snapshot.registration.runId,
-    wave: snapshot.wave,
-    authorityDigest: snapshot.registration.authorityDigest,
-    readinessDigest: snapshot.readinessDigest,
-    subject,
-    packet,
-    task: subject.kind === "task-review"
-      ? snapshot.waveTasks.find((task) => task.id === subject.taskId) ?? null
-      : null,
-    specCheckScope: subject.kind === "spec-check"
-      ? snapshot.waveTasks.map((task) => ({
-          id: task.id,
-          completionAnchors: task.spec_anchors ?? [],
-          contributions: task.spec_contributions ?? [],
-          declaredFiles: task.file_list ?? [],
-        }))
-      : null,
-    specFile: snapshot.graph.spec_file,
-    planFile: snapshot.graph.plan_file,
-  });
-  const slotHash = createHash("sha256").update(subjectAuthority).digest("hex");
-  const slotId = parseSlotId(`wave-slot:${slotHash.slice(0, 32)}`);
-  if (!slotId.ok) return preparationFailure(slotId.error.message);
-  const policy = resolveAgentPolicy(role);
-  if (!policy.ok) return preparationFailure(policy.error.message);
-  const profile = resolveModelProfile(policy.value.profile);
-  if (!profile.ok) return preparationFailure(profile.error.message);
-  const attempts: InitialSpawnRequestInput[] = [];
-  for (const attempt of [1, 2] as const) {
-    const requestId = parseRequestId(`wave-request:${slotHash.slice(0, 32)}:${attempt}`);
-    if (!requestId.ok) return preparationFailure(requestId.error.message);
-    const contextHash = createHash("sha256")
-      .update(`${subjectAuthority}|${requestId.value}|attempt:${attempt}`)
-      .digest("hex");
-    const contextDigest = parseContextDigest(contextHash);
-    if (!contextDigest.ok) return preparationFailure(contextDigest.error.message);
-    const authority = parseAgentRequestAuthority({
-      runId: snapshot.registration.runId,
-      requestId: requestId.value,
-      slotId: slotId.value,
-      program: "wave-gate",
-      role,
-      attempt,
-      modelProfile: policy.value.profile,
-      harnessBinding: {
-        pi: lowerModelProfile(profile.value, "pi"),
-        claude: lowerModelProfile(profile.value, "claude-code"),
-      },
-      requiredSkill: policy.value.requiredSkill,
-      contextDigest: contextDigest.value,
-      outputSlot: `transcripts/wave-${slotHash.slice(0, 32)}/attempt-${attempt}.raw`,
-    });
-    if (!authority.ok) {
-      return preparationFailure(authority.error.violations.map(({ message }) => message).join("; "));
-    }
-    attempts.push(canonicalRecord({
-      authority: authority.value,
-      context: canonicalRecord({
-        digest: authority.value.contextDigest,
-        slot: canonicalRecord({
-          kind: "fixed-artifact-slot" as const,
-          path: `contexts/${authority.value.contextDigest}.json`,
-        }),
-      }),
-    }));
-  }
-  const pair = parseAgentRosterSlot(attempts[0]!.authority, attempts[1]!.authority);
-  if (!pair.ok) return preparationFailure(`derived immutable attempt authority is invalid: ${JSON.stringify(pair.error.violations)}`);
-  return canonicalRecord({ ok: true, value: canonicalRecord({
-    subject,
-    attempts: Object.freeze(attempts) as unknown as readonly [InitialSpawnRequestInput, InitialSpawnRequestInput],
-  }) });
-}
-
-function sameInitialRequest(left: InitialSpawnRequestInput, right: InitialSpawnRequestInput): boolean {
-  // Claims are comparison-only JSON values. The engine-derived side is already
-  // parser-proven above; byte-equivalent canonical data is the only accepted
-  // assertion and the claimed object is never returned as authority.
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-
-function sameBinding(left: WaveReviewRequestBinding, right: WaveReviewRequestBinding): boolean {
-  return subjectMatches(left.subject, right.subject) &&
-    sameInitialRequest(left.attempts[0], right.attempts[0]) &&
-    sameInitialRequest(left.attempts[1], right.attempts[1]);
-}
-
-/** Prepare exact immutable Wave review authority from the protected graph and
- * engine roster/model policy. Caller claims are comparison-only and cannot
- * assemble or select authority. The intent confers no spawn authority until
- * the shell reconciles the all-or-none publication receipt. */
-export function prepareWaveReviewBatch(
-  snapshot: WaveReadinessSnapshot,
-  claims: WaveReviewAuthorityClaims = {},
-): DomainResult<WaveReviewPreparation, WavePreparationError> {
-  if (!waveReadinessProofs.has(snapshot)) return preparationFailure("Wave review preparation requires canonical readiness");
-  if (snapshot.registration.terminalOutcome !== null) return preparationFailure("a terminal Wave Gate cannot prepare another review batch");
-  if (snapshot.waveTasks.length === 0) return preparationFailure("an empty Wave cannot prepare a review batch");
-  const preliminaryFailure = snapshot.gateDecision.checks.slice(0, 5).find((check) => !check.passed);
-  if (preliminaryFailure !== undefined && !preliminaryFailure.passed) {
-    return preparationFailure(`Wave implementation readiness failed: ${preliminaryFailure.reason}`);
-  }
-  const packetPublications = snapshot.waveTasks.map((task) => prepareReviewPacketForTask(snapshot, task));
-  const canonicalPackets = packetPublications.map(({ registration }) => registration);
-  const subjects = expectedReviewSubjects(snapshot);
-  const initialRequests: InitialSpawnRequestInput[] = [];
-  const canonicalBindings: WaveReviewRequestBinding[] = [];
-  for (const subject of subjects) {
-    const packet = subject.kind === "task-review"
-      ? canonicalPackets.find((entry) => entry.task_id === subject.taskId) ?? null
-      : null;
-    const binding = deriveWaveReviewBinding(snapshot, subject, packet);
-    if (!binding.ok) return binding;
-    canonicalBindings.push(binding.value);
-    initialRequests.push(binding.value.attempts[0]);
-  }
-  if (claims.packets !== undefined && (
-    claims.packets.length !== canonicalPackets.length ||
-    claims.packets.some((packet, index) => !samePacket(packet, canonicalPackets[index]!))
-  )) {
-    return preparationFailure("caller Review Packet claim drifted from engine-derived protected Task authority");
-  }
-  if (claims.bindings !== undefined && (
-    claims.bindings.length !== canonicalBindings.length ||
-    claims.bindings.some((binding, index) => !sameBinding(binding, canonicalBindings[index]!))
-  )) {
-    return preparationFailure("caller request binding claim drifted from engine-derived roster/model/context/request authority");
-  }
-  const requestFingerprint = canonicalBindings.map((binding) => {
-    const pair = parseAgentRosterSlot(binding.attempts[0].authority, binding.attempts[1].authority);
-    return pair.ok ? `${pair.value.attempts[0].requestId}:${pair.value.attempts[1].requestId}` : "invalid";
-  }).join("|");
-  const rawEffect = createHash("sha256")
-    .update(`${snapshot.readinessDigest}|${canonicalPackets.map(({ packet_id }) => packet_id).join("|")}|${requestFingerprint}`)
-    .digest("hex");
-  const effectId = parseEffectId(`wave-review:${rawEffect.slice(0, 32)}`);
-  if (!effectId.ok) return preparationFailure(effectId.error.message);
-  const requestPublicationIntent = prepareInitialBatchPublicationIntent(
-    snapshot.registration.runId,
-    effectId.value,
-    initialRequests,
-  );
-  if (!requestPublicationIntent.ok) return preparationFailure(requestPublicationIntent.error.message);
-  const packetSetDigest = parseArtifactDigest(createHash("sha256")
-    .update(packetPublications.map(({ registration, bytes }) => `${registration.packet_id}:${bytes.length}`).join("|"))
-    .digest("hex"));
-  if (!packetSetDigest.ok) return preparationFailure(packetSetDigest.error.message);
-  const publicationDigest = parseArtifactDigest(createHash("sha256")
-    .update(`${snapshot.registration.runId}|${packetSetDigest.value}|${requestPublicationIntent.value.identity.publicationDigest}`)
-    .digest("hex"));
-  if (!publicationDigest.ok) return preparationFailure(publicationDigest.error.message);
-  const wavePublicationIntent: WaveReviewBatchPublicationIntent = canonicalRecord({
-    schemaVersion: 1,
-    kind: "wave-review-batch-publication-intent",
-    runId: snapshot.registration.runId,
-    packetSetDigest: packetSetDigest.value,
-    publicationDigest: publicationDigest.value,
-    packets: Object.freeze(packetPublications) as NonEmpty<WaveReviewPacketPublication>,
-    requestPublicationIntent: requestPublicationIntent.value,
-  });
-  const preparation = canonicalRecord({
-    schemaVersion: 1,
-    kind: "wave-review-preparation",
-    runId: snapshot.registration.runId,
-    wave: snapshot.wave,
-    registrationRevision: snapshot.registration.revision,
-    authorityDigest: snapshot.registration.authorityDigest,
-    readinessDigest: snapshot.readinessDigest,
-    packets: Object.freeze(canonicalPackets) as NonEmpty<IssuedReviewPacketRegistration>,
-    packetPublications: Object.freeze(packetPublications) as NonEmpty<WaveReviewPacketPublication>,
-    bindings: Object.freeze(canonicalBindings) as NonEmpty<WaveReviewRequestBinding>,
-    initialRequests: Object.freeze(initialRequests) as NonEmpty<InitialSpawnRequestInput>,
-    publicationIntent: wavePublicationIntent,
-  }) as WaveReviewPreparation;
-  waveReviewPreparationProofs.add(preparation);
-  return canonicalRecord({ ok: true, value: preparation });
-}
-
-/** Shell bridge: only T1's reconciled all-or-none publication authority can
- * produce the spawn action, which is immediately lifecycle-proven. */
-export function publishWaveReviewBatch(
-  snapshot: WaveReadinessSnapshot,
-  state: Extract<WaveGateState, { kind: "preparing" } | { kind: "awaiting-review-results" }>,
-  preparation: WaveReviewPreparation,
-  reconcile: WaveReviewBatchPublicationReconciler,
-): DomainResult<WaveGateNextAction, WavePreparationError> {
-  if (
-    !waveReviewPreparationProofs.has(preparation) || state.runId !== preparation.runId ||
-    preparation.readinessDigest !== snapshot.readinessDigest
-  ) {
-    return preparationFailure("review publication requires the original prepared authority for this lifecycle run");
-  }
-  const publication = reconcile(preparation.publicationIntent);
-  if (!publication.ok) return preparationFailure(publication.error.message);
-  if (
-    publication.value.runId !== preparation.runId ||
-    publication.value.publicationDigest !== preparation.publicationIntent.publicationDigest
-  ) {
-    return preparationFailure("atomic Wave packet/request publication receipt does not match the prepared batch");
-  }
-  const action = spawnBatchAction(publication.value.requestIssuance, preparation.initialRequests);
-  if (!action.ok) return preparationFailure(action.error.message);
-  const proven = proveWaveGateNextAction(snapshot, state, action.value);
-  return proven.ok ? canonicalRecord({ ok: true, value: proven.value }) : preparationFailure(proven.error.message);
-}
-
-export type WaveReviewSlotEvidence = Readonly<{
-  slotId: import("./orchestration-contract").SlotId;
-  result: "accepted" | "missing" | "invalid";
-  attempted: 1 | 2;
-}>;
-
-/**
- * How a wave-scoped spec-check slot settled: it must belong to THIS wave, and a
- * capture failure is evidence that arrived broken rather than evidence missing.
- * The two distinctions were a nested ternary inline in the evidence loop.
- */
-function specCheckSlotResult(
-  spec: Readonly<{ wave: number; verdict: string }> | undefined,
-  wave: number,
-): WaveReviewSlotEvidence["result"] {
-  if (spec?.wave !== wave) return "missing";
-  return spec.verdict === "EVIDENCE_CAPTURE_FAILED" ? "invalid" : "accepted";
-}
-
-/**
- * How one reviewer slot settled. `accepted` and `invalid` are proven mutually
- * exclusive by the caller before this is reached, so the order here decides
- * nothing the caller has not already established.
- */
-function reviewerSlotResult(accepted: boolean, invalid: boolean): WaveReviewSlotEvidence["result"] {
-  if (accepted) return "accepted";
-  return invalid ? "invalid" : "missing";
-}
-
-export type WaveReviewRecovery =
-  | Readonly<{ kind: "complete"; affectedSlotIds: readonly [] }>
-  | Readonly<{
-      kind: "retry-batch";
-      affectedSlotIds: NonEmpty<import("./orchestration-contract").SlotId>;
-      requests: NonEmpty<InitialSpawnRequestInput>;
-      publicationIntent: InitialBatchPublicationIntent;
-    }>;
-
-/** Derive exact slot status from the protected active Review Runs. Caller
- * evidence is an optional comparison-only assertion and never supplies slot,
- * attempt, or result authority. */
-function authoritativeWaveReviewSlotEvidence(
-  preparation: WaveReviewPreparation,
-  activeSnapshot: WaveReadinessSnapshot,
-): DomainResult<NonEmpty<WaveReviewSlotEvidence>, WavePreparationError> {
-  if (!waveReadinessProofs.has(activeSnapshot)) return preparationFailure("recovery requires canonical active Wave authority");
-  if (
-    activeSnapshot.registration.runId !== preparation.runId || activeSnapshot.wave !== preparation.wave ||
-    activeSnapshot.registration.revision !== preparation.registrationRevision ||
-    activeSnapshot.registration.authorityDigest !== preparation.authorityDigest
-  ) {
-    return preparationFailure("active Review Run authority belongs to a different Wave Gate snapshot");
-  }
-  const evidence: WaveReviewSlotEvidence[] = [];
-  for (const binding of preparation.bindings) {
-    const pair = parseAgentRosterSlot(binding.attempts[0].authority, binding.attempts[1].authority);
-    if (!pair.ok) return preparationFailure("stored Wave preparation attempt authority is invalid");
-    const subject = binding.subject;
-    if (subject.kind === "spec-check") {
-      const spec = activeSnapshot.graph.spec_check;
-      evidence.push(canonicalRecord({
-        slotId: pair.value.slotId,
-        result: specCheckSlotResult(spec, preparation.wave),
-        attempted: 1 as const,
-      }));
-      continue;
-    }
-    const task = activeSnapshot.waveTasks.find(({ id }) => id === subject.taskId);
-    const packet = preparation.packets.find(({ task_id }) => task?.id === task_id);
-    if (task === undefined || packet === undefined) return preparationFailure(`prepared Task ${subject.taskId} is absent from the active Wave`);
-    const run = task.review_run;
-    if (run === undefined) return preparationFailure(`Task ${task.id} has no exact active Review Run authority`);
-    if (
-      run.generation !== (task.review_generation ?? 0) || run.packet_id !== packet.packet_id ||
-      run.head_sha !== packet.head_sha || run.expected_agents.length !== WAVE_REVIEW_AGENTS.length ||
-      run.expected_agents.some((agent, index) => agent !== WAVE_REVIEW_AGENTS[index])
-    ) {
-      return preparationFailure(`Task ${task.id} active Review Run does not match the prepared packet/generation/roster authority`);
-    }
-    if (run.slot_authority === undefined || run.slot_authority.length !== run.expected_agents.length) {
-      return preparationFailure(`Task ${task.id} active Review Run lacks engine-issued exact slot authority`);
-    }
-    const slotIndex = run.expected_agents.indexOf(subject.reviewer);
-    const slot = run.slot_authority[slotIndex];
-    if (slot === undefined || slot.agent !== subject.reviewer || slot.slot_id !== pair.value.slotId) {
-      return preparationFailure(`Task ${task.id}/${subject.reviewer} active Review Run slot authority drifted`);
-    }
-    const accepted = run.evidence.some(({ agent }) => agent === subject.reviewer);
-    const invalid = (task.review_evidence_failures ?? []).includes(subject.reviewer);
-    if (accepted && invalid) return preparationFailure(`Task ${task.id}/${subject.reviewer} is both accepted and invalid in active Review Run authority`);
-    evidence.push(canonicalRecord({
-      slotId: pair.value.slotId,
-      result: reviewerSlotResult(accepted, invalid),
-      attempted: slot.attempted,
-    }));
-  }
-  return canonicalRecord({ ok: true, value: Object.freeze(evidence) as NonEmpty<WaveReviewSlotEvidence> });
-}
-
-/** Exact-slot recovery never shrinks authority. Only missing/invalid attempt-1
- * slots derived from the exact active Review Run receive their originally
- * prepared attempt-2 request. */
-export function deriveWaveReviewRecovery(
-  preparation: WaveReviewPreparation,
-  activeSnapshot: WaveReadinessSnapshot,
-  claims?: readonly WaveReviewSlotEvidence[],
-): DomainResult<WaveReviewRecovery, WavePreparationError> {
-  if (!waveReviewPreparationProofs.has(preparation)) return preparationFailure("recovery requires the original Wave preparation proof");
-  const derived = authoritativeWaveReviewSlotEvidence(preparation, activeSnapshot);
-  if (!derived.ok) return derived;
-  if (claims !== undefined && (
-    claims.length !== derived.value.length || claims.some((claim, index) => {
-      const expected = derived.value[index];
-      return expected === undefined || claim.slotId !== expected.slotId ||
-        claim.result !== expected.result || claim.attempted !== expected.attempted;
-    })
-  )) {
-    return preparationFailure("caller recovery claim drifted from the exact active Review Run authority");
-  }
-  const affected: SlotId[] = [];
-  const retries: InitialSpawnRequestInput[] = [];
-  for (let index = 0; index < preparation.bindings.length; index++) {
-    const binding = preparation.bindings[index]!;
-    const result = derived.value[index]!;
-    if (result.result === "accepted") continue;
-    if (result.attempted === 2) return preparationFailure(`slot ${result.slotId} exhausted semantic attempt 2 and cannot be retried`);
-    affected.push(result.slotId);
-    retries.push(binding.attempts[1]);
-  }
-  if (retries.length === 0) {
-    return canonicalRecord({ ok: true, value: canonicalRecord({ kind: "complete", affectedSlotIds: Object.freeze([]) as readonly [] }) });
-  }
-  const rawEffect = createHash("sha256")
-    .update(`${preparation.publicationIntent.publicationDigest}|retry|${affected.join("|")}`)
-    .digest("hex");
-  const effectId = parseEffectId(`wave-retry:${rawEffect.slice(0, 32)}`);
-  if (!effectId.ok) return preparationFailure(effectId.error.message);
-  const intent = prepareInitialBatchPublicationIntent(preparation.runId, effectId.value, retries);
-  if (!intent.ok) return preparationFailure(intent.error.message);
-  return canonicalRecord({ ok: true, value: canonicalRecord({
-    kind: "retry-batch",
-    affectedSlotIds: Object.freeze(affected) as NonEmpty<SlotId>,
-    requests: Object.freeze(retries) as NonEmpty<InitialSpawnRequestInput>,
-    publicationIntent: intent.value,
-  }) });
-}
 
 export type WaveRefutationPlan = Readonly<{
   runId: OrchestrationRunId;
@@ -2413,15 +1965,19 @@ const projectionFailure = (message: string): DomainResult<WaveGateState, WaveGat
  * interface, the whole stage decision behind it, callable by the façade and by
  * `status` alike.
  *
- * Every transition goes through `reduceWaveGate`, so a combination of facts
- * that no declared transition admits is a rejection rather than a stage nobody
- * checked. The order below IS the wave's order: publish, collect, adjudicate
+ * Every transition goes through the reducer's union replay entry point, so a
+ * combination of facts that no declared transition admits is a rejection rather
+ * than a stage nobody checked. The order below IS the wave's order: publish,
+ * collect, adjudicate
  * criticals, triage advisories, complete.
  */
 export function projectWaveGateLifecycle(
   snapshot: WaveReadinessSnapshot,
   evidence: WaveGateLifecycleEvidence,
 ): DomainResult<WaveGateState, WaveGateProjectionError> {
+  if (!Number.isSafeInteger(evidence.acceptedResults) || evidence.acceptedResults < 0) {
+    return projectionFailure("acceptedResults must be a non-negative safe integer");
+  }
   const initial = createWaveGateState(snapshot);
   if (!initial.ok) return projectionFailure(initial.error.message);
 
@@ -2489,15 +2045,31 @@ export type WaveAdvisoryDecisionRequest = Readonly<{
   advisories: NonEmpty<WaveAdvisoryArtifactMaterial>;
 }>;
 
-/** Strip publication bytes only after the same material produced every ref. */
-export function waveAdvisoryDecisionActionRequest(material: WaveAdvisoryDecisionRequest) {
-  return canonicalRecord({
+const waveAdvisoryDecisionMaterialProofs = new WeakSet<object>();
+
+/** Strip publication bytes only from the exact material set derived by core. */
+export function waveAdvisoryDecisionActionRequest(
+  material: WaveAdvisoryDecisionRequest,
+): DomainResult<Readonly<{
+  kind: "advisory-triage";
+  requestId: RequestId;
+  runId: OrchestrationRunId;
+  context: Readonly<{
+    digest: import("./orchestration-contract").ContextDigest;
+    slot: Readonly<{ kind: "fixed-artifact-slot"; path: string }>;
+  }>;
+  advisories: NonEmpty<ArtifactRef>;
+}>, WavePreparationError> {
+  if (!waveAdvisoryDecisionMaterialProofs.has(material) || material.decisionDigest !== material.context.digest) {
+    return preparationFailure("advisory action requires one exact core-derived decision material set");
+  }
+  return canonicalRecord({ ok: true, value: canonicalRecord({
     kind: "advisory-triage" as const,
     requestId: material.requestId,
     runId: material.advisories[0].reference.runId,
     context: canonicalRecord({ digest: material.context.digest, slot: material.context.slot }),
     advisories: Object.freeze(material.advisories.map(({ reference }) => reference)) as NonEmpty<ArtifactRef>,
-  });
+  }) });
 }
 
 /** One pure source for advisory bytes, references, and request identity. */
@@ -2551,16 +2123,18 @@ export function deriveWaveAdvisoryDecisionRequest(
   if (!contextDigest.ok) return preparationFailure(contextDigest.error.message);
   const requestId = parseRequestId(`advisory-decision:${contextDigest.value.slice(0, 32)}`);
   if (!requestId.ok) return preparationFailure(requestId.error.message);
-  return canonicalRecord({ ok: true, value: canonicalRecord({
+  const material = canonicalRecord({
     requestId: requestId.value,
     decisionDigest: contextDigest.value,
     context: canonicalRecord({
       digest: contextDigest.value,
-      slot: canonicalRecord({ kind: "fixed-artifact-slot", path: `contexts/${contextDigest.value}.json` }),
+      slot: canonicalRecord({ kind: "fixed-artifact-slot" as const, path: `contexts/${contextDigest.value}.json` }),
       bytes: contextBytes,
     }),
     advisories: Object.freeze(advisories) as NonEmpty<WaveAdvisoryArtifactMaterial>,
-  }) });
+  });
+  waveAdvisoryDecisionMaterialProofs.add(material);
+  return canonicalRecord({ ok: true, value: material });
 }
 
 export type WaveGateDriveStep =
@@ -2620,8 +2194,8 @@ export function deriveWaveGateDriveStep(
 }
 
 /** Advisory policy remains user-owned. The engine derives whether the action
- * exists from canonical advisory counts and only accepts the exact run-sized
- * T1 advisory request. */
+ * exists from canonical advisory counts and only accepts the exact Wave/run-
+ * scoped advisory request. */
 export function deriveWaveAdvisoryNextAction(
   snapshot: WaveReadinessSnapshot,
   state: Extract<WaveGateState, { kind: "awaiting-advisory-decision" }>,
@@ -2631,7 +2205,9 @@ export function deriveWaveAdvisoryNextAction(
   }
   const request = deriveWaveAdvisoryDecisionRequest(snapshot.registration.runId, snapshot.waveTasks);
   if (!request.ok) return request;
-  const built = awaitUserAction(waveAdvisoryDecisionActionRequest(request.value));
+  const actionRequest = waveAdvisoryDecisionActionRequest(request.value);
+  if (!actionRequest.ok) return actionRequest;
+  const built = awaitUserAction(actionRequest.value);
   if (!built.ok) return preparationFailure(built.error.message);
   const proven = proveWaveGateNextAction(snapshot, state, built.value);
   return proven.ok ? canonicalRecord({ ok: true, value: proven.value }) : preparationFailure(proven.error.message);
@@ -2704,16 +2280,17 @@ function engineResumeAction(runId: OrchestrationRunId): EngineResumeAction {
 function snapshotActionProofIsExact(snapshot: WaveReadinessSnapshot): boolean {
   const proof = snapshot.nextActionAuthority;
   if (proof === null) return snapshot.lifecycleCheckpointDigest === null;
-  const binding = proof.binding;
-  return waveReadinessProofs.has(snapshot) && waveNextActionProofs.has(proof) &&
+  return waveReadinessProofs.has(snapshot) &&
     snapshot.graph.active_wave_gate === snapshot.registration &&
     proof.kind !== "completed" &&
-    proof.action.runId === snapshot.registration.runId &&
-    binding.runId === snapshot.registration.runId &&
-    binding.registrationRevision === snapshot.registration.revision &&
-    binding.authorityDigest === snapshot.registration.authorityDigest &&
-    binding.readinessDigest === snapshot.readinessDigest &&
-    binding.lifecycleCheckpointDigest === snapshot.lifecycleCheckpointDigest;
+    snapshot.lifecycleCheckpointDigest !== null &&
+    nextActionProofIdentityIsExact(
+      proof,
+      snapshot.registration,
+      snapshot.readinessDigest,
+      proof.lifecycle,
+      snapshot.lifecycleCheckpointDigest,
+    );
 }
 
 /** Why the proven authority selected this action. One arm per authority kind. */
@@ -2819,7 +2396,7 @@ function deriveNonExecuteLoomStatus(
     failedProofObligations: canonicalRecord({ kind: "known", value: failedProofs(graph) }),
     testReadiness: canonicalRecord({ kind: "known", value: deriveTestReadinessForTasks(graph.tasks) }),
     reviewRuns: canonicalRecord({ kind: "known", value: reviews }),
-    findingCounts: canonicalRecord({ kind: "known", value: deriveFindingCounts(graph) }),
+    findingCounts: canonicalRecord({ kind: "known", value: deriveFindingCounts(graph.tasks) }),
     refutationPanelNeed: canonicalRecord({
       kind: "known",
       value: canonicalRecord({
@@ -2868,7 +2445,10 @@ function waveScopedStatusFacts(
     failedProofObligations: canonicalRecord({ kind: "known", value: failedProofs(graph) }),
     testReadiness: canonicalRecord({ kind: "known", value: deriveTestReadiness(graph, wave) }),
     reviewRuns: canonicalRecord({ kind: "known", value: reviews }),
-    findingCounts: canonicalRecord({ kind: "known", value: deriveFindingCounts(graph) }),
+    findingCounts: canonicalRecord({
+      kind: "known",
+      value: deriveFindingCounts(graph.tasks.filter((task) => task.wave === wave)),
+    }),
     refutationPanelNeed: canonicalRecord({ kind: "known", value: panelNeed(graph, wave) }),
     waveCompletionSuiteReadiness: canonicalRecord({
       kind: "known",
@@ -2886,7 +2466,11 @@ function persistedTerminalBlockedStatus(
   const registration = graph.active_wave_gate;
   if (registration?.terminalOutcome?.kind !== "terminal-blocked") return null;
   const built = blockedAction(registration.terminalOutcome.diagnostic);
-  if (!built.ok) return null;
+  if (!built.ok) {
+    return deriveUnavailableLoomStatus(Object.freeze([
+      unavailableStatusReason(`cannot construct persisted terminal-blocked action: ${built.error.message}`),
+    ]) as NonEmpty<StatusReason>);
+  }
   const blockedReason = reason("blocked-diagnostic", registration.terminalOutcome.diagnostic.message);
   return canonicalRecord({
     schemaVersion: 1,
@@ -2925,7 +2509,11 @@ function committedTerminalStatus(
     digest: receiptDigest,
     byteLength: receiptBytes.byteLength,
   });
-  if (!done.ok) return null;
+  if (!done.ok) {
+    return deriveUnavailableLoomStatus(Object.freeze([
+      unavailableStatusReason(`cannot construct committed terminal action: ${done.error.message}`),
+    ]) as NonEmpty<StatusReason>);
+  }
   const completeReason = reason("run-complete", `Wave Gate run ${terminal.runId} completed with committed revision ${terminal.revision}`);
   return canonicalRecord({
     schemaVersion: 1,
@@ -3013,23 +2601,31 @@ function unstartedWaveStatus(
  *
  * So status reduces LC-1 over the run's durable evidence and, only when the
  * stage is the advisory one, proves and reports the real await-user action.
- * Every other stage falls through to the ordinary readiness path — where
- * "resume the engine" is the correct answer, not a placeholder.
- *
- * `null` means "not the advisory stage, or it could not be proven" — the
- * caller continues, so a projection failure degrades to today's behaviour
- * rather than replacing a usable status with an error.
+ * Every other successfully projected stage falls through to the ordinary
+ * readiness path — where "resume the engine" is the correct answer, not a
+ * placeholder. A failed projection or proof returns explicit unavailable
+ * status; `null` is reserved for a successfully proven non-advisory stage.
  */
+function unavailableAdvisoryProjection(message: string): LoomStatus {
+  return deriveUnavailableLoomStatus(Object.freeze([
+    unavailableStatusReason(message),
+  ]) as NonEmpty<StatusReason>);
+}
+
 function projectedAdvisoryStatus(
   graph: TaskGraph,
   deps: GateDeps,
   runDirectory: ActiveRunDirectoryObservation,
 ): LoomStatus | null {
   const snapshot = deriveWaveReadiness(graph, deps);
-  if (!snapshot.ok) return null;
+  if (!snapshot.ok) return deriveUnavailableLoomStatus(snapshot.error.reasons);
   const counts = snapshot.value.facts.findingCounts;
   const runs = snapshot.value.facts.reviewRuns;
-  if (counts.kind !== "known" || runs.kind !== "known") return null;
+  if (counts.kind !== "known" || runs.kind !== "known") {
+    return unavailableAdvisoryProjection(
+      "LC-1 advisory projection requires canonical Finding and Review Run facts",
+    );
+  }
 
   const rosterComplete = runs.value.rosterGaps.length === 0 && runs.value.evidenceFailures.length === 0;
   const evidence: WaveGateLifecycleEvidence = canonicalRecord({
@@ -3047,15 +2643,24 @@ function projectedAdvisoryStatus(
   });
 
   const state = projectWaveGateLifecycle(snapshot.value, evidence);
-  if (!state.ok || state.value.kind !== "awaiting-advisory-decision") return null;
+  if (!state.ok) {
+    return unavailableAdvisoryProjection(`cannot project LC-1 advisory lifecycle: ${state.error.message}`);
+  }
+  if (state.value.kind !== "awaiting-advisory-decision") return null;
   const proven = deriveWaveAdvisoryNextAction(snapshot.value, state.value);
-  if (!proven.ok) return null;
+  if (!proven.ok) {
+    return unavailableAdvisoryProjection(`cannot prove LC-1 advisory action: ${proven.error.message}`);
+  }
 
   const bound = deriveWaveReadiness(graph, deps, canonicalRecord({
     nextActionAuthority: proven.value,
     lifecycleCheckpoint: state.value,
   }));
-  return bound.ok ? deriveLoomStatus(bound.value) : null;
+  return bound.ok
+    ? deriveLoomStatus(bound.value)
+    : unavailableAdvisoryProjection(
+        `cannot bind LC-1 advisory action to protected readiness: ${bound.error.reasons.map(({ message }) => message).join("; ")}`,
+      );
 }
 
 /** Anti-corruption adapter from the protected-state parser into the canonical status contract. */

@@ -1,23 +1,25 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
+import fc from "fast-check";
 import { mkdirSync, realpathSync, writeFileSync, chmodSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { parseSpecCheckOutput } from "../../src/handlers/subagent-stop/store-spec-check-findings";
-import handler from "../../src/handlers/subagent-stop/store-spec-check-findings";
+import handler, { runStoreSpecCheckFindings } from "../../src/handlers/subagent-stop/store-spec-check-findings";
 import { projectSlug } from "../../src/utils/agent-transcript-path";
 import { reconcileSpecCheck } from "../../src/core/spec-check";
-import { graphFixture } from "../fixtures/task-lifecycle";
+import { parseOrchestrationRunId, parseSlotId } from "../../src/core/orchestration-contract";
 
 describe("parseSpecCheckOutput (pure)", () => {
   it("parses all severity levels", () => {
     const output = [
+      "SPEC_CHECK_WAVE: 2",
       "CRITICAL: Missing authentication on /api/admin",
       "HIGH: No rate limiting on public endpoints",
       "MEDIUM: Inconsistent error response format",
       "SPEC_CHECK_CRITICAL_COUNT: 1",
       "SPEC_CHECK_HIGH_COUNT: 1",
       "SPEC_CHECK_VERDICT: BLOCKED",
-      "SPEC_CHECK_WAVE: 2",
     ].join("\n");
 
     const result = parseSpecCheckOutput(output);
@@ -112,12 +114,85 @@ describe("parseSpecCheckOutput (pure)", () => {
     expect(resolution.specCheck.verdict).toBe("PASSED");
   });
 
-  it("fails evidence reconciliation when the high count drifts from HIGH lines", () => {
+  it("rejects contradictory duplicate count markers instead of selecting the first", () => {
     const parsed = parseSpecCheckOutput([
+      "SPEC_CHECK_WAVE: 1",
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_CRITICAL_COUNT: 1",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+    ].join("\n"));
+
+    expect(parsed.duplicateMarkers).toEqual(["SPEC_CHECK_CRITICAL_COUNT"]);
+    expect(reconcileSpecCheck(parsed, 1, "now")).toMatchObject({
+      kind: "evidence-failed",
+      specCheck: {
+        verdict: "EVIDENCE_CAPTURE_FAILED",
+        error: expect.stringContaining("SPEC_CHECK_CRITICAL_COUNT marker appears more than once"),
+      },
+    });
+  });
+
+  it("rejects contradictory terminal verdicts instead of accepting the first", () => {
+    const parsed = parseSpecCheckOutput([
+      "SPEC_CHECK_WAVE: 1",
       "SPEC_CHECK_CRITICAL_COUNT: 0",
       "SPEC_CHECK_HIGH_COUNT: 0",
       "SPEC_CHECK_VERDICT: PASSED",
+      "SPEC_CHECK_VERDICT: BLOCKED",
+    ].join("\n"));
+
+    expect(parsed.duplicateMarkers).toEqual(["SPEC_CHECK_VERDICT"]);
+    expect(reconcileSpecCheck(parsed, 1, "now")).toMatchObject({
+      kind: "evidence-failed",
+      specCheck: {
+        verdict: "EVIDENCE_CAPTURE_FAILED",
+        error: expect.stringContaining("SPEC_CHECK_VERDICT marker appears more than once"),
+      },
+    });
+  });
+
+  it("property: duplicate footer scalars never reconcile to captured evidence", () => {
+    fc.assert(fc.property(
+      fc.constantFrom(
+        "SPEC_CHECK_CRITICAL_COUNT",
+        "SPEC_CHECK_HIGH_COUNT",
+        "SPEC_CHECK_OVERRIDE",
+        "SPEC_CHECK_VERDICT",
+      ),
+      fc.nat({ max: 10 }),
+      fc.nat({ max: 10 }),
+      (marker, first, second) => {
+        const value = (count: number): string => {
+          if (marker === "SPEC_CHECK_OVERRIDE") return `reason-${count}`;
+          if (marker === "SPEC_CHECK_VERDICT") return count % 2 === 0 ? "PASSED" : "BLOCKED";
+          return String(count);
+        };
+        const parsed = parseSpecCheckOutput([
+          "SPEC_CHECK_WAVE: 1",
+          "SPEC_CHECK_CRITICAL_COUNT: 0",
+          "SPEC_CHECK_HIGH_COUNT: 0",
+          `${marker}: ${value(first)}`,
+          `${marker}: ${value(second)}`,
+          "SPEC_CHECK_VERDICT: PASSED",
+        ].join("\n"));
+        const resolution = reconcileSpecCheck(parsed, 1, "now");
+
+        expect(parsed.duplicateMarkers).toContain(marker);
+        expect(resolution.kind).toBe("evidence-failed");
+        if (resolution.kind === "evidence-failed") {
+          expect(resolution.specCheck.error).toContain(`${marker} marker appears more than once`);
+        }
+      },
+    ));
+  });
+
+  it("fails evidence reconciliation when the high count drifts from HIGH lines", () => {
+    const parsed = parseSpecCheckOutput([
       "HIGH: uncounted risk",
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
     ].join("\n"));
 
     const resolution = reconcileSpecCheck(parsed, 1, "now");
@@ -139,12 +214,12 @@ describe("parseSpecCheckOutput (pure)", () => {
       "Agent processing text...",
       "",
       "SPEC_CHECK_WAVE: 2",
-      "SPEC_CHECK_CRITICAL_COUNT: 2",
-      "SPEC_CHECK_HIGH_COUNT: 1",
-      "SPEC_CHECK_VERDICT: BLOCKED",
       "CRITICAL: Missing authentication on /api/admin",
       "CRITICAL: SQL injection vulnerability",
       "HIGH: No rate limiting on public endpoints",
+      "SPEC_CHECK_CRITICAL_COUNT: 2",
+      "SPEC_CHECK_HIGH_COUNT: 1",
+      "SPEC_CHECK_VERDICT: BLOCKED",
     ].join("\n");
 
     const result = parseSpecCheckOutput(output);
@@ -159,6 +234,36 @@ describe("parseSpecCheckOutput (pure)", () => {
     ]);
     expect(result.high).toEqual(["No rate limiting on public endpoints"]);
     expect(result.medium).toEqual([]);
+  });
+
+  it("ignores finding and override markers after the selected footer verdict", () => {
+    const result = parseSpecCheckOutput([
+      "SPEC_CHECK_WAVE: 2",
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+      "HIGH: trailing transcript prose",
+      "SPEC_CHECK_OVERRIDE: unauthorised trailing override",
+    ].join("\n"));
+
+    expect(result).toMatchObject({
+      critical: [], high: [], medium: [], criticalCount: 0, highCount: 0,
+      verdict: "PASSED", wave: 2, overrideReason: null,
+    });
+  });
+
+  it("does not let a later incomplete footer borrow an earlier verdict", () => {
+    const result = parseSpecCheckOutput([
+      "SPEC_CHECK_WAVE: 1",
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+      "SPEC_CHECK_WAVE: 2",
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+    ].join("\n"));
+
+    expect(result).toMatchObject({ criticalCount: 0, highCount: 0, verdict: null, wave: 2 });
   });
 });
 
@@ -177,7 +282,6 @@ describe("handler reads file content (not path)", () => {
     // canonical too.
     tmpDir = realpathSync.native(tmpDir);
 
-    // Create a JSONL transcript file with spec-check output
     const transcriptPath = join(tmpDir, "transcript.jsonl");
     const transcriptLine = JSON.stringify({
       type: "assistant",
@@ -189,7 +293,6 @@ describe("handler reads file content (not path)", () => {
     });
     writeFileSync(transcriptPath, transcriptLine);
 
-    // Create state file
     const statePath = join(tmpDir, "active_task_graph.json");
     const state = {
       current_phase: "execute",
@@ -203,13 +306,10 @@ describe("handler reads file content (not path)", () => {
     writeFileSync(statePath, JSON.stringify(state, null, 2));
     chmodSync(statePath, 0o444);
 
-    // Create subagent tracking file pointing to our state
     const subagentDir = join(tmpDir, "subagents");
     mkdirSync(subagentDir, { recursive: true });
     writeFileSync(join(subagentDir, "test-session.task_graph"), statePath);
 
-    // This pins one thing: parseTranscript treats its argument as transcript
-    // CONTENT — the file's bytes parse, and a file PATH yields "".
     const content = readFileSync(transcriptPath, "utf-8");
     const { parseTranscript } = await import("../../src/parsers/parse-transcript");
     const transcript = parseTranscript(content);
@@ -217,7 +317,6 @@ describe("handler reads file content (not path)", () => {
     expect(transcript).toContain("SPEC_CHECK_CRITICAL_COUNT: 0");
     expect(transcript).toContain("SPEC_CHECK_VERDICT: PASSED");
 
-    // Verify that passing a file PATH (old bug) gives empty string
     const badResult = parseTranscript(transcriptPath);
     expect(badResult).toBe("");
 
@@ -231,12 +330,283 @@ describe("handler reads file content (not path)", () => {
 });
 
 describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
+  async function withTaskGraphPointer<T>(
+    session: string,
+    statePath: string,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const { SUBAGENT_DIR } = await import("../../src/config");
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
+    writeFileSync(pointer, statePath);
+    try {
+      return await run();
+    } finally {
+      rmSync(pointer, { force: true });
+    }
+  }
+  it.each(["missing", "unreadable"] as const)(
+    "records exact modern Wave %s transcript capture as EVIDENCE_CAPTURE_FAILED",
+    async (failureKind) => {
+      const tmpRoot = join(tmpdir(), `spec-check-${failureKind}-modern-${Date.now()}`);
+      mkdirSync(tmpRoot, { recursive: true });
+      const tmpDir = realpathSync.native(tmpRoot);
+      const statePath = join(tmpDir, "active_task_graph.json");
+      const transcriptPath = join(tmpDir, "transcript.jsonl");
+      if (failureKind === "unreadable") mkdirSync(transcriptPath);
+      const runId = parseOrchestrationRunId(`run.spec-${failureKind}-transcript`);
+      const slotId = parseSlotId(`wave-slot:spec-${failureKind}-transcript`);
+      if (!runId.ok || !slotId.ok) throw new Error("invalid transcript failure authority fixture");
+      writeFileSync(statePath, JSON.stringify({
+        spec_trace_version: 2,
+        current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+        spec_file: null, plan_file: null, current_wave: 5, tasks: [], wave_gates: {},
+        active_wave_gate: {
+          schemaVersion: 1, kind: "active-wave-gate", runId: runId.value, wave: 5,
+          authorityDigest: "a".repeat(64), revision: 1, terminalOutcome: null,
+        },
+        wave_review_epoch: {
+          runId: runId.value, wave: 5, batchEpoch: "b".repeat(64),
+          specCheckDocuments: {
+            spec: { path: null, contentDigest: null },
+            plan: { path: null, contentDigest: null },
+          },
+          specCheckSlotAuthority: { slot_id: slotId.value, attempted: 1 },
+        },
+      }));
+      const session = `spec-check-${failureKind}-modern-${process.pid}-${Date.now()}`;
+      try {
+        await withTaskGraphPointer(session, statePath, async () => {
+          const result = await runStoreSpecCheckFindings(JSON.stringify({
+            session_id: session,
+            agent_type: "spec-check-invoker",
+            agent_transcript_path: transcriptPath,
+          }), [], {
+            runId: runId.value,
+            slotId: slotId.value,
+            attempt: 1,
+            role: "spec-check-invoker",
+          });
+
+          expect(result).toMatchObject({
+            kind: "passthrough",
+            systemMessage: expect.stringContaining("marking evidence_capture_failed"),
+          });
+          expect(JSON.parse(readFileSync(statePath, "utf8")).spec_check).toMatchObject({
+            wave: 5,
+            verdict: "EVIDENCE_CAPTURE_FAILED",
+            error: expect.stringMatching(/spec-check transcript is unreadable.*re-run \/wave-gate/),
+          });
+        });
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("malformed stdin → contextual error naming that findings were NOT stored (parity with update-task-status)", async () => {
     const result = await handler("{not json", []);
     expect(result.kind).toBe("error");
     if (result.kind === "error") {
-      expect(result.message).toContain("malformed SubagentStop input");
+      expect(result.message).toContain("invalid SubagentStop input");
       expect(result.message).toContain("NOT stored");
+    }
+  });
+
+  it.each(["null", "42", "[]", JSON.stringify({ session_id: "session-1", agent_type: 7 })])(
+    "valid JSON outside the SubagentStop domain fails closed: %s",
+    async (stdin) => {
+      const result = await handler(stdin, []);
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringMatching(/invalid SubagentStop input.*NOT stored/),
+      });
+    },
+  );
+
+  it.each([
+    ["absent", `missing-spec-session-${process.pid}-${Date.now()}`],
+    ["malformed", "../../invalid spec session"],
+  ])("%s TaskGraph authority fails the recognized spec-check stop", async (_label, sessionId) => {
+    const result = await handler(JSON.stringify({
+      session_id: sessionId,
+      agent_type: "spec-check-invoker",
+      agent_transcript_path: "/nonexistent/spec-check.jsonl",
+    }), []);
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/TaskGraph authority unavailable.*spec-check findings NOT stored/),
+    });
+  });
+
+  it("rejects absent and stale request authority on a modern Wave without changing spec evidence", async () => {
+    const tmpDir = join(tmpdir(), `spec-check-authority-${Date.now()}`);
+    mkdirSync(tmpDir, { recursive: true });
+    const statePath = join(tmpDir, "active_task_graph.json");
+    const runId = parseOrchestrationRunId("run.spec-authority");
+    const slotId = parseSlotId("wave-slot:spec-check");
+    if (!runId.ok || !slotId.ok) throw new Error("invalid authority fixture");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, current_wave: 1, tasks: [], wave_gates: {},
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: runId.value, wave: 1,
+        authorityDigest: "a".repeat(64), revision: 1, terminalOutcome: null,
+      },
+      wave_review_epoch: {
+        runId: runId.value, wave: 1, batchEpoch: "b".repeat(64),
+        specCheckDocuments: {
+          spec: { path: null, contentDigest: null },
+          plan: { path: null, contentDigest: null },
+        },
+        specCheckSlotAuthority: { slot_id: slotId.value, attempted: 2 },
+      },
+    }));
+    const transcriptPath = join(tmpDir, "transcript.jsonl");
+    writeFileSync(transcriptPath, JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED" }] },
+    }));
+    const session = `spec-check-authority-${process.pid}-${Date.now()}`;
+    const stdin = JSON.stringify({
+      session_id: session,
+      agent_type: "spec-check-invoker",
+      agent_transcript_path: transcriptPath,
+    });
+    try {
+      await withTaskGraphPointer(session, statePath, async () => {
+        await expect(handler(stdin, [])).resolves.toMatchObject({
+          kind: "error",
+          message: expect.stringContaining("no capture-correlated request authority"),
+        });
+        await expect(runStoreSpecCheckFindings(stdin, [], {
+          runId: runId.value,
+          slotId: slotId.value,
+          attempt: 1,
+          role: "spec-check-invoker",
+        })).resolves.toMatchObject({
+          kind: "error",
+          message: expect.stringContaining("does not match the exact current Wave epoch"),
+        });
+        expect(JSON.parse(readFileSync(statePath, "utf-8")).spec_check).toBeUndefined();
+      });
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects exact request evidence after the bound specification bytes change", async () => {
+    const tmpRoot = join(tmpdir(), `spec-check-byte-drift-${Date.now()}`);
+    mkdirSync(tmpRoot, { recursive: true });
+    const tmpDir = realpathSync.native(tmpRoot);
+    const statePath = join(tmpDir, "active_task_graph.json");
+    const specPath = join(tmpDir, "spec.md");
+    const planPath = join(tmpDir, "plan.md");
+    const originalSpec = "spec before";
+    const plan = "plan";
+    writeFileSync(specPath, originalSpec);
+    writeFileSync(planPath, plan);
+    const runId = parseOrchestrationRunId("run.spec-byte-drift");
+    const slotId = parseSlotId("wave-slot:spec-byte-drift");
+    if (!runId.ok || !slotId.ok) throw new Error("invalid authority fixture");
+    writeFileSync(statePath, JSON.stringify({
+      spec_trace_version: 2,
+      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+      spec_file: specPath, plan_file: planPath, current_wave: 1, tasks: [], wave_gates: {},
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: runId.value, wave: 1,
+        authorityDigest: "a".repeat(64), revision: 1, terminalOutcome: null,
+      },
+      wave_review_epoch: {
+        runId: runId.value, wave: 1, batchEpoch: "b".repeat(64),
+        specCheckDocuments: {
+          spec: { path: specPath, contentDigest: createHash("sha256").update(originalSpec).digest("hex") },
+          plan: { path: planPath, contentDigest: createHash("sha256").update(plan).digest("hex") },
+        },
+        specCheckSlotAuthority: { slot_id: slotId.value, attempted: 1 },
+      },
+    }));
+    const transcriptPath = join(tmpDir, "transcript.jsonl");
+    writeFileSync(transcriptPath, JSON.stringify({
+      type: "assistant",
+      message: { content: [{
+        type: "text",
+        text: "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED",
+      }] },
+    }));
+    writeFileSync(specPath, "spec after");
+    const session = `spec-check-byte-drift-${process.pid}-${Date.now()}`;
+    try {
+      await withTaskGraphPointer(session, statePath, async () => {
+        const result = await runStoreSpecCheckFindings(JSON.stringify({
+          session_id: session,
+          agent_type: "spec-check-invoker",
+          agent_transcript_path: transcriptPath,
+        }), [], {
+          runId: runId.value,
+          slotId: slotId.value,
+          attempt: 1,
+          role: "spec-check-invoker",
+        });
+        expect(result).toMatchObject({
+          kind: "error",
+          message: expect.stringContaining("spec/plan bytes do not match"),
+        });
+        expect(JSON.parse(readFileSync(statePath, "utf8")).spec_check).toBeUndefined();
+      });
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects authority-free spec-check evidence after modern Wave authority is retired", async () => {
+    const { SUBAGENT_DIR } = await import("../../src/config");
+    const tmpDir = join(tmpdir(), `spec-check-retired-modern-${Date.now()}`);
+    mkdirSync(tmpDir, { recursive: true });
+    const statePath = join(tmpDir, "active_task_graph.json");
+    const initial = {
+      spec_trace_version: 2,
+      current_phase: "execute",
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      current_wave: 1,
+      tasks: [],
+      wave_gates: {},
+      spec_check: {
+        wave: 1, run_at: "accepted", verdict: "PASSED", critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+    };
+    writeFileSync(statePath, JSON.stringify(initial));
+    const transcriptPath = join(tmpDir, "transcript.jsonl");
+    writeFileSync(transcriptPath, JSON.stringify({
+      type: "assistant",
+      message: { content: [{
+        type: "text",
+        text: "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 1\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: BLOCKED\nCRITICAL: late stale result",
+      }] },
+    }));
+    const session = `spec-check-retired-modern-${process.pid}-${Date.now()}`;
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
+    writeFileSync(pointer, statePath);
+    try {
+      const result = await handler(JSON.stringify({
+        session_id: session,
+        agent_type: "spec-check-invoker",
+        agent_transcript_path: transcriptPath,
+      }), []);
+
+      expect(result).toMatchObject({
+        kind: "error",
+        message: expect.stringContaining("modern Wave spec-check has no current capture-correlated request authority"),
+      });
+      expect(JSON.parse(readFileSync(statePath, "utf8"))).toEqual(initial);
+    } finally {
+      rmSync(pointer, { force: true });
+      rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 
@@ -249,10 +619,22 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
     // root so the anchored primitives' base-resolution matches production.
     const tmpDir = realpathSync.native(tmpRoot);
     const statePath = join(tmpDir, "active_task_graph.json");
-    writeFileSync(statePath, JSON.stringify(graphFixture([])));
-    // A reported count of 0 alongside a listed CRITICAL finding — storing it
-    // as-is would let wave-gate check 4 pass on critical_count while the
-    // findings say otherwise.
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute",
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      current_wave: 1,
+      tasks: [],
+      spec_check: {
+        wave: 1, run_at: "earlier", verdict: "BLOCKED", critical_count: 1, high_count: 0,
+        critical_findings: ["earlier blocker"], high_findings: [], medium_findings: [],
+      },
+      wave_gates: {
+        "1": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: true },
+      },
+    }));
     const transcriptPath = join(tmpDir, "transcript.jsonl");
     writeFileSync(transcriptPath, JSON.stringify({
       type: "assistant",
@@ -260,7 +642,7 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
         content: [
           {
             type: "text",
-            text: "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED\nCRITICAL: smuggled unreconciled finding",
+            text: "SPEC_CHECK_WAVE: 1\nCRITICAL: smuggled unreconciled finding\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED",
           },
         ],
       },
@@ -284,6 +666,7 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
       const state = JSON.parse(readFileSync(statePath, "utf-8"));
       expect(state.spec_check.verdict).toBe("EVIDENCE_CAPTURE_FAILED");
       expect(state.spec_check.error).toContain("does not match");
+      expect(state.wave_gates["1"].blocked).toBe(false);
     } finally {
       stderrSpy.mockRestore();
       rmSync(tmpDir, { recursive: true, force: true });
@@ -350,7 +733,7 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
     }
   });
 
-  it("empty/unreadable transcript → EVIDENCE_CAPTURE_FAILED recorded, never a silent skip", async () => {
+  it("absent transcript → EVIDENCE_CAPTURE_FAILED recorded, never a silent skip", async () => {
     const { SUBAGENT_DIR } = await import("../../src/config");
     const { mkdirSync: mkdir } = await import("node:fs");
     const tmpRoot = join(tmpdir(), `spec-check-empty-${Date.now()}`);
@@ -384,14 +767,62 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
       expect(text).toContain("marking evidence_capture_failed");
 
       const state = JSON.parse(readFileSync(statePath, "utf-8"));
-      // Wave-gate check 4 now sees a verdict, not a vacuous "no spec-check data".
+      // Preserve the concrete unreadable-transcript cause instead of generic
+      // missing spec-check evidence.
       expect(state.spec_check.verdict).toBe("EVIDENCE_CAPTURE_FAILED");
       expect(state.spec_check.wave).toBe(3);
+      expect(state.spec_check.error).toContain("spec-check transcript is unreadable");
+      expect(state.spec_check.error).toContain("does-not-exist.jsonl");
       expect(state.spec_check.error).toContain("re-run /wave-gate");
     } finally {
       stderrSpy.mockRestore();
       rmSync(tmpDir, { recursive: true, force: true });
       rmSync(pointer, { force: true });
+    }
+  });
+
+  it("existing unreadable transcript records its concrete EVIDENCE_CAPTURE_FAILED cause", async () => {
+    const { SUBAGENT_DIR } = await import("../../src/config");
+    const tmpDir = join(tmpdir(), `spec-check-unreadable-${Date.now()}`);
+    mkdirSync(tmpDir, { recursive: true });
+    const statePath = join(tmpDir, "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute",
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      current_wave: 4,
+      tasks: [],
+      wave_gates: {},
+    }));
+    const transcriptPath = join(tmpDir, "transcript.jsonl");
+    mkdirSync(transcriptPath);
+    const session = `spec-check-unreadable-${process.pid}-${Date.now()}`;
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
+    writeFileSync(pointer, statePath);
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    try {
+      const result = await handler(JSON.stringify({
+        session_id: session,
+        agent_type: "spec-check-invoker",
+        agent_transcript_path: transcriptPath,
+      }), []);
+
+      expect(result.kind).toBe("passthrough");
+      const state = JSON.parse(readFileSync(statePath, "utf8"));
+      expect(state.spec_check).toMatchObject({
+        wave: 4,
+        verdict: "EVIDENCE_CAPTURE_FAILED",
+        error: expect.stringContaining("spec-check transcript is unreadable"),
+      });
+      expect(state.spec_check.error).toContain("re-run /wave-gate");
+    } finally {
+      stderrSpy.mockRestore();
+      rmSync(pointer, { force: true });
+      rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 });

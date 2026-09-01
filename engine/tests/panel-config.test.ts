@@ -17,6 +17,7 @@ import {
   REVIEW_SUB_AGENTS,
   REVIEW_AGENTS,
   EXECUTE_AGENTS,
+  READ_ONLY_STATE_COMMANDS,
   panelPhaseOverlap,
   assertPanelPhaseDisjoint,
   panelExecuteOverlap,
@@ -385,17 +386,19 @@ describe("runtime immutability of derived config", () => {
     expect(Object.isFrozen(PHASE_AGENT_MAP)).toBe(true);
   });
 
-  it("ARCH_PANEL_AGENTS throws on add/delete/clear (frozenSet mutators shadowed)", () => {
+  it.each([
+    ["ARCH_PANEL_AGENTS", ARCH_PANEL_AGENTS, "arch-designer-agent"],
+    ["READ_ONLY_STATE_COMMANDS", READ_ONLY_STATE_COMMANDS, "cat"],
+  ] as const)("%s throws on add/delete/clear (frozenSet mutators shadowed)", (_name, readonlySet, retained) => {
     // Object.freeze alone does NOT stop set.add — a Set's elements live in an
     // internal slot. frozenSet shadows the mutators so these throw; without the
-    // shadowing they would silently succeed and mutate the "immutable" set.
-    const mutable = ARCH_PANEL_AGENTS as Set<string>;
-    expect(() => mutable.add("smuggled-phase-agent")).toThrow(/immutable/);
-    expect(() => mutable.delete("arch-designer-agent")).toThrow(/immutable/);
+    // shadowing they would silently mutate a security-relevant allowlist.
+    const mutable = readonlySet as Set<string>;
+    expect(() => mutable.add("smuggled-entry")).toThrow(/immutable/);
+    expect(() => mutable.delete(retained)).toThrow(/immutable/);
     expect(() => mutable.clear()).toThrow(/immutable/);
-    // And the set is genuinely unchanged after the failed mutations.
-    expect(ARCH_PANEL_AGENTS.has("smuggled-phase-agent")).toBe(false);
-    expect(ARCH_PANEL_AGENTS.has("arch-designer-agent")).toBe(true);
+    expect(readonlySet.has("smuggled-entry")).toBe(false);
+    expect(readonlySet.has(retained)).toBe(true);
   });
 });
 

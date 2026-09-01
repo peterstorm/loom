@@ -119,12 +119,50 @@ function transcript(path: string, lines: readonly unknown[]): void {
 const user = (text: string) => ({ type: "user", message: { role: "user", content: text } });
 const assistant = (text: string) => ({ type: "assistant", message: { role: "assistant", content: text } });
 
-function startInput(transcriptPath: string): string {
+function startInput(
+  transcriptPath: string | null,
+  options: Readonly<{ includeAgentType?: boolean }> = {},
+): string {
   return JSON.stringify({
     session_id: SESSION,
     agent_id: AGENT,
-    agent_type: "code-implementer-agent",
-    agent_transcript_path: transcriptPath,
+    ...(options.includeAgentType === false ? {} : { agent_type: "code-implementer-agent" }),
+    ...(transcriptPath === null ? {} : { agent_transcript_path: transcriptPath }),
+  });
+}
+
+function modernClaudeAttemptFixture(
+  reservation: string,
+  options: Readonly<{
+    taskOverrides?: Partial<Task>;
+    transcriptLines?: readonly unknown[] | null;
+  }> = {},
+): Readonly<{
+  attempt: ImplementationAttemptAuthority;
+  transcriptPath: string;
+  read: () => TaskGraph;
+}> {
+  const dir = root();
+  const statePath = join(dir, "active_task_graph.json");
+  const attempt = authority("T1", reservation);
+  modernGraph(statePath, attempt, options.taskOverrides);
+  process.env.LOOM_STATE_PATH = statePath;
+  mkdirSync(process.env.LOOM_SUBAGENT_DIR!, { recursive: true });
+  writeFileSync(join(process.env.LOOM_SUBAGENT_DIR!, `${SESSION}.task_graph`), statePath);
+  const transcriptPath = join(dir, "agent.jsonl");
+  if (options.transcriptLines !== null) {
+    transcript(transcriptPath, options.transcriptLines ?? [user("Task ID: T1"), assistant("implementation finished")]);
+  }
+  publishImplementationAttemptSidecar({
+    sessionId: SESSION,
+    agentId: AGENT,
+    taskGraphPath: statePath,
+    authority: attempt,
+  });
+  return Object.freeze({
+    attempt,
+    transcriptPath,
+    read: () => JSON.parse(readFileSync(statePath, "utf8")) as TaskGraph,
   });
 }
 
@@ -251,99 +289,55 @@ describe("Claude implementation authority sidecar", () => {
   });
 
   it("snapshots authority before cleanup removes the sidecar and dispatches settlement", async () => {
-    const dir = root();
-    const statePath = join(dir, "active_task_graph.json");
-    const attempt = authority();
-    modernGraph(statePath, attempt);
-    process.env.LOOM_STATE_PATH = statePath;
-    mkdirSync(process.env.LOOM_SUBAGENT_DIR!, { recursive: true });
-    writeFileSync(join(process.env.LOOM_SUBAGENT_DIR!, `${SESSION}.task_graph`), statePath);
-    const transcriptPath = join(dir, "agent.jsonl");
-    transcript(transcriptPath, [user("Task ID: T1"), assistant("implementation finished")]);
-    publishImplementationAttemptSidecar({ sessionId: SESSION, agentId: AGENT, taskGraphPath: statePath, authority: attempt });
+    const fixture = modernClaudeAttemptFixture("sidecar-reservation");
 
-    const result = await dispatch(JSON.stringify({
-      session_id: SESSION,
-      agent_id: AGENT,
-      agent_type: "code-implementer-agent",
-      agent_transcript_path: transcriptPath,
-    }), []);
+    const result = await dispatch(startInput(fixture.transcriptPath), []);
     if (result.kind === "error" || result.kind === "block") throw new Error(result.message);
     expect(result.kind).toBe("passthrough");
     expect(snapshotImplementationAttemptSidecar(SESSION, AGENT)).toMatchObject({
       kind: "authority-unavailable",
       failure: { kind: "missing-sidecar" },
     });
-    const stored = JSON.parse(readFileSync(statePath, "utf8")) as TaskGraph;
+    const stored = fixture.read();
     expect(stored.executing_tasks).toEqual([]);
     expect(stored.tasks[0]?.active_implementation_attempt).toBeUndefined();
   });
 
   it("routes an exact modern sidecar even when Claude omits agent_type metadata", async () => {
-    const dir = root();
-    const statePath = join(dir, "active_task_graph.json");
-    const attempt = authority("T1", "claude-sidecar-route");
-    modernGraph(statePath, attempt, {
-      new_tests_required: false,
-      proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
-    });
-    process.env.LOOM_STATE_PATH = statePath;
-    mkdirSync(process.env.LOOM_SUBAGENT_DIR!, { recursive: true });
-    writeFileSync(join(process.env.LOOM_SUBAGENT_DIR!, `${SESSION}.task_graph`), statePath);
-    const transcriptPath = join(dir, "agent.jsonl");
-    transcript(transcriptPath, [user("Task ID: T1"), assistant("implementation finished")]);
-    publishImplementationAttemptSidecar({
-      sessionId: SESSION, agentId: AGENT, taskGraphPath: statePath, authority: attempt,
+    const fixture = modernClaudeAttemptFixture("claude-sidecar-route", {
+      taskOverrides: {
+        new_tests_required: false,
+        proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+      },
     });
 
-    const result = await dispatch(JSON.stringify({
-      session_id: SESSION,
-      agent_id: AGENT,
-      agent_transcript_path: transcriptPath,
-    }), []);
+    const result = await dispatch(startInput(fixture.transcriptPath, { includeAgentType: false }), []);
 
     expect(result.kind).toBe("passthrough");
-    const stored = JSON.parse(readFileSync(statePath, "utf8")) as TaskGraph;
+    const stored = fixture.read();
     expect(stored.tasks[0]).toMatchObject({
       status: "implemented",
-      implementation_attempt_history: [{ authorityDigest: attempt.authorityDigest }],
+      implementation_attempt_history: [{ authorityDigest: fixture.attempt.authorityDigest }],
     });
   });
 
   it("implements an exact modern Claude attempt only through an Oracle receipt", async () => {
-    const dir = root();
-    const statePath = join(dir, "active_task_graph.json");
-    const attempt = authority("T1", "claude-positive-oracle");
-    modernGraph(statePath, attempt, {
-      new_tests_required: false,
-      proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
-    });
-    process.env.LOOM_STATE_PATH = statePath;
-    mkdirSync(process.env.LOOM_SUBAGENT_DIR!, { recursive: true });
-    writeFileSync(join(process.env.LOOM_SUBAGENT_DIR!, `${SESSION}.task_graph`), statePath);
-    const transcriptPath = join(dir, "agent.jsonl");
-    transcript(transcriptPath, [user("Task ID: T1"), assistant("implementation finished")]);
-    publishImplementationAttemptSidecar({
-      sessionId: SESSION,
-      agentId: AGENT,
-      taskGraphPath: statePath,
-      authority: attempt,
+    const fixture = modernClaudeAttemptFixture("claude-positive-oracle", {
+      taskOverrides: {
+        new_tests_required: false,
+        proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+      },
     });
 
-    const result = await dispatch(JSON.stringify({
-      session_id: SESSION,
-      agent_id: AGENT,
-      agent_type: "code-implementer-agent",
-      agent_transcript_path: transcriptPath,
-    }), []);
+    const result = await dispatch(startInput(fixture.transcriptPath), []);
     expect(result.kind).toBe("passthrough");
-    const stored = JSON.parse(readFileSync(statePath, "utf8")) as TaskGraph;
+    const stored = fixture.read();
     expect(stored.executing_tasks).toEqual([]);
     expect(stored.tasks[0]).toMatchObject({
       status: "implemented",
       proof: { state: "satisfied" },
       implementation_attempt_history: [{
-        authorityDigest: attempt.authorityDigest,
+        authorityDigest: fixture.attempt.authorityDigest,
         transition: "implemented",
         consumesSemanticAttempt: false,
       }],
@@ -394,28 +388,15 @@ describe("Claude implementation authority sidecar", () => {
   });
 
   it("settles a modern stop with no resolvable transcript as exact infrastructure and releases only that authority", async () => {
-    const dir = root();
-    const statePath = join(dir, "active_task_graph.json");
-    const attempt = authority("T1", "claude-missing-transcript");
-    modernGraph(statePath, attempt, {
-      new_tests_required: false,
-      proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
-    });
-    process.env.LOOM_STATE_PATH = statePath;
-    mkdirSync(process.env.LOOM_SUBAGENT_DIR!, { recursive: true });
-    writeFileSync(join(process.env.LOOM_SUBAGENT_DIR!, `${SESSION}.task_graph`), statePath);
-    publishImplementationAttemptSidecar({
-      sessionId: SESSION,
-      agentId: AGENT,
-      taskGraphPath: statePath,
-      authority: attempt,
+    const fixture = modernClaudeAttemptFixture("claude-missing-transcript", {
+      taskOverrides: {
+        new_tests_required: false,
+        proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+      },
+      transcriptLines: null,
     });
 
-    const result = await dispatch(JSON.stringify({
-      session_id: SESSION,
-      agent_id: AGENT,
-      agent_type: "code-implementer-agent",
-    }), []);
+    const result = await dispatch(startInput(null), []);
 
     expect(result).toMatchObject({
       kind: "error",
@@ -424,13 +405,13 @@ describe("Claude implementation authority sidecar", () => {
     expect(result).toMatchObject({
       message: expect.stringContaining("exact non-consuming infrastructure Oracle receipt"),
     });
-    const stored = JSON.parse(readFileSync(statePath, "utf8")) as TaskGraph;
+    const stored = fixture.read();
     expect(stored.executing_tasks).toEqual([]);
     expect(stored.tasks[0]).toMatchObject({
       status: "pending",
       revalidation_required: true,
       implementation_attempt_history: [{
-        authorityDigest: attempt.authorityDigest,
+        authorityDigest: fixture.attempt.authorityDigest,
         transition: "infrastructure-blocked",
         consumesSemanticAttempt: false,
       }],

@@ -112,6 +112,7 @@ export interface SubagentStartInput {
   session_id: string;
   agent_id?: string;
   agent_type?: string;
+  agent_transcript_path?: string;
 }
 
 // --- Task Graph state ---
@@ -179,7 +180,7 @@ export interface DraftFinding {
   readonly claim: string;
 }
 
-/** A draft plus derived identity. Only `attributeFindings` produces these. */
+/** A draft plus derived identity. `attributeFindings` mints new identities; parsers rehydrate persisted ones. */
 export interface Finding extends DraftFinding {
   /** `${agent}-${ordinal}`, derived — never agent-chosen. */
   readonly id: string;
@@ -859,8 +860,8 @@ export type WaveCompletionSuiteReadiness =
       verificationManifestDigest: ArtifactDigest;
       suiteDigest: ArtifactDigest;
       workspaceDigest: ArtifactDigest;
-      failureKinds: readonly CompletionSemanticFailure["kind"][];
-      checkIds: readonly CompletionCheckId[];
+      failureKinds: OrchestrationNonEmpty<CompletionSemanticFailure["kind"]>;
+      checkIds: OrchestrationNonEmpty<CompletionCheckId>;
     }>
   | Readonly<{
       kind: "stale";
@@ -982,10 +983,30 @@ export type LoomStatus = Readonly<{
   next: NextActionDecision;
 }>;
 
+export type WaveSpecCheckSlotAuthority = Readonly<{
+  readonly slot_id: string;
+  readonly attempted: 1 | 2;
+}>;
+
+export type WaveSpecCheckDocumentAuthority =
+  | Readonly<{ path: null; contentDigest: null }>
+  | Readonly<{ path: string; contentDigest: ArtifactDigest }>;
+
+export type WaveSpecCheckDocumentsAuthority = Readonly<{
+  readonly spec: WaveSpecCheckDocumentAuthority;
+  readonly plan: WaveSpecCheckDocumentAuthority;
+}>;
+
 export interface WaveReviewEpochAuthority {
   readonly runId: OrchestrationRunId;
   readonly wave: number;
   readonly batchEpoch: ArtifactDigest;
+  /** Exact spec/plan paths and bytes. Absent only on historical epochs. */
+  readonly specCheckDocuments?: WaveSpecCheckDocumentsAuthority;
+  /** Exact spec-check slot attempt issued for this epoch. Absent on historical
+   * epochs and while modern task-attempt invalidation awaits reissuance; exact
+   * recovery refuses to infer it from evidence. */
+  readonly specCheckSlotAuthority?: WaveSpecCheckSlotAuthority;
 }
 
 export interface TaskGraph {

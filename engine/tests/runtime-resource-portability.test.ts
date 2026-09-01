@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, extname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -8,6 +8,7 @@ import { renderMarkdownForPi } from "../src/core/harness-resources";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const RUNTIME_TREES = ["agents", "commands", "skills", "references"] as const;
+const BUN = execFileSync("which", ["bun"], { encoding: "utf8" }).trim();
 
 function markdownFiles(root: string): readonly string[] {
   const files: string[] = [];
@@ -23,6 +24,7 @@ function markdownFiles(root: string): readonly string[] {
 }
 
 const FILES = RUNTIME_TREES.flatMap((tree) => markdownFiles(join(REPO_ROOT, tree)));
+const MARKDOWN_CASES = FILES.map((file) => [relative(REPO_ROOT, file), file] as const);
 const LEGACY_LOOM_CACHE = /\.claude\/plugins\/cache[^\n`]*loom|plugins\/cache\/plugins\/loom|LOOM_DIR=.*plugins\/cache/;
 
 describe("Pi harness detection", () => {
@@ -93,6 +95,140 @@ describe("Pi harness detection", () => {
   });
 });
 
+describe("TaskGraph repository-root discovery", () => {
+  const configScript = `import { TASK_GRAPH_PATH } from ${JSON.stringify(pathToFileURL(join(REPO_ROOT, "engine/src/config.ts")).href)}; console.log(TASK_GRAPH_PATH);`;
+
+  function fakeGit(root: string, stderr: string, status: number): string {
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    const git = join(bin, "git");
+    writeFileSync(git, `#!/bin/sh\nprintf '%s\\n' ${JSON.stringify(stderr)} >&2\nexit ${status}\n`);
+    chmodSync(git, 0o755);
+    return bin;
+  }
+
+  it("fails closed when Git cannot prove the root from a nested repository cwd", () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-git-root-failure-")));
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: root });
+      mkdirSync(join(root, ".claude", "state"), { recursive: true });
+      writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), "{}\n");
+      const nested = join(root, "nested", "cwd");
+      mkdirSync(nested, { recursive: true });
+      const bin = fakeGit(root, "fatal: detected dubious ownership in repository", 128);
+
+      const run = spawnSync(BUN, ["-e", configScript], {
+        cwd: nested,
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+        encoding: "utf8",
+      });
+
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toContain("git rev-parse failed (exit 128)");
+      expect(run.stderr).toContain("dubious ownership");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.getuid?.() === 0)("rejects Git's non-repository diagnostic when ancestor metadata exists but is unreadable", () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-unreadable-git-root-")));
+    const gitDirectory = join(root, ".git");
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: root });
+      const nested = join(root, "nested", "cwd");
+      mkdirSync(nested, { recursive: true });
+      chmodSync(gitDirectory, 0o000);
+
+      const run = spawnSync(BUN, ["-e", configScript], {
+        cwd: nested,
+        env: process.env,
+        encoding: "utf8",
+      });
+
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toMatch(/repository metadata|git rev-parse failed|cannot inspect repository metadata/);
+    } finally {
+      chmodSync(gitDirectory, 0o700);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a non-repository diagnostic when readable ancestor metadata exists", () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-readable-git-root-")));
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: root });
+      const nested = join(root, "nested", "cwd");
+      mkdirSync(nested, { recursive: true });
+      const bin = fakeGit(root, "fatal: not a git repository (or any of the parent directories): .git", 128);
+
+      const run = spawnSync(BUN, ["-e", configScript], {
+        cwd: nested,
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+        encoding: "utf8",
+      });
+
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toContain(`git reported no repository, but repository metadata exists at ${join(root, ".git")}`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when the Git executable cannot start", () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-missing-git-")));
+    try {
+      const emptyPath = join(root, "empty-bin");
+      mkdirSync(emptyPath);
+      const run = spawnSync(BUN, ["-e", configScript], {
+        cwd: root,
+        env: { ...process.env, PATH: emptyPath },
+        encoding: "utf8",
+      });
+
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toContain("git rev-parse could not start");
+      expect(run.stderr).toMatch(/ENOENT|not found/i);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when Git reports success without a repository root", () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-empty-git-root-")));
+    try {
+      const bin = fakeGit(root, "", 0);
+      const run = spawnSync(BUN, ["-e", configScript], {
+        cwd: root,
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+        encoding: "utf8",
+      });
+
+      expect(run.status).not.toBe(0);
+      expect(run.stderr).toContain("git rev-parse returned an empty repository root");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses cwd-relative creation authority only for a proven non-repository", () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-no-git-root-")));
+    try {
+      const bin = fakeGit(root, "fatal: not a git repository (or any of the parent directories): .git", 128);
+      const run = spawnSync(BUN, ["-e", configScript], {
+        cwd: root,
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+        encoding: "utf8",
+      });
+
+      expect(run.status, run.stderr).toBe(0);
+      expect(run.stdout.trim()).toBe(".claude/state/active_task_graph.json");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("runtime markdown is portable across harnesses", () => {
   it("scans a non-vacuous command/skill/agent/reference surface", () => {
     expect(FILES.length).toBeGreaterThan(100);
@@ -101,14 +237,14 @@ describe("runtime markdown is portable across harnesses", () => {
     }
   });
 
-  it.each(FILES.map((file) => [relative(REPO_ROOT, file), file] as const))(
+  it.each(MARKDOWN_CASES)(
     "%s never discovers Loom through the Claude plugin cache",
     (_relativePath, file) => {
       expect(readFileSync(file, "utf-8")).not.toMatch(LEGACY_LOOM_CACHE);
     },
   );
 
-  it.each(FILES.map((file) => [relative(REPO_ROOT, file), file] as const))(
+  it.each(MARKDOWN_CASES)(
     "%s has no unresolved Claude root after Pi lowering",
     (_relativePath, file) => {
       const rendered = renderMarkdownForPi(readFileSync(file, "utf-8"), "/active/loom-package");

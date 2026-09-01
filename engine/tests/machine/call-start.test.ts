@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect, afterAll, vi } from "vitest";
-import { unlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import {
   CALL_START_CAP,
   CALL_START_SUFFIX,
@@ -28,40 +28,41 @@ import { inMemorySessionRegistry } from "./fake-session-registry";
 
 const run = `call-start-${process.pid}-${Date.now()}`;
 const sid = (name: string) => parseSessionId(`${run}-${name}`)!;
-const sessions = ["roundtrip", "prune", "restamp", "corrupt"].map(sid);
+const sessions = ["roundtrip", "prune", "restamp", "corrupt", "unreadable"].map(sid);
 
 afterAll(() => {
   for (const s of sessions) {
-    try {
-      unlinkSync(`${SUBAGENT_DIR}/${s}${CALL_START_SUFFIX}`);
-    } catch {}
+    rmSync(`${SUBAGENT_DIR}/${s}${CALL_START_SUFFIX}`, { recursive: true, force: true });
   }
 });
 
 describe("pure call-start vocabulary", () => {
-  it("parseCallStartEntries accepts what recordCallStart writes and drops malformed entries", () => {
+  it("parseCallStartEntries accepts exactly what recordCallStart writes", () => {
     expect(
       parseCallStartEntries('[{"id":"toolu_1","startMs":1000},{"id":"toolu_2","startMs":2000}]'),
     ).toEqual([
       { id: "toolu_1", startMs: 1000 },
       { id: "toolu_2", startMs: 2000 },
     ]);
-    // Malformed ENTRIES are dropped one-by-one (fail closed: a dropped
-    // stamp only ever rejects artifacts)…
-    expect(
-      parseCallStartEntries(
-        '[{"id":"a","startMs":1},{"id":"neg","startMs":-5},{"id":"frac","startMs":1.5},' +
-          '{"id":"str","startMs":"9"},{"id":"","startMs":3},{"id":"huge","startMs":9007199254740993},' +
-          '1,"x",null,{"startMs":4},{"id":"nostamp"}]',
-      ),
-    ).toEqual([{ id: "a", startMs: 1 }]);
-    // …while a non-array file is corruption the caller must log — INCLUDING
-    // the pre-array Record shape, which fails closed instead of being read
-    // through JS key-ordering semantics.
-    expect(parseCallStartEntries('{"toolu_1":1000,"toolu_2":2000}')).toBeNull();
-    expect(parseCallStartEntries("not json")).toBeNull();
-    expect(parseCallStartEntries('"str"')).toBeNull();
-    expect(parseCallStartEntries("null")).toBeNull();
+  });
+
+  it.each([
+    '[{"id":"a","startMs":1},{"id":"neg","startMs":-5}]',
+    '[{"id":"a","startMs":1},{"id":"frac","startMs":1.5}]',
+    '[{"id":"a","startMs":1},{"id":"str","startMs":"9"}]',
+    '[{"id":"a","startMs":1},{"id":"","startMs":3}]',
+    '[{"id":"a","startMs":1},{"id":"huge","startMs":9007199254740993}]',
+    '[{"id":"a","startMs":1},1]',
+    '[{"id":"a","startMs":1},null]',
+    '[{"id":"a","startMs":1},{"startMs":4}]',
+    '[{"id":"a","startMs":1},{"id":"nostamp"}]',
+    '[{"id":"a","startMs":1},{"id":"a","startMs":2}]',
+    '{"toolu_1":1000,"toolu_2":2000}',
+    "not json",
+    '"str"',
+    "null",
+  ])("rejects the complete call-start authority when any member or shape is corrupt: %s", (raw) => {
+    expect(parseCallStartEntries(raw)).toBeNull();
   });
 
   it("pruneCallStarts keeps the LAST cap entries in order (oldest dropped first)", () => {
@@ -71,13 +72,13 @@ describe("pure call-start vocabulary", () => {
     expect(pruneCallStarts([], 3)).toEqual([]);
   });
 
-  it("callStartOf scans from the END so a duplicate id resolves to the most recent stamp", () => {
+  it("callStartOf rejects duplicate in-memory authority", () => {
     const entries = [
       { id: "t", startMs: 100 },
       { id: "other", startMs: 150 },
       { id: "t", startMs: 200 },
     ];
-    expect(callStartOf(entries, "t")).toBe(200);
+    expect(callStartOf(entries, "t")).toBeNull();
     expect(callStartOf(entries, "other")).toBe(150);
     expect(callStartOf(entries, "missing")).toBeNull();
     expect(callStartOf([], "t")).toBeNull();
@@ -123,6 +124,18 @@ registryContract("fs adapter", fsSessionRegistry);
 registryContract("in-memory fake", inMemorySessionRegistry());
 
 describe("call-start stamps — fs corruption handling", () => {
+  it("propagates a call-start inspection fault instead of replacing hidden authority", async () => {
+    const s = sid("unreadable");
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const path = `${SUBAGENT_DIR}/${s}${CALL_START_SUFFIX}`;
+    symlinkSync(path, path);
+
+    await expect(fsSessionRegistry.recordCallStart(s, "toolu_x", 777)).rejects.toThrow(
+      /cannot read call-start file.*ELOOP|too many levels of symbolic links/i,
+    );
+    expect(() => readFileSync(path)).toThrow();
+  });
+
   it("a corrupt stamp file reads as null (loudly) and is replaced by the next stamp", async () => {
     const s = sid("corrupt");
     mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
@@ -138,6 +151,24 @@ describe("call-start stamps — fs corruption handling", () => {
       stderrSpy.mockRestore();
     }
     expect(fsSessionRegistry.callStartFor(s, "toolu_x")).toBe(777);
+  });
+
+  it("a malformed newer duplicate cannot reveal an older stamp", async () => {
+    const s = sid("corrupt");
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(`${SUBAGENT_DIR}/${s}${CALL_START_SUFFIX}`,
+      '[{"id":"toolu_same","startMs":100},{"id":"toolu_same","startMs":"newer-corrupt"}]');
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(fsSessionRegistry.callStartFor(s, "toolu_same")).toBeNull();
+      await fsSessionRegistry.recordCallStart(s, "toolu_same", 300);
+      expect(stderrSpy.mock.calls.map((c) => String(c[0])).join(""))
+        .toContain("corrupt call-start file");
+    } finally {
+      stderrSpy.mockRestore();
+    }
+    expect(fsSessionRegistry.callStartFor(s, "toolu_same")).toBe(300);
   });
 
   it("an old Record-shaped stamp file fails closed as corruption and is replaced by the next stamp", async () => {

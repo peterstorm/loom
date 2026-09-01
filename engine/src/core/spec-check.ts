@@ -1,11 +1,15 @@
 import { isNoFindingSentinel } from "../utils/no-finding-sentinel";
+import type { AgentRequestAuthority } from "./orchestration-contract";
 import {
   parseSpecCheckVerdict,
   type CapturedSpecCheck,
   type EvidenceFailedSpecCheck,
   type SpecCheck,
   type SpecCheckVerdict,
+  type TaskGraph,
+  type WaveSpecCheckDocumentsAuthority,
 } from "../types";
+import { waveSpecCheckDocumentsMatch } from "./wave-review-authority";
 
 export interface ParsedSpecCheckOutput {
   readonly critical: readonly string[];
@@ -15,6 +19,13 @@ export interface ParsedSpecCheckOutput {
   readonly highCount: number | null;
   readonly verdict: SpecCheckVerdict | null;
   readonly wave: number | null;
+  readonly duplicateMarkers: readonly string[];
+  /**
+   * Why an operator is overriding captured evidence by hand. `null` is a
+   * different answer from an empty string: an override is either deliberate and
+   * attributable, or it did not happen.
+   */
+  readonly overrideReason: string | null;
 }
 
 export type SpecCheckResolution =
@@ -25,52 +36,169 @@ export type SpecCheckParseResult =
   | Readonly<{ ok: true; value: SpecCheck }>
   | Readonly<{ ok: false; errors: readonly string[] }>;
 
-/** Parse the last concrete spec-check block from an agent transcript. */
+const SPEC_FINDING_MARKERS = Object.freeze([
+  Object.freeze({ prefix: "CRITICAL:", target: "critical" as const }),
+  Object.freeze({ prefix: "HIGH:", target: "high" as const }),
+  Object.freeze({ prefix: "MEDIUM:", target: "medium" as const }),
+]);
+
+function allMatches(input: string, regex: RegExp): readonly RegExpMatchArray[] {
+  return [...input.matchAll(regex)];
+}
+
+function lastMatch(input: string, regex: RegExp): RegExpMatchArray | null {
+  return allMatches(input, regex).at(-1) ?? null;
+}
+
+type ScalarMarker = Readonly<{
+  name: string;
+  matches: readonly RegExpMatchArray[];
+}>;
+
+function scalarMarker(input: string, name: string, regex: RegExp): ScalarMarker {
+  return Object.freeze({ name, matches: Object.freeze(allMatches(input, regex)) });
+}
+
+/**
+ * Parse the final concrete spec-check footer, bounded by its verdict when one
+ * landed. A final incomplete footer remains authoritative and reconciles to
+ * evidence failure; it never lends an earlier footer's counts or verdict.
+ */
 export function parseSpecCheckOutput(output: string): ParsedSpecCheckOutput {
-  const lastCritCountIdx = output.lastIndexOf("SPEC_CHECK_CRITICAL_COUNT:");
-  let blockStart = 0;
-  if (lastCritCountIdx >= 0) {
-    const lastWaveIdx = output.slice(0, lastCritCountIdx).lastIndexOf("SPEC_CHECK_WAVE:");
-    blockStart = lastWaveIdx >= 0 ? lastWaveIdx : 0;
-  }
-  const searchBlock = lastCritCountIdx >= 0 ? output.slice(blockStart) : output;
+  const finalWaveMarker = lastMatch(output, /^SPEC_CHECK_WAVE:\s*.*$/gm);
+  const blockStart = finalWaveMarker?.index ?? 0;
+  const footer = output.slice(blockStart);
+  const verdictMarker = /^SPEC_CHECK_VERDICT:\s*(?:PASSED|BLOCKED)\s*$/m.exec(footer);
+  const blockEnd = verdictMarker?.index === undefined
+    ? footer.length
+    : verdictMarker.index + verdictMarker[0].length;
+  const searchBlock = footer.slice(0, blockEnd);
 
-  const critical: string[] = [];
-  const high: string[] = [];
-  const medium: string[] = [];
+  const findings = {
+    critical: [] as string[],
+    high: [] as string[],
+    medium: [] as string[],
+  };
   for (const line of searchBlock.split("\n")) {
-    const criticalMatch = line.match(/^CRITICAL:\s*(.*)/);
-    if (criticalMatch) {
-      const claim = criticalMatch[1].trim();
-      if (claim !== "" && !isNoFindingSentinel(claim)) critical.push(claim);
-      continue;
-    }
-    const highMatch = line.match(/^HIGH:\s*(.*)/);
-    if (highMatch) {
-      const claim = highMatch[1].trim();
-      if (claim !== "" && !isNoFindingSentinel(claim)) high.push(claim);
-      continue;
-    }
-    const mediumMatch = line.match(/^MEDIUM:\s*(.*)/);
-    if (mediumMatch) {
-      const claim = mediumMatch[1].trim();
-      if (claim !== "" && !isNoFindingSentinel(claim)) medium.push(claim);
-    }
+    const marker = SPEC_FINDING_MARKERS.find(({ prefix }) => line.startsWith(prefix));
+    if (marker === undefined) continue;
+    const claim = line.slice(marker.prefix.length).trim();
+    if (claim !== "" && !isNoFindingSentinel(claim)) findings[marker.target].push(claim);
   }
+  const { critical, high, medium } = findings;
 
-  const criticalCount = searchBlock.match(/SPEC_CHECK_CRITICAL_COUNT:\s*(\d+)/);
-  const highCount = searchBlock.match(/SPEC_CHECK_HIGH_COUNT:\s*(\d+)/);
-  const verdict = searchBlock.match(/SPEC_CHECK_VERDICT:\s*(PASSED|BLOCKED)/);
-  const wave = searchBlock.match(/SPEC_CHECK_WAVE:\s*(\d+)/);
+  const criticalCount = scalarMarker(searchBlock, "SPEC_CHECK_CRITICAL_COUNT", /^SPEC_CHECK_CRITICAL_COUNT:\s*(\d+)\s*$/gm);
+  const highCount = scalarMarker(searchBlock, "SPEC_CHECK_HIGH_COUNT", /^SPEC_CHECK_HIGH_COUNT:\s*(\d+)\s*$/gm);
+  // Verdicts are terminal but contradiction-sensitive: counts/findings after
+  // the first verdict remain trailing prose, while another complete verdict
+  // anywhere in this final Wave footer invalidates the whole footer.
+  const verdict = scalarMarker(footer, "SPEC_CHECK_VERDICT", /^SPEC_CHECK_VERDICT:\s*(PASSED|BLOCKED)\s*$/gm);
+  const wave = scalarMarker(searchBlock, "SPEC_CHECK_WAVE", /^SPEC_CHECK_WAVE:\s*(\d+)\s*$/gm);
+  const override = scalarMarker(searchBlock, "SPEC_CHECK_OVERRIDE", /^SPEC_CHECK_OVERRIDE:\s*(.*)$/gm);
+  const uniqueValue = (marker: ScalarMarker): string | null =>
+    marker.matches.length === 1 ? (marker.matches[0]?.[1] ?? null) : null;
+  const criticalCountValue = uniqueValue(criticalCount);
+  const highCountValue = uniqueValue(highCount);
+  const verdictValue = uniqueValue(verdict);
+  const waveValue = uniqueValue(wave);
+  const overrideText = uniqueValue(override)?.trim() ?? "";
   return {
     critical,
     high,
     medium,
-    criticalCount: criticalCount ? Number(criticalCount[1]) : null,
-    highCount: highCount ? Number(highCount[1]) : null,
-    verdict: verdict ? parseSpecCheckVerdict(verdict[1]) : null,
-    wave: wave ? Number(wave[1]) : null,
+    criticalCount: criticalCountValue === null ? null : Number(criticalCountValue),
+    highCount: highCountValue === null ? null : Number(highCountValue),
+    verdict: verdictValue === null ? null : parseSpecCheckVerdict(verdictValue),
+    wave: waveValue === null ? null : Number(waveValue),
+    duplicateMarkers: Object.freeze(
+      [criticalCount, highCount, verdict, wave, override]
+        .filter((marker) => marker.matches.length > 1)
+        .map(({ name }) => name),
+    ),
+    overrideReason: overrideText === "" ? null : overrideText,
   };
+}
+
+export type SpecCheckRequestAuthority = Pick<
+  AgentRequestAuthority,
+  "runId" | "slotId" | "attempt" | "role"
+>;
+
+/**
+ * One owner of the question "is this the current spec-check capability?"
+ *
+ * The same invariant was decided independently by the Wave Gate façade, the
+ * Claude SubagentStop hook, the Pi shell, and the manual `store-spec-check`
+ * helper, and the copies demanded different conjuncts — which is how a
+ * stdin-only helper call could flip a Wave's spec gate from
+ * `EVIDENCE_CAPTURE_FAILED` to `PASSED`. `null` means the evidence may be
+ * written; a string names the exact mismatch.
+ */
+export function specCheckAuthorityProblem(
+  state: TaskGraph,
+  authority: SpecCheckRequestAuthority | undefined,
+  documents?: WaveSpecCheckDocumentsAuthority,
+): string | null {
+  const epoch = state.wave_review_epoch;
+  const active = state.active_wave_gate;
+  if (epoch === undefined && active === undefined) {
+    const modernAuthorityHistory = state.spec_trace_version === 2 ||
+      state.verification_manifest !== undefined ||
+      state.active_wave_completion_suite !== undefined ||
+      (state.wave_gate_history?.length ?? 0) > 0 ||
+      (state.wave_reopening_history?.length ?? 0) > 0 ||
+      (state.orphaned_wave_gate_history?.length ?? 0) > 0 ||
+      (state.spec_trace_wave_gate_retirements?.length ?? 0) > 0;
+    if (authority !== undefined) {
+      return `captured spec-check request ${authority.runId}/${authority.slotId}/${authority.attempt} has no current Wave authority`;
+    }
+    return modernAuthorityHistory
+      ? "modern Wave spec-check has no current capture-correlated request authority"
+      : null;
+  }
+  if (authority === undefined) return "modern Wave spec-check has no capture-correlated request authority";
+  if (authority.role !== "spec-check-invoker") return `captured request belongs to ${authority.role}`;
+  if (documents === undefined || !waveSpecCheckDocumentsMatch(epoch?.specCheckDocuments, documents) ||
+      state.spec_file !== documents.spec.path || state.plan_file !== documents.plan.path) {
+    return "current spec/plan bytes do not match the exact Wave spec-check authority";
+  }
+  const slot = epoch?.specCheckSlotAuthority;
+  return state.current_phase === "execute" && epoch !== undefined && active !== undefined &&
+      state.current_wave === epoch.wave && active.runId === authority.runId && active.wave === epoch.wave &&
+      epoch.runId === authority.runId && slot?.slot_id === authority.slotId && slot.attempted === authority.attempt
+    ? null
+    : `captured spec-check request ${authority.runId}/${authority.slotId}/${authority.attempt} does not match the exact current Wave epoch`;
+}
+
+export type SpecCheckManualOverride =
+  /** Legacy graph: the documented manual route is available as before. */
+  | Readonly<{ kind: "allowed"; reason: string | null }>
+  /** A registered Wave Gate owns this Wave; only its capture route may write. */
+  | Readonly<{ kind: "refused-active"; problem: string }>
+  /** Modern graph with no active run: allowed only as an attributable override. */
+  | Readonly<{ kind: "requires-reason"; problem: string }>;
+
+/**
+ * May `helper store-spec-check` write protected spec-check state at all?
+ *
+ * The helper is the documented, user-approved override for false positives, so
+ * it is not deleted — but it carries no capture-correlated request authority.
+ * While a registered run owns the Wave it must not write at all: doing so could
+ * flip a failed spec gate, clear the derived Wave block, and suppress that run's
+ * real spec-check spawn.
+ */
+export function decideSpecCheckManualOverride(
+  state: TaskGraph,
+  overrideReason: string | null,
+): SpecCheckManualOverride {
+  const problem = specCheckAuthorityProblem(state, undefined);
+  if (problem === null) return Object.freeze({ kind: "allowed", reason: overrideReason });
+  if (state.wave_review_epoch !== undefined || state.active_wave_gate !== undefined) {
+    return Object.freeze({ kind: "refused-active", problem });
+  }
+  return overrideReason === null
+    ? Object.freeze({ kind: "requires-reason", problem })
+    : Object.freeze({ kind: "allowed", reason: overrideReason });
 }
 
 const evidenceFailure = (wave: number, runAt: string, error: string): SpecCheckResolution => ({
@@ -88,6 +216,13 @@ export function reconcileSpecCheck(
   wave: number,
   runAt: string,
 ): SpecCheckResolution {
+  if (parsed.duplicateMarkers.length > 0) {
+    return evidenceFailure(
+      wave,
+      runAt,
+      `${parsed.duplicateMarkers.join(", ")} marker appears more than once in the authoritative footer - re-run /wave-gate`,
+    );
+  }
   if (parsed.criticalCount === null) {
     return evidenceFailure(wave, runAt, "SPEC_CHECK_CRITICAL_COUNT marker not found - re-run /wave-gate");
   }

@@ -28,7 +28,6 @@ function validateExecution(
     : { kind: "allow" };
 }
 
-/** Helper to build a task */
 function mkTask(overrides: Partial<TaskFixtureInput> & { id: string; wave: number }): Task {
   return taskFixture({
     description: `task ${overrides.id}`,
@@ -39,7 +38,6 @@ function mkTask(overrides: Partial<TaskFixtureInput> & { id: string; wave: numbe
   });
 }
 
-/** Helper to build a gate */
 function mkGate(overrides: Partial<WaveGate> = {}): WaveGate {
   return {
     impl_complete: false,
@@ -50,7 +48,6 @@ function mkGate(overrides: Partial<WaveGate> = {}): WaveGate {
   };
 }
 
-/** Build a minimal TaskGraph */
 function mkState(
   tasks: Task[],
   overrides: Partial<TaskGraph> = {},
@@ -261,7 +258,7 @@ describe("validate-task-execution — exclusive ownership", () => {
       const baseline = [{ artifact: "src/a.ts", snapshot: { kind: "missing" as const } }];
       const baselines = new Map([[
         "T1",
-        { proof: baseline, attempt: baseline, repositoryAttempt: [] },
+        { proof: baseline, attempt: baseline, repositoryAttempt: [], repositoryObservation: [] },
       ]]);
       const state = mkState([scoped("T1", "src/a.ts")], {
         current_wave: 1,
@@ -304,7 +301,7 @@ describe("validate-task-execution — exclusive ownership", () => {
     const baseline = [{ artifact: "src/a.ts", snapshot: { kind: "missing" as const } }];
     const baselines = new Map([[
       "T1",
-      { proof: baseline, attempt: baseline, repositoryAttempt: [] },
+      { proof: baseline, attempt: baseline, repositoryAttempt: [], repositoryObservation: [] },
     ]]);
     const pending = scoped("T1", "src/a.ts");
 
