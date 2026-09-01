@@ -2236,39 +2236,32 @@ function waveImplementationAction(
   message: string,
   recovery: WaveImplementationRecovery,
 ): WaveImplementationAction {
-  return recovery.kind === "escalate-wave-implementation"
+  const diagnostic: WaveImplementationAction["diagnostic"] = recovery.kind === "escalate-wave-implementation"
     ? canonicalRecord({
-        kind: "blocked",
+        kind: "implementation-escalation-required",
+        category: "semantic-attempts-exhausted",
         runId: statusRunId,
-        diagnostic: canonicalRecord({
-          kind: "implementation-escalation-required",
-          category: "semantic-attempts-exhausted",
-          runId: statusRunId,
-          message,
-          retry: canonicalRecord({
-            kind: "advance-wave-lifecycle",
-            eligible: false,
-            consumesSemanticAttempt: false,
-          }),
-          recovery,
+        message,
+        retry: canonicalRecord({
+          kind: "advance-wave-lifecycle",
+          eligible: false,
+          consumesSemanticAttempt: false,
         }),
+        recovery,
       })
     : canonicalRecord({
-        kind: "blocked",
+        kind: "wave-gate-not-started",
+        category: "healthy-wave-unstarted",
         runId: statusRunId,
-        diagnostic: canonicalRecord({
-          kind: "wave-gate-not-started",
-          category: "healthy-wave-unstarted",
-          runId: statusRunId,
-          message,
-          retry: canonicalRecord({
-            kind: "advance-wave-lifecycle",
-            eligible: true,
-            consumesSemanticAttempt: false,
-          }),
-          recovery,
+        message,
+        retry: canonicalRecord({
+          kind: "advance-wave-lifecycle",
+          eligible: true,
+          consumesSemanticAttempt: false,
         }),
+        recovery,
       });
+  return canonicalRecord({ kind: "blocked", runId: statusRunId, diagnostic });
 }
 
 /** Status-only recovery projection for a registered run whose durable lifecycle
@@ -2581,6 +2574,10 @@ function unstartedWaveStatus(
   if (waveTasks.length === 0) return null;
 
   const outstanding = waveTasks.filter((task) => task.status !== "implemented" && task.status !== "completed");
+  const executing = new Set(graph.executing_tasks ?? []);
+  const active = outstanding.filter((task) =>
+    executing.has(task.id) || task.active_implementation_attempt !== undefined);
+  const activeTaskIds = new Set(active.map((task) => task.id));
   const dispositions = outstanding.map((task) => ({
     task,
     disposition: deriveImplementationRetryDisposition(task),
@@ -2604,6 +2601,7 @@ function unstartedWaveStatus(
         })]
       : []);
   const dispatches = dispositions.flatMap(({ task, disposition }): readonly WaveImplementationDispatch[] => {
+    if (activeTaskIds.has(task.id)) return [];
     if (disposition.kind === "initial") {
       return [canonicalRecord({
         kind: "initial-implementation",
@@ -2636,17 +2634,32 @@ function unstartedWaveStatus(
       tasks: Object.freeze(escalated) as NonEmpty<(typeof escalated)[number]>,
     });
     message = `Wave ${wave} requires implementation escalation; ${escalated.length} task(s) exhausted semantic attempt 2`;
-  } else {
+  } else if (dispatches.length > 0) {
     recovery = canonicalRecord({
       kind: "spawn-wave-implementation",
       wave,
-      pendingTaskIds: Object.freeze(outstanding.map((task) => task.id)) as NonEmpty<string>,
+      pendingTaskIds: Object.freeze(dispatches.map((dispatch) => dispatch.taskId)) as NonEmpty<string>,
       dispatches: Object.freeze(dispatches) as NonEmpty<WaveImplementationDispatch>,
     });
-    message = `Wave ${wave} implementation is in progress; ${outstanding.length} task(s) have not reached implemented`;
+    message = `Wave ${wave} implementation is in progress; ${dispatches.length} task(s) are ready to dispatch` +
+      (active.length === 0 ? "" : ` and ${active.length} task(s) remain active`);
+  } else if (active.length > 0) {
+    recovery = canonicalRecord({
+      kind: "await-wave-implementation",
+      wave,
+      activeTaskIds: Object.freeze(active.map((task) => task.id)) as NonEmpty<string>,
+    });
+    message = `Wave ${wave} implementation is in progress; wait for ${active.length} active task(s)`;
+  } else {
+    return deriveUnavailableLoomStatus(Object.freeze([
+      reason("authority-contradiction", `Wave ${wave} has outstanding Tasks but no legal implementation recovery`),
+    ]) as NonEmpty<StatusReason>);
   }
   const reasons: StatusReason[] = outstanding.map((task) =>
     reason("wave-implementation-pending", `${task.id} has not reached implemented`, task.id));
+  for (const task of active) {
+    reasons.push(reason("task-running", `${task.id} already has active implementation authority`, task.id));
+  }
   for (const task of escalated) {
     reasons.push(reason(
       "implementation-escalation-required",

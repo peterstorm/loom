@@ -14,7 +14,10 @@ import {
   evaluateProofObligations,
 } from "../src/core/proof-obligations";
 import { parseTaskGraph } from "../src/state-manager";
-import { createImplementationAttemptContext } from "../src/core/implementation-retry";
+import {
+  authorizeImplementationSpawn,
+  createImplementationAttemptContext,
+} from "../src/core/implementation-retry";
 
 function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T {
   if (!result.ok) throw new Error("fixture parse failed");
@@ -30,17 +33,26 @@ const repositoryBaseline = [{
   snapshot: { kind: "sha256", digest: "b".repeat(64) },
 }];
 
-function authority(reservationId = "state-reservation-1"): ImplementationAttemptAuthority {
+function authority(
+  reservationId = "state-reservation-1",
+  semanticAttempt: 1 | 2 = 1,
+): ImplementationAttemptAuthority {
   return valueOf(createImplementationAttemptAuthority({
     taskId: "T1",
     wave: 1,
-    semanticAttempt: 1,
+    semanticAttempt,
     reservationId,
     headSha: "c".repeat(40),
     reservedAt: "2026-08-23T00:00:00.000Z",
     taskScopeBaseline: attemptBaseline,
     dirtySetBaseline: repositoryBaseline,
   }));
+}
+
+function initialContext(active: ImplementationAttemptAuthority, prompt = "Task ID: T1") {
+  const admission = authorizeImplementationSpawn({ id: "T1" }, prompt);
+  if (!admission.ok) throw new Error(admission.error);
+  return createImplementationAttemptContext({ authority: active, prompt, admission });
 }
 
 const pendingProof = () => derivePendingTaskProof({
@@ -77,14 +89,14 @@ function errorOf(raw: Record<string, unknown>): string {
   return parsed.error;
 }
 
-function receiptFor(attempt: ImplementationAttemptAuthority) {
+function receiptFor(attempt: ImplementationAttemptAuthority, taskCompleted = true) {
   const suite = valueOf(createTaskCompletionSuiteAuthority(attempt));
   const observation = valueOf(parseImplementationObservation({
     schemaVersion: 1,
     kind: "implementation-observed",
     observedAt: "2026-08-23T00:01:00.000Z",
     evidence: {
-      taskCompleted: true,
+      taskCompleted,
       filesModified: ["engine/src/a.ts"],
     },
     proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
@@ -112,7 +124,7 @@ function receiptFor(attempt: ImplementationAttemptAuthority) {
       }],
     },
   );
-  if (!settled.ok || settled.value.kind !== "implemented") throw new Error("fixture must implement");
+  if (!settled.ok || settled.value.kind === "ignored") throw new Error("fixture must settle");
   return settled.value.receipt;
 }
 
@@ -177,12 +189,7 @@ describe("Task lifecycle migration", () => {
 describe("Task attempt authority StateManager lockstep", () => {
   it("parses and freezes exact active authority, context, baselines, and history", () => {
     const active = authority();
-    const context = createImplementationAttemptContext({
-      authority: active,
-      prompt: "Task ID: T1",
-      predecessorReceiptId: null,
-      retryContext: null,
-    });
+    const context = initialContext(active);
     const receipt = receiptFor(authority("settled-reservation"));
     const parsed = parseTaskGraph(graph({
       ...baseTask(),
@@ -208,12 +215,7 @@ describe("Task attempt authority StateManager lockstep", () => {
 
   it("rejects orphaned and digest-tampered active attempt context", () => {
     const active = authority();
-    const context = createImplementationAttemptContext({
-      authority: active,
-      prompt: "Task ID: T1",
-      predecessorReceiptId: null,
-      retryContext: null,
-    });
+    const context = initialContext(active);
     expect(errorOf(graph({
       ...baseTask(),
       proof: pendingProof(),
@@ -237,6 +239,20 @@ describe("Task attempt authority StateManager lockstep", () => {
       ...valid,
       active_implementation_context: { ...context, contextDigest: "f".repeat(64) },
     }, { executing_tasks: ["T1"] }))).toContain("contextDigest does not match");
+  });
+
+  it("requires exact active context for semantic attempt 2", () => {
+    const retry = receiptFor(authority("retry-source"), false);
+    const active = authority("retry-active", 2);
+    expect(errorOf(graph({
+      ...baseTask(),
+      proof: pendingProof(),
+      active_implementation_attempt: active,
+      attempt_artifact_baseline: attemptBaseline,
+      attempt_repository_baseline: repositoryBaseline,
+      reserved_at: active.reservedAt,
+      implementation_attempt_history: [retry],
+    }, { executing_tasks: ["T1"] }))).toContain("semantic attempt 2 requires active_implementation_context");
   });
 
   it("rejects active modern authority on the legacy-missing-Proof lifecycle", () => {

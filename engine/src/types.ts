@@ -507,11 +507,12 @@ interface TaskCommonMetadataBase {
    *  starts. Proof compares current bytes to this baseline; transcript tool
    *  calls remain lint targets and cannot vouch that a change occurred. */
   readonly artifact_baseline?: readonly DeclaredArtifactBaseline[];
-  /** Current implementation-attempt fields are compatibility-optional on the
-   * shared metadata; StateManager proves their all-or-none digest lockstep. */
+  /** Active attempt authority remains compatibility-optional on shared metadata.
+   * StateManager proves authority/baseline/reservation lockstep; historical
+   * attempt 1 may omit context, but semantic attempt 2 may not. */
   readonly active_implementation_attempt?: ImplementationAttemptAuthority;
   /** Exact prompt/retry authority frozen before the active Agent dispatch.
-   * Historical active attempts may omit it; every Slice-4 registration writes it. */
+   * Historical attempt 1 may omit it; attempt 2 and every Slice-4 registration require it. */
   readonly active_implementation_context?: ImplementationAttemptContext;
   readonly attempt_artifact_baseline?: readonly DeclaredArtifactBaseline[];
   readonly attempt_repository_baseline?: readonly DeclaredArtifactBaseline[];
@@ -963,6 +964,11 @@ export type WaveImplementationRecovery =
       wave: number;
       pendingTaskIds: OrchestrationNonEmpty<string>;
       dispatches: OrchestrationNonEmpty<WaveImplementationDispatch>;
+    }>
+  | Readonly<{
+      kind: "await-wave-implementation";
+      wave: number;
+      activeTaskIds: OrchestrationNonEmpty<string>;
     }>
   | Readonly<{
       kind: "escalate-wave-implementation";

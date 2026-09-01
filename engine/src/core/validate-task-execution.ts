@@ -386,8 +386,7 @@ export function createTaskExecutionAuthorityBatch(
     const context = createImplementationAttemptContext({
       authority: authority.value,
       prompt: input.prompt,
-      predecessorReceiptId: admission.predecessorReceiptId,
-      retryContext: admission.retryContext,
+      admission,
     });
     plans.push(Object.freeze({ authority: authority.value, context, baselines: taskBaselines }));
   }
@@ -639,20 +638,20 @@ export function taskExecutionRegistrationError(
     if (authorityPlans !== undefined) {
       const plan = authorityPlans.find((candidate) => candidate.authority.taskId === taskId);
       const input = inputs[expectedTaskIds.indexOf(taskId)];
-      const admission = input === undefined ? null : authorizeImplementationSpawn(task, input.prompt);
-      const expectedContext = plan === undefined || input === undefined || admission === null || !admission.ok
-        ? null
-        : createImplementationAttemptContext({
-            authority: plan.authority,
-            prompt: input.prompt,
-            predecessorReceiptId: admission.predecessorReceiptId,
-            retryContext: admission.retryContext,
-          });
-      if (plan === undefined || input === undefined || admission === null || !admission.ok ||
-          expectedContext === null || plan.authority.wave !== task.wave ||
-          plan.authority.semanticAttempt !== admission.semanticAttempt ||
-          !implementationAttemptContextMatchesAuthority(plan.context, plan.authority) ||
-          plan.context.contextDigest !== expectedContext.contextDigest || plan.baselines !== baseline) {
+      if (plan === undefined || input === undefined || plan.authority.wave !== task.wave || plan.baselines !== baseline) {
+        return `Task ${taskId} implementation authority changed before execution registration.`;
+      }
+      const admission = authorizeImplementationSpawn(task, input.prompt);
+      if (!admission.ok || plan.authority.semanticAttempt !== admission.semanticAttempt ||
+          !implementationAttemptContextMatchesAuthority(plan.context, plan.authority)) {
+        return `Task ${taskId} implementation authority changed before execution registration.`;
+      }
+      const expectedContext = createImplementationAttemptContext({
+        authority: plan.authority,
+        prompt: input.prompt,
+        admission,
+      });
+      if (plan.context.contextDigest !== expectedContext.contextDigest) {
         return `Task ${taskId} implementation authority changed before execution registration.`;
       }
     }

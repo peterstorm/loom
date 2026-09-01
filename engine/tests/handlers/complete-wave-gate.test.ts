@@ -1562,6 +1562,58 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
         .map((entry) => entry.taskId)).toEqual(["T2", "T3"]);
     });
 
+    it("dispatches only inactive Tasks and waits when every outstanding Task is active", () => {
+      const activeAuthority = authorityValue(createImplementationAttemptAuthority({
+        taskId: "T3",
+        wave: 1,
+        semanticAttempt: 1,
+        reservationId: "status-active-attempt",
+        headSha: "a".repeat(40),
+        reservedAt: "2026-09-01T00:00:01.000Z",
+        taskScopeBaseline: [],
+        dirtySetBaseline: [],
+      }));
+      const mixed = unstarted({
+        executing_tasks: ["T2"],
+        tasks: [
+          taskState({ id: "T2", wave: 1, status: "pending" }),
+          { ...taskState({ id: "T3", wave: 1, status: "pending" }), active_implementation_attempt: activeAuthority },
+          taskState({ id: "T4", wave: 1, status: "pending" }),
+        ],
+      });
+
+      const mixedStatus = deriveLoomStatusFromParsedGraph({ ok: true, value: mixed }, statusDeps);
+      expect(mixedStatus.next.action).toMatchObject({
+        diagnostic: {
+          recovery: {
+            kind: "spawn-wave-implementation",
+            pendingTaskIds: ["T4"],
+            dispatches: [{ taskId: "T4", semanticAttempt: 1 }],
+          },
+        },
+      });
+      expect(mixedStatus.next.reasons.filter((entry) => entry.kind === "task-running")
+        .map((entry) => entry.taskId)).toEqual(["T2", "T3"]);
+
+      const waiting = unstarted({
+        executing_tasks: ["T2"],
+        tasks: [
+          taskState({ id: "T2", wave: 1, status: "pending" }),
+          { ...taskState({ id: "T3", wave: 1, status: "pending" }), active_implementation_attempt: activeAuthority },
+        ],
+      });
+      const waitingStatus = deriveLoomStatusFromParsedGraph({ ok: true, value: waiting }, statusDeps);
+      expect(waitingStatus.next.action).toMatchObject({
+        diagnostic: {
+          recovery: {
+            kind: "await-wave-implementation",
+            wave: 1,
+            activeTaskIds: ["T2", "T3"],
+          },
+        },
+      });
+    });
+
     function semanticReceipt(
       attemptNumber: 1 | 2,
       history: readonly ImplementationAttemptSettlementReceipt[],

@@ -547,10 +547,11 @@ For each wave:
 
 1. Read `helper orchestration status --json` and execute only its implementation-window recovery:
    - `spawn-wave-implementation`: build each listed Task prompt and append that dispatch's exact `promptAppendix` when non-null. `retry-implementation` is the one engine-authorized semantic attempt 2; never rewrite or summarize its appendix.
+   - `await-wave-implementation`: spawn nothing; wait for the listed active Tasks to settle, then re-read status.
    - `escalate-wave-implementation`: STOP and present every Task/receipt/failure kind to the user. Attempt 2 is terminal; manually re-spawning would be an unauthorized attempt 3 and the spawn gate refuses it.
    - `start-wave-gate`: proceed to the Wave Gate.
-2. Spawn all status-authorized Wave Tasks in parallel (single message, multiple Task/subagent calls).
-3. Wait for all to settle. Infrastructure-blocked attempts remain retryable at the same semantic attempt; semantic attempt 1 produces exactly one retry dispatch.
+2. Spawn only the Tasks in `recovery.dispatches`, in parallel when more than one is listed. Status excludes Tasks already in `executing_tasks` or carrying active attempt authority.
+3. Wait for all to settle. Infrastructure-blocked attempts reuse the initial/retry dispatch arm for their preserved current semantic attempt; they never consume the budget or introduce another semantic dispatch kind. Semantic attempt 1 failure produces exactly one retry dispatch.
 4. Re-read canonical status. Do not infer retry count from `pending`, `retry_count`, or `failure_reason`; immutable settlement history owns the budget.
 5. **RUN `/wave-gate` — MANDATORY, via subagents** (see below)
 6. If blocked (critical findings): spawn fix agents with the findings, re-run `/wave-gate`
@@ -574,7 +575,7 @@ For each wave:
 
 **The `validate-task-execution` hook enforces this:** it blocks next-wave impl agents if `wave_gates[N-1].reviews_complete == false`. Even if you try to skip, the hook will BLOCK.
 
-**Re-spawn logic:** Never derive a re-spawn from raw `pending` state. Run canonical status and inspect `next.action.diagnostic.recovery`. It distinguishes initial execution, exact attempt-2 retry (including the required appendix), same-attempt infrastructure recovery, and terminal escalation. Spawn only `recovery.dispatches`; stop on `escalate-wave-implementation`.
+**Re-spawn logic:** Never derive a re-spawn from raw `pending` state. Run canonical status and inspect `next.action.diagnostic.recovery`. It distinguishes dispatchable initial/current-attempt work, exact attempt-2 retry (including the required appendix), active work that must be awaited, and terminal escalation. Infrastructure recovery reuses the dispatch kind for its preserved semantic attempt. Spawn only `recovery.dispatches`; wait on `await-wave-implementation`; stop on `escalate-wave-implementation`.
 
 **Load template:** Read `{LOOM_DIR}/commands/templates/impl-agent-context.md`
 

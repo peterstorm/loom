@@ -724,6 +724,41 @@ describe("applyFailedPiResult", () => {
     expect(store.current().wave_gates["1"]?.blocked).toBe(false);
   });
 
+  it("names failed spec-check TaskGraph load and settlement persistence separately", async () => {
+    const fixture = graphWithSpecCheckAuthority();
+    const loadFailure: TaskGraphStore = {
+      load: () => { throw new Error("injected graph read failure"); },
+      update: async () => {},
+      updateAndReturn: async () => { throw new Error("must not persist after load failure"); },
+    };
+    const failedLoad = await applyFailedPiResult({
+      store: loadFailure,
+      agentType: "spec-check-invoker",
+      result: result({ agent: "spec-check-invoker", exitCode: 1 }),
+      reservedSlot: fixture.reservedSlot,
+      now: NOW,
+    });
+    expect(failedLoad.processingErrors).toEqual([
+      "spec-check TaskGraph load failed: injected graph read failure",
+    ]);
+
+    const persistenceFailure: TaskGraphStore = {
+      load: () => fixture.state,
+      update: async () => {},
+      updateAndReturn: async () => { throw new Error("injected settlement write failure"); },
+    };
+    const failedPersistence = await applyFailedPiResult({
+      store: persistenceFailure,
+      agentType: "spec-check-invoker",
+      result: result({ agent: "spec-check-invoker", exitCode: 1 }),
+      reservedSlot: fixture.reservedSlot,
+      now: NOW,
+    });
+    expect(failedPersistence.processingErrors).toEqual([
+      "spec-check settlement persistence failed: injected settlement write failure",
+    ]);
+  });
+
   it("rejects an unreserved failed spec-check without changing current Wave evidence", async () => {
     const fixture = graphWithSpecCheckAuthority();
     const store = fakeStore(fixture.state);

@@ -8,7 +8,10 @@ import {
 import { taskFixture } from "../fixtures/task-lifecycle";
 import type { TaskGraph } from "../../src/types";
 import { parseTaskGraph, type ParsedTaskGraph } from "../../src/state-manager";
-import { createImplementationAttemptContext } from "../../src/core/implementation-retry";
+import {
+  authorizeImplementationSpawn,
+  createImplementationAttemptContext,
+} from "../../src/core/implementation-retry";
 
 function authority(reservation: string) {
   const instant = parseIsoInstant("2026-08-24T00:00:00.000Z");
@@ -21,6 +24,12 @@ function authority(reservation: string) {
   });
   if (!created.ok) throw new Error(created.error.errors.join("; "));
   return created.value;
+}
+
+function initialContext(attempt: ReturnType<typeof authority>, prompt: string) {
+  const admission = authorizeImplementationSpawn({ id: "T1" }, prompt);
+  if (!admission.ok) throw new Error(admission.error);
+  return createImplementationAttemptContext({ authority: attempt, prompt, admission });
 }
 
 function parsedGraph(graph: TaskGraph): ParsedTaskGraph {
@@ -49,12 +58,7 @@ function store(initial: TaskGraph): TaskGraphStore & { current(): TaskGraph } {
 describe("Pi exact implementation authority correlation", () => {
   it("settles an exact failed result with a non-consuming infrastructure receipt", async () => {
     const attempt = authority("pi-failed-attempt");
-    const context = createImplementationAttemptContext({
-      authority: attempt,
-      prompt: "Task ID: T1",
-      predecessorReceiptId: null,
-      retryContext: null,
-    });
+    const context = initialContext(attempt, "Task ID: T1");
     const graph: TaskGraph = {
       current_phase: "execute",
       phase_artifacts: {},
@@ -113,12 +117,7 @@ describe("Pi exact implementation authority correlation", () => {
   it("a late failed result cannot release a newer active attempt sharing the Task id", async () => {
     const oldAttempt = authority("pi-old-attempt");
     const replacement = authority("pi-replacement-attempt");
-    const replacementContext = createImplementationAttemptContext({
-      authority: replacement,
-      prompt: "Task ID: T1 replacement",
-      predecessorReceiptId: null,
-      retryContext: null,
-    });
+    const replacementContext = initialContext(replacement, "Task ID: T1 replacement");
     const graph: TaskGraph = {
       current_phase: "execute",
       phase_artifacts: {},

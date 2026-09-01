@@ -1178,6 +1178,9 @@ function taskAttemptAuthorityError(
   if (authority.value.semanticAttempt !== retryDisposition.semanticAttempt) {
     return `${label}: active_implementation_attempt semantic attempt contradicts settlement history`;
   }
+  if (retryDisposition.kind === "retry" && t.active_implementation_context === undefined) {
+    return `${label}: semantic attempt 2 requires active_implementation_context`;
+  }
   if (t.active_implementation_context !== undefined) {
     const context = parseImplementationAttemptContext(
       t.active_implementation_context,
@@ -1186,9 +1189,6 @@ function taskAttemptAuthorityError(
     if (!context.ok) return context.errors.join("; ");
     if (!implementationAttemptContextMatchesAuthority(context.value, authority.value)) {
       return `${label}: active_implementation_context must match active_implementation_attempt`;
-    }
-    if (retryDisposition.kind === "initial" && context.value.retryContext !== null) {
-      return `${label}: initial implementation context cannot carry retry authority`;
     }
     if (retryDisposition.kind === "retry" && (
       context.value.retryContext === null ||

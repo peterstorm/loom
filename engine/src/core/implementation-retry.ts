@@ -74,11 +74,21 @@ export type ImplementationRetryDisposition =
 export type ImplementationSpawnAdmission =
   | Readonly<{
       ok: true;
-      semanticAttempt: SemanticAttempt;
-      retryContext: ImplementationRetryContext | null;
-      predecessorReceiptId: ImplementationSettlementReceiptId | null;
+      kind: "initial";
+      semanticAttempt: SemanticAttempt & 1;
+      retryContext: null;
+      predecessorReceiptId: null;
+    }>
+  | Readonly<{
+      ok: true;
+      kind: "retry";
+      semanticAttempt: SemanticAttempt & 2;
+      retryContext: ImplementationRetryContext;
+      predecessorReceiptId: ImplementationSettlementReceiptId;
     }>
   | Readonly<{ ok: false; error: string }>;
+
+type AdmittedImplementationSpawn = Extract<ImplementationSpawnAdmission, { readonly ok: true }>;
 
 export type AttemptContextParseResult =
   | Readonly<{ ok: true; value: ImplementationAttemptContext }>
@@ -205,8 +215,24 @@ function parsePromptRetryContext(prompt: string):
     : { ok: false, error: parsed.errors.join("; ") };
 }
 
-function sameRetryContext(left: ImplementationRetryContext, right: ImplementationRetryContext): boolean {
-  return canonicalJson(left as unknown as JsonValue) === canonicalJson(right as unknown as JsonValue);
+type ImplementationRetryLineage =
+  | Readonly<{ kind: "initial" }>
+  | Readonly<{ kind: "retry"; predecessor: RetryRequiredSettlementReceipt }>
+  | Readonly<{
+      kind: "escalated";
+      receiptId: ImplementationSettlementReceiptId;
+      failureKinds: readonly [string, ...string[]];
+    }>;
+
+function invalidLineage(
+  index: number,
+  receipt: ImplementationAttemptSettlementReceipt,
+  error: string,
+): ImplementationRetryDisposition {
+  return freeze({
+    kind: "invalid",
+    errors: [`implementation_attempt_history[${index}] (${receipt.receiptId}): ${error}`],
+  });
 }
 
 /** Derive the only legal next semantic attempt from immutable settlement history. */
@@ -223,43 +249,57 @@ export function deriveImplementationRetryDisposition(
     return freeze({ kind: "invalid", errors: nonEmptyErrors(parseErrors) });
   }
 
-  const lastImplemented = parsedHistory.value.findLastIndex((receipt) => receipt.transition === "implemented");
-  const lineage = parsedHistory.value.slice(lastImplemented + 1);
-  const retries = lineage.filter((receipt): receipt is RetryRequiredSettlementReceipt =>
-    receipt.transition === "retry-required");
-  const escalations = lineage.filter((receipt) => receipt.transition === "escalation-required");
-  const errors: string[] = [];
-  if (retries.length > 1) errors.push("implementation retry lineage contains more than one semantic retry authorization");
-  if (escalations.length > 1) errors.push("implementation retry lineage contains more than one escalation");
-  const retry = retries[0];
-  const escalation = escalations[0];
-  if (escalation !== undefined && retry === undefined) {
-    errors.push("implementation escalation has no predecessor retry-required receipt");
-  }
-  const retryIndex = retry === undefined ? -1 : lineage.indexOf(retry);
-  for (const [index, receipt] of lineage.entries()) {
-    if (receipt.transition !== "infrastructure-blocked") continue;
-    if (retryIndex < 0 && receipt.semanticAttempt !== 1) {
-      errors.push("attempt-2 infrastructure receipt has no predecessor retry-required receipt");
+  let lineage: ImplementationRetryLineage = freeze({ kind: "initial" });
+  for (const [index, receipt] of parsedHistory.value.entries()) {
+    if (receipt.taskId !== parsedTaskId.value) {
+      return invalidLineage(index, receipt, `receipt task ${receipt.taskId} does not match ${parsedTaskId.value}`);
     }
-    if (retryIndex >= 0 && index > retryIndex && receipt.semanticAttempt !== 2) {
-      errors.push("infrastructure receipt after retry authorization must retain semantic attempt 2");
+    if (lineage.kind === "escalated") {
+      return invalidLineage(index, receipt, `receipt appears after terminal escalation ${lineage.receiptId}`);
     }
-  }
-  if (errors.length > 0) return freeze({ kind: "invalid", errors: nonEmptyErrors(errors) });
-  if (escalation !== undefined) {
-    return freeze({
+    const expectedAttempt = lineage.kind === "initial" ? 1 : 2;
+    if (receipt.semanticAttempt !== expectedAttempt) {
+      return invalidLineage(
+        index,
+        receipt,
+        `semantic attempt ${receipt.semanticAttempt} is not the current attempt ${expectedAttempt}`,
+      );
+    }
+    if (receipt.transition === "infrastructure-blocked") continue;
+    if (receipt.transition === "implemented") {
+      lineage = freeze({ kind: "initial" });
+      continue;
+    }
+    if (receipt.transition === "retry-required") {
+      if (lineage.kind !== "initial") {
+        return invalidLineage(index, receipt, "retry authorization requires semantic attempt 1");
+      }
+      lineage = freeze({ kind: "retry", predecessor: receipt });
+      continue;
+    }
+    if (lineage.kind !== "retry") {
+      return invalidLineage(index, receipt, "escalation requires a preceding retry authorization");
+    }
+    lineage = freeze({
       kind: "escalated",
-      receiptId: escalation.receiptId,
-      failureKinds: escalation.failureKinds,
+      receiptId: receipt.receiptId,
+      failureKinds: receipt.failureKinds,
     });
   }
-  if (retry !== undefined) {
-    const context = retryContextFor(retry);
+
+  if (lineage.kind === "escalated") {
+    return freeze({
+      kind: "escalated",
+      receiptId: lineage.receiptId,
+      failureKinds: lineage.failureKinds,
+    });
+  }
+  if (lineage.kind === "retry") {
+    const context = retryContextFor(lineage.predecessor);
     return freeze({
       kind: "retry",
       semanticAttempt: 2,
-      predecessor: retry,
+      predecessor: lineage.predecessor,
       context,
       promptAppendix: renderImplementationRetryContext(context),
     });
@@ -273,18 +313,29 @@ export function authorizeImplementationSpawn(
   prompt: string,
 ): ImplementationSpawnAdmission {
   const disposition = deriveImplementationRetryDisposition(task);
-  if (disposition.kind === "invalid") return { ok: false, error: disposition.errors.join("; ") };
-  if (disposition.kind === "escalated") {
-    return {
-      ok: false,
-      error: `Task ${task.id} exhausted semantic attempt 2 and requires escalation (${disposition.failureKinds.join(", ")})`,
-    };
+  switch (disposition.kind) {
+    case "invalid":
+      return { ok: false, error: disposition.errors.join("; ") };
+    case "escalated":
+      return {
+        ok: false,
+        error: `Task ${task.id} exhausted semantic attempt 2 and requires escalation (${disposition.failureKinds.join(", ")})`,
+      };
+    case "initial":
+    case "retry":
+      break;
   }
   const supplied = parsePromptRetryContext(prompt);
   if (!supplied.ok) return supplied;
   if (disposition.kind === "initial") {
     return supplied.value === null
-      ? { ok: true, semanticAttempt: 1 as SemanticAttempt, retryContext: null, predecessorReceiptId: null }
+      ? {
+          ok: true,
+          kind: "initial",
+          semanticAttempt: 1 as SemanticAttempt & 1,
+          retryContext: null,
+          predecessorReceiptId: null,
+        }
       : { ok: false, error: `Task ${task.id} has no current retry authority; refusing a caller-supplied retry context` };
   }
   if (supplied.value === null) {
@@ -293,15 +344,16 @@ export function authorizeImplementationSpawn(
       error: `Task ${task.id} requires the exact attempt-2 retry context from orchestration status`,
     };
   }
-  if (!sameRetryContext(supplied.value, disposition.context)) {
+  if (contextLines(prompt)[0] !== disposition.promptAppendix) {
     return {
       ok: false,
-      error: `Task ${task.id} retry context does not match current receipt ${disposition.predecessor.receiptId}`,
+      error: `Task ${task.id} retry context bytes do not match current receipt ${disposition.predecessor.receiptId}`,
     };
   }
   return {
     ok: true,
-    semanticAttempt: 2 as SemanticAttempt,
+    kind: "retry",
+    semanticAttempt: 2 as SemanticAttempt & 2,
     retryContext: disposition.context,
     predecessorReceiptId: disposition.predecessor.receiptId,
   };
@@ -333,14 +385,19 @@ function attemptContextBody(args: Readonly<{
 export function createImplementationAttemptContext(args: Readonly<{
   authority: ImplementationAttemptAuthority;
   prompt: string;
-  predecessorReceiptId: ImplementationSettlementReceiptId | null;
-  retryContext: ImplementationRetryContext | null;
+  admission: AdmittedImplementationSpawn;
 }>): ImplementationAttemptContext {
+  if (args.authority.semanticAttempt !== args.admission.semanticAttempt) {
+    throw new Error(
+      `implementation attempt authority ${args.authority.authorityDigest} uses semantic attempt ` +
+      `${args.authority.semanticAttempt}, but spawn admission authorizes ${args.admission.semanticAttempt}`,
+    );
+  }
   const body = attemptContextBody({
     authority: args.authority,
     promptDigest: sha256(args.prompt),
-    predecessorReceiptId: args.predecessorReceiptId,
-    retryContext: args.retryContext,
+    predecessorReceiptId: args.admission.predecessorReceiptId,
+    retryContext: args.admission.retryContext,
   });
   return freeze({ ...body, contextDigest: sha256(canonicalJson(body as unknown as JsonValue)) });
 }

@@ -1355,18 +1355,6 @@ export default function (pi: ExtensionAPI) {
               removed.add(agentId);
             },
           }));
-        const pointerRollbackActions = (released: () => void): readonly PiCleanupAction[] => {
-          if (taskGraphPointerBinding === null) return [];
-          const ownedPointer = taskGraphPointerBinding;
-          return [{
-            label: "roll back task-graph pointer",
-            run: async () => {
-              const result = await rollbackSessionTaskGraphPointer(ownedPointer);
-              if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
-              released();
-            },
-          }];
-        };
         const retainAdmissionCleanupDebt = (
           revoked: ReadonlySet<string>,
           removed: ReadonlySet<AgentId>,
@@ -1408,10 +1396,22 @@ export default function (pi: ExtensionAPI) {
           const revokedGrantTokens = new Set<string>();
           const removedRosterIds = new Set<AgentId>();
           let pointerReleased = false;
+          const pointerActions: PiCleanupAction[] = [];
+          if (taskGraphPointerBinding !== null) {
+            const ownedPointer = taskGraphPointerBinding;
+            pointerActions.push({
+              label: "roll back task-graph pointer",
+              run: async () => {
+                const result = await rollbackSessionTaskGraphPointer(ownedPointer);
+                if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
+                pointerReleased = true;
+              },
+            });
+          }
           const errors = await runPiCleanupActions([
             ...grantRollbackActions(revokedGrantTokens),
             ...rosterRollbackActions(removedRosterIds),
-            ...pointerRollbackActions(() => { pointerReleased = true; }),
+            ...pointerActions,
           ]);
           retainAdmissionCleanupDebt(revokedGrantTokens, removedRosterIds, pointerReleased);
           return errors;

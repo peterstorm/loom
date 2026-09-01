@@ -185,7 +185,7 @@ One engine-reserved execution of one Task under one semantic attempt ordinal and
 _Avoid_: Agent run, retry (that is a transition between attempts), subagent result
 
 **Implementation Retry Context**:
-The canonical immutable prompt appendix derived from one exact attempt-1 `retry-required` settlement receipt. It binds Task, semantic attempt 2, predecessor receipt, and sorted failure kinds; the shared spawn gate must match it exactly before issuing attempt-2 authority. Infrastructure failures reuse the current semantic attempt and never mint this context; attempt-2 semantic failure produces terminal escalation rather than another context.
+The canonical immutable prompt appendix derived from one exact attempt-1 `retry-required` settlement receipt. It binds Task, semantic attempt 2, predecessor receipt, and sorted failure kinds; the shared spawn gate must match the status-issued appendix byte-for-byte before issuing attempt-2 authority. Infrastructure failures reuse the current semantic attempt and never mint this context; attempt-2 semantic failure produces terminal escalation rather than another context.
 _Avoid_: Failure reason, retry prompt, retry count, attempt token
 
 **Verification Policy**:
@@ -291,7 +291,7 @@ _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory ru
 - A Pi-launched mutating CLI process must match the in-memory extension's **Runtime Revision** before changing protected or run-scoped state
 - A **Task** becomes implemented only after all of its **Proof Obligations** and required Task-scoped Completion Check Results are satisfied
 - An **Implementation Attempt** is settled only by the **Implementation Completion Oracle** under exact engine-issued authority and one **Implementation Settlement Receipt**
-- An attempt-1 semantic-failure **Implementation Settlement Receipt** derives exactly one **Implementation Retry Context**; matching it authorizes attempt 2, while infrastructure failure preserves the current semantic attempt and attempt-2 semantic failure escalates terminally
+- Ordered **Implementation Settlement Receipts** form one fail-closed lineage: current-attempt infrastructure preserves the state, current-attempt implementation reopens attempt 1, attempt-1 semantic failure derives exactly one byte-exact **Implementation Retry Context**, and attempt-2 semantic failure escalates terminally; reordered or post-escalation receipts authorize nothing
 - A Task-local Completion Suite contains only `loom:task-byte-scope`; it runs no Task/project subprocesses
 - Repository observation never grants Task attribution: current Task paths stay local, locked current-Wave sibling-owned paths stay inert, and every changed unowned path is unresolved semantic failure/invalidation
 - Slice 3 classifies retry-required/escalation-required without dispatch; Slice 4 alone freezes retry context and launches semantic attempt 2 or escalation

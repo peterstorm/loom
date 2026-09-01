@@ -117,7 +117,11 @@ describe("bounded implementation retry admission", () => {
   it("starts a fresh lineage at semantic attempt 1 and rejects invented retry context", () => {
     const task = retryTask([]);
     expect(deriveImplementationRetryDisposition(task)).toEqual({ kind: "initial", semanticAttempt: 1 });
-    expect(authorizeImplementationSpawn(task, "Task ID: T1")).toMatchObject({ ok: true, semanticAttempt: 1 });
+    expect(authorizeImplementationSpawn(task, "Task ID: T1")).toMatchObject({
+      ok: true,
+      kind: "initial",
+      semanticAttempt: 1,
+    });
 
     const foreign = deriveImplementationRetryDisposition(retryTask([retryReceipt()]));
     if (foreign.kind !== "retry") throw new Error("retry fixture failed");
@@ -140,12 +144,18 @@ describe("bounded implementation retry admission", () => {
     });
     expect(authorizeImplementationSpawn(task, `Task ID: T1\n${disposition.promptAppendix}`)).toEqual({
       ok: true,
+      kind: "retry",
       semanticAttempt: 2,
       retryContext: disposition.context,
       predecessorReceiptId: receipt.receiptId,
     });
     const tampered = disposition.promptAppendix.replace(receipt.receiptId, "f".repeat(64));
     expect(authorizeImplementationSpawn(task, `Task ID: T1\n${tampered}`)).toMatchObject({ ok: false });
+    const reformatted = disposition.promptAppendix.replace(": {", ": { ");
+    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${reformatted}`)).toEqual({
+      ok: false,
+      error: `Task T1 retry context bytes do not match current receipt ${receipt.receiptId}`,
+    });
   });
 
   it("keeps both unknown-input parsers total", () => {
@@ -165,17 +175,27 @@ describe("bounded implementation retry admission", () => {
     expect(parsedRetry).toEqual({ ok: true, value: disposition.context });
 
     const attempt = authority(2, "attempt-two", 2);
+    const prompt = `Task ID: T1\n${disposition.promptAppendix}`;
+    const admission = authorizeImplementationSpawn(retryTask([receipt]), prompt);
+    if (!admission.ok) throw new Error("retry admission fixture failed");
     const context = createImplementationAttemptContext({
       authority: attempt,
-      prompt: `Task ID: T1\n${disposition.promptAppendix}`,
-      predecessorReceiptId: receipt.receiptId,
-      retryContext: disposition.context,
+      prompt,
+      admission,
     });
     expect(parseImplementationAttemptContext(JSON.parse(JSON.stringify(context)))).toEqual({
       ok: true,
       value: context,
     });
     expect(parseImplementationAttemptContext({ ...context, promptDigest: "b".repeat(64) })).toMatchObject({ ok: false });
+
+    const initialAdmission = authorizeImplementationSpawn(retryTask([]), "Task ID: T1");
+    if (!initialAdmission.ok) throw new Error("initial admission fixture failed");
+    expect(() => createImplementationAttemptContext({
+      authority: attempt,
+      prompt: "Task ID: T1",
+      admission: initialAdmission,
+    })).toThrow("spawn admission authorizes 1");
   });
 
   it("terminalizes attempt-2 semantic failure as explicit escalation", () => {
@@ -211,6 +231,40 @@ describe("bounded implementation retry admission", () => {
     })).toEqual({ kind: "initial", semanticAttempt: 1 });
   });
 
+  it("rejects every contradictory settlement transition in wire order", () => {
+    const retry = retryReceipt();
+    const attempt2Infrastructure = settle(
+      authority(2, "attempt-two-infrastructure", 2),
+      [retry],
+      unavailable("2026-09-01T00:02:00.000Z"),
+    );
+    const escalation = settle(
+      authority(2, "attempt-two-escalation", 3),
+      [retry],
+      observation("2026-09-01T00:03:00.000Z", false),
+    );
+    const attempt1Implemented = settle(
+      authority(1, "attempt-one-implemented", 4),
+      [],
+      observation("2026-09-01T00:04:00.000Z", true),
+    );
+    const afterEscalation = settle(
+      authority(2, "attempt-two-after-escalation", 5),
+      [retry],
+      unavailable("2026-09-01T00:05:00.000Z"),
+    );
+
+    const contradictory = [
+      [attempt2Infrastructure, retry],
+      [escalation, retry],
+      [retry, attempt1Implemented],
+      [retry, escalation, afterEscalation],
+    ];
+    for (const history of contradictory) {
+      expect(deriveImplementationRetryDisposition(retryTask(history))).toMatchObject({ kind: "invalid" });
+    }
+  });
+
   it("infrastructure receipts never consume the semantic attempt budget", () => {
     fc.assert(fc.property(
       fc.uniqueArray(fc.uuid(), { maxLength: 20 }),
@@ -227,6 +281,25 @@ describe("bounded implementation retry admission", () => {
         expect(deriveImplementationRetryDisposition(retryTask([...infrastructure, retry]))).toMatchObject({
           kind: "retry",
           semanticAttempt: 2,
+        });
+      },
+    ));
+  });
+
+  it("preserves semantic attempt 2 across one or many infrastructure failures", () => {
+    fc.assert(fc.property(
+      fc.uniqueArray(fc.uuid(), { minLength: 1, maxLength: 20 }),
+      (reservationIds) => {
+        const retry = retryReceipt();
+        const infrastructure = reservationIds.map((reservationId, index) => settle(
+          authority(2, reservationId, 10 + index),
+          [retry],
+          unavailable(`2026-09-01T00:04:${String(index).padStart(2, "0")}.000Z`),
+        ));
+        expect(deriveImplementationRetryDisposition(retryTask([retry, ...infrastructure]))).toMatchObject({
+          kind: "retry",
+          semanticAttempt: 2,
+          predecessor: { receiptId: retry.receiptId },
         });
       },
     ));

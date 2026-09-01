@@ -587,6 +587,47 @@ async function applyFailedReviewResult(args: Readonly<{
   }
 }
 
+type FailedPiResultArgs = Readonly<{
+  store: TaskGraphStore;
+  agentType: string;
+  result: PiSubagentResult;
+  reservedSlot: ReservedSlot | undefined;
+  now: string;
+}>;
+
+async function applyFailedSpecCheckResult(
+  args: FailedPiResultArgs,
+  failure: string,
+): Promise<PiResultOutcome> {
+  let observedState: ParsedTaskGraph;
+  try {
+    observedState = args.store.load();
+  } catch (cause) {
+    const diagnostic = `spec-check TaskGraph load failed: ${cause instanceof Error ? cause.message : String(cause)}`;
+    return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);
+  }
+  let documents: WaveSpecCheckDocumentsAuthority;
+  try {
+    documents = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
+  } catch (cause) {
+    const diagnostic = `spec-check document observation failed: ${cause instanceof Error ? cause.message : String(cause)}`;
+    return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);
+  }
+  try {
+    return await args.store.updateAndReturn((state) =>
+      reducePiSpecCheckResult(
+        state,
+        args.reservedSlot?.specCheckAuthority,
+        { kind: "capture-failed", error: failure },
+        documents,
+        args.now,
+      ));
+  } catch (cause) {
+    const diagnostic = `spec-check settlement persistence failed: ${cause instanceof Error ? cause.message : String(cause)}`;
+    return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);
+  }
+}
+
 /**
  * Record the failure of an agent whose process did not succeed.
  *
@@ -598,13 +639,7 @@ async function applyFailedReviewResult(args: Readonly<{
  * authority. Unreserved failures never store positive evidence; a proven
  * legacy implementation reservation may still be released during cleanup.
  */
-export async function applyFailedPiResult(args: Readonly<{
-  store: TaskGraphStore;
-  agentType: string;
-  result: PiSubagentResult;
-  reservedSlot: ReservedSlot | undefined;
-  now: string;
-}>): Promise<PiResultOutcome> {
+export async function applyFailedPiResult(args: FailedPiResultArgs): Promise<PiResultOutcome> {
   const { store, agentType, result, reservedSlot } = args;
   const failure =
     `${agentType} failed before evidence capture completed (${piSubagentFailureSignals(result)})`;
@@ -614,21 +649,7 @@ export async function applyFailedPiResult(args: Readonly<{
   }
 
   if (agentType === "spec-check-invoker") {
-    try {
-      const observedState = store.load();
-      const documents = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
-      return store.updateAndReturn((state) =>
-        reducePiSpecCheckResult(
-          state,
-          reservedSlot?.specCheckAuthority,
-          { kind: "capture-failed", error: failure },
-          documents,
-          args.now,
-        ));
-    } catch (error) {
-      const diagnostic = `spec-check document observation failed: ${error instanceof Error ? error.message : String(error)}`;
-      return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);
-    }
+    return applyFailedSpecCheckResult(args, failure);
   }
 
   // The dispatcher normally settled a reserved failure through

@@ -6,11 +6,16 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { canonicalTempDir } from "./fixtures/canonical-temp-dir";
 import { evaluateTaskProof } from "../src/core/proof-obligations";
-import { createImplementationAttemptAuthority } from "../src/core/implementation-completion";
 import {
+  createImplementationAttemptAuthority,
+  type ImplementationAttemptAuthority,
+} from "../src/core/implementation-completion";
+import {
+  authorizeImplementationSpawn,
   createImplementationAttemptContext,
   deriveImplementationRetryDisposition,
 } from "../src/core/implementation-retry";
+import type { DeclaredArtifactBaseline } from "../src/core/artifact-baseline";
 import type { AgentRequestAuthority } from "../src/core/orchestration-contract";
 import { fsSessionRegistry, TASK_GRAPH_POINTER_LEASES_SUFFIX } from "../src/machine";
 import { openRunDirectory, type RunDirHandle } from "../src/orchestration/run-directory-handle";
@@ -149,6 +154,39 @@ const specCheckGraph = (overrides: Record<string, unknown> = {}) => {
     },
   };
 };
+
+function replacementAttemptContext(
+  task: Readonly<{
+    active_implementation_attempt: ImplementationAttemptAuthority;
+    attempt_artifact_baseline: readonly DeclaredArtifactBaseline[];
+    attempt_repository_baseline: readonly DeclaredArtifactBaseline[];
+  }>,
+  reservationId: string,
+  reservedAt: string,
+  prompt: string,
+) {
+  const replacement = createImplementationAttemptAuthority({
+    taskId: "T1",
+    wave: 1,
+    semanticAttempt: 1,
+    reservationId,
+    headSha: task.active_implementation_attempt.headSha,
+    reservedAt,
+    taskScopeBaseline: task.attempt_artifact_baseline,
+    dirtySetBaseline: task.attempt_repository_baseline,
+  });
+  if (!replacement.ok) throw new Error(replacement.error.errors.join("; "));
+  const admission = authorizeImplementationSpawn({ id: "T1" }, prompt);
+  if (!admission.ok) throw new Error(admission.error);
+  return {
+    authority: replacement.value,
+    context: createImplementationAttemptContext({
+      authority: replacement.value,
+      prompt,
+      admission,
+    }),
+  };
+}
 
 function writeState(state: unknown): void {
   try {
@@ -3449,17 +3487,20 @@ describe("Pi extension review tool_result integration", () => {
     expect(JSON.parse(readFileSync(statePath, "utf8")).executing_tasks).toEqual([]);
 
     const retryPrompt = `${initialPrompt}\n${retry.promptAppendix}`;
+    const attempt2Input = { agent: "code-implementer-agent", task: retryPrompt, agentScope: "user" };
     expect(await pi.emit("tool_call", {
       toolName: "subagent",
       toolCallId: "call-bounded-retry-attempt-2",
-      input: { agent: "code-implementer-agent", task: retryPrompt, agentScope: "user" },
+      input: attempt2Input,
     }, context)).toEqual([undefined]);
+    expect(attempt2Input.task).toContain("LOOM_PI_WRITE_GRANT:");
     const activeAttempt2 = JSON.parse(readFileSync(statePath, "utf8")).tasks[0];
     expect(activeAttempt2.active_implementation_attempt.semanticAttempt).toBe(2);
     expect(activeAttempt2.active_implementation_context).toMatchObject({
       semanticAttempt: 2,
       predecessorReceiptId: retry.predecessor.receiptId,
       retryContext: { predecessorReceiptId: retry.predecessor.receiptId },
+      promptDigest: createHash("sha256").update(attempt2Input.task).digest("hex"),
     });
 
     await pi.emit("tool_result", {
@@ -3741,28 +3782,19 @@ describe("Pi extension review tool_result integration", () => {
     }, context)).toEqual([undefined]);
     const spawned = JSON.parse(readFileSync(statePath, "utf8"));
     const task = spawned.tasks[0];
-    const replacement = createImplementationAttemptAuthority({
-      taskId: "T1", wave: 1, semanticAttempt: 1,
-      reservationId: `replacement-${_label}`,
-      headSha: task.active_implementation_attempt.headSha,
-      reservedAt: "2026-08-24T00:10:00.000Z",
-      taskScopeBaseline: task.attempt_artifact_baseline,
-      dirtySetBaseline: task.attempt_repository_baseline,
-    });
-    if (!replacement.ok) throw new Error(replacement.error.errors.join("; "));
-    const replacementContext = createImplementationAttemptContext({
-      authority: replacement.value,
-      prompt: "Task ID: T1\nUse the code-implementer skill. Implement and test.",
-      predecessorReceiptId: null,
-      retryContext: null,
-    });
+    const replacement = replacementAttemptContext(
+      task,
+      `replacement-${_label}`,
+      "2026-08-24T00:10:00.000Z",
+      "Task ID: T1\nUse the code-implementer skill. Implement and test.",
+    );
     writeState({
       ...spawned,
       tasks: [{
         ...task,
-        active_implementation_attempt: replacement.value,
-        active_implementation_context: replacementContext,
-        reserved_at: replacement.value.reservedAt,
+        active_implementation_attempt: replacement.authority,
+        active_implementation_context: replacement.context,
+        reserved_at: replacement.authority.reservedAt,
       }],
     });
 
@@ -3772,7 +3804,7 @@ describe("Pi extension review tool_result integration", () => {
 
     const state = JSON.parse(readFileSync(statePath, "utf8"));
     expect(state.executing_tasks).toEqual(["T1"]);
-    expect(state.tasks[0].active_implementation_attempt).toEqual(replacement.value);
+    expect(state.tasks[0].active_implementation_attempt).toEqual(replacement.authority);
     expect(state.tasks[0].implementation_attempt_history ?? []).toEqual([]);
   });
 
@@ -5013,28 +5045,19 @@ describe("Pi extension review tool_result integration", () => {
 
     const spawned = JSON.parse(readFileSync(statePath, "utf8"));
     const task = spawned.tasks[0];
-    const replacement = createImplementationAttemptAuthority({
-      taskId: "T1", wave: 1, semanticAttempt: 1,
-      reservationId: "finalization-diagnostic-replacement",
-      headSha: task.active_implementation_attempt.headSha,
-      reservedAt: "2026-08-24T00:20:00.000Z",
-      taskScopeBaseline: task.attempt_artifact_baseline,
-      dirtySetBaseline: task.attempt_repository_baseline,
-    });
-    if (!replacement.ok) throw new Error(replacement.error.errors.join("; "));
-    const replacementContext = createImplementationAttemptContext({
-      authority: replacement.value,
-      prompt: "Task ID: T1\nUse the code-implementer skill. Implement and test.",
-      predecessorReceiptId: null,
-      retryContext: null,
-    });
+    const replacement = replacementAttemptContext(
+      task,
+      "finalization-diagnostic-replacement",
+      "2026-08-24T00:20:00.000Z",
+      "Task ID: T1\nUse the code-implementer skill. Implement and test.",
+    );
     writeState({
       ...spawned,
       tasks: [{
         ...task,
-        active_implementation_attempt: replacement.value,
-        active_implementation_context: replacementContext,
-        reserved_at: replacement.value.reservedAt,
+        active_implementation_attempt: replacement.authority,
+        active_implementation_context: replacement.context,
+        reserved_at: replacement.authority.reservedAt,
       }],
     });
 
