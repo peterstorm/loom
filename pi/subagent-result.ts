@@ -443,7 +443,7 @@ async function settleFailedExactImplementation(
   const settlement = await args.store.updateAndReturn((state) => {
     const applied = settleUnavailableImplementation(state, authority, observedAt.value, args.failure);
     return {
-      state: applied.kind === "error" ? state : applied.state,
+      state: applicationState(state, applied),
       value: applied,
     };
   });
@@ -915,18 +915,29 @@ async function settleCompletedOrMissingImplementation(
   taskId: string,
   reservedSlot: ReservedSlot | undefined,
 ): Promise<boolean> {
-  let settled = false;
-  await store.update((state) => {
-    if (!reservedAuthorityIsCurrent(state, taskId, reservedSlot)) return state;
+  return store.updateAndReturn((state) => {
+    if (!reservedAuthorityIsCurrent(state, taskId, reservedSlot)) return { state, value: false };
     const task = state.tasks.find((candidate) => candidate.id === taskId);
-    if (task !== undefined && task.status !== "completed") return state;
-    settled = true;
-    return clearCurrentReservedAuthority({
+    if (task !== undefined && task.status !== "completed") return { state, value: false };
+    const cleared = clearCurrentReservedAuthority({
       ...state,
       executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== taskId),
     }, taskId, reservedSlot);
+    return {
+      state: {
+        ...cleared,
+        tasks: cleared.tasks.map((candidate) =>
+          candidate.id === taskId && candidate.status === "completed"
+            ? {
+                ...candidate,
+                repository_baseline: undefined,
+                unresolved_repository_paths: undefined,
+              }
+            : candidate),
+      },
+      value: true,
+    };
   });
-  return settled;
 }
 
 async function resolveImplementationBindingForResult(args: Readonly<{
@@ -1384,9 +1395,6 @@ async function applyLegacyImplementationPiResult(
   binding: ResultImplementationBinding,
   log: string[],
 ): Promise<PiResultOutcome> {
-  if (await settleCompletedOrMissingImplementation(args.store, binding.taskId, args.reservedSlot)) {
-    return outcome([...log, `loom(pi): ${binding.taskId} stopped; preserved completed/missing legacy state`]);
-  }
   const transcript = observeImplementationTranscript(args.result, binding.taskId);
   log.push(...transcript.log);
   if (transcript.kind === "malformed") {
@@ -1426,6 +1434,9 @@ async function applyBoundImplementationPiResult(
   binding: ResultImplementationBinding,
 ): Promise<PiResultOutcome> {
   const log = [...binding.log];
+  if (await settleCompletedOrMissingImplementation(args.store, binding.taskId, args.reservedSlot)) {
+    return outcome([...log, `loom(pi): ${binding.taskId} stopped; retired exact completed/missing reservation`]);
+  }
   const authority = args.reservedSlot?.implementationAuthority;
   const currentTask = args.store.load().tasks.find((task) => task.id === binding.taskId);
   if (currentTask?.active_implementation_attempt !== undefined && authority == null) {

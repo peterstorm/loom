@@ -1391,6 +1391,53 @@ describe("applyImplementationPiResult", () => {
     expect(store.current().executing_tasks).toEqual([]);
   });
 
+  it("retires an exact modern reservation from an already-completed Task", async () => {
+    const verificationPolicy = {
+      regression: { kind: "waived" as const, reason: "documentation-only" as const },
+      newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
+    };
+    const proof = evaluateTaskProof(
+      { verificationPolicy, declaredArtifacts: [] },
+      { taskCompleted: true, filesModified: [], newTestsWritten: false },
+    );
+    if (proof.state !== "satisfied") throw new Error("completed cleanup fixture must be satisfied");
+    const modern = modernize(implementationGraph({
+      file_list: [],
+      verification_policy: {
+        regression: verificationPolicy.regression,
+        new_tests: verificationPolicy.newTests,
+      },
+    }), process.cwd(), "pi-completed-modern-cleanup");
+    const completed: TaskGraph = {
+      ...modern.graph,
+      tasks: modern.graph.tasks.map((task) => taskFixture({
+        ...task,
+        status: "completed",
+        proof,
+        revalidation_required: undefined,
+      })),
+    };
+    const store = fakeStore(completed);
+
+    const applied = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages: [] }),
+      reservedSlot: modern.reservedSlot,
+      parentPrompt: "",
+    });
+
+    expect(applied.processingErrors).toEqual([]);
+    expect(applied.log.join("\n")).toContain("retired exact completed/missing reservation");
+    expect(store.current().executing_tasks).toEqual([]);
+    expect(store.current().tasks[0]).toMatchObject({ status: "completed", proof });
+    expect(store.current().tasks[0]?.active_implementation_attempt).toBeUndefined();
+    expect(store.current().tasks[0]?.active_implementation_context).toBeUndefined();
+    expect(store.current().tasks[0]?.attempt_artifact_baseline).toBeUndefined();
+    expect(store.current().tasks[0]?.attempt_repository_baseline).toBeUndefined();
+  });
+
   it("keeps a concurrently reopened unreserved Task pending despite a stale completed pre-read", async () => {
     const reopened = regressionWaivedRecoveryGraph();
     const completedView: TaskGraph = {

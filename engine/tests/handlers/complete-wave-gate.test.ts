@@ -1782,7 +1782,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
           implementation_attempt_history: [retry, escalation],
           failure_reason: `escalation-required: ${escalation.failureKinds.join(", ")}`,
           retry_count: 2,
-        }],
+        }, taskState({ id: "T2", wave: 1, status: "pending" })],
       });
 
       const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
