@@ -2726,6 +2726,57 @@ describe("Pi extension review tool_result integration", () => {
     expect(readdirSync(grantDir).filter((name) => name.endsWith(".json"))).toEqual([]);
   });
 
+  it("retires successful result-time grant revocations while retaining only failed authority", async () => {
+    const planPath = join(temp, "mixed-result-revocation-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks: [
+        { ...initialGraph().tasks[0], id: "T1", file_list: ["pi/extension.ts"] },
+        { ...initialGraph().tasks[0], id: "T2", file_list: ["README.md"] },
+      ],
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4a3";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-mixed-result-revocation";
+    const tasks = ["T1", "T2"].map((taskId) => ({
+      agent: "code-implementer-agent",
+      task: `Task ID: ${taskId}\nUse the code-implementer skill. Implement and test.`,
+    }));
+    const grantDir = join(subagentDir, "pi-write-grants");
+    const before = new Set(existsSync(grantDir) ? readdirSync(grantDir) : []);
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent", toolCallId,
+      input: { agentScope: "user", tasks },
+    }, context)).toEqual([undefined]);
+
+    const issued = readdirSync(grantDir).filter((name) => !before.has(name));
+    expect(issued).toHaveLength(2);
+    const failedPath = join(grantDir, issued[0]!);
+    rmSync(failedPath);
+    mkdirSync(failedPath);
+
+    const responses = await pi.emit("tool_result", {
+      toolName: "subagent", toolCallId, content: [],
+      details: { results: tasks.map(({ agent, task }) => ({ agent, task, exitCode: 1, messages: [] })) },
+    }, context);
+
+    expect(responses).toContainEqual(expect.objectContaining({
+      isError: true,
+      content: [expect.objectContaining({ text: expect.stringContaining("revoke write grant") })],
+    }));
+    expect(issued.filter((name) => existsSync(join(grantDir, name)))).toEqual([issued[0]]);
+
+    rmSync(failedPath, { recursive: true });
+    const retried = await pi.emit("session_shutdown", {}, context);
+    expect(retried.every((result) => result === undefined)).toBe(true);
+    expect(issued.filter((name) => existsSync(join(grantDir, name)))).toEqual([]);
+  });
+
   it.skipIf(runningAsRoot)("rejects shutdown until outstanding write-grant revocation succeeds", async () => {
     const planPath = join(temp, "shutdown-grant-revocation-plan.md");
     writeFileSync(planPath, "# Plan\n");

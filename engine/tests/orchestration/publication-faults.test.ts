@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import fc from "fast-check";
 import { afterEach, describe, expect, it } from "vitest";
 import { agentRequestAuthority } from "../fixtures/agent-request-authority";
 import {
@@ -304,6 +305,49 @@ describe("context packets", () => {
     const built = packet("request:reviewer:1");
     expect(built.digest).toMatch(/^[0-9a-f]{64}$/);
     expect(parseContextPacket(JSON.parse(JSON.stringify(built))).ok).toBe(true);
+  });
+
+  it("refuses an undeclared top-level field even when the declared digest remains valid", () => {
+    const tampered = {
+      ...JSON.parse(JSON.stringify(packet("request:reviewer:1"))) as Record<string, unknown>,
+      injectedAuthority: true,
+    };
+
+    const parsed = parseContextPacket(tampered);
+
+    expect(parsed).toMatchObject({
+      ok: false,
+      error: { field: "packet.injectedAuthority", message: expect.stringContaining("undeclared field") },
+    });
+  });
+
+  it("refuses undeclared section fields omitted from section identity", () => {
+    const tampered = JSON.parse(JSON.stringify(packet("request:reviewer:1"))) as Record<string, unknown>;
+    const fixed = tampered["fixedContext"] as Record<string, unknown>[];
+    fixed[0]!["injectedAuthority"] = true;
+
+    expect(parseContextPacket(tampered)).toMatchObject({
+      ok: false,
+      error: { field: "fixedContext[0].injectedAuthority", message: expect.stringContaining("undeclared field") },
+    });
+  });
+
+  it("property: every injected undeclared top-level key is rejected", () => {
+    const declared = new Set([
+      "schemaVersion", "digest", "requestId", "role", "requiredSkill",
+      "outputContract", "fixedContext", "variableContext",
+    ]);
+    fc.assert(fc.property(
+      fc.stringMatching(/^[A-Za-z][A-Za-z0-9_]{0,24}$/).filter((key) => !declared.has(key)),
+      fc.jsonValue(),
+      (key, value) => {
+        const tampered = {
+          ...JSON.parse(JSON.stringify(packet("request:reviewer:1"))) as Record<string, unknown>,
+          [key]: value,
+        };
+        expect(parseContextPacket(tampered).ok).toBe(false);
+      },
+    ));
   });
 
   it("refuses a packet whose section bytes were edited after publication", () => {
@@ -660,10 +704,24 @@ describe("artifact set publication", () => {
     expect(readFileSync(join(directory, "artifacts", "nested", "report.md"), "utf-8")).toBe("# report");
   });
 
+  it("refuses every staged suffix outside the generator's 24-character lowercase hex grammar", () => {
+    const { root, directory } = freshRun();
+    const final = join(directory, "artifacts", "suffix.json");
+    const noncanonical = fc.stringMatching(/^[A-Za-z0-9_-]{1,32}$/)
+      .filter((suffix) => !/^[0-9a-f]{24}$/.test(suffix));
+
+    fc.assert(fc.property(noncanonical, (suffix) => {
+      expect(parseStagedArtifactPromotion(root, directory, {
+        final,
+        staged: `${final}.staged-${suffix}`,
+      }).ok).toBe(false);
+    }));
+  });
+
   it("reports every parser-minted staged artifact it could not clean up", () => {
     const { root, directory } = freshRun();
     const final = join(directory, "artifacts", "occupied");
-    const staged = `${final}.staged-cleanup-test`;
+    const staged = `${final}.staged-${"1".repeat(24)}`;
     mkdirSync(staged);
     mkdirSync(final);
 
@@ -798,7 +856,7 @@ describe("artifact set publication", () => {
     it("reports a parser-minted staged-file race cause instead of claiming the bytes differ", () => {
       const { root, directory } = freshRun();
       const final = join(directory, "artifacts", "result.json");
-      const staged = `${final}.staged-raced-away`;
+      const staged = `${final}.staged-${"2".repeat(24)}`;
       writeFileSync(final, "original");
 
       const promoted = promoteArtifactSet([promotion(root, directory, staged, final)]);
@@ -1239,11 +1297,11 @@ describe("promoteArtifactSet partial-promotion recovery", () => {
     const { root, directory } = freshRun();
     const artifacts = join(directory, "artifacts");
     const firstFinal = join(artifacts, "first.json");
-    const firstStaged = `${firstFinal}.staged-partial-test`;
+    const firstStaged = `${firstFinal}.staged-${"3".repeat(24)}`;
     writeFileSync(firstStaged, "first");
     const missing = join(artifacts, "vanished");
     const secondFinal = join(missing, "second.json");
-    const secondStaged = `${secondFinal}.staged-partial-test`;
+    const secondStaged = `${secondFinal}.staged-${"3".repeat(24)}`;
 
     const promoted = promoteArtifactSet([
       promotion(root, directory, firstStaged, firstFinal),

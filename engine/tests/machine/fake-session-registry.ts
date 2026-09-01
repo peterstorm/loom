@@ -86,6 +86,13 @@ export function inMemorySessionRegistry(): SessionRegistry {
       (bindings.get(sessionId) ?? []).map((binding) => Object.freeze({ ...binding })),
     ),
 
+    readBindingAuthority: (sessionId: string) => Object.freeze({
+      kind: "parsed" as const,
+      bindings: Object.freeze(
+        (bindings.get(sessionId) ?? []).map((binding) => Object.freeze({ ...binding })),
+      ),
+    }),
+
     appendEvidence: (
       sessionId: string,
       epoch: Epoch,

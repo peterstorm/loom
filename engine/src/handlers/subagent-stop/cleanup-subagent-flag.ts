@@ -10,6 +10,7 @@ import { stripNamespace } from "../../utils/strip-namespace";
 import { resolveAgentType } from "../../utils/agent-transcript-path";
 import {
   fsSessionRegistry,
+  machineBindingPath,
   parseAgentId,
   parseAgentType,
   parseReportedAgentId,
@@ -78,17 +79,24 @@ export const runCleanupSubagentFlag = async (
   let boundAgentType: ReturnType<typeof parseAgentType> = null;
   if (boundAgentId !== null) {
     try {
-      const matchingBindings = registry.readBindings(sessionId)
-        .filter((binding) => binding.agentId === boundAgentId);
-      if (matchingBindings.length === 1) {
-        boundAgentType = matchingBindings[0]!.agentType;
-        if (reportedAgentType !== null && reportedAgentType !== boundAgentType) {
-          failures.push(
-            `reported agent_type ${reportedAgentType} disagrees with persisted binding ${boundAgentType} for ${agent_id}/${sessionId}`,
-          );
+      const authority = registry.readBindingAuthority(sessionId);
+      if (authority.kind === "corrupt") {
+        failures.push(
+          `machine binding authority ${machineBindingPath(sessionId)} is corrupt; binding NOT released for ${agent_id}/${sessionId} — repair or remove the corrupt file`,
+        );
+      } else {
+        const matchingBindings = authority.bindings
+          .filter((binding) => binding.agentId === boundAgentId);
+        if (matchingBindings.length === 1) {
+          boundAgentType = matchingBindings[0]!.agentType;
+          if (reportedAgentType !== null && reportedAgentType !== boundAgentType) {
+            failures.push(
+              `reported agent_type ${reportedAgentType} disagrees with persisted binding ${boundAgentType} for ${agent_id}/${sessionId}`,
+            );
+          }
+        } else if (matchingBindings.length > 1) {
+          failures.push(`machine unbind identity is ambiguous for ${agent_id}/${sessionId}`);
         }
-      } else if (matchingBindings.length > 1) {
-        failures.push(`machine unbind identity is ambiguous for ${agent_id}/${sessionId}`);
       }
     } catch (error) {
       failures.push(`machine binding lookup failed for ${agent_id}/${sessionId}: ${errorMessage(error)}`);

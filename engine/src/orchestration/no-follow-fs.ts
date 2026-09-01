@@ -684,8 +684,10 @@ function settleRecoveryGuardTomb(
     return true;
   }
 
-  // Re-read the tomb immediately before unlink. This proves the unique name
-  // still denotes the exact abandoned token/inode this reclamation assessed.
+  // Re-read the tomb immediately before unlink. This narrows the pathname race
+  // and revalidates the exact abandoned token/inode just before removal; Node
+  // exposes no unlinkat-by-retained-fd primitive, so it is not an atomic proof
+  // of which inode the following pathname unlink will remove.
   const confirmed = readRecoveryGuardSnapshot(directory, tombName);
   if (!sameRecoveryGuard(confirmed, tomb) || !recoveryGuardIsAbandoned(confirmed)) return false;
   removeDirectoryFileNoFollow(directory, tombName);
@@ -995,14 +997,7 @@ export async function withAnchoredDirectoryLock<T>(
   } catch (error) {
     outcome = { kind: "threw", error };
   }
-  const failure = closeAnchorGuarded(
-    anchored,
-    outcome.kind === "threw" ? outcome.error : null,
-    `anchored lock ${lockName}`,
-  );
-  if (failure !== null) throw failure;
-  if (outcome.kind === "threw") throw outcome.error;
-  return outcome.value;
+  return finishAnchoredOperation(anchored, outcome, `anchored lock ${lockName}`);
 }
 
 /**
@@ -1126,6 +1121,21 @@ type AnchoredOperation<T> =
   | Readonly<{ kind: "returned"; value: T }>
   | Readonly<{ kind: "threw"; error: unknown }>;
 
+function finishAnchoredOperation<T>(
+  directory: AnchoredDirectory,
+  outcome: AnchoredOperation<T>,
+  operation: string,
+): T {
+  const failure = closeAnchorGuarded(
+    directory,
+    outcome.kind === "threw" ? outcome.error : null,
+    operation,
+  );
+  if (failure !== null) throw failure;
+  if (outcome.kind === "threw") throw outcome.error;
+  return outcome.value;
+}
+
 function withOpenedDirectoryNoFollow<T>(
   path: string,
   operation: string,
@@ -1138,14 +1148,7 @@ function withOpenedDirectoryNoFollow<T>(
   } catch (error) {
     outcome = { kind: "threw", error };
   }
-  const failure = closeAnchorGuarded(
-    directory,
-    outcome.kind === "threw" ? outcome.error : null,
-    operation,
-  );
-  if (failure !== null) throw failure;
-  if (outcome.kind === "threw") throw outcome.error;
-  return outcome.value;
+  return finishAnchoredOperation(directory, outcome, operation);
 }
 
 function writeAnchoredRunFile(path: string, data: string | Uint8Array, exclusive: boolean): void {

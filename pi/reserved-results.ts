@@ -8,10 +8,8 @@
  * re-associated by identity. Otherwise stale review or spec-check evidence
  * stays authoritative and the wave gate reads it as green.
  *
- * Pure by construction: no state manager, no filesystem, no stderr. It grew
- * inline in `extension.ts`'s `tool_result` handler, where the only way to reach
- * these rules was through a full fake-harness integration fixture; the shell
- * now keeps the I/O and calls this for the decision.
+ * Pure by construction: no state manager, no filesystem, no stderr. The shell
+ * owns result I/O and delegates only positional reconciliation to this module.
  */
 
 import { agentsOfKind } from "../engine/src/core/model-profiles";

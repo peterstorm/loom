@@ -28,6 +28,23 @@ import {
 
 export const CONTEXT_PACKET_SCHEMA_VERSION = 1;
 
+const CONTEXT_PACKET_FIELDS: ReadonlySet<string> = new Set([
+  "schemaVersion",
+  "digest",
+  "requestId",
+  "role",
+  "requiredSkill",
+  "outputContract",
+  "fixedContext",
+  "variableContext",
+]);
+const CONTEXT_SECTION_FIELDS: ReadonlySet<string> = new Set([
+  "label",
+  "byteLength",
+  "digest",
+  "bytes",
+]);
+
 /** One labelled, digested run of exact bytes inside a packet. */
 export type ByteSection = Readonly<{
   label: string;
@@ -194,6 +211,10 @@ function parseSection(raw: unknown, field: string): DomainResult<ByteSection, Co
     return failure(field, "a context section must be an object");
   }
   const record = raw as Record<string, unknown>;
+  const undeclaredField = Object.keys(record).find((key) => !CONTEXT_SECTION_FIELDS.has(key));
+  if (undeclaredField !== undefined) {
+    return failure(`${field}.${undeclaredField}`, `a context section must not contain undeclared field ${undeclaredField}`);
+  }
   if (typeof record["label"] !== "string" || record["label"].length === 0) {
     return failure(`${field}.label`, "a context section label must be a non-empty string");
   }
@@ -241,6 +262,10 @@ export function parseContextPacket(raw: unknown): DomainResult<ContextPacket, Co
     return failure("packet", "a context packet must be an object");
   }
   const record = raw as Record<string, unknown>;
+  const undeclaredField = Object.keys(record).find((field) => !CONTEXT_PACKET_FIELDS.has(field));
+  if (undeclaredField !== undefined) {
+    return failure(`packet.${undeclaredField}`, `a context packet must not contain undeclared field ${undeclaredField}`);
+  }
   if (record["schemaVersion"] !== CONTEXT_PACKET_SCHEMA_VERSION) {
     return failure("schemaVersion", `a context packet must declare schema version ${CONTEXT_PACKET_SCHEMA_VERSION}`);
   }

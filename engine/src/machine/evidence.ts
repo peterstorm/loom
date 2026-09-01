@@ -448,6 +448,11 @@ export function resolveSoleActiveBinding(
 /** Exact outcome of an attempted machine-binding capability release. */
 export type MachineBindingRelease = "released" | "not-owned";
 
+/** Parsed persisted binding authority, including explicit corruption evidence. */
+export type MachineBindingAuthority =
+  | Readonly<{ kind: "parsed"; bindings: readonly MachineBinding[] }>
+  | Readonly<{ kind: "corrupt"; bindings: readonly MachineBinding[] }>;
+
 /**
  * The binding/active-roster/ledger lifecycle as a port, owned by the core.
  * The fs adapter (session-registry.ts) wraps the ledger's fs code; an
@@ -473,7 +478,10 @@ export interface SessionRegistry {
   readonly countActiveAgents: (sessionId: SessionId) => number;
   readonly soleActiveBinding: (sessionId: SessionId) => MachineBinding | null;
   readonly refreshBindingActivity: (sessionId: SessionId) => Promise<void>;
+  /** Diagnostic/liveness projection that omits malformed rows. */
   readonly readBindings: (sessionId: SessionId) => readonly MachineBinding[];
+  /** Authority projection; callers must not act on bindings when corrupt. */
+  readonly readBindingAuthority: (sessionId: SessionId) => MachineBindingAuthority;
   readonly appendEvidence: (
     sessionId: SessionId,
     epoch: Epoch,

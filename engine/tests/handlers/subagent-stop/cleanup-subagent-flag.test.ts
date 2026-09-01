@@ -72,7 +72,7 @@ describe("cleanup-subagent-flag — malformed stdin", () => {
     const attempted: string[] = [];
     const registry = {
       ...fsSessionRegistry,
-      readBindings: () => [{ agentId, agentType, epoch }],
+      readBindingAuthority: () => ({ kind: "parsed" as const, bindings: [{ agentId, agentType, epoch }] }),
       unbind: async (_sessionId: unknown, observedType: unknown, observedId: unknown) => {
         attempted.push(`unbind:${String(observedType)}:${String(observedId)}`);
         return "released" as const;
@@ -101,7 +101,7 @@ describe("cleanup-subagent-flag — malformed stdin", () => {
     const attempted: string[] = [];
     const registry = {
       ...fsSessionRegistry,
-      readBindings: () => [{ agentId, agentType, epoch }],
+      readBindingAuthority: () => ({ kind: "parsed" as const, bindings: [{ agentId, agentType, epoch }] }),
       unbind: async () => { attempted.push("unbind"); return "released" as const; },
       removeActive: async () => { attempted.push("roster"); },
     };
@@ -126,7 +126,10 @@ describe("cleanup-subagent-flag — malformed stdin", () => {
     const attempted: string[] = [];
     const registry = {
       ...fsSessionRegistry,
-      readBindings: () => [{ agentId, agentType: persistedType, epoch }],
+      readBindingAuthority: () => ({
+        kind: "parsed" as const,
+        bindings: [{ agentId, agentType: persistedType, epoch }],
+      }),
       unbind: async (_sessionId: unknown, observedType: unknown) => {
         attempted.push(`unbind:${String(observedType)}`);
         return "released" as const;
@@ -152,11 +155,42 @@ describe("cleanup-subagent-flag — malformed stdin", () => {
     });
   });
 
+  it("fails closed on corrupt binding authority while releasing independent capabilities", async () => {
+    const { agentId, agentType, epoch } = cleanupBindingFixture();
+    const attempted: string[] = [];
+    const registry = {
+      ...fsSessionRegistry,
+      readBindingAuthority: () => ({
+        kind: "corrupt" as const,
+        bindings: [{ agentId, agentType, epoch }],
+      }),
+      unbind: async () => { attempted.push("unbind"); return "released" as const; },
+      removeActive: async () => { attempted.push("roster"); },
+    };
+
+    const result = await runCleanupSubagentFlag(
+      JSON.stringify({
+        session_id: "cleanup-corrupt-binding",
+        agent_id: "agent-cleanup",
+        agent_type: "code-implementer-agent",
+      }),
+      registry,
+      () => { attempted.push("sidecar"); },
+      async () => { attempted.push("pointer"); return "binding-missing"; },
+    );
+
+    expect(attempted).toEqual(["sidecar", "pointer", "roster"]);
+    expect(result).toMatchObject({
+      kind: "error",
+      message: expect.stringMatching(/machine binding authority .*cleanup-corrupt-binding\.machine.*corrupt.*binding NOT released/i),
+    });
+  });
+
   it("reports when exact machine-binding ownership changes before release", async () => {
     const { agentId, agentType, epoch } = cleanupBindingFixture();
     const registry = {
       ...fsSessionRegistry,
-      readBindings: () => [{ agentId, agentType, epoch }],
+      readBindingAuthority: () => ({ kind: "parsed" as const, bindings: [{ agentId, agentType, epoch }] }),
       unbind: async () => "not-owned" as const,
       removeActive: async () => {},
     };
@@ -183,7 +217,7 @@ describe("cleanup-subagent-flag — malformed stdin", () => {
     const attempted: string[] = [];
     const registry = {
       ...fsSessionRegistry,
-      readBindings: () => [{ agentId, agentType, epoch }],
+      readBindingAuthority: () => ({ kind: "parsed" as const, bindings: [{ agentId, agentType, epoch }] }),
       unbind: async () => {
         attempted.push("unbind");
         throw new Error("unbind unavailable");

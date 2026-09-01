@@ -59,6 +59,7 @@ import {
   type AgentId,
   type AgentType,
   type MachineBinding,
+  type MachineBindingAuthority,
   type MachineBindingRelease,
   type PersistedBinding,
   type SessionFileSuffix,
@@ -178,11 +179,7 @@ function classifyBindingLines(sessionId: SessionId, nowMs: number): ClassifiedLi
   }
 }
 
-type BindingProjection =
-  | Readonly<{ kind: "parsed"; bindings: readonly MachineBinding[] }>
-  | Readonly<{ kind: "corrupt"; bindings: readonly MachineBinding[] }>;
-
-function projectBindingAuthority(sessionId: SessionId, nowMs: number): BindingProjection {
+function projectBindingAuthority(sessionId: SessionId, nowMs: number): MachineBindingAuthority {
   const lines = classifyBindingLines(sessionId, nowMs);
   const malformed = lines.filter((line) => line.kind === "malformed").length;
   if (malformed > 0) {
@@ -209,6 +206,14 @@ function projectBindingAuthority(sessionId: SessionId, nowMs: number): BindingPr
  */
 export function readBindings(sessionId: SessionId, nowMs: number = Date.now()): readonly MachineBinding[] {
   return projectBindingAuthority(sessionId, nowMs).bindings;
+}
+
+/** Parse persisted binding authority without collapsing malformed rows. */
+export function readBindingAuthority(
+  sessionId: SessionId,
+  nowMs: number = Date.now(),
+): MachineBindingAuthority {
+  return projectBindingAuthority(sessionId, nowMs);
 }
 
 /**

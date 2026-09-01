@@ -1643,7 +1643,7 @@ export function parseStagedArtifactPromotion(
   const staged = resolve(record["staged"]);
   const stagedPrefix = `${final}.staged-`;
   const stagedSuffix = staged.slice(stagedPrefix.length);
-  if (record["staged"] !== staged || !staged.startsWith(stagedPrefix) || !/^[A-Za-z0-9_-]+$/.test(stagedSuffix)) {
+  if (record["staged"] !== staged || !staged.startsWith(stagedPrefix) || !/^[0-9a-f]{24}$/.test(stagedSuffix)) {
     return failure("artifacts", "staged artifact promotion path must be the canonical sibling generated for its final artifact");
   }
   const promotion = Object.freeze({ staged, final, [STAGED_ARTIFACT_PROMOTION]: true as const });
@@ -1762,8 +1762,10 @@ function occupiedArtifactConflict(
 /**
  * Promote internal staged paths. Every target is checked BEFORE any rename,
  * which rules out predictable conflicts while the set is entirely staged.
- * An unexpected later rename fault can leave earlier final files in place;
- * those bytes are inert because no successful result or Effect Receipt exists.
+ * An unexpected later rename fault can leave earlier final files in place.
+ * Those bytes carry no publication authority because no successful result or
+ * Effect Receipt exists; the low-level `readArtifactBytes` operation is not
+ * receipt-gated, so consumers must follow only successful publication refs.
  * Publication authority is all-or-none even though filesystem promotion is not.
  *
  * The fault-injection seam is exported, but structural path pairs are not
@@ -1805,9 +1807,9 @@ export function promoteArtifactSet(
   }
 
   // A failure here must still not report success. Any member already promoted
-  // stays on disk but is inert: nothing treats a set as published until its
-  // receipt is recorded, and the effect runner records that receipt only on a
-  // successful return.
+  // stays on disk but carries no publication authority: the effect runner
+  // records a receipt only on a successful return. Low-level path reads remain
+  // possible, so callers must consume only refs from successful publication.
   for (const [index, entry] of stagedPaths.entries()) {
     try {
       publishStagedRunFile(entry.staged, entry.final);

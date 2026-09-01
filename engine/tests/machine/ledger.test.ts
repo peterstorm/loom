@@ -279,6 +279,10 @@ describe("machine binding lifecycle", () => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       expect(ledger.readBindings(s)).toHaveLength(1);
+      expect(ledger.readBindingAuthority(s)).toMatchObject({
+        kind: "corrupt",
+        bindings: [{ agentId: "a-1", agentType: "code-implementer-agent" }],
+      });
       expect(() => ledger.soleActiveBinding(s)).toThrow(/binding authority.*malformed rows/i);
       expect(stderrSpy.mock.calls.map(([text]) => String(text)).join(""))
         .toContain("skipped 1 malformed binding line(s)");
