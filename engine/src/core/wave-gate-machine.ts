@@ -2580,12 +2580,35 @@ function unstartedWaveStatus(
   if (waveTasks.length === 0) return null;
 
   const executing = new Set(graph.executing_tasks ?? []);
+  const completedReservation = waveTasks.find((task) =>
+    task.status === "completed" &&
+    (executing.has(task.id) || task.active_implementation_attempt !== undefined));
+  if (completedReservation !== undefined) {
+    return deriveUnavailableLoomStatus(Object.freeze([
+      reason(
+        "authority-contradiction",
+        `${completedReservation.id} is completed but retains implementation reservation authority; repair the Task Graph`,
+        completedReservation.id,
+      ),
+    ]) as NonEmpty<StatusReason>);
+  }
   const outstanding = waveTasks.filter((task) =>
     (task.status !== "implemented" && task.status !== "completed") ||
     executing.has(task.id) || task.active_implementation_attempt !== undefined);
   const observation = deps.implementationReservations;
   const reservationCandidates = outstanding.filter((task) =>
     executing.has(task.id) || task.active_implementation_attempt !== undefined);
+  const nonCurrentReservation = reservationCandidates.find((task) =>
+    task.reserved_at === undefined || Number.isNaN(Date.parse(task.reserved_at)));
+  if (nonCurrentReservation !== undefined) {
+    return deriveUnavailableLoomStatus(Object.freeze([
+      reason(
+        "authority-contradiction",
+        `${nonCurrentReservation.id} has timestamp-less legacy implementation authority that canonical status cannot reclaim; repair or migrate the Task Graph`,
+        nonCurrentReservation.id,
+      ),
+    ]) as NonEmpty<StatusReason>);
+  }
   if (reservationCandidates.length > 0 && observation?.kind === "unavailable") {
     return deriveUnavailableLoomStatus(Object.freeze([
       unavailableStatusReason(
@@ -2678,8 +2701,10 @@ function unstartedWaveStatus(
       reason("authority-contradiction", `Wave ${wave} has outstanding Tasks but no legal implementation recovery`),
     ]) as NonEmpty<StatusReason>);
   }
-  const reasons: StatusReason[] = outstanding.map((task) =>
-    reason("wave-implementation-pending", `${task.id} has not reached implemented`, task.id));
+  const reasons: StatusReason[] = outstanding.flatMap((task) =>
+    task.status === "implemented"
+      ? []
+      : [reason("wave-implementation-pending", `${task.id} has not reached implemented`, task.id)]);
   for (const task of active) {
     reasons.push(reason("task-running", `${task.id} already has active implementation authority`, task.id));
   }

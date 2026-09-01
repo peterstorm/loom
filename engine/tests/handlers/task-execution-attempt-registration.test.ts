@@ -256,6 +256,7 @@ describe("modern implementation attempt registration", () => {
     expect(third.authorities[0]?.semanticAttempt).toBe(2);
     await settle(third.authorities[0]!, [], "2026-08-25T00:03:00.000Z");
     expect(manager.load().tasks[0]).toMatchObject({ status: "implemented" });
+    expect(manager.load().tasks[0]?.retry_count).toBeUndefined();
     expect(manager.load().tasks[0]?.files_modified).not.toContain("sibling.ts");
     expect(manager.load().tasks[0]?.repository_baseline).toBeUndefined();
     expect(readFileSync(join(repo.root, "sibling.ts"), "utf8")).toBe("parallel T2 bytes\n");
@@ -432,6 +433,56 @@ describe("modern implementation attempt registration", () => {
       authorityDigest: old.value.authorityDigest,
       failureKinds: ["reservation-reclaimed"],
     }));
+  });
+
+  it("an exact rollback retires matching authority and Attempt Context together", () => {
+    const state = graph([taskFixture({
+      id: "T1", description: "one", agent: "code-implementer-agent",
+      wave: 1, status: "pending", depends_on: [], file_list: ["src/a.ts"],
+    })]);
+    const baseline = [{ artifact: "src/a.ts", snapshot: { kind: "missing" as const } }];
+    const instant = parseIsoInstant("2026-01-01T00:00:00.000Z");
+    const reservation = parseReservationId("matching-rollback");
+    if (!instant.ok || !reservation.ok) throw new Error("rollback fixture failed");
+    const batch = createTaskExecutionAuthorityBatch(
+      state,
+      [spawn("T1")],
+      ["T1"],
+      [reservation.value],
+      "1".repeat(40),
+      instant.value,
+      new Map([["T1", {
+        proof: baseline,
+        attempt: baseline,
+        repositoryAttempt: [],
+        repositoryObservation: [],
+      }]]),
+    );
+    if (!batch.ok) throw new Error(batch.error);
+    const active: TaskGraph = {
+      ...state,
+      executing_tasks: ["T1"],
+      tasks: [{
+        ...state.tasks[0]!,
+        active_implementation_attempt: batch.plans[0]!.authority,
+        active_implementation_context: batch.plans[0]!.context,
+        attempt_artifact_baseline: baseline,
+        attempt_repository_baseline: [],
+        reserved_at: instant.value,
+      }],
+    };
+
+    const rolledBack = rollbackTaskExecutionAuthorityBatch(active, [batch.plans[0]!.authority], instant.value);
+
+    expect(rolledBack.executing_tasks).toEqual([]);
+    expect(rolledBack.tasks[0]?.active_implementation_attempt).toBeUndefined();
+    expect(rolledBack.tasks[0]?.active_implementation_context).toBeUndefined();
+    expect(rolledBack.tasks[0]?.implementation_attempt_history).toEqual([
+      expect.objectContaining({
+        authorityDigest: batch.plans[0]!.authority.authorityDigest,
+        transition: "infrastructure-blocked",
+      }),
+    ]);
   });
 
   it("an exact rollback cannot clear a late replacement for the same Task", () => {

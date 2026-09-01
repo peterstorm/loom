@@ -679,14 +679,17 @@ Loom Status v1
 - location: {"activePhase":"execute","activeWave":2}
 - tasks: {"counts":{"pending":1,"running":0,"implemented":2,"blocked":0,"completed":0}}
 - failedProofObligations: []
-- testReadiness: {"kind":"ready"}
+- testReadiness: {"kind":"ready","affectedTasks":[]}
 - reviewRuns: {"rosterGaps":[],"evidenceFailures":[]}
-- findingCounts: {"active":0,"advisory":3,"resolved":0,"refuted":0}
-- refutationPanelNeed: {"kind":"no-need"}
-- waveGateCompletionEligibility: {"kind":"ineligible","failed":["T3 has no test evidence"]}
-- nextAction: spawn-batch
+- findingCounts: {"activeCritical":0,"advisory":0,"resolved":0,"refuted":0}
+- refutationPanelNeed: {"kind":"not-needed","findingIds":[],"reasons":["the active Wave has no critical Findings"]}
+- waveCompletionSuiteReadiness: {"kind":"legacy-unavailable","verificationManifestDigest":null}
+- waveGateCompletionEligibility: {"kind":"ineligible","failedPrerequisites":["Wave 2 implementation is in progress"]}
+- nextAction: blocked
+- nextActionPayload: {"kind":"blocked","runId":"loom-status-authority","diagnostic":{"kind":"wave-gate-not-started","category":"healthy-wave-unstarted","runId":"loom-status-authority","message":"Wave 2 implementation is in progress; 1 task(s) are ready to dispatch","retry":{"kind":"advance-wave-lifecycle","eligible":true,"consumesSemanticAttempt":false},"recovery":{"kind":"spawn-wave-implementation","wave":2,"dispatches":[{"kind":"initial-implementation","taskId":"T3","semanticAttempt":1,"promptAppendix":null}]}}}
 - reasons:
-  - [wave-incomplete] T3 has not reached implemented
+  - [wave-implementation-pending] T3 has not reached implemented
+  - [wave-gate-not-started] Wave 2 implementation is in progress; 1 task(s) are ready to dispatch
 ```
 
 An `unavailable` category is a real answer, not a rendering gap: it means the
@@ -730,7 +733,7 @@ Hooks auto-activate when `active_task_graph.json` exists:
 | `resume-after-clear.sh` | SessionStart: clear | Restores loom context after /clear |
 | `dispatch.sh` | SubagentStop | Routes to the TS handlers below (`engine/src/handlers/subagent-stop/`) by agent type |
 | ↳ `advance-phase.ts` | via dispatch | Advances phase + captures spec_file/plan_file from transcript |
-| ↳ `update-task-status.ts` | via dispatch | Marks "implemented" + test evidence + new-test verification |
+| ↳ `update-task-status.ts` | via dispatch | Runs exact Implementation Completion Oracle settlement: implemented, retry-required, escalation-required, or infrastructure-blocked |
 | ↳ `store-reviewer-findings.ts` | via dispatch | Parses review findings |
 | ↳ `store-spec-check-findings.ts` | via dispatch | Parses spec-check findings |
 | ↳ `cleanup-subagent-flag.ts` | via dispatch | Cleans up subagent tracking + machine bindings (always runs) |

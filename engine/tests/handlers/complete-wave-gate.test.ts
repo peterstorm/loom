@@ -1575,8 +1575,12 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       const mixed = unstarted({
         executing_tasks: ["T2"],
         tasks: [
-          taskState({ id: "T2", wave: 1, status: "implemented" }),
-          { ...taskState({ id: "T3", wave: 1, status: "implemented" }), active_implementation_attempt: activeAuthority },
+          { ...taskState({ id: "T2", wave: 1, status: "implemented" }), reserved_at: activeAuthority.reservedAt },
+          {
+            ...taskState({ id: "T3", wave: 1, status: "implemented" }),
+            active_implementation_attempt: activeAuthority,
+            reserved_at: activeAuthority.reservedAt,
+          },
           taskState({ id: "T4", wave: 1, status: "pending" }),
         ],
       });
@@ -1596,8 +1600,12 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       const waiting = unstarted({
         executing_tasks: ["T2"],
         tasks: [
-          taskState({ id: "T2", wave: 1, status: "implemented" }),
-          { ...taskState({ id: "T3", wave: 1, status: "implemented" }), active_implementation_attempt: activeAuthority },
+          { ...taskState({ id: "T2", wave: 1, status: "implemented" }), reserved_at: activeAuthority.reservedAt },
+          {
+            ...taskState({ id: "T3", wave: 1, status: "implemented" }),
+            active_implementation_attempt: activeAuthority,
+            reserved_at: activeAuthority.reservedAt,
+          },
         ],
       });
       const waitingStatus = deriveLoomStatusFromParsedGraph({ ok: true, value: waiting }, statusDeps);
@@ -1610,6 +1618,37 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
           },
         },
       });
+      expect(waitingStatus.next.reasons.some(({ kind }) => kind === "wave-implementation-pending")).toBe(false);
+    });
+
+    it("reports completed or timestamp-less reservation authority as unavailable", () => {
+      const completed = unstarted({
+        executing_tasks: ["T1"],
+        tasks: [{
+          ...taskState({ id: "T1", wave: 1, status: "completed" }),
+          reserved_at: "2026-09-01T00:00:00.000Z",
+        }],
+      });
+      const completedStatus = deriveLoomStatusFromParsedGraph({ ok: true, value: completed }, statusDeps);
+      expect(Object.values(completedStatus.facts).every(({ kind }) => kind === "unavailable")).toBe(true);
+      expect(completedStatus.next.reasons[0]?.message).toContain(
+        "completed but retains implementation reservation authority",
+      );
+
+      const legacy = unstarted({
+        executing_tasks: ["T1"],
+        tasks: [taskState({ id: "T1", wave: 1, status: "pending" })],
+      });
+      const legacyStatus = deriveLoomStatusFromParsedGraph({ ok: true, value: legacy }, {
+        ...statusDeps,
+        implementationReservations: {
+          kind: "observed",
+          observedAtMs: Date.now(),
+          anyActiveForGraph: false,
+        },
+      });
+      expect(Object.values(legacyStatus.facts).every(({ kind }) => kind === "unavailable")).toBe(true);
+      expect(legacyStatus.next.reasons[0]?.message).toContain("timestamp-less legacy implementation authority");
     });
 
     it("re-dispatches only policy-expired reservations when roster observation proves no active Agent", () => {

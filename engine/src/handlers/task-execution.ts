@@ -31,7 +31,7 @@ import { repositoryContext } from "../utils/git";
 import { anyActiveSubagent } from "../machine";
 
 /**
- * Reservations no agent can still be serving.
+ * Reservations eligible for bounded policy-based reclamation.
  *
  * This registration commits `executing_tasks` during PreToolUse — before the
  * sibling PreToolUse gates (template substitution, agent model, agent skill)

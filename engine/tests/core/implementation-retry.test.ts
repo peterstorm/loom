@@ -185,6 +185,15 @@ describe("bounded implementation retry admission", () => {
       renderImplementationRetryContext(disposition.context).split(": ", 2)[1]!,
     ));
     expect(parsedRetry).toEqual({ ok: true, value: disposition.context });
+    expect(parseImplementationRetryContext({ ...disposition.context, extra: true })).toMatchObject({ ok: false });
+    expect(parseImplementationRetryContext({
+      ...disposition.context,
+      failureKinds: [...disposition.context.failureKinds, disposition.context.failureKinds[0]],
+    })).toMatchObject({ ok: false });
+    expect(parseImplementationRetryContext({
+      ...disposition.context,
+      semanticAttempt: 1,
+    })).toMatchObject({ ok: false });
 
     const attempt = authority(2, "attempt-two", 2);
     const prompt = `Task ID: T1\n${disposition.promptAppendix}`;
