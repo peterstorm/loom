@@ -157,9 +157,11 @@ async function runCaptureRawTranscript(
 function describePortError(error: unknown): string {
   if (!(error instanceof Error)) return `thrown: ${String(error)}`;
   const name = error.name === "" ? "Error" : error.name;
-  const cause = error.cause === undefined ? ""
-    : ` (caused by ${error.cause instanceof Error ? `${error.cause.name}: ${error.cause.message}` : String(error.cause)})`;
-  return `${name}: ${error.message}${cause}`;
+  if (error.cause === undefined) return `${name}: ${error.message}`;
+  const cause = error.cause instanceof Error
+    ? `${error.cause.name}: ${error.cause.message}`
+    : String(error.cause);
+  return `${name}: ${error.message} (caused by ${cause})`;
 }
 
 async function runThroughPort(
