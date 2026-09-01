@@ -298,7 +298,7 @@ export function parseContextPacket(raw: unknown): DomainResult<ContextPacket, Co
   return success(built.value);
 }
 
-/** Total bytes a packet delivers — used to prove packets removed repeated bytes. */
+/** Section payload bytes only; excludes packet metadata and JSON serialization overhead. */
 export function contextPacketByteLength(packet: ContextPacket): number {
   return [...packet.fixedContext, ...packet.variableContext]
     .reduce((total, section) => total + section.byteLength, 0);

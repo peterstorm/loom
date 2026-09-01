@@ -166,27 +166,31 @@ async function runThroughPort(
   intent: EffectIntent,
   port: () => Promise<unknown>,
 ): Promise<DomainResult<EffectReceipt, EffectRunnerError>> {
+  let raw: unknown;
   try {
-    const raw = await port();
-    return reconcile(intent, raw);
+    raw = await port();
   } catch (error) {
     // `retriable: true` is the runner's honest limit of knowledge, not a
-    // diagnosis: any throw COULD be transient. Preserve its name and cause so
-    // the operator can distinguish wiring faults from transport failures.
+    // diagnosis: any PORT throw COULD be transient. Preserve its name and cause
+    // so the operator can distinguish wiring faults from transport failures.
     return failure(intent.effectId, true, describePortError(error));
   }
+  // Pure reconciliation defects are engine bugs, not adapter failures. Keep
+  // this outside the port catch so they cannot be mislabeled as retriable I/O.
+  return reconcile(intent, raw);
 }
 
 /**
  * Build the runner. `handle` owns run-directory effects; `ports` own the ones
  * that reach outside it.
  *
- * This is the only path that EXECUTES an intent and reconciles its receipt, and
- * the only one that enforces the read-before-run idempotency guard. It is not
- * the only place a receipt file can appear: `standalone.ts` records one
- * `artifact-set-published` receipt itself on the exclusive-publication collision
- * path, where the effect already happened and re-running it is the very thing
- * the guard exists to prevent.
+ * This is the general path that executes an intent and reconciles its receipt,
+ * and the only one that enforces the read-before-run idempotency guard.
+ * Standalone finalization is the explicit alternative: `finalizeStandaloneState`
+ * publishes `result.json`, records its publication receipt, and reconciles that
+ * receipt after either a fresh exclusive write or a byte-identical collision.
+ * Its exclusive-write protocol owns idempotency because result publication and
+ * terminal state reduction are one standalone-specific operation.
  */
 export function createEffectRunner(args: Readonly<{
   handle: RunDirHandle;

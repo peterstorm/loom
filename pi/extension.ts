@@ -701,31 +701,25 @@ export async function capturePiSubagentResult(
   runBinding: SessionRunBinding | null = null,
   observationRefusal: TerminalCaptureRefusal | null = null,
 ): Promise<CaptureOutcome> {
-  try {
-    const runsRoot = runBinding?.runsRoot ?? process.env[RUNS_ROOT_ENV];
-    const runDirectory = runBinding?.runDirectory ?? process.env[RUN_DIR_ENV];
-    const observe = (): CaptureObservation => {
-      if (observationRefusal !== null) return observationRefusal;
-      const candidates = piResultFinalPayloadCandidates(messages ?? []);
-      return candidates.ok
-        ? captureCandidates(candidates.value)
-        : terminalCaptureRefusal("transcript-shape", candidates.errors.join("; "));
-    };
-    const outcome = await captureHarnessResult({
-      harness: "pi",
-      runsRoot,
-      runDirectory,
-      nativeId: piSpawnRosterId(toolCallId, resultIndex, agentType),
-      observe,
-    });
-    const audit = captureAuditLine("loom(pi): capture-orchestration-result", outcome);
-    if (audit !== null) process.stderr.write(audit);
-    return outcome;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`loom(pi): capture-orchestration-result crashed for ${agentType}: ${message}\n`);
-    return { kind: "retriable-failure", reason: "capture-crashed", message };
-  }
+  const runsRoot = runBinding?.runsRoot ?? process.env[RUNS_ROOT_ENV];
+  const runDirectory = runBinding?.runDirectory ?? process.env[RUN_DIR_ENV];
+  const observe = (): CaptureObservation => {
+    if (observationRefusal !== null) return observationRefusal;
+    const candidates = piResultFinalPayloadCandidates(messages ?? []);
+    return candidates.ok
+      ? captureCandidates(candidates.value)
+      : terminalCaptureRefusal("transcript-shape", candidates.errors.join("; "));
+  };
+  const outcome = await captureHarnessResult({
+    harness: "pi",
+    runsRoot,
+    runDirectory,
+    nativeId: piSpawnRosterId(toolCallId, resultIndex, agentType),
+    observe,
+  });
+  const audit = captureAuditLine("loom(pi): capture-orchestration-result", outcome);
+  if (audit !== null) process.stderr.write(audit);
+  return outcome;
 }
 
 export interface PiCleanupAction {
@@ -1339,10 +1333,16 @@ export default function (pi: ExtensionAPI) {
         let specCheckAuthority: PiSpecCheckAttemptAuthority | null = null;
         const rollbackLifecycle = async (): Promise<readonly string[]> => {
           const actions: PiCleanupAction[] = [];
+          const revokedGrantTokens = new Set<string>();
+          const removedRosterIds = new Set<AgentId>();
+          let pointerReleased = false;
           for (const grant of writeGrants) {
             actions.push({
               label: `revoke write grant for spawn item ${grant.index + 1}`,
-              run: () => revokePiWriteGrant(grant.token),
+              run: () => {
+                revokePiWriteGrant(grant.token);
+                revokedGrantTokens.add(grant.token);
+              },
             });
             if (grant.injected) {
               actions.push({
@@ -1354,7 +1354,10 @@ export default function (pi: ExtensionAPI) {
           for (const agentId of [...reserved].reverse()) {
             actions.push({
               label: `remove active roster entry ${agentId}`,
-              run: () => fsSessionRegistry.removeActive(safeSessionId, agentId),
+              run: async () => {
+                await fsSessionRegistry.removeActive(safeSessionId, agentId);
+                removedRosterIds.add(agentId);
+              },
             });
           }
           if (taskGraphPointerBinding !== null) {
@@ -1364,10 +1367,44 @@ export default function (pi: ExtensionAPI) {
               run: async () => {
                 const result = await rollbackSessionTaskGraphPointer(ownedPointer);
                 if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
+                pointerReleased = true;
               },
             });
           }
-          return runPiCleanupActions(actions);
+          const errors = await runPiCleanupActions(actions);
+          const remainingGrantTokens = writeGrants
+            .map(({ token }) => token)
+            .filter((token) => !revokedGrantTokens.has(token));
+          const remainingRosterIds = new Set(reserved.filter((agentId) => !removedRosterIds.has(agentId)));
+          const remainingPointerBinding = pointerReleased ? null : taskGraphPointerBinding;
+          if (remainingGrantTokens.length > 0 || remainingRosterIds.size > 0 || remainingPointerBinding !== null) {
+            const runtime = runtimeFor(safeSessionId);
+            if (remainingGrantTokens.length > 0) {
+              runtime.issuedWriteGrants.set(toolCallId, Object.freeze(remainingGrantTokens));
+            }
+            retainSpawnCleanupDebt(runtime, toolCallId, {
+              sessionId: safeSessionId,
+              needsTaskGraphLifecycle,
+              graphActiveAtSpawn: graphIsActive,
+              orchestrationRunBinding,
+              pointerBinding: remainingPointerBinding,
+              items: Object.freeze(parsedItems.flatMap((item, index) => {
+                const rosterId = rosterIds[index]!;
+                return remainingRosterIds.has(rosterId)
+                  ? [Object.freeze({
+                      agentType: item.agent,
+                      rosterId,
+                      taskId: extractTaskId(item.task),
+                      implementationAuthority: null,
+                      reviewAuthority: null,
+                      specCheckAuthority: null,
+                      kind: taskExecutionSpawns[index]?.kind ?? "non-implementation",
+                    })]
+                  : [];
+              })),
+            });
+          }
+          return errors;
         };
         // Observe graph activity before this prospective batch writes its own
         // roster rows. Those rows prove only that admission is in progress;
@@ -2013,6 +2050,40 @@ export default function (pi: ExtensionAPI) {
       if (sessionRuntime) pruneRuntime(resultSessionId, sessionRuntime);
     };
 
+    const settleReservedImplementationCrash = async (
+      item: PiSpawnReservation["items"][number] | undefined,
+      diagnostic: string,
+    ): Promise<readonly string[]> => {
+      if (item?.kind !== "implementation" || item.implementationAuthority === null) return [];
+      const finalizedAt = parseIsoInstant(new Date().toISOString(), "Pi crash-settlement instant");
+      if (!finalizedAt.ok) return [finalizedAt.error.errors.join("; ")];
+      try {
+        const manager = StateManager.fromLocalSession(reservation?.sessionId ?? "");
+        if (manager === null) return [`cannot settle crashed reserved implementation ${item.taskId ?? "unknown"}: task graph unavailable`];
+        const applied = await manager.updateAndReturn((state) => {
+          const settlement = settleUnavailableImplementation(
+            state,
+            item.implementationAuthority!,
+            finalizedAt.value,
+            diagnostic,
+          );
+          if (settlement.kind === "error") throw new Error(JSON.stringify(settlement.error));
+          return { state: settlement.state, value: settlement };
+        });
+        if (applied.kind === "ignored") {
+          process.stderr.write(
+            `loom(pi): crashed result for ${item.taskId ?? "unknown"} was ${applied.reason}; current authority preserved\n`,
+          );
+        }
+        return [];
+      } catch (error) {
+        return [
+          `cannot settle crashed reserved implementation ${item.taskId ?? "unknown"}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        ];
+      }
+    };
+
     const finalizeReservedImplementations = async (
       entries: readonly PiSubagentResultEntry[],
     ): Promise<readonly string[]> => {
@@ -2564,10 +2635,17 @@ export default function (pi: ExtensionAPI) {
           taskIdFailure = `; task-id extraction failed: ${error instanceof Error ? error.message : String(error)}`;
         }
         const diagnostic = `result ${resultIndex + 1} for agent ${String(result?.agent ?? "<unknown>")} (task ${taskIdForLog}${taskIdFailure}): ${err instanceof Error ? err.message : String(err)}`;
-        processingErrors.push(diagnostic);
+        const settlementErrors = await settleReservedImplementationCrash(
+          reservation?.items[resultIndex],
+          diagnostic,
+        );
+        processingErrors.push(diagnostic, ...settlementErrors);
         process.stderr.write(
           `loom(pi): subagent-stop processing failed for ${diagnostic} — continuing with remaining results\n`,
         );
+        for (const settlementError of settlementErrors) {
+          process.stderr.write(`loom(pi): ${settlementError}\n`);
+        }
       }
     }
 

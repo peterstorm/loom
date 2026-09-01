@@ -131,6 +131,8 @@ const outcome = (
   processingErrors: readonly string[] = [],
 ): PiResultOutcome => Object.freeze({ processingErrors: Object.freeze(processingErrors), log: Object.freeze(log) });
 
+const processingFailure = (message: string): PiResultOutcome => outcome([message], [message]);
+
 /** One Pi subagent result, in the shape the appliers actually read. */
 export type PiSubagentResult = Readonly<{
   agent: string;
@@ -227,7 +229,9 @@ export function piSubagentResultFailed(result: {
  * batch, beside the per-slot diagnostics,
  * so the operator reads the pattern where the symptoms are. `null` below two
  * results or when any slot survived: one slot is not a pattern, and a surviving
- * sibling refutes the shared-fault reading outright.
+ * sibling removes the all-slot failure signature this helper reports. Partial or
+ * intermittent shared infrastructure faults remain possible but are not inferred
+ * from this batch-level heuristic.
  */
 export function piAllSlotsFailedNote(
   results: readonly {
@@ -444,11 +448,11 @@ async function settleFailedExactImplementation(
   const settlement = settled.value;
   if (settlement === undefined) {
     const message = `loom(pi): ${args.failure}; exact Oracle settlement produced no transition — current attempt preserved`;
-    return outcome([message], [message]);
+    return processingFailure(message);
   }
   if (settlement.kind === "error") {
     const message = `loom(pi): ${args.failure}; exact Oracle settlement failed: ${JSON.stringify(settlement.error)} — current attempt preserved`;
-    return outcome([message], [message]);
+    return processingFailure(message);
   }
   return settlement.kind === "ignored"
     ? outcome([`loom(pi): ${args.failure}; exact result ignored (${settlement.reason})`])
@@ -474,7 +478,7 @@ async function cleanupFailedLegacyImplementation(
   });
   if (!released) {
     const message = `loom(pi): ${args.failure}; modern attempt lacks exact ReservedSlot authority — current attempt preserved`;
-    return outcome([message], [message]);
+    return processingFailure(message);
   }
   const inference = binding.inferred
     ? `loom(pi): ${args.failure} — released ${binding.taskId} legacy reservation inferred from the sole executing ` +
@@ -544,12 +548,12 @@ async function applyFailedReviewResult(args: Readonly<{
   const reservedTaskId = args.reservedSlot?.taskId;
   if (reservedTaskId === undefined || reservedTaskId === null) {
     const message = `loom(pi): ${args.failure}; failed reviewer has no reserved Task authority — review evidence NOT stored`;
-    return outcome([message], [message]);
+    return processingFailure(message);
   }
   if (returnedTaskId !== reservedTaskId) {
     const message = `loom(pi): ${args.failure}; returned Task ${returnedTaskId ?? "missing"} does not match ` +
       `reserved Task ${reservedTaskId} — review evidence NOT stored`;
-    return outcome([message], [message]);
+    return processingFailure(message);
   }
   const failedTaskId = reservedTaskId;
   const resolution = { kind: "evidence-failed" as const, agent: args.agentType, message: args.failure };
@@ -561,15 +565,25 @@ async function applyFailedReviewResult(args: Readonly<{
       args.reservedSlot?.reviewAuthority,
       resolution,
     ));
-  if (application.kind !== "applied") {
-    let disposition = "rejected duplicate/stale failure evidence";
-    if (application.kind === "missing") disposition = "disappeared";
-    if (application.kind === "authority-rejected") disposition = application.problem;
-    const message = `loom(pi): ${args.failure}; review task ${failedTaskId} ` +
-      `${disposition} under the state lock — review evidence NOT stored`;
-    return outcome([message], [message]);
+  switch (application.kind) {
+    case "applied":
+      return outcome([reviewResolutionLog(failedTaskId, resolution, application.task, true)]);
+    case "missing": {
+      const message = `loom(pi): ${args.failure}; review task ${failedTaskId} disappeared ` +
+        "under the state lock — review evidence NOT stored";
+      return processingFailure(message);
+    }
+    case "unchanged": {
+      const message = `loom(pi): ${args.failure}; review task ${failedTaskId} rejected duplicate/stale failure evidence ` +
+        "under the state lock — review evidence NOT stored";
+      return processingFailure(message);
+    }
+    case "authority-rejected": {
+      const message = `loom(pi): ${args.failure}; review task ${failedTaskId} ${application.problem} ` +
+        "under the state lock — review evidence NOT stored";
+      return processingFailure(message);
+    }
   }
-  return outcome([reviewResolutionLog(failedTaskId, resolution, application.task, true)]);
 }
 
 /**
@@ -624,7 +638,7 @@ export async function applyFailedPiResult(args: Readonly<{
   }
   if (PHASE_AGENTS.has(agentType)) {
     const message = `loom(pi): ${failure} — phase was not advanced`;
-    return outcome([message], [message]);
+    return processingFailure(message);
   }
   return outcome([`loom(pi): ${failure} — completion evidence ignored`]);
 }
@@ -1430,18 +1444,18 @@ function resolveReviewTaskBinding(args: Readonly<{
   if (reservedTaskId !== undefined && reservedTaskId !== null && returnedTaskId !== reservedTaskId) {
     const message = `WARNING: ${args.agentType} review result Task identity ${returnedTaskId ?? "missing"} ` +
       `does not match reserved Task ${reservedTaskId} — findings NOT stored`;
-    return { kind: "blocked", outcome: outcome([message], [message]) };
+    return { kind: "blocked", outcome: processingFailure(message) };
   }
   const taskId = reservedTaskId ?? returnedTaskId ?? extractTaskId(args.parentPrompt);
   if (!taskId) {
     const message = `WARNING: ${args.agentType} review completed without an extractable task ID — findings NOT stored`;
-    return { kind: "blocked", outcome: outcome([message], [message]) };
+    return { kind: "blocked", outcome: processingFailure(message) };
   }
 
   const reviewTask = args.store.load().tasks.find((task) => task.id === taskId);
   if (!reviewTask) {
     const message = `WARNING: ${args.agentType} review names task ${taskId}, which is not in the task graph — findings NOT stored`;
-    return { kind: "blocked", outcome: outcome([message], [message]) };
+    return { kind: "blocked", outcome: processingFailure(message) };
   }
   return { kind: "bound", taskId };
 }
@@ -1494,11 +1508,11 @@ async function applyLockedReviewEvidence(args: Readonly<{
   const application = result.application;
   if (application.kind === "missing") {
     const message = `WARNING: ${args.agentType} review task ${args.taskId} disappeared before evidence application — findings NOT stored`;
-    return outcome([message], [message]);
+    return processingFailure(message);
   }
   if (application.kind === "authority-rejected") {
     const message = `WARNING: ${args.agentType} review task ${args.taskId} ${application.problem} — findings NOT stored`;
-    return outcome([message], [message]);
+    return processingFailure(message);
   }
   return outcome([
     reviewResolutionLog(args.taskId, application.resolution, application.task, application.changed),

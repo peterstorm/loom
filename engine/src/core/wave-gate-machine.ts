@@ -822,6 +822,35 @@ function requiredWaveCompletionSuite(
   });
 }
 
+function parseWorkspaceObservation(
+  currentWorkspace: WaveWorkspaceObservation | undefined,
+  manifestDigest: RequiredWaveCompletionSuite["verificationManifestDigest"],
+  acceptedResultDigest: RequiredWaveCompletionSuite["acceptedResultDigest"] = null,
+): DomainResult<Extract<WaveWorkspaceObservation, { kind: "observed" }>, RequiredWaveCompletionSuite> {
+  if (currentWorkspace === undefined) {
+    return canonicalRecord({
+      ok: false,
+      error: requiredWaveCompletionSuite(
+        "workspace-observation-missing",
+        "current Wave workspace observation is missing",
+        manifestDigest,
+        acceptedResultDigest,
+      ),
+    });
+  }
+  return currentWorkspace.kind === "unavailable"
+    ? canonicalRecord({
+        ok: false,
+        error: requiredWaveCompletionSuite(
+          "workspace-observation-unavailable",
+          currentWorkspace.reason,
+          manifestDigest,
+          acceptedResultDigest,
+        ),
+      })
+    : canonicalRecord({ ok: true, value: currentWorkspace });
+}
+
 /** Pure canonical status for active or terminal Wave completion-suite evidence. */
 export function deriveWaveCompletionSuiteReadiness(
   graph: TaskGraph,
@@ -843,20 +872,8 @@ export function deriveWaveCompletionSuiteReadiness(
         manifestDigest,
       );
     }
-    if (currentWorkspace === undefined) {
-      return requiredWaveCompletionSuite(
-        "workspace-observation-missing",
-        "current Wave workspace observation is missing",
-        manifestDigest,
-      );
-    }
-    if (currentWorkspace.kind === "unavailable") {
-      return requiredWaveCompletionSuite(
-        "workspace-observation-unavailable",
-        currentWorkspace.reason,
-        manifestDigest,
-      );
-    }
+    const workspace = parseWorkspaceObservation(currentWorkspace, manifestDigest);
+    if (!workspace.ok) return workspace.error;
     if (currentResult === undefined || currentResult.kind === "absent") {
       return requiredWaveCompletionSuite(
         "accepted-suite-missing",
@@ -874,7 +891,7 @@ export function deriveWaveCompletionSuiteReadiness(
     const authorized = authorizeWaveCompletionSuite(
       manifest,
       source.registration,
-      currentWorkspace.workspaceDigest,
+      workspace.value.workspaceDigest,
     );
     if (!authorized.ok) {
       return requiredWaveCompletionSuite(
@@ -950,30 +967,20 @@ export function deriveWaveCompletionSuiteReadiness(
       checkCount: source.receipt.checks.length,
     });
   }
-  if (currentWorkspace === undefined) {
-    return requiredWaveCompletionSuite(
-      "workspace-observation-missing",
-      "current Wave workspace observation is missing",
-      manifestDigest,
-      source.receipt.resultDigest,
-    );
-  }
-  if (currentWorkspace.kind === "unavailable") {
-    return requiredWaveCompletionSuite(
-      "workspace-observation-unavailable",
-      currentWorkspace.reason,
-      manifestDigest,
-      source.receipt.resultDigest,
-    );
-  }
-  if (currentWorkspace.workspaceDigest !== source.receipt.workspaceDigest) {
+  const workspace = parseWorkspaceObservation(
+    currentWorkspace,
+    manifestDigest,
+    source.receipt.resultDigest,
+  );
+  if (!workspace.ok) return workspace.error;
+  if (workspace.value.workspaceDigest !== source.receipt.workspaceDigest) {
     return canonicalRecord({
       kind: "stale",
       verificationManifestDigest: manifestDigest,
       suiteDigest: source.receipt.suiteDigest,
       resultDigest: source.receipt.resultDigest,
       acceptedWorkspaceDigest: source.receipt.workspaceDigest,
-      currentWorkspaceDigest: currentWorkspace.workspaceDigest,
+      currentWorkspaceDigest: workspace.value.workspaceDigest,
       checkCount: source.receipt.checks.length,
     });
   }

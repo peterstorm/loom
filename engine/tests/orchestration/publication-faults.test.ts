@@ -1289,9 +1289,9 @@ describe("event journal ordering", () => {
 });
 
 describe("promoteArtifactSet partial-promotion recovery", () => {
-  // Every failure reachable through publishArtifactSet is turned into an
-  // all-staged refusal by the pre-checks, so this arm — a member that fails to
-  // rename AFTER an earlier member already promoted — uses parser-minted test
+  // Deterministic publishArtifactSet prechecks catch predictable conflicts
+  // while every member is staged. A later race or I/O fault can still fail a
+  // rename AFTER an earlier member promoted, so this arm uses parser-minted
   // authority for exact in-run paths rather than an exported structural pair.
   it("discards the unpromoted remainder and reports failure", () => {
     const { root, directory } = freshRun();

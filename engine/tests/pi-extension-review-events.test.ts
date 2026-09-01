@@ -44,6 +44,16 @@ class FakePi {
   }
 }
 
+const extension = async (): Promise<FakePi> => {
+  const extensionSpecifier = "../../pi/extension.ts";
+  const module = await import(/* @vite-ignore */ extensionSpecifier) as {
+    default: (pi: unknown) => void;
+  };
+  const pi = new FakePi();
+  module.default(pi as never);
+  return pi;
+};
+
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const temp = canonicalTempDir("loom-pi-review-events-");
 const specCheckPlanPath = join(temp, "spec-check-authority-plan.md");
@@ -308,16 +318,6 @@ describe("Pi extension review tool_result integration", () => {
     evidence: [],
     slot_authority: [{ agent: "code-reviewer", slot_id: `review-slot:${marker}`, attempted: 1 }],
   });
-
-  const extension = async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
-    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
-      default: (pi: unknown) => void;
-    };
-    const pi = new FakePi();
-    module.default(pi as never);
-    return pi;
-  };
 
   it("publishes the exact loaded runtime identity for fresh CLI mutation handshakes", async () => {
     await extension();
@@ -3028,6 +3028,206 @@ describe("Pi extension review tool_result integration", () => {
     expect(() => readFileSync(join(subagentDir, `${session}.task_graph`), "utf-8")).toThrow();
   });
 
+  it("retains failed admission rollback authority for shutdown retry", async () => {
+    const planPath = join(temp, "admission-rollback-retry-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4a4";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const grantDir = join(subagentDir, "pi-write-grants");
+    const before = new Set(existsSync(grantDir) ? readdirSync(grantDir) : []);
+    let task = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+    let failedGrantPath: string | null = null;
+    const input: Record<string, unknown> = {
+      agent: "code-implementer-agent",
+      agentScope: "user",
+    };
+    Object.defineProperty(input, "task", {
+      enumerable: true,
+      get: () => task,
+      set: (next: string) => {
+        task = next;
+        const issued = readdirSync(grantDir).filter((name) => !before.has(name));
+        expect(issued).toHaveLength(1);
+        failedGrantPath = join(grantDir, issued[0]!);
+        rmSync(failedGrantPath);
+        mkdirSync(failedGrantPath);
+        throw new Error("injected admission prompt mutation failure");
+      },
+    });
+
+    const blocked = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-admission-rollback-retry",
+      input,
+    }, context);
+
+    expect(blocked).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("revoke write grant for spawn item 1"),
+    }));
+    expect(failedGrantPath).not.toBeNull();
+    await expect(pi.emit("session_shutdown", {}, context))
+      .rejects.toThrow(/session shutdown cleanup failed.*revoke outstanding write grant/i);
+
+    rmSync(failedGrantPath!, { recursive: true });
+    const retried = await pi.emit("session_shutdown", {}, context);
+    expect(retried.every((result) => result === undefined)).toBe(true);
+    expect(existsSync(failedGrantPath!)).toBe(false);
+  });
+
+  it("retires successful admission revocations while retaining only the failed grant", async () => {
+    const planPath = join(temp, "partial-admission-grant-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks: [
+        { ...initialGraph().tasks[0], id: "T1", file_list: ["pi/extension.ts"] },
+        { ...initialGraph().tasks[0], id: "T2", file_list: ["README.md"] },
+      ],
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4a6";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const grantDir = join(subagentDir, "pi-write-grants");
+    const before = new Set(existsSync(grantDir) ? readdirSync(grantDir) : []);
+    let secondTask = "Task ID: T2\nUse the code-implementer skill. Implement and test.";
+    let failedGrantPath: string | null = null;
+    const second: Record<string, unknown> = { agent: "code-implementer-agent" };
+    Object.defineProperty(second, "task", {
+      enumerable: true,
+      get: () => secondTask,
+      set: (next: string) => {
+        secondTask = next;
+        const issued = readdirSync(grantDir).filter((name) => !before.has(name));
+        expect(issued).toHaveLength(2);
+        failedGrantPath = join(grantDir, issued[0]!);
+        rmSync(failedGrantPath);
+        mkdirSync(failedGrantPath);
+        throw new Error("injected second prompt mutation failure");
+      },
+    });
+
+    const blocked = await pi.emit("tool_call", {
+      toolName: "subagent", toolCallId: "call-partial-admission-grants",
+      input: {
+        agentScope: "user",
+        tasks: [
+          { agent: "code-implementer-agent", task: "Task ID: T1\nUse the code-implementer skill. Implement and test." },
+          second,
+        ],
+      },
+    }, context);
+
+    expect(blocked).toContainEqual(expect.objectContaining({ block: true }));
+    const retainedPath = failedGrantPath;
+    if (retainedPath === null) throw new Error("admission fault did not retain a grant path");
+    const remaining = readdirSync(grantDir).filter((name) => !before.has(name));
+    expect(remaining.map((name) => join(grantDir, name))).toEqual([retainedPath]);
+    await expect(pi.emit("session_shutdown", {}, context)).rejects.toThrow(/revoke outstanding write grant 1/i);
+    rmSync(retainedPath, { recursive: true });
+    expect((await pi.emit("session_shutdown", {}, context)).every((result) => result === undefined)).toBe(true);
+  });
+
+  it("retains failed admission roster cleanup for shutdown retry", async () => {
+    const planPath = join(temp, "admission-roster-retry-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4a7";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const removeActive = vi.spyOn(fsSessionRegistry, "removeActive")
+      .mockRejectedValueOnce(new Error("injected admission roster cleanup failure"));
+    let task = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+    const input: Record<string, unknown> = { agent: "code-implementer-agent", agentScope: "user" };
+    Object.defineProperty(input, "task", {
+      enumerable: true,
+      get: () => task,
+      set: (next: string) => {
+        task = next;
+        throw new Error("injected admission prompt mutation failure");
+      },
+    });
+    try {
+      const blocked = await pi.emit("tool_call", {
+        toolName: "subagent", toolCallId: "call-admission-roster-retry", input,
+      }, context);
+
+      expect(blocked).toContainEqual(expect.objectContaining({
+        block: true,
+        reason: expect.stringContaining("admission roster cleanup failure"),
+      }));
+      expect(readFileSync(join(subagentDir, `${session}.active`), "utf8").trim()).not.toBe("");
+      expect((await pi.emit("session_shutdown", {}, context)).every((result) => result === undefined)).toBe(true);
+      expect(removeActive).toHaveBeenCalledTimes(2);
+      expect(existsSync(join(subagentDir, `${session}.active`))).toBe(false);
+    } finally {
+      removeActive.mockRestore();
+    }
+  });
+
+  it("retains failed admission pointer rollback for shutdown retry", async () => {
+    const planPath = join(temp, "admission-pointer-retry-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4a8";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const pointer = join(subagentDir, `${session}.task_graph`);
+    const registry = join(subagentDir, `${session}${TASK_GRAPH_POINTER_LEASES_SUFFIX}`);
+    let registryBytes = "";
+    let task = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+    const input: Record<string, unknown> = { agent: "code-implementer-agent", agentScope: "user" };
+    Object.defineProperty(input, "task", {
+      enumerable: true,
+      get: () => task,
+      set: (next: string) => {
+        task = next;
+        registryBytes = readFileSync(registry, "utf8");
+        writeFileSync(registry, "{malformed");
+        throw new Error("injected admission prompt mutation failure");
+      },
+    });
+    try {
+      const blocked = await pi.emit("tool_call", {
+        toolName: "subagent", toolCallId: "call-admission-pointer-retry", input,
+      }, context);
+
+      expect(blocked).toContainEqual(expect.objectContaining({
+        block: true,
+        reason: expect.stringContaining("roll back task-graph pointer"),
+      }));
+      expect(existsSync(pointer)).toBe(true);
+      writeFileSync(registry, registryBytes);
+      expect((await pi.emit("session_shutdown", {}, context)).every((result) => result === undefined)).toBe(true);
+      expect(existsSync(pointer)).toBe(false);
+      expect(existsSync(registry)).toBe(false);
+    } finally {
+      if (registryBytes !== "" && existsSync(registry)) writeFileSync(registry, registryBytes);
+      rmSync(pointer, { force: true });
+      rmSync(registry, { force: true });
+    }
+  });
+
   it("retains failed result-time roster cleanup after its sibling pointer release succeeds", async () => {
     const planPath = join(temp, "roster-cleanup-retry-plan.md");
     writeFileSync(planPath, "# Plan\n");
@@ -4926,6 +5126,109 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
+  it("infrastructure-settles a reserved implementation when result application throws", async () => {
+    const planPath = join(temp, "reserved-application-crash-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4a5";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-reserved-application-crash";
+    const prompt = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent", toolCallId,
+      input: { agent: "code-implementer-agent", task: prompt, agentScope: "user" },
+    }, context)).toEqual([undefined]);
+
+    const { StateManager } = await import("../src/state-manager");
+    const update = vi.spyOn(StateManager.prototype, "update")
+      .mockRejectedValueOnce(new Error("injected reserved application failure"));
+    try {
+      const responses = await pi.emit("tool_result", {
+        toolName: "subagent", toolCallId, content: [],
+        details: { results: [{
+          agent: "code-implementer-agent", task: prompt, exitCode: 0, messages: [],
+        }] },
+      }, context);
+
+      expect(responses).toContainEqual(expect.objectContaining({
+        isError: true,
+        content: [expect.objectContaining({ text: expect.stringContaining("injected reserved application failure") })],
+      }));
+      const state = JSON.parse(readFileSync(statePath, "utf8"));
+      expect(state.executing_tasks).toEqual([]);
+      expect(state.tasks[0]).toMatchObject({
+        status: "pending",
+        revalidation_required: true,
+        implementation_attempt_history: [{ transition: "infrastructure-blocked" }],
+      });
+    } finally {
+      update.mockRestore();
+    }
+  });
+
+  it("preserves application and fallback-settlement failures while processing a sibling", async () => {
+    const planPath = join(temp, "dual-result-settlement-failure-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks: [
+        { ...initialGraph().tasks[0], id: "T1", file_list: ["pi/extension.ts"] },
+        { ...initialGraph().tasks[0], id: "T2", file_list: ["README.md"] },
+      ],
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4a9";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const toolCallId = "call-dual-result-settlement-failure";
+    const tasks = ["T1", "T2"].map((taskId) => ({
+      agent: "code-implementer-agent",
+      task: `Task ID: ${taskId}\nUse the code-implementer skill. Implement and test.`,
+    }));
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent", toolCallId, input: { agentScope: "user", tasks },
+    }, context)).toEqual([undefined]);
+
+    const { StateManager } = await import("../src/state-manager");
+    const update = vi.spyOn(StateManager.prototype, "update")
+      .mockRejectedValueOnce(new Error("injected result application failure"));
+    const originalUpdateAndReturn = StateManager.prototype.updateAndReturn;
+    let updateAndReturnCalls = 0;
+    const updateAndReturn = vi.spyOn(StateManager.prototype, "updateAndReturn")
+      .mockImplementation(async function (this: typeof StateManager.prototype, mutate) {
+        updateAndReturnCalls++;
+        if (updateAndReturnCalls === 2) throw new Error("injected fallback settlement failure");
+        return originalUpdateAndReturn.call(this, mutate);
+      });
+    try {
+      const responses = await pi.emit("tool_result", {
+        toolName: "subagent", toolCallId, content: [],
+        details: { results: tasks.map(({ agent, task }) => ({ agent, task, exitCode: 0, messages: [] })) },
+      }, context);
+
+      const rendered = JSON.stringify(responses);
+      expect(rendered).toContain("injected result application failure");
+      expect(rendered).toContain("injected fallback settlement failure");
+      const state = JSON.parse(readFileSync(statePath, "utf8"));
+      expect(state.executing_tasks).toEqual(["T1"]);
+      expect(state.tasks.find((task: { id: string }) => task.id === "T2")).toMatchObject({
+        status: "pending",
+        implementation_attempt_history: [expect.objectContaining({ transition: "retry-required" })],
+      });
+    } finally {
+      updateAndReturn.mockRestore();
+      update.mockRestore();
+    }
+  });
+
   it("continues processing later Pi results when the first result throws", async () => {
     // A well-formed element that throws DOWNSTREAM — the case the loop's own
     // per-result try/catch exists for, and the one the malformed-shape test
@@ -5175,16 +5478,6 @@ describe("Pi extension review tool_result integration", () => {
  * each fails in the direction that matters only if it actually runs.
  */
 describe("Pi extension tool_call fail-closed backstops", () => {
-  const extension = async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
-    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
-      default: (pi: unknown) => void;
-    };
-    const pi = new FakePi();
-    module.default(pi as never);
-    return pi;
-  };
-
   const SESSION = "019fca39-f989-7510-8e62-50dadbcad4a1";
 
   it("BLOCKS the call when a guard throws, naming the guard", async () => {

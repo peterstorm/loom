@@ -16,9 +16,11 @@
  * a stop that matches no reservation is audited and rejected: silently treating
  * it as unrelated would strand the reserved slot.
  *
- * This handler NEVER resolves an unrelated State File. It reads only the run
- * directory it was pointed at, so a standalone review running beside an active
- * wave cannot capture into the wave's graph or vice versa.
+ * This handler NEVER resolves an unrelated State File. Orchestration authority
+ * comes only from the Run Directory it was pointed at; payload observation also
+ * reads the external Claude transcript selected by the harness locator. A
+ * standalone review beside an active wave therefore cannot capture into the
+ * wave's graph or vice versa.
  *
  * Only the two genuinely harness-native facts live here — how to read Claude's
  * final payload, and what its native correlator is. Everything the run
@@ -64,6 +66,9 @@ export type { CaptureOutcome };
  * unreachable refusal on this path.
  */
 class ClaudeTranscriptReadError extends Error {}
+class ClaudeTranscriptJsonError extends Error {}
+
+export type ClaudePayloadReader = (transcriptPath: string) => readonly FinalPayloadCandidate[];
 
 export function claudeFinalPayloadCandidates(transcriptPath: string): readonly FinalPayloadCandidate[] {
   // One read, no pre-check: `existsSync` returns false for ELOOP/ENOTDIR too,
@@ -97,7 +102,7 @@ function assistantTextBlocksOf(line: string | undefined, zeroBasedLine: number):
   try {
     parsed = JSON.parse(line) as unknown;
   } catch (error) {
-    throw new Error(
+    throw new ClaudeTranscriptJsonError(
       `invalid final Claude transcript JSON at line ${zeroBasedLine + 1}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
@@ -177,6 +182,7 @@ export async function captureClaudeResult(
   input: SubagentStopInput,
   runsRoot: string | undefined,
   runDirectory: string | undefined,
+  readPayload: ClaudePayloadReader = claudeFinalPayloadCandidates,
 ): Promise<CaptureOutcome> {
   // Observation stays lazy so the shared runtime resolves the correlator and
   // immutable reservation first. An unrelated stop therefore remains
@@ -191,12 +197,15 @@ export async function captureClaudeResult(
       );
     }
     try {
-      return captureCandidates(claudeFinalPayloadCandidates(transcriptPath));
+      return captureCandidates(readPayload(transcriptPath));
     } catch (error) {
-      return terminalCaptureRefusal(
-        error instanceof ClaudeTranscriptReadError ? "transcript-read" : "transcript-json",
-        error instanceof Error ? error.message : String(error),
-      );
+      if (error instanceof ClaudeTranscriptReadError || error instanceof ClaudeTranscriptJsonError) {
+        return terminalCaptureRefusal(
+          error instanceof ClaudeTranscriptReadError ? "transcript-read" : "transcript-json",
+          error.message,
+        );
+      }
+      throw error;
     }
   };
   return captureHarnessResult({

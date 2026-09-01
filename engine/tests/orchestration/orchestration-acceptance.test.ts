@@ -1108,6 +1108,28 @@ describe("Claude capture against a real run directory", () => {
     await expectTerminalCaptureRejection(runsRoot, runDir, "transcript-json");
   });
 
+  it("rethrows an unexpected payload-reader defect without terminalizing request authority", async () => {
+    const { runsRoot, runDir } = await stagedRun();
+    const path = transcript(runDir, "unobserved payload");
+    const engineFault = new Error("payload reader invariant failed");
+
+    await expect(captureClaudeResult(
+      { session_id: "s1", agent_id: "agent-abc", agent_type: "code-reviewer", agent_transcript_path: path },
+      runsRoot,
+      runDir,
+      () => { throw engineFault; },
+    )).rejects.toBe(engineFault);
+
+    const opened = openRunDirectory(runsRoot, runDir);
+    if (!opened.ok) throw new Error(opened.error.message);
+    const issued = opened.value.readIssuedRequests();
+    if (!issued.ok || issued.value[0] === undefined) throw new Error(issued.ok ? "missing request" : issued.error.message);
+    expect(opened.value.readCaptureRejection(issued.value[0])).toEqual({ ok: true, value: null });
+    const captured = opened.value.readCapturedAttempts();
+    if (!captured.ok) throw new Error(captured.error.message);
+    expect([...captured.value]).toEqual([]);
+  });
+
   it("reports a missing transcript rather than capturing nothing silently", async () => {
     const { runsRoot, runDir } = await stagedRun();
 

@@ -1,10 +1,11 @@
 /**
  * Anchored atomic State File manager.
  *
- * The State File stays mode 0444 at rest. Hooks and whitelisted helpers stage
- * validated bytes, set mode 0444 before publication, and rename through the
- * anchored parent capability and lock — the retained parent descriptor on
- * Linux, the `O_NOFOLLOW_ANY`-proven real path on darwin.
+ * Successful State File publications install mode 0444. Hooks and whitelisted
+ * helpers stage validated bytes, set that mode before publication, and rename
+ * through the anchored parent capability and lock — the retained parent
+ * descriptor on Linux, the `O_NOFOLLOW_ANY`-proven real path on darwin. Loading
+ * re-proves path and content authority; it does not attest the current file mode.
  * Replaces: state-file-write.sh, resolve-task-graph.sh, loom-config.sh
  */
 
