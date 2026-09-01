@@ -1550,7 +1550,6 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
           recovery: {
             kind: "spawn-wave-implementation",
             wave: 1,
-            pendingTaskIds: ["T2", "T3"],
             dispatches: [
               { kind: "initial-implementation", taskId: "T2", semanticAttempt: 1, promptAppendix: null },
               { kind: "initial-implementation", taskId: "T3", semanticAttempt: 1, promptAppendix: null },
@@ -1587,7 +1586,6 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
         diagnostic: {
           recovery: {
             kind: "spawn-wave-implementation",
-            pendingTaskIds: ["T4"],
             dispatches: [{ taskId: "T4", semanticAttempt: 1 }],
           },
         },
@@ -1611,6 +1609,51 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
             activeTaskIds: ["T2", "T3"],
           },
         },
+      });
+    });
+
+    it("re-dispatches only policy-expired reservations when roster observation proves no active Agent", () => {
+      const activeAuthority = authorityValue(createImplementationAttemptAuthority({
+        taskId: "T1",
+        wave: 1,
+        semanticAttempt: 1,
+        reservationId: "status-expired-attempt",
+        headSha: "a".repeat(40),
+        reservedAt: "2026-09-01T00:00:00.000Z",
+        taskScopeBaseline: [],
+        dirtySetBaseline: [],
+      }));
+      const graph = unstarted({
+        executing_tasks: ["T1"],
+        tasks: [{
+          ...taskState({ id: "T1", wave: 1, status: "pending" }),
+          active_implementation_attempt: activeAuthority,
+          reserved_at: activeAuthority.reservedAt,
+        }],
+      });
+      const expired = {
+        ...statusDeps,
+        implementationReservations: {
+          kind: "observed" as const,
+          observedAtMs: Date.parse(activeAuthority.reservedAt) + 11 * 60_000,
+          anyActiveForGraph: false,
+        },
+      };
+      expect(deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, expired).next.action).toMatchObject({
+        diagnostic: {
+          recovery: {
+            kind: "spawn-wave-implementation",
+            dispatches: [{ taskId: "T1", semanticAttempt: 1 }],
+          },
+        },
+      });
+
+      const live = {
+        ...expired,
+        implementationReservations: { ...expired.implementationReservations, anyActiveForGraph: true },
+      };
+      expect(deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, live).next.action).toMatchObject({
+        diagnostic: { recovery: { kind: "await-wave-implementation", activeTaskIds: ["T1"] } },
       });
     });
 
@@ -1680,7 +1723,6 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
           retry: { eligible: true },
           recovery: {
             kind: "spawn-wave-implementation",
-            pendingTaskIds: ["T1"],
             dispatches: [{
               kind: "retry-implementation",
               taskId: "T1",

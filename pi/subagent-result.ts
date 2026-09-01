@@ -962,14 +962,19 @@ async function resolveImplementationBindingForResult(args: Readonly<{
   };
 }
 
-function missingStructuredEvidenceLog(taskId: string, messages: unknown): string | null {
+function missingStructuredEvidenceLog(taskId: string, messages: unknown):
+  | Readonly<{ ok: true; value: string }>
+  | Readonly<{ ok: false; errors: readonly string[] }> {
   const trace = piStructuredTestDiagnostics(messages);
-  if (!trace.ok) return null;
+  if (!trace.ok) return trace;
   const summary = trace.value.classifiedCommands.length === 0
     ? "no Bash call was classified as a test run"
     : `verdict=${trace.value.verdict}, classified=[${trace.value.classifiedCommands.join(" | ")}]`;
-  return `loom(pi): ${taskId} produced no structured test evidence (${summary}) — transcript fallback used; ` +
-    `the wave gate will reject it`;
+  return {
+    ok: true,
+    value: `loom(pi): ${taskId} produced no structured test evidence (${summary}) — transcript fallback used; ` +
+      `the wave gate will reject it`,
+  };
 }
 
 function observeImplementationTranscript(result: PiSubagentResult, taskId: string): ImplementationTranscriptObservation {
@@ -985,12 +990,16 @@ function observeImplementationTranscript(result: PiSubagentResult, taskId: strin
 
   const adaptedTranscript = messagesToClaudeJsonl(parsedMessages.value);
   const structuredEvidence = piStructuredTestResult(parsedMessages.value);
-  if (structuredEvidence.ok && structuredEvidence.value === null) {
-    const structuredLog = missingStructuredEvidenceLog(taskId, result.messages);
-    if (structuredLog !== null) log.push(structuredLog);
-  }
-  if (!adaptedTranscript.ok || !structuredEvidence.ok) {
-    const errors = firstFailureErrors(adaptedTranscript, structuredEvidence);
+  const diagnostics = structuredEvidence.ok && structuredEvidence.value === null
+    ? missingStructuredEvidenceLog(taskId, result.messages)
+    : null;
+  if (diagnostics?.ok) log.push(diagnostics.value);
+  if (!adaptedTranscript.ok || !structuredEvidence.ok || diagnostics?.ok === false) {
+    const errors = firstFailureErrors(
+      adaptedTranscript,
+      structuredEvidence,
+      ...(diagnostics === null ? [] : [diagnostics]),
+    );
     return {
       kind: "malformed",
       failureReason: `Pi transcript evidence capture failed: ${errors.join("; ")}`,

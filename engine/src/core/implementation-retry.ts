@@ -75,14 +75,18 @@ export type ImplementationSpawnAdmission =
   | Readonly<{
       ok: true;
       kind: "initial";
+      taskId: TaskId;
       semanticAttempt: SemanticAttempt & 1;
+      promptDigest: ArtifactDigest;
       retryContext: null;
       predecessorReceiptId: null;
     }>
   | Readonly<{
       ok: true;
       kind: "retry";
+      taskId: TaskId;
       semanticAttempt: SemanticAttempt & 2;
+      promptDigest: ArtifactDigest;
       retryContext: ImplementationRetryContext;
       predecessorReceiptId: ImplementationSettlementReceiptId;
     }>
@@ -192,10 +196,10 @@ function contextLines(prompt: string): readonly string[] {
 }
 
 function parsePromptRetryContext(prompt: string):
-  | Readonly<{ ok: true; value: ImplementationRetryContext | null }>
+  | Readonly<{ ok: true; value: ImplementationRetryContext | null; sourceLine: string | null }>
   | Readonly<{ ok: false; error: string }> {
   const lines = contextLines(prompt);
-  if (lines.length === 0) return { ok: true, value: null };
+  if (lines.length === 0) return { ok: true, value: null, sourceLine: null };
   if (lines.length !== 1) return { ok: false, error: "implementation prompt must contain at most one retry context" };
   const prefix = `${IMPLEMENTATION_RETRY_CONTEXT_LABEL}: `;
   const line = lines[0]!;
@@ -211,7 +215,7 @@ function parsePromptRetryContext(prompt: string):
   }
   const parsed = parseImplementationRetryContext(raw);
   return parsed.ok
-    ? { ok: true, value: parsed.value }
+    ? { ok: true, value: parsed.value, sourceLine: line }
     : { ok: false, error: parsed.errors.join("; ") };
 }
 
@@ -325,6 +329,9 @@ export function authorizeImplementationSpawn(
     case "retry":
       break;
   }
+  const parsedTaskId = parseTaskId(task.id, "implementation spawn task id");
+  if (!parsedTaskId.ok) return { ok: false, error: parsedTaskId.error.errors.join("; ") };
+  const promptDigest = sha256(prompt);
   const supplied = parsePromptRetryContext(prompt);
   if (!supplied.ok) return supplied;
   if (disposition.kind === "initial") {
@@ -332,7 +339,9 @@ export function authorizeImplementationSpawn(
       ? {
           ok: true,
           kind: "initial",
+          taskId: parsedTaskId.value,
           semanticAttempt: 1 as SemanticAttempt & 1,
+          promptDigest,
           retryContext: null,
           predecessorReceiptId: null,
         }
@@ -344,7 +353,7 @@ export function authorizeImplementationSpawn(
       error: `Task ${task.id} requires the exact attempt-2 retry context from orchestration status`,
     };
   }
-  if (contextLines(prompt)[0] !== disposition.promptAppendix) {
+  if (supplied.sourceLine !== disposition.promptAppendix) {
     return {
       ok: false,
       error: `Task ${task.id} retry context bytes do not match current receipt ${disposition.predecessor.receiptId}`,
@@ -353,7 +362,9 @@ export function authorizeImplementationSpawn(
   return {
     ok: true,
     kind: "retry",
+    taskId: parsedTaskId.value,
     semanticAttempt: 2 as SemanticAttempt & 2,
+    promptDigest,
     retryContext: disposition.context,
     predecessorReceiptId: disposition.predecessor.receiptId,
   };
@@ -387,11 +398,20 @@ export function createImplementationAttemptContext(args: Readonly<{
   prompt: string;
   admission: AdmittedImplementationSpawn;
 }>): ImplementationAttemptContext {
+  if (args.authority.taskId !== args.admission.taskId) {
+    throw new Error(
+      `implementation attempt authority ${args.authority.authorityDigest} belongs to Task ${args.authority.taskId}, ` +
+      `but spawn admission belongs to ${args.admission.taskId}`,
+    );
+  }
   if (args.authority.semanticAttempt !== args.admission.semanticAttempt) {
     throw new Error(
       `implementation attempt authority ${args.authority.authorityDigest} uses semantic attempt ` +
       `${args.authority.semanticAttempt}, but spawn admission authorizes ${args.admission.semanticAttempt}`,
     );
+  }
+  if (sha256(args.prompt) !== args.admission.promptDigest) {
+    throw new Error(`implementation attempt prompt does not match admitted prompt bytes for Task ${args.authority.taskId}`);
   }
   const body = attemptContextBody({
     authority: args.authority,

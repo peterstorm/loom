@@ -167,9 +167,9 @@ export type TaskExecutionRosterObservation =
 export const RESERVATION_GRACE_MS = 10 * 60_000;
 
 /**
- * Pure staleness predicate: which committed reservations are provably
- * abandoned, given the roster fact the shell already resolved (`anyActive`)
- * and the current clock. A reservation is abandoned only when ALL hold:
+ * Pure reclamation policy: which committed reservations are eligible under
+ * the bounded grace assumption, given the roster fact the shell already
+ * resolved (`anyActive`) and the current clock. Eligibility requires ALL:
  * its task is not `completed`; no agent is active for this graph; and it has
  * aged past `graceMs`. A reservation whose `reserved_at` is missing or
  * unparseable predates the timestamp (or is corrupt) and stays eligible so
@@ -251,15 +251,16 @@ function declaredPathOverlap(left: Task, right: Task): string | undefined {
  * baselines before dispatch, so even sequential siblings must be disjoint;
  * path handoff requires separate calls so each task gets a fresh baseline.
  *
- * `staleReservations` names reservations the shell has PROVEN abandoned. The
- * reservation is committed during PreToolUse, before the sibling PreToolUse
- * gates have voted, so a spawn any one of them then denies leaves an entry in
- * `executing_tasks` that no SubagentStop will ever clear — permanently
- * deadlocking the task and every task sharing a declared path with it.
- * Releasing those entries here keeps the invariant honest (a reservation only
- * owns paths while its agent can still be running) without weakening it: the
- * shell only ever proves staleness fail-closed, so an unproven reservation
- * still owns its paths.
+ * `staleReservations` names reservations the bounded policy permits reclaiming;
+ * it does not prove process death, because transport start latency has no hard
+ * upper bound. The reservation is committed during PreToolUse, before the
+ * sibling PreToolUse gates have voted, so a spawn any one of them then denies
+ * leaves an entry in `executing_tasks` that no SubagentStop will ever clear —
+ * permanently deadlocking the task and every task sharing a declared path with it.
+ * Releasing those entries keeps recovery bounded under that operational
+ * assumption without weakening the fail-closed preconditions: unreadable or
+ * positive roster liveness makes no reservation eligible, and an ineligible
+ * reservation still owns its paths.
  */
 export function taskExecutionOwnershipError(
   state: TaskGraph,

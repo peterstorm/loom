@@ -962,7 +962,6 @@ export type WaveImplementationRecovery =
   | Readonly<{
       kind: "spawn-wave-implementation";
       wave: number;
-      pendingTaskIds: OrchestrationNonEmpty<string>;
       dispatches: OrchestrationNonEmpty<WaveImplementationDispatch>;
     }>
   | Readonly<{

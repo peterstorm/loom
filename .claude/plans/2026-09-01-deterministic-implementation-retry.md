@@ -65,7 +65,7 @@ It is protected Task state while the attempt is active. Settlement, exact rollba
 
 ### Retry admission
 
-The pure command examines only receipts after the most recent `implemented` receipt:
+The pure command validates the complete history in wire order; each legal `implemented` receipt resets the current lineage to attempt 1:
 
 - no semantic-consuming receipt → attempt 1;
 - one `retry-required` receipt and no later escalation → attempt 2, exact appendix required;

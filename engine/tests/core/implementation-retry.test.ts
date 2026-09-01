@@ -30,9 +30,10 @@ function authority(
   semanticAttempt: 1 | 2,
   reservationId: string,
   second: number,
+  taskId = "T1",
 ): ImplementationAttemptAuthority {
   return valueOf(createImplementationAttemptAuthority({
-    taskId: "T1",
+    taskId,
     wave: 1,
     semanticAttempt,
     reservationId,
@@ -142,10 +143,12 @@ describe("bounded implementation retry admission", () => {
       ok: false,
       error: "Task T1 requires the exact attempt-2 retry context from orchestration status",
     });
-    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${disposition.promptAppendix}`)).toEqual({
+    expect(authorizeImplementationSpawn(task, `Task ID: T1\n${disposition.promptAppendix}`)).toMatchObject({
       ok: true,
       kind: "retry",
+      taskId: "T1",
       semanticAttempt: 2,
+      promptDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
       retryContext: disposition.context,
       predecessorReceiptId: receipt.receiptId,
     });
@@ -155,6 +158,13 @@ describe("bounded implementation retry admission", () => {
     expect(authorizeImplementationSpawn(task, `Task ID: T1\n${reformatted}`)).toEqual({
       ok: false,
       error: `Task T1 retry context bytes do not match current receipt ${receipt.receiptId}`,
+    });
+    expect(authorizeImplementationSpawn(
+      task,
+      `Task ID: T1\n${disposition.promptAppendix}\n${disposition.promptAppendix}`,
+    )).toEqual({
+      ok: false,
+      error: "implementation prompt must contain at most one retry context",
     });
   });
 
@@ -196,6 +206,16 @@ describe("bounded implementation retry admission", () => {
       prompt: "Task ID: T1",
       admission: initialAdmission,
     })).toThrow("spawn admission authorizes 1");
+    expect(() => createImplementationAttemptContext({
+      authority: authority(2, "foreign-task", 3, "T2"),
+      prompt,
+      admission,
+    })).toThrow("belongs to Task T2, but spawn admission belongs to T1");
+    expect(() => createImplementationAttemptContext({
+      authority: attempt,
+      prompt: `${prompt}\nrepresentation drift`,
+      admission,
+    })).toThrow("does not match admitted prompt bytes");
   });
 
   it("terminalizes attempt-2 semantic failure as explicit escalation", () => {

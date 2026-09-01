@@ -72,6 +72,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
 import { parseTaskGraph } from "../../state-manager";
+import { anyActiveSubagent } from "../../machine";
 import type {
   ActiveWaveGateRegistration,
   HookHandler,
@@ -86,6 +87,7 @@ import {
   type ActiveRunDirectoryObservation,
   type AdvisoryApprovalObservation,
   type GateDeps,
+  type ImplementationReservationStatusObservation,
 } from "../../core/wave-gate-machine";
 import { inspectFilePresence, loadPlanModelsSource } from "./complete-wave-gate";
 import {
@@ -227,14 +229,23 @@ function parseStatusGraph(rawGraph: unknown): ReturnType<typeof parseTaskGraph> 
   return parseTaskGraph(rawGraph);
 }
 
+function renderParsedStatus(
+  parsedGraph: ReturnType<typeof parseStatusGraph>,
+  deps: GateDeps,
+  asJson: boolean,
+  runDirectory: ActiveRunDirectoryObservation,
+): string {
+  const status = deriveLoomStatusFromParsedGraph(parsedGraph, deps, null, runDirectory);
+  return asJson ? renderLoomStatusJson(status) : renderLoomStatusHuman(status);
+}
+
 export function renderStatus(
   rawGraph: unknown,
   deps: GateDeps,
   asJson: boolean,
   runDirectory: ActiveRunDirectoryObservation = Object.freeze({ kind: "unverified" }),
 ): string {
-  const status = deriveLoomStatusFromParsedGraph(parseStatusGraph(rawGraph), deps, null, runDirectory);
-  return asJson ? renderLoomStatusJson(status) : renderLoomStatusHuman(status);
+  return renderParsedStatus(parseStatusGraph(rawGraph), deps, asJson, runDirectory);
 }
 
 function readGraph(path: string): unknown {
@@ -274,11 +285,12 @@ const invalidStatusBinding = (
   message: string,
 ): StatusRunDirectoryBinding => unavailableStatusBinding(Object.freeze({ kind: "invalid" as const, runId, path, message }));
 
-function activeStatusRun(rawGraph: unknown): ActiveWaveGateRegistration | null {
-  const parsed = parseStatusGraph(rawGraph);
-  if (!parsed.ok || parsed.value.active_wave_gate === undefined ||
-      parsed.value.active_wave_gate.terminalOutcome !== null) return null;
-  return parsed.value.active_wave_gate;
+function activeStatusRun(
+  parsedGraph: ReturnType<typeof parseStatusGraph>,
+): ActiveWaveGateRegistration | null {
+  if (!parsedGraph.ok || parsedGraph.value.active_wave_gate === undefined ||
+      parsedGraph.value.active_wave_gate.terminalOutcome !== null) return null;
+  return parsedGraph.value.active_wave_gate;
 }
 
 function statusRunsRoot(
@@ -298,11 +310,11 @@ function protectedRunsRootMismatch(active: ActiveWaveGateRegistration, args: rea
 }
 
 function statusRunDirectoryBinding(
-  rawGraph: unknown,
+  parsedGraph: ReturnType<typeof parseStatusGraph>,
   args: readonly string[],
   statePath: string,
 ): StatusRunDirectoryBinding {
-  const active = activeStatusRun(rawGraph);
+  const active = activeStatusRun(parsedGraph);
   if (active === null) return unavailableStatusBinding(Object.freeze({ kind: "unverified" }));
 
   const runId = active.runId;
@@ -379,9 +391,10 @@ function statusCompletionResult(
 }
 
 /** Observe the exact advisory decision without conflating absence and I/O loss. */
-export async function observedAdvisoryApproval(
-  rawGraph: unknown,
+async function observedAdvisoryApprovalFromParsed(
+  parsed: ReturnType<typeof parseStatusGraph>,
   observation: ActiveRunDirectoryObservation,
+  workspace: NonNullable<GateDeps["currentWaveWorkspace"]>,
   boundHandle?: RunDirHandle,
 ): Promise<AdvisoryApprovalObservation> {
   if (observation.kind !== "present") return Object.freeze({ kind: "not-approved" });
@@ -391,11 +404,9 @@ export async function observedAdvisoryApproval(
     );
     return Object.freeze({ kind: "unavailable", reason });
   };
-  const parsed = parseStatusGraph(rawGraph);
   if (!parsed.ok) return unavailable(parsed.error);
   const opened = openStatusObservationHandle(observation, boundHandle);
   if (!opened.ok) return unavailable(opened.message);
-  const workspace = observeCurrentWaveWorkspace(parsed.value, dirname(resolve(TASK_GRAPH_PATH)));
   const readiness = deriveWaveReadiness(parsed.value, parsed.value.verification_manifest === undefined
     ? productionGateDeps
     : Object.freeze({
@@ -431,13 +442,45 @@ export async function observedAdvisoryApproval(
   }
 }
 
+export async function observedAdvisoryApproval(
+  rawGraph: unknown,
+  observation: ActiveRunDirectoryObservation,
+  boundHandle?: RunDirHandle,
+  statePath: string = TASK_GRAPH_PATH,
+): Promise<AdvisoryApprovalObservation> {
+  const parsed = parseStatusGraph(rawGraph);
+  const workspace = parsed.ok
+    ? observeCurrentWaveWorkspace(parsed.value, dirname(resolve(statePath)))
+    : Object.freeze({
+        kind: "unavailable" as const,
+        reason: `protected graph unavailable before Git observation: ${parsed.error}`,
+      });
+  return observedAdvisoryApprovalFromParsed(parsed, observation, workspace, boundHandle);
+}
+
+function implementationReservationObservation(
+  parsedGraph: ReturnType<typeof parseStatusGraph>,
+  statePath: string,
+): ImplementationReservationStatusObservation {
+  return parsedGraph.ok
+    ? Object.freeze({
+        kind: "observed" as const,
+        observedAtMs: Date.now(),
+        anyActiveForGraph: anyActiveSubagent(statePath),
+      })
+    : Object.freeze({
+        kind: "unavailable" as const,
+        reason: `protected graph unavailable before roster observation: ${parsedGraph.error}`,
+      });
+}
+
 export async function currentOrchestrationStatus(
   args: readonly string[] = [],
   statePath: string = TASK_GRAPH_PATH,
 ): Promise<string> {
   const rawGraph = readGraph(statePath);
   const parsedGraph = parseStatusGraph(rawGraph);
-  const binding = statusRunDirectoryBinding(rawGraph, args, statePath);
+  const binding = statusRunDirectoryBinding(parsedGraph, args, statePath);
   const workspace = parsedGraph.ok
     ? observeCurrentWaveWorkspace(parsedGraph.value, dirname(resolve(statePath)))
     : Object.freeze({
@@ -449,15 +492,16 @@ export async function currentOrchestrationStatus(
     ...productionGateDeps,
     currentWaveWorkspace: workspace,
     currentWaveCompletionResult: completionResult,
+    implementationReservations: implementationReservationObservation(parsedGraph, statePath),
   });
   const base = binding.observation;
   const observation: ActiveRunDirectoryObservation = binding.kind === "bound"
     ? Object.freeze({
         ...base,
-        advisoryApproval: await observedAdvisoryApproval(rawGraph, base, binding.handle),
+        advisoryApproval: await observedAdvisoryApprovalFromParsed(parsedGraph, base, workspace, binding.handle),
       })
     : base;
-  return renderStatus(rawGraph, statusDeps, hasFlag(args, "--json"), observation);
+  return renderParsedStatus(parsedGraph, statusDeps, hasFlag(args, "--json"), observation);
 }
 
 async function statusOperation(args: readonly string[]): Promise<HookResult> {

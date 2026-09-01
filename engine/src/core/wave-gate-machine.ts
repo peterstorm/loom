@@ -49,6 +49,7 @@ import {
 } from "./verification-manifest";
 import { WAVE_REVIEW_AGENTS } from "./model-profiles";
 import { deriveImplementationRetryDisposition } from "./implementation-retry";
+import { staleReservationsForRosterObservation } from "./validate-task-execution";
 import {
   awaitUserAction,
   blockedAction,
@@ -706,6 +707,10 @@ export function checkLifecycleArtifacts(
     bound.map(({ lifecycle, machineFile }) => `     ${lifecycle.id}: ${machineFile}`).join("\n"));
 }
 
+export type ImplementationReservationStatusObservation =
+  | Readonly<{ kind: "observed"; observedAtMs: number; anyActiveForGraph: boolean }>
+  | Readonly<{ kind: "unavailable"; reason: string }>;
+
 export interface GateDeps {
   readonly loadPlanModels: (planFile: string | null | undefined) => PlanModelsSource;
   readonly filePresence: (path: string) => FilePresence;
@@ -718,6 +723,9 @@ export interface GateDeps {
   /** Shell-supplied persisted result observation, separate from workspace
    * authority so absence cannot be confused with an unreadable artifact. */
   readonly currentWaveCompletionResult?: WaveCompletionResultObservation;
+  /** Shell observation used only to make policy-expired reservations
+   * dispatchable again. Absence/unavailability keeps them active fail-closed. */
+  readonly implementationReservations?: ImplementationReservationStatusObservation;
 }
 
 function exactCompletionSuiteError(
@@ -2236,12 +2244,12 @@ function waveImplementationAction(
   message: string,
   recovery: WaveImplementationRecovery,
 ): WaveImplementationAction {
+  const common = canonicalRecord({ runId: statusRunId, message });
   const diagnostic: WaveImplementationAction["diagnostic"] = recovery.kind === "escalate-wave-implementation"
     ? canonicalRecord({
         kind: "implementation-escalation-required",
         category: "semantic-attempts-exhausted",
-        runId: statusRunId,
-        message,
+        ...common,
         retry: canonicalRecord({
           kind: "advance-wave-lifecycle",
           eligible: false,
@@ -2252,8 +2260,7 @@ function waveImplementationAction(
     : canonicalRecord({
         kind: "wave-gate-not-started",
         category: "healthy-wave-unstarted",
-        runId: statusRunId,
-        message,
+        ...common,
         retry: canonicalRecord({
           kind: "advance-wave-lifecycle",
           eligible: true,
@@ -2561,8 +2568,7 @@ function committedTerminalStatus(
  */
 function unstartedWaveStatus(
   graph: TaskGraph,
-  currentWorkspace: WaveWorkspaceObservation | undefined,
-  currentResult: WaveCompletionResultObservation | undefined,
+  deps: GateDeps,
 ): LoomStatus | null {
   if (graph.active_wave_gate !== undefined || graph.current_wave === undefined) return null;
   const wave = graph.current_wave;
@@ -2575,8 +2581,17 @@ function unstartedWaveStatus(
 
   const outstanding = waveTasks.filter((task) => task.status !== "implemented" && task.status !== "completed");
   const executing = new Set(graph.executing_tasks ?? []);
+  const observation = deps.implementationReservations;
+  const reclaimable = observation?.kind === "observed"
+    ? staleReservationsForRosterObservation(
+        graph,
+        { kind: "at-registration", anyActiveForGraph: observation.anyActiveForGraph },
+        observation.observedAtMs,
+      )
+    : new Set<string>();
   const active = outstanding.filter((task) =>
-    executing.has(task.id) || task.active_implementation_attempt !== undefined);
+    !reclaimable.has(task.id) &&
+    (executing.has(task.id) || task.active_implementation_attempt !== undefined));
   const activeTaskIds = new Set(active.map((task) => task.id));
   const dispositions = outstanding.map((task) => ({
     task,
@@ -2638,7 +2653,6 @@ function unstartedWaveStatus(
     recovery = canonicalRecord({
       kind: "spawn-wave-implementation",
       wave,
-      pendingTaskIds: Object.freeze(dispatches.map((dispatch) => dispatch.taskId)) as NonEmpty<string>,
       dispatches: Object.freeze(dispatches) as NonEmpty<WaveImplementationDispatch>,
     });
     message = `Wave ${wave} implementation is in progress; ${dispatches.length} task(s) are ready to dispatch` +
@@ -2674,7 +2688,7 @@ function unstartedWaveStatus(
     facts: waveScopedStatusFacts(graph, wave, canonicalRecord({
       kind: "ineligible",
       failedPrerequisites: Object.freeze([message]) as NonEmpty<string>,
-    }), currentWorkspace, currentResult),
+    }), deps.currentWaveWorkspace, deps.currentWaveCompletionResult),
     next: canonicalRecord({
       action: waveImplementationAction(message, recovery),
       reasons: Object.freeze(reasons) as NonEmpty<StatusReason>,
@@ -2817,11 +2831,7 @@ export function deriveLoomStatusFromParsedGraph(
   if (committed !== null) return committed;
   // Before the readiness path, which requires a registration: an execute Wave
   // legitimately has none for its whole implementation span.
-  const unstarted = unstartedWaveStatus(
-    parsed.value,
-    deps.currentWaveWorkspace,
-    deps.currentWaveCompletionResult,
-  );
+  const unstarted = unstartedWaveStatus(parsed.value, deps);
   if (unstarted !== null) return unstarted;
   if (lifecycleProof === null) {
     const projected = projectedAdvisoryStatus(parsed.value, deps, runDirectory);

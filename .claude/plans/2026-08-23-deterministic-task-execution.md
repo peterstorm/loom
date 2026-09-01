@@ -586,7 +586,7 @@ Slice 4 alone freezes retry contexts, dispatches attempt 2, persists retry diagn
 
 1. Only engine-issued Implementation Attempt authority can settle a Task.
 2. Exactly one current attempt exists per executing Task.
-3. Attempt 2 is terminal: success, escalation, infrastructure block, or ignored stale result.
+3. Only semantic failure on attempt 2 is terminal and publishes escalation; infrastructure failure preserves attempt 2, while ignored stale evidence leaves current authority untouched.
 4. Infrastructure failure does not consume semantic attempt budget.
 5. A Task suite never executes a check whose truth can observe sibling intermediate bytes, and persisted Task proof is rechecked against its exact byte scope.
 6. A Wave suite executes only after every Wave Agent has stopped, and its accepted digest is part of protected Wave completion authority.

@@ -17,6 +17,7 @@ import { parseTaskGraph } from "../src/state-manager";
 import {
   authorizeImplementationSpawn,
   createImplementationAttemptContext,
+  deriveImplementationRetryDisposition,
 } from "../src/core/implementation-retry";
 
 function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T {
@@ -239,6 +240,35 @@ describe("Task attempt authority StateManager lockstep", () => {
       ...valid,
       active_implementation_context: { ...context, contextDigest: "f".repeat(64) },
     }, { executing_tasks: ["T1"] }))).toContain("contextDigest does not match");
+  });
+
+  it("rejects a digest-valid attempt-2 context bound to a stale predecessor receipt", () => {
+    const staleRetry = receiptFor(authority("stale-retry-source"), false);
+    const currentRetry = receiptFor(authority("current-retry-source"), false);
+    const active = authority("retry-active-stale-context", 2);
+    const retry = deriveImplementationRetryDisposition({
+      id: "T1",
+      implementation_attempt_history: [staleRetry],
+    });
+    if (retry.kind !== "retry") throw new Error("retry fixture failed");
+    const prompt = `Task ID: T1\n${retry.promptAppendix}`;
+    const staleAdmission = authorizeImplementationSpawn({
+      id: "T1",
+      implementation_attempt_history: [staleRetry],
+    }, prompt);
+    if (!staleAdmission.ok) throw new Error(staleAdmission.error);
+    const staleContext = createImplementationAttemptContext({ authority: active, prompt, admission: staleAdmission });
+
+    expect(errorOf(graph({
+      ...baseTask(),
+      proof: pendingProof(),
+      active_implementation_attempt: active,
+      active_implementation_context: staleContext,
+      attempt_artifact_baseline: attemptBaseline,
+      attempt_repository_baseline: repositoryBaseline,
+      reserved_at: active.reservedAt,
+      implementation_attempt_history: [currentRetry],
+    }, { executing_tasks: ["T1"] }))).toContain("active retry context must match the current retry-required receipt");
   });
 
   it("requires exact active context for semantic attempt 2", () => {

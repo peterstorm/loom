@@ -294,7 +294,7 @@ _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory ru
 - Ordered **Implementation Settlement Receipts** form one fail-closed lineage: current-attempt infrastructure preserves the state, current-attempt implementation reopens attempt 1, attempt-1 semantic failure derives exactly one byte-exact **Implementation Retry Context**, and attempt-2 semantic failure escalates terminally; reordered or post-escalation receipts authorize nothing
 - A Task-local Completion Suite contains only `loom:task-byte-scope`; it runs no Task/project subprocesses
 - Repository observation never grants Task attribution: current Task paths stay local, locked current-Wave sibling-owned paths stay inert, and every changed unowned path is unresolved semantic failure/invalidation
-- Slice 3 classifies retry-required/escalation-required without dispatch; Slice 4 alone freezes retry context and launches semantic attempt 2 or escalation
+- Slice 3 classifies retry-required/escalation-required without dispatch; Slice 4 freezes retry context, authorizes semantic attempt 2 dispatch, and publishes terminal escalation for operator handling
 - A Task's **Verification Policy** independently determines its regression and new-test **Proof Obligations**
 - A **Verification Manifest** is frozen by the engine before implementation and cannot be authored through decompose output
 - A Task-scoped **Completion Suite Result** binds to one **Implementation Attempt**; a Wave-scoped result binds to a quiescent Wave workspace
