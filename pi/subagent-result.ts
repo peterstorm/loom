@@ -460,17 +460,18 @@ async function cleanupFailedLegacyImplementation(
   args: FailedImplementationArgs,
   binding: BoundImplementation,
 ): Promise<PiResultOutcome> {
-  let released = false;
-  await args.store.update((state) => {
+  const released = await args.store.updateAndReturn((state) => {
     const task = state.tasks.find((candidate) => candidate.id === binding.taskId);
-    if (task?.active_implementation_attempt !== undefined) return state;
-    released = true;
+    if (task?.active_implementation_attempt !== undefined) return { state, value: false };
     return {
-      ...state,
-      executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== binding.taskId),
-      tasks: state.tasks.map((candidate) => candidate.id === binding.taskId
-        ? { ...candidate, reserved_at: undefined, legacy_execution_reservation: undefined }
-        : candidate),
+      state: {
+        ...state,
+        executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== binding.taskId),
+        tasks: state.tasks.map((candidate) => candidate.id === binding.taskId
+          ? { ...candidate, reserved_at: undefined, legacy_execution_reservation: undefined }
+          : candidate),
+      },
+      value: true,
     };
   });
   if (!released) {

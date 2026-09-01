@@ -2579,8 +2579,10 @@ function unstartedWaveStatus(
   const waveTasks = graph.tasks.filter((task) => task.wave === wave);
   if (waveTasks.length === 0) return null;
 
-  const outstanding = waveTasks.filter((task) => task.status !== "implemented" && task.status !== "completed");
   const executing = new Set(graph.executing_tasks ?? []);
+  const outstanding = waveTasks.filter((task) =>
+    (task.status !== "implemented" && task.status !== "completed") ||
+    executing.has(task.id) || task.active_implementation_attempt !== undefined);
   const observation = deps.implementationReservations;
   const reservationCandidates = outstanding.filter((task) =>
     executing.has(task.id) || task.active_implementation_attempt !== undefined);
@@ -2632,7 +2634,6 @@ function unstartedWaveStatus(
         taskId: task.id,
         semanticAttempt: 1,
         promptAppendix: null,
-        retryContext: null,
       })];
     }
     if (disposition.kind === "retry") {
@@ -2641,7 +2642,6 @@ function unstartedWaveStatus(
         taskId: task.id,
         semanticAttempt: 2,
         promptAppendix: disposition.promptAppendix,
-        retryContext: disposition.context,
       })];
     }
     return [];

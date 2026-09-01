@@ -1575,8 +1575,8 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       const mixed = unstarted({
         executing_tasks: ["T2"],
         tasks: [
-          taskState({ id: "T2", wave: 1, status: "pending" }),
-          { ...taskState({ id: "T3", wave: 1, status: "pending" }), active_implementation_attempt: activeAuthority },
+          taskState({ id: "T2", wave: 1, status: "implemented" }),
+          { ...taskState({ id: "T3", wave: 1, status: "implemented" }), active_implementation_attempt: activeAuthority },
           taskState({ id: "T4", wave: 1, status: "pending" }),
         ],
       });
@@ -1596,8 +1596,8 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       const waiting = unstarted({
         executing_tasks: ["T2"],
         tasks: [
-          taskState({ id: "T2", wave: 1, status: "pending" }),
-          { ...taskState({ id: "T3", wave: 1, status: "pending" }), active_implementation_attempt: activeAuthority },
+          taskState({ id: "T2", wave: 1, status: "implemented" }),
+          { ...taskState({ id: "T3", wave: 1, status: "implemented" }), active_implementation_attempt: activeAuthority },
         ],
       });
       const waitingStatus = deriveLoomStatusFromParsedGraph({ ok: true, value: waiting }, statusDeps);
@@ -1626,7 +1626,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       const graph = unstarted({
         executing_tasks: ["T1"],
         tasks: [{
-          ...taskState({ id: "T1", wave: 1, status: "pending" }),
+          ...taskState({ id: "T1", wave: 1, status: "implemented" }),
           active_implementation_attempt: activeAuthority,
           reserved_at: activeAuthority.reservedAt,
         }],
@@ -1728,10 +1728,6 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
               taskId: "T1",
               semanticAttempt: 2,
               promptAppendix: expect.stringContaining(retry.receiptId),
-              retryContext: {
-                predecessorReceiptId: retry.receiptId,
-                failureKinds: retry.failureKinds,
-              },
             }],
           },
         },

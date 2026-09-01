@@ -81,7 +81,7 @@ The pure command validates the complete history in wire order; each legal `imple
   - exact Retry Context parser/renderer;
   - admission derivation;
   - active Attempt Context constructor/parser;
-  - status dispatch instruction and escalation projection.
+  - retry disposition and exact prompt appendix derivation.
 - `engine/src/core/validate-task-execution.ts`
   - derive admission for every bound spawn;
   - mint authority with the derived semantic attempt;

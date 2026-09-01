@@ -1233,7 +1233,7 @@ function makeReceipt<Kind extends ImplementationSettlementKind>(
 }
 
 /**
- * Archive a reservation the shell proved abandoned. Reclamation is an
+ * Archive a reservation the bounded shell policy selected for reclamation. Reclamation is an
  * infrastructure settlement: it releases no semantic retry budget and carries
  * the exact authority it retired, so a late result cannot collide with its
  * replacement by Task id alone.

@@ -213,14 +213,26 @@ describe("modern implementation attempt registration", () => {
     });
 
     rmSync(join(repo.root, "foreign.ts"));
-    const second = await registerTaskExecutionBatch([nextSpawn(manager.load(), "T1")]);
+    const second = await registerTaskExecutionBatch([
+      nextSpawn(manager.load(), "T1"),
+      spawn("T2"),
+    ]);
     if (second.kind !== "registered") throw new Error(second.message);
-    expect(second.authorities[0]?.semanticAttempt).toBe(2);
+    expect(second.authorities.map(({ taskId, semanticAttempt }) => ({ taskId, semanticAttempt }))).toEqual([
+      { taskId: "T1", semanticAttempt: 2 },
+      { taskId: "T2", semanticAttempt: 1 },
+    ]);
     expect(manager.load().tasks[0]?.active_implementation_context).toMatchObject({
       semanticAttempt: 2,
       authorityDigest: second.authorities[0]?.authorityDigest,
       predecessorReceiptId: manager.load().tasks[0]?.implementation_attempt_history?.[0]?.receiptId,
       retryContext: expect.objectContaining({ semanticAttempt: 2 }),
+    });
+    expect(manager.load().tasks[1]?.active_implementation_context).toMatchObject({
+      semanticAttempt: 1,
+      authorityDigest: second.authorities[1]?.authorityDigest,
+      predecessorReceiptId: null,
+      retryContext: null,
     });
     const infrastructureAt = parseIsoInstant("2026-08-25T00:02:00.000Z");
     if (!infrastructureAt.ok) throw new Error("infrastructure instant fixture failed");

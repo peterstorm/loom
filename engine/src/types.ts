@@ -12,10 +12,7 @@ import type {
   ImplementationAttemptAuthority,
   ImplementationAttemptSettlementReceipt,
 } from "./core/implementation-completion";
-import type {
-  ImplementationAttemptContext,
-  ImplementationRetryContext,
-} from "./core/implementation-retry";
+import type { ImplementationAttemptContext } from "./core/implementation-retry";
 import type { StoredVerificationPolicy } from "./core/verification-policy";
 import type { DeclaredArtifactBaseline } from "./core/artifact-baseline";
 import type { IssuedReviewPacketRegistration } from "./core/review-packet";
@@ -947,14 +944,12 @@ export type WaveImplementationDispatch =
       taskId: string;
       semanticAttempt: 1;
       promptAppendix: null;
-      retryContext: null;
     }>
   | Readonly<{
       kind: "retry-implementation";
       taskId: string;
       semanticAttempt: 2;
       promptAppendix: string;
-      retryContext: ImplementationRetryContext;
     }>;
 
 /** What the orchestrator owes to leave the implementation window. */

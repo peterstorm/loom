@@ -442,6 +442,18 @@ async function observedAdvisoryApprovalFromParsed(
   }
 }
 
+function statusWorkspaceObservation(
+  parsedGraph: ReturnType<typeof parseStatusGraph>,
+  statePath: string,
+): NonNullable<GateDeps["currentWaveWorkspace"]> {
+  return parsedGraph.ok
+    ? observeCurrentWaveWorkspace(parsedGraph.value, dirname(resolve(statePath)))
+    : Object.freeze({
+        kind: "unavailable",
+        reason: `protected graph unavailable before Git observation: ${parsedGraph.error}`,
+      });
+}
+
 export async function observedAdvisoryApproval(
   rawGraph: unknown,
   observation: ActiveRunDirectoryObservation,
@@ -449,12 +461,7 @@ export async function observedAdvisoryApproval(
   statePath: string = TASK_GRAPH_PATH,
 ): Promise<AdvisoryApprovalObservation> {
   const parsed = parseStatusGraph(rawGraph);
-  const workspace = parsed.ok
-    ? observeCurrentWaveWorkspace(parsed.value, dirname(resolve(statePath)))
-    : Object.freeze({
-        kind: "unavailable" as const,
-        reason: `protected graph unavailable before Git observation: ${parsed.error}`,
-      });
+  const workspace = statusWorkspaceObservation(parsed, statePath);
   return observedAdvisoryApprovalFromParsed(parsed, observation, workspace, boundHandle);
 }
 
@@ -485,12 +492,7 @@ export async function currentOrchestrationStatus(
   const rawGraph = readGraph(statePath);
   const parsedGraph = parseStatusGraph(rawGraph);
   const binding = statusRunDirectoryBinding(parsedGraph, args, statePath);
-  const workspace = parsedGraph.ok
-    ? observeCurrentWaveWorkspace(parsedGraph.value, dirname(resolve(statePath)))
-    : Object.freeze({
-        kind: "unavailable" as const,
-        reason: `protected graph unavailable before Git observation: ${parsedGraph.error}`,
-      });
+  const workspace = statusWorkspaceObservation(parsedGraph, statePath);
   const completionResult = statusCompletionResult(parsedGraph, binding, workspace);
   const statusDeps: GateDeps = Object.freeze({
     ...productionGateDeps,

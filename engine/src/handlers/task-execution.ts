@@ -42,8 +42,10 @@ import { anyActiveSubagent } from "../machine";
  * remediation re-spawns against `implemented` and `failed` tasks routinely —
  * so recovery cannot be limited to tasks still `pending`.
  *
- * A reservation is provably abandoned only when its task is not `completed`,
- * no subagent is active FOR THIS GRAPH, AND it has aged past the grace window.
+ * A reservation becomes policy-eligible for reclamation only when its task is
+ * not `completed`, no subagent is observed active FOR THIS GRAPH, AND it has
+ * aged past the grace window. This is a bounded operational assumption, not
+ * proof of process death: transport start latency has no hard upper bound.
  * All three matter: a `completed` task can never be re-executed;
  * `anyActiveSubagent` fails closed, so an unreadable roster or any live agent
  * on this graph releases nothing; and the grace window shields a freshly
@@ -60,8 +62,9 @@ import { anyActiveSubagent } from "../machine";
  * Imperative shell: preflight every input against one state snapshot, capture
  * every baseline, then register the accepted batch in one locked update. A
  * blocked sibling therefore leaves no ghost execution state behind — and a
- * spawn denied by a SIBLING HOOK, which this registration cannot observe, is
- * reclaimed by `staleReservationsForRosterObservation` on the next attempt.
+ * spawn denied by a SIBLING HOOK, which this registration cannot observe,
+ * becomes reclaimable only on a later registration after the grace period and
+ * a qualifying roster-liveness observation.
  */
 export type TaskExecutionRegistrationOutcome =
   | Readonly<{

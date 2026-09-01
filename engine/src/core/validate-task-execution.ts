@@ -496,7 +496,7 @@ function reclaimTaskAttempt(
     };
     return invalidateEvidence ? invalidateReclaimedEvidence(reclaimed) : reclaimed;
   }
-  if (proof.kind === "legacy" && task.active_implementation_attempt === undefined) {
+  if (task.active_implementation_attempt === undefined) {
     return { ...task, reserved_at: undefined, legacy_execution_reservation: undefined };
   }
   return task;
@@ -616,7 +616,7 @@ export function taskExecutionRegistrationError(
   // after passing preflight.
   const ownership = taskExecutionOwnershipError(current, expectedTaskIds, mode, staleReservations);
   if (ownership !== null) return ownership;
-  for (const taskId of expectedTaskIds) {
+  for (const [taskIndex, taskId] of expectedTaskIds.entries()) {
     const decision = taskExecutionDecision(current, taskId);
     if (decision.kind === "ineligible") return decision.reason;
     const task = current.tasks.find((candidate) => candidate.id === taskId);
@@ -639,7 +639,7 @@ export function taskExecutionRegistrationError(
     }
     if (authorityPlans !== undefined) {
       const plan = authorityPlans.find((candidate) => candidate.authority.taskId === taskId);
-      const input = inputs[expectedTaskIds.indexOf(taskId)];
+      const input = inputs[taskIndex];
       if (plan === undefined || input === undefined || plan.authority.wave !== task.wave || plan.baselines !== baseline) {
         return `Task ${taskId} implementation authority changed before execution registration.`;
       }
