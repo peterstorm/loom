@@ -113,7 +113,12 @@ function retryReceipt(): ImplementationAttemptSettlementReceipt {
 }
 
 function retryTask(history: readonly ImplementationAttemptSettlementReceipt[]) {
-  return { id: "T1", implementation_attempt_history: history };
+  return {
+    id: "T1",
+    implementation_attempt_history: history,
+    implementation_retry_protocol: 2 as const,
+    implementation_retry_history_start: 0,
+  };
 }
 
 describe("bounded implementation retry admission", () => {
@@ -318,6 +323,38 @@ describe("bounded implementation retry admission", () => {
     for (const history of contradictory) {
       expect(deriveImplementationRetryDisposition(retryTask(history))).toMatchObject({ kind: "invalid" });
     }
+  });
+
+  it("projects pre-protocol Slice-3 attempt-1 histories without rewriting receipts", () => {
+    const retry = retryReceipt();
+    const implemented = settle(
+      authority(1, "legacy-implemented", 6),
+      [],
+      observation("2026-09-01T00:06:00.000Z", true),
+    );
+    const infrastructure = settle(
+      authority(1, "legacy-infrastructure", 7),
+      [],
+      unavailable("2026-09-01T00:07:00.000Z"),
+    );
+    const repeatedRetry = settle(
+      authority(1, "legacy-repeated-retry", 8),
+      [],
+      observation("2026-09-01T00:08:00.000Z", false),
+    );
+
+    expect(deriveImplementationRetryDisposition({
+      id: "T1",
+      implementation_attempt_history: [retry, implemented],
+    })).toEqual({ kind: "initial", semanticAttempt: 1 });
+    expect(deriveImplementationRetryDisposition({
+      id: "T1",
+      implementation_attempt_history: [retry, infrastructure],
+    })).toMatchObject({ kind: "retry", predecessor: { receiptId: retry.receiptId } });
+    expect(deriveImplementationRetryDisposition({
+      id: "T1",
+      implementation_attempt_history: [retry, repeatedRetry],
+    })).toMatchObject({ kind: "retry", predecessor: { receiptId: repeatedRetry.receiptId } });
   });
 
   it("infrastructure receipts never consume the semantic attempt budget", () => {

@@ -2205,10 +2205,12 @@ export default function (pi: ExtensionAPI) {
       }
     };
 
-    const details = event.details as Record<string, unknown> | undefined;
-    const rawResults = details && "results" in details && Array.isArray(details.results)
-      ? details.results
-      : [];
+    const rawDetails: unknown = event.details;
+    const details = typeof rawDetails === "object" && rawDetails !== null && !Array.isArray(rawDetails)
+      ? rawDetails as Record<string, unknown>
+      : null;
+    const hasResults = details !== null && Object.hasOwn(details, "results");
+    const rawResults = hasResults && Array.isArray(details.results) ? details.results : [];
     // Exact per-entry parsing precedes finalization. A matching-agent/exit-0
     // shell is not a successful implementation envelope until transcript shape
     // and exact returned Task identity have both parsed.
@@ -2386,7 +2388,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    if (!details || !("results" in details)) {
+    if (!hasResults) {
       const diagnostic = "subagent tool_result is missing details.results — successful evidence was not applied";
       processingErrors.push(diagnostic);
       process.stderr.write(`loom(pi): ${diagnostic}\n`);

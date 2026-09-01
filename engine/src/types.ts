@@ -537,6 +537,10 @@ interface TaskCommonMetadataBase {
   readonly start_sha?: string;
   readonly failure_reason?: string;
   readonly retry_count?: number;
+  /** Strict bounded-retry lineage marker. Absent histories use the read-only
+   * Slice-3 compatibility projection until their next engine registration. */
+  readonly implementation_retry_protocol?: 2;
+  readonly implementation_retry_history_start?: number;
   /** Immutable exact receipts; append-only settlement audit in wire order. */
   readonly implementation_attempt_history?: readonly ImplementationAttemptSettlementReceipt[];
 }

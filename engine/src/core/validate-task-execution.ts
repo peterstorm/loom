@@ -341,6 +341,7 @@ export type TaskExecutionBaselines = ReadonlyMap<string, TaskExecutionBaselineBu
 export type TaskExecutionAuthorityPlan = Readonly<{
   authority: ImplementationAttemptAuthority;
   context: ImplementationAttemptContext;
+  retryHistoryStart: number;
   baselines: TaskExecutionBaselineBundle;
 }>;
 
@@ -390,7 +391,12 @@ export function createTaskExecutionAuthorityBatch(
       prompt: input.prompt,
       admission,
     });
-    plans.push(Object.freeze({ authority: authority.value, context, baselines: taskBaselines }));
+    plans.push(Object.freeze({
+      authority: authority.value,
+      context,
+      retryHistoryStart: admission.historyStart,
+      baselines: taskBaselines,
+    }));
   }
   return { ok: true, plans: Object.freeze(plans) };
 }
@@ -533,6 +539,8 @@ export function applyTaskExecutionAuthorityBatch(
       ),
       active_implementation_attempt: plan.authority,
       active_implementation_context: plan.context,
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: plan.retryHistoryStart,
       reserved_at: plan.authority.reservedAt,
       legacy_execution_reservation: undefined,
     };
@@ -645,6 +653,7 @@ export function taskExecutionRegistrationError(
       }
       const admission = authorizeImplementationSpawn(task, input.prompt);
       if (!admission.ok || plan.authority.semanticAttempt !== admission.semanticAttempt ||
+          plan.retryHistoryStart !== admission.historyStart ||
           !implementationAttemptContextMatchesAuthority(plan.context, plan.authority)) {
         return `Task ${taskId} implementation authority changed before execution registration.`;
       }

@@ -125,6 +125,8 @@ describe("modern implementation attempt registration", () => {
         retryContext: null,
       });
       expect(task.reserved_at).toBe(authority.reservedAt);
+      expect(task.implementation_retry_protocol).toBe(2);
+      expect(task.implementation_retry_history_start).toBe(0);
       expect(task.legacy_execution_reservation).toBeUndefined();
       expect(task.attempt_artifact_baseline).toBeDefined();
       expect(task.attempt_repository_baseline).toBeDefined();

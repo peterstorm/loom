@@ -53,6 +53,8 @@ export type ImplementationAttemptContext = Readonly<{
 export type RetryableImplementationTask = Readonly<{
   id: string;
   implementation_attempt_history?: readonly ImplementationAttemptSettlementReceipt[];
+  implementation_retry_protocol?: 2;
+  implementation_retry_history_start?: number;
 }>;
 
 export type ImplementationRetryDisposition =
@@ -78,6 +80,7 @@ export type ImplementationSpawnAdmission =
       taskId: TaskId;
       semanticAttempt: SemanticAttempt & 1;
       promptDigest: ArtifactDigest;
+      historyStart: number;
       retryContext: null;
       predecessorReceiptId: null;
     }>
@@ -87,6 +90,7 @@ export type ImplementationSpawnAdmission =
       taskId: TaskId;
       semanticAttempt: SemanticAttempt & 2;
       promptDigest: ArtifactDigest;
+      historyStart: number;
       retryContext: ImplementationRetryContext;
       predecessorReceiptId: ImplementationSettlementReceiptId;
     }>
@@ -239,6 +243,47 @@ function invalidLineage(
   });
 }
 
+function projectedDisposition(lineage: ImplementationRetryLineage): ImplementationRetryDisposition {
+  if (lineage.kind === "escalated") {
+    return freeze({
+      kind: "escalated",
+      receiptId: lineage.receiptId,
+      failureKinds: lineage.failureKinds,
+    });
+  }
+  if (lineage.kind === "retry") {
+    const context = retryContextFor(lineage.predecessor);
+    return freeze({
+      kind: "retry",
+      semanticAttempt: 2,
+      predecessor: lineage.predecessor,
+      context,
+      promptAppendix: renderImplementationRetryContext(context),
+    });
+  }
+  return freeze({ kind: "initial", semanticAttempt: 1 });
+}
+
+function legacyRetryDisposition(
+  history: readonly ImplementationAttemptSettlementReceipt[],
+): ImplementationRetryDisposition {
+  const lastImplemented = history.findLastIndex((receipt) => receipt.transition === "implemented");
+  const current = history.slice(lastImplemented + 1);
+  const escalation = [...current].reverse().find((receipt) => receipt.transition === "escalation-required");
+  if (escalation?.transition === "escalation-required") {
+    return projectedDisposition(freeze({
+      kind: "escalated",
+      receiptId: escalation.receiptId,
+      failureKinds: escalation.failureKinds,
+    }));
+  }
+  const retry = [...current].reverse().find((receipt): receipt is RetryRequiredSettlementReceipt =>
+    receipt.transition === "retry-required");
+  return retry === undefined
+    ? projectedDisposition(freeze({ kind: "initial" }))
+    : projectedDisposition(freeze({ kind: "retry", predecessor: retry }));
+}
+
 /** Derive the only legal next semantic attempt from immutable settlement history. */
 export function deriveImplementationRetryDisposition(
   task: RetryableImplementationTask,
@@ -253,11 +298,27 @@ export function deriveImplementationRetryDisposition(
     return freeze({ kind: "invalid", errors: nonEmptyErrors(parseErrors) });
   }
 
-  let lineage: ImplementationRetryLineage = freeze({ kind: "initial" });
-  for (const [index, receipt] of parsedHistory.value.entries()) {
+  const history = parsedHistory.value;
+  for (const [index, receipt] of history.entries()) {
     if (receipt.taskId !== parsedTaskId.value) {
       return invalidLineage(index, receipt, `receipt task ${receipt.taskId} does not match ${parsedTaskId.value}`);
     }
+  }
+  const hasProtocol = task.implementation_retry_protocol !== undefined ||
+    task.implementation_retry_history_start !== undefined;
+  if (!hasProtocol) return legacyRetryDisposition(history);
+  const historyStart = task.implementation_retry_history_start;
+  if (task.implementation_retry_protocol !== 2 || historyStart === undefined ||
+      !Number.isSafeInteger(historyStart) || historyStart < 0 || historyStart > history.length) {
+    return freeze({
+      kind: "invalid",
+      errors: ["implementation retry protocol 2 requires a valid history start index"],
+    });
+  }
+
+  let lineage: ImplementationRetryLineage = freeze({ kind: "initial" });
+  for (const [relativeIndex, receipt] of history.slice(historyStart).entries()) {
+    const index = historyStart + relativeIndex;
     if (lineage.kind === "escalated") {
       return invalidLineage(index, receipt, `receipt appears after terminal escalation ${lineage.receiptId}`);
     }
@@ -291,24 +352,7 @@ export function deriveImplementationRetryDisposition(
     });
   }
 
-  if (lineage.kind === "escalated") {
-    return freeze({
-      kind: "escalated",
-      receiptId: lineage.receiptId,
-      failureKinds: lineage.failureKinds,
-    });
-  }
-  if (lineage.kind === "retry") {
-    const context = retryContextFor(lineage.predecessor);
-    return freeze({
-      kind: "retry",
-      semanticAttempt: 2,
-      predecessor: lineage.predecessor,
-      context,
-      promptAppendix: renderImplementationRetryContext(context),
-    });
-  }
-  return freeze({ kind: "initial", semanticAttempt: 1 });
+  return projectedDisposition(lineage);
 }
 
 /** Require the exact engine-derived retry appendix before attempt-2 authority can be minted. */
@@ -331,6 +375,15 @@ export function authorizeImplementationSpawn(
   }
   const parsedTaskId = parseTaskId(task.id, "implementation spawn task id");
   if (!parsedTaskId.ok) return { ok: false, error: parsedTaskId.error.errors.join("; ") };
+  const history = task.implementation_attempt_history ?? [];
+  let historyStart: number;
+  if (task.implementation_retry_protocol === 2) {
+    historyStart = task.implementation_retry_history_start!;
+  } else if (disposition.kind === "retry") {
+    historyStart = history.findIndex((receipt) => receipt.receiptId === disposition.predecessor.receiptId);
+  } else {
+    historyStart = history.length;
+  }
   const promptDigest = sha256(prompt);
   const supplied = parsePromptRetryContext(prompt);
   if (!supplied.ok) return supplied;
@@ -342,6 +395,7 @@ export function authorizeImplementationSpawn(
           taskId: parsedTaskId.value,
           semanticAttempt: 1 as SemanticAttempt & 1,
           promptDigest,
+          historyStart,
           retryContext: null,
           predecessorReceiptId: null,
         }
@@ -365,6 +419,7 @@ export function authorizeImplementationSpawn(
     taskId: parsedTaskId.value,
     semanticAttempt: 2 as SemanticAttempt & 2,
     promptDigest,
+    historyStart,
     retryContext: disposition.context,
     predecessorReceiptId: disposition.predecessor.receiptId,
   };

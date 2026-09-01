@@ -808,7 +808,7 @@ jq '.wave_gates' .claude/state/active_task_graph.json
 | Task stays `pending` after settlement | Semantic or infrastructure outcome requires a canonical next decision | Read `orchestration status --json`; use only its initial/retry dispatch or escalation action |
 | Task stays `pending`, agent still running | Agent live (tracked via `executing_tasks`, there is no `in_progress` status) | Wait; do not duplicate the active authority |
 | Status reports `escalate-wave-implementation` | Exact semantic attempt 2 failed | Stop and present the receipt/failure kinds to the user; no attempt 3 exists |
-| `test_result` missing or not a pass | No recognizable output | Re-spawn, ensure test markers in output |
+| `test_result` missing or not a pass | Evidence is absent, semantic-failed, or infrastructure-blocked | Run `orchestration status --json`; execute only its exact dispatch (including any attempt-2 appendix), wait action, or terminal escalation |
 | Wave not advancing | Gate blocked | Check `wave_gates[N].blocked`, run `/wave-gate` |
 | State write blocked | Guard hook active | State writes via hooks only; reads OK |
 | Test task blocked, impl wrote tests | Separate test task for new code | Don't create separate test tasks; mark superseded or merge |

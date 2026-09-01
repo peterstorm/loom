@@ -129,6 +129,36 @@ function receiptFor(attempt: ImplementationAttemptAuthority, taskCompleted = tru
   return settled.value.receipt;
 }
 
+function infrastructureReceiptFor(attempt: ImplementationAttemptAuthority) {
+  const suite = valueOf(createTaskCompletionSuiteAuthority(attempt));
+  const settled = settleImplementationAttempt({
+    id: "T1",
+    status: "pending",
+    proof: pendingProof(),
+    active_implementation_attempt: attempt,
+    implementation_attempt_history: [],
+  }, attempt, attempt, {
+    schemaVersion: 1,
+    kind: "implementation-observation-unavailable",
+    observedAt: "2026-08-23T00:02:00.000Z",
+    failure: { kind: "observation-unavailable", message: "legacy transport failure" },
+  }, {
+    schemaVersion: 1,
+    kind: "task-completion-suite-result",
+    implementationAuthorityDigest: suite.implementationAuthorityDigest,
+    suiteDigest: suite.suiteDigest,
+    checks: [{
+      checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
+      scope: "task",
+      outcome: { kind: "accepted", changedPaths: [] },
+    }],
+  });
+  if (!settled.ok || settled.value.kind !== "infrastructure-blocked") {
+    throw new Error("legacy infrastructure receipt fixture failed");
+  }
+  return settled.value.receipt;
+}
+
 describe("Task lifecycle migration", () => {
   it("derives pending Proof for a legacy pending Task and round-trips the modern arm", () => {
     const parsed = parseTaskGraph(graph(baseTask()));
@@ -268,6 +298,8 @@ describe("Task attempt authority StateManager lockstep", () => {
       attempt_repository_baseline: repositoryBaseline,
       reserved_at: active.reservedAt,
       implementation_attempt_history: [currentRetry],
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
     }, { executing_tasks: ["T1"] }))).toContain("active retry context must match the current retry-required receipt");
   });
 
@@ -282,7 +314,33 @@ describe("Task attempt authority StateManager lockstep", () => {
       attempt_repository_baseline: repositoryBaseline,
       reserved_at: active.reservedAt,
       implementation_attempt_history: [retry],
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
     }, { executing_tasks: ["T1"] }))).toContain("semantic attempt 2 requires active_implementation_context");
+  });
+
+  it("loads pre-protocol Slice-3 attempt-1 histories without rewriting receipts", () => {
+    const retry = receiptFor(authority("legacy-retry"), false);
+    const implemented = receiptFor(authority("legacy-implemented"), true);
+    const infrastructure = infrastructureReceiptFor(authority("legacy-infrastructure"));
+    const repeatedRetry = receiptFor(authority("legacy-repeated-retry"), false);
+
+    for (const history of [
+      [retry, implemented],
+      [retry, infrastructure],
+      [retry, repeatedRetry],
+    ]) {
+      const parsed = parseTaskGraph(graph({
+        ...baseTask(),
+        proof: pendingProof(),
+        implementation_attempt_history: history,
+      }));
+      expect(parsed.ok).toBe(true);
+      if (parsed.ok) {
+        expect(parsed.value.tasks[0]?.implementation_attempt_history).toEqual(history);
+        expect(parsed.value.tasks[0]?.implementation_retry_protocol).toBeUndefined();
+      }
+    }
   });
 
   it("rejects active modern authority on the legacy-missing-Proof lifecycle", () => {

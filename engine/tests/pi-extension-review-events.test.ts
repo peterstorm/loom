@@ -3666,7 +3666,7 @@ describe("Pi extension review tool_result integration", () => {
     expect(readFileSync(join(subagentDir, `${session}.active`), "utf-8").trim()).not.toBe("");
 
     await pi.emit("tool_result", {
-      toolName: "subagent", toolCallId, content: [], details: {},
+      toolName: "subagent", toolCallId, content: [], details: true,
     }, context);
 
     expect(JSON.parse(readFileSync(statePath, "utf-8")).executing_tasks).toEqual([]);
