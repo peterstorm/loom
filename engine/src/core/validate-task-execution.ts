@@ -14,8 +14,15 @@ import {
   createReclaimedImplementationAttemptReceipt,
   type ImplementationAttemptAuthority,
   type IsoInstant,
+  type ImplementationSettlementReceiptId,
   type ReservationId,
 } from "./implementation-completion";
+import {
+  authorizeImplementationSpawn,
+  createImplementationAttemptContext,
+  implementationAttemptContextMatchesAuthority,
+  type ImplementationAttemptContext,
+} from "./implementation-retry";
 
 export interface ValidateTaskExecutionInput {
   readonly agentType: string;
@@ -161,14 +168,15 @@ export type TaskExecutionRosterObservation =
 export const RESERVATION_GRACE_MS = 10 * 60_000;
 
 /**
- * Pure staleness predicate: which committed reservations are provably
- * abandoned, given the roster fact the shell already resolved (`anyActive`)
- * and the current clock. A reservation is abandoned only when ALL hold:
+ * Pure reclamation policy: which committed reservations are eligible under
+ * the bounded grace assumption, given the roster fact the shell already
+ * resolved (`anyActive`) and the current clock. Eligibility requires ALL:
  * its task is not `completed`; no agent is active for this graph; and it has
  * aged past `graceMs`. A reservation whose `reserved_at` is missing or
  * unparseable predates the timestamp (or is corrupt) and stays eligible so
- * legacy stranded entries still recover — the fail-closed direction is to keep
- * recovering deadlocks, which the grace only ever DELAYS.
+ * legacy stranded entries still recover immediately. This is an
+ * availability-biased compatibility exception that releases uncertain
+ * ownership; only timestamped reservations observe the grace period.
  *
  * Status is deliberately NOT narrowed to `pending`. A spawn vetoed by a
  * sibling PreToolUse gate strands its reservation whatever the task's status
@@ -240,20 +248,21 @@ function declaredPathOverlap(left: Task, right: Task): string | undefined {
 }
 
 /**
- * Pure ownership invariant for one execution reservation. Active tasks own
- * their declared paths until stop cleanup. One reservation captures all task
- * baselines before dispatch, so even sequential siblings must be disjoint;
+ * Pure ownership invariant for one execution reservation. Non-reclaimable
+ * reservations own their declared paths until exact cleanup or policy-authorized
+ * reclamation. One reservation captures all task baselines before dispatch, so even sequential siblings must be disjoint;
  * path handoff requires separate calls so each task gets a fresh baseline.
  *
- * `staleReservations` names reservations the shell has PROVEN abandoned. The
- * reservation is committed during PreToolUse, before the sibling PreToolUse
- * gates have voted, so a spawn any one of them then denies leaves an entry in
- * `executing_tasks` that no SubagentStop will ever clear — permanently
- * deadlocking the task and every task sharing a declared path with it.
- * Releasing those entries here keeps the invariant honest (a reservation only
- * owns paths while its agent can still be running) without weakening it: the
- * shell only ever proves staleness fail-closed, so an unproven reservation
- * still owns its paths.
+ * `staleReservations` names reservations the bounded policy permits reclaiming;
+ * it does not prove process death, because transport start latency has no hard
+ * upper bound. The reservation is committed during PreToolUse, before the
+ * sibling PreToolUse gates have voted, so a spawn any one of them then denies
+ * leaves an entry in `executing_tasks` that no SubagentStop will ever clear —
+ * permanently deadlocking the task and every task sharing a declared path with it.
+ * Releasing those entries keeps recovery bounded under that operational
+ * assumption without weakening the fail-closed preconditions: unreadable or
+ * positive roster liveness makes no reservation eligible, and an ineligible
+ * reservation still owns its paths.
  */
 export function taskExecutionOwnershipError(
   state: TaskGraph,
@@ -332,6 +341,9 @@ export type TaskExecutionBaselines = ReadonlyMap<string, TaskExecutionBaselineBu
 
 export type TaskExecutionAuthorityPlan = Readonly<{
   authority: ImplementationAttemptAuthority;
+  context: ImplementationAttemptContext;
+  retryHistoryStart: number;
+  retryLineagePredecessorReceiptId: ImplementationSettlementReceiptId | null;
   baselines: TaskExecutionBaselineBundle;
 }>;
 
@@ -342,27 +354,31 @@ export type TaskExecutionAuthorityBatch =
 /** Mint one exact authority per bound Task while preserving binding order. */
 export function createTaskExecutionAuthorityBatch(
   state: TaskGraph,
+  inputs: readonly Extract<TaskExecutionSpawn, { kind: "implementation" }>[],
   taskIds: readonly string[],
   reservationIds: readonly ReservationId[],
   headSha: string,
   reservedAt: IsoInstant,
   baselines: TaskExecutionBaselines,
 ): TaskExecutionAuthorityBatch {
-  if (taskIds.length !== reservationIds.length) {
+  if (taskIds.length !== reservationIds.length || taskIds.length !== inputs.length) {
     return { ok: false, error: "Implementation reservation identity count does not match bound Task count." };
   }
   const plans: TaskExecutionAuthorityPlan[] = [];
   for (const [index, taskId] of taskIds.entries()) {
     const task = state.tasks.find((candidate) => candidate.id === taskId);
+    const input = inputs[index];
     const taskBaselines = baselines.get(taskId);
     const reservationId = reservationIds[index];
-    if (task === undefined || taskBaselines === undefined || reservationId === undefined) {
+    if (task === undefined || input === undefined || taskBaselines === undefined || reservationId === undefined) {
       return { ok: false, error: `Cannot mint exact implementation authority for ${taskId}.` };
     }
+    const admission = authorizeImplementationSpawn(task, input.prompt);
+    if (!admission.ok) return { ok: false, error: admission.error };
     const authority = createImplementationAttemptAuthority({
       taskId,
       wave: task.wave,
-      semanticAttempt: 1,
+      semanticAttempt: admission.semanticAttempt,
       reservationId,
       headSha,
       reservedAt,
@@ -372,7 +388,18 @@ export function createTaskExecutionAuthorityBatch(
     if (!authority.ok) {
       return { ok: false, error: authority.error.errors.join("; ") };
     }
-    plans.push(Object.freeze({ authority: authority.value, baselines: taskBaselines }));
+    const context = createImplementationAttemptContext({
+      authority: authority.value,
+      prompt: input.prompt,
+      admission,
+    });
+    plans.push(Object.freeze({
+      authority: authority.value,
+      context,
+      retryHistoryStart: admission.historyStart,
+      retryLineagePredecessorReceiptId: admission.lineagePredecessorReceiptId,
+      baselines: taskBaselines,
+    }));
   }
   return { ok: true, plans: Object.freeze(plans) };
 }
@@ -470,6 +497,7 @@ function reclaimTaskAttempt(
     const reclaimed: Task = {
       ...task,
       active_implementation_attempt: undefined,
+      active_implementation_context: undefined,
       attempt_artifact_baseline: undefined,
       attempt_repository_baseline: undefined,
       reserved_at: undefined,
@@ -477,7 +505,7 @@ function reclaimTaskAttempt(
     };
     return invalidateEvidence ? invalidateReclaimedEvidence(reclaimed) : reclaimed;
   }
-  if (proof.kind === "legacy" && task.active_implementation_attempt === undefined) {
+  if (task.active_implementation_attempt === undefined) {
     return { ...task, reserved_at: undefined, legacy_execution_reservation: undefined };
   }
   return task;
@@ -513,6 +541,10 @@ export function applyTaskExecutionAuthorityBatch(
         plan.baselines.repositoryAttempt,
       ),
       active_implementation_attempt: plan.authority,
+      active_implementation_context: plan.context,
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: plan.retryHistoryStart,
+      implementation_retry_predecessor_receipt_id: plan.retryLineagePredecessorReceiptId ?? undefined,
       reserved_at: plan.authority.reservedAt,
       legacy_execution_reservation: undefined,
     };
@@ -596,7 +628,7 @@ export function taskExecutionRegistrationError(
   // after passing preflight.
   const ownership = taskExecutionOwnershipError(current, expectedTaskIds, mode, staleReservations);
   if (ownership !== null) return ownership;
-  for (const taskId of expectedTaskIds) {
+  for (const [taskIndex, taskId] of expectedTaskIds.entries()) {
     const decision = taskExecutionDecision(current, taskId);
     if (decision.kind === "ineligible") return decision.reason;
     const task = current.tasks.find((candidate) => candidate.id === taskId);
@@ -619,8 +651,23 @@ export function taskExecutionRegistrationError(
     }
     if (authorityPlans !== undefined) {
       const plan = authorityPlans.find((candidate) => candidate.authority.taskId === taskId);
-      if (plan === undefined || plan.authority.wave !== task.wave ||
-          plan.baselines !== baseline) {
+      const input = inputs[taskIndex];
+      if (plan === undefined || input === undefined || plan.authority.wave !== task.wave || plan.baselines !== baseline) {
+        return `Task ${taskId} implementation authority changed before execution registration.`;
+      }
+      const admission = authorizeImplementationSpawn(task, input.prompt);
+      if (!admission.ok || plan.authority.semanticAttempt !== admission.semanticAttempt ||
+          plan.retryHistoryStart !== admission.historyStart ||
+          plan.retryLineagePredecessorReceiptId !== admission.lineagePredecessorReceiptId ||
+          !implementationAttemptContextMatchesAuthority(plan.context, plan.authority)) {
+        return `Task ${taskId} implementation authority changed before execution registration.`;
+      }
+      const expectedContext = createImplementationAttemptContext({
+        authority: plan.authority,
+        prompt: input.prompt,
+        admission,
+      });
+      if (plan.context.contextDigest !== expectedContext.contextDigest) {
         return `Task ${taskId} implementation authority changed before execution registration.`;
       }
     }

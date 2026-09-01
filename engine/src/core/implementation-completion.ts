@@ -49,6 +49,7 @@ const GIT_SHA_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const ISO_INSTANT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const MAX_REASON_LENGTH = 4_096;
+export const MAX_IMPLEMENTATION_FAILURE_KINDS = 64;
 export const TASK_BYTE_SCOPE_CHECK_ID_TEXT = "loom:task-byte-scope" as const;
 
 // Brands prevent adjacent authority fields with identical runtime primitives
@@ -208,8 +209,11 @@ function parseTaskSuiteDigest(raw: unknown, path: string): Parsed<TaskCompletion
   return parseSha256<TaskCompletionSuiteDigest>(raw, path);
 }
 
-function parseReceiptId(raw: unknown, path: string): Parsed<ImplementationSettlementReceiptId> {
-  return parseSha256<ImplementationSettlementReceiptId>(raw, path);
+export function parseImplementationSettlementReceiptId(
+  raw: unknown,
+  path = "settlementReceiptId",
+): Parsed<ImplementationSettlementReceiptId> {
+  return total(() => parseSha256<ImplementationSettlementReceiptId>(raw, path));
 }
 
 function parseSnapshot(raw: unknown, path: string): Parsed<DeclaredArtifactBaseline["snapshot"]> {
@@ -447,7 +451,7 @@ function parseTaskRoster(raw: unknown, path: string): Parsed<readonly [Authorize
   return success(Object.freeze([checks.value[0]!]));
 }
 
-/** Initial Phase-1 Task suite: one non-empty engine-owned byte-scope roster. */
+/** Initial Task-local suite: one non-empty engine-owned byte-scope roster. */
 export function createTaskCompletionSuiteAuthority(
   rawAuthority: unknown,
 ): Parsed<TaskCompletionSuiteAuthority> {
@@ -961,6 +965,9 @@ function receiptId(body: ReceiptBody): ImplementationSettlementReceiptId {
 function parseFailureKinds(raw: unknown, path: string): Parsed<readonly string[]> {
   const array = parseDenseArray(raw, path);
   if (!array.ok) return array;
+  if (array.value.length > MAX_IMPLEMENTATION_FAILURE_KINDS) {
+    return failure([`${path} must contain at most ${MAX_IMPLEMENTATION_FAILURE_KINDS} entries`]);
+  }
   const values: string[] = [];
   const errors: string[] = [];
   array.value.forEach((value, index) => {
@@ -1063,7 +1070,7 @@ export function parseImplementationAttemptSettlementReceipt(
       "semanticAttempt", "observedAt", "transition", "consumesSemanticAttempt", "failureKinds",
     ], path);
     if (!record.ok) return record;
-    const parsedReceiptId = parseReceiptId(record.value.receiptId, `${path}.receiptId`);
+    const parsedReceiptId = parseImplementationSettlementReceiptId(record.value.receiptId, `${path}.receiptId`);
     const taskId = parseTaskId(record.value.taskId, `${path}.taskId`);
     const reservationId = parseReservationId(record.value.reservationId, `${path}.reservationId`);
     const digestValue = parseImplementationAuthorityDigest(record.value.authorityDigest, `${path}.authorityDigest`);
@@ -1226,7 +1233,7 @@ function makeReceipt<Kind extends ImplementationSettlementKind>(
 }
 
 /**
- * Archive a reservation the shell proved abandoned. Reclamation is an
+ * Archive a reservation the bounded shell policy selected for reclamation. Reclamation is an
  * infrastructure settlement: it releases no semantic retry budget and carries
  * the exact authority it retired, so a late result cannot collide with its
  * replacement by Task id alone.

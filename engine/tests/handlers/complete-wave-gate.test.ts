@@ -43,7 +43,18 @@ import {
   type Task,
   type TaskGraph,
 } from "../../src/types";
-import { derivePendingTaskProof, evaluateTaskProof } from "../../src/core/proof-obligations";
+import {
+  TRUSTED_LEDGER_ONLY_POLICY,
+  derivePendingTaskProof,
+  evaluateTaskProof,
+} from "../../src/core/proof-obligations";
+import {
+  TASK_BYTE_SCOPE_CHECK_ID_TEXT,
+  createImplementationAttemptAuthority,
+  createTaskCompletionSuiteAuthority,
+  settleImplementationAttempt,
+  type ImplementationAttemptSettlementReceipt,
+} from "../../src/core/implementation-completion";
 import { taskFixture, type TaskFixtureInput } from "../fixtures/task-lifecycle";
 import { defaultVerificationManifest } from "../../src/core/verification-manifest";
 import {
@@ -1536,11 +1547,264 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
           kind: "wave-gate-not-started",
           category: "healthy-wave-unstarted",
           retry: { kind: "advance-wave-lifecycle", eligible: true, consumesSemanticAttempt: false },
-          recovery: { kind: "spawn-wave-implementation", wave: 1, pendingTaskIds: ["T2", "T3"] },
+          recovery: {
+            kind: "spawn-wave-implementation",
+            wave: 1,
+            dispatches: [
+              { kind: "initial-implementation", taskId: "T2", semanticAttempt: 1, promptAppendix: null },
+              { kind: "initial-implementation", taskId: "T3", semanticAttempt: 1, promptAppendix: null },
+            ],
+          },
         },
       });
       expect(status.next.reasons.filter((entry) => entry.kind === "wave-implementation-pending")
         .map((entry) => entry.taskId)).toEqual(["T2", "T3"]);
+    });
+
+    it("dispatches only inactive Tasks and waits when every outstanding Task is active", () => {
+      const activeAuthority = authorityValue(createImplementationAttemptAuthority({
+        taskId: "T3",
+        wave: 1,
+        semanticAttempt: 1,
+        reservationId: "status-active-attempt",
+        headSha: "a".repeat(40),
+        reservedAt: "2026-09-01T00:00:01.000Z",
+        taskScopeBaseline: [],
+        dirtySetBaseline: [],
+      }));
+      const mixed = unstarted({
+        executing_tasks: ["T2"],
+        tasks: [
+          { ...taskState({ id: "T2", wave: 1, status: "implemented" }), reserved_at: activeAuthority.reservedAt },
+          {
+            ...taskState({ id: "T3", wave: 1, status: "implemented" }),
+            active_implementation_attempt: activeAuthority,
+            reserved_at: activeAuthority.reservedAt,
+          },
+          taskState({ id: "T4", wave: 1, status: "pending" }),
+        ],
+      });
+
+      const mixedStatus = deriveLoomStatusFromParsedGraph({ ok: true, value: mixed }, statusDeps);
+      expect(mixedStatus.next.action).toMatchObject({
+        diagnostic: {
+          recovery: {
+            kind: "spawn-wave-implementation",
+            dispatches: [{ taskId: "T4", semanticAttempt: 1 }],
+          },
+        },
+      });
+      expect(mixedStatus.next.reasons.filter((entry) => entry.kind === "task-running")
+        .map((entry) => entry.taskId)).toEqual(["T2", "T3"]);
+
+      const waiting = unstarted({
+        executing_tasks: ["T2"],
+        tasks: [
+          { ...taskState({ id: "T2", wave: 1, status: "implemented" }), reserved_at: activeAuthority.reservedAt },
+          {
+            ...taskState({ id: "T3", wave: 1, status: "implemented" }),
+            active_implementation_attempt: activeAuthority,
+            reserved_at: activeAuthority.reservedAt,
+          },
+        ],
+      });
+      const waitingStatus = deriveLoomStatusFromParsedGraph({ ok: true, value: waiting }, statusDeps);
+      expect(waitingStatus.next.action).toMatchObject({
+        diagnostic: {
+          recovery: {
+            kind: "await-wave-implementation",
+            wave: 1,
+            activeTaskIds: ["T2", "T3"],
+          },
+        },
+      });
+      expect(waitingStatus.next.reasons.some(({ kind }) => kind === "wave-implementation-pending")).toBe(false);
+    });
+
+    it("reports completed or timestamp-less reservation authority as unavailable", () => {
+      const completed = unstarted({
+        executing_tasks: ["T1"],
+        tasks: [{
+          ...taskState({ id: "T1", wave: 1, status: "completed" }),
+          reserved_at: "2026-09-01T00:00:00.000Z",
+        }],
+      });
+      const completedStatus = deriveLoomStatusFromParsedGraph({ ok: true, value: completed }, statusDeps);
+      expect(Object.values(completedStatus.facts).every(({ kind }) => kind === "unavailable")).toBe(true);
+      expect(completedStatus.next.reasons[0]?.message).toContain(
+        "completed but retains implementation reservation authority",
+      );
+
+      const legacy = unstarted({
+        executing_tasks: ["T1"],
+        tasks: [taskState({ id: "T1", wave: 1, status: "pending" })],
+      });
+      const legacyStatus = deriveLoomStatusFromParsedGraph({ ok: true, value: legacy }, {
+        ...statusDeps,
+        implementationReservations: {
+          kind: "observed",
+          observedAtMs: Date.now(),
+          anyActiveForGraph: false,
+        },
+      });
+      expect(Object.values(legacyStatus.facts).every(({ kind }) => kind === "unavailable")).toBe(true);
+      expect(legacyStatus.next.reasons[0]?.message).toContain("timestamp-less legacy implementation authority");
+    });
+
+    it("re-dispatches only policy-expired reservations when roster observation proves no active Agent", () => {
+      const activeAuthority = authorityValue(createImplementationAttemptAuthority({
+        taskId: "T1",
+        wave: 1,
+        semanticAttempt: 1,
+        reservationId: "status-expired-attempt",
+        headSha: "a".repeat(40),
+        reservedAt: "2026-09-01T00:00:00.000Z",
+        taskScopeBaseline: [],
+        dirtySetBaseline: [],
+      }));
+      const graph = unstarted({
+        executing_tasks: ["T1"],
+        tasks: [{
+          ...taskState({ id: "T1", wave: 1, status: "implemented" }),
+          active_implementation_attempt: activeAuthority,
+          reserved_at: activeAuthority.reservedAt,
+        }],
+      });
+      const expired = {
+        ...statusDeps,
+        implementationReservations: {
+          kind: "observed" as const,
+          observedAtMs: Date.parse(activeAuthority.reservedAt) + 11 * 60_000,
+          anyActiveForGraph: false,
+        },
+      };
+      expect(deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, expired).next.action).toMatchObject({
+        diagnostic: {
+          recovery: {
+            kind: "spawn-wave-implementation",
+            dispatches: [{ taskId: "T1", semanticAttempt: 1 }],
+          },
+        },
+      });
+
+      const live = {
+        ...expired,
+        implementationReservations: { ...expired.implementationReservations, anyActiveForGraph: true },
+      };
+      expect(deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, live).next.action).toMatchObject({
+        diagnostic: { recovery: { kind: "await-wave-implementation", activeTaskIds: ["T1"] } },
+      });
+    });
+
+    function semanticReceipt(
+      attemptNumber: 1 | 2,
+      history: readonly ImplementationAttemptSettlementReceipt[],
+    ): ImplementationAttemptSettlementReceipt {
+      const authority = authorityValue(createImplementationAttemptAuthority({
+        taskId: "T1",
+        wave: 1,
+        semanticAttempt: attemptNumber,
+        reservationId: `status-attempt-${attemptNumber}`,
+        headSha: "a".repeat(40),
+        reservedAt: `2026-09-01T00:00:0${attemptNumber}.000Z`,
+        taskScopeBaseline: [],
+        dirtySetBaseline: [],
+      }));
+      const suiteAuthority = authorityValue(createTaskCompletionSuiteAuthority(authority));
+      const result = settleImplementationAttempt({
+        id: "T1",
+        status: "pending",
+        proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+        active_implementation_attempt: authority,
+        implementation_attempt_history: history,
+      }, authority, authority, {
+        schemaVersion: 1,
+        kind: "implementation-observed",
+        observedAt: `2026-09-01T00:01:0${attemptNumber}.000Z`,
+        evidence: {
+          taskCompleted: false,
+          testResult: { verdict: "trusted-pass" },
+          filesModified: [],
+          newTestsWritten: false,
+          newTestEvidence: "waived",
+        },
+        proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
+      }, {
+        schemaVersion: 1,
+        kind: "task-completion-suite-result",
+        implementationAuthorityDigest: suiteAuthority.implementationAuthorityDigest,
+        suiteDigest: suiteAuthority.suiteDigest,
+        checks: [{
+          checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
+          scope: "task",
+          outcome: { kind: "accepted", changedPaths: [] },
+        }],
+      });
+      if (!result.ok || result.value.kind === "ignored") throw new Error("status settlement fixture failed");
+      return result.value.receipt;
+    }
+
+    it("publishes the exact attempt-2 prompt appendix after semantic attempt 1", () => {
+      const retry = semanticReceipt(1, []);
+      const graph = unstarted({
+        tasks: [{
+          ...taskState({ id: "T1", wave: 1, status: "pending" }),
+          implementation_attempt_history: [retry],
+          failure_reason: `retry-required: ${retry.failureKinds.join(", ")}`,
+          retry_count: 1,
+        }],
+      });
+
+      const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
+
+      expect(status.next.action).toMatchObject({
+        diagnostic: {
+          retry: { eligible: true },
+          recovery: {
+            kind: "spawn-wave-implementation",
+            dispatches: [{
+              kind: "retry-implementation",
+              taskId: "T1",
+              semanticAttempt: 2,
+              promptAppendix: expect.stringContaining(retry.receiptId),
+            }],
+          },
+        },
+      });
+    });
+
+    it("reports terminal non-retryable escalation after semantic attempt 2", () => {
+      const retry = semanticReceipt(1, []);
+      const escalation = semanticReceipt(2, [retry]);
+      const graph = unstarted({
+        tasks: [{
+          ...taskState({ id: "T1", wave: 1, status: "pending" }),
+          implementation_attempt_history: [retry, escalation],
+          implementation_retry_protocol: 2,
+          implementation_retry_history_start: 0,
+          failure_reason: `escalation-required: ${escalation.failureKinds.join(", ")}`,
+          retry_count: 2,
+        }, taskState({ id: "T2", wave: 1, status: "pending" })],
+      });
+
+      const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
+
+      expect(status.next.action).toMatchObject({
+        diagnostic: {
+          kind: "implementation-escalation-required",
+          category: "semantic-attempts-exhausted",
+          retry: { eligible: false, consumesSemanticAttempt: false },
+          recovery: {
+            kind: "escalate-wave-implementation",
+            wave: 1,
+            tasks: [{ taskId: "T1", receiptId: escalation.receiptId }],
+          },
+        },
+      });
+      expect(status.next.reasons).toContainEqual(expect.objectContaining({
+        kind: "implementation-escalation-required",
+        taskId: "T1",
+      }));
     });
 
     it("asks for the Wave Gate once every Task in the Wave is implemented", () => {

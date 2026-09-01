@@ -30,39 +30,6 @@ import {
 import { repositoryContext } from "../utils/git";
 import { anyActiveSubagent } from "../machine";
 
-/**
- * Reservations no agent can still be serving.
- *
- * This registration commits `executing_tasks` during PreToolUse — before the
- * sibling PreToolUse gates (template substitution, agent model, agent skill)
- * have voted. When one of them denies the spawn, SubagentStart never fires, so
- * no SubagentStop ever arrives to clear the entry: the task is deadlocked
- * while owning its declared paths, taking every path-sharing sibling down with
- * it. A veto strands the reservation whatever the task's status was — wave
- * remediation re-spawns against `implemented` and `failed` tasks routinely —
- * so recovery cannot be limited to tasks still `pending`.
- *
- * A reservation is provably abandoned only when its task is not `completed`,
- * no subagent is active FOR THIS GRAPH, AND it has aged past the grace window.
- * All three matter: a `completed` task can never be re-executed;
- * `anyActiveSubagent` fails closed, so an unreadable roster or any live agent
- * on this graph releases nothing; and the grace window shields a freshly
- * committed reservation whose agent has not yet reached its SubagentStart
- * roster mark — without it, a parallel wave batch reclaims a live sibling that
- * is merely mid-startup (it has no roster entry, indistinguishable from a
- * vetoed spawn on that instant alone). See staleReservationsForRosterObservation.
- *
- * The graph scope is not a detail. SUBAGENT_DIR is shared by every project on
- * the machine, so a project-blind probe lets another repo's live agent — or
- * any stray roster file — veto recovery here indefinitely.
- */
-/**
- * Imperative shell: preflight every input against one state snapshot, capture
- * every baseline, then register the accepted batch in one locked update. A
- * blocked sibling therefore leaves no ghost execution state behind — and a
- * spawn denied by a SIBLING HOOK, which this registration cannot observe, is
- * reclaimed by `staleReservationsForRosterObservation` on the next attempt.
- */
 export type TaskExecutionRegistrationOutcome =
   | Readonly<{
       kind: "registered";
@@ -73,9 +40,12 @@ export type TaskExecutionRegistrationOutcome =
 class LockedRegistrationRefusal extends Error {}
 
 /**
- * Typed registration operation used by Pi. The Claude Hook wrapper below keeps
- * the historical HookResult API while intentionally discarding capabilities
- * that Claude correlates through its SubagentStart sidecar.
+ * Imperative shell: preflight one snapshot, capture baselines, then register
+ * the accepted batch in one locked update. A sibling-hook veto that occurs
+ * after registration becomes policy-eligible for exact reclamation only after
+ * the grace period and a qualifying graph-scoped roster observation; the
+ * policy does not prove process death. Pi consumes the returned authorities,
+ * while the Claude wrapper correlates them through SubagentStart sidecars.
  */
 export async function registerTaskExecutionBatch(
   spawns: readonly TaskExecutionSpawn[],
@@ -87,26 +57,25 @@ export async function registerTaskExecutionBatch(
       spawn.kind === "implementation",
   );
   if (inputs.length === 0) return { kind: "registered", authorities: Object.freeze([]) };
-  const statePath = taskGraphPath();
-  // Fail CLOSED on an unreadable graph: `existsSync` collapses EACCES/ELOOP/
-  // ENOTDIR/EIO into `false`, which would wave the whole implementation batch
-  // through with no ownership, staleness, or baseline check and no trace.
-  if (!pathExistsFailClosed(statePath)) return { kind: "registered", authorities: Object.freeze([]) };
-  // Past the fail-closed probe the graph is PRESENT-or-unprovable, so every
-  // remaining failure to read it is a refusal, never a pass: returning "allow"
-  // here is the same fail-open the probe above was introduced to close.
-  const manager = StateManager.fromPath(statePath);
-  if (!manager) {
-    return { kind: "block", message: `BLOCKED: task graph at ${statePath} could not be opened; refusing to spawn implementation tasks unchecked` };
-  }
-
+  let statePath = "<unresolved>";
+  let manager: StateManager;
   let state: TaskGraph;
   try {
+    statePath = taskGraphPath();
+    // Fail CLOSED on an unreadable graph: `existsSync` collapses EACCES/ELOOP/
+    // ENOTDIR/EIO into `false`, which would wave the whole implementation batch
+    // through with no ownership, staleness, or baseline check and no trace.
+    if (!pathExistsFailClosed(statePath)) return { kind: "registered", authorities: Object.freeze([]) };
+    const candidate = StateManager.fromPath(statePath);
+    if (candidate === null) {
+      return { kind: "block", message: `BLOCKED: task graph at ${statePath} disappeared during registration; refusing to spawn implementation tasks unchecked` };
+    }
+    manager = candidate;
     state = manager.load();
   } catch (error) {
     return {
       kind: "block",
-      message: `BLOCKED: cannot read the task graph at ${statePath}: ${error instanceof Error ? error.message : String(error)}`,
+      message: `BLOCKED: cannot establish task graph authority at ${statePath}: ${error instanceof Error ? error.message : String(error)}; refusing unchecked implementation spawn`,
     };
   }
   const bindings = parseImplementationTaskBindings(state, inputs);
@@ -195,6 +164,7 @@ export async function registerTaskExecutionBatch(
   }
   const authorityBatch = createTaskExecutionAuthorityBatch(
     state,
+    inputs,
     taskIds,
     reservationIds.flatMap((result) => result.ok ? [result.value] : []),
     repository.headSha,
@@ -240,20 +210,21 @@ export async function rollbackTaskExecutionRegistration(
   authorities: readonly ImplementationAttemptAuthority[],
 ): Promise<HookResult> {
   if (authorities.length === 0) return { kind: "allow" };
-  const statePath = taskGraphPath();
-  const manager = StateManager.fromPath(statePath);
-  if (manager === null) {
-    return { kind: "block", message: `BLOCKED: Cannot roll back implementation registration; task graph ${statePath} is unavailable.` };
-  }
-  const rolledBackAt = parseIsoInstant(new Date().toISOString(), "rollback instant");
-  if (!rolledBackAt.ok) return { kind: "block", message: `BLOCKED: ${rolledBackAt.error.errors.join("; ")}` };
+  let statePath = "<unresolved>";
   try {
+    statePath = taskGraphPath();
+    const manager = StateManager.fromPath(statePath);
+    if (manager === null) {
+      return { kind: "block", message: `BLOCKED: Cannot roll back implementation registration; task graph ${statePath} is unavailable.` };
+    }
+    const rolledBackAt = parseIsoInstant(new Date().toISOString(), "rollback instant");
+    if (!rolledBackAt.ok) return { kind: "block", message: `BLOCKED: ${rolledBackAt.error.errors.join("; ")}` };
     await manager.update((state) => rollbackTaskExecutionAuthorityBatch(state, authorities, rolledBackAt.value));
     return { kind: "allow" };
   } catch (error) {
     return {
       kind: "block",
-      message: `BLOCKED: Cannot roll back implementation registration: ${error instanceof Error ? error.message : String(error)}`,
+      message: `BLOCKED: Cannot roll back implementation registration at ${statePath}: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
 }

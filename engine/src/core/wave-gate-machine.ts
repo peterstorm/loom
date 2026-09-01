@@ -22,6 +22,7 @@ import type {
   WaveGateNextAction,
   WaveGateProtectedSnapshotBinding,
   WaveImplementationAction,
+  WaveImplementationDispatch,
   WaveImplementationRecovery,
   WaveCompletionResultObservation,
   WaveCompletionSuiteReadiness,
@@ -47,6 +48,8 @@ import {
   defaultVerificationManifest,
 } from "./verification-manifest";
 import { WAVE_REVIEW_AGENTS } from "./model-profiles";
+import { deriveImplementationRetryDisposition } from "./implementation-retry";
+import { staleReservationsForRosterObservation } from "./validate-task-execution";
 import {
   awaitUserAction,
   blockedAction,
@@ -704,6 +707,10 @@ export function checkLifecycleArtifacts(
     bound.map(({ lifecycle, machineFile }) => `     ${lifecycle.id}: ${machineFile}`).join("\n"));
 }
 
+export type ImplementationReservationStatusObservation =
+  | Readonly<{ kind: "observed"; observedAtMs: number; anyActiveForGraph: boolean }>
+  | Readonly<{ kind: "unavailable"; reason: string }>;
+
 export interface GateDeps {
   readonly loadPlanModels: (planFile: string | null | undefined) => PlanModelsSource;
   readonly filePresence: (path: string) => FilePresence;
@@ -716,6 +723,9 @@ export interface GateDeps {
   /** Shell-supplied persisted result observation, separate from workspace
    * authority so absence cannot be confused with an unreadable artifact. */
   readonly currentWaveCompletionResult?: WaveCompletionResultObservation;
+  /** Shell observation used only to make policy-expired reservations
+   * dispatchable again. Absence/unavailability keeps them active fail-closed. */
+  readonly implementationReservations?: ImplementationReservationStatusObservation;
 }
 
 function exactCompletionSuiteError(
@@ -2234,22 +2244,31 @@ function waveImplementationAction(
   message: string,
   recovery: WaveImplementationRecovery,
 ): WaveImplementationAction {
-  return canonicalRecord({
-    kind: "blocked",
-    runId: statusRunId,
-    diagnostic: canonicalRecord({
-      kind: "wave-gate-not-started",
-      category: "healthy-wave-unstarted",
-      runId: statusRunId,
-      message,
-      retry: canonicalRecord({
-        kind: "advance-wave-lifecycle",
-        eligible: true,
-        consumesSemanticAttempt: false,
-      }),
-      recovery,
-    }),
-  });
+  const common = canonicalRecord({ runId: statusRunId, message });
+  const diagnostic: WaveImplementationAction["diagnostic"] = recovery.kind === "escalate-wave-implementation"
+    ? canonicalRecord({
+        kind: "implementation-escalation-required",
+        category: "semantic-attempts-exhausted",
+        ...common,
+        retry: canonicalRecord({
+          kind: "advance-wave-lifecycle",
+          eligible: false,
+          consumesSemanticAttempt: false,
+        }),
+        recovery,
+      })
+    : canonicalRecord({
+        kind: "wave-gate-not-started",
+        category: "healthy-wave-unstarted",
+        ...common,
+        retry: canonicalRecord({
+          kind: "advance-wave-lifecycle",
+          eligible: true,
+          consumesSemanticAttempt: false,
+        }),
+        recovery,
+      });
+  return canonicalRecord({ kind: "blocked", runId: statusRunId, diagnostic });
 }
 
 /** Status-only recovery projection for a registered run whose durable lifecycle
@@ -2549,8 +2568,7 @@ function committedTerminalStatus(
  */
 function unstartedWaveStatus(
   graph: TaskGraph,
-  currentWorkspace: WaveWorkspaceObservation | undefined,
-  currentResult: WaveCompletionResultObservation | undefined,
+  deps: GateDeps,
 ): LoomStatus | null {
   if (graph.active_wave_gate !== undefined || graph.current_wave === undefined) return null;
   const wave = graph.current_wave;
@@ -2561,19 +2579,142 @@ function unstartedWaveStatus(
   const waveTasks = graph.tasks.filter((task) => task.wave === wave);
   if (waveTasks.length === 0) return null;
 
-  const outstanding = waveTasks.filter((task) => task.status !== "implemented" && task.status !== "completed");
-  const recovery: WaveImplementationRecovery = outstanding.length === 0
-    ? canonicalRecord({ kind: "start-wave-gate", wave })
-    : canonicalRecord({
-        kind: "spawn-wave-implementation",
-        wave,
-        pendingTaskIds: Object.freeze(outstanding.map((task) => task.id)) as NonEmpty<string>,
-      });
-  const message = outstanding.length === 0
-    ? `Wave ${wave} implementation is complete and no Wave Gate run is registered; start the Wave Gate`
-    : `Wave ${wave} implementation is in progress; ${outstanding.length} task(s) have not reached implemented`;
-  const reasons: StatusReason[] = outstanding.map((task) =>
-    reason("wave-implementation-pending", `${task.id} has not reached implemented`, task.id));
+  const executing = new Set(graph.executing_tasks ?? []);
+  const completedReservation = waveTasks.find((task) =>
+    task.status === "completed" &&
+    (executing.has(task.id) || task.active_implementation_attempt !== undefined));
+  if (completedReservation !== undefined) {
+    return deriveUnavailableLoomStatus(Object.freeze([
+      reason(
+        "authority-contradiction",
+        `${completedReservation.id} is completed but retains implementation reservation authority; repair the Task Graph`,
+        completedReservation.id,
+      ),
+    ]) as NonEmpty<StatusReason>);
+  }
+  const outstanding = waveTasks.filter((task) =>
+    (task.status !== "implemented" && task.status !== "completed") ||
+    executing.has(task.id) || task.active_implementation_attempt !== undefined);
+  const observation = deps.implementationReservations;
+  const reservationCandidates = outstanding.filter((task) =>
+    executing.has(task.id) || task.active_implementation_attempt !== undefined);
+  const nonCurrentReservation = reservationCandidates.find((task) =>
+    task.reserved_at === undefined || Number.isNaN(Date.parse(task.reserved_at)));
+  if (nonCurrentReservation !== undefined) {
+    return deriveUnavailableLoomStatus(Object.freeze([
+      reason(
+        "authority-contradiction",
+        `${nonCurrentReservation.id} has timestamp-less legacy implementation authority that canonical status cannot reclaim; repair or migrate the Task Graph`,
+        nonCurrentReservation.id,
+      ),
+    ]) as NonEmpty<StatusReason>);
+  }
+  if (reservationCandidates.length > 0 && observation?.kind === "unavailable") {
+    return deriveUnavailableLoomStatus(Object.freeze([
+      unavailableStatusReason(
+        `cannot determine implementation reservation liveness: ${observation.reason}`,
+      ),
+    ]) as NonEmpty<StatusReason>);
+  }
+  const reclaimable = observation?.kind === "observed"
+    ? staleReservationsForRosterObservation(
+        graph,
+        { kind: "at-registration", anyActiveForGraph: observation.anyActiveForGraph },
+        observation.observedAtMs,
+      )
+    : new Set<string>();
+  const active = outstanding.filter((task) =>
+    !reclaimable.has(task.id) &&
+    (executing.has(task.id) || task.active_implementation_attempt !== undefined));
+  const activeTaskIds = new Set(active.map((task) => task.id));
+  const dispositions = outstanding.map((task) => ({
+    task,
+    disposition: deriveImplementationRetryDisposition(task),
+  }));
+  const invalid = dispositions.find(({ disposition }) => disposition.kind === "invalid");
+  if (invalid?.disposition.kind === "invalid") {
+    return deriveUnavailableLoomStatus(Object.freeze([
+      reason(
+        "authority-contradiction",
+        `${invalid.task.id} has invalid implementation retry authority: ${invalid.disposition.errors.join("; ")}`,
+        invalid.task.id,
+      ),
+    ]) as NonEmpty<StatusReason>);
+  }
+  const escalated = dispositions.flatMap(({ task, disposition }) =>
+    disposition.kind === "escalated"
+      ? [canonicalRecord({
+          taskId: task.id,
+          receiptId: disposition.receiptId,
+          failureKinds: disposition.failureKinds as NonEmpty<string>,
+        })]
+      : []);
+  const dispatches = dispositions.flatMap(({ task, disposition }): readonly WaveImplementationDispatch[] => {
+    if (activeTaskIds.has(task.id)) return [];
+    if (disposition.kind === "initial") {
+      return [canonicalRecord({
+        kind: "initial-implementation",
+        taskId: task.id,
+        semanticAttempt: 1,
+        promptAppendix: null,
+      })];
+    }
+    if (disposition.kind === "retry") {
+      return [canonicalRecord({
+        kind: "retry-implementation",
+        taskId: task.id,
+        semanticAttempt: 2,
+        promptAppendix: disposition.promptAppendix,
+      })];
+    }
+    return [];
+  });
+  let recovery: WaveImplementationRecovery;
+  let message: string;
+  if (outstanding.length === 0) {
+    recovery = canonicalRecord({ kind: "start-wave-gate", wave });
+    message = `Wave ${wave} implementation is complete and no Wave Gate run is registered; start the Wave Gate`;
+  } else if (escalated.length > 0) {
+    recovery = canonicalRecord({
+      kind: "escalate-wave-implementation",
+      wave,
+      tasks: Object.freeze(escalated) as NonEmpty<(typeof escalated)[number]>,
+    });
+    message = `Wave ${wave} requires implementation escalation; ${escalated.length} task(s) exhausted semantic attempt 2`;
+  } else if (dispatches.length > 0) {
+    recovery = canonicalRecord({
+      kind: "spawn-wave-implementation",
+      wave,
+      dispatches: Object.freeze(dispatches) as NonEmpty<WaveImplementationDispatch>,
+    });
+    message = `Wave ${wave} implementation is in progress; ${dispatches.length} task(s) are ready to dispatch` +
+      (active.length === 0 ? "" : ` and ${active.length} task(s) remain active`);
+  } else if (active.length > 0) {
+    recovery = canonicalRecord({
+      kind: "await-wave-implementation",
+      wave,
+      activeTaskIds: Object.freeze(active.map((task) => task.id)) as NonEmpty<string>,
+    });
+    message = `Wave ${wave} implementation is in progress; wait for ${active.length} active task(s)`;
+  } else {
+    return deriveUnavailableLoomStatus(Object.freeze([
+      reason("authority-contradiction", `Wave ${wave} has outstanding Tasks but no legal implementation recovery`),
+    ]) as NonEmpty<StatusReason>);
+  }
+  const reasons: StatusReason[] = outstanding.flatMap((task) =>
+    task.status === "implemented"
+      ? []
+      : [reason("wave-implementation-pending", `${task.id} has not reached implemented`, task.id)]);
+  for (const task of active) {
+    reasons.push(reason("task-running", `${task.id} already has active implementation authority`, task.id));
+  }
+  for (const task of escalated) {
+    reasons.push(reason(
+      "implementation-escalation-required",
+      `${task.taskId} exhausted attempt 2: ${task.failureKinds.join(", ")}`,
+      task.taskId,
+    ));
+  }
   reasons.push(reason("wave-gate-not-started", message));
 
   return canonicalRecord({
@@ -2581,7 +2722,7 @@ function unstartedWaveStatus(
     facts: waveScopedStatusFacts(graph, wave, canonicalRecord({
       kind: "ineligible",
       failedPrerequisites: Object.freeze([message]) as NonEmpty<string>,
-    }), currentWorkspace, currentResult),
+    }), deps.currentWaveWorkspace, deps.currentWaveCompletionResult),
     next: canonicalRecord({
       action: waveImplementationAction(message, recovery),
       reasons: Object.freeze(reasons) as NonEmpty<StatusReason>,
@@ -2724,11 +2865,7 @@ export function deriveLoomStatusFromParsedGraph(
   if (committed !== null) return committed;
   // Before the readiness path, which requires a registration: an execute Wave
   // legitimately has none for its whole implementation span.
-  const unstarted = unstartedWaveStatus(
-    parsed.value,
-    deps.currentWaveWorkspace,
-    deps.currentWaveCompletionResult,
-  );
+  const unstarted = unstartedWaveStatus(parsed.value, deps);
   if (unstarted !== null) return unstarted;
   if (lifecycleProof === null) {
     const projected = projectedAdvisoryStatus(parsed.value, deps, runDirectory);

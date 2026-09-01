@@ -11,7 +11,9 @@ import type {
 import type {
   ImplementationAttemptAuthority,
   ImplementationAttemptSettlementReceipt,
+  ImplementationSettlementReceiptId,
 } from "./core/implementation-completion";
+import type { ImplementationAttemptContext } from "./core/implementation-retry";
 import type { StoredVerificationPolicy } from "./core/verification-policy";
 import type { DeclaredArtifactBaseline } from "./core/artifact-baseline";
 import type { IssuedReviewPacketRegistration } from "./core/review-packet";
@@ -503,17 +505,22 @@ interface TaskCommonMetadataBase {
    *  starts. Proof compares current bytes to this baseline; transcript tool
    *  calls remain lint targets and cannot vouch that a change occurred. */
   readonly artifact_baseline?: readonly DeclaredArtifactBaseline[];
-  /** Current implementation-attempt fields are compatibility-optional on the
-   * shared metadata; StateManager proves their all-or-none digest lockstep. */
+  /** Active attempt authority remains compatibility-optional on shared metadata.
+   * StateManager proves authority/baseline/reservation lockstep; historical
+   * attempt 1 may omit context, but semantic attempt 2 may not. */
   readonly active_implementation_attempt?: ImplementationAttemptAuthority;
+  /** Exact prompt/retry authority frozen before the active Agent dispatch.
+   * Unversioned historical attempts may omit it; every protocol-2 registration requires it. */
+  readonly active_implementation_context?: ImplementationAttemptContext;
   readonly attempt_artifact_baseline?: readonly DeclaredArtifactBaseline[];
   readonly attempt_repository_baseline?: readonly DeclaredArtifactBaseline[];
   /** First repository boundary retained until an exact attempt is accepted.
    * Fresh attempts bind to this boundary instead of snapshotting unresolved
    * foreign bytes as their new starting state. */
   readonly repository_baseline?: readonly DeclaredArtifactBaseline[];
-  /** Parser-attributed out-of-scope paths still different from the retained
-   * repository boundary. Sibling dirty paths never enter this set. */
+  /** Repository-observed unowned paths still different from the retained
+   * repository boundary, including paths omitted from transcript evidence.
+   * Sibling-owned dirty paths never enter this set. */
   readonly unresolved_repository_paths?: readonly string[];
   readonly reserved_at?: string;
   readonly legacy_execution_reservation?: true;
@@ -531,6 +538,11 @@ interface TaskCommonMetadataBase {
   readonly start_sha?: string;
   readonly failure_reason?: string;
   readonly retry_count?: number;
+  /** Strict bounded-retry lineage marker. Histories without protocol-2 metadata
+   * use the read-only Slice-3 compatibility projection until their next engine registration. */
+  readonly implementation_retry_protocol?: 2;
+  readonly implementation_retry_history_start?: number;
+  readonly implementation_retry_predecessor_receipt_id?: ImplementationSettlementReceiptId;
   /** Immutable exact receipts; append-only settlement audit in wire order. */
   readonly implementation_attempt_history?: readonly ImplementationAttemptSettlementReceipt[];
 }
@@ -738,6 +750,7 @@ export type StatusReasonKind =
   | "blocked-diagnostic"
   | "engine-resume-required"
   | "wave-implementation-pending"
+  | "implementation-escalation-required"
   | "wave-gate-not-started"
   | "run-complete"
   | "completion-prerequisite-failed"
@@ -931,37 +944,72 @@ export type EngineResumeAction = Readonly<{
   diagnostic: EngineResumeDiagnostic;
 }>;
 
-/** What the orchestrator owes to leave the implementation window. Spawning the
- * outstanding implementation agents and starting the Wave Gate are the two
- * exhaustive moves, so the recovery names the one currently owed rather than
- * leaving a caller to re-derive it from the task counts. */
+/** One exact implementation spawn instruction derived from protected history. */
+export type WaveImplementationDispatch =
+  | Readonly<{
+      kind: "initial-implementation";
+      taskId: string;
+      semanticAttempt: 1;
+      promptAppendix: null;
+    }>
+  | Readonly<{
+      kind: "retry-implementation";
+      taskId: string;
+      semanticAttempt: 2;
+      promptAppendix: string;
+    }>;
+
+/** What the orchestrator owes to leave the implementation window. */
 export type WaveImplementationRecovery =
   | Readonly<{
       kind: "spawn-wave-implementation";
       wave: number;
-      pendingTaskIds: OrchestrationNonEmpty<string>;
+      dispatches: OrchestrationNonEmpty<WaveImplementationDispatch>;
+    }>
+  | Readonly<{
+      kind: "await-wave-implementation";
+      wave: number;
+      activeTaskIds: OrchestrationNonEmpty<string>;
+    }>
+  | Readonly<{
+      kind: "escalate-wave-implementation";
+      wave: number;
+      tasks: OrchestrationNonEmpty<Readonly<{
+        taskId: string;
+        receiptId: string;
+        failureKinds: OrchestrationNonEmpty<string>;
+      }>>;
     }>
   | Readonly<{ kind: "start-wave-gate"; wave: number }>;
 
 /** An execute Wave holds no Wave Gate registration between entering the Wave
- * and starting its gate: completion retires the outgoing registration in the
- * same commit that advances `current_wave`, so this implementation window is
- * the ordinary state for most of a Wave's life rather than an authority
- * failure. Like engine resume it keeps one of the fixed four transport tags
- * (`blocked`) while refusing to pretend protected authority is malformed or
- * the lifecycle terminal. */
-export type WaveImplementationDiagnostic = Readonly<{
-  kind: "wave-gate-not-started";
-  category: "healthy-wave-unstarted";
-  runId: OrchestrationRunId;
-  message: string;
-  retry: Readonly<{
-    kind: "advance-wave-lifecycle";
-    eligible: true;
-    consumesSemanticAttempt: false;
-  }>;
-  recovery: WaveImplementationRecovery;
-}>;
+ * and starting its gate. Healthy implementation work is retryable; exhausted
+ * attempt-2 authority is a separate terminal escalation arm. */
+export type WaveImplementationDiagnostic =
+  | Readonly<{
+      kind: "wave-gate-not-started";
+      category: "healthy-wave-unstarted";
+      runId: OrchestrationRunId;
+      message: string;
+      retry: Readonly<{
+        kind: "advance-wave-lifecycle";
+        eligible: true;
+        consumesSemanticAttempt: false;
+      }>;
+      recovery: Exclude<WaveImplementationRecovery, { kind: "escalate-wave-implementation" }>;
+    }>
+  | Readonly<{
+      kind: "implementation-escalation-required";
+      category: "semantic-attempts-exhausted";
+      runId: OrchestrationRunId;
+      message: string;
+      retry: Readonly<{
+        kind: "advance-wave-lifecycle";
+        eligible: false;
+        consumesSemanticAttempt: false;
+      }>;
+      recovery: Extract<WaveImplementationRecovery, { kind: "escalate-wave-implementation" }>;
+    }>;
 
 export type WaveImplementationAction = Readonly<{
   kind: "blocked";
@@ -970,9 +1018,9 @@ export type WaveImplementationAction = Readonly<{
 }>;
 
 export type NextActionDecision = Readonly<{
-  /** Exactly one of the fixed four transport tags. Engine resume and the
-   * implementation window are typed, retryable blocked actions rather than
-   * terminal invalid authority. */
+  /** Exactly one of the fixed four transport tags. `blocked` is a transport
+   * tag: engine resume and healthy implementation actions are retryable, while
+   * implementation escalation is terminal with `retry.eligible: false`. */
   action: WaveGateNextAction["action"] | EngineResumeAction | WaveImplementationAction;
   reasons: OrchestrationNonEmpty<StatusReason>;
 }>;

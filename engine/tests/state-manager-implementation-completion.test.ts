@@ -14,6 +14,11 @@ import {
   evaluateProofObligations,
 } from "../src/core/proof-obligations";
 import { parseTaskGraph } from "../src/state-manager";
+import {
+  authorizeImplementationSpawn,
+  createImplementationAttemptContext,
+  deriveImplementationRetryDisposition,
+} from "../src/core/implementation-retry";
 
 function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T {
   if (!result.ok) throw new Error("fixture parse failed");
@@ -29,17 +34,26 @@ const repositoryBaseline = [{
   snapshot: { kind: "sha256", digest: "b".repeat(64) },
 }];
 
-function authority(reservationId = "state-reservation-1"): ImplementationAttemptAuthority {
+function authority(
+  reservationId = "state-reservation-1",
+  semanticAttempt: 1 | 2 = 1,
+): ImplementationAttemptAuthority {
   return valueOf(createImplementationAttemptAuthority({
     taskId: "T1",
     wave: 1,
-    semanticAttempt: 1,
+    semanticAttempt,
     reservationId,
     headSha: "c".repeat(40),
     reservedAt: "2026-08-23T00:00:00.000Z",
     taskScopeBaseline: attemptBaseline,
     dirtySetBaseline: repositoryBaseline,
   }));
+}
+
+function initialContext(active: ImplementationAttemptAuthority, prompt = "Task ID: T1") {
+  const admission = authorizeImplementationSpawn({ id: "T1" }, prompt);
+  if (!admission.ok) throw new Error(admission.error);
+  return createImplementationAttemptContext({ authority: active, prompt, admission });
 }
 
 const pendingProof = () => derivePendingTaskProof({
@@ -76,14 +90,14 @@ function errorOf(raw: Record<string, unknown>): string {
   return parsed.error;
 }
 
-function receiptFor(attempt: ImplementationAttemptAuthority) {
+function receiptFor(attempt: ImplementationAttemptAuthority, taskCompleted = true) {
   const suite = valueOf(createTaskCompletionSuiteAuthority(attempt));
   const observation = valueOf(parseImplementationObservation({
     schemaVersion: 1,
     kind: "implementation-observed",
     observedAt: "2026-08-23T00:01:00.000Z",
     evidence: {
-      taskCompleted: true,
+      taskCompleted,
       filesModified: ["engine/src/a.ts"],
     },
     proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
@@ -111,7 +125,37 @@ function receiptFor(attempt: ImplementationAttemptAuthority) {
       }],
     },
   );
-  if (!settled.ok || settled.value.kind !== "implemented") throw new Error("fixture must implement");
+  if (!settled.ok || settled.value.kind === "ignored") throw new Error("fixture must settle");
+  return settled.value.receipt;
+}
+
+function infrastructureReceiptFor(attempt: ImplementationAttemptAuthority) {
+  const suite = valueOf(createTaskCompletionSuiteAuthority(attempt));
+  const settled = settleImplementationAttempt({
+    id: "T1",
+    status: "pending",
+    proof: pendingProof(),
+    active_implementation_attempt: attempt,
+    implementation_attempt_history: [],
+  }, attempt, attempt, {
+    schemaVersion: 1,
+    kind: "implementation-observation-unavailable",
+    observedAt: "2026-08-23T00:02:00.000Z",
+    failure: { kind: "observation-unavailable", message: "legacy transport failure" },
+  }, {
+    schemaVersion: 1,
+    kind: "task-completion-suite-result",
+    implementationAuthorityDigest: suite.implementationAuthorityDigest,
+    suiteDigest: suite.suiteDigest,
+    checks: [{
+      checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
+      scope: "task",
+      outcome: { kind: "accepted", changedPaths: [] },
+    }],
+  });
+  if (!settled.ok || settled.value.kind !== "infrastructure-blocked") {
+    throw new Error("legacy infrastructure receipt fixture failed");
+  }
   return settled.value.receipt;
 }
 
@@ -174,13 +218,15 @@ describe("Task lifecycle migration", () => {
 });
 
 describe("Task attempt authority StateManager lockstep", () => {
-  it("parses and freezes exact active authority, baselines, and history", () => {
+  it("parses and freezes exact active authority, context, baselines, and history", () => {
     const active = authority();
+    const context = initialContext(active);
     const receipt = receiptFor(authority("settled-reservation"));
     const parsed = parseTaskGraph(graph({
       ...baseTask(),
       proof: pendingProof(),
       active_implementation_attempt: active,
+      active_implementation_context: context,
       attempt_artifact_baseline: attemptBaseline,
       attempt_repository_baseline: repositoryBaseline,
       reserved_at: active.reservedAt,
@@ -190,10 +236,139 @@ describe("Task attempt authority StateManager lockstep", () => {
     if (!parsed.ok) return;
     const task = parsed.value.tasks[0];
     expect(task?.active_implementation_attempt).toEqual(active);
+    expect(task?.active_implementation_context).toEqual(context);
     expect(task?.implementation_attempt_history).toEqual([receipt]);
     expect(task?.legacy_execution_reservation).toBeUndefined();
     expect(Object.isFrozen(task?.active_implementation_attempt)).toBe(true);
+    expect(Object.isFrozen(task?.active_implementation_context)).toBe(true);
     expect(Object.isFrozen(task?.implementation_attempt_history)).toBe(true);
+  });
+
+  it("rejects orphaned and digest-tampered active attempt context", () => {
+    const active = authority();
+    const context = initialContext(active);
+    expect(errorOf(graph({
+      ...baseTask(),
+      proof: pendingProof(),
+      active_implementation_context: context,
+    }))).toContain("requires active_implementation_attempt");
+
+    const valid = {
+      ...baseTask(),
+      proof: pendingProof(),
+      active_implementation_attempt: active,
+      active_implementation_context: context,
+      attempt_artifact_baseline: attemptBaseline,
+      attempt_repository_baseline: repositoryBaseline,
+      reserved_at: active.reservedAt,
+    };
+    expect(errorOf(graph({
+      ...valid,
+      active_implementation_context: { ...context, authorityDigest: "f".repeat(64) },
+    }, { executing_tasks: ["T1"] }))).toContain("contextDigest does not match");
+    expect(errorOf(graph({
+      ...valid,
+      active_implementation_context: { ...context, contextDigest: "f".repeat(64) },
+    }, { executing_tasks: ["T1"] }))).toContain("contextDigest does not match");
+    const foreign = authority("foreign-context-authority");
+    expect(errorOf(graph({
+      ...valid,
+      active_implementation_context: initialContext(foreign),
+    }, { executing_tasks: ["T1"] }))).toContain("must match active_implementation_attempt");
+  });
+
+  it("rejects a digest-valid attempt-2 context bound to a stale predecessor receipt", () => {
+    const staleRetry = receiptFor(authority("stale-retry-source"), false);
+    const currentRetry = receiptFor(authority("current-retry-source"), false);
+    const active = authority("retry-active-stale-context", 2);
+    const retry = deriveImplementationRetryDisposition({
+      id: "T1",
+      implementation_attempt_history: [staleRetry],
+    });
+    if (retry.kind !== "retry") throw new Error("retry fixture failed");
+    const prompt = `Task ID: T1\n${retry.promptAppendix}`;
+    const staleAdmission = authorizeImplementationSpawn({
+      id: "T1",
+      implementation_attempt_history: [staleRetry],
+    }, prompt);
+    if (!staleAdmission.ok) throw new Error(staleAdmission.error);
+    const staleContext = createImplementationAttemptContext({ authority: active, prompt, admission: staleAdmission });
+
+    expect(errorOf(graph({
+      ...baseTask(),
+      proof: pendingProof(),
+      active_implementation_attempt: active,
+      active_implementation_context: staleContext,
+      attempt_artifact_baseline: attemptBaseline,
+      attempt_repository_baseline: repositoryBaseline,
+      reserved_at: active.reservedAt,
+      implementation_attempt_history: [currentRetry],
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
+    }, { executing_tasks: ["T1"] }))).toContain("active retry context must match the current retry-required receipt");
+  });
+
+  it("requires exact protocol-2 lineage and active context for semantic attempt 2", () => {
+    const retry = receiptFor(authority("retry-source"), false);
+    const active = authority("retry-active", 2);
+    expect(errorOf(graph({
+      ...baseTask(),
+      proof: pendingProof(),
+      active_implementation_attempt: active,
+      attempt_artifact_baseline: attemptBaseline,
+      attempt_repository_baseline: repositoryBaseline,
+      reserved_at: active.reservedAt,
+    }, { executing_tasks: ["T1"] }))).toContain("semantic attempt 2 requires protocol-2 retry lineage");
+
+    expect(errorOf(graph({
+      ...baseTask(),
+      proof: pendingProof(),
+      active_implementation_attempt: active,
+      attempt_artifact_baseline: attemptBaseline,
+      attempt_repository_baseline: repositoryBaseline,
+      reserved_at: active.reservedAt,
+      implementation_attempt_history: [retry],
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
+    }, { executing_tasks: ["T1"] }))).toContain("protocol-2 active implementation requires active_implementation_context");
+
+    const initial = authority("protocol-two-initial", 1);
+    expect(errorOf(graph({
+      ...baseTask(),
+      proof: pendingProof(),
+      active_implementation_attempt: initial,
+      attempt_artifact_baseline: attemptBaseline,
+      attempt_repository_baseline: repositoryBaseline,
+      reserved_at: initial.reservedAt,
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
+    }, { executing_tasks: ["T1"] }))).toContain(
+      "protocol-2 active implementation requires active_implementation_context",
+    );
+  });
+
+  it("loads pre-protocol Slice-3 attempt-1 histories without rewriting receipts", () => {
+    const retry = receiptFor(authority("legacy-retry"), false);
+    const implemented = receiptFor(authority("legacy-implemented"), true);
+    const infrastructure = infrastructureReceiptFor(authority("legacy-infrastructure"));
+    const repeatedRetry = receiptFor(authority("legacy-repeated-retry"), false);
+
+    for (const history of [
+      [retry, implemented],
+      [retry, infrastructure],
+      [retry, repeatedRetry],
+    ]) {
+      const parsed = parseTaskGraph(graph({
+        ...baseTask(),
+        proof: pendingProof(),
+        implementation_attempt_history: history,
+      }));
+      expect(parsed.ok).toBe(true);
+      if (parsed.ok) {
+        expect(parsed.value.tasks[0]?.implementation_attempt_history).toEqual(history);
+        expect(parsed.value.tasks[0]?.implementation_retry_protocol).toBeUndefined();
+      }
+    }
   });
 
   it("rejects active modern authority on the legacy-missing-Proof lifecycle", () => {

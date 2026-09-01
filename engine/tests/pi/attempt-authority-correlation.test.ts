@@ -8,6 +8,10 @@ import {
 import { taskFixture } from "../fixtures/task-lifecycle";
 import type { TaskGraph } from "../../src/types";
 import { parseTaskGraph, type ParsedTaskGraph } from "../../src/state-manager";
+import {
+  authorizeImplementationSpawn,
+  createImplementationAttemptContext,
+} from "../../src/core/implementation-retry";
 
 function authority(reservation: string) {
   const instant = parseIsoInstant("2026-08-24T00:00:00.000Z");
@@ -20,6 +24,12 @@ function authority(reservation: string) {
   });
   if (!created.ok) throw new Error(created.error.errors.join("; "));
   return created.value;
+}
+
+function initialContext(attempt: ReturnType<typeof authority>, prompt: string) {
+  const admission = authorizeImplementationSpawn({ id: "T1" }, prompt);
+  if (!admission.ok) throw new Error(admission.error);
+  return createImplementationAttemptContext({ authority: attempt, prompt, admission });
 }
 
 function parsedGraph(graph: TaskGraph): ParsedTaskGraph {
@@ -48,6 +58,7 @@ function store(initial: TaskGraph): TaskGraphStore & { current(): TaskGraph } {
 describe("Pi exact implementation authority correlation", () => {
   it("settles an exact failed result with a non-consuming infrastructure receipt", async () => {
     const attempt = authority("pi-failed-attempt");
+    const context = initialContext(attempt, "Task ID: T1");
     const graph: TaskGraph = {
       current_phase: "execute",
       phase_artifacts: {},
@@ -60,6 +71,7 @@ describe("Pi exact implementation authority correlation", () => {
         id: "T1", description: "implementation", agent: "code-implementer-agent",
         wave: 1, status: "pending", depends_on: [], file_list: [],
         active_implementation_attempt: attempt,
+        active_implementation_context: context,
         artifact_baseline: [],
         attempt_artifact_baseline: [],
         attempt_repository_baseline: [],
@@ -99,11 +111,13 @@ describe("Pi exact implementation authority correlation", () => {
       }],
     });
     expect(fake.current().tasks[0]?.active_implementation_attempt).toBeUndefined();
+    expect(fake.current().tasks[0]?.active_implementation_context).toBeUndefined();
   });
 
   it("a late failed result cannot release a newer active attempt sharing the Task id", async () => {
     const oldAttempt = authority("pi-old-attempt");
     const replacement = authority("pi-replacement-attempt");
+    const replacementContext = initialContext(replacement, "Task ID: T1 replacement");
     const graph: TaskGraph = {
       current_phase: "execute",
       phase_artifacts: {},
@@ -116,6 +130,7 @@ describe("Pi exact implementation authority correlation", () => {
         id: "T1", description: "implementation", agent: "code-implementer-agent",
         wave: 1, status: "pending", depends_on: [], file_list: [],
         active_implementation_attempt: replacement,
+        active_implementation_context: replacementContext,
         attempt_artifact_baseline: [],
         attempt_repository_baseline: [],
         reserved_at: replacement.reservedAt,
@@ -147,5 +162,6 @@ describe("Pi exact implementation authority correlation", () => {
     expect(fake.current()).toEqual(parsedGraph(graph));
     expect(fake.current().executing_tasks).toEqual(["T1"]);
     expect(fake.current().tasks[0]?.active_implementation_attempt).toEqual(replacement);
+    expect(fake.current().tasks[0]?.active_implementation_context).toEqual(replacementContext);
   });
 });

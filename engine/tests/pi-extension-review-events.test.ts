@@ -6,7 +6,16 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { canonicalTempDir } from "./fixtures/canonical-temp-dir";
 import { evaluateTaskProof } from "../src/core/proof-obligations";
-import { createImplementationAttemptAuthority } from "../src/core/implementation-completion";
+import {
+  createImplementationAttemptAuthority,
+  type ImplementationAttemptAuthority,
+} from "../src/core/implementation-completion";
+import {
+  authorizeImplementationSpawn,
+  createImplementationAttemptContext,
+  deriveImplementationRetryDisposition,
+} from "../src/core/implementation-retry";
+import type { DeclaredArtifactBaseline } from "../src/core/artifact-baseline";
 import type { AgentRequestAuthority } from "../src/core/orchestration-contract";
 import { fsSessionRegistry, TASK_GRAPH_POINTER_LEASES_SUFFIX } from "../src/machine";
 import { openRunDirectory, type RunDirHandle } from "../src/orchestration/run-directory-handle";
@@ -145,6 +154,39 @@ const specCheckGraph = (overrides: Record<string, unknown> = {}) => {
     },
   };
 };
+
+function replacementAttemptContext(
+  task: Readonly<{
+    active_implementation_attempt: ImplementationAttemptAuthority;
+    attempt_artifact_baseline: readonly DeclaredArtifactBaseline[];
+    attempt_repository_baseline: readonly DeclaredArtifactBaseline[];
+  }>,
+  reservationId: string,
+  reservedAt: string,
+  prompt: string,
+) {
+  const replacement = createImplementationAttemptAuthority({
+    taskId: "T1",
+    wave: 1,
+    semanticAttempt: 1,
+    reservationId,
+    headSha: task.active_implementation_attempt.headSha,
+    reservedAt,
+    taskScopeBaseline: task.attempt_artifact_baseline,
+    dirtySetBaseline: task.attempt_repository_baseline,
+  });
+  if (!replacement.ok) throw new Error(replacement.error.errors.join("; "));
+  const admission = authorizeImplementationSpawn({ id: "T1" }, prompt);
+  if (!admission.ok) throw new Error(admission.error);
+  return {
+    authority: replacement.value,
+    context: createImplementationAttemptContext({
+      authority: replacement.value,
+      prompt,
+      admission,
+    }),
+  };
+}
 
 function writeState(state: unknown): void {
   try {
@@ -1414,7 +1456,7 @@ describe("Pi extension review tool_result integration", () => {
       await status?.handler({}, {
         ui: { notify: (message: string, level: string) => notifications.push({ message, level }) },
       });
-      expect(notifications).toContainEqual({ message: expect.stringContaining("Error: ELOOP"), level: "error" });
+      expect(notifications).toContainEqual({ message: expect.stringContaining("ELOOP"), level: "error" });
       expect(notifications).not.toContainEqual({ message: "No active loom orchestration", level: "info" });
     } finally {
       stderr.mockRestore();
@@ -1423,12 +1465,27 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
-  it("renders non-Error loom-status failures without losing their value", async () => {
+  it("renders canonical retry-capable LoomStatus through the Pi command", async () => {
     const pi = await extension();
-    const { StateManager } = await import("../src/state-manager");
-    const load = vi.spyOn(StateManager.prototype, "load").mockImplementationOnce(() => {
-      throw "string status failure";
+    const notifications: Array<{ message: string; level: string }> = [];
+
+    await pi.commands.get("loom-status")?.handler({}, {
+      ui: { notify: (message: string, level: string) => notifications.push({ message, level }) },
     });
+
+    expect(notifications).toContainEqual({
+      level: "info",
+      message: expect.stringContaining("Loom Status v1"),
+    });
+    expect(notifications[0]?.message).toContain("nextActionPayload");
+    expect(notifications[0]?.message).toContain("spawn-wave-implementation");
+  });
+
+  it("renders unexpected non-Error canonical-status failures without losing their value", async () => {
+    const orchestration = await import("../src/handlers/helpers/orchestration");
+    const statusFailure = vi.spyOn(orchestration, "currentOrchestrationStatus")
+      .mockRejectedValueOnce("string status failure");
+    const pi = await extension();
     const notifications: Array<{ message: string; level: string }> = [];
     try {
       const status = pi.commands.get("loom-status");
@@ -1438,7 +1495,7 @@ describe("Pi extension review tool_result integration", () => {
       });
       expect(notifications).toContainEqual({ message: "Error: string status failure", level: "error" });
     } finally {
-      load.mockRestore();
+      statusFailure.mockRestore();
     }
   });
 
@@ -3380,6 +3437,102 @@ describe("Pi extension review tool_result integration", () => {
     expect(JSON.parse(readFileSync(statePath, "utf-8"))).toEqual(before);
   });
 
+  it("admits one exact Pi semantic retry and terminally refuses attempt 3", async () => {
+    const planPath = join(temp, "bounded-pi-retry-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4b0";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const initialPrompt = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-bounded-retry-attempt-1",
+      input: { agent: "code-implementer-agent", task: initialPrompt, agentScope: "user" },
+    }, context)).toEqual([undefined]);
+    await pi.emit("tool_result", {
+      toolName: "subagent",
+      toolCallId: "call-bounded-retry-attempt-1",
+      content: [],
+      details: { results: [{
+        agent: "code-implementer-agent",
+        task: initialPrompt,
+        exitCode: 0,
+        messages: [],
+      }] },
+    }, context);
+
+    const afterAttempt1 = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(afterAttempt1.tasks[0].implementation_attempt_history).toEqual([
+      expect.objectContaining({ semanticAttempt: 1, transition: "retry-required" }),
+    ]);
+    const retry = deriveImplementationRetryDisposition(afterAttempt1.tasks[0]);
+    if (retry.kind !== "retry") throw new Error(`expected retry, got ${retry.kind}`);
+
+    const missingContext = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-bounded-retry-missing-context",
+      input: { agent: "code-implementer-agent", task: initialPrompt, agentScope: "user" },
+    }, context);
+    expect(missingContext).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("requires the exact attempt-2 retry context"),
+    }));
+    expect(JSON.parse(readFileSync(statePath, "utf8")).executing_tasks).toEqual([]);
+
+    const retryPrompt = `${initialPrompt}\n${retry.promptAppendix}`;
+    const attempt2Input = { agent: "code-implementer-agent", task: retryPrompt, agentScope: "user" };
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-bounded-retry-attempt-2",
+      input: attempt2Input,
+    }, context)).toEqual([undefined]);
+    expect(attempt2Input.task).toContain("LOOM_PI_WRITE_GRANT:");
+    const activeAttempt2 = JSON.parse(readFileSync(statePath, "utf8")).tasks[0];
+    expect(activeAttempt2.active_implementation_attempt.semanticAttempt).toBe(2);
+    expect(activeAttempt2.active_implementation_context).toMatchObject({
+      semanticAttempt: 2,
+      predecessorReceiptId: retry.predecessor.receiptId,
+      retryContext: { predecessorReceiptId: retry.predecessor.receiptId },
+      promptDigest: createHash("sha256").update(attempt2Input.task).digest("hex"),
+    });
+
+    await pi.emit("tool_result", {
+      toolName: "subagent",
+      toolCallId: "call-bounded-retry-attempt-2",
+      content: [],
+      details: { results: [{
+        agent: "code-implementer-agent",
+        task: retryPrompt,
+        exitCode: 0,
+        messages: [],
+      }] },
+    }, context);
+    const escalated = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(escalated.tasks[0].implementation_attempt_history).toEqual([
+      expect.objectContaining({ semanticAttempt: 1, transition: "retry-required" }),
+      expect.objectContaining({ semanticAttempt: 2, transition: "escalation-required" }),
+    ]);
+    expect(escalated.tasks[0].retry_count).toBe(2);
+
+    const attempt3 = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-bounded-retry-attempt-3",
+      input: { agent: "code-implementer-agent", task: retryPrompt, agentScope: "user" },
+    }, context);
+    expect(attempt3).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("exhausted semantic attempt 2 and requires escalation"),
+    }));
+    expect(JSON.parse(readFileSync(statePath, "utf8")).executing_tasks).toEqual([]);
+  });
+
   it("reclaims an aged current-protocol reservation before adding the retry's own Pi roster row", async () => {
     // This scenario's premise is that no earlier agent is still serving the
     // graph. Other integration cases intentionally leave durable session
@@ -3513,11 +3666,65 @@ describe("Pi extension review tool_result integration", () => {
     expect(readFileSync(join(subagentDir, `${session}.active`), "utf-8").trim()).not.toBe("");
 
     await pi.emit("tool_result", {
-      toolName: "subagent", toolCallId, content: [], details: {},
+      toolName: "subagent", toolCallId, content: [], details: true,
     }, context);
 
     expect(JSON.parse(readFileSync(statePath, "utf-8")).executing_tasks).toEqual([]);
     expect(() => readFileSync(join(subagentDir, `${session}.active`), "utf-8")).toThrow();
+  });
+
+  it("retires completed modern authority when the reserved Pi result is missing", async () => {
+    const planPath = join(temp, "missing-completed-modern-result-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4ca";
+    const toolCallId = "call-missing-completed-modern-result";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: {
+        agent: "code-implementer-agent",
+        task: "Task ID: T1\nUse the code-implementer skill. Implement and test.",
+        agentScope: "user",
+      },
+    }, context)).toEqual([undefined]);
+    const spawned = JSON.parse(readFileSync(statePath, "utf8"));
+    const task = spawned.tasks[0];
+    const proof = evaluateTaskProof(
+      { newTestsRequired: false, declaredArtifacts: task.file_list ?? [] },
+      { taskCompleted: true, filesModified: task.file_list ?? [] },
+    );
+    if (proof.state !== "satisfied") throw new Error("completed missing-result proof fixture failed");
+    writeState({
+      ...spawned,
+      tasks: [{
+        ...task,
+        status: "completed",
+        proof,
+        new_tests_required: false,
+        revalidation_required: undefined,
+      }],
+    });
+
+    await pi.emit("tool_result", {
+      toolName: "subagent", toolCallId, content: [], details: { results: [] },
+    }, context);
+
+    const settled = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(settled.executing_tasks).toEqual([]);
+    expect(settled.tasks[0]).toMatchObject({ status: "completed", proof });
+    expect(settled.tasks[0].active_implementation_attempt).toBeUndefined();
+    expect(settled.tasks[0].active_implementation_context).toBeUndefined();
+    expect(settled.tasks[0].attempt_artifact_baseline).toBeUndefined();
+    expect(settled.tasks[0].attempt_repository_baseline).toBeUndefined();
+    expect(settled.tasks[0].repository_baseline).toBeUndefined();
   });
 
   it("infrastructure-settles a matching-agent exit-0 envelope whose messages are missing", async () => {
@@ -3629,18 +3836,20 @@ describe("Pi extension review tool_result integration", () => {
     }, context)).toEqual([undefined]);
     const spawned = JSON.parse(readFileSync(statePath, "utf8"));
     const task = spawned.tasks[0];
-    const replacement = createImplementationAttemptAuthority({
-      taskId: "T1", wave: 1, semanticAttempt: 1,
-      reservationId: `replacement-${_label}`,
-      headSha: task.active_implementation_attempt.headSha,
-      reservedAt: "2026-08-24T00:10:00.000Z",
-      taskScopeBaseline: task.attempt_artifact_baseline,
-      dirtySetBaseline: task.attempt_repository_baseline,
-    });
-    if (!replacement.ok) throw new Error(replacement.error.errors.join("; "));
+    const replacement = replacementAttemptContext(
+      task,
+      `replacement-${_label}`,
+      "2026-08-24T00:10:00.000Z",
+      "Task ID: T1\nUse the code-implementer skill. Implement and test.",
+    );
     writeState({
       ...spawned,
-      tasks: [{ ...task, active_implementation_attempt: replacement.value, reserved_at: replacement.value.reservedAt }],
+      tasks: [{
+        ...task,
+        active_implementation_attempt: replacement.authority,
+        active_implementation_context: replacement.context,
+        reserved_at: replacement.authority.reservedAt,
+      }],
     });
 
     await pi.emit("tool_result", {
@@ -3649,7 +3858,7 @@ describe("Pi extension review tool_result integration", () => {
 
     const state = JSON.parse(readFileSync(statePath, "utf8"));
     expect(state.executing_tasks).toEqual(["T1"]);
-    expect(state.tasks[0].active_implementation_attempt).toEqual(replacement.value);
+    expect(state.tasks[0].active_implementation_attempt).toEqual(replacement.authority);
     expect(state.tasks[0].implementation_attempt_history ?? []).toEqual([]);
   });
 
@@ -4890,18 +5099,20 @@ describe("Pi extension review tool_result integration", () => {
 
     const spawned = JSON.parse(readFileSync(statePath, "utf8"));
     const task = spawned.tasks[0];
-    const replacement = createImplementationAttemptAuthority({
-      taskId: "T1", wave: 1, semanticAttempt: 1,
-      reservationId: "finalization-diagnostic-replacement",
-      headSha: task.active_implementation_attempt.headSha,
-      reservedAt: "2026-08-24T00:20:00.000Z",
-      taskScopeBaseline: task.attempt_artifact_baseline,
-      dirtySetBaseline: task.attempt_repository_baseline,
-    });
-    if (!replacement.ok) throw new Error(replacement.error.errors.join("; "));
+    const replacement = replacementAttemptContext(
+      task,
+      "finalization-diagnostic-replacement",
+      "2026-08-24T00:20:00.000Z",
+      "Task ID: T1\nUse the code-implementer skill. Implement and test.",
+    );
     writeState({
       ...spawned,
-      tasks: [{ ...task, active_implementation_attempt: replacement.value, reserved_at: replacement.value.reservedAt }],
+      tasks: [{
+        ...task,
+        active_implementation_attempt: replacement.authority,
+        active_implementation_context: replacement.context,
+        reserved_at: replacement.authority.reservedAt,
+      }],
     });
 
     const { StateManager } = await import("../src/state-manager");
@@ -5146,8 +5357,14 @@ describe("Pi extension review tool_result integration", () => {
     }, context)).toEqual([undefined]);
 
     const { StateManager } = await import("../src/state-manager");
-    const update = vi.spyOn(StateManager.prototype, "update")
-      .mockRejectedValueOnce(new Error("injected reserved application failure"));
+    const originalUpdateAndReturn = StateManager.prototype.updateAndReturn;
+    let updateAndReturnCalls = 0;
+    const updateAndReturn = vi.spyOn(StateManager.prototype, "updateAndReturn")
+      .mockImplementation(async function (this: typeof StateManager.prototype, mutate) {
+        updateAndReturnCalls++;
+        if (updateAndReturnCalls === 2) throw new Error("injected reserved application failure");
+        return originalUpdateAndReturn.call(this, mutate);
+      });
     try {
       const responses = await pi.emit("tool_result", {
         toolName: "subagent", toolCallId, content: [],
@@ -5168,7 +5385,7 @@ describe("Pi extension review tool_result integration", () => {
         implementation_attempt_history: [{ transition: "infrastructure-blocked" }],
       });
     } finally {
-      update.mockRestore();
+      updateAndReturn.mockRestore();
     }
   });
 
@@ -5198,14 +5415,13 @@ describe("Pi extension review tool_result integration", () => {
     }, context)).toEqual([undefined]);
 
     const { StateManager } = await import("../src/state-manager");
-    const update = vi.spyOn(StateManager.prototype, "update")
-      .mockRejectedValueOnce(new Error("injected result application failure"));
     const originalUpdateAndReturn = StateManager.prototype.updateAndReturn;
     let updateAndReturnCalls = 0;
     const updateAndReturn = vi.spyOn(StateManager.prototype, "updateAndReturn")
       .mockImplementation(async function (this: typeof StateManager.prototype, mutate) {
         updateAndReturnCalls++;
-        if (updateAndReturnCalls === 2) throw new Error("injected fallback settlement failure");
+        if (updateAndReturnCalls === 2) throw new Error("injected result application failure");
+        if (updateAndReturnCalls === 3) throw new Error("injected fallback settlement failure");
         return originalUpdateAndReturn.call(this, mutate);
       });
     try {
@@ -5225,7 +5441,6 @@ describe("Pi extension review tool_result integration", () => {
       });
     } finally {
       updateAndReturn.mockRestore();
-      update.mockRestore();
     }
   });
 

@@ -121,8 +121,8 @@ export function sessionScopedPath(sessionId: SessionId, suffix: SessionFileSuffi
  * Full-file rewrite via temp-file + rename in the SAME directory: readers
  * take no lock, so an in-place writeFileSync could expose a torn (partial)
  * file mid-write. rename(2) is atomic on the same filesystem — a reader
- * sees the old content or the new, never a prefix. Appends stay plain
- * appendFileSync (single O_APPEND writes); a torn ledger tail is corruption
+ * sees the old content or the new, never a prefix. Appends preserve the
+ * append-only intent through appendFileSync; a torn ledger tail is corruption
  * and readEvidence rejects the complete ledger rather than using a prefix.
  */
 function rewriteFileAtomic(path: string, content: string): void {
@@ -288,53 +288,74 @@ export function countActiveAgents(sessionId: SessionId): number {
  *   - resolves elsewhere      → not ours
  *   - absent (ENOENT)         → not ours; "bound to no graph" is a real answer,
  *                               which is what stops stray rosters vetoing
- *   - malformed or unreadable → active (fail closed: cannot disprove it's ours)
+ *   - malformed or unreadable → typed `unavailable` observation
  *
  * The ENOENT-vs-error split is load-bearing: absence is evidence, failure is
- * not. A directory that cannot be read at all is likewise fail-closed.
+ * not. The compatibility `anyActiveSubagent` adapter maps `unavailable` to
+ * active so callers that need only a boolean still fail closed.
  */
-export function anyActiveSubagent(taskGraphPath: string): boolean {
+export type ActiveSubagentObservation =
+  | Readonly<{ kind: "observed"; anyActiveForGraph: boolean }>
+  | Readonly<{ kind: "unavailable"; reason: string }>;
+
+export function observeAnyActiveSubagent(taskGraphPath: string): ActiveSubagentObservation {
   const wanted = resolve(taskGraphPath);
   let entries: readonly string[];
   try {
     entries = readdirSync(subagentDir());
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
-    process.stderr.write(
-      `anyActiveSubagent: cannot read ${subagentDir()} (${e instanceof Error ? e.message : String(e)}) — assuming a subagent is active (fail closed)\n`,
-    );
-    return true;
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
+      return Object.freeze({ kind: "observed", anyActiveForGraph: false });
+    }
+    return Object.freeze({
+      kind: "unavailable",
+      reason: `cannot read ${subagentDir()} (${cause instanceof Error ? cause.message : String(cause)})`,
+    });
   }
-  return entries.filter((name) => name.endsWith(".active")).some((name) => {
+  for (const name of entries.filter((entry) => entry.endsWith(".active"))) {
     const session = name.slice(0, -".active".length);
     try {
-      if (statSync(`${subagentDir()}/${name}`).size === 0) return false;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
-      process.stderr.write(
-        `anyActiveSubagent: cannot stat roster ${name} (${e instanceof Error ? e.message : String(e)}) — assuming a subagent is active (fail closed)\n`,
-      );
-      return true;
+      if (statSync(`${subagentDir()}/${name}`).size === 0) continue;
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") continue;
+      return Object.freeze({
+        kind: "unavailable",
+        reason: `cannot stat roster ${name} (${cause instanceof Error ? cause.message : String(cause)})`,
+      });
     }
     try {
       const parsedPointer = parseCanonicalTaskGraphPointer(
         readFileSync(`${subagentDir()}/${session}.task_graph`, "utf-8"),
       );
       if (!parsedPointer.ok) {
-        process.stderr.write(
-          `anyActiveSubagent: malformed task-graph pointer for ${session} — assuming it serves this graph (fail closed)\n`,
-        );
-        return true;
+        return Object.freeze({
+          kind: "unavailable",
+          reason: `malformed task-graph pointer for ${session}: ${parsedPointer.error}`,
+        });
       }
-      return parsedPointer.value === wanted;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
-      process.stderr.write(
-        `anyActiveSubagent: cannot read the task-graph pointer for ${session} (${e instanceof Error ? e.message : String(e)}) — assuming it serves this graph (fail closed)\n`,
-      );
-      return true;
+      if (parsedPointer.value === wanted) {
+        return Object.freeze({ kind: "observed", anyActiveForGraph: true });
+      }
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") continue;
+      return Object.freeze({
+        kind: "unavailable",
+        reason: `cannot read the task-graph pointer for ${session} ` +
+          `(${cause instanceof Error ? cause.message : String(cause)})`,
+      });
     }
-  });
+  }
+  return Object.freeze({ kind: "observed", anyActiveForGraph: false });
+}
+
+export function anyActiveSubagent(taskGraphPath: string): boolean {
+  const observation = observeAnyActiveSubagent(taskGraphPath);
+  if (observation.kind === "observed") return observation.anyActiveForGraph;
+  const assumption = observation.reason.startsWith("malformed task-graph pointer")
+    ? "assuming it serves this graph"
+    : "assuming a subagent is active";
+  process.stderr.write(`anyActiveSubagent: ${observation.reason} — ${assumption} (fail closed)\n`);
+  return true;
 }
 
 /**

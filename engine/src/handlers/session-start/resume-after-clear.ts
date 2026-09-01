@@ -3,7 +3,6 @@
  * Stdout from SessionStart hooks is auto-injected as context by Claude Code.
  */
 
-import { existsSync } from "node:fs";
 import { StateManager } from "../../state-manager";
 import { TASK_GRAPH_PATH } from "../../config";
 import type { HookHandler } from "../../types";
@@ -56,7 +55,6 @@ export function buildContextOutput(state: TaskGraph, loomDir: string): string {
   lines.push("");
   lines.push("## Instructions");
 
-  // Check if wave-gate needs running before spawning tasks
   const currentWaveGate = state.wave_gates?.[String(currentWave)];
   const prevWaveGate = currentWave > 1 ? state.wave_gates?.[String(currentWave - 1)] : null;
   const needsWaveGate = currentWaveGate?.impl_complete && !currentWaveGate?.reviews_complete;
@@ -70,8 +68,8 @@ export function buildContextOutput(state: TaskGraph, loomDir: string): string {
     lines.push(`Read \`${loomDir}/commands/wave-gate.md\` and spawn review subagents for wave ${currentWave}.`);
   } else {
     lines.push(`Read the loom skill at \`${loomDir}/commands/loom.md\`, specifically Phase 5: Execute.`);
-    lines.push(`Spawn all pending wave ${currentWave} tasks in parallel using the Task tool.`);
-    lines.push(`Load impl-agent-context template from \`${loomDir}/commands/templates/impl-agent-context.md\`.`);
+    lines.push("Run `helper orchestration status --json` and execute only its implementation recovery: initial/retry dispatches or terminal escalation.");
+    lines.push(`Load impl-agent-context template from \`${loomDir}/commands/templates/impl-agent-context.md\`; substitute the exact status-issued retry appendix when present.`);
   }
   lines.push("<!-- END LOOM RESUME CONTEXT -->");
 
@@ -87,18 +85,16 @@ function resolveLoomDir(): string {
 }
 
 const handler: HookHandler = async (_stdin, _args) => {
-  if (!existsSync(TASK_GRAPH_PATH)) return { kind: "passthrough" };
-
-  const sm = StateManager.fromPath(TASK_GRAPH_PATH);
-  if (!sm) return { kind: "passthrough" };
-
   let state: TaskGraph;
   try {
-    state = sm.load();
-  } catch (e) {
+    const manager = StateManager.fromPath(TASK_GRAPH_PATH);
+    if (manager === null) return { kind: "passthrough" };
+    state = manager.load();
+  } catch (cause) {
     return {
       kind: "error",
-      message: `[loom] resume-after-clear: corrupt state (${TASK_GRAPH_PATH}): ${(e as Error).message}`,
+      message: `[loom] resume-after-clear: cannot access Task Graph (${TASK_GRAPH_PATH}): ` +
+        `${cause instanceof Error ? cause.message : String(cause)}`,
     };
   }
 

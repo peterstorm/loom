@@ -16,7 +16,7 @@ mvn test          # Java/Maven projects
 pytest            # Python projects
 ```
 
-Test evidence is resolved ledger-first: a PostToolUse hook records every Bash test run (real exit codes and report artifacts) into an evidence ledger, and the SubagentStop hook judges your task from that ledger — it falls back to transcript scanning whenever the ledger yields no trusted verdict (no ledger evidence at all, an exit-0 run with no report artifact, or a pass invalidated by later file writes), and that fallback is always labeled untrusted.
+On Claude Code, test evidence is resolved ledger-first: a PostToolUse hook records every Bash test run (real exit codes and report artifacts) into an evidence ledger, and the SubagentStop hook judges your task from that ledger — it falls back to transcript scanning whenever the ledger yields no trusted verdict (no ledger evidence at all, an exit-0 run with no report artifact, or a pass invalidated by later file writes), and that fallback is always labeled untrusted. On Pi, the result adapter preserves Pi's structured test evidence and its provenance; it does not relabel that evidence as ledger-trusted.
 Either way, evidence only exists for tests EXECUTED via the Bash tool: if your task DOES require tests and you do not run them via Bash, the task's `test_result` will not show a pass and the wave gate FAILS.
 Writing tests without executing them counts as failure.
 
@@ -59,6 +59,12 @@ If your plan context declares none of these, this section imposes nothing.
 
 Regression execution and new-test creation are separate obligations. Follow each arm independently.
 
+## Engine-Issued Implementation Retry Context
+
+{implementation_retry_context}
+
+When this is an exact `LOOM_IMPLEMENTATION_RETRY_CONTEXT` appendix, it is exact attempt-2 admission evidence and the failure kinds are the previous attempt's deterministic diagnostics. The spawn gate validates these bytes against protected settlement history before minting attempt authority. Address the diagnostics during this attempt. When it says `None — semantic attempt 1.`, no retry admission evidence exists.
+
 ## Your Task
 
 {task_description}
@@ -89,8 +95,8 @@ Available at: {plan_file_path}
 
 ## You CAN Write Files
 
-**You are a subagent. The block-direct-edits hook detects subagents and allows Edit/Write.**
-- You MUST use Write/Edit tools to create/modify files — this WILL work
+**Your harness grants writes only under exact implementation authority:** Pi consumes the task-bound one-time write capability in this prompt; Claude requires the proven implementation-role roster entry established for this Agent. Generic subagent identity is not write authority.
+- You MUST use Write/Edit tools to create/modify files — this WILL work under that bound authority
 - Do NOT read `.claude/hooks/` or `.claude/state/` files — they are irrelevant to you
 - Do NOT check if you are "allowed" to write — you are. Just write.
 

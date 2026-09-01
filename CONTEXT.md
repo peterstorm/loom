@@ -184,6 +184,10 @@ _Avoid_: Package version, schema version, commit hash, current checkout
 One engine-reserved execution of one Task under one semantic attempt ordinal and one immutable byte baseline. Only engine-issued attempt authority can settle it; a Task id inferred from concurrent execution state is cleanup evidence, not completion authority.
 _Avoid_: Agent run, retry (that is a transition between attempts), subagent result
 
+**Implementation Retry Context**:
+The canonical immutable prompt appendix derived from one exact attempt-1 `retry-required` settlement receipt. It binds Task, semantic attempt 2, predecessor receipt, and sorted failure kinds; the shared spawn gate must match the status-issued appendix byte-for-byte before issuing attempt-2 authority. Infrastructure failures reuse the current semantic attempt and never mint this context; attempt-2 semantic failure produces terminal escalation rather than another context.
+_Avoid_: Failure reason, retry prompt, retry count, attempt token
+
 **Verification Policy**:
 A Task's explicit, independently modeled requirements for regression execution and new-test creation, including typed waiver reasons. It replaces the ambiguous `new_tests_required` coupling; legacy booleans are translated only at the TaskGraph parse boundary.
 _Avoid_: Test flag, new-tests flag, test exemption
@@ -209,7 +213,7 @@ The exact path set captured in `attempt_artifact_baseline`: declared Task paths 
 _Avoid_: Repository dirty set, transcript file list, Task test command
 
 **Implementation Settlement Receipt**:
-The immutable, self-digested audit record for one exact Implementation Attempt transition. Retry/escalation receipts consume the semantic attempt; implemented and infrastructure-blocked receipts do not. Receipt identity makes duplicate delivery idempotent and prevents late results from releasing a newer reservation.
+The immutable, self-digested audit record for one exact Implementation Attempt transition. Retry/escalation receipts consume the semantic attempt; implemented and infrastructure-blocked receipts do not. Receipt identity makes duplicate delivery idempotent; exact active-authority and reservation-digest matching prevents a late result from releasing a newer reservation.
 _Avoid_: Rollback receipt, cleanup log, retry counter
 
 **Proof Obligation**:
@@ -287,9 +291,10 @@ _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory ru
 - A Pi-launched mutating CLI process must match the in-memory extension's **Runtime Revision** before changing protected or run-scoped state
 - A **Task** becomes implemented only after all of its **Proof Obligations** and required Task-scoped Completion Check Results are satisfied
 - An **Implementation Attempt** is settled only by the **Implementation Completion Oracle** under exact engine-issued authority and one **Implementation Settlement Receipt**
+- Unversioned Slice-3 **Implementation Settlement Receipts** use a read-only compatibility projection until the next registration records protocol-2 cutover authority; from that strict suffix, ordered receipts form one fail-closed lineage: current-attempt infrastructure preserves state, current-attempt implementation reopens attempt 1, attempt-1 semantic failure derives exactly one byte-exact **Implementation Retry Context**, and attempt-2 semantic failure escalates terminally; skipped-terminal, reordered, or post-escalation receipts authorize nothing
 - A Task-local Completion Suite contains only `loom:task-byte-scope`; it runs no Task/project subprocesses
 - Repository observation never grants Task attribution: current Task paths stay local, locked current-Wave sibling-owned paths stay inert, and every changed unowned path is unresolved semantic failure/invalidation
-- Slice 3 classifies retry-required/escalation-required without dispatch; Slice 4 alone freezes retry context and launches semantic attempt 2 or escalation
+- Slice 3 classifies retry-required/escalation-required without dispatch; Slice 4 freezes retry context, authorizes semantic attempt 2 dispatch, and publishes terminal escalation for operator handling
 - A Task's **Verification Policy** independently determines its regression and new-test **Proof Obligations**
 - A **Verification Manifest** is frozen by the engine before implementation and cannot be authored through decompose output
 - A Task-scoped **Completion Suite Result** binds to one **Implementation Attempt**; a Wave-scoped result binds to a quiescent Wave workspace

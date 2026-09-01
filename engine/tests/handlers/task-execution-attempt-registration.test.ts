@@ -1,28 +1,35 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   registerTaskExecutionBatch,
+  rollbackTaskExecutionRegistration,
 } from "../../src/handlers/task-execution";
 import {
   createTaskExecutionAuthorityBatch,
   rollbackTaskExecutionAuthorityBatch,
+  taskExecutionRegistrationError,
 } from "../../src/core/validate-task-execution";
-import { evaluateTaskProof, TRUSTED_LEDGER_ONLY_POLICY } from "../../src/core/proof-obligations";
+import { derivePendingTaskProof, evaluateTaskProof, TRUSTED_LEDGER_ONLY_POLICY } from "../../src/core/proof-obligations";
+import { settleUnavailableImplementation } from "../../src/core/implementation-application";
 import {
   productionExactSettlementPorts,
   settleExactImplementation,
 } from "../../src/handlers/helpers/exact-implementation-settlement";
 import { StateManager } from "../../src/state-manager";
 import {
+  TASK_BYTE_SCOPE_CHECK_ID_TEXT,
   createImplementationAttemptAuthority,
+  createTaskCompletionSuiteAuthority,
   parseIsoInstant,
   parseReservationId,
+  settleImplementationAttempt,
   type ImplementationAttemptAuthority,
 } from "../../src/core/implementation-completion";
 import { taskFixture, graphFixture } from "../fixtures/task-lifecycle";
+import { deriveImplementationRetryDisposition } from "../../src/core/implementation-retry";
 import type { TaskGraph } from "../../src/types";
 
 const roots: string[] = [];
@@ -65,6 +72,19 @@ const spawn = (taskId: string) => ({
   description: "",
 });
 
+function nextSpawn(state: TaskGraph, taskId: string) {
+  const task = state.tasks.find((candidate) => candidate.id === taskId);
+  if (task === undefined) throw new Error(`missing task ${taskId}`);
+  const disposition = deriveImplementationRetryDisposition(task);
+  if (disposition.kind === "invalid" || disposition.kind === "escalated") {
+    throw new Error(`task ${taskId} is not spawnable: ${disposition.kind}`);
+  }
+  const initial = spawn(taskId);
+  return disposition.kind === "retry"
+    ? { ...initial, prompt: `${initial.prompt}\n${disposition.promptAppendix}` }
+    : initial;
+}
+
 function writeGraph(path: string, state: TaskGraph): void {
   writeFileSync(path, JSON.stringify(state, null, 2));
 }
@@ -80,6 +100,38 @@ afterEach(() => {
 });
 
 describe("modern implementation attempt registration", () => {
+  it("returns blocking outcomes when StateManager authority capture rejects the TaskGraph parent", async () => {
+    const repo = repository();
+    writeGraph(repo.statePath, graph());
+    const symlinkedStateDirectory = join(repo.root, "state-link");
+    symlinkSync(join(repo.root, ".loom-state"), symlinkedStateDirectory, "dir");
+    process.env.LOOM_STATE_PATH = join(symlinkedStateDirectory, "active_task_graph.json");
+
+    await expect(registerTaskExecutionBatch([spawn("T1")])).resolves.toMatchObject({
+      kind: "block",
+      message: expect.stringContaining("cannot establish task graph authority"),
+    });
+
+    const reservedAt = parseIsoInstant("2026-01-01T00:00:00.000Z");
+    const reservationId = parseReservationId("rollback-capture-refusal");
+    if (!reservedAt.ok || !reservationId.ok) throw new Error("authority fixture failed");
+    const authority = createImplementationAttemptAuthority({
+      taskId: "T1",
+      wave: 1,
+      semanticAttempt: 1,
+      reservationId: reservationId.value,
+      headSha: repo.headSha,
+      reservedAt: reservedAt.value,
+      taskScopeBaseline: [],
+      dirtySetBaseline: [],
+    });
+    if (!authority.ok) throw new Error(authority.error.errors.join("; "));
+    await expect(rollbackTaskExecutionRegistration([authority.value])).resolves.toMatchObject({
+      kind: "block",
+      message: expect.stringContaining("Cannot roll back implementation registration"),
+    });
+  });
+
   it("atomically returns ordered cryptographically unique authorities in baseline lockstep", async () => {
     const repo = repository();
     writeGraph(repo.statePath, graph());
@@ -101,7 +153,17 @@ describe("modern implementation attempt registration", () => {
     for (const authority of result.authorities) {
       const task = stored.tasks.find(({ id }) => id === authority.taskId)!;
       expect(task.active_implementation_attempt).toEqual(authority);
+      expect(task.active_implementation_context).toMatchObject({
+        kind: "implementation-attempt-context",
+        taskId: authority.taskId,
+        semanticAttempt: 1,
+        authorityDigest: authority.authorityDigest,
+        predecessorReceiptId: null,
+        retryContext: null,
+      });
       expect(task.reserved_at).toBe(authority.reservedAt);
+      expect(task.implementation_retry_protocol).toBe(2);
+      expect(task.implementation_retry_history_start).toBe(0);
       expect(task.legacy_execution_reservation).toBeUndefined();
       expect(task.attempt_artifact_baseline).toBeDefined();
       expect(task.attempt_repository_baseline).toBeDefined();
@@ -189,22 +251,137 @@ describe("modern implementation attempt registration", () => {
       unresolved_repository_paths: ["foreign.ts"],
     });
 
-    const second = await registerTaskExecutionBatch([spawn("T1")]);
-    if (second.kind !== "registered") throw new Error(second.message);
-    await settle(second.authorities[0]!, [], "2026-08-25T00:02:00.000Z");
-    expect(manager.load().tasks[0]).toMatchObject({
-      status: "pending",
-      unresolved_repository_paths: ["foreign.ts"],
-    });
-    expect(manager.load().tasks[0]?.files_modified).not.toContain("sibling.ts");
-
     rmSync(join(repo.root, "foreign.ts"));
-    const third = await registerTaskExecutionBatch([spawn("T1")]);
+    const second = await registerTaskExecutionBatch([
+      nextSpawn(manager.load(), "T1"),
+      spawn("T2"),
+    ]);
+    if (second.kind !== "registered") throw new Error(second.message);
+    expect(second.authorities.map(({ taskId, semanticAttempt }) => ({ taskId, semanticAttempt }))).toEqual([
+      { taskId: "T1", semanticAttempt: 2 },
+      { taskId: "T2", semanticAttempt: 1 },
+    ]);
+    expect(manager.load().tasks[0]?.active_implementation_context).toMatchObject({
+      semanticAttempt: 2,
+      authorityDigest: second.authorities[0]?.authorityDigest,
+      predecessorReceiptId: manager.load().tasks[0]?.implementation_attempt_history?.[0]?.receiptId,
+      retryContext: expect.objectContaining({ semanticAttempt: 2 }),
+    });
+    expect(manager.load().tasks[1]?.active_implementation_context).toMatchObject({
+      semanticAttempt: 1,
+      authorityDigest: second.authorities[1]?.authorityDigest,
+      predecessorReceiptId: null,
+      retryContext: null,
+    });
+    const infrastructureAt = parseIsoInstant("2026-08-25T00:02:00.000Z");
+    if (!infrastructureAt.ok) throw new Error("infrastructure instant fixture failed");
+    await manager.update((state) => {
+      const applied = settleUnavailableImplementation(
+        state,
+        second.authorities[0]!,
+        infrastructureAt.value,
+        "temporary model transport failure",
+      );
+      if (applied.kind === "error") throw new Error(JSON.stringify(applied.error));
+      return applied.state;
+    });
+    expect(manager.load().tasks[0]?.implementation_attempt_history).toEqual([
+      expect.objectContaining({ semanticAttempt: 1, transition: "retry-required" }),
+      expect.objectContaining({ semanticAttempt: 2, transition: "infrastructure-blocked" }),
+    ]);
+
+    const third = await registerTaskExecutionBatch([nextSpawn(manager.load(), "T1")]);
     if (third.kind !== "registered") throw new Error(third.message);
+    expect(third.authorities[0]?.semanticAttempt).toBe(2);
     await settle(third.authorities[0]!, [], "2026-08-25T00:03:00.000Z");
     expect(manager.load().tasks[0]).toMatchObject({ status: "implemented" });
+    expect(manager.load().tasks[0]?.retry_count).toBeUndefined();
+    expect(manager.load().tasks[0]?.files_modified).not.toContain("sibling.ts");
     expect(manager.load().tasks[0]?.repository_baseline).toBeUndefined();
     expect(readFileSync(join(repo.root, "sibling.ts"), "utf8")).toBe("parallel T2 bytes\n");
+  });
+
+  it("rejects a preflight authority plan when locked settlement history advances the semantic attempt", () => {
+    const state = graph([taskFixture({
+      id: "T1", description: "one", agent: "code-implementer-agent",
+      wave: 1, status: "pending", depends_on: [], file_list: ["src/a.ts"],
+    })]);
+    const artifactBaseline = [{ artifact: "src/a.ts", snapshot: { kind: "missing" as const } }];
+    const baselines = new Map([["T1", {
+      proof: artifactBaseline,
+      attempt: artifactBaseline,
+      repositoryAttempt: [],
+      repositoryObservation: [],
+    }]]);
+    const reservedAt = parseIsoInstant("2026-01-01T00:00:00.000Z");
+    const reservationId = parseReservationId("stale-preflight-plan");
+    if (!reservedAt.ok || !reservationId.ok) throw new Error("plan fixture failed");
+    const batch = createTaskExecutionAuthorityBatch(
+      state,
+      [spawn("T1")],
+      ["T1"],
+      [reservationId.value],
+      "1".repeat(40),
+      reservedAt.value,
+      baselines,
+    );
+    if (!batch.ok) throw new Error(batch.error);
+    const plannedAuthority = batch.plans[0]!.authority;
+    const suite = createTaskCompletionSuiteAuthority(plannedAuthority);
+    if (!suite.ok) throw new Error(suite.error.errors.join("; "));
+    const settled = settleImplementationAttempt(
+      {
+        ...state.tasks[0]!,
+        proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: ["src/a.ts"] }),
+        active_implementation_attempt: plannedAuthority,
+      },
+      plannedAuthority,
+      plannedAuthority,
+      {
+        schemaVersion: 1,
+        kind: "implementation-observed",
+        observedAt: "2026-01-01T00:01:00.000Z",
+        evidence: {
+          taskCompleted: false,
+          testResult: { verdict: "trusted-pass" },
+          filesModified: [],
+          newTestsWritten: false,
+          newTestEvidence: "waived",
+        },
+        proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
+      },
+      {
+        schemaVersion: 1,
+        kind: "task-completion-suite-result",
+        implementationAuthorityDigest: suite.value.implementationAuthorityDigest,
+        suiteDigest: suite.value.suiteDigest,
+        checks: [{
+          checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
+          scope: "task",
+          outcome: { kind: "accepted", changedPaths: [] },
+        }],
+      },
+    );
+    if (!settled.ok || settled.value.kind !== "retry-required") {
+      throw new Error("retry receipt fixture failed");
+    }
+    const lockedState: TaskGraph = {
+      ...state,
+      tasks: [{
+        ...state.tasks[0]!,
+        implementation_attempt_history: [settled.value.receipt],
+      }],
+    };
+
+    expect(taskExecutionRegistrationError(
+      lockedState,
+      [spawn("T1")],
+      ["T1"],
+      "parallel",
+      baselines,
+      new Set(),
+      batch.plans,
+    )).toBe("Task T1 implementation authority changed before execution registration.");
   });
 
   it("writes no TaskGraph bytes when any sibling makes the batch invalid", async () => {
@@ -380,6 +557,56 @@ describe("modern implementation attempt registration", () => {
     }));
   });
 
+  it("an exact rollback retires matching authority and Attempt Context together", () => {
+    const state = graph([taskFixture({
+      id: "T1", description: "one", agent: "code-implementer-agent",
+      wave: 1, status: "pending", depends_on: [], file_list: ["src/a.ts"],
+    })]);
+    const baseline = [{ artifact: "src/a.ts", snapshot: { kind: "missing" as const } }];
+    const instant = parseIsoInstant("2026-01-01T00:00:00.000Z");
+    const reservation = parseReservationId("matching-rollback");
+    if (!instant.ok || !reservation.ok) throw new Error("rollback fixture failed");
+    const batch = createTaskExecutionAuthorityBatch(
+      state,
+      [spawn("T1")],
+      ["T1"],
+      [reservation.value],
+      "1".repeat(40),
+      instant.value,
+      new Map([["T1", {
+        proof: baseline,
+        attempt: baseline,
+        repositoryAttempt: [],
+        repositoryObservation: [],
+      }]]),
+    );
+    if (!batch.ok) throw new Error(batch.error);
+    const active: TaskGraph = {
+      ...state,
+      executing_tasks: ["T1"],
+      tasks: [{
+        ...state.tasks[0]!,
+        active_implementation_attempt: batch.plans[0]!.authority,
+        active_implementation_context: batch.plans[0]!.context,
+        attempt_artifact_baseline: baseline,
+        attempt_repository_baseline: [],
+        reserved_at: instant.value,
+      }],
+    };
+
+    const rolledBack = rollbackTaskExecutionAuthorityBatch(active, [batch.plans[0]!.authority], instant.value);
+
+    expect(rolledBack.executing_tasks).toEqual([]);
+    expect(rolledBack.tasks[0]?.active_implementation_attempt).toBeUndefined();
+    expect(rolledBack.tasks[0]?.active_implementation_context).toBeUndefined();
+    expect(rolledBack.tasks[0]?.implementation_attempt_history).toEqual([
+      expect.objectContaining({
+        authorityDigest: batch.plans[0]!.authority.authorityDigest,
+        transition: "infrastructure-blocked",
+      }),
+    ]);
+  });
+
   it("an exact rollback cannot clear a late replacement for the same Task", () => {
     const state = graph([taskFixture({ id: "T1", description: "one", agent: "code-implementer-agent", wave: 1, status: "pending", depends_on: [], file_list: ["src/a.ts"] })]);
     const baseline = [{ artifact: "src/a.ts", snapshot: { kind: "missing" as const } }];
@@ -387,9 +614,9 @@ describe("modern implementation attempt registration", () => {
     const oldId = parseReservationId("old");
     const newId = parseReservationId("new");
     if (!instant.ok || !oldId.ok || !newId.ok) throw new Error("fixture parse failed");
-    const oldBatch = createTaskExecutionAuthorityBatch(state, ["T1"], [oldId.value], "1".repeat(40), instant.value,
+    const oldBatch = createTaskExecutionAuthorityBatch(state, [spawn("T1")], ["T1"], [oldId.value], "1".repeat(40), instant.value,
       new Map([["T1", { proof: baseline, attempt: baseline, repositoryAttempt: [], repositoryObservation: [] }]]));
-    const newBatch = createTaskExecutionAuthorityBatch(state, ["T1"], [newId.value], "1".repeat(40), instant.value,
+    const newBatch = createTaskExecutionAuthorityBatch(state, [spawn("T1")], ["T1"], [newId.value], "1".repeat(40), instant.value,
       new Map([["T1", { proof: baseline, attempt: baseline, repositoryAttempt: [], repositoryObservation: [] }]]));
     if (!oldBatch.ok || !newBatch.ok) throw new Error("authority fixture failed");
     const current: TaskGraph = {
@@ -398,6 +625,7 @@ describe("modern implementation attempt registration", () => {
       tasks: [{
         ...state.tasks[0]!,
         active_implementation_attempt: newBatch.plans[0]!.authority,
+        active_implementation_context: newBatch.plans[0]!.context,
         attempt_artifact_baseline: baseline,
         attempt_repository_baseline: [],
         reserved_at: instant.value,
@@ -411,5 +639,6 @@ describe("modern implementation attempt registration", () => {
     expect(rolledBack).toBe(current);
     expect(rolledBack.executing_tasks).toEqual(["T1"]);
     expect(rolledBack.tasks[0]?.active_implementation_attempt).toEqual(newBatch.plans[0]!.authority);
+    expect(rolledBack.tasks[0]?.active_implementation_context).toEqual(newBatch.plans[0]!.context);
   });
 });

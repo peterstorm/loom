@@ -60,6 +60,7 @@ import {
   parsePiSubagentResults,
   piSubagentFailureSignals,
   piSubagentResultFailed,
+  retireCompletedOrMissingImplementation,
   type PiResultOutcome,
   type PiReviewAttemptAuthority,
   type PiSpecCheckAttemptAuthority,
@@ -78,6 +79,7 @@ import {
 import { isReviewAgent, taskGraphPath, subagentDir, PHASE_AGENT_MAP, IMPL_AGENTS, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
+import { currentOrchestrationStatus } from "../engine/src/handlers/helpers/orchestration";
 import type { Task, TaskGraph } from "../engine/src/types";
 import {
   anyActiveSubagent,
@@ -1291,6 +1293,7 @@ export default function (pi: ExtensionAPI) {
         if (admission.kind === "pass-through") return;
         const parsedItems = admission.items;
         const taskExecutionSpawns = admission.taskExecutionSpawns;
+        let dispatchTaskExecutionSpawns = taskExecutionSpawns;
         const needsTaskGraphLifecycle = admission.needsTaskGraphLifecycle;
 
         // Reserve every lifecycle identity before task-state mutation. A roster
@@ -1331,38 +1334,73 @@ export default function (pi: ExtensionAPI) {
         let reviewAuthoritiesBySlot: readonly (PiReviewAttemptAuthority | null)[] =
           Object.freeze(parsedItems.map(() => null));
         let specCheckAuthority: PiSpecCheckAttemptAuthority | null = null;
-        const rollbackLifecycle = async (): Promise<readonly string[]> => {
-          const actions: PiCleanupAction[] = [];
-          const revokedGrantTokens = new Set<string>();
-          const removedRosterIds = new Set<AgentId>();
-          let pointerReleased = false;
-          for (const grant of writeGrants) {
-            actions.push({
+        const grantRollbackActions = (revoked: Set<string>): readonly PiCleanupAction[] =>
+          writeGrants.flatMap((grant): readonly PiCleanupAction[] => [
+            {
               label: `revoke write grant for spawn item ${grant.index + 1}`,
               run: () => {
                 revokePiWriteGrant(grant.token);
-                revokedGrantTokens.add(grant.token);
+                revoked.add(grant.token);
               },
-            });
-            if (grant.injected) {
-              actions.push({
-                label: `restore child prompt for spawn item ${grant.index + 1}`,
-                run: () => replacePiSpawnTask(event.input, grant.index, grant.originalTask),
-              });
-            }
+            },
+            ...(grant.injected ? [{
+              label: `restore child prompt for spawn item ${grant.index + 1}`,
+              run: () => replacePiSpawnTask(event.input, grant.index, grant.originalTask),
+            }] : []),
+          ]);
+        const rosterRollbackActions = (removed: Set<AgentId>): readonly PiCleanupAction[] =>
+          [...reserved].reverse().map((agentId) => ({
+            label: `remove active roster entry ${agentId}`,
+            run: async () => {
+              await fsSessionRegistry.removeActive(safeSessionId, agentId);
+              removed.add(agentId);
+            },
+          }));
+        const retainAdmissionCleanupDebt = (
+          revoked: ReadonlySet<string>,
+          removed: ReadonlySet<AgentId>,
+          pointerReleased: boolean,
+        ): void => {
+          const remainingGrantTokens = writeGrants
+            .map(({ token }) => token)
+            .filter((token) => !revoked.has(token));
+          const remainingRosterIds = new Set(reserved.filter((agentId) => !removed.has(agentId)));
+          const remainingPointerBinding = pointerReleased ? null : taskGraphPointerBinding;
+          if (remainingGrantTokens.length === 0 && remainingRosterIds.size === 0 && remainingPointerBinding === null) return;
+          const runtime = runtimeFor(safeSessionId);
+          if (remainingGrantTokens.length > 0) {
+            runtime.issuedWriteGrants.set(toolCallId, Object.freeze(remainingGrantTokens));
           }
-          for (const agentId of [...reserved].reverse()) {
-            actions.push({
-              label: `remove active roster entry ${agentId}`,
-              run: async () => {
-                await fsSessionRegistry.removeActive(safeSessionId, agentId);
-                removedRosterIds.add(agentId);
-              },
-            });
-          }
+          retainSpawnCleanupDebt(runtime, toolCallId, {
+            sessionId: safeSessionId,
+            needsTaskGraphLifecycle,
+            graphActiveAtSpawn: graphIsActive,
+            orchestrationRunBinding,
+            pointerBinding: remainingPointerBinding,
+            items: Object.freeze(parsedItems.flatMap((item, index) => {
+              const rosterId = rosterIds[index]!;
+              return remainingRosterIds.has(rosterId)
+                ? [Object.freeze({
+                    agentType: item.agent,
+                    rosterId,
+                    taskId: extractTaskId(item.task),
+                    implementationAuthority: null,
+                    reviewAuthority: null,
+                    specCheckAuthority: null,
+                    kind: taskExecutionSpawns[index]?.kind ?? "non-implementation",
+                  })]
+                : [];
+            })),
+          });
+        };
+        const rollbackLifecycle = async (): Promise<readonly string[]> => {
+          const revokedGrantTokens = new Set<string>();
+          const removedRosterIds = new Set<AgentId>();
+          let pointerReleased = false;
+          const pointerActions: PiCleanupAction[] = [];
           if (taskGraphPointerBinding !== null) {
             const ownedPointer = taskGraphPointerBinding;
-            actions.push({
+            pointerActions.push({
               label: "roll back task-graph pointer",
               run: async () => {
                 const result = await rollbackSessionTaskGraphPointer(ownedPointer);
@@ -1371,39 +1409,12 @@ export default function (pi: ExtensionAPI) {
               },
             });
           }
-          const errors = await runPiCleanupActions(actions);
-          const remainingGrantTokens = writeGrants
-            .map(({ token }) => token)
-            .filter((token) => !revokedGrantTokens.has(token));
-          const remainingRosterIds = new Set(reserved.filter((agentId) => !removedRosterIds.has(agentId)));
-          const remainingPointerBinding = pointerReleased ? null : taskGraphPointerBinding;
-          if (remainingGrantTokens.length > 0 || remainingRosterIds.size > 0 || remainingPointerBinding !== null) {
-            const runtime = runtimeFor(safeSessionId);
-            if (remainingGrantTokens.length > 0) {
-              runtime.issuedWriteGrants.set(toolCallId, Object.freeze(remainingGrantTokens));
-            }
-            retainSpawnCleanupDebt(runtime, toolCallId, {
-              sessionId: safeSessionId,
-              needsTaskGraphLifecycle,
-              graphActiveAtSpawn: graphIsActive,
-              orchestrationRunBinding,
-              pointerBinding: remainingPointerBinding,
-              items: Object.freeze(parsedItems.flatMap((item, index) => {
-                const rosterId = rosterIds[index]!;
-                return remainingRosterIds.has(rosterId)
-                  ? [Object.freeze({
-                      agentType: item.agent,
-                      rosterId,
-                      taskId: extractTaskId(item.task),
-                      implementationAuthority: null,
-                      reviewAuthority: null,
-                      specCheckAuthority: null,
-                      kind: taskExecutionSpawns[index]?.kind ?? "non-implementation",
-                    })]
-                  : [];
-              })),
-            });
-          }
+          const errors = await runPiCleanupActions([
+            ...grantRollbackActions(revokedGrantTokens),
+            ...rosterRollbackActions(removedRosterIds),
+            ...pointerActions,
+          ]);
+          retainAdmissionCleanupDebt(revokedGrantTokens, removedRosterIds, pointerReleased);
           return errors;
         };
         // Observe graph activity before this prospective batch writes its own
@@ -1514,6 +1525,17 @@ export default function (pi: ExtensionAPI) {
             replacePiSpawnTask(event.input, grant.index, grant.task);
             grant.injected = true;
           }
+          dispatchTaskExecutionSpawns = Object.freeze(taskExecutionSpawns.map((spawn, index) => {
+            if (spawn.kind !== "implementation") return spawn;
+            if (typeof event.input !== "object" || event.input === null || Array.isArray(event.input)) {
+              throw new Error("Pi implementation input became malformed before dispatch registration");
+            }
+            const prompt = piSpawnItem(event.input as Record<string, unknown>, index).task;
+            if (typeof prompt !== "string") {
+              throw new Error(`Pi implementation spawn item ${index + 1} lost its child-visible prompt`);
+            }
+            return Object.freeze({ ...spawn, prompt });
+          }));
         } catch (error) {
           const cleanupErrors = await rollbackLifecycle();
           return {
@@ -1531,7 +1553,7 @@ export default function (pi: ExtensionAPI) {
             : "parallel" as const;
           taskRegistration = graphIsActive
             ? await registerTaskExecutionBatch(
-                taskExecutionSpawns,
+                dispatchTaskExecutionSpawns,
                 executionMode,
                 rosterObservation,
               )
@@ -1550,7 +1572,7 @@ export default function (pi: ExtensionAPI) {
         const alignment = graphIsActive
           ? alignPiImplementationAuthorities(
               parsedItems,
-              taskExecutionSpawns,
+              dispatchTaskExecutionSpawns,
               taskRegistration.authorities,
             )
           : {
@@ -1588,7 +1610,7 @@ export default function (pi: ExtensionAPI) {
               implementationAuthority: alignment.authoritiesBySlot[index] ?? null,
               reviewAuthority: reviewAuthoritiesBySlot[index] ?? null,
               specCheckAuthority: item.agent === "spec-check-invoker" ? specCheckAuthority : null,
-              kind: taskExecutionSpawns[index]?.kind ?? "non-implementation",
+              kind: dispatchTaskExecutionSpawns[index]?.kind ?? "non-implementation",
             };
           }),
         });
@@ -2132,6 +2154,12 @@ export default function (pi: ExtensionAPI) {
               );
               continue;
             }
+            const retired = retireCompletedOrMissingImplementation(state, item.taskId, item);
+            if (retired.retired) {
+              state = retired.state;
+              logs.push(`retired completed/missing implementation reservation for ${item.taskId}`);
+              continue;
+            }
             const failure = reservedImplementationFailure(
               item.agentType,
               item.taskId,
@@ -2177,10 +2205,12 @@ export default function (pi: ExtensionAPI) {
       }
     };
 
-    const details = event.details as Record<string, unknown> | undefined;
-    const rawResults = details && "results" in details && Array.isArray(details.results)
-      ? details.results
-      : [];
+    const rawDetails: unknown = event.details;
+    const details = typeof rawDetails === "object" && rawDetails !== null && !Array.isArray(rawDetails)
+      ? rawDetails as Record<string, unknown>
+      : null;
+    const hasResults = details !== null && Object.hasOwn(details, "results");
+    const rawResults = hasResults && Array.isArray(details.results) ? details.results : [];
     // Exact per-entry parsing precedes finalization. A matching-agent/exit-0
     // shell is not a successful implementation envelope until transcript shape
     // and exact returned Task identity have both parsed.
@@ -2358,7 +2388,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    if (!details || !("results" in details)) {
+    if (!hasResults) {
       const diagnostic = "subagent tool_result is missing details.results — successful evidence was not applied";
       processingErrors.push(diagnostic);
       process.stderr.write(`loom(pi): ${diagnostic}\n`);
@@ -2665,26 +2695,8 @@ export default function (pi: ExtensionAPI) {
       }
 
       try {
-        const sm = StateManager.fromPath(activeTaskGraphPath);
-        if (!sm) {
-          ctx.ui.notify("Could not load task graph", "error");
-          return;
-        }
-        const state = sm.load();
-        const totalTasks = state.tasks.length;
-        const completed = state.tasks.filter(t => t.status === "completed").length;
-        const failed = state.tasks.filter(t => t.status === "failed").length;
-        const pending = state.tasks.filter(t => t.status === "pending").length;
-
-        ctx.ui.notify(
-          [
-            `Phase: ${state.current_phase}`,
-            `Wave: ${state.current_wave ?? 1}`,
-            `Tasks: ${completed}/${totalTasks} done, ${pending} pending, ${failed} failed`,
-            state.github_issue ? `Issue: #${state.github_issue}` : "",
-          ].filter(Boolean).join(" | "),
-          "info",
-        );
+        const rendered = await currentOrchestrationStatus([], activeTaskGraphPath);
+        ctx.ui.notify(rendered, rendered.includes("- location: unavailable (") ? "error" : "info");
       } catch (error) {
         ctx.ui.notify(`Error: ${error instanceof Error ? error.message : String(error)}`, "error");
       }

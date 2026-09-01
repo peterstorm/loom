@@ -300,7 +300,13 @@ export function applyCompletionInfrastructureFailure(
   if (target?.active_implementation_attempt !== undefined || expectedAuthority !== undefined) return state;
   const clearedExecuting = (state.executing_tasks ?? []).filter((id) => id !== taskId);
   if (target === undefined || target.status === "completed" || target.legacy_missing_proof === true) {
-    return { ...state, executing_tasks: clearedExecuting };
+    return {
+      ...state,
+      executing_tasks: clearedExecuting,
+      tasks: state.tasks.map((task) => task.id === taskId
+        ? { ...task, reserved_at: undefined, legacy_execution_reservation: undefined }
+        : task),
+    };
   }
   return applyResolvedTask(
     state,
@@ -309,15 +315,11 @@ export function applyCompletionInfrastructureFailure(
     bytesChangedSinceAttempt,
     clearedExecuting,
     (task) => task.proof === undefined ? task : ({
-      ...task,
+      ...clearAttempt(task),
       status: "pending",
       proof: task.proof,
       revalidation_required: true,
       legacy_missing_proof: undefined,
-      active_implementation_attempt: undefined,
-      attempt_artifact_baseline: undefined,
-      attempt_repository_baseline: undefined,
-      reserved_at: undefined,
     }),
   );
 }
@@ -452,10 +454,11 @@ function transitionFailureKinds(transition: Exclude<ImplementationCompletionTran
   });
 }
 
-function clearAttempt(task: Task): Omit<Task, "status" | "proof" | "revalidation_required" | "legacy_missing_proof"> {
+function clearAttempt(task: Task): Task {
   return {
     ...task,
     active_implementation_attempt: undefined,
+    active_implementation_context: undefined,
     attempt_artifact_baseline: undefined,
     attempt_repository_baseline: undefined,
     reserved_at: undefined,
@@ -493,6 +496,7 @@ function transitionedTask(
       revalidation_required: undefined,
       legacy_missing_proof: undefined,
       failure_reason: undefined,
+      retry_count: undefined,
       ...evidenceFields(facts.normalizedEvidence),
     };
   }
@@ -508,6 +512,7 @@ function transitionedTask(
         : facts.bytes.unresolvedRepositoryPaths,
       legacy_missing_proof: undefined,
       failure_reason: `${transition.kind}: ${transitionFailureKinds(transition).join(", ")}`,
+      retry_count: transition.kind === "retry-required" ? 1 : 2,
       ...evidenceFields(facts.normalizedEvidence),
     };
     return transition.proof.state === "satisfied"

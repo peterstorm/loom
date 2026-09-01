@@ -2,11 +2,11 @@
 
 ## Status
 
-Accepted architecture, recovered from the 2026-08-22 completion-oracle discussion and reconciled against Loom `main`. Slice 1 (Verification Policy) merged at `529ffb9`; Slice 2 (quiescent Wave completion suite) merged through PR #29 at `bd16fed`. Slice 3 production-cutover implementation is present as current uncommitted work; no Slice 3 review or merge is claimed. Slices 4–5 remain planned.
+Accepted architecture, recovered from the 2026-08-22 completion-oracle discussion and reconciled against Loom `main`. Slice 1 (Verification Policy) merged at `529ffb9`; Slice 2 (quiescent Wave completion suite) merged through PR #29 at `bd16fed`; Slice 3 (Task-local Completion Oracle and exact Implementation Attempt authority) merged through PR #35 at `cfeacae6`. Slice 4 is implemented and locally validated on its feature branch but is not yet review/merge evidence. Slice 5 remains planned.
 
-Implementation worktree: `~/dev/claude-plugins/loom-deterministic-task-completion-oracle`
+Slice 4 worktree: `~/dev/claude-plugins/loom-deterministic-implementation-retry`
 
-Branch: `feat/deterministic-task-completion-oracle`
+Branch: `feat/deterministic-implementation-retry` — issue #39
 
 ## Objective
 
@@ -476,7 +476,7 @@ Task id in executing_tasks
   iff stored attempt baselines hash to that authority's two baseline digests
 ```
 
-Legacy `executing_tasks` entries without active authority remain readable as legacy reservations, but are cleanup/invalidation-only. Stale reservation reclamation removes only the exact active authority it proved abandoned.
+Legacy `executing_tasks` entries without active authority remain readable as legacy reservations, but are cleanup/invalidation-only. Timestamped reservations become policy-eligible after bounded grace and liveness checks; missing or invalid legacy timestamps are the explicit immediate, availability-biased compatibility exception. Reclamation removes only the exact selected authority. Exact identity prevents releasing a replacement, but the policy does not prove process death because transport latency has no hard upper bound.
 
 Registration captures baselines and reservation ids in the shell, then revalidates and atomically installs baselines, digests, authority, `reserved_at`, and `executing_tasks` under one StateManager lock. The returned authority is the only result correlation capability.
 
@@ -546,9 +546,9 @@ Parity tests feed equivalent Claude/Pi normalized observations into the same red
 
 Runtime rollout occurs only at a Pi session boundary after merge. A pre-Slice-3 active child has no exact sidecar/reserved authority and therefore requires cleanup/revalidation and a fresh spawn; compatibility inference never upgrades it to implemented.
 
-Slice 4 alone freezes retry contexts, dispatches attempt 2, persists retry diagnostics/request identity, and owns escalation execution. Slice 3 classifies and records those transitions but launches no retry.
+Slice 4 alone freezes retry contexts, dispatches attempt 2, persists retry diagnostics/request identity, and publishes terminal escalation for operator handling. Slice 3 classifies and records those transitions but launches no retry.
 
-#### Slice 3 implementation evidence (uncommitted; not review/merge evidence)
+#### Slice 3 shipped evidence
 
 - `engine/src/core/implementation-completion.ts` owns exact attempt/suite/observation/receipt parsers and the pure Oracle; `engine/src/core/implementation-application.ts` owns Task-byte-scope construction, one evidence-preservation rule, and one exact transition applier.
 - `engine/src/handlers/helpers/task-local-completion.ts` is the thin filesystem/Git shell. It reads exact registered paths and fixed Git dirty-set facts only; it runs no Task/project subprocess.
@@ -566,6 +566,15 @@ Slice 4 alone freezes retry contexts, dispatches attempt 2, persists retry diagn
 - One retry for semantic failure; explicit escalation after attempt 2.
 - Infrastructure retry policy remains separate.
 
+#### Slice 4 implementation checkpoint (feature branch; not merge evidence)
+
+- `engine/src/core/implementation-retry.ts` derives the only legal next attempt from exact settlement history and owns exact Retry Context/Attempt Context parsing, rendering, self-digests, and admission.
+- Canonical status emits initial or exact retry dispatch instructions. Attempt-2 exhaustion emits non-retryable `escalate-wave-implementation`; no pending-state inference can mint attempt 3.
+- The shared Claude/Pi task registration shell requires the exact status-issued retry appendix, mints semantic attempt 2 atomically with baselines, and freezes prompt/context identity before dispatch. Pi rebuilds the registration prompt after write-grant injection so the digest covers exactly what its child sees.
+- Settlement, rollback, stale reclamation, and Pi exact cleanup retire Attempt Context only with matching authority. Infrastructure receipts preserve the current semantic attempt and do not consume the budget.
+- `/loom`, resume-after-clear, the implementation prompt template, workflow docs, canonical Pi status, and `CONTEXT.md` consume the same status/retry vocabulary.
+- Pure parser/property, StateManager, shared registration, status, Claude-shell, and full Pi extension tests cover missing/stale/tampered retry context, attempt-2 admission, crash/replay authority, terminal escalation, and attempt-3 refusal.
+
 ### Slice 5 — attributed events and semantic Task output
 
 - Add proven per-Task event identity where the harness exposes or can carry it.
@@ -577,7 +586,7 @@ Slice 4 alone freezes retry contexts, dispatches attempt 2, persists retry diagn
 
 1. Only engine-issued Implementation Attempt authority can settle a Task.
 2. Exactly one current attempt exists per executing Task.
-3. Attempt 2 is terminal: success, escalation, infrastructure block, or ignored stale result.
+3. Only semantic failure on attempt 2 is terminal and publishes escalation; infrastructure failure preserves attempt 2, while ignored stale evidence leaves current authority untouched.
 4. Infrastructure failure does not consume semantic attempt budget.
 5. A Task suite never executes a check whose truth can observe sibling intermediate bytes, and persisted Task proof is rechecked against its exact byte scope.
 6. A Wave suite executes only after every Wave Agent has stopped, and its accepted digest is part of protected Wave completion authority.

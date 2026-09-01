@@ -413,6 +413,7 @@ function clearCurrentReservedAuthority(
         ? {
             ...task,
             active_implementation_attempt: undefined,
+            active_implementation_context: undefined,
             attempt_artifact_baseline: undefined,
             attempt_repository_baseline: undefined,
             reserved_at: undefined,
@@ -439,17 +440,13 @@ async function settleFailedExactImplementation(
 ): Promise<PiResultOutcome> {
   const observedAt = parseIsoInstant(args.now, "Pi failed-result instant");
   if (!observedAt.ok) return outcome(observedAt.error.errors, observedAt.error.errors);
-  const settled: { value?: ImplementationSettlementApplicationResult } = {};
-  await args.store.update((state) => {
-    const settlement = settleUnavailableImplementation(state, authority, observedAt.value, args.failure);
-    settled.value = settlement;
-    return settlement.kind === "error" ? state : settlement.state;
+  const settlement = await args.store.updateAndReturn((state) => {
+    const applied = settleUnavailableImplementation(state, authority, observedAt.value, args.failure);
+    return {
+      state: applicationState(state, applied),
+      value: applied,
+    };
   });
-  const settlement = settled.value;
-  if (settlement === undefined) {
-    const message = `loom(pi): ${args.failure}; exact Oracle settlement produced no transition — current attempt preserved`;
-    return processingFailure(message);
-  }
   if (settlement.kind === "error") {
     const message = `loom(pi): ${args.failure}; exact Oracle settlement failed: ${JSON.stringify(settlement.error)} — current attempt preserved`;
     return processingFailure(message);
@@ -463,17 +460,18 @@ async function cleanupFailedLegacyImplementation(
   args: FailedImplementationArgs,
   binding: BoundImplementation,
 ): Promise<PiResultOutcome> {
-  let released = false;
-  await args.store.update((state) => {
+  const released = await args.store.updateAndReturn((state) => {
     const task = state.tasks.find((candidate) => candidate.id === binding.taskId);
-    if (task?.active_implementation_attempt !== undefined) return state;
-    released = true;
+    if (task?.active_implementation_attempt !== undefined) return { state, value: false };
     return {
-      ...state,
-      executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== binding.taskId),
-      tasks: state.tasks.map((candidate) => candidate.id === binding.taskId
-        ? { ...candidate, reserved_at: undefined, legacy_execution_reservation: undefined }
-        : candidate),
+      state: {
+        ...state,
+        executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== binding.taskId),
+        tasks: state.tasks.map((candidate) => candidate.id === binding.taskId
+          ? { ...candidate, reserved_at: undefined, legacy_execution_reservation: undefined }
+          : candidate),
+      },
+      value: true,
     };
   });
   if (!released) {
@@ -500,6 +498,9 @@ async function applyFailedImplementationResult(args: FailedImplementationArgs): 
   if (binding.kind === "unbound") {
     const message = `loom(pi): ${args.failure}; ${binding.reason} — completion evidence ignored`;
     return outcome([message], executingTasks.length > 0 ? [message] : []);
+  }
+  if (await settleCompletedOrMissingImplementation(args.store, binding.taskId, args.reservedSlot)) {
+    return outcome([`loom(pi): ${binding.taskId} failed after completion; retired exact completed/missing reservation`]);
   }
   const authority = args.reservedSlot?.implementationAuthority;
   return authority == null
@@ -586,6 +587,47 @@ async function applyFailedReviewResult(args: Readonly<{
   }
 }
 
+type FailedPiResultArgs = Readonly<{
+  store: TaskGraphStore;
+  agentType: string;
+  result: PiSubagentResult;
+  reservedSlot: ReservedSlot | undefined;
+  now: string;
+}>;
+
+async function applyFailedSpecCheckResult(
+  args: FailedPiResultArgs,
+  failure: string,
+): Promise<PiResultOutcome> {
+  let observedState: ParsedTaskGraph;
+  try {
+    observedState = args.store.load();
+  } catch (cause) {
+    const diagnostic = `spec-check TaskGraph load failed: ${cause instanceof Error ? cause.message : String(cause)}`;
+    return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);
+  }
+  let documents: WaveSpecCheckDocumentsAuthority;
+  try {
+    documents = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
+  } catch (cause) {
+    const diagnostic = `spec-check document observation failed: ${cause instanceof Error ? cause.message : String(cause)}`;
+    return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);
+  }
+  try {
+    return await args.store.updateAndReturn((state) =>
+      reducePiSpecCheckResult(
+        state,
+        args.reservedSlot?.specCheckAuthority,
+        { kind: "capture-failed", error: failure },
+        documents,
+        args.now,
+      ));
+  } catch (cause) {
+    const diagnostic = `spec-check settlement persistence failed: ${cause instanceof Error ? cause.message : String(cause)}`;
+    return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);
+  }
+}
+
 /**
  * Record the failure of an agent whose process did not succeed.
  *
@@ -597,13 +639,7 @@ async function applyFailedReviewResult(args: Readonly<{
  * authority. Unreserved failures never store positive evidence; a proven
  * legacy implementation reservation may still be released during cleanup.
  */
-export async function applyFailedPiResult(args: Readonly<{
-  store: TaskGraphStore;
-  agentType: string;
-  result: PiSubagentResult;
-  reservedSlot: ReservedSlot | undefined;
-  now: string;
-}>): Promise<PiResultOutcome> {
+export async function applyFailedPiResult(args: FailedPiResultArgs): Promise<PiResultOutcome> {
   const { store, agentType, result, reservedSlot } = args;
   const failure =
     `${agentType} failed before evidence capture completed (${piSubagentFailureSignals(result)})`;
@@ -613,21 +649,7 @@ export async function applyFailedPiResult(args: Readonly<{
   }
 
   if (agentType === "spec-check-invoker") {
-    try {
-      const observedState = store.load();
-      const documents = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
-      return store.updateAndReturn((state) =>
-        reducePiSpecCheckResult(
-          state,
-          reservedSlot?.specCheckAuthority,
-          { kind: "capture-failed", error: failure },
-          documents,
-          args.now,
-        ));
-    } catch (error) {
-      const diagnostic = `spec-check document observation failed: ${error instanceof Error ? error.message : String(error)}`;
-      return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);
-    }
+    return applyFailedSpecCheckResult(args, failure);
   }
 
   // The dispatcher normally settled a reserved failure through
@@ -891,23 +913,43 @@ type ImplementationTranscriptObservation =
       log: readonly string[];
     }>;
 
+export function retireCompletedOrMissingImplementation(
+  state: TaskGraph,
+  taskId: string,
+  reservedSlot: ReservedSlot | undefined,
+): Readonly<{ state: TaskGraph; retired: boolean }> {
+  if (!reservedAuthorityIsCurrent(state, taskId, reservedSlot)) return { state, retired: false };
+  const task = state.tasks.find((candidate) => candidate.id === taskId);
+  if (task !== undefined && task.status !== "completed") return { state, retired: false };
+  const cleared = clearCurrentReservedAuthority({
+    ...state,
+    executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== taskId),
+  }, taskId, reservedSlot);
+  return {
+    state: {
+      ...cleared,
+      tasks: cleared.tasks.map((candidate) =>
+        candidate.id === taskId && candidate.status === "completed"
+          ? {
+              ...candidate,
+              repository_baseline: undefined,
+              unresolved_repository_paths: undefined,
+            }
+          : candidate),
+    },
+    retired: true,
+  };
+}
+
 async function settleCompletedOrMissingImplementation(
   store: TaskGraphStore,
   taskId: string,
   reservedSlot: ReservedSlot | undefined,
 ): Promise<boolean> {
-  let settled = false;
-  await store.update((state) => {
-    if (!reservedAuthorityIsCurrent(state, taskId, reservedSlot)) return state;
-    const task = state.tasks.find((candidate) => candidate.id === taskId);
-    if (task !== undefined && task.status !== "completed") return state;
-    settled = true;
-    return clearCurrentReservedAuthority({
-      ...state,
-      executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== taskId),
-    }, taskId, reservedSlot);
+  return store.updateAndReturn((state) => {
+    const retired = retireCompletedOrMissingImplementation(state, taskId, reservedSlot);
+    return { state: retired.state, value: retired.retired };
   });
-  return settled;
 }
 
 async function resolveImplementationBindingForResult(args: Readonly<{
@@ -940,14 +982,19 @@ async function resolveImplementationBindingForResult(args: Readonly<{
   };
 }
 
-function missingStructuredEvidenceLog(taskId: string, messages: unknown): string | null {
+function missingStructuredEvidenceLog(taskId: string, messages: unknown):
+  | Readonly<{ ok: true; value: string }>
+  | Readonly<{ ok: false; errors: readonly string[] }> {
   const trace = piStructuredTestDiagnostics(messages);
-  if (!trace.ok) return null;
+  if (!trace.ok) return trace;
   const summary = trace.value.classifiedCommands.length === 0
     ? "no Bash call was classified as a test run"
     : `verdict=${trace.value.verdict}, classified=[${trace.value.classifiedCommands.join(" | ")}]`;
-  return `loom(pi): ${taskId} produced no structured test evidence (${summary}) — transcript fallback used; ` +
-    `the wave gate will reject it`;
+  return {
+    ok: true,
+    value: `loom(pi): ${taskId} produced no structured test evidence (${summary}) — transcript fallback used; ` +
+      `the wave gate will reject it`,
+  };
 }
 
 function observeImplementationTranscript(result: PiSubagentResult, taskId: string): ImplementationTranscriptObservation {
@@ -963,12 +1010,16 @@ function observeImplementationTranscript(result: PiSubagentResult, taskId: strin
 
   const adaptedTranscript = messagesToClaudeJsonl(parsedMessages.value);
   const structuredEvidence = piStructuredTestResult(parsedMessages.value);
-  if (structuredEvidence.ok && structuredEvidence.value === null) {
-    const structuredLog = missingStructuredEvidenceLog(taskId, result.messages);
-    if (structuredLog !== null) log.push(structuredLog);
-  }
-  if (!adaptedTranscript.ok || !structuredEvidence.ok) {
-    const errors = firstFailureErrors(adaptedTranscript, structuredEvidence);
+  const diagnostics = structuredEvidence.ok && structuredEvidence.value === null
+    ? missingStructuredEvidenceLog(taskId, result.messages)
+    : null;
+  if (diagnostics?.ok) log.push(diagnostics.value);
+  if (!adaptedTranscript.ok || !structuredEvidence.ok || diagnostics?.ok === false) {
+    const errors = firstFailureErrors(
+      adaptedTranscript,
+      structuredEvidence,
+      ...(diagnostics === null ? [] : [diagnostics]),
+    );
     return {
       kind: "malformed",
       failureReason: `Pi transcript evidence capture failed: ${errors.join("; ")}`,
@@ -1265,13 +1316,9 @@ function applicationState(state: TaskGraph, application: ImplementationSettlemen
 
 function renderExactPiSettlement(
   args: ExactPiSettlementArgs,
-  settled: LockedPiSettlement | undefined,
+  settled: LockedPiSettlement,
 ): PiResultOutcome {
-  const applied = settled?.application;
-  if (applied === undefined) {
-    const diagnostic = `loom(pi): exact Oracle settlement produced no transition for ${args.binding.taskId} — current attempt preserved`;
-    return outcome([...args.log, diagnostic], [diagnostic]);
-  }
+  const applied = settled.application;
   if (applied.kind === "error") {
     const diagnostic = `loom(pi): exact Oracle settlement failed for ${args.binding.taskId}: ${JSON.stringify(applied.error)} — current attempt preserved`;
     return outcome([...args.log, diagnostic], [diagnostic]);
@@ -1279,7 +1326,7 @@ function renderExactPiSettlement(
   if (applied.kind === "ignored") {
     return outcome([...args.log, `loom(pi): ${args.binding.taskId} result ignored (${applied.reason})`]);
   }
-  const reason = settled?.infrastructureReason;
+  const reason = settled.infrastructureReason;
   const log = [...args.log, `loom(pi): ${args.binding.taskId} settlement: ${applied.transition.kind}`];
   if (applied.transition.kind === "infrastructure-blocked" && reason !== undefined) {
     log.push(`loom(pi): ${reason}`);
@@ -1291,13 +1338,14 @@ async function settleExactPiInfrastructure(
   args: ExactPiSettlementArgs,
   reason: string,
 ): Promise<PiResultOutcome> {
-  const settled: { value?: LockedPiSettlement } = {};
-  await args.store.update((state) => {
+  const settled = await args.store.updateAndReturn((state) => {
     const application = settleUnavailableImplementation(state, args.authority, args.observedAt, reason);
-    settled.value = { application, infrastructureReason: reason };
-    return applicationState(state, application);
+    return {
+      state: applicationState(state, application),
+      value: { application, infrastructureReason: reason },
+    };
   });
-  return renderExactPiSettlement(args, settled.value);
+  return renderExactPiSettlement(args, settled);
 }
 
 function piExactSettlementPorts(args: ExactPiSettlementArgs): ExactImplementationSettlementPorts {
@@ -1344,13 +1392,14 @@ async function applyExactImplementationPiResult(args: ExactPiSettlementArgs): Pr
   if (transcript.kind === "malformed") return settleExactPiInfrastructure(args, transcript.failureReason);
   const modified = readImplementationModifiedPaths(args.repository, transcript.resultMessages, args.binding.taskId);
   if (!modified.ok) return settleExactPiInfrastructure(args, modified.message);
-  const settled: { value?: LockedPiSettlement } = {};
-  await args.store.update((state) => {
+  const settled = await args.store.updateAndReturn((state) => {
     const application = settleLockedPiResult(state, args, transcript, modified.filesModified);
-    settled.value = application;
-    return applicationState(state, application.application);
+    return {
+      state: applicationState(state, application.application),
+      value: application,
+    };
   });
-  return renderExactPiSettlement(args, settled.value);
+  return renderExactPiSettlement(args, settled);
 }
 
 async function applyLegacyImplementationPiResult(
@@ -1358,9 +1407,6 @@ async function applyLegacyImplementationPiResult(
   binding: ResultImplementationBinding,
   log: string[],
 ): Promise<PiResultOutcome> {
-  if (await settleCompletedOrMissingImplementation(args.store, binding.taskId, args.reservedSlot)) {
-    return outcome([...log, `loom(pi): ${binding.taskId} stopped; preserved completed/missing legacy state`]);
-  }
   const transcript = observeImplementationTranscript(args.result, binding.taskId);
   log.push(...transcript.log);
   if (transcript.kind === "malformed") {
@@ -1400,6 +1446,9 @@ async function applyBoundImplementationPiResult(
   binding: ResultImplementationBinding,
 ): Promise<PiResultOutcome> {
   const log = [...binding.log];
+  if (await settleCompletedOrMissingImplementation(args.store, binding.taskId, args.reservedSlot)) {
+    return outcome([...log, `loom(pi): ${binding.taskId} stopped; retired exact completed/missing reservation`]);
+  }
   const authority = args.reservedSlot?.implementationAuthority;
   const currentTask = args.store.load().tasks.find((task) => task.id === binding.taskId);
   if (currentTask?.active_implementation_attempt !== undefined && authority == null) {

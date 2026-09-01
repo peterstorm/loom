@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -12,6 +12,10 @@ import { applyCompletionInfrastructureFailure } from "../../src/core/implementat
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { createImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import { taskVerificationPolicy } from "../../src/core/verification-policy";
+import {
+  authorizeImplementationSpawn,
+  createImplementationAttemptContext,
+} from "../../src/core/implementation-retry";
 import { parseArtifactDigest, parseOrchestrationRunId } from "../../src/core/orchestration-contract";
 import {
   captureDeclaredArtifactBaseline,
@@ -724,6 +728,69 @@ describe("applyFailedPiResult", () => {
     expect(store.current().wave_gates["1"]?.blocked).toBe(false);
   });
 
+  it("names failed spec-check TaskGraph load and settlement persistence separately", async () => {
+    const fixture = graphWithSpecCheckAuthority();
+    const loadFailure: TaskGraphStore = {
+      load: () => { throw new Error("injected graph read failure"); },
+      update: async () => {},
+      updateAndReturn: async () => { throw new Error("must not persist after load failure"); },
+    };
+    const failedLoad = await applyFailedPiResult({
+      store: loadFailure,
+      agentType: "spec-check-invoker",
+      result: result({ agent: "spec-check-invoker", exitCode: 1 }),
+      reservedSlot: fixture.reservedSlot,
+      now: NOW,
+    });
+    expect(failedLoad.processingErrors).toEqual([
+      "spec-check TaskGraph load failed: injected graph read failure",
+    ]);
+
+    const persistenceFailure: TaskGraphStore = {
+      load: () => fixture.state,
+      update: async () => {},
+      updateAndReturn: async () => { throw new Error("injected settlement write failure"); },
+    };
+    const failedPersistence = await applyFailedPiResult({
+      store: persistenceFailure,
+      agentType: "spec-check-invoker",
+      result: result({ agent: "spec-check-invoker", exitCode: 1 }),
+      reservedSlot: fixture.reservedSlot,
+      now: NOW,
+    });
+    expect(failedPersistence.processingErrors).toEqual([
+      "spec-check settlement persistence failed: injected settlement write failure",
+    ]);
+  });
+
+  it("names failed spec-check document observation separately", async () => {
+    const fixture = graphWithSpecCheckAuthority();
+    const root = canonicalTempDir("loom-failed-spec-observation-");
+    const loop = join(root, "spec-loop.md");
+    symlinkSync(loop, loop);
+    const observed = { ...fixture.state, spec_file: loop } as ParsedTaskGraph;
+    const store: TaskGraphStore = {
+      load: () => observed,
+      update: async () => {},
+      updateAndReturn: async () => { throw new Error("must not persist after observation failure"); },
+    };
+    try {
+      const applied = await applyFailedPiResult({
+        store,
+        agentType: "spec-check-invoker",
+        result: result({ agent: "spec-check-invoker", exitCode: 1 }),
+        reservedSlot: fixture.reservedSlot,
+        now: NOW,
+      });
+      expect(applied.processingErrors).toEqual([
+        expect.stringContaining("spec-check document observation failed"),
+      ]);
+      expect(applied.processingErrors[0]).toMatch(/ELOOP|symbolic link/i);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects an unreserved failed spec-check without changing current Wave evidence", async () => {
     const fixture = graphWithSpecCheckAuthority();
     const store = fakeStore(fixture.state);
@@ -1261,6 +1328,25 @@ describe("applyImplementationPiResult", () => {
     return { ...recovered, executing_tasks: ["T1"] };
   };
 
+  it("clears legacy reservation marker with infrastructure cleanup", () => {
+    const initial = implementationGraph();
+    const reserved: TaskGraph = {
+      ...initial,
+      executing_tasks: ["T1"],
+      tasks: initial.tasks.map((task) => taskFixture({
+        ...task,
+        legacy_execution_reservation: true,
+        reserved_at: "2020-01-01T00:00:00.000Z",
+      })),
+    };
+
+    const recovered = applyCompletionInfrastructureFailure(reserved, "T1", false);
+
+    expect(recovered.executing_tasks).toEqual([]);
+    expect(recovered.tasks[0]?.legacy_execution_reservation).toBeUndefined();
+    expect(recovered.tasks[0]?.reserved_at).toBeUndefined();
+  });
+
   it("preserves parallel execution authority and reports an unbound successful result", async () => {
     const base = implementationGraph();
     const second = { ...base.tasks[0]!, id: "T2" };
@@ -1326,6 +1412,80 @@ describe("applyImplementationPiResult", () => {
       revalidation_required: true,
     });
     expect(store.current().executing_tasks).toEqual([]);
+  });
+
+  it("retires an exact modern reservation from an already-completed Task", async () => {
+    const verificationPolicy = {
+      regression: { kind: "waived" as const, reason: "documentation-only" as const },
+      newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
+    };
+    const proof = evaluateTaskProof(
+      { verificationPolicy, declaredArtifacts: [] },
+      { taskCompleted: true, filesModified: [], newTestsWritten: false },
+    );
+    if (proof.state !== "satisfied") throw new Error("completed cleanup fixture must be satisfied");
+    const modern = modernize(implementationGraph({
+      file_list: [],
+      verification_policy: {
+        regression: verificationPolicy.regression,
+        new_tests: verificationPolicy.newTests,
+      },
+    }), process.cwd(), "pi-completed-modern-cleanup");
+    const authority = modern.reservedSlot.implementationAuthority;
+    if (authority === null || authority === undefined) throw new Error("modern cleanup authority missing");
+    const prompt = "Task ID: T1";
+    const admission = authorizeImplementationSpawn({ id: "T1" }, prompt);
+    if (!admission.ok) throw new Error(admission.error);
+    const context = createImplementationAttemptContext({ authority, prompt, admission });
+    const completed: TaskGraph = {
+      ...modern.graph,
+      tasks: modern.graph.tasks.map((task) => taskFixture({
+        ...task,
+        status: "completed",
+        proof,
+        revalidation_required: undefined,
+        active_implementation_context: context,
+        repository_baseline: task.attempt_repository_baseline,
+        unresolved_repository_paths: ["foreign.ts"],
+      })),
+    };
+    const store = fakeStore(completed);
+    const failedStore = fakeStore(completed);
+
+    const applied = await applyImplementationPiResult({
+      store,
+      repository: repositoryAt(process.cwd()),
+      agentType: "code-implementer-agent",
+      result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages: [] }),
+      reservedSlot: modern.reservedSlot,
+      parentPrompt: "",
+    });
+
+    expect(applied.processingErrors).toEqual([]);
+    expect(applied.log.join("\n")).toContain("retired exact completed/missing reservation");
+    expect(store.current().executing_tasks).toEqual([]);
+    expect(store.current().tasks[0]).toMatchObject({ status: "completed", proof });
+    expect(store.current().tasks[0]?.active_implementation_attempt).toBeUndefined();
+    expect(store.current().tasks[0]?.active_implementation_context).toBeUndefined();
+    expect(store.current().tasks[0]?.attempt_artifact_baseline).toBeUndefined();
+    expect(store.current().tasks[0]?.attempt_repository_baseline).toBeUndefined();
+    expect(store.current().tasks[0]?.repository_baseline).toBeUndefined();
+    expect(store.current().tasks[0]?.unresolved_repository_paths).toBeUndefined();
+
+    const failed = await applyFailedPiResult({
+      store: failedStore,
+      agentType: "code-implementer-agent",
+      result: result({ agent: "code-implementer-agent", task: "Task ID: T1", exitCode: 1 }),
+      reservedSlot: modern.reservedSlot,
+      now: NOW,
+    });
+    expect(failed.processingErrors).toEqual([]);
+    expect(failedStore.current().executing_tasks).toEqual([]);
+    expect(failedStore.current().tasks[0]?.status).toBe("completed");
+    expect(failedStore.current().tasks[0]?.active_implementation_attempt).toBeUndefined();
+    expect(failedStore.current().tasks[0]?.active_implementation_context).toBeUndefined();
+    expect(failedStore.current().tasks[0]?.repository_baseline).toBeUndefined();
+    expect(failedStore.current().tasks[0]?.unresolved_repository_paths).toBeUndefined();
   });
 
   it("keeps a concurrently reopened unreserved Task pending despite a stale completed pre-read", async () => {

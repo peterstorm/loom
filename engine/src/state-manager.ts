@@ -84,7 +84,15 @@ import {
   canonicalArtifactBaselineDigest,
   parseImplementationAttemptAuthority,
   parseImplementationAttemptHistory,
+  parseImplementationSettlementReceiptId,
+  type ImplementationSettlementReceiptId,
 } from "./core/implementation-completion";
+import {
+  deriveImplementationRetryDisposition,
+  implementationAttemptContextMatchesAuthority,
+  parseImplementationAttemptContext,
+  renderImplementationRetryContext,
+} from "./core/implementation-retry";
 import { parseTaskId, type TaskId } from "./core/task-id";
 import {
   anchoredDirectoryHasIdentity,
@@ -170,7 +178,7 @@ async function withStateDirectoryAsync<T>(
  * The subagent directory is the BASE for session-scoped files: its configured
  * path may traverse a system symlink (macOS resolves `/tmp` to
  * `/private/tmp`), so it is resolved here rather than walked strictly from the
- * filesystem root — the same reason `ensureResolvedBaseDirectory` resolves a
+ * filesystem root — the same reason `resolveBaseDirectory` resolves a
  * run base. ENOENT propagates: an absent base is the one absent answer, the
  * same one an absent pointer produces. The leaf itself is still read with no
  * component followed.
@@ -1128,22 +1136,62 @@ function taskAttemptAuthorityError(
   id: string,
 ): string | null {
   const label = `tasks[${index}] ("${id}")`;
-  const history = t.implementation_attempt_history === undefined
+  const parsedHistory = t.implementation_attempt_history === undefined
     ? undefined
     : parseImplementationAttemptHistory(
         t.implementation_attempt_history,
         `${label}: implementation_attempt_history`,
       );
-  if (history !== undefined) {
-    if (!history.ok) return history.error.errors.join("; ");
-    if (history.value.some((receipt) => receipt.taskId !== id)) {
-      return `${label}: implementation_attempt_history receipt taskId must equal ${id}`;
+  if (parsedHistory !== undefined && !parsedHistory.ok) {
+    return parsedHistory.error.errors.join("; ");
+  }
+  const history = parsedHistory?.value;
+  if (history?.some((receipt) => receipt.taskId !== id)) {
+    return `${label}: implementation_attempt_history receipt taskId must equal ${id}`;
+  }
+  const protocolPresent = t.implementation_retry_protocol !== undefined ||
+    t.implementation_retry_history_start !== undefined ||
+    t.implementation_retry_predecessor_receipt_id !== undefined;
+  let retryProtocol: 2 | undefined;
+  let retryHistoryStart: number | undefined;
+  let retryPredecessorReceiptId: ImplementationSettlementReceiptId | undefined;
+  if (protocolPresent) {
+    if (t.implementation_retry_protocol !== 2 ||
+        typeof t.implementation_retry_history_start !== "number" ||
+        !Number.isSafeInteger(t.implementation_retry_history_start) ||
+        t.implementation_retry_history_start < 0 ||
+        t.implementation_retry_history_start > (history?.length ?? 0)) {
+      return `${label}: implementation retry protocol 2 requires a valid history start index`;
     }
+    if (t.implementation_retry_predecessor_receipt_id !== undefined) {
+      const predecessor = parseImplementationSettlementReceiptId(
+        t.implementation_retry_predecessor_receipt_id,
+        `${label}: implementation_retry_predecessor_receipt_id`,
+      );
+      if (!predecessor.ok) return predecessor.error.errors.join("; ");
+      retryPredecessorReceiptId = predecessor.value;
+    }
+    retryProtocol = 2;
+    retryHistoryStart = t.implementation_retry_history_start;
+  }
+  const retryDisposition = deriveImplementationRetryDisposition({
+    id,
+    implementation_attempt_history: history,
+    implementation_retry_protocol: retryProtocol,
+    implementation_retry_history_start: retryHistoryStart,
+    implementation_retry_predecessor_receipt_id: retryPredecessorReceiptId,
+  });
+  if (retryDisposition.kind === "invalid") {
+    return `${label}: invalid implementation retry lineage: ${retryDisposition.errors.join("; ")}`;
   }
   if (t.legacy_execution_reservation !== undefined && t.legacy_execution_reservation !== true) {
     return `${label}: legacy_execution_reservation must be true when present`;
   }
-  if (t.active_implementation_attempt === undefined) return null;
+  if (t.active_implementation_attempt === undefined) {
+    return t.active_implementation_context === undefined
+      ? null
+      : `${label}: active_implementation_context requires active_implementation_attempt`;
+  }
   if (t.legacy_execution_reservation === true) {
     return `${label}: active_implementation_attempt cannot coexist with legacy_execution_reservation`;
   }
@@ -1155,7 +1203,36 @@ function taskAttemptAuthorityError(
   if (authority.value.taskId !== id || authority.value.wave !== t.wave) {
     return `${label}: active_implementation_attempt must match Task id and Wave`;
   }
-  if (history?.ok && history.value.some((receipt) =>
+  if (retryDisposition.kind === "escalated") {
+    return `${label}: escalated implementation lineage cannot carry an active attempt`;
+  }
+  if (retryProtocol === undefined && authority.value.semanticAttempt === 2) {
+    return `${label}: semantic attempt 2 requires protocol-2 retry lineage`;
+  }
+  if (retryProtocol === 2 && authority.value.semanticAttempt !== retryDisposition.semanticAttempt) {
+    return `${label}: active_implementation_attempt semantic attempt contradicts settlement history`;
+  }
+  if (retryProtocol === 2 && t.active_implementation_context === undefined) {
+    return `${label}: protocol-2 active implementation requires active_implementation_context`;
+  }
+  if (t.active_implementation_context !== undefined) {
+    const context = parseImplementationAttemptContext(
+      t.active_implementation_context,
+      `${label}: active_implementation_context`,
+    );
+    if (!context.ok) return context.errors.join("; ");
+    if (!implementationAttemptContextMatchesAuthority(context.value, authority.value)) {
+      return `${label}: active_implementation_context must match active_implementation_attempt`;
+    }
+    if (retryDisposition.kind === "retry" && (
+      context.value.retryContext === null ||
+      context.value.predecessorReceiptId !== retryDisposition.predecessor.receiptId ||
+      renderImplementationRetryContext(context.value.retryContext) !== retryDisposition.promptAppendix
+    )) {
+      return `${label}: active retry context must match the current retry-required receipt`;
+    }
+  }
+  if (history?.some((receipt) =>
     receipt.authorityDigest === authority.value.authorityDigest ||
     receipt.reservationId === authority.value.reservationId)) {
     return `${label}: active_implementation_attempt authorityDigest and reservationId must be absent from implementation_attempt_history`;
@@ -1780,6 +1857,14 @@ function migrateParsedTask(
     const authority = parseImplementationAttemptAuthority(task.active_implementation_attempt);
     if (!authority.ok) return parseErr(authority.error.errors.join("; "));
     migrated = { ...migrated, active_implementation_attempt: authority.value };
+    if (task.active_implementation_context !== undefined) {
+      const context = parseImplementationAttemptContext(
+        task.active_implementation_context,
+        `tasks[${index}].active_implementation_context`,
+      );
+      if (!context.ok) return parseErr(context.errors.join("; "));
+      migrated = { ...migrated, active_implementation_context: context.value };
+    }
   } else if (executing.has(String(task.id))) {
     migrated = { ...migrated, legacy_execution_reservation: true };
   } else {

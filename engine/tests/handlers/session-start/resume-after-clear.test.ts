@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, chmodSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
@@ -84,6 +84,26 @@ describe("resume-after-clear handler", () => {
     const { exitCode, stdout } = runHandler();
     expect(exitCode).toBe(0);
     expect(stdout.trim()).toBe("");
+  });
+
+  it("fails closed when the Task Graph path is present but inaccessible", () => {
+    symlinkSync(statePath, statePath);
+
+    const { exitCode, stderr } = runHandler();
+
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("cannot access Task Graph");
+    expect(stderr).toMatch(/ELOOP|symbolic link/i);
+  });
+
+  it("fails closed when the Task Graph JSON is corrupt", () => {
+    writeFileSync(statePath, "{not json");
+
+    const { exitCode, stderr } = runHandler();
+
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("cannot access Task Graph");
+    expect(stderr).toContain("invalid JSON");
   });
 
   it("passthrough when phase is not execute", () => {
@@ -206,7 +226,8 @@ describe("resume-after-clear handler", () => {
     const { stdout } = runHandler();
     expect(stdout).toContain("Phase 5: Execute");
     expect(stdout).toContain("impl-agent-context");
-    expect(stdout).toContain("Spawn all pending wave");
+    expect(stdout).toContain("helper orchestration status --json");
+    expect(stdout).toContain("initial/retry dispatches or terminal escalation");
   });
 
   // --- optional fields ---
@@ -348,7 +369,8 @@ describe("buildContextOutput (pure)", () => {
         "2": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false },
       },
     }), "/loom");
-    expect(out).toContain("Spawn all pending wave 2 tasks");
+    expect(out).toContain("helper orchestration status --json");
+    expect(out).toContain("exact status-issued retry appendix");
     expect(out).not.toContain("BLOCKED");
   });
 });
