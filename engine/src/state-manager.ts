@@ -354,11 +354,11 @@ function parseSpecCheckField(v: unknown):
  * `blocked` is an orthogonal veto — it legitimately coexists with
  * `impl_complete`/`reviews_complete` (see `WaveGate`), so no combination of the
  * flags is contradictory on its own. What IS meaningless is a veto with no
- * reason behind it: the flag has exactly two causes, and `updateTaskFindings`
- * — driven by `store-review-findings` and `store-spec-check-findings` against
- * `core/wave-gate-model.ts` `waveHasBlockCause` — already clears it when the
- * last cause dies, using the writers' own predicate so the load boundary
- * cannot disagree with them. Its absence is not cosmetic:
+ * reason behind it: the flag has exactly two causes, and the finding/spec-check
+ * callers invoke `reconcileWaveBlock` against `core/wave-gate-model.ts`
+ * `waveHasBlockCause` after rewriting their evidence. That reconciliation
+ * clears the flag when the last cause dies, using the writers' own predicate so
+ * the load boundary cannot disagree with them. Its absence is not cosmetic:
  * `validate-task-execution` renders a causeless gate as
  *
  *     BLOCKED: Wave N review gate not passed.

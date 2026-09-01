@@ -89,7 +89,10 @@ export function parseSpecCheckOutput(output: string): ParsedSpecCheckOutput {
 
   const criticalCount = scalarMarker(searchBlock, "SPEC_CHECK_CRITICAL_COUNT", /^SPEC_CHECK_CRITICAL_COUNT:\s*(\d+)\s*$/gm);
   const highCount = scalarMarker(searchBlock, "SPEC_CHECK_HIGH_COUNT", /^SPEC_CHECK_HIGH_COUNT:\s*(\d+)\s*$/gm);
-  const verdict = scalarMarker(searchBlock, "SPEC_CHECK_VERDICT", /^SPEC_CHECK_VERDICT:\s*(PASSED|BLOCKED)\s*$/gm);
+  // Verdicts are terminal but contradiction-sensitive: counts/findings after
+  // the first verdict remain trailing prose, while another complete verdict
+  // anywhere in this final Wave footer invalidates the whole footer.
+  const verdict = scalarMarker(footer, "SPEC_CHECK_VERDICT", /^SPEC_CHECK_VERDICT:\s*(PASSED|BLOCKED)\s*$/gm);
   const wave = scalarMarker(searchBlock, "SPEC_CHECK_WAVE", /^SPEC_CHECK_WAVE:\s*(\d+)\s*$/gm);
   const override = scalarMarker(searchBlock, "SPEC_CHECK_OVERRIDE", /^SPEC_CHECK_OVERRIDE:\s*(.*)$/gm);
   const uniqueValue = (marker: ScalarMarker): string | null =>

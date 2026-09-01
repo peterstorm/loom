@@ -137,7 +137,12 @@ function assertDarwinNoFollowAnyCapability(): void {
     symlinkSync(".", join(probeDir, "planted-link"));
     let refusedWithEloop = false;
     try {
-      openSync(join(probeDir, "planted-link"), fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | DARWIN_O_NOFOLLOW_ANY);
+      const unexpectedFd = openSync(
+        join(probeDir, "planted-link"),
+        fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | DARWIN_O_NOFOLLOW_ANY,
+      );
+      const closeError = closeFileDescriptor(unexpectedFd, null, "darwin O_NOFOLLOW_ANY capability probe");
+      if (closeError !== null) throw closeError;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ELOOP") refusedWithEloop = true;
       else {

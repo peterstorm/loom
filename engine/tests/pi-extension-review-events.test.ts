@@ -732,6 +732,51 @@ describe("Pi extension review tool_result integration", () => {
       });
   });
 
+  it("includes partial child-roster cleanup failure in the actionable grant rejection", async () => {
+    const planPath = join(temp, "partial-child-cleanup-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const parentSession = "019fca39-f989-7510-8e62-50dadbcad490";
+    const childSession = "019fca39-f989-7510-8e62-50dadbcad491";
+    const input = {
+      agent: "code-implementer-agent",
+      task: "Task ID: T1\nUse the code-implementer skill. Implement and test.",
+      agentScope: "user",
+    };
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent", toolCallId: "call-partial-child-cleanup", input,
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => parentSession } })).toEqual([undefined]);
+
+    const pointer = join(subagentDir, `${childSession}.task_graph`);
+    mkdirSync(pointer, { recursive: true });
+    const cleanup = vi.spyOn(fsSessionRegistry, "removeActive")
+      .mockRejectedValueOnce(new Error("injected partial roster cleanup failure"));
+    try {
+      const rejected = await pi.emit("before_agent_start", {
+        prompt: input.task,
+        systemPrompt: "<!-- LOOM_PI_AGENT_ID:code-implementer-agent -->",
+      }, { cwd: ROOT, sessionManager: { getSessionId: () => childSession } });
+
+      expect(rejected).toContainEqual(expect.objectContaining({
+        message: expect.objectContaining({
+          customType: "loom-write-grant-error",
+          content: expect.stringContaining("Cleanup failures: remove partial child roster entry"),
+        }),
+      }));
+      expect(JSON.stringify(rejected)).toContain("injected partial roster cleanup failure");
+    } finally {
+      cleanup.mockRestore();
+      rmSync(pointer, { recursive: true, force: true });
+      rmSync(join(subagentDir, `${childSession}.active`), { force: true });
+    }
+  });
+
   it("blocks later Edit and Write calls in the child session after grant rejection", async () => {
     const planPath = join(temp, "rejected-write-grant-plan.md");
     writeFileSync(planPath, "# Plan\n");
@@ -2672,6 +2717,43 @@ describe("Pi extension review tool_result integration", () => {
     expect(readdirSync(grantDir).filter((name) => name.endsWith(".json"))).toEqual([]);
   });
 
+  it.skipIf(runningAsRoot)("rejects shutdown until outstanding write-grant revocation succeeds", async () => {
+    const planPath = join(temp, "shutdown-grant-revocation-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad492";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-shutdown-grant-revocation",
+      input: {
+        agent: "code-implementer-agent",
+        task: "Task ID: T1\nUse the code-implementer skill. Implement and test.",
+        agentScope: "user",
+      },
+    }, context)).toEqual([undefined]);
+
+    const grantDir = join(subagentDir, "pi-write-grants");
+    try {
+      chmodSync(grantDir, 0o500);
+      await expect(pi.emit("session_shutdown", {}, context))
+        .rejects.toThrow(/session shutdown cleanup failed.*revoke outstanding write grant/i);
+    } finally {
+      chmodSync(grantDir, 0o700);
+    }
+    expect(readdirSync(grantDir).filter((name) => name.endsWith(".json"))).toHaveLength(1);
+
+    const retried = await pi.emit("session_shutdown", {}, context);
+    expect(retried.every((result) => result === undefined)).toBe(true);
+    expect(readdirSync(grantDir).filter((name) => name.endsWith(".json"))).toEqual([]);
+  });
+
   it.skipIf(runningAsRoot)("revokes every outstanding grant when its parent session shutdown roster cleanup fails", async () => {
     const planPath = join(temp, "shutdown-revocation-plan.md");
     writeFileSync(planPath, "# Plan\n");
@@ -2712,10 +2794,10 @@ describe("Pi extension review tool_result integration", () => {
     let shutdownDiagnostic = "";
     try {
       chmodSync(subagentDir, 0o500);
-      await pi.emit("session_shutdown", {}, {
+      await expect(pi.emit("session_shutdown", {}, {
         cwd: ROOT,
         sessionManager: { getSessionId: () => parentSession },
-      });
+      })).rejects.toThrow(/session shutdown cleanup failed/i);
       shutdownDiagnostic = stderr.mock.calls.map(([text]) => String(text)).join("");
     } finally {
       chmodSync(subagentDir, 0o700);

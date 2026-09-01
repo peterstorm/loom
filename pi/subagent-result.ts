@@ -221,9 +221,10 @@ export function piSubagentResultFailed(result: {
 }
 
 /**
- * A failure that hit EVERY slot at once is a shared-infrastructure signature,
- * not N independent agent faults — and it is invisible from inside any single
- * slot's rejection. Reported once per batch, beside the per-slot diagnostics,
+ * A failure that hit EVERY slot at once is consistent with shared
+ * infrastructure rather than N independent agent faults — a hypothesis that
+ * is invisible from inside any single slot's rejection. Reported once per
+ * batch, beside the per-slot diagnostics,
  * so the operator reads the pattern where the symptoms are. `null` below two
  * results or when any slot survived: one slot is not a pattern, and a surviving
  * sibling refutes the shared-fault reading outright.

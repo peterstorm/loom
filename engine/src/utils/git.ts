@@ -417,7 +417,7 @@ function diffArgs(args: readonly string[]): GitDiffResult {
     : diffArgsAt(root, args);
 }
 
-/** Binary packet diff from a parsed revision through the hardened boundary. */
+/** Binary packet diff from an option-delimited revision through the hardened boundary. */
 export function diffBinaryFileFromRevision(root: string, revision: string, file: string): GitDiffResult {
   return diffArgsAt(root, ["diff", "--binary", "--end-of-options", revision, "--", file]);
 }

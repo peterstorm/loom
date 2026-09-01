@@ -3,10 +3,10 @@
  *
  * A packet is the complete context one semantic Agent request receives,
  * addressed by content digest. Parent actions carry only a digest reference;
- * this module guarantees the packet bytes are immutable once published and
- * that a digest names exactly one packet (re-hashing at parse time proves the
- * stored bytes match the digest, and a packet whose identity/section bytes
- * change gets a different digest).
+ * this module constructs immutable values and proves that a digest names exact
+ * packet bytes. Write-once publication is enforced separately by the Run
+ * Directory adapter; a packet whose identity/section bytes change gets a
+ * different digest.
  *
  * What this module does NOT claim: it does not attest that a child actually
  * read the bytes, and it does not by itself bind a packet to an external

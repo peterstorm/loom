@@ -946,6 +946,17 @@ interface PiParentSessionRuntime {
   readonly spawnReservations: Map<string, PiSpawnReservation>;
 }
 
+type ActiveChildWriteGrantScope = Readonly<{
+  scopeDirs?: readonly string[];
+  grantCwd?: string;
+}>;
+
+type ActiveChildWriteGrant = ActiveChildWriteGrantScope & (
+  | Readonly<{ kind: "active"; agentId: AgentId; pointerBinding: SessionTaskGraphPointerBinding }>
+  | Readonly<{ kind: "roster-cleanup-pending"; agentId: AgentId; pointerBinding: null }>
+  | Readonly<{ kind: "pointer-cleanup-pending"; agentId: null; pointerBinding: SessionTaskGraphPointerBinding }>
+);
+
 const emptyParentSessionRuntime = (): PiParentSessionRuntime => ({
   issuedWriteGrants: new Map(),
   spawnReservations: new Map(),
@@ -1084,16 +1095,8 @@ export default function (pi: ExtensionAPI) {
       parentSessionRuntimes.delete(sessionId);
     }
   };
-  const activeChildWriteGrants = new Map<string, {
-    agentId: AgentId;
-    pointerBinding: SessionTaskGraphPointerBinding;
-    /** Present only on scoped (phase/panel) grants: Edit/Write targets must
-     *  fall inside one of these artifact dirs. Scopes resolve against
-     *  `grantCwd` (the spawn cwd), which is also the base relative targets
-     *  are judged against. */
-    scopeDirs?: readonly string[];
-    grantCwd?: string;
-  }>();
+  /** Scoped write policy plus exact outstanding child cleanup authority. */
+  const activeChildWriteGrants = new Map<string, ActiveChildWriteGrant>();
   const rejectedChildWriteGrantSessions = new Set<string>();
 
   // ─── Resource Discovery ───────────────────────────────────────────────
@@ -1604,7 +1607,13 @@ export default function (pi: ExtensionAPI) {
       await fsSessionRegistry.markActive(sessionId, agentId);
       partialBinding = { sessionId, agentId };
       const pointerBinding = await bindSessionTaskGraphPointer(sessionId, grant.taskGraphPath);
-      activeChildWriteGrants.set(sessionId, { agentId, pointerBinding, scopeDirs: grant.scopeDirs, grantCwd: grant.cwd });
+      activeChildWriteGrants.set(sessionId, {
+        kind: "active",
+        agentId,
+        pointerBinding,
+        scopeDirs: grant.scopeDirs,
+        grantCwd: grant.cwd,
+      });
       partialBinding = null;
       process.stderr.write(`loom(pi): activated child write grant for ${grant.taskId}/${sessionId}\n`);
     } catch (error) {
@@ -1615,16 +1624,17 @@ export default function (pi: ExtensionAPI) {
       // into the deferred `run`, and the cleanup would dereference whatever the
       // variable held when it finally ran rather than what was checked.
       const orphanedBinding = partialBinding;
-      if (orphanedBinding !== null) {
-        const cleanupErrors = await runPiCleanupActions([{
-          label: `remove partial child roster entry ${orphanedBinding.agentId}`,
-          run: () => fsSessionRegistry.removeActive(orphanedBinding.sessionId, orphanedBinding.agentId),
-        }]);
-        for (const cleanupError of cleanupErrors) {
-          process.stderr.write(`loom(pi): child write-grant cleanup failed: ${cleanupError}\n`);
-        }
+      const cleanupErrors: readonly string[] = orphanedBinding === null
+        ? Object.freeze([])
+        : await runPiCleanupActions([{
+            label: `remove partial child roster entry ${orphanedBinding.agentId}`,
+            run: () => fsSessionRegistry.removeActive(orphanedBinding.sessionId, orphanedBinding.agentId),
+          }]);
+      for (const cleanupError of cleanupErrors) {
+        process.stderr.write(`loom(pi): child write-grant cleanup failed: ${cleanupError}\n`);
       }
-      const message = `loom(pi): child write grant rejected — edits remain blocked: ${error instanceof Error ? error.message : String(error)}`;
+      const message = `loom(pi): child write grant rejected — edits remain blocked: ${error instanceof Error ? error.message : String(error)}` +
+        cleanupFailureSuffix(cleanupErrors);
       process.stderr.write(message + "\n");
       return {
         message: { customType: "loom-write-grant-error", content: message, display: false },
@@ -1639,6 +1649,9 @@ export default function (pi: ExtensionAPI) {
     const sessionId = parseSessionId(rawSessionId);
     const binding = activeChildWriteGrants.get(rawSessionId);
     const actions: PiCleanupAction[] = [];
+    const revokedTokens = new Set<string>();
+    const removedRosterIds = new Set<AgentId>();
+    const releasedPointers = new Set<SessionTaskGraphPointerBinding>();
 
     // Capabilities are the security boundary: schedule this session's every
     // revocation before fallible roster/pointer housekeeping, then execute all
@@ -1650,20 +1663,31 @@ export default function (pi: ExtensionAPI) {
         grantOrdinal++;
         actions.push({
           label: `revoke outstanding write grant ${grantOrdinal}`,
-          run: () => revokePiWriteGrant(token),
+          run: () => {
+            revokePiWriteGrant(token);
+            revokedTokens.add(token);
+          },
         });
       }
     }
-    if (sessionId && binding) {
+    const childAgentId = binding?.agentId ?? null;
+    if (sessionId && childAgentId !== null) {
       actions.push({
-        label: `remove child roster entry ${binding.agentId}`,
-        run: () => fsSessionRegistry.removeActive(sessionId, binding.agentId),
+        label: `remove child roster entry ${childAgentId}`,
+        run: async () => {
+          await fsSessionRegistry.removeActive(sessionId, childAgentId);
+          removedRosterIds.add(childAgentId);
+        },
       });
+    }
+    const childPointer = binding?.pointerBinding ?? null;
+    if (sessionId && childPointer !== null) {
       actions.push({
         label: `roll back child task-graph pointer for ${sessionId}`,
         run: async () => {
-          const result = await rollbackSessionTaskGraphPointer(binding.pointerBinding);
+          const result = await rollbackSessionTaskGraphPointer(childPointer);
           if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
+          releasedPointers.add(childPointer);
         },
       });
     }
@@ -1671,7 +1695,10 @@ export default function (pi: ExtensionAPI) {
       for (const item of reservation.items) {
         actions.push({
           label: `remove shutdown roster entry for ${item.agentType}`,
-          run: () => fsSessionRegistry.removeActive(reservation.sessionId, item.rosterId),
+          run: async () => {
+            await fsSessionRegistry.removeActive(reservation.sessionId, item.rosterId);
+            removedRosterIds.add(item.rosterId);
+          },
         });
       }
       if (reservation.pointerBinding !== null) {
@@ -1681,22 +1708,76 @@ export default function (pi: ExtensionAPI) {
           run: async () => {
             const result = await rollbackSessionTaskGraphPointer(pointerBinding);
             if (result !== "rolled-back") throw new Error(`exact pointer ownership lost (${result})`);
+            releasedPointers.add(pointerBinding);
           },
         });
       }
     }
 
     const cleanupErrors = await runPiCleanupActions(actions);
-    // Failed revocation/cleanup remains retryable on the next shutdown event.
-    // Dropping these maps after a failure would orphan the capability while
-    // erasing the only in-process record that can revoke it.
-    if (cleanupErrors.length === 0) {
-      if (sessionId) parentSessionRuntimes.delete(sessionId);
-      activeChildWriteGrants.delete(rawSessionId);
+    // Retire each successfully released capability independently. Retaining an
+    // entire aggregate after one failure retries already-released pointer
+    // leases as `not-owned`, turning a recoverable cleanup debt permanent.
+    if (sessionId && parentRuntime !== undefined) {
+      for (const [toolCallId, tokens] of parentRuntime.issuedWriteGrants) {
+        const remaining = tokens.filter((token) => !revokedTokens.has(token));
+        if (remaining.length === 0) parentRuntime.issuedWriteGrants.delete(toolCallId);
+        else parentRuntime.issuedWriteGrants.set(toolCallId, Object.freeze(remaining));
+      }
+      for (const [toolCallId, reservation] of parentRuntime.spawnReservations) {
+        const items = reservation.items.filter((item) => !removedRosterIds.has(item.rosterId));
+        const pointerBinding = reservation.pointerBinding !== null && releasedPointers.has(reservation.pointerBinding)
+          ? null
+          : reservation.pointerBinding;
+        if (items.length === 0 && pointerBinding === null) {
+          parentRuntime.spawnReservations.delete(toolCallId);
+        } else {
+          parentRuntime.spawnReservations.set(toolCallId, Object.freeze({
+            ...reservation,
+            items: Object.freeze(items),
+            pointerBinding,
+          }));
+        }
+      }
+      pruneRuntime(sessionId, parentRuntime);
+    }
+    if (binding !== undefined) {
+      const agentId = binding.agentId !== null && removedRosterIds.has(binding.agentId) ? null : binding.agentId;
+      const pointerBinding = binding.pointerBinding !== null && releasedPointers.has(binding.pointerBinding)
+        ? null
+        : binding.pointerBinding;
+      if (agentId === null && pointerBinding === null) {
+        activeChildWriteGrants.delete(rawSessionId);
+      } else if (agentId !== null && pointerBinding !== null) {
+        activeChildWriteGrants.set(rawSessionId, { ...binding, kind: "active", agentId, pointerBinding });
+      } else if (agentId !== null) {
+        activeChildWriteGrants.set(rawSessionId, {
+          ...binding,
+          kind: "roster-cleanup-pending",
+          agentId,
+          pointerBinding: null,
+        });
+      } else if (pointerBinding !== null) {
+        activeChildWriteGrants.set(rawSessionId, {
+          ...binding,
+          kind: "pointer-cleanup-pending",
+          agentId: null,
+          pointerBinding,
+        });
+      }
+    }
+    const parentCleanupComplete = sessionId === null || !parentSessionRuntimes.has(sessionId);
+    if (!activeChildWriteGrants.has(rawSessionId) && parentCleanupComplete) {
       rejectedChildWriteGrantSessions.delete(rawSessionId);
     }
     for (const cleanupError of cleanupErrors) {
       process.stderr.write(`loom(pi): shutdown cleanup failed: ${cleanupError}\n`);
+    }
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        cleanupErrors.map((error) => new Error(error)),
+        `Loom Pi session shutdown cleanup failed: ${cleanupErrors.join("; ")}`,
+      );
     }
   });
 

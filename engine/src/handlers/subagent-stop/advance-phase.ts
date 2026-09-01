@@ -92,8 +92,9 @@ const transitionReady = (
 const transitionNotReady = (reason: string): PhaseTransitionResolution => ({ kind: "not-ready", reason });
 
 /**
- * `init` is deliberately unarmed; the first brainstorm result is its sole
- * legal completion. Every later result must match the active Phase exactly.
+ * An exact current-Phase completion is always eligible, including `init` for
+ * compatibility callers. The first brainstorm result may additionally
+ * bootstrap `init`; every other result must match the active Phase exactly.
  */
 export function isPhaseResultEligible(
   currentPhase: Phase,

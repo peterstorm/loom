@@ -133,17 +133,41 @@ describe("parseSpecCheckOutput (pure)", () => {
     });
   });
 
+  it("rejects contradictory terminal verdicts instead of accepting the first", () => {
+    const parsed = parseSpecCheckOutput([
+      "SPEC_CHECK_WAVE: 1",
+      "SPEC_CHECK_CRITICAL_COUNT: 0",
+      "SPEC_CHECK_HIGH_COUNT: 0",
+      "SPEC_CHECK_VERDICT: PASSED",
+      "SPEC_CHECK_VERDICT: BLOCKED",
+    ].join("\n"));
+
+    expect(parsed.duplicateMarkers).toEqual(["SPEC_CHECK_VERDICT"]);
+    expect(reconcileSpecCheck(parsed, 1, "now")).toMatchObject({
+      kind: "evidence-failed",
+      specCheck: {
+        verdict: "EVIDENCE_CAPTURE_FAILED",
+        error: expect.stringContaining("SPEC_CHECK_VERDICT marker appears more than once"),
+      },
+    });
+  });
+
   it("property: duplicate footer scalars never reconcile to captured evidence", () => {
     fc.assert(fc.property(
       fc.constantFrom(
         "SPEC_CHECK_CRITICAL_COUNT",
         "SPEC_CHECK_HIGH_COUNT",
         "SPEC_CHECK_OVERRIDE",
+        "SPEC_CHECK_VERDICT",
       ),
       fc.nat({ max: 10 }),
       fc.nat({ max: 10 }),
       (marker, first, second) => {
-        const value = marker === "SPEC_CHECK_OVERRIDE" ? (count: number) => `reason-${count}` : String;
+        const value = (count: number): string => {
+          if (marker === "SPEC_CHECK_OVERRIDE") return `reason-${count}`;
+          if (marker === "SPEC_CHECK_VERDICT") return count % 2 === 0 ? "PASSED" : "BLOCKED";
+          return String(count);
+        };
         const parsed = parseSpecCheckOutput([
           "SPEC_CHECK_WAVE: 1",
           "SPEC_CHECK_CRITICAL_COUNT: 0",

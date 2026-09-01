@@ -150,10 +150,10 @@ export type TaskExecutionRosterObservation =
  * later, at SubagentStart. Between those two points a LIVE reservation is
  * indistinguishable from one STRANDED by a vetoed spawn — both are `pending`
  * with no active agent for the graph — so reclamation must wait out that
- * window. The grace is deliberately far larger than any plausible
- * dispatch/queue latency (a roster mark follows dispatch in well under a
- * second; even a heavily queued spawn starts in seconds) so a live-but-not-yet
- * rostered sibling is never reclaimed. A reservation stranded by a veto simply
+ * window. The grace is a deliberately conservative fixed bound relative to
+ * normal dispatch/queue latency; the transport exposes no enforceable upper
+ * latency guarantee, so an exceptionally delayed unrostered spawn can outlive
+ * it. A reservation stranded by a veto simply
  * ages past the window and is reclaimed on the first spawn attempt after it.
  * A long-RUNNING task is protected independently: its agent is roster-active,
  * so `anyActive` shields it regardless of age.
