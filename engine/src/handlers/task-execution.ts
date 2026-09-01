@@ -195,6 +195,7 @@ export async function registerTaskExecutionBatch(
   }
   const authorityBatch = createTaskExecutionAuthorityBatch(
     state,
+    inputs,
     taskIds,
     reservationIds.flatMap((result) => result.ok ? [result.value] : []),
     repository.headSha,

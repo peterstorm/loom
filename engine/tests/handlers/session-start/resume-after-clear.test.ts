@@ -206,7 +206,8 @@ describe("resume-after-clear handler", () => {
     const { stdout } = runHandler();
     expect(stdout).toContain("Phase 5: Execute");
     expect(stdout).toContain("impl-agent-context");
-    expect(stdout).toContain("Spawn all pending wave");
+    expect(stdout).toContain("helper orchestration status --json");
+    expect(stdout).toContain("initial/retry dispatches or terminal escalation");
   });
 
   // --- optional fields ---
@@ -348,7 +349,8 @@ describe("buildContextOutput (pure)", () => {
         "2": { impl_complete: false, tests_passed: null, reviews_complete: false, blocked: false },
       },
     }), "/loom");
-    expect(out).toContain("Spawn all pending wave 2 tasks");
+    expect(out).toContain("helper orchestration status --json");
+    expect(out).toContain("exact status-issued retry appendix");
     expect(out).not.toContain("BLOCKED");
   });
 });

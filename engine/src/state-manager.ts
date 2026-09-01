@@ -85,6 +85,12 @@ import {
   parseImplementationAttemptAuthority,
   parseImplementationAttemptHistory,
 } from "./core/implementation-completion";
+import {
+  deriveImplementationRetryDisposition,
+  implementationAttemptContextMatchesAuthority,
+  parseImplementationAttemptContext,
+  renderImplementationRetryContext,
+} from "./core/implementation-retry";
 import { parseTaskId, type TaskId } from "./core/task-id";
 import {
   anchoredDirectoryHasIdentity,
@@ -1140,10 +1146,21 @@ function taskAttemptAuthorityError(
       return `${label}: implementation_attempt_history receipt taskId must equal ${id}`;
     }
   }
+  const retryDisposition = deriveImplementationRetryDisposition({
+    id,
+    implementation_attempt_history: history?.ok ? history.value : undefined,
+  });
+  if (retryDisposition.kind === "invalid") {
+    return `${label}: invalid implementation retry lineage: ${retryDisposition.errors.join("; ")}`;
+  }
   if (t.legacy_execution_reservation !== undefined && t.legacy_execution_reservation !== true) {
     return `${label}: legacy_execution_reservation must be true when present`;
   }
-  if (t.active_implementation_attempt === undefined) return null;
+  if (t.active_implementation_attempt === undefined) {
+    return t.active_implementation_context === undefined
+      ? null
+      : `${label}: active_implementation_context requires active_implementation_attempt`;
+  }
   if (t.legacy_execution_reservation === true) {
     return `${label}: active_implementation_attempt cannot coexist with legacy_execution_reservation`;
   }
@@ -1154,6 +1171,32 @@ function taskAttemptAuthorityError(
   if (!authority.ok) return `${label}: invalid active_implementation_attempt: ${authority.error.errors.join("; ")}`;
   if (authority.value.taskId !== id || authority.value.wave !== t.wave) {
     return `${label}: active_implementation_attempt must match Task id and Wave`;
+  }
+  if (retryDisposition.kind === "escalated") {
+    return `${label}: escalated implementation lineage cannot carry an active attempt`;
+  }
+  if (authority.value.semanticAttempt !== retryDisposition.semanticAttempt) {
+    return `${label}: active_implementation_attempt semantic attempt contradicts settlement history`;
+  }
+  if (t.active_implementation_context !== undefined) {
+    const context = parseImplementationAttemptContext(
+      t.active_implementation_context,
+      `${label}: active_implementation_context`,
+    );
+    if (!context.ok) return context.errors.join("; ");
+    if (!implementationAttemptContextMatchesAuthority(context.value, authority.value)) {
+      return `${label}: active_implementation_context must match active_implementation_attempt`;
+    }
+    if (retryDisposition.kind === "initial" && context.value.retryContext !== null) {
+      return `${label}: initial implementation context cannot carry retry authority`;
+    }
+    if (retryDisposition.kind === "retry" && (
+      context.value.retryContext === null ||
+      context.value.predecessorReceiptId !== retryDisposition.predecessor.receiptId ||
+      renderImplementationRetryContext(context.value.retryContext) !== retryDisposition.promptAppendix
+    )) {
+      return `${label}: active retry context must match the current retry-required receipt`;
+    }
   }
   if (history?.ok && history.value.some((receipt) =>
     receipt.authorityDigest === authority.value.authorityDigest ||
@@ -1780,6 +1823,14 @@ function migrateParsedTask(
     const authority = parseImplementationAttemptAuthority(task.active_implementation_attempt);
     if (!authority.ok) return parseErr(authority.error.errors.join("; "));
     migrated = { ...migrated, active_implementation_attempt: authority.value };
+    if (task.active_implementation_context !== undefined) {
+      const context = parseImplementationAttemptContext(
+        task.active_implementation_context,
+        `tasks[${index}].active_implementation_context`,
+      );
+      if (!context.ok) return parseErr(context.errors.join("; "));
+      migrated = { ...migrated, active_implementation_context: context.value };
+    }
   } else if (executing.has(String(task.id))) {
     migrated = { ...migrated, legacy_execution_reservation: true };
   } else {

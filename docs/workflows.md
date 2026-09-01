@@ -167,7 +167,9 @@ The Slice 3 Task-local suite has one engine-owned check: `loom:task-byte-scope`.
 
 `executing_tasks` is parser-bound to the Task roster. An unknown reservation makes the TaskGraph corrupt and blocks readiness/writes until `repair-task-graph` explicitly removes it with a diagnostic. Session `.task_graph` pointers are bound through one Claude/Pi helper that canonicalizes the active graph, refreshes stale pointers atomically without following symlinks, and rolls back only an exact owned binding.
 
-Task-local settlement runs **no arbitrary Task/project subprocesses**. Build, typecheck, test commands, package scripts, reports, and full-tier lint execute only in the quiescent Wave suite. Slice 3 records retry-required after semantic attempt 1 and escalation-required after semantic attempt 2, but dispatches neither. Slice 4 alone freezes retry diagnostics/context and launches attempt 2 or escalation.
+Task-local settlement runs **no arbitrary Task/project subprocesses**. Build, typecheck, test commands, package scripts, reports, and full-tier lint execute only in the quiescent Wave suite.
+
+Bounded retry is derived exclusively from immutable settlement history. A semantic attempt-1 failure emits `retry-required`; canonical status then publishes one exact `LOOM_IMPLEMENTATION_RETRY_CONTEXT` appendix binding the Task, attempt 2, predecessor receipt, and sorted failure kinds. The shared Claude/Pi spawn gate requires that exact appendix, freezes its prompt/context digest with the new attempt authority before dispatch, and refuses stale, altered, missing, duplicate, or invented retry context. Infrastructure-blocked receipts never consume the semantic budget and remain eligible at the same attempt. A semantic attempt-2 failure emits `escalation-required`; status becomes non-retryable and no attempt 3 can be registered. An accepted implementation receipt starts a fresh attempt-1 lineage if the non-completed Task is later deliberately reopened for remediation.
 
 ## Task proof obligations
 

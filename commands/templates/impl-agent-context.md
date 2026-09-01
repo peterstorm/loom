@@ -59,6 +59,12 @@ If your plan context declares none of these, this section imposes nothing.
 
 Regression execution and new-test creation are separate obligations. Follow each arm independently.
 
+## Engine-Issued Implementation Retry Context
+
+{implementation_retry_context}
+
+When this is an exact `LOOM_IMPLEMENTATION_RETRY_CONTEXT` appendix, it is protected attempt-2 authority and the failure kinds are the previous attempt's deterministic diagnostics. Address them during this attempt. When it says `None — semantic attempt 1.`, no retry authority exists.
+
 ## Your Task
 
 {task_description}

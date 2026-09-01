@@ -7,6 +7,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { canonicalTempDir } from "./fixtures/canonical-temp-dir";
 import { evaluateTaskProof } from "../src/core/proof-obligations";
 import { createImplementationAttemptAuthority } from "../src/core/implementation-completion";
+import {
+  createImplementationAttemptContext,
+  deriveImplementationRetryDisposition,
+} from "../src/core/implementation-retry";
 import type { AgentRequestAuthority } from "../src/core/orchestration-contract";
 import { fsSessionRegistry, TASK_GRAPH_POINTER_LEASES_SUFFIX } from "../src/machine";
 import { openRunDirectory, type RunDirHandle } from "../src/orchestration/run-directory-handle";
@@ -1414,7 +1418,7 @@ describe("Pi extension review tool_result integration", () => {
       await status?.handler({}, {
         ui: { notify: (message: string, level: string) => notifications.push({ message, level }) },
       });
-      expect(notifications).toContainEqual({ message: expect.stringContaining("Error: ELOOP"), level: "error" });
+      expect(notifications).toContainEqual({ message: expect.stringContaining("ELOOP"), level: "error" });
       expect(notifications).not.toContainEqual({ message: "No active loom orchestration", level: "info" });
     } finally {
       stderr.mockRestore();
@@ -1423,12 +1427,27 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
-  it("renders non-Error loom-status failures without losing their value", async () => {
+  it("renders canonical retry-capable LoomStatus through the Pi command", async () => {
     const pi = await extension();
-    const { StateManager } = await import("../src/state-manager");
-    const load = vi.spyOn(StateManager.prototype, "load").mockImplementationOnce(() => {
-      throw "string status failure";
+    const notifications: Array<{ message: string; level: string }> = [];
+
+    await pi.commands.get("loom-status")?.handler({}, {
+      ui: { notify: (message: string, level: string) => notifications.push({ message, level }) },
     });
+
+    expect(notifications).toContainEqual({
+      level: "info",
+      message: expect.stringContaining("Loom Status v1"),
+    });
+    expect(notifications[0]?.message).toContain("nextActionPayload");
+    expect(notifications[0]?.message).toContain("spawn-wave-implementation");
+  });
+
+  it("renders unexpected non-Error canonical-status failures without losing their value", async () => {
+    const orchestration = await import("../src/handlers/helpers/orchestration");
+    const statusFailure = vi.spyOn(orchestration, "currentOrchestrationStatus")
+      .mockRejectedValueOnce("string status failure");
+    const pi = await extension();
     const notifications: Array<{ message: string; level: string }> = [];
     try {
       const status = pi.commands.get("loom-status");
@@ -1438,7 +1457,7 @@ describe("Pi extension review tool_result integration", () => {
       });
       expect(notifications).toContainEqual({ message: "Error: string status failure", level: "error" });
     } finally {
-      load.mockRestore();
+      statusFailure.mockRestore();
     }
   });
 
@@ -3380,6 +3399,99 @@ describe("Pi extension review tool_result integration", () => {
     expect(JSON.parse(readFileSync(statePath, "utf-8"))).toEqual(before);
   });
 
+  it("admits one exact Pi semantic retry and terminally refuses attempt 3", async () => {
+    const planPath = join(temp, "bounded-pi-retry-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4b0";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    const initialPrompt = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-bounded-retry-attempt-1",
+      input: { agent: "code-implementer-agent", task: initialPrompt, agentScope: "user" },
+    }, context)).toEqual([undefined]);
+    await pi.emit("tool_result", {
+      toolName: "subagent",
+      toolCallId: "call-bounded-retry-attempt-1",
+      content: [],
+      details: { results: [{
+        agent: "code-implementer-agent",
+        task: initialPrompt,
+        exitCode: 0,
+        messages: [],
+      }] },
+    }, context);
+
+    const afterAttempt1 = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(afterAttempt1.tasks[0].implementation_attempt_history).toEqual([
+      expect.objectContaining({ semanticAttempt: 1, transition: "retry-required" }),
+    ]);
+    const retry = deriveImplementationRetryDisposition(afterAttempt1.tasks[0]);
+    if (retry.kind !== "retry") throw new Error(`expected retry, got ${retry.kind}`);
+
+    const missingContext = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-bounded-retry-missing-context",
+      input: { agent: "code-implementer-agent", task: initialPrompt, agentScope: "user" },
+    }, context);
+    expect(missingContext).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("requires the exact attempt-2 retry context"),
+    }));
+    expect(JSON.parse(readFileSync(statePath, "utf8")).executing_tasks).toEqual([]);
+
+    const retryPrompt = `${initialPrompt}\n${retry.promptAppendix}`;
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-bounded-retry-attempt-2",
+      input: { agent: "code-implementer-agent", task: retryPrompt, agentScope: "user" },
+    }, context)).toEqual([undefined]);
+    const activeAttempt2 = JSON.parse(readFileSync(statePath, "utf8")).tasks[0];
+    expect(activeAttempt2.active_implementation_attempt.semanticAttempt).toBe(2);
+    expect(activeAttempt2.active_implementation_context).toMatchObject({
+      semanticAttempt: 2,
+      predecessorReceiptId: retry.predecessor.receiptId,
+      retryContext: { predecessorReceiptId: retry.predecessor.receiptId },
+    });
+
+    await pi.emit("tool_result", {
+      toolName: "subagent",
+      toolCallId: "call-bounded-retry-attempt-2",
+      content: [],
+      details: { results: [{
+        agent: "code-implementer-agent",
+        task: retryPrompt,
+        exitCode: 0,
+        messages: [],
+      }] },
+    }, context);
+    const escalated = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(escalated.tasks[0].implementation_attempt_history).toEqual([
+      expect.objectContaining({ semanticAttempt: 1, transition: "retry-required" }),
+      expect.objectContaining({ semanticAttempt: 2, transition: "escalation-required" }),
+    ]);
+    expect(escalated.tasks[0].retry_count).toBe(2);
+
+    const attempt3 = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-bounded-retry-attempt-3",
+      input: { agent: "code-implementer-agent", task: retryPrompt, agentScope: "user" },
+    }, context);
+    expect(attempt3).toContainEqual(expect.objectContaining({
+      block: true,
+      reason: expect.stringContaining("exhausted semantic attempt 2 and requires escalation"),
+    }));
+    expect(JSON.parse(readFileSync(statePath, "utf8")).executing_tasks).toEqual([]);
+  });
+
   it("reclaims an aged current-protocol reservation before adding the retry's own Pi roster row", async () => {
     // This scenario's premise is that no earlier agent is still serving the
     // graph. Other integration cases intentionally leave durable session
@@ -3638,9 +3750,20 @@ describe("Pi extension review tool_result integration", () => {
       dirtySetBaseline: task.attempt_repository_baseline,
     });
     if (!replacement.ok) throw new Error(replacement.error.errors.join("; "));
+    const replacementContext = createImplementationAttemptContext({
+      authority: replacement.value,
+      prompt: "Task ID: T1\nUse the code-implementer skill. Implement and test.",
+      predecessorReceiptId: null,
+      retryContext: null,
+    });
     writeState({
       ...spawned,
-      tasks: [{ ...task, active_implementation_attempt: replacement.value, reserved_at: replacement.value.reservedAt }],
+      tasks: [{
+        ...task,
+        active_implementation_attempt: replacement.value,
+        active_implementation_context: replacementContext,
+        reserved_at: replacement.value.reservedAt,
+      }],
     });
 
     await pi.emit("tool_result", {
@@ -4899,9 +5022,20 @@ describe("Pi extension review tool_result integration", () => {
       dirtySetBaseline: task.attempt_repository_baseline,
     });
     if (!replacement.ok) throw new Error(replacement.error.errors.join("; "));
+    const replacementContext = createImplementationAttemptContext({
+      authority: replacement.value,
+      prompt: "Task ID: T1\nUse the code-implementer skill. Implement and test.",
+      predecessorReceiptId: null,
+      retryContext: null,
+    });
     writeState({
       ...spawned,
-      tasks: [{ ...task, active_implementation_attempt: replacement.value, reserved_at: replacement.value.reservedAt }],
+      tasks: [{
+        ...task,
+        active_implementation_attempt: replacement.value,
+        active_implementation_context: replacementContext,
+        reserved_at: replacement.value.reservedAt,
+      }],
     });
 
     const { StateManager } = await import("../src/state-manager");

@@ -43,7 +43,18 @@ import {
   type Task,
   type TaskGraph,
 } from "../../src/types";
-import { derivePendingTaskProof, evaluateTaskProof } from "../../src/core/proof-obligations";
+import {
+  TRUSTED_LEDGER_ONLY_POLICY,
+  derivePendingTaskProof,
+  evaluateTaskProof,
+} from "../../src/core/proof-obligations";
+import {
+  TASK_BYTE_SCOPE_CHECK_ID_TEXT,
+  createImplementationAttemptAuthority,
+  createTaskCompletionSuiteAuthority,
+  settleImplementationAttempt,
+  type ImplementationAttemptSettlementReceipt,
+} from "../../src/core/implementation-completion";
 import { taskFixture, type TaskFixtureInput } from "../fixtures/task-lifecycle";
 import { defaultVerificationManifest } from "../../src/core/verification-manifest";
 import {
@@ -1536,11 +1547,133 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
           kind: "wave-gate-not-started",
           category: "healthy-wave-unstarted",
           retry: { kind: "advance-wave-lifecycle", eligible: true, consumesSemanticAttempt: false },
-          recovery: { kind: "spawn-wave-implementation", wave: 1, pendingTaskIds: ["T2", "T3"] },
+          recovery: {
+            kind: "spawn-wave-implementation",
+            wave: 1,
+            pendingTaskIds: ["T2", "T3"],
+            dispatches: [
+              { kind: "initial-implementation", taskId: "T2", semanticAttempt: 1, promptAppendix: null },
+              { kind: "initial-implementation", taskId: "T3", semanticAttempt: 1, promptAppendix: null },
+            ],
+          },
         },
       });
       expect(status.next.reasons.filter((entry) => entry.kind === "wave-implementation-pending")
         .map((entry) => entry.taskId)).toEqual(["T2", "T3"]);
+    });
+
+    function semanticReceipt(
+      attemptNumber: 1 | 2,
+      history: readonly ImplementationAttemptSettlementReceipt[],
+    ): ImplementationAttemptSettlementReceipt {
+      const authority = authorityValue(createImplementationAttemptAuthority({
+        taskId: "T1",
+        wave: 1,
+        semanticAttempt: attemptNumber,
+        reservationId: `status-attempt-${attemptNumber}`,
+        headSha: "a".repeat(40),
+        reservedAt: `2026-09-01T00:00:0${attemptNumber}.000Z`,
+        taskScopeBaseline: [],
+        dirtySetBaseline: [],
+      }));
+      const suiteAuthority = authorityValue(createTaskCompletionSuiteAuthority(authority));
+      const result = settleImplementationAttempt({
+        id: "T1",
+        status: "pending",
+        proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
+        active_implementation_attempt: authority,
+        implementation_attempt_history: history,
+      }, authority, authority, {
+        schemaVersion: 1,
+        kind: "implementation-observed",
+        observedAt: `2026-09-01T00:01:0${attemptNumber}.000Z`,
+        evidence: {
+          taskCompleted: false,
+          testResult: { verdict: "trusted-pass" },
+          filesModified: [],
+          newTestsWritten: false,
+          newTestEvidence: "waived",
+        },
+        proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
+      }, {
+        schemaVersion: 1,
+        kind: "task-completion-suite-result",
+        implementationAuthorityDigest: suiteAuthority.implementationAuthorityDigest,
+        suiteDigest: suiteAuthority.suiteDigest,
+        checks: [{
+          checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
+          scope: "task",
+          outcome: { kind: "accepted", changedPaths: [] },
+        }],
+      });
+      if (!result.ok || result.value.kind === "ignored") throw new Error("status settlement fixture failed");
+      return result.value.receipt;
+    }
+
+    it("publishes the exact attempt-2 prompt appendix after semantic attempt 1", () => {
+      const retry = semanticReceipt(1, []);
+      const graph = unstarted({
+        tasks: [{
+          ...taskState({ id: "T1", wave: 1, status: "pending" }),
+          implementation_attempt_history: [retry],
+          failure_reason: `retry-required: ${retry.failureKinds.join(", ")}`,
+          retry_count: 1,
+        }],
+      });
+
+      const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
+
+      expect(status.next.action).toMatchObject({
+        diagnostic: {
+          retry: { eligible: true },
+          recovery: {
+            kind: "spawn-wave-implementation",
+            pendingTaskIds: ["T1"],
+            dispatches: [{
+              kind: "retry-implementation",
+              taskId: "T1",
+              semanticAttempt: 2,
+              promptAppendix: expect.stringContaining(retry.receiptId),
+              retryContext: {
+                predecessorReceiptId: retry.receiptId,
+                failureKinds: retry.failureKinds,
+              },
+            }],
+          },
+        },
+      });
+    });
+
+    it("reports terminal non-retryable escalation after semantic attempt 2", () => {
+      const retry = semanticReceipt(1, []);
+      const escalation = semanticReceipt(2, [retry]);
+      const graph = unstarted({
+        tasks: [{
+          ...taskState({ id: "T1", wave: 1, status: "pending" }),
+          implementation_attempt_history: [retry, escalation],
+          failure_reason: `escalation-required: ${escalation.failureKinds.join(", ")}`,
+          retry_count: 2,
+        }],
+      });
+
+      const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
+
+      expect(status.next.action).toMatchObject({
+        diagnostic: {
+          kind: "implementation-escalation-required",
+          category: "semantic-attempts-exhausted",
+          retry: { eligible: false, consumesSemanticAttempt: false },
+          recovery: {
+            kind: "escalate-wave-implementation",
+            wave: 1,
+            tasks: [{ taskId: "T1", receiptId: escalation.receiptId }],
+          },
+        },
+      });
+      expect(status.next.reasons).toContainEqual(expect.objectContaining({
+        kind: "implementation-escalation-required",
+        taskId: "T1",
+      }));
     });
 
     it("asks for the Wave Gate once every Task in the Wave is implemented", () => {

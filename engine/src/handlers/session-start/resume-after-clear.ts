@@ -70,8 +70,8 @@ export function buildContextOutput(state: TaskGraph, loomDir: string): string {
     lines.push(`Read \`${loomDir}/commands/wave-gate.md\` and spawn review subagents for wave ${currentWave}.`);
   } else {
     lines.push(`Read the loom skill at \`${loomDir}/commands/loom.md\`, specifically Phase 5: Execute.`);
-    lines.push(`Spawn all pending wave ${currentWave} tasks in parallel using the Task tool.`);
-    lines.push(`Load impl-agent-context template from \`${loomDir}/commands/templates/impl-agent-context.md\`.`);
+    lines.push("Run `helper orchestration status --json` and execute only its implementation recovery: initial/retry dispatches or terminal escalation.");
+    lines.push(`Load impl-agent-context template from \`${loomDir}/commands/templates/impl-agent-context.md\`; substitute the exact status-issued retry appendix when present.`);
   }
   lines.push("<!-- END LOOM RESUME CONTEXT -->");
 

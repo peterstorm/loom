@@ -14,6 +14,7 @@ import {
   evaluateProofObligations,
 } from "../src/core/proof-obligations";
 import { parseTaskGraph } from "../src/state-manager";
+import { createImplementationAttemptContext } from "../src/core/implementation-retry";
 
 function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T {
   if (!result.ok) throw new Error("fixture parse failed");
@@ -174,13 +175,20 @@ describe("Task lifecycle migration", () => {
 });
 
 describe("Task attempt authority StateManager lockstep", () => {
-  it("parses and freezes exact active authority, baselines, and history", () => {
+  it("parses and freezes exact active authority, context, baselines, and history", () => {
     const active = authority();
+    const context = createImplementationAttemptContext({
+      authority: active,
+      prompt: "Task ID: T1",
+      predecessorReceiptId: null,
+      retryContext: null,
+    });
     const receipt = receiptFor(authority("settled-reservation"));
     const parsed = parseTaskGraph(graph({
       ...baseTask(),
       proof: pendingProof(),
       active_implementation_attempt: active,
+      active_implementation_context: context,
       attempt_artifact_baseline: attemptBaseline,
       attempt_repository_baseline: repositoryBaseline,
       reserved_at: active.reservedAt,
@@ -190,10 +198,45 @@ describe("Task attempt authority StateManager lockstep", () => {
     if (!parsed.ok) return;
     const task = parsed.value.tasks[0];
     expect(task?.active_implementation_attempt).toEqual(active);
+    expect(task?.active_implementation_context).toEqual(context);
     expect(task?.implementation_attempt_history).toEqual([receipt]);
     expect(task?.legacy_execution_reservation).toBeUndefined();
     expect(Object.isFrozen(task?.active_implementation_attempt)).toBe(true);
+    expect(Object.isFrozen(task?.active_implementation_context)).toBe(true);
     expect(Object.isFrozen(task?.implementation_attempt_history)).toBe(true);
+  });
+
+  it("rejects orphaned and digest-tampered active attempt context", () => {
+    const active = authority();
+    const context = createImplementationAttemptContext({
+      authority: active,
+      prompt: "Task ID: T1",
+      predecessorReceiptId: null,
+      retryContext: null,
+    });
+    expect(errorOf(graph({
+      ...baseTask(),
+      proof: pendingProof(),
+      active_implementation_context: context,
+    }))).toContain("requires active_implementation_attempt");
+
+    const valid = {
+      ...baseTask(),
+      proof: pendingProof(),
+      active_implementation_attempt: active,
+      active_implementation_context: context,
+      attempt_artifact_baseline: attemptBaseline,
+      attempt_repository_baseline: repositoryBaseline,
+      reserved_at: active.reservedAt,
+    };
+    expect(errorOf(graph({
+      ...valid,
+      active_implementation_context: { ...context, authorityDigest: "f".repeat(64) },
+    }, { executing_tasks: ["T1"] }))).toContain("contextDigest does not match");
+    expect(errorOf(graph({
+      ...valid,
+      active_implementation_context: { ...context, contextDigest: "f".repeat(64) },
+    }, { executing_tasks: ["T1"] }))).toContain("contextDigest does not match");
   });
 
   it("rejects active modern authority on the legacy-missing-Proof lifecycle", () => {

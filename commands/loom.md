@@ -545,10 +545,13 @@ If user continues: Proceed to Phase 5 normally.
 
 For each wave:
 
-1. Get pending tasks in the current wave (crashed tasks remain `pending` and are re-spawned)
-2. Spawn ALL wave tasks in parallel (single message, multiple Task/subagent calls)
-3. Wait for all to reach "implemented"
-4. If any wave task never reached `implemented` (agent crashed): re-spawn it (still `pending`, `executing_tasks` was cleared)
+1. Read `helper orchestration status --json` and execute only its implementation-window recovery:
+   - `spawn-wave-implementation`: build each listed Task prompt and append that dispatch's exact `promptAppendix` when non-null. `retry-implementation` is the one engine-authorized semantic attempt 2; never rewrite or summarize its appendix.
+   - `escalate-wave-implementation`: STOP and present every Task/receipt/failure kind to the user. Attempt 2 is terminal; manually re-spawning would be an unauthorized attempt 3 and the spawn gate refuses it.
+   - `start-wave-gate`: proceed to the Wave Gate.
+2. Spawn all status-authorized Wave Tasks in parallel (single message, multiple Task/subagent calls).
+3. Wait for all to settle. Infrastructure-blocked attempts remain retryable at the same semantic attempt; semantic attempt 1 produces exactly one retry dispatch.
+4. Re-read canonical status. Do not infer retry count from `pending`, `retry_count`, or `failure_reason`; immutable settlement history owns the budget.
 5. **RUN `/wave-gate` — MANDATORY, via subagents** (see below)
 6. If blocked (critical findings): spawn fix agents with the findings, re-run `/wave-gate`
 7. **Triage advisory findings and fix the RELEVANT ones** before advancing (see [Addressing Advisories](#addressing-advisories)). Advisories bypass refutation but pause the lifecycle at `awaiting-advisory-decision`; record an accept/defer disposition before completion.
@@ -571,17 +574,14 @@ For each wave:
 
 **The `validate-task-execution` hook enforces this:** it blocks next-wave impl agents if `wave_gates[N-1].reviews_complete == false`. Even if you try to skip, the hook will BLOCK.
 
-**Re-spawn logic:** After spawning, check for pending wave tasks whose agent did not complete (a crashed agent leaves the task `pending` with `executing_tasks` cleared). Resolve the current wave inside the jq program — the guard blocks `WAVE=$(jq … state)` capture-into-variable, and shell vars don't persist across Bash tool calls:
-```bash
-jq -r '.current_wave as $w | .tasks[] | select(.wave == $w and .status == "pending") | .id' .claude/state/active_task_graph.json
-```
-Re-spawn each pending wave task whose agent did not reach `implemented`.
+**Re-spawn logic:** Never derive a re-spawn from raw `pending` state. Run canonical status and inspect `next.action.diagnostic.recovery`. It distinguishes initial execution, exact attempt-2 retry (including the required appendix), same-attempt infrastructure recovery, and terminal escalation. Spawn only `recovery.dispatches`; stop on `escalate-wave-implementation`.
 
 **Load template:** Read `{LOOM_DIR}/commands/templates/impl-agent-context.md`
 
 Substitute variables:
 - `{task_id}`, `{wave}`, `{agent_type}`, `{dependencies}`
 - `{verification_policy}` - Render the Task's exact `verification_policy` object, including both independent `regression` and `new_tests` arms and any waiver reasons. Legacy Tasks are rendered through the engine's compatibility semantics: absent/true means both required; false means both waived under `legacy-new-tests-required-false`.
+- `{implementation_retry_context}` - For an initial dispatch, substitute `None — semantic attempt 1.` For `retry-implementation`, substitute the exact `promptAppendix` emitted by canonical status, byte-for-byte. Never synthesize this from `failure_reason`.
 - `{required_skill}` - Read the selected source agent's `skills:` frontmatter and substitute its exact declared skill name (for agents with no declared skill, use `none`). This is both the Claude spawn-gate evidence and the Pi preloaded-skill audit label; never infer it from the agent name.
 - `{task_description}` - From task breakdown
 - `{spec_anchors_formatted}` - Formatted Requirement Completion Claims with requirement text
@@ -758,8 +758,10 @@ Set `LOOM_STATE_PATH` only when repairing a non-default graph. The helper fails 
 ### Status Transitions
 
 ```
-pending → implemented    (agent completes; SubagentStop hook resolves test evidence)
-pending → pending        (agent crash: no task ID resolvable; executing_tasks cleared, task re-spawned)
+pending → implemented    (exact attempt satisfies Proof and Task-local suite)
+pending → pending        (infrastructure block: same semantic attempt remains eligible)
+pending → pending        (attempt 1 semantic failure: one exact attempt-2 retry is issued)
+pending → escalation     (attempt 2 semantic failure: terminal user-visible escalation; no attempt 3)
 implemented → completed  (wave gate passed: tests + review + no critical findings)
 ```
 
@@ -799,8 +801,9 @@ jq '.wave_gates' .claude/state/active_task_graph.json
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Task stuck `pending` after agent ran | Agent crashed (no resolvable task ID) | `executing_tasks` cleared automatically; re-spawn the task |
-| Task stays `pending`, agent still running | Agent live (no crash; tracked via `executing_tasks`, there is no `in_progress` status) | Wait for it, or re-spawn if hung |
+| Task stays `pending` after settlement | Semantic or infrastructure outcome requires a canonical next decision | Read `orchestration status --json`; use only its initial/retry dispatch or escalation action |
+| Task stays `pending`, agent still running | Agent live (tracked via `executing_tasks`, there is no `in_progress` status) | Wait; do not duplicate the active authority |
+| Status reports `escalate-wave-implementation` | Exact semantic attempt 2 failed | Stop and present the receipt/failure kinds to the user; no attempt 3 exists |
 | `test_result` missing or not a pass | No recognizable output | Re-spawn, ensure test markers in output |
 | Wave not advancing | Gate blocked | Check `wave_gates[N].blocked`, run `/wave-gate` |
 | State write blocked | Guard hook active | State writes via hooks only; reads OK |
@@ -915,7 +918,7 @@ Advances `current_phase` when phase agents complete.
 | Architecture agent off-spec | Re-spawn referencing spec requirements |
 | Plan-alignment agent fails to write report | Re-spawn plan-alignment-agent; check spec_dir is writable |
 | Plan-alignment gaps unresolvable | Use `--skip-plan-alignment` or manually amend plan before proceeding |
-| Implementation agent fails tests | Re-spawn with error context |
+| Implementation agent fails tests | Follow canonical status: append its exact attempt-2 context once, or escalate after attempt 2 |
 | Wave gate blocked | Fix issues, re-run `/wave-gate` |
 
 ---

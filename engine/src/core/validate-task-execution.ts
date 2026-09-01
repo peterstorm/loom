@@ -16,6 +16,12 @@ import {
   type IsoInstant,
   type ReservationId,
 } from "./implementation-completion";
+import {
+  authorizeImplementationSpawn,
+  createImplementationAttemptContext,
+  implementationAttemptContextMatchesAuthority,
+  type ImplementationAttemptContext,
+} from "./implementation-retry";
 
 export interface ValidateTaskExecutionInput {
   readonly agentType: string;
@@ -332,6 +338,7 @@ export type TaskExecutionBaselines = ReadonlyMap<string, TaskExecutionBaselineBu
 
 export type TaskExecutionAuthorityPlan = Readonly<{
   authority: ImplementationAttemptAuthority;
+  context: ImplementationAttemptContext;
   baselines: TaskExecutionBaselineBundle;
 }>;
 
@@ -342,27 +349,31 @@ export type TaskExecutionAuthorityBatch =
 /** Mint one exact authority per bound Task while preserving binding order. */
 export function createTaskExecutionAuthorityBatch(
   state: TaskGraph,
+  inputs: readonly Extract<TaskExecutionSpawn, { kind: "implementation" }>[],
   taskIds: readonly string[],
   reservationIds: readonly ReservationId[],
   headSha: string,
   reservedAt: IsoInstant,
   baselines: TaskExecutionBaselines,
 ): TaskExecutionAuthorityBatch {
-  if (taskIds.length !== reservationIds.length) {
+  if (taskIds.length !== reservationIds.length || taskIds.length !== inputs.length) {
     return { ok: false, error: "Implementation reservation identity count does not match bound Task count." };
   }
   const plans: TaskExecutionAuthorityPlan[] = [];
   for (const [index, taskId] of taskIds.entries()) {
     const task = state.tasks.find((candidate) => candidate.id === taskId);
+    const input = inputs[index];
     const taskBaselines = baselines.get(taskId);
     const reservationId = reservationIds[index];
-    if (task === undefined || taskBaselines === undefined || reservationId === undefined) {
+    if (task === undefined || input === undefined || taskBaselines === undefined || reservationId === undefined) {
       return { ok: false, error: `Cannot mint exact implementation authority for ${taskId}.` };
     }
+    const admission = authorizeImplementationSpawn(task, input.prompt);
+    if (!admission.ok) return { ok: false, error: admission.error };
     const authority = createImplementationAttemptAuthority({
       taskId,
       wave: task.wave,
-      semanticAttempt: 1,
+      semanticAttempt: admission.semanticAttempt,
       reservationId,
       headSha,
       reservedAt,
@@ -372,7 +383,13 @@ export function createTaskExecutionAuthorityBatch(
     if (!authority.ok) {
       return { ok: false, error: authority.error.errors.join("; ") };
     }
-    plans.push(Object.freeze({ authority: authority.value, baselines: taskBaselines }));
+    const context = createImplementationAttemptContext({
+      authority: authority.value,
+      prompt: input.prompt,
+      predecessorReceiptId: admission.predecessorReceiptId,
+      retryContext: admission.retryContext,
+    });
+    plans.push(Object.freeze({ authority: authority.value, context, baselines: taskBaselines }));
   }
   return { ok: true, plans: Object.freeze(plans) };
 }
@@ -470,6 +487,7 @@ function reclaimTaskAttempt(
     const reclaimed: Task = {
       ...task,
       active_implementation_attempt: undefined,
+      active_implementation_context: undefined,
       attempt_artifact_baseline: undefined,
       attempt_repository_baseline: undefined,
       reserved_at: undefined,
@@ -513,6 +531,7 @@ export function applyTaskExecutionAuthorityBatch(
         plan.baselines.repositoryAttempt,
       ),
       active_implementation_attempt: plan.authority,
+      active_implementation_context: plan.context,
       reserved_at: plan.authority.reservedAt,
       legacy_execution_reservation: undefined,
     };
@@ -619,8 +638,21 @@ export function taskExecutionRegistrationError(
     }
     if (authorityPlans !== undefined) {
       const plan = authorityPlans.find((candidate) => candidate.authority.taskId === taskId);
-      if (plan === undefined || plan.authority.wave !== task.wave ||
-          plan.baselines !== baseline) {
+      const input = inputs[expectedTaskIds.indexOf(taskId)];
+      const admission = input === undefined ? null : authorizeImplementationSpawn(task, input.prompt);
+      const expectedContext = plan === undefined || input === undefined || admission === null || !admission.ok
+        ? null
+        : createImplementationAttemptContext({
+            authority: plan.authority,
+            prompt: input.prompt,
+            predecessorReceiptId: admission.predecessorReceiptId,
+            retryContext: admission.retryContext,
+          });
+      if (plan === undefined || input === undefined || admission === null || !admission.ok ||
+          expectedContext === null || plan.authority.wave !== task.wave ||
+          plan.authority.semanticAttempt !== admission.semanticAttempt ||
+          !implementationAttemptContextMatchesAuthority(plan.context, plan.authority) ||
+          plan.context.contextDigest !== expectedContext.contextDigest || plan.baselines !== baseline) {
         return `Task ${taskId} implementation authority changed before execution registration.`;
       }
     }

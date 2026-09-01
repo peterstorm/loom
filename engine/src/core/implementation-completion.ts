@@ -208,8 +208,11 @@ function parseTaskSuiteDigest(raw: unknown, path: string): Parsed<TaskCompletion
   return parseSha256<TaskCompletionSuiteDigest>(raw, path);
 }
 
-function parseReceiptId(raw: unknown, path: string): Parsed<ImplementationSettlementReceiptId> {
-  return parseSha256<ImplementationSettlementReceiptId>(raw, path);
+export function parseImplementationSettlementReceiptId(
+  raw: unknown,
+  path = "settlementReceiptId",
+): Parsed<ImplementationSettlementReceiptId> {
+  return total(() => parseSha256<ImplementationSettlementReceiptId>(raw, path));
 }
 
 function parseSnapshot(raw: unknown, path: string): Parsed<DeclaredArtifactBaseline["snapshot"]> {
@@ -1063,7 +1066,7 @@ export function parseImplementationAttemptSettlementReceipt(
       "semanticAttempt", "observedAt", "transition", "consumesSemanticAttempt", "failureKinds",
     ], path);
     if (!record.ok) return record;
-    const parsedReceiptId = parseReceiptId(record.value.receiptId, `${path}.receiptId`);
+    const parsedReceiptId = parseImplementationSettlementReceiptId(record.value.receiptId, `${path}.receiptId`);
     const taskId = parseTaskId(record.value.taskId, `${path}.taskId`);
     const reservationId = parseReservationId(record.value.reservationId, `${path}.reservationId`);
     const digestValue = parseImplementationAuthorityDigest(record.value.authorityDigest, `${path}.authorityDigest`);

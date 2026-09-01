@@ -249,8 +249,8 @@ function readGraph(path: string): unknown {
   }
 }
 
-function canonicalWaveGateRunsRoot(): string {
-  return join(dirname(dirname(resolve(TASK_GRAPH_PATH))), "reviews", "wave-gate-runs");
+function canonicalWaveGateRunsRoot(statePath: string): string {
+  return join(dirname(dirname(resolve(statePath))), "reviews", "wave-gate-runs");
 }
 
 type StatusRunDirectoryBinding =
@@ -281,9 +281,13 @@ function activeStatusRun(rawGraph: unknown): ActiveWaveGateRegistration | null {
   return parsed.value.active_wave_gate;
 }
 
-function statusRunsRoot(active: ActiveWaveGateRegistration, args: readonly string[]): string {
+function statusRunsRoot(
+  active: ActiveWaveGateRegistration,
+  args: readonly string[],
+  statePath: string,
+): string {
   const requestedRoot = argumentValue(args, "--runs-root");
-  return active.runsRoot ?? resolve(requestedRoot ?? canonicalWaveGateRunsRoot());
+  return active.runsRoot ?? resolve(requestedRoot ?? canonicalWaveGateRunsRoot(statePath));
 }
 
 function protectedRunsRootMismatch(active: ActiveWaveGateRegistration, args: readonly string[]): string | null {
@@ -293,7 +297,11 @@ function protectedRunsRootMismatch(active: ActiveWaveGateRegistration, args: rea
     : null;
 }
 
-function statusRunDirectoryBinding(rawGraph: unknown, args: readonly string[]): StatusRunDirectoryBinding {
+function statusRunDirectoryBinding(
+  rawGraph: unknown,
+  args: readonly string[],
+  statePath: string,
+): StatusRunDirectoryBinding {
   const active = activeStatusRun(rawGraph);
   if (active === null) return unavailableStatusBinding(Object.freeze({ kind: "unverified" }));
 
@@ -301,7 +309,7 @@ function statusRunDirectoryBinding(rawGraph: unknown, args: readonly string[]): 
   const mismatch = protectedRunsRootMismatch(active, args);
   if (mismatch !== null) return invalidStatusBinding(runId, join(active.runsRoot ?? "", runId), mismatch);
 
-  const runsRoot = statusRunsRoot(active, args);
+  const runsRoot = statusRunsRoot(active, args, statePath);
   const expectedPath = join(runsRoot, runId);
   const inspected = inspectRunDirectoryEntry(runsRoot, expectedPath);
   if (!inspected.ok) return invalidStatusBinding(runId, resolve(expectedPath), inspected.error.message);
@@ -423,12 +431,15 @@ export async function observedAdvisoryApproval(
   }
 }
 
-async function statusOperation(args: readonly string[]): Promise<HookResult> {
-  const rawGraph = readGraph(TASK_GRAPH_PATH);
+export async function currentOrchestrationStatus(
+  args: readonly string[] = [],
+  statePath: string = TASK_GRAPH_PATH,
+): Promise<string> {
+  const rawGraph = readGraph(statePath);
   const parsedGraph = parseStatusGraph(rawGraph);
-  const binding = statusRunDirectoryBinding(rawGraph, args);
+  const binding = statusRunDirectoryBinding(rawGraph, args, statePath);
   const workspace = parsedGraph.ok
-    ? observeCurrentWaveWorkspace(parsedGraph.value, dirname(resolve(TASK_GRAPH_PATH)))
+    ? observeCurrentWaveWorkspace(parsedGraph.value, dirname(resolve(statePath)))
     : Object.freeze({
         kind: "unavailable" as const,
         reason: `protected graph unavailable before Git observation: ${parsedGraph.error}`,
@@ -446,8 +457,11 @@ async function statusOperation(args: readonly string[]): Promise<HookResult> {
         advisoryApproval: await observedAdvisoryApproval(rawGraph, base, binding.handle),
       })
     : base;
-  const output = renderStatus(rawGraph, statusDeps, hasFlag(args, "--json"), observation);
-  process.stdout.write(`${output}\n`);
+  return renderStatus(rawGraph, statusDeps, hasFlag(args, "--json"), observation);
+}
+
+async function statusOperation(args: readonly string[]): Promise<HookResult> {
+  process.stdout.write(`${await currentOrchestrationStatus(args)}\n`);
   return { kind: "allow" };
 }
 

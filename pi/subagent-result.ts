@@ -413,6 +413,7 @@ function clearCurrentReservedAuthority(
         ? {
             ...task,
             active_implementation_attempt: undefined,
+            active_implementation_context: undefined,
             attempt_artifact_baseline: undefined,
             attempt_repository_baseline: undefined,
             reserved_at: undefined,
