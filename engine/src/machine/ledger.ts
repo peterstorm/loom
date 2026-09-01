@@ -121,8 +121,8 @@ export function sessionScopedPath(sessionId: SessionId, suffix: SessionFileSuffi
  * Full-file rewrite via temp-file + rename in the SAME directory: readers
  * take no lock, so an in-place writeFileSync could expose a torn (partial)
  * file mid-write. rename(2) is atomic on the same filesystem — a reader
- * sees the old content or the new, never a prefix. Appends stay plain
- * appendFileSync (single O_APPEND writes); a torn ledger tail is corruption
+ * sees the old content or the new, never a prefix. Appends preserve the
+ * append-only intent through appendFileSync; a torn ledger tail is corruption
  * and readEvidence rejects the complete ledger rather than using a prefix.
  */
 function rewriteFileAtomic(path: string, content: string): void {
@@ -288,10 +288,11 @@ export function countActiveAgents(sessionId: SessionId): number {
  *   - resolves elsewhere      → not ours
  *   - absent (ENOENT)         → not ours; "bound to no graph" is a real answer,
  *                               which is what stops stray rosters vetoing
- *   - malformed or unreadable → active (fail closed: cannot disprove it's ours)
+ *   - malformed or unreadable → typed `unavailable` observation
  *
  * The ENOENT-vs-error split is load-bearing: absence is evidence, failure is
- * not. A directory that cannot be read at all is likewise fail-closed.
+ * not. The compatibility `anyActiveSubagent` adapter maps `unavailable` to
+ * active so callers that need only a boolean still fail closed.
  */
 export type ActiveSubagentObservation =
   | Readonly<{ kind: "observed"; anyActiveForGraph: boolean }>

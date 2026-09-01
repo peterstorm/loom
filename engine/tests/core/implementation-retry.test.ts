@@ -374,6 +374,21 @@ describe("bounded implementation retry admission", () => {
       id: "T1",
       implementation_attempt_history: [retry, repeatedRetry],
     })).toMatchObject({ kind: "retry", predecessor: { receiptId: repeatedRetry.receiptId } });
+    expect(deriveImplementationRetryDisposition({
+      ...legacyInfrastructureTask,
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 2,
+    })).toMatchObject({ kind: "invalid" });
+    expect(deriveImplementationRetryDisposition({
+      ...legacyInfrastructureTask,
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 2,
+      implementation_retry_predecessor_receipt_id: repeatedRetry.receiptId,
+    })).toMatchObject({ kind: "invalid" });
+    expect(deriveImplementationRetryDisposition({
+      ...retryTask([retry]),
+      implementation_retry_predecessor_receipt_id: retry.receiptId,
+    })).toMatchObject({ kind: "invalid" });
 
     const attempt2 = authority(2, "legacy-terminal", 9);
     const escalation = settle(

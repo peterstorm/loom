@@ -30,45 +30,6 @@ import {
 import { repositoryContext } from "../utils/git";
 import { anyActiveSubagent } from "../machine";
 
-/**
- * Reservations eligible for bounded policy-based reclamation.
- *
- * This registration commits `executing_tasks` during PreToolUse — before the
- * sibling PreToolUse gates (template substitution, agent model, agent skill)
- * have voted. When one of them denies the spawn, SubagentStart never fires, so
- * no SubagentStop ever arrives to clear the entry: the task is deadlocked
- * while owning its declared paths, taking every path-sharing sibling down with
- * it. A veto strands the reservation whatever the task's status was — wave
- * remediation re-spawns against `implemented` and `failed` tasks routinely —
- * so recovery cannot be limited to tasks still `pending`.
- *
- * A timestamped reservation becomes policy-eligible for reclamation only when
- * its task is not `completed`, no subagent is observed active FOR THIS GRAPH,
- * AND it has aged past the grace window. Timestamp-less/malformed legacy
- * reservations are the explicit immediate availability-biased exception on
- * ordinary registration; Pi's pre-roster observation excludes that exception.
- * This is a bounded operational assumption, not
- * proof of process death: transport start latency has no hard upper bound.
- * All three matter: a `completed` task can never be re-executed;
- * `anyActiveSubagent` fails closed, so an unreadable roster or any live agent
- * on this graph releases nothing; and the grace window shields a freshly
- * committed reservation whose agent has not yet reached its SubagentStart
- * roster mark — without it, a parallel wave batch reclaims a live sibling that
- * is merely mid-startup (it has no roster entry, indistinguishable from a
- * vetoed spawn on that instant alone). See staleReservationsForRosterObservation.
- *
- * The graph scope is not a detail. SUBAGENT_DIR is shared by every project on
- * the machine, so a project-blind probe lets another repo's live agent — or
- * any stray roster file — veto recovery here indefinitely.
- */
-/**
- * Imperative shell: preflight every input against one state snapshot, capture
- * every baseline, then register the accepted batch in one locked update. A
- * blocked sibling therefore leaves no ghost execution state behind — and a
- * spawn denied by a SIBLING HOOK, which this registration cannot observe,
- * becomes reclaimable only on a later registration after the grace period and
- * a qualifying roster-liveness observation.
- */
 export type TaskExecutionRegistrationOutcome =
   | Readonly<{
       kind: "registered";
@@ -79,9 +40,12 @@ export type TaskExecutionRegistrationOutcome =
 class LockedRegistrationRefusal extends Error {}
 
 /**
- * Typed registration operation used by Pi. The Claude Hook wrapper below keeps
- * the historical HookResult API while intentionally discarding capabilities
- * that Claude correlates through its SubagentStart sidecar.
+ * Imperative shell: preflight one snapshot, capture baselines, then register
+ * the accepted batch in one locked update. A sibling-hook veto that occurs
+ * after registration becomes policy-eligible for exact reclamation only after
+ * the grace period and a qualifying graph-scoped roster observation; the
+ * policy does not prove process death. Pi consumes the returned authorities,
+ * while the Claude wrapper correlates them through SubagentStart sidecars.
  */
 export async function registerTaskExecutionBatch(
   spawns: readonly TaskExecutionSpawn[],

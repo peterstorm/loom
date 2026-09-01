@@ -315,17 +315,11 @@ export function applyCompletionInfrastructureFailure(
     bytesChangedSinceAttempt,
     clearedExecuting,
     (task) => task.proof === undefined ? task : ({
-      ...task,
+      ...clearAttempt(task),
       status: "pending",
       proof: task.proof,
       revalidation_required: true,
       legacy_missing_proof: undefined,
-      active_implementation_attempt: undefined,
-      active_implementation_context: undefined,
-      attempt_artifact_baseline: undefined,
-      attempt_repository_baseline: undefined,
-      reserved_at: undefined,
-      legacy_execution_reservation: undefined,
     }),
   );
 }

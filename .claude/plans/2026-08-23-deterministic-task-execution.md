@@ -476,7 +476,7 @@ Task id in executing_tasks
   iff stored attempt baselines hash to that authority's two baseline digests
 ```
 
-Legacy `executing_tasks` entries without active authority remain readable as legacy reservations, but are cleanup/invalidation-only. Stale reservation reclamation removes only the exact active authority it proved abandoned.
+Legacy `executing_tasks` entries without active authority remain readable as legacy reservations, but are cleanup/invalidation-only. A stale reservation becomes policy-eligible after the bounded grace and liveness checks; reclamation removes only that exact active authority. Exact identity prevents releasing a replacement, but the policy does not prove process death because transport latency has no hard upper bound.
 
 Registration captures baselines and reservation ids in the shell, then revalidates and atomically installs baselines, digests, authority, `reserved_at`, and `executing_tasks` under one StateManager lock. The returned authority is the only result correlation capability.
 
@@ -546,7 +546,7 @@ Parity tests feed equivalent Claude/Pi normalized observations into the same red
 
 Runtime rollout occurs only at a Pi session boundary after merge. A pre-Slice-3 active child has no exact sidecar/reserved authority and therefore requires cleanup/revalidation and a fresh spawn; compatibility inference never upgrades it to implemented.
 
-Slice 4 alone freezes retry contexts, dispatches attempt 2, persists retry diagnostics/request identity, and owns escalation execution. Slice 3 classifies and records those transitions but launches no retry.
+Slice 4 alone freezes retry contexts, dispatches attempt 2, persists retry diagnostics/request identity, and publishes terminal escalation for operator handling. Slice 3 classifies and records those transitions but launches no retry.
 
 #### Slice 3 shipped evidence
 

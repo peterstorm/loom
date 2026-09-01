@@ -16,7 +16,7 @@ mvn test          # Java/Maven projects
 pytest            # Python projects
 ```
 
-Test evidence is resolved ledger-first: a PostToolUse hook records every Bash test run (real exit codes and report artifacts) into an evidence ledger, and the SubagentStop hook judges your task from that ledger — it falls back to transcript scanning whenever the ledger yields no trusted verdict (no ledger evidence at all, an exit-0 run with no report artifact, or a pass invalidated by later file writes), and that fallback is always labeled untrusted.
+On Claude Code, test evidence is resolved ledger-first: a PostToolUse hook records every Bash test run (real exit codes and report artifacts) into an evidence ledger, and the SubagentStop hook judges your task from that ledger — it falls back to transcript scanning whenever the ledger yields no trusted verdict (no ledger evidence at all, an exit-0 run with no report artifact, or a pass invalidated by later file writes), and that fallback is always labeled untrusted. On Pi, the result adapter preserves Pi's structured test evidence and its provenance; it does not relabel that evidence as ledger-trusted.
 Either way, evidence only exists for tests EXECUTED via the Bash tool: if your task DOES require tests and you do not run them via Bash, the task's `test_result` will not show a pass and the wave gate FAILS.
 Writing tests without executing them counts as failure.
 
@@ -63,7 +63,7 @@ Regression execution and new-test creation are separate obligations. Follow each
 
 {implementation_retry_context}
 
-When this is an exact `LOOM_IMPLEMENTATION_RETRY_CONTEXT` appendix, it is protected attempt-2 authority and the failure kinds are the previous attempt's deterministic diagnostics. Address them during this attempt. When it says `None — semantic attempt 1.`, no retry authority exists.
+When this is an exact `LOOM_IMPLEMENTATION_RETRY_CONTEXT` appendix, it is exact attempt-2 admission evidence and the failure kinds are the previous attempt's deterministic diagnostics. The spawn gate validates these bytes against protected settlement history before minting attempt authority. Address the diagnostics during this attempt. When it says `None — semantic attempt 1.`, no retry admission evidence exists.
 
 ## Your Task
 

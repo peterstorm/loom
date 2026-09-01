@@ -213,7 +213,7 @@ The exact path set captured in `attempt_artifact_baseline`: declared Task paths 
 _Avoid_: Repository dirty set, transcript file list, Task test command
 
 **Implementation Settlement Receipt**:
-The immutable, self-digested audit record for one exact Implementation Attempt transition. Retry/escalation receipts consume the semantic attempt; implemented and infrastructure-blocked receipts do not. Receipt identity makes duplicate delivery idempotent and prevents late results from releasing a newer reservation.
+The immutable, self-digested audit record for one exact Implementation Attempt transition. Retry/escalation receipts consume the semantic attempt; implemented and infrastructure-blocked receipts do not. Receipt identity makes duplicate delivery idempotent; exact active-authority and reservation-digest matching prevents a late result from releasing a newer reservation.
 _Avoid_: Rollback receipt, cleanup log, retry counter
 
 **Proof Obligation**:
