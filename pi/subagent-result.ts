@@ -499,6 +499,9 @@ async function applyFailedImplementationResult(args: FailedImplementationArgs): 
     const message = `loom(pi): ${args.failure}; ${binding.reason} — completion evidence ignored`;
     return outcome([message], executingTasks.length > 0 ? [message] : []);
   }
+  if (await settleCompletedOrMissingImplementation(args.store, binding.taskId, args.reservedSlot)) {
+    return outcome([`loom(pi): ${binding.taskId} failed after completion; retired exact completed/missing reservation`]);
+  }
   const authority = args.reservedSlot?.implementationAuthority;
   return authority == null
     ? cleanupFailedLegacyImplementation(args, binding)
@@ -910,33 +913,42 @@ type ImplementationTranscriptObservation =
       log: readonly string[];
     }>;
 
+export function retireCompletedOrMissingImplementation(
+  state: TaskGraph,
+  taskId: string,
+  reservedSlot: ReservedSlot | undefined,
+): Readonly<{ state: TaskGraph; retired: boolean }> {
+  if (!reservedAuthorityIsCurrent(state, taskId, reservedSlot)) return { state, retired: false };
+  const task = state.tasks.find((candidate) => candidate.id === taskId);
+  if (task !== undefined && task.status !== "completed") return { state, retired: false };
+  const cleared = clearCurrentReservedAuthority({
+    ...state,
+    executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== taskId),
+  }, taskId, reservedSlot);
+  return {
+    state: {
+      ...cleared,
+      tasks: cleared.tasks.map((candidate) =>
+        candidate.id === taskId && candidate.status === "completed"
+          ? {
+              ...candidate,
+              repository_baseline: undefined,
+              unresolved_repository_paths: undefined,
+            }
+          : candidate),
+    },
+    retired: true,
+  };
+}
+
 async function settleCompletedOrMissingImplementation(
   store: TaskGraphStore,
   taskId: string,
   reservedSlot: ReservedSlot | undefined,
 ): Promise<boolean> {
   return store.updateAndReturn((state) => {
-    if (!reservedAuthorityIsCurrent(state, taskId, reservedSlot)) return { state, value: false };
-    const task = state.tasks.find((candidate) => candidate.id === taskId);
-    if (task !== undefined && task.status !== "completed") return { state, value: false };
-    const cleared = clearCurrentReservedAuthority({
-      ...state,
-      executing_tasks: (state.executing_tasks ?? []).filter((id) => id !== taskId),
-    }, taskId, reservedSlot);
-    return {
-      state: {
-        ...cleared,
-        tasks: cleared.tasks.map((candidate) =>
-          candidate.id === taskId && candidate.status === "completed"
-            ? {
-                ...candidate,
-                repository_baseline: undefined,
-                unresolved_repository_paths: undefined,
-              }
-            : candidate),
-      },
-      value: true,
-    };
+    const retired = retireCompletedOrMissingImplementation(state, taskId, reservedSlot);
+    return { state: retired.state, value: retired.retired };
   });
 }
 

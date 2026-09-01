@@ -517,8 +517,9 @@ interface TaskCommonMetadataBase {
    * Fresh attempts bind to this boundary instead of snapshotting unresolved
    * foreign bytes as their new starting state. */
   readonly repository_baseline?: readonly DeclaredArtifactBaseline[];
-  /** Parser-attributed out-of-scope paths still different from the retained
-   * repository boundary. Sibling dirty paths never enter this set. */
+  /** Repository-observed unowned paths still different from the retained
+   * repository boundary, including paths omitted from transcript evidence.
+   * Sibling-owned dirty paths never enter this set. */
   readonly unresolved_repository_paths?: readonly string[];
   readonly reserved_at?: string;
   readonly legacy_execution_reservation?: true;

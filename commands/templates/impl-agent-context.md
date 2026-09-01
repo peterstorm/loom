@@ -95,8 +95,8 @@ Available at: {plan_file_path}
 
 ## You CAN Write Files
 
-**You are a subagent. The block-direct-edits hook detects subagents and allows Edit/Write.**
-- You MUST use Write/Edit tools to create/modify files — this WILL work
+**Your harness grants writes only under exact implementation authority:** Pi consumes the task-bound one-time write capability in this prompt; Claude requires the proven implementation-role roster entry established for this Agent. Generic subagent identity is not write authority.
+- You MUST use Write/Edit tools to create/modify files — this WILL work under that bound authority
 - Do NOT read `.claude/hooks/` or `.claude/state/` files — they are irrelevant to you
 - Do NOT check if you are "allowed" to write — you are. Just write.
 

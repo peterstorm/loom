@@ -12,6 +12,10 @@ import { applyCompletionInfrastructureFailure } from "../../src/core/implementat
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { createImplementationAttemptAuthority } from "../../src/core/implementation-completion";
 import { taskVerificationPolicy } from "../../src/core/verification-policy";
+import {
+  authorizeImplementationSpawn,
+  createImplementationAttemptContext,
+} from "../../src/core/implementation-retry";
 import { parseArtifactDigest, parseOrchestrationRunId } from "../../src/core/orchestration-contract";
 import {
   captureDeclaredArtifactBaseline,
@@ -1408,6 +1412,12 @@ describe("applyImplementationPiResult", () => {
         new_tests: verificationPolicy.newTests,
       },
     }), process.cwd(), "pi-completed-modern-cleanup");
+    const authority = modern.reservedSlot.implementationAuthority;
+    if (authority === null || authority === undefined) throw new Error("modern cleanup authority missing");
+    const prompt = "Task ID: T1";
+    const admission = authorizeImplementationSpawn({ id: "T1" }, prompt);
+    if (!admission.ok) throw new Error(admission.error);
+    const context = createImplementationAttemptContext({ authority, prompt, admission });
     const completed: TaskGraph = {
       ...modern.graph,
       tasks: modern.graph.tasks.map((task) => taskFixture({
@@ -1415,9 +1425,13 @@ describe("applyImplementationPiResult", () => {
         status: "completed",
         proof,
         revalidation_required: undefined,
+        active_implementation_context: context,
+        repository_baseline: task.attempt_repository_baseline,
+        unresolved_repository_paths: ["foreign.ts"],
       })),
     };
     const store = fakeStore(completed);
+    const failedStore = fakeStore(completed);
 
     const applied = await applyImplementationPiResult({
       store,
@@ -1436,6 +1450,23 @@ describe("applyImplementationPiResult", () => {
     expect(store.current().tasks[0]?.active_implementation_context).toBeUndefined();
     expect(store.current().tasks[0]?.attempt_artifact_baseline).toBeUndefined();
     expect(store.current().tasks[0]?.attempt_repository_baseline).toBeUndefined();
+    expect(store.current().tasks[0]?.repository_baseline).toBeUndefined();
+    expect(store.current().tasks[0]?.unresolved_repository_paths).toBeUndefined();
+
+    const failed = await applyFailedPiResult({
+      store: failedStore,
+      agentType: "code-implementer-agent",
+      result: result({ agent: "code-implementer-agent", task: "Task ID: T1", exitCode: 1 }),
+      reservedSlot: modern.reservedSlot,
+      now: NOW,
+    });
+    expect(failed.processingErrors).toEqual([]);
+    expect(failedStore.current().executing_tasks).toEqual([]);
+    expect(failedStore.current().tasks[0]?.status).toBe("completed");
+    expect(failedStore.current().tasks[0]?.active_implementation_attempt).toBeUndefined();
+    expect(failedStore.current().tasks[0]?.active_implementation_context).toBeUndefined();
+    expect(failedStore.current().tasks[0]?.repository_baseline).toBeUndefined();
+    expect(failedStore.current().tasks[0]?.unresolved_repository_paths).toBeUndefined();
   });
 
   it("keeps a concurrently reopened unreserved Task pending despite a stale completed pre-read", async () => {

@@ -60,6 +60,7 @@ import {
   parsePiSubagentResults,
   piSubagentFailureSignals,
   piSubagentResultFailed,
+  retireCompletedOrMissingImplementation,
   type PiResultOutcome,
   type PiReviewAttemptAuthority,
   type PiSpecCheckAttemptAuthority,
@@ -2151,6 +2152,12 @@ export default function (pi: ExtensionAPI) {
               logs.push(
                 `implementation slot ${index + 1}/${item.taskId} has no exact attempt authority — current reservation preserved`,
               );
+              continue;
+            }
+            const retired = retireCompletedOrMissingImplementation(state, item.taskId, item);
+            if (retired.retired) {
+              state = retired.state;
+              logs.push(`retired completed/missing implementation reservation for ${item.taskId}`);
               continue;
             }
             const failure = reservedImplementationFailure(

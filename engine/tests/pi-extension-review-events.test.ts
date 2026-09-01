@@ -3673,6 +3673,60 @@ describe("Pi extension review tool_result integration", () => {
     expect(() => readFileSync(join(subagentDir, `${session}.active`), "utf-8")).toThrow();
   });
 
+  it("retires completed modern authority when the reserved Pi result is missing", async () => {
+    const planPath = join(temp, "missing-completed-modern-result-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+    });
+    const pi = await extension();
+    const session = "019fca39-f989-7510-8e62-50dadbcad4ca";
+    const toolCallId = "call-missing-completed-modern-result";
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+    expect(await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId,
+      input: {
+        agent: "code-implementer-agent",
+        task: "Task ID: T1\nUse the code-implementer skill. Implement and test.",
+        agentScope: "user",
+      },
+    }, context)).toEqual([undefined]);
+    const spawned = JSON.parse(readFileSync(statePath, "utf8"));
+    const task = spawned.tasks[0];
+    const proof = evaluateTaskProof(
+      { newTestsRequired: false, declaredArtifacts: task.file_list ?? [] },
+      { taskCompleted: true, filesModified: task.file_list ?? [] },
+    );
+    if (proof.state !== "satisfied") throw new Error("completed missing-result proof fixture failed");
+    writeState({
+      ...spawned,
+      tasks: [{
+        ...task,
+        status: "completed",
+        proof,
+        new_tests_required: false,
+        revalidation_required: undefined,
+      }],
+    });
+
+    await pi.emit("tool_result", {
+      toolName: "subagent", toolCallId, content: [], details: { results: [] },
+    }, context);
+
+    const settled = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(settled.executing_tasks).toEqual([]);
+    expect(settled.tasks[0]).toMatchObject({ status: "completed", proof });
+    expect(settled.tasks[0].active_implementation_attempt).toBeUndefined();
+    expect(settled.tasks[0].active_implementation_context).toBeUndefined();
+    expect(settled.tasks[0].attempt_artifact_baseline).toBeUndefined();
+    expect(settled.tasks[0].attempt_repository_baseline).toBeUndefined();
+    expect(settled.tasks[0].repository_baseline).toBeUndefined();
+  });
+
   it("infrastructure-settles a matching-agent exit-0 envelope whose messages are missing", async () => {
     const planPath = join(temp, "missing-messages-finalization-plan.md");
     writeFileSync(planPath, "# Plan\n");
