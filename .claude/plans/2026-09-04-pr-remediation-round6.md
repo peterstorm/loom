@@ -79,3 +79,11 @@ git diff --check
 ```
 
 Regression tests are authored red first (watched fail against `30e06e1`), then fixed green. Stop without staging or committing if validation cannot pass.
+
+## Round 7 correction (honest record)
+
+This record was born disagreeing with its artifact — the exact class upheld 3–0 in round 2 (critical C) and round 5 (Fix 3). Round 7's refutation panel (reproduction / intent / test-coverage, all 7 criticals upheld 3–0, run `review-20260904T202844Z-52167`) verified:
+
+- **Item 4's three "pinned intentional-vanishing regression tests" were never authored in round 6.** The pins (`FR-002 content without a colon`, `FR.002:`, `F R-002:`) were delivered under round 7 (commit following this note). The record also misclassified `FR.002:` — the `[\s.-]*` widening makes it a diagnostic (`ok: false`), not an intentional vanishing.
+- **Item 6's "acceptanceScenarioLines JSDoc; pinned" claim was doubly unmet in round 6:** the function had no JSDoc (the asymmetry was an inline comment above `scenarios.push`), and no test exercised the pass side. Round 7 delivered the proper JSDoc (the inline comment moved into it) and the pass-side pin.
+- **Item 7's "!isCollectedBullet(raw) collection guard" distill was NOT applied — and will not be.** Round 6 attempted the move and reverted it in the same session: `isCollectedBullet` returns `boolean`, not a type predicate, so the replacement broke TypeScript narrowing (`TS2339: Property 'headerLine' does not exist` at the post-guard `state.headerLine`). The move is not behavior-identical in the type sense. The collection guard keeps the hand-derived De Morgan form (`state.kind !== "inside" || !line.startsWith("-")`), which narrows correctly; `isCollectedBullet` remains referenced only by the stray-ID check.

@@ -53,18 +53,21 @@ const ENTRY_PATTERNS = Object.freeze({
 
 /**
  * Recognizable structural ID syntax, with or without a Markdown prefix:
- * bare, bold (1–3 asterisks), single-bullet, nested blockquote, heading of
- * any level, or an ordered-list marker of any digit run. Families are
- * case-insensitive with any digit run, any combination of whitespace, dots,
- * and hyphens between the family and the digits, and zero or more whitespace
- * before the colon, so the enumerated near-miss variants fail closed instead
- * of vanishing. The colon and the contiguous family token are the deliberate
- * prose-disambiguation boundary: a colon-less ID-shaped line ("FR-002 and
- * FR-003 are related") and a spaced family token ("F R-002:") are prose, not
- * IDs, and stay legal. Both nets below reference this one pattern so the
- * in-body and document-wide fail-closed checks cannot drift.
+ * bare, or a run of one or more Markdown marker characters (`#`, `>`, `*`,
+ * `+`, `-`) or ordered-list markers (`1.`), optionally separated by
+ * whitespace (e.g. `> >`, `- -`, `* *`, `1. 2.`, `> -`) — the CommonMark
+ * spaced forms of nested blockquotes, nested bullets, and ordered lists are
+ * recognized syntax, not prose. Families are case-insensitive with any digit
+ * run, any combination of whitespace, dots, and hyphens between the family
+ * and the digits, and zero or more whitespace before the colon, so the
+ * enumerated near-miss variants fail closed instead of vanishing. The colon
+ * and the contiguous family token are the deliberate prose-disambiguation
+ * boundary: a colon-less ID-shaped line ("FR-002 and FR-003 are related")
+ * and a spaced family token ("F R-002:") are prose, not IDs, and stay legal.
+ * Both nets below reference this one pattern so the in-body and
+ * document-wide fail-closed checks cannot drift.
  */
-const STRUCTURAL_ID = /^\s*(?:\*{1,3}|[*+-]|>+|#+|\d+[.)])?\s*(?:fr|as|oos)[\s.-]*\d+\s*:\s*/iu;
+const STRUCTURAL_ID = /^\s*(?:(?:[#>*+-]|\d+[.)])\s*)*(?:fr|as|oos)[\s.-]*\d+\s*:\s*/iu;
 
 const ACCEPTANCE_HEADER = /^\*\*Acceptance Scenarios:\*\*$/u;
 
@@ -93,20 +96,22 @@ function duplicates(values: readonly string[]): readonly string[] {
  * indentation), so fence and furniture logic sees the columns editors see.
  * Tabs inside content are untouched. */
 function expandLeadingTabs(line: string): string {
+  const leading = /^[\t ]+/u.exec(line);
+  if (leading === null) return line;
+  const head = leading[0];
   let column = 0;
-  let index = 0;
-  while (index < line.length && (line[index] === " " || line[index] === "\t")) {
-    if (line[index] === "\t") {
+  let expanded = "";
+  for (const char of head) {
+    if (char === "\t") {
       const spaces = 4 - (column % 4);
-      line = line.slice(0, index) + " ".repeat(spaces) + line.slice(index + 1);
+      expanded += " ".repeat(spaces);
       column += spaces;
-      index += spaces;
     } else {
+      expanded += " ";
       column += 1;
-      index += 1;
     }
   }
-  return line;
+  return expanded + line.slice(head.length);
 }
 
 /**
@@ -152,7 +157,7 @@ function withoutFences(markdown: string): Readonly<{ text: string; unterminated:
       continue;
     }
     const rawMarker = fence[1];
-    const info = fence[2] ?? "";
+    const info = fence[2];
     // CommonMark: info strings for backtick code blocks may not contain
     // backticks — such a line is paragraph text, never a fence opener, and it
     // can never close (closers are marker-only). Inside an open fence it is
@@ -180,18 +185,18 @@ function sections(markdown: string): readonly MarkdownSection[] {
     REQUIRED_SECTIONS.some((section) => section === value);
   const lineAt = (byteOffset: number): number => markdown.slice(0, byteOffset).split("\n").length;
   return Object.freeze(headings.flatMap((match, index): readonly MarkdownSection[] => {
-    const heading = match[1]?.trim();
-    if (heading === undefined || !isSectionName(heading)) return [];
+    const heading = match[1].trim();
+    if (!isSectionName(heading)) return [];
     const start = (match.index ?? 0) + match[0].length;
     const startLine = lineAt(start);
-    const nextHeadingLine = headings[index + 1] === undefined
+    const endLine = headings[index + 1] === undefined
       ? markdown.split("\n").length + 1
       : lineAt(headings[index + 1].index ?? 0);
     return [Object.freeze({
       heading,
       body: markdown.slice(start, headings[index + 1]?.index ?? markdown.length),
       startLine,
-      endLine: nextHeadingLine,
+      endLine,
     })];
   }));
 }
@@ -251,6 +256,13 @@ function parseEntries(
   return Object.freeze(entries);
 }
 
+/**
+ * Collects the scenario bullet lines of the User Scenarios section and fails
+ * closed on every stray structural ID, in or out of an acceptance block.
+ * Deliberate asymmetry, stated at the seam: outside an acceptance block a
+ * non-ID bullet is narrative furniture in a narrative section and passes;
+ * FR/OOS are entry-only sections, so any bullet there errors.
+ */
 function acceptanceScenarioLines(lines: readonly SourceLine[], errors: string[]): readonly SourceLine[] {
   const scenarios: SourceLine[] = [];
   const closeBlock = (headerLine: number): void => {
@@ -261,9 +273,7 @@ function acceptanceScenarioLines(lines: readonly SourceLine[], errors: string[])
     | Readonly<{ kind: "after" }> = Object.freeze({ kind: "before" });
   const isCollectedBullet = (raw: string): boolean => state.kind === "inside" && raw.trim().startsWith("-");
   const strayIdError = (inside: boolean, documentLine: number): string =>
-    inside
-      ? `Acceptance Scenarios line ${documentLine} must be a "- ID: content" bullet`
-      : `Acceptance Scenarios line ${documentLine} must be a "- ID: content" bullet under an **Acceptance Scenarios:** block`;
+    `Acceptance Scenarios line ${documentLine} must be a "- ID: content" bullet${inside ? "" : " under an **Acceptance Scenarios:** block"}`;
   for (const { raw, documentLine } of lines) {
     const line = raw.trim();
     if (ACCEPTANCE_HEADER.test(line)) {
@@ -288,9 +298,6 @@ function acceptanceScenarioLines(lines: readonly SourceLine[], errors: string[])
     // of an acceptance block — must fail closed, never vanish.
     if (STRUCTURAL_ID.test(raw) && !isCollectedBullet(raw)) errors.push(strayIdError(state.kind === "inside", documentLine));
     if (state.kind !== "inside" || !line.startsWith("-")) continue;
-    // Deliberate asymmetry, stated at the seam: outside an acceptance block a
-    // non-ID bullet is narrative furniture in a narrative section and passes;
-    // FR/OOS are entry-only sections, so any bullet there errors.
     scenarios.push(Object.freeze({ raw, documentLine }));
     state = Object.freeze({ kind: "inside", headerLine: state.headerLine, sawBullet: true });
   }

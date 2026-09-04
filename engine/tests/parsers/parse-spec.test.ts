@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import * as parserBarrel from "../../src/parsers";
 import { parseSpec, specContentHash } from "../../src/parsers/parse-spec";
 
@@ -135,31 +136,20 @@ describe("parseSpec", () => {
     if (parsed.ok) expect(parsed.value.frs.map(({ id }) => id)).toEqual(["FR-001", "FR-002"]);
   });
 
-  it("keeps an info-string line inside a fence as content, never a closer", () => {
+  it.each([
+    ["yaml", "```yaml"],
+    ["inner", "```inner"],
+  ])("keeps an info-string line inside a fence as content, never a closer", (_kind, infoLine) => {
     const infoString = validSpec.replace(
       "## Out of Scope",
-      "```markdown\n## Out of Scope\n- OOS-009: minted from fence content\n```yaml\n```\n\n## Out of Scope",
+      "```markdown\n## Out of Scope\n- OOS-009: minted from fence content\n" + infoLine + "\n```\n\n## Out of Scope",
     );
     const parsed = parseSpec(infoString);
-    // CommonMark: the ```yaml line is fence content, so the fence stays open
-    // until the marker-only closer — the restored Out of Scope section parses
-    // and the fenced OOS-009 never mints an entry. Closing early on the
-    // info-string line blanks the restored section and fails the parse.
-    expect(parsed).toMatchObject({ ok: true });
-    if (parsed.ok) {
-      expect(JSON.stringify(parsed.value)).not.toContain("OOS-009");
-      expect(parsed.value.oos.map(({ id }) => id)).toEqual(["OOS-001", "OOS-002"]);
-    }
-  });
-
-  it("never closes a fence on a same-character marker carrying trailing content", () => {
-    const trailing = validSpec.replace(
-      "## Out of Scope",
-      "```markdown\n## Out of Scope\n- OOS-009: minted from fence content\n```inner\n```\n\n## Out of Scope",
-    );
-    const parsed = parseSpec(trailing);
-    // CommonMark: ```inner carries an info string, so it is fence content and
-    // never a closer; the fence closes on the marker-only line that follows.
+    // CommonMark: a marker with a non-empty info string is fence content, so
+    // the fence stays open until the marker-only closer — the restored Out of
+    // Scope section parses and the fenced OOS-009 never mints an entry.
+    // Closing early on the info-string line blanks the restored section and
+    // fails the parse.
     expect(parsed).toMatchObject({ ok: true });
     if (parsed.ok) {
       expect(JSON.stringify(parsed.value)).not.toContain("OOS-009");
@@ -179,12 +169,15 @@ describe("parseSpec", () => {
     }
   });
 
+  // The [\s.-]* separator class in STRUCTURAL_ID is pinned by the
+  // dot-separator row: reverting the widening to [\s-] would make FR.002:
+  // vanish with ok:true — the silent-drop class upheld across rounds 1–6.
   it.each([
     ["bold-asterisk", "** FR-002: System MUST be recognized"],
     ["ordered-list", "1. FR-002: System MUST be recognized"],
     ["lowercase bare", "fr-002: System MUST be recognized"],
     ["two-digit ID", "FR-12: System MUST be recognized"],
-    ["single-digit", "AS-1: System MUST be recognized"],
+    ["dot-separator", "FR.002: System MUST be recognized"],
   ])("fails closed for %s near-miss IDs", (_kind, strayLine) => {
     const stray = validSpec.replace(
       "- FR-002: System MUST hash requirement content deterministically",
@@ -198,23 +191,27 @@ describe("parseSpec", () => {
   });
 
   it.each([
-    ["hyphen-space gap", "FR- 002: System MUST be recognized"],
-    ["space-hyphen-space gap", "FR - 002: System MUST be recognized"],
+    ["spaced separator", "FR- 002: System MUST be recognized"],
     ["space before colon", "FR-002 : System MUST be recognized"],
-    ["spaces before colon", "FR-002  : System MUST be recognized"],
     ["four-digit ID", "FR-1234: System MUST be recognized"],
-    ["two-space gap", "FR-  123: System MUST be recognized"],
     ["three-digit ordered-list prefix", "123. FR-002: System MUST be recognized"],
     ["blockquote prefix", "> FR-002: System MUST be recognized"],
+    ["plus-bullet", "+ FR-002: System MUST be recognized"],
+    ["close-paren ordered-list", "1) FR-002: System MUST be recognized"],
+    ["spaced nested blockquote", "> > FR-002: System MUST be recognized"],
+    ["nested bullet", "* * FR-002: System MUST be recognized"],
+    ["spaced ordered markers", "1. 2. FR-002: System MUST be recognized"],
+    ["mixed marker run", "> - FR-002: System MUST be recognized"],
   ])("fails closed for a bare %s variant in a section body", (_kind, strayLine) => {
     const stray = validSpec.replace(
       "- FR-002: System MUST hash requirement content deterministically",
       strayLine,
     );
     const parsed = parseSpec(stray);
-    // Any ID-shaped line — combined space/hyphen gaps, a space before the
-    // colon, one digit past the canonical three, a wider ordered-list marker,
-    // a blockquote or heading prefix — must fail closed, never vanish.
+    // Any ID-shaped line — spaced separators, a space before the colon, one
+    // digit past the canonical three, wider ordered-list markers, and any
+    // Markdown marker run (spaced nested blockquotes, nested bullets, spaced
+    // ordered markers, mixed runs) — must fail closed, never vanish.
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
       expect(parsed.errors.join("\n")).toContain("Functional Requirements");
@@ -311,6 +308,8 @@ describe("parseSpec", () => {
   it.each([
     ["four-digit scenario ID", "AS-1234: Given a typo, When parsed, Then it fails closed"],
     ["hyphen-space scenario ID", "AS- 002: Given a typo, When parsed, Then it fails closed"],
+    ["asterisk-prefixed", "* AS-999: Given a typo, When parsed, Then it fails closed"],
+    ["spaced nested blockquote", "> > AS-999: Given a typo, When parsed, Then it fails closed"],
   ])("fails closed for a bare %s variant in an acceptance block", (_kind, strayLine) => {
     const stray = validSpec.replace(
       "- AS-002: Given duplicate IDs, When it is parsed, Then parsing fails closed",
@@ -658,6 +657,90 @@ describe("parseSpec", () => {
     if (parsed.ok) {
       expect(JSON.stringify(parsed.value)).not.toContain("FR-999");
       expect(parsed.value.frs.map(({ id }) => id)).toEqual(["FR-001", "FR-002"]);
+    }
+  });
+
+  it("keeps a colon-less ID-shaped line and a spaced family token as deliberate prose", () => {
+    const prose = validSpec.replace(
+      "- FR-002: System MUST hash requirement content deterministically",
+      "FR-002 and FR-003 are related",
+    );
+    // CONTEXT.md Spec Index: an ID-shaped line without a colon is prose, not
+    // a malformed identifier, and stays legal — pinned so a future net change
+    // in either direction cannot silently alter the boundary.
+    const parsed = parseSpec(prose);
+    expect(parsed).toMatchObject({ ok: true });
+    if (parsed.ok) expect(parsed.value.frs.map(({ id }) => id)).toEqual(["FR-001"]);
+
+    const spaced = validSpec.replace(
+      "- FR-002: System MUST hash requirement content deterministically",
+      "F R-002: System MUST be recognized",
+    );
+    // A spaced family token breaks the contiguous family token — the second
+    // deliberate prose boundary — and stays legal.
+    expect(parseSpec(spaced)).toMatchObject({ ok: true });
+  });
+
+  it("binds the CONTEXT.md Spec Index definition as the executable colon boundary", () => {
+    const context = readFileSync(new URL("../../../CONTEXT.md", import.meta.url), "utf8");
+    // The Spec Index entry documents the colon as the deliberate
+    // prose-disambiguation boundary; this test binds the living language to
+    // the parser's behavior so neither can drift from the other.
+    expect(context).toMatch(/\*\*Spec Index\*\*/u);
+    expect(context).toMatch(/The colon and the contiguous family token are the deliberate prose-disambiguation boundaries/u);
+    const prose = validSpec.replace(
+      "- FR-002: System MUST hash requirement content deterministically",
+      "FR-002 and FR-003 are related",
+    );
+    const parsed = parseSpec(prose);
+    expect(parsed).toMatchObject({ ok: true });
+    if (parsed.ok) expect(parsed.value.frs.map(({ id }) => id)).toEqual(["FR-001"]);
+  });
+
+  it("passes a narrative bullet outside an acceptance block as furniture", () => {
+    const narrative = validSpec.replace(
+      "### US1: [P1] Parse a spec",
+      "### US1: [P1] Parse a spec\n\n- Some narrative note outside any block",
+    );
+    const parsed = parseSpec(narrative);
+    // The deliberate asymmetry's pass side: outside an acceptance block a
+    // non-ID bullet is narrative furniture in a narrative section and passes;
+    // pinned so a future guard change in either direction cannot silently
+    // alter legal narrative-furniture behavior.
+    expect(parsed).toMatchObject({ ok: true });
+    if (parsed.ok) {
+      expect(parsed.value.scenarios.map(({ id }) => id)).toEqual(["AS-001", "AS-002"]);
+      expect(parsed.value.frs.map(({ id }) => id)).toEqual(["FR-001", "FR-002"]);
+    }
+  });
+
+  it("skips a thematic break between glossary rows as furniture", () => {
+    const furnished = validSpec.replace(
+      "| Content Hash | A SHA-256 digest of canonical entry content |",
+      "---\n| Content Hash | A SHA-256 digest of canonical entry content |",
+    );
+    const parsed = parseSpec(furnished);
+    // A thematic break between glossary rows is furniture: the skip branch is
+    // position-agnostic, and the real row after it still mints.
+    expect(parsed).toMatchObject({ ok: true });
+    if (parsed.ok) {
+      expect(parsed.value.glossary.map(({ term }) => term)).toEqual(["Spec Index", "Content Hash"]);
+    }
+  });
+
+  it("keeps a tab-indented closer inside an open fence open, failing closed", () => {
+    const indented = validSpec.replace(
+      "## Out of Scope",
+      "```markdown\n## Out of Scope\n- OOS-009: minted from fence content\n\t```\n\n## Out of Scope",
+    );
+    const parsed = parseSpec(indented);
+    // CommonMark: the tab expands to column 4, so the closer condition (a
+    // marker-only line at up to three spaces of indentation) cannot fire —
+    // the fence stays open, the interior is literal code, and the
+    // unterminated fence fails the parse closed.
+    expect(parsed).toMatchObject({ ok: false });
+    if (!parsed.ok) {
+      expect(parsed.errors.join("\n")).toContain("unterminated code fence");
     }
   });
 });

@@ -38,9 +38,7 @@ describe("structural specification identifier contract", () => {
   });
 
   it("executes the specify skill's section-grammar examples through parseSpec", () => {
-    const fences = [...specify.matchAll(/```markdown\n([\s\S]*?)```/gu)].flatMap((match) =>
-      match[1] === undefined ? [] : [match[1]],
-    );
+    const fences = [...specify.matchAll(/```markdown\n([\s\S]*?)```/gu)].map((match) => match[1]);
     const grammar = fences.filter((body) => body.startsWith("## "));
     expect(grammar.length).toBe(5);
     const parsed = parseSpec(grammar.join("\n"));
