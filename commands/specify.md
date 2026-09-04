@@ -97,7 +97,7 @@ Categories of uncertainty:
 After writing spec, count markers:
 
 ```bash
-# grep exits 1 when zero markers exist; || true keeps that success state from aborting strict shells
+# grep exits 1 when zero markers exist (a good state for the spec) and 2 when no spec dirs match; || true masks both failures so set -e shells don't abort
 grep -c "NEEDS CLARIFICATION" .claude/specs/*/spec.md || true
 ```
 
@@ -194,7 +194,7 @@ Prevents scope creep during implementation.
 | {domain term} | {meaning in this context} |
 ```
 
-Every glossary row must have exactly two non-empty cells, and every term must be unique (case-insensitive). Rows whose term collides with the reserved header term `Term` fail the structural parse.
+Every glossary row must have exactly two non-empty cells, and every term must be unique (case-insensitive). Data rows whose term is the reserved header term `Term` fail the structural parse (the canonical header is table furniture, not data).
 
 ---
 

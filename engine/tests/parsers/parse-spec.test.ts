@@ -125,6 +125,46 @@ describe("parseSpec", () => {
     if (parsed.ok) expect(parsed.value.frs.map(({ id }) => id)).toEqual(["FR-001", "FR-002"]);
   });
 
+  it("never closes a backtick fence on a tilde marker", () => {
+    const mixed = validSpec.replace(
+      "## Out of Scope",
+      "```markdown\n## Functional Requirements\n- FR-999: quoted example\n~~~\n```\n\n## Out of Scope",
+    );
+    const parsed = parseSpec(mixed);
+    expect(parsed).toMatchObject({ ok: true });
+    if (parsed.ok) expect(parsed.value.frs.map(({ id }) => id)).toEqual(["FR-001", "FR-002"]);
+  });
+
+  it.each([
+    ["bulleted", "- AS-009: Given a stray scenario, When parsed, Then it errors"],
+    ["bullet-less", "AS-010: Given a stray scenario, When parsed, Then it errors"],
+  ])("fails closed for %s structural IDs outside acceptance blocks", (_kind, strayLine) => {
+    const stray = validSpec.replace(
+      "## Functional Requirements",
+      `### US2: [P2] Stray\n\n${strayLine}\n\n## Functional Requirements`,
+    );
+    const parsed = parseSpec(stray);
+    expect(parsed).toMatchObject({ ok: false });
+    if (!parsed.ok) {
+      expect(parsed.errors.join("\n")).toContain(
+        "must be a \"- ID: content\" bullet under an **Acceptance Scenarios:** block",
+      );
+    }
+  });
+
+  it("fails closed for structural IDs inside the glossary section", () => {
+    const stray = validSpec.replace(
+      "| Content Hash | A SHA-256 digest of canonical entry content |",
+      "| Content Hash | A SHA-256 digest of canonical entry content |\nFR-009: A stray requirement",
+    );
+    const parsed = parseSpec(stray);
+    expect(parsed).toMatchObject({ ok: false });
+    if (!parsed.ok) {
+      expect(parsed.errors.join("\n")).toContain("Glossary line");
+      expect(parsed.errors.join("\n")).toContain('must be a "| Term | Definition" row');
+    }
+  });
+
   it("reports document-absolute line numbers for bullet-less ID lines", () => {
     const markdown = ["# Feature", "", "## Functional Requirements", "", "FR-002: System MUST be a bullet", ""].join("\n");
     const parsed = parseSpec(markdown);
@@ -171,6 +211,11 @@ describe("parseSpec", () => {
       "| Spec Index | A deterministic projection of specification entries |",
       "| Spec Index | A deterministic projection | with extra |",
     ), "exactly Term and Definition columns"],
+    ["glossary row with an empty definition", validSpec.replace(
+      "| Content Hash | A SHA-256 digest of canonical entry content |",
+      "| Content Hash |  |",
+    ), "requires a non-empty term and definition"],
+    ["case-insensitive duplicate glossary term", validSpec.replace("| Content Hash |", "| spec index |"), "duplicate term"],
     ["unterminated fence", `${validSpec}\n\`\`\`markdown\n`, "unterminated code fence"],
   ])("fails closed for %s", (_label, markdown, diagnostic) => {
     const parsed = parseSpec(markdown);

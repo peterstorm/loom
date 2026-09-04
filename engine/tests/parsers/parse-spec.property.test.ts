@@ -12,6 +12,18 @@ describe("parseSpec properties", () => {
     }));
   });
 
+  it("ok:true results always carry unique IDs and 64-hex content hashes", () => {
+    fc.assert(fc.property(fc.string(), (markdown) => {
+      const parsed = parseSpec(markdown);
+      if (!parsed.ok) return;
+      for (const collection of [parsed.value.frs, parsed.value.scenarios, parsed.value.oos]) {
+        const ids = collection.map(({ id }) => id);
+        expect(new Set(ids).size).toBe(ids.length);
+        for (const entry of collection) expect(entry.contentHash).toMatch(/^[0-9a-f]{64}$/u);
+      }
+    }));
+  });
+
   it("hashes canonical content independently of surrounding and repeated whitespace", () => {
     fc.assert(fc.property(
       fc.string({ minLength: 1 }).filter((value) => canonicalText(value) !== ""),

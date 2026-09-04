@@ -29,7 +29,9 @@ export type SpecParseResult =
   | Readonly<{ ok: true; value: ParsedSpec }>
   | Readonly<{ ok: false; errors: readonly [string, ...string[]] }>;
 
-type SectionName = "User Scenarios" | "Functional Requirements" | "Out of Scope" | "Appendix: Glossary";
+const REQUIRED_SECTIONS = ["User Scenarios", "Functional Requirements", "Out of Scope", "Appendix: Glossary"] as const;
+
+type SectionName = (typeof REQUIRED_SECTIONS)[number];
 
 type MarkdownSection = Readonly<{
   heading: SectionName;
@@ -42,13 +44,6 @@ type SourceLine = Readonly<{
   documentLine: number;
 }>;
 
-const REQUIRED_SECTIONS: readonly SectionName[] = Object.freeze([
-  "User Scenarios",
-  "Functional Requirements",
-  "Out of Scope",
-  "Appendix: Glossary",
-]);
-
 const ENTRY_PATTERNS = Object.freeze({
   frs: /^-\s+(FR-\d{3}):\s+(.+?)\s*$/u,
   scenarios: /^-\s+(AS-\d{3}):\s+(.+?)\s*$/u,
@@ -60,6 +55,13 @@ const STRUCTURAL_ID = /^\s*[*+-]?\s*[A-Z]{2,3}-\d{3}:\s*/u;
 
 const ACCEPTANCE_HEADER = /^\*\*Acceptance Scenarios:\*\*$/u;
 
+/** CommonMark thematic break: ---, *** or ___ (three or more, spaces allowed). */
+const THEMATIC_BREAK = /^(?:(?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$/u;
+
+function isThematicBreak(line: string): boolean {
+  return THEMATIC_BREAK.test(line);
+}
+
 function canonicalContent(content: string): string {
   return content.trim().replace(/\s+/gu, " ");
 }
@@ -68,7 +70,7 @@ export function specContentHash(content: string): SpecContentHash {
   return createHash("sha256").update(canonicalContent(content), "utf8").digest("hex") as SpecContentHash;
 }
 
-/** Every duplicated value in first-seen order, once each. */
+/** Every duplicated value, in order of each value's first duplicate occurrence, once each. */
 function duplicates(values: readonly string[]): readonly string[] {
   return Object.freeze([...new Set(values.filter((value, index) => values.indexOf(value) !== index))]);
 }
@@ -77,7 +79,9 @@ function duplicates(values: readonly string[]): readonly string[] {
  * Blank fenced examples while preserving headings and line numbers outside them.
  * Closing follows CommonMark: a fence closes only on an equal-or-longer marker of
  * the same character, so 4+ backtick fences cannot be closed early by ``` fences.
- * The returned flag marks an unterminated fence so parseSpec can fail closed.
+ * Fence detection itself accepts any leading whitespace, diverging from
+ * CommonMark's three-space limit. The returned flag marks an unterminated fence
+ * so parseSpec can fail closed.
  */
 function withoutFences(markdown: string): Readonly<{ text: string; unterminated: boolean }> {
   let marker: Readonly<{ char: string; length: number }> | null = null;
@@ -126,6 +130,11 @@ function sourceLines(body: string, startLine: number): readonly SourceLine[] {
   );
 }
 
+/** One owner for the missing-section fallback; fires only after sectionMap has already errored. */
+function sectionLines(section: MarkdownSection | undefined): readonly SourceLine[] {
+  return sourceLines(section?.body ?? "", section?.startLine ?? 1);
+}
+
 function parseEntries(
   lines: readonly SourceLine[],
   pattern: RegExp,
@@ -141,6 +150,7 @@ function parseEntries(
       if (STRUCTURAL_ID.test(raw)) errors.push(`${label} line ${documentLine} must be a "- ID: content" bullet`);
       continue;
     }
+    if (isThematicBreak(line)) continue;
     const match = pattern.exec(line);
     if (match === null) {
       errors.push(`${label} line ${documentLine} must use a canonical ${label} ID`);
@@ -157,46 +167,56 @@ function parseEntries(
   return Object.freeze(entries);
 }
 
-function acceptanceScenarioLines(body: string, startLine: number, errors: string[]): readonly SourceLine[] {
+function acceptanceScenarioLines(lines: readonly SourceLine[], errors: string[]): readonly SourceLine[] {
   const scenarios: SourceLine[] = [];
-  let inAcceptanceBlock = false;
-  let foundBlock = false;
-  for (const { raw, documentLine } of sourceLines(body, startLine)) {
+  let phase: "before" | "inside" | "after" = "before";
+  for (const { raw, documentLine } of lines) {
     const line = raw.trim();
     if (ACCEPTANCE_HEADER.test(line)) {
-      inAcceptanceBlock = true;
-      foundBlock = true;
+      phase = "inside";
       continue;
     }
-    if (/^###\s+/u.test(line) || /^---$/u.test(line)) inAcceptanceBlock = false;
-    if (!inAcceptanceBlock) continue;
-    if (!line.startsWith("-")) {
-      // Same silent-drop class as parseEntries: a bullet-less ID inside an
-      // acceptance block must fail closed, not vanish.
-      if (STRUCTURAL_ID.test(raw)) {
-        errors.push(`Acceptance Scenarios line ${documentLine} must be a "- ID: content" bullet`);
-      }
+    if (/^###\s+/u.test(line) || isThematicBreak(line)) {
+      if (phase === "inside") phase = "after";
       continue;
     }
+    // A recognizable structural ID that is not a collected bullet — in or out
+    // of an acceptance block — must fail closed, never vanish.
+    if (STRUCTURAL_ID.test(raw) && !(phase === "inside" && line.startsWith("-"))) {
+      errors.push(
+        phase === "inside"
+          ? `Acceptance Scenarios line ${documentLine} must be a "- ID: content" bullet`
+          : `Acceptance Scenarios line ${documentLine} must be a "- ID: content" bullet under an **Acceptance Scenarios:** block`,
+      );
+      continue;
+    }
+    if (phase !== "inside" || !line.startsWith("-")) continue;
     scenarios.push(Object.freeze({ raw, documentLine }));
   }
-  if (!foundBlock) errors.push("User Scenarios must contain at least one **Acceptance Scenarios:** block");
+  if (phase === "before") errors.push("User Scenarios must contain at least one **Acceptance Scenarios:** block");
   return Object.freeze(scenarios);
 }
 
-function parseGlossary(body: string, startLine: number, errors: string[]): readonly SpecGlossaryEntry[] {
+function parseGlossary(lines: readonly SourceLine[], errors: string[]): readonly SpecGlossaryEntry[] {
   const entries: SpecGlossaryEntry[] = [];
-  for (const { raw, documentLine } of sourceLines(body, startLine)) {
+  for (const { raw, documentLine } of lines) {
     const line = raw.trim();
-    if (!line.startsWith("|")) continue;
+    if (!line.startsWith("|")) {
+      // The glossary grammar is table rows only; a stray structural ID would
+      // otherwise silently vanish.
+      if (STRUCTURAL_ID.test(raw)) {
+        errors.push(`Glossary line ${documentLine} must be a "| Term | Definition" row`);
+      }
+      continue;
+    }
     const cells = line.split("|").slice(1, -1).map((cell) => canonicalContent(cell));
     if (cells.length !== 2) {
       errors.push(`Glossary line ${documentLine} must contain exactly Term and Definition columns`);
       continue;
     }
-    // Skip only the canonical table furniture: the separator row and the exact
-    // header shape. Any other row matching the header heuristic is an error,
-    // never a silent drop.
+    // Silently skip only the separator row and the exact header shape; any
+    // reserved-term data row is both dropped from entries and flagged as an
+    // error, never silently dropped.
     if (cells.every((cell) => /^:?-{2,}:?$/u.test(cell))) continue;
     const [term, definition] = cells;
     if (term.toLocaleLowerCase("en-US") === "term") {
@@ -228,30 +248,26 @@ export function parseSpec(markdown: string): SpecParseResult {
   const stripped = withoutFences(markdown);
   if (stripped.unterminated) errors.push("spec contains an unterminated code fence");
   const bySection = sectionMap(sections(stripped.text), errors);
-  const userScenarios = bySection.get("User Scenarios");
-  const functionalRequirements = bySection.get("Functional Requirements");
-  const outOfScope = bySection.get("Out of Scope");
-  const glossarySection = bySection.get("Appendix: Glossary");
 
   const frs = parseEntries(
-    sourceLines(functionalRequirements?.body ?? "", functionalRequirements?.startLine ?? 1),
+    sectionLines(bySection.get("Functional Requirements")),
     ENTRY_PATTERNS.frs,
     "Functional Requirements",
     errors,
   );
   const scenarios = parseEntries(
-    acceptanceScenarioLines(userScenarios?.body ?? "", userScenarios?.startLine ?? 1, errors),
+    acceptanceScenarioLines(sectionLines(bySection.get("User Scenarios")), errors),
     ENTRY_PATTERNS.scenarios,
     "Acceptance Scenarios",
     errors,
   );
   const oos = parseEntries(
-    sourceLines(outOfScope?.body ?? "", outOfScope?.startLine ?? 1),
+    sectionLines(bySection.get("Out of Scope")),
     ENTRY_PATTERNS.oos,
     "Out of Scope",
     errors,
   );
-  const glossary = parseGlossary(glossarySection?.body ?? "", glossarySection?.startLine ?? 1, errors);
+  const glossary = parseGlossary(sectionLines(bySection.get("Appendix: Glossary")), errors);
 
   const [head, ...tail] = errors;
   if (head === undefined) {
