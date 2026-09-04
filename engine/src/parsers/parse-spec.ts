@@ -52,15 +52,18 @@ const ENTRY_PATTERNS = Object.freeze({
 });
 
 /**
- * Recognizable structural ID syntax, with or without a Markdown bullet or
- * bold-asterisk prefix. Families are case-insensitive with 1–3 digits and an
- * optional hyphen so near-miss variants fail closed instead of vanishing.
+ * Recognizable structural ID syntax, with or without a Markdown bullet,
+ * bold-asterisk, or ordered-list prefix. Families are case-insensitive with
+ * 1–3 digits and an optional hyphen so near-miss variants fail closed instead
+ * of vanishing. Both nets below reference this one pattern so the in-body and
+ * document-wide fail-closed checks cannot drift.
  */
 const STRUCTURAL_ID = /^\s*(?:\*\*|[*+-]|\d{1,2}[.)])?\s*(?:fr|as|oos)\s?-?\d{1,3}:\s*/iu;
 
 const ACCEPTANCE_HEADER = /^\*\*Acceptance Scenarios:\*\*$/u;
 
-/** CommonMark thematic break: ---, *** or ___ (three or more, spaces allowed). */
+/** CommonMark thematic break: ---, *** or ___ (three or more, spaces allowed
+ * between markers; call sites must trim leading indentation first). */
 const THEMATIC_BREAK = /^(?:(?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$/u;
 
 function isThematicBreak(line: string): boolean {
@@ -84,29 +87,61 @@ function duplicates(values: readonly string[]): readonly string[] {
  * Blank fenced examples and indented-code furniture while preserving headings
  * and line numbers outside them, aligned with CommonMark in both directions:
  * an opener is a 3+ marker of one character at up to three spaces of
- * indentation, carrying an optional info string; a closer is a marker-only
- * line (nothing but whitespace after) of the same character, equal or longer.
- * Lines indented four or more spaces are indented code blocks — literal code
- * furniture, never spec text. The returned flag marks an unterminated fence so
- * parseSpec can fail closed.
+ * indentation, carrying an optional info string — for backtick markers the
+ * info string may not contain a backtick (CommonMark calls such a line
+ * paragraph text); a closer is a marker-only line (nothing but whitespace
+ * after) of the same character, equal or longer. Lines indented four or more
+ * spaces are furniture only after a blank line, a fence line, or the start of
+ * the document (an indented code block cannot interrupt a paragraph); lazy
+ * continuations are real content. The returned flag marks an unterminated
+ * fence so parseSpec can fail closed.
  */
 function withoutFences(markdown: string): Readonly<{ text: string; unterminated: boolean }> {
   let marker: Readonly<{ char: string; length: number }> | null = null;
+  let previousBlank = true;
   const out: string[] = [];
   for (const line of markdown.replace(/\r\n?/gu, "\n").split("\n")) {
     const fence = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
     if (fence === null) {
-      out.push(marker === null && !/^ {4,}/u.test(line) ? line : "");
+      if (marker !== null) {
+        out.push("");
+        previousBlank = true;
+        continue;
+      }
+      // An indented code block cannot interrupt a paragraph: a 4+-space
+      // indented line is furniture only after a blank line (or the start of
+      // the document); a lazy continuation is real content.
+      if (previousBlank && /^ {4,}/u.test(line)) {
+        out.push("");
+        previousBlank = true;
+        continue;
+      }
+      out.push(line);
+      previousBlank = line.trim().length === 0;
       continue;
     }
     const rawMarker = fence[1];
     const info = fence[2] ?? "";
+    // CommonMark: info strings for backtick code blocks may not contain
+    // backticks — such a line is paragraph text, never a fence opener, and it
+    // can never close (closers are marker-only).
+    if (rawMarker[0] === "`" && info.includes("`")) {
+      if (marker === null) {
+        out.push(line);
+        previousBlank = false;
+      } else {
+        out.push("");
+        previousBlank = true;
+      }
+      continue;
+    }
     if (marker === null) {
       marker = Object.freeze({ char: rawMarker[0], length: rawMarker.length });
     } else if (marker.char === rawMarker[0] && rawMarker.length >= marker.length && info.trim().length === 0) {
       marker = null;
     }
     out.push("");
+    previousBlank = true;
   }
   return Object.freeze({ text: out.join("\n"), unterminated: marker !== null });
 }
@@ -115,14 +150,15 @@ function sections(markdown: string): readonly MarkdownSection[] {
   const headings = [...markdown.matchAll(/^##\s+(.+?)\s*$/gmu)];
   const isSectionName = (value: string): value is SectionName =>
     (REQUIRED_SECTIONS as readonly string[]).includes(value);
+  const lineAt = (byteOffset: number): number => markdown.slice(0, byteOffset).split("\n").length;
   return Object.freeze(headings.flatMap((match, index): readonly MarkdownSection[] => {
     const heading = match[1]?.trim();
     if (heading === undefined || !isSectionName(heading)) return [];
     const start = (match.index ?? 0) + match[0].length;
-    const startLine = markdown.slice(0, start).split("\n").length;
+    const startLine = lineAt(start);
     const nextHeadingLine = headings[index + 1] === undefined
       ? markdown.split("\n").length + 1
-      : markdown.slice(0, headings[index + 1].index ?? 0).split("\n").length;
+      : lineAt(headings[index + 1].index ?? 0);
     return [Object.freeze({
       heading,
       body: markdown.slice(start, headings[index + 1]?.index ?? markdown.length),
@@ -188,24 +224,24 @@ function parseEntries(
 
 function acceptanceScenarioLines(lines: readonly SourceLine[], errors: string[]): readonly SourceLine[] {
   const scenarios: SourceLine[] = [];
-  let phase: "before" | "inside" | "after" = "before";
-  let blockEmpty = false;
-  let headerLine = 0;
-  const isCollectedBullet = (raw: string): boolean => phase === "inside" && raw.trim().startsWith("-");
+  const closeBlock = (headerLine: number): void => {
+    errors.push(`Acceptance Scenarios block starting at line ${headerLine} contains no scenario bullets`);
+  };
+  let state: Readonly<{ kind: "before" }>
+    | Readonly<{ kind: "inside"; headerLine: number; sawBullet: boolean }>
+    | Readonly<{ kind: "after" }> = Object.freeze({ kind: "before" });
+  const isCollectedBullet = (raw: string): boolean => state.kind === "inside" && raw.trim().startsWith("-");
   for (const { raw, documentLine } of lines) {
     const line = raw.trim();
     if (ACCEPTANCE_HEADER.test(line)) {
-      phase = "inside";
-      blockEmpty = true;
-      headerLine = documentLine;
+      if (state.kind === "inside" && !state.sawBullet) closeBlock(state.headerLine);
+      state = Object.freeze({ kind: "inside", headerLine: documentLine, sawBullet: false });
       continue;
     }
     if (/^###\s+/u.test(line) || isThematicBreak(line)) {
-      if (phase === "inside") {
-        if (blockEmpty) {
-          errors.push(`Acceptance Scenarios block starting at line ${headerLine} contains no scenario bullets`);
-        }
-        phase = "after";
+      if (state.kind === "inside") {
+        if (!state.sawBullet) closeBlock(state.headerLine);
+        state = Object.freeze({ kind: "after" });
       }
       continue;
     }
@@ -213,25 +249,25 @@ function acceptanceScenarioLines(lines: readonly SourceLine[], errors: string[])
     // of an acceptance block — must fail closed, never vanish.
     if (STRUCTURAL_ID.test(raw) && !isCollectedBullet(raw)) {
       errors.push(
-        phase === "inside"
+        state.kind === "inside"
           ? `Acceptance Scenarios line ${documentLine} must be a "- ID: content" bullet`
           : `Acceptance Scenarios line ${documentLine} must be a "- ID: content" bullet under an **Acceptance Scenarios:** block`,
       );
       continue;
     }
-    if (!isCollectedBullet(raw)) continue;
+    if (state.kind !== "inside" || !line.startsWith("-")) continue;
     scenarios.push(Object.freeze({ raw, documentLine }));
-    blockEmpty = false;
+    state = Object.freeze({ kind: "inside", headerLine: state.headerLine, sawBullet: true });
   }
-  if (phase === "inside" && blockEmpty) {
-    errors.push(`Acceptance Scenarios block starting at line ${headerLine} contains no scenario bullets`);
-  }
-  if (phase === "before") errors.push("User Scenarios must contain at least one **Acceptance Scenarios:** block");
+  if (state.kind === "inside" && !state.sawBullet) closeBlock(state.headerLine);
+  if (state.kind === "before") errors.push("User Scenarios must contain at least one **Acceptance Scenarios:** block");
   return Object.freeze(scenarios);
 }
 
 function parseGlossary(lines: readonly SourceLine[], errors: string[]): readonly SpecGlossaryEntry[] {
   const entries: SpecGlossaryEntry[] = [];
+  // Locale-pinned so host locale cannot change dedup: en-US, always.
+  const lower = (value: string): string => value.toLocaleLowerCase("en-US");
   for (const { raw, documentLine } of lines) {
     const line = raw.trim();
     if (!line.startsWith("|")) {
@@ -252,8 +288,8 @@ function parseGlossary(lines: readonly SourceLine[], errors: string[]): readonly
     // flagged as an error, never silently dropped.
     if (cells.every((cell) => /^:?-{2,}:?$/u.test(cell))) continue;
     const [term, definition] = cells;
-    if (term.toLocaleLowerCase("en-US") === "term") {
-      if (definition.toLocaleLowerCase("en-US") !== "definition") {
+    if (lower(term) === "term") {
+      if (lower(definition) !== "definition") {
         errors.push(`Glossary line ${documentLine} uses the reserved header term ${JSON.stringify(term)}`);
       }
       continue;
@@ -269,18 +305,18 @@ function parseGlossary(lines: readonly SourceLine[], errors: string[]): readonly
     }));
   }
   if (entries.length === 0) errors.push("Glossary must contain at least one term");
-  for (const term of duplicates(entries.map(({ term }) => term.toLocaleLowerCase("en-US")))) {
+  for (const term of duplicates(entries.map(({ term }) => lower(term)))) {
     errors.push(`Glossary contains duplicate term ${JSON.stringify(term)}`);
   }
   return Object.freeze(entries);
 }
 
-/**
- * Reserved-family structural IDs outside the parsed sections' bodies — bare,
- * bulleted, bold, or ordered-list — must fail closed, never vanish. Template
- * furniture (SC/NFR IDs) stays legal.
+/** Reserved-family structural IDs outside the parsed sections' bodies — the
+ * document-wide net; the pattern is shared with STRUCTURAL_ID so the two
+ * fail-closed checks cannot drift. Template furniture (SC/NFR IDs) stays
+ * legal.
  */
-const RESERVED_FAMILY_ID = /^\s*(?:\*\*|[*+-]|\d{1,2}[.)])?\s*(?:fr|as|oos)\s?-?\d{1,3}:\s*/iu;
+const RESERVED_FAMILY_ID = STRUCTURAL_ID;
 
 /** Parse one canonical specification into deterministic structural join inputs. */
 export function parseSpec(markdown: string): SpecParseResult {

@@ -317,6 +317,74 @@ describe("parseSpec", () => {
     if (!parsed.ok) expect(parsed.errors.join("\n")).toContain(diagnostic);
   });
 
+  it("treats a backtick fence whose info string contains backticks as paragraph text, never a fence opener", () => {
+    const probe = validSpec.replace(
+      "- FR-002: System MUST hash requirement content deterministically",
+      "``` `snippet`\n- FR-002: System MUST hash requirement content deterministically\n```",
+    );
+    const parsed = parseSpec(probe);
+    // CommonMark: a backtick fence whose info string contains backticks is
+    // paragraph text, not a fence — the bullet after it is real content and
+    // the trailing marker-only line opens an unterminated fence, so the parse
+    // fails closed with the unterminated-fence diagnostic. Opening a fence on
+    // the info-string line blanks FR-002 and returns ok:true.
+    expect(parsed).toMatchObject({ ok: false });
+    if (!parsed.ok) {
+      expect(parsed.errors.join("\n")).toContain("unterminated code fence");
+    }
+  });
+
+  it("collects a lazy-continuation bullet indented four spaces after a non-blank line", () => {
+    const lazy = validSpec.replace(
+      "- FR-002: System MUST hash requirement content deterministically",
+      "    - FR-002: System MUST hash requirement content deterministically",
+    );
+    const parsed = parseSpec(lazy);
+    // CommonMark: an indented code block cannot interrupt a paragraph — a
+    // 4+-space-indented line directly after a non-blank line is a lazy
+    // continuation, i.e. real content. Blanking it as furniture drops FR-002
+    // with ok:true.
+    expect(parsed).toMatchObject({ ok: true });
+    if (parsed.ok) expect(parsed.value.frs.map(({ id }) => id)).toEqual(["FR-001", "FR-002"]);
+  });
+
+  it("fails closed for an empty Acceptance Scenarios block terminated by a following header", () => {
+    const consecutive = validSpec.replace(
+      "**Acceptance Scenarios:**",
+      "**Acceptance Scenarios:**\n\n**Acceptance Scenarios:**",
+    );
+    const parsed = parseSpec(consecutive);
+    // The remediated invariant is "error at block close when no bullets were
+    // collected" — a header line terminates the open block just like a
+    // sub-heading does, so the empty first block must error, not reset.
+    expect(parsed).toMatchObject({ ok: false });
+    if (!parsed.ok) {
+      expect(parsed.errors.join("\n")).toContain("contains no scenario bullets");
+    }
+  });
+
+  it("fails closed for a lazy-continuation structural ID in a non-required section", () => {
+    const lazy = validSpec.replace(
+      "## Appendix: Glossary",
+      "## Open Questions\n\n1. Is FR-003 needed?\n    - FR-009: An indented lazy requirement\n\n## Appendix: Glossary",
+    );
+    const parsed = parseSpec(lazy);
+    expect(parsed).toMatchObject({ ok: false });
+    if (!parsed.ok) {
+      expect(parsed.errors.join("\n")).toContain("outside a parsed section");
+    }
+  });
+
+  it("treats a 4-space-indented structural ID after a blank line as indented code furniture", () => {
+    const furniture = validSpec.replace(
+      "# Feature: Structural spec\n",
+      "# Feature: Structural spec\n\n    - FR-009: an indented preamble bullet\n",
+    );
+    const parsed = parseSpec(furniture);
+    expect(parsed).toMatchObject({ ok: true });
+    if (parsed.ok) expect(parsed.value.frs.map(({ id }) => id)).toEqual(["FR-001", "FR-002"]);
+  });
+
   it("canonicalizes formatting whitespace but changes the hash when content changes", () => {
     expect(specContentHash("System MUST parse specs"))
       .toBe(specContentHash("  System   MUST parse\n specs  "));
