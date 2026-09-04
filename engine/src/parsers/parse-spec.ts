@@ -37,6 +37,7 @@ type MarkdownSection = Readonly<{
   heading: SectionName;
   body: string;
   startLine: number;
+  endLine: number;
 }>;
 
 type SourceLine = Readonly<{
@@ -50,8 +51,12 @@ const ENTRY_PATTERNS = Object.freeze({
   oos: /^-\s+(OOS-\d{3}):\s+(.+?)\s*$/u,
 });
 
-/** Recognizable structural ID syntax, with or without a Markdown bullet. */
-const STRUCTURAL_ID = /^\s*[*+-]?\s*[A-Z]{2,3}-\d{3}:\s*/u;
+/**
+ * Recognizable structural ID syntax, with or without a Markdown bullet or
+ * bold-asterisk prefix. Families are case-insensitive with 1–3 digits and an
+ * optional hyphen so near-miss variants fail closed instead of vanishing.
+ */
+const STRUCTURAL_ID = /^\s*(?:\*\*|[*+-]|\d{1,2}[.)])?\s*(?:fr|as|oos)\s?-?\d{1,3}:\s*/iu;
 
 const ACCEPTANCE_HEADER = /^\*\*Acceptance Scenarios:\*\*$/u;
 
@@ -76,40 +81,54 @@ function duplicates(values: readonly string[]): readonly string[] {
 }
 
 /**
- * Blank fenced examples while preserving headings and line numbers outside them.
- * Closing follows CommonMark: a fence closes only on an equal-or-longer marker of
- * the same character, so 4+ backtick fences cannot be closed early by ``` fences.
- * Fence detection itself accepts any leading whitespace, diverging from
- * CommonMark's three-space limit. The returned flag marks an unterminated fence
- * so parseSpec can fail closed.
+ * Blank fenced examples and indented-code furniture while preserving headings
+ * and line numbers outside them, aligned with CommonMark in both directions:
+ * an opener is a 3+ marker of one character at up to three spaces of
+ * indentation, carrying an optional info string; a closer is a marker-only
+ * line (nothing but whitespace after) of the same character, equal or longer.
+ * Lines indented four or more spaces are indented code blocks — literal code
+ * furniture, never spec text. The returned flag marks an unterminated fence so
+ * parseSpec can fail closed.
  */
 function withoutFences(markdown: string): Readonly<{ text: string; unterminated: boolean }> {
   let marker: Readonly<{ char: string; length: number }> | null = null;
-  const text = markdown
-    .replace(/\r\n?/gu, "\n")
-    .split("\n")
-    .map((line) => {
-      const fence = /^\s*(`{3,}|~{3,})/u.exec(line)?.[1];
-      if (fence !== undefined) {
-        if (marker === null) marker = Object.freeze({ char: fence[0], length: fence.length });
-        else if (marker.char === fence[0] && fence.length >= marker.length) marker = null;
-        return "";
-      }
-      return marker === null ? line : "";
-    })
-    .join("\n");
-  return Object.freeze({ text, unterminated: marker !== null });
+  const out: string[] = [];
+  for (const line of markdown.replace(/\r\n?/gu, "\n").split("\n")) {
+    const fence = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
+    if (fence === null) {
+      out.push(marker === null && !/^ {4,}/u.test(line) ? line : "");
+      continue;
+    }
+    const rawMarker = fence[1];
+    const info = fence[2] ?? "";
+    if (marker === null) {
+      marker = Object.freeze({ char: rawMarker[0], length: rawMarker.length });
+    } else if (marker.char === rawMarker[0] && rawMarker.length >= marker.length && info.trim().length === 0) {
+      marker = null;
+    }
+    out.push("");
+  }
+  return Object.freeze({ text: out.join("\n"), unterminated: marker !== null });
 }
 
 function sections(markdown: string): readonly MarkdownSection[] {
   const headings = [...markdown.matchAll(/^##\s+(.+?)\s*$/gmu)];
+  const isSectionName = (value: string): value is SectionName =>
+    (REQUIRED_SECTIONS as readonly string[]).includes(value);
   return Object.freeze(headings.flatMap((match, index): readonly MarkdownSection[] => {
-    const heading = match[1]?.trim() as SectionName | undefined;
-    if (heading === undefined || !REQUIRED_SECTIONS.includes(heading)) return [];
+    const heading = match[1]?.trim();
+    if (heading === undefined || !isSectionName(heading)) return [];
     const start = (match.index ?? 0) + match[0].length;
-    const end = headings[index + 1]?.index ?? markdown.length;
     const startLine = markdown.slice(0, start).split("\n").length;
-    return [Object.freeze({ heading, body: markdown.slice(start, end), startLine })];
+    const nextHeadingLine = headings[index + 1] === undefined
+      ? markdown.split("\n").length + 1
+      : markdown.slice(0, headings[index + 1].index ?? 0).split("\n").length;
+    return [Object.freeze({
+      heading,
+      body: markdown.slice(start, headings[index + 1]?.index ?? markdown.length),
+      startLine,
+      endLine: nextHeadingLine,
+    })];
   }));
 }
 
@@ -145,8 +164,8 @@ function parseEntries(
   for (const { raw, documentLine } of lines) {
     const line = raw.trim();
     if (!line.startsWith("-")) {
-      // A recognizable structural ID without a "- " bullet would otherwise be
-      // silently dropped; fail closed instead of continuing past it.
+      // A recognizable structural ID without a "- " bullet — bare, bold, or
+      // ordered-list — would otherwise be silently dropped; fail closed.
       if (STRUCTURAL_ID.test(raw)) errors.push(`${label} line ${documentLine} must be a "- ID: content" bullet`);
       continue;
     }
@@ -170,19 +189,29 @@ function parseEntries(
 function acceptanceScenarioLines(lines: readonly SourceLine[], errors: string[]): readonly SourceLine[] {
   const scenarios: SourceLine[] = [];
   let phase: "before" | "inside" | "after" = "before";
+  let blockEmpty = false;
+  let headerLine = 0;
+  const isCollectedBullet = (raw: string): boolean => phase === "inside" && raw.trim().startsWith("-");
   for (const { raw, documentLine } of lines) {
     const line = raw.trim();
     if (ACCEPTANCE_HEADER.test(line)) {
       phase = "inside";
+      blockEmpty = true;
+      headerLine = documentLine;
       continue;
     }
     if (/^###\s+/u.test(line) || isThematicBreak(line)) {
-      if (phase === "inside") phase = "after";
+      if (phase === "inside") {
+        if (blockEmpty) {
+          errors.push(`Acceptance Scenarios block starting at line ${headerLine} contains no scenario bullets`);
+        }
+        phase = "after";
+      }
       continue;
     }
     // A recognizable structural ID that is not a collected bullet — in or out
     // of an acceptance block — must fail closed, never vanish.
-    if (STRUCTURAL_ID.test(raw) && !(phase === "inside" && line.startsWith("-"))) {
+    if (STRUCTURAL_ID.test(raw) && !isCollectedBullet(raw)) {
       errors.push(
         phase === "inside"
           ? `Acceptance Scenarios line ${documentLine} must be a "- ID: content" bullet`
@@ -190,8 +219,12 @@ function acceptanceScenarioLines(lines: readonly SourceLine[], errors: string[])
       );
       continue;
     }
-    if (phase !== "inside" || !line.startsWith("-")) continue;
+    if (!isCollectedBullet(raw)) continue;
     scenarios.push(Object.freeze({ raw, documentLine }));
+    blockEmpty = false;
+  }
+  if (phase === "inside" && blockEmpty) {
+    errors.push(`Acceptance Scenarios block starting at line ${headerLine} contains no scenario bullets`);
   }
   if (phase === "before") errors.push("User Scenarios must contain at least one **Acceptance Scenarios:** block");
   return Object.freeze(scenarios);
@@ -202,9 +235,9 @@ function parseGlossary(lines: readonly SourceLine[], errors: string[]): readonly
   for (const { raw, documentLine } of lines) {
     const line = raw.trim();
     if (!line.startsWith("|")) {
-      // The glossary grammar is table rows only; a stray structural ID would
-      // otherwise silently vanish.
-      if (STRUCTURAL_ID.test(raw)) {
+      // The glossary grammar is table rows only; a stray structural ID or prose
+      // row would otherwise silently vanish. Thematic breaks are furniture.
+      if (STRUCTURAL_ID.test(raw) || (line.length > 0 && !isThematicBreak(line))) {
         errors.push(`Glossary line ${documentLine} must be a "| Term | Definition" row`);
       }
       continue;
@@ -214,9 +247,9 @@ function parseGlossary(lines: readonly SourceLine[], errors: string[]): readonly
       errors.push(`Glossary line ${documentLine} must contain exactly Term and Definition columns`);
       continue;
     }
-    // Silently skip only the separator row and the exact header shape; any
-    // reserved-term data row is both dropped from entries and flagged as an
-    // error, never silently dropped.
+    // Silently skip only the separator row and the case-insensitive header
+    // shape; any reserved-term data row is both dropped from entries and
+    // flagged as an error, never silently dropped.
     if (cells.every((cell) => /^:?-{2,}:?$/u.test(cell))) continue;
     const [term, definition] = cells;
     if (term.toLocaleLowerCase("en-US") === "term") {
@@ -242,12 +275,20 @@ function parseGlossary(lines: readonly SourceLine[], errors: string[]): readonly
   return Object.freeze(entries);
 }
 
+/**
+ * Reserved-family structural IDs outside the parsed sections' bodies — bare,
+ * bulleted, bold, or ordered-list — must fail closed, never vanish. Template
+ * furniture (SC/NFR IDs) stays legal.
+ */
+const RESERVED_FAMILY_ID = /^\s*(?:\*\*|[*+-]|\d{1,2}[.)])?\s*(?:fr|as|oos)\s?-?\d{1,3}:\s*/iu;
+
 /** Parse one canonical specification into deterministic structural join inputs. */
 export function parseSpec(markdown: string): SpecParseResult {
   const errors: string[] = [];
   const stripped = withoutFences(markdown);
   if (stripped.unterminated) errors.push("spec contains an unterminated code fence");
-  const bySection = sectionMap(sections(stripped.text), errors);
+  const parsedSections = sections(stripped.text);
+  const bySection = sectionMap(parsedSections, errors);
 
   const frs = parseEntries(
     sectionLines(bySection.get("Functional Requirements")),
@@ -268,6 +309,19 @@ export function parseSpec(markdown: string): SpecParseResult {
     errors,
   );
   const glossary = parseGlossary(sectionLines(bySection.get("Appendix: Glossary")), errors);
+
+  // A reserved-family structural ID anywhere outside the parsed sections'
+  // bodies — preamble, non-required section, or stray prose bullet — must fail
+  // closed; template furniture stays legal.
+  const collectedRanges = parsedSections.map((section) =>
+    Object.freeze({ start: section.startLine, end: section.endLine }),
+  );
+  for (const { raw, documentLine } of sourceLines(stripped.text, 1)) {
+    const consumed = collectedRanges.some((range) => documentLine >= range.start && documentLine < range.end);
+    if (!consumed && RESERVED_FAMILY_ID.test(raw)) {
+      errors.push(`structural ID at line ${documentLine} is outside a parsed section`);
+    }
+  }
 
   const [head, ...tail] = errors;
   if (head === undefined) {

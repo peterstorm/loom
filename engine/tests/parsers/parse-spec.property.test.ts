@@ -21,6 +21,9 @@ describe("parseSpec properties", () => {
         expect(new Set(ids).size).toBe(ids.length);
         for (const entry of collection) expect(entry.contentHash).toMatch(/^[0-9a-f]{64}$/u);
       }
+      const terms = parsed.value.glossary.map(({ term }) => term.toLocaleLowerCase("en-US"));
+      expect(new Set(terms).size).toBe(terms.length);
+      for (const entry of parsed.value.glossary) expect(entry.contentHash).toMatch(/^[0-9a-f]{64}$/u);
     }));
   });
 

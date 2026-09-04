@@ -44,7 +44,7 @@ entry IDs) and append an honest correction note to the round-1 plan record.
 
 ## Advisory dispositions
 
-Accepted (16) — sound claims with complete in-scope fixes:
+Accepted (17) — sound claims with complete in-scope fixes:
 
 - `pr-test-analyzer-2` ok:true ⇒ unique IDs + 64-hex hashes property → added.
 - `pr-test-analyzer-3` same-character fence-closing rule unpinned → test added.

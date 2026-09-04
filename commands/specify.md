@@ -97,7 +97,11 @@ Categories of uncertainty:
 After writing spec, count markers:
 
 ```bash
-# grep exits 1 when zero markers exist (a good state for the spec) and 2 when no spec dirs match; || true masks both failures so set -e shells don't abort
+# Exactly one spec must exist before counting; a missing spec is fatal, not a zero count.
+ls .claude/specs/*/spec.md >/dev/null 2>&1 || { echo "FATAL: no spec found under .claude/specs/ — run /specify first"; exit 1; }
+# grep -c prints one count per matching spec.md (per-file, not a total). It exits 1
+# when a spec has zero markers (a good state for the spec) — || true masks that good
+# state so set -e shells don't abort; a missing spec never reaches this line.
 grep -c "NEEDS CLARIFICATION" .claude/specs/*/spec.md || true
 ```
 

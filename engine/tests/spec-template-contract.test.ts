@@ -37,6 +37,21 @@ describe("structural specification identifier contract", () => {
     }
   });
 
+  it("executes the specify skill's section-grammar examples through parseSpec", () => {
+    const fences = [...specify.matchAll(/```markdown\n([\s\S]*?)```/gu)].flatMap((match) =>
+      match[1] === undefined ? [] : [match[1]],
+    );
+    const grammar = fences.filter((body) => body.startsWith("## "));
+    expect(grammar.length).toBe(5);
+    const parsed = parseSpec(grammar.join("\n"));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.value.scenarios.map(({ id }) => id)).toEqual(["AS-001", "AS-002", "AS-003"]);
+    expect(parsed.value.frs.map(({ id }) => id)).toEqual(["FR-001", "FR-002", "FR-003", "FR-004"]);
+    expect(parsed.value.oos.map(({ id }) => id)).toEqual(["OOS-001", "OOS-002", "OOS-003", "OOS-004"]);
+    expect(parsed.value.glossary.length).toBeGreaterThan(0);
+  });
+
   it("keeps bare Given bullets out of both guidance sources", () => {
     for (const source of [template, specify]) {
       expect(source).not.toMatch(/^\s*-\s+Given\b/gmu);
