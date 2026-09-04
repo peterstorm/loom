@@ -52,13 +52,16 @@ const ENTRY_PATTERNS = Object.freeze({
 });
 
 /**
- * Recognizable structural ID syntax, with or without a Markdown bullet,
- * bold-asterisk, or ordered-list prefix. Families are case-insensitive with
- * 1–3 digits and an optional hyphen so near-miss variants fail closed instead
- * of vanishing. Both nets below reference this one pattern so the in-body and
- * document-wide fail-closed checks cannot drift.
+ * Recognizable structural ID syntax, with or without a Markdown prefix:
+ * bare, bold-asterisk, single-bullet, nested blockquote, heading of any
+ * level, or an ordered-list marker of any digit run. Families are
+ * case-insensitive with any digit run, any combination of spaces and hyphens
+ * between the family and the digits, and an optional space before the colon,
+ * so near-miss variants fail closed instead of vanishing. Both nets below
+ * reference this one pattern so the in-body and document-wide fail-closed
+ * checks cannot drift.
  */
-const STRUCTURAL_ID = /^\s*(?:\*\*|[*+-]|\d{1,2}[.)])?\s*(?:fr|as|oos)\s?-?\d{1,3}:\s*/iu;
+const STRUCTURAL_ID = /^\s*(?:\*\*|[*+-]|>+|#+|\d+[.)])?\s*(?:fr|as|oos)[\s-]*\d+\s*:\s*/iu;
 
 const ACCEPTANCE_HEADER = /^\*\*Acceptance Scenarios:\*\*$/u;
 
@@ -83,6 +86,26 @@ function duplicates(values: readonly string[]): readonly string[] {
   return Object.freeze([...new Set(values.filter((value, index) => values.indexOf(value) !== index))]);
 }
 
+/** Expand leading tabs to the next 4-column tab stop (CommonMark tab
+ * indentation), so fence and furniture logic sees the columns editors see.
+ * Tabs inside content are untouched. */
+function expandLeadingTabs(line: string): string {
+  let column = 0;
+  let index = 0;
+  while (index < line.length && (line[index] === " " || line[index] === "\t")) {
+    if (line[index] === "\t") {
+      const spaces = 4 - (column % 4);
+      line = line.slice(0, index) + " ".repeat(spaces) + line.slice(index + 1);
+      column += spaces;
+      index += spaces;
+    } else {
+      column += 1;
+      index += 1;
+    }
+  }
+  return line;
+}
+
 /**
  * Blank fenced examples and indented-code furniture while preserving headings
  * and line numbers outside them, aligned with CommonMark in both directions:
@@ -100,7 +123,12 @@ function withoutFences(markdown: string): Readonly<{ text: string; unterminated:
   let marker: Readonly<{ char: string; length: number }> | null = null;
   let previousBlank = true;
   const out: string[] = [];
-  for (const line of markdown.replace(/\r\n?/gu, "\n").split("\n")) {
+  for (const rawLine of markdown.replace(/\r\n?/gu, "\n").split("\n")) {
+    // CommonMark expands each tab to the next 4-column tab stop: a
+    // tab-indented line after a blank line is indented code, never spec text,
+    // and a tab-indented fence marker at 4+ columns is code furniture, not a
+    // fence boundary. Tabs inside content are untouched.
+    const line = expandLeadingTabs(rawLine);
     const fence = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
     if (fence === null) {
       if (marker !== null) {
@@ -124,15 +152,12 @@ function withoutFences(markdown: string): Readonly<{ text: string; unterminated:
     const info = fence[2] ?? "";
     // CommonMark: info strings for backtick code blocks may not contain
     // backticks — such a line is paragraph text, never a fence opener, and it
-    // can never close (closers are marker-only).
-    if (rawMarker[0] === "`" && info.includes("`")) {
-      if (marker === null) {
-        out.push(line);
-        previousBlank = false;
-      } else {
-        out.push("");
-        previousBlank = true;
-      }
+    // can never close (closers are marker-only). Inside an open fence it is
+    // fence content: the fall-through below blanks it, and the closer
+    // condition cannot fire (the info string is non-empty).
+    if (rawMarker[0] === "`" && info.includes("`") && marker === null) {
+      out.push(line);
+      previousBlank = false;
       continue;
     }
     if (marker === null) {
@@ -149,7 +174,7 @@ function withoutFences(markdown: string): Readonly<{ text: string; unterminated:
 function sections(markdown: string): readonly MarkdownSection[] {
   const headings = [...markdown.matchAll(/^##\s+(.+?)\s*$/gmu)];
   const isSectionName = (value: string): value is SectionName =>
-    (REQUIRED_SECTIONS as readonly string[]).includes(value);
+    REQUIRED_SECTIONS.some((section) => section === value);
   const lineAt = (byteOffset: number): number => markdown.slice(0, byteOffset).split("\n").length;
   return Object.freeze(headings.flatMap((match, index): readonly MarkdownSection[] => {
     const heading = match[1]?.trim();
@@ -283,10 +308,11 @@ function parseGlossary(lines: readonly SourceLine[], errors: string[]): readonly
       errors.push(`Glossary line ${documentLine} must contain exactly Term and Definition columns`);
       continue;
     }
-    // Silently skip only the separator row and the case-insensitive header
-    // shape; any reserved-term data row is both dropped from entries and
-    // flagged as an error, never silently dropped.
-    if (cells.every((cell) => /^:?-{2,}:?$/u.test(cell))) continue;
+    // Silently skip only the separator row (GFM accepts 1+ hyphens per cell)
+    // and the case-insensitive header shape; any reserved-term data row is
+    // both dropped from entries and flagged as an error, never silently
+    // dropped.
+    if (cells.every((cell) => /^:?-{1,}:?$/u.test(cell))) continue;
     const [term, definition] = cells;
     if (lower(term) === "term") {
       if (lower(definition) !== "definition") {

@@ -189,12 +189,66 @@ describe("parseSpec", () => {
   ])("fails closed for %s near-miss IDs", (_kind, strayLine) => {
     const stray = validSpec.replace(
       "- FR-002: System MUST hash requirement content deterministically",
-      `- FR-001: System MUST parse canonical requirement IDs\n${strayLine}`,
+      strayLine,
     );
     const parsed = parseSpec(stray);
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
       expect(parsed.errors.join("\n")).toContain("Functional Requirements");
+    }
+  });
+
+  it.each([
+    ["hyphen-space gap", "FR- 002: System MUST be recognized"],
+    ["space-hyphen-space gap", "FR - 002: System MUST be recognized"],
+    ["space before colon", "FR-002 : System MUST be recognized"],
+    ["spaces before colon", "FR-002  : System MUST be recognized"],
+    ["four-digit ID", "FR-1234: System MUST be recognized"],
+    ["two-space gap", "FR-  123: System MUST be recognized"],
+    ["three-digit ordered-list prefix", "123. FR-002: System MUST be recognized"],
+    ["blockquote prefix", "> FR-002: System MUST be recognized"],
+  ])("fails closed for a bare %s variant in a section body", (_kind, strayLine) => {
+    const stray = validSpec.replace(
+      "- FR-002: System MUST hash requirement content deterministically",
+      strayLine,
+    );
+    const parsed = parseSpec(stray);
+    // Any ID-shaped line — combined space/hyphen gaps, a space before the
+    // colon, one digit past the canonical three, a wider ordered-list marker,
+    // a blockquote or heading prefix — must fail closed, never vanish.
+    expect(parsed).toMatchObject({ ok: false });
+    if (!parsed.ok) {
+      expect(parsed.errors.join("\n")).toContain("Functional Requirements");
+    }
+  });
+
+  it("fails closed for a heading-prefixed structural ID", () => {
+    const headed = validSpec.replace(
+      "- FR-002: System MUST hash requirement content deterministically",
+      "## FR-002: System MUST be recognized",
+    );
+    const parsed = parseSpec(headed);
+    // A heading-shaped structural ID truncates the body and lands on the
+    // section boundary: the document-wide net must fail closed on it, never
+    // mint it or let it vanish.
+    expect(parsed).toMatchObject({ ok: false });
+    if (!parsed.ok) {
+      expect(parsed.errors.join("\n")).toContain("outside a parsed section");
+    }
+  });
+
+  it.each([
+    ["four-digit scenario ID", "AS-1234: Given a typo, When parsed, Then it fails closed"],
+    ["hyphen-space scenario ID", "AS- 002: Given a typo, When parsed, Then it fails closed"],
+  ])("fails closed for a bare %s variant in an acceptance block", (_kind, strayLine) => {
+    const stray = validSpec.replace(
+      "- AS-002: Given duplicate IDs, When it is parsed, Then parsing fails closed",
+      strayLine,
+    );
+    const parsed = parseSpec(stray);
+    expect(parsed).toMatchObject({ ok: false });
+    if (!parsed.ok) {
+      expect(parsed.errors.join("\n")).toContain("Acceptance Scenarios");
     }
   });
 
@@ -385,10 +439,138 @@ describe("parseSpec", () => {
     if (parsed.ok) expect(parsed.value.frs.map(({ id }) => id)).toEqual(["FR-001", "FR-002"]);
   });
 
+  it("treats a tab-indented structural bullet after a blank line as indented code furniture", () => {
+    const furniture = validSpec.replace(
+      "- FR-002: System MUST hash requirement content deterministically",
+      "\n\t- FR-002: System MUST hash requirement content deterministically",
+    );
+    const parsed = parseSpec(furniture);
+    // CommonMark expands each tab to the next 4-column tab stop: a
+    // tab-indented line after a blank line is an indented code block — literal
+    // code, never spec text. Minting FR-002 returns ok:true with a phantom
+    // entry; the 4-space twin is pinned inert above.
+    expect(parsed).toMatchObject({ ok: true });
+    if (parsed.ok) expect(parsed.value.frs.map(({ id }) => id)).toEqual(["FR-001"]);
+  });
+
+  it("treats a tab-indented scenario bullet after a blank line as indented code furniture", () => {
+    const furniture = validSpec.replace(
+      "- AS-002: Given duplicate IDs, When it is parsed, Then parsing fails closed",
+      "\n\t- AS-002: Given duplicate IDs, When it is parsed, Then parsing fails closed",
+    );
+    const parsed = parseSpec(furniture);
+    expect(parsed).toMatchObject({ ok: true });
+    if (parsed.ok) expect(parsed.value.scenarios.map(({ id }) => id)).toEqual(["AS-001"]);
+  });
+
+  it("treats a tab-indented glossary row after a blank line as indented code furniture", () => {
+    const furniture = validSpec.replace(
+      "| Spec Index | A deterministic projection of specification entries |",
+      "| Spec Index | A deterministic projection of specification entries |\n\n\t| Beta | A tab-indented term |",
+    );
+    const parsed = parseSpec(furniture);
+    expect(parsed).toMatchObject({ ok: true });
+    if (parsed.ok) {
+      expect(parsed.value.glossary.map(({ term }) => term)).toEqual(["Spec Index", "Content Hash"]);
+    }
+  });
+
   it("canonicalizes formatting whitespace but changes the hash when content changes", () => {
     expect(specContentHash("System MUST parse specs"))
       .toBe(specContentHash("  System   MUST parse\n specs  "));
     expect(specContentHash("System MUST parse specs"))
       .not.toBe(specContentHash("System SHOULD parse specs"));
+  });
+
+  it("parses a GFM single-dash delimiter row as a separator, not a data row", () => {
+    const gfm = validSpec.replace(
+      "| Spec Index | A deterministic projection of specification entries |",
+      "| Spec Index | A deterministic projection of specification entries |\n|-|-|",
+    );
+    const parsed = parseSpec(gfm);
+    // GFM accepts 1+ hyphens per delimiter cell; a single-dash row is
+    // furniture. Misclassifying it as a data row mints a bogus entry.
+    expect(parsed).toMatchObject({ ok: true });
+    if (parsed.ok) {
+      expect(parsed.value.glossary.map(({ term }) => term)).not.toContain("-");
+    }
+  });
+
+  it("fails closed for bullets after a thematic break inside an Acceptance Scenarios block", () => {
+    const furnished = validSpec.replace(
+      "- AS-002: Given duplicate IDs, When it is parsed, Then parsing fails closed",
+      "---\n- AS-002: Given duplicate IDs, When it is parsed, Then parsing fails closed",
+    );
+    const parsed = parseSpec(furnished);
+    // The thematic break terminates the open block even when bullets were
+    // collected; subsequent bullets are outside the block and must fail
+    // closed, never be collected.
+    expect(parsed).toMatchObject({ ok: false });
+    if (!parsed.ok) {
+      expect(parsed.errors.join("\n")).toContain("under an **Acceptance Scenarios:** block");
+    }
+  });
+
+  it("fails closed for an empty Acceptance Scenarios block terminated by a thematic break", () => {
+    const emptyBreak = validSpec.replace(
+      "## Functional Requirements",
+      "### US2: [P2] Empty\n\n**Acceptance Scenarios:**\n\n---\n\n## Functional Requirements",
+    );
+    const parsed = parseSpec(emptyBreak);
+    expect(parsed).toMatchObject({ ok: false });
+    if (!parsed.ok) {
+      expect(parsed.errors.join("\n")).toContain("contains no scenario bullets");
+    }
+  });
+
+  it("fails closed for prose rows in the glossary", () => {
+    const prose = validSpec.replace(
+      "| Spec Index | A deterministic projection of specification entries |",
+      "| Spec Index | A deterministic projection of specification entries |\nSome stray prose row",
+    );
+    const parsed = parseSpec(prose);
+    expect(parsed).toMatchObject({ ok: false });
+    if (!parsed.ok) {
+      expect(parsed.errors.join("\n")).toContain("must be a \"| Term | Definition\" row");
+    }
+  });
+
+  it("fails closed for a non-indented structural ID in the preamble", () => {
+    const preamble = validSpec.replace(
+      "# Feature: Structural spec\n",
+      "# Feature: Structural spec\n\nFR-009: a preamble requirement\n",
+    );
+    const parsed = parseSpec(preamble);
+    expect(parsed).toMatchObject({ ok: false });
+    if (!parsed.ok) {
+      expect(parsed.errors.join("\n")).toContain("outside a parsed section");
+    }
+  });
+
+  it("skips the case-insensitive header-shape row as furniture", () => {
+    const header = validSpec.replace(
+      "| Spec Index | A deterministic projection of specification entries |",
+      "| Spec Index | A deterministic projection of specification entries |\n| TERM | DEFINITION |",
+    );
+    const parsed = parseSpec(header);
+    // The case-insensitive header shape is deliberately skipped — only the
+    // reserved-term-with-non-matching-definition variant errors.
+    expect(parsed).toMatchObject({ ok: true });
+    if (parsed.ok) {
+      expect(parsed.value.glossary.map(({ term }) => term)).not.toContain("TERM");
+    }
+  });
+
+  it("ignores canonical-looking examples inside tilde fences carrying an info string", () => {
+    const fenced = validSpec.replace(
+      "## Out of Scope",
+      "~~~yaml\n## Functional Requirements\n- FR-999: quoted example\n~~~\n\n## Out of Scope",
+    );
+    const parsed = parseSpec(fenced);
+    expect(parsed).toMatchObject({ ok: true });
+    if (parsed.ok) {
+      expect(JSON.stringify(parsed.value)).not.toContain("FR-999");
+      expect(parsed.value.frs.map(({ id }) => id)).toEqual(["FR-001", "FR-002"]);
+    }
   });
 });

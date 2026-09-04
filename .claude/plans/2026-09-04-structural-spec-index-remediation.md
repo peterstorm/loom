@@ -90,7 +90,7 @@ lint, authoritative unit and smoke suites, `git diff --check`.
 Review `review-20260904T110733Z-608307` found that this plan recorded
 `architecture-tech-lead-1` as an accepted complete in-scope fix while the
 executable contract test had not been implemented — the record and the artifact
-were born disagreeing in commit `59bed1f`. The executable contract test is now
-implemented for real in
-`.claude/plans/2026-09-04-structural-spec-index-remediation-round2.md`, whose
-Accepted list supersedes the completeness claim above for that item.
+were born disagreeing in commit `59bed1f`. The executable contract test was
+delivered under the round-2 remediation plan, whose Accepted list supersedes
+the completeness claim above for that item; the test itself lives in
+`engine/tests/spec-template-contract.test.ts`.

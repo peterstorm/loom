@@ -99,7 +99,8 @@ After writing spec, count markers:
 ```bash
 # At least one spec must exist before counting; a missing spec is fatal, not a zero count.
 ls .claude/specs/*/spec.md >/dev/null 2>&1 || { echo "FATAL: no spec found under .claude/specs/ — run /specify first"; exit 1; }
-# grep -c prints one count per matching spec.md (per-file, not a total). It exits 1
+# grep -c prints one count per spec.md file (per-file, not a total) — including
+# specs with zero markers. It exits 1
 # when no spec has any markers (a good state for the spec) and 2 on a real error
 # (an unreadable or vanished spec) — only the good state is masked, so a real
 # I/O failure aborts set -e shells with grep's stderr visible.
