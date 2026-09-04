@@ -53,19 +53,22 @@ const ENTRY_PATTERNS = Object.freeze({
 
 /**
  * Recognizable structural ID syntax, with or without a Markdown prefix:
- * bare, bold-asterisk, single-bullet, nested blockquote, heading of any
- * level, or an ordered-list marker of any digit run. Families are
- * case-insensitive with any digit run, any combination of spaces and hyphens
- * between the family and the digits, and an optional space before the colon,
- * so near-miss variants fail closed instead of vanishing. Both nets below
- * reference this one pattern so the in-body and document-wide fail-closed
- * checks cannot drift.
+ * bare, bold (1–3 asterisks), single-bullet, nested blockquote, heading of
+ * any level, or an ordered-list marker of any digit run. Families are
+ * case-insensitive with any digit run, any combination of whitespace, dots,
+ * and hyphens between the family and the digits, and zero or more whitespace
+ * before the colon, so the enumerated near-miss variants fail closed instead
+ * of vanishing. The colon and the contiguous family token are the deliberate
+ * prose-disambiguation boundary: a colon-less ID-shaped line ("FR-002 and
+ * FR-003 are related") and a spaced family token ("F R-002:") are prose, not
+ * IDs, and stay legal. Both nets below reference this one pattern so the
+ * in-body and document-wide fail-closed checks cannot drift.
  */
-const STRUCTURAL_ID = /^\s*(?:\*\*|[*+-]|>+|#+|\d+[.)])?\s*(?:fr|as|oos)[\s-]*\d+\s*:\s*/iu;
+const STRUCTURAL_ID = /^\s*(?:\*{1,3}|[*+-]|>+|#+|\d+[.)])?\s*(?:fr|as|oos)[\s.-]*\d+\s*:\s*/iu;
 
 const ACCEPTANCE_HEADER = /^\*\*Acceptance Scenarios:\*\*$/u;
 
-/** CommonMark thematic break: ---, *** or ___ (three or more, spaces allowed
+/** CommonMark thematic break: ---, *** or ___ (three or more, whitespace allowed
  * between markers; call sites must trim leading indentation first). */
 const THEMATIC_BREAK = /^(?:(?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$/u;
 
@@ -225,8 +228,9 @@ function parseEntries(
   for (const { raw, documentLine } of lines) {
     const line = raw.trim();
     if (!line.startsWith("-")) {
-      // A recognizable structural ID without a "- " bullet — bare, bold, or
-      // ordered-list — would otherwise be silently dropped; fail closed.
+      // A recognizable structural ID without a "- " bullet would otherwise
+      // be silently dropped; fail closed. The JSDoc above owns the full
+      // accepted prefix set.
       if (STRUCTURAL_ID.test(raw)) errors.push(`${label} line ${documentLine} must be a "- ID: content" bullet`);
       continue;
     }
@@ -256,6 +260,10 @@ function acceptanceScenarioLines(lines: readonly SourceLine[], errors: string[])
     | Readonly<{ kind: "inside"; headerLine: number; sawBullet: boolean }>
     | Readonly<{ kind: "after" }> = Object.freeze({ kind: "before" });
   const isCollectedBullet = (raw: string): boolean => state.kind === "inside" && raw.trim().startsWith("-");
+  const strayIdError = (inside: boolean, documentLine: number): string =>
+    inside
+      ? `Acceptance Scenarios line ${documentLine} must be a "- ID: content" bullet`
+      : `Acceptance Scenarios line ${documentLine} must be a "- ID: content" bullet under an **Acceptance Scenarios:** block`;
   for (const { raw, documentLine } of lines) {
     const line = raw.trim();
     if (ACCEPTANCE_HEADER.test(line)) {
@@ -263,7 +271,13 @@ function acceptanceScenarioLines(lines: readonly SourceLine[], errors: string[])
       state = Object.freeze({ kind: "inside", headerLine: documentLine, sawBullet: false });
       continue;
     }
-    if (/^###\s+/u.test(line) || isThematicBreak(line)) {
+    const subHeading = /^###\s+/u.test(line);
+    if (subHeading || isThematicBreak(line)) {
+      // A ###-prefixed structural ID is not a real heading (sections() splits
+      // only on ##, so the line never truncates the section body) — without
+      // this check it would be silently dropped here. Fail closed, never
+      // vanish; the terminator behavior is preserved either way.
+      if (subHeading && STRUCTURAL_ID.test(raw)) errors.push(strayIdError(state.kind === "inside", documentLine));
       if (state.kind === "inside") {
         if (!state.sawBullet) closeBlock(state.headerLine);
         state = Object.freeze({ kind: "after" });
@@ -272,15 +286,11 @@ function acceptanceScenarioLines(lines: readonly SourceLine[], errors: string[])
     }
     // A recognizable structural ID that is not a collected bullet — in or out
     // of an acceptance block — must fail closed, never vanish.
-    if (STRUCTURAL_ID.test(raw) && !isCollectedBullet(raw)) {
-      errors.push(
-        state.kind === "inside"
-          ? `Acceptance Scenarios line ${documentLine} must be a "- ID: content" bullet`
-          : `Acceptance Scenarios line ${documentLine} must be a "- ID: content" bullet under an **Acceptance Scenarios:** block`,
-      );
-      continue;
-    }
+    if (STRUCTURAL_ID.test(raw) && !isCollectedBullet(raw)) errors.push(strayIdError(state.kind === "inside", documentLine));
     if (state.kind !== "inside" || !line.startsWith("-")) continue;
+    // Deliberate asymmetry, stated at the seam: outside an acceptance block a
+    // non-ID bullet is narrative furniture in a narrative section and passes;
+    // FR/OOS are entry-only sections, so any bullet there errors.
     scenarios.push(Object.freeze({ raw, documentLine }));
     state = Object.freeze({ kind: "inside", headerLine: state.headerLine, sawBullet: true });
   }
@@ -297,7 +307,8 @@ function parseGlossary(lines: readonly SourceLine[], errors: string[]): readonly
     const line = raw.trim();
     if (!line.startsWith("|")) {
       // The glossary grammar is table rows only; a stray structural ID or prose
-      // row would otherwise silently vanish. Thematic breaks are furniture.
+      // row would otherwise silently vanish. Thematic breaks and blank lines
+      // are furniture.
       if (STRUCTURAL_ID.test(raw) || (line.length > 0 && !isThematicBreak(line))) {
         errors.push(`Glossary line ${documentLine} must be a "| Term | Definition" row`);
       }
@@ -337,13 +348,6 @@ function parseGlossary(lines: readonly SourceLine[], errors: string[]): readonly
   return Object.freeze(entries);
 }
 
-/** Reserved-family structural IDs outside the parsed sections' bodies — the
- * document-wide net; the pattern is shared with STRUCTURAL_ID so the two
- * fail-closed checks cannot drift. Template furniture (SC/NFR IDs) stays
- * legal.
- */
-const RESERVED_FAMILY_ID = STRUCTURAL_ID;
-
 /** Parse one canonical specification into deterministic structural join inputs. */
 export function parseSpec(markdown: string): SpecParseResult {
   const errors: string[] = [];
@@ -380,7 +384,7 @@ export function parseSpec(markdown: string): SpecParseResult {
   );
   for (const { raw, documentLine } of sourceLines(stripped.text, 1)) {
     const consumed = collectedRanges.some((range) => documentLine >= range.start && documentLine < range.end);
-    if (!consumed && RESERVED_FAMILY_ID.test(raw)) {
+    if (!consumed && STRUCTURAL_ID.test(raw)) {
       errors.push(`structural ID at line ${documentLine} is outside a parsed section`);
     }
   }

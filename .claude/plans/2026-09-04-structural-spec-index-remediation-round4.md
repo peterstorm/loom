@@ -57,7 +57,8 @@ Accepted — sound claims with complete in-scope fixes:
 - `STRUCTURAL_ID`/`RESERVED_FAMILY_ID` byte-identical duplication (4 reviewers) → one
   pattern constant derived once, both nets reference it; drift is prevented
   structurally by the binding — the alias is module-private, so no suite
-  assertion pins the equality, and none is needed.
+  assertion pins the equality, and none is needed. (Round 7 removed the alias;
+  both nets reference `STRUCTURAL_ID` directly.)
 - `STRUCTURAL_ID` JSDoc omits the ordered-list prefix (comment-analyzer) → merged JSDoc
   states the full accepted prefix set.
 - specify.md "Exactly one spec must exist" overstates the at-least-one `ls` check
