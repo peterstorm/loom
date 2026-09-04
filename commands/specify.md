@@ -97,7 +97,8 @@ Categories of uncertainty:
 After writing spec, count markers:
 
 ```bash
-grep -c "NEEDS CLARIFICATION" .claude/specs/*/spec.md
+# grep exits 1 when zero markers exist; || true keeps that success state from aborting strict shells
+grep -c "NEEDS CLARIFICATION" .claude/specs/*/spec.md || true
 ```
 
 If count > 3: Invoke `/clarify` before proceeding.
@@ -123,10 +124,12 @@ See `{LOOM_DIR}/references/spec-template.md` for full template. Key sections:
 **Why P1:** Core functionality, blocks all other features
 
 **Acceptance Scenarios:**
-- Given valid email and password, When I submit, Then account is created and confirmation sent
-- Given existing email, When I submit, Then error shown with login link
-- Given weak password, When I submit, Then requirements shown inline
+- AS-001: Given valid email and password, When I submit, Then account is created and confirmation sent
+- AS-002: Given existing email, When I submit, Then error shown with login link
+- AS-003: Given weak password, When I submit, Then requirements shown inline
 ```
+
+Every acceptance scenario must have one unique canonical `AS-NNN:` ID across the specification.
 
 Priority levels:
 - **P1** - Must have, blocks other work
@@ -167,17 +170,31 @@ Criteria MUST be:
 
 ### Out of Scope (Required)
 
+Every exclusion must have one unique canonical `OOS-NNN:` ID.
+
 ```markdown
 ## Out of Scope
 
 Explicitly NOT part of this feature:
-- Social login (separate spec)
-- Account deletion (future work)
-- Profile editing (separate spec)
-- Admin user management
+- OOS-001: Social login (separate spec)
+- OOS-002: Account deletion (future work)
+- OOS-003: Profile editing (separate spec)
+- OOS-004: Admin user management
 ```
 
 Prevents scope creep during implementation.
+
+### Appendix: Glossary (Required)
+
+```markdown
+## Appendix: Glossary
+
+| Term | Definition |
+|------|------------|
+| {domain term} | {meaning in this context} |
+```
+
+Every glossary row must have exactly two non-empty cells, and every term must be unique (case-insensitive). Rows whose term collides with the reserved header term `Term` fail the structural parse.
 
 ---
 
@@ -191,6 +208,7 @@ Before finalizing spec, verify:
 | Testable | Every FR has clear pass/fail condition |
 | Measurable | Every SC has specific metric |
 | Scoped | Out of Scope section populated |
+| Glossary | Appendix: Glossary populated with non-empty, unique term/definition rows |
 | Prioritized | All user scenarios have P1/P2/P3 |
 | Uncertain marked | Ambiguities use `[NEEDS CLARIFICATION]` |
 

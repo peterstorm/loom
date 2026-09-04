@@ -220,6 +220,10 @@ _Avoid_: Rollback receipt, cleanup log, retry counter
 An engine-authored requirement a Task must discharge before its status can become implemented: completion, required regression tests, required new tests, and declared artifacts changed. Regression and new-test obligations derive independently from Verification Policy. Evidence keeps its provenance; Pi structured evidence is never relabeled as ledger-trusted.
 _Avoid_: Checklist item, self-report, completion claim
 
+**Spec Index**:
+A pure deterministic projection of one canonical specification into Functional Requirement (`FR-NNN`), Acceptance Scenario (`AS-NNN`), Out-of-Scope (`OOS-NNN`), and glossary entries with canonical content hashes. It is derived join input, not a second source of truth; malformed or duplicate identifiers fail parsing.
+_Avoid_: TaskGraph, specification database, LLM requirement summary
+
 **Review Packet**:
 A canonical immutable snapshot binding one Task to its base/head revisions, exact declared/modified path scope, diffs, byte-preserving postimages, plan context, and Proof Obligations. Postimages use `utf8` when lossless and `base64` otherwise; their digest identifies the original bytes. The sole review scope; empty scope fails rather than broadening to the wave. Its self-hashes prove integrity, not provenance; historical write recovery additionally requires the exact engine-issued packet registration stored in protected Task state at packet creation.
 _Avoid_: File list, live diff, review context, fallback scope, self-authenticating recovery packet
