@@ -34,7 +34,11 @@ import {
   reconcileSpecCheck,
   type ParsedSpecCheckOutput,
 } from "../engine/src/core/spec-check";
-import { waveSpecCheckDocumentsMatch } from "../engine/src/core/wave-review-authority";
+import {
+  settledSpecCheckFloor,
+  waveSpecCheckDocumentsMatch,
+  type SpecIndexAvailability,
+} from "../engine/src/core/wave-review-authority";
 import { observeWaveSpecCheckDocuments } from "../engine/src/orchestration/wave-spec-check-documents";
 import { reconcileWaveBlock } from "../engine/src/core/wave-gate-model";
 import {
@@ -606,9 +610,9 @@ async function applyFailedSpecCheckResult(
     const diagnostic = `spec-check TaskGraph load failed: ${cause instanceof Error ? cause.message : String(cause)}`;
     return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);
   }
-  let documents: WaveSpecCheckDocumentsAuthority;
+  let specObservation;
   try {
-    documents = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
+    specObservation = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
   } catch (cause) {
     const diagnostic = `spec-check document observation failed: ${cause instanceof Error ? cause.message : String(cause)}`;
     return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);
@@ -619,7 +623,8 @@ async function applyFailedSpecCheckResult(
         state,
         args.reservedSlot?.specCheckAuthority,
         { kind: "capture-failed", error: failure },
-        documents,
+        specObservation.specIndex,
+        specObservation.authority,
         args.now,
       ));
   } catch (cause) {
@@ -1711,6 +1716,7 @@ function reducePiSpecCheckResult(
   state: TaskGraph,
   authority: PiSpecCheckAttemptAuthority | null | undefined,
   observation: PiSpecCheckObservation,
+  observationIndex: SpecIndexAvailability,
   documents: WaveSpecCheckDocumentsAuthority,
   now: string,
 ): Readonly<{ state: TaskGraph; value: PiResultOutcome }> {
@@ -1734,7 +1740,12 @@ function reducePiSpecCheckResult(
     );
   }
 
-  const resolution = reconcileSpecCheck(observation.findings, wave, now);
+  // Floored through the same `reconcileSpecCheck` the Claude hook and the Wave
+  // Gate facade call. Committing the Agent's own count here left the settled
+  // floor unenforced on this transport entirely, while the command told the
+  // Agent the engine re-derives it at capture.
+  const resolution = reconcileSpecCheck(observation.findings, wave, now,
+    settledSpecCheckFloor(observationIndex, state, wave));
   if (resolution.kind === "evidence-failed") {
     return commitPiSpecCheck(
       state,
@@ -1767,9 +1778,10 @@ export async function applySpecCheckPiResult(args: Readonly<{
       };
   try {
     const observedState = args.store.load();
-    const documents = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
+    const specObservation = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
     return await args.store.updateAndReturn((state) =>
-      reducePiSpecCheckResult(state, args.reservedSlot?.specCheckAuthority, observation, documents, args.now));
+      reducePiSpecCheckResult(state, args.reservedSlot?.specCheckAuthority, observation,
+        specObservation.specIndex, specObservation.authority, args.now));
   } catch (error) {
     const diagnostic = `spec-check state commit failed: ${error instanceof Error ? error.message : String(error)}`;
     return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);

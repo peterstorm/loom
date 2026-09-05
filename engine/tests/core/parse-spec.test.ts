@@ -3,11 +3,12 @@ import { readFileSync } from "node:fs";
 import * as parserBarrel from "../../src/parsers";
 import {
   parseSpec,
+  parseSpecContentHash,
   specContentHash,
   specParseErrorMessage,
   type ParsedSpec,
   type SpecParseError,
-} from "../../src/parsers/parse-spec";
+} from "../../src/core/parse-spec";
 
 const validSpec = `# Feature: Structural spec
 
@@ -120,9 +121,15 @@ describe("parseSpec", () => {
     expect(parsed.value.glossary[0].term).toBe("Spec Index");
   });
 
-  it("exports parseSpec and specContentHash through the parser barrel", () => {
-    expect(parserBarrel.parseSpec).toBe(parseSpec);
-    expect(parserBarrel.specContentHash).toBe(specContentHash);
+  // The Spec Index moved out of `parsers/` and into the functional core when
+  // the Requirement Coverage Projection needed it: `core/` may not import
+  // `parsers/`, and opening that arrow to reach one pure projection would have
+  // inverted the layering for every core module. The barrel must therefore NOT
+  // re-export it — a re-export is exactly the import path the boundary refuses,
+  // and it would compile until the day a core module used it.
+  it("is not reachable through the parser barrel", () => {
+    expect(Object.hasOwn(parserBarrel, "parseSpec")).toBe(false);
+    expect(Object.hasOwn(parserBarrel, "specContentHash")).toBe(false);
   });
 
   it("collects scenarios from every Acceptance Scenarios block", () => {
@@ -923,6 +930,34 @@ describe("parseSpec", () => {
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
       expect(messagesOf(parsed.errors)).toContain("unterminated code fence");
+    }
+  });
+});
+
+describe("parseSpecContentHash", () => {
+  it("admits exactly the shape specContentHash mints", () => {
+    const minted = specContentHash("System MUST parse specs");
+    expect(parseSpecContentHash(minted)).toBe(minted);
+    expect(parseSpecContentHash("0".repeat(64))).toBe("0".repeat(64));
+  });
+
+  it("refuses every value the engine could not have written", () => {
+    // The gate treats a rejected value as corrupt authority, so admitting a
+    // near-miss here would launder a tampered graph into ordinary drift.
+    for (const bad of [
+      "deadbeef",                 // too short
+      "0".repeat(63),             // one short
+      "0".repeat(65),             // one long
+      "A".repeat(64),             // uppercase hex is not what the mint emits
+      `${"0".repeat(63)}g`,       // non-hex character
+      ` ${"0".repeat(64)}`,       // leading space
+      `${"0".repeat(64)}\n`,      // trailing newline
+      "",
+    ]) {
+      expect(parseSpecContentHash(bad)).toBeNull();
+    }
+    for (const bad of [null, undefined, 42, {}, ["0".repeat(64)]]) {
+      expect(parseSpecContentHash(bad)).toBeNull();
     }
   });
 });

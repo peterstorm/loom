@@ -16,6 +16,17 @@ import { parseTaskGraph, StateManager } from "../../../src/state-manager";
 import type { AgentRequestAuthority } from "../../../src/core/orchestration-contract";
 import { taskFixture } from "../../fixtures/task-lifecycle";
 import { WAVE_REVIEW_AGENTS } from "../../../src/core/model-profiles";
+import { prepareWaveReviewBatch } from "../../../src/core/wave-review-authority";
+import { observeWaveSpecCheckDocuments } from "../../../src/orchestration/wave-spec-check-documents";
+import { projectSpecBytes } from "../../../src/orchestration/spec-index-observation";
+import { parseOrchestrationRunId, parseRequestId } from "../../../src/core/orchestration-contract";
+
+const decodeRequestId = (raw: string) => {
+  const parsed = parseRequestId(raw);
+  if (!parsed.ok) throw new Error(parsed.error.message);
+  return parsed.value;
+};
+import { buildContextPacket, encodeByteSection } from "../../../src/core/context-packets";
 
 const cleanup: string[] = [];
 afterEach(() => { for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true }); });
@@ -101,6 +112,7 @@ describe("registered Wave spec-check scope", () => {
         completionAnchors: [],
         contributions: ["FR-1"],
         declaredFiles: ["src/contribution.ts"],
+        modifiedFiles: [],
       },
       {
         id: "T2",
@@ -108,6 +120,7 @@ describe("registered Wave spec-check scope", () => {
         completionAnchors: ["FR-1"],
         contributions: [],
         declaredFiles: ["src/completion.ts"],
+        modifiedFiles: [],
       },
     ]);
 
@@ -445,5 +458,389 @@ describe("Wave reviewer slot identity projection", () => {
 
     expect(identitiesFor({ ...plain, authorityDigest: "b".repeat(64) }, 1)).not.toEqual(baseline);
     expect(identitiesFor(plain, 2)).not.toEqual(baseline);
+  });
+});
+
+describe("Requirement Coverage Projection in the spec-check packet", () => {
+  const spec = `# Feature: Coverage wiring
+
+## User Scenarios
+
+### US1: [P1] Project coverage
+
+**Acceptance Scenarios:**
+- AS-001: Given a claim, When the gate runs, Then a structural verdict exists
+
+## Functional Requirements
+
+- FR-001: System MUST project structural verdicts before any model reads a file
+- FR-002: System MUST name Requirements no Task claims
+
+## Out of Scope
+
+- OOS-001: Symbol-level source indexing
+
+## Appendix: Glossary
+
+| Term | Definition |
+|------|------------|
+| Spec Index | A deterministic projection of specification entries |
+`;
+
+  const coverageSectionOf = (specFile: string | null, tasks: TaskGraph["tasks"]): string => {
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-coverage-"));
+    cleanup.push(runsRoot);
+    const created = createRunDirectory(runsRoot, "run.coverage");
+    if (!created.ok) throw new Error(created.error.message);
+    const parsedGraph = parseTaskGraph({
+      spec_trace_version: 2,
+      current_phase: "execute",
+      current_wave: 1,
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: specFile,
+      plan_file: null,
+      wave_gates: {},
+      tasks,
+    });
+    if (!parsedGraph.ok) throw new Error("graph fixture must parse");
+    const batch = waveRequests(created.value, {
+      schemaVersion: 1,
+      kind: "wave-gate",
+      input: { wave: 1 },
+      taskIds: tasks.map(({ id }) => id),
+      authorityDigest: "a".repeat(64),
+    }, parsedGraph.value, 1);
+    const specRequest = batch.requests.find(({ authority }) =>
+      (authority as AgentRequestAuthority).role === "spec-check-invoker");
+    const digest = (specRequest!.authority as AgentRequestAuthority).contextDigest;
+    const packet = batch.packets.find((candidate) => candidate.digest === digest);
+    const section = packet?.fixedContext.find(({ label }) => label === "requirement-coverage");
+    if (section === undefined) throw new Error("spec-check packet must carry a requirement-coverage section");
+    return new TextDecoder("utf8", { fatal: true }).decode(Uint8Array.from(section.bytes));
+  };
+
+  const specFileIn = (contents: string): string => {
+    const root = mkdtempSync(join(tmpdir(), "loom-coverage-spec-"));
+    cleanup.push(root);
+    mkdirSync(join(root, "specs"), { recursive: true });
+    const path = join(root, "specs", "spec.md");
+    writeFileSync(path, contents, "utf8");
+    return path;
+  };
+
+  it("settles structural verdicts in the packet the spec-check Agent reads", () => {
+    const rendered = coverageSectionOf(specFileIn(spec), [
+      taskFixture({
+        id: "T1", description: "claims an excluded item", agent: "code-implementer-agent", wave: 1,
+        status: "pending", depends_on: [], spec_anchors: ["OOS-001"], spec_contributions: [],
+        file_list: ["src/a.ts"], files_modified: ["src/a.ts"],
+      }),
+      taskFixture({
+        id: "T2", description: "claims a real Requirement but touched nothing",
+        agent: "code-implementer-agent", wave: 1,
+        status: "pending", depends_on: [], spec_anchors: ["FR-001"], spec_contributions: [],
+        file_list: ["src/b.ts"], files_modified: [],
+      }),
+    ]);
+    expect(rendered).toContain("Out-of-Scope item cannot be completed");
+    expect(rendered).toContain("modified no files");
+    // FR-002 is claimed by no Task at any Wave — planned by nobody.
+    expect(rendered).toContain("FR-002 — CRITICAL: no Task in the graph claims it");
+  });
+
+  it("only the spec-check subject receives the projection", () => {
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-coverage-subject-"));
+    cleanup.push(runsRoot);
+    const created = createRunDirectory(runsRoot, "run.subject");
+    if (!created.ok) throw new Error(created.error.message);
+    const parsedGraph = parseTaskGraph({
+      spec_trace_version: 2, current_phase: "execute", current_wave: 1, phase_artifacts: {},
+      skipped_phases: [], spec_file: specFileIn(spec), plan_file: null, wave_gates: {},
+      tasks: [taskFixture({
+        id: "T1", description: "implements FR-001", agent: "code-implementer-agent", wave: 1,
+        status: "pending", depends_on: [], spec_anchors: ["FR-001"], spec_contributions: [],
+        file_list: ["src/a.ts"], files_modified: ["src/a.ts"],
+      })],
+    });
+    if (!parsedGraph.ok) throw new Error("graph fixture must parse");
+    const batch = waveRequests(created.value, {
+      schemaVersion: 1, kind: "wave-gate", input: { wave: 1 }, taskIds: ["T1"],
+      authorityDigest: "a".repeat(64),
+    }, parsedGraph.value, 1);
+    for (const request of batch.requests) {
+      const authority = request.authority as AgentRequestAuthority;
+      const packet = batch.packets.find((candidate) => candidate.digest === authority.contextDigest);
+      const hasCoverage = packet?.fixedContext.some(({ label }) => label === "requirement-coverage") ?? false;
+      expect(hasCoverage).toBe(authority.role === "spec-check-invoker");
+    }
+    expect(WAVE_REVIEW_AGENTS.length).toBeGreaterThan(0);
+  });
+
+  it("states an unavailable projection rather than passing silently", () => {
+    const rendered = coverageSectionOf(null, [taskFixture({
+      id: "T1", description: "claims FR-001", agent: "code-implementer-agent", wave: 1,
+      status: "pending", depends_on: [], spec_anchors: ["FR-001"], spec_contributions: [],
+      file_list: ["src/a.ts"], files_modified: ["src/a.ts"],
+    })]);
+    expect(rendered).toContain("UNAVAILABLE");
+    expect(rendered).toContain("never a pass");
+  });
+
+  it("reports an altered recorded hash as corrupt authority, end to end through the packet", () => {
+    const rendered = coverageSectionOf(specFileIn(spec), [taskFixture({
+      id: "T1", description: "claims FR-001", agent: "code-implementer-agent", wave: 1,
+      status: "pending", depends_on: [], spec_anchors: ["FR-001"], spec_contributions: [],
+      file_list: ["src/a.ts"], files_modified: ["src/a.ts"],
+      spec_anchor_hashes: { "FR-001": "deadbeef" },
+    })]);
+    expect(rendered).toContain("have been altered");
+    expect(rendered).not.toContain("no hash was recorded");
+  });
+
+  it("reports drift when the specification changed after the hashes were recorded", () => {
+    const drifted = spec.replace(
+      "System MUST project structural verdicts before any model reads a file",
+      "System MUST project structural verdicts, reworded after the claim was made",
+    );
+    const rendered = coverageSectionOf(specFileIn(drifted), [taskFixture({
+      id: "T1", description: "claims FR-001", agent: "code-implementer-agent", wave: 1,
+      status: "pending", depends_on: [], spec_anchors: ["FR-001"], spec_contributions: [],
+      file_list: ["src/a.ts"], files_modified: ["src/a.ts"],
+      spec_anchor_hashes: { "FR-001": "0".repeat(64) },
+    })]);
+    expect(rendered).toContain("its text changed since the claim");
+  });
+});
+
+describe("Wave spec-check authority guards", () => {
+  const spec = `# Feature: Guarded
+
+## User Scenarios
+
+### US1: [P1] Guard the projection
+
+**Acceptance Scenarios:**
+- AS-001: Given an observation, When it names another document, Then preparation fails
+
+## Functional Requirements
+
+- FR-001: System MUST bind the projection to the protected spec_file
+
+## Out of Scope
+
+- OOS-001: Symbol-level source indexing
+
+## Appendix: Glossary
+
+| Term | Definition |
+|------|------------|
+| Spec Index | A deterministic projection of specification entries |
+`;
+
+  const specFileIn = (contents: string): string => {
+    const root = mkdtempSync(join(tmpdir(), "loom-guard-spec-"));
+    cleanup.push(root);
+    const path = join(root, "spec.md");
+    writeFileSync(path, contents, "utf8");
+    return path;
+  };
+
+  const graphWith = (specFile: string | null, modified: readonly string[] = ["src/a.ts"]) => {
+    const parsed = parseTaskGraph({
+      spec_trace_version: 2, current_phase: "execute", current_wave: 1, phase_artifacts: {},
+      skipped_phases: [], spec_file: specFile, plan_file: null, wave_gates: {},
+      tasks: [taskFixture({
+        id: "T1", description: "implements FR-001", agent: "code-implementer-agent", wave: 1,
+        status: "pending", depends_on: [], spec_anchors: ["FR-001"], spec_contributions: [],
+        file_list: ["src/a.ts"], files_modified: [...modified],
+      })],
+    });
+    if (!parsed.ok) throw new Error("graph fixture must parse");
+    return parsed.value;
+  };
+
+  const registration = {
+    schemaVersion: 1 as const, kind: "wave-gate" as const, input: { wave: 1 },
+    taskIds: ["T1"], authorityDigest: "a".repeat(64),
+  };
+
+  const runId = () => {
+    const parsed = parseOrchestrationRunId("run.guard");
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    return parsed.value;
+  };
+
+  const workspace = [{ taskId: "T1", headSha: "b".repeat(64), scope: ["src/a.ts"] }];
+
+  it("refuses an observation whose Spec Index names another document", () => {
+    // The guard exists so a projection can never be published under a document
+    // it was not derived from. Deleting it used to leave every test green.
+    const specFile = specFileIn(spec);
+    const other = specFileIn(spec.replace("FR-001", "FR-002"));
+    const honest = observeWaveSpecCheckDocuments(specFile, null);
+    const mismatched = Object.freeze({
+      authority: honest.authority,
+      specIndex: observeWaveSpecCheckDocuments(other, null).specIndex,
+    });
+    const prepared = prepareWaveReviewBatch(
+      runId(), registration, graphWith(specFile), 1, workspace, mismatched,
+    );
+    expect(prepared.ok).toBe(false);
+    if (!prepared.ok) expect(prepared.error.message).toContain("does not name the protected spec_file");
+  });
+
+  it("refuses an index parsed from bytes other than the observed document", () => {
+    // Same path, different bytes: only the digest comparison catches this, and
+    // it is what makes the module's "one read" claim true rather than asserted.
+    const specFile = specFileIn(spec);
+    const honest = observeWaveSpecCheckDocuments(specFile, null);
+    const forged = Object.freeze({
+      authority: honest.authority,
+      specIndex: projectSpecBytes(specFile, Buffer.from(spec.replace("FR-001", "FR-009"), "utf8")),
+    });
+    const prepared = prepareWaveReviewBatch(
+      runId(), registration, graphWith(specFile), 1, workspace, forged,
+    );
+    expect(prepared.ok).toBe(false);
+    if (!prepared.ok) expect(prepared.error.message).toContain("parsed from bytes other than");
+  });
+
+  it("accepts the honest single-read observation the shell produces", () => {
+    const specFile = specFileIn(spec);
+    const prepared = prepareWaveReviewBatch(
+      runId(), registration, graphWith(specFile), 1, workspace,
+      observeWaveSpecCheckDocuments(specFile, null),
+    );
+    if (!prepared.ok) throw new Error(prepared.error.message);
+    expect(prepared.ok).toBe(true);
+  });
+
+  it("carries the Task's real modified files into the spec-check scope", () => {
+    // Hardcoding this to the empty array used to leave every test green, while
+    // it is the field that separates "declared nothing" from "modified nothing".
+    const scope = waveSpecCheckScope(graphWith(specFileIn(spec), ["src/a.ts", "src/b.ts"]).tasks);
+    expect(scope[0]?.modifiedFiles).toEqual(["src/a.ts", "src/b.ts"]);
+  });
+});
+
+describe("wave-review-authority spec-check scope decoding", () => {
+  const base = {
+    runId: "run.decode", wave: 1, authorityDigest: "a".repeat(64), batchEpoch: "b".repeat(64),
+    subject: { role: "spec-check-invoker", taskId: null }, taskRun: null, task: null, packetId: null,
+    specFile: null, planFile: null,
+    specCheckDocuments: { spec: { path: null, contentDigest: null }, plan: { path: null, contentDigest: null } },
+  };
+
+  const packetFor = (scope: unknown) => {
+    const section = encodeByteSection("wave-review-authority", JSON.stringify({ ...base, specCheckScope: scope }));
+    if (!section.ok) throw new Error(section.error.message);
+    const packet = buildContextPacket({
+      requestId: decodeRequestId("request:" + "c".repeat(64)), role: "spec-check-invoker", requiredSkill: "none",
+      outputContract: "decode", fixedContext: [section.value], variableContext: [],
+    });
+    if (!packet.ok) throw new Error(packet.error.message);
+    return packet.value;
+  };
+
+  it("loads a scope entry published before modifiedFiles existed", () => {
+    // A packet a schema generation behind is not damaged bytes. Refusing it
+    // reported an engine's own persisted packet as corrupt and blocked a Wave
+    // Gate that merely outlived an upgrade.
+    const packet = packetFor([{
+      id: "T1", description: "legacy", completionAnchors: ["FR-1"], contributions: [], declaredFiles: ["a.ts"],
+    }]);
+    const context = handleWaveReviewContext([packet], packet.digest);
+    expect(context.kind).toBe("loaded");
+    if (context.kind !== "loaded" || context.value.specCheckScope === null) return;
+    expect(context.value.specCheckScope[0]?.modifiedFiles).toEqual([]);
+  });
+
+  it("loads the current shape and rejects a blank modified path", () => {
+    const current = packetFor([{
+      id: "T1", description: "current", completionAnchors: ["FR-1"], contributions: [],
+      declaredFiles: ["a.ts"], modifiedFiles: ["a.ts"],
+    }]);
+    expect(handleWaveReviewContext([current], current.digest).kind).toBe("loaded");
+
+    const blank = packetFor([{
+      id: "T1", description: "blank", completionAnchors: ["FR-1"], contributions: [],
+      declaredFiles: ["a.ts"], modifiedFiles: ["  "],
+    }]);
+    expect(handleWaveReviewContext([blank], blank.digest).kind).toBe("corrupt");
+  });
+
+  it("accepts repeated modified paths, which the state schema also accepts", () => {
+    // A stricter decoder than the StateManager would reject a packet the engine
+    // itself built one step earlier from a graph that was accepted.
+    const repeated = packetFor([{
+      id: "T1", description: "repeated", completionAnchors: ["FR-1"], contributions: [],
+      declaredFiles: ["a.ts"], modifiedFiles: ["a.ts", "a.ts"],
+    }]);
+    expect(handleWaveReviewContext([repeated], repeated.digest).kind).toBe("loaded");
+  });
+});
+
+describe("a non-string recorded hash is described, not crashed on", () => {
+  it("renders a stated verdict instead of throwing out of prepareWaveReviewBatch", () => {
+    // `spec_anchor_hashes` is typed Record<string, string> but nothing on the
+    // load path parses it, so a hand-edited graph can put a number there. The
+    // renderer then did `stored.slice(0, 16)` and threw a TypeError out of a
+    // function whose contract is a stated refusal, aborting the Wave Gate.
+    const spec = `# Feature: Altered
+
+## User Scenarios
+
+### US1: [P1] Describe an altered hash
+
+**Acceptance Scenarios:**
+- AS-001: Given a non-string hash, When the gate runs, Then it is described
+
+## Functional Requirements
+
+- FR-001: System MUST describe an unreadable recorded hash
+
+## Out of Scope
+
+- OOS-001: Symbol-level source indexing
+
+## Appendix: Glossary
+
+| Term | Definition |
+|------|------------|
+| Spec Index | A deterministic projection of specification entries |
+`;
+    const root = mkdtempSync(join(tmpdir(), "loom-nonstring-hash-"));
+    cleanup.push(root);
+    const specPath = join(root, "spec.md");
+    writeFileSync(specPath, spec, "utf8");
+    const parsed = parseTaskGraph({
+      spec_trace_version: 2, current_phase: "execute", current_wave: 1, phase_artifacts: {},
+      skipped_phases: [], spec_file: specPath, plan_file: null, wave_gates: {},
+      tasks: [taskFixture({
+        id: "T1", description: "claims FR-001", agent: "code-implementer-agent", wave: 1,
+        status: "pending", depends_on: [], spec_anchors: ["FR-001"], spec_contributions: [],
+        file_list: ["src/a.ts"], files_modified: ["src/a.ts"],
+        spec_anchor_hashes: { "FR-001": 42 } as unknown as Readonly<Record<string, string>>,
+      })],
+    });
+    if (!parsed.ok) throw new Error("graph fixture must parse");
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-nonstring-run-"));
+    cleanup.push(runsRoot);
+    const created = createRunDirectory(runsRoot, "run.nonstring");
+    if (!created.ok) throw new Error(created.error.message);
+    const batch = waveRequests(created.value, {
+      schemaVersion: 1, kind: "wave-gate", input: { wave: 1 }, taskIds: ["T1"],
+      authorityDigest: "a".repeat(64),
+    }, parsed.value, 1);
+    const specRequest = batch.requests.find(({ authority }) =>
+      (authority as AgentRequestAuthority).role === "spec-check-invoker");
+    const digest = (specRequest!.authority as AgentRequestAuthority).contextDigest;
+    const packet = batch.packets.find((candidate) => candidate.digest === digest);
+    const section = packet?.fixedContext.find(({ label }) => label === "requirement-coverage");
+    if (section === undefined) throw new Error("spec-check packet must carry a requirement-coverage section");
+    const rendered = new TextDecoder("utf8", { fatal: true }).decode(Uint8Array.from(section.bytes));
+    expect(rendered).toContain("have been altered");
+    expect(rendered).toContain("non-string number");
   });
 });

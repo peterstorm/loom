@@ -826,3 +826,127 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
     }
   });
 });
+
+describe("the Requirement Coverage Projection is enforced, not merely rendered", () => {
+  const spec = `# Feature: Enforced
+
+## User Scenarios
+
+### US1: [P1] Enforce the floor
+
+**Acceptance Scenarios:**
+- AS-001: Given a settled row, When the Agent drops it, Then evidence capture fails
+
+## Functional Requirements
+
+- FR-001: System MUST floor the reported CRITICAL count at the settled count
+
+## Out of Scope
+
+- OOS-001: Symbol-level source indexing
+
+## Appendix: Glossary
+
+| Term | Definition |
+|------|------------|
+| Spec Index | A deterministic projection of specification entries |
+`;
+
+  /**
+   * One Wave whose single Task claims an identifier the spec does not define —
+   * a settled CRITICAL — and a spec-check transcript reporting `reported`
+   * CRITICAL findings. Returns the persisted `spec_check` record.
+   */
+  async function storedSpecCheck(reported: number): Promise<Record<string, unknown>> {
+    const tmpRoot = join(tmpdir(), `spec-check-floor-${reported}-${Date.now()}`);
+    mkdirSync(tmpRoot, { recursive: true });
+    const tmpDir = realpathSync.native(tmpRoot);
+    const statePath = join(tmpDir, "active_task_graph.json");
+    const specPath = join(tmpDir, "spec.md");
+    writeFileSync(specPath, spec);
+    const specDigest = createHash("sha256").update(readFileSync(specPath)).digest("hex");
+    const transcriptPath = join(tmpDir, "transcript.jsonl");
+    const criticalLines = Array.from({ length: reported }, (_, at) => `CRITICAL: finding ${at + 1}`);
+    writeFileSync(transcriptPath, JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "text", text: [
+        "SPEC_CHECK_WAVE: 5",
+        ...criticalLines,
+        `SPEC_CHECK_CRITICAL_COUNT: ${reported}`,
+        "SPEC_CHECK_HIGH_COUNT: 0",
+        `SPEC_CHECK_VERDICT: ${reported === 0 ? "PASSED" : "BLOCKED"}`,
+      ].join("\n") }] },
+    }));
+    const runId = parseOrchestrationRunId(`run.spec-floor-${reported}`);
+    const slotId = parseSlotId(`wave-slot:spec-floor-${reported}`);
+    if (!runId.ok || !slotId.ok) throw new Error("invalid floor authority fixture");
+    writeFileSync(statePath, JSON.stringify({
+      spec_trace_version: 2,
+      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+      spec_file: specPath, plan_file: null, current_wave: 5,
+      tasks: [{
+        id: "T1", description: "claims an undefined Requirement", agent: "code-implementer-agent",
+        wave: 5, status: "completed", depends_on: [],
+        spec_anchors: ["FR-404"], spec_contributions: [],
+        file_list: ["src/a.ts"], files_modified: ["src/a.ts"],
+      }],
+      wave_gates: {},
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: runId.value, wave: 5,
+        authorityDigest: "a".repeat(64), revision: 1, terminalOutcome: null,
+      },
+      wave_review_epoch: {
+        runId: runId.value, wave: 5, batchEpoch: "b".repeat(64),
+        specCheckDocuments: {
+          spec: { path: specPath, contentDigest: specDigest },
+          plan: { path: null, contentDigest: null },
+        },
+        specCheckSlotAuthority: { slot_id: slotId.value, attempted: 1 },
+      },
+    }));
+    const session = `spec-check-floor-${reported}-${process.pid}-${Date.now()}`;
+    await withTaskGraphPointer(session, statePath, async () => {
+      await runStoreSpecCheckFindings(JSON.stringify({
+        session_id: session,
+        agent_type: "spec-check-invoker",
+        agent_transcript_path: transcriptPath,
+      }), [], { runId: runId.value, slotId: slotId.value, attempt: 1, role: "spec-check-invoker" });
+    });
+    const stored = JSON.parse(readFileSync(statePath, "utf8")).spec_check as Record<string, unknown>;
+    rmSync(tmpDir, { recursive: true, force: true });
+    return stored;
+  }
+
+  it("fails evidence capture when the report drops a row the engine settled", async () => {
+    // The defect this closes: the engine settled FR-404 as CRITICAL, rendered
+    // it into the packet, and then accepted a transcript claiming zero. The
+    // Wave Gate opened on the model's own arithmetic.
+    const stored = await storedSpecCheck(0);
+    expect(stored).toMatchObject({ wave: 5, verdict: "EVIDENCE_CAPTURE_FAILED" });
+    expect(String(stored.error)).toContain("the Requirement Coverage Projection settled");
+    expect(String(stored.error)).toContain("re-run /wave-gate");
+  });
+
+  it("accepts a report that meets the floor", async () => {
+    // FR-404 is the one settled CRITICAL: unknown-requirement, and no FR or AS
+    // in the fixture goes unclaimed except the ones the Task does not name.
+    const settled = 3; // FR-404 row + FR-001 unclaimed + AS-001 unclaimed
+    const stored = await storedSpecCheck(settled);
+    expect(stored).toMatchObject({ wave: 5, critical_count: settled });
+    expect(stored.verdict).not.toBe("EVIDENCE_CAPTURE_FAILED");
+  });
+});
+
+function withTaskGraphPointer<T>(session: string, statePath: string, run: () => Promise<T>): Promise<T> {
+  return (async () => {
+    const { SUBAGENT_DIR } = await import("../../src/config");
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    const pointer = join(SUBAGENT_DIR, `${session}.task_graph`);
+    writeFileSync(pointer, statePath);
+    try {
+      return await run();
+    } finally {
+      rmSync(pointer, { force: true });
+    }
+  })();
+}

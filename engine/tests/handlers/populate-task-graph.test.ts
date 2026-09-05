@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import fc from "fast-check";
 import {
   chmodSync,
@@ -11,7 +11,7 @@ import {
 import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
-import populate from "../../src/handlers/helpers/populate-task-graph";
+import populate, { resolvedSpecFile } from "../../src/handlers/helpers/populate-task-graph";
 import type { Task, TaskGraph } from "../../src/types";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import {
@@ -641,5 +641,164 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
     if (result.kind === "error") expect(result.message).toContain("--fix could not repair");
     const after = JSON.parse(readFileSync(statePath, "utf-8")) as TaskGraph;
     expect(after.tasks).toEqual([]);
+  });
+});
+
+describe("populate-task-graph — engine-derived Requirement content hashes", () => {
+  const canonicalSpec = `# Feature: Recorded hashes
+
+## User Scenarios
+
+### US1: [P1] Record hashes
+
+**Acceptance Scenarios:**
+- AS-001: Given a claim, When the graph is populated, Then its Requirement hash is recorded
+
+## Functional Requirements
+
+- FR-001: System MUST record Requirement content hashes at link time
+
+## Out of Scope
+
+- OOS-001: Symbol-level source indexing
+
+## Appendix: Glossary
+
+| Term | Definition |
+|------|------------|
+| Spec Index | A deterministic projection of specification entries |
+`;
+
+  /** Populate one graph whose spec file holds `spec`, claiming `anchors`. */
+  async function populatedTask(
+    spec: string | null,
+    anchors: readonly string[],
+  ): Promise<Task> {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    writeManifest(dir);
+    const specFile = spec === null ? null : join(dir, "spec.md");
+    if (specFile !== null && spec !== null) writeFileSync(specFile, spec, "utf8");
+    const statePath = writeState(dir, plan, [], { spec_file: specFile });
+    const decompose = JSON.stringify({
+      spec_trace_version: 2,
+      plan_title: "t",
+      spec_file: specFile ?? "spec.md",
+      plan_file: plan,
+      tasks: [{
+        id: "T1", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [],
+        spec_anchors: [...anchors], spec_contributions: [],
+        verification_policy: REQUIRED_VERIFICATION, plan_context: "", file_list: ["src/a.ts"],
+      }],
+    });
+    const result = await populate(decompose, []);
+    if (result.kind === "error") throw new Error(result.message);
+    expect(result.kind).toBe("passthrough");
+    const graph = JSON.parse(stateBytes(statePath)) as TaskGraph;
+    const task = graph.tasks[0];
+    if (task === undefined) throw new Error("populate must persist the decomposed Task");
+    return task;
+  }
+
+  it("records the Spec Index hash for every claim the specification defines", async () => {
+    const task = await populatedTask(canonicalSpec, ["FR-001", "AS-001"]);
+    expect(Object.keys(task.spec_anchor_hashes ?? {}).sort()).toEqual(["AS-001", "FR-001"]);
+    for (const hash of Object.values(task.spec_anchor_hashes ?? {})) {
+      expect(hash).toMatch(/^[0-9a-f]{64}$/u);
+    }
+  });
+
+  it("omits identifiers the specification does not define", async () => {
+    const task = await populatedTask(canonicalSpec, ["FR-001", "FR-404"]);
+    expect(Object.keys(task.spec_anchor_hashes ?? {})).toEqual(["FR-001"]);
+  });
+
+  it("records nothing rather than guessing when the spec does not project, and says why", async () => {
+    // A project without a canonical specification still decomposes; drift is
+    // then reported as unverifiable at the gate, never as stable. The REASON is
+    // what distinguishes this from a missing file, so assert it: without that,
+    // this test and the one below assert the identical thing.
+    const stderr: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderr.push(String(chunk));
+      return true;
+    });
+    try {
+      const task = await populatedTask("# not a specification", ["FR-001"]);
+      expect(task.spec_anchor_hashes).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(stderr.join("")).toContain("is not a canonical specification");
+    expect(stderr.join("")).toContain("drift as unverifiable");
+  });
+
+  it("records nothing when the spec file does not exist, and says so distinctly", async () => {
+    // `populatedTask(null, ...)` leaves the graph pointing at a "spec.md" that
+    // was never written: an unreadable spec is a stated reason, not a refusal —
+    // and a DIFFERENT reason from the non-canonical case above.
+    const stderr: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderr.push(String(chunk));
+      return true;
+    });
+    try {
+      const task = await populatedTask(null, ["FR-001"]);
+      expect(task.spec_anchor_hashes).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(stderr.join("")).toContain("could not be read");
+    expect(stderr.join("")).not.toContain("is not a canonical specification");
+  });
+
+  it("cannot be pre-stamped by the decompose payload", async () => {
+    // Decompose says WHICH Requirements a Task completes; the specification's
+    // own bytes say what they SAID. An authored hash is dropped like every
+    // other field `sanitizeDecomposedTask` does not pick.
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    writeManifest(dir);
+    const specFile = join(dir, "spec.md");
+    writeFileSync(specFile, canonicalSpec, "utf8");
+    const statePath = writeState(dir, plan, [], { spec_file: specFile });
+    const forged = "f".repeat(64);
+    const result = await populate(JSON.stringify({
+      spec_trace_version: 2,
+      plan_title: "t",
+      spec_file: specFile,
+      plan_file: plan,
+      tasks: [{
+        id: "T1", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [],
+        spec_anchors: ["FR-001"], spec_contributions: [], spec_anchor_hashes: { "FR-001": forged },
+        verification_policy: REQUIRED_VERIFICATION, plan_context: "", file_list: ["src/a.ts"],
+      }],
+    }), []);
+    expect(result.kind).toBe("passthrough");
+    const graph = JSON.parse(stateBytes(statePath)) as TaskGraph;
+    expect(graph.tasks[0]?.spec_anchor_hashes?.["FR-001"]).not.toBe(forged);
+  });
+});
+
+describe("populate-task-graph — one spec_file precedence", () => {
+  it("prefers the graph's own spec_file, falls back to the authored one, and otherwise none", () => {
+    // The pre-lock observation, the in-lock guard and the persisted value all
+    // call this. As three hand-written `??` chains, the guard could compare
+    // against a derivation neither of the others used and pass while the
+    // prepared Requirement hashes described a different document.
+    expect(resolvedSpecFile("graph.md", "authored.md")).toBe("graph.md");
+    expect(resolvedSpecFile(null, "authored.md")).toBe("authored.md");
+    expect(resolvedSpecFile(undefined, "authored.md")).toBe("authored.md");
+    expect(resolvedSpecFile(null, undefined)).toBeNull();
+    expect(resolvedSpecFile(undefined, undefined)).toBeNull();
+  });
+
+  it("makes the in-lock guard compare like for like", () => {
+    // The guard fires exactly when the two derivations disagree, which is the
+    // only condition under which the prepared Spec Index describes another
+    // document. Same inputs must always agree; changed inputs must not.
+    expect(resolvedSpecFile("a.md", "x.md")).toBe(resolvedSpecFile("a.md", "x.md"));
+    expect(resolvedSpecFile("a.md", "x.md")).not.toBe(resolvedSpecFile("b.md", "x.md"));
+    expect(resolvedSpecFile(null, "x.md")).not.toBe(resolvedSpecFile("b.md", "x.md"));
   });
 });

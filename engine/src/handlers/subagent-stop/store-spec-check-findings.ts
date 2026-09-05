@@ -18,6 +18,7 @@ import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry"
 import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { observeWaveSpecCheckDocuments } from "../../orchestration/wave-spec-check-documents";
+import { settledSpecCheckFloor } from "../../core/wave-review-authority";
 
 export const runStoreSpecCheckFindings = async (
   stdin: string,
@@ -71,16 +72,17 @@ export const runStoreSpecCheckFindings = async (
     }
   }
   const findings = parseSpecCheckOutput(transcript ?? "");
-  let documents;
+  let observation;
   try {
     const observedState = manager.load();
-    documents = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
+    observation = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
   } catch (error) {
     return {
       kind: "error",
       message: `store-spec-check-findings: spec/plan authority is unreadable — spec-check findings NOT stored: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
+  const documents = observation.authority;
   const applied = await manager.updateAndReturn((state) => {
     const authorityProblem = specCheckAuthorityProblem(state, requestAuthority, documents);
     if (authorityProblem !== null) {
@@ -93,8 +95,9 @@ export const runStoreSpecCheckFindings = async (
       };
     }
     const wave = state.wave_review_epoch?.wave ?? findings.wave ?? state.current_wave ?? 1;
-    const resolution = transcriptFailure === null
-      ? reconcileSpecCheck(findings, wave, new Date().toISOString())
+    const captured = transcriptFailure === null
+      ? reconcileSpecCheck(findings, wave, new Date().toISOString(),
+          settledSpecCheckFloor(observation.specIndex, state, wave))
       : {
           kind: "evidence-failed" as const,
           specCheck: {
@@ -104,6 +107,7 @@ export const runStoreSpecCheckFindings = async (
             error: `${transcriptFailure} - re-run /wave-gate`,
           },
         };
+    const resolution = captured;
     const value = resolution.kind === "evidence-failed"
       ? passthroughResult(`WARNING: ${resolution.specCheck.error} — marking evidence_capture_failed`)
       : passthroughResult(
