@@ -64,6 +64,22 @@ function scalarMarker(input: string, name: string, regex: RegExp): ScalarMarker 
  * landed. A final incomplete footer remains authoritative and reconciles to
  * evidence failure; it never lends an earlier footer's counts or verdict.
  */
+/** Collect the itemized finding lines from the authoritative footer block. */
+function footerFindings(searchBlock: string): Readonly<{
+  critical: readonly string[];
+  high: readonly string[];
+  medium: readonly string[];
+}> {
+  const findings = { critical: [] as string[], high: [] as string[], medium: [] as string[] };
+  for (const line of searchBlock.split("\n")) {
+    const marker = SPEC_FINDING_MARKERS.find(({ prefix }) => line.startsWith(prefix));
+    if (marker === undefined) continue;
+    const claim = line.slice(marker.prefix.length).trim();
+    if (claim !== "" && !isNoFindingSentinel(claim)) findings[marker.target].push(claim);
+  }
+  return findings;
+}
+
 export function parseSpecCheckOutput(output: string): ParsedSpecCheckOutput {
   const finalWaveMarker = lastMatch(output, /^SPEC_CHECK_WAVE:\s*.*$/gm);
   const blockStart = finalWaveMarker?.index ?? 0;
@@ -74,18 +90,7 @@ export function parseSpecCheckOutput(output: string): ParsedSpecCheckOutput {
     : verdictMarker.index + verdictMarker[0].length;
   const searchBlock = footer.slice(0, blockEnd);
 
-  const findings = {
-    critical: [] as string[],
-    high: [] as string[],
-    medium: [] as string[],
-  };
-  for (const line of searchBlock.split("\n")) {
-    const marker = SPEC_FINDING_MARKERS.find(({ prefix }) => line.startsWith(prefix));
-    if (marker === undefined) continue;
-    const claim = line.slice(marker.prefix.length).trim();
-    if (claim !== "" && !isNoFindingSentinel(claim)) findings[marker.target].push(claim);
-  }
-  const { critical, high, medium } = findings;
+  const { critical, high, medium } = footerFindings(searchBlock);
 
   const criticalCount = scalarMarker(searchBlock, "SPEC_CHECK_CRITICAL_COUNT", /^SPEC_CHECK_CRITICAL_COUNT:\s*(\d+)\s*$/gm);
   const highCount = scalarMarker(searchBlock, "SPEC_CHECK_HIGH_COUNT", /^SPEC_CHECK_HIGH_COUNT:\s*(\d+)\s*$/gm);
@@ -210,11 +215,26 @@ const evidenceFailure = (wave: number, runAt: string, error: string): SpecCheckR
  * Reconcile marker counts with their itemized views before constructing gate
  * state. Every harness calls this function, so a transcript cannot be clean on
  * one harness and evidence-failed on another.
+ *
+ * `settledFloor` is that same promise applied to the Requirement Coverage
+ * Projection. It lives HERE, not beside one harness's call, for exactly the
+ * reason this contract already states: a floor enforced outside
+ * `reconcileSpecCheck` existed on the Claude SubagentStop hook alone. The Pi
+ * transport and the Wave Gate façade both committed the Agent's own count
+ * unchecked — and the façade's resume loop re-applied the transcript through
+ * its unfloored path precisely BECAUSE the floor had written
+ * `EVIDENCE_CAPTURE_FAILED`, erasing the refusal it had just recorded.
+ *
+ * `null` means no projection was available to floor against. That is a real
+ * state — no spec file, or a specification that no longer parses — and it is
+ * not a pass: the Agent is then on the Unprojected path, where the command
+ * requires it to say so.
  */
 export function reconcileSpecCheck(
   parsed: ParsedSpecCheckOutput,
   wave: number,
   runAt: string,
+  settledFloor: number | null = null,
 ): SpecCheckResolution {
   if (parsed.duplicateMarkers.length > 0) {
     return evidenceFailure(
@@ -245,6 +265,17 @@ export function reconcileSpecCheck(
       wave,
       runAt,
       `SPEC_CHECK_HIGH_COUNT (${highCount}) does not match HIGH: findings (${parsed.high.length}); counts must match the findings - re-run /wave-gate`,
+    );
+  }
+  // Last, so a malformed footer is reported as malformed rather than as a
+  // floor violation. A floor, never an equality: the Agent is expected to ADD
+  // findings its own reading turns up; it may never subtract the engine's.
+  if (settledFloor !== null && parsed.criticalCount < settledFloor) {
+    return evidenceFailure(
+      wave,
+      runAt,
+      `spec-check reported ${parsed.criticalCount} CRITICAL but the Requirement Coverage Projection settled ` +
+      `${settledFloor}; settled rows are decided by structure and are not the Agent's to drop - re-run /wave-gate`,
     );
   }
   const verdict = parsed.verdict === "EVIDENCE_CAPTURE_FAILED" ? "UNKNOWN" : parsed.verdict;

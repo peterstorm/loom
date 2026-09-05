@@ -32,6 +32,7 @@ import type { ReviewedWorkspaceObservation } from "./reviewed-workspace";
 import {
   projectRequirementCoverage,
   renderRequirementCoverage,
+  settledCriticalCount,
   specIndexDigest,
   specIndexPath,
   type CoverageTask,
@@ -495,8 +496,17 @@ export function waveSpecCheckScope(tasks: readonly Task[]): readonly WaveSpecChe
 const parsedAnchorHashes = (stored: Task["spec_anchor_hashes"]): ReadonlyMap<string, RecordedHash> =>
   new Map(Object.entries(stored ?? {}).map(([claim, raw]) => {
     const hash = parseSpecContentHash(raw);
+    // `raw` is typed `string` by the TaskGraph interface, but nothing on the
+    // load path parses `spec_anchor_hashes` — `migrateParsedTask` spreads the
+    // record through verbatim — so a hand-edited graph can put a number or an
+    // object here. Rendering it later did `stored.slice(0, 16)` and threw a
+    // TypeError out of a function whose contract is a stated refusal, aborting
+    // the Wave Gate. Describe whatever was actually there instead.
     const recorded: RecordedHash = hash === null
-      ? Object.freeze({ kind: "unreadable", stored: raw })
+      ? Object.freeze({
+          kind: "unreadable",
+          stored: typeof raw === "string" ? raw : `<non-string ${typeof raw}>`,
+        })
       : Object.freeze({ kind: "readable", hash });
     return [claim, recorded] as const;
   }));
@@ -754,4 +764,22 @@ export function prepareWaveReviewBatch(
       taskRuns: Object.freeze(taskRuns),
     }),
   });
+}
+
+/**
+ * The settled CRITICAL floor for one spec-check capture, or `null` when no
+ * projection was available to floor against.
+ *
+ * The single derivation every harness uses. `reconcileSpecCheck` owns applying
+ * it; this owns computing it, from the same `coverageTasks` lift the packet was
+ * built from, so the number the Agent was shown and the number the engine
+ * enforces come from one place.
+ */
+export function settledSpecCheckFloor(
+  specIndex: SpecIndexAvailability,
+  graph: TaskGraph,
+  wave: number,
+): number | null {
+  const coverage = projectRequirementCoverage(specIndex, coverageTasks(graph, wave));
+  return coverage.kind === "projected" ? settledCriticalCount(coverage) : null;
 }

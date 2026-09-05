@@ -309,7 +309,13 @@ export function claimSeverity(verdict: ClaimVerdict): ClaimSeverity {
  */
 export function settledCriticalCount(coverage: RequirementCoverage): number {
   if (coverage.kind === "unavailable") return 0;
-  const criticalRows = coverage.rows.filter((row) => claimSeverity(row.verdict) === "CRITICAL").length;
+  // A Wave that claims nothing renders one synthetic CRITICAL row, and it is
+  // the whole point of that row that the floor covers it: the defect it names —
+  // an entire Wave of work tracing to no Requirement — was otherwise the one
+  // CRITICAL an Agent could drop for free.
+  const criticalRows = coverage.rows.length === 0
+    ? 1
+    : coverage.rows.filter((row) => claimSeverity(row.verdict) === "CRITICAL").length;
   return criticalRows + coverage.unclaimed.length + coverage.unclaimedScenarios.length;
 }
 
@@ -331,7 +337,7 @@ export function claimVerdictMessage(verdict: ClaimVerdict): string {
       .with({ kind: "unverifiable" }, () =>
         `${entry.id} is structurally covered; drift is unverifiable because no hash was recorded when the claim was made`)
       .with({ kind: "unreadable-record" }, ({ stored }) =>
-        `${entry.id} is structurally covered but its recorded hash is not a value this engine could have written (stored ${JSON.stringify(stored.slice(0, 16))}) — the TaskGraph's Requirement hashes have been altered`)
+        `${entry.id} is structurally covered but its recorded hash is not a value this engine could have written (stored ${JSON.stringify(stored.slice(0, 32))}) — the TaskGraph's Requirement hashes have been altered`)
       .with({ kind: "stable" }, () => `${entry.id} is structurally covered and its text is unchanged since the claim`)
       .with({ kind: "drifted" }, ({ recorded, current }) =>
         `${entry.id} is structurally covered but its text changed since the claim (recorded ${recorded.slice(0, 12)}, now ${current.slice(0, 12)})`)
@@ -349,7 +355,11 @@ export function claimVerdictMessage(verdict: ClaimVerdict): string {
  * seam where it becomes table structure.
  */
 function cell(value: string): string {
-  return value.replace(/\|/gu, "\\|").replace(/[\r\n]+/gu, " ");
+  // Backslashes FIRST, then pipes. Escaping pipes alone turned an input that
+  // already contained a backslash-pipe into an escaped BACKSLASH followed by a
+  // LIVE delimiter — so a claim could still forge its own columns and push the
+  // engine-settled ones out of the row entirely.
+  return value.replace(/\\/gu, "\\\\").replace(/\|/gu, "\\|").replace(/[\r\n]+/gu, " ");
 }
 
 /** The Requirement's own text, for the rows where one exists. */

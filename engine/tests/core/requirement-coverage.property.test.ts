@@ -224,8 +224,14 @@ describe("Requirement Coverage Projection properties", () => {
     fc.assert(fc.property(tasksArb, (tasks) => {
       const coverage = projectRequirementCoverage(indexed, tasks);
       if (coverage.kind !== "projected") return;
-      const expected = coverage.rows.filter(({ verdict }) => claimSeverity(verdict) === "CRITICAL").length +
-        coverage.unclaimed.length + coverage.unclaimedScenarios.length;
+      // A Wave with no claims renders one synthetic CRITICAL row, and the floor
+      // counts it: that row names an entire Wave of work tracing to no
+      // Requirement, and it was the one settled finding an Agent could drop for
+      // free while the projection stated a floor of zero.
+      const criticalRows = coverage.rows.length === 0
+        ? 1
+        : coverage.rows.filter(({ verdict }) => claimSeverity(verdict) === "CRITICAL").length;
+      const expected = criticalRows + coverage.unclaimed.length + coverage.unclaimedScenarios.length;
       expect(settledCriticalCount(coverage)).toBe(expected);
       expect(settledFloorProblem(coverage, expected)).toBeNull();
       if (expected > 0) expect(settledFloorProblem(coverage, expected - 1)).not.toBeNull();

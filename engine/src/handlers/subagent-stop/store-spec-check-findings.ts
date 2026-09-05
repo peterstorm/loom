@@ -18,8 +18,7 @@ import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry"
 import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { observeWaveSpecCheckDocuments } from "../../orchestration/wave-spec-check-documents";
-import { projectRequirementCoverage, settledFloorProblem } from "../../core/requirement-coverage";
-import { coverageTasks } from "../../core/wave-review-authority";
+import { settledSpecCheckFloor } from "../../core/wave-review-authority";
 
 export const runStoreSpecCheckFindings = async (
   stdin: string,
@@ -97,7 +96,8 @@ export const runStoreSpecCheckFindings = async (
     }
     const wave = state.wave_review_epoch?.wave ?? findings.wave ?? state.current_wave ?? 1;
     const captured = transcriptFailure === null
-      ? reconcileSpecCheck(findings, wave, new Date().toISOString())
+      ? reconcileSpecCheck(findings, wave, new Date().toISOString(),
+          settledSpecCheckFloor(observation.specIndex, state, wave))
       : {
           kind: "evidence-failed" as const,
           specCheck: {
@@ -107,28 +107,7 @@ export const runStoreSpecCheckFindings = async (
             error: `${transcriptFailure} - re-run /wave-gate`,
           },
         };
-    // The engine settled verdicts from structure and rendered them into the
-    // packet; without reading them back, "not yours to overturn" was prose an
-    // Agent could ignore by summarizing instead of copying. Re-derive the
-    // projection from the same lift the packet was built from and refuse a
-    // report that fell below the floor.
-    const floorProblem = captured.kind === "evidence-failed"
-      ? null
-      : settledFloorProblem(
-          projectRequirementCoverage(observation.specIndex, coverageTasks(state, wave)),
-          captured.specCheck.critical_count,
-        );
-    const resolution = floorProblem === null
-      ? captured
-      : {
-          kind: "evidence-failed" as const,
-          specCheck: {
-            wave,
-            run_at: new Date().toISOString(),
-            verdict: "EVIDENCE_CAPTURE_FAILED" as const,
-            error: `${floorProblem} - re-run /wave-gate`,
-          },
-        };
+    const resolution = captured;
     const value = resolution.kind === "evidence-failed"
       ? passthroughResult(`WARNING: ${resolution.specCheck.error} — marking evidence_capture_failed`)
       : passthroughResult(

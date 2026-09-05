@@ -34,6 +34,7 @@ import {
   readWaveReviewContext,
   waveSpecCheckDocumentsMatch,
   waveSpecCheckScope,
+  settledSpecCheckFloor,
   type WaveRequestBatch,
   type WaveReviewContextAuthority,
   type WaveReviewContextRead,
@@ -1402,14 +1403,14 @@ export async function applyWaveFacadeSubmission(
       if (context.specCheckDocuments === null) {
         return { ok: false, message: "Wave spec-check request predates byte-bound document authority" };
       }
-      const currentDocuments = observeWaveSpecCheckDocuments(
+      const currentObservation = observeWaveSpecCheckDocuments(
         context.specCheckDocuments.spec.path,
         context.specCheckDocuments.plan.path,
-      ).authority;
+      );
+      const currentDocuments = currentObservation.authority;
       const parsed = parseSpecCheckOutput(raw);
       const wave = context.wave;
       const batchEpoch = context.batchEpoch;
-      const resolution = reconcileSpecCheck(parsed, wave, new Date().toISOString());
       await manager.update((locked) => {
         const epoch = locked.wave_review_epoch;
         if (locked.current_wave !== wave || locked.active_wave_gate?.runId !== authority.runId ||
@@ -1424,6 +1425,14 @@ export async function applyWaveFacadeSubmission(
           const expected = `${locked.current_wave}/${locked.active_wave_gate?.runId ?? "none"}/${locked.active_wave_gate?.authorityDigest ?? "none"}/${epoch?.runId ?? "none"}/${epoch?.wave ?? "none"}/${(epoch?.batchEpoch ?? "none").slice(0, 12)}`;
           throw new Error(`Wave spec-check request ${authority.requestId} does not belong to the exact current review epoch (expected current_wave/runId/digest/epoch-runId/epoch-wave/epoch-batch: ${expected}; request wave ${wave}, digest ${context.authorityDigest}, runId ${authority.runId}, batch ${batchEpoch.slice(0, 12)})`);
         }
+        // Floored inside the lock against the locked graph, through the same
+        // `reconcileSpecCheck` every other harness calls. Resolving before the
+        // lock left this path unfloored, and the resume loop re-applies a
+        // capture exactly when spec_check.verdict is EVIDENCE_CAPTURE_FAILED —
+        // which is what a floor violation writes — so an unfloored facade
+        // silently overwrote the refusal the hook had just recorded.
+        const resolution = reconcileSpecCheck(parsed, wave, new Date().toISOString(),
+          settledSpecCheckFloor(currentObservation.specIndex, locked, wave));
         return {
           ...locked,
           spec_check: resolution.specCheck,

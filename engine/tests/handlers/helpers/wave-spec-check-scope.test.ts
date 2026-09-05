@@ -780,3 +780,67 @@ describe("wave-review-authority spec-check scope decoding", () => {
     expect(handleWaveReviewContext([repeated], repeated.digest).kind).toBe("loaded");
   });
 });
+
+describe("a non-string recorded hash is described, not crashed on", () => {
+  it("renders a stated verdict instead of throwing out of prepareWaveReviewBatch", () => {
+    // `spec_anchor_hashes` is typed Record<string, string> but nothing on the
+    // load path parses it, so a hand-edited graph can put a number there. The
+    // renderer then did `stored.slice(0, 16)` and threw a TypeError out of a
+    // function whose contract is a stated refusal, aborting the Wave Gate.
+    const spec = `# Feature: Altered
+
+## User Scenarios
+
+### US1: [P1] Describe an altered hash
+
+**Acceptance Scenarios:**
+- AS-001: Given a non-string hash, When the gate runs, Then it is described
+
+## Functional Requirements
+
+- FR-001: System MUST describe an unreadable recorded hash
+
+## Out of Scope
+
+- OOS-001: Symbol-level source indexing
+
+## Appendix: Glossary
+
+| Term | Definition |
+|------|------------|
+| Spec Index | A deterministic projection of specification entries |
+`;
+    const root = mkdtempSync(join(tmpdir(), "loom-nonstring-hash-"));
+    cleanup.push(root);
+    const specPath = join(root, "spec.md");
+    writeFileSync(specPath, spec, "utf8");
+    const parsed = parseTaskGraph({
+      spec_trace_version: 2, current_phase: "execute", current_wave: 1, phase_artifacts: {},
+      skipped_phases: [], spec_file: specPath, plan_file: null, wave_gates: {},
+      tasks: [taskFixture({
+        id: "T1", description: "claims FR-001", agent: "code-implementer-agent", wave: 1,
+        status: "pending", depends_on: [], spec_anchors: ["FR-001"], spec_contributions: [],
+        file_list: ["src/a.ts"], files_modified: ["src/a.ts"],
+        spec_anchor_hashes: { "FR-001": 42 } as unknown as Readonly<Record<string, string>>,
+      })],
+    });
+    if (!parsed.ok) throw new Error("graph fixture must parse");
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-nonstring-run-"));
+    cleanup.push(runsRoot);
+    const created = createRunDirectory(runsRoot, "run.nonstring");
+    if (!created.ok) throw new Error(created.error.message);
+    const batch = waveRequests(created.value, {
+      schemaVersion: 1, kind: "wave-gate", input: { wave: 1 }, taskIds: ["T1"],
+      authorityDigest: "a".repeat(64),
+    }, parsed.value, 1);
+    const specRequest = batch.requests.find(({ authority }) =>
+      (authority as AgentRequestAuthority).role === "spec-check-invoker");
+    const digest = (specRequest!.authority as AgentRequestAuthority).contextDigest;
+    const packet = batch.packets.find((candidate) => candidate.digest === digest);
+    const section = packet?.fixedContext.find(({ label }) => label === "requirement-coverage");
+    if (section === undefined) throw new Error("spec-check packet must carry a requirement-coverage section");
+    const rendered = new TextDecoder("utf8", { fatal: true }).decode(Uint8Array.from(section.bytes));
+    expect(rendered).toContain("have been altered");
+    expect(rendered).toContain("non-string number");
+  });
+});
