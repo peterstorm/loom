@@ -29,8 +29,8 @@ Copy and populate this template for new specifications.
 **Why this priority:** {justification for P1/P2/P3}
 
 **Acceptance Scenarios:**
-- Given {precondition}, When {action}, Then {expected result}
-- Given {edge case}, When {action}, Then {error handling}
+- AS-001: Given {precondition}, When {action}, Then {expected result}
+- AS-002: Given {edge case}, When {action}, Then {error handling}
 
 ### US2: [P2] {Scenario Title}
 
@@ -41,7 +41,7 @@ Copy and populate this template for new specifications.
 **Why this priority:** {justification}
 
 **Acceptance Scenarios:**
-- Given {precondition}, When {action}, Then {expected result}
+- AS-003: Given {precondition}, When {action}, Then {expected result}
 
 ### US3: [P3] {Scenario Title}
 ...
@@ -101,10 +101,10 @@ Measurable outcomes that define "done":
 
 Explicitly NOT part of this feature:
 
-- {Related feature to defer}
-- {Edge case to ignore}
-- {Integration to skip}
-- {User type not supported}
+- OOS-001: {Related feature to defer}
+- OOS-002: {Edge case to ignore}
+- OOS-003: {Integration to skip}
+- OOS-004: {User type not supported}
 
 ---
 
@@ -166,7 +166,7 @@ Known risks and mitigation thoughts (not solutions):
 **Bad:**
 > As a user, I want the system to persist cart state to Redis with 24h TTL
 
-**Acceptance scenarios** use Given/When/Then:
+Every acceptance scenario uses one unique canonical `AS-NNN:` ID followed by Given/When/Then:
 - **Given** - precondition/context
 - **When** - action taken
 - **Then** - observable outcome
@@ -208,7 +208,7 @@ Cover happy path + 2-3 edge cases per scenario.
 
 **Why critical:** Prevents scope creep. When someone asks "can we also add X?", point to Out of Scope.
 
-Include:
+Give every exclusion a unique canonical `OOS-NNN:` ID. Include:
 - Related features for future specs
 - Edge cases you're consciously ignoring
 - User types not supported in v1
@@ -291,7 +291,7 @@ As a user, I want to log in.
 As a returning user, I want to log in with my credentials so that I can access my account.
 
 **Acceptance Scenarios:**
-- Given valid credentials, When I submit, Then I'm redirected to dashboard
-- Given invalid password, When I submit, Then error shown, account not locked
-- Given 5 failed attempts, When I try again, Then account locked for 15 minutes
+- AS-001: Given valid credentials, When I submit, Then I'm redirected to dashboard
+- AS-002: Given invalid password, When I submit, Then error shown, account not locked
+- AS-003: Given 5 failed attempts, When I try again, Then account locked for 15 minutes
 ```
