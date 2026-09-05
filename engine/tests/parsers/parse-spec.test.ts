@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import * as parserBarrel from "../../src/parsers";
-import { parseSpec, specContentHash } from "../../src/parsers/parse-spec";
+import {
+  parseSpec,
+  specContentHash,
+  specParseErrorMessage,
+  type SpecParseError,
+} from "../../src/parsers/parse-spec";
 
 const validSpec = `# Feature: Structural spec
 
@@ -34,6 +39,31 @@ Explicitly NOT part of this feature:
 | Spec Index | A deterministic projection of specification entries |
 | Content Hash | A SHA-256 digest of canonical entry content |
 `;
+
+/** The operator-facing surface, rendered through the one total renderer — used
+ * only where the prose itself is the contract under test. */
+const messagesOf = (errors: readonly SpecParseError[]): string =>
+  errors.map(specParseErrorMessage).join("\n");
+
+/** Document-absolute line of a source line, so typed line assertions track the
+ * document instead of hard-coding offsets that drift when it is edited. */
+const lineIn = (source: string, needle: string): number =>
+  source.split("\n").findIndex((line) => line.startsWith(needle)) + 1;
+
+const lineOf = (needle: string): number => lineIn(validSpec, needle);
+
+const FR_002_LINE = lineOf("- FR-002:");
+const AS_002_LINE = lineOf("- AS-002:");
+const OOS_002_LINE = lineOf("- OOS-002:");
+const SPEC_INDEX_ROW_LINE = lineOf("| Spec Index |");
+const CONTENT_HASH_ROW_LINE = lineOf("| Content Hash |");
+
+/** A reserved-family ID parked in a non-required section — the document-wide
+ * net's subject, hoisted so its own line number can be derived from it. */
+const misplacedIdSpec = validSpec.replace(
+  "## Appendix: Glossary",
+  "## Open Questions\n\n1. Is FR-003 needed?\n- FR-009: A misplaced requirement\n\n## Appendix: Glossary",
+);
 
 describe("parseSpec", () => {
   it("returns immutable FR, acceptance-scenario, out-of-scope, and glossary entries with hashes", () => {
@@ -186,7 +216,12 @@ describe("parseSpec", () => {
     const parsed = parseSpec(stray);
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("Functional Requirements");
+      // The exact typed error, not a substring of the joined prose: the whole
+      // list is pinned, so a near miss that starts producing a second — or a
+      // different — diagnostic is caught rather than absorbed by a `toContain`.
+      expect(parsed.errors).toEqual([
+        { kind: "entry-not-bulleted", section: "Functional Requirements", line: FR_002_LINE },
+      ]);
     }
   });
 
@@ -214,7 +249,9 @@ describe("parseSpec", () => {
     // ordered markers, mixed runs) — must fail closed, never vanish.
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("Functional Requirements");
+      expect(parsed.errors).toEqual([
+        { kind: "entry-not-bulleted", section: "Functional Requirements", line: FR_002_LINE },
+      ]);
     }
   });
 
@@ -229,7 +266,7 @@ describe("parseSpec", () => {
     // mint it or let it vanish.
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("outside a parsed section");
+      expect(messagesOf(parsed.errors)).toContain("outside a parsed section");
     }
   });
 
@@ -245,7 +282,7 @@ describe("parseSpec", () => {
     // check the ID vanishes with ok:true — AS-999 gone, no diagnostic.
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("must be a \"- ID: content\" bullet");
+      expect(messagesOf(parsed.errors)).toContain("must be a \"- ID: content\" bullet");
     }
   });
 
@@ -260,7 +297,7 @@ describe("parseSpec", () => {
     // missing-block error. The structural-ID diagnostic must fire either way.
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("must be a \"- ID: content\" bullet");
+      expect(messagesOf(parsed.errors)).toContain("must be a \"- ID: content\" bullet");
     }
   });
 
@@ -272,7 +309,7 @@ describe("parseSpec", () => {
     const parsed = parseSpec(dup);
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("must be a \"- ID: content\" bullet");
+      expect(messagesOf(parsed.errors)).toContain("must be a \"- ID: content\" bullet");
     }
   });
 
@@ -287,7 +324,7 @@ describe("parseSpec", () => {
     // discriminates the hole rather than passing against it.
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("Out of Scope");
+      expect(messagesOf(parsed.errors)).toContain("Out of Scope");
     }
   });
 
@@ -301,7 +338,7 @@ describe("parseSpec", () => {
     // prefix; minting FR-002's sibling vanishes with ok:true.
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("Functional Requirements");
+      expect(messagesOf(parsed.errors)).toContain("Functional Requirements");
     }
   });
 
@@ -310,6 +347,11 @@ describe("parseSpec", () => {
     ["hyphen-space scenario ID", "AS- 002: Given a typo, When parsed, Then it fails closed"],
     ["asterisk-prefixed", "* AS-999: Given a typo, When parsed, Then it fails closed"],
     ["spaced nested blockquote", "> > AS-999: Given a typo, When parsed, Then it fails closed"],
+    // The bold-asterisk pair is the in-block twin of the Functional
+    // Requirements rows above; the acceptance-block matrix had no bold-asterisk
+    // case, so an in-block `**`/`***` stray was unpinned here.
+    ["bold-asterisk", "** AS-999: Given a typo, When parsed, Then it fails closed"],
+    ["bold-italic asterisks", "*** AS-999: Given a typo, When parsed, Then it fails closed"],
   ])("fails closed for a bare %s variant in an acceptance block", (_kind, strayLine) => {
     const stray = validSpec.replace(
       "- AS-002: Given duplicate IDs, When it is parsed, Then parsing fails closed",
@@ -318,7 +360,9 @@ describe("parseSpec", () => {
     const parsed = parseSpec(stray);
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("Acceptance Scenarios");
+      expect(parsed.errors).toEqual([
+        { kind: "scenario-not-bulleted", line: AS_002_LINE, insideBlock: true },
+      ]);
     }
   });
 
@@ -339,7 +383,7 @@ describe("parseSpec", () => {
     const parsed = parseSpec(emptySecond);
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("contains no scenario bullets");
+      expect(messagesOf(parsed.errors)).toContain("contains no scenario bullets");
     }
   });
 
@@ -351,7 +395,7 @@ describe("parseSpec", () => {
     const parsed = parseSpec(beforeBlock);
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("under an **Acceptance Scenarios:** block");
+      expect(messagesOf(parsed.errors)).toContain("under an **Acceptance Scenarios:** block");
     }
   });
 
@@ -373,8 +417,8 @@ describe("parseSpec", () => {
     const parsed = parseSpec(markdown);
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("Functional Requirements line 5 must be a \"- ID: content\" bullet");
-      expect(parsed.errors.join("\n")).toContain("Functional Requirements must contain at least one entry");
+      expect(messagesOf(parsed.errors)).toContain("Functional Requirements line 5 must be a \"- ID: content\" bullet");
+      expect(messagesOf(parsed.errors)).toContain("Functional Requirements must contain at least one entry");
     }
   });
 
@@ -383,53 +427,164 @@ describe("parseSpec", () => {
     const parsed = parseSpec(markdown);
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("Functional Requirements line 5 must use a canonical Functional Requirements ID");
+      expect(messagesOf(parsed.errors)).toContain("Functional Requirements line 5 must use a canonical Functional Requirements ID");
     }
   });
 
-  it.each([
-    ["missing section", validSpec.replace("## Out of Scope", "## Deferred"), "missing required section ## Out of Scope"],
-    ["duplicate section", `${validSpec}\n## Out of Scope\n\n- OOS-003: duplicate section\n`, "must appear exactly once"],
-    ["duplicate FR", validSpec.replace("FR-002", "FR-001"), "duplicate ID FR-001"],
-    ["duplicate AS", validSpec.replace("- AS-002:", "- AS-001:"), "duplicate ID AS-001"],
-    ["duplicate OOS", validSpec.replace("- OOS-002:", "- OOS-001:"), "duplicate ID OOS-001"],
-    ["duplicate glossary term", validSpec.replace("| Content Hash |", "| Spec Index |"), "duplicate term"],
-    ["unidentified scenario", validSpec.replace("- AS-002:", "- Given"), "canonical Acceptance Scenarios ID"],
-    ["unidentified exclusion", validSpec.replace("- OOS-002:", "- Deferred:"), "canonical Out of Scope ID"],
+  // Every failure mode is pinned as a whole typed error value, payload
+  // included: a diagnostic that is reordered, merged, or reworded can no longer
+  // satisfy a substring match while the structured failure quietly changes.
+  it.each<[string, string, SpecParseError]>([
+    ["missing section", validSpec.replace("## Out of Scope", "## Deferred"),
+      { kind: "missing-section", section: "Out of Scope" }],
+    ["duplicate section", `${validSpec}\n## Out of Scope\n\n- OOS-003: duplicate section\n`,
+      { kind: "repeated-section", section: "Out of Scope" }],
+    ["duplicate FR", validSpec.replace("FR-002", "FR-001"),
+      { kind: "duplicate-entry-id", section: "Functional Requirements", id: "FR-001" }],
+    ["duplicate AS", validSpec.replace("- AS-002:", "- AS-001:"),
+      { kind: "duplicate-entry-id", section: "Acceptance Scenarios", id: "AS-001" }],
+    ["duplicate OOS", validSpec.replace("- OOS-002:", "- OOS-001:"),
+      { kind: "duplicate-entry-id", section: "Out of Scope", id: "OOS-001" }],
+    ["duplicate glossary term", validSpec.replace("| Content Hash |", "| Spec Index |"),
+      { kind: "duplicate-glossary-term", term: "spec index" }],
+    ["unidentified scenario", validSpec.replace("- AS-002:", "- Given"),
+      { kind: "entry-not-canonical", section: "Acceptance Scenarios", line: AS_002_LINE }],
+    ["unidentified exclusion", validSpec.replace("- OOS-002:", "- Deferred:"),
+      { kind: "entry-not-canonical", section: "Out of Scope", line: OOS_002_LINE }],
     ["bullet-less requirement ID", validSpec.replace(
       "- FR-002: System MUST hash requirement content deterministically",
       "FR-002: System MUST hash requirement content deterministically",
-    ), "must be a \"- ID: content\" bullet"],
-    ["asterisk-bulleted requirement ID", validSpec.replace("- FR-002:", "* FR-002:"), "must be a \"- ID: content\" bullet"],
-    ["bold-asterisk requirement ID", validSpec.replace("- FR-002:", "** FR-002:"), "must be a \"- ID: content\" bullet"],
-    ["ordered-list requirement ID", validSpec.replace("- FR-002:", "1. FR-002:"), "must be a \"- ID: content\" bullet"],
-    ["bullet-less scenario ID in an acceptance block", validSpec.replace("- AS-002:", "AS-002:"), "must be a \"- ID: content\" bullet"],
+    ), { kind: "entry-not-bulleted", section: "Functional Requirements", line: FR_002_LINE }],
+    ["asterisk-bulleted requirement ID", validSpec.replace("- FR-002:", "* FR-002:"),
+      { kind: "entry-not-bulleted", section: "Functional Requirements", line: FR_002_LINE }],
+    ["bold-asterisk requirement ID", validSpec.replace("- FR-002:", "** FR-002:"),
+      { kind: "entry-not-bulleted", section: "Functional Requirements", line: FR_002_LINE }],
+    ["ordered-list requirement ID", validSpec.replace("- FR-002:", "1. FR-002:"),
+      { kind: "entry-not-bulleted", section: "Functional Requirements", line: FR_002_LINE }],
+    ["bullet-less scenario ID in an acceptance block", validSpec.replace("- AS-002:", "AS-002:"),
+      { kind: "scenario-not-bulleted", line: AS_002_LINE, insideBlock: true }],
     ["reserved glossary header term", validSpec.replace(
       "| Content Hash | A SHA-256 digest of canonical entry content |",
       "| Term | A real definition |",
-    ), "reserved header term"],
-    ["empty Functional Requirements", validSpec.replace(/- FR-\d{3}:[^\n]*\n/gu, ""), "must contain at least one entry"],
-    ["empty Out of Scope", validSpec.replace(/- OOS-\d{3}:[^\n]*\n/gu, ""), "must contain at least one entry"],
-    ["empty glossary", validSpec.replace(/\| (Spec Index|Content Hash) \|[^\n]*\n/gu, ""), "Glossary must contain at least one term"],
-    ["no Acceptance Scenarios block", validSpec.replace("**Acceptance Scenarios:**", "**Scenarios:**"), "must contain at least one **Acceptance Scenarios:** block"],
+    ), { kind: "glossary-reserved-header-term", line: CONTENT_HASH_ROW_LINE, term: "Term" }],
+    ["empty Functional Requirements", validSpec.replace(/- FR-\d{3}:[^\n]*\n/gu, ""),
+      { kind: "section-has-no-entries", section: "Functional Requirements" }],
+    ["empty Out of Scope", validSpec.replace(/- OOS-\d{3}:[^\n]*\n/gu, ""),
+      { kind: "section-has-no-entries", section: "Out of Scope" }],
+    ["empty glossary", validSpec.replace(/\| (Spec Index|Content Hash) \|[^\n]*\n/gu, ""),
+      { kind: "glossary-has-no-terms" }],
+    ["no Acceptance Scenarios block", validSpec.replace("**Acceptance Scenarios:**", "**Scenarios:**"),
+      { kind: "no-acceptance-block" }],
     ["glossary row with three cells", validSpec.replace(
       "| Spec Index | A deterministic projection of specification entries |",
       "| Spec Index | A deterministic projection | with extra |",
-    ), "exactly Term and Definition columns"],
+    ), { kind: "glossary-column-count", line: SPEC_INDEX_ROW_LINE }],
     ["glossary row with an empty definition", validSpec.replace(
       "| Content Hash | A SHA-256 digest of canonical entry content |",
       "| Content Hash |  |",
-    ), "requires a non-empty term and definition"],
-    ["case-insensitive duplicate glossary term", validSpec.replace("| Content Hash |", "| spec index |"), "duplicate term"],
-    ["misplaced reserved-family ID", validSpec.replace(
-      "## Appendix: Glossary",
-      "## Open Questions\n\n1. Is FR-003 needed?\n- FR-009: A misplaced requirement\n\n## Appendix: Glossary",
-    ), "outside a parsed section"],
-    ["unterminated fence", `${validSpec}\n\`\`\`markdown\n`, "unterminated code fence"],
-  ])("fails closed for %s", (_label, markdown, diagnostic) => {
+    ), { kind: "glossary-cell-empty", line: CONTENT_HASH_ROW_LINE }],
+    ["case-insensitive duplicate glossary term", validSpec.replace("| Content Hash |", "| spec index |"),
+      { kind: "duplicate-glossary-term", term: "spec index" }],
+    ["misplaced reserved-family ID", misplacedIdSpec,
+      { kind: "id-outside-section", line: lineIn(misplacedIdSpec, "- FR-009:") }],
+    ["unterminated fence", `${validSpec}\n\`\`\`markdown\n`, { kind: "unterminated-fence" }],
+  ])("fails closed for %s", (_label, markdown, expected) => {
     const parsed = parseSpec(markdown);
     expect(parsed).toMatchObject({ ok: false });
-    if (!parsed.ok) expect(parsed.errors.join("\n")).toContain(diagnostic);
+    if (!parsed.ok) expect(parsed.errors).toContainEqual(expected);
+  });
+
+  it("emits and renders every failure reason in the union", () => {
+    // specParseErrorMessage is exhaustive at the type level, but exhaustiveness
+    // over the union is not reachability from the parser. These documents
+    // provoke every kind the parser can emit and prove each renders to real
+    // operator text — so a new failure reason cannot be added without both a
+    // document that reaches it and a message an operator can read.
+    const documents = [
+      validSpec.replace("## Out of Scope", "## Deferred"),
+      `${validSpec}\n## Out of Scope\n\n- OOS-003: duplicate section\n`,
+      validSpec.replace("- FR-002:", "** FR-002:"),
+      validSpec.replace("- OOS-002:", "- Deferred:"),
+      validSpec.replace("- AS-002:", "- AS-001:"),
+      validSpec.replace("- AS-002:", "AS-002:"),
+      validSpec.replace("## Functional Requirements", "### US2: [P2] Empty\n\n**Acceptance Scenarios:**\n\n## Functional Requirements"),
+      validSpec.replace("| Content Hash |", "| Spec Index |"),
+      validSpec.replace(
+        "| Spec Index | A deterministic projection of specification entries |",
+        "| Spec Index | A deterministic projection of specification entries |\nSome stray prose row",
+      ),
+      validSpec.replace(
+        "| Spec Index | A deterministic projection of specification entries |",
+        "| Spec Index | A deterministic projection | with extra |",
+      ),
+      validSpec.replace("| Content Hash | A SHA-256 digest of canonical entry content |", "| Term | A real definition |"),
+      validSpec.replace("| Content Hash | A SHA-256 digest of canonical entry content |", "| Content Hash |  |"),
+      misplacedIdSpec,
+      `${validSpec}\n\`\`\`markdown\n`,
+      "",
+    ];
+    const kinds = new Set<SpecParseError["kind"]>();
+    for (const markdown of documents) {
+      const parsed = parseSpec(markdown);
+      expect(parsed.ok).toBe(false);
+      if (parsed.ok) continue;
+      for (const error of parsed.errors) {
+        kinds.add(error.kind);
+        expect(specParseErrorMessage(error).trim().length).toBeGreaterThan(0);
+      }
+    }
+    expect([...kinds].sort()).toEqual([
+      "acceptance-block-has-no-bullets",
+      "duplicate-entry-id",
+      "duplicate-glossary-term",
+      "entry-not-bulleted",
+      "entry-not-canonical",
+      "glossary-cell-empty",
+      "glossary-column-count",
+      "glossary-has-no-terms",
+      "glossary-reserved-header-term",
+      "glossary-row-expected",
+      "id-outside-section",
+      "missing-section",
+      "no-acceptance-block",
+      "repeated-section",
+      "scenario-not-bulleted",
+      "section-has-no-entries",
+      "unterminated-fence",
+    ]);
+  });
+
+  it("pins the exact ordered error list for a determinate document", () => {
+    const markdown = ["# Feature", "", "## Functional Requirements", "", "FR-002: System MUST be a bullet", ""].join("\n");
+    const parsed = parseSpec(markdown);
+    expect(parsed).toMatchObject({ ok: false });
+    if (parsed.ok) return;
+    // Exact equality, in order: the strongest available regression pin. A
+    // reordering, a merge, an extra diagnostic, or a dropped one changes this
+    // list; a reworded message does not, because identity now lives in the
+    // data. The prose surface is pinned separately, below.
+    expect(parsed.errors).toEqual([
+      { kind: "missing-section", section: "User Scenarios" },
+      { kind: "missing-section", section: "Out of Scope" },
+      { kind: "missing-section", section: "Appendix: Glossary" },
+      { kind: "entry-not-bulleted", section: "Functional Requirements", line: 5 },
+      { kind: "section-has-no-entries", section: "Functional Requirements" },
+      { kind: "no-acceptance-block" },
+      { kind: "section-has-no-entries", section: "Acceptance Scenarios" },
+      { kind: "section-has-no-entries", section: "Out of Scope" },
+      { kind: "glossary-has-no-terms" },
+    ]);
+    expect(messagesOf(parsed.errors)).toBe([
+      "missing required section ## User Scenarios",
+      "missing required section ## Out of Scope",
+      "missing required section ## Appendix: Glossary",
+      "Functional Requirements line 5 must be a \"- ID: content\" bullet",
+      "Functional Requirements must contain at least one entry",
+      "User Scenarios must contain at least one **Acceptance Scenarios:** block",
+      "Acceptance Scenarios must contain at least one entry",
+      "Out of Scope must contain at least one entry",
+      "Glossary must contain at least one term",
+    ].join("\n"));
   });
 
   it("treats a backtick fence whose info string contains backticks as paragraph text, never a fence opener", () => {
@@ -445,7 +600,7 @@ describe("parseSpec", () => {
     // the info-string line blanks FR-002 and returns ok:true.
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("unterminated code fence");
+      expect(messagesOf(parsed.errors)).toContain("unterminated code fence");
     }
   });
 
@@ -474,7 +629,7 @@ describe("parseSpec", () => {
     // sub-heading does, so the empty first block must error, not reset.
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("contains no scenario bullets");
+      expect(messagesOf(parsed.errors)).toContain("contains no scenario bullets");
     }
   });
 
@@ -486,7 +641,7 @@ describe("parseSpec", () => {
     const parsed = parseSpec(lazy);
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("outside a parsed section");
+      expect(messagesOf(parsed.errors)).toContain("outside a parsed section");
     }
   });
 
@@ -593,7 +748,7 @@ describe("parseSpec", () => {
     // closed, never be collected.
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("under an **Acceptance Scenarios:** block");
+      expect(messagesOf(parsed.errors)).toContain("under an **Acceptance Scenarios:** block");
     }
   });
 
@@ -605,7 +760,7 @@ describe("parseSpec", () => {
     const parsed = parseSpec(emptyBreak);
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("contains no scenario bullets");
+      expect(messagesOf(parsed.errors)).toContain("contains no scenario bullets");
     }
   });
 
@@ -617,7 +772,7 @@ describe("parseSpec", () => {
     const parsed = parseSpec(prose);
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("must be a \"| Term | Definition\" row");
+      expect(messagesOf(parsed.errors)).toContain("must be a \"| Term | Definition\" row");
     }
   });
 
@@ -629,7 +784,7 @@ describe("parseSpec", () => {
     const parsed = parseSpec(preamble);
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("outside a parsed section");
+      expect(messagesOf(parsed.errors)).toContain("outside a parsed section");
     }
   });
 
@@ -740,7 +895,7 @@ describe("parseSpec", () => {
     // unterminated fence fails the parse closed.
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
-      expect(parsed.errors.join("\n")).toContain("unterminated code fence");
+      expect(messagesOf(parsed.errors)).toContain("unterminated code fence");
     }
   });
 });
