@@ -36,11 +36,18 @@ export type SpecGlossaryEntry = Readonly<{
   contentHash: SpecContentHash;
 }> & HashedByConstruction;
 
+export type NonEmpty<T> = readonly [T, ...T[]];
+
+/**
+ * A successful projection. Every collection is non-empty because the parser
+ * proves it — an empty section is itself a parse failure — so the guarantee
+ * travels in the type instead of being re-checked by each consumer.
+ */
 export type ParsedSpec = Readonly<{
-  frs: readonly SpecEntry<"FR">[];
-  scenarios: readonly SpecEntry<"AS">[];
-  oos: readonly SpecEntry<"OOS">[];
-  glossary: readonly SpecGlossaryEntry[];
+  frs: NonEmpty<SpecEntry<"FR">>;
+  scenarios: NonEmpty<SpecEntry<"AS">>;
+  oos: NonEmpty<SpecEntry<"OOS">>;
+  glossary: NonEmpty<SpecGlossaryEntry>;
 }>;
 
 const REQUIRED_SECTIONS = ["User Scenarios", "Functional Requirements", "Out of Scope", "Appendix: Glossary"] as const;
@@ -79,7 +86,7 @@ export type SpecParseError =
 
 export type SpecParseResult =
   | Readonly<{ ok: true; value: ParsedSpec }>
-  | Readonly<{ ok: false; errors: readonly [SpecParseError, ...SpecParseError[]] }>;
+  | Readonly<{ ok: false; errors: NonEmpty<SpecParseError> }>;
 
 /**
  * The total renderer for every `SpecParseError`. Exhaustive by construction: a
@@ -340,11 +347,13 @@ function sectionLines(section: MarkdownSection | undefined): readonly SourceLine
   return sourceLines(section?.body ?? "", section?.startLine ?? 1);
 }
 
+/** Returns the family's entries, or `null` after recording why none exist. An
+ * empty section is a parse failure, so the success shape cannot represent it. */
 function parseEntries<F extends SpecFamily>(
   family: F,
   lines: readonly SourceLine[],
   errors: SpecParseError[],
-): readonly SpecEntry<F>[] {
+): NonEmpty<SpecEntry<F>> | null {
   const { section, pattern } = ENTRY_GRAMMARS[family];
   const entries: SpecEntry<F>[] = [];
   for (const { raw, documentLine } of lines) {
@@ -366,11 +375,15 @@ function parseEntries<F extends SpecFamily>(
     }
     entries.push(specEntry<F>(matched[1], matched[2]));
   }
-  if (entries.length === 0) errors.push(Object.freeze({ kind: "section-has-no-entries", section }));
+  if (entries.length === 0) {
+    errors.push(Object.freeze({ kind: "section-has-no-entries", section }));
+    return null;
+  }
   for (const id of duplicates(entries.map(({ id }) => id))) {
     errors.push(Object.freeze({ kind: "duplicate-entry-id", section, id }));
   }
-  return Object.freeze(entries);
+  const [head, ...tail] = entries;
+  return Object.freeze([head, ...tail]);
 }
 
 /**
@@ -423,7 +436,8 @@ function acceptanceScenarioLines(lines: readonly SourceLine[], errors: SpecParse
   return Object.freeze(scenarios);
 }
 
-function parseGlossary(lines: readonly SourceLine[], errors: SpecParseError[]): readonly SpecGlossaryEntry[] {
+/** Returns the glossary terms, or `null` after recording that there are none. */
+function parseGlossary(lines: readonly SourceLine[], errors: SpecParseError[]): NonEmpty<SpecGlossaryEntry> | null {
   const entries: SpecGlossaryEntry[] = [];
   // Locale-pinned so host locale cannot change dedup: en-US, always.
   const lower = (value: string): string => value.toLocaleLowerCase("en-US");
@@ -461,11 +475,15 @@ function parseGlossary(lines: readonly SourceLine[], errors: SpecParseError[]): 
     }
     entries.push(glossaryEntry(term, definition));
   }
-  if (entries.length === 0) errors.push(Object.freeze({ kind: "glossary-has-no-terms" }));
+  if (entries.length === 0) {
+    errors.push(Object.freeze({ kind: "glossary-has-no-terms" }));
+    return null;
+  }
   for (const term of duplicates(entries.map(({ term }) => lower(term)))) {
     errors.push(Object.freeze({ kind: "duplicate-glossary-term", term }));
   }
-  return Object.freeze(entries);
+  const [head, ...tail] = entries;
+  return Object.freeze([head, ...tail]);
 }
 
 /** Parse one canonical specification into deterministic structural join inputs. */
@@ -498,10 +516,14 @@ export function parseSpec(markdown: string): SpecParseResult {
     }
   }
 
-  const [head, ...tail] = errors;
-  if (head === undefined) {
-    return Object.freeze({ ok: true, value: Object.freeze({ frs, scenarios, oos, glossary }) });
+  // A `null` collection and a recorded diagnostic are the same condition: each
+  // collector records its own emptiness before returning `null`, so this guard
+  // never reports a failure without a reason, and the success branch carries
+  // four proven-non-empty collections.
+  if (frs === null || scenarios === null || oos === null || glossary === null || errors.length > 0) {
+    const [head, ...tail] = errors;
+    const recorded: NonEmpty<SpecParseError> = Object.freeze([head, ...tail]);
+    return Object.freeze({ ok: false, errors: recorded });
   }
-  const nonEmptyErrors: readonly [SpecParseError, ...SpecParseError[]] = Object.freeze([head, ...tail]);
-  return Object.freeze({ ok: false, errors: nonEmptyErrors });
+  return Object.freeze({ ok: true, value: Object.freeze({ frs, scenarios, oos, glossary }) });
 }

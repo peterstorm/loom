@@ -5,6 +5,7 @@ import {
   parseSpec,
   specContentHash,
   specParseErrorMessage,
+  type ParsedSpec,
   type SpecParseError,
 } from "../../src/parsers/parse-spec";
 
@@ -91,6 +92,32 @@ describe("parseSpec", () => {
       expect(Object.isFrozen(collection)).toBe(true);
     }
     expect(Object.isFrozen(parsed.value)).toBe(true);
+  });
+
+  it("makes an empty projection and a swapped family unrepresentable", () => {
+    // Compile-time assertions, checked by `tsc` over `tests/`: each expected-
+    // error directive below fails the build if its error stops occurring. They
+    // pin what the runtime cannot observe — that the guarantees the parser
+    // proves (every collection non-empty, each family distinct) live in the
+    // type, so no consumer re-checks them and no change can quietly drop them.
+    const parsed = parseSpec(validSpec);
+    expect(parsed).toMatchObject({ ok: true });
+    if (!parsed.ok) return;
+
+    // @ts-expect-error — an empty array is not a NonEmpty projection.
+    const empty: ParsedSpec["frs"] = [];
+    expect(empty).toEqual([]);
+
+    // @ts-expect-error — a Functional Requirements collection is not an
+    // Acceptance Scenarios collection, even though both hold SpecEntry values.
+    const swapped: ParsedSpec["scenarios"] = parsed.value.frs;
+    expect(swapped.map(({ id }) => id)).toEqual(["FR-001", "FR-002"]);
+
+    // The head of every collection is reachable without an emptiness check.
+    expect(parsed.value.frs[0].id).toBe("FR-001");
+    expect(parsed.value.scenarios[0].id).toBe("AS-001");
+    expect(parsed.value.oos[0].id).toBe("OOS-001");
+    expect(parsed.value.glossary[0].term).toBe("Spec Index");
   });
 
   it("exports parseSpec and specContentHash through the parser barrel", () => {

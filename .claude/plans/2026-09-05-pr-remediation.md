@@ -187,6 +187,47 @@ out to the installed plugin runtime and fails closed on worktree version skew
 Both must pass before any staging. Nothing is staged or committed if validation
 cannot pass.
 
+## Follow-up — Fix I: non-empty projections (operator-directed, not a review finding)
+
+Raised in review of this round's own result, not by a reviewer: on `ok: true`
+the parser has *proved* every collection non-empty — `parseEntries` and
+`parseGlossary` record `section-has-no-entries` / `glossary-has-no-terms` and
+any error forces `ok: false` — yet `ParsedSpec` still typed them as plain
+arrays. A consumer therefore had to re-check `.length > 0` for something the
+parse had already established: the parse-don't-validate smell this PR otherwise
+closes.
+
+`engine/src/parsers/parse-spec.ts`:
+
+- Add `NonEmpty<T> = readonly [T, ...T[]]` (the per-module idiom already used in
+  `core/proof-obligations.ts`, `core/panel-program.ts`,
+  `core/orchestration-contract/identity.ts`), and give all four `ParsedSpec`
+  collections that type. `SpecParseResult`'s error channel reuses the same name
+  for the tuple it already had.
+- `parseEntries` and `parseGlossary` return `NonEmpty<…> | null`, recording the
+  emptiness diagnostic at the same point they do today, so the emitted error
+  **order is unchanged** and the round-8 exact-ordered-list pin still holds
+  byte-for-byte.
+- `parseSpec` gates on `frs === null || … || errors.length > 0`, the idiom
+  `core/standalone-review.ts` uses. A `null` collection and a recorded
+  diagnostic are the same condition, so the guard cannot report a failure
+  without a reason — and unlike `preparationFailure` there, no sentinel error
+  and no non-null assertion is needed.
+
+`engine/tests/parsers/parse-spec.test.ts`: two expected-error directives pin
+what no runtime assertion can — an empty array is not assignable to
+`ParsedSpec["frs"]`, and `ParsedSpec["scenarios"]` does not accept
+`parsed.value.frs`. `tsc` fails the build if either error stops occurring, so
+this also converts the round-8 family-branding fix (`type-design-analyzer-1`)
+from a runtime witness into a compile-time one.
+
+**Known limit, stated rather than implied**: `noUncheckedIndexedAccess` is off
+in `engine/tsconfig.json`, so indexing a plain array already yields a
+non-`undefined` type. `NonEmpty` therefore does not remove `| undefined` at use
+sites here; what it buys is that the guarantee is stated in the signature and
+that a future change projecting an empty collection fails to compile. Turning
+that flag on is a repo-wide change and is not in this PR's scope.
+
 ## Remediation run
 
 A fresh remediation Run Directory under
