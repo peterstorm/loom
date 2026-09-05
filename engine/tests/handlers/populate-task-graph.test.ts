@@ -643,3 +643,114 @@ describe("populate-task-graph — decompose stdin cannot mint execution state", 
     expect(after.tasks).toEqual([]);
   });
 });
+
+describe("populate-task-graph — engine-derived Requirement content hashes", () => {
+  const canonicalSpec = `# Feature: Recorded hashes
+
+## User Scenarios
+
+### US1: [P1] Record hashes
+
+**Acceptance Scenarios:**
+- AS-001: Given a claim, When the graph is populated, Then its Requirement hash is recorded
+
+## Functional Requirements
+
+- FR-001: System MUST record Requirement content hashes at link time
+
+## Out of Scope
+
+- OOS-001: Symbol-level source indexing
+
+## Appendix: Glossary
+
+| Term | Definition |
+|------|------------|
+| Spec Index | A deterministic projection of specification entries |
+`;
+
+  /** Populate one graph whose spec file holds `spec`, claiming `anchors`. */
+  async function populatedTask(
+    spec: string | null,
+    anchors: readonly string[],
+  ): Promise<Task> {
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    writeManifest(dir);
+    const specFile = spec === null ? null : join(dir, "spec.md");
+    if (specFile !== null && spec !== null) writeFileSync(specFile, spec, "utf8");
+    const statePath = writeState(dir, plan, [], { spec_file: specFile });
+    const decompose = JSON.stringify({
+      spec_trace_version: 2,
+      plan_title: "t",
+      spec_file: specFile ?? "spec.md",
+      plan_file: plan,
+      tasks: [{
+        id: "T1", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [],
+        spec_anchors: [...anchors], spec_contributions: [],
+        verification_policy: REQUIRED_VERIFICATION, plan_context: "", file_list: ["src/a.ts"],
+      }],
+    });
+    const result = await populate(decompose, []);
+    if (result.kind === "error") throw new Error(result.message);
+    expect(result.kind).toBe("passthrough");
+    const graph = JSON.parse(stateBytes(statePath)) as TaskGraph;
+    const task = graph.tasks[0];
+    if (task === undefined) throw new Error("populate must persist the decomposed Task");
+    return task;
+  }
+
+  it("records the Spec Index hash for every claim the specification defines", async () => {
+    const task = await populatedTask(canonicalSpec, ["FR-001", "AS-001"]);
+    expect(Object.keys(task.spec_anchor_hashes ?? {}).sort()).toEqual(["AS-001", "FR-001"]);
+    for (const hash of Object.values(task.spec_anchor_hashes ?? {})) {
+      expect(hash).toMatch(/^[0-9a-f]{64}$/u);
+    }
+  });
+
+  it("omits identifiers the specification does not define", async () => {
+    const task = await populatedTask(canonicalSpec, ["FR-001", "FR-404"]);
+    expect(Object.keys(task.spec_anchor_hashes ?? {})).toEqual(["FR-001"]);
+  });
+
+  it("records nothing rather than guessing when the spec does not project", async () => {
+    // A project without a canonical specification still decomposes; drift is
+    // then reported as unverifiable at the gate, never as stable.
+    const task = await populatedTask("# not a specification", ["FR-001"]);
+    expect(task.spec_anchor_hashes).toBeUndefined();
+  });
+
+  it("records nothing when the spec file does not exist", async () => {
+    // `populatedTask(null, ...)` leaves the graph pointing at a "spec.md" that
+    // was never written: an unreadable spec is a stated reason, not a refusal.
+    const task = await populatedTask(null, ["FR-001"]);
+    expect(task.spec_anchor_hashes).toBeUndefined();
+  });
+
+  it("cannot be pre-stamped by the decompose payload", async () => {
+    // Decompose says WHICH Requirements a Task completes; the specification's
+    // own bytes say what they SAID. An authored hash is dropped like every
+    // other field `sanitizeDecomposedTask` does not pick.
+    const dir = tempDir();
+    const plan = modelFreePlan(dir);
+    writeManifest(dir);
+    const specFile = join(dir, "spec.md");
+    writeFileSync(specFile, canonicalSpec, "utf8");
+    const statePath = writeState(dir, plan, [], { spec_file: specFile });
+    const forged = "f".repeat(64);
+    const result = await populate(JSON.stringify({
+      spec_trace_version: 2,
+      plan_title: "t",
+      spec_file: specFile,
+      plan_file: plan,
+      tasks: [{
+        id: "T1", description: "impl", agent: "code-implementer-agent", wave: 1, depends_on: [],
+        spec_anchors: ["FR-001"], spec_contributions: [], spec_anchor_hashes: { "FR-001": forged },
+        verification_policy: REQUIRED_VERIFICATION, plan_context: "", file_list: ["src/a.ts"],
+      }],
+    }), []);
+    expect(result.kind).toBe("passthrough");
+    const graph = JSON.parse(stateBytes(statePath)) as TaskGraph;
+    expect(graph.tasks[0]?.spec_anchor_hashes?.["FR-001"]).not.toBe(forged);
+  });
+});

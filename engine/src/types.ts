@@ -410,6 +410,16 @@ interface TaskCommonMetadataBase {
   readonly spec_anchors?: readonly string[];
   /** Partial Requirement Contributions; never part of Wave Gate spec-check completion scope. */
   readonly spec_contributions?: readonly string[];
+  /**
+   * Spec Index content hash per Requirement Completion Claim, recorded by the
+   * engine when the Task→Requirement edge was created. Engine-derived, never
+   * authored: decompose describes WHICH Requirements a Task completes, and the
+   * specification's own bytes decide what those Requirements SAID at that
+   * moment. Absent on graphs decomposed before this field existed and on graphs
+   * whose spec file does not project into a Spec Index — in both cases drift is
+   * reported as unverifiable, never as stable.
+   */
+  readonly spec_anchor_hashes?: Readonly<Record<string, string>>;
   /** Explicit independent regression/new-test policy. New graphs carry this;
    * new_tests_required remains a read-compatible legacy projection. */
   readonly verification_policy?: StoredVerificationPolicy;

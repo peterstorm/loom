@@ -101,6 +101,7 @@ describe("registered Wave spec-check scope", () => {
         completionAnchors: [],
         contributions: ["FR-1"],
         declaredFiles: ["src/contribution.ts"],
+        modifiedFiles: [],
       },
       {
         id: "T2",
@@ -108,6 +109,7 @@ describe("registered Wave spec-check scope", () => {
         completionAnchors: ["FR-1"],
         contributions: [],
         declaredFiles: ["src/completion.ts"],
+        modifiedFiles: [],
       },
     ]);
 
@@ -445,5 +447,146 @@ describe("Wave reviewer slot identity projection", () => {
 
     expect(identitiesFor({ ...plain, authorityDigest: "b".repeat(64) }, 1)).not.toEqual(baseline);
     expect(identitiesFor(plain, 2)).not.toEqual(baseline);
+  });
+});
+
+describe("Requirement Coverage Projection in the spec-check packet", () => {
+  const spec = `# Feature: Coverage wiring
+
+## User Scenarios
+
+### US1: [P1] Project coverage
+
+**Acceptance Scenarios:**
+- AS-001: Given a claim, When the gate runs, Then a structural verdict exists
+
+## Functional Requirements
+
+- FR-001: System MUST project structural verdicts before any model reads a file
+- FR-002: System MUST name Requirements no Task claims
+
+## Out of Scope
+
+- OOS-001: Symbol-level source indexing
+
+## Appendix: Glossary
+
+| Term | Definition |
+|------|------------|
+| Spec Index | A deterministic projection of specification entries |
+`;
+
+  const coverageSectionOf = (specFile: string | null, tasks: TaskGraph["tasks"]): string => {
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-coverage-"));
+    cleanup.push(runsRoot);
+    const created = createRunDirectory(runsRoot, "run.coverage");
+    if (!created.ok) throw new Error(created.error.message);
+    const parsedGraph = parseTaskGraph({
+      spec_trace_version: 2,
+      current_phase: "execute",
+      current_wave: 1,
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: specFile,
+      plan_file: null,
+      wave_gates: {},
+      tasks,
+    });
+    if (!parsedGraph.ok) throw new Error("graph fixture must parse");
+    const batch = waveRequests(created.value, {
+      schemaVersion: 1,
+      kind: "wave-gate",
+      input: { wave: 1 },
+      taskIds: tasks.map(({ id }) => id),
+      authorityDigest: "a".repeat(64),
+    }, parsedGraph.value, 1);
+    const specRequest = batch.requests.find(({ authority }) =>
+      (authority as AgentRequestAuthority).role === "spec-check-invoker");
+    const digest = (specRequest!.authority as AgentRequestAuthority).contextDigest;
+    const packet = batch.packets.find((candidate) => candidate.digest === digest);
+    const section = packet?.fixedContext.find(({ label }) => label === "requirement-coverage");
+    if (section === undefined) throw new Error("spec-check packet must carry a requirement-coverage section");
+    return new TextDecoder("utf8", { fatal: true }).decode(Uint8Array.from(section.bytes));
+  };
+
+  const specFileIn = (contents: string): string => {
+    const root = mkdtempSync(join(tmpdir(), "loom-coverage-spec-"));
+    cleanup.push(root);
+    mkdirSync(join(root, "specs"), { recursive: true });
+    const path = join(root, "specs", "spec.md");
+    writeFileSync(path, contents, "utf8");
+    return path;
+  };
+
+  it("settles structural verdicts in the packet the spec-check Agent reads", () => {
+    const rendered = coverageSectionOf(specFileIn(spec), [
+      taskFixture({
+        id: "T1", description: "claims an excluded item", agent: "code-implementer-agent", wave: 1,
+        status: "pending", depends_on: [], spec_anchors: ["OOS-001"], spec_contributions: [],
+        file_list: ["src/a.ts"], files_modified: ["src/a.ts"],
+      }),
+      taskFixture({
+        id: "T2", description: "claims a real Requirement but touched nothing",
+        agent: "code-implementer-agent", wave: 1,
+        status: "pending", depends_on: [], spec_anchors: ["FR-001"], spec_contributions: [],
+        file_list: ["src/b.ts"], files_modified: [],
+      }),
+    ]);
+    expect(rendered).toContain("Out-of-Scope item cannot be completed");
+    expect(rendered).toContain("modified no files");
+    // FR-002 is claimed by no Task at any Wave — planned by nobody.
+    expect(rendered).toContain("FR-002 — CRITICAL: no Task in the graph claims it");
+  });
+
+  it("only the spec-check subject receives the projection", () => {
+    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-coverage-subject-"));
+    cleanup.push(runsRoot);
+    const created = createRunDirectory(runsRoot, "run.subject");
+    if (!created.ok) throw new Error(created.error.message);
+    const parsedGraph = parseTaskGraph({
+      spec_trace_version: 2, current_phase: "execute", current_wave: 1, phase_artifacts: {},
+      skipped_phases: [], spec_file: specFileIn(spec), plan_file: null, wave_gates: {},
+      tasks: [taskFixture({
+        id: "T1", description: "implements FR-001", agent: "code-implementer-agent", wave: 1,
+        status: "pending", depends_on: [], spec_anchors: ["FR-001"], spec_contributions: [],
+        file_list: ["src/a.ts"], files_modified: ["src/a.ts"],
+      })],
+    });
+    if (!parsedGraph.ok) throw new Error("graph fixture must parse");
+    const batch = waveRequests(created.value, {
+      schemaVersion: 1, kind: "wave-gate", input: { wave: 1 }, taskIds: ["T1"],
+      authorityDigest: "a".repeat(64),
+    }, parsedGraph.value, 1);
+    for (const request of batch.requests) {
+      const authority = request.authority as AgentRequestAuthority;
+      const packet = batch.packets.find((candidate) => candidate.digest === authority.contextDigest);
+      const hasCoverage = packet?.fixedContext.some(({ label }) => label === "requirement-coverage") ?? false;
+      expect(hasCoverage).toBe(authority.role === "spec-check-invoker");
+    }
+    expect(WAVE_REVIEW_AGENTS.length).toBeGreaterThan(0);
+  });
+
+  it("states an unavailable projection rather than passing silently", () => {
+    const rendered = coverageSectionOf(null, [taskFixture({
+      id: "T1", description: "claims FR-001", agent: "code-implementer-agent", wave: 1,
+      status: "pending", depends_on: [], spec_anchors: ["FR-001"], spec_contributions: [],
+      file_list: ["src/a.ts"], files_modified: ["src/a.ts"],
+    })]);
+    expect(rendered).toContain("UNAVAILABLE");
+    expect(rendered).toContain("never a pass");
+  });
+
+  it("reports drift when the specification changed after the hashes were recorded", () => {
+    const drifted = spec.replace(
+      "System MUST project structural verdicts before any model reads a file",
+      "System MUST project structural verdicts, reworded after the claim was made",
+    );
+    const rendered = coverageSectionOf(specFileIn(drifted), [taskFixture({
+      id: "T1", description: "claims FR-001", agent: "code-implementer-agent", wave: 1,
+      status: "pending", depends_on: [], spec_anchors: ["FR-001"], spec_contributions: [],
+      file_list: ["src/a.ts"], files_modified: ["src/a.ts"],
+      spec_anchor_hashes: { "FR-001": "0".repeat(64) },
+    })]);
+    expect(rendered).toContain("its text changed since the claim");
   });
 });

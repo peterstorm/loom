@@ -184,6 +184,21 @@ export function specContentHash(content: string): SpecContentHash {
   return createHash("sha256").update(canonicalContent(content), "utf8").digest("hex") as SpecContentHash;
 }
 
+/** The exact shape `specContentHash` mints: lowercase SHA-256 hex. */
+const SPEC_CONTENT_HASH_SHAPE = /^[0-9a-f]{64}$/u;
+
+/**
+ * The only way a hash persisted by an earlier phase re-enters the type. Its
+ * content is deliberately unavailable here — a recorded hash is compared
+ * against a freshly derived one, never re-derived — so this admits the minted
+ * shape and nothing else. `null` for anything else, which stops a truncated or
+ * hand-edited value from entering the type and then merely failing to match,
+ * where it would read as ordinary Requirement drift.
+ */
+export function parseSpecContentHash(raw: unknown): SpecContentHash | null {
+  return typeof raw === "string" && SPEC_CONTENT_HASH_SHAPE.test(raw) ? raw as SpecContentHash : null;
+}
+
 /** The only mint for a `SpecEntry`: canonicalizes the content and derives the
  * hash from that same canonical text, so the pair cannot disagree. */
 function specEntry<F extends SpecFamily>(id: string, rawContent: string): SpecEntry<F> {

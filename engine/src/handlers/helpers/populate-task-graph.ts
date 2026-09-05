@@ -29,6 +29,12 @@ import {
   type FrozenVerificationManifest,
 } from "../../core/verification-manifest";
 import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
+import { observeSpecIndex } from "../../orchestration/spec-index-observation";
+import {
+  recordedAnchorHashes,
+  specIndexUnavailableMessage,
+  type SpecIndexAvailability,
+} from "../../core/requirement-coverage";
 
 type AuthoredTask = Readonly<
   Pick<
@@ -261,8 +267,17 @@ function parseArgs(args: string[]): ParsedPopulateArgs {
  * verdicts exist only via the evidence ledger, mirroring the refusal in
  * store-test-evidence.
  */
-function sanitizeDecomposedTask(t: AuthoredTask): Task {
+function sanitizeDecomposedTask(t: AuthoredTask, specIndex: SpecIndexAvailability): Task {
   const verificationPolicy = taskVerificationPolicy(t);
+  const completionAnchors = Object.freeze([...(t.spec_anchors ?? [])]);
+  // Engine-derived, exactly like the verification manifest above it: decompose
+  // says WHICH Requirements a Task completes, the specification's own bytes say
+  // what those Requirements SAID. `AuthoredTask` cannot carry hashes, so a
+  // decompose payload that pre-stamps them is dropped with every other field
+  // this function does not pick.
+  const anchorHashes = specIndex.kind === "indexed"
+    ? recordedAnchorHashes(specIndex.index, completionAnchors)
+    : {};
   return {
     id: t.id,
     description: t.description,
@@ -270,8 +285,9 @@ function sanitizeDecomposedTask(t: AuthoredTask): Task {
     wave: t.wave,
     status: "pending",
     depends_on: t.depends_on ?? [],
-    spec_anchors: Object.freeze([...(t.spec_anchors ?? [])]),
+    spec_anchors: completionAnchors,
     spec_contributions: Object.freeze([...(t.spec_contributions ?? [])]),
+    ...(Object.keys(anchorHashes).length === 0 ? {} : { spec_anchor_hashes: anchorHashes }),
     verification_policy: serializeVerificationPolicy(verificationPolicy),
     ...(t.plan_context !== undefined ? { plan_context: t.plan_context } : {}),
     ...(t.file_list !== undefined ? { file_list: t.file_list } : {}),
@@ -427,6 +443,20 @@ const handler: HookHandler = async (stdin, args) => {
     return { kind: "error", message: `Verification manifest authority unavailable: ${preparedManifest.error}` };
   }
 
+  // The Spec Index is observed here, beside the manifest, for the same reason:
+  // the locked transform stamps a prepared value and never reads mutable source
+  // bytes itself. Unlike the manifest this one degrades — a project with no
+  // canonical specification still decomposes, and every Requirement it claims
+  // simply reports drift as unverifiable at the gate rather than as stable.
+  const observedSpecFile = existingState.spec_file ?? decompose.spec_file ?? null;
+  const specIndex = observeSpecIndex(observedSpecFile);
+  if (specIndex.kind === "unavailable") {
+    process.stderr.write(
+      `Requirement content hashes NOT recorded: ${specIndexUnavailableMessage(specIndex.reason)}\n` +
+      "Wave Gate spec-check will report Requirement drift as unverifiable for these Tasks.\n",
+    );
+  }
+
   const populate = async (): Promise<void> => mgr.update((existing) => {
     // Re-check the guard INSIDE the locked transform. The check above ran on a
     // snapshot loaded before the lock, and this callback receives a freshly
@@ -441,6 +471,17 @@ const handler: HookHandler = async (stdin, args) => {
         "population was being prepared. Use --force to override.",
       );
     }
+    // The prepared Spec Index was read from the spec file this same precedence
+    // named before the lock. If the locked graph now names a different one, the
+    // prepared hashes describe another document — refuse rather than stamp
+    // Requirement text that was never at these identifiers.
+    const lockedSpecFile = existing.spec_file ?? decompose.spec_file ?? null;
+    if (lockedSpecFile !== observedSpecFile) {
+      throw new Error(
+        `spec_file changed from ${observedSpecFile ?? "none"} to ${lockedSpecFile ?? "none"} while this ` +
+        "population was being prepared; re-run populate-task-graph.",
+      );
+    }
     const { active_wave_completion_suite: staleCompletionSuite, ...existingWithoutCompletionSuite } = existing;
     void staleCompletionSuite;
     const merged: TaskGraph = {
@@ -449,7 +490,7 @@ const handler: HookHandler = async (stdin, args) => {
       plan_title: decompose.plan_title,
       plan_file: validatedPlanFile,
       spec_file: existing.spec_file ?? decompose.spec_file ?? null,
-      tasks: decompose.tasks.map(sanitizeDecomposedTask),
+      tasks: decompose.tasks.map((task) => sanitizeDecomposedTask(task, specIndex)),
       current_wave: 1,
       executing_tasks: [],
       wave_gates: buildWaveGates(waves),

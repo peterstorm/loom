@@ -38,7 +38,21 @@ console.log(JSON.stringify({specFile: authority.specFile, wave: authority.wave, 
 '
 ```
 
-Save the exact `specFile`, `wave`, and `tasks` values. Each Task contains `completionAnchors`, `contributions`, and `declaredFiles`. This roster is immutable authority even if the live graph changes later.
+Save the exact `specFile`, `wave`, and `tasks` values. Each Task contains `completionAnchors`, `contributions`, `declaredFiles`, and `modifiedFiles`. This roster is immutable authority even if the live graph changes later.
+
+**Then read the Requirement Coverage Projection from the same packet.** The engine has already joined the Spec Index against this exact roster; Steps 2, 4, 5, 6 and 7 consume that projection instead of re-deriving it.
+
+```bash
+bun -e '
+const path = process.env.LOOM_CONTEXT_PATH;
+const packet = JSON.parse(await Bun.file(path).text());
+const section = packet.fixedContext?.find((entry) => entry.label === "requirement-coverage");
+if (!section) throw new Error("immutable packet lacks the Requirement Coverage Projection");
+console.log(new TextDecoder("utf-8", {fatal:true}).decode(Uint8Array.from(section.bytes)));
+'
+```
+
+The projection is engine-derived authority, not advice. Its `CRITICAL` and `MEDIUM` rows are **settled** — you copy them into your report; you do not re-litigate them. Only `CANDIDATE` rows are yours to decide. If it renders `UNAVAILABLE`, the specification does not project into a Spec Index: every claim falls back to the model-read path below, and you MUST say so in the summary. An unavailable projection is an absence of evidence, never a pass.
 
 **Standalone `/spec-check` only (`LOOM_CONTEXT_PATH` is absent): Run the live-graph fallback:**
 
@@ -51,24 +65,24 @@ jq -r '.current_wave' .claude/state/active_task_graph.json
 ```
 
 ```bash
-jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | {id, description, completionAnchors:(.spec_anchors // []), contributions:(.spec_contributions // []), declaredFiles:(.file_list // [])}' .claude/state/active_task_graph.json
+jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | {id, description, completionAnchors:(.spec_anchors // []), contributions:(.spec_contributions // []), declaredFiles:(.file_list // []), modifiedFiles:(.files_modified // [])}' .claude/state/active_task_graph.json
 ```
 
-Normalize this fallback to the same SPEC path, WAVE number, and Task scope shape.
+Normalize this fallback to the same SPEC path, WAVE number, and Task scope shape. **The standalone path has no engine-derived projection** — there is no registered packet to carry one — so it performs the model-read assessment for every claim, exactly as before. Say so in the summary rather than implying structural verdicts were available.
 
-### Step 2: Extract the Requirement checklist (deterministic)
+### Step 2: Take the Requirement checklist from the projection
 
-**Run:** Use Grep to locate every identifier named by `completionAnchors` in the spec (including FR, SC, and US/scenario anchors). A Completion Claim absent from the Spec is a critical trace-contract failure, not an item to skip.
+**Registered path:** the projection's rows ARE the checklist — one row per Requirement Completion Claim in the frozen roster, already joined against the Spec Index. Do not grep the spec for identifiers and do not re-count: the row set is engine-derived and complete by construction. `contributions` are partial traceability evidence only and never enter it.
 
-Collect only `completionAnchors` across the frozen Wave Task roster into a flat list. These are the **in-scope Requirements** for this wave. `contributions` are partial traceability evidence only and MUST NOT enter the completion checklist.
-
-**Build a checklist** — one row per in-scope Requirement:
+Carry each row forward as:
 
 ```
-<anchor> | <description from spec> | <assigned task(s)> | PENDING
+<task> | <anchor> | <projected verdict> | PENDING-or-SETTLED
 ```
 
-You MUST have one row for every Requirement Completion Claim in `completionAnchors`. Count them. You will emit a verdict for every single row. Use `contributions` to understand precursor work, never to broaden the checklist.
+Rows whose projected verdict is `CRITICAL` or `MEDIUM` are **SETTLED** — their verdict is already decided and goes straight to Step 4's output. Rows marked `CANDIDATE` are **PENDING** your assessment.
+
+**Standalone path (no projection):** build the checklist by grepping the spec for every identifier named by `completionAnchors`. A Completion Claim absent from the spec is a critical trace-contract failure, not an item to skip. Every row is PENDING.
 
 ### Step 3: Get changed files (deterministic)
 
@@ -81,58 +95,76 @@ For a registered Wave Gate, use only each frozen Task's `declaredFiles` for Task
 
 ### Step 4: Coverage check — per-Requirement verdicts
 
-For EACH Requirement Completion Claim in the checklist from step 2:
+**SETTLED rows — copy, do not assess.** The projection already decided these from structure, and reading files cannot change them. Emit each verbatim:
 
-1. **Read the Requirement description** from spec (you already have it)
-2. **Read the relevant source file(s)** — use the changed files list and Task assignment to identify which files implement this Requirement. Use Read tool.
-3. **Assess**: Does the code satisfy the Requirement as written in spec?
+| Projected verdict | Emit | Severity |
+|---|---|---|
+| `unknown-requirement` | `<anchor>: FAIL — names no entry in the Spec Index` | CRITICAL |
+| `excluded-requirement` | `<anchor>: FAIL — claims completion of an explicitly excluded item` | CRITICAL |
+| `not-declared` | `<anchor>: FAIL — the Task declared no artifacts` | CRITICAL |
+| `not-implemented` | `<anchor>: FAIL — the Task modified no files` | CRITICAL |
+| `candidate-pass` with drifted text | assess as below, and additionally report the drift | MEDIUM |
+
+You MUST NOT overturn a settled row. If you believe one is wrong, the defect is in the engine's join or in the graph, and it belongs in the summary as a note — not as a softened verdict.
+
+**PENDING rows — assess.** For each `CANDIDATE` row:
+
+1. **Read the Requirement text** — the projection carries it; you do not need to re-find it in the spec.
+2. **Read the relevant source file(s)** — use the changed files list and the Task's `declaredFiles`/`modifiedFiles`. Use Read tool.
+3. **Assess**: Does the code satisfy the Requirement as written?
 4. **Emit verdict**: `<anchor>: PASS` or `<anchor>: FAIL — <specific reason>`
 
 **Rules:**
-- MUST emit exactly one verdict line per in-scope Completion Claim. If the checklist has 12 anchors, output has 12 verdict lines.
+- MUST emit exactly one verdict line per checklist row — settled and pending together. The projection's row count is the expected total.
 - "Soft compliance" is not PASS. If spec says "MUST do X" and code doesn't do X, it's FAIL.
 - MUST/SHALL requirements that are unimplemented = CRITICAL
 - SHOULD requirements that are unimplemented = HIGH
 - MAY requirements that are unimplemented = MEDIUM
 
-**After all verdicts, count:** How many in-scope Completion Claims from the checklist did you emit? Does it match the total from step 2? If not, you skipped one — go back.
+**Then emit the projection's unclaimed Functional Requirements**, each as CRITICAL: a Requirement no Task in the graph claims at any Wave is planned by nobody.
 
 ### Step 5: Acceptance scenario coverage
 
-**Run:** Use Grep to extract lines matching `Given .* When .* Then` or `- Given` from the spec file. These are acceptance scenarios.
+Acceptance Scenarios are canonical `AS-NNN` entries in the Spec Index — a Task claims one exactly as it claims an `FR-NNN`, and a claimed scenario already has its row in Step 4. This step covers the scenarios in scope that **no** Task claimed.
 
-Filter to scenarios belonging to User Stories that map to the in-scope Completion Claims.
+**Run:** For each `AS-NNN` the projection lists that has no row of its own, grep the changed test files for its identifier:
 
-For EACH acceptance scenario:
+```bash
+grep -rn "AS-001" --include=*.test.ts --include=*.spec.ts --include=*Test.java .
+```
 
-1. Identify which test file should cover it (from changed files, `*.test.ts` or `*.spec.ts`)
-2. **Read the test file** — use Read tool
-3. **Assess**: Is there a test that exercises this scenario (happy path, error path, edge case)?
-4. **Emit verdict**: `US-X scenario N: COVERED` or `US-X scenario N: NOT COVERED — <reason>`
+The convention is `it('AS-001: …')` — an identifier in a test name is a structural link, not prose matching.
+
+1. **Emit verdict**: `AS-NNN: COVERED — <test file>` or `AS-NNN: NOT COVERED — <reason>`
+2. When the grep finds a name, **Read the test** to confirm it exercises the scenario rather than merely naming it.
 
 **Severity for uncovered scenarios:**
 - Happy path not tested = HIGH
 - Error path not tested = MEDIUM
 - Edge case not tested = LOW
 
-### Step 6: Terminology check (deterministic)
+**Standalone path (no projection):** grep the spec for `Given .* When .* Then` lines and assess each, as before.
 
-**Run:** Use Grep to find the Glossary/Appendix table in the spec. Extract key terms.
+### Step 6: Terminology check
 
-**Run:** Also extract from spec Dependencies section — note specific technology names (e.g., "Voyage AI", "Haiku", "FTS5").
+The projection carries the typed glossary — term and definition, parsed, not grepped. Do not re-extract the table.
 
-For each key term/technology name, grep the changed source files for that term AND common variants. Flag mismatches where spec uses one name but code uses another.
+**Run:** Also extract from the spec's Dependencies section — note specific technology names (e.g., "Voyage AI", "Haiku", "FTS5"). This section is not part of the Spec Index, so it still needs a read.
+
+For each glossary term and technology name, grep the changed source files for that term AND common variants. Flag mismatches where the spec uses one name but the code uses another.
 
 Severity: MEDIUM for terminology drift.
 
 ### Step 7: Scope creep check
 
-**Run:** Use Grep to find the "Out of Scope" section in the spec. Extract the exclusion list.
+The projection carries the typed exclusion list as canonical `OOS-NNN` entries. Do not grep for the section.
 
 Review the changed files list from step 3. For each new exported function/class/command not traceable to an in-scope Completion Claim:
-- If it's in the Out of Scope list = CRITICAL (explicitly excluded)
+- If it matches an `OOS-NNN` entry = CRITICAL, and **name the identifier** (`OOS-003`), not a paraphrase of the section text
 - If it's a helper/utility supporting an in-scope Requirement = OK (not scope creep)
 - If it's a new feature with no Spec requirement = HIGH
+
+A Task that *claimed* an `OOS-NNN` as completed was already settled CRITICAL in Step 4; this step is about code that drifted into an exclusion without claiming it.
 
 ---
 
@@ -140,18 +172,25 @@ Review the changed files list from step 3. For each new exported function/class/
 
 ### Per-Requirement Verdicts (MANDATORY)
 
+`Source` states who decided each row, so a reader can tell a structural refutation from a judgement without re-running anything.
+
 ```
 ## Requirement Coverage — Wave {N}
 
-| Anchor | Description | Task | Verdict |
-|----|-------------|------|---------|
-| FR-001 | System MUST extract memories... | T15 | PASS |
-| FR-004 | System MUST track cursor... | T15 | PASS |
-| FR-039 | System MUST prefix query... | T17 | FAIL — buildQueryEmbeddingText returns raw query |
+| Anchor | Description | Task | Source | Verdict |
+|----|-------------|------|--------|---------|
+| FR-001 | System MUST extract memories... | T15 | assessed | PASS |
+| FR-004 | System MUST track cursor... | T15 | assessed | PASS |
+| FR-039 | System MUST prefix query... | T17 | assessed | FAIL — buildQueryEmbeddingText returns raw query |
+| FR-042 | System MUST rotate keys... | T18 | projection | FAIL — the Task modified no files |
+| OOS-002 | Symbol-level indexing | T19 | projection | FAIL — claims completion of an explicitly excluded item |
+| FR-050 | System MUST cap batches... | — | projection | FAIL — no Task in the graph claims it |
 ...
 
-Total: {X}/{Y} PASS ({Z} FAIL)
+Total: {X}/{Y} PASS ({Z} FAIL) — {S} settled by the projection, {A} assessed
 ```
+
+When the projection was UNAVAILABLE, every row reads `assessed` and the summary must say why no structural verdicts were available.
 
 ### Per-Scenario Verdicts
 
@@ -160,8 +199,8 @@ Total: {X}/{Y} PASS ({Z} FAIL)
 
 | Scenario | Verdict |
 |----------|---------|
-| US1: Given session with decisions, When ends, Then extracted | COVERED |
-| US3: Given indexed function, When search prose, Then code returned | NOT COVERED |
+| AS-001: Given session with decisions, When ends, Then extracted | COVERED — engine/tests/extract.test.ts |
+| AS-003: Given indexed function, When search prose, Then code returned | NOT COVERED |
 ...
 ```
 
@@ -239,6 +278,8 @@ SPEC_CHECK_VERDICT: PASSED | BLOCKED
 - CRITICAL blocks waves: Non-negotiable
 - MUST emit one verdict per in-scope Requirement Completion Claim — no skipping
 - Registered Wave Gate scope comes only from `LOOM_CONTEXT_PATH`; never reread mutable `active_task_graph.json`
+- The Requirement Coverage Projection is engine-derived authority: settled rows are copied, never overturned or softened
+- An UNAVAILABLE projection is an absence of evidence, never a pass — say so in the summary
 - Requirement Contributions are traceability only and never enter completion scope
-- MUST use tool calls (Grep, Read, Bash) for evidence — no assessing from memory
+- MUST use tool calls (Grep, Read, Bash) for evidence — no assessing from memory, and no re-deriving what the projection already decided
 - Different from code review: Alignment vs quality are separate concerns

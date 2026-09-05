@@ -699,10 +699,11 @@ export async function installWaveReviewRuns(
     preinstall.tasks.filter(({ id }) => registration.taskIds.includes(id)),
   );
   const workspaceByTask = new Map(observedWorkspaces.map((observation) => [observation.taskId, observation]));
-  const currentDocuments = observeWaveSpecCheckDocuments(
+  const currentObservation = observeWaveSpecCheckDocuments(
     batch.specCheckDocuments.spec.path,
     batch.specCheckDocuments.plan.path,
   );
+  const currentDocuments = currentObservation.authority;
   await manager.update((locked) => {
     const wave = registration.input.wave;
     const active = locked.active_wave_gate;
@@ -726,7 +727,7 @@ export async function installWaveReviewRuns(
       locked,
       1,
       observedWorkspaces,
-      currentDocuments,
+      currentObservation,
     );
     if (!lockedPreparation.ok || !canonicalStructuralEquals(lockedPreparation.value, batch)) {
       throw new Error("Wave review packet context changed before the batch could be installed");
@@ -1404,7 +1405,7 @@ export async function applyWaveFacadeSubmission(
       const currentDocuments = observeWaveSpecCheckDocuments(
         context.specCheckDocuments.spec.path,
         context.specCheckDocuments.plan.path,
-      );
+      ).authority;
       const parsed = parseSpecCheckOutput(raw);
       const wave = context.wave;
       const batchEpoch = context.batchEpoch;
@@ -1535,7 +1536,7 @@ export async function resumeWaveGateFacade(
       return waveBlocked(handle, "protected active Wave Gate authority differs from the registered façade run");
     }
     if (graph.wave_review_epoch !== undefined) {
-      const currentDocuments = observeWaveSpecCheckDocuments(graph.spec_file, graph.plan_file);
+      const currentDocuments = observeWaveSpecCheckDocuments(graph.spec_file, graph.plan_file).authority;
       if (!waveSpecCheckDocumentsMatch(graph.wave_review_epoch.specCheckDocuments, currentDocuments)) {
         return waveBlocked(handle, "current spec/plan bytes differ from the active Wave spec-check authority; refresh spec-check evidence");
       }
@@ -2076,7 +2077,7 @@ export async function resumeWaveGateFacade(
     }
     const lint = runFullTierWaveLint(current.value.waveTasks);
     if (lint.kind === "block") return waveBlocked(handle, lint.message);
-    const completionDocuments = observeWaveSpecCheckDocuments(refreshed.spec_file, refreshed.plan_file);
+    const completionDocuments = observeWaveSpecCheckDocuments(refreshed.spec_file, refreshed.plan_file).authority;
     const committed = await manager.commitActiveWaveGateCompletion((locked) => {
       if (locked.spec_file !== refreshed.spec_file || locked.plan_file !== refreshed.plan_file ||
           !waveSpecCheckDocumentsMatch(locked.wave_review_epoch?.specCheckDocuments, completionDocuments)) {

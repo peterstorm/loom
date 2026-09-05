@@ -608,7 +608,7 @@ async function applyFailedSpecCheckResult(
   }
   let documents: WaveSpecCheckDocumentsAuthority;
   try {
-    documents = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
+    documents = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file).authority;
   } catch (cause) {
     const diagnostic = `spec-check document observation failed: ${cause instanceof Error ? cause.message : String(cause)}`;
     return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);
@@ -1767,7 +1767,7 @@ export async function applySpecCheckPiResult(args: Readonly<{
       };
   try {
     const observedState = args.store.load();
-    const documents = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
+    const documents = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file).authority;
     return await args.store.updateAndReturn((state) =>
       reducePiSpecCheckResult(state, args.reservedSlot?.specCheckAuthority, observation, documents, args.now));
   } catch (error) {

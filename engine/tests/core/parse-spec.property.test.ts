@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { parseSpec, specContentHash, specParseErrorMessage } from "../../src/parsers/parse-spec";
+import { parseSpec, specContentHash, specParseErrorMessage } from "../../src/core/parse-spec";
 
 const canonicalText = (value: string): string => value.trim().replace(/\s+/gu, " ");
 

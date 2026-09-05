@@ -74,7 +74,7 @@ export const runStoreSpecCheckFindings = async (
   let documents;
   try {
     const observedState = manager.load();
-    documents = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
+    documents = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file).authority;
   } catch (error) {
     return {
       kind: "error",

@@ -166,6 +166,7 @@ describe("wave review context authority", () => {
         completionAnchors: ["FR-1"],
         contributions: [],
         declaredFiles: ["engine/src/a.ts"],
+        modifiedFiles: ["engine/src/a.ts"],
       }],
       packetId: null,
       specFile: null,
@@ -203,6 +204,7 @@ describe("wave review context authority", () => {
       task: null,
       specCheckScope: [{
         id: "T1", description: "review T1", completionAnchors: ["FR-1"], contributions: [], declaredFiles: [],
+        modifiedFiles: [],
       }],
       packetId: null,
       specFile: null,

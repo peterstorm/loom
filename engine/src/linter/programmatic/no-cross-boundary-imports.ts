@@ -125,6 +125,7 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/core/orchestration-contract/bytes.ts": ["node:crypto"],
       "engine/src/core/orchestration-contract/effects.ts": ["node:path"],
       "engine/src/core/orchestration-contract/publication.ts": ["node:crypto"],
+      "engine/src/core/parse-spec.ts": ["node:crypto"],
       "engine/src/core/panel-kernel.ts": ["node:path"],
       "engine/src/core/phase-artifact-paths.ts": ["node:path"],
       "engine/src/core/panel-program.ts": ["node:crypto"],
