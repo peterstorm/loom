@@ -19,6 +19,22 @@ Read-only verification that implementation aligns with specification. Mechanical
 
 Every step below that says "Run:" is a command you MUST execute via Bash/Grep/Read tool. Do NOT skip tool calls. Do NOT assess from memory alone.
 
+### Which path you are on — decide ONCE, here
+
+Two execution paths exist, and every step below depends on which one you are on. Decide now and carry it through; do not re-decide per step.
+
+| | **Projected** | **Unprojected** |
+|---|---|---|
+| When | `LOOM_CONTEXT_PATH` is set AND the `requirement-coverage` section does **not** say `UNAVAILABLE` | `LOOM_CONTEXT_PATH` is absent (standalone), OR the section says `UNAVAILABLE` |
+| Requirement checklist | the projection's rows | grep the spec for the claimed identifiers |
+| Requirement text | the projection's `Requirement` column | read it from the spec at `specFile` |
+| Acceptance scenarios | the projection's unclaimed-scenario list | grep the spec for `Given … When … Then` |
+| Out-of-Scope list | the projection's typed `OOS-NNN` entries | grep the spec's Out of Scope section |
+| Glossary | the projection's typed terms | grep the spec's Appendix table |
+| Who settles a row | `Decided by: engine` rows are settled | nothing is settled; you assess everything |
+
+**On the Unprojected path you MUST say so in the summary**, and state why (no registered packet, or the projection's stated `UNAVAILABLE` reason). An unprojected run is a weaker run; reporting it as if structural verdicts were available is the one failure this whole step exists to prevent.
+
 ### Step 1: Load artifacts and freeze scope authority
 
 **Registered Wave Gate (`LOOM_CONTEXT_PATH` is set): Run this decoder.** It reads the immutable packet only; do NOT read `active_task_graph.json` on this path.
@@ -52,7 +68,14 @@ console.log(new TextDecoder("utf-8", {fatal:true}).decode(Uint8Array.from(sectio
 '
 ```
 
-The projection is engine-derived authority, not advice. Its `CRITICAL` and `MEDIUM` rows are **settled** — you copy them into your report; you do not re-litigate them. Only `CANDIDATE` rows are yours to decide. If it renders `UNAVAILABLE`, the specification does not project into a Spec Index: every claim falls back to the model-read path below, and you MUST say so in the summary. An unavailable projection is an absence of evidence, never a pass.
+The projection is engine-derived authority, not advice, and it states its own rules in its header — those rules win over anything restated here. Two facts travel per row and must not be confused:
+
+- **`Decided by`** — `engine` means the row is settled: copy it into your report verbatim, do not re-litigate it. `agent` means an assessment is still owed **regardless of severity**.
+- **`Severity`** — how bad the structural fact is. A `MEDIUM` (drifted) or `CRITICAL` (altered hash) row can still be `Decided by: agent`; severity never excuses you from reading the code.
+
+The projection's last line states the settled CRITICAL count. **Your report may not fall below it** — the engine re-derives that count at capture and fails evidence capture if you do.
+
+If it renders `UNAVAILABLE` you are on the **Unprojected** path: nothing is settled, and the projection carries no Requirement text, no scenario roster, no exclusion list and no glossary.
 
 **Standalone `/spec-check` only (`LOOM_CONTEXT_PATH` is absent): Run the live-graph fallback:**
 
@@ -70,19 +93,19 @@ jq -r '.current_wave as $w | .tasks[] | select(.wave == $w) | {id, description, 
 
 Normalize this fallback to the same SPEC path, WAVE number, and Task scope shape. **The standalone path has no engine-derived projection** — there is no registered packet to carry one — so it performs the model-read assessment for every claim, exactly as before. Say so in the summary rather than implying structural verdicts were available.
 
-### Step 2: Take the Requirement checklist from the projection
+### Step 2: Take the Requirement checklist
 
-**Registered path:** the projection's rows ARE the checklist — one row per Requirement Completion Claim in the frozen roster, already joined against the Spec Index. Do not grep the spec for identifiers and do not re-count: the row set is engine-derived and complete by construction. `contributions` are partial traceability evidence only and never enter it.
+**Projected:** the projection's rows ARE the checklist — one row per Requirement Completion Claim in the frozen roster, already joined against the Spec Index. Do not grep the spec for identifiers and do not re-count: the row set is engine-derived and complete by construction. `contributions` are partial traceability evidence only and never enter it.
 
-Carry each row forward as:
+Carry each row forward with both of its facts:
 
 ```
-<task> | <anchor> | <projected verdict> | PENDING-or-SETTLED
+<task> | <anchor> | <decided by> | <severity> | SETTLED-or-PENDING
 ```
 
-Rows whose projected verdict is `CRITICAL` or `MEDIUM` are **SETTLED** — their verdict is already decided and goes straight to Step 4's output. Rows marked `CANDIDATE` are **PENDING** your assessment.
+`Decided by: engine` → **SETTLED**, goes straight to Step 4's output. `Decided by: agent` → **PENDING** your assessment, whatever its severity.
 
-**Standalone path (no projection):** build the checklist by grepping the spec for every identifier named by `completionAnchors`. A Completion Claim absent from the spec is a critical trace-contract failure, not an item to skip. Every row is PENDING.
+**Unprojected:** build the checklist by grepping the spec for every identifier named by `completionAnchors`. A Completion Claim absent from the spec is a critical trace-contract failure, not an item to skip. Every row is PENDING.
 
 ### Step 3: Get changed files (deterministic)
 
@@ -95,24 +118,23 @@ For a registered Wave Gate, use only each frozen Task's `declaredFiles` for Task
 
 ### Step 4: Coverage check — per-Requirement verdicts
 
-**SETTLED rows — copy, do not assess.** The projection already decided these from structure, and reading files cannot change them. Emit each verbatim:
+**SETTLED rows (`Decided by: engine`) — copy, do not assess.** The projection decided these from structure, and reading files cannot change them. Emit each verbatim:
 
-| Projected verdict | Emit | Severity |
+| Projected detail | Emit | Severity |
 |---|---|---|
-| `unknown-requirement` | `<anchor>: FAIL — names no entry in the Spec Index` | CRITICAL |
-| `excluded-requirement` | `<anchor>: FAIL — claims completion of an explicitly excluded item` | CRITICAL |
-| `not-declared` | `<anchor>: FAIL — the Task declared no artifacts` | CRITICAL |
-| `not-implemented` | `<anchor>: FAIL — the Task modified no files` | CRITICAL |
-| `candidate-pass` with drifted text | assess as below, and additionally report the drift | MEDIUM |
+| names no entry in the Spec Index | `<anchor>: FAIL — names no entry in the Spec Index` | CRITICAL |
+| claims completion of an excluded item | `<anchor>: FAIL — claims completion of an explicitly excluded item` | CRITICAL |
+| the Task declared no artifacts | `<anchor>: FAIL — the Task declared no artifacts` | CRITICAL |
+| the Task modified no files | `<anchor>: FAIL — the Task modified no files` | CRITICAL |
 
 You MUST NOT overturn a settled row. If you believe one is wrong, the defect is in the engine's join or in the graph, and it belongs in the summary as a note — not as a softened verdict.
 
-**PENDING rows — assess.** For each `CANDIDATE` row:
+**PENDING rows (`Decided by: agent`) — assess.** This includes rows already carrying a severity: a `MEDIUM` drifted row and a `CRITICAL` altered-hash row are both still yours to assess, and the drifted one *most* of all, because its Requirement text moved after the claim was made.
 
-1. **Read the Requirement text** — the projection carries it; you do not need to re-find it in the spec.
+1. **Read the Requirement text.** On the Projected path the row's `Requirement` column carries it. On the Unprojected path, read it from the spec at `specFile`.
 2. **Read the relevant source file(s)** — use the changed files list and the Task's `declaredFiles`/`modifiedFiles`. Use Read tool.
-3. **Assess**: Does the code satisfy the Requirement as written?
-4. **Emit verdict**: `<anchor>: PASS` or `<anchor>: FAIL — <specific reason>`
+3. **Assess**: Does the code satisfy the Requirement as written *now*?
+4. **Emit verdict**: `<anchor>: PASS` or `<anchor>: FAIL — <specific reason>`, and for a drifted or altered-hash row also emit the projection's severity line beside it.
 
 **Rules:**
 - MUST emit exactly one verdict line per checklist row — settled and pending together. The projection's row count is the expected total.
@@ -121,13 +143,13 @@ You MUST NOT overturn a settled row. If you believe one is wrong, the defect is 
 - SHOULD requirements that are unimplemented = HIGH
 - MAY requirements that are unimplemented = MEDIUM
 
-**Then emit the projection's unclaimed Functional Requirements**, each as CRITICAL: a Requirement no Task in the graph claims at any Wave is planned by nobody.
+**Then emit both unclaimed lists from the projection** — Functional Requirements and Acceptance Scenarios — each entry as CRITICAL: a Requirement or Scenario whose completion no Task claims at any Wave is planned by nobody. (Requirement Contributions are deliberately not counted as claims; if a listed item has contributing work planned, say so beside the finding rather than dropping it.)
 
 ### Step 5: Acceptance scenario coverage
 
 Acceptance Scenarios are canonical `AS-NNN` entries in the Spec Index — a Task claims one exactly as it claims an `FR-NNN`, and a claimed scenario already has its row in Step 4. This step covers the scenarios in scope that **no** Task claimed.
 
-**Run:** For each `AS-NNN` the projection lists that has no row of its own, grep the changed test files for its identifier:
+**Projected — the scenario roster is the projection's "Acceptance Scenarios whose completion no Task claims" section.** For each identifier it lists, grep the changed test files:
 
 ```bash
 grep -rn "AS-001" --include=*.test.ts --include=*.spec.ts --include=*Test.java .
@@ -138,18 +160,22 @@ The convention is `it('AS-001: …')` — an identifier in a test name is a stru
 1. **Emit verdict**: `AS-NNN: COVERED — <test file>` or `AS-NNN: NOT COVERED — <reason>`
 2. When the grep finds a name, **Read the test** to confirm it exercises the scenario rather than merely naming it.
 
+If that section says every scenario is claimed, this step is genuinely empty — say so; do not leave the scenario table blank.
+
+**Unprojected:** grep the spec for `Given .* When .* Then` lines and assess each, as before.
+
 **Severity for uncovered scenarios:**
 - Happy path not tested = HIGH
 - Error path not tested = MEDIUM
 - Edge case not tested = LOW
 
-**Standalone path (no projection):** grep the spec for `Given .* When .* Then` lines and assess each, as before.
-
 ### Step 6: Terminology check
 
-The projection carries the typed glossary — term and definition, parsed, not grepped. Do not re-extract the table.
+**Projected:** the projection carries the typed glossary — term and definition, parsed, not grepped. Do not re-extract the table.
 
-**Run:** Also extract from the spec's Dependencies section — note specific technology names (e.g., "Voyage AI", "Haiku", "FTS5"). This section is not part of the Spec Index, so it still needs a read.
+**Unprojected:** grep the spec for the Glossary/Appendix table and extract the terms yourself. The projection carries no glossary on this path, and skipping the step because it "should have" is exactly how the terminology check goes dark.
+
+**Run (both paths):** extract from the spec's Dependencies section — note specific technology names (e.g., "Voyage AI", "Haiku", "FTS5"). This section is not part of the Spec Index, so it always needs a read.
 
 For each glossary term and technology name, grep the changed source files for that term AND common variants. Flag mismatches where the spec uses one name but the code uses another.
 
@@ -157,7 +183,9 @@ Severity: MEDIUM for terminology drift.
 
 ### Step 7: Scope creep check
 
-The projection carries the typed exclusion list as canonical `OOS-NNN` entries. Do not grep for the section.
+**Projected:** the projection carries the typed exclusion list as canonical `OOS-NNN` entries. Do not grep for the section.
+
+**Unprojected:** grep the spec's "Out of Scope" section and extract the exclusion list yourself. Where the section has no canonical identifiers, quote the exclusion text instead of naming an id you do not have.
 
 Review the changed files list from step 3. For each new exported function/class/command not traceable to an in-scope Completion Claim:
 - If it matches an `OOS-NNN` entry = CRITICAL, and **name the identifier** (`OOS-003`), not a paraphrase of the section text
@@ -172,25 +200,28 @@ A Task that *claimed* an `OOS-NNN` as completed was already settled CRITICAL in 
 
 ### Per-Requirement Verdicts (MANDATORY)
 
-`Source` states who decided each row, so a reader can tell a structural refutation from a judgement without re-running anything.
+`Decided by` is copied from the projection, not judged by you, so a reader can tell a structural refutation from an assessment without re-running anything.
 
 ```
 ## Requirement Coverage — Wave {N}
 
-| Anchor | Description | Task | Source | Verdict |
+| Anchor | Description | Task | Decided by | Verdict |
 |----|-------------|------|--------|---------|
-| FR-001 | System MUST extract memories... | T15 | assessed | PASS |
-| FR-004 | System MUST track cursor... | T15 | assessed | PASS |
-| FR-039 | System MUST prefix query... | T17 | assessed | FAIL — buildQueryEmbeddingText returns raw query |
-| FR-042 | System MUST rotate keys... | T18 | projection | FAIL — the Task modified no files |
-| OOS-002 | Symbol-level indexing | T19 | projection | FAIL — claims completion of an explicitly excluded item |
-| FR-050 | System MUST cap batches... | — | projection | FAIL — no Task in the graph claims it |
+| FR-001 | System MUST extract memories... | T15 | agent | PASS |
+| FR-004 | System MUST track cursor... | T15 | agent | PASS |
+| FR-039 | System MUST prefix query... | T17 | agent | FAIL — buildQueryEmbeddingText returns raw query |
+| FR-041 | System MUST retry on 429... | T17 | agent | PASS — MEDIUM: spec text drifted since the claim; reassessed against the current wording |
+| FR-042 | System MUST rotate keys... | T18 | engine | FAIL — the Task modified no files |
+| OOS-002 | Symbol-level indexing | T19 | engine | FAIL — claims completion of an explicitly excluded item |
+| FR-050 | System MUST cap batches... | — | engine | FAIL — no Task in the graph claims its completion |
+| AS-004 | Given a stale cursor, When... | — | engine | FAIL — no Task in the graph claims its completion |
 ...
 
-Total: {X}/{Y} PASS ({Z} FAIL) — {S} settled by the projection, {A} assessed
+Total: {X}/{Y} PASS ({Z} FAIL) — {S} settled by the engine, {A} assessed.
+Settled CRITICAL floor: {F}. Reported CRITICAL: {R}.
 ```
 
-When the projection was UNAVAILABLE, every row reads `assessed` and the summary must say why no structural verdicts were available.
+On the Unprojected path every row reads `agent` and the summary MUST say why no structural verdicts were available. `Decided by` is the projection's own column, not a judgement you make: copy it.
 
 ### Per-Scenario Verdicts
 
@@ -278,8 +309,10 @@ SPEC_CHECK_VERDICT: PASSED | BLOCKED
 - CRITICAL blocks waves: Non-negotiable
 - MUST emit one verdict per in-scope Requirement Completion Claim — no skipping
 - Registered Wave Gate scope comes only from `LOOM_CONTEXT_PATH`; never reread mutable `active_task_graph.json`
-- The Requirement Coverage Projection is engine-derived authority: settled rows are copied, never overturned or softened
-- An UNAVAILABLE projection is an absence of evidence, never a pass — say so in the summary
+- The Requirement Coverage Projection is engine-derived authority: `Decided by: engine` rows are copied, never overturned or softened
+- Severity is not settlement. A `MEDIUM` or `CRITICAL` row that reads `Decided by: agent` still needs you to read the code
+- Your CRITICAL count may never fall below the projection's stated settled floor; the engine re-derives it at capture and fails evidence capture if it does
+- An UNAVAILABLE projection puts you on the Unprojected path: nothing is settled, and the glossary and Out-of-Scope list must be read from the specification — say so in the summary
 - Requirement Contributions are traceability only and never enter completion scope
 - MUST use tool calls (Grep, Read, Bash) for evidence — no assessing from memory, and no re-deriving what the projection already decided
 - Different from code review: Alignment vs quality are separate concerns

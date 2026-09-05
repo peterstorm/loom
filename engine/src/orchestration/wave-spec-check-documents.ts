@@ -1,32 +1,22 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { parseArtifactDigest } from "../core/orchestration-contract";
-import type { SpecIndexAvailability } from "../core/requirement-coverage";
-import { parseSpec } from "../core/parse-spec";
-import type {
-  WaveSpecCheckDocumentAuthority,
-  WaveSpecCheckDocumentsAuthority,
-} from "../types";
+import type { SpecIndexAvailability, WaveSpecCheckObservation } from "../core/wave-review-authority";
+import { projectSpecBytes } from "./spec-index-observation";
+import type { WaveSpecCheckDocumentAuthority } from "../types";
 
-/**
- * One spec-check observation: the serializable document authority and the Spec
- * Index projected from the very bytes that authority's digest names.
- *
- * They travel together because they are one fact. Observing the digest and the
- * Spec Index through two reads would let the file change in between, and a
- * projection attributed to a digest it was not derived from is worse than no
- * projection at all — it reads as evidence.
- */
-export type WaveSpecCheckObservation = Readonly<{
-  authority: WaveSpecCheckDocumentsAuthority;
-  specIndex: SpecIndexAvailability;
-}>;
+export type { WaveSpecCheckObservation } from "../core/wave-review-authority";
 
 type ObservedDocument = Readonly<{
   authority: WaveSpecCheckDocumentAuthority;
   bytes: Buffer | null;
 }>;
 
+/**
+ * Gate-time read policy: a recorded document that cannot be read is a refusal,
+ * not a degradation. Gate evidence must name exact bytes, so there is no
+ * `unreadable` outcome on this path — the observation throws instead.
+ */
 function observeDocument(path: string | null): ObservedDocument {
   if (path === null) return Object.freeze({ authority: Object.freeze({ path: null, contentDigest: null }), bytes: null });
   let bytes: Buffer;
@@ -45,16 +35,9 @@ function observeDocument(path: string | null): ObservedDocument {
 
 /** Project the observed spec bytes, never a second read of the same path. */
 function indexOf(spec: ObservedDocument): SpecIndexAvailability {
-  if (spec.authority.path === null || spec.bytes === null) {
-    return Object.freeze({ kind: "unavailable", reason: Object.freeze({ kind: "no-spec-file" }) });
-  }
-  const parsed = parseSpec(spec.bytes.toString("utf8"));
-  return parsed.ok
-    ? Object.freeze({ kind: "indexed", path: spec.authority.path, index: parsed.value })
-    : Object.freeze({
-        kind: "unavailable",
-        reason: Object.freeze({ kind: "unparsed", path: spec.authority.path, errors: parsed.errors }),
-      });
+  return spec.authority.path === null || spec.bytes === null
+    ? Object.freeze({ kind: "unavailable", reason: Object.freeze({ kind: "no-spec-file" }) })
+    : projectSpecBytes(spec.authority.path, spec.bytes);
 }
 
 /** Imperative-shell byte observation. Call before entering any TaskGraph lock. */

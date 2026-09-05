@@ -125,6 +125,13 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/core/orchestration-contract/bytes.ts": ["node:crypto"],
       "engine/src/core/orchestration-contract/effects.ts": ["node:path"],
       "engine/src/core/orchestration-contract/publication.ts": ["node:crypto"],
+      // The Spec Index: a total pure grammar whose only node use is a content
+      // digest. It lives in core/ rather than parsers/ because the Requirement
+      // Coverage Projection joins against it, and core may not import parsers.
+      // The rule that move established: a DOMAIN grammar whose output is a
+      // value object carrying invariants belongs in core/; a harness or tool
+      // OUTPUT scraper (transcripts, bash output, changed-file lists) belongs
+      // in parsers/.
       "engine/src/core/parse-spec.ts": ["node:crypto"],
       "engine/src/core/panel-kernel.ts": ["node:path"],
       "engine/src/core/phase-artifact-paths.ts": ["node:path"],

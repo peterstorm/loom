@@ -2,12 +2,16 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { parseSpec, type ParsedSpec, type SpecContentHash } from "../../src/core/parse-spec";
 import {
+  claimDecider,
   claimSeverity,
   claimVerdictMessage,
   projectRequirementCoverage,
   recordedAnchorHashes,
   renderRequirementCoverage,
+  settledCriticalCount,
+  settledFloorProblem,
   type CoverageTask,
+  type RecordedHash,
   type SpecIndexAvailability,
 } from "../../src/core/requirement-coverage";
 
@@ -19,7 +23,7 @@ const specSource = `# Feature: Coverage
 
 **Acceptance Scenarios:**
 - AS-001: Given a claim, When the gate runs, Then a verdict exists
-- AS-002: Given no claim, When the gate runs, Then the table says so
+- AS-002: Given no claim, When the gate runs, Then the scenario is listed
 
 ## Functional Requirements
 
@@ -44,31 +48,61 @@ const index = ((): ParsedSpec => {
   return parsed.value;
 })();
 
-const indexed: SpecIndexAvailability = Object.freeze({ kind: "indexed", path: "spec.md", index });
+const indexed: SpecIndexAvailability =
+  Object.freeze({ kind: "indexed", path: "spec.md", contentDigest: "a".repeat(64), index });
 
 const KNOWN = ["FR-001", "FR-002", "FR-003", "AS-001", "AS-002", "OOS-001"] as const;
+
+/** Every real content hash, so `stable` is reachable from the general roster. */
+const REAL_HASHES: ReadonlyMap<string, SpecContentHash> =
+  new Map(Object.entries(recordedAnchorHashes(index, KNOWN)));
 
 const claimArb = fc.oneof(
   fc.constantFrom(...KNOWN),
   fc.string({ minLength: 1, maxLength: 12 }),
 );
 
-const hashArb: fc.Arbitrary<SpecContentHash> = fc
+const hexHashArb: fc.Arbitrary<SpecContentHash> = fc
   .string({ unit: fc.constantFrom(..."0123456789abcdef".split("")), minLength: 64, maxLength: 64 })
   .map((raw) => raw as SpecContentHash);
 
-const taskArb: fc.Arbitrary<CoverageTask> = fc.record({
-  id: fc.string({ minLength: 1, maxLength: 6 }),
-  inCurrentWave: fc.boolean(),
-  completionAnchors: fc.uniqueArray(claimArb, { maxLength: 6 }),
-  declaredFiles: fc.array(fc.string({ minLength: 1, maxLength: 8 }), { maxLength: 3 }),
-  modifiedFiles: fc.array(fc.string({ minLength: 1, maxLength: 8 }), { maxLength: 3 }),
-  anchorHashes: fc.option(
-    fc.array(fc.tuple(claimArb, hashArb), { maxLength: 4 })
-      .map((pairs) => new Map(pairs) as ReadonlyMap<string, SpecContentHash>),
-    { nil: null },
-  ),
-});
+/**
+ * A recorded hash of every kind the boundary can produce, for a claim that may
+ * or may not be real. `real` is what makes `stable` reachable: a purely random
+ * 64-hex string can never equal a content hash, so an arbitrary built only from
+ * `hexHashArb` silently excluded one third of `DriftFact` from every property.
+ */
+const recordedArb = (claim: string): fc.Arbitrary<RecordedHash> => {
+  const real = REAL_HASHES.get(claim);
+  return fc.oneof(
+    ...(real === undefined ? [] : [fc.constant<RecordedHash>({ kind: "readable", hash: real })]),
+    hexHashArb.map<RecordedHash>((hash) => ({ kind: "readable", hash })),
+    fc.string({ minLength: 1, maxLength: 8 })
+      .filter((raw) => !/^[0-9a-f]{64}$/u.test(raw))
+      .map<RecordedHash>((stored) => ({ kind: "unreadable", stored })),
+  );
+};
+
+const anchorHashesArb = (claims: readonly string[]): fc.Arbitrary<ReadonlyMap<string, RecordedHash>> =>
+  claims.length === 0
+    ? fc.constant(new Map<string, RecordedHash>())
+    : fc.tuple(...claims.map((claim) => fc.option(recordedArb(claim), { nil: null })))
+        .map((recorded) => new Map(
+          claims.flatMap((claim, at) => {
+            const value = recorded[at];
+            return value === null || value === undefined ? [] : [[claim, value] as const];
+          }),
+        ));
+
+const taskArb: fc.Arbitrary<CoverageTask> = fc
+  .record({
+    id: fc.string({ minLength: 1, maxLength: 6 }),
+    inCurrentWave: fc.boolean(),
+    completionAnchors: fc.uniqueArray(claimArb, { maxLength: 6 }),
+    declaredFiles: fc.array(fc.string({ minLength: 1, maxLength: 8 }), { maxLength: 3 }),
+    modifiedFiles: fc.array(fc.string({ minLength: 1, maxLength: 8 }), { maxLength: 3 }),
+  })
+  .chain((base) => anchorHashesArb(base.completionAnchors).map((anchorHashes) => ({ ...base, anchorHashes })));
 
 const tasksArb = fc.array(taskArb, { maxLength: 5 });
 
@@ -105,44 +139,68 @@ describe("Requirement Coverage Projection properties", () => {
     }));
   });
 
-  it("gives every claim a rendered verdict, and grades exactly the non-candidates as settled", () => {
+  it("decides settlement by verdict kind alone, never by severity", () => {
+    // The invariant D6 restored: a MEDIUM or CRITICAL row can still be the
+    // Agent's, and only a candidate-pass ever is.
     fc.assert(fc.property(tasksArb, (tasks) => {
       const coverage = projectRequirementCoverage(indexed, tasks);
       if (coverage.kind !== "projected") return;
       for (const { verdict } of coverage.rows) {
         expect(claimVerdictMessage(verdict).length).toBeGreaterThan(0);
-        // A settled row is exactly a non-candidate; only a candidate is ever
-        // handed to a model, and only a drifted candidate grades MEDIUM.
-        expect(claimSeverity(verdict) === "CANDIDATE").toBe(
-          verdict.kind === "candidate-pass" && verdict.drift.kind !== "drifted",
-        );
-        expect(["CRITICAL", "MEDIUM", "CANDIDATE"]).toContain(claimSeverity(verdict));
+        expect(claimDecider(verdict)).toBe(verdict.kind === "candidate-pass" ? "agent" : "engine");
+        if (verdict.kind === "candidate-pass") {
+          const expectedSeverity = verdict.drift.kind === "unreadable-record"
+            ? "CRITICAL"
+            : verdict.drift.kind === "drifted" ? "MEDIUM" : "NONE";
+          expect(claimSeverity(verdict)).toBe(expectedSeverity);
+        } else {
+          expect(claimSeverity(verdict)).toBe("CRITICAL");
+        }
       }
     }));
   });
 
-  it("a claim is unclaimed only when no Task at any Wave names it", () => {
+  it("reaches every DriftFact kind across the generated rosters", () => {
+    // A guard on the arbitraries themselves: the previous `hashArb` made
+    // `stable` unreachable, so a property named for it proved nothing.
+    const seen = new Set<string>();
+    fc.assert(fc.property(tasksArb, (tasks) => {
+      const coverage = projectRequirementCoverage(indexed, tasks);
+      if (coverage.kind !== "projected") return;
+      for (const { verdict } of coverage.rows) {
+        if (verdict.kind === "candidate-pass") seen.add(verdict.drift.kind);
+      }
+    }), { numRuns: 400 });
+    expect(seen).toEqual(new Set(["unverifiable", "unreadable-record", "stable", "drifted"]));
+  });
+
+  it("an identifier is unclaimed only when no Task at any Wave names it", () => {
     fc.assert(fc.property(tasksArb, (tasks) => {
       const coverage = projectRequirementCoverage(indexed, tasks);
       if (coverage.kind !== "projected") return;
       const named = new Set(tasks.flatMap(({ completionAnchors }) => completionAnchors));
-      for (const id of coverage.unclaimed) expect(named.has(id)).toBe(false);
+      for (const id of [...coverage.unclaimed, ...coverage.unclaimedScenarios]) {
+        expect(named.has(id)).toBe(false);
+      }
       for (const { id } of index.frs) {
         if (!named.has(id)) expect(coverage.unclaimed).toContain(id);
+      }
+      for (const { id } of index.scenarios) {
+        if (!named.has(id)) expect(coverage.unclaimedScenarios).toContain(id);
       }
     }));
   });
 
   it("hashes recorded from the index always read back as stable, for any claim set", () => {
     // The round trip that makes drift meaningful: what `recordedAnchorHashes`
-    // writes at link time is exactly what `driftOf` proves unchanged at the
-    // gate, so a Requirement nobody edited can never report as drifted.
+    // writes at link time is exactly what the gate proves unchanged, so a
+    // Requirement nobody edited can never report as drifted.
     fc.assert(fc.property(
       fc.uniqueArray(fc.constantFrom(...KNOWN), { minLength: 1, maxLength: 6 }),
       (claims) => {
-        const recorded = recordedAnchorHashes(index, claims);
-        const anchorHashes = new Map(
-          Object.entries(recorded).map(([claim, hash]) => [claim, hash as SpecContentHash]),
+        const anchorHashes = new Map<string, RecordedHash>(
+          Object.entries(recordedAnchorHashes(index, claims))
+            .map(([claim, hash]) => [claim, { kind: "readable", hash } as const]),
         );
         const coverage = projectRequirementCoverage(indexed, [{
           id: "T1",
@@ -156,18 +214,38 @@ describe("Requirement Coverage Projection properties", () => {
         for (const { verdict } of coverage.rows) {
           if (verdict.kind !== "candidate-pass") continue;
           expect(verdict.drift.kind).toBe("stable");
+          expect(claimSeverity(verdict)).toBe("NONE");
         }
       },
     ));
   });
 
-  it("renders every row it projected, so no verdict is silently dropped", () => {
+  it("the settled floor equals the CRITICAL findings the command tells the Agent to emit", () => {
+    fc.assert(fc.property(tasksArb, (tasks) => {
+      const coverage = projectRequirementCoverage(indexed, tasks);
+      if (coverage.kind !== "projected") return;
+      const expected = coverage.rows.filter(({ verdict }) => claimSeverity(verdict) === "CRITICAL").length +
+        coverage.unclaimed.length + coverage.unclaimedScenarios.length;
+      expect(settledCriticalCount(coverage)).toBe(expected);
+      expect(settledFloorProblem(coverage, expected)).toBeNull();
+      if (expected > 0) expect(settledFloorProblem(coverage, expected - 1)).not.toBeNull();
+    }));
+  });
+
+  it("renders one body row per projected row, whatever the claim text contains", () => {
+    // Asserts the table's SHAPE, not substring presence: a claim carrying a
+    // pipe or a newline must not become extra rows in engine-settled authority.
     fc.assert(fc.property(tasksArb, (tasks) => {
       const coverage = projectRequirementCoverage(indexed, tasks);
       const rendered = renderRequirementCoverage(coverage);
       if (coverage.kind !== "projected") return;
-      for (const row of coverage.rows) expect(rendered).toContain(row.claim);
-      for (const id of coverage.unclaimed) expect(rendered).toContain(id);
+      const bodyRows = rendered
+        .split("\n")
+        .filter((line) => line.startsWith("| ") && !line.startsWith("| Task |") && !line.startsWith("|---"));
+      expect(bodyRows).toHaveLength(Math.max(coverage.rows.length, 1));
+      for (const id of [...coverage.unclaimed, ...coverage.unclaimedScenarios]) {
+        expect(rendered).toContain(id);
+      }
     }));
   });
 });

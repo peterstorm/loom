@@ -10,6 +10,14 @@
  * behaviour, and `/spec-check` stops re-deriving the graph it was already
  * handed.
  *
+ * Two facts about a row are deliberately orthogonal and never collapsed:
+ * **who decides it** (`claimDecider`) and **how bad it is** (`claimSeverity`).
+ * A Requirement whose text drifted since the claim is a CRITICAL-adjacent fact
+ * about the specification AND an open question about the code, so it is graded
+ * `MEDIUM` and still handed to the Agent. Folding those two axes into one
+ * severity string is what told the Agent to skip the assessment the verdict
+ * exists to request.
+ *
  * The projection is derived join input, never a second source of truth: the
  * Spec Index owns Requirement identity, the protected TaskGraph owns the
  * Task→Requirement edges, and this module owns neither.
@@ -36,20 +44,33 @@ import { specParseErrorMessage } from "./parse-spec";
 export type CompletableEntry = SpecEntry<"FR"> | SpecEntry<"AS">;
 
 /**
+ * A hash as protected Task state actually holds it, classified at the boundary.
+ *
+ * The persisted form is an unbranded string in a hand-editable file, so it
+ * enters the type through this parse rather than by assertion. Carrying the
+ * rejected value as its own case is the point: dropping it made a truncated or
+ * tampered hash indistinguishable from one that was never recorded.
+ */
+export type RecordedHash =
+  | Readonly<{ kind: "readable"; hash: SpecContentHash }>
+  | Readonly<{ kind: "unreadable"; stored: string }>;
+
+/**
  * Whether the Requirement text still says what it said when the Task claimed
  * it. Orthogonal to whether the claim is implemented, so it travels beside the
  * verdict rather than collapsing into it.
  */
 export type DriftFact =
   | Readonly<{ kind: "unverifiable" }>
-  | Readonly<{ kind: "stable"; hash: SpecContentHash }>
+  | Readonly<{ kind: "unreadable-record"; stored: string }>
+  | Readonly<{ kind: "stable" }>
   | Readonly<{ kind: "drifted"; recorded: SpecContentHash; current: SpecContentHash }>;
 
 /**
  * One Requirement Completion Claim's structural outcome.
  *
  * `candidate-pass` is the only verdict that hands work to a model; the other
- * three are decided here and are not the model's to overturn.
+ * four are decided here and are not the model's to overturn.
  */
 export type ClaimVerdict =
   | Readonly<{ kind: "unknown-requirement" }>
@@ -78,15 +99,26 @@ export type SpecIndexUnavailable =
   | Readonly<{ kind: "unreadable"; path: string; reason: string }>
   | Readonly<{ kind: "unparsed"; path: string; errors: NonEmpty<SpecParseError> }>;
 
-/** A Spec Index observation: the projection of the exact observed bytes. */
+/**
+ * A Spec Index observation: the projection of the exact observed bytes, and the
+ * digest of those same bytes.
+ *
+ * The digest rides inside the variant so the "one read" claim is checkable
+ * rather than asserted: a caller can prove the index came from the document
+ * whose digest it is publishing, instead of proving only that the paths agree.
+ */
 export type SpecIndexAvailability =
-  | Readonly<{ kind: "indexed"; path: string; index: ParsedSpec }>
+  | Readonly<{ kind: "indexed"; path: string; contentDigest: string; index: ParsedSpec }>
   | Readonly<{ kind: "unavailable"; reason: SpecIndexUnavailable }>;
 
 /**
  * One Task's join input. `inCurrentWave` rides on the Task rather than arriving
  * as a separate id list: a roster and a list of ids can disagree, a flag on the
  * row cannot.
+ *
+ * `anchorHashes` is always a map — an empty one means the graph recorded
+ * nothing, which is the same fact a missing field carries and needs no second
+ * representation.
  */
 export type CoverageTask = Readonly<{
   id: string;
@@ -94,9 +126,7 @@ export type CoverageTask = Readonly<{
   completionAnchors: readonly string[];
   declaredFiles: readonly string[];
   modifiedFiles: readonly string[];
-  /** Hashes recorded when the Task→Requirement edge was created; `null` on
-   * graphs decomposed before Requirement hashes were engine-derived. */
-  anchorHashes: ReadonlyMap<string, SpecContentHash> | null;
+  anchorHashes: ReadonlyMap<string, RecordedHash>;
 }>;
 
 export type RequirementCoverage =
@@ -105,9 +135,16 @@ export type RequirementCoverage =
       kind: "projected";
       /** One row per current-Wave Requirement Completion Claim, in roster order. */
       rows: readonly CoverageRow[];
-      /** Functional Requirements no Task in the whole graph claims — planned by
-       * nobody, at any Wave. Wave-independent, so it is honest at every gate. */
+      /** Functional Requirements whose *completion* no Task claims at any Wave.
+       * Requirement Contributions are deliberately not counted — they are
+       * partial traceability and never assert completion — so an FR listed here
+       * may still have contributing work planned. Wave-independent, so it is
+       * honest at every gate. */
       unclaimed: readonly SpecEntryId<"FR">[];
+      /** The same join over Acceptance Scenarios. Without it the Agent has no
+       * roster of scenarios to check coverage for, and the step that exists to
+       * find uncovered scenarios silently iterates nothing. */
+      unclaimedScenarios: readonly SpecEntryId<"AS">[];
       /** The typed exclusion list, replacing a grep of the Out of Scope section. */
       exclusions: NonEmpty<SpecEntry<"OOS">>;
       /** The typed glossary, replacing a grep of the Appendix table. */
@@ -133,26 +170,34 @@ const entryById = (index: ParsedSpec): ReadonlyMap<string, IndexedEntry> => {
 
 /**
  * The recorded-vs-current comparison, as the only place a hash equality is
- * decided. A Task with no recorded hash yields `unverifiable`, which is a
- * different fact from `stable` and must never be rendered as one.
+ * decided.
+ *
+ * Three different absences, three different facts: nothing recorded is
+ * `unverifiable`, something recorded that the engine cannot have minted is
+ * `unreadable-record`, and a recorded hash that disagrees is `drifted`. None of
+ * them may be rendered as another — a graph carrying a value no engine could
+ * have written is corrupt authority, not missing authority.
  */
 function driftOf(
-  anchorHashes: CoverageTask["anchorHashes"],
+  anchorHashes: ReadonlyMap<string, RecordedHash>,
   claim: string,
   entry: CompletableEntry,
 ): DriftFact {
-  const recorded = anchorHashes?.get(claim);
+  const recorded = anchorHashes.get(claim);
   if (recorded === undefined) return Object.freeze({ kind: "unverifiable" });
-  return recorded === entry.contentHash
-    ? Object.freeze({ kind: "stable", hash: entry.contentHash })
-    : Object.freeze({ kind: "drifted", recorded, current: entry.contentHash });
+  if (recorded.kind === "unreadable") {
+    return Object.freeze({ kind: "unreadable-record", stored: recorded.stored });
+  }
+  return recorded.hash === entry.contentHash
+    ? Object.freeze({ kind: "stable" })
+    : Object.freeze({ kind: "drifted", recorded: recorded.hash, current: entry.contentHash });
 }
 
 /**
  * The single classification. Order is the point: an identifier that names
  * nothing cannot be assessed, an excluded identifier must not be assessed, and
  * a Requirement with no artifacts behind it has nothing to read — only what
- * survives all three earns a model's attention.
+ * survives all four gates earns a model's attention.
  */
 function classify(
   task: CoverageTask,
@@ -194,10 +239,13 @@ export function projectRequirementCoverage(
       rows.push(Object.freeze({ taskId: task.id, claim, verdict: classify(task, claim, byId) }));
     }
   }
+  const unclaimedOf = <F extends "FR" | "AS">(entries: readonly SpecEntry<F>[]): readonly SpecEntryId<F>[] =>
+    Object.freeze(entries.filter(({ id }) => !claimedAnywhere.has(id)).map(({ id }) => id));
   return Object.freeze({
     kind: "projected",
     rows: Object.freeze(rows),
-    unclaimed: Object.freeze(specIndex.index.frs.filter(({ id }) => !claimedAnywhere.has(id)).map(({ id }) => id)),
+    unclaimed: unclaimedOf(specIndex.index.frs),
+    unclaimedScenarios: unclaimedOf(specIndex.index.scenarios),
     exclusions: specIndex.index.oos,
     glossary: specIndex.index.glossary,
   });
@@ -208,7 +256,7 @@ export function projectRequirementCoverage(
  * construction: a new reason cannot reach an operator without text.
  */
 export function specIndexUnavailableMessage(reason: SpecIndexUnavailable): string {
-  return match(reason)
+  return match<SpecIndexUnavailable, string>(reason)
     .with({ kind: "no-spec-file" }, () => "the TaskGraph records no spec_file, so no Spec Index exists to join against")
     .with({ kind: "unreadable" }, ({ path, reason: cause }) => `spec file ${path} could not be read: ${cause}`)
     .with({ kind: "unparsed" }, ({ path, errors }) =>
@@ -217,20 +265,52 @@ export function specIndexUnavailableMessage(reason: SpecIndexUnavailable): strin
 }
 
 /**
- * The severity a settled verdict carries into the spec-check findings contract.
- * Decided here rather than in the command prose, so an Agent cannot soften a
- * structural refutation by describing it differently.
+ * Who decided a row. The engine decides everything structure can settle; only
+ * a `candidate-pass` is handed to an Agent, whatever its severity — which is
+ * why this is derived from the verdict's kind and never from its severity.
  */
-export type ClaimSeverity = "CRITICAL" | "MEDIUM" | "CANDIDATE";
+export type ClaimDecider = "engine" | "agent";
+
+export function claimDecider(verdict: ClaimVerdict): ClaimDecider {
+  return verdict.kind === "candidate-pass" ? "agent" : "engine";
+}
+
+/**
+ * How bad a row is, independent of who decides it. `NONE` is not "fine" — it
+ * means the structure raised nothing and the Agent's assessment supplies the
+ * verdict.
+ */
+export type ClaimSeverity = "CRITICAL" | "MEDIUM" | "NONE";
 
 export function claimSeverity(verdict: ClaimVerdict): ClaimSeverity {
-  return match(verdict)
-    .with({ kind: "unknown-requirement" }, () => "CRITICAL" as const)
-    .with({ kind: "excluded-requirement" }, () => "CRITICAL" as const)
-    .with({ kind: "not-declared" }, () => "CRITICAL" as const)
-    .with({ kind: "not-implemented" }, () => "CRITICAL" as const)
-    .with({ kind: "candidate-pass" }, ({ drift }) => drift.kind === "drifted" ? "MEDIUM" as const : "CANDIDATE" as const)
+  return match<ClaimVerdict, ClaimSeverity>(verdict)
+    .with({ kind: "unknown-requirement" }, () => "CRITICAL")
+    .with({ kind: "excluded-requirement" }, () => "CRITICAL")
+    .with({ kind: "not-declared" }, () => "CRITICAL")
+    .with({ kind: "not-implemented" }, () => "CRITICAL")
+    .with({ kind: "candidate-pass" }, ({ drift }) => match<DriftFact, ClaimSeverity>(drift)
+      // A stored hash the engine cannot have minted is corrupt authority, not
+      // missing authority, and outranks every other fact about the row.
+      .with({ kind: "unreadable-record" }, () => "CRITICAL")
+      .with({ kind: "drifted" }, () => "MEDIUM")
+      .with({ kind: "unverifiable" }, () => "NONE")
+      .with({ kind: "stable" }, () => "NONE")
+      .exhaustive())
     .exhaustive();
+}
+
+/**
+ * The exact number of CRITICAL findings the projection settles, and therefore
+ * the floor the spec-check Agent's own report may not go under.
+ *
+ * Counts what the command instructs the Agent to emit: every CRITICAL row, plus
+ * every Requirement and Acceptance Scenario nobody claims. Derived here so the
+ * engine and the Agent are counting the same thing.
+ */
+export function settledCriticalCount(coverage: RequirementCoverage): number {
+  if (coverage.kind === "unavailable") return 0;
+  const criticalRows = coverage.rows.filter((row) => claimSeverity(row.verdict) === "CRITICAL").length;
+  return criticalRows + coverage.unclaimed.length + coverage.unclaimedScenarios.length;
 }
 
 /**
@@ -238,7 +318,7 @@ export function claimSeverity(verdict: ClaimVerdict): ClaimSeverity {
  * what lets every caller discriminate on `kind` instead of matching text.
  */
 export function claimVerdictMessage(verdict: ClaimVerdict): string {
-  return match(verdict)
+  return match<ClaimVerdict, string>(verdict)
     .with({ kind: "unknown-requirement" }, () =>
       "names no entry in the Spec Index — a Completion Claim that the specification does not define")
     .with({ kind: "excluded-requirement" }, ({ entry }) =>
@@ -247,9 +327,11 @@ export function claimVerdictMessage(verdict: ClaimVerdict): string {
       `claims ${entry.id} but the Task declared no artifacts, so nothing can satisfy it`)
     .with({ kind: "not-implemented" }, ({ entry }) =>
       `claims ${entry.id} but the Task modified no files`)
-    .with({ kind: "candidate-pass" }, ({ entry, drift }) => match(drift)
+    .with({ kind: "candidate-pass" }, ({ entry, drift }) => match<DriftFact, string>(drift)
       .with({ kind: "unverifiable" }, () =>
         `${entry.id} is structurally covered; drift is unverifiable because no hash was recorded when the claim was made`)
+      .with({ kind: "unreadable-record" }, ({ stored }) =>
+        `${entry.id} is structurally covered but its recorded hash is not a value this engine could have written (stored ${JSON.stringify(stored.slice(0, 16))}) — the TaskGraph's Requirement hashes have been altered`)
       .with({ kind: "stable" }, () => `${entry.id} is structurally covered and its text is unchanged since the claim`)
       .with({ kind: "drifted" }, ({ recorded, current }) =>
         `${entry.id} is structurally covered but its text changed since the claim (recorded ${recorded.slice(0, 12)}, now ${current.slice(0, 12)})`)
@@ -258,42 +340,90 @@ export function claimVerdictMessage(verdict: ClaimVerdict): string {
 }
 
 /**
+ * Make one value safe to place in a Markdown table cell.
+ *
+ * `claim` and `taskId` originate in the decompose payload, which is
+ * agent-authored and validated only as non-empty strings. Interpolated raw,
+ * one pipe or newline forges extra rows in a table the packet declares
+ * engine-settled authority — so the untrusted text is neutralized at the one
+ * seam where it becomes table structure.
+ */
+function cell(value: string): string {
+  return value.replace(/\|/gu, "\\|").replace(/[\r\n]+/gu, " ");
+}
+
+/** The Requirement's own text, for the rows where one exists. */
+function requirementText(verdict: ClaimVerdict): string {
+  return verdict.kind === "unknown-requirement" ? "—" : verdict.entry.content;
+}
+
+/**
  * The Requirement Coverage Projection as the spec-check Agent reads it.
  *
  * Deterministic text: the same projection always renders the same bytes, so the
  * rendering contributes to Context Packet identity like any other frozen input.
- * Settled rows are copied into the report verbatim; only `CANDIDATE` rows are
- * the Agent's to decide.
+ * The `Decided by` column, not the severity, says which rows the Agent still
+ * has work to do on.
  */
-export function renderRequirementCoverage(coverage: RequirementCoverage): string {
-  if (coverage.kind === "unavailable") {
-    return [
-      "## Requirement Coverage Projection — UNAVAILABLE",
-      "",
-      `No structural projection was possible: ${specIndexUnavailableMessage(coverage.reason)}`,
-      "",
-      "Every Requirement Completion Claim below must be assessed by reading the specification and the code.",
-      "An unavailable projection is an absence of evidence, never a pass.",
-    ].join("\n");
+/** The honest-absence rendering: what is NOT carried is as load-bearing as what is. */
+function renderUnavailable(reason: SpecIndexUnavailable): readonly string[] {
+  return [
+    "## Requirement Coverage Projection — UNAVAILABLE",
+    "",
+    `No structural projection was possible: ${specIndexUnavailableMessage(reason)}`,
+    "",
+    "Nothing below is settled. Every Requirement Completion Claim must be assessed by reading the",
+    "specification and the code, and the Out-of-Scope list and glossary must be read from the",
+    "specification directly — this projection carries neither.",
+    "An unavailable projection is an absence of evidence, never a pass, and the report must say so.",
+  ];
+}
+
+function renderRows(rows: readonly CoverageRow[]): readonly string[] {
+  if (rows.length === 0) {
+    // A Wave whose Tasks claim nothing is a decompose defect, not a quiet pass:
+    // an entire Wave of work then traces to no Requirement at all.
+    return ["| — | — | engine | CRITICAL | — |" +
+      " this Wave's Tasks make no Requirement Completion Claims, so no work in this Wave traces to a Requirement |"];
   }
-  const rows = coverage.rows.map((row) =>
-    `| ${row.taskId} | ${row.claim} | ${claimSeverity(row.verdict)} | ${claimVerdictMessage(row.verdict)} |`);
+  return rows.map((row) => [
+    "|", cell(row.taskId),
+    "|", cell(row.claim),
+    "|", claimDecider(row.verdict),
+    "|", claimSeverity(row.verdict),
+    "|", cell(requirementText(row.verdict)),
+    "|", cell(claimVerdictMessage(row.verdict)), "|",
+  ].join(" "));
+}
+
+/** One unclaimed roster, rendered so an empty one still states its emptiness. */
+function renderUnclaimed(heading: string, family: string, ids: readonly string[]): readonly string[] {
+  return [
+    `### ${heading} whose completion no Task claims, at any Wave`,
+    "",
+    ...(ids.length === 0
+      ? [`Every ${family} in the Spec Index is claimed by some Task.`]
+      : ids.map((id) => `- ${id} — CRITICAL: no Task in the graph claims its completion`)),
+    "",
+  ];
+}
+
+export function renderRequirementCoverage(coverage: RequirementCoverage): string {
+  if (coverage.kind === "unavailable") return renderUnavailable(coverage.reason).join("\n");
   return [
     "## Requirement Coverage Projection",
     "",
-    "Engine-derived structural verdicts. `CRITICAL` and `MEDIUM` rows are settled — copy them",
-    "into the report verbatim; they are not yours to overturn. Assess only `CANDIDATE` rows.",
+    "Engine-derived structural verdicts. A row decided by `engine` is settled — copy it into the",
+    "report verbatim; it is not yours to overturn. A row decided by `agent` still needs you to read",
+    "the code, **including** rows already carrying a `MEDIUM` or `CRITICAL` severity: severity says",
+    "how bad the structural fact is, `Decided by` says whether an assessment is still owed.",
     "",
-    "| Task | Claim | Verdict | Detail |",
-    "|---|---|---|---|",
-    ...(rows.length === 0 ? ["| — | — | — | this Wave's Tasks make no Requirement Completion Claims |"] : rows),
+    "| Task | Claim | Decided by | Severity | Requirement | Detail |",
+    "|---|---|---|---|---|---|",
+    ...renderRows(coverage.rows),
     "",
-    "### Functional Requirements claimed by no Task, at any Wave",
-    "",
-    ...(coverage.unclaimed.length === 0
-      ? ["Every Functional Requirement in the Spec Index is claimed by some Task."]
-      : coverage.unclaimed.map((id) => `- ${id} — CRITICAL: no Task in the graph claims it`)),
-    "",
+    ...renderUnclaimed("Functional Requirements", "Functional Requirement", coverage.unclaimed),
+    ...renderUnclaimed("Acceptance Scenarios", "Acceptance Scenario", coverage.unclaimedScenarios),
     "### Out of Scope (typed exclusion list)",
     "",
     ...coverage.exclusions.map(({ id, content }) => `- ${id}: ${content}`),
@@ -301,6 +431,8 @@ export function renderRequirementCoverage(coverage: RequirementCoverage): string
     "### Glossary (typed terms)",
     "",
     ...coverage.glossary.map(({ term, definition }) => `- ${term}: ${definition}`),
+    "",
+    `Settled CRITICAL findings: ${settledCriticalCount(coverage)}. Your report may not fall below this count.`,
   ].join("\n");
 }
 
@@ -313,6 +445,8 @@ export function renderRequirementCoverage(coverage: RequirementCoverage): string
  * themselves, never recomputed: an entry's hash is derived from its own
  * canonical content by the parser's smart constructor, so re-deriving it here
  * would introduce a second canonicalization that could disagree with the first.
+ * The brand rides all the way to the persistence edge, where the caller widens
+ * it once rather than every reader re-earning it.
  *
  * Unknown identifiers are omitted rather than stamped with a placeholder. A
  * recorded hash asserts "the Requirement said this when the edge was made", and
@@ -322,9 +456,9 @@ export function renderRequirementCoverage(coverage: RequirementCoverage): string
 export function recordedAnchorHashes(
   index: ParsedSpec,
   completionAnchors: readonly string[],
-): Readonly<Record<string, string>> {
+): Readonly<Record<string, SpecContentHash>> {
   const byId = entryById(index);
-  const hashes: Record<string, string> = {};
+  const hashes: Record<string, SpecContentHash> = {};
   for (const claim of completionAnchors) {
     const indexed = byId.get(claim);
     if (indexed !== undefined) hashes[claim] = indexed.entry.contentHash;
@@ -340,10 +474,36 @@ export function recordedAnchorHashes(
  * variant — and a new variant cannot silently answer `null`.
  */
 export function specIndexPath(availability: SpecIndexAvailability): string | null {
-  return match(availability)
-    .with({ kind: "indexed" }, ({ path }) => path as string | null)
+  return match<SpecIndexAvailability, string | null>(availability)
+    .with({ kind: "indexed" }, ({ path }) => path)
     .with({ kind: "unavailable", reason: { kind: "no-spec-file" } }, () => null)
-    .with({ kind: "unavailable", reason: { kind: "unreadable" } }, ({ reason }) => reason.path as string | null)
-    .with({ kind: "unavailable", reason: { kind: "unparsed" } }, ({ reason }) => reason.path as string | null)
+    .with({ kind: "unavailable", reason: { kind: "unreadable" } }, ({ reason }) => reason.path)
+    .with({ kind: "unavailable", reason: { kind: "unparsed" } }, ({ reason }) => reason.path)
     .exhaustive();
+}
+
+/** The digest of the bytes an available index was parsed from; `null` otherwise. */
+export function specIndexDigest(availability: SpecIndexAvailability): string | null {
+  return availability.kind === "indexed" ? availability.contentDigest : null;
+}
+
+/**
+ * Whether a spec-check report honours the floor the projection already set.
+ *
+ * The projection settles verdicts from structure and then hands them to a model
+ * as text. Without this check that hand-off is the end of the story: an Agent
+ * that summarizes the coverage section instead of copying it can report zero
+ * CRITICAL findings, and the Wave Gate opens on the model's own arithmetic
+ * while the engine holds the proof it should not have. `null` means the report
+ * may stand; a string names the exact shortfall.
+ *
+ * Deliberately a floor, not an equality: the Agent is expected to ADD findings
+ * its own reading turns up. It may never subtract the engine's.
+ */
+export function settledFloorProblem(coverage: RequirementCoverage, reportedCritical: number): string | null {
+  const floor = settledCriticalCount(coverage);
+  return reportedCritical >= floor
+    ? null
+    : `spec-check reported ${reportedCritical} CRITICAL but the Requirement Coverage Projection settled ${floor}; ` +
+      "settled rows are decided by structure and are not the Agent's to drop";
 }

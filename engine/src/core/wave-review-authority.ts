@@ -32,17 +32,24 @@ import type { ReviewedWorkspaceObservation } from "./reviewed-workspace";
 import {
   projectRequirementCoverage,
   renderRequirementCoverage,
+  specIndexDigest,
   specIndexPath,
   type CoverageTask,
+  type RecordedHash,
   type SpecIndexAvailability,
 } from "./requirement-coverage";
-import { parseSpecContentHash, type SpecContentHash } from "./parse-spec";
+export type { SpecIndexAvailability } from "./requirement-coverage";
+import { parseSpecContentHash } from "./parse-spec";
 
 /**
  * One spec-check observation: the serializable document authority together with
- * the Spec Index projected from the very bytes its digest names. The shell
- * produces it from a single read, so a projection can never be attributed to a
- * digest it was not derived from.
+ * the Spec Index projected from the very bytes its digest names.
+ *
+ * The shell produces both from a single read, and `prepareWaveReviewBatch`
+ * PROVES the pairing rather than trusting it: the index carries the digest of
+ * the bytes it was parsed from, and that digest is compared with the document
+ * authority's own. Declared here, where the consumer lives, and re-exported by
+ * the shell producer so the contract has exactly one owner.
  */
 export type WaveSpecCheckObservation = Readonly<{
   authority: WaveSpecCheckDocumentsAuthority;
@@ -198,22 +205,33 @@ function parseWaveSpecCheckScope(raw: unknown): readonly WaveSpecCheckTaskAuthor
   if (!Array.isArray(raw) || raw.length === 0) return null;
   const scope: WaveSpecCheckTaskAuthority[] = [];
   for (const entry of raw) {
-    if (!exactObject(entry, [
-      "id", "description", "completionAnchors", "contributions", "declaredFiles", "modifiedFiles",
-    ])) {
+    // Both shapes, exactly as `specCheckDocuments` and `workspaceHeadSha` are
+    // already handled elsewhere in this file: a scope entry published before
+    // `modifiedFiles` existed is a schema generation behind, not damaged bytes.
+    // Refusing it would report an engine's own persisted packet as corrupt and
+    // block a Wave Gate that merely outlived an upgrade.
+    const legacyFields = ["id", "description", "completionAnchors", "contributions", "declaredFiles"];
+    if (!exactObject(entry, legacyFields) && !exactObject(entry, [...legacyFields, "modifiedFiles"])) {
       return null;
     }
     const completionAnchors = parseStringArray(entry.completionAnchors);
     const contributions = parseStringArray(entry.contributions);
     const declaredFiles = parseStringArray(entry.declaredFiles);
-    const modifiedFiles = parseStringArray(entry.modifiedFiles);
+    const modifiedFiles = entry.modifiedFiles === undefined
+      ? (Object.freeze([]) as readonly string[])
+      : parseStringArray(entry.modifiedFiles);
     if (typeof entry.id !== "string" || entry.id.trim() === "" ||
         typeof entry.description !== "string" || completionAnchors === null || contributions === null ||
         declaredFiles === null || modifiedFiles === null ||
         hasDuplicates(completionAnchors) || hasDuplicates(contributions) ||
-        hasDuplicates(declaredFiles) || hasDuplicates(modifiedFiles) ||
+        hasDuplicates(declaredFiles) ||
         hasBlank(completionAnchors) || hasBlank(contributions) ||
-        hasBlank(declaredFiles) || hasBlank(modifiedFiles) ||
+        hasBlank(declaredFiles) ||
+        // `modifiedFiles` is checked for blanks but NOT for duplicates. The
+        // state schema validates `files_modified` only as an array of strings,
+        // so a stricter decoder here would reject a packet the engine itself
+        // built one step earlier from a graph the StateManager accepted.
+        hasBlank(modifiedFiles) ||
         scopesOverlap(completionAnchors, contributions)) return null;
     scope.push(Object.freeze({
       id: entry.id,
@@ -464,19 +482,31 @@ export function waveSpecCheckScope(tasks: readonly Task[]): readonly WaveSpecChe
 
 /**
  * Lift protected Task state into the Requirement Coverage Projection's join
- * input. Recorded hashes cross the boundary through `parseSpecContentHash`: a
- * stored value that is not the shape `specContentHash` mints is dropped rather
- * than carried into the comparison, where it would read as ordinary drift.
+ * input.
+ *
+ * Recorded hashes cross the boundary through `parseSpecContentHash`, and a
+ * value that is not the shape `specContentHash` mints is KEPT as an unreadable
+ * record rather than dropped. Dropping it made a truncated or tampered hash
+ * indistinguishable from one that was never recorded — the projection then
+ * stated "no hash was recorded" about a graph that did record one, and graded
+ * the row down while doing it. A value no engine could have written is corrupt
+ * authority, and the projection says so.
  */
-const parsedAnchorHashes = (stored: Task["spec_anchor_hashes"]): ReadonlyMap<string, SpecContentHash> | null =>
-  stored === undefined
-    ? null
-    : new Map(Object.entries(stored).flatMap(([claim, raw]) => {
-        const hash = parseSpecContentHash(raw);
-        return hash === null ? [] : [[claim, hash] as const];
-      }));
+const parsedAnchorHashes = (stored: Task["spec_anchor_hashes"]): ReadonlyMap<string, RecordedHash> =>
+  new Map(Object.entries(stored ?? {}).map(([claim, raw]) => {
+    const hash = parseSpecContentHash(raw);
+    const recorded: RecordedHash = hash === null
+      ? Object.freeze({ kind: "unreadable", stored: raw })
+      : Object.freeze({ kind: "readable", hash });
+    return [claim, recorded] as const;
+  }));
 
-function coverageTasks(graph: TaskGraph, currentWave: number): readonly CoverageTask[] {
+/**
+ * The projection's join input for one graph. Exported so the SubagentStop
+ * enforcement path derives the settled floor from the SAME lift the packet was
+ * built from, rather than a second, drift-prone copy of it.
+ */
+export function coverageTasks(graph: TaskGraph, currentWave: number): readonly CoverageTask[] {
   return Object.freeze(graph.tasks.map((task) => Object.freeze({
     id: task.id,
     inCurrentWave: task.wave === currentWave,
@@ -494,13 +524,20 @@ function coverageTasks(graph: TaskGraph, currentWave: number): readonly Coverage
  * This pure function freezes the roster, packet/context bytes, model policy,
  * request/slot identities, and both Task and spec-check authority.
  *
- * The Requirement Coverage Projection deliberately stays out of `batchEpoch`.
- * Slot and request identity name the reviewed Wave, and every input the
- * projection reads — the observed spec digest, declared and modified files,
- * completion claims — is already an epoch input. Adding it would re-derive
- * every slot id in the batch on upgrade and orphan captures already written
- * against the old ones, buying nothing: the projection travels in packet bytes,
- * whose digest is part of Agent Request Authority.
+ * The Requirement Coverage Projection deliberately stays out of `batchEpoch`,
+ * and NOT because the epoch already covers its inputs — it does not. Two
+ * projection inputs are absent from the epoch payload: `spec_anchor_hashes`,
+ * which decides every `DriftFact`, and the `spec_anchors` of Tasks outside the
+ * current Wave, which decide the unclaimed lists. (`registration.authorityDigest`
+ * hashes the whole graph, but only as of gate registration, while resume
+ * recomputes against a refreshed one.)
+ *
+ * The real argument is narrower and does not need that coverage: the projection
+ * travels in packet bytes whose digest is part of Agent Request Authority, so
+ * its integrity is already proven where it is consumed. Adding it to the epoch
+ * would re-derive every slot id in the batch on upgrade and orphan captures
+ * already written against the old ones, for a guarantee the packet digest
+ * already gives.
  */
 export function prepareWaveReviewBatch(
   runId: OrchestrationRunId,
@@ -508,9 +545,9 @@ export function prepareWaveReviewBatch(
   graph: TaskGraph,
   attempt: 1 | 2,
   workspace: readonly ReviewedWorkspaceObservation[],
-  observation: WaveSpecCheckObservation,
+  specCheckObservation: WaveSpecCheckObservation,
 ): DomainResult<WaveRequestBatch, WaveReviewPreparationError> {
-  const specCheckDocuments = observation.authority;
+  const specCheckDocuments = specCheckObservation.authority;
   const currentWaveTasks = graph.tasks.filter((task) => task.wave === registration.input.wave);
   const tasks: Task[] = [];
   for (const taskId of registration.taskIds) {
@@ -536,16 +573,21 @@ export function prepareWaveReviewBatch(
       specCheckDocuments.plan.path !== (graph.plan_file ?? null)) {
     return failure("spec-check document observations do not match protected spec_file/plan_file authority");
   }
-  // The observation binds digest and Spec Index to one read; this proves that
-  // pair was taken from the protected spec_file rather than assuming it, so a
-  // projection can never be published under another document's authority.
-  if (specIndexPath(observation.specIndex) !== (graph.spec_file ?? null)) {
+  // Prove, do not assume, that the index and the digest name the same bytes of
+  // the same protected document. The path check alone would still admit an
+  // observation assembled from two unrelated reads; comparing the digest the
+  // index was parsed from against the document authority's own closes that.
+  if (specIndexPath(specCheckObservation.specIndex) !== (graph.spec_file ?? null)) {
     return failure("Spec Index observation does not name the protected spec_file");
+  }
+  if (specIndexDigest(specCheckObservation.specIndex) !== null &&
+      specIndexDigest(specCheckObservation.specIndex) !== specCheckDocuments.spec.contentDigest) {
+    return failure("Spec Index was parsed from bytes other than the observed spec-check document");
   }
 
   const specCheckScope = waveSpecCheckScope(tasks);
   const requirementCoverage = projectRequirementCoverage(
-    observation.specIndex,
+    specCheckObservation.specIndex,
     coverageTasks(graph, registration.input.wave),
   );
   const batchEpoch = parseArtifactDigest(sha256Hex(JSON.stringify({

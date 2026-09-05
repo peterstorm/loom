@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import * as parserBarrel from "../../src/parsers";
 import {
   parseSpec,
+  parseSpecContentHash,
   specContentHash,
   specParseErrorMessage,
   type ParsedSpec,
@@ -929,6 +930,34 @@ describe("parseSpec", () => {
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
       expect(messagesOf(parsed.errors)).toContain("unterminated code fence");
+    }
+  });
+});
+
+describe("parseSpecContentHash", () => {
+  it("admits exactly the shape specContentHash mints", () => {
+    const minted = specContentHash("System MUST parse specs");
+    expect(parseSpecContentHash(minted)).toBe(minted);
+    expect(parseSpecContentHash("0".repeat(64))).toBe("0".repeat(64));
+  });
+
+  it("refuses every value the engine could not have written", () => {
+    // The gate treats a rejected value as corrupt authority, so admitting a
+    // near-miss here would launder a tampered graph into ordinary drift.
+    for (const bad of [
+      "deadbeef",                 // too short
+      "0".repeat(63),             // one short
+      "0".repeat(65),             // one long
+      "A".repeat(64),             // uppercase hex is not what the mint emits
+      `${"0".repeat(63)}g`,       // non-hex character
+      ` ${"0".repeat(64)}`,       // leading space
+      `${"0".repeat(64)}\n`,      // trailing newline
+      "",
+    ]) {
+      expect(parseSpecContentHash(bad)).toBeNull();
+    }
+    for (const bad of [null, undefined, 42, {}, ["0".repeat(64)]]) {
+      expect(parseSpecContentHash(bad)).toBeNull();
     }
   });
 });

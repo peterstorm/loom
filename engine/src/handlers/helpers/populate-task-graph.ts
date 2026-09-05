@@ -61,6 +61,22 @@ interface DecomposeInput {
   tasks: readonly AuthoredTask[];
 }
 
+/**
+ * The one spec_file precedence, used by the pre-lock Spec Index observation, by
+ * the in-lock guard that compares against it, and by the value actually
+ * persisted.
+ *
+ * Three hand-written copies of a `??` chain is how the prepared Spec Index and
+ * the graph it is stamped onto drift apart: the guard can only be honest if it
+ * compares the same derivation the other two used.
+ */
+export function resolvedSpecFile(
+  existing: string | null | undefined,
+  authored: string | undefined,
+): string | null {
+  return existing ?? authored ?? null;
+}
+
 const DECOMPOSE_FIELDS = new Set(["spec_trace_version", "plan_title", "plan_file", "spec_file", "tasks"]);
 
 type PreparedManifest =
@@ -448,7 +464,7 @@ const handler: HookHandler = async (stdin, args) => {
   // bytes itself. Unlike the manifest this one degrades — a project with no
   // canonical specification still decomposes, and every Requirement it claims
   // simply reports drift as unverifiable at the gate rather than as stable.
-  const observedSpecFile = existingState.spec_file ?? decompose.spec_file ?? null;
+  const observedSpecFile = resolvedSpecFile(existingState.spec_file, decompose.spec_file);
   const specIndex = observeSpecIndex(observedSpecFile);
   if (specIndex.kind === "unavailable") {
     process.stderr.write(
@@ -475,7 +491,7 @@ const handler: HookHandler = async (stdin, args) => {
     // named before the lock. If the locked graph now names a different one, the
     // prepared hashes describe another document — refuse rather than stamp
     // Requirement text that was never at these identifiers.
-    const lockedSpecFile = existing.spec_file ?? decompose.spec_file ?? null;
+    const lockedSpecFile = resolvedSpecFile(existing.spec_file, decompose.spec_file);
     if (lockedSpecFile !== observedSpecFile) {
       throw new Error(
         `spec_file changed from ${observedSpecFile ?? "none"} to ${lockedSpecFile ?? "none"} while this ` +
@@ -489,7 +505,7 @@ const handler: HookHandler = async (stdin, args) => {
       spec_trace_version: 2,
       plan_title: decompose.plan_title,
       plan_file: validatedPlanFile,
-      spec_file: existing.spec_file ?? decompose.spec_file ?? null,
+      spec_file: lockedSpecFile,
       tasks: decompose.tasks.map((task) => sanitizeDecomposedTask(task, specIndex)),
       current_wave: 1,
       executing_tasks: [],
