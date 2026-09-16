@@ -11,9 +11,10 @@
  */
 
 import { statSync } from "node:fs";
+import { resolve as pathResolve, relative as pathRelative, sep as pathSep } from "node:path";
 import type { HookHandler, PreToolUseInput } from "../../types";
 import { shouldBlockDirectEdit, type ActiveRosterProbe } from "../../core/block-direct-edits";
-import { subagentDir } from "../../config";
+import { gitRepositoryRoot, subagentDir } from "../../config";
 import { readActiveAgentRoles } from "../../machine/ledger";
 
 /**
@@ -56,7 +57,36 @@ const handler: HookHandler = async (stdin) => {
       message: `block-direct-edits: malformed hook input — failing closed: ${e instanceof Error ? e.message : String(e)}`,
     };
   }
-  return shouldBlockDirectEdit(input.tool_name, input.session_id, undefined, activeRosterProbe);
+  return shouldBlockDirectEdit(
+    input.tool_name,
+    input.session_id,
+    undefined,
+    activeRosterProbe,
+    panelWriteTargetPaths(input.tool_input),
+  );
 };
+
+/**
+ * Repo-relative write targets for the panel-artifact admission. The raw
+ * file_path arrives from hook input; this shell resolves it against the
+ * harness cwd and makes it repo-relative, so the guard's admission sees one
+ * canonical form and a `..` escape or an outside-the-repo target cannot be
+ * proven in-scope. An unobservable repository root cannot prove the
+ * target's scope either: fail closed to the role admission, which blocks
+ * panel writers.
+ */
+function panelWriteTargetPaths(toolInput: Record<string, unknown>): readonly string[] {
+  const filePath = toolInput["file_path"];
+  if (typeof filePath !== "string" || filePath === "") return [];
+  try {
+    const repoRoot = gitRepositoryRoot();
+    if (repoRoot === null) return [];
+    const absolute = pathResolve(process.cwd(), filePath);
+    const relative = pathRelative(repoRoot, absolute).split(pathSep).join("/");
+    return Object.freeze([relative]);
+  } catch {
+    return [];
+  }
+}
 
 export default handler;

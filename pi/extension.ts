@@ -6,7 +6,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative as pathRelative, resolve, sep as pathSep } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { mkdirSync, readFileSync } from "node:fs";
@@ -76,7 +76,7 @@ import {
 // with it — every hook below, not just review capture. `engine/tests/pi-imports.test.ts`
 // resolves every engine import in this file against the real exports so the next
 // move of a shared symbol fails a test instead of silently disarming Pi.
-import { isReviewAgent, taskGraphPath, subagentDir, PHASE_AGENT_MAP, IMPL_AGENTS, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
+import { isReviewAgent, taskGraphPath, subagentDir, PHASE_AGENT_MAP, IMPL_AGENTS, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS, probePathFailClosed, gitRepositoryRoot } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
 import { currentOrchestrationStatus } from "../engine/src/handlers/helpers/orchestration";
@@ -419,6 +419,29 @@ export function piWriteTargetPaths(raw: unknown): PiWriteTargetPathsResult {
   }
   return Object.freeze({ ok: true, value: Object.freeze(paths) as readonly [string, ...string[]] });
 }
+
+/**
+ * Repo-relative write targets for the panel-artifact admission. The raw
+ * edit/write input paths arrive from the harness; this shell resolves them
+ * against the session cwd and makes them repo-relative, so the guard's
+ * admission sees one canonical form and a `..` escape or an
+ * outside-the-repo target cannot be proven in-scope. An unobservable
+ * repository root cannot prove the target's scope either: fail closed to
+ * the role admission, which blocks panel writers.
+ */
+const panelGuardTargets = (rawInput: unknown, cwd: string): readonly string[] => {
+  if (typeof rawInput !== "object" || rawInput === null || Array.isArray(rawInput)) return [];
+  const targets = piWriteTargetPaths(rawInput);
+  if (!targets.ok) return [];
+  try {
+    const repoRoot = gitRepositoryRoot();
+    if (repoRoot === null) return [];
+    return Object.freeze(targets.value.map((target) =>
+      pathRelative(repoRoot, resolve(cwd, target)).split(pathSep).join("/")));
+  } catch {
+    return [];
+  }
+};
 
 export function replacePiSpawnTask(raw: unknown, index: number, task: string): void {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
@@ -1321,7 +1344,13 @@ export default function (
         currentGuard = "block-direct-edits";
         const rejectedGrant = rejectedChildWriteGrantBlock(rejectedChildWriteGrantSessions.has(sessionId));
         if (rejectedGrant !== null) return rejectedGrant;
-        const result = shouldBlockDirectEdit(event.toolName, sessionId, () => graphIsActive, activeRosterProbe);
+        const result = shouldBlockDirectEdit(
+          event.toolName,
+          sessionId,
+          () => graphIsActive,
+          activeRosterProbe,
+          panelGuardTargets(event.input, ctx.cwd),
+        );
         if (result.kind === "block") {
           return { block: true, reason: result.message };
         }

@@ -624,8 +624,10 @@ function proveNoGitMetadataInAncestors(): void {
   }
 }
 
-/** Resolve Git root without conflating an absent repository with an unavailable probe. */
-function gitRepositoryRoot(): string | null {
+/** Resolve Git root without conflating an absent repository with an unavailable probe.
+ *  Exported for the direct-edit wrapper's panel-artifact target resolution; the
+ *  probe itself stays the one implementation the task-graph search shares. */
+export function gitRepositoryRoot(): string | null {
   const probe = spawnSync("git", ["rev-parse", "--show-toplevel"], {
     encoding: "utf-8",
     env: { ...process.env, LANG: "C", LC_ALL: "C" },

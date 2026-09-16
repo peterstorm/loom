@@ -21,7 +21,7 @@ import {
   type ActiveRosterProbe,
 } from "../../../src/core/block-direct-edits";
 import blockDirectEdits, { activeRosterProbe } from "../../../src/handlers/pre-tool-use/block-direct-edits";
-import { SUBAGENT_DIR, TASK_GRAPH_PATH, pathExistsFailClosed } from "../../../src/config";
+import { SUBAGENT_DIR, TASK_GRAPH_PATH, pathExistsFailClosed, gitRepositoryRoot } from "../../../src/config";
 import { parseSessionId } from "../../../src/machine/evidence";
 
 const orchestrating = () => true;
@@ -372,5 +372,114 @@ describe("activeRosterProbe — the adapter's catch branch (round-41 A2)", () =>
       stderr.mockRestore();
     }
     expect(written.join("")).toBe("");
+  });
+});
+
+describe("shouldBlockDirectEdit — panel-artifact admission (grammar-constrained-decoding seam gap)", () => {
+  /**
+   * The panel templates promise write capability the guard did not admit: the
+   * interviewer writes the run's interview digest and the designer writes one
+   * candidate per lens under the run's panel-runs dir, while the guard admitted
+   * only implementation-role agents — so a panel writer was blocked by the
+   * guard at its first write ("a spawn with no scoped Pi write grant fails
+   * confusingly at its first edit"). The admission is scoped to the spec
+   * artifact root the panel run's artifacts live under; targets arrive
+   * repo-relative from the caller's shell.
+   */
+  const decideWithTargets = (...entries: readonly ActiveRosterEntry[]) =>
+    (targets: readonly string[]) =>
+      shouldBlockDirectEdit("Write", s, orchestrating, roster(...entries), targets).kind;
+
+  it("allows a panel artifact writer targeting the run's panel-runs digest path", () => {
+    const decide = decideWithTargets(entry("a339f6fd51d78b179", "arch-interviewer-agent"));
+    expect(decide([".claude/specs/2026-09-16-grammar-constrained-decoding/panel-runs/run-1/interview.md"])).toBe("allow");
+  });
+
+  it("allows every panel artifact writer role, not just the interviewer", () => {
+    const decide = decideWithTargets(entry("opaque-designer", "arch-designer-agent"));
+    expect(decide([".claude/specs/slug/panel-runs/run-1/candidates/candidate-lens.md"])).toBe("allow");
+  });
+
+  it("admits on any active entry, not only the first", () => {
+    expect(shouldBlockDirectEdit("Write", s, orchestrating, roster(
+      entry("opaque-judge", "arch-judge-agent"),
+      entry("opaque-interviewer", "arch-interviewer-agent"),
+    ), [".claude/specs/slug/panel-runs/run-1/interview.md"]).kind).toBe("allow");
+  });
+
+  it("blocks a panel writer targeting outside the spec artifact root", () => {
+    const decide = decideWithTargets(entry("a339f6fd51d78b179", "arch-interviewer-agent"));
+    for (const evil of [".claude/plans/plan.md", "engine/src/core/x.ts", "../outside.md", "unrelated.md"]) {
+      expect(decide([evil]), evil).toBe("block");
+    }
+  });
+
+  it("blocks a `..` segment that normalizes out of the spec artifact root", () => {
+    const decide = decideWithTargets(entry("a339f6fd51d78b179", "arch-interviewer-agent"));
+    expect(decide([".claude/specs/../.claude/state/active_task_graph.json"])).toBe("block");
+  });
+
+  it("blocks a panel writer with NO provable target — fail closed", () => {
+    const decide = decideWithTargets(entry("a339f6fd51d78b179", "arch-interviewer-agent"));
+    expect(decide([])).toBe("block");
+  });
+
+  it("blocks the judge even on an in-scope target — read-only role", () => {
+    const decide = decideWithTargets(entry("opaque-judge", "arch-judge-agent"));
+    expect(decide([".claude/specs/slug/panel-runs/run-1/candidates/candidate-lens.md"])).toBe("block");
+  });
+
+  it("keeps the impl admission untouched: targets are irrelevant to it", () => {
+    expect(shouldBlockDirectEdit("Edit", s, orchestrating, roster(entry("code-implementer-agent")), []).kind).toBe("allow");
+    expect(shouldBlockDirectEdit("Edit", s, orchestrating, roster(entry("code-implementer-agent")), ["/etc/passwd"]).kind).toBe("allow");
+  });
+
+  it("both admissions share ONE roster probe", () => {
+    const probe = vi.fn<ActiveRosterProbe>(() => [entry("a339f6fd51d78b179", "arch-interviewer-agent")]);
+    shouldBlockDirectEdit("Write", s, orchestrating, probe, [".claude/specs/slug/panel-runs/run-1/interview.md"]);
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it("a traversal session id still fails CLOSED before the panel admission", () => {
+    const probe = vi.fn<ActiveRosterProbe>(() => [entry("a339f6fd51d78b179", "arch-interviewer-agent")]);
+    const result = shouldBlockDirectEdit("Write", "../../etc", orchestrating, probe, [".claude/specs/x.md"]);
+    expect(result.kind).toBe("block");
+    expect(probe).not.toHaveBeenCalled();
+  });
+});
+
+describe("block-direct-edits handler — panel-artifact targets (end-to-end wiring)", () => {
+  /**
+   * The wiring proof the array-fixture cases above deliberately do not carry:
+   * the wrapper resolves the raw file_path against the harness cwd and makes
+   * it repo-relative, so a real .claude/specs target under this repo admits a
+   * real panel-writer roster while an outside-the-repo target stays blocked.
+   * Both assertions assume the guard is armed (a task graph exists in this
+   * checkout); without one the gate's first act allows every edit.
+   */
+  it("a real .claude/specs target under the repo admits a real panel-writer roster", async () => {
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(join(SUBAGENT_DIR, `${s}.active`), "a339f6fd51d78b179\tarch-interviewer-agent\n");
+    const repoRoot = gitRepositoryRoot();
+    if (repoRoot === null) return; // proven non-repository: the resolution cannot be proven
+    const target = join(repoRoot, ".claude", "specs", "panel-runs", `run-${process.pid}`, "interview.md");
+    const result = await blockDirectEdits(JSON.stringify({
+      tool_name: "Write",
+      tool_input: { file_path: target },
+      session_id: s,
+    }), []);
+    expect(result.kind).toBe("allow");
+  });
+
+  it("an outside-the-repo target stays blocked for a panel writer", async () => {
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(join(SUBAGENT_DIR, `${s}.active`), "a339f6fd51d78b179\tarch-interviewer-agent\n");
+    if (gitRepositoryRoot() === null) return;
+    const result = await blockDirectEdits(JSON.stringify({
+      tool_name: "Write",
+      tool_input: { file_path: join(tmpdir(), `outside-${process.pid}.md`) },
+      session_id: s,
+    }), []);
+    expect(result.kind).toBe("block");
   });
 });

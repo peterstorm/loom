@@ -31,6 +31,13 @@ import { stripNamespace } from "../utils/strip-namespace";
  */
 const ARTIFACT_PATH_TOKEN = /(?:^|[^A-Za-z0-9_./{}-])((?:\.\.\/)*\.claude\/(?:specs|plans)(?:\/[A-Za-z0-9._/{}:-]*)?)/g;
 
+/** The spec artifact root, repo-relative: where every spec-phase and panel-run
+ *  artifact lives (`.claude/specs/<slug>/`, including the panel-runs subtree the
+ *  interview digest and designer candidates occupy). The direct-edit guard
+ *  consumes this same constant, so its admission and the scope derivation can
+ *  never name two roots. */
+export const SPEC_ARTIFACT_ROOT = ".claude/specs";
+
 /** Phase agents whose run contract includes writing an artifact. Everything
  *  else PHASE_AGENT_MAP knows (decompose) is read-only and receives no grant
  *  even when its prompt names artifact paths. */
@@ -48,7 +55,9 @@ const ARTIFACT_WRITING_PHASES: ReadonlySet<string> = new Set([
  *  absent: their prompts name candidate paths to READ, and a scoped write
  *  grant would let a compromised judge rewrite candidate files the finalizer
  *  reads verbatim. */
-const PANEL_ARTIFACT_WRITERS: ReadonlySet<string> = new Set([
+/** Exported for the direct-edit guard's panel-artifact admission: the role set
+ *  is the one honest door both the grant planner and the guard admit through. */
+export const PANEL_ARTIFACT_WRITERS: ReadonlySet<string> = new Set([
   "arch-interviewer-agent",
   "arch-designer-agent",
 ]);
@@ -63,7 +72,7 @@ function phaseFallbackScope(phase: string): readonly string[] | null {
     case "specify":
     case "clarify":
     case "plan-alignment":
-      return [".claude/specs"];
+      return [SPEC_ARTIFACT_ROOT];
     case "architecture":
       return [".claude/plans"];
     default:
