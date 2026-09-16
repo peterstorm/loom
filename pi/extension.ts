@@ -57,6 +57,7 @@ import {
   piAllSlotsFailedNote,
   piReviewAuthorityProblem,
   piSpecCheckAuthorityProblem,
+  piSilentStopNote,
   parsePiSubagentResults,
   piSubagentFailureSignals,
   piSubagentResultFailed,
@@ -2382,6 +2383,17 @@ export default function (
     const entries = parsePiSubagentResults(rawResults);
     if (!spawnedWithoutTaskGraph(reservation)) {
       processingErrors.push(...await finalizeReservedImplementations(entries));
+    }
+    // Silent-stop observability: an exit-0 result with no assistant text is the
+    // failure mode the appliers cannot name — they parse the empty transcript
+    // and report "not ready"/"no structured evidence" without the stopReason
+    // that discriminates it. The note is stderr-only: the state side above
+    // already settled or preserved what it owns, and a processing error here
+    // would turn a settled batch into an orchestration failure.
+    for (const entry of entries) {
+      if (!entry.ok) continue;
+      const note = piSilentStopNote(entry.result);
+      if (note !== null) process.stderr.write(`loom(pi): ${note}\n`);
     }
 
     // A reservation is the authoritative expected batch. Pi may return a

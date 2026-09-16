@@ -277,6 +277,68 @@ export function piSubagentFailureSignals(result: {
   ].join(", ");
 }
 
+/** Whether any assistant text block is observable in an unknown transcript. */
+const assistantTextPresent = (messages: unknown): boolean => {
+  if (!Array.isArray(messages)) return true;
+  return messages.some((message) => {
+    if (typeof message !== "object" || message === null) return false;
+    const record = message as Record<string, unknown>;
+    if (record.role !== "assistant" || !Array.isArray(record.content)) return false;
+    return record.content.some((block) => {
+      if (typeof block !== "object" || block === null) return false;
+      const text = (block as Record<string, unknown>).text;
+      return typeof text === "string" && text.trim() !== "";
+    });
+  });
+};
+
+/** The last non-empty text lines of an unknown transcript, for a diagnostic tail. */
+const transcriptTail = (messages: unknown): string => {
+  if (!Array.isArray(messages)) return "n/a (unreadable transcript shape)";
+  const texts = messages.flatMap((message) => {
+    if (typeof message !== "object" || message === null) return [];
+    const content = (message as Record<string, unknown>).content;
+    if (!Array.isArray(content)) return [];
+    return content.flatMap((block) => {
+      if (typeof block !== "object" || block === null) return [];
+      const text = (block as Record<string, unknown>).text;
+      return typeof text === "string" && text.trim() !== "" ? [text.trim().slice(0, 160)] : [];
+    });
+  });
+  return texts.length === 0 ? "(empty transcript)" : texts.slice(-3).join(" | ");
+};
+
+/**
+ * The diagnostic for a Pi subagent that exited CLEANLY but emitted no
+ * assistant text — the "silent stop" failure mode observed in in-memory RPC
+ * children: exitCode=0, a non-error stopReason, an empty transcript, and pi
+ * rendering "(no output)". The appliers then parse the empty transcript and
+ * report "not ready" or "no structured evidence" without surfacing the
+ * stopReason that discriminates the mode; this note carries it beside the
+ * transcript tail, so the operator reads the pattern where the symptoms are.
+ *
+ * Failed results return null: they already carry `piSubagentFailureSignals`
+ * through `applyFailedPiResult`, and a second diagnostic would repeat them. A
+ * result WITH assistant text also returns null — silence is positively
+ * identified only when no assistant text block is observable, so this helper
+ * reports only a case it can account for. `messages` is typed `unknown` and
+ * read defensively: pi versions differ on transcript shape, and a shape this
+ * helper cannot read degrades to "not provably silent" instead of a parse
+ * crash at the diagnostic site.
+ */
+export function piSilentStopNote(result: PiSubagentResult): string | null {
+  if (piSubagentResultFailed(result)) return null;
+  if (assistantTextPresent(result.messages)) return null;
+  const stopReason = typeof result.stopReason === "string" ? result.stopReason : "n/a";
+  const errorMessage = typeof result.errorMessage === "string" ? result.errorMessage.trim() : "";
+  return [
+    `${result.agent} exited cleanly but emitted no assistant text (silent stop): ` +
+      `exitCode=${result.exitCode}, stopReason=${stopReason}`,
+    `transcript tail: ${transcriptTail(result.messages)}`,
+    ...(errorMessage === "" ? [] : [`errorMessage=${JSON.stringify(errorMessage)}`]),
+  ].join("; ") + " — the child ended without a final message; its evidence was not applied";
+}
+
 /** The reserved slot this result answers for, when the spawn reserved one. */
 export type PiSpecCheckAttemptAuthority = Readonly<{
   runId: WaveReviewEpochAuthority["runId"];
