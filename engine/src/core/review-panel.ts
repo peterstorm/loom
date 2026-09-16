@@ -35,6 +35,7 @@
 // a module that declares itself pure.
 import { match } from "ts-pattern";
 import { posix } from "node:path";
+import { z } from "zod/v4";
 import { parseFindingSeverity, parseStoredFindings } from "./findings";
 import type { CurrentDraftFinding, LegacyDraftFinding } from "../types";
 
@@ -63,6 +64,8 @@ import {
   type VerdictEnvelope,
 } from "./panel-kernel";
 import { STANDALONE_REVIEW_SUBJECT } from "./reviewer-contract";
+import { sha256Hex } from "./review-packet";
+import { type ArtifactDigest } from "./orchestration-contract/identity";
 
 // ---------------------------------------------------------------------------
 // Lenses
@@ -945,6 +948,43 @@ export function serializeRefutationVerdict(envelope: VerdictEnvelope<RefutationV
     })),
   }, null, 2);
 }
+
+// ---------------------------------------------------------------------------
+// Refutation-verdict emission schema — the frozen parameter bytes for the
+// refutation-verdict emission tool (one schema, no second contract)
+// ---------------------------------------------------------------------------
+
+/**
+ * The schema-conformance grammar for one refutation verdict's arguments,
+ * derived from the current external snake_case contract of
+ * `serializeRefutationVerdict` — the SAME serialization chain the panel writes
+ * with, so the refutation-verdict emission tool's parameter schema is the exact
+ * frozen bytes of this one schema. Prose sanitization is expressed as a
+ * refinement; the issuance-join constraints (criterion binding, finding
+ * coverage of the issued brief) are NOT expressible in a standalone schema and
+ * stay in `parseRefutationVerdict` at the submission seam.
+ */
+export const refutationVerdictV1Schema = z.strictObject({
+  criterion: z.string().min(1)
+    .describe("The lens whose slot issued this verdict; ingress binds it to the run's lens roster."),
+  verdicts: z.array(z.strictObject({
+    finding_id: z.string().min(1)
+      .describe("The wave-scoped finding id this entry judges; ingress binds it to the issued brief."),
+    verdict: z.enum(REFUTATION_VERDICTS)
+      .describe("One of: refuted, upheld, uncertain. Uncertain counts toward neither side."),
+    reasoning: z.string().min(1).refine((value) => sanitizeProse(value).length > 0)
+      .describe("1+ UTF-8 bytes; non-empty after brace stripping and trimming."),
+  }).readonly()).min(1).readonly(),
+}).readonly();
+export type RefutationVerdictArgsV1 = z.infer<typeof refutationVerdictV1Schema>;
+
+/** The frozen zod-derived parameter bytes; the byte-match guard is proven
+ *  through a different serialization chain than this stamper writes with. */
+export const REFUTATION_VERDICT_SCHEMA_V1: string = JSON.stringify(z.toJSONSchema(refutationVerdictV1Schema, {
+  target: "draft-2020-12", io: "output", unrepresentable: "throw", cycles: "throw", reused: "ref",
+}), null, 2);
+
+export const REFUTATION_VERDICT_SCHEMA_V1_DIGEST: ArtifactDigest = sha256Hex(REFUTATION_VERDICT_SCHEMA_V1) as ArtifactDigest;
 
 // ---------------------------------------------------------------------------
 // The tally — the deterministic k-of-n decision

@@ -1,0 +1,225 @@
+/**
+ * The emission-tool kernel: the frozen registry mapping each cataloged
+ * producer payload kind to its emission tool spec — the one place kind→schema
+ * knowledge lives — plus the admission gate at the emission edge, the
+ * capability ADT, and the ONE constructor of an emission tool's `parameters`
+ * object.
+ *
+ * Pure module: no I/O, no clock, no randomness, no pi-package import — the
+ * dependency direction stays pi → engine. Every trust boundary is explicit and
+ * fail-closed: `admitEmissionArguments` re-validates untrusted model input
+ * with the same parsers the fallback uses before anything is ingestable (the
+ * parse IS the gate), and the frozen bytes are the ONE serialization chain
+ * (AD-5) — no TypeBox mirror, no drift.
+ */
+
+import { z } from "zod/v4";
+import { REVIEWER_PAYLOAD_SCHEMA_V2 } from "./reviewer-contract";
+import { parseReviewerPayloadV2, parseStandaloneReviewerPayloadV3 } from "./reviewer-protocol";
+import { STANDALONE_REVIEWER_SCHEMA_V3 } from "./standalone-lineage-contract";
+import { JUDGE_VERDICT_SCHEMA_V1, judgeVerdictV1Schema } from "./panel-contract";
+import { REFUTATION_VERDICT_SCHEMA_V1, refutationVerdictV1Schema } from "./review-panel";
+import {
+  canonicalRecord,
+  failure,
+  success,
+  type ArtifactDigest,
+  type DomainResult,
+} from "./orchestration-contract/identity";
+import type { PayloadProducerKindName } from "./model-profiles";
+
+/** FR-009 vocabulary: the recorded source of every ingested payload. */
+export type PayloadSource = "emission-tool" | "extraction";
+
+/** The toolName literal union — no branded newtype: the toolName is carried
+ *  verbatim in protocol wording and agent prompts, never minted by prompt text. */
+export type EmissionToolName =
+  | "loom_emit_reviewer_payload"
+  | "loom_emit_judge_verdict"
+  | "loom_emit_refutation_verdict";
+
+/** The schema-version vocabulary of the frozen per-kind registry. */
+export type EmissionSchemaVersion = "v2" | "v3" | "v1";
+
+/**
+ * The failure the emission edge refuses. `code` is the parse's own code
+ * vocabulary, never-ingestable per FR-006; `message` is the deterministic
+ * diagnostic the tool result carries and the model re-emits within the
+ * bounded budget.
+ */
+export type EmissionParseFailure = Readonly<{ code: string; message: string }>;
+
+/** One per-version parser: the parse IS the gate at the emission edge. */
+export type EmissionPayloadParser = (
+  raw: Uint8Array,
+) => DomainResult<unknown, EmissionParseFailure>;
+
+export type EmissionToolSpec = Readonly<{
+  toolName: EmissionToolName;
+  schemaVersions: Readonly<Record<string, Readonly<{
+    schemaBytes: string;
+    parsePayload: EmissionPayloadParser;
+  }>>>;
+}>;
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder("utf-8", { fatal: true });
+
+/**
+ * The pure schema-conformance parser for one verdict kind's arguments. The
+ * frozen zod schema is the ONE contract (AD-5); this parse is its gate: shape,
+ * score domain, and prose sanitization are expressed in the schema, so
+ * arguments conform by construction at the syntax level. The authoritative
+ * engine-side gate for verdicts is the submission seam's parse with the panel
+ * authority's bindings (AD-8/FR-012) — the trust boundary is re-validated at
+ * the engine edge regardless, so the difference is defense-in-depth placement,
+ * not a security property the design depends on.
+ */
+const verdictArgsParser = (schema: z.ZodType): EmissionPayloadParser => (raw: Uint8Array) => {
+  let value: unknown;
+  try {
+    value = JSON.parse(decoder.decode(raw));
+  } catch {
+    return failure(canonicalRecord({
+      code: "invalid-json",
+      message: "emission arguments are not valid JSON",
+    }));
+  }
+  const parsed = schema.safeParse(value);
+  return parsed.success
+    ? success(parsed.data)
+    : failure(canonicalRecord({
+        code: "invalid-schema",
+        message: `emission arguments do not conform to the frozen schema: ${parsed.error.issues[0]?.message ?? "schema non-conformance"}`,
+      }));
+};
+
+/**
+ * The frozen registry: each of the three cataloged producer payload kinds
+ * mapped to its emission tool spec — reviewer-payload (v2 current + v3
+ * standalone-successor, the same parsers the fallback uses), judge-verdict
+ * (v1, the current external snake_case contract of serializeJudgeVerdict),
+ * and refutation-verdict (v1, the current external contract of
+ * serializeRefutationVerdict). A new producer kind is one entry here plus
+ * compiler-guided wiring: the `satisfies` check is exhaustive over the kind
+ * union, so a kind without a spec fails to compile at the one place kind→schema
+ * knowledge lives.
+ */
+export const EMISSION_TOOL_SPECS = Object.freeze({
+  "reviewer-payload": Object.freeze({
+    toolName: "loom_emit_reviewer_payload",
+    schemaVersions: Object.freeze({
+      v2: Object.freeze({
+        schemaBytes: REVIEWER_PAYLOAD_SCHEMA_V2,
+        parsePayload: parseReviewerPayloadV2,
+      }),
+      v3: Object.freeze({
+        schemaBytes: STANDALONE_REVIEWER_SCHEMA_V3,
+        parsePayload: parseStandaloneReviewerPayloadV3,
+      }),
+    }),
+  }),
+  "judge-verdict": Object.freeze({
+    toolName: "loom_emit_judge_verdict",
+    schemaVersions: Object.freeze({
+      v1: Object.freeze({
+        schemaBytes: JUDGE_VERDICT_SCHEMA_V1,
+        parsePayload: verdictArgsParser(judgeVerdictV1Schema),
+      }),
+    }),
+  }),
+  "refutation-verdict": Object.freeze({
+    toolName: "loom_emit_refutation_verdict",
+    schemaVersions: Object.freeze({
+      v1: Object.freeze({
+        schemaBytes: REFUTATION_VERDICT_SCHEMA_V1,
+        parsePayload: verdictArgsParser(refutationVerdictV1Schema),
+      }),
+    }),
+  }),
+} satisfies Record<PayloadProducerKindName, EmissionToolSpec>);
+
+/**
+ * The ONE constructor of an emission tool's `parameters` object (AD-5): the
+ * frozen zod-derived bytes, parsed once. Byte-identity by construction — one
+ * schema, one serialization chain, no TypeBox mirror, no drift, zero new
+ * dependency. The confined TSchema cast's price is paid once per kind at the
+ * pi registration surface (Phase 2), never here: this pure leaf returns the
+ * parsed JSON, and the byte-match guard re-serializes it against the frozen
+ * bytes.
+ */
+export function frozenPayloadSchemaParameters(schemaBytes: string): unknown {
+  return JSON.parse(schemaBytes);
+}
+
+export type EmissionArgumentAdmission =
+  | Readonly<{ kind: "valid"; payload: unknown }>
+  | Readonly<{ kind: "invalid-schema"; code: string; message: string }>;
+
+/**
+ * The parse IS the gate at the emission edge. The arguments are serialized
+ * deterministically and parsed through the registry's parsePayload — for
+ * reviewer-payload the SAME full schema-level parser the fallback uses; for
+ * the verdict kinds the pure schema-conformance parse of the frozen verdict
+ * schema. An invalid-schema refusal is never-ingestable (FR-006); the tool
+ * result is an error the model sees and re-emits within the bounded budget.
+ */
+export function admitEmissionArguments(
+  spec: EmissionToolSpec,
+  version: EmissionSchemaVersion,
+  rawArgs: unknown,
+): EmissionArgumentAdmission {
+  const schemaVersion = spec.schemaVersions[version];
+  if (schemaVersion === undefined) {
+    return Object.freeze({
+      kind: "invalid-schema" as const,
+      code: "unsupported-schema-version",
+      message: `emission tool ${spec.toolName} carries no schema version ${version}`,
+    });
+  }
+  let bytes: Uint8Array;
+  try {
+    bytes = encoder.encode(JSON.stringify(rawArgs, null, 2));
+  } catch (error) {
+    return Object.freeze({
+      kind: "invalid-schema" as const,
+      code: "invalid-json",
+      message: `emission arguments could not be serialized deterministically: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
+  const parsed = schemaVersion.parsePayload(bytes);
+  return parsed.ok
+    ? Object.freeze({ kind: "valid" as const, payload: parsed.value })
+    : Object.freeze({
+        kind: "invalid-schema" as const,
+        code: parsed.error.code,
+        message: parsed.error.message,
+      });
+}
+
+/**
+ * The capability ADT (US4): per harness × producer kind, whether the
+ * constrained path can be provided. Pi's declaration returns degradation
+ * "refuse" on a failed revision proof — the US4 hard fail, where the /reload
+ * remediation exists; Claude Code's declaration returns not-provided with
+ * degradation "extraction" (no Loom extension seam — the US2
+ * capability-aware-degradation class; the guard therefore admits those spawns,
+ * AD-7).
+ */
+export type EmissionToolCapability =
+  | Readonly<{ kind: "provided"; schemaDigest: ArtifactDigest }>
+  | Readonly<{ kind: "not-provided"; reason: string; degradation: "refuse" | "extraction" }>;
+
+/** The ONLY mint of the provided capability; the schema digest is branded. */
+export function providedEmissionCapability(schemaDigest: ArtifactDigest): EmissionToolCapability {
+  return canonicalRecord({ kind: "provided" as const, schemaDigest });
+}
+
+/** The ONLY mint of the not-provided capability; the degradation class is data. */
+export function notProvidedEmissionCapability(
+  reason: string,
+  degradation: "refuse" | "extraction",
+): EmissionToolCapability {
+  return canonicalRecord({ kind: "not-provided" as const, reason, degradation });
+}

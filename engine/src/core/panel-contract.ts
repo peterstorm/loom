@@ -1,3 +1,4 @@
+import { z } from "zod/v4";
 import {
   coverageErrors,
   fail,
@@ -14,6 +15,8 @@ import {
   type VerdictEnvelope,
 } from "./panel-kernel";
 import { compareStrings } from "./ordering";
+import { sha256Hex } from "./review-packet";
+import { type ArtifactDigest } from "./orchestration-contract/identity";
 
 // The architecture panel is consumer 1 of the kernel. Everything below is what
 // is genuinely architecture-specific: the interview digest, lens selection, the
@@ -580,6 +583,47 @@ export function serializeJudgeVerdict(verdict: JudgeVerdict): string {
     })),
   }, null, 2);
 }
+
+// ---------------------------------------------------------------------------
+// Judge-verdict emission schema — the frozen parameter bytes for the
+// judge-verdict emission tool (one schema, no second contract)
+// ---------------------------------------------------------------------------
+
+/**
+ * The schema-conformance grammar for one judge verdict's arguments, derived
+ * from the current external snake_case contract of `serializeJudgeVerdict` —
+ * the SAME serialization chain the panel writes with, so the judge-verdict
+ * emission tool's parameter schema is the exact frozen bytes of this one schema
+ * (FR-021/SC-006). Shape, score domain, and prose sanitization are expressed
+ * here; the issuance-join constraints (criterion binding to the run's derived
+ * criteria, candidate coverage of the expected set, non-increasing scores) are
+ * NOT expressible in a standalone schema and stay in `parseJudgeVerdict` at the
+ * submission seam — the schema's criterion and candidate fields are therefore
+ * shape-level strings, bound by the seam's authority.
+ */
+export const judgeVerdictV1Schema = z.strictObject({
+  criterion: z.string().min(1)
+    .describe("The judge criterion this verdict ranks under; ingress binds it to the run's derived criteria."),
+  rankings: z.array(z.strictObject({
+    candidate: z.string().min(1)
+      .describe("The run-scoped candidate filename this ranking judges; ingress binds it to the expected candidate set."),
+    score: z.number().int().min(0).max(10)
+      .describe("An integer from 0 to 10; judges score one candidate per criterion."),
+    fatal_flaw: z.string().min(1).refine((value) => sanitizeProse(value).length > 0).nullable()
+      .describe("The fatal flaw, or null. Non-empty after brace stripping and trimming when present."),
+    strongest_idea: z.string().min(1).refine((value) => sanitizeProse(value).length > 0)
+      .describe("The strongest idea; non-empty after brace stripping and trimming."),
+  }).readonly()).min(1).readonly(),
+}).readonly();
+export type JudgeVerdictArgsV1 = z.infer<typeof judgeVerdictV1Schema>;
+
+/** The frozen zod-derived parameter bytes; the byte-match guard is proven
+ *  through a different serialization chain than this stamper writes with. */
+export const JUDGE_VERDICT_SCHEMA_V1: string = JSON.stringify(z.toJSONSchema(judgeVerdictV1Schema, {
+  target: "draft-2020-12", io: "output", unrepresentable: "throw", cycles: "throw", reused: "ref",
+}), null, 2);
+
+export const JUDGE_VERDICT_SCHEMA_V1_DIGEST: ArtifactDigest = sha256Hex(JUDGE_VERDICT_SCHEMA_V1) as ArtifactDigest;
 
 // ---------------------------------------------------------------------------
 // Aggregation — the deterministic cross-verdict ranking

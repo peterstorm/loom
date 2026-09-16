@@ -232,6 +232,48 @@ export function isStandaloneReviewAgent(agent: string): boolean {
   return kind === "reviewer" || kind === "review-verifier";
 }
 
+/**
+ * The producer-kind vocabulary for structured payload emission (CONTEXT.md):
+ * which structured payload an Agent emits, as data. The review-verifier Agent
+ * is genuinely dual-payload — reviewer-payload for standalone/wave reviews,
+ * refutation-verdict for `/review-pr` panel verdicts — so a kind-keyed-only
+ * scoping cannot express it, and the `arch-panel` kind spans judges
+ * (`arch-judge-agent`) and non-judge designers, so only a catalog-derived
+ * projection (kind + profile) scopes the judge-verdict kind correctly.
+ */
+export type PayloadProducerKind =
+  | Readonly<{ kind: "reviewer-payload" }>
+  | Readonly<{ kind: "judge-verdict" }>
+  | Readonly<{ kind: "refutation-verdict" }>;
+
+export type PayloadProducerKindName = PayloadProducerKind["kind"];
+
+const producerKind = (name: PayloadProducerKindName): PayloadProducerKind =>
+  Object.freeze({ kind: name });
+
+/**
+ * Derived projection of AGENT_CATALOG — never a second source. Reviewer and
+ * review-verifier Agents produce reviewer payloads (standalone/wave reviews);
+ * the review-verifier Agent additionally produces refutation verdicts; the
+ * panel judge (the unique `panel-judge` profile on `arch-judge-agent`)
+ * produces judge verdicts. Every other Agent — including the non-judge
+ * `arch-panel` designers and utility-kind reviewers — produces none.
+ */
+export function producerKindsOfAgent(agent: LoomAgentName): readonly PayloadProducerKind[] {
+  const entry = AGENT_CATALOG[agent];
+  const kinds: PayloadProducerKind[] = [];
+  if (entry.kind.kind === "reviewer" || entry.kind.kind === "review-verifier") {
+    kinds.push(producerKind("reviewer-payload"));
+  }
+  if (entry.kind.kind === "review-verifier") {
+    kinds.push(producerKind("refutation-verdict"));
+  }
+  if (entry.kind.kind === "arch-panel" && entry.profile === "panel-judge") {
+    kinds.push(producerKind("judge-verdict"));
+  }
+  return Object.freeze(kinds);
+}
+
 /** Ordered Wave review roster policy — a selection FROM the catalog, not a
  *  second identity source. Ordering is load-bearing: wave-gate slot authority
  *  binds reviewers by index. Lives beside the catalog (this module is a pure

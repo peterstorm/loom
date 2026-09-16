@@ -113,8 +113,22 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/core/reviewer-contract.ts": ["zod/v4"],
       "engine/src/core/standalone-lineage-contract.ts": ["zod/v4"],
       "engine/src/core/reviewer-protocol.ts": ["jsonc-parser"],
+      // Grammar-constrained verdict grammars: the panel contract and the panel
+      // tally define their judge/refutation verdict schemas with zod, and the
+      // emission tool's verdict-args parser types its admission seam with the
+      // same package. Exact-specifier grants — never a prefix — so a new zod
+      // subpath fails the gate until it is re-audited by machine-purity.
+      "engine/src/core/panel-contract.ts": ["zod/v4"],
+      "engine/src/core/review-panel.ts": ["zod/v4"],
+      "engine/src/core/emission-tool.ts": ["zod/v4"],
     },
     perFileAllow: {
+      // The direct-edit guard normalizes panel/spec-artifact targets with pure
+      // path math (posix.normalize) before the prefix test — no filesystem I/O.
+      "engine/src/core/block-direct-edits.ts": ["node:path"],
+      // The emission ingestion folds a digest over captured payload bytes —
+      // digest-only hashing, mirroring review-packet/panel-program.
+      "engine/src/core/emission-ingestion.ts": ["node:crypto"],
       "engine/src/core/harness-capture.ts": ["node:crypto"],
       "engine/src/core/harness-resources.ts": ["node:crypto", "node:path"],
       "engine/src/core/legacy-archive.ts": ["node:crypto"],
