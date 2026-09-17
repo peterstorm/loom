@@ -69,3 +69,23 @@ Zero criticals validates the round-2 repair (`b7b4c83`): the reviewers ran again
 - code-simplifier: assertPanelExecuteDisjoint restated default (the round-1 sibling collapse), stale EXECUTE_AGENTS comment, spawn-graph inline comment duplication, after-HEAD double throw, diffUntracked restating its At twin, duplicated `patch` fixture, .tmp-pi debris (removed).
 
 Disposition: all deferred — interface changes (deepen) or nonblocking expressiveness/tidiness; zero criticals in all three rounds.
+
+## Round 4 (run.pr55-source-review-4) — COMPLETED
+
+Second completed standalone-review run through the engine's full state machine. 7 reviewer slots, all 7 accepted (slot 7 after an attempt-2 retry — the reviewer's own emitted payload was structurally invalid JSON, repaired by re-dispatch with the facade-issued retry request), aggregate: **18 advisories, ZERO criticals** → no refutation panel → done, `result.json` published.
+
+Zero criticals across all four rounds. Two operator-facing findings from this run's driving:
+- The engine captures the **reviewer's own emitted output** via the spawn correlator, not the operator's stdin bytes — a structurally invalid reviewer emission is what gets admitted/rejected, and fixing the operator's transcript copy does not change the verdict.
+- Facade resume mechanics: `resume` is a dedicated CLI operation (distinct from submit short-circuit); it issues the retry batch only after a slot is tombstoned.
+
+### Round-4 advisories (18) — deferred, nonblocking per the reviewers' own rationales
+
+- code-reviewer: RepositoryProbe's isRepo answers for the cached runtime cwd rather than the spawn's pointer-derived root (narrow precondition: runtime outside any git repo); spawn-graph all-or-refuse compares raw resolve() strings without symlink canonicalization; hasTypeScriptTestCall misses the only/skip/todo/fixme modifier family; countAssertions' Java arm misses JUnit's assertTrue/assertFalse family.
+- silent-failure-hunter: tool_call guard crash catch writes only error.message, omits err.stack (diagnostic depth, not silence).
+- pr-test-analyzer: per-entry malformed arm of extractSpawnBatchCwds unpinned (current polarity correct and reproduced).
+- type-design-analyzer: recoverPiSpawnReservation overloads 'standalone' kind on recovered implementation items (prose-only); REAL_DIFF_DEPS mutable vs frozen twin REAL_TASK_LOCAL_PORTS.
+- comment-analyzer: `manager.update` misnamed (×2 sites across rounds); stale `safeRun`→`runChild` reference.
+- architecture-tech-lead: analyzeNewTests runs the lexical projector twice (countNewTests + countAssertions each rescan); spawnBatchEntries returns unvalidated entries (parse-then-validate).
+- code-simplifier (retry): spawn-graph fold two-local encoding (test-pinned, behavior-preserving distill); duplicated malformed-CALL constraint prose; inspectFilePresenceAt one-caller pass-through; dispatcher's repeated push-then-stderr route (~14 sites); the two stale symbol references above.
+
+Disposition: all deferred — interface changes (deepen/distill) or nonblocking expressiveness/tidiness; zero criticals in all four rounds.
