@@ -58,14 +58,24 @@ export function spawnEntryAt(raw: unknown, index: number): Record<string, unknow
  *  same precedence `piSpawnCwd` applies (item cwd → batch cwd → parent cwd).
  *  `unresolved` means the raw input is malformed; the admission blocks those
  *  batches, so the runtime graph polarity applies and nothing is gated that
- *  the admission would not already have refused. */
+ *  the admission would not already have refused. A non-string `defaultCwd` is
+ *  a malformed CALL (a harness context that omits cwd), not a malformed
+ *  batch: resolve() would crash on the undefined parent instead of answering,
+ *  so the runtime graph polarity applies there too — the admission's parse
+ *  still refuses malformed batches, so nothing is gated that the admission
+ *  would refuse. */
 export type SpawnBatchCwds =
   | Readonly<{ kind: "resolved"; cwds: readonly string[] }>
   | Readonly<{ kind: "unresolved" }>;
 
-export function extractSpawnBatchCwds(raw: unknown, defaultCwd: string): SpawnBatchCwds {
+export function extractSpawnBatchCwds(raw: unknown, defaultCwd?: string): SpawnBatchCwds {
   const entries = spawnBatchEntries(raw);
-  if (entries === null) return Object.freeze({ kind: "unresolved" });
+  // A non-string defaultCwd is a malformed CALL (a harness context that omits
+  // cwd), not a malformed batch: resolve() would crash on the undefined parent
+  // instead of answering. The runtime graph polarity applies per the module
+  // contract — the admission's parse still refuses malformed batches, so
+  // nothing is gated that the admission would refuse.
+  if (entries === null || typeof defaultCwd !== "string") return Object.freeze({ kind: "unresolved" });
   const input = raw as Record<string, unknown>;
   const batchCwd = typeof input.cwd === "string" ? input.cwd : undefined;
   const cwds: string[] = [];
@@ -120,7 +130,7 @@ const diverged = (first: string, second: string): SpawnBatchGraphObservation =>
  *  batch adopt a later item's graph via the assignment branch instead of
  *  returning diverged, silently arming against a graph the contract says
  *  the operator partitions by spawn cwd. */
-export function observeSpawnBatchGraph(raw: unknown, defaultCwd: string): SpawnBatchGraphObservation {
+export function observeSpawnBatchGraph(raw: unknown, defaultCwd?: string): SpawnBatchGraphObservation {
   const cwds = extractSpawnBatchCwds(raw, defaultCwd);
   if (cwds.kind === "unresolved") return Object.freeze({ kind: "runtime" });
   let seen = false;

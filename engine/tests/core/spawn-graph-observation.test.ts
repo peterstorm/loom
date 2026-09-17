@@ -92,6 +92,19 @@ describe("spawn batch graph observation", () => {
     expect(observeSpawnBatchGraph("not-an-object", "/tmp")).toEqual({ kind: "runtime" });
     expect(observeSpawnBatchGraph(null, "/tmp")).toEqual({ kind: "runtime" });
   });
+
+  it("resolves a well-formed batch with an omitted harness cwd to the runtime polarity", () => {
+    // The fixed branch: a non-string defaultCwd is a malformed CALL (a harness
+    // context that omits cwd), not a malformed batch — extractSpawnBatchCwds
+    // crashed on resolve(undefined, ...) instead of returning the documented
+    // unresolved → runtime polarity, which crashed 60 spawn-batch parses,
+    // blocked 29 integration batches fail-closed, and failed the suite
+    // 146→117 in the delivered tree (standalone-review:pr-test-analyzer-1;
+    // the pre-PR tree passed 146/146 at 8357cda).
+    expect(observeSpawnBatchGraph({ agent: "review-verifier-agent", task: "adjudicate" }, undefined)).toEqual({ kind: "runtime" });
+    const a = graphed();
+    expect(observeSpawnBatchGraph(batch(a, a), undefined).kind).toBe("runtime");
+  });
 });
 
 describe("findTaskGraphPathFrom cross-cwd polarity", () => {
