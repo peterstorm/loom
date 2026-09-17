@@ -85,16 +85,20 @@ function commandFailure(error: unknown): string {
   return [code, status, stderr || message].filter((part): part is string => part !== null && part !== "").join(": ");
 }
 
-/** Resolve the repository root and exact HEAD as one typed proof boundary. */
-export function repositoryContext(): GitRepositoryContext {
-  const cwd = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+/** Resolve the repository root and exact HEAD as one typed proof boundary.
+ *  An explicit `cwd` (a spawn's declared cwd naming a linked worktree) wins
+ *  over the ambient environment: the spawn cwd is the boundary-trusted source
+ *  for which repository the caller targets, so it outranks CLAUDE_PROJECT_DIR.
+ *  The no-argument call preserves the historical env-then-cwd precedence. */
+export function repositoryContext(cwd?: string): GitRepositoryContext {
+  const base = cwd ?? (process.env.CLAUDE_PROJECT_DIR || process.cwd());
   try {
     const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-      cwd,
+      cwd: base,
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
-    if (root === "") return { ok: false, error: `git returned an empty repository root for ${cwd}` };
+    if (root === "") return { ok: false, error: `git returned an empty repository root for ${base}` };
     const headSha = execFileSync("git", ["rev-parse", "--verify", "HEAD"], {
       cwd: root,
       encoding: "utf-8",
@@ -105,7 +109,7 @@ export function repositoryContext(): GitRepositoryContext {
     }
     return { ok: true, root, headSha };
   } catch (error) {
-    return { ok: false, error: `cannot resolve repository root and HEAD from ${cwd}: ${commandFailure(error)}` };
+    return { ok: false, error: `cannot resolve repository root and HEAD from ${base}: ${commandFailure(error)}` };
   }
 }
 
@@ -120,6 +124,33 @@ export function repositoryContext(): GitRepositoryContext {
  */
 export function repositoryRoot(): string | undefined {
   return currentRepoRoot("repositoryRoot");
+}
+
+/** Resolve the repository root FROM an explicit directory — a per-call probe,
+ *  not the cached runtime root. The settlement derives its repository from the
+ *  task-graph pointer it already holds, whose target lives in the spawn's
+ *  repository; the cached root answers for whichever cwd the runtime process
+ *  happens to report, which is the misalignment this probe exists to close.
+ *  Undefined is never silent: the caller's fallback chain keeps working, but
+ *  the failure names itself first. */
+export function repositoryRootFrom(cwd: string): string | undefined {
+  try {
+    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+    if (root !== "") return root;
+    process.stderr.write(
+      `loom: git rev-parse --show-toplevel returned an empty root from ${cwd} — falling back to the runtime repository root\n`,
+    );
+    return undefined;
+  } catch (error) {
+    process.stderr.write(
+      `loom: git rev-parse --show-toplevel failed from ${cwd} (${error instanceof Error ? error.message : String(error)}) — falling back to the runtime repository root\n`,
+    );
+    return undefined;
+  }
 }
 
 /** Run a fixed git command (no user input in args) */
@@ -440,11 +471,28 @@ export function diffFiles(files: string[]): GitDiffResult {
     : diffArgs(["diff", FULL_POSTIMAGE_CONTEXT, "--", ...files]);
 }
 
+/** Diff specific files (unstaged) from an EXPLICIT root — the same hardened
+ *  boundary as `diffFiles`, rooted at the caller's repository instead of the
+ *  cached runtime root: a settlement judging a spawn's worktree must diff
+ *  against the repository the work happened in. */
+export function diffFilesAt(root: string, files: string[]): GitDiffResult {
+  return files.length === 0
+    ? { ok: true, diff: "" }
+    : diffArgsAt(root, ["diff", FULL_POSTIMAGE_CONTEXT, "--", ...files]);
+}
+
 /** Diff specific files (staged), retaining complete postimage context. */
 export function diffFilesStaged(files: string[]): GitDiffResult {
   return files.length === 0
     ? { ok: true, diff: "" }
     : diffArgs(["diff", "--cached", FULL_POSTIMAGE_CONTEXT, "--", ...files]);
+}
+
+/** Diff specific files (staged) from an EXPLICIT root — see `diffFilesAt`. */
+export function diffFilesStagedAt(root: string, files: string[]): GitDiffResult {
+  return files.length === 0
+    ? { ok: true, diff: "" }
+    : diffArgsAt(root, ["diff", "--cached", FULL_POSTIMAGE_CONTEXT, "--", ...files]);
 }
 
 /**
@@ -458,6 +506,14 @@ export function diffFilesSince(revision: string, files: string[]): GitDiffResult
   return files.length === 0
     ? { ok: true, diff: "" }
     : diffArgs(["diff", FULL_POSTIMAGE_CONTEXT, "--end-of-options", revision, "HEAD", "--", ...files]);
+}
+
+/** Diff committed changes from one baseline from an EXPLICIT root —
+ *  see `diffFilesAt`. */
+export function diffFilesSinceAt(root: string, revision: string, files: string[]): GitDiffResult {
+  return files.length === 0
+    ? { ok: true, diff: "" }
+    : diffArgsAt(root, ["diff", FULL_POSTIMAGE_CONTEXT, "--end-of-options", revision, "HEAD", "--", ...files]);
 }
 
 export type GitTrackedResult =
@@ -506,6 +562,12 @@ export function diffUntracked(file: string): GitDiffResult {
   return root === undefined
     ? { ok: false, error: "cannot diff an untracked file outside a Git repository" }
     : diffArgsAt(root, ["diff", "--no-index", FULL_POSTIMAGE_CONTEXT, "/dev/null", "--", file], true);
+}
+
+/** Diff one untracked file against /dev/null from an EXPLICIT root —
+ *  see `diffFilesAt`. */
+export function diffUntrackedAt(root: string, file: string): GitDiffResult {
+  return diffArgsAt(root, ["diff", "--no-index", FULL_POSTIMAGE_CONTEXT, "/dev/null", "--", file], true);
 }
 
 // --- Pure functions for test evidence (no git calls) ---

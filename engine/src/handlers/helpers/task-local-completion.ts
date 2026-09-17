@@ -253,6 +253,23 @@ const REAL_DIFF_DEPS: DiffDeps = {
   inspectFilePresence,
 };
 
+/** Root-explicit diff deps: the same hardened Git boundary as
+ *  `REAL_DIFF_DEPS`, rooted at the caller's repository instead of the cached
+ *  runtime root. A settlement judging a spawn's linked worktree must observe
+ *  the repository the work happened in — the cached root answers for whichever
+ *  cwd the runtime process reports, which misaligns every diff and tracking
+ *  answer against files that live in another worktree. */
+export function realDiffDepsAt(root: string): DiffDeps {
+  return {
+    isTracked: (file) => git.isTrackedAt(root, file),
+    diffFiles: (files) => git.diffFilesAt(root, files),
+    diffFilesStaged: (files) => git.diffFilesStagedAt(root, files),
+    diffFilesSince: (revision, files) => git.diffFilesSinceAt(root, revision, files),
+    diffUntracked: (file) => git.diffUntrackedAt(root, file),
+    inspectFilePresence,
+  };
+}
+
 export function collectDiff(
   filesModified: readonly string[],
   deps: DiffDeps = REAL_DIFF_DEPS,

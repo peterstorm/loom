@@ -6,7 +6,7 @@
 
 import { spawnSync } from "node:child_process";
 import { accessSync, constants as fsConstants, lstatSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PHASES, type Phase } from "./types";
 // Panel SIZE policy is derived from the pure panel-contract lens tables, not
@@ -603,8 +603,8 @@ export function pathExistsFailClosed(path: string): boolean {
 const NOT_A_GIT_REPOSITORY = /^fatal: not a git repository(?: \(or any of the parent directories\))?:/m;
 
 /** Prove no ancestor contains repository metadata; only ENOENT is absence. */
-function proveNoGitMetadataInAncestors(): void {
-  let directory = process.cwd();
+function proveNoGitMetadataInAncestorsFrom(cwd: string): void {
+  let directory = cwd;
   while (true) {
     const candidate = join(directory, ".git");
     try {
@@ -625,9 +625,10 @@ function proveNoGitMetadataInAncestors(): void {
 }
 
 /** Resolve Git root without conflating an absent repository with an unavailable probe. */
-function gitRepositoryRoot(): string | null {
+function gitRepositoryRootFrom(cwd: string): string | null {
   const probe = spawnSync("git", ["rev-parse", "--show-toplevel"], {
     encoding: "utf-8",
+    cwd,
     env: { ...process.env, LANG: "C", LC_ALL: "C" },
   });
   if (probe.error !== undefined) {
@@ -639,39 +640,64 @@ function gitRepositoryRoot(): string | null {
     return root;
   }
   if (probe.status === 128 && NOT_A_GIT_REPOSITORY.test(probe.stderr)) {
-    proveNoGitMetadataInAncestors();
+    proveNoGitMetadataInAncestorsFrom(cwd);
     return null;
   }
   const outcome = probe.signal === null ? `exit ${probe.status ?? "unknown"}` : `signal ${probe.signal}`;
   throw new Error(`git rev-parse failed (${outcome}): ${probe.stderr.trim() || "no diagnostic"}`);
 }
 
-/** Find task graph by walking up from cwd to git root. */
-function findTaskGraphPath(): string {
+/** Find the task graph by walking up from the GIVEN cwd to its git root.
+ *  Returns an absolute path so consumers rooted at a different cwd (a spawn
+ *  whose declared cwd names a linked worktree) resolve the same file the
+ *  observation probed: the graph that governs a repository lives IN that
+ *  repository, so the cwd is the boundary-trusted source for which graph
+ *  authority a caller targets. The engine's ONE task-graph resolution core —
+ *  both this finder and the runtime `taskGraphPath()` wrapper below compose
+ *  it, so no two callers can disagree about where the graph sits. */
+export function findTaskGraphPathFrom(cwd: string): string {
   const relatives = taskGraphRelatives();
 
   // Try cwd-relative candidates first (works when cwd = repo root). A
   // non-ENOENT-unreadable candidate is treated as PRESENT (fail closed):
-  // skipping it would point TASK_GRAPH_PATH at a creation path while the real
+  // skipping it would point the caller at a creation path while the real
   // graph sits unreadable, compounding the fail-open below.
   for (const relative of relatives) {
-    if (pathExistsFailClosed(relative)) return relative;
+    const candidate = resolve(cwd, relative);
+    if (pathExistsFailClosed(candidate)) return candidate;
   }
 
   // Walk up via git rev-parse and preserve candidate priority at the root.
   // Only a proven non-repository permits fallback. Missing Git, permission,
   // safe-directory, I/O, and malformed-output failures throw so callers cannot
   // mistake an unobservable repository-root graph for no graph.
-  const root = gitRepositoryRoot();
+  const root = gitRepositoryRootFrom(cwd);
   if (root !== null) {
-    for (const relative of relatives) {
-      const absolute = join(root, relative);
+    for (const candidateRelative of relatives) {
+      const absolute = join(root, candidateRelative);
       if (pathExistsFailClosed(absolute)) return absolute;
     }
   }
 
   // No graph exists yet: retain the harness-native creation path.
-  return taskGraphRelative();
+  return resolve(cwd, taskGraphRelative());
+}
+
+/** Find task graph by walking up from cwd to git root. */
+function findTaskGraphPath(): string {
+  // The explicit LOOM_STATE_PATH override is authoritative and returned
+  // as-written: the composition below relativizes only its own discovery
+  // resolutions, and relativizing an absolute override that happens to sit
+  // under cwd would rewrite an authoritative path into a bare relative one.
+  const override = process.env.LOOM_STATE_PATH;
+  if (override !== undefined && pathExistsFailClosed(override)) return override;
+  const absolute = findTaskGraphPathFrom(process.cwd());
+  // Preserve the historical relative return for candidates under cwd: every
+  // consumer resolves paths against process.cwd(), so a graph the first loop
+  // found cwd-relative reads the same either way. Walk-up results are never
+  // under cwd (the first loop would have found them), so they stay absolute.
+  const underCwd = relative(process.cwd(), absolute);
+  return underCwd.startsWith("..") ? absolute : underCwd;
 }
 
 /**
