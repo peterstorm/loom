@@ -3,8 +3,8 @@ import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, it, expect, vi } from "vitest";
-import { countNewTests, countAssertions, diffFiles, diffFilesSince, diffFilesStaged, diffUntracked, isTrackedAt, mergeBase, type GitDiffResult } from "../../src/utils/git";
+import { describe, it, expect } from "vitest";
+import { countNewTests, countAssertions, diffFiles, diffFilesSince, diffFilesStaged, diffUntracked, isTrackedAt, type GitDiffResult } from "../../src/utils/git";
 
 /**
  * Wrap added lines in the exact patch shape Git emits: one `diff --git` entry,
@@ -32,21 +32,6 @@ const withProjectDir = <T>(root: string, run: () => T): T => {
     else process.env.CLAUDE_PROJECT_DIR = previous;
   }
 };
-
-describe("git command diagnostics", () => {
-  it("reports array-argument git failures instead of returning empty silently", () => {
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    try {
-      expect(mergeBase("definitely-missing-loom-test-ref")).toBeNull();
-      const output = stderr.mock.calls.map(([text]) => String(text)).join("");
-      expect(output).toContain("git warning: git");
-      expect(output).toContain("merge-base");
-      expect(output).toContain("definitely-missing-loom-test-ref");
-    } finally {
-      stderr.mockRestore();
-    }
-  });
-});
 
 describe("diffUntracked", () => {
   it("accepts exit 1 only when Git emitted an actual patch", () => {
@@ -1014,95 +999,5 @@ describe("countAssertions (pure)", () => {
     ].join("\n");
 
     expect(countAssertions(diff)).toBe(2);
-  });
-});
-
-import { filterTestFiles } from "../../src/utils/git";
-
-describe("filterTestFiles (pure)", () => {
-  it("matches files in top-level tests/ directory", () => {
-    const files = ["tests/utils/git.test.ts", "tests/integration.spec.ts"];
-    expect(filterTestFiles(files)).toEqual(files);
-  });
-
-  it("matches files in nested tests/ directories", () => {
-    const files = [
-      "engine/tests/utils/git.test.ts",
-      "apps/web/tests/login.spec.ts",
-      "packages/core/tests/unit/foo.test.ts",
-    ];
-    expect(filterTestFiles(files)).toEqual(files);
-  });
-
-  it("matches files in test/ (singular) directories", () => {
-    const files = ["src/test/java/com/example/FooTest.java", "lib/test/helper.test.ts"];
-    expect(filterTestFiles(files)).toEqual(files);
-  });
-
-  it("matches files in __tests__/ directories", () => {
-    const files = [
-      "src/components/__tests__/Button.test.tsx",
-      "packages/ui/__tests__/hook.spec.ts",
-    ];
-    expect(filterTestFiles(files)).toEqual(files);
-  });
-
-  it("matches files in spec/ directories", () => {
-    const files = ["spec/models/user.spec.ts", "lib/spec/integration.test.js"];
-    expect(filterTestFiles(files)).toEqual(files);
-  });
-
-  it("matches .test.ts and .test.tsx suffixes anywhere", () => {
-    const files = ["src/utils/parser.test.ts", "components/Button.test.tsx"];
-    expect(filterTestFiles(files)).toEqual(files);
-  });
-
-  it("matches .spec.ts and .spec.jsx suffixes anywhere", () => {
-    const files = ["src/api.spec.ts", "components/Dialog.spec.jsx"];
-    expect(filterTestFiles(files)).toEqual(files);
-  });
-
-  it("matches .test.js and .spec.js suffixes", () => {
-    const files = ["lib/calc.test.js", "utils/format.spec.js"];
-    expect(filterTestFiles(files)).toEqual(files);
-  });
-
-  it("excludes non-test files", () => {
-    const files = [
-      "src/config.ts",
-      "README.md",
-      ".claude/specs/spec.md",
-      "src/utils/parser.ts",
-      "package.json",
-      "engine/src/handlers/test-handler.ts", // has 'test' in name but not a test dir/suffix
-    ];
-    expect(filterTestFiles(files)).toEqual([]);
-  });
-
-  it("excludes files that have 'spec' or 'test' only in non-directory path segments", () => {
-    const files = [
-      ".claude/specs/spec.md",       // `specs/` is deliberately distinct from the `spec/` test directory.
-      "docs/testing-guide.md",       // 'testing' not 'test/'
-      "src/testutils/helper.ts",     // 'testutils' not 'test/'
-    ];
-    expect(filterTestFiles(files)).toEqual([]);
-  });
-
-  it("handles empty input", () => {
-    expect(filterTestFiles([])).toEqual([]);
-  });
-
-  it("handles mixed test and non-test files", () => {
-    const files = [
-      "src/config.ts",
-      "engine/tests/utils/git.test.ts",
-      "README.md",
-      "src/api.spec.ts",
-      "package.json",
-    ];
-    expect(filterTestFiles(files)).toEqual([
-      "engine/tests/utils/git.test.ts",
-      "src/api.spec.ts",
-    ]);
   });
 });

@@ -112,15 +112,24 @@ const diverged = (first: string, second: string): SpawnBatchGraphObservation =>
 /** Decide which graph authority one spawn batch targets. Every item's
  *  resolved cwd probes the engine's ONE task-graph finder, so the observation
  *  and the registration can never see different graphs; the all-or-refuse
- *  aggregation keeps the single-graph batch machinery intact. */
+ *  aggregation keeps the single-graph batch machinery intact.
+ *
+ *  `seen` is the has-any-item-been-probed flag, kept separate from
+ *  `graphPath` because null is both the not-yet-assigned sentinel and the
+ *  legitimate no-graph answer: collapsing the two made an absence-first
+ *  batch adopt a later item's graph via the assignment branch instead of
+ *  returning diverged, silently arming against a graph the contract says
+ *  the operator partitions by spawn cwd. */
 export function observeSpawnBatchGraph(raw: unknown, defaultCwd: string): SpawnBatchGraphObservation {
   const cwds = extractSpawnBatchCwds(raw, defaultCwd);
   if (cwds.kind === "unresolved") return Object.freeze({ kind: "runtime" });
+  let seen = false;
   let graphPath: string | null = null;
   for (const cwd of cwds.cwds) {
     const candidate = findTaskGraphPathFrom(cwd);
     const authority = pathExistsFailClosed(candidate) ? candidate : null;
-    if (graphPath === null) {
+    if (!seen) {
+      seen = true;
       graphPath = authority;
       continue;
     }

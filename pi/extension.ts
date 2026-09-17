@@ -1721,7 +1721,7 @@ export default function (
           const cleanupErrors = await rollbackLifecycle();
           return { block: true, reason: `${taskRegistration.message}${cleanupFailureSuffix(cleanupErrors)}` };
         }
-        const alignment = graphIsActive
+        const alignment = orchestrationGraphActive
           ? alignPiImplementationAuthorities(
               parsedItems,
               dispatchTaskExecutionSpawns,
@@ -1732,7 +1732,10 @@ export default function (
               authoritiesBySlot: Object.freeze(parsedItems.map(() => null)),
             };
         if (!alignment.ok) {
-          const registrationRollback = await rollbackTaskExecutionRegistration(taskRegistration.authorities);
+          const registrationRollback = await rollbackTaskExecutionRegistration(
+            taskRegistration.authorities,
+            spawnGraphPath === null ? undefined : piSpawnCwd(event.input, 0, ctx.cwd),
+          );
           const cleanupErrors = await rollbackLifecycle();
           const rollbackErrors = [
             ...(registrationRollback.kind === "block" ? [registrationRollback.message] : []),
