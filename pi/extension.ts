@@ -178,6 +178,7 @@ import {
   LOOM_INTERACTIVE_SUBAGENT_TOOL,
   registerInteractiveSubagentTool,
 } from "./interactive-subagent";
+import { observeSpawnBatchGraph, spawnEntryAt } from "./spawn-graph";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 // Capture once, while this extension module is loaded. Fresh CLI processes
@@ -344,21 +345,13 @@ export function piSystemAgentIdentity(systemPrompt: string): string {
 
 /** The raw batch entry at `index`, whichever spawn shape the caller used
  *  (`tasks`, `chain`, or a bare single entry). Returned by reference: callers
- *  such as `replacePiSpawnTask` write its `task` field in place. */
+ *  such as `replacePiSpawnTask` write its `task` field in place. The
+ *  batch-shape read lives in `pi/spawn-graph.ts` — one home shared with the
+ *  spawn-graph observation, so the two can never disagree about the shape. */
 function piSpawnItem(raw: Record<string, unknown>, index: number): Record<string, unknown> {
-  let entries: unknown[];
-  if (Array.isArray(raw.tasks)) {
-    entries = raw.tasks;
-  } else if (Array.isArray(raw.chain)) {
-    entries = raw.chain;
-  } else {
-    entries = [raw];
-  }
-  const entry = entries[index];
-  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
-    throw new Error(`missing Pi spawn item ${index}`);
-  }
-  return entry as Record<string, unknown>;
+  const entry = spawnEntryAt(raw, index);
+  if (entry === null) throw new Error(`missing Pi spawn item ${index}`);
+  return entry;
 }
 
 export function piSpawnCwd(raw: unknown, index: number, defaultCwd: string): string {
@@ -1431,9 +1424,25 @@ export default function (
         // A spawn's rendered agent may carry the declared binding or a
         // routing-authorized inherit of the (local) parent model; the routing
         // context is observed once per batch for the definition check.
+        //
+        // Which graph authority does this batch target? The spawn's declared
+        // cwd is the boundary-trusted source: the graph that governs a
+        // repository lives IN that repository, so a batch whose items declare
+        // a linked worktree is an orchestration dispatch against the
+        // worktree's graph even when the orchestrator runtime is rooted in the
+        // main checkout. The observation runs BEFORE the admission because the
+        // admission's gates consume the polarity; a malformed batch resolves
+        // to the runtime polarity and the admission's parse still refuses it.
+        const batchGraph = observeSpawnBatchGraph(event.input, ctx.cwd);
+        if (batchGraph.kind === "diverged") {
+          return { block: true, reason: `BLOCKED: ${batchGraph.reason}.` };
+        }
+        const spawnGraphPath = batchGraph.kind === "spawn" ? batchGraph.graphPath : null;
+        const orchestrationGraphActive = spawnGraphPath !== null || graphIsActive;
+        const orchestrationGraphPath = spawnGraphPath ?? taskGraphPath();
         const routing = buildPiRoutingContext();
         const admission = admitPiSpawnBatch(event.input, {
-          graphActive: graphIsActive,
+          graphActive: orchestrationGraphActive,
           transport: event.toolName === LOOM_INTERACTIVE_SUBAGENT_TOOL ? "interactive-rpc" : "headless",
           packageRoot: PACKAGE_ROOT,
           validateDefinition: (agent) =>
@@ -1456,7 +1465,7 @@ export default function (
           },
           checkTemplateSubstitution: (task) => {
             currentGuard = "validate-template-substitution";
-            return validateTemplateSubstitution(task, graphIsActive);
+            return validateTemplateSubstitution(task, orchestrationGraphActive);
           },
         });
         if (admission.kind === "block") {
@@ -1547,7 +1556,7 @@ export default function (
           retainSpawnCleanupDebt(runtime, toolCallId, {
             sessionId: safeSessionId,
             needsTaskGraphLifecycle,
-            graphActiveAtSpawn: graphIsActive,
+            graphActiveAtSpawn: orchestrationGraphActive,
             orchestrationRunBinding,
             pointerBinding: remainingPointerBinding,
             items: Object.freeze(parsedItems.flatMap((item, index) => {
@@ -1597,10 +1606,10 @@ export default function (
         // observation typed so the registration core can limit this ordering
         // exception to current-protocol (timestamped) reservations.
         const rosterObservation: TaskExecutionRosterObservation | undefined =
-          graphIsActive && taskExecutionSpawns.some(({ kind }) => kind === "implementation")
+          orchestrationGraphActive && taskExecutionSpawns.some(({ kind }) => kind === "implementation")
             ? {
                 kind: "pre-roster-current-protocol",
-                anyActiveForGraph: anyActiveSubagent(taskGraphPath()),
+                anyActiveForGraph: anyActiveSubagent(orchestrationGraphPath),
               }
             : undefined;
         try {
@@ -1609,11 +1618,10 @@ export default function (
             await fsSessionRegistry.markActive(safeSessionId, agentId);
             reserved.push(agentId);
           }
-          const activeTaskGraphPath = taskGraphPath();
-          if (needsTaskGraphLifecycle && pathExistsFailClosed(activeTaskGraphPath)) {
+          if (needsTaskGraphLifecycle && pathExistsFailClosed(orchestrationGraphPath)) {
             taskGraphPointerBinding = await bindSessionTaskGraphPointer(
               safeSessionId,
-              activeTaskGraphPath,
+              orchestrationGraphPath,
             );
           }
           // Bind every Loom-owned Pi native spawn identity to the exact issued
@@ -1624,7 +1632,7 @@ export default function (
           const unboundSpecChecks = orchestrationRunBinding === null
             ? parsedItems.filter(({ agent }) => agent === "spec-check-invoker")
             : [];
-          if (graphIsActive && unboundSpecChecks.length > 0) {
+          if (orchestrationGraphActive && unboundSpecChecks.length > 0) {
             if (unboundSpecChecks.length !== 1) {
               throw new Error("a protected Pi spawn may reserve exactly one unbound spec-check slot");
             }
@@ -1639,7 +1647,7 @@ export default function (
             ? parsedItems.filter(({ agent }, index) =>
                 isReviewAgent(agent) && taskExecutionSpawns[index]?.kind !== "standalone")
             : [];
-          if (graphIsActive && unboundReviewers.length > 0) {
+          if (orchestrationGraphActive && unboundReviewers.length > 0) {
             const manager = StateManager.fromLocalSession(safeSessionId);
             if (manager === null) throw new Error("protected Pi reviewer spawn has no TaskGraph authority");
             const reviewGraph = manager.load();
@@ -1666,7 +1674,7 @@ export default function (
           // block-direct-edits allows every edit when no task graph exists, so
           // a grant would authorize nothing that was not already permitted,
           // while its Task ID requirement refused the spawn outright.
-          const grantPlan = planPiWriteGrants(parsedItems, taskExecutionSpawns, graphIsActive);
+          const grantPlan = planPiWriteGrants(parsedItems, taskExecutionSpawns, orchestrationGraphActive);
           if (!grantPlan.ok) throw new Error(grantPlan.error);
           for (const [index, requirement] of grantPlan.requirements.entries()) {
             if (requirement.kind === "none") continue;
@@ -1675,7 +1683,7 @@ export default function (
               agent: item.agent,
               taskId: requirement.taskId,
               cwd: piSpawnCwd(event.input, index, ctx.cwd),
-              taskGraphPath: taskGraphPath(),
+              taskGraphPath: orchestrationGraphPath,
               ...(requirement.kind === "scoped" ? { scopeDirs: requirement.scopeDirs } : {}),
             });
             // Track the issued token before prompt injection can fail. If its
@@ -1724,11 +1732,12 @@ export default function (
               Array.isArray((event.input as { chain?: unknown }).chain)
             ? "sequential" as const
             : "parallel" as const;
-          taskRegistration = graphIsActive
+          taskRegistration = orchestrationGraphActive
             ? await registerTaskExecutionBatch(
                 dispatchTaskExecutionSpawns,
                 executionMode,
                 rosterObservation,
+                spawnGraphPath === null ? undefined : piSpawnCwd(event.input, 0, ctx.cwd),
               )
             : { kind: "registered" as const, authorities: Object.freeze([]) };
         } catch (error) {
@@ -1742,7 +1751,7 @@ export default function (
           const cleanupErrors = await rollbackLifecycle();
           return { block: true, reason: `${taskRegistration.message}${cleanupFailureSuffix(cleanupErrors)}` };
         }
-        const alignment = graphIsActive
+        const alignment = orchestrationGraphActive
           ? alignPiImplementationAuthorities(
               parsedItems,
               dispatchTaskExecutionSpawns,
@@ -1753,7 +1762,10 @@ export default function (
               authoritiesBySlot: Object.freeze(parsedItems.map(() => null)),
             };
         if (!alignment.ok) {
-          const registrationRollback = await rollbackTaskExecutionRegistration(taskRegistration.authorities);
+          const registrationRollback = await rollbackTaskExecutionRegistration(
+            taskRegistration.authorities,
+            spawnGraphPath === null ? undefined : piSpawnCwd(event.input, 0, ctx.cwd),
+          );
           const cleanupErrors = await rollbackLifecycle();
           const rollbackErrors = [
             ...(registrationRollback.kind === "block" ? [registrationRollback.message] : []),
@@ -1771,7 +1783,7 @@ export default function (
         sessionRuntime.spawnReservations.set(toolCallId, {
           sessionId: safeSessionId,
           needsTaskGraphLifecycle,
-          graphActiveAtSpawn: graphIsActive,
+          graphActiveAtSpawn: orchestrationGraphActive,
           orchestrationRunBinding,
           pointerBinding: taskGraphPointerBinding,
           items: parsedItems.map((item, index) => {
@@ -2747,7 +2759,11 @@ export default function (
         // orchestration processing errors.
         const store: TaskGraphStore = mgr;
         const repository: RepositoryProbe = {
-          root: () => git.repositoryRoot() ?? process.cwd(),
+          // The settlement judges the SPAWN's repository: the graph store is
+          // the session's task-graph pointer, whose target lives in the
+          // repository the work happened in — derive the probe root from it
+          // rather than from whichever cwd the runtime process reports.
+          root: () => git.repositoryRootFrom(dirname(mgr.getPath())) ?? git.repositoryRoot() ?? process.cwd(),
           isRepo: () => git.isGitRepo(),
         };
         const parentPrompt = event.content

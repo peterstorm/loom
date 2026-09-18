@@ -17,6 +17,7 @@ import {
   collectNewTestEvidence,
   describeNewTestObservationError,
   observeTaskLocalCompletion,
+  realDiffDepsAt,
   type NewTestObservationResult,
   type TaskLocalCompletionArgs,
 } from "./task-local-completion";
@@ -68,7 +69,12 @@ export function productionExactSettlementPorts(
     }),
     newTests: Object.freeze({
       collect: (args: ExactNewTestCollectionArgs) =>
-        collectNewTestEvidence(args.filesModified, args.requirement, args.startSha),
+        collectNewTestEvidence(
+          args.filesModified,
+          args.requirement,
+          args.startSha,
+          realDiffDepsAt(repositoryRoot),
+        ),
     }),
   });
 }

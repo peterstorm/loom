@@ -197,15 +197,16 @@ const ZERO_FAILURE_MARKER = /\b0 fail(?:ed|ing)?\b|\bFailures: 0\b|\bErrors: 0\b
  *    Any other prior (`false && bun test`, `git stash && bun test`) means the
  *    test may never have run.
  *  - every segment AFTER the test is a proven stdin-only PIPE stage. The narrow
- *    grammar admits `tail` without file operands and `tee` with inert path
- *    operands; an arbitrary pipe command can ignore stdin and fabricate a green
- *    summary just as easily as a sequenced trailer. A `;`/`&&`/`||`/`&` command
- *    after the test is also refused because its stdout is concatenated into the
- *    paired output and would be read as the verdict.
+ *    grammar admits `tail` without file operands (optionally `-n N`, its
+ *    attached form `-nN`, or the GNU tail obsolete form `-N`) and `tee` with
+ *    inert path operands; an arbitrary pipe command can ignore stdin
+ *    and fabricate a green summary just as easily as a sequenced trailer. A
+ *    `;`/`&&`/`||`/`&` command after the test is also refused because its stdout
+ *    is concatenated into the paired output and would be read as the verdict.
  *
  *  A segment that cannot be located or proven stdin-derived fails closed. */
 function isStdinDerivedPipeStage(stage: string): boolean {
-  if (/^tail(?:\s+-n\s+[1-9][0-9]*)?$/.test(stage)) return true;
+  if (/^tail(?:\s+(?:-n\s*|-)[1-9][0-9]*)?$/.test(stage)) return true;
   const [command, ...rawArguments] = stage.split(/\s+/);
   if (command !== "tee") return false;
   const withoutAppend = rawArguments[0] === "-a" ? rawArguments.slice(1) : rawArguments;

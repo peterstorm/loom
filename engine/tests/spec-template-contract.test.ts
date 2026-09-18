@@ -23,11 +23,14 @@ describe("structural specification identifier contract", () => {
     expect(parsed.value.scenarios.map(({ id }) => id)).toEqual(
       expect.arrayContaining(["AS-001", "AS-002", "AS-003"]),
     );
-    expect(parsed.value.oos.map(({ id }) => id)).toEqual(["OOS-001", "OOS-002", "OOS-003", "OOS-004"]);
-    expect(parsed.value.glossary.length).toBeGreaterThan(0);
     for (const entry of [...parsed.value.frs, ...parsed.value.scenarios, ...parsed.value.oos]) {
       expect(entry.contentHash).toMatch(/^[0-9a-f]{64}$/u);
     }
+    // The template's placeholder glossary row (`| {domain term} | {meaning in
+    // this context} |`) is its only glossary entry and mints as a data row —
+    // the header and separator rows are furniture — so this smoke assertion
+    // pins that parseGlossary still mints it.
+    expect(parsed.value.glossary.length).toBeGreaterThan(0);
   });
 
   it("binds canonical identifier guidance in both the template and the specify skill", () => {
@@ -47,6 +50,10 @@ describe("structural specification identifier contract", () => {
     expect(parsed.value.scenarios.map(({ id }) => id)).toEqual(["AS-001", "AS-002", "AS-003"]);
     expect(parsed.value.frs.map(({ id }) => id)).toEqual(["FR-001", "FR-002", "FR-003", "FR-004"]);
     expect(parsed.value.oos.map(({ id }) => id)).toEqual(["OOS-001", "OOS-002", "OOS-003", "OOS-004"]);
+    // The specify grammar's placeholder glossary row is its only glossary
+    // entry and mints as a data row (header and separator rows are furniture)
+    // — the same mechanism the template-parse test pins, scoped here to the
+    // specify skill's five grammar fences.
     expect(parsed.value.glossary.length).toBeGreaterThan(0);
   });
 

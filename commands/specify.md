@@ -107,9 +107,9 @@ ls .claude/specs/*/spec.md >/dev/null 2>&1 || { echo "FATAL: no spec found under
 grep -c "NEEDS CLARIFICATION" .claude/specs/*/spec.md || [ $? -eq 1 ]
 ```
 
-If count > 3: Invoke `/clarify` before proceeding.
+If the sum of the per-file counts printed above is > 3: Invoke `/clarify` before proceeding.
 
-If count <= 3: Note markers for arch-lead to address during research phase.
+If the sum is <= 3: Note markers for arch-lead to address during research phase.
 
 ---
 
@@ -225,7 +225,7 @@ Before finalizing spec, verify:
 When spec is ready (markers <= 3 or clarified):
 
 1. Commit spec: `git add .claude/specs/ && git commit -m "spec: {slug}"`
-2. Invoke arch-lead: `/architecture-tech-lead`
+2. Invoke the architecture-tech-lead skill (`/skill:architecture-tech-lead` in Pi) — the invocation this file's own description and Position in flow give; no `/architecture-tech-lead` command exists
 3. Arch-lead reads spec, produces plan with technical decisions
 
 Arch-lead resolves technical uncertainties during research phase.

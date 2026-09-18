@@ -425,30 +425,14 @@ describe("parseSpec", () => {
   // The [\s.-]* separator class in STRUCTURAL_ID is pinned by the
   // dot-separator row: reverting the widening to [\s-] would make FR.002:
   // vanish with ok:true — the silent-drop class upheld across rounds 1–6.
+  // One stray-ID matrix instead of two parallel ones: the case list is the
+  // documentation, and a future near-miss variant has one place to go.
   it.each([
     ["bold-asterisk", "** FR-002: System MUST be recognized"],
     ["ordered-list", "1. FR-002: System MUST be recognized"],
     ["lowercase bare", "fr-002: System MUST be recognized"],
     ["two-digit ID", "FR-12: System MUST be recognized"],
     ["dot-separator", "FR.002: System MUST be recognized"],
-  ])("fails closed for %s near-miss IDs", (_kind, strayLine) => {
-    const stray = validSpec.replace(
-      "- FR-002: System MUST hash requirement content deterministically",
-      strayLine,
-    );
-    const parsed = parseSpec(stray);
-    expect(parsed).toMatchObject({ ok: false });
-    if (!parsed.ok) {
-      // The exact typed error, not a substring of the joined prose: the whole
-      // list is pinned, so a near miss that starts producing a second — or a
-      // different — diagnostic is caught rather than absorbed by a `toContain`.
-      expect(parsed.errors).toEqual([
-        { kind: "entry-not-bulleted", section: "Functional Requirements", line: FR_002_LINE },
-      ]);
-    }
-  });
-
-  it.each([
     ["spaced separator", "FR- 002: System MUST be recognized"],
     ["space before colon", "FR-002 : System MUST be recognized"],
     ["four-digit ID", "FR-1234: System MUST be recognized"],
@@ -472,6 +456,9 @@ describe("parseSpec", () => {
     // ordered markers, mixed runs) — must fail closed, never vanish.
     expect(parsed).toMatchObject({ ok: false });
     if (!parsed.ok) {
+      // The exact typed error, not a substring of the joined prose: the whole
+      // list is pinned, so a near miss that starts producing a second — or a
+      // different — diagnostic is caught rather than absorbed by a `toContain`.
       expect(parsed.errors).toEqual([
         { kind: "entry-not-bulleted", section: "Functional Requirements", line: FR_002_LINE },
       ]);
@@ -943,6 +930,15 @@ describe("parseSpec", () => {
       .not.toBe(specContentHash("System SHOULD parse specs"));
   });
 
+  it("distinguishes glossary hash inputs the ambiguous term-colon join collided", () => {
+    // The glossary hash input is the lossless (term, definition) pair: the
+    // former `${term}: ${definition}` join mapped the distinct pairs
+    // ("a: b", "c") and ("a", "b: c") to one digest, so two distinct
+    // glossary entries could share a content hash.
+    expect(specContentHash(JSON.stringify(["a: b", "c"])))
+      .not.toBe(specContentHash(JSON.stringify(["a", "b: c"])));
+  });
+
   it("parses Loom's single-dash delimiter extension as a separator, not a data row", () => {
     const gfm = validSpec.replace(
       "| Spec Index | A deterministic projection of specification entries |",
@@ -1054,6 +1050,69 @@ describe("parseSpec", () => {
     // A spaced family token breaks the contiguous family token — the second
     // deliberate prose boundary — and stays legal.
     expect(parseSpec(spaced)).toMatchObject({ ok: true });
+  });
+
+  it("fails closed for the CONTEXT.md-documented '- -' marker-run form in a section body", () => {
+    const stray = validSpec.replace(
+      "- FR-002: System MUST hash requirement content deterministically",
+      "- - FR-002: System MUST be recognized",
+    );
+    const parsed = parseSpec(stray);
+    // CONTEXT.md enumerates `- -` among the marker-run forms that fail closed;
+    // it takes a distinct code path from its documented siblings (the line
+    // starts with "-", so parseEntries skips the entry-not-bulleted branch and
+    // fails via entry-not-canonical) — pinned so a prefix-handling refactor
+    // cannot silently change which diagnostic the documented form produces.
+    expect(parsed).toMatchObject({ ok: false });
+    if (!parsed.ok) {
+      expect(parsed.errors).toEqual([
+        { kind: "entry-not-canonical", section: "Functional Requirements", line: FR_002_LINE },
+      ]);
+    }
+  });
+
+  it("fails closed for the CONTEXT.md-documented '- -' marker-run form in an acceptance block", () => {
+    const stray = validSpec.replace(
+      "- AS-002: Given duplicate IDs, When it is parsed, Then parsing fails closed",
+      "- - AS-999: Given a typo, When parsed, Then it fails closed",
+    );
+    const parsed = parseSpec(stray);
+    // The in-block twin of the FR-section pin: the collected bullet fails via
+    // entry-not-canonical (the pattern rejects the marker run), the same
+    // diagnostic the unidentified-scenario row pins.
+    expect(parsed).toMatchObject({ ok: false });
+    if (!parsed.ok) {
+      expect(parsed.errors).toEqual([
+        { kind: "entry-not-canonical", section: "Acceptance Scenarios", line: AS_002_LINE },
+      ]);
+    }
+  });
+
+  it("keeps the document-wide net covering a spec whose final line is an entry", () => {
+    // The trailing-section boundary is load-bearing: the last required
+    // section must end one line past the document's last line or the
+    // document-wide fail-closed net stops covering that last line. No other
+    // fixture ends with an ID-shaped entry, so dropping the +1 passes the
+    // whole suite while this legal spec gains a spurious
+    // id-outside-section diagnostic.
+    const trailing = [
+      "# Feature", "",
+      "## User Scenarios", "", "**Acceptance Scenarios:**",
+      "- AS-001: Given a canonical spec, When it is parsed, Then entries are returned",
+      "",
+      "## Appendix: Glossary", "",
+      "| Term | Definition |",
+      "| Spec Index | A deterministic projection of specification entries |",
+      "",
+      "## Functional Requirements", "",
+      "- FR-001: System MUST parse canonical requirement IDs",
+      "",
+      "## Out of Scope", "",
+      "- OOS-001: Symbol-level source indexing",
+    ].join("\n");
+    const parsed = parseSpec(trailing);
+    expect(parsed).toMatchObject({ ok: true });
+    if (parsed.ok) expect(parsed.value.oos.map(({ id }) => id)).toEqual(["OOS-001"]);
   });
 
   it("binds the CONTEXT.md Spec Index definition as the executable colon boundary", () => {

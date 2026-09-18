@@ -7,6 +7,7 @@
  */
 
 import { lstatSync } from "node:fs";
+import { resolve } from "node:path";
 import type { Task } from "../../types";
 import {
   buildTaskLocalByteObservation,
@@ -131,7 +132,19 @@ function observeAvailableTaskScope(
   } catch (error) {
     observationFailure = error;
   }
-  authorityHead(args, ports, "after");
+  try {
+    authorityHead(args, ports, "after");
+  } catch (error) {
+    // Both failures are facts about this settlement: the after-HEAD error
+    // propagates and the inner observation failure rides as its cause —
+    // discarding it leaves the unavailable return without the reason the
+    // observation failed.
+    if (observationFailure !== undefined && error instanceof Error) {
+      error.cause = observationFailure;
+      throw error;
+    }
+    throw error;
+  }
   if (observationFailure !== undefined) throw observationFailure;
   if (observed === undefined) throw new Error("Task-local observation produced no facts");
   return observed;
@@ -188,7 +201,9 @@ export function analyzeNewTests(
   }
   return parseNewTestEvidence(
     false,
-    tests.total > 0 ? `${tests.total} test methods but 0 assertions (empty stubs?)` : "",
+    tests.total > 0
+      ? `${tests.total} test methods but 0 assertions (empty stubs?)`
+      : "no test declarations found in modified files",
   );
 }
 
@@ -252,6 +267,34 @@ const REAL_DIFF_DEPS: DiffDeps = {
   diffUntracked: git.diffUntracked,
   inspectFilePresence,
 };
+
+/** File presence rooted at the caller's repository. `inspectFilePresence`
+ *  resolves repository-relative paths against `process.cwd()`, which for a
+ *  settlement judging a spawn's linked worktree from a runtime process rooted
+ *  elsewhere classifies a worktree-only file as absent and silently drops its
+ *  bytes — the same misalignment the rooted Git arms exist to prevent. The
+ *  repository-relative vocabulary (`canonicalRepositoryPaths`) is preserved:
+ *  an absolute path resolves to itself, a relative one joins `root`. */
+function inspectFilePresenceAt(root: string, path: string): FilePresenceResult {
+  return inspectFilePresence(resolve(root, path));
+}
+
+/** Root-explicit diff deps: the same hardened Git boundary as
+ *  `REAL_DIFF_DEPS`, rooted at the caller's repository instead of the cached
+ *  runtime root. A settlement judging a spawn's linked worktree must observe
+ *  the repository the work happened in — the cached root answers for whichever
+ *  cwd the runtime process reports, which misaligns every diff and tracking
+ *  answer against files that live in another worktree. */
+export function realDiffDepsAt(root: string): DiffDeps {
+  return {
+    isTracked: (file) => git.isTrackedAt(root, file),
+    diffFiles: (files) => git.diffFilesAt(root, files),
+    diffFilesStaged: (files) => git.diffFilesStagedAt(root, files),
+    diffFilesSince: (revision, files) => git.diffFilesSinceAt(root, revision, files),
+    diffUntracked: (file) => git.diffUntrackedAt(root, file),
+    inspectFilePresence: (path) => inspectFilePresenceAt(root, path),
+  };
+}
 
 export function collectDiff(
   filesModified: readonly string[],

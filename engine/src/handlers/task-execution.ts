@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { HookResult, TaskGraph } from "../types";
-import { pathExistsFailClosed, taskGraphPath } from "../config";
+import { findTaskGraphPathFrom, pathExistsFailClosed, taskGraphPath } from "../config";
 import { StateManager } from "../state-manager";
 import {
   parseIsoInstant,
@@ -46,11 +46,19 @@ class LockedRegistrationRefusal extends Error {}
  * the grace period and a qualifying graph-scoped roster observation; the
  * policy does not prove process death. Pi consumes the returned authorities,
  * while the Claude wrapper correlates them through SubagentStart sidecars.
+ *
+ * An optional `spawnCwd` re-roots the whole registration at the spawn's
+ * declared repository: the graph that governs a repository lives IN that
+ * repository, so a batch whose items declare a linked worktree registers in
+ * the worktree's graph and snapshots the worktree's baselines, while the
+ * orchestrator runtime itself stays rooted wherever it is. The no-argument
+ * call preserves the historical runtime-cwd resolution exactly.
  */
 export async function registerTaskExecutionBatch(
   spawns: readonly TaskExecutionSpawn[],
   mode: ExecutionBatchMode = "parallel",
   rosterObservation?: TaskExecutionRosterObservation,
+  spawnCwd?: string,
 ): Promise<TaskExecutionRegistrationOutcome> {
   const inputs = spawns.filter(
     (spawn): spawn is Extract<TaskExecutionSpawn, { kind: "implementation" }> =>
@@ -61,7 +69,7 @@ export async function registerTaskExecutionBatch(
   let manager: StateManager;
   let state: TaskGraph;
   try {
-    statePath = taskGraphPath();
+    statePath = spawnCwd === undefined ? taskGraphPath() : findTaskGraphPathFrom(spawnCwd);
     // Fail CLOSED on an unreadable graph: `existsSync` collapses EACCES/ELOOP/
     // ENOTDIR/EIO into `false`, which would wave the whole implementation batch
     // through with no ownership, staleness, or baseline check and no trace.
@@ -103,7 +111,7 @@ export async function registerTaskExecutionBatch(
     if (decision.kind === "ineligible") return { kind: "block", message: `BLOCKED: ${decision.reason}` };
   }
 
-  const repository = repositoryContext();
+  const repository = repositoryContext(spawnCwd);
   if (!repository.ok) {
     return {
       kind: "block",
@@ -205,14 +213,18 @@ export async function registerTaskExecutionBatch(
   }
 }
 
-/** Exact rollback used when a harness cannot carry a just-minted capability. */
+/** Exact rollback used when a harness cannot carry a just-minted capability.
+ *  The optional `spawnCwd` must be the SAME repository the registration
+ *  resolved: a rollback that targets a different graph would reclaim
+ *  reservations the wrong State File still holds. */
 export async function rollbackTaskExecutionRegistration(
   authorities: readonly ImplementationAttemptAuthority[],
+  spawnCwd?: string,
 ): Promise<HookResult> {
   if (authorities.length === 0) return { kind: "allow" };
   let statePath = "<unresolved>";
   try {
-    statePath = taskGraphPath();
+    statePath = spawnCwd === undefined ? taskGraphPath() : findTaskGraphPathFrom(spawnCwd);
     const manager = StateManager.fromPath(statePath);
     if (manager === null) {
       return { kind: "block", message: `BLOCKED: Cannot roll back implementation registration; task graph ${statePath} is unavailable.` };
@@ -233,8 +245,9 @@ export async function validateTaskExecutionBatch(
   spawns: readonly TaskExecutionSpawn[],
   mode: ExecutionBatchMode = "parallel",
   rosterObservation?: TaskExecutionRosterObservation,
+  spawnCwd?: string,
 ): Promise<HookResult> {
-  const result = await registerTaskExecutionBatch(spawns, mode, rosterObservation);
+  const result = await registerTaskExecutionBatch(spawns, mode, rosterObservation, spawnCwd);
   return result.kind === "registered" ? { kind: "allow" } : result;
 }
 
