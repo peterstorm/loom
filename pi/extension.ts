@@ -1721,7 +1721,7 @@ export default function (
           const cleanupErrors = await rollbackLifecycle();
           return { block: true, reason: `${taskRegistration.message}${cleanupFailureSuffix(cleanupErrors)}` };
         }
-        const alignment = graphIsActive
+        const alignment = orchestrationGraphActive
           ? alignPiImplementationAuthorities(
               parsedItems,
               dispatchTaskExecutionSpawns,
