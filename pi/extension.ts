@@ -1732,7 +1732,10 @@ export default function (
               authoritiesBySlot: Object.freeze(parsedItems.map(() => null)),
             };
         if (!alignment.ok) {
-          const registrationRollback = await rollbackTaskExecutionRegistration(taskRegistration.authorities);
+          const registrationRollback = await rollbackTaskExecutionRegistration(
+            taskRegistration.authorities,
+            spawnGraphPath === null ? undefined : piSpawnCwd(event.input, 0, ctx.cwd),
+          );
           const cleanupErrors = await rollbackLifecycle();
           const rollbackErrors = [
             ...(registrationRollback.kind === "block" ? [registrationRollback.message] : []),

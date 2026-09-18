@@ -302,7 +302,10 @@ export function assertReviewPanelDisjoint(
   panel: ReadonlySet<string> = REVIEW_PANEL_AGENTS,
   reserved?: ReadonlySet<string>,
 ): void {
-  const overlap = reserved ? reviewPanelOverlap(panel, reserved) : reviewPanelOverlap(panel);
+  // `reviewPanelOverlap`'s `reserved` parameter carries the same default the
+  // one-argument call triggers, so the branch is a pass-through and is
+  // collapsed: passing `reserved` through is identical in every state.
+  const overlap = reviewPanelOverlap(panel, reserved);
   assertNoOverlap(
     overlap,
     `loom config invariant violated: review-panel verifiers must not also be phase, ` +

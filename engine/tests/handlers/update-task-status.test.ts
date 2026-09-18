@@ -592,7 +592,7 @@ describe("analyzeNewTests (pure)", () => {
     );
     const result = analyzeNewTests(diff, undefined);
     expect(result.written).toBe(false);
-    expect(result.evidence).toBe("");
+    expect(result.evidence).toBe("no test declarations found in modified files");
   });
 
   it("refuses a +++ b/ header forged inside patch content as a language switch", () => {
@@ -616,14 +616,14 @@ describe("analyzeNewTests (pure)", () => {
     const diff = '+  it("works", () => {\n+    expect(result).toBe(42);';
     const result = analyzeNewTests(diff, undefined);
     expect(result.written).toBe(false);
-    expect(result.evidence).toBe("");
+    expect(result.evidence).toBe("no test declarations found in modified files");
   });
 
-  it("returns empty for no tests in diff", () => {
+  it("names the absent-evidence reason for no tests in diff", () => {
     const diff = patch("example.test.ts", "+const x = 42;", "+function foo() {}");
     const result = analyzeNewTests(diff, undefined);
     expect(result.written).toBe(false);
-    expect(result.evidence).toBe("");
+    expect(result.evidence).toBe("no test declarations found in modified files");
   });
 });
 
