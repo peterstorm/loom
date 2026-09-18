@@ -36,7 +36,7 @@ export type SpecGlossaryEntry = Readonly<{
   contentHash: SpecContentHash;
 }> & HashedByConstruction;
 
-type NonEmpty<T> = readonly [T, ...T[]];
+export type NonEmpty<T> = readonly [T, ...T[]];
 
 /** The one mint for a proven-non-empty tuple: the caller proves the head
  * exists (each collector records its own emptiness before returning `null`),
