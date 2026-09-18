@@ -126,6 +126,21 @@ function renderDiagnostic(failure: StaleCleanupDiagnostic): string {
   return `cleanup-stale-subagents: ${failure.operation} failed for ${failure.path}: ${failure.cause}`;
 }
 
+/** Stat failures that prove the entry can never resolve to a tracking file:
+ *  a symlink loop (ELOOP) or a dangling link (ENOENT/ENOTDIR). The machine
+ *  code only ever creates regular files here, so such an entry is garbage
+ *  regardless of age — the sweep removes it instead of re-reporting the same
+ *  diagnostic at every session start. Every other failure (EACCES/EPERM/
+ *  EIO/...) may be transient and keeps the conservative protect + loud
+ *  report behavior. */
+const DEAD_ENTRY_STAT_CODES: ReadonlySet<string> = new Set(["ELOOP", "ENOENT", "ENOTDIR"]);
+
+/** Pure: does this stat failure prove the entry is dead, not merely unreadable? */
+export function isDeadStatFailure(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return typeof code === "string" && DEAD_ENTRY_STAT_CODES.has(code);
+}
+
 /** Shell: returns every failed operation with its exact path and cause. */
 export function sweepStaleSessions(
   dir: string,
@@ -148,9 +163,21 @@ export function sweepStaleSessions(
     try {
       mtimes.set(entry, operations.mtime(path));
     } catch (error) {
-      diagnostics.push(diagnostic("stat", path, error));
       const session = sessionOfEntry(entry);
       if (session !== null) unobservableSessions.add(session);
+      if (isDeadStatFailure(error)) {
+        // Provably-dead entry (self-referential/dangling symlink): rmSync
+        // removes the link itself, never its target. Success heals the
+        // directory silently; a failed removal still surfaces so the
+        // operator knows it persisted.
+        try {
+          operations.remove(path);
+        } catch (removeError) {
+          diagnostics.push(diagnostic("remove", path, removeError));
+        }
+        continue;
+      }
+      diagnostics.push(diagnostic("stat", path, error));
     }
   }
   for (const entry of staleEntries(mtimes, cutoffMs, unobservableSessions)) {

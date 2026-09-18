@@ -11,13 +11,14 @@
  */
 
 import { describe, it, expect, afterAll } from "vitest";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
+  isDeadStatFailure,
   runCleanupStaleSubagents,
   sessionOfEntry,
   staleEntries,
@@ -114,6 +115,28 @@ describe("staleEntries (pure) — group max mtime governs", () => {
   });
 });
 
+describe("isDeadStatFailure (pure)", () => {
+  const errno = (code: string) => Object.assign(new Error(code), { code });
+
+  it("classifies provably-dead link errors as dead", () => {
+    expect(isDeadStatFailure(errno("ELOOP"))).toBe(true);
+    expect(isDeadStatFailure(errno("ENOENT"))).toBe(true);
+    expect(isDeadStatFailure(errno("ENOTDIR"))).toBe(true);
+  });
+
+  it("classifies potentially-transient failures as unreadable, not dead", () => {
+    expect(isDeadStatFailure(errno("EACCES"))).toBe(false);
+    expect(isDeadStatFailure(errno("EPERM"))).toBe(false);
+    expect(isDeadStatFailure(errno("EIO"))).toBe(false);
+  });
+
+  it("is false for non-errno errors", () => {
+    expect(isDeadStatFailure(new Error("EACCES stat"))).toBe(false);
+    expect(isDeadStatFailure("string error")).toBe(false);
+    expect(isDeadStatFailure(undefined)).toBe(false);
+  });
+});
+
 describe("sweepStaleSessions (fs)", () => {
   it("sweeps whole stale groups, spares live groups whose roster/ledger mtimes lag", () => {
     const old = new Date(Date.now() - 3_600_000);
@@ -181,6 +204,38 @@ describe("sweepStaleSessions (fs)", () => {
     }]);
   });
 
+  it("removes provably-dead entries, surfacing only failed removals", () => {
+    const removed: string[] = [];
+    const diagnostics = sweepStaleSessions("/tracking", 100, {
+      probeDirectory: () => ({
+        kind: "present",
+        entries: ["looped.active", "dangling.active", "stale.active"],
+      }),
+      mtime: (path) => {
+        if (path.endsWith("looped.active")) throw Object.assign(new Error("ELOOP"), { code: "ELOOP" });
+        if (path.endsWith("dangling.active")) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        return 10;
+      },
+      remove: (path) => {
+        removed.push(path);
+        if (path.endsWith("dangling.active")) throw new Error("EROFS remove");
+      },
+    });
+
+    // The dead entries were removed (no stat diagnostics for them) and the
+    // normally-stale entry swept; only the failed removal surfaced.
+    expect(removed.sort()).toEqual([
+      join("/tracking", "dangling.active"),
+      join("/tracking", "looped.active"),
+      join("/tracking", "stale.active"),
+    ]);
+    expect(diagnostics).toEqual([{
+      operation: "remove",
+      path: join("/tracking", "dangling.active"),
+      cause: "EROFS remove",
+    }]);
+  });
+
   it("returns stat and remove diagnostics with operation, exact path, and cause", () => {
     const removed: string[] = [];
     const diagnostics = sweepStaleSessions("/tracking", 100, {
@@ -229,12 +284,11 @@ describe("sweepStaleSessions (fs)", () => {
     }]);
   });
 
-  it("SessionStart surfaces best-effort cleanup failures through systemMessage", async () => {
+  it("SessionStart heals dead symlink entries and surfaces transient stat failures", async () => {
     // SUBAGENT_DIR freezes at the first config import, so the ACTUAL default
     // handler runs in a fresh disposable child process whose LOOM_SUBAGENT_DIR
     // points at a private owned temp dir — never the real
-    // /tmp/claude-subagents. The child imports the package-owned module and
-    // awaits cleanup("", []).
+    // /tmp/claude-subagents.
     const privateDir = mkdtempSync(join(tmpdir(), "loom-handler-"));
     const ambientDir = mkdtempSync(join(tmpdir(), "loom-handler-ambient-"));
     try {
@@ -243,10 +297,20 @@ describe("sweepStaleSessions (fs)", () => {
       const old = new Date(Date.now() - 3_600_000);
       utimesSync(staleSentinel, old, old); // older than STALE_SUBAGENT_TTL_MS
 
-      // Broken self-referential symlink → ELOOP on stat (best-effort
-      // diagnostic oracle); its session group becomes unobservable, so the
-      // sweep must PROTECT it rather than unlink it.
-      const looped = join(privateDir, `cleanup-diagnostic-${process.pid}-${Date.now()}.active`);
+      // Transient stat failure → EACCES via a no-exec path component (may be
+      // live behind a permission issue): surfaced through systemMessage and
+      // kept; only the entry-level stat error, never the link replaced.
+      const noexecDir = join(privateDir, "noexec-dir");
+      mkdirSync(noexecDir, { mode: 0o755 });
+      writeFileSync(join(noexecDir, "target.json"), "x\n");
+      const unreadable = join(privateDir, `cleanup-diagnostic-${process.pid}-${Date.now()}.active`);
+      symlinkSync(join(noexecDir, "target.json"), unreadable);
+      chmodSync(noexecDir, 0o000);
+
+      // Broken self-referential symlink → ELOOP on stat: provably dead, so
+      // the sweep must HEAL the directory (remove the link) silently instead
+      // of re-reporting the same diagnostic at every session start.
+      const looped = join(privateDir, `cleanup-dead-${process.pid}-${Date.now()}.active`);
       symlinkSync(looped, looped);
 
       // Unrelated owned ambient control directory: outside the child's
@@ -264,24 +328,24 @@ describe("sweepStaleSessions (fs)", () => {
         `import handler from ${JSON.stringify(modulePath)};\nconsole.log(JSON.stringify(await handler("", [])));`,
       ], { cwd: privateDir, env: childEnv, timeout: 15_000 });
 
-      // Actual-run proof: the real default handler produced its passthrough
-      // result with the ELOOP stat diagnostic.
-      const result: unknown = JSON.parse(stdout);
-      expect(result).toMatchObject({
-        kind: "passthrough",
-        systemMessage: expect.stringContaining(`cleanup-stale-subagents: stat failed for ${looped}`),
-      });
-      expect(result).toMatchObject({
-        systemMessage: expect.stringMatching(/ELOOP|too many levels of symbolic links/i),
-      });
+      // Actual-run proof: the transient EACCES diagnostic surfaced while the
+      // dead ELOOP entry healed WITHOUT a diagnostic.
+      const result: { kind: string; systemMessage?: string } = JSON.parse(stdout);
+      expect(result.kind).toBe("passthrough");
+      expect(result.systemMessage).toContain(`cleanup-stale-subagents: stat failed for ${unreadable}`);
+      expect(result.systemMessage).toMatch(/EACCES|permission denied/i);
+      expect(result.systemMessage).not.toContain(looped);
 
       // The stale sentinel was swept in the SELECTED private dir.
       expect(existsSync(staleSentinel)).toBe(false);
-      // The protected looped symlink was NOT swept (negative ownership proof).
-      expect(lstatSync(looped).isSymbolicLink()).toBe(true);
+      // The dead looped symlink was REMOVED (healed — not protected forever).
+      expect(existsSync(looped)).toBe(false);
+      // The transiently-unstatable link was preserved for human inspection.
+      expect(lstatSync(unreadable).isSymbolicLink()).toBe(true);
       // The unrelated owned ambient control directory was preserved.
       expect(readFileSync(ambientSentinel, "utf8")).toBe("x\n");
     } finally {
+      chmodSync(join(privateDir, "noexec-dir"), 0o755); // restore before recursive rm
       rmSync(privateDir, { recursive: true, force: true });
       rmSync(ambientDir, { recursive: true, force: true });
     }
