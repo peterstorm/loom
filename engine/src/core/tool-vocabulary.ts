@@ -46,7 +46,7 @@ export const TEST_COMMAND_PATTERNS: readonly string[] = [
   "mvnw test", "mvnw verify",
   "./gradlew test", "./gradlew check",
   "gradle test", "gradle check",
-  "npm test", "npm run test",
+  "npm test", "npm run test", "npm run verify",
   "npx vitest", "npx jest",
   "yarn test", "pnpm test", "bun test",
   "pytest", "python -m pytest", "python3 -m pytest",

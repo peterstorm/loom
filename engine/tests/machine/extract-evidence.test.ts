@@ -57,6 +57,16 @@ describe("classifyTestCommand — parse, don't substring-match", () => {
     expect(classifyTestCommand("go test ./...")).toBe("go test ./...");
   });
 
+  it("the verification manifest command classifies as a test run", () => {
+    // `npm run verify` is loom's own verification-manifest command — the
+    // manifest the verification policy points at, and it runs the tests
+    // (typecheck + unit suite + smoke), so the runner vocabulary must
+    // recognize it or the manifest command's paired output never mints
+    // structured evidence.
+    expect(classifyTestCommand("npm run verify")).toBe("npm run verify");
+    expect(classifyTestCommand("cd engine && npm run verify")).toBe("npm run verify");
+  });
+
   it("mvn segments require an actual test goal — `mvn -pl core install` is not a test run", () => {
     expect(classifyTestCommand("mvn -pl core install")).toBeNull();
     expect(classifyTestCommand("mvn -pl core -am compile")).toBeNull();

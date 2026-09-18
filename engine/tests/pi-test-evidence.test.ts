@@ -118,6 +118,17 @@ describe("Pi test-evidence transcript adapter", () => {
       ok: true,
       value: { passed: true, evidence: "bun: 654 pass" },
     });
+    // The bash-equivalent obsolete form `tail -N` ≡ `tail -n N` reaches the
+    // same relaxation: GNU tail treats them identically, so the pipe grammar
+    // must as well.
+    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "cd engine && bun test | tail -n 40"))).toEqual({
+      ok: true,
+      value: { passed: true, evidence: "bun: 654 pass" },
+    });
+    expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "cd engine && bun test | tail -40"))).toEqual({
+      ok: true,
+      value: { passed: true, evidence: "bun: 654 pass" },
+    });
     expect(piStructuredTestResult(testRun("654 pass\n0 fail\n", "cd engine && bun test --no-color 2>&1 | tee /tmp/out.log"))).toEqual({
       ok: true,
       value: { passed: true, evidence: "bun: 654 pass" },
@@ -309,6 +320,11 @@ describe("Pi test-evidence transcript adapter", () => {
     });
     // Relaxed-but-valid pipe → relaxed.
     expect(piStructuredTestDiagnostics(testRun("654 pass\n0 fail\n", "cd engine && bun test | tail -n 40"))).toMatchObject({
+      ok: true,
+      value: expect.objectContaining({ attributedPairs: 1, verdict: "relaxed" }),
+    });
+    // The bash-equivalent obsolete form reaches the same relaxation.
+    expect(piStructuredTestDiagnostics(testRun("654 pass\n0 fail\n", "cd engine && bun test | tail -40"))).toMatchObject({
       ok: true,
       value: expect.objectContaining({ attributedPairs: 1, verdict: "relaxed" }),
     });
