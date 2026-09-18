@@ -233,13 +233,15 @@ export function isStandaloneReviewAgent(agent: string): boolean {
 }
 
 /**
- * The producer-kind vocabulary for structured payload emission (CONTEXT.md):
- * which structured payload an Agent emits, as data. The review-verifier Agent
- * is genuinely dual-payload — reviewer-payload for standalone/wave reviews,
- * refutation-verdict for `/review-pr` panel verdicts — so a kind-keyed-only
- * scoping cannot express it, and the `arch-panel` kind spans judges
- * (`arch-judge-agent`) and non-judge designers, so only a catalog-derived
- * projection (kind + profile) scopes the judge-verdict kind correctly.
+ * The producer-kind vocabulary for structured payload emission — the spec
+ * glossary's "Payload producer" term as data (the CONTEXT.md glossary entries
+ * land with the tool-primary docs): which structured payload an Agent emits.
+ * The review-verifier Agent is genuinely dual-payload — reviewer-payload for
+ * standalone/wave reviews, refutation-verdict for `/review-pr` panel verdicts
+ * — so a kind-keyed-only scoping cannot express it, and the `arch-panel` kind
+ * spans judges (`arch-judge-agent`) and non-judge designers, so only a
+ * catalog-derived projection (kind + profile) scopes the judge-verdict kind
+ * correctly.
  */
 export type PayloadProducerKind =
   | Readonly<{ kind: "reviewer-payload" }>
@@ -258,6 +260,18 @@ const producerKind = (name: PayloadProducerKindName): PayloadProducerKind =>
  * panel judge (the unique `panel-judge` profile on `arch-judge-agent`)
  * produces judge verdicts. Every other Agent — including the non-judge
  * `arch-panel` designers and utility-kind reviewers — produces none.
+ *
+ * The judge-verdict scoping consumes the panel-judge profile's uniqueness as
+ * data: profiles are shared across Agents generally ("implementation" alone
+ * binds seven), so uniqueness is a catalog-level fact, not a type invariant —
+ * the agent-catalog and model-profiles suites pin the mapping, and a second
+ * panel-judge Agent would mis-scope the judge-verdict kind at this condition.
+ *
+ * Total over the catalog and deterministically ordered: every Agent name
+ * answers (non-producers answer an empty list), the dual-payload Agent
+ * answers [reviewer-payload, refutation-verdict] in that order, and the
+ * result is frozen — the US4 capability gate and the per-kind emission-tool
+ * scoping read it as data, never as a caller convention.
  */
 export function producerKindsOfAgent(agent: LoomAgentName): readonly PayloadProducerKind[] {
   const entry = AGENT_CATALOG[agent];

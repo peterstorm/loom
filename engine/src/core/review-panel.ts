@@ -963,6 +963,11 @@ export function serializeRefutationVerdict(envelope: VerdictEnvelope<RefutationV
  * refinement; the issuance-join constraints (criterion binding, finding
  * coverage of the issued brief) are NOT expressible in a standalone schema and
  * stay in `parseRefutationVerdict` at the submission seam.
+ *
+ * Consumed by `EMISSION_TOOL_SPECS["refutation-verdict"]` — the emission-tool
+ * kernel's one place kind→schema knowledge lives — whose
+ * `frozenPayloadSchemaParameters` is the ONE constructor of the tool's
+ * `parameters` object from these bytes (AD-5, byte-identity by construction).
  */
 export const refutationVerdictV1Schema = z.strictObject({
   criterion: z.string().min(1)
@@ -979,7 +984,16 @@ export const refutationVerdictV1Schema = z.strictObject({
 export type RefutationVerdictArgsV1 = z.infer<typeof refutationVerdictV1Schema>;
 
 /** The frozen zod-derived parameter bytes; the byte-match guard is proven
- *  through a different serialization chain than this stamper writes with. */
+ *  through a different serialization chain than this stamper writes with.
+ *  Consumed verbatim by the emission-tool kernel's refutation-verdict spec.
+ *
+ *  JSON Schema cannot represent refinements, and `z.toJSONSchema` silently
+ *  drops them: the frozen bytes grammar-constrain SHAPE only (minLength, the
+ *  verdict enum). The prose-sanitization refinement rides the emission edge's
+ *  parse — `verdictArgsParser` re-runs `safeParse` on every generated argument
+ *  — so sanitization is enforced at the emission edge, never by the provider
+ *  grammar. A reader who believed the rendered bytes enforced it would be
+ *  wrong about the one sanitization the schema expresses. */
 export const REFUTATION_VERDICT_SCHEMA_V1: string = JSON.stringify(z.toJSONSchema(refutationVerdictV1Schema, {
   target: "draft-2020-12", io: "output", unrepresentable: "throw", cycles: "throw", reused: "ref",
 }), null, 2);

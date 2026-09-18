@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 import {
   admitEmissionArguments,
   EMISSION_TOOL_SPECS,
+  type EmissionArgumentAdmission,
   type EmissionSchemaVersion,
 } from "./emission-tool";
 import {
@@ -58,6 +59,14 @@ export type EmissionToolCallRecord = Readonly<{
  * More than one record is ambiguity, fail-closed to the emission-tool budget
  * (FR-007/AS-007).
  *
+ * The duplicate check is the RECORD COUNT of the path's kind, validity-blind
+ * (FR-007's literal "duplicate emission-tool calls"): a valid record does not
+ * rescue a duplicate, so the deterministic winner is the single record of the
+ * path's kind, never the single valid one among several. `selectVerdictSource`
+ * folds the same kernel — the share is structural (`selectByRecordCount`),
+ * not a comment convention: the two folds cannot drift out of the
+ * record-count-first, validity-blind semantics independently.
+ *
  * The selection is scoped to the canonical path's producer kind: records for
  * the other kinds belong to their own paths and are not consulted here — a
  * judge record in a reviewer spawn's transcript is ignored and the fallback
@@ -77,6 +86,36 @@ export type IngestionSelection =
 
 const encoder = new TextEncoder();
 
+const REVIEWER_PAYLOAD_SPEC = EMISSION_TOOL_SPECS["reviewer-payload"];
+
+/**
+ * The record-count kernel both selection folds fold — the record-count-first,
+ * validity-blind semantics in ONE place, not two conventions. More than one
+ * record of the fold's kind is ambiguity (`duplicate`); the single record is
+ * admitted through the fold's own admission and wins (`admitted`), or the
+ * fold's fallback engages (`fallback`). Validity-blind throughout: a valid
+ * record does not rescue a duplicate, and an invalid record does not disable
+ * the fallback (FR-006/FR-007).
+ */
+type RecordCountSelection =
+  | Readonly<{ kind: "duplicate" }>
+  | Readonly<{ kind: "admitted"; payload: unknown }>
+  | Readonly<{ kind: "fallback" }>;
+
+function selectByRecordCount(
+  records: readonly EmissionToolCallRecord[],
+  admit: (record: EmissionToolCallRecord) => EmissionArgumentAdmission,
+): RecordCountSelection {
+  if (records.length > 1) return Object.freeze({ kind: "duplicate" as const });
+  if (records.length === 1) {
+    const admitted = admit(records[0]!);
+    if (admitted.kind === "valid") {
+      return Object.freeze({ kind: "admitted" as const, payload: admitted.payload });
+    }
+  }
+  return Object.freeze({ kind: "fallback" as const });
+}
+
 /**
  * The canonical payload bytes for validated emission arguments: encoded ONCE,
  * deterministically — no trim, no join, no re-indent — the same encode-once
@@ -84,13 +123,13 @@ const encoder = new TextEncoder();
  */
 function finalPayloadOfArguments(payload: unknown, origin: string): FinalPayload {
   const text = JSON.stringify(payload, null, 2);
-  const bytes = Array.from(encoder.encode(text));
+  const bytes = encoder.encode(text);
   return canonicalRecord({
     origin,
     text,
-    bytes: Object.freeze(bytes),
+    bytes: Object.freeze(Array.from(bytes)),
     byteLength: bytes.length,
-    digest: createHash("sha256").update(Uint8Array.from(bytes)).digest("hex") as ArtifactDigest,
+    digest: createHash("sha256").update(bytes).digest("hex") as ArtifactDigest,
   });
 }
 
@@ -98,20 +137,19 @@ export function selectCanonicalPayload(
   emissionRecords: readonly EmissionToolCallRecord[],
   finalMessageCandidates: readonly FinalPayloadCandidate[],
 ): IngestionSelection {
-  const reviewerRecords = emissionRecords.filter((record) => record.kind.kind === "reviewer-payload");
-  if (reviewerRecords.length > 1) {
+  const selected = selectByRecordCount(
+    emissionRecords.filter((record) => record.kind.kind === "reviewer-payload"),
+    (record) => admitEmissionArguments(REVIEWER_PAYLOAD_SPEC, record.version, record.arguments),
+  );
+  if (selected.kind === "duplicate") {
     return Object.freeze({ kind: "duplicate-emission-call" as const });
   }
-  if (reviewerRecords.length === 1) {
-    const record = reviewerRecords[0]!;
-    const admitted = admitEmissionArguments(REVIEWER_PAYLOAD_SPEC, record.version, record.arguments);
-    if (admitted.kind === "valid") {
-      return Object.freeze({
-        kind: "emission-tool-arguments" as const,
-        payload: finalPayloadOfArguments(admitted.payload, "emission-tool-arguments"),
-        source: "emission-tool" as const,
-      });
-    }
+  if (selected.kind === "admitted") {
+    return Object.freeze({
+      kind: "emission-tool-arguments" as const,
+      payload: finalPayloadOfArguments(selected.payload, "emission-tool-arguments"),
+      source: "emission-tool" as const,
+    });
   }
   return Object.freeze({
     kind: "final-message-extraction" as const,
@@ -120,22 +158,34 @@ export function selectCanonicalPayload(
   });
 }
 
-const REVIEWER_PAYLOAD_SPEC = EMISSION_TOOL_SPECS["reviewer-payload"];
-
 /**
  * The panel verdict paths' deterministic verdict-source selection.
  *
- * Exactly one emission record with arguments valid per the registry's
+ * Exactly one verdict-kind record with arguments valid per the registry's
  * schema-conformance parse wins deterministically; its serialized arguments
  * become the rawJson the submission seam parses — the authoritative engine-side
- * gate with the issuance-join inside (FR-012 retained verbatim). Zero records,
- * or invalid records, leave the caller's existing rawJson standing byte-verbatim:
- * the kernel's fail-closed extraction engages exactly as today. More than one
- * valid record is ambiguity, fail-closed to the emission-tool budget
- * (FR-007/AS-007).
+ * gate with the issuance-join inside (FR-012 retained verbatim); final-message
+ * extraction is not consulted (FR-003/AS-003). Zero records, or the single
+ * record invalid, leave the caller's existing rawJson standing byte-verbatim:
+ * the kernel's fail-closed extraction engages exactly as today (FR-004/
+ * FR-005/AS-006) — invalid records are never-ingestable, and the caller
+ * journals the consumed retry round from the records it passed in (FR-006).
+ * More than one verdict-kind record is ambiguity, fail-closed to the
+ * emission-tool budget (FR-007/AS-007).
  *
- * The selection is scoped to the verdict producer kinds: records for the
- * canonical path's kind are not consulted here.
+ * The duplicate check is the RECORD COUNT of the verdict kinds, validity-blind
+ * — the same kernel `selectCanonicalPayload` folds for the canonical path's
+ * kind (`selectByRecordCount`, one semantics, structural): a valid record
+ * does not rescue a duplicate, so a model that re-emits within one attempt
+ * discards the re-emitted work to the fallback and the emission-tool budget
+ * absorbs the round (the spec's named duplicate-call risk, mitigated
+ * fail-closed).
+ *
+ * The selection is scoped to the verdict kinds (judge-verdict,
+ * refutation-verdict): reviewer-payload records belong to the canonical
+ * payload path and are not consulted here — a reviewer record in a verdict
+ * spawn's transcript is ignored and the caller's existing rawJson stands (the
+ * no-op baseline).
  */
 export type VerdictSourceSelection =
   | Readonly<{ kind: "emission-tool-arguments"; rawJson: string; source: "emission-tool" }>
@@ -153,22 +203,17 @@ export function selectVerdictSource(
   transcriptText: string,
   emissionRecords: readonly EmissionToolCallRecord[],
 ): VerdictSourceSelection {
-  const verdictRecords = emissionRecords.filter((record) => record.kind.kind !== "reviewer-payload");
-  const validRawJson = verdictRecords.flatMap((record) => {
-    const admitted = admitEmissionArguments(
-      EMISSION_TOOL_SPECS[record.kind.kind],
-      record.version,
-      record.arguments,
-    );
-    return admitted.kind === "valid" ? [JSON.stringify(admitted.payload, null, 2)] : [];
-  });
-  if (validRawJson.length > 1) {
+  const selected = selectByRecordCount(
+    emissionRecords.filter((record) => record.kind.kind !== "reviewer-payload"),
+    (record) => admitEmissionArguments(EMISSION_TOOL_SPECS[record.kind.kind], record.version, record.arguments),
+  );
+  if (selected.kind === "duplicate") {
     return Object.freeze({ kind: "duplicate-emission-call" as const });
   }
-  if (validRawJson.length === 1) {
+  if (selected.kind === "admitted") {
     return Object.freeze({
       kind: "emission-tool-arguments" as const,
-      rawJson: validRawJson[0]!,
+      rawJson: JSON.stringify(selected.payload, null, 2),
       source: "emission-tool" as const,
     });
   }

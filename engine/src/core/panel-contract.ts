@@ -600,6 +600,11 @@ export function serializeJudgeVerdict(verdict: JudgeVerdict): string {
  * NOT expressible in a standalone schema and stay in `parseJudgeVerdict` at the
  * submission seam — the schema's criterion and candidate fields are therefore
  * shape-level strings, bound by the seam's authority.
+ *
+ * Consumed by `EMISSION_TOOL_SPECS["judge-verdict"]` — the emission-tool
+ * kernel's one place kind→schema knowledge lives — whose
+ * `frozenPayloadSchemaParameters` is the ONE constructor of the tool's
+ * `parameters` object from these bytes (AD-5, byte-identity by construction).
  */
 export const judgeVerdictV1Schema = z.strictObject({
   criterion: z.string().min(1)
@@ -618,7 +623,17 @@ export const judgeVerdictV1Schema = z.strictObject({
 export type JudgeVerdictArgsV1 = z.infer<typeof judgeVerdictV1Schema>;
 
 /** The frozen zod-derived parameter bytes; the byte-match guard is proven
- *  through a different serialization chain than this stamper writes with. */
+ *  through a different serialization chain than this stamper writes with.
+ *  Consumed verbatim by the emission-tool kernel's judge-verdict spec.
+ *
+ *  JSON Schema cannot represent refinements, and `z.toJSONSchema` silently
+ *  drops them: the frozen bytes grammar-constrain SHAPE only (minLength, the
+ *  integer score domain, the verdict enum, nullability). The prose-sanitization
+ *  refinement rides the emission edge's parse — `verdictArgsParser` re-runs
+ *  `safeParse` on every generated argument — so sanitization is enforced at
+ *  the emission edge, never by the provider grammar. A reader who believed the
+ *  rendered bytes enforced it would be wrong about the one sanitization the
+ *  schema expresses. */
 export const JUDGE_VERDICT_SCHEMA_V1: string = JSON.stringify(z.toJSONSchema(judgeVerdictV1Schema, {
   target: "draft-2020-12", io: "output", unrepresentable: "throw", cycles: "throw", reused: "ref",
 }), null, 2);

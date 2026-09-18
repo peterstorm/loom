@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
+import { createHash } from "node:crypto";
 import {
   selectCanonicalPayload,
   selectVerdictSource,
@@ -80,6 +81,24 @@ const validJudgeRecordArb = fc.record({
   }),
 });
 
+/** A valid refutation verdict as emission arguments — the second verdict kind
+ *  the verdict path serves, parametrized over the reasoning prose. */
+const validRefutationRecordArb = fc.record({
+  kind: fc.constant({ kind: "refutation-verdict" } as const),
+  version: fc.constant("v1" as const),
+  arguments: fc.record({
+    criterion: proseArb,
+    verdicts: fc.array(
+      fc.record({
+        finding_id: proseArb,
+        verdict: fc.constantFrom("refuted", "upheld", "uncertain"),
+        reasoning: proseArb,
+      }),
+      { minLength: 1, maxLength: 4 },
+    ),
+  }),
+});
+
 describe("selectCanonicalPayload", () => {
   it("is deterministic: the same inputs select the same source", () => {
     fc.assert(
@@ -91,7 +110,7 @@ describe("selectCanonicalPayload", () => {
     );
   });
 
-  it("prefers a valid emission record whenever one is present — extraction is not consulted", () => {
+  it("prefers a valid emission record over extraction whenever it is the only reviewer record", () => {
     fc.assert(
       fc.property(validReviewerRecordArb, fc.array(candidateArb, { maxLength: 3 }), (record, candidates) => {
         const selection = selectCanonicalPayload([record], candidates);
@@ -138,6 +157,21 @@ describe("selectCanonicalPayload", () => {
     }
   });
 
+  it("digests the canonical payload as the sha256 of its deterministically encoded bytes", () => {
+    const selection = selectCanonicalPayload(
+      [{ kind: { kind: "reviewer-payload" }, version: "v2", arguments: REVIEWER_PAYLOAD_EXAMPLE_V2 }],
+      [],
+    );
+    expect(selection.kind).toBe("emission-tool-arguments");
+    if (selection.kind === "emission-tool-arguments") {
+      // Encoded ONCE, deterministically — the digest derivation is pinned so a
+      // re-encode or re-indent divergence in the canonical payload is caught.
+      const bytes = new TextEncoder().encode(selection.payload.text);
+      expect(selection.payload.digest).toBe(createHash("sha256").update(bytes).digest("hex"));
+      expect(selection.payload.byteLength).toBe(bytes.length);
+    }
+  });
+
   it("treats an invalid emission record as never-ingestable — the fallback still engages", () => {
     const selection = selectCanonicalPayload(
       [{ kind: { kind: "reviewer-payload" }, version: "v2", arguments: { arbitrary: "not a payload" } }],
@@ -156,6 +190,32 @@ describe("selectCanonicalPayload", () => {
       arguments: REVIEWER_PAYLOAD_EXAMPLE_V2,
     };
     const selection = selectCanonicalPayload([record, record], []);
+    expect(selection).toEqual({ kind: "duplicate-emission-call" });
+  });
+
+  it("fails closed on a duplicate even when one record is valid — a valid record does not rescue a duplicate", () => {
+    const valid: EmissionToolCallRecord = {
+      kind: { kind: "reviewer-payload" },
+      version: "v2",
+      arguments: REVIEWER_PAYLOAD_EXAMPLE_V2,
+    };
+    const invalid: EmissionToolCallRecord = {
+      kind: { kind: "reviewer-payload" },
+      version: "v2",
+      arguments: { arbitrary: "not a payload" },
+    };
+    // Either order: the duplicate-ness is the call count, validity-blind (FR-007).
+    expect(selectCanonicalPayload([valid, invalid], [])).toEqual({ kind: "duplicate-emission-call" });
+    expect(selectCanonicalPayload([invalid, valid], [])).toEqual({ kind: "duplicate-emission-call" });
+  });
+
+  it("fails closed on two invalid emission records rather than engaging the fallback", () => {
+    const invalid: EmissionToolCallRecord = {
+      kind: { kind: "reviewer-payload" },
+      version: "v2",
+      arguments: { arbitrary: "not a payload" },
+    };
+    const selection = selectCanonicalPayload([invalid, invalid], [{ origin: "content[0].text", text: "prose" }]);
     expect(selection).toEqual({ kind: "duplicate-emission-call" });
   });
 
@@ -179,11 +239,14 @@ describe("selectVerdictSource", () => {
     );
   });
 
-  it("prefers a valid verdict record whenever one is present", () => {
+  it("prefers a valid verdict record over extraction whenever it is the only verdict record", () => {
     fc.assert(
-      fc.property(validJudgeRecordArb, proseArb, (record, transcriptText) => {
-        const selection = selectVerdictSource(transcriptText, [record]);
-        return selection.kind === "emission-tool-arguments" && selection.source === "emission-tool";
+      fc.property(validJudgeRecordArb, validRefutationRecordArb, proseArb, (judge, refutation, transcriptText) => {
+        for (const record of [judge, refutation]) {
+          const selection = selectVerdictSource(transcriptText, [record]);
+          if (selection.kind !== "emission-tool-arguments" || selection.source !== "emission-tool") return false;
+        }
+        return true;
       }),
     );
   });
@@ -241,6 +304,59 @@ describe("selectVerdictSource", () => {
     expect(selection).toEqual({ kind: "duplicate-emission-call" });
   });
 
+  it("fails closed on one judge and one refutation record — the verdict count spans both verdict kinds", () => {
+    const judge: EmissionToolCallRecord = {
+      kind: { kind: "judge-verdict" },
+      version: "v1",
+      arguments: {
+        criterion: "extensibility",
+        rankings: [{ candidate: "candidate-x.md", score: 8, fatal_flaw: null, strongest_idea: "x" }],
+      },
+    };
+    const refutation: EmissionToolCallRecord = {
+      kind: { kind: "refutation-verdict" },
+      version: "v1",
+      arguments: {
+        criterion: "reproduction",
+        verdicts: [{ finding_id: "T1:x-1", verdict: "refuted", reasoning: "x" }],
+      },
+    };
+    // Either order: the duplicate-ness is the count of ALL verdict-kind records,
+    // validity-blind (FR-007) — two verdict kinds in one slot's transcript are
+    // ambiguous about which path produced them, so the selection never ingests.
+    expect(selectVerdictSource("transcript", [judge, refutation])).toEqual({ kind: "duplicate-emission-call" });
+    expect(selectVerdictSource("transcript", [refutation, judge])).toEqual({ kind: "duplicate-emission-call" });
+  });
+
+  it("fails closed on a duplicate even when one verdict record is valid — the call count is validity-blind", () => {
+    const valid: EmissionToolCallRecord = {
+      kind: { kind: "judge-verdict" },
+      version: "v1",
+      arguments: {
+        criterion: "extensibility",
+        rankings: [{ candidate: "candidate-type-driven-fp.md", score: 8, fatal_flaw: null, strongest_idea: "the registry" }],
+      },
+    };
+    const invalid: EmissionToolCallRecord = {
+      kind: { kind: "judge-verdict" },
+      version: "v1",
+      arguments: { criterion: "x", rankings: [] },
+    };
+    // Either order: the duplicate-ness is the call count, validity-blind (FR-007).
+    expect(selectVerdictSource("transcript", [valid, invalid])).toEqual({ kind: "duplicate-emission-call" });
+    expect(selectVerdictSource("transcript", [invalid, valid])).toEqual({ kind: "duplicate-emission-call" });
+  });
+
+  it("fails closed on two invalid verdict records rather than leaving the rawJson standing", () => {
+    const invalid: EmissionToolCallRecord = {
+      kind: { kind: "judge-verdict" },
+      version: "v1",
+      arguments: { criterion: "x", rankings: [] },
+    };
+    const selection = selectVerdictSource("the captured attempt bytes", [invalid, invalid]);
+    expect(selection).toEqual({ kind: "duplicate-emission-call" });
+  });
+
   it("does not consult a reviewer-payload record in a verdict spawn", () => {
     const selection = selectVerdictSource("transcript", [
       { kind: { kind: "reviewer-payload" }, version: "v2", arguments: REVIEWER_PAYLOAD_EXAMPLE_V2 },
@@ -249,6 +365,15 @@ describe("selectVerdictSource", () => {
     if (selection.kind === "final-message-extraction") {
       expect(selection.rawJson).toBe("transcript");
     }
+  });
+
+  it("engages the caller's rawJson byte-verbatim with zero records — the no-op baseline", () => {
+    const selection = selectVerdictSource("the captured attempt bytes", []);
+    expect(selection).toEqual({
+      kind: "final-message-extraction",
+      rawJson: "the captured attempt bytes",
+      source: "extraction",
+    });
   });
 });
 

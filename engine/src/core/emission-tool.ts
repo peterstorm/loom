@@ -14,7 +14,7 @@
  */
 
 import { z } from "zod/v4";
-import { REVIEWER_PAYLOAD_SCHEMA_V2 } from "./reviewer-contract";
+import { REVIEWER_PAYLOAD_SCHEMA_V2, type ReviewerProtocolFailure } from "./reviewer-contract";
 import { parseReviewerPayloadV2, parseStandaloneReviewerPayloadV3 } from "./reviewer-protocol";
 import { STANDALONE_REVIEWER_SCHEMA_V3 } from "./standalone-lineage-contract";
 import { JUDGE_VERDICT_SCHEMA_V1, judgeVerdictV1Schema } from "./panel-contract";
@@ -38,7 +38,15 @@ export type EmissionToolName =
   | "loom_emit_judge_verdict"
   | "loom_emit_refutation_verdict";
 
-/** The schema-version vocabulary of the frozen per-kind registry. */
+/**
+ * The schema-version vocabulary of the frozen per-kind registry — the
+ * transport-level union, deliberately flat. Which (kind, version) pairs a tool
+ * carries is the registry's knowledge (`spec.schemaVersions`), and a spawn
+ * bound to a version its tool does not carry is the degradation path the
+ * admission gate refuses (`unsupported-schema-version`), not a type error — a
+ * compound union of the valid pairs would type away the degradation the
+ * capability ADT exists to express.
+ */
 export type EmissionSchemaVersion = "v2" | "v3" | "v1";
 
 /**
@@ -47,7 +55,21 @@ export type EmissionSchemaVersion = "v2" | "v3" | "v1";
  * diagnostic the tool result carries and the model re-emits within the
  * bounded budget.
  */
-export type EmissionParseFailure = Readonly<{ code: string; message: string }>;
+/**
+ * The emission edge's closed refusal-code vocabulary — parse, don't validate:
+ * a code is a member of THIS union, never a free string, so an unknown code is
+ * unrepresentable behind every consumer that switches on it (the tool result
+ * mapping, the Phase-2 execute shell). It is the reviewer protocol's own
+ * failure codes (the registry's reviewer parsers mint exactly these) plus the
+ * two failures the admission gate itself mints around the parse — the
+ * unsupported-version and deterministic-serialization refusals.
+ */
+export type EmissionParseFailureCode =
+  | ReviewerProtocolFailure["code"]
+  | "invalid-schema"
+  | "unsupported-schema-version";
+
+export type EmissionParseFailure = Readonly<{ code: EmissionParseFailureCode; message: string }>;
 
 /** One per-version parser: the parse IS the gate at the emission edge. */
 export type EmissionPayloadParser = (
@@ -143,26 +165,46 @@ export const EMISSION_TOOL_SPECS = Object.freeze({
  * The ONE constructor of an emission tool's `parameters` object (AD-5): the
  * frozen zod-derived bytes, parsed once. Byte-identity by construction — one
  * schema, one serialization chain, no TypeBox mirror, no drift, zero new
- * dependency. The confined TSchema cast's price is paid once per kind at the
- * pi registration surface (Phase 2), never here: this pure leaf returns the
- * parsed JSON, and the byte-match guard re-serializes it against the frozen
- * bytes.
+ * dependency.
+ *
+ * The confined TSchema cast: pi's `registerTool` types its `parameters`
+ * parameter as a TypeBox `TSchema`, so the pi registration surface (Phase 2)
+ * claims the parsed JSON as one — a cast, not a proof, since this pure leaf
+ * returns `unknown`. The cast's price is paid ONCE per kind at that single
+ * surface and nowhere else; this leaf never narrows, and the byte-match guard
+ * re-proves the parse→stringify round trip against the frozen bytes per kind
+ * and version, so the claimed type can never describe a schema the provider
+ * grammar-constrains against.
+ *
+ * The parse throws on non-JSON bytes — a constructor invariant guarding the
+ * tool's `parameters` validity, permitted to throw per the functional core's
+ * error strategy. Unreachable for every registry consumer: the spec-carried
+ * bytes are stamper-written constants that always parse.
  */
 export function frozenPayloadSchemaParameters(schemaBytes: string): unknown {
   return JSON.parse(schemaBytes);
 }
 
+/**
+ * The admission ADT: admitted or refused — exactly one arm per argument, so
+ * the tool result mapping switches on the discriminant. The refused arm is
+ * named for the VERDICT (refused = never-ingestable, FR-006), not for one of
+ * its reasons: the `code` field carries the precise refusal (unsupported
+ * version, non-serializable arguments, or schema non-conformance), and naming
+ * the arm after one reason would read as schema non-conformance when the
+ * version or the serialization failed.
+ */
 export type EmissionArgumentAdmission =
   | Readonly<{ kind: "valid"; payload: unknown }>
-  | Readonly<{ kind: "invalid-schema"; code: string; message: string }>;
+  | Readonly<{ kind: "refused"; code: EmissionParseFailureCode; message: string }>;
 
 /**
  * The parse IS the gate at the emission edge. The arguments are serialized
  * deterministically and parsed through the registry's parsePayload — for
  * reviewer-payload the SAME full schema-level parser the fallback uses; for
  * the verdict kinds the pure schema-conformance parse of the frozen verdict
- * schema. An invalid-schema refusal is never-ingestable (FR-006); the tool
- * result is an error the model sees and re-emits within the bounded budget.
+ * schema. A refused admission is never-ingestable (FR-006); the tool result
+ * is an error the model sees and re-emits within the bounded budget.
  */
 export function admitEmissionArguments(
   spec: EmissionToolSpec,
@@ -172,7 +214,7 @@ export function admitEmissionArguments(
   const schemaVersion = spec.schemaVersions[version];
   if (schemaVersion === undefined) {
     return Object.freeze({
-      kind: "invalid-schema" as const,
+      kind: "refused" as const,
       code: "unsupported-schema-version",
       message: `emission tool ${spec.toolName} carries no schema version ${version}`,
     });
@@ -182,7 +224,7 @@ export function admitEmissionArguments(
     bytes = encoder.encode(JSON.stringify(rawArgs, null, 2));
   } catch (error) {
     return Object.freeze({
-      kind: "invalid-schema" as const,
+      kind: "refused" as const,
       code: "invalid-json",
       message: `emission arguments could not be serialized deterministically: ` +
         `${error instanceof Error ? error.message : String(error)}`,
@@ -192,7 +234,7 @@ export function admitEmissionArguments(
   return parsed.ok
     ? Object.freeze({ kind: "valid" as const, payload: parsed.value })
     : Object.freeze({
-        kind: "invalid-schema" as const,
+        kind: "refused" as const,
         code: parsed.error.code,
         message: parsed.error.message,
       });
