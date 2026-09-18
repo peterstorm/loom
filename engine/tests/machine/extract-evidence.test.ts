@@ -59,9 +59,10 @@ describe("classifyTestCommand — parse, don't substring-match", () => {
 
   it("the verification manifest command classifies as a test run", () => {
     // `npm run verify` is loom's own verification-manifest command — the
-    // manifest the verification policy points at, and it runs the tests
-    // (typecheck + unit suite + smoke), so the runner vocabulary must
-    // recognize it or the manifest command's paired output never mints
+    // Wave Gate's Project Verification Coverage section (commands/wave-gate.md)
+    // grounds the frozen manifest's `project:verify` entry to it, and it runs
+    // the tests (typecheck + unit suite + smoke), so the runner vocabulary
+    // must recognize it or the manifest command's paired output never mints
     // structured evidence.
     expect(classifyTestCommand("npm run verify")).toBe("npm run verify");
     expect(classifyTestCommand("cd engine && npm run verify")).toBe("npm run verify");
