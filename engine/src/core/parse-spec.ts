@@ -36,7 +36,17 @@ export type SpecGlossaryEntry = Readonly<{
   contentHash: SpecContentHash;
 }> & HashedByConstruction;
 
-export type NonEmpty<T> = readonly [T, ...T[]];
+type NonEmpty<T> = readonly [T, ...T[]];
+
+/** The one mint for a proven-non-empty tuple: the caller proves the head
+ * exists (each collector records its own emptiness before returning `null`),
+ * and the destructure-and-respread satisfies the `NonEmpty` brand without a
+ * cast, so the construction invariant is owned here once instead of being
+ * re-derived inline at every collection site. */
+function nonEmpty<T>(values: readonly T[]): NonEmpty<T> {
+  const [head, ...tail] = values;
+  return Object.freeze([head, ...tail]);
+}
 
 /**
  * A successful projection. Every collection is non-empty because the parser
@@ -82,6 +92,8 @@ export type SpecParseError =
   | Readonly<{ kind: "glossary-cell-empty"; line: number }>
   | Readonly<{ kind: "glossary-has-no-terms" }>
   | Readonly<{ kind: "duplicate-glossary-term"; term: string }>
+  // `term` is the en-US-lowercased form of the duplicated term (locale-pinned
+  // dedup compares folded values), not the document's original casing.
   | Readonly<{ kind: "id-outside-section"; line: number }>;
 
 export type SpecParseResult =
@@ -180,6 +192,9 @@ function canonicalContent(content: string): string {
   return content.trim().replace(/\s+/gu, " ");
 }
 
+/** SHA-256 over the canonical form of `content` (trimmed, whitespace
+ * collapsed), so formatting-only edits do not change the digest; consumers
+ * recomputing or comparing hashes must use this function, not a raw sha-256. */
 export function specContentHash(content: string): SpecContentHash {
   return createHash("sha256").update(canonicalContent(content), "utf8").digest("hex") as SpecContentHash;
 }
@@ -210,12 +225,16 @@ function specEntry<F extends SpecFamily>(id: string, rawContent: string): SpecEn
   }) as SpecEntry<F>;
 }
 
-/** The only mint for a `SpecGlossaryEntry`; same construction invariant. */
+/** The only mint for a `SpecGlossaryEntry`; same construction invariant. The
+ * hash input is the lossless serialization of the `(term, definition)` pair —
+ * not the ambiguous join `${term}: ${definition}`, which maps the distinct
+ * pairs `a: b|c` and `a|b: c` to one digest — so the hash can disambiguate
+ * entries as a derived join input. */
 function glossaryEntry(term: string, definition: string): SpecGlossaryEntry {
   return Object.freeze({
     term,
     definition,
-    contentHash: specContentHash(`${term}: ${definition}`),
+    contentHash: specContentHash(JSON.stringify([term, definition])),
   }) as SpecGlossaryEntry;
 }
 
@@ -338,7 +357,18 @@ function sections(markdown: string): readonly MarkdownSection[] {
   const headings = [...markdown.matchAll(/^##\s+(.+?)\s*$/gmu)];
   const isSectionName = (value: string): value is SectionName =>
     REQUIRED_SECTIONS.some((section) => section === value);
-  const lineAt = (byteOffset: number): number => markdown.slice(0, byteOffset).split("\n").length;
+  // Lines are counted in one incremental pass over the document, in heading
+  // order: the former `lineAt` re-sliced and re-split the whole document per
+  // required-section heading — O(document) per call, quadratic overall —
+  // while this cursor visits each byte once.
+  let cursor = 0;
+  let linesSeen = 1;
+  const lineAt = (byteOffset: number): number => {
+    for (; cursor < byteOffset; cursor += 1) {
+      if (markdown[cursor] === "\n") linesSeen += 1;
+    }
+    return linesSeen;
+  };
   return Object.freeze(headings.flatMap((heading, index): readonly MarkdownSection[] => {
     const name = heading[1].trim();
     if (!isSectionName(name)) return [];
@@ -442,8 +472,8 @@ function parseEntries<F extends SpecFamily>(
     }
     if (!line.startsWith("-") && !startsMarkdownListItem(line)) {
       // A recognizable structural ID without a "- " bullet would otherwise
-      // be silently dropped; fail closed. The JSDoc above owns the full
-      // accepted prefix set.
+      // be silently dropped; fail closed. The `STRUCTURAL_ID` JSDoc above
+      // owns the full accepted prefix set.
       if (STRUCTURAL_ID.test(raw)) {
         finishCurrent();
         errors.push(Object.freeze({ kind: "entry-not-bulleted", section, line: documentLine }));
@@ -492,8 +522,7 @@ function parseEntries<F extends SpecFamily>(
   for (const id of duplicates(entries.map(({ id }) => id))) {
     errors.push(Object.freeze({ kind: "duplicate-entry-id", section, id }));
   }
-  const [head, ...tail] = entries;
-  return Object.freeze([head, ...tail]);
+  return nonEmpty(entries);
 }
 
 type AcceptanceBlockState = Readonly<{ kind: "before" }>
@@ -612,11 +641,13 @@ function parseGlossary(lines: readonly SourceLine[], errors: SpecParseError[]): 
   for (const term of duplicates(entries.map(({ term }) => lower(term)))) {
     errors.push(Object.freeze({ kind: "duplicate-glossary-term", term }));
   }
-  const [head, ...tail] = entries;
-  return Object.freeze([head, ...tail]);
+  return nonEmpty(entries);
 }
 
-/** Parse one canonical specification into deterministic structural join inputs. */
+/** Parse one canonical specification into deterministic structural join
+ * inputs. Pure and total over arbitrary markdown — never throws and never
+ * mutates input; failures return a `SpecParseResult` whose `errors` is a
+ * non-empty structured list (see `SpecParseError`). */
 export function parseSpec(markdown: string): SpecParseResult {
   const errors: SpecParseError[] = [];
   const stripped = withoutFences(markdown);
@@ -636,11 +667,19 @@ export function parseSpec(markdown: string): SpecParseResult {
   // A reserved-family structural ID anywhere outside the parsed sections'
   // bodies — preamble, non-required section, or stray prose bullet — must fail
   // closed; template furniture stays legal.
-  const collectedRanges = parsedSections.map((section) =>
-    Object.freeze({ start: section.startLine, end: section.endLine }),
-  );
+  const collectedRanges = parsedSections
+    .map((section) => Object.freeze({ start: section.startLine, end: section.endLine }))
+    .sort((first, second) => first.start - second.start);
+  let rangeIndex = 0;
   for (const { raw, documentLine } of sourceLines(stripped.text, 1)) {
-    const consumed = collectedRanges.some((range) => documentLine >= range.start && documentLine < range.end);
+    // The ranges are disjoint and sorted by start, and the lines arrive in
+    // document order: advancing one cursor past expired ranges makes the
+    // membership test O(1) amortized instead of O(ranges) per line.
+    while (rangeIndex < collectedRanges.length && collectedRanges[rangeIndex]!.end <= documentLine) {
+      rangeIndex += 1;
+    }
+    const range = collectedRanges[rangeIndex];
+    const consumed = range !== undefined && documentLine >= range.start;
     if (!consumed && STRUCTURAL_ID.test(raw)) {
       errors.push(Object.freeze({ kind: "id-outside-section", line: documentLine }));
     }
@@ -651,9 +690,7 @@ export function parseSpec(markdown: string): SpecParseResult {
   // never reports a failure without a reason, and the success branch carries
   // four proven-non-empty collections.
   if (frs === null || scenarios === null || oos === null || glossary === null || errors.length > 0) {
-    const [head, ...tail] = errors;
-    const recorded: NonEmpty<SpecParseError> = Object.freeze([head, ...tail]);
-    return Object.freeze({ ok: false, errors: recorded });
+    return Object.freeze({ ok: false, errors: nonEmpty(errors) });
   }
   return Object.freeze({ ok: true, value: Object.freeze({ frs, scenarios, oos, glossary }) });
 }

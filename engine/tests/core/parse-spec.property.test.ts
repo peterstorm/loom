@@ -110,7 +110,9 @@ describe("parseSpec properties", () => {
         expect(entry.contentHash).toBe(specContentHash(entry.content));
       }
       for (const entry of value.glossary) {
-        expect(entry.contentHash).toBe(specContentHash(`${entry.term}: ${entry.definition}`));
+        // The glossary hash input is the lossless (term, definition) pair —
+        // the mint's derivation, not the ambiguous term-colon join.
+        expect(entry.contentHash).toBe(specContentHash(JSON.stringify([entry.term, entry.definition])));
       }
     }));
   });
