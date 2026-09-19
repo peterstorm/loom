@@ -16,12 +16,12 @@ jobs:
       # exercise different filesystem strategies, so each failure is its own
       # diagnosis.
       fail-fast: false
+      # macOS exists for a reason the Linux job can never cover: the
+      # anchored no-follow filesystem layer (engine/src/orchestration/
+      # no-follow-fs.ts) takes a darwin branch (O_NOFOLLOW_ANY-proven real
+      # path) that Linux CI never executes. Pin the newest standard macOS
+      # runner; it is free on public repositories.
       matrix:
-        # macOS exists for a reason the Linux job can never cover: the
-        # anchored no-follow filesystem layer (engine/src/orchestration/
-        # no-follow-fs.ts) takes a darwin branch (O_NOFOLLOW_ANY-proven real
-        # path) that Linux CI never executes. Pin the newest standard macOS
-        # runner; it is free on public repositories.
         os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
     # The engine unit suite alone runs ~8.5 minutes on a fast Linux box and
