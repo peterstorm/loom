@@ -1,0 +1,16 @@
+data: {"id":"chatcmpl-af922d5b5258cf23","object":"chat.completion.chunk","created":1789819260,"model":"glm-5.3-flash-spark-tp2-v14","choices":[{"index":0,"delta":{"role":"assistant","content":""},"logprobs":null,"finish_reason":null}],"prompt_token_ids":null,"prompt_text":null}
+
+data: {"id":"chatcmpl-af922d5b5258cf23","object":"chat.completion.chunk","created":1789819260,"model":"glm-5.3-flash-spark-tp2-v14","choices":[{"index":0,"delta":{"tool_calls":[{"id":"chatcmpl-tool-8ff5fa0445af5c9a","type":"function","index":0,"function":{"name":"loom_emit_refutation_verdict"}}]},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-af922d5b5258cf23","object":"chat.completion.chunk","created":1789819260,"model":"glm-5.3-flash-spark-tp2-v14","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"criterion\": \""}}]},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-af922d5b5258cf23","object":"chat.completion.chunk","created":1789819260,"model":"glm-5.3-flash-spark-tp2-v14","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"code-reviewer"}}]},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-af922d5b5258cf23","object":"chat.completion.chunk","created":1789819260,"model":"glm-5.3-flash-spark-tp2-v14","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\""}}]},"logprobs":null,"finish_reason":null,"token_ids":null}]}
+
+data: {"id":"chatcmpl-af922d5b5258cf23","object":"chat.completion.chunk","created":1789819260,"model":"glm-5.3-flash-spark-tp2-v14","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":", \"verdicts\": [{\"finding_id\": \"F-001\", \"verdict\": \"upheld\", \"reasoning\": \"The claim holds against the cited contract text.\"}]}"}}]},"logprobs":null,"finish_reason":"tool_calls","stop_reason":154829,"token_ids":null}]}
+
+data: {"id":"chatcmpl-af922d5b5258cf23","object":"chat.completion.chunk","created":1789819260,"model":"glm-5.3-flash-spark-tp2-v14","choices":[],"usage":{"prompt_tokens":94687,"total_tokens":94746,"completion_tokens":59,"completion_tokens_details":{"reasoning_tokens":0}},"system_fingerprint":"vllm-0.1.dev21530+gbd7681400-tp2-78dbda3f"}
+
+data: [DONE]
+
