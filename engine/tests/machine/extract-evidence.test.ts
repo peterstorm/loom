@@ -68,6 +68,25 @@ describe("classifyTestCommand — parse, don't substring-match", () => {
     expect(classifyTestCommand("cd engine && npm run verify")).toBe("npm run verify");
   });
 
+  it("package-manager run scripts classify through a test-bearing script token", () => {
+    // Scoped npm script names (`test:unit`) die on the plain pattern's token
+    // boundary (the `:` is not whitespace), yet they ARE test runs — the
+    // emission wave's mandated `npm run test:unit` regression produced no
+    // structured evidence because the pairing never classified it. The script
+    // token carries the intent (the Maven-goal guard's shape):
+    expect(classifyTestCommand("npm run test:unit")).toBe("npm run test:unit");
+    expect(classifyTestCommand("npm run test:e2e")).toBe("npm run test:e2e");
+    expect(classifyTestCommand("yarn run unit-tests")).toBe("yarn run unit-tests");
+    expect(classifyTestCommand("pnpm run verify:all")).toBe("pnpm run verify:all");
+    expect(classifyTestCommand("bun run test")).toBe("bun run test");
+    expect(classifyTestCommand("cd engine && npm run test:unit")).toBe("npm run test:unit");
+    // …while non-test script names stay unclassified (boundary-guarded):
+    expect(classifyTestCommand("npm run contest")).toBeNull();
+    expect(classifyTestCommand("npm run pretestify")).toBeNull();
+    expect(classifyTestCommand("npm run typecheck")).toBeNull();
+    expect(classifyTestCommand("yarn run attestation")).toBeNull();
+  });
+
   it("mvn segments require an actual test goal — `mvn -pl core install` is not a test run", () => {
     expect(classifyTestCommand("mvn -pl core install")).toBeNull();
     expect(classifyTestCommand("mvn -pl core -am compile")).toBeNull();
