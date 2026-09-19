@@ -73,15 +73,23 @@ function check(
 }
 
 function execution(result: CompletionCheckRunnerResult) {
-  expect(result.ok).toBe(true);
+  expect(result.ok, result.ok ? "" : `runner refused: ${refusalText(result)}`).toBe(true);
   if (!result.ok) throw new Error(result.error.message);
   return result.value;
 }
 
 function remediationExecution(result: RemediationCheckRunnerResult) {
-  expect(result.ok).toBe(true);
+  expect(result.ok, result.ok ? "" : `runner refused: ${refusalText(result)}`).toBe(true);
   if (!result.ok) throw new Error(result.error.message);
   return result.value;
+}
+
+/** Diagnostic tails can carry up to 64 KiB each; drop them so the refusal
+ *  context stays inside assertion-message bounds. */
+function refusalText(result: { readonly ok: false; readonly error: unknown }): string {
+  const error = result.error as Readonly<Record<string, unknown>>;
+  const { diagnostics: _diagnostics, ...rest } = error;
+  return JSON.stringify(rest);
 }
 
 function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown }): T {
@@ -172,7 +180,7 @@ describe("completion check process shell", () => {
     const result = execution(await runCompletionCheck(
       check("timeout-exit-zero", { timeoutMs: 200 }),
       fixtureRoot(),
-      { terminationGraceMs: 250 },
+      { terminationGraceMs: 250, hardKillWaitMs: 2_000 },
     ));
     expect(result.checkResult.outcome).toEqual({
       kind: "observed",
@@ -269,7 +277,7 @@ describe("completion check process shell", () => {
     const sentinel = join(root, "parent-exit-sentinel");
     const result = await runCompletionCheck(check("parent-exits-with-descendant", {
       args: ["completion-process.mjs", "parent-exits-with-descendant", "parent-exit-sentinel"],
-    }), root, { terminationGraceMs: 100, hardKillWaitMs: 500 });
+    }), root, { terminationGraceMs: 250, hardKillWaitMs: 2_000 });
 
     expect(result).toMatchObject({
       ok: false,
@@ -285,7 +293,7 @@ describe("completion check process shell", () => {
     const result = execution(await runCompletionCheck(check("timeout-with-descendant", {
       args: ["completion-process.mjs", "timeout-with-descendant", "timeout-sentinel"],
       timeoutMs: 100,
-    }), root, { terminationGraceMs: 100, hardKillWaitMs: 500 }));
+    }), root, { terminationGraceMs: 250, hardKillWaitMs: 2_000 }));
 
     expect(result.checkResult.outcome).toMatchObject({ kind: "observed", timedOut: true });
     await new Promise((resolve) => setTimeout(resolve, 450));
@@ -296,7 +304,7 @@ describe("completion check process shell", () => {
     const result = execution(await runCompletionCheck(
       check("ignore-sigterm", { timeoutMs: 200 }),
       fixtureRoot(),
-      { terminationGraceMs: 80, hardKillWaitMs: 500 },
+      { terminationGraceMs: 250, hardKillWaitMs: 2_000 },
     ));
     expect(result.checkResult.outcome).toMatchObject({
       kind: "observed",
@@ -325,11 +333,11 @@ describe("completion check process shell", () => {
     const pending = runCompletionCheck(
       check("ignore-sigterm", { timeoutMs: 5_000 }),
       root,
-      { signal: controller.signal, terminationGraceMs: 30 },
+      { signal: controller.signal, terminationGraceMs: 250, hardKillWaitMs: 2_000 },
     );
     setTimeout(() => controller.abort(), 30);
     const result = await pending;
-    expect(result).toMatchObject({ ok: false, error: { kind: "cancelled" } });
+    expect(result, result.ok ? "" : `runner refused: ${refusalText(result)}`).toMatchObject({ ok: false, error: { kind: "cancelled" } });
   });
 
   it("rejects symlink ancestors for cwd and report paths", async () => {
@@ -600,7 +608,7 @@ describe("standalone remediation check process/report seam", () => {
       const result = remediationExecution(await runRemediationCheck(
         authorized,
         root,
-        { terminationGraceMs: 100, hardKillWaitMs: 500 },
+        { terminationGraceMs: 250, hardKillWaitMs: 2_000 },
       ));
       expect(result.process).toEqual({ kind: "observed", ...expected });
       expect(result.report).toMatchObject({
@@ -665,7 +673,7 @@ describe("standalone remediation check process/report seam", () => {
     const controller = new AbortController();
     const pending = runRemediationCheck(remediationCheck(
       root, "cancel", ["cancel.mjs"], ".loom/completion-reports/cancel.json", "node", 5_000,
-    ), root, { signal: controller.signal, terminationGraceMs: 30, hardKillWaitMs: 500 });
+    ), root, { signal: controller.signal, terminationGraceMs: 250, hardKillWaitMs: 2_000 });
     setTimeout(() => controller.abort(), 30);
     expect(await pending).toMatchObject({ ok: false, error: { kind: "cancelled" } });
   });

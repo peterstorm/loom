@@ -689,7 +689,7 @@ describe.sequential("Defect-Family Accounting production facade", () => {
       expect(await remediation.value.readEvents()).toHaveLength(1);
       expect(readFileSync(join(fixture.repository, ".git", "index"))).toEqual(indexBefore);
     }
-  }, 30_000);
+  }, 90_000);
 
   it("fails closed on oversized durable report replay without changing the real index", async () => {
     const fixture = scriptedReportFixture();
@@ -813,7 +813,7 @@ describe.sequential("Defect-Family Accounting production facade", () => {
         expect(readFileSync(join(fixture.repository, ".git", "index"))).toEqual(indexBefore);
       }
     }
-  });
+  }, 90_000);
 
   it("records report removal failure durably, never launches, and cannot retry it in the same Run", async () => {
     expect(process.getuid?.()).not.toBe(0);

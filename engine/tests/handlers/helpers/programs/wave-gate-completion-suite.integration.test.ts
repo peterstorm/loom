@@ -228,7 +228,8 @@ describe("Wave Gate façade completion-suite integration", () => {
     const runId = "run.coverage";
     const diagnostic = coverage.kind === "configured" ? "checks configured: project:sentinel" : "NOT CONFIGURED";
     const unstartedStatus = (await cli(root, ["status", "--json"], "", outside));
-    expect((await start(root, runId, outside))).toMatchObject({ kind: "spawn-batch" });
+    const started = await start(root, runId, outside);
+    expect(started, started.kind === "blocked" ? JSON.stringify(started) : "").toMatchObject({ kind: "spawn-batch" });
     const acceptedState = readFileSync(join(root, ".claude/state/active_task_graph.json"), "utf8");
     expect((await cli(root, ["status", "--json"], "", outside))).toMatchObject({
       facts: { waveCompletionSuiteReadiness: { value: { kind: "accepted", projectVerificationCoverage: coverage } } },
