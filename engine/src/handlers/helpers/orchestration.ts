@@ -24,6 +24,8 @@
  *                                 --operation <operation-id>
  *   helper orchestration decide --run <run-directory> --runs-root <root>
  *                               --request <decision-id>   (decision on stdin)
+ *   helper orchestration remediate --task <task-id> --receipt <terminal escalation receipt id>
+ *                               --reason <text>
  *
  * Every `--run`, `--new-run`, and remediation `sourceRun` accepts either the
  * bare run id or a full path to that same direct child of its runs-root. The
@@ -168,6 +170,7 @@ import {
   type RegisteredWaveGateProgram,
 } from "./programs";
 import { parseBoundedReviewerJson } from '../../core/reviewer-protocol';
+import { remediateOperation } from "./remediate-implementation-escalation";
 import { renderStandaloneReviewSummary } from "../../core/standalone-review";
 import { serializeStandaloneReviewMachineState } from "../../core/standalone-review-machine";
 import { argumentValue, hasFlag } from "./cli-args";
@@ -180,7 +183,7 @@ import { prepareStandaloneDispositionFacadeStart, startStandaloneDispositionFaca
   resumeStandaloneDispositionFacade, inspectStandaloneDispositionFacade, readSelectedStandaloneDisposition,
   STANDALONE_DISPOSITION_EVENT_RESOURCE_POLICY } from "./programs/standalone-disposition";
 
-const OPERATIONS = ["status", "inspect", "start", "restart", "recover-orphan", "resume", "submit", "correlate", "complete", "decide", "abandon"] as const;
+const OPERATIONS = ["status", "inspect", "start", "restart", "recover-orphan", "resume", "submit", "correlate", "complete", "decide", "abandon", "remediate"] as const;
 type Operation = (typeof OPERATIONS)[number];
 
 const isOperation = (value: string | undefined): value is Operation =>
@@ -213,6 +216,8 @@ function usage(): HookResult {
       "  correlate --runs-root <root> --run <run-directory> --request <id> --harness <pi|claude> --native-id <id> --agent <role>",
       "  complete --runs-root <root> --run <run-directory> --operation <id>",
       "  decide  --runs-root <root> --run <run-directory> --request <decision-id>",
+  "  remediate --task <task-id> --receipt <terminal escalation receipt id> --reason <text>",
+  "          (consumes escalate-wave-implementation: retires the terminal attempt-2 escalation so the next status offers a fresh attempt-1 dispatch; prior receipts stay in history)",
     ].join("\n"),
   };
 }
@@ -2028,6 +2033,8 @@ const handler: HookHandler = async (stdin, args) => {
       return completeOperation(rest);
     case "decide":
       return decideOperation(stdin, rest);
+    case "remediate":
+      return remediateOperation(rest);
   }
 };
 

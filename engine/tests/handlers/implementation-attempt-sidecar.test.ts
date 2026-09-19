@@ -29,6 +29,10 @@ import { countActiveAgents, machineBindingPath, parseSessionId } from "../../src
 import { taskFixture } from "../fixtures/task-lifecycle";
 import type { Task, TaskGraph } from "../../src/types";
 import { derivePendingTaskProof } from "../../src/core/proof-obligations";
+import {
+  authorizeImplementationSpawn,
+  createImplementationAttemptContext,
+} from "../../src/core/implementation-retry";
 
 const roots: string[] = [];
 const previousDir = process.env.LOOM_SUBAGENT_DIR;
@@ -82,6 +86,10 @@ function modernGraph(
   attempt = authority(),
   taskOverrides: Partial<Task> = {},
 ): TaskGraph {
+  // Protocol-2 lineage fields are part of every modern registration; the
+  // settlement path appends receipts and the updated graph must parse.
+  const admission = authorizeImplementationSpawn({ id: "T1" }, "Task ID: T1");
+  if (!admission.ok) throw new Error(admission.error);
   const task = taskFixture({
     id: "T1",
     description: "implementation",
@@ -91,6 +99,13 @@ function modernGraph(
     depends_on: [],
     file_list: [],
     active_implementation_attempt: attempt,
+    active_implementation_context: createImplementationAttemptContext({
+      authority: attempt,
+      prompt: "Task ID: T1",
+      admission,
+    }),
+    implementation_retry_protocol: 2,
+    implementation_retry_history_start: 0,
     artifact_baseline: [],
     attempt_artifact_baseline: [],
     attempt_repository_baseline: [],

@@ -598,8 +598,10 @@ interface TaskCommonMetadataBase {
   readonly start_sha?: string;
   readonly failure_reason?: string;
   readonly retry_count?: number;
-  /** Strict bounded-retry lineage marker. Histories without protocol-2 metadata
-   * use the read-only Slice-3 compatibility projection until their next engine registration. */
+  /** Strict bounded-retry lineage marker. Attempt history REQUIRES protocol-2
+   * metadata; there is no read-only compatibility projection — a history
+   * without it fails closed at load, and the Task must be re-registered
+   * through a modern implementation dispatch (or re-populated). */
   readonly implementation_retry_protocol?: 2;
   readonly implementation_retry_history_start?: number;
   readonly implementation_retry_predecessor_receipt_id?: ImplementationSettlementReceiptId;

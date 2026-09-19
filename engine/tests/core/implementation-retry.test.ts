@@ -4,6 +4,7 @@ import {
   TASK_BYTE_SCOPE_CHECK_ID_TEXT,
   createImplementationAttemptAuthority,
   createTaskCompletionSuiteAuthority,
+  createEscalationRemediationReceipt,
   parseImplementationAttemptSettlementReceipt,
   settleImplementationAttempt,
   type ImplementationAttemptAuthority,
@@ -331,12 +332,12 @@ describe("bounded implementation retry admission", () => {
         implementation_attempt_history: [receipt],
       })).toMatchObject({
         kind: "invalid",
-        errors: [expect.stringContaining("pre-protocol Slice-3 compatibility")],
+        errors: [expect.stringContaining("attempt history requires protocol-2 retry lineage")],
       });
     }
   });
 
-  it("projects pre-protocol Slice-3 attempt-1 histories without rewriting receipts", () => {
+  it("refuses attempt history without protocol-2 retry lineage instead of projecting it", () => {
     const retry = retryReceipt();
     const implemented = settle(
       authority(1, "legacy-implemented", 6),
@@ -354,53 +355,52 @@ describe("bounded implementation retry admission", () => {
       observation("2026-09-01T00:08:00.000Z", false),
     );
 
+    // Non-empty history without the protocol-2 fields is refused outright.
+    for (const history of [
+      [retry],
+      [retry, implemented],
+      [retry, infrastructure],
+      [retry, repeatedRetry],
+    ]) {
+      expect(deriveImplementationRetryDisposition({ id: "T1", implementation_attempt_history: history }))
+        .toMatchObject({
+          kind: "invalid",
+          errors: [expect.stringContaining("attempt history requires protocol-2 retry lineage")],
+        });
+    }
+    // An empty history is a fresh lineage with or without protocol metadata.
+    expect(deriveImplementationRetryDisposition({ id: "T1" })).toEqual({ kind: "initial", semanticAttempt: 1 });
+    expect(deriveImplementationRetryDisposition(retryTask([]))).toEqual({ kind: "initial", semanticAttempt: 1 });
+    // With the protocol-2 fields the SAME attempt-1 receipts project, and only
+    // attempt-2 receipts may follow a retry authorization (wire order holds).
+    expect(deriveImplementationRetryDisposition(retryTask([retry])))
+      .toMatchObject({ kind: "retry", predecessor: { receiptId: retry.receiptId } });
+    const attempt2Implemented = settle(
+      authority(2, "protocol-impl-2", 10),
+      [retry],
+      observation("2026-09-01T00:10:00.000Z", true),
+    );
+    expect(deriveImplementationRetryDisposition(retryTask([retry, attempt2Implemented])))
+      .toEqual({ kind: "initial", semanticAttempt: 1 });
+    const attempt2Infrastructure = settle(
+      authority(2, "protocol-infra-2", 11),
+      [retry],
+      unavailable("2026-09-01T00:11:00.000Z"),
+    );
+    expect(deriveImplementationRetryDisposition(retryTask([retry, attempt2Infrastructure])))
+      .toMatchObject({ kind: "retry", semanticAttempt: 2 });
+    // Attempt-1 receipts after a retry authorization are contradictions.
+    expect(deriveImplementationRetryDisposition(retryTask([retry, implemented])))
+      .toMatchObject({ kind: "invalid" });
+    expect(deriveImplementationRetryDisposition(retryTask([retry, infrastructure])))
+      .toMatchObject({ kind: "invalid" });
+    expect(deriveImplementationRetryDisposition(retryTask([retry, repeatedRetry])))
+      .toMatchObject({ kind: "invalid" });
+    // History-start bounds and terminal-skip guards still apply.
     expect(deriveImplementationRetryDisposition({
-      id: "T1",
-      implementation_attempt_history: [retry, implemented],
-    })).toEqual({ kind: "initial", semanticAttempt: 1 });
-    const legacyInfrastructureTask = {
-      id: "T1",
-      implementation_attempt_history: [retry, infrastructure],
-    };
-    const legacyInfrastructureDisposition = deriveImplementationRetryDisposition(legacyInfrastructureTask);
-    expect(legacyInfrastructureDisposition).toMatchObject({
-      kind: "retry",
-      predecessor: { receiptId: retry.receiptId },
-    });
-    if (legacyInfrastructureDisposition.kind !== "retry") throw new Error("legacy retry projection failed");
-    const migrationPrompt = `Task ID: T1\n${legacyInfrastructureDisposition.promptAppendix}`;
-    const migrationAdmission = authorizeImplementationSpawn(legacyInfrastructureTask, migrationPrompt);
-    if (!migrationAdmission.ok) throw new Error(migrationAdmission.error);
-    expect(migrationAdmission).toMatchObject({
-      historyStart: 2,
-      lineagePredecessorReceiptId: retry.receiptId,
-    });
-    expect(deriveImplementationRetryDisposition({
-      ...legacyInfrastructureTask,
-      implementation_retry_protocol: 2,
-      implementation_retry_history_start: migrationAdmission.historyStart,
-      implementation_retry_predecessor_receipt_id: migrationAdmission.lineagePredecessorReceiptId ?? undefined,
-    })).toMatchObject({ kind: "retry", predecessor: { receiptId: retry.receiptId } });
-    expect(deriveImplementationRetryDisposition({
-      id: "T1",
-      implementation_attempt_history: [retry, repeatedRetry],
-    })).toMatchObject({ kind: "retry", predecessor: { receiptId: repeatedRetry.receiptId } });
-    expect(deriveImplementationRetryDisposition({
-      ...legacyInfrastructureTask,
-      implementation_retry_protocol: 2,
+      ...retryTask([retry, attempt2Infrastructure]),
       implementation_retry_history_start: 2,
     })).toMatchObject({ kind: "invalid" });
-    expect(deriveImplementationRetryDisposition({
-      ...legacyInfrastructureTask,
-      implementation_retry_protocol: 2,
-      implementation_retry_history_start: 2,
-      implementation_retry_predecessor_receipt_id: repeatedRetry.receiptId,
-    })).toMatchObject({ kind: "invalid" });
-    expect(deriveImplementationRetryDisposition({
-      ...retryTask([retry]),
-      implementation_retry_predecessor_receipt_id: retry.receiptId,
-    })).toMatchObject({ kind: "invalid" });
-
     const attempt2 = authority(2, "legacy-terminal", 9);
     const escalation = settle(
       attempt2,
@@ -408,15 +408,11 @@ describe("bounded implementation retry admission", () => {
       observation("2026-09-01T00:09:00.000Z", false),
     );
     expect(deriveImplementationRetryDisposition({
-      id: "T1",
-      implementation_attempt_history: [retry, escalation, implemented],
-    })).toMatchObject({ kind: "invalid" });
-    expect(deriveImplementationRetryDisposition({
-      id: "T1",
-      implementation_attempt_history: [retry, escalation],
-      implementation_retry_protocol: 2,
+      ...retryTask([retry, escalation]),
       implementation_retry_history_start: 2,
     })).toMatchObject({ kind: "invalid" });
+    expect(deriveImplementationRetryDisposition(retryTask([retry, escalation])))
+      .toMatchObject({ kind: "escalated", receiptId: escalation.receiptId });
   });
 
   it("infrastructure receipts never consume the semantic attempt budget", () => {
@@ -457,5 +453,127 @@ describe("bounded implementation retry admission", () => {
         });
       },
     ));
+  });
+});
+
+describe("escalation remediation closes the terminal lineage", () => {
+  const remediationReceiptFor = (
+    escalationDigest: string,
+    failureKinds: readonly string[],
+    observedAt = "2026-09-01T00:10:00.000Z",
+  ): ImplementationAttemptSettlementReceipt => {
+    const remediation = createEscalationRemediationReceipt({
+      taskId: "T1",
+      reservationId: "remediation-fixture-1",
+      authorityDigest: escalationDigest,
+      observedAt,
+      failureKinds: [...failureKinds],
+    });
+    if (!remediation.ok) throw new Error(remediation.error.errors.join("; "));
+    return remediation.value;
+  };
+
+  const escalatedTask = () => {
+    const retry = retryReceipt();
+    const attempt2 = authority(2, "legacy-terminal", 9);
+    const escalation = settle(attempt2, [retry], observation("2026-09-01T00:09:00.000Z", false));
+    return {
+      retry,
+      attempt2,
+      escalation,
+      task: {
+        id: "T1",
+        implementation_attempt_history: [retry, escalation],
+        implementation_retry_protocol: 2 as const,
+        implementation_retry_history_start: 0,
+      },
+    };
+  };
+
+  it("round-trips the remediation receipt through the exact history parser", () => {
+    const { attempt2, escalation } = escalatedTask();
+    const remediation = remediationReceiptFor(attempt2.authorityDigest, escalation.failureKinds);
+    expect(remediation.transition).toBe("escalation-remediated");
+    expect(remediation.consumesSemanticAttempt).toBe(false);
+    expect(remediation.semanticAttempt).toBe(2);
+    expect(remediation.authorityDigest).toBe(attempt2.authorityDigest);
+    const reparsed = parseImplementationAttemptSettlementReceipt(remediation);
+    expect(reparsed).toMatchObject({ ok: true, value: { receiptId: remediation.receiptId } });
+  });
+
+  it("resets an escalated lineage to a fresh attempt 1 and lets the cycle repeat", () => {
+    const { attempt2, escalation, task } = escalatedTask();
+    expect(deriveImplementationRetryDisposition(task)).toMatchObject({
+      kind: "escalated",
+      receiptId: escalation.receiptId,
+    });
+    const remediation = remediationReceiptFor(attempt2.authorityDigest, escalation.failureKinds);
+    const remediated = {
+      ...task,
+      implementation_attempt_history: [task.implementation_attempt_history[0]!, task.implementation_attempt_history[1]!, remediation],
+    };
+    expect(deriveImplementationRetryDisposition(remediated)).toEqual({ kind: "initial", semanticAttempt: 1 });
+    const freshPrompt = "Task ID: T1";
+    const admission = authorizeImplementationSpawn(remediated, freshPrompt);
+    expect(admission).toMatchObject({ ok: true, kind: "initial", semanticAttempt: 1 });
+    // The full cycle repeats: a fresh attempt-1 failure re-arms the retry budget.
+    const freshAttempt = authority(1, "fresh-attempt", 11);
+    const freshRetry = settle(freshAttempt, remediated.implementation_attempt_history,
+      observation("2026-09-01T00:11:00.000Z", false));
+    expect(freshRetry.transition).toBe("retry-required");
+    expect(deriveImplementationRetryDisposition({
+      ...remediated,
+      implementation_attempt_history: [...remediated.implementation_attempt_history, freshRetry],
+    })).toMatchObject({ kind: "retry", semanticAttempt: 2 });
+  });
+
+  it("refuses remediation without a terminal escalation and attempt-2 work after one", () => {
+    const { attempt2, escalation, task } = escalatedTask();
+    const remediation = remediationReceiptFor(attempt2.authorityDigest, escalation.failureKinds);
+    // No escalation in the lineage: the remediation receipt is a contradiction.
+    expect(deriveImplementationRetryDisposition({
+      ...task,
+      implementation_attempt_history: [task.implementation_attempt_history[0]!, remediation],
+    })).toMatchObject({ kind: "invalid" });
+    // After the reset, the next receipt must be a fresh attempt 1: an
+    // escalation-required receipt with no new retry authorization is invalid.
+    expect(deriveImplementationRetryDisposition({
+      ...task,
+      implementation_attempt_history: [
+        task.implementation_attempt_history[0]!,
+        task.implementation_attempt_history[1]!,
+        remediation,
+        task.implementation_attempt_history[1]!,
+      ],
+    })).toMatchObject({ kind: "invalid" });
+  });
+
+  it("rejects malformed remediation receipts at the exact parser", () => {
+    const { attempt2, escalation } = escalatedTask();
+    const base = {
+      schemaVersion: 1,
+      kind: "implementation-attempt-settlement",
+      taskId: "T1",
+      reservationId: "remediation-fixture-2",
+      authorityDigest: attempt2.authorityDigest,
+      observedAt: "2026-09-01T00:12:00.000Z",
+      transition: "escalation-remediated",
+      failureKinds: [...escalation.failureKinds],
+    };
+    // Attempt 1 cannot carry a remediation (it never held the escalation).
+    expect(parseImplementationAttemptSettlementReceipt({
+      ...base, semanticAttempt: 1, consumesSemanticAttempt: false, receiptId: "0".repeat(64),
+    })).toMatchObject({ ok: false });
+    // Remediation never consumes a semantic attempt.
+    expect(parseImplementationAttemptSettlementReceipt({
+      ...base, semanticAttempt: 2, consumesSemanticAttempt: true, receiptId: "0".repeat(64),
+    })).toMatchObject({ ok: false });
+    // The declared id must be the canonical receipt body's digest.
+    const minted = remediationReceiptFor(attempt2.authorityDigest, escalation.failureKinds,
+      "2026-09-01T00:12:00.000Z");
+    expect(parseImplementationAttemptSettlementReceipt({
+      ...base, semanticAttempt: 2, consumesSemanticAttempt: false, receiptId: "1".repeat(64),
+    })).toMatchObject({ ok: false });
+    expect(minted.receiptId).not.toBe("1".repeat(64));
   });
 });

@@ -1421,6 +1421,10 @@ describe("applyImplementationPiResult", () => {
       dirtySetBaseline: repositoryBaseline,
     });
     if (!authority.ok) throw new Error(authority.error.errors.join("; "));
+    // Protocol-2 lineage fields are part of every modern registration; the
+    // settlement parse refuses a receipt-bearing Task without them.
+    const admission = authorizeImplementationSpawn({ id: task.id }, "Task ID: T1");
+    if (!admission.ok) throw new Error(admission.error);
     return {
       graph: {
         ...state,
@@ -1437,6 +1441,13 @@ describe("applyImplementationPiResult", () => {
           attempt_artifact_baseline: attemptBaseline,
           attempt_repository_baseline: repositoryBaseline,
           active_implementation_attempt: authority.value,
+          active_implementation_context: createImplementationAttemptContext({
+            authority: authority.value,
+            prompt: "Task ID: T1",
+            admission,
+          }),
+          implementation_retry_protocol: 2,
+          implementation_retry_history_start: 0,
           reserved_at: authority.value.reservedAt,
         })],
       },

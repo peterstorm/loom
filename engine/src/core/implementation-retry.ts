@@ -266,28 +266,68 @@ function projectedDisposition(lineage: ImplementationRetryLineage): Implementati
   return freeze({ kind: "initial", semanticAttempt: 1 });
 }
 
-function legacyRetryDisposition(
+/**
+ * Project one wire-order history slice onto the attempt-lineage state machine.
+ *
+ * Returns the final lineage, or the rejection reason for the first
+ * contradictory receipt. The remediation receipt is the ONE legal successor of
+ * a terminal escalation: it closes the escalated lineage so the walk can reset
+ * to a fresh attempt 1. Every other receipt after a terminal escalation is a
+ * contradiction.
+ */
+function projectLineage(
+  start: ImplementationRetryLineage,
   history: readonly ImplementationAttemptSettlementReceipt[],
-): ImplementationRetryDisposition {
-  const unsupportedIndex = history.findIndex((receipt) => receipt.semanticAttempt !== 1);
-  if (unsupportedIndex >= 0) {
-    return invalidLineage(
-      unsupportedIndex,
-      history[unsupportedIndex]!,
-      "pre-protocol Slice-3 compatibility accepts only semantic attempt 1 receipts",
-    );
+): ImplementationRetryLineage | string {
+  let lineage = start;
+  for (const [index, receipt] of history.entries()) {
+    if (lineage.kind === "escalated" && receipt.transition !== "escalation-remediated") {
+      return `implementation_attempt_history[${index}] (${receipt.receiptId}): receipt appears after terminal escalation ${lineage.receiptId}`;
+    }
+    const expectedAttempt = lineage.kind === "initial" ? 1 : 2;
+    if (receipt.semanticAttempt !== expectedAttempt) {
+      return `implementation_attempt_history[${index}] (${receipt.receiptId}): semantic attempt ${receipt.semanticAttempt} is not the current attempt ${expectedAttempt}`;
+    }
+    if (receipt.transition === "infrastructure-blocked") continue;
+    if (receipt.transition === "implemented") {
+      lineage = freeze({ kind: "initial" });
+      continue;
+    }
+    if (receipt.transition === "retry-required") {
+      if (lineage.kind !== "initial") {
+        return `implementation_attempt_history[${index}] (${receipt.receiptId}): retry authorization requires semantic attempt 1`;
+      }
+      lineage = freeze({ kind: "retry", predecessor: receipt });
+      continue;
+    }
+    if (receipt.transition === "escalation-remediated") {
+      if (lineage.kind !== "escalated") {
+        return `implementation_attempt_history[${index}] (${receipt.receiptId}): escalation remediation requires a terminal escalation`;
+      }
+      lineage = freeze({ kind: "initial" });
+      continue;
+    }
+    if (lineage.kind !== "retry") {
+      return `implementation_attempt_history[${index}] (${receipt.receiptId}): escalation requires a preceding retry authorization`;
+    }
+    lineage = freeze({
+      kind: "escalated",
+      receiptId: receipt.receiptId,
+      failureKinds: receipt.failureKinds,
+    });
   }
-  const lastImplemented = history.findLastIndex((receipt) => receipt.transition === "implemented");
-  const current = history.slice(lastImplemented + 1);
-  const retry = current.findLast((receipt): receipt is RetryRequiredSettlementReceipt =>
-    receipt.transition === "retry-required");
-  return retry === undefined
-    ? projectedDisposition(freeze({ kind: "initial" }))
-    : projectedDisposition(freeze({ kind: "retry", predecessor: retry }));
+  return lineage;
 }
 
-/** Derive the only legal next semantic attempt from settlement history plus
- * persisted protocol, history-start, and predecessor authority. */
+/**
+ * Derive the only legal next semantic attempt from settlement history plus the
+ * persisted protocol-2 lineage fields.
+ *
+ * A Task with NO settlement history is a fresh lineage: the first modern
+ * registration writes the protocol-2 fields. Attempt history WITHOUT them is
+ * refused — there is no read-only compatibility projection; such a Task must
+ * be re-registered through a modern implementation dispatch (or re-populated).
+ */
 export function deriveImplementationRetryDisposition(
   task: RetryableImplementationTask,
 ): ImplementationRetryDisposition {
@@ -307,78 +347,55 @@ export function deriveImplementationRetryDisposition(
       return invalidLineage(index, receipt, `receipt task ${receipt.taskId} does not match ${parsedTaskId.value}`);
     }
   }
-  const hasProtocol = task.implementation_retry_protocol !== undefined ||
-    task.implementation_retry_history_start !== undefined ||
-    task.implementation_retry_predecessor_receipt_id !== undefined;
-  if (!hasProtocol) return legacyRetryDisposition(history);
-  const historyStart = task.implementation_retry_history_start;
-  if (task.implementation_retry_protocol !== 2 || historyStart === undefined ||
-      !Number.isSafeInteger(historyStart) || historyStart < 0 || historyStart > history.length) {
+  if (history.length === 0) return freeze({ kind: "initial", semanticAttempt: 1 });
+  if (task.implementation_retry_protocol !== 2) {
     return freeze({
       kind: "invalid",
-      errors: ["implementation retry protocol 2 requires a valid history start index"],
+      errors: nonEmptyErrors([
+        "attempt history requires protocol-2 retry lineage; re-register the Task through a modern implementation dispatch",
+      ]),
     });
   }
-
-  const prefixDisposition = legacyRetryDisposition(history.slice(0, historyStart));
-  if (prefixDisposition.kind === "invalid" || prefixDisposition.kind === "escalated") {
+  const historyStart = task.implementation_retry_history_start;
+  if (historyStart === undefined || !Number.isSafeInteger(historyStart) ||
+      historyStart < 0 || historyStart > history.length) {
     return freeze({
       kind: "invalid",
-      errors: ["implementation retry history start cannot skip invalid or terminal authority"],
+      errors: nonEmptyErrors(["implementation retry protocol 2 requires a valid history start index"]),
+    });
+  }
+  const prefix = projectLineage(freeze({ kind: "initial" }), history.slice(0, historyStart));
+  if (typeof prefix === "string") {
+    return freeze({
+      kind: "invalid",
+      errors: nonEmptyErrors([`implementation retry history start skips an invalid lineage: ${prefix}`]),
+    });
+  }
+  if (prefix.kind === "escalated") {
+    return freeze({
+      kind: "invalid",
+      errors: nonEmptyErrors(["implementation retry history start cannot skip terminal authority"]),
     });
   }
   const seedId = task.implementation_retry_predecessor_receipt_id;
-  let lineage: ImplementationRetryLineage = freeze({ kind: "initial" });
-  if (prefixDisposition.kind === "retry") {
-    if (seedId !== prefixDisposition.predecessor.receiptId) {
+  if (prefix.kind === "retry") {
+    if (seedId !== prefix.predecessor.receiptId) {
       return freeze({
         kind: "invalid",
-        errors: ["implementation retry predecessor must match the compatibility prefix disposition"],
+        errors: nonEmptyErrors(["implementation retry predecessor must match the compatibility prefix disposition"]),
       });
     }
-    lineage = freeze({ kind: "retry", predecessor: prefixDisposition.predecessor });
   } else if (seedId !== undefined) {
     return freeze({
       kind: "invalid",
-      errors: ["initial compatibility prefix cannot carry a retry predecessor"],
+      errors: nonEmptyErrors(["initial compatibility prefix cannot carry a retry predecessor"]),
     });
   }
-  for (const [relativeIndex, receipt] of history.slice(historyStart).entries()) {
-    const index = historyStart + relativeIndex;
-    if (lineage.kind === "escalated") {
-      return invalidLineage(index, receipt, `receipt appears after terminal escalation ${lineage.receiptId}`);
-    }
-    const expectedAttempt = lineage.kind === "initial" ? 1 : 2;
-    if (receipt.semanticAttempt !== expectedAttempt) {
-      return invalidLineage(
-        index,
-        receipt,
-        `semantic attempt ${receipt.semanticAttempt} is not the current attempt ${expectedAttempt}`,
-      );
-    }
-    if (receipt.transition === "infrastructure-blocked") continue;
-    if (receipt.transition === "implemented") {
-      lineage = freeze({ kind: "initial" });
-      continue;
-    }
-    if (receipt.transition === "retry-required") {
-      if (lineage.kind !== "initial") {
-        return invalidLineage(index, receipt, "retry authorization requires semantic attempt 1");
-      }
-      lineage = freeze({ kind: "retry", predecessor: receipt });
-      continue;
-    }
-    if (lineage.kind !== "retry") {
-      return invalidLineage(index, receipt, "escalation requires a preceding retry authorization");
-    }
-    lineage = freeze({
-      kind: "escalated",
-      receiptId: receipt.receiptId,
-      failureKinds: receipt.failureKinds,
-    });
+  const walked = projectLineage(prefix, history.slice(historyStart));
+  if (typeof walked === "string") {
+    return freeze({ kind: "invalid", errors: nonEmptyErrors([walked]) });
   }
-
-  return projectedDisposition(lineage);
+  return projectedDisposition(walked);
 }
 
 /** Require the exact engine-derived retry appendix before attempt-2 authority can be minted. */
@@ -405,14 +422,10 @@ export function authorizeImplementationSpawn(
   const historyStart = task.implementation_retry_protocol === 2
     ? task.implementation_retry_history_start!
     : history.length;
-  let lineagePredecessorReceiptId: ImplementationSettlementReceiptId | null;
-  if (task.implementation_retry_protocol === 2) {
-    lineagePredecessorReceiptId = task.implementation_retry_predecessor_receipt_id ?? null;
-  } else if (disposition.kind === "retry") {
-    lineagePredecessorReceiptId = disposition.predecessor.receiptId;
-  } else {
-    lineagePredecessorReceiptId = null;
-  }
+  const lineagePredecessorReceiptId: ImplementationSettlementReceiptId | null =
+    task.implementation_retry_protocol === 2
+      ? task.implementation_retry_predecessor_receipt_id ?? null
+      : null;
   const promptDigest = sha256(prompt);
   const supplied = parsePromptRetryContext(prompt);
   if (!supplied.ok) return supplied;
