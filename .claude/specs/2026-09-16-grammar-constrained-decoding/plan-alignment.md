@@ -1,47 +1,89 @@
-# Plan Alignment Report — revision checkpoint
+# Plan Alignment Report
 
-**Spec:** `.claude/specs/2026-09-16-grammar-constrained-decoding/spec.md`
-**Plan:** `.claude/plans/2026-09-16-grammar-constrained-decoding.md`
+**Spec:** /home/peterstorm/dev/claude-plugins/loom-grammar-constrained-decoding/.claude/specs/2026-09-16-grammar-constrained-decoding/spec.md
+**Plan:** /home/peterstorm/dev/claude-plugins/loom-grammar-constrained-decoding/.claude/plans/2026-09-16-grammar-constrained-decoding.md
 **Date:** 2026-09-19
-**Status:** BLOCKED on feasibility/launcher prerequisites; parent-authored revision checkpoint, not a fresh independent plan-alignment pass.
 
 ## Summary
 
-The 2026-09-16 “No gaps found” report applies only to the previous Spec/Plan and is preserved byte-for-byte in `plan-alignment-2026-09-16-superseded.md`. It must not authorize execution of the revised plan. **Both execution-blocking prerequisites are now resolved and recorded** (see Gaps): the launcher readiness seam (FR-008) is proven mechanism-wise with the launcher change separately owned, and the exact-route qualification (FR-002) is qualified for the live local route as unconstrained emission with the engine authoritative. Revised behavior and measurement obligations have explicit planned coverage, but their implementation and feasibility are not claimed complete.
-
-The TaskGraph was returned to architecture through `helper set-phase --phase architecture --clear-artifact plan-alignment`. Existing T1 work/evidence remains historical; the pending T2–T14 descriptions and trace hashes are stale. No direct TaskGraph edit, guard disablement, fresh completion claim or new implementation dispatch occurred in this revision.
+No gaps found.
 
 ## Gaps
 
-- **FR-002 — RESOLVED for the live local route (qualified 2026-09-19; requalification triggers recorded):** route `desktop-vllm` (vLLM) · `glm-5.3-flash-spark-tp2-v14` · all four frozen schemas. All four accepted (HTTP 200) with the production registration shape; `strict: true` requested on the wire and the wire parameters are STRUCTURALLY EQUAL to the frozen bytes for all four (the strictifier is a no-op — the zod bytes are already strict-compatible, including across v2's root `oneOf`). The route classifies **unconstrained emission**: vLLM ignores the OpenAI tool-level `strict` flag (decisive forced-tool-choice adversarial calls carried `score: 12` and `verdict: "partially_upheld"` through at HTTP 200; v2/v3 direct calls conforming is model compliance, recorded inconclusive). Engine-authoritative mode per FR-003/FR-006/FR-010/FR-018 — the planned design holds on this route; no extraction-only classification. Pi-side gates verified live: canonical fixtures pass `validateToolArguments` against the exact wire parameters for all four; malformed emissions were refused with precise per-branch errors; execute round-trip proven for judge/refutation. Discoveries recorded: pi's in-child validation-retry loop (calibration latency + FR-006 boundary note); vLLM-native enforcement is a pi-ai resolver capability (FR-030 keeps it out of loom's scope). Evidence: `probes/emission-qualification/` (fixtures, driver, README, `recordings/`). NOT yet qualified: any cloud route (openai-codex unspent), any future served-model switch (requalify — the routing policy makes route identity `(provider, served model, digest)` explicit).
-- **FR-008 — RESOLVED (mechanism proven 2026-09-19, integration allocated):** the supported launcher seam is `pi --mode rpc` with an extension-command readiness exchange: the launcher spawns the child headless with no prompt, discovers the readiness command via `get_commands`, invokes it (extension commands execute with **no model request**), and receives the bound readiness payload through `entry_appended` (exact tool, schema digest, revision, child identity, active flag from `pi.getActiveTools()`); the gate is a pure comparison plus a fail-closed `set_model` route binding, and only a matching readiness prompts the child. Missing/contradictory readiness and absent/stale extensions all yield **zero model requests**; the in-child awaited `before_agent_start` hold is proven as the defense-in-depth layer (a throw is NOT a stop — `emit()` catches and continues; the hold is the gate). Evidence: `probes/emission-readiness/` (driver + child extension + README), `PROBE PASS` 4/4 variants twice against installed pi 0.83.0 with a counting provider substitute. Ownership: seam primitives `@earendil-works/pi-coding-agent` (proven on installed 0.83.0; true upstream minimum unverified); the launcher itself lives in `~/.dotfiles/pi/extensions/subagent/index.ts` — the launcher edit is a separately owned change, not a hidden global-extension edit. Remaining allocated work: the dotfiles launcher gate, the loom child-extension readiness command, and the full AS-020 negative-control matrix through the production path.
+None.
+
+## Executable-Models Policy Check
+
+- **Lifecycles:** The plan describes no domain lifecycle in prose. It explicitly states it "introduces no independent lifecycle machine" and declines a second persisted retry lifecycle for readiness (Data Flow section). No `## Lifecycles` binding required.
+- **Pipeline:** The plan explicitly declines the fugue bridge: "The feature is not a Fugue pipeline; no AuthoredDag bridge is selected" (Data Flow section). Satisfies the policy.
+- **Invariant tiering:** INV-1 ("No tool constraint may demand strict sampling via strict-required mode") is tiered `checkable` with rule file `.claude/linter/rules/inv-1-no-strict-require-constraint.json`. Its stated property is a code-spelling property a regex lint rule can actually check (`strict: "prefer"` present, strict-required absent in constraint construction). Correctly tiered — the plan itself routes behavioral properties (schema identity, selection outcomes, readiness, provenance) to tests rather than mislabeling them as regex invariants.
+
+No MODEL-N gaps.
 
 ## Coverage
 
-| Requirement / scenario | Planned coverage | Current evidence boundary |
-|---|---|---|
-| FR-001/FR-008/FR-014; AS-001/AS-010/AS-020 | Issued kind/version and actual child readiness, AD-4/AD-6/AD-8 | Readiness seam proven (`probes/emission-readiness/`); launcher gate + loom readiness command are allocated integration work |
-| FR-002/FR-010/FR-030; AS-005/AS-023 | Exact-route qualification and preferred strict mode, AD-2/AD-5 | **Qualified unconstrained** on the live vLLM route (`probes/emission-qualification/`); requalification triggers recorded; cloud route unspent |
-| FR-003–FR-007; AS-003/AS-006/AS-007/AS-019 | Explicit selection/attempt table, AD-8/AD-9 | Existing T1 selection needs binding/refusal-diagnostic changes |
-| FR-009/FR-011; AS-008/AS-009 | Selection-owned source and existing publication/replay seams | Integration remains planned |
-| FR-012; AS-002/AS-018 | Existing schema parser and issued-contract joins retained | Local probe confirms JSON Schema can accept engine-refused whitespace prose |
-| FR-013; AS-021 | Pi terminating success and tool-only capture, AD-3 | Installed API/example inspected; production integration not built |
-| FR-020–FR-022; AS-012–AS-014 | New-issuance route-aware wording, unchanged frozen schemas, docs | Planned Phase 5; archived contracts preserved |
-| FR-031 | Existing revision handshake and normal activation | Helper loop-back succeeded using the loaded main-package CLI |
-| FR-032; AS-022 | Feasibility then real vertical acceptance with negative controls | Planned Phases 2/3; not helper-only completion |
-| AS-004/AS-015–AS-017; SC-001–SC-003/SC-007 | Preregistered matched route/schema calibration, AD-11 | Not measured |
-| SC-004–SC-006/SC-008; NFR-002/NFR-010/NFR-011 | All-path provenance, registered-schema checks, startup/acceptance and degradation tests | Planned runtime verification, not inferred from T1 tests |
+| ID | Description | Status |
+|----|-------------|--------|
+| US1 | Grammar-constrained payload emission on capable providers (per-kind emission tool + ingestion preference) | Covered |
+| US2 | Deterministic fail-closed fallback preserved (PR #52 extraction unchanged) | Covered |
+| US3 | Observable provenance of payload source (emission vs extraction) | Covered |
+| US4 | Hard fail when the emission tool is missing (Pi payload-producer spawns) | Covered |
+| US5 | Wire contract and docs updated to tool-primary | Covered |
+| US6 | Calibration gate for quality and latency | Covered |
+| AS-001 | Exact issued tool registered/active at child start; parameter schema byte-matches frozen schema | Covered (AD-4 readiness binding, AD-5 frozen bytes, byte-identity test suite) |
+| AS-002 | Engine parser + issuance joins decide acceptance; provider JSON Schema conformity alone is not acceptance | Covered (AD-8: selection then authoritative admission; FR-012 joins retained) |
+| AS-003 | Emission arguments win deterministically over final-message extraction | Covered (AD-8/AD-9: "Emission, regardless of final text") |
+| AS-004 | Zero retries attributed to verified provider-enforced schema violations; other causes reported separately | Covered (AD-11 retry causes, separate series; Phase 6) |
+| AS-005 | No failure merely from unsupported strict mode; zero emission calls use old extraction unchanged | Covered (AD-2 preferred/unconstrained/extraction-only classes; AD-9 zero-call row) |
+| AS-006 | Prose/fence payload engages fail-closed extraction exactly as today | Covered (AD-9 zero-emission row + containment law) |
+| AS-007 | One refused emission call never ingested; usable fallback consumes no retry; at most attempt 2 | Covered (AD-9 rows 3–4; existing slot budget, no separate emission counter) |
+| AS-008 | Every ingested payload records its source in engine-side metadata | Covered (provenance component; source returned by selection, bound at acceptance) |
+| AS-009 | Fallback engagement observable via recorded extraction source | Covered (single-call refusal retained; historical absence handled honestly) |
+| AS-010 | Missing/inactive/misbound tool → no model request, bounded actionable startup failure | Covered (AD-4 launcher barrier; notification/revision-hash insufficiency explicitly addressed) |
+| AS-011 | Spawn retried after tool becomes available behaves identically (idempotent, no residual state) | Covered (idempotent registration for same request/kind/version/digest; only matching reservations released) |
+| AS-012 | Tool-primary wire instructions; no same-spawn re-emission; extraction fallback; archived contracts untouched | Covered (AD-7 new-issuance wording + one-call rule; archived v1/v2/v3 bytes unchanged) |
+| AS-013 | Emission tool parameter schema byte-identical to frozen payload schema | Covered (AD-5 byte round-trip guard; emission-tool-contract test suite) |
+| AS-014 | Agent README + model-profile docs describe emission flow; capability flags stay user-side | Covered (Phase 5 files; AD-2 operator-configuration ruling) |
+| AS-015 | p95 wall-clock ≤ +25% vs extraction-only baseline incl. startup/follow-ups/retries; terminal failures separate | Covered (AD-11 matched-runtime measurement; terminal-failure rate not increased) |
+| AS-016 | Escaped-defect severity not worse than PR #52-only baseline | Covered (AD-11 independent rubric, blinded assessment, held-out known-defect cases) |
+| AS-017 | Preregistered workload/matrix/rates/latency/quality retained; violated guardrail blocks done | Covered (AD-11 ≥100 paired requests per cell, retention, guardrail-blocks-done; Phase 6) |
+| AS-018 | Schema-conforming but engine-refined-violating arguments refused; whitespace-only prose regression case | Covered (AD-5 live probe of whitespace-only case; Phase 2; testing-strategy table) |
+| AS-019 | Two distinct emission calls → ambiguity rejection even with valid final; exact replay is not a second call | Covered (AD-9 ambiguity + replay rows) |
+| AS-020 | Missing/stale/contradictory/wrong-request readiness → zero model requests; only matching reservations cleaned | Covered (AD-4 + Phase 2 counting-provider negative controls; probes/emission-readiness PROBE PASS 4/4) |
+| AS-021 | Tool-only terminal result ingests without extra final message; mixed batches retain Pi semantics | Covered (AD-3 terminating success; mixed batch/cancellation tested, not labeled) |
+| AS-022 | Vertical-slice controls: bypass/always-accept/always-reject detected; helper-only tests insufficient | Covered (AD-10 production-path negative controls; testing crosses the same policy seam as production) |
+| AS-023 | Exact v2/v3 reviewer + v1 judge/refutation schemas qualified per route; unsupported routes extraction-only, no rewriting | Covered (AD-5 local-route qualification, all four schemas; AD-2 no silent rewrite; no cloud route claimed) |
+| FR-001 | Exact issued kind/version tool from frozen schema bytes; catalog+authenticated context decide identity; extraction-only routes advertise nothing | Covered (AD-5 frozen bytes; AD-6 catalog eligibility; AD-7 issuance authority, prompt markers rejected) |
+| FR-002 | Preferred (not required) strict sampling via harness resolver; only qualified routes called capable | Covered (AD-2 `strict: "prefer"` through Pi's resolver; per-route qualification) |
+| FR-003 | Ingestion seam additively prefers valid emission arguments; deterministic | Covered (AD-8/AD-9 one pure selection policy) |
+| FR-004 | PR #52 fail-closed extraction retained verbatim as fallback | Covered (AD-9 unchanged extraction; containment law vs existing parser) |
+| FR-005 | Fallback stays fail-closed for every provider (prose/fence admission, zero-candidate/ambiguity rejection, bounded retry) | Covered (extraction unchanged; bounded retry = existing request slots) |
+| FR-006 | One refused call: refusal retained, unchanged extraction, no retry on usable fallback, single rejection otherwise, attempt-1→attempt-2 only, no separate emission counter | Covered (AD-9 matrix + budget paragraph; explicitly supersedes old wording) |
+| FR-007 | Two+ distinct calls reject as ambiguity; replay idempotent; contradictory records sharing identity refuse | Covered (AD-8 closed observation vocabulary with call identity; AD-9 replay/ambiguity rows) |
+| FR-008 | No model request before registered+active tool matches issued request/kind/version/digest; bounded observation; parent hash alone insufficient | Covered (AD-4 launcher barrier; infrastructure failure does not consume semantic retry authority) |
+| FR-009 | Record payload source in engine-side metadata | Covered (provenance component; source recorded with selection, durably bound) |
+| FR-010 | Unsupported strict sampling must not fail request; zero-emission preserves extraction; emission calls follow new rules | Covered (AD-2 route classes; AD-9 zero-call row) |
+| FR-011 | Captured arguments inherit existing retention; no new retention policy | Covered (existing publication/retention; "no new retention policy or full payload copy") |
+| FR-012 | Ingress retains issuance-join checks regardless of emission availability | Covered (AD-8 authoritative admission after selection; failed-issuance emission must not fall back) |
+| FR-013 | Successful emission returns minimal terminating acknowledgment; failed validation is explicit refusal | Covered (AD-3 `terminate: true` + minimal ack; execute throws at shell boundary for refusals) |
+| FR-014 | Observations bound to request attempt + tool-call identity; complete vs incomplete preserved; unexpected kinds/versions never self-select or become absence | Covered (AD-8 binding, incomplete-not-absence rule, wrong-kind/version rejection before schema selection) |
+| FR-020 | New emission-enabled instructions tool-primary; extraction-only and archived contracts keep final-message contract | Covered (AD-7; Phase 5 rendering from actual route/binding) |
+| FR-021 | No second parallel schema outside frozen bytes | Covered (AD-5 rejected mirror/builder; AS-013 byte identity at registered surface) |
+| FR-022 | Agent README + model-profile docs updated; capability flags remain user-side config | Covered (Phase 5 doc files; AD-2 operator-configuration statement) |
+| FR-030 | Constrained sampling via engine's existing capability; no second provider serialization | Covered (AD-2 Pi's existing resolver; AD-1 rejected second serializer; vLLM enforcement stays in pi-ai resolver) |
+| FR-031 | Compatibility with existing content-addressed revision handshake | Covered (Phase 6 final-runtime handshake match; Verification step 6 no handshake bypass) |
+| FR-032 | Route qualification + real vertical slice with discriminating controls before breadth; missing access = blocker not pass | Covered (AD-2/AD-5 qualification; AD-10/Phase 3 slice; Phase 2 "remain blocked here") |
+| NFR-001 | p95 dispatch-to-ingestion ≤ +25% vs matched baseline; terminal-failure rate not increased | Covered (AD-11; Phase 6) |
+| NFR-002 | Emission tool serves concurrent wave without new serialization | Covered (per-child concurrency preserved; Phase 5 concurrency checks) |
+| NFR-010 | Fallback path fail-closed for every provider | Covered (unchanged PR #52 extraction; AD-9) |
+| NFR-011 | Extraction-only/zero-emission preserve prior contract; strict lack not a failure; new outcomes explicit | Covered (AD-2/AD-9; anti-baseline-equivalence containment law) |
+| SC-001 | Zero schema-constraint retries on qualified routes; other causes accounted separately | Covered (AD-11 retry causes/separate series; Phase 6 measured) |
+| SC-002 | p95 latency ≤ +25% without increased terminal failures | Covered (AD-11; Phase 6) |
+| SC-003 | Escaped-defect severity not worse over calibration window | Covered (AD-11 rubric/blinding/held-out cases) |
+| SC-004 | 100% of ingested payloads record source | Covered (source returned by every selection outcome; durable binding at acceptance) |
+| SC-005 | Zero children send model requests without exact readiness; extraction-only routes retain behavior | Covered (AD-4 zero-request controls; Phase 4 Claude Code/historical protocol verification) |
+| SC-006 | 100% of per-kind parameter schemas byte-match frozen bytes | Covered (Phase 5 registered-surface byte checks; contract test suite) |
+| SC-007 | No strict-capability failures or changed extraction on degraded routes; emission failures reported not hidden | Covered (AD-9 explicit no-no-op-equivalence claim for non-containment rows; Phase 4 verification; AD-11 separate series) |
+| SC-008 | Vertical slice passes success/refusal acceptance and fails bypass/always-accept/always-reject controls | Covered (AD-10; Phase 3 production-path controls before breadth) |
 
-## Corrections made in this revision
-
-- Provider-enforced JSON Schema constraints are separated from engine-only refinements, issuance checks and unobservable raw duplicate-key behavior.
-- The contradictory separate emission retry budget is replaced explicitly with existing request-slot attempts 1/2. One refused call with usable final extraction can complete without retry; duplicate calls reject even with valid final text.
-- Child readiness is a pre-model launcher requirement, not a logged startup error.
-- Successful emission uses terminating tool results; forced tool choice is not claimed.
-- Acceptance precedes broad implementation, with one real reviewer path before expanding to all kinds.
-- The fallback-equivalence property applies only to extraction-selected states; rejection branches get their own assertions.
-- Calibration includes startup, follow-up turns, retries and terminal failures, plus independent quality comparison.
-
-## Required next action
-
-Resolve and record the two prerequisites, rerun independent plan alignment against these revised bytes, then use supported decomposition/reconciliation for the remaining Tasks. Preserve original T1 receipts and explicitly allocate any changed T1 contract work. Do not resume the original T2 brief or interpret this checkpoint as a completed alignment or Wave Gate.
+Out-of-scope items (OOS-001–OOS-004) were excluded from gap analysis per spec; the plan's "no G5 work, no general mutation platform" statements are consistent with them.
