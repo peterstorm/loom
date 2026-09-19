@@ -1,52 +1,47 @@
-# Plan Alignment Report
+# Plan Alignment Report — revision checkpoint
 
-**Spec:** .claude/specs/2026-09-16-grammar-constrained-decoding/spec.md
-**Plan:** .claude/plans/2026-09-16-grammar-constrained-decoding.md
-**Date:** 2026-09-16
+**Spec:** `.claude/specs/2026-09-16-grammar-constrained-decoding/spec.md`
+**Plan:** `.claude/plans/2026-09-16-grammar-constrained-decoding.md`
+**Date:** 2026-09-19
+**Status:** BLOCKED on feasibility/launcher prerequisites; parent-authored revision checkpoint, not a fresh independent plan-alignment pass.
 
 ## Summary
 
-No gaps found. Round 2 re-verification: both round-1 divergence areas are now covered — (1) payload scope is up (AD-6/AD-8: per-kind emission tools for all three cataloged producer payload kinds — reviewer-payload, judge-verdict, refutation-verdict — with catalog-derived `PayloadProducerKind` scoping, new frozen verdict schemas, and per-path ingestion folds), so US1/AS-004/SC-001 now cover judge-kind and verdict-slot spawns; and (2) Claude Code spawn behavior is resolved per the amended spec (AD-4/AD-7: the US4 hard fail is scoped to Pi payload-producer spawns with the `/reload` remediation; Claude Code declares `not-provided` with degradation `extraction` and proceeds exactly as today), so FR-008/US4/SC-005 are covered. One disclosed deviation is documented in the plan, not a gap: FR-002's literal "requiring" wording is realized as `strict: "prefer"` (AD-2) because `require` throws on constraint-ignoring providers — the requirement's substance (capable providers grammar-constrain the tool arguments) is satisfied and the deviation is explicitly documented. The executable-models policy check passed: INV-1 is correctly tiered `checkable` (a regex lint rule can check the stated property, and it is validated); the plan describes no prose lifecycle ("no second state model") and no unbound pipeline — its data flow threads new data through existing engine seams.
+The 2026-09-16 “No gaps found” report applies only to the previous Spec/Plan and is preserved byte-for-byte in `plan-alignment-2026-09-16-superseded.md`. It must not authorize execution of the revised plan. Two execution-blocking prerequisites remain. Revised behavior and measurement obligations have explicit planned coverage, but their implementation and feasibility are not claimed complete.
+
+The TaskGraph was returned to architecture through `helper set-phase --phase architecture --clear-artifact plan-alignment`. Existing T1 work/evidence remains historical; the pending T2–T14 descriptions and trace hashes are stale. No direct TaskGraph edit, guard disablement, fresh completion claim or new implementation dispatch occurred in this revision.
 
 ## Gaps
 
-None.
+- **FR-008** — Actual pre-model child readiness: the installed normal subagent launcher starts print-mode Pi with its prompt already supplied. No supported pre-prompt readiness exchange has been demonstrated. Resolve the launcher hook, owning package and minimum version, then prove zero model requests under missing/inactive/misbound-tool and failed-startup controls. A parent revision check, `before_agent_start` throw or startup notification does not satisfy this requirement. Plan AD-4 and Phase 2 keep this as a blocking prerequisite; an external launcher change requires separate owned delivery rather than hidden edits to global extensions.
+- **FR-002** — Exact-route schema qualification: no live provider acceptance/enforcement evidence for the exact v2/v3 reviewer and v1 judge/refutation schemas was produced by this revision. Reviewer v2 contains a root `oneOf` and Pi forwards it unchanged. Qualify the intended route/schema matrix and explicitly classify constrained, unconstrained and extraction-only routes before breadth expansion. Do not fix provider rejection by silently rewriting frozen bytes. Plan AD-2/AD-5 and Phase 2 name the work; configuration flags or byte-round-trip tests alone are not evidence.
 
 ## Coverage
 
-| ID | Description | Status |
-|----|-------------|--------|
-| US1 | Grammar-constrained payload emission on capable providers (per-kind emission tool, additive ingestion preference, zero-retry syntax classes) | Covered |
-| US2 | Deterministic fail-closed fallback preserved (PR #52 extraction verbatim, no new failure modes) | Covered |
-| US3 | Observable provenance of payload source (emission-tool arguments vs final-message extraction) | Covered |
-| US4 | Hard fail when the emission tool is missing (Pi refuses with /reload remediation; Claude Code degrades via extraction) | Covered |
-| US5 | Wire contract and docs updated to tool-primary | Covered |
-| US6 | Calibration gate for quality and latency (p95 +25%, escaped-defect severity, evidence recorded before done) | Covered |
-| FR-001 | Per-kind emission tool in every payload-agent child session, exact frozen schema bytes, cataloged producer-kind (profile-driven) scoping, never prompt text | Covered |
-| FR-002 | Emission tool carries a strict-sampling constraint so capable providers grammar-constrain the tool arguments | Covered (disclosed deviation: `strict: "prefer"` replaces the literal "requiring" wording — AD-2; `require` throws on constraint-ignoring providers, violating FR-010/NFR-011) |
-| FR-003 | Ingestion seam additively prefers valid emission-tool arguments over final-message extraction — deterministic, never a choice between interpretations | Covered |
-| FR-004 | PR #52's fail-closed extraction retained verbatim as the deterministic fallback | Covered |
-| FR-005 | Fallback path stays fail-closed (prose/fence admission, zero-candidate and ambiguity rejection, bounded retry) | Covered |
-| FR-006 | Invalid emission-tool arguments never-ingestable; separate emission-tool bounded-retry budget bounded to the same magnitude as the existing extraction bounded-retry | Covered |
-| FR-007 | Duplicate emission-tool calls treated as ambiguity, fail-closed to the emission-tool bounded-retry budget | Covered |
-| FR-008 | Refuse to spawn payload-agent sessions where the emission tool cannot be provided, per-harness scoped (Pi refuses with actionable error + /reload remediation; Claude Code proceeds via extraction exactly as today) | Covered |
-| FR-009 | Engine-side metadata records the source of every ingested payload | Covered |
-| FR-010 | Regress to exactly today's pipeline, no new failure modes, when the provider ignores the constraint | Covered |
-| FR-011 | Captured emission-tool arguments inherit existing retention; no new retention, expiration, or deletion policy | Covered |
-| FR-012 | Ingress seam retains the issuance-join checks (frozen scope, packet/generation binding, prior-assessment ordering) regardless of emission-tool availability | Covered |
-| FR-020 | Wire contract names the emission tool as the primary emission path, extraction as the deterministic fallback only | Covered |
-| FR-021 | No second, parallel schema outside the frozen payload schema bytes | Covered |
-| FR-022 | Agent README and model-profile docs describe the emission-tool flow; capability flags remain user-side configuration | Covered |
-| FR-030 | Constrained sampling via the engine's existing constrained-sampling capability; no second provider payload serialization | Covered |
-| FR-031 | Extension and engine changes compatible with the content-addressed revision handshake | Covered |
-| NFR-001 | Per-payload wall-clock on capable providers no worse than +25% versus today's pipeline, measured p95 | Covered (P2 calibration gate — US6 / Phase 6 / SC-002) |
-| NFR-002 | Emission tool serves all concurrently spawned payload agents without serializing beyond today's behavior | Covered (`executionMode: "parallel"`, stateless per-child execute — holds by construction) |
-| NFR-010 | Fallback path fail-closed for every provider: prose/fence admission, zero-candidate and ambiguity rejection, bounded retry | Covered |
-| NFR-011 | Constraint-ignoring providers indistinguishable from today's pipeline — zero new failure-mode classes | Covered (containment invariant, fast-check property over all input combinations) |
-| SC-001 | Zero bounded-retry rounds consumed for syntax-level classes across the calibration window | Covered (Phase 6 calibration counters across reviewer, judge-kind, and verdict-slot spawns) |
-| SC-002 | Per-payload wall-clock no worse than +25% p95 on capable providers | Covered (Phase 6 calibration gate; p95 violation blocks done per AS-017) |
-| SC-003 | Escaped-defect severity not worse than the PR #52-only baseline over the calibration window | Covered (Phase 6 calibration gate) |
-| SC-004 | 100% of ingested payloads record their source in engine-side metadata | Covered (provenance sidecar on the reviewer path; additive `source` field on accepted-verdict journal events + operation artifacts on the panel path) |
-| SC-005 | Zero Pi payload-agent spawns proceed without the emission tool available (hard fail verified); Claude Code spawns are the documented capability-aware-degradation class | Covered (spawn-admission tests: capability gate, per-harness degradation, hard fail, AS-011 idempotency; AD-7) |
-| SC-006 | 100% of per-kind emission-tool parameter schemas byte-match the frozen payload schema bytes | Covered (deterministic JSON.stringify byte-match guard, three kinds — AD-5) |
-| SC-007 | Zero new failure-mode classes observed on constraint-ignoring providers over the calibration window | Covered (containment by construction: fallback byte-for-byte identical in every input combination; fallback-preservation tests) |
+| Requirement / scenario | Planned coverage | Current evidence boundary |
+|---|---|---|
+| FR-001/FR-008/FR-014; AS-001/AS-010/AS-020 | Issued kind/version and actual child readiness, AD-4/AD-6/AD-8 | Launcher prerequisite unresolved |
+| FR-002/FR-010/FR-030; AS-005/AS-023 | Exact-route qualification and preferred strict mode, AD-2/AD-5 | Resolver behavior inspected; live qualification not run |
+| FR-003–FR-007; AS-003/AS-006/AS-007/AS-019 | Explicit selection/attempt table, AD-8/AD-9 | Existing T1 selection needs binding/refusal-diagnostic changes |
+| FR-009/FR-011; AS-008/AS-009 | Selection-owned source and existing publication/replay seams | Integration remains planned |
+| FR-012; AS-002/AS-018 | Existing schema parser and issued-contract joins retained | Local probe confirms JSON Schema can accept engine-refused whitespace prose |
+| FR-013; AS-021 | Pi terminating success and tool-only capture, AD-3 | Installed API/example inspected; production integration not built |
+| FR-020–FR-022; AS-012–AS-014 | New-issuance route-aware wording, unchanged frozen schemas, docs | Planned Phase 5; archived contracts preserved |
+| FR-031 | Existing revision handshake and normal activation | Helper loop-back succeeded using the loaded main-package CLI |
+| FR-032; AS-022 | Feasibility then real vertical acceptance with negative controls | Planned Phases 2/3; not helper-only completion |
+| AS-004/AS-015–AS-017; SC-001–SC-003/SC-007 | Preregistered matched route/schema calibration, AD-11 | Not measured |
+| SC-004–SC-006/SC-008; NFR-002/NFR-010/NFR-011 | All-path provenance, registered-schema checks, startup/acceptance and degradation tests | Planned runtime verification, not inferred from T1 tests |
+
+## Corrections made in this revision
+
+- Provider-enforced JSON Schema constraints are separated from engine-only refinements, issuance checks and unobservable raw duplicate-key behavior.
+- The contradictory separate emission retry budget is replaced explicitly with existing request-slot attempts 1/2. One refused call with usable final extraction can complete without retry; duplicate calls reject even with valid final text.
+- Child readiness is a pre-model launcher requirement, not a logged startup error.
+- Successful emission uses terminating tool results; forced tool choice is not claimed.
+- Acceptance precedes broad implementation, with one real reviewer path before expanding to all kinds.
+- The fallback-equivalence property applies only to extraction-selected states; rejection branches get their own assertions.
+- Calibration includes startup, follow-up turns, retries and terminal failures, plus independent quality comparison.
+
+## Required next action
+
+Resolve and record the two prerequisites, rerun independent plan alignment against these revised bytes, then use supported decomposition/reconciliation for the remaining Tasks. Preserve original T1 receipts and explicitly allocate any changed T1 contract work. Do not resume the original T2 brief or interpret this checkpoint as a completed alignment or Wave Gate.

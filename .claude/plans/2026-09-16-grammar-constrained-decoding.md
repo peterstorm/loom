@@ -2,518 +2,350 @@
 
 **Spec:** `.claude/specs/2026-09-16-grammar-constrained-decoding/spec.md`
 **Created:** 2026-09-16
-**Amended:** 2026-09-16 (gap-report re-run, round 2 — AD-6/AD-7/AD-8; AD-4 stakeholder-confirm resolved)
+**Amended:** 2026-09-19 — user-authorized quality/feasibility revision
+**Status:** Architecture revision; feasibility prerequisites and fresh alignment/decomposition required. Not authorization to resume the old T2 brief.
 
 ## Summary
 
-Payload-producing agents — the three cataloged producer payload kinds (reviewer-payload, judge-verdict, refutation-verdict) — emit structured payloads through per-kind emission tools whose parameters ARE the exact frozen payload schema bytes (three kinds, three zod-derived frozen schemas); the ingestion seams additively prefer emission-tool arguments over final-message extraction via pure total functions whose discriminated-union results carry provenance at construction — the reviewer payload path through the harness-capture seam, the panel verdict paths through the submission seams. PR #52's fail-closed extraction is retained verbatim as the deterministic fallback (containment invariant); US4 admission rides the found pure spawn-admission seam with the hard fail scoped to Pi payload-producer spawns (Claude Code degrades via extraction — AD-7); the constrained-sampling constraint is a provider request (`strict: "prefer"`), never an enforcement.
+Keep the selected type-driven functional core: exact frozen schemas, per-kind emission tools, deterministic source selection, and unchanged final-message extraction. Correct the original plan's unsupported guarantees: provider schema support is qualified per route; JSON Schema is not the full engine parser; child readiness is demonstrated before model execution; emission and extraction failures use one existing bounded request-slot retry mechanism.
 
----
+Prove one real reviewer request-to-ingestion path before expanding to the remaining kinds. Write discriminating acceptance before that integration, use minimal shared contracts and existing production exemplars, and keep the code's policy decisions in the pure core. This feature does not implement or modify the vault's G5 sequence.
+
+### Execution checkpoint and revision boundary
+
+At inspection on 2026-09-19, the existing TaskGraph was in execute/Wave 1 with T1 implemented, review pending, and no executing Tasks. The supported `helper set-phase --phase architecture --clear-artifact plan-alignment` loop-back was used for this revision; no guards were disabled. Implementation source files and existing T1 evidence are not rewritten by this document.
+
+The old graph's descriptions, plan excerpts, requirement hashes, completion claims and wave schedule describe the previous plan. Do not dispatch its pending T2–T14 unchanged. Fresh alignment and supported decomposition/reconciliation must account for this revision. Preserve the previous T1 work and receipts as history; do not manufacture new completion evidence from them. Reassess the portions of T1 affected by the new selection contract before claiming the revised requirements complete.
 
 ## Architectural Decisions
 
-### AD-1: Approach selection (panel)
+### AD-1: Retain the selected type-driven FP approach and panel provenance
 
-**Choice:** `candidate-type-driven-fp` as the base, with grafts from the losing candidates (below).
-**Manifest:** `.claude/specs/2026-09-16-grammar-constrained-decoding/panel-runs/run.zOVEfIJzSl/manifest.json` — run `run.zOVEfIJzSl`, lenses: `simplicity-first`, `type-driven-fp`, `risk-security-first`.
+**Choice:** Keep `candidate-type-driven-fp` as the architectural base, with frozen-schema reuse and the existing pure spawn-admission seam.
+**Why:** The user selected this candidate. The 2026-09-19 revision corrects feasibility and behavior contracts, not that selection.
+**Panel manifest:** `.claude/specs/2026-09-16-grammar-constrained-decoding/panel-runs/run.zOVEfIJzSl/manifest.json`.
+**Recorded ranking:** type-driven-fp 23, risk-security-first 22, simplicity-first 20. These are historical panel scores, not new feasibility evidence. The candidate and verdict artifacts remain untouched.
+**Rejected:** a second provider serializer, a hand-authored schema mirror, and a new generic orchestration/retry subsystem.
 
-**Verdict summary per criterion** (validated attempt verdicts; canonical verdict files remain in the run directory):
-- **extensibility:** type-driven-fp 8 — the frozen per-kind registry (EMISSION_TOOL_SPECS) makes a new producer kind a one-entry addition with compiler-guided wiring and centralizes kind→schema knowledge the other designs scatter; risk-security-first 7 — the closed capability ADT per harness × kind makes capability-aware degradation data-driven; simplicity-first 5 — the frozen bytes as parameter schema.
-- **pure functional core:** type-driven-fp 9 — IngestionSelection discriminated union reusing the existing DomainResult/canonicalRecord kernel (identity.ts), with provenance constructed at the same deterministic seam that selects the source (the provenance-drift risk closed by construction); simplicity-first 8 — the frozen bytes BE the emission tool's parameters, byte-identity by construction; risk-security-first 7 — the harness's tool-argument validation is convenience, never authority.
-- **codebase fit + effort:** risk-security-first 8 — the auditable containment property (fallback byte-for-byte identical in every input combination, testable as fast-check); simplicity-first 7 — the frozen bytes ARE the parameter schema (fatal flaw: under-covers the review-verifier kind and standalone-successor V3 payloads); type-driven-fp 6 — fatal flaw: `strict:"require"` throws on constraint-ignoring providers (verified in pi-ai), and the US4 admission lived in a parallel module instead of the pure spawn-admission seam.
+### AD-2: Preferred strict sampling, with exact-route qualification
 
-**Computed panel ranking** (authoritative, computed by `helper panel-contract aggregate`; not recomputed):
-| Candidate | Rank | Total score |
+**Choice:** `constrainedSampling: { type: "json_schema", strict: "prefer" }` through Pi's existing resolver. Never use strict-required sampling for this feature.
+**Why:** Installed Pi 0.83.0 returns no strict flag for unsupported preferred sampling; required sampling throws. Preferred sampling does not, however, repair a provider-incompatible schema.
+
+Qualify the exact provider/model/API, Pi revision and frozen schema digest. Distinguish:
+
+- **Constrained emission:** the route accepts the tool schema and demonstrates the advertised JSON Schema constraints.
+- **Unconstrained emission:** the route accepts the tool schema but does not enforce preferred strict sampling; engine parsing remains authoritative.
+- **Extraction-only:** the harness or route cannot support the exact tool schema. Do not advertise the unsupported tool. Claude Code and unsupported historical reviewer protocols use this path explicitly.
+
+Provider capability flags remain operator configuration. A flag, provider name or successful local schema round-trip is not live qualification. Qualification evidence is bound to the route/schema configuration; changed schema or capability configuration requires requalification. Missing access is a blocker to the corresponding evidence, never a pass. Qualification failure must not trigger a silent schema rewrite or unbounded request retries.
+**Rejected:** treating all grammar-capable providers as JSON-schema-capable; rewriting frozen schemas into a provider-specific mirror; automatically upgrading a route based only on valid-looking output.
+
+### AD-3: Model-initiated emission, terminating success
+
+**Choice:** Do not force per-request tool selection. Use the exact tool name in new emission-enabled instructions and return `terminate: true` with a minimal acknowledgment on successful execute.
+**Why:** Pi 0.83.0 documents terminating structured-output tools. This avoids an otherwise unnecessary follow-up model turn; it is not a guarantee that the model calls the tool. Extraction remains necessary.
+
+Termination only suppresses the follow-up when every finalized result in the tool batch is terminating. Test mixed batches, cancellation and tool-only terminal capture. Do not echo large payloads in acknowledgment content. Error signaling uses the actual harness contract: execute throws at the shell boundary for a core refusal; returning an object labeled as an error does not set Pi's `isError` flag. Harness schema rejection may happen before execute and must still be observable.
+**Rejected:** claiming schema constraints force tool choice; assuming a final text message always exists; relying on prompt instructions alone to remove the post-tool model turn.
+
+### AD-4: Child readiness is a launcher barrier, not a notification
+
+**Choice:** Parent spawn admission remains the pure batch decision. An emission-enabled child additionally needs a bounded, request-bound pre-model readiness barrier at the launcher. The launcher must not deliver/start the model prompt until the actual child's tool is registered, active, and matches the issued kind/version/schema digest.
+**Why:** The parent's runtime revision proves which code the parent loaded, not what the child activated. Pi catches `before_agent_start` exceptions and continues; Loom's existing startup sweep explicitly continues after reported failures. Neither is a hard stop.
+
+The readiness observation binds request ID, context digest, child/session identity, producer kind, schema version, schema digest and exact tool name. Missing, malformed, contradictory, inactive or wrong-request readiness fails startup before any model request. Timeout, cancellation and cleanup preserve existing infrastructure-failure semantics and release only matching reservations. No new semantic retry is minted. Error text names the actual remediation; stale resources may require `/reload`, unsupported provider schemas do not.
+
+**Known prerequisite:** the inspected installed normal subagent launcher (`~/.pi/agent/extensions/subagent/index.ts`) starts `pi --mode json -p --no-session` with the prompt already supplied. It exposes no demonstrated pre-prompt readiness exchange. A content-addressed parent declaration or a child extension callback does not close that gap. Phase 2 must identify and prove the supported launcher seam, including its owning package and minimum version. If it requires a change outside this repository, that change is a separately owned prerequisite: do not silently edit global extensions, add external files to this repository's Task scope, or build a second child runtime as an incidental workaround. Broad integration remains blocked until the seam exists.
+**Rejected:** `before_agent_start` throw/notify as a stop; declaring readiness from the parent's hash; treating absence of the extension that performs the check as successful startup.
+
+### AD-5: One frozen schema; explicit limits on its guarantees
+
+**Choice:** Construct tool parameters from the exact issued frozen schema bytes. Retain the byte round-trip guard and engine parsing. Do not change existing v2/v3 schema bytes or issued protocol identity in this feature.
+**Why:** It prevents schema drift, not semantic mistakes or provider incompatibility.
+
+The current reviewer v2 schema has root `oneOf`; Pi's Responses serializer forwards it unchanged with `strict: true`. Live acceptance must be tested, not inferred. A direct local probe also showed whitespace-only advisory claims/reasons passing Pi's frozen JSON Schema validation but failing `admitEmissionArguments`. Zod refinements, UTF-8/global byte bounds, canonical paths and cross-field/issuance requirements are not all enforced by the emitted JSON Schema. Keep every existing engine gate.
+
+Parsed tool arguments cannot establish what duplicate keys existed in the original generated JSON. Record raw-argument observation as unavailable where the harness does not expose it. Never convert this limitation into a claimed zero-duplicate-key measurement.
+**Rejected:** TypeBox mirror definitions, a provider-specific payload builder, silently changing optionality/root shape, or claiming all engine validation is now guaranteed by sampling.
+
+### AD-6: All three producer kinds remain in scope
+
+**Choice:** Retain `reviewer-payload` (v2 and standalone-successor v3), `judge-verdict` v1, and `refutation-verdict` v1.
+**Why:** The user previously chose scope-up; this revision changes integration order, not that scope.
+
+`producerKindsOfAgent` derives eligibility from the Agent Catalog. The issued request chooses exactly one eligible kind/version. The review-verifier Agent can produce different kinds in different issued contexts; do not activate all its possible tools or use output shape to select a decoder. Non-producer Agents receive no emission tool.
+**Rejected:** kind-only lookup that conflates panel designers with judges; treating an unverified prompt marker as authority; omitting successor v3 from qualification or tests.
+
+### AD-7: Issuance-aware instructions and honest degraded routes
+
+**Choice:** Render new tool-primary instructions only for emission-enabled requests, naming the selected tool and one-call rule. Extraction-only requests retain appropriate final-message instructions.
+**Why:** Telling Claude Code or a schema-incompatible route to call an unavailable tool is not degradation compatibility.
+
+Keep archived v1/v2/v3 request/context bytes unchanged. The emitted descriptor is a convenience projection of authenticated request authority, not a standalone permission claim. Missing/malformed descriptors on an expected emission-enabled request fail; absence on a non-producer or explicitly extraction-only request is normal. Version and digest come from the issued packet, never from current defaults or the model's arguments.
+**Rejected:** globally stamping tool-only wording into all historical/current contexts, or accepting the first marker found in prompt text.
+
+### AD-8: One observation/selection decision with per-path payload construction
+
+**Choice:** Normalize actual harness tool-call observations, bind them to one issued request attempt, then use one pure selection policy. Reviewer and verdict paths retain their distinct output construction and authoritative ingestion joins.
+**Why:** Provenance and refusal diagnostics must be returned by the same decision, not reconstructed by callers from the input records.
+
+The shared contract carries the expected kind/version/schema and a closed emission observation: absent, one complete call, multiple distinct calls, or unusable observation with a reason. Include tool-call identity. Adapters observe assistant tool calls, not JSON pasted in user/tool-result text. Replayed transport frames with the same identity and bytes are idempotent; contradictory duplicates refuse. Incomplete/failed tool-call observation is not silently reclassified as absence.
+
+The selection returns either emission payload + source, extraction result + source + optional single-call refusal, or a typed rejection. Wrong kind/version/request and unusable observation reject before schema selection. Engine-only argument refusal from exactly one correctly bound complete call allows extraction as defined in AD-9. Retain the authoritative reviewer protocol admission after selection and the verdict parsers with their criterion/lens/roster bindings. No FinalPayload or serialized verdict bypasses those joins.
+
+Keep the pure kernel in `emission-ingestion.ts`. It must not import `panel-program.ts` or I/O adapters. Shared schema definitions remain below the program layer, preventing a registry↔program import cycle. Use the existing DomainResult/immutable-record conventions; do not add branded wrappers that hide no invariant.
+**Rejected:** filtering unexpected emission kinds away as though nothing happened, selecting a parser from a model-supplied version, recounting validity separately in every shell, or testing only a helper that production never calls.
+
+### AD-9: One existing request-slot budget; no same-spawn correction protocol
+
+**Choice:** Emission and extraction rejection use the existing semantic attempts 1 and 2. Separate diagnostic causes, not separate retry counters. This explicitly supersedes the original separate-emission-budget wording in the Spec and Plan.
+**Why:** A second call is ambiguity by the retained duplicate policy. Instructing the child to correct arguments by calling again in the same spawn guarantees rejection. A second budget without a separate lifecycle was never implemented or specified coherently.
+
+| Observation in one issued attempt | Selection / accepted source | Attempt effect |
 |---|---|---|
-| candidate-type-driven-fp.md | 1 | 23 |
-| candidate-risk-security-first.md | 2 | 22 |
-| candidate-simplicity-first.md | 3 | 20 |
+| Zero emission calls | Existing extraction result unchanged | Accept if usable; otherwise one existing rejection |
+| One complete, correctly bound call; engine arguments valid | Emission, regardless of final text | Existing issuance joins still decide admission |
+| One complete, correctly bound call; engine arguments refused; final extraction usable | Extraction, retaining the emission refusal | Accept; no retry consumed |
+| One refused call; extraction unusable | Typed rejection with both causes retained | One rejection, not two |
+| Two distinct calls, including refused then corrected or identical arguments under different call IDs | Ambiguity, even with valid final text | One rejection |
+| Exact replay of one transport call observation | Same single observation | No additional consumption/publication |
+| Wrong request/kind/version or contradictory/incomplete observation | Typed refusal, never absence | Existing evidence/infrastructure classification at the boundary; no invented successful fallback |
+| Startup/transport infrastructure unavailable | No semantic payload decision | Existing infrastructure recovery at the same attempt |
 
-**User's choice:** type-driven-fp ("type driven fp yes please, i agree with panel") — same as the panel recommendation.
+A semantic rejection at attempt 1 permits one fresh engine-issued attempt-2 spawn; rejection at attempt 2 is terminal. A source accepted as emission but rejected by an issuance join must not fall back to final text. Agents are instructed not to re-emit within a spawn; after one argument refusal they may finish with the documented final-message fallback. The engine remains validity/count authoritative even if the model ignores that instruction.
 
-**Grafted strongest_ideas (synthesis):**
-1. **`strict: "prefer"` replaces `strict: "require"`** (from simplicity-first; fixes the codebase-fit judge's verified fatal flaw, independently confirmed by the extensibility judge against pi-ai's `resolveJsonSchemaStrictSampling`): the constraint is a provider request, never an enforcement; `require` throws on constraint-ignoring providers so the child's requests fail and the fallback never engages — the exact new-failure-mode class FR-010/NFR-011 forbid. Enforced by INV-1 (checkable lint rule). See AD-2.
-2. **Frozen-bytes-as-parameter-schema, made byte-explicit** (from simplicity-first's strongest idea): `parameters = JSON.parse(<frozen bytes>)` per kind — the base's `frozenPayloadSchemaParameters` — plus a deterministic JSON.stringify byte-match guard against the frozen bytes per kind and version, extending the existing "two contracts" test. One schema, no second serialization chain, zero new dependency. See AD-5.
-3. **Containment invariant** (from risk-security-first's codebase-fit strongest idea): the PR #52 fallback stays byte-for-byte identical to today in **every** input combination, so any behavioral divergence from the no-op baseline can only originate from the validated, deterministic emission path — testable as a fast-check containment property over all input combinations.
-4. **US4 admission rides the pure spawn-admission seam** (from the codebase-fit judge's fatal flaw against the recommended candidate): the pure US4 spawn-admission decision moved from the base's parallel module (`emission-tool.ts emissionToolAdmission` + child `session_start`) into `engine/src/core/spawn-admission.ts` as a new port + `SpawnGuardName` member (data on the block result); the child-side keeps a fail-loud registration self-check at the edge where registration actually happens. See AD-4.
+**Containment law:** when there are zero emission calls, or when exactly one correctly bound complete call is engine-refused and extraction is selected, the extraction result equals the existing parser's result on the same final candidates. There is deliberately no no-op-equivalence claim for duplicate or misbound calls. Property tests must assert those rejection outcomes rather than skip them under a misleading universal containment test name.
 
-### AD-2: Constrained sampling is a provider request, never an enforcement (`strict: "prefer"`)
+### AD-10: Acceptance and a real vertical slice before breadth
 
-**Choice:** `constrainedSampling: { type: "json_schema", strict: "prefer" }` on the emission tool definition.
-**Why:** pi-ai's `resolveJsonSchemaStrictSampling` throws (`Tool "..." requires JSON-schema constrained sampling, but strict tools are unsupported`) when `config.strict === "require"` and the provider does not support strict mode — verified in the installed pi 0.83.0 package and independently by two panel judges. With `require`, the child session's requests fail and the extraction fallback never engages, violating FR-010/NFR-011's zero-new-failure-modes. `prefer` returns `undefined` for constraint-ignoring providers: the request proceeds unconstrained, exactly as today. Disclosed deviation from FR-002's literal "requiring" wording, honored in substance — the constraint is carried and capable providers grammar-constrain the tool arguments by construction.
-**Rejected:**
-- `strict: "require"` — throws on constraint-ignoring providers (verified twice); the fallback never engages.
-- No constraint — fails FR-002 (no grammar constraining at all).
+**Choice:** Phase 2 resolves risky assumptions and establishes focused behavior-first acceptance; Phase 3 wires one real reviewer path; Phase 4 expands to successor/judge/refutation and degraded harness paths.
+**Why:** Schema/kernel unit tests alone cannot demonstrate provider acceptance, child startup, transcript capture or production selection.
 
-### AD-3: toolChoice (spec Open Question 1): NOT reachable from the extension seam
+Use `harness-capture-runtime.ts`, the issued reviewer protocol path and existing panel submission seams as reuse exemplars, with their tests. The installed Pi `examples/extensions/structured-output.ts` documents terminating success; it is a usage reference, not a second schema source. Replace redundant implementation-brief prose with these specific references and the behavior matrix. Freeze only minimal shared inputs/results needed by consumers; no automatic skeleton of every internal helper.
 
-**Choice:** Prompt-level tool availability — FR-002's strict-sampling constraint on the tool is the closing mechanism; per-request forced selection is recorded as a pi-side future direction.
-**Why:** pi 0.83.0's extension seam has no per-request tool-selection plumbing (verified: no `toolChoice`/`tool_choice` anywhere in pi's dist, docs, or engine/src; `ConstrainedSamplingConfig` is per-tool, resolution per-provider; `pi.setActiveTools()` toggles availability but cannot force selection). Reaching it would mean a custom provider wrapper — a second provider serialization surface FR-030 forbids. This resolves the spec's Open Question 1 ([NEEDS CLARIFICATION] marker): tool-call *arguments* are deterministic (fully closing the syntax-level class) while the tool call itself remains model-initiated; the arguments trust boundary is re-validated at the engine edge regardless, so determinism of the tool *call* is defense-in-depth convenience, not a security property the design depends on.
+No new default reviewer roster, general mutation platform or G5 work is selected. Feature-local negative controls must show bypassing selection and always-accept/always-reject behavior fail the relevant acceptance cases. A missing import or an empty file is not the behavioral RED for this feature.
 
-### AD-4: US4 admission rides the pure spawn-admission seam
+### AD-11: Measure useful acceptance, not only syntactic success
 
-**Choice:** The authoritative US4 (FR-008) decision lives in `engine/src/core/spawn-admission.ts` as a new port + guard (data on the block result); the child-side `before_agent_start` keeps a fail-loud registration self-check.
-**Why:** The panel-recommended candidate placed the US4 admission in a parallel module (`emission-tool.ts emissionToolAdmission` + child `session_start`) — the codebase-fit judge's verified fatal flaw. The found pure spawn-admission seam (`admitPiSpawnBatch` / `SpawnAdmissionPorts` / `SpawnGuardName` / `block()`) is the authoritative gate: it provably covers the extension-not-loaded / stale-revision class from the content-addressed revision (exactly what the revision handshake exists to catch) and blocks the batch before any state mutation with an actionable error naming the missing capability and the `/reload` remediation (AS-010; AS-011 idempotent). The capability declaration is data, per harness × producer kind: Pi declares `provided` when the loaded runtime revision contains the emission-tool module and the pi package supports the registration seam (provable at spawn time from the content-addressed revision — exactly the class the revision handshake exists to catch); Claude Code declares `not-provided` with degradation `extraction` (no Loom extension seam — the capture handler's Claude JSONL payload reader keeps extraction working). The guard blocks only not-provided capabilities whose degradation class is `refuse` (Pi's declaration on a failed revision proof — US4 hard fail, `/reload` remediation); Claude Code payload-producer spawns are therefore admitted and behave exactly as today — the pi-only `/reload` remediation does not apply to them, so hard-failing them would regress providers that currently work via extraction with no remediation path (gap-report re-run ruling — see AD-7). The child-side self-check catches registration failure at the edge where registration actually happens (defense that mostly cannot fire — the spawn-side revision proof mostly covers the class; named honestly as the residual over-fortification risk).
-**Gap-report re-run resolution (stakeholder-confirm, resolved):** Claude Code child sessions are the US2 capability-aware-degradation class — the US4 hard fail is scoped to Pi payload-producer spawns; the capability declaration is per-harness with the degradation class explicit on the not-provided member (see AD-7).
-**Rejected:**
-- `emissionToolAdmission` in `emission-tool.ts` + child `session_start` only — a parallel module diverging from the found pure spawn-admission seam (verified fatal flaw); "extension not loaded" is unobservable at the child (the `session_start` handler IS the extension — it cannot fire when the extension is absent).
-- Blocking all harnesses (FR-008's letter) — hard-fails currently-working Claude Code extraction with no remediation path; rejected by the gap-report re-run ruling (AD-7).
+**Choice:** Compare emission-enabled and extraction-only operation on the same frozen runtime with matched requests, source snapshots, models, reasoning settings and token budgets.
+**Why:** An unrelated old checkout or completed-only samples confound the latency and quality claims.
 
-### AD-5: One schema, no second contract — the frozen bytes ARE the emission tool's parameter schema
+Before the window, record the intended deployment route matrix and a fixed workload: at least 100 paired requests per required route/schema cell (reviewer v2/v3, judge v1, refutation v1), with easy/hard cases and fixed input/seed policy where supported. Unsupported cells have explicit qualification outcomes, not fabricated constrained samples. This is a minimum operational pilot, not a statistical proof of universal non-regression. If the intended deployment has no qualified capable route, the constrained feature cannot be declared measured/done.
 
-**Choice:** `frozenPayloadSchemaParameters(schemaBytes)` — the ONE constructor of an emission tool's `parameters` object, parsing the frozen zod-derived bytes once; plus a deterministic JSON.stringify byte-match guard against the frozen bytes per kind and version.
-**Why:** Byte-identity by construction (FR-021/AS-013, SC-006): one schema, one serialization chain, no TypeBox mirror, no drift, zero new dependency. pi-ai passes `tool.parameters` verbatim into provider requests and its `validateToolArguments` explicitly handles plain JSON-schema parameters. The byte-match guard extends the existing "two contracts" test (`engine/tests/wire-contract.test.ts`), proven through a different serialization chain than the stamper writes with.
-**Rejected:**
-- TypeBox `Type.Object` mirror — a second serialization chain violating FR-021's one-schema rule.
-- Hand-frozen schema bytes separate from zod — forbidden by the interview's tech preferences (no hand-frozen schema bytes separate from zod).
+Measure initial dispatch through accepted ingestion, including startup, tool acknowledgments, follow-up model turns and retries. Retain terminal failures/timeouts separately and require their rate not to increase; do not hide them by reporting successful samples alone. Report p50/p95, paired sample counts, tool-use/non-emission/fallback rates, retry causes and raw-observation limits. Provider-enforced structural failures and engine-only refusals are separate series. Report effect sizes and uncertainty; inconclusive evidence is not a pass.
 
-### AD-6: Judge and refutation-verdict payload production is in scope (gap-report re-run ruling)
-
-**Choice:** Scope up — per-kind emission tools for every cataloged producer payload kind: the `"reviewer-payload"` kind (the base design, unchanged) plus new `"judge-verdict"` and `"refutation-verdict"` kinds, each with a new frozen schema (`JUDGE_VERDICT_SCHEMA_V1`, `REFUTATION_VERDICT_SCHEMA_V1` — zod-derived via the reviewer-protocol codec pattern beside their parsers) and ingestion folds for the panel/refutation paths.
-**Why:** The user ruled scope-up at the gap-report re-run (round 2). The spec's summary/US1/glossary read as deliberate — the authors explicitly excluded other structured-payload paths in OOS-003 but not this one — and US1's actor explicitly includes judge and verifier kinds, so AS-004's zero-retry audit (SC-001) covers judge-kind spawns only if the design provides their emission tools. Engine-catalog verified: `isStandaloneReviewAgent` spans the reviewer and review-verifier kinds (both receiving frozen-schema reviewer packets through the subagent-stop capture path); the panel judge (`arch-judge-agent`, profile `panel-judge`) emits `JudgeVerdict` through the `capturedPanelRaw`/panel-contract ingestion path; the review-verifier kind's refutation verdict (`RefutationVerdict`, `/review-pr` panel) flows through the submission/verdict path. The producer-kind vocabulary (`PayloadProducerKind` + `producerKindsOfAgent`) lives in `model-profiles.ts` beside the catalog it derives from: the review-verifier agent is genuinely dual-payload (reviewer-payload for standalone/wave reviews, refutation-verdict for panel verdicts) and a kind-keyed-only scoping cannot express it — the `arch-panel` kind spans judges and non-judge designers, so only a catalog-derived projection (kind + profile) scopes the judge-verdict kind correctly.
-**Rejected:**
-- Scope-down (amend the spec so judges/verifiers are explicitly out) — the user ruled against it at the re-run; accepted without argument.
-- Kind-keyed-only scoping keyed on `arch-panel` — unrepresentable: the kind spans `arch-designer-agent`/`arch-interviewer-agent` (no verdicts) and `arch-judge-agent`; only a catalog-derived projection scopes the judge-verdict kind correctly.
-
-### AD-7: Claude Code payload-producer spawns degrade via extraction; US4 hard fail scoped to Pi (gap-report re-run ruling)
-
-**Choice:** The proceeding reading. The spawn-admission guard blocks only not-provided capabilities whose degradation class is `refuse` (Pi's declaration on a failed revision proof — where the `/reload` remediation exists); Claude Code payload-producer spawns are declared `not-provided` with degradation `extraction` and proceed exactly as today (no Loom extension seam — the capture handler's Claude JSONL payload reader keeps extraction working; the ingestion scanner ordinarily finds zero emission records on Claude Code).
-**Why:** The user ruled the proceeding reading at the gap-report re-run (round 2). The spec summary and US2 guarantee "no provider or model regresses"; hard-failing currently-working Claude Code extraction would regress functionality with no remediation path — the pi-only `/reload` remediation does not apply to Claude Code, so the actionable-error requirement (AS-010) could not be satisfied there. The degradation class is declared data on the not-provided member, making capability-aware degradation data-driven per harness (the extensibility judge's panel verdict on the closed capability ADT).
-**Rejected:**
-- The blocking reading (FR-008's letter) — hard-fails Claude Code spawns too, regressing currently-working extraction; the user ruled against it; the no-regression guarantee wins.
-
-### AD-8: One emission kernel, per-path ingestion folds — the authoritative verdict parse with issuance-join stays at the submission seam
-
-**Choice:** The shared emission kernel (`EMISSION_TOOL_SPECS`, `admitEmissionArguments`, `parseEmissionToolCallRecords`, the frozen schemas, the capability ADT, and the additive-preference / duplicate-fail-closed semantics) with per-path ingestion folds in the one module: `selectCanonicalPayload` (reviewer payload path — FinalPayload construction at the seam; the authoritative engine-side gate is the registry's schema-level parse at the selection and the tool's execute) and `selectVerdictSource` (panel verdict paths — returns the rawJson to parse; the authoritative engine-side gate is `parseJudgeVerdict`/`parseRefutationVerdict` with the panel authority's bindings at the submission seam).
-**Why:** The reviewer payload path's authoritative engine-side gate is the registry's parse at the selection; the panel verdict paths' issuance-join (criterion/lens binding, candidate/finding coverage, non-increasing scores) is not expressible in a standalone schema and must stay at ingress per FR-012 — the child session cannot evaluate it. Two genuinely different pipeline shapes; two thin selection functions in the same module with the same union vocabulary is the honest structure — not a divergent parallel module (the codebase-fit judge's fatal flaw was a parallel module diverging from a found pure seam; here the emission kernel IS the shared seam and there is no single pre-existing seam covering both payload types).
-**Rejected:**
-- Forcing the panel verdict paths through `selectCanonicalPayload`'s FinalPayload construction — verdicts are `VerdictEnvelope` payloads, not `FinalPayload`; a type-mismatched graft.
-- One over-generalized generic selection parameterized by parse — hides the two authoritative-gate placements from the type system and couples both paths to one signature.
-
----
+The p95 bound remains +25%. Use the same independent defect-severity rubric and blinded source/payload assessment for both arms, plus held-out known-defect cases; preserve disagreements and observed escapes. Required guardrail failure blocks done and triggers design reconsideration, not more retries until a favorable window appears.
 
 ## File Structure
 
-### Emission core (engine/src/core)
+All paths below are repository-relative unless explicitly identified as an external prerequisite. Reuse existing files before creating new abstractions.
 
-```
-engine/src/core/model-profiles.ts           — MODIFY: PayloadProducerKind ADT + producerKindsOfAgent projection (derived from AGENT_CATALOG — the single declarative registry)
-engine/src/core/emission-tool.ts            — NEW: EMISSION_TOOL_SPECS registry (three producer kinds), EmissionToolSpec, admitEmissionArguments, PayloadSource, EmissionToolCapability, frozenPayloadSchemaParameters (pure leaf, no I/O)
-engine/src/core/emission-ingestion.ts       — NEW: selectCanonicalPayload (reviewer payload path) + selectVerdictSource (panel verdict paths), IngestionSelection + VerdictSourceSelection unions (pure leaf, reuses the DomainResult kernel)
-engine/src/core/spawn-admission.ts          — MODIFY: emissionToolCapability port + "emission-tool-capability" SpawnGuardName + guard in the admission sequence (blocks only degradation-"refuse" capabilities; per-harness degradation explicit)
-engine/src/core/harness-capture.ts          — MODIFY: + EmissionToolCallRecord type beside FinalPayloadCandidate, + "emission-ambiguous" CaptureRejectionReason (additive; parseFinalPayload byte-verbatim untouched)
-engine/src/core/panel-contract.ts           — MODIFY: + zod-derived JUDGE_VERDICT_SCHEMA_V1 frozen bytes + digest (mirrors the reviewer-protocol codec pattern beside the judge parsers)
-engine/src/core/review-panel.ts             — MODIFY: + zod-derived REFUTATION_VERDICT_SCHEMA_V1 frozen bytes + digest (beside parseRefutationVerdict/serializeRefutationVerdict)
-engine/src/core/panel-program.ts            — MODIFY: verdict-source fold in submitArchitectureJudgeResult / submitRefutationVerdict (the issuance-join stays before the parse, untouched); + additive `source` field on the accepted-verdict journal events; + "emission-ambiguous" rejection category; panel prompt rendering tool-primary wording
-engine/src/core/reviewer-contract.ts        — MODIFY: REVIEWER_OUTPUT_CONTRACT tool-primary wording (FR-020; schema bytes + digest untouched, so CURRENT_REVIEWER_PROTOCOL is unchanged)
-engine/src/core/reviewer-protocol.ts        — MODIFY: renderReviewerWireContract embeds the new wording (re-stamp via the existing script)
-```
+### Pure emission and admission core
 
-### Ingestion seam (engine/src/handlers + engine/src/orchestration)
-
-```
-engine/src/handlers/subagent-stop/capture-orchestration-result.ts  — MODIFY: Claude payload reader gains parseEmissionToolCallRecords (JSONL tool_use blocks); pass into the runtime
-engine/src/orchestration/harness-capture-runtime.ts                — MODIFY: captureHarnessResult folds observed emission records through selectCanonicalPayload (the FR-003 seam change at the existing parseFinalPayload call site); publish the provenance sidecar; journal fallback engagement + emission-retry consumption
-engine/src/handlers/helpers/orchestration.ts                       — MODIFY: executeDeterministicPanelOperation folds the captured panel transcript bytes through selectVerdictSource before parseJudgeVerdict/parseRefutationVerdict (capturedPanelRaw byte-verbatim untouched); additive provenance record on the operation artifacts
+```text
+engine/src/core/model-profiles.ts                 — retain catalog-derived producer kinds
+engine/src/core/emission-tool.ts                  — retain frozen registry; explicit argument refusals
+engine/src/core/emission-ingestion.ts             — issued binding + observation/selection result contract
+engine/src/core/spawn-admission.ts                — gather-ready inputs, pure expected-capability decision
+engine/src/core/harness-capture.ts                — additive emission observation/rejection vocabulary
+engine/src/core/panel-contract.ts                — retain frozen judge schema and authoritative parser
+engine/src/core/review-panel.ts                  — retain frozen refutation schema and authoritative parser
 ```
 
-### Spawn-side emission-tool descriptor (engine/src/handlers)
+### Pi and capture shells
 
-```
-engine/src/handlers/helpers/programs/helpers.ts    — MODIFY: + stampEmissionToolDescriptor (shared pure stamp: the LOOM_PI_EMISSION_TOOL descriptor for cataloged payload producers — producer kind + schema version, derived from the catalog projection + the spawn's payload kind, never prompt text); applied at the same spawn prompt assembly call sites that stamp the request/context digest markers (programs/standalone.ts, programs/wave-gate.ts, orchestration.ts)
-```
-
-### Pi surface (pi/)
-
-```
-pi/emission-tool.ts          — NEW: registerEmissionTools (pi.registerTool surface), execute shell over admitEmissionArguments
-pi/extension.ts              — MODIFY: kind-scoped registration at before_agent_start from the engine-stamped emission-tool descriptor + child-side registration self-check + emissionToolCapability gathered into the spawn-admission ports
-pi/transcript-adapter.ts     — MODIFY: parseEmissionToolCallRecords extraction (pure Pi scan for toolCall blocks)
-```
-
-### Agents, docs, protocol
-
-```
-agents/_shared/wire-contract.md   — MODIFY: tool-primary wording (FR-020); re-stamp shims via scripts/stamp-wire-contract.ts
-docs/                             — MODIFY: agent README + model-profile docs (FR-022: emission-tool flow; capability flags user-side)
-CONTEXT.md                        — MODIFY: "Emission tool", "Payload source", "Constrained sampling" glossary terms
-scripts/stamp-wire-contract.ts    — re-run to re-stamp fragments (no code change)
+```text
+pi/emission-tool.ts                              — register exact tool; execute parser; terminating acknowledgment
+pi/emission-startup.ts                           — narrow readiness adapter once launcher prerequisite is proven
+pi/extension.ts                                  — issued capability wiring, not a startup-notification substitute
+pi/transcript-adapter.ts                         — complete, request-bound tool-call observations
+engine/src/handlers/subagent-stop/capture-orchestration-result.ts — harness observation adapter
+engine/src/orchestration/harness-capture-runtime.ts — selection, existing admission, provenance publication
+engine/src/core/panel-program.ts                 — verdict selection before authoritative parse; accepted source
+engine/src/handlers/helpers/orchestration.ts      — legacy panel path, same selection policy
+engine/src/handlers/helpers/programs/helpers.ts  — descriptor/instruction projection from issued authority
+engine/src/handlers/helpers/programs/standalone.ts — standalone/successor request integration
+engine/src/handlers/helpers/programs/wave-gate.ts — Wave request integration
 ```
 
-### Tests (engine/tests)
+The installed external subagent launcher is not a repository artifact. Any required launcher hook must first have an identified owner, version and separate delivery plan. Do not introduce `pi/emission-startup.ts` as a pass-through if the supported launcher already exposes everything the extension needs; the adapter must earn its seam with a real startup test substitute.
 
-```
-engine/tests/core/emission-tool.test.ts            — NEW: registry + admission unit tests (mock-free)
-engine/tests/core/emission-ingestion.test.ts       — NEW: selectCanonicalPayload + selectVerdictSource property tests (fast-check)
-engine/tests/core/emission-tool-contract.test.ts   — NEW: byte-match guard vs frozen schema bytes per kind and version (three kinds)
-engine/tests/core/spawn-admission.test.ts          — MODIFY: capability gate + per-harness degradation + hard fail + AS-011 idempotency
-engine/tests/core/panel-verdict-fold.test.ts       — NEW: submission-seam fold tests (emission wins / extraction byte-verbatim / duplicate fail-closed) + additive source field + "emission-ambiguous" category
-engine/tests/pi/emission-tool.test.ts              — NEW: pi execute shell tests (registerTool + harness validation path)
-engine/tests/wire-contract.test.ts                 — MODIFY: extend the two-contracts guard to the emission tools' parameter schemas (three kinds)
-engine/tests (harness-capture suites)              — MODIFY: emission-path capture outcomes (selector + sidecar + journal events)
+### Contracts, docs and qualification
+
+```text
+engine/src/core/reviewer-contract.ts             — new-issuance wording only, schema/rubric bytes unchanged
+engine/src/core/reviewer-protocol.ts             — route-aware rendered instructions and frozen issuance handling
+agents/_shared/wire-contract.md                  — regenerate from the existing source
+agents/README.md                                — producer flow and extraction-only behavior
+agents/* reviewer shims                         — re-stamp through scripts/stamp-wire-contract.ts
+CONTEXT.md                                      — emission source/readiness terminology, no G5 changes
+docs/model-profiles-and-calibration.md           — exact-route qualification and operator configuration
+docs/pi-usage.md                                — readiness dependency, errors and activation
+scripts/run-model-calibration.ts                — matched end-to-end metrics; no new provider serializer
+.claude/specs/2026-09-16-grammar-constrained-decoding/feasibility.md — measured assumptions and blockers
+calibration/grammar-constrained-decoding/        — route matrix, raw observations, paired results and summary
 ```
 
----
+### Tests
+
+```text
+engine/tests/core/emission-tool.test.ts          — engine-only refinements; frozen registry
+engine/tests/core/emission-tool-contract.test.ts — byte identity for every supported kind/version
+engine/tests/core/emission-ingestion.test.ts     — full selection matrix, identity/replay and exact fallback law
+engine/tests/core/spawn-admission.test.ts        — expected capability and explicit extraction-only routes
+engine/tests/pi/emission-tool.test.ts            — real Pi validation and terminating result semantics
+engine/tests/pi/emission-startup.test.ts         — zero-request negative controls, cleanup and ready success
+engine/tests/pi/emission-vertical-slice.test.ts  — real request→child→capture→ingestion path
+engine/tests/core/panel-verdict-fold.test.ts      — real panel submission joins plus source selection
+engine/tests/wire-contract.test.ts               — stamp/schema consistency
+engine/tests/core/reviewer-protocol-docs.test.ts — new vs archived/extraction-only wording
+```
+
+Extend the existing harness-capture and transcript-adapter suites at their owning paths. Decompose must resolve their actual filenames and explicitly allocate shared-file edits; do not assign two concurrent Tasks overlapping production paths.
 
 ## Component Design
 
-### Emission tool registry
+### Frozen registry and issued binding
 
-**Responsibility:** The frozen registry + ADTs mapping each of the three cataloged producer payload kinds to its emission tool spec — the one place kind→schema knowledge lives.
-**Files:** `engine/src/core/emission-tool.ts` (registry + admission), `engine/src/core/model-profiles.ts` (PayloadProducerKind + producerKindsOfAgent)
-**Interface:**
+**Responsibility:** Associate each allowed producer kind/version with its exact frozen schema and engine parser; select one through authenticated issuance.
+**Files:** `model-profiles.ts`, `emission-tool.ts`, existing reviewer and verdict schema modules.
+**Interface:** A parsed issued binding carries request/context/attempt identity, producer kind, supported version, exact tool name and schema digest. Reject invalid pairs at the boundary; use valid-pair types internally rather than independent string fields that allow unsupported combinations.
+**Depends on:** Agent Catalog and issued request/context readers, existing schema parsers and DomainResult kernel. No Pi or provider import in the core.
 
-```ts
-// model-profiles.ts — the producer-kind vocabulary lives beside the catalog it
-// derives from (the single declarative registry), because the review-verifier
-// agent is genuinely dual-payload and a kind-keyed-only scoping cannot express it.
-type PayloadProducerKind =
-  | Readonly<{ kind: "reviewer-payload" }>      // reviewer + review-verifier kinds (standalone/wave reviews)
-  | Readonly<{ kind: "judge-verdict" }>         // the panel judge (arch-judge-agent, profile "panel-judge")
-  | Readonly<{ kind: "refutation-verdict" }>;   // review-verifier kind (/review-pr panel verdicts)
+### Observation and source selection
 
-// Derived projection of AGENT_CATALOG — never a second source. The panel-judge
-// profile is unique to arch-judge-agent, so the projection composes
-// isStandaloneReviewAgent + the catalog entry (kind + profile); a non-producer
-// agent (arch-designer/arch-interviewer) produces an empty list.
-function producerKindsOfAgent(agent: LoomAgentName): readonly PayloadProducerKind[];
+**Responsibility:** Apply AD-8/AD-9 once; return selected bytes and provenance, or a typed refusal with retained causes.
+**Files:** `emission-ingestion.ts`, `harness-capture.ts`, harness adapters.
+**Interface:** `selectCanonicalPayload(expected, observation, finalCandidates)` and `selectVerdictSource(expected, observation, existingRawJson)` share the observation decision, not a caller-maintained policy. The reviewer extraction arm carries its existing DomainResult; the verdict extraction arm preserves the existing raw input. Neither silently drops invalid observations or diagnostics.
+**Depends on:** Issued binding, immutable observations, engine admission functions, unchanged extraction. No I/O.
 
-// emission-tool.ts
-type EmissionToolSpec = Readonly<{
-  toolName: "loom_emit_reviewer_payload" | "loom_emit_judge_verdict" | "loom_emit_refutation_verdict";  // literal union — no branded newtype
-  schemaVersions: Readonly<{
-    // reviewer-payload:    v2 (CURRENT_REVIEWER_PROTOCOL) + v3 (standalone-successor) — unchanged from the base design
-    // judge-verdict:       v1 (JUDGE_VERDICT_SCHEMA_V1 — the current external snake_case contract of serializeJudgeVerdict)
-    // refutation-verdict:  v1 (REFUTATION_VERDICT_SCHEMA_V1 — the current external contract of serializeRefutationVerdict)
-    [version: string]: { schemaBytes: string; parsePayload: (raw: Uint8Array) => DomainResult<unknown, ProtocolFailure> };
-  }>;
-}>;
+### Child startup and tool execution
 
-const EMISSION_TOOL_SPECS: Readonly<Record<"reviewer-payload" | "judge-verdict" | "refutation-verdict", EmissionToolSpec>>; // frozen; a new producer kind is one entry + compiler-guided wiring
+**Responsibility:** At the launcher seam, provision before prompt, prove actual readiness, then let model execution begin. Execute performs parser admission and returns terminating success or the harness's real error signal.
+**Files:** `spawn-admission.ts`, `pi/emission-tool.ts`, `pi/extension.ts`, conditional narrow startup adapter.
+**Interface:** Readiness success and startup unavailable are distinct outcomes. Timeout/cancel are infrastructure observations. Registration is idempotent only for the exact same request/kind/version/digest; a contradictory re-registration refuses. Provider exposure uses the frozen route decision.
+**Depends on:** The Phase-2 proven launcher readiness hook. It is a prerequisite, not a presumed capability in today's print-mode launcher.
 
-function frozenPayloadSchemaParameters(schemaBytes: string): unknown;
-// the ONE constructor of an emission tool's parameters object (AD-5, unchanged);
-// the confined TSchema cast's price is paid once per kind — the byte-identity invariant.
+### Reviewer/panel ingestion and provenance
 
-function admitEmissionArguments(spec: EmissionToolSpec, version: "v2" | "v3" | "v1", rawArgs: unknown): EmissionArgumentAdmission;
-// the parse IS the gate at the emission edge. For reviewer-payload this is the
-// SAME full schema-level parser the fallback uses; for the verdict kinds it is
-// the pure schema-conformance parse of the frozen verdict schema (shape, score
-// domain, prose sanitization) — the authoritative engine-side gate for verdicts
-// is the submission seam's parse with the panel authority's bindings (AD-8, FR-012).
+**Responsibility:** Observe → select in core → run existing issued-contract admission → persist accepted evidence and source.
+**Files:** `harness-capture-runtime.ts`, capture adapters, `panel-program.ts`, legacy helper integration.
+**Interface:** Record accepted source, request/call identity where applicable, schema digest and any single-call refusal that led to fallback. Do not reconstruct source in a later logger. Reuse bounded no-follow artifact publication and exact replay/idempotency patterns. Missing/corrupt required provenance is unavailable evidence, never an invented historical source.
 
-type EmissionArgumentAdmission =
-  | Readonly<{ kind: "valid"; payload: unknown }>
-  | Readonly<{ kind: "invalid-schema"; code: string; message: string }>;   // never-ingestable, FR-006
-
-type EmissionToolCapability =
-  | Readonly<{ kind: "provided"; schemaDigest: ArtifactDigest }>
-  | Readonly<{ kind: "not-provided"; reason: string; degradation: "refuse" | "extraction" }>;
-  // per harness × producer kind: Pi's declaration returns degradation "refuse"
-  // on a failed revision proof (US4 hard fail — the /reload remediation exists);
-  // Claude Code's declaration returns not-provided with degradation "extraction"
-  // (no Loom extension seam — the US2 degradation class; the guard therefore
-  // admits those spawns — AD-7).
-
-type PayloadSource = "emission-tool" | "extraction";   // FR-009 vocabulary
-```
-
-**Depends on:** `engine/src/core/model-profiles.ts` (AGENT_CATALOG, isStandaloneReviewAgent, the panel-judge profile), `engine/src/core/panel-contract.ts` (JUDGE_VERDICT_SCHEMA_V1), `engine/src/core/review-panel.ts` (REFUTATION_VERDICT_SCHEMA_V1), `engine/src/core/reviewer-contract.ts` (frozen bytes + digest), `engine/src/core/reviewer-protocol.ts` (the same parsers the fallback uses), `engine/src/core/orchestration-contract/identity.ts` (DomainResult kernel). No pi-package import — dependency direction stays pi → engine.
-
-### Canonical-payload selection (reviewer payload path)
-
-**Responsibility:** The deterministic canonical-payload selection for the reviewer payload path — additive preference, fallback preservation, and duplicate rejection each a discriminated-union member; provenance constructed at the same deterministic seam that selects the source.
-**Files:** `engine/src/core/emission-ingestion.ts`
-**Interface:**
-
-```ts
-type IngestionSelection =
-  | Readonly<{ kind: "emission-tool-arguments"; payload: FinalPayload; source: "emission-tool" }>
-  | Readonly<{ kind: "final-message-extraction"; payload: FinalPayload; source: "extraction" }>
-  | Readonly<{ kind: "duplicate-emission-call" }>;   // ambiguity → fail-closed to the emission-tool budget (FR-007)
-
-function selectCanonicalPayload(
-  emissionRecords: readonly EmissionToolCallRecord[],
-  finalMessageCandidates: readonly FinalPayloadCandidate[],
-): IngestionSelection;
-```
-
-Semantics (each a union member, testable mock-free):
-- exactly one emission record with arguments valid per the registry's parsePayload → wins deterministically over final-message extraction (FR-003/AS-003); extraction is not consulted.
-- zero records, or invalid records → PR #52's `parseFinalPayload` engages exactly as today (FR-004/FR-005/AS-006); invalid records are never-ingestable and one observable round of the emission-tool bounded-retry budget is consumed (FR-006) — the fallback still engages exactly as today on the same observation (containment: the new path only adds, never alters).
-- more than one emission record → ambiguity → fail-closed (never ingested), observable round consumed (FR-007/AS-007).
-- The "both sources present and valid" state's deterministic winner is encoded in the union, not a caller convention — the engine never chooses between interpretations; provenance cannot drift (the spec's named risk closed by construction).
-
-**Depends on:** `engine/src/core/harness-capture.ts` (EmissionToolCallRecord, FinalPayloadCandidate, parseFinalPayload — consumed, never modified), `engine/src/core/emission-tool.ts` (parsePayload + PayloadSource), `engine/src/core/orchestration-contract/identity.ts` (DomainResult/canonicalRecord kernel).
-
-### Verdict-source selection (panel verdict paths)
-
-**Responsibility:** The deterministic verdict-source selection for the panel verdict paths — additive preference, fallback preservation, and duplicate rejection each a discriminated-union member; the authoritative parse with the panel authority's bindings stays at the submission seam.
-**Files:** `engine/src/core/emission-ingestion.ts`
-**Interface:**
-
-```ts
-type VerdictSourceSelection =
-  | Readonly<{ kind: "emission-tool-arguments"; rawJson: string; source: "emission-tool" }>
-  | Readonly<{ kind: "final-message-extraction"; source: "extraction" }>   // the caller's existing rawJson stands byte-verbatim
-  | Readonly<{ kind: "duplicate-emission-call" }>;                          // ambiguity → fail-closed to the emission-tool budget (FR-007)
-
-function selectVerdictSource(
-  transcriptText: string,
-  emissionRecords: readonly EmissionToolCallRecord[],
-): VerdictSourceSelection;
-```
-
-Semantics (each a union member, testable mock-free):
-- exactly one emission record with arguments valid per the registry's parsePayload for the verdict kind → its deterministically serialized arguments become the rawJson the submission seam parses (the kernel's `parseVerdictEnvelope` with the panel bindings — the authoritative engine-side gate with the issuance-join inside, FR-012 retained verbatim); final-message extraction is not consulted (FR-003/AS-003).
-- zero records, or invalid records → the caller's existing rawJson stands byte-verbatim: the kernel's fail-closed extraction (`parseJudgeVerdict`/`parseRefutationVerdict`'s prose/fence admission) engages exactly as today (FR-004/FR-005/AS-006); invalid records are never-ingestable and one observable round of the emission-tool bounded-retry budget is consumed (FR-006); the capture-rejection path (no final payload) still engages exactly as today on the same observation (containment).
-- more than one emission record → ambiguity → fail-closed (never ingested), observable round consumed (FR-007/AS-007).
-- Provenance is constructed at the same deterministic seam that selects the source: the submit functions' fold records the selected source on the accepted-verdict journal event.
-
-**Depends on:** `engine/src/core/emission-tool.ts` (parsePayload + PayloadSource), `engine/src/core/harness-capture.ts` (EmissionToolCallRecord — consumed, never modified), `engine/src/core/orchestration-contract/identity.ts` (DomainResult kernel).
-
-### Spawn-admission capability gate
-
-**Responsibility:** The authoritative US4 (FR-008) decision — refuse Pi payload-producer spawns when the constrained path cannot be provided, blocking the batch before any state mutation; Claude Code spawns degrade via extraction (AD-7).
-**Files:** `engine/src/core/spawn-admission.ts` (modified minimally)
-**Interface:**
-
-```ts
-// SpawnAdmissionPorts gains:
-emissionToolCapability: (kind: PayloadProducerKind) => EmissionToolCapability;
-
-// SpawnGuardName gains:
-| "emission-tool-capability"
-
-// guard in the admission sequence (itemAdmission): for each of the spawn item's
-// cataloged producer kinds (producerKindsOfAgent), the capability is consulted;
-// the item blocks when a not-provided capability's degradation class is "refuse",
-// with an actionable error naming the missing capability and the remediation (/reload).
-// A not-provided capability with degradation "extraction" (Claude Code's declaration)
-// never blocks — those spawns are the US2 capability-aware-degradation class (AD-7).
-```
-
-The block is data on the result — idempotent on retry, no residual state (AS-011). The capability declaration is per-harness data: Pi declares `provided` when the loaded runtime revision contains the emission-tool module and the pi package supports the registration seam (provable at spawn time from the content-addressed revision — exactly the class the revision handshake exists to catch); Claude Code declares `not-provided` with degradation `extraction` (no Loom extension seam — the spawn-admission gate covers Pi spawns; Claude Code spawns are recorded via `engine/src/handlers/post-tool-use/record-orchestration-spawn.ts` without an admission gate and proceed exactly as today, their degradation observable via recorded provenance — US3).
-
-**Depends on:** `engine/src/core/emission-tool.ts` (EmissionToolCapability), `engine/src/core/model-profiles.ts` (producerKindsOfAgent).
-
-### Pi emission-tool surface
-
-**Responsibility:** Register the per-kind emission tool; execute shell over admitEmissionArguments.
-**Files:** `pi/emission-tool.ts` (NEW)
-**Interface:**
-
-```ts
-registerEmissionTools(pi: ExtensionAPI, kind: PayloadProducerKind, schemaVersion: "v2" | "v3" | "v1"): void;
-// registers via pi.registerTool() with:
-//   parameters = frozenPayloadSchemaParameters(spec.schemaVersions[version].schemaBytes)  // AD-5
-//   constrainedSampling: { type: "json_schema", strict: "prefer" }                        // AD-2, INV-1
-//   executionMode: "parallel"                                                             // NFR-002
-// execute calls admitEmissionArguments; a valid payload returns as the tool result
-// (arguments conform by construction at the syntax level, AS-002); an invalid-schema
-// refusal returns an error result the model sees and re-emits within the bounded
-// budget (FR-006). For the verdict kinds the tool's execute is the syntax-level gate
-// only — the authoritative engine-side gate is the submission seam's parse with the
-// panel authority's bindings (AD-8, FR-012): the trust boundary is re-validated at
-// the engine edge regardless, so the difference is defense-in-depth placement, not a
-// security property the design depends on.
-// No fs writes, no command execution, no uploads — least privilege; the transcript
-// is the transport, so the tool cannot bypass the child's armed guards.
-```
-
-**Depends on:** `engine/src/core/emission-tool.ts` (registry + admission), `pi/extension.ts` (registration surface).
-
-### Spawn-side emission-tool descriptor
-
-**Responsibility:** The engine-stamped descriptor for cataloged payload producers — producer kind + schema version, per spawn.
-**Files:** `engine/src/handlers/helpers/programs/helpers.ts` (modified; applied at the spawn prompt assembly call sites in `programs/standalone.ts`, `programs/wave-gate.ts`, `orchestration.ts`)
-- `stampEmissionToolDescriptor(agent, spawnPayloadKind)` — a pure function producing the `LOOM_PI_EMISSION_TOOL` marker text from `producerKindsOfAgent(agent)` + the spawn's payload kind; a non-producer agent produces no marker (the spawn prompt is byte-identical to today — containment).
-- Applied at the same engine-owned spawn prompt assembly seam that stamps the request/context digest markers into the spawn task — one mechanism family, engine-owned, never prompt text (FR-001). The descriptor disambiguates the review-verifier agent's dual payload kinds per spawn (standalone/wave review vs `/review-pr` panel verdict slot) and binds the schema version explicitly.
-
-**Depends on:** `engine/src/core/model-profiles.ts` (producerKindsOfAgent), `engine/src/core/emission-tool.ts` (the schema-version vocabulary).
-
-### Child-side registration self-check
-
-**Responsibility:** Kind-scoped registration at before_agent_start + fail-loud self-check at the edge where registration actually happens.
-**Files:** `pi/extension.ts` (modified minimally)
-- At `before_agent_start`, the child scans its spawn context for the engine-stamped emission-tool descriptor (`LOOM_PI_EMISSION_TOOL:<producer-kind>:<schema-version>` — exposed as `event.prompt`, pi 0.83.0) and registers **only** that producer kind's tool at that schema version — per-kind scoping derived from the catalog via the engine-stamped descriptor, never minted by prompt text.
-- A pure self-check verifies the tool actually registered (present in the child's tool list, schema digest matches the frozen bytes); failure surfaces an actionable error through the existing startup-sweep reporting protocol — fail loud at the edge.
-- An absent descriptor (ad-hoc child, non-producer) registers nothing: the ordinary case, not an error.
-- The schema version rides the descriptor for all three kinds: for reviewer-payload spawns the engine derives it from the reviewer context packet it issues (the v2-vs-v3 admission seam stays untouched — so the tool, the packet, and the ingestion seam cannot disagree about which schema bytes apply); for panel slots it is the panel verdict schema version (v1) derived from the registered panel program.
-
-**Depends on:** `pi/emission-tool.ts`, the spawn-side descriptor stamp (`engine/src/handlers/helpers/programs/helpers.ts`), `engine/src/core/emission-tool.ts` (registry + capability).
-
-### Panel verdict ingestion folds
-
-**Responsibility:** Fold observed emission-tool calls in the panel transcripts through the deterministic verdict-source selection; record provenance.
-**Files:** `engine/src/core/panel-program.ts` (the persistent submission seams), `engine/src/handlers/helpers/orchestration.ts` (the legacy deterministic path) — modified additively
-- `submitArchitectureJudgeResult` / `submitRefutationVerdict` gain the fold: the transcript text (the captured attempt bytes the handlers already submit as `rawJson`) folds through `selectVerdictSource` BEFORE the parse; the issuance-join (resolvePanelRequest → roster → slot binding → bound criterion/lens) stays before the parse regardless (FR-012) — untouched. On the emission path the winning rawJson is the serialized arguments; on extraction the rawJson stands byte-verbatim (containment); on duplicate the existing rejection path engages with the new additive `"emission-ambiguous"` category — one mechanism (rejectionEvent → attempt advance), magnitude unchanged.
-- The legacy deterministic path (`executeDeterministicPanelOperation` → `capturedPanelRaw`) gains the same fold on the captured panel transcript bytes before `parseJudgeVerdict`/`parseRefutationVerdict` (`capturedPanelRaw` byte-verbatim untouched); the duplicate case fails closed with the legacy path's existing diagnostic vocabulary.
-- The helpers' `verdict`/`tally` commands (`engine/src/handlers/helpers/review-panel.ts`) read caller-attested stdin and canonical-disk bytes — not transcript ingestion — and stay untouched (named honestly).
-- The accepted-verdict journal events (`architecture-judge-accepted` / `refutation-verdict-accepted`) gain the additive `source: PayloadSource` field, recorded by the same deterministic seam that selects the source; pre-feature journals (no field) read as `"extraction"` — the only path that existed. The legacy path's operation artifacts gain an additive provenance record via the existing `operationArtifact` seam (the same bounded record shape; retention inherited verbatim, FR-011).
-
-**Depends on:** `engine/src/core/emission-ingestion.ts` (selectVerdictSource), `engine/src/core/emission-tool.ts` (the registry), `engine/src/core/panel-contract.ts` / `engine/src/core/review-panel.ts` (the frozen verdict schemas + the same parsers).
-
-### Frozen verdict schemas
-
-**Responsibility:** The zod-derived frozen schema bytes + digests for the two new payload kinds — one schema per verdict, no second contract (FR-021).
-**Files:** `engine/src/core/panel-contract.ts` (JUDGE_VERDICT_SCHEMA_V1), `engine/src/core/review-panel.ts` (REFUTATION_VERDICT_SCHEMA_V1)
-- The judge verdict schema is derived from the current external snake_case contract of `serializeJudgeVerdict` (`{ criterion, rankings: [{ candidate, score, fatal_flaw, strongest_idea }] }`); the refutation verdict schema from `serializeRefutationVerdict` (`{ criterion, verdicts: [{ finding_id, verdict, reasoning }] }`) — the SAME serialization chains the panel writes with, so the byte-match guard is proven through a different chain than the stamper writes with.
-- The frozen bytes are derived via the reviewer-protocol codec pattern (`z.toJSONSchema` + `sha256Hex` digest) beside their parsers.
-- The issuance-join constraints (criterion binding, candidate/finding coverage, non-increasing scores) stay in `parseJudgeVerdict`/`parseRefutationVerdict` at ingress — not expressible in a standalone schema (the spec's own glossary).
-
-**Depends on:** `engine/src/core/panel-kernel.ts` (the envelope vocabulary the parsers validate against), `engine/src/core/reviewer-contract.ts` (the codec pattern).
-
-### Ingestion seam extension (reviewer payload path)
-
-**Responsibility:** Observe emission-tool calls in each harness's transcript and fold them through the deterministic selection; persist provenance.
-**Files:** `engine/src/handlers/subagent-stop/capture-orchestration-result.ts`, `engine/src/orchestration/harness-capture-runtime.ts`, `pi/transcript-adapter.ts` (all modified additively)
-- Both adapters gain one new pure extraction: `parseEmissionToolCallRecords` (Pi: `PiContentBlock` toolCall blocks; Claude: the equivalent from its JSONL `tool_use` blocks). Emission-tool arguments are OBSERVED from the transcript at ingestion time — the transcript stays immutable audit evidence; the child writes nothing to the run directory. The seam is harness-agnostic from day one; on Claude Code the scanner ordinarily finds zero records (Claude child sessions are the US2 degradation class — AD-7).
-- `captureHarnessResult` gains the fold: observed emission records fold through `selectCanonicalPayload` alongside the final-message candidates (the one-line FR-003 seam change at the existing `parseFinalPayload` call site); the selected source becomes the persisted provenance.
-- The duplicate case rides the existing rejection path (`terminalizeCaptureRejection` → journal → attempt advance, `SemanticAttempt` 1|2) with the new `"emission-ambiguous"` reason — one mechanism, magnitude unchanged, no second state model.
-- The issuance-join checks (frozen scope, packet/generation binding, prior-assessment ordering) stay at ingress regardless of emission-tool availability (FR-012) — untouched.
-
-**Depends on:** `engine/src/core/emission-ingestion.ts`, `engine/src/core/harness-capture.ts`, `engine/src/orchestration/run-directory-handle.ts` (publishArtifactSet / readArtifactBytes / readRunBytesNoFollow).
-
-### Emission provenance sidecar (reviewer payload path)
-
-**Responsibility:** One bounded sidecar record beside the transcript evidence per ingested payload: the recorded source plus the captured arguments when the emission path won, and the schema digest.
-**Files:** published from `engine/src/orchestration/harness-capture-runtime.ts` via the existing `handle.publishArtifactSet` (precedent: `native-capture-observations/<requestId>.json`); record shape `{ kind, source, origin, arguments?, schemaDigest }`. Written at ingestion time by the same deterministic seam that selects the source — provenance cannot drift; read via the `readRunBytesNoFollow` no-follow convention; retention inherited verbatim (FR-011); no new retention, expiration, or deletion policy; no new fields on existing artifacts.
-- Observability: the required-by-spec floor is provenance + `captureAuditLine` (existing stderr audit pattern); the design adds structured journal events for fallback engagement and emission-tool retry consumption (matching the existing `appendEvent` schemaVersion/dedupKey/recordedAtMs pattern) plus retry-round / fallback-engagement counters surfaced through `scripts/run-model-calibration.ts` — the interview's maximal interpretation, flagged honestly as intent beyond the required floor.
-
-**Depends on:** `engine/src/core/harness-capture.ts`, `engine/src/orchestration/run-directory-handle.ts`.
-
-### Wire contract + docs
-
-**Responsibility:** One schema, one contract, tool-primary wording (FR-020/FR-021/FR-022).
-- `REVIEWER_OUTPUT_CONTRACT` wording replaced with tool-primary wording ("Call the emission tool as the primary emission path; final-message extraction is the deterministic fallback only."), regenerating the shared fragment through the existing stamp seam (`renderReviewerWireContract()` + `scripts/stamp-wire-contract.ts`). `REVIEWER_PAYLOAD_SCHEMA_V2` bytes and their digest untouched, so `CURRENT_REVIEWER_PROTOCOL` is unchanged and issued v1/v2/v3 contracts stay valid.
-- The panel prompt rendering (`engine/src/core/panel-program.ts`) gains tool-primary wording for the judge verdict and refutation verdict instructions — judges do not receive the reviewer wire contract (only reviewer roles may receive a reviewer packet), so the engine-rendered panel prompts are the verdict paths' protocol text; the toolName literal appears in the wording from the registry, never hand-minted.
-- The byte-match guard extends to the emission tools' parameter schemas per kind and version, three kinds (SC-006/AS-013).
-- Agent README and model-profile docs describe the emission-tool flow and state that provider capability flags remain user-side configuration (loom contributes documentation only, FR-022).
-- CONTEXT.md gains the "Emission tool", "Payload source", and "Constrained sampling" glossary terms from the spec's appendix.
-
-**Depends on:** `engine/src/core/emission-tool.ts` (the toolName literals appear in the wording), `engine/src/core/panel-program.ts` (the panel prompt rendering).
-
----
+For new reviewer captures, publish the bounded source record with the existing evidence publication/recovery mechanism before declaring acceptance complete. Panel acceptance events gain a source arm with a parser-compatible historical projection: genuinely pre-feature accepted events were extraction; malformed present-day source fields are not historical absence. Legacy deterministic operations record the same selected source through operation artifacts. No new retention policy or full payload copy in every journal event.
+**Depends on:** Shared selection, issued reviewer/panel authority and existing publication/replay seams. Manual verdict/tally commands remain canonical-input parsers, not transcript scanners.
 
 ## Data Flow
 
-```
-Parent → spawn-admission (emission-tool-capability gate — blocks only degradation-"refuse"; correlator stamping → write grants)
-       → spawn prompt assembly (the engine-stamped LOOM_PI_EMISSION_TOOL descriptor for cataloged payload producers)
-       → child session (pi extension registers the descriptor's per-kind emission tool at before_agent_start; child-side self-check)
-       → model calls the emission tool (pi validates args against the registered schema — fast feedback;
-         execute re-parses through the registry's parsePayload — the syntax-level gate;
-         minimal ack, no fs writes)
-       → child transcript records the toolCall block (the transport — the child holds no run-directory authority)
-       → child stops → engine ingestion:
-           reviewer payload → subagent-stop (emission-tool scan → selectCanonicalPayload → sidecar + journal + audit)
-           panel verdict    → submission seams (selectVerdictSource → the authoritative parse with issuance-join → accepted event + source + operation artifacts)
+```text
+qualified route + authenticated issuance
+→ pure parent admission
+→ launcher provisions child without model prompt
+→ actual child readiness (or bounded infrastructure failure)
+→ model uses exact tool, or final-message fallback
+→ complete request-bound transcript observations
+→ pure canonical selection
+→ existing issued-contract/roster/scope admission
+→ immutable accepted evidence + source
 ```
 
-1. Spawn side (unchanged): `spawn-admission` admits the batch (the new capability gate runs before any state mutation; a not-provided capability with degradation `extraction` — Claude Code — never blocks); the spawn task carries request/context digest markers + the emission-tool descriptor; correlators are recorded into their reserved slots as today. FR-012's issuance-join checks stay untouched.
-2. Child session startup: the extension loads; `before_agent_start` scans for the emission-tool descriptor (absent → registers nothing); the child-side self-check fails fast and loud (US4) through the existing startup-sweep reporting protocol if registration failed. Admitted → `pi.registerTool()` registers the per-kind tool with frozen schema bytes + `strict: "prefer"`.
-3. Capable provider: the harness's constrained-sampling capability grammar-constrains the tool arguments by construction. The model calls the emission tool → pi validates args against `parameters` → the tool's `execute` re-parses through the registry's parsePayload (`admitEmissionArguments` — the syntax-level gate; for reviewer-payload the authoritative engine-side gate) → valid payload returns as the tool result; the emission record later folds into ingestion from the transcript.
-4. Constraint-ignoring provider: the model emits prose/fence payloads instead of calling the tool → the ingestion seams see no emission records → deterministic fail-closed extraction engages exactly as today (US2/AS-006); observed behavior is indistinguishable from today's pipeline (FR-010/NFR-011) — the containment property.
-5. Emission args fail schema validation (degraded provider): `admitEmissionArguments` refuses — never-ingestable; the tool result is an error; one observable round of the separate emission-tool bounded-retry budget is consumed (AS-007), riding the request-bound attempt tracking; the ingestion seams journal the retry consumption (FR-006); the fallback still engages exactly as today on the same observation.
-6. Stop side, reviewer payload: the capture handler resolves the correlator as today; the adapters hand over every candidate final AND every emission record; `selectCanonicalPayload` folds deterministically; the selected payload's provenance is recorded in the sidecar record beside the transcript evidence (FR-009/FR-011, SC-004).
-7. Stop side, panel verdicts: the panel handlers hand over the captured attempt bytes as today; `selectVerdictSource` folds deterministically before the parse; the authoritative parse with the panel authority's bindings (issuance-join) ingests the verdict; the selected source is recorded on the accepted-verdict journal event (additive `source` field) and the legacy path's operation artifacts (FR-009/FR-011, SC-004).
-
----
+This threads data through existing ingestion and request-slot programs; it introduces no independent lifecycle machine. The readiness barrier uses the launcher's startup/cancellation contract, not a second persisted retry lifecycle. The feature is not a Fugue pipeline; no AuthoredDag bridge is selected.
 
 ## Invariants
 
-### INV-1: No tool constraint may demand strict sampling via `strict: "require"`
+### INV-1: No tool constraint may demand strict sampling via strict-required mode
 
 **Tier:** checkable
 **Rule file:** `.claude/linter/rules/inv-1-no-strict-require-constraint.json`
-**Statement:** No TypeScript source may carry `strict: "require"` on a constrained-sampling constraint — pi-ai's `resolveJsonSchemaStrictSampling` throws on constraint-ignoring providers when `config.strict === "require"` (verified against pi 0.83.0), failing the child session's request so the extraction fallback never engages (FR-010/NFR-011 violation). The constraint is a provider request, never an enforcement; use `strict: "prefer"`.
+**Statement:** This feature requests JSON-schema strict sampling with `strict: "prefer"`, never strict-required mode, so lack of strict support alone cannot fail the request.
 
-(Validated: `bun /home/peterstorm/dev/claude-plugins/loom/engine/src/cli.ts helper validate-lint-rules .claude/linter/rules` → "Lint rules valid: 17 rules loaded (1 project rules)".)
-
-Byte-identity (SC-006/AS-013 — now three kinds), selection determinism (both selection functions), the containment property, and provenance-at-construction are enforced deterministically by the test suite (named in Testing Strategy) — the spec's own measurement approach tiers them as "deterministic checks verified by tests", so they are deliberately NOT declared here as lint rules: a regex rule cannot test runtime JSON equality, and only the tests test the real property.
-
----
+Retain the existing rule file. Its regex is a spelling guard, not proof of provider compatibility. Schema identity, selection outcomes, readiness and provenance are behavioral test obligations below, not mislabeled regex invariants. No G5 owner-map grammar is introduced here.
 
 ## Implementation Phases
 
-### Phase 1: Pure emission core + verdict schemas (no dependencies)
+### Phase 1: Existing pure-core foundation (original T1; historical baseline)
 
-- `engine/src/core/model-profiles.ts`: PayloadProducerKind ADT + producerKindsOfAgent projection (catalog-derived; three kinds; the dual-payload review-verifier agent).
-- `engine/src/core/emission-tool.ts`: EMISSION_TOOL_SPECS registry (three producer kinds; toolName literals; per-version schemaVersions carrying the frozen bytes + the same parsers the fallback uses), EmissionArgumentAdmission + admitEmissionArguments, PayloadSource, EmissionToolCapability (degradation class explicit), frozenPayloadSchemaParameters (the ONE constructor, confined TSchema cast documented).
-- `engine/src/core/panel-contract.ts` + `engine/src/core/review-panel.ts`: zod-derived JUDGE_VERDICT_SCHEMA_V1 / REFUTATION_VERDICT_SCHEMA_V1 frozen bytes + digests, mirroring the reviewer-protocol codec pattern beside their parsers.
-- `engine/src/core/emission-ingestion.ts`: selectCanonicalPayload + selectVerdictSource + the two unions, reusing the DomainResult/canonicalRecord kernel.
-- Byte-match guard test: `engine/tests/core/emission-tool-contract.test.ts` — the emission tools' parameter schemas byte-match the frozen payload schema bytes per kind and version (three kinds; extends the "two contracts" guard pattern).
-- Unit tests (registry + admission, mock-free) and fast-check property tests (selection determinism, additive preference, containment, fallback preservation — both selection functions).
-- **Files:** `engine/src/core/model-profiles.ts`, `engine/src/core/emission-tool.ts`, `engine/src/core/emission-ingestion.ts`, `engine/src/core/panel-contract.ts`, `engine/src/core/review-panel.ts`, `engine/tests/core/emission-tool.test.ts`, `engine/tests/core/emission-ingestion.test.ts`, `engine/tests/core/emission-tool-contract.test.ts`
+- Preserve and review the existing catalog, registry, frozen verdict schemas and source selectors. The 2026-09-19 focused run passed 58 tests across the three emission suites; this is development evidence, not a completed Wave Gate or provider/child integration proof.
+- Identify the delta owed by AD-8/AD-9: explicit expected issuance, call identity, unexpected/incomplete observation refusal, and retained single-call refusal diagnostics. Do not label current kind-filtering and diagnostic-free fallback as the revised contract.
+- **Files:** `engine/src/core/model-profiles.ts`, `engine/src/core/emission-tool.ts`, `engine/src/core/emission-ingestion.ts`, `engine/src/core/panel-contract.ts`, `engine/src/core/review-panel.ts`, their three emission test suites.
 
-### Phase 2: US4 gate + pi tool surface (depends on Phase 1)
+### Phase 2: Feasibility and minimal acceptance contract (depends on Phase 1)
 
-- `engine/src/core/spawn-admission.ts`: `emissionToolCapability` port + `"emission-tool-capability"` SpawnGuardName + guard in the admission sequence (blocks only degradation-"refuse" capabilities, before any state mutation, names the missing capability + `/reload` remediation; degradation "extraction" never blocks).
-- Spawn-side descriptor: `stampEmissionToolDescriptor` in `engine/src/handlers/helpers/programs/helpers.ts`, applied at the spawn prompt assembly call sites (`engine/src/handlers/helpers/programs/standalone.ts`, `engine/src/handlers/helpers/programs/wave-gate.ts`, `engine/src/handlers/helpers/orchestration.ts`).
-- `pi/emission-tool.ts`: `registerEmissionTools` (pi.registerTool surface, `strict: "prefer"`, `executionMode: "parallel"`) + `execute` shell over `admitEmissionArguments` (no fs writes, no command execution).
-- `pi/extension.ts`: kind-scoped registration at `before_agent_start` from the engine-stamped descriptor (absent descriptor registers nothing) + child-side registration self-check (fail loud through the existing startup-sweep reporting protocol) + `emissionToolCapability` gathered into the spawn-admission ports.
-- Pi surface tests: registerTool + execute over the real harness validation path (including the plain-JSON-schema coercion branch).
-- **Files:** `engine/src/core/spawn-admission.ts`, `engine/tests/core/spawn-admission.test.ts`, `engine/src/handlers/helpers/programs/helpers.ts`, `engine/src/handlers/helpers/programs/standalone.ts`, `engine/src/handlers/helpers/programs/wave-gate.ts`, `engine/src/handlers/helpers/orchestration.ts`, `pi/emission-tool.ts`, `pi/extension.ts`, `engine/tests/pi/emission-tool.test.ts`
+- Probe every intended provider/schema route with exact bytes through the real harness serialization/validation path; record supported constraints and explicit degraded routes.
+- Prove the real launcher can hold model execution until request-bound child readiness. Use a counting provider substitute to demonstrate zero calls for missing extension/tool, inactive tool, wrong version/digest/request, timeout and cancellation. Identify external ownership/version before any outside-repository prerequisite work.
+- Establish minimal shared observation/selection contracts and behavior-first acceptance. Include whitespace-only schema-vs-parser disagreement, invalid-call-plus-valid-final acceptance, invalid-then-corrected duplicate rejection, exact replay, and wrong-kind/version refusal.
+- Publish feasibility observations with exact commands, runtime/schema identity and evidence limits. If provider access or the launcher seam is missing, remain blocked here; tests asserting a fabricated port succeeds are not readiness proof.
+- **Files:** `.claude/specs/2026-09-16-grammar-constrained-decoding/feasibility.md`, `engine/src/core/emission-ingestion.ts`, `engine/src/core/harness-capture.ts`, `engine/tests/core/emission-ingestion.test.ts`, `engine/tests/core/emission-tool.test.ts`, `engine/tests/pi/emission-tool.test.ts`, `engine/tests/pi/emission-startup.test.ts`.
 
-### Phase 3: Reviewer payload ingestion seam + sidecar (depends on Phase 1+2)
+### Phase 3: One reviewer v2 production vertical slice (depends on Phase 2)
 
-- Both adapters gain `parseEmissionToolCallRecords` (Pi: toolCall blocks in `pi/transcript-adapter.ts`; Claude: JSONL `tool_use` blocks in `capture-orchestration-result.ts`) — pure extractions, additive.
-- `engine/src/core/harness-capture.ts`: + `EmissionToolCallRecord` beside `FinalPayloadCandidate`, + `"emission-ambiguous"` CaptureRejectionReason (additive; `parseFinalPayload` byte-verbatim untouched).
-- `engine/src/orchestration/harness-capture-runtime.ts`: `captureHarnessResult` folds observed emission records through `selectCanonicalPayload` (the FR-003 seam change at the existing call site); publish the provenance sidecar via `handle.publishArtifactSet`; journal fallback engagement + emission-tool retry consumption (existing `appendEvent` pattern).
-- Harness-capture suites extended with emission-path capture outcomes (selector + sidecar + journal events).
-- **Files:** `pi/transcript-adapter.ts`, `engine/src/handlers/subagent-stop/capture-orchestration-result.ts`, `engine/src/core/harness-capture.ts`, `engine/src/orchestration/harness-capture-runtime.ts`, harness-capture test suites
+- Integrate issued descriptor/route projection, pure parent capability admission, proven launcher readiness and exact tool registration.
+- Execute parser admission with minimal terminating success; scan actual tool-call observations and select at the existing reviewer capture seam. Preserve existing issued reviewer admission and publish source consistently.
+- Demonstrate standalone and Wave v2 binding cases, including successful tool-only completion, fallback, semantic rejection, infrastructure startup failure, and exact replay. A valid tool payload that fails issuance must not fall back to a different final message.
+- Run relevant bypass/always-accept/always-reject controls against the production-path acceptance. Correct contract assumptions before breadth expansion.
+- **Files:** `pi/emission-tool.ts`, `pi/emission-startup.ts` if needed, `pi/extension.ts`, `pi/transcript-adapter.ts`, `engine/src/core/spawn-admission.ts`, `engine/src/handlers/helpers/programs/helpers.ts`, `engine/src/handlers/helpers/programs/standalone.ts`, `engine/src/handlers/helpers/programs/wave-gate.ts`, `engine/src/handlers/subagent-stop/capture-orchestration-result.ts`, `engine/src/orchestration/harness-capture-runtime.ts`, the Pi/spawn-admission/capture suites.
 
-### Phase 4: Panel verdict ingestion folds + provenance (depends on Phase 1+2; parallel with Phase 3)
+### Phase 4: Remaining kinds and harness/legacy parity (depends on Phase 3)
 
-- `engine/src/core/panel-program.ts`: verdict-source fold in `submitArchitectureJudgeResult` / `submitRefutationVerdict` (the issuance-join stays before the parse, untouched); + additive `source` field on the accepted-verdict journal events; + `"emission-ambiguous"` rejection category.
-- `engine/src/handlers/helpers/orchestration.ts`: `executeDeterministicPanelOperation` folds the captured panel transcript bytes through `selectVerdictSource` before `parseJudgeVerdict`/`parseRefutationVerdict` (`capturedPanelRaw` byte-verbatim untouched); additive provenance record on the operation artifacts.
-- Panel verdict fold tests: submission-seam outcomes (emission wins / extraction byte-verbatim / duplicate fail-closed) + additive source field + `"emission-ambiguous"` category.
-- **Files:** `engine/src/core/panel-program.ts`, `engine/src/handlers/helpers/orchestration.ts`, `engine/tests/core/panel-verdict-fold.test.ts`
+- Add reviewer v3, judge v1 and refutation v1 through the same proven seams. Preserve v3 issuance selection and all prior-origin/coverage joins; panel parsers retain criterion/lens and complete candidate/finding coverage.
+- Wire persistent and legacy panel submission paths before claiming all-kind provenance/preference. Retain exact-call identity across per-attempt scans; no selection based on output shape.
+- Verify Claude Code, unsupported historical protocols and schema-incompatible routes remain explicit extraction-only, with unchanged extraction semantics. Verify unconstrained-tool routes honor the same selection matrix without strict-required failures.
+- **Files:** `engine/src/core/panel-program.ts`, `engine/src/handlers/helpers/orchestration.ts`, shared request/capture adapters as needed, `engine/tests/core/panel-verdict-fold.test.ts`, reviewer successor/capture suites, `engine/tests/pi/emission-vertical-slice.test.ts`.
 
-### Phase 5: Wire contract + panel prompts + docs (depends on Phase 1-4)
+### Phase 5: Wire instructions, docs and complete deterministic verification (depends on Phase 4)
 
-- `REVIEWER_OUTPUT_CONTRACT` tool-primary wording (FR-020) — schema bytes + digest untouched; `renderReviewerWireContract()` re-rendered and re-stamped via `scripts/stamp-wire-contract.ts`.
-- Panel prompt rendering (`engine/src/core/panel-program.ts`) tool-primary wording for the judge verdict and refutation verdict instructions (the toolName literal from the registry).
-- Agent README + model-profile docs updated (FR-022: emission-tool flow; capability flags user-side).
-- CONTEXT.md gains the "Emission tool", "Payload source", "Constrained sampling" glossary terms.
-- `engine/tests/wire-contract.test.ts`: extend the two-contracts guard to the emission tools' parameter schemas; `engine/tests/core/reviewer-protocol-docs.test.ts` extended for the new wording.
-- **Files:** `engine/src/core/reviewer-contract.ts`, `engine/src/core/reviewer-protocol.ts`, `engine/src/core/panel-program.ts`, `agents/_shared/wire-contract.md`, re-stamped shims, `docs/`, `CONTEXT.md`, `engine/tests/wire-contract.test.ts`, `engine/tests/core/reviewer-protocol-docs.test.ts`
+- Render tool-primary/new-issuance instructions and extraction-only instructions from the actual route/binding. Re-stamp shared fragments/shims through the existing script; never edit generated shims independently.
+- Document capability configuration, exact-route qualification, readiness dependency/remediation, one-call semantics, shared retry budget and observability limits.
+- Check all supported schema parameter byte matches at the registered tool surface, full ingestion/replay provenance, concurrency and negative controls. No unchanged-schema/unchanged-protocol claim without the exact before/after comparison.
+- **Files:** `engine/src/core/reviewer-contract.ts`, `engine/src/core/reviewer-protocol.ts`, `engine/src/core/panel-program.ts`, `agents/_shared/wire-contract.md`, generated reviewer shims, `agents/README.md`, `CONTEXT.md`, `docs/model-profiles-and-calibration.md`, `docs/pi-usage.md`, wire-contract/docs suites.
 
-### Phase 6: Calibration counters + calibration gate (depends on Phase 1-5)
+### Phase 6: Preregistered calibration and release decision (depends on Phase 5)
 
-- Retry-round / fallback-engagement counters surfaced through `scripts/run-model-calibration.ts` so US6/SC-001 evidence is collected directly — across reviewer, judge-kind, and verdict-slot spawns.
-- US6 calibration window on a capable provider: p95 +25% bound (SC-002) and escaped-defect severity (SC-003) recorded as evidence before done — a gate before done, not a design driver.
-- **Files:** `scripts/run-model-calibration.ts`, calibration evidence records
+- Add matched dispatch-to-ingestion counters to the existing calibration runner; retain per-route/schema outcomes rather than aggregate away unsupported or failed cells.
+- Run AD-11's fixed pilot and record latency, retries, tool-use/fallback rate, terminal outcomes and independent quality. Missing or inconclusive measurements remain incomplete; p95 or quality/failure regression blocks done.
+- Record final qualification/config/runtime identity and operator activation/reload steps. The final runtime must match the content-addressed handshake; staging/merge and loaded runtime remain distinct.
+- **Files:** `scripts/run-model-calibration.ts`, `calibration/grammar-constrained-decoding/`, qualification/calibration documentation.
 
----
+### Requirement completion ownership for fresh decomposition
+
+- Phase 1/2 Tasks are foundations and generally make Requirement Contributions; earlier parser/unit evidence does not complete runtime tool requirements.
+- Phase 3 completes AS-022/FR-032 only when both qualification prerequisites and the real vertical slice are demonstrated, not merely when a feasibility document exists.
+- Phase 4 owns all-kind behavior completion for FR-001–FR-014 and FR-030–FR-031 and their runtime acceptance scenarios, subject to the Phase-5 exact registered-schema verification where relevant. Split contributors from one final completion Wave; do not claim cross-kind requirements complete in the reviewer-only Wave.
+- Phase 5 owns FR-020–FR-022, exact registered-tool schema identity and docs requirements. Phase 6 owns the measured calibration criteria (including AS-004 and AS-015–AS-017); never assign measured completion to a unit-test-only Task.
+- Decompose enumerates exact canonical FR/AS IDs from the revised Spec. NFR/SC/US remain explicit acceptance context, not invented Spec Index entries. Assign each canonical requirement one completion Wave and validate contributions/ownership normally.
 
 ## Testing Strategy
 
-| Component | Unit Tests | Integration Tests | Property Tests |
-|-----------|-----------|-------------------|----------------|
-| emission-tool registry | producerKindsOfAgent projection (three kinds; the dual-payload review-verifier); admitEmissionArguments valid/invalid-schema (three specs); EmissionToolCapability degradation class; frozenPayloadSchemaParameters purity (mock-free) | — | — |
-| emission-ingestion selections | the three IngestionSelection union members; the three VerdictSourceSelection union members; duplicate rejection | — | fast-check: determinism (same inputs → same selection), additive preference (a valid emission record wins whenever present), containment (fallback behavior identical to the no-op baseline in every input combination where the selection is not emission-tool-arguments), fallback preserves the rejection vocabulary verbatim |
-| spawn-admission gate | capability gate, per-harness degradation (refuse blocks; extraction never blocks), hard fail, AS-011 idempotency (in-memory fakes, existing ports pattern) | — | — |
-| pi emission-tool surface | execute shell over admitEmissionArguments | registerTool + execute over the real harness validation path (including the plain-JSON-schema coercion branch) | — |
-| ingestion seam (reviewer payload) | parseEmissionToolCallRecords extraction (both adapters, pure) | existing harness-capture suites extended: emission-path capture outcomes (selector + sidecar + journal events) | — |
-| panel verdict folds | selectVerdictSource members; submitArchitectureJudgeResult/submitRefutationVerdict fold outcomes; additive source field; "emission-ambiguous" category | legacy deterministic path: executeDeterministicPanelOperation fold outcomes (selector + operation artifacts) | — |
-| frozen verdict schemas | byte-match guard: the verdict emission tools' parameter schemas byte-match JUDGE_VERDICT_SCHEMA_V1 / REFUTATION_VERDICT_SCHEMA_V1, proven through a different serialization chain than the stamper writes with | — | — |
-| wire contract | byte-match guard: parameter schema bytes byte-match the frozen payload schema bytes per kind/version | existing two-contracts suite (`engine/tests/wire-contract.test.ts`) | — |
+| Surface | Behavioral evidence | Discriminating control |
+|---|---|---|
+| Schema/engine boundary | Actual Pi validation versus engine parser for v2/v3/verdicts | Whitespace-only prose and other engine-only refinements pass shape checks but must not be ingested |
+| Issued observation | Exact request/kind/version/call identity, complete/incomplete, replay | Wrong-kind/version and contradictory duplicate frames refuse rather than vanish |
+| Selection | Every row of AD-9; same final input yields same extraction result in extraction-selected states | Duplicate plus valid final rejects; single invalid plus valid final accepts extraction |
+| Child readiness | Real launcher/child handshake and counting provider substitute | Missing/inactive/misbound tool and failed startup produce zero model requests |
+| Termination | Actual Pi tool validation/execute and tool-only settled transcript | No compulsory final text; mixed batches do not falsely promise termination |
+| Reviewer integration | Real request→child→capture→issued admission | Bypassed selection, always-accept and always-reject controls are detected |
+| Panel integration | Persistent and legacy submission with real criterion/lens/coverage joins | Valid shape with wrong roster/binding rejects; source cannot override issuance |
+| Replay/publication | Exact accepted bytes/source survive repeat capture and recovery | Duplicate consumption, source mismatch and corrupt present-day provenance refuse |
+| Degradation | Claude/extraction-only/constraint-ignoring route behavior | No unsupported tool advertised; zero-call extraction baseline remains unchanged |
+| Calibration | Matched route/schema workloads and independent quality assessment | Failed/unsupported cells retained, never silently removed from the result |
 
----
+Use structured valid generators plus targeted invalid mutations. Exercise both successful and rejected branches. Tests cross the same policy seam as production; pure core tests do not replace shell integration. Run focused checks during development and the complete configured suite on a quiescent workspace; do not overwrite another running Task's verification report with an unrelated partial run.
 
 ## Security & NFR Notes
 
-- **Security:** every trust boundary explicit and fail-closed — the harness's tool-argument validation is convenience, never authority: the tool's `execute` re-validates untrusted model input with the engine's own parser (`admitEmissionArguments` — the SAME parser the fallback uses) before any ingestion; for the verdict kinds the authoritative engine-side gate is the submission seam's parse with the panel authority's bindings (issuance-join, FR-012) — the tool's execute is the syntax-level gate only, and the trust boundary is re-validated at the engine edge regardless (defense-in-depth placement, not a security property the design depends on); the tool's execute performs no fs writes, no command execution, no uploads (least privilege — the transcript is the transport, so a compromised child cannot cascade into new write authority and the child's armed guards are not bypassable through the tool); the spawn-side capability gate blocks before any state mutation; the sidecar is bounded and no-follow-read. Disclosed residual for the `/security-expert` review the spec flags: the duplicate-key grammar class — pi collapses duplicate keys before the engine sees them, so the engine's grammar on the emitted arguments catches bytes/depth/strict-schema conformance but not duplicate keys; closing it would require a raw-args-text transport pi's tool-call plumbing does not offer, and building a second provider payload serialization is forbidden (FR-030). The verdict emission path's syntax-level gate also cannot catch cross-entry ordering (non-increasing scores) or the issuance bindings — the submission seam's parse with the panel authority's bindings catches everything (FR-012).
-- **Performance:** NFR-002 holds by construction — `executionMode: "parallel"`, stateless per-child-session tool execute; concurrently spawned payload agents (now including judges and verdict slots) are not serialized beyond today's behavior. NFR-001/SC-002 (+25% p95) is the P2 calibration gate (US6).
-- **Over-fortification (named):** the child-side registration self-check is a second validation layer against the stale-global-package class the spawn-side revision proof mostly covers — it mostly cannot fire; kept because it catches registration failure at the edge where registration actually happens.
-
----
+- Tool arguments and prompt markers remain untrusted. Issuance selects authority and decoder; model output selects neither.
+- Emission tools do no filesystem writes, commands or uploads. Transport/capture retain existing authority and no-follow publication rules.
+- Readiness is bounded and tied to actual child state. Parent hashes and informative errors are not substitutes for a pre-model barrier.
+- Concurrency remains per-child; do not serialize independent producer spawns globally to implement readiness or count duplicate calls. Mixed-batch behavior and cancellation are tested rather than claimed from an `executionMode` label.
+- Provenance is constructed with selection and durably bound to acceptance, with honest historical absence handling and existing retention.
+- Preserve route/schema evidence without logging credentials. Calibration is an experiment with limited scope, not a claim that all future payloads or code are correct.
 
 ## Verification
 
-1. `npm --prefix engine run verify` (typecheck + unit + smoke) — all new suites pass; the worktree's typecheck has pre-existing errors (peer deps never installed in this worktree) identical before/after, zero new.
-2. `bun /home/peterstorm/dev/claude-plugins/loom/engine/src/cli.ts helper validate-lint-rules .claude/linter/rules` — proves INV-1 loads (already proven: "Lint rules valid: 17 rules loaded (1 project rules)").
-3. Re-stamp: `scripts/stamp-wire-contract.ts` re-run after the wording change; agent shims re-stamped byte-identical except the fragment.
-4. Manual: `/reload` cutover required after merge (content-addressed revision handshake, FR-031); US6 calibration window on a capable provider recorded as evidence (SC-001 zero syntax-level retry rounds across reviewer, judge-kind, and verdict-slot spawns, SC-002 p95 +25% bound, SC-003 escaped-defect severity) before the feature is declared done — if the p95 bound is violated, the feature is not done and the design is revisited before shipping (AS-017).
+1. Parse the revised Spec with the real Spec Index parser and check all canonical FR/AS/OOS IDs are unique and retained. Validate executable-model declarations and the retained invariant rule through the existing helpers.
+2. Independently rerun plan alignment after the Phase-2 feasibility/ownership questions have a supported resolution; the previous report is historical and cannot authorize fresh decomposition.
+3. Fresh decomposition must use the revised Spec/Plan and supported TaskGraph helpers. Preserve original T1 history, allocate changed contracts explicitly, and do not reuse stale pending Task descriptions or completion claims.
+4. Run focused emission/transport/capture suites during implementation. Before Wave completion/release, run `npm --prefix engine run verify` on the quiescent worktree with installed prerequisites; pre-existing or environment failures must be reported, not dismissed as success.
+5. Re-stamp with the existing wire-contract script and verify schema/rubric bytes and archived request contracts remain unchanged. Exercise startup and complete ingestion through the actual installed launcher/harness, not only fakes.
+6. Complete exact-route qualification and AD-11 calibration before declaring done. Retain blocked/failed observations. Activate the delivered compatible runtime through the normal reload/restart path; do not bypass the revision handshake.
