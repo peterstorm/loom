@@ -308,6 +308,30 @@ describe("anchored lock ownership", () => {
   it("aggregates operation, lock-release, and directory-close failures without masking the primary", async () => {
     const root = workspace();
     const directory = join(root, "run");
+    if (process.platform === "darwin") {
+      // Darwin addresses children through the proven-real path, so the release
+      // channel is broken by removing the directory itself — pre-closing the
+      // retained descriptor is non-deterministic there (fd numbers are reused
+      // between the close and the aggregation close, which can mask the EBADF).
+      // The retained descriptor stays open, so the close channel succeeds and
+      // the aggregate carries exactly the two constructed failures.
+      let darwinThrown: unknown;
+      try {
+        await withAnchoredDirectoryLock(directory, "close-failure.lock", () => {
+          rmSync(directory, { recursive: true, force: true });
+          throw new Error("primary operation exploded");
+        });
+      } catch (error) {
+        darwinThrown = error;
+      }
+      expect(darwinThrown).toBeInstanceOf(AggregateError);
+      const darwinAggregate = darwinThrown as AggregateError;
+      expect(darwinAggregate.errors.map(String)).toEqual([
+        "Error: primary operation exploded",
+        expect.stringContaining("cannot release anchored lock close-failure.lock"),
+      ]);
+      return;
+    }
     let thrown: unknown;
 
     try {

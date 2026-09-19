@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { parseTaskGraph, StateManager } from "../../src/state-manager";
 import type { SpecParseError } from "../../src/core/parse-spec";
 import type { SettledFloor } from "../../src/core/requirement-coverage";
@@ -265,7 +265,7 @@ describe("durable observation availability", () => {
 // load() must translate typed parser refusal to an attributable corruption error.
 describe("StateManager JSON load authority boundary", () => {
   it.each(TARGETS)("rejects all inherited $label kinds as corrupt state, preserving bytes", ({ wrap, populated, path }) => {
-    const root = mkdtempSync(join(tmpdir(), "loom-pr43-authority-"));
+    const root = canonicalTempDir("loom-pr43-authority-");
     const directory = join(root, ".claude", "state");
     const statePath = join(directory, "active_task_graph.json");
     try {

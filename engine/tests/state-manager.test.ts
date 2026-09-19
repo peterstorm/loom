@@ -1193,6 +1193,10 @@ describe("resolveTaskGraph — session ids are parsed before naming SUBAGENT_DIR
   });
 
   it("rejects a pointed graph whose ancestor is a symlink", () => {
+    // Unlike the session pointer's subagent base, the graph parent is held to
+    // the strict no-symlink rule: the pointer names an engine-issued location,
+    // so a symlinked ancestor is hostile re-binding and the authority capture
+    // refuses before any byte is read.
     const s = `sm-symlink-ancestor-${process.pid}-${Date.now()}`;
     const dir = makeTmpDir();
     const realParent = join(dir, "real-parent");

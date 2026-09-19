@@ -31,6 +31,16 @@ describe("descriptor-anchored report reset and bounded read", () => {
     try {
       renameSync(parent, join(root, "moved"));
       symlinkSync(foreign, parent);
+      if (process.platform === "darwin") {
+        // Darwin has no descriptor-relative unlink: the re-proof refuses the
+        // planted symlink with ELOOP instead of unlinking through it, and BOTH
+        // reports survive — the redirect is impossible in either direction.
+        expect(() => removeDirectoryRegularFileNoFollow(anchor, "report.xml"))
+          .toThrow(/report reset requires descriptor-anchored unlink.*re-proof failed.*ELOOP|too many symbolic/i);
+        expect(existsSync(join(root, "moved", "report.xml"))).toBe(true);
+        expect(readFileSync(join(foreign, "report.xml"), "utf8")).toBe("foreign sentinel");
+        return;
+      }
       removeDirectoryRegularFileNoFollow(anchor, "report.xml");
       expect(existsSync(join(root, "moved", "report.xml"))).toBe(false);
       expect(readFileSync(join(foreign, "report.xml"), "utf8")).toBe("foreign sentinel");

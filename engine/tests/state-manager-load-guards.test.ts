@@ -9,9 +9,9 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { canonicalTempDir } from "./fixtures/canonical-temp-dir";
 import {
   parseCompletedWaveGateRegistration,
   parseTaskGraph,
@@ -1297,7 +1297,7 @@ describe("untrusted test_result label validation", () => {
 
 describe("StateManager byte decoding", () => {
   it("rejects malformed UTF-8 before attempting JSON parsing", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-invalid-state-utf8-"));
+    const root = canonicalTempDir("loom-invalid-state-utf8-");
     const stateDirectory = join(root, ".claude", "state");
     const statePath = join(stateDirectory, "active_task_graph.json");
     mkdirSync(stateDirectory, { recursive: true });

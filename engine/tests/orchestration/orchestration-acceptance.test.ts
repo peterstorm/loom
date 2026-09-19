@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { agentRequestAuthority } from "../fixtures/agent-request-authority";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import {
   bindCapture,
   captureKey,
@@ -132,7 +132,7 @@ describe("Pi and Claude reach the same result", () => {
   }
 
   function claudeCandidates(text: string): readonly FinalPayloadCandidate[] {
-    const root = mkdtempSync(join(tmpdir(), "loom-parity-"));
+    const root = canonicalTempDir("loom-parity-");
     cleanup.push(root);
     const transcript = join(root, "transcript.jsonl");
     writeFileSync(transcript, `${JSON.stringify({
@@ -183,7 +183,7 @@ describe("Pi and Claude reach the same result", () => {
     expect(pi.ok).toBe(true);
     if (!pi.ok) return;
 
-    const root = mkdtempSync(join(tmpdir(), "loom-parity-multiblock-"));
+    const root = canonicalTempDir("loom-parity-multiblock-");
     cleanup.push(root);
     const transcript = join(root, "transcript.jsonl");
     writeFileSync(transcript, `${JSON.stringify({
@@ -220,7 +220,7 @@ describe("Pi and Claude reach the same result", () => {
       directory: string;
       request: AgentRequestAuthority;
     }>> {
-      const runsRoot = mkdtempSync(join(tmpdir(), "loom-capture-parity-"));
+      const runsRoot = canonicalTempDir("loom-capture-parity-");
       cleanup.push(runsRoot);
       const directory = join(runsRoot, "run.capture-parity");
       mkdirSync(directory, { recursive: true });
@@ -309,7 +309,7 @@ describe("Pi and Claude reach the same result", () => {
     });
 
     it("rejects capture when the reserved context describes a different request role", async () => {
-      const runsRoot = mkdtempSync(join(tmpdir(), "loom-capture-binding-"));
+      const runsRoot = canonicalTempDir("loom-capture-binding-");
       cleanup.push(runsRoot);
       const directory = join(runsRoot, "run.capture-binding");
       mkdirSync(directory, { recursive: true });
@@ -624,7 +624,7 @@ describe("Pi and Claude reach the same result", () => {
     });
 
     it("replays one refusal as exactly one marker and one journal record", async () => {
-      const runsRoot = mkdtempSync(join(tmpdir(), "loom-capture-rejection-replay-"));
+      const runsRoot = canonicalTempDir("loom-capture-rejection-replay-");
       cleanup.push(runsRoot);
       const directory = join(runsRoot, "run.acceptance-1");
       mkdirSync(directory);
@@ -690,7 +690,7 @@ describe("Pi and Claude reach the same result", () => {
   });
 
   it("surfaces malformed final Claude JSON with its physical line number", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-claude-malformed-"));
+    const root = canonicalTempDir("loom-claude-malformed-");
     cleanup.push(root);
     const transcript = join(root, "transcript.jsonl");
     writeFileSync(transcript, [
@@ -704,7 +704,7 @@ describe("Pi and Claude reach the same result", () => {
   });
 
   it("surfaces an unreadable Claude transcript instead of returning no candidates", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-claude-loop-"));
+    const root = canonicalTempDir("loom-claude-loop-");
     cleanup.push(root);
     const transcript = join(root, "loop.jsonl");
     // A symlink loop makes the transcript ELOOP: the filesystem cause must
@@ -716,7 +716,7 @@ describe("Pi and Claude reach the same result", () => {
   });
 
   it("reports a resolved transcript that disappeared as a filesystem read failure", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-claude-disappeared-"));
+    const root = canonicalTempDir("loom-claude-disappeared-");
     cleanup.push(root);
     const transcript = join(root, "disappeared.jsonl");
 
@@ -826,7 +826,7 @@ describe("invalid evidence is audited but never accepted", () => {
 
 describe("Claude capture against a real run directory", () => {
   async function stagedRun(): Promise<Readonly<{ runsRoot: string; runDir: string }>> {
-    const root = mkdtempSync(join(tmpdir(), "loom-capture-run-"));
+    const root = canonicalTempDir("loom-capture-run-");
     cleanup.push(root);
     const runsRoot = join(root, "runs");
     const runDir = join(runsRoot, "run.acceptance-1");

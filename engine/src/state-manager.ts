@@ -203,6 +203,10 @@ function readSessionPointerNoFollow(sessionFile: string): string {
 function captureTaskGraphFileAuthority(path: string, requireExisting: boolean): TaskGraphFileAuthority {
   const parsedPath = parseCanonicalTaskGraphPointer(resolve(path));
   if (!parsedPath.ok) throw new Error(parsedPath.error);
+  // Unlike the session pointer's subagent base, the graph parent is held to the
+  // STRICT no-symlink rule: the pointer names an engine-issued location, so a
+  // symlinked ancestor is hostile re-binding, not legitimate configuration —
+  // openDirectoryNoFollow refuses it with ELOOP before any byte is read.
   const directoryPath = dirname(parsedPath.value);
   const directory = openDirectoryNoFollow(directoryPath);
   return withStateDirectory(directory, `TaskGraph authority capture for ${parsedPath.value}`, () => {
