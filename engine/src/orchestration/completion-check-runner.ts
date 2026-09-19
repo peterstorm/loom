@@ -348,6 +348,12 @@ function spawnFailure(cause: unknown, output: CompletionCheckDiagnostics): Comma
 type ProcessGroupProbe =
   | Readonly<{ kind: "gone" }>
   | Readonly<{ kind: "present" }>
+  | Readonly<{ kind: "eperm" }>
+  | Readonly<{ kind: "error"; message: string }>;
+
+type LeaderProbe =
+  | Readonly<{ kind: "present" }>
+  | Readonly<{ kind: "gone" }>
   | Readonly<{ kind: "error"; message: string }>;
 
 type ParentObservation =
@@ -373,13 +379,56 @@ function probeProcessGroup(processGroupId: number): ProcessGroupProbe {
     process.kill(-processGroupId, 0);
     return Object.freeze({ kind: "present" });
   } catch (cause) {
+    const code = errnoCode(cause);
+    if (code === "ESRCH") return Object.freeze({ kind: "gone" });
+    // EPERM is its own state, never a generic error: the group exists but
+    // contains at least one process we may not signal. Our own tree cannot
+    // produce that state (children inherit our uid and are signalable by us),
+    // and our descendants cannot be members of a recycled id — a process
+    // group id is only reused after the original group dissolved, which
+    // requires every original member (our whole descendant tree) to be dead.
+    // See probeLeaderAlive for how this is discharged.
+    if (code === "EPERM") return Object.freeze({ kind: "eperm" });
+    return Object.freeze({
+      kind: "error",
+      message: `process-group ${processGroupId} existence check failed: ${messageOf(cause)}`,
+    });
+  }
+}
+
+/** Liveness of the group LEADER itself (the spawned check process, positive
+ *  pid). While the leader exists — including as an unreaped zombie — the
+ *  group is legitimately ours. */
+function probeLeaderAlive(processGroupId: number): LeaderProbe {
+  try {
+    process.kill(processGroupId, 0);
+    return Object.freeze({ kind: "present" });
+  } catch (cause) {
     return errnoCode(cause) === "ESRCH"
       ? Object.freeze({ kind: "gone" })
       : Object.freeze({
           kind: "error",
-          message: `process-group ${processGroupId} existence check failed: ${messageOf(cause)}`,
+          message: `process-group ${processGroupId} leader check failed: ${messageOf(cause)}`,
         });
   }
+}
+
+/** EPERM on the group probe with the leader already reaped proves the id was
+ *  recycled to a foreign group: the original group dissolves before its id
+ *  can be reused, dissolving requires the whole original tree (leader plus
+ *  every descendant) to be dead, and our own tree can never contain a member
+ *  we are not permitted to signal. Returning "gone" therefore stops the
+ *  containment escalation against a group that is no longer ours — without
+ *  it, the runner would keep probing (EPERM "error") and eventually fire
+ *  its SIGKILL pass at unrelated same-uid processes. */
+function groupGoneAfterLeaderDeath(
+  processGroupId: number,
+  probe: ProcessGroupProbe,
+): boolean {
+  if (probe.kind === "gone") return true;
+  if (probe.kind !== "eperm") return false;
+  const leader = probeLeaderAlive(processGroupId);
+  return leader.kind === "gone";
 }
 
 function signalProcessGroup(processGroupId: number, signal: "SIGTERM" | "SIGKILL"): string | null {
@@ -403,7 +452,7 @@ async function waitForProcessGroupGone(
 ): Promise<ProcessGroupProbe> {
   const deadline = Date.now() + maximumWaitMs;
   let latest = probeProcessGroup(processGroupId);
-  while (latest.kind === "present" && Date.now() < deadline) {
+  while (!groupGoneAfterLeaderDeath(processGroupId, latest) && Date.now() < deadline) {
     await delay(Math.min(GROUP_PROBE_INTERVAL_MS, Math.max(1, deadline - Date.now())));
     latest = probeProcessGroup(processGroupId);
   }
@@ -593,7 +642,7 @@ async function runProjectCommand(
       return spawnFailure(trigger.observation.cause, diagnostics(stdout, stderr));
     }
     const group = probeProcessGroup(processGroupId);
-    if (group.kind === "gone") {
+    if (groupGoneAfterLeaderDeath(processGroupId, group)) {
       return observedExecution(
         repositoryRoot,
         check,
