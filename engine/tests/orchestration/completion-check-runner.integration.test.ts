@@ -73,15 +73,23 @@ function check(
 }
 
 function execution(result: CompletionCheckRunnerResult) {
-  expect(result.ok).toBe(true);
+  expect(result.ok, result.ok ? "" : `runner refused: ${refusalText(result)}`).toBe(true);
   if (!result.ok) throw new Error(result.error.message);
   return result.value;
 }
 
 function remediationExecution(result: RemediationCheckRunnerResult) {
-  expect(result.ok).toBe(true);
+  expect(result.ok, result.ok ? "" : `runner refused: ${refusalText(result)}`).toBe(true);
   if (!result.ok) throw new Error(result.error.message);
   return result.value;
+}
+
+/** Diagnostic tails can carry up to 64 KiB each; drop them so the refusal
+ *  context stays inside assertion-message bounds. */
+function refusalText(result: { readonly ok: false }): string {
+  const error = result.error as Readonly<Record<string, unknown>>;
+  const { diagnostics: _diagnostics, ...rest } = error;
+  return JSON.stringify(rest);
 }
 
 function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown }): T {
@@ -329,7 +337,7 @@ describe("completion check process shell", () => {
     );
     setTimeout(() => controller.abort(), 30);
     const result = await pending;
-    expect(result).toMatchObject({ ok: false, error: { kind: "cancelled" } });
+    expect(result, result.ok ? "" : `runner refused: ${refusalText(result)}`).toMatchObject({ ok: false, error: { kind: "cancelled" } });
   });
 
   it("rejects symlink ancestors for cwd and report paths", async () => {
