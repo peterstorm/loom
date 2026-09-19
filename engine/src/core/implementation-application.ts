@@ -171,9 +171,14 @@ export function buildTaskLocalByteObservation(
   const changedAttempt = new Set(attempt.changed);
   const attributedAttempt = insideParserPaths.filter((path) => changedAttempt.has(path));
   const priorAllowedPaths = priorPaths.value.filter((path) => allowed.has(path));
-  const cumulative = frozenArray([...new Set([...priorAllowedPaths, ...attributedAttempt])].sort(compareStrings));
-  const cumulativeSet = new Set(cumulative);
-  const proofChanges = proof.changed.filter((path) => cumulativeSet.has(path));
+  // INV-DF1: the proof boundary predates the Task's production, so every
+  // proof-scope change is task production. The cumulative paths are
+  // prior ∪ attributedAttempt ∪ proof.changed; proof.changed ⊆ cumulative by
+  // construction, so the Oracle's filesModified sees ALL task production and
+  // normal flow is unchanged (the child's parser-proven edits).
+  const cumulative = frozenArray(
+    [...new Set([...priorAllowedPaths, ...attributedAttempt, ...proof.changed])].sort(compareStrings),
+  );
   const suite = createTaskCompletionSuiteResult(
     input.authority,
     outside.length > 0
@@ -185,7 +190,7 @@ export function buildTaskLocalByteObservation(
     suite: suite.value,
     attributedAttemptChangedPaths: frozenArray(attributedAttempt),
     cumulativeModifiedPaths: cumulative,
-    cumulativeProofArtifactChanges: frozenArray(proofChanges),
+    cumulativeProofArtifactChanges: frozenArray(proof.changed),
     taskBytesChangedOrUnobservable: attempt.changed.length > 0,
     unresolvedRepositoryPaths,
     invalidationBytesChanged: attempt.changed.length > 0 || unresolvedRepositoryPaths.length > 0,

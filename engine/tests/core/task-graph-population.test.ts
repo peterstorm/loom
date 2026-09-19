@@ -9,6 +9,8 @@ import {
 } from "../../src/core/task-graph-population";
 import { defaultVerificationManifest } from "../../src/core/verification-manifest";
 import { parseArtifactDigest } from "../../src/core/orchestration-contract";
+import { registerTaskExecutionBaseline } from "../../src/core/validate-task-execution";
+import type { DeclaredArtifactBaseline } from "../../src/core/artifact-baseline";
 import type { TaskGraph } from "../../src/types";
 
 const specSource = `# Feature: Population
@@ -67,6 +69,12 @@ const roster = (tasks: readonly AuthoredTask[]) => {
   if (!parsed.ok) throw new Error(`invalid authored roster fixture: ${parsed.error}`);
   return parsed.value;
 };
+
+/** GIT-captured declared-artifact baseline as the population command receives it. */
+const gitBaseline = (path: string, digest: string): readonly DeclaredArtifactBaseline[] =>
+  Object.freeze([{ artifact: path, snapshot: { kind: "sha256" as const, digest } }]);
+const missingBaseline = (path: string): readonly DeclaredArtifactBaseline[] =>
+  Object.freeze([{ artifact: path, snapshot: { kind: "missing" as const } }]);
 
 const graph = (overrides: Partial<TaskGraph> = {}): TaskGraph => ({
   current_phase: "decompose",
@@ -137,6 +145,62 @@ describe("populateTaskGraph aggregate command", () => {
         spec_anchor_hashes: { "AS-001": parsedSpec.value.scenarios[0]!.contentHash },
       }),
     ]);
+  });
+
+  it("stamps the GIT proof boundary at the population revision, and the first dispatch preserves it", () => {
+    const populationRevision = "b".repeat(40);
+    const result = populateTaskGraph(graph(), command({
+      tasks: roster([authoredTask("T1", 1), authoredTask("T2", 2, ["AS-001"])]),
+      proofBaselines: new Map([
+        ["T1", gitBaseline("src/T1.ts", parsedDigest.value)],
+        ["T2", missingBaseline("src/T2.ts")],
+      ]),
+      populationRevision,
+    }));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const [first, second] = result.value.state.tasks;
+    // The boundary always predates the Task's production (INV-DF1): captured at
+    // the population revision, BEFORE any work exists.
+    expect(first).toMatchObject({
+      id: "T1",
+      status: "pending",
+      start_sha: populationRevision,
+      artifact_baseline: [{ artifact: "src/T1.ts", snapshot: { kind: "sha256", digest: parsedDigest.value } }],
+    });
+    expect(second).toMatchObject({
+      id: "T2",
+      start_sha: populationRevision,
+      artifact_baseline: [{ artifact: "src/T2.ts", snapshot: { kind: "missing" } }],
+    });
+
+    // First dispatch: registerTaskExecutionBaseline prefers task.start_sha and
+    // task.artifact_baseline, so the population-time boundary survives the
+    // dispatch-time refresh and Proof keeps seeing all bytes produced by the task.
+    const dispatchProofBaseline = gitBaseline("src/T1.ts", "d".repeat(64));
+    const registered = registerTaskExecutionBaseline(first!, "c".repeat(40), dispatchProofBaseline);
+    expect(registered.start_sha).toBe(populationRevision);
+    expect(registered.artifact_baseline).toEqual(gitBaseline("src/T1.ts", parsedDigest.value));
+    expect(registered.attempt_artifact_baseline).toEqual(dispatchProofBaseline);
+  });
+
+  it("leaves the proof boundary absent when Git could not capture it, and the first dispatch stamps its own", () => {
+    const result = populateTaskGraph(graph(), command());
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const task = result.value.state.tasks[0]!;
+    expect(task).not.toHaveProperty("artifact_baseline");
+    expect(task).not.toHaveProperty("start_sha");
+
+    const registered = registerTaskExecutionBaseline(
+      task,
+      "c".repeat(40),
+      gitBaseline("src/T1.ts", parsedDigest.value),
+    );
+    expect(registered.start_sha).toBe("c".repeat(40));
+    expect(registered.artifact_baseline).toEqual(gitBaseline("src/T1.ts", parsedDigest.value));
   });
 
   it("defensively refuses an empty authored roster at the exported boundary", () => {
