@@ -1486,6 +1486,20 @@ function taskStatusError(
   }
   const verification = parseTaskVerificationPolicy(t, label);
   if (!verification.ok) return verification.errors.join("; ");
+  if (t.implementation_attestation !== undefined && t.implementation_attestation !== true) {
+    return `${label}: implementation_attestation must be true when present`;
+  }
+  if (t.implementation_attestation === true) {
+    if (verification.value.policy.newTests.kind !== "waived") {
+      return `${label}: attestation mode requires a verification policy that waives new tests — the dispatched child must not author new work`;
+    }
+    if (t.legacy_missing_proof === true) {
+      return `${label}: attestation mode requires modern authored Proof, not legacy_missing_proof`;
+    }
+    if (t.legacy_execution_reservation === true) {
+      return `${label}: attestation mode requires a modern implementation dispatch, not a legacy execution reservation`;
+    }
+  }
   if (t.review_status !== undefined && !(REVIEW_STATUSES as readonly string[]).includes(t.review_status as string)) {
     return `${label}: review_status ${JSON.stringify(t.review_status)} is not one of ${REVIEW_STATUSES.join(", ")}`;
   }
@@ -1518,16 +1532,20 @@ function taskStatusError(
   if (t.legacy_missing_proof === true) return `${label}: legacy_missing_proof requires absent Proof`;
   const proof = parseTaskProof(t.proof);
   if (!proof.ok) return `${label}: invalid proof: ${proof.errors.join("; ")}`;
+  const expectation = t.implementation_attestation === true ? "attested" as const : "changed" as const;
   const expectedObligations = deriveProofObligations({
     verificationPolicy: verification.value.policy,
     declaredArtifacts: Array.isArray(t.file_list) ? t.file_list : [],
+    declaredArtifactExpectation: expectation,
   });
   const obligationsMatch = proof.value.obligations.length === expectedObligations.length &&
     proof.value.obligations.every((actual, obligationIndex) => {
       const expected = expectedObligations[obligationIndex];
-      return expected !== undefined && actual.kind === expected.kind &&
-        (actual.kind !== "declared-artifact-changed" ||
-          (expected.kind === "declared-artifact-changed" && actual.artifact === expected.artifact));
+      if (expected === undefined || actual.kind !== expected.kind) return false;
+      return actual.kind === "declared-artifact-changed" || actual.kind === "declared-artifact-attested"
+        ? (expected.kind === "declared-artifact-changed" || expected.kind === "declared-artifact-attested") &&
+          actual.artifact === expected.artifact
+        : true;
     });
   if (!obligationsMatch) return `${label}: proof obligations do not exactly match verification policy and file_list`;
   if (t.status === "pending") {
@@ -1911,6 +1929,7 @@ function migrateParsedTask(
       proof: derivePendingTaskProof({
         verificationPolicy: verification.value.policy,
         declaredArtifacts: Array.isArray(task.file_list) ? task.file_list : [],
+        declaredArtifactExpectation: task.implementation_attestation === true ? "attested" : "changed",
       }),
     };
   } else if (task.proof === undefined && (task.status === "implemented" || task.status === "completed")) {

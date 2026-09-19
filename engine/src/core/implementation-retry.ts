@@ -24,9 +24,15 @@ import {
 import { compareStrings } from "./ordering";
 import { canonicalJson, sha256Hex, type JsonValue } from "./review-packet";
 import { parseTaskId, type TaskId } from "./task-id";
+import {
+  parseTaskProof,
+  type TaskProof,
+} from "./proof-obligations";
+import { taskVerificationPolicy } from "./verification-policy";
 
 const MAX_FAILURE_KIND_LENGTH = 4_096;
 export const IMPLEMENTATION_RETRY_CONTEXT_LABEL = "LOOM_IMPLEMENTATION_RETRY_CONTEXT";
+export const IMPLEMENTATION_ATTESTATION_CONTEXT_LABEL = "LOOM_IMPLEMENTATION_ATTESTATION_CONTEXT";
 
 const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(value);
 
@@ -57,6 +63,11 @@ export type RetryableImplementationTask = Readonly<{
   implementation_retry_protocol?: 2;
   implementation_retry_history_start?: number;
   implementation_retry_predecessor_receipt_id?: ImplementationSettlementReceiptId;
+  /** Attestation-mode fields; present only on a Task the attest program authored. */
+  implementation_attestation?: true;
+  proof?: TaskProof;
+  verification_policy?: unknown;
+  new_tests_required?: unknown;
 }>;
 
 export type ImplementationRetryDisposition =
@@ -220,6 +231,143 @@ function parsePromptRetryContext(prompt: string):
     };
   }
   const parsed = parseImplementationRetryContext(raw);
+  return parsed.ok
+    ? { ok: true, value: parsed.value, sourceLine: line }
+    : { ok: false, error: parsed.errors.join("; ") };
+}
+
+/** The engine-derived authority a dispatched child needs to prove EXISTING
+ * work. The digest binds the exact attested obligation set and verification
+ * policy the attest program authored, so a prompt carrying this line cannot
+ * have been written for any other proof state. */
+export type ImplementationAttestationContext = Readonly<{
+  schemaVersion: 1;
+  kind: "implementation-attestation-context";
+  taskId: TaskId;
+  attestationProofDigest: ArtifactDigest;
+}>;
+
+export type AttestationContextSource = Readonly<{
+  id: string;
+  implementation_attestation?: true;
+  proof?: TaskProof;
+  verification_policy?: unknown;
+  new_tests_required?: unknown;
+}>;
+
+export type AttestationContextDerivation =
+  | Readonly<{ ok: true; context: ImplementationAttestationContext; promptAppendix: string }>
+  | Readonly<{ ok: false; error: string }>;
+
+export function parseImplementationAttestationContext(raw: unknown, path = "implementationAttestationContext"):
+  | Readonly<{ ok: true; value: ImplementationAttestationContext }>
+  | Readonly<{ ok: false; errors: readonly [string, ...string[]] }> {
+  const record = readExactDataRecord(raw, [
+    "schemaVersion",
+    "kind",
+    "taskId",
+    "attestationProofDigest",
+  ], path);
+  if (!record.ok) return { ok: false, errors: nonEmptyErrors([record.error.message]) };
+  const taskId = parseTaskId(record.value.taskId, `${path}.taskId`);
+  const digest = parseArtifactDigest(record.value.attestationProofDigest);
+  const errors = [
+    ...(record.value.schemaVersion === 1 ? [] : [`${path}.schemaVersion must equal 1`]),
+    ...(record.value.kind === "implementation-attestation-context"
+      ? []
+      : [`${path}.kind must equal implementation-attestation-context`]),
+    ...(taskId.ok ? [] : taskId.error.errors),
+    ...(digest.ok ? [] : [`${path}.attestationProofDigest: ${digest.error.message}`]),
+  ];
+  if (errors.length > 0 || !taskId.ok || !digest.ok) {
+    return { ok: false, errors: nonEmptyErrors(errors) };
+  }
+  return {
+    ok: true,
+    value: freeze({
+      schemaVersion: 1,
+      kind: "implementation-attestation-context",
+      taskId: taskId.value,
+      attestationProofDigest: digest.value,
+    }),
+  };
+}
+
+/** Derive the attestation context from a Task's stored attestation proof and
+ * verification policy. Refuses anything that is not exactly attestation mode
+ * with a parser-proven, attested-arm-only proof — the same invariants the
+ * load boundary proves for persisted Tasks, re-proven at the binding boundary
+ * so an in-memory graph cannot bind authority its own loader would refuse. */
+export function deriveImplementationAttestationContext(
+  task: AttestationContextSource,
+): AttestationContextDerivation {
+  if (task.implementation_attestation !== true) {
+    return { ok: false, error: `Task ${task.id} is not in attestation mode` };
+  }
+  const taskId = parseTaskId(task.id, "attestation task id");
+  if (!taskId.ok) return { ok: false, error: taskId.error.errors.join("; ") };
+  if (task.proof === undefined) {
+    return { ok: false, error: `Task ${task.id} carries no attestation proof` };
+  }
+  const proof = parseTaskProof(task.proof);
+  if (!proof.ok) {
+    return { ok: false, error: `Task ${task.id} carries malformed proof: ${proof.errors.join("; ")}` };
+  }
+  if (proof.value.obligations.some((obligation) => obligation.kind === "declared-artifact-changed")) {
+    return {
+      ok: false,
+      error: `Task ${task.id} attestation proof carries declared-artifact-changed obligations; attestation requires the attested arm`,
+    };
+  }
+  let policy: ReturnType<typeof taskVerificationPolicy>;
+  try {
+    policy = taskVerificationPolicy(task);
+  } catch (cause) {
+    return {
+      ok: false,
+      error: `Task ${task.id} carries malformed verification policy: ${cause instanceof Error ? cause.message : String(cause)}`,
+    };
+  }
+  const attestationProofDigest = sha256Hex(canonicalJson({
+    obligations: proof.value.obligations as unknown as JsonValue,
+    verificationPolicy: policy as unknown as JsonValue,
+  }));
+  const digest = parseArtifactDigest(attestationProofDigest);
+  if (!digest.ok) throw new Error("internal attestation context digest is invalid");
+  const context = freeze({
+    schemaVersion: 1 as const,
+    kind: "implementation-attestation-context" as const,
+    taskId: taskId.value,
+    attestationProofDigest: digest.value,
+  });
+  return {
+    ok: true,
+    context,
+    promptAppendix: `${IMPLEMENTATION_ATTESTATION_CONTEXT_LABEL}: ${canonicalJson(context as unknown as JsonValue)}`,
+  };
+}
+
+function parsePromptAttestationContext(prompt: string):
+  | Readonly<{ ok: true; value: ImplementationAttestationContext | null; sourceLine: string | null }>
+  | Readonly<{ ok: false; error: string }> {
+  const lines = prompt
+    .split(/\r?\n/u)
+    .filter((line) => line.startsWith(`${IMPLEMENTATION_ATTESTATION_CONTEXT_LABEL}:`));
+  if (lines.length === 0) return { ok: true, value: null, sourceLine: null };
+  if (lines.length !== 1) return { ok: false, error: "implementation prompt must contain at most one attestation context" };
+  const prefix = `${IMPLEMENTATION_ATTESTATION_CONTEXT_LABEL}: `;
+  const line = lines[0]!;
+  if (!line.startsWith(prefix)) return { ok: false, error: "implementation attestation context must use the canonical label separator" };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(line.slice(prefix.length));
+  } catch (cause) {
+    return {
+      ok: false,
+      error: `implementation attestation context is not JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
+    };
+  }
+  const parsed = parseImplementationAttestationContext(raw);
   return parsed.ok
     ? { ok: true, value: parsed.value, sourceLine: line }
     : { ok: false, error: parsed.errors.join("; ") };
@@ -429,6 +577,33 @@ export function authorizeImplementationSpawn(
   const promptDigest = sha256(prompt);
   const supplied = parsePromptRetryContext(prompt);
   if (!supplied.ok) return supplied;
+  // Attestation binding is orthogonal to the retry budget: EVERY dispatched
+  // prompt for an attestation Task (attempt 1 or attempt 2) must carry the
+  // exact engine-derived attestation context, and no other prompt may carry
+  // one. The context digest binds the stored attested obligation set and
+  // verification policy, so a drifted proof cannot ride an old appendix.
+  const suppliedAttestation = parsePromptAttestationContext(prompt);
+  if (!suppliedAttestation.ok) return suppliedAttestation;
+  const expectedAttestation = task.implementation_attestation === true
+    ? deriveImplementationAttestationContext(task)
+    : null;
+  if (expectedAttestation !== null) {
+    if (!expectedAttestation.ok) return { ok: false, error: expectedAttestation.error };
+    if (suppliedAttestation.value === null) {
+      return {
+        ok: false,
+        error: `Task ${task.id} is in attestation mode and requires the exact attestation context from orchestration status`,
+      };
+    }
+    if (suppliedAttestation.sourceLine !== expectedAttestation.promptAppendix) {
+      return {
+        ok: false,
+        error: `Task ${task.id} attestation context bytes do not match the stored attestation proof`,
+      };
+    }
+  } else if (suppliedAttestation.value !== null) {
+    return { ok: false, error: `Task ${task.id} is not in attestation mode; refusing a caller-supplied attestation context` };
+  }
   if (disposition.kind === "initial") {
     return supplied.value === null
       ? {

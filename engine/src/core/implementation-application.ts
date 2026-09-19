@@ -41,6 +41,11 @@ export type TaskLocalByteObservation = Readonly<{
   suite: TaskCompletionSuiteResult;
   /** Parser-proven paths whose bytes changed during this exact attempt. */
   attributedAttemptChangedPaths: readonly ReviewPath[];
+  /** EVERY task-scope path whose bytes changed vs the attempt baseline —
+   *  transcript attribution OR NOT. This is the attestation oracle: a
+   *  verify-only child must leave these empty, and an unreported write is
+   *  drift, never an attested pass. */
+  attemptScopeChangedPaths: readonly ReviewPath[];
   /** Parser-proven cumulative paths retained for audit/lint scope. */
   cumulativeModifiedPaths: readonly ReviewPath[];
   /** Declared paths changed from the first Task baseline and parser-attributed. */
@@ -184,6 +189,7 @@ export function buildTaskLocalByteObservation(
   return freeze({
     suite: suite.value,
     attributedAttemptChangedPaths: frozenArray(attributedAttempt),
+    attemptScopeChangedPaths: attempt.changed,
     cumulativeModifiedPaths: cumulative,
     cumulativeProofArtifactChanges: frozenArray(proofChanges),
     taskBytesChangedOrUnobservable: attempt.changed.length > 0,
@@ -205,6 +211,7 @@ export function unavailableTaskLocalByteObservation(
   return freeze({
     suite: suite.value,
     attributedAttemptChangedPaths: frozenArray([]),
+    attemptScopeChangedPaths: frozenArray([]),
     cumulativeModifiedPaths: frozenArray(cumulativeModifiedPaths),
     cumulativeProofArtifactChanges: frozenArray([]),
     taskBytesChangedOrUnobservable: true,
@@ -360,6 +367,7 @@ export function applyUntrustedStopResolution(
     {
       verificationPolicy: taskVerificationPolicy(target),
       declaredArtifacts: target.file_list ?? [],
+      declaredArtifactExpectation: target.implementation_attestation === true ? "attested" : "changed",
     },
     {
       taskCompleted: false,
@@ -646,7 +654,12 @@ export function settleObservedImplementation(
     evidence: {
       taskCompleted: incoming.taskCompleted,
       ...(normalized.testResult === undefined ? {} : { testResult: normalized.testResult }),
-      filesModified: bytes.cumulativeProofArtifactChanges,
+      // Attestation reads the raw attempt-scope byte delta, never the
+      // transcript-attributed set: an unreported write must surface as drift
+      // on the attested obligations, not as a clean verification.
+      filesModified: task.implementation_attestation === true
+        ? bytes.attemptScopeChangedPaths
+        : bytes.cumulativeProofArtifactChanges,
       newTestsWritten: normalized.newTests.written,
       newTestEvidence: normalized.newTests.evidence,
     },

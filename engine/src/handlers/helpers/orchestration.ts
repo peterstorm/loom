@@ -171,6 +171,7 @@ import {
 } from "./programs";
 import { parseBoundedReviewerJson } from '../../core/reviewer-protocol';
 import { remediateOperation } from "./remediate-implementation-escalation";
+import { attestOperation } from "./attest-implementation";
 import { renderStandaloneReviewSummary } from "../../core/standalone-review";
 import { serializeStandaloneReviewMachineState } from "../../core/standalone-review-machine";
 import { argumentValue, hasFlag } from "./cli-args";
@@ -183,7 +184,7 @@ import { prepareStandaloneDispositionFacadeStart, startStandaloneDispositionFaca
   resumeStandaloneDispositionFacade, inspectStandaloneDispositionFacade, readSelectedStandaloneDisposition,
   STANDALONE_DISPOSITION_EVENT_RESOURCE_POLICY } from "./programs/standalone-disposition";
 
-const OPERATIONS = ["status", "inspect", "start", "restart", "recover-orphan", "resume", "submit", "correlate", "complete", "decide", "abandon", "remediate"] as const;
+const OPERATIONS = ["status", "inspect", "start", "restart", "recover-orphan", "resume", "submit", "correlate", "complete", "decide", "abandon", "remediate", "attest"] as const;
 type Operation = (typeof OPERATIONS)[number];
 
 const isOperation = (value: string | undefined): value is Operation =>
@@ -218,6 +219,8 @@ function usage(): HookResult {
       "  decide  --runs-root <root> --run <run-directory> --request <decision-id>",
   "  remediate --task <task-id> --receipt <terminal escalation receipt id> --reason <text>",
   "          (consumes escalate-wave-implementation: retires the terminal attempt-2 escalation so the next status offers a fresh attempt-1 dispatch; prior receipts stay in history)",
+  "  attest   --task <task-id> --reason <text>",
+  "          (arms implementation re-attestation: rewrites the Task's pending proof to attested obligations + regression-only policy; the next dispatch runs a verify-only child whose writes settle as drift, never as attested)",
     ].join("\n"),
   };
 }
@@ -2035,6 +2038,8 @@ const handler: HookHandler = async (stdin, args) => {
       return decideOperation(stdin, rest);
     case "remediate":
       return remediateOperation(rest);
+    case "attest":
+      return attestOperation(rest);
   }
 };
 

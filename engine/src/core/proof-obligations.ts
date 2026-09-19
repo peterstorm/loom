@@ -46,7 +46,17 @@ export type ProofObligation =
   | Readonly<{ kind: "task-completed" }>
   | Readonly<{ kind: "regression-test-pass" }>
   | Readonly<{ kind: "new-tests" }>
-  | Readonly<{ kind: "declared-artifact-changed"; artifact: string }>;
+  | Readonly<{ kind: "declared-artifact-changed"; artifact: string }>
+  | Readonly<{ kind: "declared-artifact-attested"; artifact: string }>;
+
+/** Which byte comparison each declared artifact owes.
+ *
+ * `changed` is the default: the dispatched child itself moves the bytes.
+ * `attested` inverts the comparison for a Task whose work predates the
+ * attempt: the child must leave the declared bytes EXACTLY as the attempt
+ * baseline captured them, and a write is a failure, not a proof.
+ */
+export type DeclaredArtifactExpectation = "changed" | "attested";
 
 /** Small decomposition-owned input from which obligations are deterministically derived. */
 export type ProofObligationInput =
@@ -54,12 +64,14 @@ export type ProofObligationInput =
       verificationPolicy: VerificationPolicy;
       newTestsRequired?: never;
       declaredArtifacts: readonly string[];
+      declaredArtifactExpectation?: DeclaredArtifactExpectation;
     }>
   | Readonly<{
       verificationPolicy?: never;
       /** Compatibility input for callers not yet holding a Task policy. */
       newTestsRequired: boolean;
       declaredArtifacts: readonly string[];
+      declaredArtifactExpectation?: DeclaredArtifactExpectation;
     }>;
 
 /**
@@ -120,7 +132,8 @@ export type ProofFailure =
   | Readonly<{ kind: "untrusted-regression-tests-failed"; label: string }>
   | Readonly<{ kind: "untrusted-regression-pass"; label: string }>
   | Readonly<{ kind: "new-tests-not-observed" }>
-  | Readonly<{ kind: "declared-artifact-not-changed"; artifact: string }>;
+  | Readonly<{ kind: "declared-artifact-not-changed"; artifact: string }>
+  | Readonly<{ kind: "declared-artifact-drifted"; artifact: string }>;
 
 /** Evidence remains explicit about where a pass came from. */
 export type ProofEvidence =
@@ -137,7 +150,8 @@ export type ProofEvidence =
       label: string;
     }>
   | Readonly<{ kind: "new-tests"; detail: string | null }>
-  | Readonly<{ kind: "declared-artifact-changed"; artifact: string }>;
+  | Readonly<{ kind: "declared-artifact-changed"; artifact: string }>
+  | Readonly<{ kind: "declared-artifact-attested"; artifact: string }>;
 
 export type PendingProofResult = Readonly<{
   state: "pending";
@@ -187,7 +201,7 @@ export type FailedTaskProof = Extract<TaskProof, { state: "failed" }>;
 export type SatisfiedTaskProof = Extract<TaskProof, { state: "satisfied" }>;
 
 const obligationKey = (obligation: ProofObligation): string =>
-  obligation.kind === "declared-artifact-changed"
+  obligation.kind === "declared-artifact-changed" || obligation.kind === "declared-artifact-attested"
     ? `${obligation.kind}:${obligation.artifact}`
     : obligation.kind;
 
@@ -202,6 +216,7 @@ const normalizedPaths = (paths: readonly string[]): readonly string[] =>
 export function deriveProofObligations(input: ProofObligationInput): NonEmpty<ProofObligation> {
   const artifacts = normalizedPaths(input.declaredArtifacts);
   const policy = input.verificationPolicy ?? verificationPolicyFromLegacy(input.newTestsRequired);
+  const expectation = input.declaredArtifactExpectation ?? "changed";
   const tail: ProofObligation[] = [
     ...(requiresRegression(policy)
       ? [Object.freeze({ kind: "regression-test-pass" as const })]
@@ -209,7 +224,9 @@ export function deriveProofObligations(input: ProofObligationInput): NonEmpty<Pr
     ...(requiresNewTests(policy)
       ? [Object.freeze({ kind: "new-tests" as const })]
       : []),
-    ...artifacts.map((artifact) => Object.freeze({ kind: "declared-artifact-changed" as const, artifact })),
+    ...artifacts.map((artifact) => Object.freeze(expectation === "attested"
+      ? { kind: "declared-artifact-attested" as const, artifact }
+      : { kind: "declared-artifact-changed" as const, artifact })),
   ];
   return nonEmpty(Object.freeze({ kind: "task-completed" }), tail);
 }
@@ -326,6 +343,22 @@ const evaluateOne = (
             obligation,
             failure: Object.freeze({ kind: "declared-artifact-not-changed", artifact: obligation.artifact }),
           });
+    case "declared-artifact-attested":
+      // The attested arm reads the same write observation as the changed arm,
+      // inverted: a verify-only child leaves the declared bytes untouched, so
+      // the artifact's absence from the changed set is the satisfaction. A
+      // write during an attestation attempt is drift, never evidence.
+      return observed.filesModified.includes(obligation.artifact)
+        ? Object.freeze({
+            state: "failed",
+            obligation,
+            failure: Object.freeze({ kind: "declared-artifact-drifted", artifact: obligation.artifact }),
+          })
+        : Object.freeze({
+            state: "satisfied",
+            obligation,
+            evidence: Object.freeze({ kind: "declared-artifact-attested", artifact: obligation.artifact }),
+          });
   }
 };
 
@@ -440,7 +473,15 @@ export function parseProofObligation(raw: unknown, path = "obligation"): ProofPa
         : artifact;
     });
   }
-  return fail([`${path}.kind must be task-completed, regression-test-pass, new-tests, or declared-artifact-changed`]);
+  if (raw.kind === "declared-artifact-attested") {
+    return parseExactRecordArm(raw, path, ["kind", "artifact"], () => {
+      const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
+      return artifact.ok
+        ? ok(Object.freeze({ kind: "declared-artifact-attested", artifact: artifact.value }))
+        : artifact;
+    });
+  }
+  return fail([`${path}.kind must be task-completed, regression-test-pass, new-tests, declared-artifact-changed, or declared-artifact-attested`]);
 }
 
 export function parseProofObligationInput(raw: unknown): ProofParseResult<ProofObligationInput> {
@@ -448,7 +489,7 @@ export function parseProofObligationInput(raw: unknown): ProofParseResult<ProofO
   const exact = parseExactRecordArm(
     raw,
     "proof obligation input",
-    ["verificationPolicy", "newTestsRequired", "declaredArtifacts"],
+    ["verificationPolicy", "newTestsRequired", "declaredArtifacts", "declaredArtifactExpectation"],
     () => ok(true),
   );
   if (!exact.ok) return fail(exact.errors);
@@ -468,6 +509,10 @@ export function parseProofObligationInput(raw: unknown): ProofParseResult<ProofO
     errors.push("verificationPolicy and newTestsRequired are mutually exclusive");
   }
   if (!Array.isArray(raw.declaredArtifacts)) errors.push("declaredArtifacts must be an array");
+  if (raw.declaredArtifactExpectation !== undefined &&
+      raw.declaredArtifactExpectation !== "changed" && raw.declaredArtifactExpectation !== "attested") {
+    errors.push("declaredArtifactExpectation must be changed or attested");
+  }
 
   const artifacts: string[] = [];
   if (Array.isArray(raw.declaredArtifacts)) {
@@ -481,8 +526,20 @@ export function parseProofObligationInput(raw: unknown): ProofParseResult<ProofO
   if (errors.length > 0) return fail(errors);
   const declaredArtifacts = Object.freeze([...artifacts]);
   return explicit?.ok
-    ? ok(Object.freeze({ verificationPolicy: explicit.value, declaredArtifacts }))
-    : ok(Object.freeze({ newTestsRequired: raw.newTestsRequired === true, declaredArtifacts }));
+    ? ok(Object.freeze({
+        verificationPolicy: explicit.value,
+        declaredArtifacts,
+        ...(raw.declaredArtifactExpectation === undefined
+          ? {}
+          : { declaredArtifactExpectation: raw.declaredArtifactExpectation as "changed" | "attested" }),
+      }))
+    : ok(Object.freeze({
+        newTestsRequired: raw.newTestsRequired === true,
+        declaredArtifacts,
+        ...(raw.declaredArtifactExpectation === undefined
+          ? {}
+          : { declaredArtifactExpectation: raw.declaredArtifactExpectation as "changed" | "attested" }),
+      }));
 }
 
 function parseUntrustedTestProvenance(
@@ -611,6 +668,13 @@ export function parseProofFailure(raw: unknown, path = "failure"): ProofParseRes
           ? ok(Object.freeze({ kind: "declared-artifact-not-changed", artifact: artifact.value }))
           : artifact;
       });
+    case "declared-artifact-drifted":
+      return parseExactRecordArm<ProofFailure>(raw, path, ["kind", "artifact"], () => {
+        const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
+        return artifact.ok
+          ? ok(Object.freeze({ kind: "declared-artifact-drifted", artifact: artifact.value }))
+          : artifact;
+      });
     default:
       return fail([`${path}.kind is not a recognized proof failure`]);
   }
@@ -661,6 +725,14 @@ export function parseProofEvidence(raw: unknown, path = "evidence"): ProofParseR
         : artifact;
     });
   }
+  if (raw.kind === "declared-artifact-attested") {
+    return parseExactRecordArm<ProofEvidence>(raw, path, ["kind", "artifact"], () => {
+      const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
+      return artifact.ok
+        ? ok(Object.freeze({ kind: "declared-artifact-attested", artifact: artifact.value }))
+        : artifact;
+    });
+  }
   return fail([`${path}.kind is not recognized proof evidence`]);
 }
 
@@ -681,12 +753,16 @@ const resultMatchesObligation = (result: ProofObligationResult): boolean => {
       case "declared-artifact-changed":
         return result.failure.kind === "declared-artifact-not-changed"
           && result.failure.artifact === result.obligation.artifact;
+      case "declared-artifact-attested":
+        return result.failure.kind === "declared-artifact-drifted"
+          && result.failure.artifact === result.obligation.artifact;
     }
   }
   if (result.state === "satisfied") {
     if (result.obligation.kind !== result.evidence.kind) return false;
-    return result.obligation.kind !== "declared-artifact-changed"
-      || (result.evidence.kind === "declared-artifact-changed"
+    return (result.obligation.kind !== "declared-artifact-changed" &&
+        result.obligation.kind !== "declared-artifact-attested")
+      || (result.evidence.kind === result.obligation.kind
         && result.obligation.artifact === result.evidence.artifact);
   }
   // `pending` — no evidence and no failure to disagree with the obligation, so
