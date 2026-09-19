@@ -51,6 +51,16 @@ describe("producerKindsOfAgent", () => {
     }
     expect(producerKindsOfAgent("arch-designer-agent")).not.toContainEqual({ kind: "judge-verdict" });
   });
+
+  it("returns frozen results — the US4 capability gate reads the projection as data, never as a caller convention", () => {
+    // The doc-comment invariant: every projection — the dual-payload list and
+    // the empty non-producer list included — is frozen, so a caller-side push
+    // cannot widen it behind the per-kind emission-tool scoping.
+    expect(Object.isFrozen(producerKindsOfAgent("code-reviewer"))).toBe(true);
+    expect(Object.isFrozen(producerKindsOfAgent("arch-judge-agent"))).toBe(true);
+    expect(Object.isFrozen(producerKindsOfAgent("review-verifier-agent"))).toBe(true);
+    expect(Object.isFrozen(producerKindsOfAgent("arch-designer-agent"))).toBe(true);
+  });
 });
 
 describe("EMISSION_TOOL_SPECS", () => {

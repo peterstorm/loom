@@ -50,12 +50,6 @@ export type EmissionToolName =
 export type EmissionSchemaVersion = "v2" | "v3" | "v1";
 
 /**
- * The failure the emission edge refuses. `code` is the parse's own code
- * vocabulary, never-ingestable per FR-006; `message` is the deterministic
- * diagnostic the tool result carries and the model re-emits within the
- * bounded budget.
- */
-/**
  * The emission edge's closed refusal-code vocabulary — parse, don't validate:
  * a code is a member of THIS union, never a free string, so an unknown code is
  * unrepresentable behind every consumer that switches on it (the tool result
@@ -69,6 +63,12 @@ export type EmissionParseFailureCode =
   | "invalid-schema"
   | "unsupported-schema-version";
 
+/**
+ * The failure the emission edge refuses. `code` is the parse's own code
+ * vocabulary, never-ingestable per FR-006; `message` is the deterministic
+ * diagnostic the tool result carries and the model re-emits within the
+ * bounded budget.
+ */
 export type EmissionParseFailure = Readonly<{ code: EmissionParseFailureCode; message: string }>;
 
 /** One per-version parser: the parse IS the gate at the emission edge. */

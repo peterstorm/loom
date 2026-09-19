@@ -121,11 +121,11 @@ function selectByRecordCount(
  * deterministically — no trim, no join, no re-indent — the same encode-once
  * rule the fallback's `parseFinalPayload` applies to harness text.
  */
-function finalPayloadOfArguments(payload: unknown, origin: string): FinalPayload {
+function finalPayloadOfArguments(payload: unknown): FinalPayload {
   const text = JSON.stringify(payload, null, 2);
   const bytes = encoder.encode(text);
   return canonicalRecord({
-    origin,
+    origin: "emission-tool-arguments",
     text,
     bytes: Object.freeze(Array.from(bytes)),
     byteLength: bytes.length,
@@ -147,7 +147,7 @@ export function selectCanonicalPayload(
   if (selected.kind === "admitted") {
     return Object.freeze({
       kind: "emission-tool-arguments" as const,
-      payload: finalPayloadOfArguments(selected.payload, "emission-tool-arguments"),
+      payload: finalPayloadOfArguments(selected.payload),
       source: "emission-tool" as const,
     });
   }

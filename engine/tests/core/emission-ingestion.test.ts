@@ -50,7 +50,7 @@ const recordArb = fc.array(
 );
 
 /** A valid reviewer payload as emission arguments, parametrized by claim text. */
-const validReviewerRecordArb = claimArb().map((claim) => ({
+const validReviewerRecordArb = proseArb.map((claim) => ({
   kind: { kind: "reviewer-payload" } as const,
   version: "v2" as const,
   arguments: reviewerPayloadV2Schema.parse({
@@ -59,10 +59,6 @@ const validReviewerRecordArb = claimArb().map((claim) => ({
     findings: [{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim }],
   }),
 }));
-
-function claimArb() {
-  return fc.stringMatching(/^[a-z0-9][a-z0-9 .,;:\-]{0,60}$/);
-}
 
 const validJudgeRecordArb = fc.record({
   kind: fc.constant({ kind: "judge-verdict" } as const),
@@ -225,6 +221,22 @@ describe("selectCanonicalPayload", () => {
       [],
     );
     expect(selection.kind).toBe("final-message-extraction");
+  });
+
+  it("admits a record carrying more than the narrow view unchanged — the adapters' full record satisfies it structurally", () => {
+    // The narrow view is what the selection reads; a harness adapter's full
+    // emission-tool record (toolCallId and agent provenance included)
+    // satisfies it structurally and is selected the same as the narrow record.
+    const narrow: EmissionToolCallRecord = {
+      kind: { kind: "reviewer-payload" },
+      version: "v2",
+      arguments: REVIEWER_PAYLOAD_EXAMPLE_V2,
+    };
+    const withProvenance = { ...narrow, toolCallId: "toolu_1", agent: "code-reviewer" };
+    const fromNarrow = selectCanonicalPayload([narrow], []);
+    const fromFull = selectCanonicalPayload([withProvenance], []);
+    expect(fromFull.kind).toBe("emission-tool-arguments");
+    expect(canonicalStructuralEquals(fromFull, fromNarrow)).toBe(true);
   });
 });
 
