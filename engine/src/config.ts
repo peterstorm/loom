@@ -627,35 +627,45 @@ function proveNoGitMetadataInAncestorsFrom(cwd: string): void {
   }
 }
 
-/** Resolve Git root without conflating an absent repository with an unavailable probe. */
+/** Resolve Git root without conflating an absent repository with an unavailable probe.
+ *
+ *  Status 0 with no output is not a documented git outcome, but it has been
+ *  observed transiently on loaded macOS runners (twice across the darwin
+ *  verification campaign, always inside a real fixture repository). One
+ *  immediate retry discharges the transient; a confirmed anomaly fails with
+ *  the full probe evidence — status, output length, stderr, termination
+ *  signal — so the operator can attribute it instead of guessing. */
 function gitRepositoryRootFrom(cwd: string): string | null {
-  const probe = spawnSync("git", ["rev-parse", "--show-toplevel"], {
-    encoding: "utf-8",
-    cwd,
-    env: { ...process.env, LANG: "C", LC_ALL: "C" },
-  });
-  if (probe.error !== undefined) {
-    throw new Error(`git rev-parse could not start: ${probe.error.message}`);
-  }
-  if (probe.status === 0) {
-    const root = probe.stdout.trim();
-    if (root === "") {
-      // Status 0 with no output is not a documented git outcome; carry the cwd
-      // and any stderr so the operator (or CI log) can tell which probe call
-      // produced it instead of a bare unattributable refusal.
-      throw new Error(
-        `git rev-parse returned an empty repository root for ${cwd}` +
-        (probe.stderr.trim() === "" ? "" : ` (stderr: ${probe.stderr.trim()})`),
-      );
+  for (const attempt of [1, 2] as const) {
+    const probe = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+      encoding: "utf-8",
+      cwd,
+      env: { ...process.env, LANG: "C", LC_ALL: "C" },
+    });
+    if (probe.error !== undefined) {
+      throw new Error(`git rev-parse could not start: ${probe.error.message}`);
     }
-    return root;
+    if (probe.status === 0) {
+      const root = probe.stdout.trim();
+      if (root !== "") return root;
+      if (attempt === 2) {
+        throw new Error(
+          `git rev-parse returned an empty repository root for ${cwd} (confirmed on retry)` +
+          ` status=${probe.status} stdoutLength=${probe.stdout.length}` +
+          ` signal=${probe.signal ?? "none"}` +
+          (probe.stderr.trim() === "" ? "" : ` stderr: ${probe.stderr.trim()}`),
+        );
+      }
+      continue;
+    }
+    if (probe.status === 128 && NOT_A_GIT_REPOSITORY.test(probe.stderr)) {
+      proveNoGitMetadataInAncestorsFrom(cwd);
+      return null;
+    }
+    const outcome = probe.signal === null ? `exit ${probe.status ?? "unknown"}` : `signal ${probe.signal}`;
+    throw new Error(`git rev-parse failed (${outcome}): ${probe.stderr.trim() || "no diagnostic"}`);
   }
-  if (probe.status === 128 && NOT_A_GIT_REPOSITORY.test(probe.stderr)) {
-    proveNoGitMetadataInAncestorsFrom(cwd);
-    return null;
-  }
-  const outcome = probe.signal === null ? `exit ${probe.status ?? "unknown"}` : `signal ${probe.signal}`;
-  throw new Error(`git rev-parse failed (${outcome}): ${probe.stderr.trim() || "no diagnostic"}`);
+  throw new Error("git rev-parse retry loop exhausted without an outcome");
 }
 
 /** Find the task graph by walking up from the GIVEN cwd to its git root.
