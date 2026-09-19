@@ -31,11 +31,29 @@ import type { Evidence, TestReportSummary } from "./types";
 
 /** The runner pattern must end at a token boundary: `npm testify` is not `npm test`. */
 function headMatchesRunner(lowerSegment: string): boolean {
-  return TEST_COMMAND_PATTERNS.some(
-    (p) =>
-      lowerSegment.startsWith(p) &&
-      (lowerSegment.length === p.length || /\s/.test(lowerSegment.charAt(p.length))),
+  return (
+    TEST_COMMAND_PATTERNS.some(
+      (p) =>
+        lowerSegment.startsWith(p) &&
+        (lowerSegment.length === p.length || /\s/.test(lowerSegment.charAt(p.length))),
+    ) || headMatchesPackageRunScript(lowerSegment)
   );
+}
+
+/** Package-manager script runners classify through their SCRIPT NAME, not the
+ *  runner head — `npm run test:unit`, `yarn run e2e-tests`, `pnpm run
+ *  verify:all` are test runs the plain patterns miss (the pattern boundary
+ *  rule dies on the `:` of a scoped script name). The script token must be
+ *  test-bearing with word boundaries (the Maven-goal guard's shape):
+ *  `contest`, `pretestify`, `attestation` stay unclassified. */
+const PACKAGE_RUN_HEADS = ["npm run ", "yarn run ", "pnpm run ", "bun run "] as const;
+const TEST_BEARING_SCRIPT_TOKEN = /(?:^|[-_:.@])(?:test|tests|verify)(?:$|[-_:.@])/;
+
+function headMatchesPackageRunScript(lowerSegment: string): boolean {
+  const head = PACKAGE_RUN_HEADS.find((p) => lowerSegment.startsWith(p));
+  if (head === undefined) return false;
+  const scriptToken = lowerSegment.slice(head.length).split(/\s+/, 1)[0] ?? "";
+  return scriptToken !== "" && TEST_BEARING_SCRIPT_TOKEN.test(scriptToken);
 }
 
 /**
