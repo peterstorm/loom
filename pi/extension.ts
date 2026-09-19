@@ -178,6 +178,7 @@ import {
   registerInteractiveSubagentTool,
 } from "./interactive-subagent";
 import { observeSpawnBatchGraph, spawnEntryAt } from "./spawn-graph";
+import { projectRootForStateFile } from "../engine/src/core/phase-artifact-paths";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 // Capture once, while this extension module is loaded. Fresh CLI processes
@@ -1244,11 +1245,14 @@ export default function (
   const rejectedChildWriteGrantSessions = new Set<string>();
 
   // ─── Resource Discovery ───────────────────────────────────────────────
-  // The package.json "pi" manifest declares the raw skills/ and command
-  // templates so the package loads first-class without this handler. This
-  // handler adds the RENDERED, content-addressed copies (package-relative
-  // tokens expanded) under the Loom resource cache — the paths the extension
-  // and spawn admission actually read.
+  // The package.json "pi" manifest declares NO raw skills or prompt
+  // templates (empty arrays): pi would otherwise load the unrendered trees
+  // AND the rendered copies below, warn about every same-name collision,
+  // and keep the unrendered file first. This handler is therefore the
+  // package's single skill/prompt source — RENDERED, content-addressed
+  // copies (package-relative tokens expanded) under the Loom resource
+  // cache — and materialization is fatal on failure so a broken install
+  // cannot silently ship unexpanded ${CLAUDE_PLUGIN_ROOT} paths.
 
   // Pi does not expand Claude Code's CLAUDE_PLUGIN_ROOT token in markdown.
   // Render package-owned prompts and skills from THIS extension's import URL;
@@ -2758,6 +2762,10 @@ export default function (
             completedPhase,
             result,
             now: new Date().toISOString(),
+            // The run's artifacts live under the checkout that owns the graph,
+            // not under this process's cwd — same derivation the repository
+            // probe above already documents.
+            phaseArtifactBaseDir: projectRootForStateFile(mgr.getPath()),
           }));
           continue;
         }
