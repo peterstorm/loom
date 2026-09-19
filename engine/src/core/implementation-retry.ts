@@ -24,9 +24,15 @@ import {
 import { compareStrings } from "./ordering";
 import { canonicalJson, sha256Hex, type JsonValue } from "./review-packet";
 import { parseTaskId, type TaskId } from "./task-id";
+import {
+  parseTaskProof,
+  type TaskProof,
+} from "./proof-obligations";
+import { taskVerificationPolicy } from "./verification-policy";
 
 const MAX_FAILURE_KIND_LENGTH = 4_096;
 export const IMPLEMENTATION_RETRY_CONTEXT_LABEL = "LOOM_IMPLEMENTATION_RETRY_CONTEXT";
+export const IMPLEMENTATION_ATTESTATION_CONTEXT_LABEL = "LOOM_IMPLEMENTATION_ATTESTATION_CONTEXT";
 
 const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(value);
 
@@ -57,6 +63,11 @@ export type RetryableImplementationTask = Readonly<{
   implementation_retry_protocol?: 2;
   implementation_retry_history_start?: number;
   implementation_retry_predecessor_receipt_id?: ImplementationSettlementReceiptId;
+  /** Attestation-mode fields; present only on a Task the attest program authored. */
+  implementation_attestation?: true;
+  proof?: TaskProof;
+  verification_policy?: unknown;
+  new_tests_required?: unknown;
 }>;
 
 export type ImplementationRetryDisposition =
@@ -225,6 +236,143 @@ function parsePromptRetryContext(prompt: string):
     : { ok: false, error: parsed.errors.join("; ") };
 }
 
+/** The engine-derived authority a dispatched child needs to prove EXISTING
+ * work. The digest binds the exact attested obligation set and verification
+ * policy the attest program authored, so a prompt carrying this line cannot
+ * have been written for any other proof state. */
+export type ImplementationAttestationContext = Readonly<{
+  schemaVersion: 1;
+  kind: "implementation-attestation-context";
+  taskId: TaskId;
+  attestationProofDigest: ArtifactDigest;
+}>;
+
+export type AttestationContextSource = Readonly<{
+  id: string;
+  implementation_attestation?: true;
+  proof?: TaskProof;
+  verification_policy?: unknown;
+  new_tests_required?: unknown;
+}>;
+
+export type AttestationContextDerivation =
+  | Readonly<{ ok: true; context: ImplementationAttestationContext; promptAppendix: string }>
+  | Readonly<{ ok: false; error: string }>;
+
+export function parseImplementationAttestationContext(raw: unknown, path = "implementationAttestationContext"):
+  | Readonly<{ ok: true; value: ImplementationAttestationContext }>
+  | Readonly<{ ok: false; errors: readonly [string, ...string[]] }> {
+  const record = readExactDataRecord(raw, [
+    "schemaVersion",
+    "kind",
+    "taskId",
+    "attestationProofDigest",
+  ], path);
+  if (!record.ok) return { ok: false, errors: nonEmptyErrors([record.error.message]) };
+  const taskId = parseTaskId(record.value.taskId, `${path}.taskId`);
+  const digest = parseArtifactDigest(record.value.attestationProofDigest);
+  const errors = [
+    ...(record.value.schemaVersion === 1 ? [] : [`${path}.schemaVersion must equal 1`]),
+    ...(record.value.kind === "implementation-attestation-context"
+      ? []
+      : [`${path}.kind must equal implementation-attestation-context`]),
+    ...(taskId.ok ? [] : taskId.error.errors),
+    ...(digest.ok ? [] : [`${path}.attestationProofDigest: ${digest.error.message}`]),
+  ];
+  if (errors.length > 0 || !taskId.ok || !digest.ok) {
+    return { ok: false, errors: nonEmptyErrors(errors) };
+  }
+  return {
+    ok: true,
+    value: freeze({
+      schemaVersion: 1,
+      kind: "implementation-attestation-context",
+      taskId: taskId.value,
+      attestationProofDigest: digest.value,
+    }),
+  };
+}
+
+/** Derive the attestation context from a Task's stored attestation proof and
+ * verification policy. Refuses anything that is not exactly attestation mode
+ * with a parser-proven, attested-arm-only proof — the same invariants the
+ * load boundary proves for persisted Tasks, re-proven at the binding boundary
+ * so an in-memory graph cannot bind authority its own loader would refuse. */
+export function deriveImplementationAttestationContext(
+  task: AttestationContextSource,
+): AttestationContextDerivation {
+  if (task.implementation_attestation !== true) {
+    return { ok: false, error: `Task ${task.id} is not in attestation mode` };
+  }
+  const taskId = parseTaskId(task.id, "attestation task id");
+  if (!taskId.ok) return { ok: false, error: taskId.error.errors.join("; ") };
+  if (task.proof === undefined) {
+    return { ok: false, error: `Task ${task.id} carries no attestation proof` };
+  }
+  const proof = parseTaskProof(task.proof);
+  if (!proof.ok) {
+    return { ok: false, error: `Task ${task.id} carries malformed proof: ${proof.errors.join("; ")}` };
+  }
+  if (proof.value.obligations.some((obligation) => obligation.kind === "declared-artifact-changed")) {
+    return {
+      ok: false,
+      error: `Task ${task.id} attestation proof carries declared-artifact-changed obligations; attestation requires the attested arm`,
+    };
+  }
+  let policy: ReturnType<typeof taskVerificationPolicy>;
+  try {
+    policy = taskVerificationPolicy(task);
+  } catch (cause) {
+    return {
+      ok: false,
+      error: `Task ${task.id} carries malformed verification policy: ${cause instanceof Error ? cause.message : String(cause)}`,
+    };
+  }
+  const attestationProofDigest = sha256Hex(canonicalJson({
+    obligations: proof.value.obligations as unknown as JsonValue,
+    verificationPolicy: policy as unknown as JsonValue,
+  }));
+  const digest = parseArtifactDigest(attestationProofDigest);
+  if (!digest.ok) throw new Error("internal attestation context digest is invalid");
+  const context = freeze({
+    schemaVersion: 1 as const,
+    kind: "implementation-attestation-context" as const,
+    taskId: taskId.value,
+    attestationProofDigest: digest.value,
+  });
+  return {
+    ok: true,
+    context,
+    promptAppendix: `${IMPLEMENTATION_ATTESTATION_CONTEXT_LABEL}: ${canonicalJson(context as unknown as JsonValue)}`,
+  };
+}
+
+function parsePromptAttestationContext(prompt: string):
+  | Readonly<{ ok: true; value: ImplementationAttestationContext | null; sourceLine: string | null }>
+  | Readonly<{ ok: false; error: string }> {
+  const lines = prompt
+    .split(/\r?\n/u)
+    .filter((line) => line.startsWith(`${IMPLEMENTATION_ATTESTATION_CONTEXT_LABEL}:`));
+  if (lines.length === 0) return { ok: true, value: null, sourceLine: null };
+  if (lines.length !== 1) return { ok: false, error: "implementation prompt must contain at most one attestation context" };
+  const prefix = `${IMPLEMENTATION_ATTESTATION_CONTEXT_LABEL}: `;
+  const line = lines[0]!;
+  if (!line.startsWith(prefix)) return { ok: false, error: "implementation attestation context must use the canonical label separator" };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(line.slice(prefix.length));
+  } catch (cause) {
+    return {
+      ok: false,
+      error: `implementation attestation context is not JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
+    };
+  }
+  const parsed = parseImplementationAttestationContext(raw);
+  return parsed.ok
+    ? { ok: true, value: parsed.value, sourceLine: line }
+    : { ok: false, error: parsed.errors.join("; ") };
+}
+
 type ImplementationRetryLineage =
   | Readonly<{ kind: "initial" }>
   | Readonly<{ kind: "retry"; predecessor: RetryRequiredSettlementReceipt }>
@@ -266,28 +414,68 @@ function projectedDisposition(lineage: ImplementationRetryLineage): Implementati
   return freeze({ kind: "initial", semanticAttempt: 1 });
 }
 
-function legacyRetryDisposition(
+/**
+ * Project one wire-order history slice onto the attempt-lineage state machine.
+ *
+ * Returns the final lineage, or the rejection reason for the first
+ * contradictory receipt. The remediation receipt is the ONE legal successor of
+ * a terminal escalation: it closes the escalated lineage so the walk can reset
+ * to a fresh attempt 1. Every other receipt after a terminal escalation is a
+ * contradiction.
+ */
+function projectLineage(
+  start: ImplementationRetryLineage,
   history: readonly ImplementationAttemptSettlementReceipt[],
-): ImplementationRetryDisposition {
-  const unsupportedIndex = history.findIndex((receipt) => receipt.semanticAttempt !== 1);
-  if (unsupportedIndex >= 0) {
-    return invalidLineage(
-      unsupportedIndex,
-      history[unsupportedIndex]!,
-      "pre-protocol Slice-3 compatibility accepts only semantic attempt 1 receipts",
-    );
+): ImplementationRetryLineage | string {
+  let lineage = start;
+  for (const [index, receipt] of history.entries()) {
+    if (lineage.kind === "escalated" && receipt.transition !== "escalation-remediated") {
+      return `implementation_attempt_history[${index}] (${receipt.receiptId}): receipt appears after terminal escalation ${lineage.receiptId}`;
+    }
+    const expectedAttempt = lineage.kind === "initial" ? 1 : 2;
+    if (receipt.semanticAttempt !== expectedAttempt) {
+      return `implementation_attempt_history[${index}] (${receipt.receiptId}): semantic attempt ${receipt.semanticAttempt} is not the current attempt ${expectedAttempt}`;
+    }
+    if (receipt.transition === "infrastructure-blocked") continue;
+    if (receipt.transition === "implemented") {
+      lineage = freeze({ kind: "initial" });
+      continue;
+    }
+    if (receipt.transition === "retry-required") {
+      if (lineage.kind !== "initial") {
+        return `implementation_attempt_history[${index}] (${receipt.receiptId}): retry authorization requires semantic attempt 1`;
+      }
+      lineage = freeze({ kind: "retry", predecessor: receipt });
+      continue;
+    }
+    if (receipt.transition === "escalation-remediated") {
+      if (lineage.kind !== "escalated") {
+        return `implementation_attempt_history[${index}] (${receipt.receiptId}): escalation remediation requires a terminal escalation`;
+      }
+      lineage = freeze({ kind: "initial" });
+      continue;
+    }
+    if (lineage.kind !== "retry") {
+      return `implementation_attempt_history[${index}] (${receipt.receiptId}): escalation requires a preceding retry authorization`;
+    }
+    lineage = freeze({
+      kind: "escalated",
+      receiptId: receipt.receiptId,
+      failureKinds: receipt.failureKinds,
+    });
   }
-  const lastImplemented = history.findLastIndex((receipt) => receipt.transition === "implemented");
-  const current = history.slice(lastImplemented + 1);
-  const retry = current.findLast((receipt): receipt is RetryRequiredSettlementReceipt =>
-    receipt.transition === "retry-required");
-  return retry === undefined
-    ? projectedDisposition(freeze({ kind: "initial" }))
-    : projectedDisposition(freeze({ kind: "retry", predecessor: retry }));
+  return lineage;
 }
 
-/** Derive the only legal next semantic attempt from settlement history plus
- * persisted protocol, history-start, and predecessor authority. */
+/**
+ * Derive the only legal next semantic attempt from settlement history plus the
+ * persisted protocol-2 lineage fields.
+ *
+ * A Task with NO settlement history is a fresh lineage: the first modern
+ * registration writes the protocol-2 fields. Attempt history WITHOUT them is
+ * refused — there is no read-only compatibility projection; such a Task must
+ * be re-registered through a modern implementation dispatch (or re-populated).
+ */
 export function deriveImplementationRetryDisposition(
   task: RetryableImplementationTask,
 ): ImplementationRetryDisposition {
@@ -307,78 +495,55 @@ export function deriveImplementationRetryDisposition(
       return invalidLineage(index, receipt, `receipt task ${receipt.taskId} does not match ${parsedTaskId.value}`);
     }
   }
-  const hasProtocol = task.implementation_retry_protocol !== undefined ||
-    task.implementation_retry_history_start !== undefined ||
-    task.implementation_retry_predecessor_receipt_id !== undefined;
-  if (!hasProtocol) return legacyRetryDisposition(history);
-  const historyStart = task.implementation_retry_history_start;
-  if (task.implementation_retry_protocol !== 2 || historyStart === undefined ||
-      !Number.isSafeInteger(historyStart) || historyStart < 0 || historyStart > history.length) {
+  if (history.length === 0) return freeze({ kind: "initial", semanticAttempt: 1 });
+  if (task.implementation_retry_protocol !== 2) {
     return freeze({
       kind: "invalid",
-      errors: ["implementation retry protocol 2 requires a valid history start index"],
+      errors: nonEmptyErrors([
+        "attempt history requires protocol-2 retry lineage; re-register the Task through a modern implementation dispatch",
+      ]),
     });
   }
-
-  const prefixDisposition = legacyRetryDisposition(history.slice(0, historyStart));
-  if (prefixDisposition.kind === "invalid" || prefixDisposition.kind === "escalated") {
+  const historyStart = task.implementation_retry_history_start;
+  if (historyStart === undefined || !Number.isSafeInteger(historyStart) ||
+      historyStart < 0 || historyStart > history.length) {
     return freeze({
       kind: "invalid",
-      errors: ["implementation retry history start cannot skip invalid or terminal authority"],
+      errors: nonEmptyErrors(["implementation retry protocol 2 requires a valid history start index"]),
+    });
+  }
+  const prefix = projectLineage(freeze({ kind: "initial" }), history.slice(0, historyStart));
+  if (typeof prefix === "string") {
+    return freeze({
+      kind: "invalid",
+      errors: nonEmptyErrors([`implementation retry history start skips an invalid lineage: ${prefix}`]),
+    });
+  }
+  if (prefix.kind === "escalated") {
+    return freeze({
+      kind: "invalid",
+      errors: nonEmptyErrors(["implementation retry history start cannot skip terminal authority"]),
     });
   }
   const seedId = task.implementation_retry_predecessor_receipt_id;
-  let lineage: ImplementationRetryLineage = freeze({ kind: "initial" });
-  if (prefixDisposition.kind === "retry") {
-    if (seedId !== prefixDisposition.predecessor.receiptId) {
+  if (prefix.kind === "retry") {
+    if (seedId !== prefix.predecessor.receiptId) {
       return freeze({
         kind: "invalid",
-        errors: ["implementation retry predecessor must match the compatibility prefix disposition"],
+        errors: nonEmptyErrors(["implementation retry predecessor must match the compatibility prefix disposition"]),
       });
     }
-    lineage = freeze({ kind: "retry", predecessor: prefixDisposition.predecessor });
   } else if (seedId !== undefined) {
     return freeze({
       kind: "invalid",
-      errors: ["initial compatibility prefix cannot carry a retry predecessor"],
+      errors: nonEmptyErrors(["initial compatibility prefix cannot carry a retry predecessor"]),
     });
   }
-  for (const [relativeIndex, receipt] of history.slice(historyStart).entries()) {
-    const index = historyStart + relativeIndex;
-    if (lineage.kind === "escalated") {
-      return invalidLineage(index, receipt, `receipt appears after terminal escalation ${lineage.receiptId}`);
-    }
-    const expectedAttempt = lineage.kind === "initial" ? 1 : 2;
-    if (receipt.semanticAttempt !== expectedAttempt) {
-      return invalidLineage(
-        index,
-        receipt,
-        `semantic attempt ${receipt.semanticAttempt} is not the current attempt ${expectedAttempt}`,
-      );
-    }
-    if (receipt.transition === "infrastructure-blocked") continue;
-    if (receipt.transition === "implemented") {
-      lineage = freeze({ kind: "initial" });
-      continue;
-    }
-    if (receipt.transition === "retry-required") {
-      if (lineage.kind !== "initial") {
-        return invalidLineage(index, receipt, "retry authorization requires semantic attempt 1");
-      }
-      lineage = freeze({ kind: "retry", predecessor: receipt });
-      continue;
-    }
-    if (lineage.kind !== "retry") {
-      return invalidLineage(index, receipt, "escalation requires a preceding retry authorization");
-    }
-    lineage = freeze({
-      kind: "escalated",
-      receiptId: receipt.receiptId,
-      failureKinds: receipt.failureKinds,
-    });
+  const walked = projectLineage(prefix, history.slice(historyStart));
+  if (typeof walked === "string") {
+    return freeze({ kind: "invalid", errors: nonEmptyErrors([walked]) });
   }
-
-  return projectedDisposition(lineage);
+  return projectedDisposition(walked);
 }
 
 /** Require the exact engine-derived retry appendix before attempt-2 authority can be minted. */
@@ -405,17 +570,40 @@ export function authorizeImplementationSpawn(
   const historyStart = task.implementation_retry_protocol === 2
     ? task.implementation_retry_history_start!
     : history.length;
-  let lineagePredecessorReceiptId: ImplementationSettlementReceiptId | null;
-  if (task.implementation_retry_protocol === 2) {
-    lineagePredecessorReceiptId = task.implementation_retry_predecessor_receipt_id ?? null;
-  } else if (disposition.kind === "retry") {
-    lineagePredecessorReceiptId = disposition.predecessor.receiptId;
-  } else {
-    lineagePredecessorReceiptId = null;
-  }
+  const lineagePredecessorReceiptId: ImplementationSettlementReceiptId | null =
+    task.implementation_retry_protocol === 2
+      ? task.implementation_retry_predecessor_receipt_id ?? null
+      : null;
   const promptDigest = sha256(prompt);
   const supplied = parsePromptRetryContext(prompt);
   if (!supplied.ok) return supplied;
+  // Attestation binding is orthogonal to the retry budget: EVERY dispatched
+  // prompt for an attestation Task (attempt 1 or attempt 2) must carry the
+  // exact engine-derived attestation context, and no other prompt may carry
+  // one. The context digest binds the stored attested obligation set and
+  // verification policy, so a drifted proof cannot ride an old appendix.
+  const suppliedAttestation = parsePromptAttestationContext(prompt);
+  if (!suppliedAttestation.ok) return suppliedAttestation;
+  const expectedAttestation = task.implementation_attestation === true
+    ? deriveImplementationAttestationContext(task)
+    : null;
+  if (expectedAttestation !== null) {
+    if (!expectedAttestation.ok) return { ok: false, error: expectedAttestation.error };
+    if (suppliedAttestation.value === null) {
+      return {
+        ok: false,
+        error: `Task ${task.id} is in attestation mode and requires the exact attestation context from orchestration status`,
+      };
+    }
+    if (suppliedAttestation.sourceLine !== expectedAttestation.promptAppendix) {
+      return {
+        ok: false,
+        error: `Task ${task.id} attestation context bytes do not match the stored attestation proof`,
+      };
+    }
+  } else if (suppliedAttestation.value !== null) {
+    return { ok: false, error: `Task ${task.id} is not in attestation mode; refusing a caller-supplied attestation context` };
+  }
   if (disposition.kind === "initial") {
     return supplied.value === null
       ? {

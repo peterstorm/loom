@@ -598,11 +598,24 @@ interface TaskCommonMetadataBase {
   readonly start_sha?: string;
   readonly failure_reason?: string;
   readonly retry_count?: number;
-  /** Strict bounded-retry lineage marker. Histories without protocol-2 metadata
-   * use the read-only Slice-3 compatibility projection until their next engine registration. */
+  /** Strict bounded-retry lineage marker. Attempt history REQUIRES protocol-2
+   * metadata; there is no read-only compatibility projection — a history
+   * without it fails closed at load, and the Task must be re-registered
+   * through a modern implementation dispatch (or re-populated). */
   readonly implementation_retry_protocol?: 2;
   readonly implementation_retry_history_start?: number;
   readonly implementation_retry_predecessor_receipt_id?: ImplementationSettlementReceiptId;
+  /**
+   * Attestation mode: the declared artifacts already carry the completed work,
+   * so the dispatched child must prove EXISTING bytes instead of producing new
+   * ones. The proof's declared-artifact obligations carry the `attested` arm
+   * (satisfied when bytes are unchanged vs the attempt baseline; a write is
+   * drift), the stored policy waives new tests, and the child's prompt must
+   * bind the engine-derived attestation context. Load-locked: a Task carrying
+   * this flag without attested obligations, or obligations without the flag,
+   * is refused by the TaskGraph task validator.
+   */
+  readonly implementation_attestation?: true;
   /** Immutable exact receipts; append-only settlement audit in wire order. */
   readonly implementation_attempt_history?: readonly ImplementationAttemptSettlementReceipt[];
 }
@@ -744,7 +757,14 @@ export type SpecCheck = CapturedSpecCheck | EvidenceFailedSpecCheck;
  */
 export type ActiveWaveGateTerminalOutcome =
   | Readonly<{ kind: "done"; outcome: ArtifactRef }>
-  | Readonly<{ kind: "terminal-blocked"; diagnostic: TerminalBlockedDiagnostic }>;
+  | Readonly<{ kind: "terminal-blocked"; diagnostic: TerminalBlockedDiagnostic }>
+  /** The operator's terminal decision recorded by `helper orchestration abandon`.
+   *  Fields mirror the run directory's immutable abandonment marker exactly —
+   *  no invented timestamp — so the state stamp and the on-disk marker can
+   *  never disagree about why the run ended or what replaced it. A tombstoned
+   *  registration is no longer active authority: `start` supersedes it, while
+   *  the spec-trace retirement flow can still prove the run from it. */
+  | Readonly<{ kind: "terminal-abandoned"; reason: string; supersededBy: OrchestrationRunId | null }>;
 
 export type ActiveWaveGateRegistration = Readonly<{
   schemaVersion: 1;
@@ -757,7 +777,10 @@ export type ActiveWaveGateRegistration = Readonly<{
    * created before directory authority was persisted. */
   runsRoot?: string;
   /** Non-null only while reading a legacy terminal registration. New
-   * completions archive it in wave_gate_history and clear active authority. */
+   * completions archive it in wave_gate_history and clear active authority.
+   * A `terminal-abandoned` tombstone marks an operator-retired run: no longer
+   * active authority (a fresh `start` supersedes it), but retained in place so
+   * the spec-trace retirement flow can still prove the exact run it abandoned. */
   terminalOutcome: ActiveWaveGateTerminalOutcome | null;
 }>;
 
@@ -1050,7 +1073,7 @@ export type WaveImplementationDispatch =
       kind: "initial-implementation";
       taskId: string;
       semanticAttempt: 1;
-      promptAppendix: null;
+      promptAppendix: string | null;
     }>
   | Readonly<{
       kind: "retry-implementation";

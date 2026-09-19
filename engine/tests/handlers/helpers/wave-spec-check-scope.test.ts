@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import fc from "fast-check";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { createRunDirectory } from "../../../src/orchestration/run-directory-handle";
 import {
   handleWaveReviewContext,
@@ -73,7 +73,7 @@ describe("registered Wave spec-check scope", () => {
   });
 
   it("freezes the exact current-Wave roster, completion claims, contributions, and declared files", () => {
-    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-spec-scope-"));
+    const runsRoot = canonicalTempDir("loom-wave-spec-scope-");
     cleanup.push(runsRoot);
     const created = createRunDirectory(runsRoot, "run.scope");
     if (!created.ok) throw new Error(created.error.message);
@@ -153,7 +153,7 @@ describe("registered Wave spec-check scope", () => {
   });
 
   it("installs the exact pure preparation roster, contexts, epoch, and reviewer slots", async () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-wave-authority-install-"));
+    const root = canonicalTempDir("loom-wave-authority-install-");
     cleanup.push(root);
     const runsRoot = join(root, "runs");
     mkdirSync(runsRoot);
@@ -323,7 +323,7 @@ describe("registered Wave spec-check scope", () => {
   });
 
   it("moves the batch epoch after either exact spec or plan bytes change", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-wave-document-bytes-"));
+    const root = canonicalTempDir("loom-wave-document-bytes-");
     cleanup.push(root);
     const runsRoot = join(root, "runs");
     mkdirSync(runsRoot);
@@ -372,7 +372,7 @@ describe("registered Wave spec-check scope", () => {
   });
 
   it("rejects installation when document bytes drift after unlocked observation", async () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-wave-document-install-"));
+    const root = canonicalTempDir("loom-wave-document-install-");
     cleanup.push(root);
     const runsRoot = join(root, "runs");
     mkdirSync(runsRoot);
@@ -457,7 +457,7 @@ describe("Wave reviewer slot identity projection", () => {
   };
 
   function identitiesFor(registration: RegisteredWaveGateProgram, attempt: 1 | 2): readonly string[] {
-    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-slot-identity-"));
+    const runsRoot = canonicalTempDir("loom-wave-slot-identity-");
     cleanup.push(runsRoot);
     const created = createRunDirectory(runsRoot, "run.identity");
     if (!created.ok) throw new Error(created.error.message);
@@ -549,7 +549,7 @@ describe("Requirement Coverage Projection in the spec-check packet", () => {
     tasks: TaskGraph["tasks"],
     graphOverrides: Partial<TaskGraph> = {},
   ): string => {
-    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-coverage-"));
+    const runsRoot = canonicalTempDir("loom-wave-coverage-");
     cleanup.push(runsRoot);
     const created = createRunDirectory(runsRoot, "run.coverage");
     if (!created.ok) throw new Error(created.error.message);
@@ -583,7 +583,7 @@ describe("Requirement Coverage Projection in the spec-check packet", () => {
   };
 
   const specFileIn = (contents: string): string => {
-    const root = mkdtempSync(join(tmpdir(), "loom-coverage-spec-"));
+    const root = canonicalTempDir("loom-coverage-spec-");
     cleanup.push(root);
     mkdirSync(join(root, "specs"), { recursive: true });
     const path = join(root, "specs", "spec.md");
@@ -612,7 +612,7 @@ describe("Requirement Coverage Projection in the spec-check packet", () => {
   });
 
   it("only the spec-check subject receives the projection", () => {
-    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-coverage-subject-"));
+    const runsRoot = canonicalTempDir("loom-wave-coverage-subject-");
     cleanup.push(runsRoot);
     const created = createRunDirectory(runsRoot, "run.subject");
     if (!created.ok) throw new Error(created.error.message);
@@ -725,7 +725,7 @@ describe("Wave spec-check authority guards", () => {
 `;
 
   const specFileIn = (contents: string): string => {
-    const root = mkdtempSync(join(tmpdir(), "loom-guard-spec-"));
+    const root = canonicalTempDir("loom-guard-spec-");
     cleanup.push(root);
     const path = join(root, "spec.md");
     writeFileSync(path, contents, "utf8");

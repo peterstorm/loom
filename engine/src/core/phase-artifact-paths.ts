@@ -21,12 +21,33 @@
  * precondition of classification.
  */
 
-import { basename, extname, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, relative, resolve, sep } from "node:path";
 
 /** Where a `spec.md` may live when the run declares no narrower `spec_dir`. */
 export const SPEC_ARTIFACT_DIR = ".claude/specs";
 /** Where a plan may live. Runs never narrow this one. */
 export const PLAN_ARTIFACT_DIR = ".claude/plans";
+
+/**
+ * The project boundary that owns a state file: the directory containing
+ * `.claude/`.
+ *
+ * Phase artifacts are stored as project-relative paths, so every filesystem
+ * probe of one must resolve against THIS root — not `process.cwd()`. The
+ * runtime's cwd names where the orchestrator happens to run (a parent session
+ * rooted in the main checkout), while the graph names where the artifacts
+ * live (a linked worktree); anchoring probes to cwd made phase advancement
+ * look for the run's spec/plan in the wrong repository and refuse to advance.
+ *
+ * The canonical locations are `<root>/.claude/state/active_task_graph.json`
+ * and `<root>/.pi/state/active_task_graph.json`; the legacy walk-up shape
+ * places the file directly in the root. Path math only — the same purity
+ * contract as the rest of this module.
+ */
+export function projectRootForStateFile(statePath: string): string {
+  const parent = dirname(resolve(statePath));
+  return basename(parent) === "state" ? dirname(dirname(parent)) : parent;
+}
 
 declare const SPEC_ARTIFACT_DIRECTORY: unique symbol;
 /** Parser-minted phase-artifact search authority beneath `.claude/specs`. */

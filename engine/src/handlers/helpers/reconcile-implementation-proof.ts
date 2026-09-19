@@ -238,6 +238,7 @@ export function reconcileTaskFromStoredEvidence(
     {
       verificationPolicy: taskVerificationPolicy(task),
       declaredArtifacts: task.file_list ?? [],
+      declaredArtifactExpectation: task.implementation_attestation === true ? "attested" : "changed",
     },
     {
       taskCompleted: taskCompletionWasObserved(task) ||
@@ -281,7 +282,7 @@ export function reconcileTaskFromStoredEvidence(
 function failureSummary(task: Task): string {
   if (task.proof?.state !== "failed") return task.proof?.state ?? "missing";
   return task.proof.failures.map((failure) =>
-    failure.kind === "declared-artifact-not-changed"
+    failure.kind === "declared-artifact-not-changed" || failure.kind === "declared-artifact-drifted"
       ? `${failure.kind}:${failure.artifact}`
       : failure.kind
   ).join(", ");
@@ -386,12 +387,31 @@ const handler: HookHandler = async (_stdin, args) => {
         const sourceTask = recoveredPaths.length > 0
           ? invalidateTaskReview(recoveredTask)
           : recoveredTask;
-        const snapshotChanges = changedDeclaredArtifactsSince(root, sourceTask.artifact_baseline);
-        const revisionChanges = sourceTask.start_sha
-          ? changedDeclaredArtifactsSinceRevision(root, sourceTask.start_sha, sourceTask.file_list ?? [])
-          : [];
-        const byteChanges = [...new Set([...snapshotChanges, ...revisionChanges])];
-        const proofArtifactsChanged = attributedChangedArtifacts(byteChanges, sourceTask.files_modified ?? []);
+        // Attestation measures drift against the ATTEMPT baseline, never the
+        // population baseline: the work predates the attempt, so
+        // population-relative changes ARE the attested bytes, not evidence of
+        // writes. It also refuses transcript attribution — cumulative
+        // files_modified from earlier attempts would otherwise read as drift
+        // this attempt never produced.
+        const attestation = sourceTask.implementation_attestation === true;
+        if (attestation && sourceTask.attempt_artifact_baseline === undefined) {
+          throw new Error(
+            `attestation Task ${sourceTask.id} has no attempt_artifact_baseline to attest against; ` +
+            "dispatch an attestation attempt first — the attest program only prepares the Task",
+          );
+        }
+        const snapshotChanges = attestation
+          ? []
+          : changedDeclaredArtifactsSince(root, sourceTask.artifact_baseline);
+        const revisionChanges = attestation || !sourceTask.start_sha
+          ? []
+          : changedDeclaredArtifactsSinceRevision(root, sourceTask.start_sha, sourceTask.file_list ?? []);
+        const byteChanges = attestation
+          ? changedDeclaredArtifactsSince(root, sourceTask.attempt_artifact_baseline)
+          : [...new Set([...snapshotChanges, ...revisionChanges])];
+        const proofArtifactsChanged = attestation
+          ? byteChanges
+          : attributedChangedArtifacts(byteChanges, sourceTask.files_modified ?? []);
         const collectedNewTests = collectNewTestEvidence(
           sourceTask.files_modified ?? [],
           taskVerificationPolicy(sourceTask).newTests,

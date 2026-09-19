@@ -1249,11 +1249,33 @@ function readAnchoredRunFile(path: string, maximumBytes?: number): Buffer {
     readDirectoryFileNoFollow(parent, basename(path), maximumBytes));
 }
 
-/** Freshness requires descriptor-relative unlink, not a proved-then-reused
- * absolute pathname. Darwin's real-path anchor cannot supply this guarantee. */
+/**
+ * Reset one report artifact relative to an anchored parent, never following a
+ * leaf: lstat refuses directories and symlinks, and `unlink(2)` removes the
+ * link itself.
+ *
+ * Linux addresses the leaf through the retained descriptor, so a parent
+ * renamed and replaced by a foreign symlink cannot redirect the reset.
+ * Darwin has no descriptor-relative unlink: the parent's whole path is
+ * RE-PROVED with `O_NOFOLLOW_ANY` plus an identity check immediately before
+ * the leaf mutation (the same proof `ensureRelativeDirectoryNoFollow` uses
+ * before mkdir), and the unlink goes through that proven pathname. A parent
+ * renamed and replaced by a planted symlink is refused by the re-proof; a
+ * swap inside the proof-to-unlink gap remains the documented darwin risk —
+ * the same one every other anchored leaf mutation accepts on this platform.
+ */
 export function removeDirectoryRegularFileNoFollow(directory: AnchoredDirectory, name: string): void {
   assertAnchoredDirectory(directory);
-  if (directory.anchor !== "descriptor") throw new Error("report reset requires descriptor-anchored unlink; platform unsupported");
+  if (directory.anchor === "real-path") {
+    try {
+      proveDarwinParentPath(directory);
+    } catch (error) {
+      throw new Error(
+        `report reset requires descriptor-anchored unlink; darwin parent re-proof failed: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    }
+  }
   const path = anchoredChildPath(directory, name);
   try {
     if (!lstatSync(path).isFile()) throw new Error("report reset requires a regular file, never a directory or symlink");
@@ -1266,7 +1288,6 @@ export function removeDirectoryRegularFileNoFollow(directory: AnchoredDirectory,
 
 /** ENOENT (including an absent parent) is the only idempotent absence. */
 export function removeRunRegularFileNoFollow(path: string): void {
-  if (process.platform !== "linux") throw new Error("report reset requires descriptor-anchored unlink; platform unsupported");
   try {
     withOpenedDirectoryNoFollow(dirname(path), `report reset of ${basename(path)}`, (parent) =>
       removeDirectoryRegularFileNoFollow(parent, basename(path)));

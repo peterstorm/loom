@@ -51,7 +51,10 @@ import {
   renderProjectVerificationCoverage,
 } from "./verification-manifest";
 import { WAVE_REVIEW_AGENTS } from "./model-profiles";
-import { deriveImplementationRetryDisposition } from "./implementation-retry";
+import {
+  deriveImplementationAttestationContext,
+  deriveImplementationRetryDisposition,
+} from "./implementation-retry";
 import { staleReservationsForRosterObservation } from "./validate-task-execution";
 import {
   awaitUserAction,
@@ -504,7 +507,8 @@ export function gateCheckMessage(check: GateCheck): string {
 
 function proofFailureMessage(failure: ProofFailure): string {
   switch (failure.kind) {
-    case "declared-artifact-not-changed": return `${failure.kind}:${failure.artifact}`;
+    case "declared-artifact-not-changed":
+    case "declared-artifact-drifted": return `${failure.kind}:${failure.artifact}`;
     case "untrusted-regression-tests-failed":
     case "untrusted-regression-pass": return `${failure.kind}:${failure.label}`;
     default: return failure.kind;
@@ -2668,14 +2672,37 @@ function unstartedWaveStatus(
           failureKinds: disposition.failureKinds as NonEmpty<string>,
         })]
       : []);
+  // Attestation Tasks bind their dispatch to the engine-derived attestation
+  // context (digest over the stored attested obligation set + policy). The
+  // load boundary proved mode/obligations/policy lockstep, so derivation can
+  // only fail on an in-memory graph; either way the wave reports unavailable
+  // instead of emitting a dispatch a child could not legally be admitted on.
+  const attestationAppendix = new Map(dispositions.flatMap(({ task, disposition }) =>
+    disposition.kind === "initial" || disposition.kind === "retry"
+      ? task.implementation_attestation === true
+        ? [[task.id, deriveImplementationAttestationContext(task)] as const]
+        : []
+      : []));
+  const attestationFailure = [...attestationAppendix.entries()].find(([, derived]) => !derived.ok);
+  if (attestationFailure !== undefined) {
+    return deriveUnavailableLoomStatus(Object.freeze([
+      reason(
+        "authority-contradiction",
+        `${attestationFailure[0]} attestation mode could not derive its attestation context: ${attestationFailure[1].ok ? "" : attestationFailure[1].error}`,
+        attestationFailure[0],
+      ),
+    ]) as NonEmpty<StatusReason>);
+  }
   const dispatches = dispositions.flatMap(({ task, disposition }): readonly WaveImplementationDispatch[] => {
     if (activeTaskIds.has(task.id)) return [];
+    const attestation = attestationAppendix.get(task.id);
+    const attestationLine = attestation !== undefined && attestation.ok ? attestation.promptAppendix : null;
     if (disposition.kind === "initial") {
       return [canonicalRecord({
         kind: "initial-implementation",
         taskId: task.id,
         semanticAttempt: 1,
-        promptAppendix: null,
+        promptAppendix: attestationLine,
       })];
     }
     if (disposition.kind === "retry") {
@@ -2683,7 +2710,9 @@ function unstartedWaveStatus(
         kind: "retry-implementation",
         taskId: task.id,
         semanticAttempt: 2,
-        promptAppendix: disposition.promptAppendix,
+        promptAppendix: attestationLine === null
+          ? disposition.promptAppendix
+          : `${disposition.promptAppendix}\n${attestationLine}`,
       })];
     }
     return [];

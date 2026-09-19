@@ -639,7 +639,15 @@ function gitRepositoryRootFrom(cwd: string): string | null {
   }
   if (probe.status === 0) {
     const root = probe.stdout.trim();
-    if (root === "") throw new Error("git rev-parse returned an empty repository root");
+    if (root === "") {
+      // Status 0 with no output is not a documented git outcome; carry the cwd
+      // and any stderr so the operator (or CI log) can tell which probe call
+      // produced it instead of a bare unattributable refusal.
+      throw new Error(
+        `git rev-parse returned an empty repository root for ${cwd}` +
+        (probe.stderr.trim() === "" ? "" : ` (stderr: ${probe.stderr.trim()})`),
+      );
+    }
     return root;
   }
   if (probe.status === 128 && NOT_A_GIT_REPOSITORY.test(probe.stderr)) {
