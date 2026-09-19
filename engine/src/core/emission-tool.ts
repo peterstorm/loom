@@ -14,6 +14,7 @@
  */
 
 import { z } from "zod/v4";
+import { sha256Hex } from "./review-packet";
 import { REVIEWER_PAYLOAD_SCHEMA_V2, type ReviewerProtocolFailure } from "./reviewer-contract";
 import { parseReviewerPayloadV2, parseStandaloneReviewerPayloadV3 } from "./reviewer-protocol";
 import { STANDALONE_REVIEWER_SCHEMA_V3 } from "./standalone-lineage-contract";
@@ -21,12 +22,16 @@ import { JUDGE_VERDICT_SCHEMA_V1, judgeVerdictV1Schema } from "./panel-contract"
 import { REFUTATION_VERDICT_SCHEMA_V1, refutationVerdictV1Schema } from "./review-panel";
 import {
   canonicalRecord,
+  describeUnknown,
   failure,
+  parseArtifactDigest,
+  parseRequestId,
   success,
   type ArtifactDigest,
   type DomainResult,
+  type RequestId,
 } from "./orchestration-contract/identity";
-import type { PayloadProducerKindName } from "./model-profiles";
+import type { PayloadProducerKind, PayloadProducerKindName } from "./model-profiles";
 
 /** FR-009 vocabulary: the recorded source of every ingested payload. */
 export type PayloadSource = "emission-tool" | "extraction";
@@ -238,6 +243,126 @@ export function admitEmissionArguments(
         code: parsed.error.code,
         message: parsed.error.message,
       });
+}
+
+// ---------------------------------------------------------------------------
+// Issued binding (AD-8): authenticated issuance selects exactly one cell of
+// the frozen registry — kind, version, exact tool name and schema digest
+// ---------------------------------------------------------------------------
+
+/**
+ * The closed refusal vocabulary of the issued-binding mint. A refusal means
+ * the issuance claims do not select a registry cell: the (kind, version) pair
+ * is unsupported, the claimed tool name or schema digest does not certify the
+ * frozen schema, or the request identity is not canonical. Never a default.
+ */
+export type EmissionBindingRefusalCode =
+  | "invalid-request-identity"
+  | "unsupported-schema-version"
+  | "tool-name-mismatch"
+  | "schema-digest-mismatch";
+
+export type EmissionBindingRefusal = Readonly<{ code: EmissionBindingRefusalCode; message: string }>;
+
+/**
+ * The parsed issued binding: ONE cell of the frozen registry selected by
+ * authenticated issuance, carried as a valid-pair record rather than
+ * independent string fields that allow unsupported combinations — a minted
+ * binding's (kind, version) pair is registry-carried by construction, its
+ * tool name is the registry's exact tool name, and its schema digest is
+ * derived from the frozen bytes, never trusted from the claims. The request
+ * identity is the issued request attempt the binding holds the emission
+ * observations to (FR-014).
+ */
+export type IssuedEmissionBinding = Readonly<{
+  requestId: RequestId;
+  kind: PayloadProducerKind;
+  version: EmissionSchemaVersion;
+  toolName: EmissionToolName;
+  schemaDigest: ArtifactDigest;
+}>;
+
+/**
+ * The path-refined binding view. `selectCanonicalPayload` takes the
+ * reviewer-payload refinement and `selectVerdictSource` the verdict-kind
+ * refinement, so a binding minted for one ingestion path cannot be passed to
+ * the other without a cast — the path scoping is a type fact, never a runtime
+ * check the caller could forget.
+ */
+export type IssuedEmissionBindingOf<K extends PayloadProducerKindName> = IssuedEmissionBinding &
+  Readonly<{ kind: Readonly<{ kind: K }> }>;
+
+/**
+ * The issuance claims the mint parses against the frozen registry. The
+ * optional claims are verified when present (a stale protocol packet must
+ * refuse here, not register a tool its packet does not certify) and derived
+ * from the registry when absent — derivation is from the ONE frozen source,
+ * never a current default (AD-7).
+ */
+export type IssuedEmissionRequest = Readonly<{
+  requestId: string;
+  kind: PayloadProducerKindName;
+  version: string;
+  toolName?: string;
+  schemaDigest?: string;
+}>;
+
+/**
+ * The ONLY mint of an issued emission binding: parse the claims against the
+ * frozen registry, refuse every claim that does not select one of its cells,
+ * and return the valid-pair binding. `sha256Hex` is the digest derivation the
+ * reviewer protocol's recorded `schemaDigest` uses, so a binding minted here
+ * and a protocol stamped from the same bytes carry the same digest.
+ */
+export function issueEmissionBinding<K extends PayloadProducerKindName>(
+  issued: IssuedEmissionRequest & Readonly<{ kind: K }>,
+): DomainResult<IssuedEmissionBindingOf<K>, EmissionBindingRefusal> {
+  const requestId = parseRequestId(issued.requestId);
+  if (!requestId.ok) {
+    return failure(canonicalRecord({
+      code: "invalid-request-identity" as const,
+      message: `issued emission binding carries no canonical request id: ${requestId.error.message}`,
+    }));
+  }
+  // The alias annotation widens the satisfies-narrowed literal registry so the
+  // version lookup below is a plain string-keyed Record lookup — the
+  // definedness check, not the type system, proves the pair is carried.
+  const spec: EmissionToolSpec = EMISSION_TOOL_SPECS[issued.kind];
+  const schemaVersion = spec.schemaVersions[issued.version];
+  if (schemaVersion === undefined) {
+    return failure(canonicalRecord({
+      code: "unsupported-schema-version" as const,
+      message: `emission tool ${spec.toolName} carries no schema version ${issued.version} for producer kind ${issued.kind} (supported: ${Object.keys(spec.schemaVersions).join(", ")})`,
+    }));
+  }
+  if (issued.toolName !== undefined && issued.toolName !== spec.toolName) {
+    return failure(canonicalRecord({
+      code: "tool-name-mismatch" as const,
+      message: `issued tool name ${describeUnknown(issued.toolName)} does not name the registry tool ${spec.toolName} for producer kind ${issued.kind}`,
+    }));
+  }
+  const schemaDigest = sha256Hex(schemaVersion.schemaBytes) as ArtifactDigest;
+  if (issued.schemaDigest !== undefined) {
+    const claimed = parseArtifactDigest(issued.schemaDigest);
+    if (!claimed.ok || claimed.value !== schemaDigest) {
+      return failure(canonicalRecord({
+        code: "schema-digest-mismatch" as const,
+        message: `issued schema digest ${describeUnknown(issued.schemaDigest)} does not certify the frozen ${issued.kind}/${issued.version} schema (registry digest ${schemaDigest})`,
+      }));
+    }
+  }
+  // The definedness check above proves issued.version is a registry-carried
+  // version, and the K constraint (K extends PayloadProducerKindName) proves
+  // the kind member — this is the one justified construction cast at the ONE
+  // minting point, so every minted binding is a valid-pair record by
+  // construction and no consumer ever re-narrows.
+  return success(canonicalRecord({
+    requestId: requestId.value,
+    kind: Object.freeze({ kind: issued.kind }),
+    version: issued.version as EmissionSchemaVersion,
+    toolName: spec.toolName,
+    schemaDigest,
+  }) as IssuedEmissionBindingOf<K>);
 }
 
 /**
