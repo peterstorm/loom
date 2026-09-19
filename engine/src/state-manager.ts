@@ -615,7 +615,24 @@ function parseActiveWaveGateTerminalOutcome(
     }
     return parseOk(Object.freeze({ kind: "terminal-blocked", diagnostic: diagnostic.value }));
   }
-  return parseErr("active_wave_gate.terminalOutcome.kind must be done or terminal-blocked");
+  if (terminal.kind === "terminal-abandoned") {
+    const keys = Object.keys(terminal);
+    if (keys.length !== 3 || !keys.includes("reason") || !keys.includes("supersededBy")) {
+      return parseErr("active_wave_gate.terminalOutcome terminal-abandoned must contain exactly kind, reason, and supersededBy");
+    }
+    const reasonError = specTraceWaveGateRetirementReasonError(terminal.reason, "active_wave_gate.terminalOutcome");
+    if (reasonError !== null) return parseErr(reasonError);
+    const supersededBy = parseSpecTraceSupersededBy(terminal.supersededBy, runId, "active_wave_gate.terminalOutcome");
+    if (!supersededBy.ok) {
+      return parseErr(supersededBy.error);
+    }
+    return parseOk(Object.freeze({
+      kind: "terminal-abandoned" as const,
+      reason: terminal.reason as string,
+      supersededBy: supersededBy.value,
+    }));
+  }
+  return parseErr("active_wave_gate.terminalOutcome.kind must be done, terminal-blocked, or terminal-abandoned");
 }
 
 /** Parse and re-prove the protected active-run anchor from unknown JSON. */
@@ -861,24 +878,25 @@ const SPEC_TRACE_WAVE_GATE_RETIREMENT_FIELDS = [
   "reason", "supersededBy",
 ] as const;
 
-function specTraceWaveGateRetirementReasonError(raw: unknown): string | null {
+function specTraceWaveGateRetirementReasonError(raw: unknown, label: string): string | null {
   if (typeof raw !== "string" || raw.length === 0 || raw.length > 512 || raw.trim() !== raw) {
-    return "spec_trace_wave_gate_retirements.reason must be exact non-blank trimmed text of at most 512 characters";
+    return `${label}.reason must be exact non-blank trimmed text of at most 512 characters`;
   }
   return null;
 }
 
 function parseSpecTraceSupersededBy(
   raw: unknown,
-  runId: SpecTraceWaveGateRetirement["runId"],
-): ParseResult<SpecTraceWaveGateRetirement["supersededBy"]> {
+  runId: ActiveWaveGateRegistration["runId"],
+  label: string,
+): ParseResult<ActiveWaveGateRegistration["runId"] | null> {
   if (raw === null) return parseOk(null);
   const parsedSupersededBy = parseOrchestrationRunId(raw);
   if (!parsedSupersededBy.ok) {
-    return parseErr(`spec_trace_wave_gate_retirements.supersededBy: ${parsedSupersededBy.error.message}`);
+    return parseErr(`${label}.supersededBy: ${parsedSupersededBy.error.message}`);
   }
   if (parsedSupersededBy.value === runId) {
-    return parseErr("spec_trace_wave_gate_retirements run cannot supersede itself");
+    return parseErr(`${label} run cannot supersede itself`);
   }
   return parseOk(parsedSupersededBy.value);
 }
@@ -917,10 +935,10 @@ function parseSpecTraceWaveGateRetirement(raw: unknown): ParseResult<SpecTraceWa
   if (typeof record.runsRoot !== "string" || !isAbsolute(record.runsRoot) || resolve(record.runsRoot) !== record.runsRoot) {
     return parseErr("spec_trace_wave_gate_retirements.runsRoot must be an absolute normalized path");
   }
-  const reasonError = specTraceWaveGateRetirementReasonError(record.reason);
+  const reasonError = specTraceWaveGateRetirementReasonError(record.reason, "spec_trace_wave_gate_retirements");
   if (reasonError !== null) return parseErr(reasonError);
   const reason = record.reason as string;
-  const supersededBy = parseSpecTraceSupersededBy(record.supersededBy, runId.value);
+  const supersededBy = parseSpecTraceSupersededBy(record.supersededBy, runId.value, "spec_trace_wave_gate_retirements");
   if (!supersededBy.ok) return parseErr(supersededBy.error);
   return parseOk(Object.freeze({
     schemaVersion: 1,
@@ -2650,9 +2668,16 @@ export class StateManager {
         if (existing.terminalOutcome === null) {
           throw new Error(`Active Wave Gate run ${existing.runId} already owns wave ${existing.wave}`);
         }
-        throw new Error(
-          `Legacy terminal Wave Gate run ${existing.runId} must be explicitly migrated to terminal history before registering another run`,
-        );
+        if (existing.terminalOutcome.kind !== "terminal-abandoned") {
+          throw new Error(
+            `Legacy terminal Wave Gate run ${existing.runId} must be explicitly migrated to terminal history before registering another run`,
+          );
+        }
+        // An operator-abandoned tombstone is not authority for the Wave: the
+        // fresh registration supersedes it below. Roster and digest are still
+        // re-proven against the locked state, and the tombstone is NOT
+        // archived into wave_gate_history — that history poisons later starts
+        // for the same Wave, and an abandoned run was never completed.
       }
       const lockedTaskIds = state.tasks
         .filter((task) => task.wave === registration.wave)
@@ -2666,6 +2691,50 @@ export class StateManager {
         );
       }
       return { state: { ...state, active_wave_gate: registration }, value: registration };
+    });
+  }
+
+  /**
+   * Stamp the operator's terminal abandonment onto the protected registration.
+   *
+   * `helper orchestration abandon` writes an immutable marker inside the Run
+   * Directory; this stamps the SAME terminal decision onto the active
+   * registration under the TaskGraph lock, so a tombstoned registration stops
+   * being active authority and a fresh `start` can supersede it. The outcome
+   * is re-proven through `parseActiveWaveGateTerminalOutcome` rather than
+   * constructed directly: the stored form is parser-proven, and the state
+   * boundary refuses to persist what its own parser would reject.
+   *
+   * No-op (returns `null`) when there is no active registration, the run id
+   * does not match, or the registration is already terminal some other way —
+   * the run-directory marker is the operator's decision of record in those
+   * cases and the state simply has nothing to tombstone. A repeat of the
+   * exact same stamp is an idempotent replay.
+   */
+  async abandonActiveWaveGateRegistration(
+    abandonment: Readonly<{
+      runId: ActiveWaveGateRegistration["runId"];
+      reason: string;
+      supersededBy: ActiveWaveGateRegistration["runId"] | null;
+    }>,
+  ): Promise<ActiveWaveGateRegistration | null> {
+    return this.updateAndReturn((state) => {
+      const active = state.active_wave_gate;
+      if (active === undefined || active.runId !== abandonment.runId) return { state, value: null };
+      if (active.terminalOutcome !== null) {
+        return active.terminalOutcome.kind === "terminal-abandoned" &&
+          active.terminalOutcome.reason === abandonment.reason &&
+          active.terminalOutcome.supersededBy === abandonment.supersededBy
+          ? { state, value: active }
+          : { state, value: null };
+      }
+      const outcome = parseActiveWaveGateTerminalOutcome(
+        { kind: "terminal-abandoned", reason: abandonment.reason, supersededBy: abandonment.supersededBy },
+        active.runId,
+      );
+      if (!outcome.ok) throw new Error(`Invalid Wave Gate abandonment stamp: ${outcome.error}`);
+      const stamped: ActiveWaveGateRegistration = Object.freeze({ ...active, terminalOutcome: outcome.value });
+      return { state: { ...state, active_wave_gate: stamped }, value: stamped };
     });
   }
 

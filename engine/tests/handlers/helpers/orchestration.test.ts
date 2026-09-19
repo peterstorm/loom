@@ -4254,6 +4254,64 @@ describe("orchestration CLI", () => {
       expect(conflicting.stderr).toContain("already abandoned under a different marker");
     });
 
+    /**
+     * Abandoning a run that OWNS the protected Wave Gate registration must
+     * tombstone that registration in the same breath. The marker alone left
+     * the registration active forever: every successor `start` was refused
+     * with "already owns wave", and the only escape was the exceptional
+     * spec-trace retirement. The stamp mirrors the marker exactly, and an
+     * exact replay leaves the protected bytes untouched.
+     */
+    it("tombstones the protected Wave Gate registration when the abandoned run owned one", async () => {
+      const root = repository();
+      const proof = passingWaveTaskProof();
+      writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
+      const statePath = join(root, ".claude", "state", "active_task_graph.json");
+      writeFileSync(statePath, JSON.stringify({
+        current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+        spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
+          id: "T1", description: "abandon stamp target", agent: "code-implementer-agent", wave: 1,
+          status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+          test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+          new_test_evidence: "present", review_status: "passed", review_generation: 0,
+          findings: [], critical_findings: [], advisory_findings: [],
+        }],
+      }));
+      const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-abandon-stamp-runs-")));
+      cleanup.push(runsRoot);
+      const runDir = join(runsRoot, "run.wave-abandon-stamp");
+      mkdirSync(runDir);
+      const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
+      expect(started.status, started.stderr).toBe(0);
+      expect((JSON.parse(readFileSync(statePath, "utf8")) as { active_wave_gate?: { runId: string } })
+        .active_wave_gate?.runId).toBe("run.wave-abandon-stamp");
+
+      const abandon = () => runCli([
+        "abandon", "--runs-root", runsRoot, "--run", "run.wave-abandon-stamp",
+        "--reason", "gate terminally blocked",
+      ], "", root);
+
+      const abandoned = (await abandon());
+      expect(abandoned.status, abandoned.stderr).toBe(0);
+      const after = JSON.parse(readFileSync(statePath, "utf8")) as {
+        active_wave_gate?: {
+          runId: string;
+          terminalOutcome: { kind: string; reason: string; supersededBy: string | null };
+        };
+      };
+      // The state stamp mirrors the run-directory marker exactly.
+      expect(after.active_wave_gate?.runId).toBe("run.wave-abandon-stamp");
+      expect(after.active_wave_gate?.terminalOutcome).toEqual({
+        kind: "terminal-abandoned", reason: "gate terminally blocked", supersededBy: null,
+      });
+      expect(existsSync(join(runDir, "abandoned.json"))).toBe(true);
+
+      // Exact replay: the repeat abandon leaves the protected bytes untouched.
+      const before = readFileSync(statePath);
+      expect((await abandon()).status).toBe(0);
+      expect(readFileSync(statePath)).toEqual(before);
+    }, 30_000);
+
     it("lists both operations in the usage text so they are discoverable", async () => {
       const usage = (await runCli(["not-an-operation"], "", project()));
 

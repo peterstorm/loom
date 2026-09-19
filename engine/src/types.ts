@@ -744,7 +744,14 @@ export type SpecCheck = CapturedSpecCheck | EvidenceFailedSpecCheck;
  */
 export type ActiveWaveGateTerminalOutcome =
   | Readonly<{ kind: "done"; outcome: ArtifactRef }>
-  | Readonly<{ kind: "terminal-blocked"; diagnostic: TerminalBlockedDiagnostic }>;
+  | Readonly<{ kind: "terminal-blocked"; diagnostic: TerminalBlockedDiagnostic }>
+  /** The operator's terminal decision recorded by `helper orchestration abandon`.
+   *  Fields mirror the run directory's immutable abandonment marker exactly —
+   *  no invented timestamp — so the state stamp and the on-disk marker can
+   *  never disagree about why the run ended or what replaced it. A tombstoned
+   *  registration is no longer active authority: `start` supersedes it, while
+   *  the spec-trace retirement flow can still prove the run from it. */
+  | Readonly<{ kind: "terminal-abandoned"; reason: string; supersededBy: OrchestrationRunId | null }>;
 
 export type ActiveWaveGateRegistration = Readonly<{
   schemaVersion: 1;
@@ -757,7 +764,10 @@ export type ActiveWaveGateRegistration = Readonly<{
    * created before directory authority was persisted. */
   runsRoot?: string;
   /** Non-null only while reading a legacy terminal registration. New
-   * completions archive it in wave_gate_history and clear active authority. */
+   * completions archive it in wave_gate_history and clear active authority.
+   * A `terminal-abandoned` tombstone marks an operator-retired run: no longer
+   * active authority (a fresh `start` supersedes it), but retained in place so
+   * the spec-trace retirement flow can still prove the exact run it abandoned. */
   terminalOutcome: ActiveWaveGateTerminalOutcome | null;
 }>;
 

@@ -71,7 +71,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { isReviewAgent, SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
-import { parseTaskGraph } from "../../state-manager";
+import { parseTaskGraph, StateManager } from "../../state-manager";
 import { observeAnyActiveSubagent } from "../../machine";
 import type {
   ActiveWaveGateRegistration,
@@ -94,7 +94,7 @@ import {
   observeCurrentWaveCompletionResult,
   observeCurrentWaveWorkspace,
 } from "./wave-completion-suite";
-import { createRunDirectory, inspectRunDirectoryEntry, openRegisteredRunDirectory, openRunDirectory, type RunDirHandle } from "../../orchestration/run-directory-handle";
+import { createRunDirectory, inspectRunDirectoryEntry, openRegisteredRunDirectory, openRunDirectory, type RunAbandonment, type RunDirHandle } from "../../orchestration/run-directory-handle";
 import {
   deriveRunInspection,
   observed,
@@ -769,6 +769,40 @@ async function inspectOperation(args: readonly string[]): Promise<HookResult> {
 }
 
 /**
+ * Tombstone the Wave Gate registration that names this run, if the protected
+ * graph carries one.
+ *
+ * The run-directory marker alone never lifted the state's active authority, so
+ * an abandoned Wave Gate run kept owning its Wave forever: `start` refused any
+ * successor with "already owns wave" and the only sanctioned escape was the
+ * exceptional spec-trace retirement. Stamping the SAME terminal decision — the
+ * marker's own runId/reason/supersededBy, re-proven by the state parser — into
+ * the registration under the TaskGraph lock closes that loop while keeping
+ * history: the tombstone stays in place until a successor start supersedes it,
+ * and `upgrade-spec-trace --retire-abandoned-run` can still prove the run.
+ *
+ * The receipt is emitted before this runs — the marker is already immutable on
+ * disk — so a stamp failure cannot unreport the abandonment; the returned
+ * error tells the operator to repeat the identical command, which replays the
+ * marker idempotently and retries the stamp.
+ */
+async function stampAbandonedWaveGateRegistration(marker: RunAbandonment): Promise<string | null> {
+  const manager = StateManager.fromPath(TASK_GRAPH_PATH);
+  if (manager === null) return null; // no protected graph: nothing to tombstone
+  try {
+    await manager.abandonActiveWaveGateRegistration({
+      runId: marker.runId,
+      reason: marker.reason,
+      supersededBy: marker.supersededBy,
+    });
+    return null;
+  } catch (error) {
+    return "run abandonment was recorded in the Run Directory, but the protected Wave Gate registration could not be tombstoned: " +
+      `${error instanceof Error ? error.message : String(error)} — repeat the identical abandon command to retry the state stamp`;
+  }
+}
+
+/**
  * Record that an operator is finished with a run, and by what it was replaced.
  *
  * The replacement is proven to exist as a real direct child of the SAME
@@ -799,7 +833,8 @@ async function abandonOperation(args: readonly string[]): Promise<HookResult> {
   const abandoned = await bound.value.handle.abandonRun({ supersededBy, reason });
   if (!abandoned.ok) return { kind: "error", message: abandoned.error.message };
   process.stdout.write(`${JSON.stringify(abandoned.value, null, 2)}\n`);
-  return { kind: "allow" };
+  const stampFailure = await stampAbandonedWaveGateRegistration(abandoned.value);
+  return stampFailure === null ? { kind: "allow" } : { kind: "error", message: stampFailure };
 }
 
 type RegisteredPanelProgram = Readonly<{
