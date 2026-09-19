@@ -67,12 +67,29 @@ export function prepareTaskGraphRepair(
  * Install a repaired graph without first loading it through StateManager: the
  * entire purpose of this helper is to recover state rejected by that boundary.
  * LOOM_STATE_PATH is the sanctioned way to target a non-default graph.
+ *
+ * The repair source is ALWAYS the graph on disk. Stdin is refused, not
+ * ignored: this helper sits next to payload-driven installers
+ * (`populate-task-graph`, `upgrade-spec-trace`) whose invocations pipe JSON,
+ * so a piped payload here used to vanish silently while the helper repaired
+ * from disk and reported success — the operator had no way to know their
+ * bytes were never read.
  */
-const handler: HookHandler = async (_stdin, args) => {
+const handler: HookHandler = async (stdin, args) => {
   if (args.length > 0) {
     return {
       kind: "error",
       message: "Usage: bun cli.ts helper repair-task-graph (set LOOM_STATE_PATH to target another graph)",
+    };
+  }
+  if (stdin.trim() !== "") {
+    return {
+      kind: "error",
+      message:
+        `repair-task-graph reads the ACTIVE task graph from disk and accepts no stdin; ` +
+        `${stdin.length} piped byte(s) would have been silently ignored. ` +
+        "Run it with no input to repair the graph named by taskGraphPath()/LOOM_STATE_PATH, " +
+        "or use populate-task-graph for payload-driven installation",
     };
   }
 
