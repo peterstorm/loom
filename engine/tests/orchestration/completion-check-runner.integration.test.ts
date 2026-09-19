@@ -86,7 +86,7 @@ function remediationExecution(result: RemediationCheckRunnerResult) {
 
 /** Diagnostic tails can carry up to 64 KiB each; drop them so the refusal
  *  context stays inside assertion-message bounds. */
-function refusalText(result: { readonly ok: false }): string {
+function refusalText(result: { readonly ok: false; readonly error: unknown }): string {
   const error = result.error as Readonly<Record<string, unknown>>;
   const { diagnostics: _diagnostics, ...rest } = error;
   return JSON.stringify(rest);
