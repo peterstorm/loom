@@ -322,6 +322,7 @@ describe("applyPhaseAgentPiResult", () => {
         completedPhase: "brainstorm",
         result: result({ agent: "brainstorm-agent", messages: [writeCall(brainstorm)] }),
         now: NOW,
+        phaseArtifactBaseDir: root,
       });
 
       expect(applied.processingErrors).toEqual([]);
@@ -341,6 +342,7 @@ describe("applyPhaseAgentPiResult", () => {
       completedPhase: "specify",
       result: result({ agent: "specify-agent", messages: [writeCall(".claude/specs/run/spec.md")] }),
       now: NOW,
+      phaseArtifactBaseDir: process.cwd(),
     });
 
     expect(applied.processingErrors).toEqual([
@@ -360,6 +362,7 @@ describe("applyPhaseAgentPiResult", () => {
         messages: [writeCall(".claude/specs/run/../../../../tmp/evil/spec.md")],
       }),
       now: NOW,
+      phaseArtifactBaseDir: process.cwd(),
     });
 
     expect(store.current().spec_file).toBeNull();
@@ -373,6 +376,7 @@ describe("applyPhaseAgentPiResult", () => {
       completedPhase: "specify",
       result: result({ agent: "specify-agent", messages: [{ role: 42 }] }),
       now: NOW,
+      phaseArtifactBaseDir: process.cwd(),
     });
 
     expect(applied.processingErrors).toHaveLength(1);
@@ -405,6 +409,7 @@ describe("applyPhaseAgentPiResult", () => {
         messages: [writeCall(".claude/specs/stale/spec.md")],
       }),
       now: NOW,
+      phaseArtifactBaseDir: process.cwd(),
     });
 
     expect(applied.processingErrors).toEqual([]);
@@ -423,6 +428,7 @@ describe("applyPhaseAgentPiResult", () => {
       completedPhase: "architecture",
       result: result({ agent: "architecture-agent", messages: [] }),
       now: NOW,
+      phaseArtifactBaseDir: process.cwd(),
     });
 
     expect(applied.processingErrors).toEqual([

@@ -58,8 +58,14 @@ function phaseArtifactExists(path: string, baseDir: string): boolean {
   }
 }
 
-/** Count NEEDS CLARIFICATION markers; unreadable authority fails the transition. */
-export function countMarkers(filePath: string, baseDir: string = process.cwd()): number {
+/** Count NEEDS CLARIFICATION markers; unreadable authority fails the transition.
+ *
+ * `baseDir` is REQUIRED: the artifact is probed against the project boundary
+ * that owns the TaskGraph, never the caller's ambient cwd — an optional base
+ * here silently reintroduces the cross-checkout drift this seam was built to
+ * close. The only cwd default in the module lives on the documented
+ * compatibility shell `resolveTransition`. */
+export function countMarkers(filePath: string, baseDir: string): number {
   try {
     return (readFileSync(withinBoundary(filePath, baseDir), "utf-8").match(/NEEDS CLARIFICATION/g) ?? []).length;
   } catch (error) {
@@ -217,17 +223,19 @@ function phaseAuthorityRefusal(current: Phase, completed: Phase): HookResult | n
 
 /** Imperative-shell observation of phase artifacts. Never call under the TaskGraph lock.
  *
- * `baseDir` is the project boundary every relative artifact path is probed
- * against: production callers MUST pass the root derived from the TaskGraph's
+ * `baseDir` is REQUIRED — the project boundary every relative artifact path is
+ * probed against: production callers pass the root derived from the TaskGraph's
  * own location (`projectRootForStateFile`), because the runtime's cwd may be a
- * different checkout than the run being advanced. The default preserves the
- * historical cwd anchoring for the compatibility shell only.
+ * different checkout than the run being advanced. Requiring the argument makes
+ * the omission a compile error instead of a silent cross-checkout drift; the
+ * historical cwd anchoring survives only on the compatibility shell
+ * `resolveTransition`, whose default documents itself as such.
  */
 export function observePhaseTransition(
   completedPhase: Phase,
   state: TaskGraph,
   specDir: SpecArtifactDirectory,
-  baseDir: string = process.cwd(),
+  baseDir: string,
 ): PhaseTransitionObservation {
   const resolution = match(completedPhase)
     .with("brainstorm", () => {
@@ -310,8 +318,10 @@ export function observePhaseTransition(
 }
 
 /** Compatibility shell for direct callers: parse scope, then observe.
- *  Production callers should observe through `observePhaseTransition` with an
- *  explicit graph-derived base instead of relying on this cwd default. */
+ *  This is the module's ONLY cwd default — production callers observe through
+ *  `observePhaseTransition` with an explicit graph-derived base (required
+ *  there), so a harness adapter cannot reintroduce the worktree/cwd-drift
+ *  failure by omission. */
 export function resolveTransition(
   completedPhase: Phase,
   state: TaskGraph,

@@ -90,8 +90,14 @@ export async function prepareStandaloneSuccessorFacadeStart(runsRoot: string, ru
       previousContexts: Object.freeze(lineage.value.packets[0]!.variableContext.slice(1)),
       authority: JSON.parse(serializeStandaloneReviewAuthority(prepared.value.authority), (_key: string, value: unknown) =>
         typeof value === "object" && value !== null ? Object.freeze(value) : value) });
-    if (Buffer.byteLength(JSON.stringify(registration)) > 16_777_216) return { ok: false as const, message: "successor registration exceeds byte budget" };
-    const start = Object.freeze({ registration, authority: prepared.value.authority, packets: lineage.value.packets });
+    // Mint the registration's wire bytes ONCE at preflight: the start token
+    // carries these exact bytes and registration publishes them verbatim, so
+    // JSON.stringify's silent-drop semantics are confined to this one seam and
+    // the registered program is byte-identical to the preflight-proved form
+    // instead of a second stringify's re-projection.
+    const registrationWire = JSON.stringify(registration);
+    if (Buffer.byteLength(registrationWire) > 16_777_216) return { ok: false as const, message: "successor registration exceeds byte budget" };
+    const start = Object.freeze({ registration, registrationWire, authority: prepared.value.authority, packets: lineage.value.packets });
     preparedSuccessorStarts.add(start);
     return { ok: true as const, value: start };
   } catch (cause) { return { ok: false as const, message: cause instanceof Error ? cause.message : String(cause) }; }
@@ -100,7 +106,9 @@ export async function prepareStandaloneSuccessorFacadeStart(runsRoot: string, ru
 export async function startPreparedStandaloneSuccessor(handle: RunDirHandle,
   prepared: Extract<Awaited<ReturnType<typeof prepareStandaloneSuccessorFacadeStart>>, { ok: true }>["value"]): Promise<FacadeDriveResult> {
   if (!preparedSuccessorStarts.has(prepared) || handle.runId !== prepared.authority.runId) return failed("successor start requires this Run's actual bounded preflight");
-  const registered = await handle.registerProgram(JSON.parse(JSON.stringify(prepared.registration)) as unknown);
+  // Registration publishes the preflight-MINTED wire bytes, parsed — never a
+  // second live-object stringify.
+  const registered = await handle.registerProgram(JSON.parse(prepared.registrationWire) as unknown);
   if (!registered.ok) return failed(registered.error.message);
   if (await handle.readCheckpoint(16_777_216) !== null) return resumeStandaloneFacade(handle, prepared.registration);
   // Initial publication owns attempt-one packets; freeze only retries here to avoid duplicate serialization/writes.

@@ -100,8 +100,12 @@ export async function prepareStandaloneSuccessorSource(input: StandaloneSuccesso
         ? previous.value.readStandaloneSuccessorContext(request.contextDigest, STANDALONE_LINEAGE_LIMITS.retainedBytes)
         : previous.value.readContext(request.contextDigest, STANDALONE_LINEAGE_LIMITS.retainedBytes);
       const decoded = parseBoundedReviewerJson(bytes, STANDALONE_LINEAGE_LIMITS.retainedBytes);
-      const projectedPacket = packet.ok ? JSON.parse(JSON.stringify(packet.value)) as unknown : null;
-      if (!packet.ok || !decoded.ok || !canonicalStructuralEquals(projectedPacket, decoded.value)) {
+      // The packet's ImmutableByteSequence sections equal their parsed wire
+      // arrays under canonicalStructuralEquals, so the live packet compares
+      // against the authenticated bytes directly — no untyped JSON projection
+      // sits between the observation and the proof, and JSON.stringify's
+      // silent-drop semantics never touch a published-identity comparison.
+      if (!packet.ok || !decoded.ok || !canonicalStructuralEquals(packet.value, decoded.value)) {
         return { ok: false as const, message: "predecessor exact Context Packet bytes changed during observation" };
       }
       // Exact published-byte references avoid recursively embedding predecessor packets.

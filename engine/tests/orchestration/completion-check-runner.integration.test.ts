@@ -329,7 +329,14 @@ describe("completion check process shell", () => {
     });
   });
 
-  it("does not SIGKILL a recycled foreign process group after leader death proves the original group gone", async () => {
+  it("refuses the timeout outcome when leader death plus EPERM cannot prove the group dissolved, without signalling", async () => {
+    // The pre-round-5 design read EPERM-with-dead-leader as "the original group
+    // dissolved and the numeric id now names foreign authority" and claimed a
+    // contained run on that basis. That evidence cannot distinguish a recycled
+    // foreign id from uid-changed survivors (setuid execution inside a project
+    // command), so EPERM no longer confirms dissolution anywhere: the runner
+    // refuses the timeout outcome fail-closed, and it STILL refuses to signal
+    // an id that may no longer name this check's group.
     const actualKill = process.kill.bind(process);
     const signals: (number | NodeJS.Signals)[] = [];
     const probeError = (code: "EPERM" | "ESRCH"): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
@@ -338,18 +345,58 @@ describe("completion check process shell", () => {
       if (signal === "SIGTERM") return actualKill(pid, signal);
       if (signal === 0 && pid < 0) throw probeError("EPERM");
       if (signal === 0 && pid > 0) throw probeError("ESRCH");
-      if (signal === "SIGKILL") throw new Error("foreign process group must not be signalled");
+      if (signal === "SIGKILL") throw new Error("unconfirmable process group must not be signalled");
       return actualKill(pid, signal);
     }) as typeof process.kill);
     try {
-      const result = execution(await runCompletionCheck(
+      const result = await runCompletionCheck(
         check("timeout-exit-zero", { timeoutMs: 200 }),
         fixtureRoot(),
         { terminationGraceMs: 250, hardKillWaitMs: 2_000 },
-      ));
-      expect(result.checkResult.outcome).toMatchObject({ kind: "observed", timedOut: true });
+      );
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          kind: "termination-unconfirmed",
+          message: expect.stringContaining("could not be confirmed after SIGTERM (EPERM)"),
+        },
+      });
       expect(signals).toContain("SIGTERM");
       expect(signals).not.toContain("SIGKILL");
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
+  it("reports a closed group whose EPERM probe cannot prove dissolution as termination-unconfirmed without signalling", async () => {
+    // Parent-close unconfirmed arm: the parent closed normally, the group
+    // probe answers EPERM (at least one member is unsignalable — or the id is
+    // foreign), and the leader probe proves the leader reaped. That pair is
+    // not a dissolution proof, so the outcome is the named unconfirmed
+    // refusal, the wait expires fail-closed, and no signal ever follows an id
+    // that may not be ours.
+    const signals: (number | NodeJS.Signals)[] = [];
+    const probeError = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+      if (signal === 0 && pid < 0) throw probeError("EPERM"); // group probe: unsignalable member (or foreign id)
+      if (signal === 0) throw probeError("ESRCH"); // leader probe: leader reaped
+      if (signal !== undefined) signals.push(signal);
+      throw new Error(`post-close signalling must be refused: ${String(signal)}`);
+    }) as typeof process.kill);
+    try {
+      const result = await runCompletionCheck(
+        check("missing-report"),
+        fixtureRoot(),
+        { hardKillWaitMs: 60 },
+      );
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          kind: "termination-unconfirmed",
+          message: expect.stringContaining("dissolution could not be confirmed (EPERM)"),
+        },
+      });
+      expect(signals).toEqual([]);
     } finally {
       kill.mockRestore();
     }

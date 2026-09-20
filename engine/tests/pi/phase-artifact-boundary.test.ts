@@ -149,9 +149,13 @@ describe("phase artifacts resolve against the graph's project boundary, not cwd"
       };
 
       // Without the boundary the applier probes cwd and refuses: the deadlock.
+      // (The base dir is a REQUIRED argument — this call passes the ambient cwd
+      // explicitly, which is exactly the spelling the boundary was introduced
+      // to replace.)
       const cwdAnchored = await applyPhaseAgentPiResult({
         store, agentType: "brainstorm-agent", completedPhase: "brainstorm" as Phase,
         result, now: "2026-09-19T00:00:00.000Z",
+        phaseArtifactBaseDir: process.cwd(),
       });
       expect(cwdAnchored.processingErrors.join("\n")).toContain("not ready");
       expect(store.current().current_phase).toBe("init");

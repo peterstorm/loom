@@ -129,6 +129,22 @@ export function structurallyEqual(left: unknown, right: unknown, seen: Structura
     return false;
   }
   return withPairInProgress(left, right, seen, () => {
+    const leftSequence = hasImmutableByteSequenceTag(left);
+    const rightSequence = hasImmutableByteSequenceTag(right);
+    if (leftSequence || rightSequence) {
+      // A Context Packet's ImmutableByteSequence and its parsed wire form (the
+      // plain number array JSON makes of it) are two spellings of the same
+      // bytes — the packet contract binds them with one digest. Compare the
+      // bytes, never by reflection: a sequence deliberately has no own
+      // enumerable keys (Object.keys of a sequence is empty), so record
+      // equality would vacuously accept ANY two sequences, and the Array arm
+      // would reject the mixed pair the packet round trip produces.
+      const leftEntries = byteSequenceEntries(left, leftSequence);
+      const rightEntries = byteSequenceEntries(right, rightSequence);
+      return leftEntries !== null && rightEntries !== null &&
+        leftEntries.length === rightEntries.length &&
+        leftEntries.every((entry, index) => structurallyEqual(entry, rightEntries[index], seen));
+    }
     if (Array.isArray(left) || Array.isArray(right)) {
       return Array.isArray(left) && Array.isArray(right) && left.length === right.length &&
         left.every((entry, index) => structurallyEqual(entry, right[index], seen));
@@ -146,6 +162,19 @@ export function structurallyEqual(left: unknown, right: unknown, seen: Structura
   });
 }
 
+/** Materialize one side of a byte-sequence comparison. A tagged sequence
+ *  iterates its bytes; the untagged side must be the plain number array the
+ *  wire form is. Anything else (a record, a Map, a hostile tagged non-iterable)
+ *  refuses instead of throwing. */
+function byteSequenceEntries(value: unknown, tagged: boolean): readonly unknown[] | null {
+  if (!tagged) return Array.isArray(value) ? (value as readonly unknown[]) : null;
+  try {
+    return Array.from(value as Iterable<unknown>);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Structural equality that stays exact on values while ignoring the single
  * prototype distinction `canonicalRecord` introduces: a canonical record (null
@@ -158,6 +187,21 @@ export function structurallyEqual(left: unknown, right: unknown, seen: Structura
 export function canonicalStructuralEquals(left: unknown, right: unknown): boolean {
   return structurallyEqual(left, right, new Map());
 }
+
+/** Well-known registry tag shared with core/context-packets' ImmutableByteSequence
+ *  prototype. The equality kernel must recognize byte sequences WITHOUT importing
+ *  the packet module — the packet module imports this kernel — so the tag travels
+ *  through the global symbol registry instead of an import edge.
+ *
+ *  The tag is set only on the packet module's frozen sequence prototype. A plain
+ *  number array (the parsed wire form) never carries it, which is exactly the
+ *  distinction the byte-sequence comparison arm needs: one tagged side means
+ *  "compare as byte sequences"; neither tagged means every other rule applies. */
+export const IMMUTABLE_BYTE_SEQUENCE_TAG: unique symbol = Symbol.for("@peterstorm/loom/immutable-byte-sequence");
+
+const hasImmutableByteSequenceTag = (value: unknown): boolean =>
+  typeof value === "object" && value !== null &&
+  (value as Record<symbol, unknown>)[IMMUTABLE_BYTE_SEQUENCE_TAG] === true;
 
 export const success = <T, E = never>(value: T): DomainResult<T, E> => canonicalRecord({ ok: true, value });
 export const failure = <T = never, E = never>(error: E): DomainResult<T, E> =>

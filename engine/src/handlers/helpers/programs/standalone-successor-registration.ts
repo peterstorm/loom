@@ -5,7 +5,7 @@ import { parseStandaloneReviewScope, STANDALONE_REVIEWER_ROLES, type StandaloneR
 import { STANDALONE_LINEAGE_LIMITS, STANDALONE_REVIEWER_PROTOCOL_V3, parseStandaloneReviewerProtocolV3,
   standalonePublicationReferenceSchema, type StandalonePublicationReference } from "../../../core/standalone-lineage-contract";
 import type { StandaloneDispositionPublicationReference } from "../../../core/standalone-lineage";
-import { encodeByteSection, type ByteSection } from "../../../core/context-packets";
+import { encodeByteSection, boundedByteIterable, type ByteSection } from "../../../core/context-packets";
 import type { ProgramParse } from "./program-result";
 
 export type StandaloneSuccessorStartInput = Readonly<{
@@ -78,14 +78,13 @@ export function parseStandaloneSuccessorStartInput(raw: unknown): ProgramParse<S
     successor: Object.freeze({ source: source.data, disposition }) }) };
 }
 
-function boundedSectionBytes(raw: unknown, maximum: number): readonly number[] | null {
-  if (typeof raw !== "object" || raw === null) return null;
-  const iterable = (raw as { [Symbol.iterator]?: unknown })[Symbol.iterator];
-  if (!Array.isArray(raw) && typeof iterable !== "function") return null;
-  const bytes = Array.from(raw as Iterable<unknown>);
-  return bytes.length <= maximum && bytes.every(byte => Number.isInteger(byte) && (byte as number) >= 0 && (byte as number) <= 255)
-    ? bytes as number[]
-    : null;
+/** The section byte grammar is owned by the packet core (`boundedByteIterable`);
+ *  this adapter keeps the registration parser's null-collapse refusal shape, so
+ *  the successor path cannot drift from the packet parser on what legal bytes
+ *  are while its own "invalid bounded ... section" messages stay exact. */
+function boundedSectionBytes(raw: unknown, maximum: number): Uint8Array | null {
+  const parsed = boundedByteIterable(raw, maximum);
+  return parsed.ok ? parsed.value : null;
 }
 
 /** Structural dispatch only. LC-2 parsing additionally requires independently authenticated nominal successor data. */
@@ -102,9 +101,9 @@ export function parseStandaloneSuccessorRegistration(raw: unknown): ProgramParse
   const currentBytes = boundedSectionBytes(raw.currentSource.bytes, 4_194_304);
   if (currentBytes === null) return bad("invalid bounded frozen successor source section");
   try {
-    const decoded = parseBoundedReviewerJson(Uint8Array.from(currentBytes), STANDALONE_LINEAGE_LIMITS.retainedBytes);
+    const decoded = parseBoundedReviewerJson(currentBytes, STANDALONE_LINEAGE_LIMITS.retainedBytes);
     if (!decoded.ok) return bad(decoded.error.message);
-    const section = encodeByteSection("standalone-frozen-source", new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(currentBytes)));
+    const section = encodeByteSection("standalone-frozen-source", new TextDecoder("utf-8", { fatal: true }).decode(currentBytes));
     if (!section.ok) return bad(`frozen successor source section could not be encoded: ${section.error.message}`);
     if (section.value.digest !== raw.currentSource.digest || section.value.byteLength !== raw.currentSource.byteLength) return bad("frozen successor source section differs from exact bytes");
     if (!Array.isArray(raw.previousContexts) || raw.previousContexts.length > STANDALONE_REVIEWER_ROLES.length * 2 + 1) return bad("bounded predecessor contexts are required");
@@ -117,7 +116,7 @@ export function parseStandaloneSuccessorRegistration(raw: unknown): ProgramParse
       const previousBytes = boundedSectionBytes(previous.bytes, remaining);
       if (previousBytes === null) return bad("invalid bounded predecessor context section");
       remaining -= previousBytes.length;
-      const section = encodeByteSection(previous.label, new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(previousBytes)));
+      const section = encodeByteSection(previous.label, new TextDecoder("utf-8", { fatal: true }).decode(previousBytes));
       if (!section.ok) return bad(`predecessor context section could not be encoded: ${section.error.message}`);
       if (section.value.digest !== previous.digest || section.value.byteLength !== previous.byteLength) return bad("predecessor context section differs from exact bytes");
       previousContexts.push(section.value);

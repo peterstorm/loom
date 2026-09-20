@@ -75,3 +75,73 @@ Every other edited file is already inside the authorized scope; a first start at
 Development (not P3 evidence): `npx tsc --noEmit` clean; targeted suites for every touched module green (attest/remediate/repair/orchestration/abandon-stamp 148, git+workspace+state 218, standalone successor/disposition 40, orchestration/standalone-review/wave-gate/reviewer-protocol 173, contract surface + attestation 27, wave-gate model/policy 149, pi-extension-review-events 147); full `npm run verify` green (9011 tests / 0 failures + 23/23 smokes, fresh `.loom/completion-reports/verify.junit.xml`).
 
 Registered (P3): remediation run `remediation-20260920T211711Z-f18f3264-r2` (source `review-fix-20260920T181759Z-f18f3264-r2`, source result digest `9e40aa84cfed45d9fa846f73a960009d70eb877115f5e97fbffd6390264a7309`) → terminal `done`, outcome `remediation-installed` with `verified-index-installed` receipt: effectId `effect:remediation-install:09f1f0376605a8dffe331c499240ede24826963290c6272d817f7878ab9f8c10`, indexDigest `42c9e6e87af8949dd76c745edcbaf9df79e78b3d8d1e6181d3ce86d4794bd02b`, witnessDigest `415b488a1cab834b89d7364287c902214c21b2d6435e8e1a8c889b87bdee1c5a`; defect-family assessment `not-required` (`no-surviving-critical-findings`, survivingCriticals `[]`, refutedCriticals `[pr-test-analyzer-1]`); zero check events (required by the not-required contract). An earlier start attempt (`remediation-20260920T211523Z-f18f3264`) was refused pre-registration for over-broad support paths and left no durable record — no abandon needed.
+
+---
+
+# Round 5 — the four deferred findings (user override of the published deferral, 2026-09-20)
+
+The user authorized implementing the 4 deferred findings on HEAD `7bd9a03b`. Design pass first (each finding's
+claims re-verified against the sources), then one focused edit per finding.
+
+## `code-reviewer-1` — EPERM can never prove process-group dissolution (fail-closed)
+
+`engine/src/orchestration/completion-check-runner.ts`: probe states are now
+`alive | surviving-descendants | recycled-leader | eperm | gone` — EPERM with a reaped leader is its own state
+because it cannot distinguish uid-changed survivors (setuid execution inside a project command) from a recycled
+foreign numeric id. `waitForProcessGroupGone` confirms dissolution ONLY on a provable ESRCH;
+`groupGoneAfterLeaderDeath` (which treated EPERM as `gone`) is deleted. Termination refuses WITHOUT escalating to
+SIGKILL when the post-SIGTERM probe is EPERM ("…could not be confirmed after SIGTERM (EPERM)…") — the pre-round-5
+invariant (never signal a numeric id that may name a foreign recycled group) is preserved, at the cost of a rare
+extra refusal. Parent-close unconfirmed + EPERM → `termination-unconfirmed` ("…dissolution could not be confirmed
+(EPERM)…"). The frozen kill-mock test is rewritten to pin the new polarity (termination refused, SIGTERM sent,
+SIGKILL never signalled); a parent-close EPERM arm test added (no signals at all).
+
+## `architecture-tech-lead-1` — phase-artifact boundary params are required
+
+`engine/src/handlers/subagent-stop/advance-phase.ts`: `observePhaseTransition` and `countMarkers` take
+`baseDir`/`phaseArtifactBaseDir` as REQUIRED parameters (no `process.cwd()` default); the cwd default survives only
+on the documented compatibility shell `resolveTransition`. Production callers (pi/extension.ts) already passed the
+project boundary; test call sites now pass it explicitly (advance-phase.test.ts, subagent-result.test.ts ×6,
+phase-artifact-boundary.test.ts) so ambient-cwd anchoring can never return silently.
+
+## `architecture-tech-lead-2` — sequence-aware structural equality + wire bytes minted once at the start seam
+
+`engine/src/core/orchestration-contract/identity.ts`: `canonicalStructuralEquals` recognizes Context Packet
+`ImmutableByteSequence` values via the registry-shared tag `IMMUTABLE_BYTE_SEQUENCE_TAG` (exported through the
+contract facade; symbol-keyed on the frozen prototype, so JSON/Object.keys stay unchanged) and byte-compares them
+position by position — both directions, and inside nested records — instead of comparing two empty key sets
+vacuously true. `engine/src/handlers/helpers/programs/standalone.ts`:
+`prepareStandaloneSuccessorFacadeStart` mints `registrationWire = JSON.stringify(registration)` once, byte-budgets
+the wire, and the prepared start carries the frozen wire; `startPreparedStandaloneSuccessor` registers
+`JSON.parse(prepared.registrationWire)`, so the untyped JSON bridge at the start seam is one deterministic string.
+`engine/src/handlers/helpers/programs/standalone-source.ts` dropped the `JSON.parse(JSON.stringify(packet.value))`
+projection in favor of direct `canonicalStructuralEquals(packet.value, decoded.value)` — byte-compare changes
+seq-vs-seq semantics from vacuously-true to real, strictly stricter, and outcomes are unchanged wherever digests
+match.
+
+## `architecture-tech-lead-3` — one shared byte-grammar validator
+
+`engine/src/core/context-packets.ts`: `boundedByteIterable(raw, maximum): DomainResult<Uint8Array,
+ByteGrammarViolation>` owns the grammar (`iterable` / `bound{count,maximum}` / `byte`); `buildContextPacket` and
+`parseSection` consume it (exact refusal prose preserved; the builder's non-iterable bytes path is now a typed
+refusal instead of a TypeError); `standalone-successor-registration.ts`'s `boundedSectionBytes` delegates to it
+(null-collapse + exact messages preserved). No consumer can drift from the others on what a legal section is.
+
+## New tests
+
+- `engine/tests/core/context-packet-byte-grammar.test.ts` — grammar acceptance/refusal matrix (arrays, iterables,
+  sequences, strings, sparse holes, bound excess), packet-parser refusal prose pins, builder typed refusal,
+  cross-parser agreement with the successor registration path (same hostile inputs, same verdicts).
+- `canonical-structural-equals.test.ts` "Context Packet byte sequences" — sequence vs its parsed wire form (both
+  orders), equal bytes equal, differing bytes separate (the vacuous-equality fix), non-array refusal, nested-record
+  position comparison.
+- `standalone-successor-registration.test.ts` — exact encoded frozen-source section admitted (digest/length carry
+  through); every byte shape the shared grammar refuses collapses to the same registration refusal.
+- `completion-check-runner.integration.test.ts` — rewritten EPERM termination test + parent-close EPERM arm.
+
+## Validation
+
+Development (not P3 evidence): `npx tsc --noEmit` clean; targeted suites green — context-packet grammar/equality/
+projection/reviewer-packets + advance-phase + phase-artifact-boundary 142, runner integration + successor
+registration + subagent-result 114, equality + successor integration/source + reviewer-protocol-standalone 32.
+Full `npm run verify` from repo root: see `.loom/completion-reports/verify.junit.xml` (fresh, this round).

@@ -45,23 +45,23 @@ describe("countMarkers", () => {
   it("counts NEEDS CLARIFICATION markers", () => {
     const f = join(tmpDir, "spec.md");
     writeFileSync(f, "FR-1\n[NEEDS CLARIFICATION] auth?\nFR-2\n[NEEDS CLARIFICATION] rate limit?\n[NEEDS CLARIFICATION] timeout?");
-    expect(countMarkers(f)).toBe(3);
+    expect(countMarkers(f, tmpDir)).toBe(3);
   });
 
   it("returns 0 for clean file", () => {
     const f = join(tmpDir, "spec.md");
     writeFileSync(f, "All clear.");
-    expect(countMarkers(f)).toBe(0);
+    expect(countMarkers(f, tmpDir)).toBe(0);
   });
 
   it("fails closed for a missing marker artifact", () => {
-    expect(() => countMarkers(join(tmpDir, "nope.md"))).toThrow(/cannot read phase artifact/);
+    expect(() => countMarkers(join(tmpDir, "nope.md"), tmpDir)).toThrow(/cannot read phase artifact/);
   });
 
   it("returns 0 for empty file", () => {
     const f = join(tmpDir, "e.md");
     writeFileSync(f, "");
-    expect(countMarkers(f)).toBe(0);
+    expect(countMarkers(f, tmpDir)).toBe(0);
   });
 });
 

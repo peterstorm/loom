@@ -845,12 +845,13 @@ export async function applyPhaseAgentPiResult(args: Readonly<{
   result: PiSubagentResult;
   now: string;
   /** The project boundary the run's artifacts live under, derived from the
-   *  TaskGraph's own location. Phase artifacts are stored project-relative, so
-   *  probing them against the Pi process's cwd searches the wrong checkout
-   *  whenever the parent session is rooted elsewhere than the graph (the
-   *  worktree case). Production callers pass `projectRootForStateFile` of the
-   *  store's graph path; the cwd default is compatibility only. */
-  phaseArtifactBaseDir?: string;
+   *  TaskGraph's own location. REQUIRED: phase artifacts are stored
+   *  project-relative, so probing them against the Pi process's cwd searches
+   *  the wrong checkout whenever the parent session is rooted elsewhere than
+   *  the graph (the worktree case). Production callers pass
+   *  `observeTaskGraphProjectBoundary(...).root`; requiring the argument makes
+   *  the omission a compile error instead of a silent cross-checkout drift. */
+  phaseArtifactBaseDir: string;
 }>): Promise<PiResultOutcome> {
   const parsed = parsePiMessages(args.result.messages);
   if (!parsed.ok) {

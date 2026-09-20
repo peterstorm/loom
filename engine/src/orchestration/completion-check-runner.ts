@@ -402,13 +402,15 @@ function probeProcessGroup(processGroupId: number): ProcessGroupProbe {
   } catch (cause) {
     const code = errnoCode(cause);
     if (code === "ESRCH") return Object.freeze({ kind: "gone" });
-    // EPERM is its own state, never a generic error: the group exists but
-    // contains at least one process we may not signal. Our own tree cannot
-    // produce that state (children inherit our uid and are signalable by us),
-    // and our descendants cannot be members of a recycled id — a process
-    // group id is only reused after the original group dissolved, which
-    // requires every original member (our whole descendant tree) to be dead.
-    // See probeLeaderAlive for how this is discharged.
+    // EPERM is its own state, never a generic error: the group contains at
+    // least one process we may not signal. Healthy descendants inherit our
+    // uid, so our own tree does not normally produce this — but a descendant
+    // that changes uid (setuid/sudo execution inside a project command) can:
+    // after the leader is reaped, EPERM is exactly the all-survivors-uid-changed
+    // state, and it is indistinguishable from a foreign id that recycled the
+    // numeric group. EPERM therefore never proves dissolution on its own; it
+    // must still be correlated with the leader probe (see
+    // observeClosedProcessGroup and waitForProcessGroupGone).
     if (code === "EPERM") return Object.freeze({ kind: "eperm" });
     return Object.freeze({
       kind: "error",
@@ -434,22 +436,33 @@ function probeLeaderAlive(processGroupId: number): LeaderProbe {
   }
 }
 
-/** EPERM with a dead leader proves the original group dissolved and the
- * numeric id now names foreign authority. This predicate is used only while
- * terminating a still-live leader; parent-close handling below is stricter. */
-function groupGoneAfterLeaderDeath(
-  processGroupId: number,
-  probe: ProcessGroupProbe,
-): boolean {
-  if (probe.kind === "gone") return true;
-  if (probe.kind !== "eperm") return false;
-  return probeLeaderAlive(processGroupId).kind === "gone";
-}
-
 type ClosedProcessGroupObservation =
-  | Readonly<{ kind: "gone"; reason: "absent" | "recycled-leader" | "foreign-eperm" }>
+  | Readonly<{ kind: "gone"; reason: "absent" | "recycled-leader" }>
   | Readonly<{ kind: "surviving-descendants" }>
+  | Readonly<{ kind: "unconfirmed"; reason: "foreign-eperm" }>
   | Readonly<{ kind: "error"; message: string }>;
+
+/** Only an ESRCH group probe confirms dissolution after the leader died.
+ *
+ *  EPERM cannot: it names at least one member we may not signal, which after
+ *  the leader is reaped is exactly the all-survivors-changed-uid case (setuid
+ *  execution inside a project command), and is indistinguishable from a
+ *  foreign id that recycled the numeric group. Claiming either would misreport
+ *  surviving descendants as contained. The caller keeps waiting for a provable
+ *  ESRCH and refuses at its deadline instead — without escalating to SIGKILL
+ *  on an id that may no longer name this check's group. */
+async function waitForProcessGroupGone(
+  processGroupId: number,
+  maximumWaitMs: number,
+): Promise<ProcessGroupProbe> {
+  const deadline = Date.now() + maximumWaitMs;
+  let latest = probeProcessGroup(processGroupId);
+  while (latest.kind !== "gone" && Date.now() < deadline) {
+    await delay(Math.min(GROUP_PROBE_INTERVAL_MS, Math.max(1, deadline - Date.now())));
+    latest = probeProcessGroup(processGroupId);
+  }
+  return latest.kind === "gone" ? Object.freeze({ kind: "gone" }) : latest;
+}
 
 /** Classify a group only after Node has reaped the spawned leader.
  *
@@ -457,7 +470,10 @@ type ClosedProcessGroupObservation =
  * the PID/PGID has been recycled and no negative-PGID signal is authorized.
  * A still-present group with no leader can only be observed, never signalled:
  * once the leader closes there is no atomic identity-bound group signalling
- * primitive available to Node. */
+ * primitive available to Node. And EPERM with a reaped leader is not a
+ * dissolution proof either — it names unsignalable members (uid-changed
+ * survivors) or a recycled foreign id, so it reports unconfirmed rather than
+ * gone; only a provable ESRCH settles the outcome. */
 function observeClosedProcessGroup(
   processGroupId: number,
   group: ProcessGroupProbe = probeProcessGroup(processGroupId),
@@ -467,8 +483,13 @@ function observeClosedProcessGroup(
   const leader = probeLeaderAlive(processGroupId);
   if (leader.kind === "error") return Object.freeze({ kind: "error", message: leader.message });
   if (leader.kind === "present") return Object.freeze({ kind: "gone", reason: "recycled-leader" });
+  // Leader reaped. "present" names unsignalled survivors; EPERM names at
+  // least one unsignalable member (or a recycled foreign id). Neither is a
+  // dissolution proof, so neither may be reported as contained: keep
+  // observing (the state may still resolve to a provable ESRCH) and fail
+  // closed at the deadline.
   return group.kind === "eperm"
-    ? Object.freeze({ kind: "gone", reason: "foreign-eperm" })
+    ? Object.freeze({ kind: "unconfirmed", reason: "foreign-eperm" })
     : Object.freeze({ kind: "surviving-descendants" });
 }
 
@@ -478,7 +499,12 @@ async function waitForClosedProcessGroup(
 ): Promise<ClosedProcessGroupObservation> {
   const deadline = Date.now() + maximumWaitMs;
   let observation = observeClosedProcessGroup(processGroupId);
-  while (observation.kind === "surviving-descendants" && Date.now() < deadline) {
+  // Both undecided states keep the observation loop alive: surviving
+  // descendants may exit, and an EPERM group may still resolve to a provable
+  // ESRCH once its uid-changed members exit. Only a confirmed-gone or an
+  // expiry ends the wait, and expiry is always the caller's refusal.
+  while ((observation.kind === "surviving-descendants" || observation.kind === "unconfirmed") &&
+         Date.now() < deadline) {
     await delay(Math.min(GROUP_PROBE_INTERVAL_MS, Math.max(1, deadline - Date.now())));
     observation = observeClosedProcessGroup(processGroupId);
   }
@@ -500,21 +526,6 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }
 
-async function waitForProcessGroupGone(
-  processGroupId: number,
-  maximumWaitMs: number,
-): Promise<ProcessGroupProbe> {
-  const deadline = Date.now() + maximumWaitMs;
-  let latest = probeProcessGroup(processGroupId);
-  let gone = groupGoneAfterLeaderDeath(processGroupId, latest);
-  while (!gone && Date.now() < deadline) {
-    await delay(Math.min(GROUP_PROBE_INTERVAL_MS, Math.max(1, deadline - Date.now())));
-    latest = probeProcessGroup(processGroupId);
-    gone = groupGoneAfterLeaderDeath(processGroupId, latest);
-  }
-  return gone ? Object.freeze({ kind: "gone" }) : latest;
-}
-
 async function terminateProcessGroup(
   processGroupId: number,
   graceMs: number,
@@ -526,12 +537,24 @@ async function terminateProcessGroup(
 
   const afterTerm = await waitForProcessGroupGone(processGroupId, graceMs);
   if (afterTerm.kind === "error") errors.push(afterTerm.message);
-  if (afterTerm.kind !== "gone") {
+  if (afterTerm.kind === "eperm") {
+    // EPERM after the leader died cannot prove dissolution (uid-changed
+    // survivors vs a recycled foreign id), and SIGKILL on a numeric id that
+    // may now name foreign authority is exactly the escalation the
+    // recycled-leader rule forbids. Refuse without signalling: the outcome is
+    // never a contained run.
+    errors.push(
+      `process-group ${processGroupId} dissolution could not be confirmed after SIGTERM (EPERM); ` +
+      "signalling an id that may no longer name this check's group is refused",
+    );
+  } else if (afterTerm.kind !== "gone") {
     const killError = signalProcessGroup(processGroupId, "SIGKILL");
     if (killError !== null) errors.push(killError);
     const afterKill = await waitForProcessGroupGone(processGroupId, hardKillWaitMs);
     if (afterKill.kind === "error") errors.push(afterKill.message);
-    if (afterKill.kind !== "gone") {
+    if (afterKill.kind === "eperm") {
+      errors.push(`process-group ${processGroupId} dissolution could not be confirmed after SIGKILL (EPERM)`);
+    } else if (afterKill.kind !== "gone") {
       errors.push(`process-group ${processGroupId} still exists after SIGKILL containment`);
     }
   }
@@ -738,8 +761,11 @@ async function runProjectCommand(
         kind: "termination-unconfirmed",
         message: settled.kind === "error"
           ? `completion parent closed but process-tree identity could not be observed: ${settled.message}`
-          : `completion parent closed while process-group ${processGroupId} descendants remained; ` +
-            "post-close signalling was refused because the numeric group id is no longer identity-bound",
+          : settled.kind === "unconfirmed"
+            ? `completion parent closed but process-group ${processGroupId} dissolution could not be confirmed ` +
+              "(EPERM): a member refuses signalling, so the group is neither provably ours nor provably gone"
+            : `completion parent closed while process-group ${processGroupId} descendants remained; ` +
+              "post-close signalling was refused because the numeric group id is no longer identity-bound",
         diagnostics: diagnostics(stdout, stderr),
       });
     }

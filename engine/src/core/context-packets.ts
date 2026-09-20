@@ -27,6 +27,7 @@ import {
   canonicalRecord,
   parseArtifactByteLength,
   parseRequestId,
+  IMMUTABLE_BYTE_SEQUENCE_TAG,
   type ArtifactByteLength,
   type ArtifactDigest,
   type ContextDigest,
@@ -119,6 +120,55 @@ const sealedSectionJson = new WeakMap<ByteSection, string>();
 const isByte = (value: unknown): value is number =>
   typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 255;
 
+/** The ONE owner of the Context Packet byte grammar: a dense iterable of
+ *  integers 0–255 whose count stays within `maximum`.
+ *
+ *  `Array.from` materializes sparse holes as `undefined`, which fails the byte
+ *  test — density is enforced by the same check, not by a separate pass. Every
+ *  byte-section consumer (packet build, packet parse, and the successor
+ *  registration parser) accepts bytes ONLY through this validator, so the
+ *  successor path cannot drift from the packet parser on what a legal section
+ *  is. The violation is typed so each caller can keep its own exact refusal
+ *  prose while sharing the grammar itself. */
+export type ByteGrammarViolation =
+  | Readonly<{ rule: "iterable" }>
+  | Readonly<{ rule: "bound"; count: number; maximum: number }>
+  | Readonly<{ rule: "byte" }>;
+
+const grammarFailure = (violation: ByteGrammarViolation): DomainResult<Uint8Array, ByteGrammarViolation> =>
+  ({ ok: false, error: canonicalRecord(violation) });
+const grammarSuccess = (bytes: Uint8Array): DomainResult<Uint8Array, ByteGrammarViolation> =>
+  ({ ok: true, value: bytes });
+
+const MAX_SAFE_BYTE_BOUND: number = Number.MAX_SAFE_INTEGER;
+
+export function boundedByteIterable(
+  raw: unknown,
+  maximum: number,
+): DomainResult<Uint8Array, ByteGrammarViolation> {
+  if (!Array.isArray(raw) &&
+      !(typeof raw === "object" && raw !== null &&
+        typeof (raw as { [Symbol.iterator]?: unknown })[Symbol.iterator] === "function")) {
+    return grammarFailure({ rule: "iterable" });
+  }
+  const bytes = Array.from(raw as Iterable<unknown>);
+  if (bytes.length > maximum) {
+    return grammarFailure({ rule: "bound", count: bytes.length, maximum });
+  }
+  if (!bytes.every(isByte)) {
+    return grammarFailure({ rule: "byte" });
+  }
+  return grammarSuccess(Uint8Array.from(bytes));
+}
+
+/** The packet parser's exact prose for each shared-grammar violation. */
+const byteGrammarRefusal = (violation: ByteGrammarViolation): string =>
+  violation.rule === "iterable"
+    ? "a context section must carry iterable bytes"
+    : violation.rule === "byte"
+      ? "a context section byte must be an integer from 0 through 255"
+      : `a context section must not exceed ${violation.maximum} bytes`;
+
 const immutableByteStorage = new WeakMap<object, Uint8Array>();
 
 function storedBytes(sequence: ImmutableByteSequence): Uint8Array {
@@ -139,7 +189,11 @@ const immutableByteSequencePrototype: ImmutableByteSequence = Object.freeze({
   },
   toJSON(): readonly number[] { return Array.from(storedBytes(this)); },
   [Symbol.iterator](): IterableIterator<number> { return storedBytes(this).values(); },
-});
+  // The equality kernel's recognition tag (orchestration-contract/identity.ts).
+  // Enumerable symbol keys stay invisible to Object.keys, spread-free JSON, and
+  // the wire form, so this does not widen the sequence contract.
+  [IMMUTABLE_BYTE_SEQUENCE_TAG]: true,
+} as ImmutableByteSequence);
 
 /** Private compact storage with no reflective Array promises. */
 function immutableBytes(owned: Uint8Array): ImmutableByteSequence {
@@ -156,7 +210,7 @@ function immutableBytes(owned: Uint8Array): ImmutableByteSequence {
   return Object.freeze(sequence);
 }
 
-function digestBytes(bytes: ImmutableByteSequence | readonly number[]): string {
+function digestBytes(bytes: ImmutableByteSequence | readonly number[] | Uint8Array): string {
   return sha256Bytes(immutableByteStorage.get(bytes) ?? Uint8Array.from(bytes));
 }
 
@@ -235,11 +289,16 @@ export function buildContextPacket(input: ContextPacketInput): DomainResult<Lega
     }
     labels.add(section.label);
     if (sealedSections.has(section)) { canonicalSections.push(section as ByteSection); continue; }
-    // Array.from materializes sparse holes as `undefined`; Array#every on the
-    // caller's array would skip them and incorrectly accept a non-byte value.
-    const bytes = Array.from(section.bytes);
+    // The byte grammar lives in `boundedByteIterable`: iterability, the 0–255
+    // integer test, and the bound (the section's own declared byteLength —
+    // over-length bytes fail here exactly as the length equality below would).
+    const materialized = boundedByteIterable(section.bytes, section.byteLength);
+    if (!materialized.ok) {
+      return failure(field, "a context section must contain only bytes whose digest and length cover the exact content");
+    }
+    const bytes = materialized.value;
     const parsedLength = parseArtifactByteLength(bytes.length);
-    const verified = bytes.every(isByte) && parsedLength.ok && parsedLength.value === section.byteLength &&
+    const verified = parsedLength.ok && parsedLength.value === section.byteLength &&
       digestBytes(bytes) === section.digest;
     if (!verified) {
       return failure(field, "a context section must contain only bytes whose digest and length cover the exact content");
@@ -248,7 +307,7 @@ export function buildContextPacket(input: ContextPacketInput): DomainResult<Lega
       label: section.label,
       byteLength: section.byteLength,
       digest: section.digest,
-      bytes: immutableBytes(Uint8Array.from(bytes)),
+      bytes: immutableBytes(bytes),
     }));
   }
   const fixedContext = canonicalSections.slice(0, input.fixedContext.length);
@@ -380,17 +439,11 @@ function parseSection(raw: unknown, field: string): DomainResult<ByteSection, Co
   if (typeof record["label"] !== "string" || record["label"].length === 0) {
     return failure(`${field}.label`, "a context section label must be a non-empty string");
   }
-  const rawBytes = record["bytes"];
-  const iterableBytes = typeof rawBytes === "object" && rawBytes !== null &&
-    typeof (rawBytes as { [Symbol.iterator]?: unknown })[Symbol.iterator] === "function";
-  if (!Array.isArray(rawBytes) && !iterableBytes) {
-    return failure(`${field}.bytes`, "a context section must carry iterable bytes");
+  const materialisedBytes = boundedByteIterable(record["bytes"], MAX_SAFE_BYTE_BOUND);
+  if (!materialisedBytes.ok) {
+    return failure(`${field}.bytes`, byteGrammarRefusal(materialisedBytes.error));
   }
-  const bytes = Array.from(rawBytes as Iterable<unknown>);
-  if (!bytes.every(isByte)) {
-    return failure(`${field}.bytes`, "a context section byte must be an integer from 0 through 255");
-  }
-  const materialised = immutableBytes(Uint8Array.from(bytes));
+  const materialised = immutableBytes(materialisedBytes.value);
   const byteLength = parseArtifactByteLength(materialised.byteLength);
   if (!byteLength.ok) return failure(`${field}.byteLength`, byteLength.error.message);
   if (record["byteLength"] !== materialised.byteLength) {

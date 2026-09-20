@@ -21,7 +21,12 @@
  * Pure module: no I/O, no clock, no randomness.
  */
 
-export { MAX_DIAGNOSTIC_MESSAGE_LENGTH, canonicalRecord, canonicalStructuralEquals, parseArtifactByteLength, parseArtifactDigest, parseContextDigest, parseEffectId, parseOrchestrationRunId, parseRequestId, parseSlotId, type ArtifactByteLength, type ArtifactDigest, type ContextDigest, type DomainResult, type EffectId, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
+// IMMUTABLE_BYTE_SEQUENCE_TAG: the well-known recognition tag the Context
+// Packet's ImmutableByteSequence prototype carries (context-packets.ts). The
+// equality kernel must recognize sequences without importing the packet module
+// — the dependency runs the other way — so the tag travels through the global
+// symbol registry and this facade is its single naming authority.
+export { MAX_DIAGNOSTIC_MESSAGE_LENGTH, canonicalRecord, canonicalStructuralEquals, parseArtifactByteLength, parseArtifactDigest, parseContextDigest, parseEffectId, parseOrchestrationRunId, parseRequestId, parseSlotId, IMMUTABLE_BYTE_SEQUENCE_TAG, type ArtifactByteLength, type ArtifactDigest, type ContextDigest, type DomainResult, type EffectId, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
 export { fieldFailureError } from './errors';
 export { MAX_DENSE_DATA_ARRAY_LENGTH, MAX_SEMANTIC_PAYLOAD_ARRAY_LENGTH, digestRawTranscriptBytes } from './bytes';
 export { AGENT_REQUIRED_SKILLS, parseFixedArtifactSlot } from './artifacts';
