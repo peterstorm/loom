@@ -633,8 +633,8 @@ function proveNoGitMetadataInAncestorsFrom(cwd: string): void {
  *
  *  Status 0 with no output is not a documented git outcome, but it has been
  *  observed transiently on loaded macOS runners (twice across the darwin
- *  verification campaign, always inside a real fixture repository). One
- *  immediate retry discharges the transient; a confirmed anomaly fails with
+ *  verification campaign, always inside a real fixture repository). Two
+ *  bounded retries discharge the transient; a confirmed anomaly fails with
  *  the full probe evidence — status, output length, stderr, termination
  *  signal — so the operator can attribute it instead of guessing. */
 function gitRepositoryRootFrom(cwd: string): string | null {
@@ -667,10 +667,10 @@ function gitRepositoryRootFrom(cwd: string): string | null {
   }, (value) => value.kind === "root" && value.root === "");
   if (observed.kind === "failed") throw observed.error;
   if (observed.kind === "confirmed-empty") {
-    const probe = observed.second;
+    const probe = observed.third;
     if (probe.kind !== "root") throw new Error("confirmed-empty Git root probe has contradictory not-repository outcome");
     throw new Error(
-      `git rev-parse returned an empty repository root for ${cwd} (confirmed on retry)` +
+      `git rev-parse returned an empty repository root for ${cwd} (confirmed after bounded retries)` +
       ` status=${probe.status} stdoutLength=${probe.stdoutLength}` +
       ` signal=${probe.signal ?? "none"}` +
       (probe.stderr === "" ? "" : ` stderr: ${probe.stderr}`),

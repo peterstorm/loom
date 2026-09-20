@@ -57,6 +57,35 @@ function reviewPath(raw: string): ReviewPath {
   return parsed.value;
 }
 
+function resolveWithTransientEmptyGit(root: string) {
+  const bin = canonicalTempDir("loom-fake-git-empty-");
+  roots.push(bin);
+  const executable = join(bin, "git");
+  const counter = join(bin, "root-count");
+  writeFileSync(executable, `#!/usr/bin/env node
+import { readFileSync, writeFileSync } from "node:fs";
+const counter = ${JSON.stringify(counter)};
+let count = 0;
+try {
+  count = Number(readFileSync(counter, "utf8"));
+} catch (cause) {
+  if (cause?.code !== "ENOENT") throw new Error(\`cannot read fake Git counter \${counter}\`, { cause });
+}
+count += 1;
+writeFileSync(counter, String(count));
+if (count >= 3) process.stdout.write(${JSON.stringify(`${root}\n`)});
+`);
+  chmodSync(executable, 0o755);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}${delimiter}${previousPath ?? ""}`;
+  try {
+    return resolveCanonicalGitRepositoryRoot(root);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  }
+}
+
 function observeWithDriftingGit(root: string, drift: "list" | "file") {
   const bin = canonicalTempDir("loom-fake-git-");
   roots.push(bin);
@@ -121,6 +150,12 @@ describe("workspace digest shell", () => {
     expect(untrackedChanged).not.toBe(trackedChanged);
     const canonical = resolveCanonicalGitRepositoryRoot(join(root, "nested", ".."));
     expect(canonical).toMatchObject({ ok: true, value: root });
+  });
+
+  it("recovers authority after two successful empty Git root observations", () => {
+    const root = repository();
+
+    expect(resolveWithTransientEmptyGit(root)).toEqual({ ok: true, value: root });
   });
 
   it("excludes ignored files, Git internals, TaskGraph state, Run Directory artifacts, and reports", () => {

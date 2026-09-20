@@ -176,7 +176,7 @@ const digestOf = (value: string): ArtifactDigest =>
   createHash("sha256").update(value).digest("hex") as ArtifactDigest;
 
 /**
- * Run one Git command, retrying ONCE when it exits 0 with NO output.
+ * Run one Git command, retrying twice when it exits 0 with NO output.
  *
  * Status 0 with an empty stdout is not a documented Git outcome, but the
  * darwin verification campaign observed it transiently on loaded macOS
@@ -186,7 +186,7 @@ const digestOf = (value: string): ArtifactDigest =>
  * witness value that then reads as "repository changed since verification"
  * at install time, or an empty authorized path roster. Both are lies.
  *
- * The retry discharges the transient. It cannot corrupt a legitimate result:
+ * The retries discharge the transient. They cannot corrupt a legitimate result:
  * for operations that legitimately produce no output (a clean `status`, an
  * empty repository's `ls-files`) the confirmatory re-run returns empty again
  * and the original value flows through. If the transient persists, the raw
@@ -203,7 +203,7 @@ function runGitProbingEmpty(
     (value) => value.length === 0,
   );
   if (observed.kind === "failed") return { ok: false, error: observed.error };
-  return success(observed.kind === "confirmed-empty" ? observed.second : observed.value);
+  return success(observed.kind === "confirmed-empty" ? observed.third : observed.value);
 }
 
 /** Split NUL-delimited Git output; a trailing NUL does not produce an empty field. */

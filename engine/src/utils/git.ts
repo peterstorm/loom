@@ -89,7 +89,7 @@ function commandFailure(error: unknown): string {
   return [code, status, stderr || message].filter((part): part is string => part !== null && part !== "").join(": ");
 }
 
-/** Run one fixed-argv Git probe, retrying ONCE when it exits 0 with no output.
+/** Run one fixed-argv Git probe, retrying twice when it exits 0 with no output.
  *
  *  Status 0 with empty stdout is not a documented Git outcome, but the darwin
  *  verification campaign observed it transiently on loaded macOS runners for
@@ -97,7 +97,7 @@ function commandFailure(error: unknown): string {
  *  `--verify HEAD` once inside a review-packet CLI child, where it surfaced
  *  as "git returned an invalid HEAD: \"\"" and turned a passing run red). A
  *  confirmed-empty then reaches the caller's existing guards — which all
- *  refuse loudly — instead of a fabricated value. The retry cannot corrupt a
+ *  refuse loudly — instead of a fabricated value. The retries cannot corrupt a
  *  legitimate result: probes that legitimately return nothing re-run and
  *  return nothing again. */
 function probeGitWithEmptyRetry(
@@ -113,7 +113,7 @@ function probeGitWithEmptyRetry(
   }, (value) => value === "");
   if (observed.kind === "failed") throw observed.error;
   if (observed.kind === "confirmed-empty") {
-    throw new Error(`git ${args.join(" ")} returned empty output after one retry`);
+    throw new Error(`git ${args.join(" ")} returned empty output after bounded retries`);
   }
   return observed.value;
 }

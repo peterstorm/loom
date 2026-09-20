@@ -12,21 +12,31 @@ describe("observeGitProbe", () => {
       .toEqual({ kind: "observed", value: "root", attempts: 1 });
   });
 
-  it("retries one empty success and returns the second non-empty value", () => {
+  it("returns the second observation when one empty success recovers", () => {
     expect(observeGitProbe(scripted([
       { ok: true, value: "" },
       { ok: true, value: "root" },
     ]), (value) => value === "")).toEqual({ kind: "observed", value: "root", attempts: 2 });
   });
 
-  it("retains both successful empty observations as a typed anomaly", () => {
+  it("returns the third observation when two empty successes recover", () => {
+    expect(observeGitProbe(scripted([
+      { ok: true, value: "" },
+      { ok: true, value: "" },
+      { ok: true, value: "root" },
+    ]), (value) => value === "")).toEqual({ kind: "observed", value: "root", attempts: 3 });
+  });
+
+  it("retains all successful empty observations as a typed anomaly", () => {
     expect(observeGitProbe(scripted([
       { ok: true, value: "first-empty" },
       { ok: true, value: "second-empty" },
+      { ok: true, value: "third-empty" },
     ]), () => true)).toEqual({
       kind: "confirmed-empty",
       first: "first-empty",
       second: "second-empty",
+      third: "third-empty",
     });
   });
 
@@ -37,5 +47,10 @@ describe("observeGitProbe", () => {
       { ok: true, value: "" },
       { ok: false, error: "second" },
     ]), (value) => value === "")).toEqual({ kind: "failed", error: "second", attempt: 2 });
+    expect(observeGitProbe(scripted([
+      { ok: true, value: "" },
+      { ok: true, value: "" },
+      { ok: false, error: "third" },
+    ]), (value) => value === "")).toEqual({ kind: "failed", error: "third", attempt: 3 });
   });
 });

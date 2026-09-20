@@ -12,6 +12,7 @@ import { COMPLETION_REPORT_ROOT } from "../core/completion-suite";
 import { compareStrings } from "../core/ordering";
 import { parseArtifactDigest, type ArtifactDigest } from "../core/orchestration-contract";
 import { parseReviewPath, type ReviewPath } from "../core/review-packet";
+import { observeGitProbe } from "./git-probe";
 import { inspectRepositoryPath } from "./repository-path";
 
 declare const CANONICAL_REPOSITORY_ROOT: unique symbol;
@@ -103,7 +104,7 @@ function gitEnvironment(): NodeJS.ProcessEnv {
   };
 }
 
-function runGit(cwd: string, operation: "resolve-root" | "list-paths", args: readonly string[]): GitOutput {
+function runGitOnce(cwd: string, operation: "resolve-root" | "list-paths", args: readonly string[]): GitOutput {
   const executed = spawnSync("git", ["-C", cwd, "--literal-pathspecs", "-c", "core.fsmonitor=false", ...args], {
     encoding: "buffer",
     env: gitEnvironment(),
@@ -117,6 +118,15 @@ function runGit(cwd: string, operation: "resolve-root" | "list-paths", args: rea
     return failure({ kind: "git-command-failed", operation, message: detail.slice(0, 4_096) });
   }
   return success(Buffer.from(executed.stdout ?? []));
+}
+
+function runGit(cwd: string, operation: "resolve-root" | "list-paths", args: readonly string[]): GitOutput {
+  const observed = observeGitProbe(
+    () => runGitOnce(cwd, operation, args),
+    (value) => value.length === 0,
+  );
+  if (observed.kind === "failed") return failure(observed.error);
+  return success(observed.kind === "confirmed-empty" ? observed.third : observed.value);
 }
 
 /** Resolve Git authority first, then mint its canonical real worktree root. */
