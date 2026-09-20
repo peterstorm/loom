@@ -32,7 +32,10 @@ import { isExactGitSha } from "../core/git-sha";
 export function resolveRepositoryRoot(context = "repository root"): string | undefined {
   if (process.env.CLAUDE_PROJECT_DIR) return process.env.CLAUDE_PROJECT_DIR;
   try {
-    return execSync("git rev-parse --show-toplevel", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim() || undefined;
+    return probeGitWithEmptyRetry(["rev-parse", "--show-toplevel"], {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    }) || undefined;
   } catch (error) {
     // Never silent: every downstream helper runs against cwd: undefined and
     // its failures read as "no tests written" — the one indistinguishable
@@ -85,6 +88,26 @@ function commandFailure(error: unknown): string {
   return [code, status, stderr || message].filter((part): part is string => part !== null && part !== "").join(": ");
 }
 
+/** Run one fixed-argv Git probe, retrying ONCE when it exits 0 with no output.
+ *
+ *  Status 0 with empty stdout is not a documented Git outcome, but the darwin
+ *  verification campaign observed it transiently on loaded macOS runners for
+ *  short-lived rev-parse probes (—show-toplevel twice, HEAD^{tree} once, and
+ *  `--verify HEAD` once inside a review-packet CLI child, where it surfaced
+ *  as "git returned an invalid HEAD: \"\"" and turned a passing run red). A
+ *  confirmed-empty then reaches the caller's existing guards — which all
+ *  refuse loudly — instead of a fabricated value. The retry cannot corrupt a
+ *  legitimate result: probes that legitimately return nothing re-run and
+ *  return nothing again. */
+function probeGitWithEmptyRetry(
+  args: readonly string[],
+  options: ExecFileSyncOptionsWithStringEncoding,
+): string {
+  const first = execFileSync("git", args, options).trim();
+  if (first !== "") return first;
+  return execFileSync("git", args, options).trim();
+}
+
 /** Resolve the repository root and exact HEAD as one typed proof boundary.
  *  An explicit `cwd` (a spawn's declared cwd naming a linked worktree) wins
  *  over the ambient environment: the spawn cwd is the boundary-trusted source
@@ -93,17 +116,17 @@ function commandFailure(error: unknown): string {
 export function repositoryContext(cwd?: string): GitRepositoryContext {
   const base = cwd ?? (process.env.CLAUDE_PROJECT_DIR || process.cwd());
   try {
-    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+    const root = probeGitWithEmptyRetry(["rev-parse", "--show-toplevel"], {
       cwd: base,
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
+    });
     if (root === "") return { ok: false, error: `git returned an empty repository root for ${base}` };
-    const headSha = execFileSync("git", ["rev-parse", "--verify", "HEAD"], {
+    const headSha = probeGitWithEmptyRetry(["rev-parse", "--verify", "HEAD"], {
       cwd: root,
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
+    });
     if (!isExactGitSha(headSha)) {
       return { ok: false, error: `git returned an invalid HEAD for ${root}: ${JSON.stringify(headSha)}` };
     }
@@ -136,11 +159,11 @@ export function repositoryRoot(): string | undefined {
  *  the failure names itself first. */
 export function repositoryRootFrom(cwd: string): string | undefined {
   try {
-    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+    const root = probeGitWithEmptyRetry(["rev-parse", "--show-toplevel"], {
       cwd,
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
+    });
     if (root !== "") return root;
     process.stderr.write(
       `loom: git rev-parse --show-toplevel returned an empty root from ${cwd} — falling back to the runtime repository root\n`,
@@ -161,11 +184,11 @@ export type GitHeadObservation =
 /** Fixed-argv exact HEAD observation for implementation authority checks. */
 export function observeExactHead(root: string): GitHeadObservation {
   try {
-    const headSha = execFileSync("git", ["rev-parse", "--verify", "HEAD"], {
+    const headSha = probeGitWithEmptyRetry(["rev-parse", "--verify", "HEAD"], {
       cwd: root,
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
+    });
     return isExactGitSha(headSha)
       ? { ok: true, headSha }
       : { ok: false, error: `git returned an invalid HEAD for ${root}: ${JSON.stringify(headSha)}` };
@@ -268,12 +291,12 @@ type ShadowGitAuthority = Readonly<{
 }>;
 
 function gitProbe(root: string, args: readonly string[]): string {
-  return execFileSync("git", ["-c", "core.fsmonitor=false", ...args], {
+  return probeGitWithEmptyRetry(["-c", "core.fsmonitor=false", ...args], {
     cwd: root,
     encoding: "utf8",
     env: diffEnvironment(),
     stdio: ["ignore", "pipe", "pipe"],
-  }).trim();
+  });
 }
 
 function absoluteGitPath(root: string, observed: string, label: string): string {
