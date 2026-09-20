@@ -174,6 +174,34 @@ export function runGit(
 const digestOf = (value: string): ArtifactDigest =>
   createHash("sha256").update(value).digest("hex") as ArtifactDigest;
 
+/**
+ * Run one Git command, retrying ONCE when it exits 0 with NO output.
+ *
+ * Status 0 with an empty stdout is not a documented Git outcome, but the
+ * darwin verification campaign observed it transiently on loaded macOS
+ * runners — for `rev-parse --show-toplevel` (twice), `rev-parse HEAD^{tree}`
+ * (once), and by inference any other short-lived invocation. An empty output
+ * that reaches a digesting site silently becomes sha256(""): a plausible
+ * witness value that then reads as "repository changed since verification"
+ * at install time, or an empty authorized path roster. Both are lies.
+ *
+ * The retry discharges the transient. It cannot corrupt a legitimate result:
+ * for operations that legitimately produce no output (a clean `status`, an
+ * empty repository's `ls-files`) the confirmatory re-run returns empty again
+ * and the original value flows through. If the transient persists, the raw
+ * empty output is returned and the digesting sites' own emptiness guards
+ * (`rev-parse` identity and HEAD^{tree} refusals) fail loudly with
+ * attribution instead of ingesting a fabricated digest.
+ */
+function runGitProbingEmpty(
+  repositoryRoot: string,
+  invocation: GitInvocation,
+): DomainResult<Buffer, GitBoundaryError> {
+  const first = runGit(repositoryRoot, invocation);
+  if (!first.ok || first.value.length > 0) return first;
+  return runGit(repositoryRoot, invocation);
+}
+
 /** Split NUL-delimited Git output; a trailing NUL does not produce an empty field. */
 function splitNul(output: Buffer): readonly string[] {
   return output.toString("utf-8").split("\0").filter((entry) => entry.length > 0);
@@ -192,13 +220,21 @@ export type GitRepository = Readonly<{ root: string; gitDir: string }>;
  */
 export function openGitRepository(startDirectory: string): DomainResult<GitRepository, GitBoundaryError> {
   const start = resolve(startDirectory);
-  const root = runGit(start, { operation: "rev-parse", args: ["rev-parse", "--show-toplevel"] });
+  const root = runGitProbingEmpty(start, { operation: "rev-parse", args: ["rev-parse", "--show-toplevel"] });
   if (!root.ok) return root;
-  const gitDir = runGit(start, { operation: "rev-parse", args: ["rev-parse", "--absolute-git-dir"] });
+  const gitDir = runGitProbingEmpty(start, { operation: "rev-parse", args: ["rev-parse", "--absolute-git-dir"] });
   if (!gitDir.ok) return gitDir;
+  const resolvedRoot = root.value.toString("utf-8").trim();
+  if (resolvedRoot.length === 0) {
+    return failure("rev-parse", "git rev-parse --show-toplevel returned no output");
+  }
+  const resolvedGitDir = gitDir.value.toString("utf-8").trim();
+  if (resolvedGitDir.length === 0) {
+    return failure("rev-parse", "git rev-parse --absolute-git-dir returned no output");
+  }
   return success(canonicalRecord({
-    root: root.value.toString("utf-8").trim(),
-    gitDir: gitDir.value.toString("utf-8").trim(),
+    root: resolvedRoot,
+    gitDir: resolvedGitDir,
   }));
 }
 
@@ -234,7 +270,7 @@ function changeOf(code: string, present: boolean): ObservedDirtyPath["change"] {
 export function observeStagedPaths(
   repository: GitRepository,
 ): DomainResult<readonly string[], GitBoundaryError> {
-  const output = runGit(repository.root, {
+  const output = runGitProbingEmpty(repository.root, {
     operation: "diff-index-staged",
     args: ["diff-index", "--cached", "--name-only", "-z", "HEAD"],
   });
@@ -244,7 +280,7 @@ export function observeStagedPaths(
 export function observeDirtyPaths(
   repository: GitRepository,
 ): DomainResult<readonly ObservedDirtyPath[], GitBoundaryError> {
-  const output = runGit(repository.root, {
+  const output = runGitProbingEmpty(repository.root, {
     operation: "status",
     args: ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
   });
@@ -331,14 +367,21 @@ export type RepositoryWitnessInput = Readonly<{
 export function snapshotRepositoryWitness(
   repository: GitRepository,
 ): DomainResult<RepositoryWitnessInput, GitBoundaryError> {
-  const head = runGit(repository.root, { operation: "rev-parse", args: ["rev-parse", "HEAD^{tree}"] });
+  const head = runGitProbingEmpty(repository.root, { operation: "rev-parse", args: ["rev-parse", "HEAD^{tree}"] });
   if (!head.ok) return head;
-  const index = runGit(repository.root, {
+  // A repository that reaches the witness always has a HEAD commit; even a
+  // commit with an empty tree resolves to the well-known empty-tree object.
+  // Silence after the transient retry is therefore a malformed observation,
+  // never an empty value to digest.
+  if (head.value.toString("utf-8").trim().length === 0) {
+    return failure("rev-parse", "git rev-parse HEAD^{tree} returned no output");
+  }
+  const index = runGitProbingEmpty(repository.root, {
     operation: "ls-files",
     args: ["ls-files", "--stage", "-z"],
   });
   if (!index.ok) return index;
-  const worktree = runGit(repository.root, {
+  const worktree = runGitProbingEmpty(repository.root, {
     operation: "status",
     args: ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
   });
@@ -487,7 +530,7 @@ export function readStagedPaths(
   const present = requireTemporaryIndex(temporary, "diff-index");
   if (!present.ok) return present;
 
-  const output = runGit(repository.root, {
+  const output = runGitProbingEmpty(repository.root, {
     operation: "diff-index",
     args: ["diff-index", "--cached", "--name-only", "-z", "HEAD"],
     indexFile: temporary.path,
@@ -510,7 +553,7 @@ export function digestTemporaryIndex(
   const present = requireTemporaryIndex(temporary, "ls-files");
   if (!present.ok) return present;
 
-  const output = runGit(repository.root, {
+  const output = runGitProbingEmpty(repository.root, {
     operation: "ls-files",
     args: ["ls-files", "--stage", "-z"],
     indexFile: temporary.path,
@@ -543,7 +586,7 @@ export function installVerifiedIndex(
   const present = requireTemporaryIndex(temporary, "install");
   if (!present.ok) return present;
 
-  const indexLocation = runGit(repository.root, {
+  const indexLocation = runGitProbingEmpty(repository.root, {
     operation: "rev-parse-index",
     args: ["rev-parse", "--git-path", "index"],
   });

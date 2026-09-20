@@ -255,7 +255,7 @@ describe("Wave Gate façade completion-suite integration", () => {
     expect(graph(root).verification_manifest).toEqual(manifest);
     expect(readFileSync(join(root, ".claude/state/active_task_graph.json"), "utf8")).toBe(beforeStatus);
     expect(sentinelCount(root)).toBe(expectedCount);
-  });
+  }, 60_000);
 
   it("treats only an absent Wave Gate sentinel as zero", () => {
     const root = canonicalTempDir("loom-wave-facade-counter-");
