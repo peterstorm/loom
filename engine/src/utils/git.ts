@@ -8,6 +8,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { isExactGitSha } from "../core/git-sha";
+import { observeGitProbe } from "./git-probe";
 
 /**
  * Resolve the git repository root FRESH: CLAUDE_PROJECT_DIR > git rev-parse >
@@ -103,9 +104,18 @@ function probeGitWithEmptyRetry(
   args: readonly string[],
   options: ExecFileSyncOptionsWithStringEncoding,
 ): string {
-  const first = execFileSync("git", args, options).trim();
-  if (first !== "") return first;
-  return execFileSync("git", args, options).trim();
+  const observed = observeGitProbe(() => {
+    try {
+      return { ok: true as const, value: execFileSync("git", args, options).trim() };
+    } catch (error) {
+      return { ok: false as const, error };
+    }
+  }, (value) => value === "");
+  if (observed.kind === "failed") throw observed.error;
+  if (observed.kind === "confirmed-empty") {
+    throw new Error(`git ${args.join(" ")} returned empty output after one retry`);
+  }
+  return observed.value;
 }
 
 /** Resolve the repository root and exact HEAD as one typed proof boundary.

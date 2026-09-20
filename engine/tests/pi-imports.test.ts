@@ -91,13 +91,18 @@ const PI_FILES = readdirSync(PI_DIR)
 const IMPORTS = PI_FILES.flatMap(engineImports);
 
 describe("pi package manifest", () => {
-  it("loads only the extension entry point; it renders harness-specific resources", () => {
+  it("declares no raw skills or prompt templates; the extension renders them", () => {
     const manifest = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf-8"));
 
+    // Empty arrays, not omitted keys: pi's convention-dir fallback would
+    // otherwise re-load the raw `skills/` tree when a settings filter is
+    // present for the package. The extension's `resources_discover` handler
+    // is the single skill/prompt source (rendered copies in the cache), so
+    // Pi never sees duplicate names from the raw and rendered trees.
     expect(manifest.pi).toEqual({
       extensions: ["./pi/extension.ts"],
-      skills: ["./skills", "./commands/vercel-react-best-practices"],
-      prompts: ["./commands/*.md"],
+      skills: [],
+      prompts: [],
     });
     const extension = readFileSync(join(PI_DIR, "extension.ts"), "utf-8");
     expect(extension).toContain('pi.on("resources_discover"');

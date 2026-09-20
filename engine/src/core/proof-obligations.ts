@@ -46,6 +46,7 @@ export type ProofObligation =
   | Readonly<{ kind: "task-completed" }>
   | Readonly<{ kind: "regression-test-pass" }>
   | Readonly<{ kind: "new-tests" }>
+  | Readonly<{ kind: "attempt-scope-attested" }>
   | Readonly<{ kind: "declared-artifact-changed"; artifact: string }>
   | Readonly<{ kind: "declared-artifact-attested"; artifact: string }>;
 
@@ -132,6 +133,7 @@ export type ProofFailure =
   | Readonly<{ kind: "untrusted-regression-tests-failed"; label: string }>
   | Readonly<{ kind: "untrusted-regression-pass"; label: string }>
   | Readonly<{ kind: "new-tests-not-observed" }>
+  | Readonly<{ kind: "attempt-scope-drifted" }>
   | Readonly<{ kind: "declared-artifact-not-changed"; artifact: string }>
   | Readonly<{ kind: "declared-artifact-drifted"; artifact: string }>;
 
@@ -150,6 +152,7 @@ export type ProofEvidence =
       label: string;
     }>
   | Readonly<{ kind: "new-tests"; detail: string | null }>
+  | Readonly<{ kind: "attempt-scope-attested" }>
   | Readonly<{ kind: "declared-artifact-changed"; artifact: string }>
   | Readonly<{ kind: "declared-artifact-attested"; artifact: string }>;
 
@@ -223,6 +226,9 @@ export function deriveProofObligations(input: ProofObligationInput): NonEmpty<Pr
       : []),
     ...(requiresNewTests(policy)
       ? [Object.freeze({ kind: "new-tests" as const })]
+      : []),
+    ...(expectation === "attested"
+      ? [Object.freeze({ kind: "attempt-scope-attested" as const })]
       : []),
     ...artifacts.map((artifact) => Object.freeze(expectation === "attested"
       ? { kind: "declared-artifact-attested" as const, artifact }
@@ -330,6 +336,18 @@ const evaluateOne = (
             state: "failed",
             obligation,
             failure: Object.freeze({ kind: "new-tests-not-observed" }),
+          });
+    case "attempt-scope-attested":
+      return observed.filesModified.length === 0
+        ? Object.freeze({
+            state: "satisfied",
+            obligation,
+            evidence: Object.freeze({ kind: "attempt-scope-attested" }),
+          })
+        : Object.freeze({
+            state: "failed",
+            obligation,
+            failure: Object.freeze({ kind: "attempt-scope-drifted" }),
           });
     case "declared-artifact-changed":
       return observed.filesModified.includes(obligation.artifact)
@@ -460,28 +478,20 @@ const parseNonEmptyString = (raw: unknown, path: string): ProofParseResult<strin
 
 export function parseProofObligation(raw: unknown, path = "obligation"): ProofParseResult<ProofObligation> {
   if (!isRecord(raw)) return fail([`${path} must be an object`]);
-  if (raw.kind === "task-completed" || raw.kind === "regression-test-pass" || raw.kind === "new-tests") {
+  if (raw.kind === "task-completed" || raw.kind === "regression-test-pass" || raw.kind === "new-tests" ||
+      raw.kind === "attempt-scope-attested") {
     const kind = raw.kind;
     return parseExactRecordArm<ProofObligation>(raw, path, ["kind"], () =>
       ok(Object.freeze({ kind })));
   }
-  if (raw.kind === "declared-artifact-changed") {
-    return parseExactRecordArm(raw, path, ["kind", "artifact"], () => {
+  if (raw.kind === "declared-artifact-changed" || raw.kind === "declared-artifact-attested") {
+    const kind = raw.kind;
+    return parseExactRecordArm<ProofObligation>(raw, path, ["kind", "artifact"], () => {
       const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
-      return artifact.ok
-        ? ok(Object.freeze({ kind: "declared-artifact-changed", artifact: artifact.value }))
-        : artifact;
+      return artifact.ok ? ok(Object.freeze({ kind, artifact: artifact.value })) : artifact;
     });
   }
-  if (raw.kind === "declared-artifact-attested") {
-    return parseExactRecordArm(raw, path, ["kind", "artifact"], () => {
-      const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
-      return artifact.ok
-        ? ok(Object.freeze({ kind: "declared-artifact-attested", artifact: artifact.value }))
-        : artifact;
-    });
-  }
-  return fail([`${path}.kind must be task-completed, regression-test-pass, new-tests, declared-artifact-changed, or declared-artifact-attested`]);
+  return fail([`${path}.kind must be task-completed, regression-test-pass, new-tests, attempt-scope-attested, declared-artifact-changed, or declared-artifact-attested`]);
 }
 
 export function parseProofObligationInput(raw: unknown): ProofParseResult<ProofObligationInput> {
@@ -643,7 +653,8 @@ export function parseProofFailure(raw: unknown, path = "failure"): ProofParseRes
   switch (raw.kind) {
     case "task-not-completed":
     case "test-result-missing":
-    case "new-tests-not-observed": {
+    case "new-tests-not-observed":
+    case "attempt-scope-drifted": {
       const kind = raw.kind;
       return parseExactRecordArm<ProofFailure>(raw, path, ["kind"], () =>
         ok(Object.freeze({ kind })));
@@ -662,19 +673,13 @@ export function parseProofFailure(raw: unknown, path = "failure"): ProofParseRes
       });
     }
     case "declared-artifact-not-changed":
+    case "declared-artifact-drifted": {
+      const kind = raw.kind;
       return parseExactRecordArm<ProofFailure>(raw, path, ["kind", "artifact"], () => {
         const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
-        return artifact.ok
-          ? ok(Object.freeze({ kind: "declared-artifact-not-changed", artifact: artifact.value }))
-          : artifact;
+        return artifact.ok ? ok(Object.freeze({ kind, artifact: artifact.value })) : artifact;
       });
-    case "declared-artifact-drifted":
-      return parseExactRecordArm<ProofFailure>(raw, path, ["kind", "artifact"], () => {
-        const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
-        return artifact.ok
-          ? ok(Object.freeze({ kind: "declared-artifact-drifted", artifact: artifact.value }))
-          : artifact;
-      });
+    }
     default:
       return fail([`${path}.kind is not a recognized proof failure`]);
   }
@@ -682,8 +687,9 @@ export function parseProofFailure(raw: unknown, path = "failure"): ProofParseRes
 
 export function parseProofEvidence(raw: unknown, path = "evidence"): ProofParseResult<ProofEvidence> {
   if (!isRecord(raw)) return fail([`${path} must be an object`]);
-  if (raw.kind === "task-completed") {
-    return parseExactRecordArm(raw, path, ["kind"], () => ok(Object.freeze({ kind: "task-completed" })));
+  if (raw.kind === "task-completed" || raw.kind === "attempt-scope-attested") {
+    const kind = raw.kind;
+    return parseExactRecordArm<ProofEvidence>(raw, path, ["kind"], () => ok(Object.freeze({ kind })));
   }
   if (raw.kind === "regression-test-pass") {
     const allowed = raw.provenance === "pi-structured"
@@ -717,20 +723,11 @@ export function parseProofEvidence(raw: unknown, path = "evidence"): ProofParseR
       return ok(Object.freeze({ kind: "new-tests", detail: raw.detail === null ? null : raw.detail }));
     });
   }
-  if (raw.kind === "declared-artifact-changed") {
+  if (raw.kind === "declared-artifact-changed" || raw.kind === "declared-artifact-attested") {
+    const kind = raw.kind;
     return parseExactRecordArm<ProofEvidence>(raw, path, ["kind", "artifact"], () => {
       const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
-      return artifact.ok
-        ? ok(Object.freeze({ kind: "declared-artifact-changed", artifact: artifact.value }))
-        : artifact;
-    });
-  }
-  if (raw.kind === "declared-artifact-attested") {
-    return parseExactRecordArm<ProofEvidence>(raw, path, ["kind", "artifact"], () => {
-      const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
-      return artifact.ok
-        ? ok(Object.freeze({ kind: "declared-artifact-attested", artifact: artifact.value }))
-        : artifact;
+      return artifact.ok ? ok(Object.freeze({ kind, artifact: artifact.value })) : artifact;
     });
   }
   return fail([`${path}.kind is not recognized proof evidence`]);
@@ -750,6 +747,8 @@ const resultMatchesObligation = (result: ProofObligationResult): boolean => {
         ].includes(result.failure.kind);
       case "new-tests":
         return result.failure.kind === "new-tests-not-observed";
+      case "attempt-scope-attested":
+        return result.failure.kind === "attempt-scope-drifted";
       case "declared-artifact-changed":
         return result.failure.kind === "declared-artifact-not-changed"
           && result.failure.artifact === result.obligation.artifact;

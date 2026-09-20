@@ -210,31 +210,40 @@ export function renderImplementationRetryContext(context: ImplementationRetryCon
   return `${IMPLEMENTATION_RETRY_CONTEXT_LABEL}: ${canonicalJson(context as unknown as JsonValue)}`;
 }
 
-function parsePromptRetryContext(prompt: string):
-  | Readonly<{ ok: true; value: ImplementationRetryContext | null; sourceLine: string | null }>
-  | Readonly<{ ok: false; error: string }> {
-  const lines = prompt
-    .split(/\r?\n/u)
-    .filter((line) => line.startsWith(`${IMPLEMENTATION_RETRY_CONTEXT_LABEL}:`));
+type PromptContextParse<T> =
+  | Readonly<{ ok: true; value: T | null; sourceLine: string | null }>
+  | Readonly<{ ok: false; error: string }>;
+
+type ContextPayloadParser<T> = (raw: unknown) =>
+  | Readonly<{ ok: true; value: T }>
+  | Readonly<{ ok: false; errors: readonly string[] }>;
+
+function parsePromptContext<T>(
+  prompt: string,
+  label: string,
+  name: string,
+  parse: ContextPayloadParser<T>,
+): PromptContextParse<T> {
+  const lines = prompt.split(/\r?\n/u).filter((line) => line.startsWith(`${label}:`));
   if (lines.length === 0) return { ok: true, value: null, sourceLine: null };
-  if (lines.length !== 1) return { ok: false, error: "implementation prompt must contain at most one retry context" };
-  const prefix = `${IMPLEMENTATION_RETRY_CONTEXT_LABEL}: `;
+  if (lines.length !== 1) return { ok: false, error: `implementation prompt must contain at most one ${name} context` };
+  const prefix = `${label}: `;
   const line = lines[0]!;
-  if (!line.startsWith(prefix)) return { ok: false, error: "implementation retry context must use the canonical label separator" };
+  if (!line.startsWith(prefix)) return { ok: false, error: `implementation ${name} context must use the canonical label separator` };
   let raw: unknown;
   try {
     raw = JSON.parse(line.slice(prefix.length));
   } catch (cause) {
-    return {
-      ok: false,
-      error: `implementation retry context is not JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
-    };
+    return { ok: false, error: `implementation ${name} context is not JSON: ${cause instanceof Error ? cause.message : String(cause)}` };
   }
-  const parsed = parseImplementationRetryContext(raw);
+  const parsed = parse(raw);
   return parsed.ok
     ? { ok: true, value: parsed.value, sourceLine: line }
     : { ok: false, error: parsed.errors.join("; ") };
 }
+
+const parsePromptRetryContext = (prompt: string): PromptContextParse<ImplementationRetryContext> =>
+  parsePromptContext(prompt, IMPLEMENTATION_RETRY_CONTEXT_LABEL, "retry", parseImplementationRetryContext);
 
 /** The engine-derived authority a dispatched child needs to prove EXISTING
  * work. The digest binds the exact attested obligation set and verification
@@ -347,31 +356,8 @@ export function deriveImplementationAttestationContext(
   };
 }
 
-function parsePromptAttestationContext(prompt: string):
-  | Readonly<{ ok: true; value: ImplementationAttestationContext | null; sourceLine: string | null }>
-  | Readonly<{ ok: false; error: string }> {
-  const lines = prompt
-    .split(/\r?\n/u)
-    .filter((line) => line.startsWith(`${IMPLEMENTATION_ATTESTATION_CONTEXT_LABEL}:`));
-  if (lines.length === 0) return { ok: true, value: null, sourceLine: null };
-  if (lines.length !== 1) return { ok: false, error: "implementation prompt must contain at most one attestation context" };
-  const prefix = `${IMPLEMENTATION_ATTESTATION_CONTEXT_LABEL}: `;
-  const line = lines[0]!;
-  if (!line.startsWith(prefix)) return { ok: false, error: "implementation attestation context must use the canonical label separator" };
-  let raw: unknown;
-  try {
-    raw = JSON.parse(line.slice(prefix.length));
-  } catch (cause) {
-    return {
-      ok: false,
-      error: `implementation attestation context is not JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
-    };
-  }
-  const parsed = parseImplementationAttestationContext(raw);
-  return parsed.ok
-    ? { ok: true, value: parsed.value, sourceLine: line }
-    : { ok: false, error: parsed.errors.join("; ") };
-}
+const parsePromptAttestationContext = (prompt: string): PromptContextParse<ImplementationAttestationContext> =>
+  parsePromptContext(prompt, IMPLEMENTATION_ATTESTATION_CONTEXT_LABEL, "attestation", parseImplementationAttestationContext);
 
 type ImplementationRetryLineage =
   | Readonly<{ kind: "initial" }>
@@ -379,6 +365,7 @@ type ImplementationRetryLineage =
   | Readonly<{
       kind: "escalated";
       receiptId: ImplementationSettlementReceiptId;
+      authorityDigest: ImplementationAuthorityDigest;
       failureKinds: readonly [string, ...string[]];
     }>;
 
@@ -426,6 +413,7 @@ function projectedDisposition(lineage: ImplementationRetryLineage): Implementati
 function projectLineage(
   start: ImplementationRetryLineage,
   history: readonly ImplementationAttemptSettlementReceipt[],
+  attestation: boolean,
 ): ImplementationRetryLineage | string {
   let lineage = start;
   for (const [index, receipt] of history.entries()) {
@@ -445,12 +433,22 @@ function projectLineage(
       if (lineage.kind !== "initial") {
         return `implementation_attempt_history[${index}] (${receipt.receiptId}): retry authorization requires semantic attempt 1`;
       }
-      lineage = freeze({ kind: "retry", predecessor: receipt });
+      lineage = attestation && receipt.failureKinds.some((kind) =>
+        kind === "proof:attempt-scope-drifted" || kind === "proof:declared-artifact-drifted")
+        ? freeze({ kind: "escalated", receiptId: receipt.receiptId,
+            authorityDigest: receipt.authorityDigest, failureKinds: receipt.failureKinds })
+        : freeze({ kind: "retry", predecessor: receipt });
       continue;
     }
     if (receipt.transition === "escalation-remediated") {
       if (lineage.kind !== "escalated") {
         return `implementation_attempt_history[${index}] (${receipt.receiptId}): escalation remediation requires a terminal escalation`;
+      }
+      const terminal = lineage;
+      const sameFailures = receipt.failureKinds.length === terminal.failureKinds.length &&
+        receipt.failureKinds.every((kind, failureIndex) => kind === terminal.failureKinds[failureIndex]);
+      if (receipt.authorityDigest !== terminal.authorityDigest || !sameFailures) {
+        return `implementation_attempt_history[${index}] (${receipt.receiptId}): escalation remediation does not bind the exact terminal authority and failure set`;
       }
       lineage = freeze({ kind: "initial" });
       continue;
@@ -461,6 +459,7 @@ function projectLineage(
     lineage = freeze({
       kind: "escalated",
       receiptId: receipt.receiptId,
+      authorityDigest: receipt.authorityDigest,
       failureKinds: receipt.failureKinds,
     });
   }
@@ -512,7 +511,8 @@ export function deriveImplementationRetryDisposition(
       errors: nonEmptyErrors(["implementation retry protocol 2 requires a valid history start index"]),
     });
   }
-  const prefix = projectLineage(freeze({ kind: "initial" }), history.slice(0, historyStart));
+  const attestation = task.implementation_attestation === true;
+  const prefix = projectLineage(freeze({ kind: "initial" }), history.slice(0, historyStart), attestation);
   if (typeof prefix === "string") {
     return freeze({
       kind: "invalid",
@@ -539,7 +539,7 @@ export function deriveImplementationRetryDisposition(
       errors: nonEmptyErrors(["initial compatibility prefix cannot carry a retry predecessor"]),
     });
   }
-  const walked = projectLineage(prefix, history.slice(historyStart));
+  const walked = projectLineage(prefix, history.slice(historyStart), attestation);
   if (typeof walked === "string") {
     return freeze({ kind: "invalid", errors: nonEmptyErrors([walked]) });
   }
@@ -558,7 +558,9 @@ export function authorizeImplementationSpawn(
     case "escalated":
       return {
         ok: false,
-        error: `Task ${task.id} exhausted semantic attempt 2 and requires escalation (${disposition.failureKinds.join(", ")})`,
+        error: disposition.failureKinds.includes("proof:attempt-scope-drifted")
+          ? `Task ${task.id} has terminal attestation drift and requires escalation (${disposition.failureKinds.join(", ")})`
+          : `Task ${task.id} exhausted semantic attempt 2 and requires escalation (${disposition.failureKinds.join(", ")})`,
       };
     case "initial":
     case "retry":

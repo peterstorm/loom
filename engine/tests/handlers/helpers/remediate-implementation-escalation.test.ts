@@ -254,5 +254,7 @@ describe("orchestration remediate consumes the escalation recovery", () => {
       .toMatchObject({ kind: "error" });
     expect(await remediateOperation(["--task", "T1", "--receipt", "a".repeat(64), "--reason", "r", "--bogus"]))
       .toMatchObject({ kind: "error" });
+    expect(await remediateOperation(["--task", "T1", "--receipt", "a".repeat(64), "--reason", "environment", "is", "fixed"]))
+      .toMatchObject({ kind: "error" });
   });
 });

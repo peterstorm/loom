@@ -11,7 +11,7 @@ import { accessSync, constants as fsConstants, readFileSync, readdirSync } from 
 import { isAbsolute, join, relative } from "node:path";
 import { match } from "ts-pattern";
 import type { HookHandler, HookResult, Phase, TaskGraph } from "../../types";
-import { PHASE_AGENT_MAP, PHASE_ORDER, CLARIFY_THRESHOLD } from "../../config";
+import { PHASE_AGENT_MAP, PHASE_ORDER, CLARIFY_THRESHOLD, projectRootForTaskGraph } from "../../config";
 import { StateManager } from "../../state-manager";
 import { parsePhaseArtifacts } from "../../parsers/parse-phase-artifacts";
 import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
@@ -372,7 +372,7 @@ const handler: HookHandler = async (stdin) => {
   // Every relative artifact path is probed against the project root that owns
   // this TaskGraph, not process.cwd(): the runtime's cwd may be a different
   // checkout (a parent session in the main checkout advancing a worktree run).
-  const artifactBaseDir = projectRootForStateFile(mgr.getPath());
+  const artifactBaseDir = projectRootForTaskGraph(mgr.getPath());
 
   // Extract artifacts from transcript before checking transition. Resolved,
   // not read off the payload: without the derived fallback a harness that

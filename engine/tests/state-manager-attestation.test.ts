@@ -25,6 +25,10 @@ const REQUIRED_POLICY = {
   regression: { kind: "required" },
   new_tests: { kind: "required" },
 };
+const REGRESSION_WAIVED_POLICY = {
+  regression: { kind: "waived", reason: "documentation-only" },
+  new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
+};
 
 const attestationProof = (artifacts: readonly string[] = ["src/a.ts"], policy = ATTESTED_POLICY): TaskProof =>
   derivePendingTaskProof({
@@ -68,7 +72,7 @@ describe("attestation Task load lockstep", () => {
     const task = parsed.value.tasks[0]!;
     expect(task.implementation_attestation).toBe(true);
     expect(task.proof?.obligations.map((obligation) => obligation.kind)).toEqual([
-      "task-completed", "regression-test-pass", "declared-artifact-attested",
+      "task-completed", "regression-test-pass", "attempt-scope-attested", "declared-artifact-attested",
     ]);
   });
 
@@ -93,7 +97,7 @@ describe("attestation Task load lockstep", () => {
 
   it("refuses changed obligations under the mode flag", () => {
     const parsed = parseTaskGraph(graphWith(attestationTask({
-      proof: attestationProof(["src/a.ts"], ATTESTED_POLICY) && derivePendingTaskProof({
+      proof: derivePendingTaskProof({
         verificationPolicy: ATTESTED_POLICY,
         declaredArtifacts: ["src/a.ts"],
         declaredArtifactExpectation: "changed",
@@ -102,6 +106,24 @@ describe("attestation Task load lockstep", () => {
     expect(parsed).toMatchObject({
       ok: false,
       error: expect.stringContaining("proof obligations do not exactly match verification policy and file_list"),
+    });
+  });
+
+  it("refuses attestation mode when regression verification is waived", () => {
+    const parsed = parseTaskGraph(graphWith(attestationTask({
+      verification_policy: REGRESSION_WAIVED_POLICY,
+      proof: derivePendingTaskProof({
+        verificationPolicy: {
+          regression: { kind: "waived", reason: "documentation-only" },
+          newTests: { kind: "waived", reason: "existing-tests-sufficient" },
+        },
+        declaredArtifacts: ["src/a.ts"],
+        declaredArtifactExpectation: "attested",
+      }),
+    })));
+    expect(parsed).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("attestation mode requires regression verification"),
     });
   });
 

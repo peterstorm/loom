@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   parseAuthorizedWaveCompletionCheck,
   type AuthorizedWaveCompletionCheck,
@@ -312,6 +312,32 @@ describe("completion check process shell", () => {
       timedOut: true,
       signal: "SIGKILL",
     });
+  });
+
+  it("does not SIGKILL a recycled foreign process group after leader death proves the original group gone", async () => {
+    const actualKill = process.kill.bind(process);
+    const signals: (number | NodeJS.Signals)[] = [];
+    const probeError = (code: "EPERM" | "ESRCH"): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+      if (signal !== undefined) signals.push(signal);
+      if (signal === "SIGTERM") return actualKill(pid, signal);
+      if (signal === 0 && pid < 0) throw probeError("EPERM");
+      if (signal === 0 && pid > 0) throw probeError("ESRCH");
+      if (signal === "SIGKILL") throw new Error("foreign process group must not be signalled");
+      return actualKill(pid, signal);
+    }) as typeof process.kill);
+    try {
+      const result = execution(await runCompletionCheck(
+        check("timeout-exit-zero", { timeoutMs: 200 }),
+        fixtureRoot(),
+        { terminationGraceMs: 250, hardKillWaitMs: 2_000 },
+      ));
+      expect(result.checkResult.outcome).toMatchObject({ kind: "observed", timedOut: true });
+      expect(signals).toContain("SIGTERM");
+      expect(signals).not.toContain("SIGKILL");
+    } finally {
+      kill.mockRestore();
+    }
   });
 
   it("keeps bounded diagnostic tails", async () => {

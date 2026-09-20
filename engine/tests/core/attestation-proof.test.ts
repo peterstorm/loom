@@ -53,10 +53,10 @@ describe("attestation obligation derivation", () => {
       declaredArtifactExpectation: "attested",
     });
     expect(obligations.map((obligation) => obligation.kind)).toEqual([
-      "task-completed", "regression-test-pass", "new-tests",
+      "task-completed", "regression-test-pass", "new-tests", "attempt-scope-attested",
       "declared-artifact-attested", "declared-artifact-attested",
     ]);
-    expect(obligations.slice(3)).toEqual([
+    expect(obligations.slice(4)).toEqual([
       { kind: "declared-artifact-attested", artifact: "src/a.ts" },
       { kind: "declared-artifact-attested", artifact: "src/b.ts" },
     ]);
@@ -83,7 +83,7 @@ describe("attestation obligation derivation", () => {
       declaredArtifactExpectation: "attested",
     });
     expect(proof.obligations.map((obligation) => obligation.kind)).toEqual([
-      "task-completed", "regression-test-pass", "declared-artifact-attested",
+      "task-completed", "regression-test-pass", "attempt-scope-attested", "declared-artifact-attested",
     ]);
   });
 });
@@ -115,6 +115,7 @@ describe("attestation obligation evaluation", () => {
     );
     expect(proof.state).toBe("failed");
     if (proof.state === "failed") {
+      expect(proof.failures).toContainEqual({ kind: "attempt-scope-drifted" });
       expect(proof.failures).toContainEqual({ kind: "declared-artifact-drifted", artifact: "src/b.ts" });
       // The untouched sibling still carries its satisfied result — no result is
       // lost merely because a sibling drifted.
@@ -124,10 +125,35 @@ describe("attestation obligation evaluation", () => {
       }));
     }
   });
+
+  it("fails when any registered attempt-scope path outside file_list changes", () => {
+    const proof = evaluateProofObligations(
+      deriveProofObligations({
+        verificationPolicy: ATTESTED_POLICY,
+        declaredArtifacts: ["src/a.ts"],
+        declaredArtifactExpectation: "attested",
+      }),
+      observed({ filesModified: ["src/extra.ts"] }),
+    );
+    expect(proof).toMatchObject({
+      state: "failed",
+      failures: [{ kind: "attempt-scope-drifted" }],
+      results: expect.arrayContaining([expect.objectContaining({
+        state: "satisfied",
+        obligation: { kind: "declared-artifact-attested", artifact: "src/a.ts" },
+      })]),
+    });
+  });
 });
 
 describe("attestation parsers", () => {
   it("round-trips the attested obligation, failure, and evidence arms", () => {
+    expect(parseProofObligation({ kind: "attempt-scope-attested" }))
+      .toEqual({ ok: true, value: { kind: "attempt-scope-attested" } });
+    expect(parseProofFailure({ kind: "attempt-scope-drifted" }))
+      .toEqual({ ok: true, value: { kind: "attempt-scope-drifted" } });
+    expect(parseProofEvidence({ kind: "attempt-scope-attested" }))
+      .toEqual({ ok: true, value: { kind: "attempt-scope-attested" } });
     expect(parseProofObligation({ kind: "declared-artifact-attested", artifact: "src/a.ts" }))
       .toEqual({ ok: true, value: { kind: "declared-artifact-attested", artifact: "src/a.ts" } });
     expect(parseProofObligation({ kind: "declared-artifact-attested" }).ok).toBe(false);
@@ -270,10 +296,10 @@ describe("attestation settlement through the Implementation Completion Oracle", 
     expect(result).toMatchObject({ ok: true });
     if (!result.ok || result.value.kind !== "retry-required") throw new Error(JSON.stringify(result));
     expect(result.value.receipt).toMatchObject({ transition: "retry-required", semanticAttempt: 1 });
-    expect(result.value.failures).toContainEqual({
-      kind: "proof-obligation-failure",
-      failure: { kind: "declared-artifact-drifted", artifact: "src/a.ts" },
-    });
+    expect(result.value.failures).toEqual(expect.arrayContaining([
+      { kind: "proof-obligation-failure", failure: { kind: "attempt-scope-drifted" } },
+      { kind: "proof-obligation-failure", failure: { kind: "declared-artifact-drifted", artifact: "src/a.ts" } },
+    ]));
   });
 
   it("still demands the classified regression on an attestation task", () => {

@@ -545,7 +545,7 @@ A malformed semantic output gets one retry. Attempt-2 rejection is terminal for 
 
 ### Implementation escalation (semantic attempt 2 exhausted)
 
-A modern implementation Task gets exactly two semantic attempts. When attempt 2's settlement also fails its proof, the lineage records an `escalation-required` receipt and further implementation dispatch is refused — the engine will not spin a third unreviewed attempt. Two operator-sanctioned exits exist; both are deliberate, reason-echoed orchestration operations, and neither rewrites history:
+A modern implementation Task gets exactly two semantic attempts. When attempt 2's settlement also fails its proof, the lineage records an `escalation-required` receipt and further implementation dispatch is refused — the engine will not spin a third unreviewed attempt. Attestation byte drift is terminal on attempt 1 because refreshing its baseline would certify child-authored bytes. The direct exit from either terminal state is `remediate`; it is deliberate, reason-echoed, and never rewrites history:
 
 ```bash
 # Consume the escalation: append one escalation-remediated receipt and return
@@ -556,10 +556,9 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration remediate \
   --receipt <exact-terminal-escalation-receipt-id> \
   --reason "<why a fresh attempt is now sanctioned>"
 
-# Arm re-attestation when the declared artifacts ALREADY carry the completed
-# work (populate-task-graph --force reset, reopened Wave, anchor-only repair):
-# rewrite the pending proof to the attested arm plus a regression-only policy,
-# so the next dispatch runs a verify-only child.
+# Separately, arm re-attestation only on an eligible pending, nonterminal Task
+# when the declared artifacts ALREADY carry the completed work
+# (populate-task-graph --force reset, reopened Wave, anchor-only repair).
 bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration attest \
   --task <task-id> \
   --reason "<why the work is known to be already present>"
@@ -567,7 +566,7 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration attest \
 
 `remediate` requires the EXACT receipt id of the Task's terminal escalation and refuses a repeat (`no longer escalated`), a live attempt, or a wrong receipt — all without touching state. The receipt is appended only; history start and the seed predecessor are untouched, and the walk past the remediation receipt lands on a fresh attempt 1 with a full two-attempt budget. The reason is echoed to stdout only; it is never persisted into the graph.
 
-`attest` refuses a live attempt, an escalated lineage (remediate first), a satisfied proof, a repeat (`already in attestation mode`), and an unknown Task — all without touching state. It rewrites exactly the proof surface under the TaskGraph lock: the attested obligation set (one per declared artifact), a regression-required/new-tests-waived stored policy (the legacy `new_tests_required` boolean is CLEARED, not flipped — a `false` there would contradict the required regression at the load boundary), and the `implementation_attestation: true` flag. Lineage, baselines, and history are untouched. The dispatch binding requires the engine-derived `LOOM_IMPLEMENTATION_ATTESTATION_CONTEXT` line on both dispatch arms and refuses it on non-attestation Tasks, so a drifted proof cannot ride an old appendix. The attested child must change NOTHING inside the attempt scope: any byte move settles as `declared-artifact-drifted`, never as attested, and the classified regression still runs. Reconcile measures drift against the attempt baseline (never the population baseline), so pre-existing population-relative changes are the attested work, not writes.
+`attest` refuses a live attempt, an escalated lineage (remediate first), a satisfied proof, a repeat (`already in attestation mode`), and an unknown Task — all without touching state. It rewrites exactly the proof surface under the TaskGraph lock: one scope-wide attestation obligation plus one attested obligation per declared artifact, a regression-required/new-tests-waived stored policy (the legacy `new_tests_required` boolean is CLEARED, not flipped — a `false` there would contradict the required regression at the load boundary), and the `implementation_attestation: true` flag. Lineage, baselines, and history are untouched. The dispatch binding requires the engine-derived `LOOM_IMPLEMENTATION_ATTESTATION_CONTEXT` line on every dispatch and refuses it on non-attestation Tasks. The attested child must change NOTHING inside the attempt scope: any byte move fails the scope obligation and terminalizes that attestation lineage, so it can never become a refreshed attempt-2 baseline. Restore the intended bytes, then use the exact terminal receipt with `remediate` before another proving round. The classified regression still runs. Reconcile measures drift against the attempt baseline (never the population baseline), so pre-existing population-relative changes are the attested work, not writes.
 
 ### Completed Wave has post-review workspace-integrity loss
 

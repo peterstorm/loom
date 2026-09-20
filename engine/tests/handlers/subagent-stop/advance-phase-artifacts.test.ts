@@ -20,6 +20,7 @@ import { SUBAGENT_DIR } from "../../../src/config";
 import { StateManager } from "../../../src/state-manager";
 import type { TaskGraph } from "../../../src/types";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -157,6 +158,34 @@ describe("advance-phase artifact authority", () => {
       const persisted = JSON.parse(readFileSync(join(tmpDir, `${session}.json`), "utf-8"));
       expect(persisted.spec_file).toBeNull();
     });
+  });
+
+  it("resolves a noncanonical LOOM_STATE_PATH against its owning Git project", async () => {
+    const session = `artifact-custom-state-${process.pid}-${Date.now()}`;
+    expect(spawnSync("git", ["init", "--quiet"], { cwd: tmpDir }).status).toBe(0);
+    const statePath = join(tmpDir, "custom", "state.json");
+    const pointerPath = join(SUBAGENT_DIR, `${session}.task_graph`);
+    const specDir = ".claude/specs/2026-08-29-custom-state";
+    plantSpec(specDir);
+    const transcript = join(tmpDir, "transcript.jsonl");
+    writeFileSync(transcript, writeLine(`${specDir}/spec.md`));
+    mkdirSync(join(tmpDir, "custom"), { recursive: true });
+    writeFileSync(statePath, JSON.stringify(mkState({ spec_dir: specDir })));
+    mkdirSync(SUBAGENT_DIR, { recursive: true });
+    writeFileSync(pointerPath, statePath);
+    const previous = process.env.LOOM_STATE_PATH;
+    process.env.LOOM_STATE_PATH = statePath;
+    try {
+      expect(await specifyResult(session, transcript)).toMatchObject({ kind: "passthrough" });
+      expect(JSON.parse(readFileSync(statePath, "utf8"))).toMatchObject({
+        current_phase: "architecture",
+        spec_file: `${specDir}/spec.md`,
+      });
+    } finally {
+      if (previous === undefined) delete process.env.LOOM_STATE_PATH;
+      else process.env.LOOM_STATE_PATH = previous;
+      rmSync(pointerPath, { force: true });
+    }
   });
 
   it("refuses the artifact write itself when the Phase advances under the transcript", async () => {

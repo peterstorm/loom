@@ -22,6 +22,8 @@ import {
   WAVE_REVIEW_AGENTS,
 } from "./core/model-profiles";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "./core/verification-manifest";
+import { projectRootForStateFile } from "./core/phase-artifact-paths";
+import { observeGitProbe } from "./utils/git-probe";
 
 export { WAVE_REVIEW_AGENTS };
 
@@ -636,36 +638,58 @@ function proveNoGitMetadataInAncestorsFrom(cwd: string): void {
  *  the full probe evidence — status, output length, stderr, termination
  *  signal — so the operator can attribute it instead of guessing. */
 function gitRepositoryRootFrom(cwd: string): string | null {
-  for (const attempt of [1, 2] as const) {
+  type RootProbe =
+    | Readonly<{ kind: "root"; root: string; status: number; stdoutLength: number; signal: NodeJS.Signals | null; stderr: string }>
+    | Readonly<{ kind: "not-repository" }>;
+  const observed = observeGitProbe<RootProbe, Error>(() => {
     const probe = spawnSync("git", ["rev-parse", "--show-toplevel"], {
       encoding: "utf-8",
       cwd,
       env: { ...process.env, LANG: "C", LC_ALL: "C" },
     });
     if (probe.error !== undefined) {
-      throw new Error(`git rev-parse could not start: ${probe.error.message}`);
+      return { ok: false, error: new Error(`git rev-parse could not start: ${probe.error.message}`) };
     }
     if (probe.status === 0) {
-      const root = probe.stdout.trim();
-      if (root !== "") return root;
-      if (attempt === 2) {
-        throw new Error(
-          `git rev-parse returned an empty repository root for ${cwd} (confirmed on retry)` +
-          ` status=${probe.status} stdoutLength=${probe.stdout.length}` +
-          ` signal=${probe.signal ?? "none"}` +
-          (probe.stderr.trim() === "" ? "" : ` stderr: ${probe.stderr.trim()}`),
-        );
-      }
-      continue;
+      return { ok: true, value: Object.freeze({ kind: "root", root: probe.stdout.trim(), status: probe.status,
+        stdoutLength: probe.stdout.length, signal: probe.signal, stderr: probe.stderr.trim() }) };
     }
     if (probe.status === 128 && NOT_A_GIT_REPOSITORY.test(probe.stderr)) {
-      proveNoGitMetadataInAncestorsFrom(cwd);
-      return null;
+      try {
+        proveNoGitMetadataInAncestorsFrom(cwd);
+        return { ok: true, value: Object.freeze({ kind: "not-repository" }) };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error : new Error(String(error)) };
+      }
     }
     const outcome = probe.signal === null ? `exit ${probe.status ?? "unknown"}` : `signal ${probe.signal}`;
-    throw new Error(`git rev-parse failed (${outcome}): ${probe.stderr.trim() || "no diagnostic"}`);
+    return { ok: false, error: new Error(`git rev-parse failed (${outcome}): ${probe.stderr.trim() || "no diagnostic"}`) };
+  }, (value) => value.kind === "root" && value.root === "");
+  if (observed.kind === "failed") throw observed.error;
+  if (observed.kind === "confirmed-empty") {
+    const probe = observed.second;
+    if (probe.kind !== "root") throw new Error("confirmed-empty Git root probe has contradictory not-repository outcome");
+    throw new Error(
+      `git rev-parse returned an empty repository root for ${cwd} (confirmed on retry)` +
+      ` status=${probe.status} stdoutLength=${probe.stdoutLength}` +
+      ` signal=${probe.signal ?? "none"}` +
+      (probe.stderr === "" ? "" : ` stderr: ${probe.stderr}`),
+    );
   }
-  throw new Error("git rev-parse retry loop exhausted without an outcome");
+  return observed.value.kind === "not-repository" ? null : observed.value.root;
+}
+
+/** Resolve the project boundary owning one selected TaskGraph. An explicit
+ * LOOM_STATE_PATH may live below any repository directory, so only a Git root
+ * observed from that State File's parent can authorize relative artifacts. */
+export function projectRootForTaskGraph(statePath: string): string {
+  const absolute = resolve(statePath);
+  const explicit = process.env.LOOM_STATE_PATH;
+  if (explicit !== undefined && resolve(explicit) === absolute) {
+    const root = gitRepositoryRootFrom(dirname(absolute));
+    if (root !== null) return projectRootForStateFile(absolute, root);
+  }
+  return projectRootForStateFile(absolute);
 }
 
 /** Find the task graph by walking up from the GIVEN cwd to its git root.

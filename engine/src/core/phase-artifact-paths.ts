@@ -44,8 +44,17 @@ export const PLAN_ARTIFACT_DIR = ".claude/plans";
  * places the file directly in the root. Path math only — the same purity
  * contract as the rest of this module.
  */
-export function projectRootForStateFile(statePath: string): string {
-  const parent = dirname(resolve(statePath));
+export function projectRootForStateFile(statePath: string, repositoryRoot?: string): string {
+  const absoluteStatePath = resolve(statePath);
+  if (repositoryRoot !== undefined) {
+    const root = resolve(repositoryRoot);
+    const fromRoot = relative(root, absoluteStatePath);
+    if (fromRoot === "" || fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || fromRoot.startsWith("/")) {
+      throw new Error(`State File ${absoluteStatePath} is outside observed project root ${root}`);
+    }
+    return root;
+  }
+  const parent = dirname(absoluteStatePath);
   return basename(parent) === "state" ? dirname(dirname(parent)) : parent;
 }
 

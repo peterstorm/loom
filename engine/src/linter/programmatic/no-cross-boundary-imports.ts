@@ -113,14 +113,6 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/core/reviewer-contract.ts": ["zod/v4"],
       "engine/src/core/standalone-lineage-contract.ts": ["zod/v4"],
       "engine/src/core/reviewer-protocol.ts": ["jsonc-parser"],
-      // Grammar-constrained verdict grammars: the panel contract and the panel
-      // tally define their judge/refutation verdict schemas with zod, and the
-      // emission tool's verdict-args parser types its admission seam with the
-      // same package. Exact-specifier grants — never a prefix — so a new zod
-      // subpath fails the gate until it is re-audited by machine-purity.
-      "engine/src/core/panel-contract.ts": ["zod/v4"],
-      "engine/src/core/review-panel.ts": ["zod/v4"],
-      "engine/src/core/emission-tool.ts": ["zod/v4"],
     },
     perFileAllow: {
       // The direct-edit guard normalizes panel/spec-artifact targets with pure

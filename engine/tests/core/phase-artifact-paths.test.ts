@@ -6,6 +6,7 @@ import {
   classifyPhaseArtifact,
   parseSpecArtifactDirectory,
   phaseArtifactUpdates,
+  projectRootForStateFile,
   resolvesWithin,
 } from "../../src/core/phase-artifact-paths";
 
@@ -63,6 +64,16 @@ describe("classifyPhaseArtifact", () => {
         return classified === null || resolvesWithin(candidate, SPEC_ARTIFACT_DIR);
       },
     ));
+  });
+});
+
+describe("projectRootForStateFile", () => {
+  it("uses explicit project authority for a noncanonical nested State File", () => {
+    expect(projectRootForStateFile("/repo/custom/state.json", "/repo")).toBe("/repo");
+  });
+
+  it("rejects a State File outside the explicit project boundary", () => {
+    expect(() => projectRootForStateFile("/elsewhere/state.json", "/repo")).toThrow("outside observed project root");
   });
 });
 

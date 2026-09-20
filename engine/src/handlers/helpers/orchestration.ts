@@ -218,7 +218,7 @@ function usage(): HookResult {
       "  complete --runs-root <root> --run <run-directory> --operation <id>",
       "  decide  --runs-root <root> --run <run-directory> --request <decision-id>",
   "  remediate --task <task-id> --receipt <terminal escalation receipt id> --reason <text>",
-  "          (consumes escalate-wave-implementation: retires the terminal attempt-2 escalation so the next status offers a fresh attempt-1 dispatch; prior receipts stay in history)",
+  "          (retires the exact terminal implementation escalation so the next status offers a fresh attempt-1 dispatch; prior receipts stay in history)",
   "  attest   --task <task-id> --reason <text>",
   "          (arms implementation re-attestation: rewrites the Task's pending proof to attested obligations + regression-only policy; the next dispatch runs a verify-only child whose writes settle as drift, never as attested)",
     ].join("\n"),
@@ -794,11 +794,12 @@ async function inspectOperation(args: readonly string[]): Promise<HookResult> {
  * error tells the operator to repeat the identical command, which replays the
  * marker idempotently and retries the stamp.
  */
-async function stampAbandonedWaveGateRegistration(marker: RunAbandonment): Promise<string | null> {
+async function stampAbandonedWaveGateRegistration(runsRoot: string, marker: RunAbandonment): Promise<string | null> {
   const manager = StateManager.fromPath(TASK_GRAPH_PATH);
   if (manager === null) return null; // no protected graph: nothing to tombstone
   try {
     await manager.abandonActiveWaveGateRegistration({
+      runsRoot,
       runId: marker.runId,
       reason: marker.reason,
       supersededBy: marker.supersededBy,
@@ -841,7 +842,7 @@ async function abandonOperation(args: readonly string[]): Promise<HookResult> {
   const abandoned = await bound.value.handle.abandonRun({ supersededBy, reason });
   if (!abandoned.ok) return { kind: "error", message: abandoned.error.message };
   process.stdout.write(`${JSON.stringify(abandoned.value, null, 2)}\n`);
-  const stampFailure = await stampAbandonedWaveGateRegistration(abandoned.value);
+  const stampFailure = await stampAbandonedWaveGateRegistration(bound.value.handle.identity.runsRoot, abandoned.value);
   return stampFailure === null ? { kind: "allow" } : { kind: "error", message: stampFailure };
 }
 

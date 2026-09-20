@@ -106,8 +106,47 @@ const sealedSectionJson = new WeakMap<ByteSection, string>();
 const isByte = (value: unknown): value is number =>
   typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 255;
 
+const COMPACT_BYTE_STORAGE_THRESHOLD = 64 * 1024;
+const immutableByteStorage = new WeakMap<readonly number[], Uint8Array>();
+function byteIndex(property: PropertyKey, length: number): number | null {
+  if (typeof property !== "string") return null;
+  const index = Number(property);
+  return Number.isInteger(index) && index >= 0 && index < length && String(index) === property ? index : null;
+}
+
+/**
+ * A frozen dense number[] makes Bun rewrite every indexed property; multi-MiB
+ * Context Packet sections consequently spent minutes in Object.freeze. Keep
+ * the public readonly-array contract while storing bytes in an unexposed
+ * typed array behind a frozen holey-array view. Array indexing, iteration,
+ * methods, Buffer.from and JSON.stringify retain their ordinary values; no
+ * per-byte mutable property exists for a caller to alter. Small sections stay
+ * dense so ordinary reflective/deep-equality behavior remains unchanged.
+ */
+function immutableBytes(owned: Uint8Array): readonly number[] {
+  if (owned.length <= COMPACT_BYTE_STORAGE_THRESHOLD) {
+    const dense = Object.freeze(Array.from(owned));
+    immutableByteStorage.set(dense, owned);
+    return dense;
+  }
+  const target = new Array<number>(owned.length);
+  Object.freeze(target);
+  const view = new Proxy(target, {
+    get(array, property, receiver) {
+      if (property === Symbol.iterator) return () => owned.values();
+      const index = byteIndex(property, owned.length);
+      return index === null ? Reflect.get(array, property, receiver) : owned[index];
+    },
+    has(array, property) {
+      return byteIndex(property, owned.length) !== null || Reflect.has(array, property);
+    },
+  });
+  immutableByteStorage.set(view, owned);
+  return view;
+}
+
 function digestBytes(bytes: readonly number[]): string {
-  return sha256Bytes(Uint8Array.from(bytes));
+  return sha256Bytes(immutableByteStorage.get(bytes) ?? Uint8Array.from(bytes));
 }
 
 /**
@@ -116,11 +155,11 @@ function digestBytes(bytes: readonly number[]): string {
  */
 export function encodeByteSection(label: string, text: string): DomainResult<ByteSection, ContextPacketError> {
   if (label.length === 0) return failure("label", "a context section label must not be empty");
-  const bytes = Array.from(encoder.encode(text));
+  const bytes = immutableBytes(encoder.encode(text));
   const byteLength = parseArtifactByteLength(bytes.length);
   if (!byteLength.ok) return failure("byteLength", byteLength.error.message);
   const section = canonicalRecord({ label, byteLength: byteLength.value,
-    digest: digestBytes(bytes) as ArtifactDigest, bytes: Object.freeze(bytes) });
+    digest: digestBytes(bytes) as ArtifactDigest, bytes });
   sealedSections.add(section);
   return success(section);
 }
@@ -196,7 +235,7 @@ export function buildContextPacket(input: ContextPacketInput): DomainResult<Lega
       label: section.label,
       byteLength: section.byteLength,
       digest: section.digest,
-      bytes: Object.freeze([...bytes]),
+      bytes: immutableBytes(Uint8Array.from(bytes)),
     }));
   }
   const fixedContext = canonicalSections.slice(0, input.fixedContext.length);
@@ -332,7 +371,7 @@ function parseSection(raw: unknown, field: string): DomainResult<ByteSection, Co
   if (!bytes.every(isByte)) {
     return failure(`${field}.bytes`, "a context section byte must be an integer from 0 through 255");
   }
-  const materialised = bytes as readonly number[];
+  const materialised = immutableBytes(Uint8Array.from(bytes));
   const byteLength = parseArtifactByteLength(materialised.length);
   if (!byteLength.ok) return failure(`${field}.byteLength`, byteLength.error.message);
   if (record["byteLength"] !== materialised.length) {
@@ -343,7 +382,7 @@ function parseSection(raw: unknown, field: string): DomainResult<ByteSection, Co
     return failure(`${field}.digest`, "a context section digest must cover its exact bytes");
   }
   const section = canonicalRecord({ label: record["label"], byteLength: byteLength.value,
-    digest: digest as ArtifactDigest, bytes: Object.freeze(materialised) });
+    digest: digest as ArtifactDigest, bytes: materialised });
   sealedSections.add(section);
   return success(section);
 }

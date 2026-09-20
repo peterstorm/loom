@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { argumentValue, hasFlag } from "../../../src/handlers/helpers/cli-args";
+import { argumentValue, hasFlag, unconsumedValueArguments } from "../../../src/handlers/helpers/cli-args";
 
 describe("argumentValue", () => {
   it("reads the value that follows the flag", () => {
@@ -59,6 +59,24 @@ describe("argumentValue", () => {
 
   it("is null on empty argv", () => {
     expect(argumentValue([], "--run")).toBeNull();
+  });
+});
+
+describe("unconsumedValueArguments", () => {
+  const flags = new Set(["--task", "--reason"]);
+
+  it("consumes exact flag/value pairs", () => {
+    expect(unconsumedValueArguments(["--task", "T1", "--reason", "verified"], flags)).toEqual([]);
+  });
+
+  it("retains positional leftovers and unknown flags", () => {
+    expect(unconsumedValueArguments(["--task", "T1", "--reason", "existing", "work", "--bogus"], flags))
+      .toEqual(["work", "--bogus"]);
+  });
+
+  it("leaves missing-value flags to the value parser without consuming the next flag", () => {
+    expect(unconsumedValueArguments(["--task", "--reason", "why"], flags)).toEqual([]);
+    expect(argumentValue(["--task", "--reason", "why"], "--task")).toBeNull();
   });
 });
 

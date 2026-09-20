@@ -20,6 +20,21 @@ export function argumentValue(args: readonly string[], flag: string): string | n
   return value === undefined || value === "" || value.startsWith("--") ? null : value;
 }
 
+/** Return every token not consumed by one exact value-bearing flag pair. */
+export function unconsumedValueArguments(args: readonly string[], flags: ReadonlySet<string>): readonly string[] {
+  const unconsumed: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index]!;
+    if (!flags.has(token)) {
+      unconsumed.push(token);
+      continue;
+    }
+    const value = args[index + 1];
+    if (value !== undefined && value.length > 0 && !value.startsWith("--")) index += 1;
+  }
+  return Object.freeze(unconsumed);
+}
+
 /** Is this bare switch present? Pass the full flag, `--json`, not `json`. */
 export function hasFlag(args: readonly string[], flag: string): boolean {
   return args.includes(flag);

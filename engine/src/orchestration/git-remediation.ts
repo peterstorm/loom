@@ -63,6 +63,7 @@ import {
 } from "../core/remediation-machine";
 import { compareCandidateRepositoryWitnesses } from "../core/defect-family-accounting";
 import { recaptureRemediationCandidateWorkspace } from "./remediation-candidate";
+import { observeGitProbe } from "../utils/git-probe";
 
 /** Fixed argument templates. Nothing here is ever built from caller input. */
 const GIT_EXECUTABLE = "git";
@@ -197,9 +198,12 @@ function runGitProbingEmpty(
   repositoryRoot: string,
   invocation: GitInvocation,
 ): DomainResult<Buffer, GitBoundaryError> {
-  const first = runGit(repositoryRoot, invocation);
-  if (!first.ok || first.value.length > 0) return first;
-  return runGit(repositoryRoot, invocation);
+  const observed = observeGitProbe(
+    () => runGit(repositoryRoot, invocation),
+    (value) => value.length === 0,
+  );
+  if (observed.kind === "failed") return { ok: false, error: observed.error };
+  return success(observed.kind === "confirmed-empty" ? observed.second : observed.value);
 }
 
 /** Split NUL-delimited Git output; a trailing NUL does not produce an empty field. */

@@ -26,7 +26,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     # The engine unit suite alone runs ~8.5 minutes on a fast Linux box and
     # GitHub's macOS runners are materially slower; 30 minutes left no head
-    # room for the macOS leg, so the budget is shared and generous.
+    # room for the macOS leg, so each job's budget is generous.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

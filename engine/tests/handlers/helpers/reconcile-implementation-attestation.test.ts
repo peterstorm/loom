@@ -11,7 +11,7 @@
  * observation, so the honest outcome is `task-completed` failing while the
  * `declared-artifact-attested` obligation holds (bytes unchanged). Drift —
  * any byte move inside the attempt scope — settles as
- * `declared-artifact-drifted`, never as attested.
+ * `attempt-scope-drifted` (plus declared-artifact detail when applicable), never as attested.
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
@@ -149,6 +149,7 @@ describe("reconcile attestation oracle", () => {
     const task = storedTask(statePath);
     expect(task.proof?.state).toBe("failed");
     expect(task.proof?.state === "failed" && task.proof.failures.map((failure) => failure.kind).sort()).toEqual([
+      "attempt-scope-drifted",
       "declared-artifact-drifted",
       "task-not-completed",
       "test-result-missing",

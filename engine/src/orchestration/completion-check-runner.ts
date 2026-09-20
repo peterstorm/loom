@@ -452,11 +452,13 @@ async function waitForProcessGroupGone(
 ): Promise<ProcessGroupProbe> {
   const deadline = Date.now() + maximumWaitMs;
   let latest = probeProcessGroup(processGroupId);
-  while (!groupGoneAfterLeaderDeath(processGroupId, latest) && Date.now() < deadline) {
+  let gone = groupGoneAfterLeaderDeath(processGroupId, latest);
+  while (!gone && Date.now() < deadline) {
     await delay(Math.min(GROUP_PROBE_INTERVAL_MS, Math.max(1, deadline - Date.now())));
     latest = probeProcessGroup(processGroupId);
+    gone = groupGoneAfterLeaderDeath(processGroupId, latest);
   }
-  return latest;
+  return gone ? Object.freeze({ kind: "gone" }) : latest;
 }
 
 async function terminateProcessGroup(

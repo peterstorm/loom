@@ -2677,12 +2677,11 @@ function unstartedWaveStatus(
   // load boundary proved mode/obligations/policy lockstep, so derivation can
   // only fail on an in-memory graph; either way the wave reports unavailable
   // instead of emitting a dispatch a child could not legally be admitted on.
-  const attestationAppendix = new Map(dispositions.flatMap(({ task, disposition }) =>
-    disposition.kind === "initial" || disposition.kind === "retry"
-      ? task.implementation_attestation === true
-        ? [[task.id, deriveImplementationAttestationContext(task)] as const]
-        : []
-      : []));
+  const attestationAppendix = new Map(dispositions.flatMap(({ task, disposition }) => {
+    if (disposition.kind !== "initial" && disposition.kind !== "retry") return [];
+    if (task.implementation_attestation !== true) return [];
+    return [[task.id, deriveImplementationAttestationContext(task)] as const];
+  }));
   const attestationFailure = [...attestationAppendix.entries()].find(([, derived]) => !derived.ok);
   if (attestationFailure !== undefined) {
     return deriveUnavailableLoomStatus(Object.freeze([
@@ -2728,7 +2727,7 @@ function unstartedWaveStatus(
       wave,
       tasks: Object.freeze(escalated) as NonEmpty<(typeof escalated)[number]>,
     });
-    message = `Wave ${wave} requires implementation escalation; ${escalated.length} task(s) exhausted semantic attempt 2`;
+    message = `Wave ${wave} requires implementation escalation; ${escalated.length} task(s) reached a terminal implementation failure`;
   } else if (dispatches.length > 0) {
     recovery = canonicalRecord({
       kind: "spawn-wave-implementation",
@@ -2759,7 +2758,7 @@ function unstartedWaveStatus(
   for (const task of escalated) {
     reasons.push(reason(
       "implementation-escalation-required",
-      `${task.taskId} exhausted attempt 2: ${task.failureKinds.join(", ")}`,
+      `${task.taskId} reached terminal implementation failure: ${task.failureKinds.join(", ")}`,
       task.taskId,
     ));
   }

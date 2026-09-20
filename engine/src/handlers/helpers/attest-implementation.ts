@@ -30,37 +30,19 @@
  * repeat refuses "already in attestation mode" without touching state.
  */
 
-import { derivePendingTaskProof, type PendingTaskProof } from "../../core/proof-obligations";
 import {
-  deriveImplementationAttestationContext,
-  deriveImplementationRetryDisposition,
-} from "../../core/implementation-retry";
-import {
-  serializeVerificationPolicy,
-  type VerificationPolicy,
-} from "../../core/verification-policy";
+  armImplementationAttestation,
+  type AttestationPlan,
+} from "../../core/implementation-lifecycle";
+export { attestedTask, ATTESTATION_VERIFICATION_POLICY } from "../../core/implementation-lifecycle";
+export type { AttestationPlan } from "../../core/implementation-lifecycle";
 import { parseTaskId, type TaskId } from "../../core/task-id";
 import { taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
 import type { HookResult, Task } from "../../types";
-import { argumentValue } from "./cli-args";
+import { argumentValue, unconsumedValueArguments } from "./cli-args";
 
 const MAX_ATTEST_REASON = 512;
-
-/** The policy attestation authors: the classified regression still runs; new
- * tests are waived because the work predates the attempt. The waiver reason is
- * the authored `existing-tests-sufficient`, not the migration spelling. */
-export const ATTESTATION_VERIFICATION_POLICY: VerificationPolicy = Object.freeze({
-  regression: Object.freeze({ kind: "required" }),
-  newTests: Object.freeze({ kind: "waived", reason: "existing-tests-sufficient" }),
-});
-
-export type AttestationPlan = Readonly<{
-  taskId: string;
-  obligations: readonly string[];
-  attestationProofDigest: string;
-  promptAppendix: string;
-}>;
 
 function duplicateFlagError(flag: string): string {
   return `attest requires ${flag} exactly once`;
@@ -70,9 +52,8 @@ function duplicateFlagError(flag: string): string {
 export function parseAttestArgs(args: readonly string[]):
   | Readonly<{ ok: true; value: { taskId: TaskId; reason: string } }>
   | Readonly<{ ok: false; message: string }> {
-  const known = new Set(["--task", "--reason"]);
-  const unknown = args.filter((arg) => arg.startsWith("--") && !known.has(arg));
-  if (unknown.length > 0) return { ok: false, message: `unknown flag(s): ${unknown.join(" ")}` };
+  const unconsumed = unconsumedValueArguments(args, new Set(["--task", "--reason"]));
+  if (unconsumed.length > 0) return { ok: false, message: `unknown or unconsumed argument(s): ${unconsumed.join(" ")}` };
   const taskId = argumentValue(args, "--task");
   const reason = argumentValue(args, "--reason");
   if (taskId === null) return { ok: false, message: "attest requires --task <task-id>" };
@@ -87,69 +68,13 @@ export function parseAttestArgs(args: readonly string[]):
   return { ok: true, value: { taskId: parsedTaskId.value, reason } };
 }
 
-/** The attested proof: same derivation for the rewritten Task and the plan,
- * so the obligation report can never diverge from what gets persisted. */
-const attestedProofFor = (task: Task): PendingTaskProof =>
-  derivePendingTaskProof({
-    verificationPolicy: ATTESTATION_VERIFICATION_POLICY,
-    declaredArtifacts: task.file_list ?? [],
-    declaredArtifactExpectation: "attested",
-  });
-
-/** The exact rewritten Task the attest program persists. */
-export function attestedTask(task: Task): Task {
-  return {
-    ...task,
-    status: "pending",
-    implementation_attestation: true,
-    verification_policy: serializeVerificationPolicy(ATTESTATION_VERIFICATION_POLICY),
-    new_tests_required: undefined,
-    proof: attestedProofFor(task),
-    revalidation_required: undefined,
-    legacy_missing_proof: undefined,
-  };
-}
-
-/** Prove the Task is attestation-eligible and derive the exact rewritten proof. */
+/** Compatibility projection for callers that need only the plan. */
 export function planAttestation(
   task: Task,
   input: Readonly<{ executing: boolean }>,
-):
-  | Readonly<{ ok: true; value: AttestationPlan }>
-  | Readonly<{ ok: false; message: string }> {
-  if (task.status !== "pending") {
-    return { ok: false, message: `Task ${task.id} has status ${task.status}; attestation applies only to pending Tasks with unsatisfied proof` };
-  }
-  if (task.active_implementation_attempt !== undefined || task.reserved_at !== undefined || input.executing) {
-    return { ok: false, message: `Task ${task.id} carries a live implementation attempt; finish or settle it before attesting` };
-  }
-  const disposition = deriveImplementationRetryDisposition(task);
-  if (disposition.kind === "invalid") {
-    return { ok: false, message: `Task ${task.id} has invalid attempt lineage: ${disposition.errors.join("; ")}` };
-  }
-  if (disposition.kind === "escalated") {
-    return { ok: false, message: `Task ${task.id} exhausted semantic attempt 2; remediate the escalation before attesting` };
-  }
-  if (task.implementation_attestation === true) {
-    return { ok: false, message: `Task ${task.id} is already in attestation mode; nothing to attest` };
-  }
-  if (task.proof?.state === "satisfied") {
-    return { ok: false, message: `Task ${task.id} already carries satisfied proof; nothing to attest` };
-  }
-  const rewritten = attestedTask(task);
-  const context = deriveImplementationAttestationContext(rewritten);
-  if (!context.ok) return { ok: false, message: `attestation context derivation failed for ${task.id}: ${context.error}` };
-  const proof = attestedProofFor(task);
-  return {
-    ok: true,
-    value: {
-      taskId: task.id,
-      obligations: proof.obligations.map((obligation) =>
-        "artifact" in obligation ? `${obligation.kind}:${obligation.artifact}` : obligation.kind),
-      attestationProofDigest: context.context.attestationProofDigest,
-      promptAppendix: context.promptAppendix,
-    },
-  };
+): Readonly<{ ok: true; value: AttestationPlan }> | Readonly<{ ok: false; message: string }> {
+  const command = armImplementationAttestation(task, input);
+  return command.ok ? { ok: true, value: command.value.plan } : command;
 }
 
 export async function attestOperation(args: readonly string[]): Promise<HookResult> {
@@ -166,15 +91,15 @@ export async function attestOperation(args: readonly string[]): Promise<HookResu
     await manager.update((state) => {
       const task = state.tasks.find((candidate) => candidate.id === taskId);
       if (task === undefined) throw new Error(`no Task ${taskId} in the active task graph`);
-      const derived = planAttestation(task, {
+      const command = armImplementationAttestation(task, {
         executing: (state.executing_tasks ?? []).includes(taskId),
       });
-      if (!derived.ok) throw new Error(derived.message);
-      obligations = derived.value.obligations;
-      attestationProofDigest = derived.value.attestationProofDigest;
+      if (!command.ok) throw new Error(command.message);
+      obligations = command.value.plan.obligations;
+      attestationProofDigest = command.value.plan.attestationProofDigest;
       return {
         ...state,
-        tasks: state.tasks.map((candidate) => candidate.id === taskId ? attestedTask(candidate) : candidate),
+        tasks: state.tasks.map((candidate) => candidate.id === taskId ? command.value.task : candidate),
       };
     });
   } catch (error) {

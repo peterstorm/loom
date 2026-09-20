@@ -1241,6 +1241,7 @@ function taskAttemptAuthorityError(
     implementation_retry_protocol: retryProtocol,
     implementation_retry_history_start: retryHistoryStart,
     implementation_retry_predecessor_receipt_id: retryPredecessorReceiptId,
+    ...(t.implementation_attestation === true ? { implementation_attestation: true } : {}),
   });
   if (retryDisposition.kind === "invalid") {
     return `${label}: invalid implementation retry lineage: ${retryDisposition.errors.join("; ")}`;
@@ -1494,6 +1495,9 @@ function taskStatusError(
     return `${label}: implementation_attestation must be true when present`;
   }
   if (t.implementation_attestation === true) {
+    if (verification.value.policy.regression.kind !== "required") {
+      return `${label}: attestation mode requires regression verification`;
+    }
     if (verification.value.policy.newTests.kind !== "waived") {
       return `${label}: attestation mode requires a verification policy that waives new tests — the dispatched child must not author new work`;
     }
@@ -2736,6 +2740,7 @@ export class StateManager {
    */
   async abandonActiveWaveGateRegistration(
     abandonment: Readonly<{
+      runsRoot: string;
       runId: ActiveWaveGateRegistration["runId"];
       reason: string;
       supersededBy: ActiveWaveGateRegistration["runId"] | null;
@@ -2743,7 +2748,9 @@ export class StateManager {
   ): Promise<ActiveWaveGateRegistration | null> {
     return this.updateAndReturn((state) => {
       const active = state.active_wave_gate;
-      if (active === undefined || active.runId !== abandonment.runId) return { state, value: null };
+      if (active === undefined || active.runsRoot !== abandonment.runsRoot || active.runId !== abandonment.runId) {
+        return { state, value: null };
+      }
       if (active.terminalOutcome !== null) {
         return active.terminalOutcome.kind === "terminal-abandoned" &&
           active.terminalOutcome.reason === abandonment.reason &&

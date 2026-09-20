@@ -85,6 +85,22 @@ describe("reviewer-only v2 Context Packet", () => {
     expect(textOf(packet.variableContext[0])).toBe("exact\n 🧵 bytes");
     for (const value of [packet, packet.reviewerProtocol, packet.fixedContext, packet.variableContext, ...packet.fixedContext, ...packet.fixedContext.map((entry) => entry.bytes)]) expect(Object.isFrozen(value)).toBe(true);
   });
+  it("keeps large parsed sections compact while preserving immutable array behavior", () => {
+    const packet = current({ variableContext: [section("large", "abcd".repeat(150_000))] });
+    const serialized = JSON.stringify(packet);
+    const parsed = parseContextPacket(JSON.parse(serialized));
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    const bytes = parsed.value.variableContext[0]!.bytes;
+    expect(Array.isArray(bytes)).toBe(true);
+    expect(Object.isFrozen(bytes)).toBe(true);
+    expect(Object.keys(bytes)).toEqual([]);
+    expect(bytes.length).toBe(600_000);
+    expect(bytes.slice(0, 8)).toEqual([97, 98, 99, 100, 97, 98, 99, 100]);
+    expect(Buffer.from(bytes).subarray(-4).toString()).toBe("abcd");
+    expect(JSON.stringify(parsed.value)).toBe(serialized);
+    expect(() => { (bytes as number[])[0] = 0; }).toThrow();
+    expect(bytes[0]).toBe(97);
+  });
   it("round-trips arbitrary variable bytes and changes identity without changing fixed contract", () => {
     fc.assert(fc.property(fc.string({ maxLength: 100 }), (text) => {
       const first = current({ variableContext: [section("task", text)] });

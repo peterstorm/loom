@@ -278,6 +278,56 @@ describe("bounded implementation retry admission", () => {
     });
   });
 
+  it("terminalizes attempt-1 attestation drift instead of refreshing its baseline for a retry", () => {
+    const attempt = authority(1, "attestation-drift", 12);
+    const attestationProof = derivePendingTaskProof({
+      verificationPolicy: {
+        regression: { kind: "required" },
+        newTests: { kind: "waived", reason: "existing-tests-sufficient" },
+      },
+      declaredArtifacts: ["src/a.ts"],
+      declaredArtifactExpectation: "attested",
+    });
+    const result = settleImplementationAttempt({
+      id: "T1",
+      status: "pending",
+      proof: attestationProof,
+      active_implementation_attempt: attempt,
+      implementation_attempt_history: [],
+    }, attempt, attempt, {
+      ...observation("2026-09-01T00:12:00.000Z", true),
+      evidence: {
+        taskCompleted: true,
+        testResult: { verdict: "trusted-pass" },
+        filesModified: ["src/extra.ts"],
+        newTestsWritten: false,
+      },
+    }, suite(attempt));
+    if (!result.ok || result.value.kind !== "retry-required") throw new Error("attestation drift fixture failed");
+    const terminalTask = {
+      ...retryTask([result.value.receipt]),
+      implementation_attestation: true as const,
+      proof: attestationProof,
+    };
+    expect(deriveImplementationRetryDisposition(terminalTask)).toMatchObject({
+      kind: "escalated",
+      receiptId: result.value.receipt.receiptId,
+      failureKinds: expect.arrayContaining(["proof:attempt-scope-drifted"]),
+    });
+    const remediation = createEscalationRemediationReceipt({
+      taskId: "T1",
+      reservationId: "attestation-drift-remediation",
+      authorityDigest: result.value.receipt.authorityDigest,
+      observedAt: "2026-09-01T00:13:00.000Z",
+      failureKinds: result.value.receipt.failureKinds,
+    });
+    if (!remediation.ok) throw new Error(remediation.error.errors.join("; "));
+    expect(deriveImplementationRetryDisposition({
+      ...terminalTask,
+      implementation_attempt_history: [...terminalTask.implementation_attempt_history, remediation.value],
+    })).toEqual({ kind: "initial", semanticAttempt: 1 });
+  });
+
   it("starts a new attempt-1 lineage after an accepted implementation is deliberately reopened", () => {
     const retry = retryReceipt();
     const attempt2 = authority(2, "attempt-two", 2);
@@ -499,6 +549,20 @@ describe("escalation remediation closes the terminal lineage", () => {
     expect(remediation.authorityDigest).toBe(attempt2.authorityDigest);
     const reparsed = parseImplementationAttemptSettlementReceipt(remediation);
     expect(reparsed).toMatchObject({ ok: true, value: { receiptId: remediation.receiptId } });
+  });
+
+  it("rejects remediation that does not bind the exact terminal authority and failure set", () => {
+    const { attempt2, escalation, task } = escalatedTask();
+    const wrongAuthority = remediationReceiptFor("f".repeat(64), escalation.failureKinds);
+    expect(deriveImplementationRetryDisposition({
+      ...task,
+      implementation_attempt_history: [...task.implementation_attempt_history, wrongAuthority],
+    })).toMatchObject({ kind: "invalid", errors: [expect.stringContaining("exact terminal authority and failure set")] });
+    const wrongFailures = remediationReceiptFor(attempt2.authorityDigest, ["different-terminal-failure"]);
+    expect(deriveImplementationRetryDisposition({
+      ...task,
+      implementation_attempt_history: [...task.implementation_attempt_history, wrongFailures],
+    })).toMatchObject({ kind: "invalid", errors: [expect.stringContaining("exact terminal authority and failure set")] });
   });
 
   it("resets an escalated lineage to a fresh attempt 1 and lets the cycle repeat", () => {

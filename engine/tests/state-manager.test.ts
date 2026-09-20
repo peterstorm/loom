@@ -1478,8 +1478,14 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
       const mgr = new StateManager(statePath);
       await mgr.registerActiveWaveGate(activeGate("run.first", mgr.load()), ["T1"]);
 
+      const foreignRoot = await mgr.abandonActiveWaveGateRegistration({
+        runsRoot: "/other-runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
+      });
+      expect(foreignRoot).toBeNull();
+      expect(mgr.load().active_wave_gate?.terminalOutcome).toBeNull();
+
       const stamped = await mgr.abandonActiveWaveGateRegistration({
-        runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
+        runsRoot: "/runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
       });
       expect(stamped?.terminalOutcome).toEqual(tombstone());
       expect(mgr.load().active_wave_gate?.terminalOutcome).toEqual(tombstone());
@@ -1487,21 +1493,21 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
       // Exact replay: same decision, no rewrite.
       const before = readFileSync(statePath, "utf-8");
       const replay = await mgr.abandonActiveWaveGateRegistration({
-        runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
+        runsRoot: "/runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
       });
       expect(replay).toEqual(stamped);
       expect(readFileSync(statePath, "utf-8")).toBe(before);
 
       // A conflicting reason is refused and leaves the stamp intact.
       const conflicting = await mgr.abandonActiveWaveGateRegistration({
-        runId: runId("run.first"), reason: "a different story", supersededBy: null,
+        runsRoot: "/runs", runId: runId("run.first"), reason: "a different story", supersededBy: null,
       });
       expect(conflicting).toBeNull();
       expect(mgr.load().active_wave_gate?.terminalOutcome).toEqual(tombstone());
 
       // A foreign run id and an absent registration are no-ops.
       expect(await mgr.abandonActiveWaveGateRegistration({
-        runId: runId("run.other"), reason: "gate terminally blocked", supersededBy: null,
+        runsRoot: "/runs", runId: runId("run.other"), reason: "gate terminally blocked", supersededBy: null,
       })).toBeNull();
       expect(mgr.load().active_wave_gate?.terminalOutcome).toEqual(tombstone());
     } finally {
@@ -1523,7 +1529,7 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
       const mgr = new StateManager(statePath);
       const before = readFileSync(statePath, "utf-8");
       expect(await mgr.abandonActiveWaveGateRegistration({
-        runId: runId("run.done"), reason: "a different story", supersededBy: null,
+        runsRoot: "/runs", runId: runId("run.done"), reason: "a different story", supersededBy: null,
       })).toBeNull();
       expect(readFileSync(statePath, "utf-8")).toBe(before);
     } finally {
@@ -1541,7 +1547,7 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
       const mgr = new StateManager(statePath);
       await mgr.registerActiveWaveGate(activeGate("run.first", mgr.load()), ["T1"]);
       await mgr.abandonActiveWaveGateRegistration({
-        runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
+        runsRoot: "/runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
       });
 
       // The digest is re-derived from the CURRENT locked state — the tombstone

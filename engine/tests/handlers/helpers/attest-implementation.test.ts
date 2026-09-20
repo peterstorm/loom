@@ -93,9 +93,9 @@ describe("orchestration attest arms implementation re-attestation", () => {
     // required regression at the load boundary.
     expect(task.new_tests_required).toBeUndefined();
     expect(task.proof?.obligations.map((obligation) => obligation.kind)).toEqual([
-      "task-completed", "regression-test-pass", "declared-artifact-attested",
+      "task-completed", "regression-test-pass", "attempt-scope-attested", "declared-artifact-attested",
     ]);
-    expect(task.proof?.obligations[2]).toEqual({ kind: "declared-artifact-attested", artifact: "src/a.ts" });
+    expect(task.proof?.obligations[3]).toEqual({ kind: "declared-artifact-attested", artifact: "src/a.ts" });
     // The lineage is untouched and still derives a fresh attempt 1.
     expect(deriveImplementationRetryDisposition(task)).toEqual({ kind: "initial", semanticAttempt: 1 });
     // The dispatch binding can derive the exact attestation context.
@@ -148,6 +148,7 @@ describe("orchestration attest arms implementation re-attestation", () => {
     expect(await attestOperation(["--task", "T1"])).toMatchObject({ kind: "error" });
     expect(await attestOperation(["--task", "T1", "--reason", " "])).toMatchObject({ kind: "error" });
     expect(await attestOperation(["--task", "T1", "--reason", "r", "--bogus"])).toMatchObject({ kind: "error" });
+    expect(await attestOperation(["--task", "T1", "--reason", "existing", "work", "verified"])).toMatchObject({ kind: "error" });
     expect(await attestOperation(["--task", "T1", "--task", "T2", "--reason", "r"])).toMatchObject({ kind: "error" });
   });
 
@@ -163,7 +164,7 @@ describe("orchestration attest arms implementation re-attestation", () => {
     expect(plan).toMatchObject({ ok: true });
     if (!plan.ok) return;
     expect(plan.value.obligations).toEqual([
-      "task-completed", "regression-test-pass", "declared-artifact-attested:src/a.ts",
+      "task-completed", "regression-test-pass", "attempt-scope-attested", "declared-artifact-attested:src/a.ts",
     ]);
     expect(plan.value.attestationProofDigest).toMatch(/^[0-9a-f]{64}$/);
 
