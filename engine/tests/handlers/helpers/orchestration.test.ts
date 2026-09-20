@@ -854,7 +854,7 @@ describe("orchestration CLI", () => {
       "start", "refutation", "--runs-root", runsRoot, "--run", runDir,
     ], program, root));
     expect(started.status).toBe(0);
-    expect(JSON.parse(started.stdout).kind).toBe("spawn-batch");
+    expect(JSON.parse(started.stdout).kind, JSON.stringify(JSON.parse(started.stdout))).toBe("spawn-batch");
     expect(JSON.parse(started.stdout).requests).toHaveLength(2);
 
     const startedAction = JSON.parse(started.stdout) as {
@@ -874,7 +874,7 @@ describe("orchestration CLI", () => {
       verdicts: [{ finding_id: "T1:finding-1", verdict: "upheld", reasoning: "trigger remains reachable" }],
     }), root));
     expect(firstSubmitted.status).toBe(0);
-    expect(JSON.parse(firstSubmitted.stdout).kind).toBe("spawn-batch");
+    expect(JSON.parse(firstSubmitted.stdout).kind, JSON.stringify(JSON.parse(firstSubmitted.stdout))).toBe("spawn-batch");
 
     const secondSubmitted = (await runCli([
       "submit", "--runs-root", runsRoot, "--run", runDir,
@@ -986,7 +986,7 @@ describe("orchestration CLI", () => {
     mkdirSync(runDir, { recursive: true });
     const result = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: null }), root));
     expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout).kind).toBe("blocked");
+    expect(JSON.parse(result.stdout).kind, JSON.stringify(JSON.parse(result.stdout))).toBe("blocked");
   });
 
   it("refuses unavailable remediation source authority before claiming a Run Directory", async () => {
@@ -2781,7 +2781,7 @@ describe("orchestration CLI", () => {
 
     const replay = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(replay.status, replay.stderr).toBe(0);
-    expect(JSON.parse(replay.stdout).kind).toBe("done");
+    expect(JSON.parse(replay.stdout).kind, JSON.stringify(JSON.parse(replay.stdout))).toBe("done");
   }, 30_000);
 
   it("blocks instead of spinning when a Wave refutation tally upholds every critical (loom#20 Finding 4)", async () => {
@@ -2862,7 +2862,7 @@ describe("orchestration CLI", () => {
     // verdicts and must also return blocked, never spin.
     const again = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(again.status, again.stderr).toBe(0);
-    expect(JSON.parse(again.stdout).kind).toBe("blocked");
+    expect(JSON.parse(again.stdout).kind, JSON.stringify(JSON.parse(again.stdout))).toBe("blocked");
   }, 30_000);
 
   it("passes a Wave whose refutation tally refutes every critical", async () => {
@@ -2929,7 +2929,7 @@ describe("orchestration CLI", () => {
     expect(protectedGraph.tasks[0]?.refuted_findings).toHaveLength(1);
     expect(protectedGraph.tasks[0]?.review_status).toBe("passed");
     const replay = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
-    expect(JSON.parse(replay.stdout).kind).toBe("done");
+    expect(JSON.parse(replay.stdout).kind, JSON.stringify(JSON.parse(replay.stdout))).toBe("done");
   }, 30_000);
 
   it("blocks protected completion when automatic full-tier lint fails", async () => {
@@ -3039,14 +3039,14 @@ describe("orchestration CLI", () => {
     expect((await opened.value.captureTranscript(retryRequest.authority, [...Buffer.from(valid)])).ok).toBe(true);
     const doneResult = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(doneResult.status, doneResult.stderr).toBe(0);
-    expect(JSON.parse(doneResult.stdout).kind).toBe("done");
+    expect(JSON.parse(doneResult.stdout).kind, JSON.stringify(JSON.parse(doneResult.stdout))).toBe("done");
     const evidenceReplay = replayFromCapturedEvidence(opened.value);
     expect(evidenceReplay, evidenceReplay.ok ? "" : evidenceReplay.message).toMatchObject({ ok: true });
 
     // Idempotent done: the durable receipt must restore cleanly after restart.
     const replay = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(replay.status, replay.stderr).toBe(0);
-    expect(JSON.parse(replay.stdout).kind).toBe("done");
+    expect(JSON.parse(replay.stdout).kind, JSON.stringify(JSON.parse(replay.stdout))).toBe("done");
   }, 30_000);
 
   it("advances a capture-rejected refutation attempt 1 to its attempt-2 retry and completes the run", async () => {
@@ -3142,11 +3142,11 @@ describe("orchestration CLI", () => {
     expect((await opened.value.captureTranscript(retryRequest.authority, [...Buffer.from(valid)])).ok).toBe(true);
     const done = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(done.status, done.stderr).toBe(0);
-    expect(JSON.parse(done.stdout).kind).toBe("done");
+    expect(JSON.parse(done.stdout).kind, JSON.stringify(JSON.parse(done.stdout))).toBe("done");
     const evidenceReplay = replayFromCapturedEvidence(opened.value);
     expect(evidenceReplay, evidenceReplay.ok ? "" : evidenceReplay.message).toMatchObject({ ok: true });
     const again = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
-    expect(JSON.parse(again.stdout).kind).toBe("done");
+    expect(JSON.parse(again.stdout).kind, JSON.stringify(JSON.parse(again.stdout))).toBe("done");
   }, 30_000);
 
   it("terminalizes the refutation panel when the attempt-2 capture is terminally rejected", async () => {
@@ -3274,7 +3274,7 @@ describe("orchestration CLI", () => {
       value: [{ runId: "run.standalone-facade", resultDigest: done.outcome.digest }],
     });
     const replay = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, piEnv));
-    expect(JSON.parse(replay.stdout).kind).toBe("done");
+    expect(JSON.parse(replay.stdout).kind, JSON.stringify(JSON.parse(replay.stdout))).toBe("done");
   });
 
   it("returns an actionable failure when an existing result cannot be verified", async () => {
@@ -3380,11 +3380,11 @@ describe("orchestration CLI", () => {
     expect((await opened.value.captureTranscript(retryRequest.authority, [...Buffer.from(cleanTranscript)])).ok).toBe(true);
     const done = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(done.status, done.stderr).toBe(0);
-    expect(JSON.parse(done.stdout).kind).toBe("done");
+    expect(JSON.parse(done.stdout).kind, JSON.stringify(JSON.parse(done.stdout))).toBe("done");
     const evidenceReplay = replayFromCapturedEvidence(opened.value);
     expect(evidenceReplay, evidenceReplay.ok ? "" : evidenceReplay.message).toMatchObject({ ok: true });
     const replay = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
-    expect(JSON.parse(replay.stdout).kind).toBe("done");
+    expect(JSON.parse(replay.stdout).kind, JSON.stringify(JSON.parse(replay.stdout))).toBe("done");
   }, 30_000);
   it("heals a standalone crash after batch publication but before the checkpoint write", async () => {
     const root = repository();
@@ -3419,7 +3419,7 @@ describe("orchestration CLI", () => {
     }
     const done = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(done.status, done.stderr).toBe(0);
-    expect(JSON.parse(done.stdout).kind).toBe("done");
+    expect(JSON.parse(done.stdout).kind, JSON.stringify(JSON.parse(done.stdout))).toBe("done");
   });
 
   /**
@@ -3471,7 +3471,7 @@ describe("orchestration CLI", () => {
       sourceRunsRoot: runsRoot, sourceRun, supportPaths: [], defectFamily: { kind: "not-required" },
     }), repository));
     expect(remediated.status, remediated.stderr).toBe(0);
-    expect(JSON.parse(remediated.stdout).kind).toBe("done");
+    expect(JSON.parse(remediated.stdout).kind, JSON.stringify(JSON.parse(remediated.stdout))).toBe("done");
     expect(git(["diff", "--cached", "--name-only"]).stdout.trim()).toBe("a.txt");
   });
 
@@ -3507,7 +3507,7 @@ describe("orchestration CLI", () => {
     // a fresh run that registers the path as a supportPath installs it.
     const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", remediationRun], "", repository));
     expect(resumed.status, resumed.stderr).toBe(0);
-    expect(JSON.parse(resumed.stdout).kind).toBe("blocked");
+    expect(JSON.parse(resumed.stdout).kind, JSON.stringify(JSON.parse(resumed.stdout))).toBe("blocked");
 
     const freshRun = join(runsRoot, "remediation-2");
     mkdirSync(freshRun);
@@ -3515,7 +3515,7 @@ describe("orchestration CLI", () => {
       sourceRunsRoot: runsRoot, sourceRun, supportPaths: ["pin.test.ts"], defectFamily: { kind: "not-required" },
     }), repository));
     expect(fresh.status, fresh.stderr).toBe(0);
-    expect(JSON.parse(fresh.stdout).kind).toBe("done");
+    expect(JSON.parse(fresh.stdout).kind, JSON.stringify(JSON.parse(fresh.stdout))).toBe("done");
     expect(git(["diff", "--cached", "--name-only"]).stdout.trim().split("\n").sort())
       .toEqual(["a.txt", "pin.test.ts"]);
   });
@@ -3533,7 +3533,7 @@ describe("orchestration CLI", () => {
     ));
 
     expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout).kind).toBe("decision-recorded");
+    expect(JSON.parse(result.stdout).kind, JSON.stringify(JSON.parse(result.stdout))).toBe("decision-recorded");
   });
 
   it("refuses a decision that is not JSON rather than recording it", async () => {
@@ -3592,7 +3592,7 @@ describe("orchestration CLI", () => {
       ], JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false }), root));
 
       expect(started.status, started.stderr).toBe(0);
-      expect(JSON.parse(started.stdout).kind).toBe("spawn-batch");
+      expect(JSON.parse(started.stdout).kind, JSON.stringify(JSON.parse(started.stdout))).toBe("spawn-batch");
       expect(JSON.parse(started.stdout).runId).toBe("run.bare-name");
       expect(existsSync(join(runsRoot, "run.bare-name", "authority.json"))).toBe(true);
     });
@@ -3779,7 +3779,7 @@ describe("orchestration CLI", () => {
         const second = (await submit());
 
         expect(first.status, first.stderr).toBe(0);
-        expect(JSON.parse(first.stdout).kind).toBe("captured");
+        expect(JSON.parse(first.stdout).kind, JSON.stringify(JSON.parse(first.stdout))).toBe("captured");
         expect(second.status, second.stderr).toBe(0);
         expect(JSON.parse(second.stdout)).toEqual({
           kind: "already-captured",
@@ -3890,7 +3890,7 @@ describe("orchestration CLI", () => {
       });
       const replay = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
       expect(replay.status, replay.stderr).toBe(0);
-      expect(JSON.parse(replay.stdout).kind).toBe("done");
+      expect(JSON.parse(replay.stdout).kind, JSON.stringify(JSON.parse(replay.stdout))).toBe("done");
     }, 15_000);
 
     it("refuses a decision id that is not the exact pending advisory request", async () => {
