@@ -13,7 +13,6 @@
 
 import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { observeTaskGraphProjectBoundary } from "../../src/config";
@@ -24,20 +23,16 @@ import {
 } from "../../../pi/subagent-result";
 import { parseTaskGraph, type ParsedTaskGraph } from "../../src/state-manager";
 import type { Phase, TaskGraph } from "../../src/types";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 
 const cleanup: string[] = [];
-const elsewhere = (): string => {
-  const dir = join(tmpdir(), `loom-phase-boundary-cwd-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  mkdirSync(dir, { recursive: true });
-  cleanup.push(dir);
-  return dir;
+const trackedTempDir = (prefix: string): string => {
+  const directory = canonicalTempDir(prefix);
+  cleanup.push(directory);
+  return directory;
 };
-
-const tempRoot = (): string => {
-  const root = join(tmpdir(), `loom-phase-boundary-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  cleanup.push(root);
-  return root;
-};
+const elsewhere = (): string => trackedTempDir("loom-phase-boundary-cwd-");
+const tempRoot = (): string => trackedTempDir("loom-phase-boundary-");
 
 afterEach(() => {
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
