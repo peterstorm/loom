@@ -60,25 +60,27 @@ export async function remediateOperation(args: readonly string[]): Promise<HookR
   if (manager === null) return { kind: "error", message: `remediate: No task graph at ${statePath}` };
 
   const { taskId, terminalReceiptId, reason } = parsed.value;
-  let observedAt = "";
-  let remediationReceiptId = "";
+  let observedAt;
+  let remediationReceiptId;
   try {
-    await manager.update((state) => {
+    ({ observedAt, remediationReceiptId } = await manager.updateAndReturn((state) => {
       const task = state.tasks.find((candidate) => candidate.id === taskId);
       if (task === undefined) throw new Error(`no Task ${taskId} in the active task graph`);
-      observedAt = new Date().toISOString();
+      const observedAt = new Date().toISOString();
       const command = remediateImplementationEscalation(task, {
         executing: (state.executing_tasks ?? []).includes(taskId),
         terminalReceiptId,
         observedAt,
       });
       if (!command.ok) throw new Error(renderImplementationLifecycleError(command.error));
-      remediationReceiptId = command.value.receipt.receiptId;
       return {
-        ...state,
-        tasks: state.tasks.map((candidate) => candidate.id === taskId ? command.value.task : candidate),
+        state: {
+          ...state,
+          tasks: state.tasks.map((candidate) => candidate.id === taskId ? command.value.task : candidate),
+        },
+        value: { observedAt, remediationReceiptId: command.value.receipt.receiptId },
       };
-    });
+    }));
   } catch (error) {
     return { kind: "error", message: `remediate failed without changing state: ${error instanceof Error ? error.message : String(error)}` };
   }

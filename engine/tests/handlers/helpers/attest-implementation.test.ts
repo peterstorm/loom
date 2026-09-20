@@ -151,6 +151,29 @@ describe("orchestration attest arms implementation re-attestation", () => {
     expect(await attestOperation(["--task", "T1", "--task", "T2", "--reason", "r"])).toMatchObject({ kind: "error" });
   });
 
+  /**
+   * The remaining parser arms the exact-surface sweep does not pin: --task
+   * absence, the 512-character --reason boundary, a repeated --reason, and a
+   * non-conforming task id. Every one of these is refused by
+   * parseTaskReasonArguments BEFORE any state access — proven by the byte
+   * identity of the installed graph across the whole sweep — and the 512
+   * boundary itself is accepted.
+   */
+  it("refuses malformed arguments at the parser, before state access", async () => {
+    installState();
+    const before = readFileSync(statePath, "utf-8");
+    const missingTask = await attestOperation(["--reason", "r"]);
+    expect(missingTask).toMatchObject({ kind: "error", message: "attest: attest requires --task <task-id>" });
+    expect(await attestOperation(["--task", "T1", "--reason", "x".repeat(513)]))
+      .toMatchObject({ kind: "error", message: "attest: attest --reason must be non-empty and at most 512 characters" });
+    expect(await attestOperation(["--task", "T1", "--reason", "first", "--reason", "second"]))
+      .toMatchObject({ kind: "error", message: "attest: attest requires --reason exactly once" });
+    expect(await attestOperation(["--task", "t1", "--reason", "r"]))
+      .toMatchObject({ kind: "error", message: "attest: attest --task must match T\\d+" });
+    expect(readFileSync(statePath, "utf-8")).toBe(before);
+    expect(await attestOperation(["--task", "T1", "--reason", "x".repeat(512)])).toMatchObject({ kind: "allow" });
+  });
+
   it("derives one aggregate command and types completed, implemented, satisfied, and escalated refusals", async () => {
     installState();
     const manager = StateManager.fromPath(statePath);

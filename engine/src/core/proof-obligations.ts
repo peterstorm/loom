@@ -137,6 +137,34 @@ export type ProofFailure =
   | Readonly<{ kind: "declared-artifact-not-changed"; artifact: string }>
   | Readonly<{ kind: "declared-artifact-drifted"; artifact: string }>;
 
+/** The base ProofFailure kinds whose minted `proof:` labels mark a retry
+ *  receipt as terminal attestation drift. `satisfies` binds each entry to a
+ *  real ProofFailure kind, so a rename in the union fails here instead of
+ *  silently disconnecting the matchers below. */
+const ATTESTATION_DRIFT_BASE_KINDS = Object.freeze([
+  "attempt-scope-drifted",
+  "declared-artifact-drifted",
+] as const satisfies readonly ProofFailure["kind"][]);
+
+/** The `proof:`-prefixed failure kinds implementation-completion's
+ *  `proofFailureKind` mints and every attestation-drift matcher consumes.
+ *  One membership list: the attestation lineage walk and the escalation
+ *  message selector cannot disagree about what counts as drift. Both kinds
+ *  co-occur by construction — any declared-artifact write makes the
+ *  attempt-scope delta non-empty — but that invariant is now code, not
+ *  folklore. */
+export type AttestationDriftFailureKind = Extract<
+  `proof:${ProofFailure["kind"]}`,
+  `proof:${(typeof ATTESTATION_DRIFT_BASE_KINDS)[number]}`
+>;
+
+export const ATTESTATION_DRIFT_FAILURE_KINDS = Object.freeze(
+  ATTESTATION_DRIFT_BASE_KINDS.map((kind) => `proof:${kind}` as AttestationDriftFailureKind),
+) as readonly [AttestationDriftFailureKind, ...AttestationDriftFailureKind[]];
+
+export const isAttestationDriftFailureKind = (kind: string): kind is AttestationDriftFailureKind =>
+  (ATTESTATION_DRIFT_FAILURE_KINDS as readonly string[]).includes(kind);
+
 /** Evidence remains explicit about where a pass came from. */
 export type ProofEvidence =
   | Readonly<{ kind: "task-completed" }>

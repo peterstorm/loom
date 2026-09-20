@@ -140,6 +140,27 @@ describe("bounded implementation retry admission", () => {
     });
   });
 
+  it("refuses a predecessor seed on an empty history before the first settlement can brick the graph", () => {
+    // A state-authoring payload that writes a protocol-2 predecessor seed while
+    // implementation_attempt_history is empty used to derive {kind: "initial"}
+    // and pass the load boundary; after the Task's FIRST settlement the same
+    // Task derived kind "invalid" ("initial compatibility prefix cannot carry
+    // a retry predecessor"), making the whole graph unloadable until the
+    // operator re-populated it. The seed is now refused up front, with the
+    // exact diagnostic the walked prefix proves for a non-empty history.
+    const seeded = {
+      ...retryTask([]),
+      implementation_retry_predecessor_receipt_id: retryReceipt().receiptId,
+    };
+    expect(deriveImplementationRetryDisposition(seeded)).toMatchObject({
+      kind: "invalid",
+      errors: ["initial compatibility prefix cannot carry a retry predecessor"],
+    });
+    expect(authorizeImplementationSpawn(seeded, "Task ID: T1")).toMatchObject({ ok: false });
+    // An unseeded empty history stays a fresh lineage.
+    expect(deriveImplementationRetryDisposition(retryTask([]))).toEqual({ kind: "initial", semanticAttempt: 1 });
+  });
+
   it("requires the byte-exact current retry appendix before minting semantic attempt 2", () => {
     const receipt = retryReceipt();
     const task = retryTask([receipt]);

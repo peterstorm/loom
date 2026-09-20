@@ -12,7 +12,7 @@ import { COMPLETION_REPORT_ROOT } from "../core/completion-suite";
 import { compareStrings } from "../core/ordering";
 import { parseArtifactDigest, type ArtifactDigest } from "../core/orchestration-contract";
 import { parseReviewPath, type ReviewPath } from "../core/review-packet";
-import { observeGitProbe } from "./git-probe";
+import { confirmedEmptyPassthrough, observeGitProbe } from "./git-probe";
 import { inspectRepositoryPath } from "./repository-path";
 
 declare const CANONICAL_REPOSITORY_ROOT: unique symbol;
@@ -125,8 +125,7 @@ function runGit(cwd: string, operation: "resolve-root" | "list-paths", args: rea
     () => runGitOnce(cwd, operation, args),
     (value) => value.length === 0,
   );
-  if (observed.kind === "failed") return failure(observed.error);
-  return success(observed.kind === "confirmed-empty" ? observed.third : observed.value);
+  return confirmedEmptyPassthrough(observed);
 }
 
 /** Resolve Git authority first, then mint its canonical real worktree root. */

@@ -27,6 +27,7 @@ import { parseTaskId, type TaskId } from "./task-id";
 import {
   parseTaskProof,
   type TaskProof,
+  isAttestationDriftFailureKind,
 } from "./proof-obligations";
 import { taskVerificationPolicy } from "./verification-policy";
 
@@ -380,6 +381,13 @@ function invalidLineage(
   });
 }
 
+/** One refusal for one invariant: a Task whose lineage walks back to a fresh
+ *  attempt 1 (empty history, or a compatibility prefix ending in `initial`)
+ *  cannot carry a retry predecessor seed. Sharing the string between the
+ *  empty-history branch and the walked-prefix branch keeps the load-boundary
+ *  diagnostics identical whichever path proves it. */
+const INITIAL_PREFIX_SEED_ERROR = "initial compatibility prefix cannot carry a retry predecessor";
+
 function projectedDisposition(lineage: ImplementationRetryLineage): ImplementationRetryDisposition {
   if (lineage.kind === "escalated") {
     return freeze({
@@ -433,8 +441,7 @@ function projectLineage(
       if (lineage.kind !== "initial") {
         return `implementation_attempt_history[${index}] (${receipt.receiptId}): retry authorization requires semantic attempt 1`;
       }
-      lineage = attestation && receipt.failureKinds.some((kind) =>
-        kind === "proof:attempt-scope-drifted" || kind === "proof:declared-artifact-drifted")
+      lineage = attestation && receipt.failureKinds.some(isAttestationDriftFailureKind)
         ? freeze({ kind: "escalated", receiptId: receipt.receiptId,
             authorityDigest: receipt.authorityDigest, failureKinds: receipt.failureKinds })
         : freeze({ kind: "retry", predecessor: receipt });
@@ -494,7 +501,16 @@ export function deriveImplementationRetryDisposition(
       return invalidLineage(index, receipt, `receipt task ${receipt.taskId} does not match ${parsedTaskId.value}`);
     }
   }
-  if (history.length === 0) return freeze({ kind: "initial", semanticAttempt: 1 });
+  if (history.length === 0) {
+    // The load boundary accepts any non-invalid disposition, so a payload that
+    // seeds a predecessor without a retry prefix would otherwise be admitted
+    // here and only brick the graph AFTER its first settlement — the same
+    // invariant the non-empty walk proves below, proven up front instead.
+    if (task.implementation_retry_predecessor_receipt_id !== undefined) {
+      return freeze({ kind: "invalid", errors: nonEmptyErrors([INITIAL_PREFIX_SEED_ERROR]) });
+    }
+    return freeze({ kind: "initial", semanticAttempt: 1 });
+  }
   if (task.implementation_retry_protocol !== 2) {
     return freeze({
       kind: "invalid",
@@ -536,7 +552,7 @@ export function deriveImplementationRetryDisposition(
   } else if (seedId !== undefined) {
     return freeze({
       kind: "invalid",
-      errors: nonEmptyErrors(["initial compatibility prefix cannot carry a retry predecessor"]),
+      errors: nonEmptyErrors([INITIAL_PREFIX_SEED_ERROR]),
     });
   }
   const walked = projectLineage(prefix, history.slice(historyStart), attestation);
@@ -558,7 +574,7 @@ export function authorizeImplementationSpawn(
     case "escalated":
       return {
         ok: false,
-        error: disposition.failureKinds.includes("proof:attempt-scope-drifted")
+        error: disposition.failureKinds.some(isAttestationDriftFailureKind)
           ? `Task ${task.id} has terminal attestation drift and requires escalation (${disposition.failureKinds.join(", ")})`
           : `Task ${task.id} exhausted semantic attempt 2 and requires escalation (${disposition.failureKinds.join(", ")})`,
       };

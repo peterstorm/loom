@@ -1516,6 +1516,27 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
     }
   });
 
+  it("abandons nothing when no registration is installed, and leaves the graph byte-identical", async () => {
+    // The registration-absent arm: without active_wave_gate there is no
+    // protected registration to tombstone, so the operator's abandon must be
+    // a typed no-op — not an apparent write and not an authority error.
+    const dir = makeTmpDir();
+    const statePath = join(dir, "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify(waveGraph));
+    chmodSync(statePath, 0o444);
+    try {
+      const mgr = new StateManager(statePath);
+      const before = readFileSync(statePath, "utf-8");
+      expect(await mgr.abandonActiveWaveGateRegistration({
+        runsRoot: "/runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
+      })).toEqual({ kind: "not-targeted", reason: "registration-absent" });
+      expect(readFileSync(statePath, "utf-8")).toBe(before);
+      expect(mgr.load().active_wave_gate).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("stamps nothing when the registration is already terminal in another way", async () => {
     const dir = makeTmpDir();
     const statePath = join(dir, "active_task_graph.json");

@@ -355,6 +355,105 @@ describe("completion check process shell", () => {
     }
   });
 
+  /**
+   * The parent-close refusal arms that returned diagnostics without any
+   * test: the runner may neither accept a parent exit it could not
+   * corroborate, nor signal a numeric group id that is no longer
+   * identity-bound. All three arms fail closed with the SAME named class,
+   * so a regression swapping or dropping the diagnostic kind ships undetected
+   * without these pins.
+   */
+  it("reports an unobservable closed process group as termination-unconfirmed without signalling", async () => {
+    // Initial probe error arm (observeClosedProcessGroup error): the parent
+    // closed but the group id cannot even be observed (EIO here — neither
+    // ESRCH-gone nor EPERM-eperm), so the exit may not count as a successful
+    // observation and no signalling may follow an unbound id.
+    const probeError = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
+    const signals: (number | NodeJS.Signals)[] = [];
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+      if (signal === 0 && pid < 0) throw probeError("EIO");
+      if (signal === 0) return true;
+      if (signal !== undefined) signals.push(signal);
+      throw new Error(`no descendant signalling may follow an unobservable group: ${String(signal)}`);
+    }) as typeof process.kill);
+    try {
+      const result = await runCompletionCheck(check("missing-report"), fixtureRoot());
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          kind: "termination-unconfirmed",
+          message: expect.stringContaining("process-tree identity could not be observed"),
+        },
+      });
+      expect(signals).toEqual([]);
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
+  it("reports descendants that outlive the post-close wait as termination-unconfirmed without signalling", async () => {
+    // Surviving-descendants expiry arm (waitForClosedProcessGroup deadline):
+    // the parent closed while the group still had members and they never
+    // exited within the hard-kill wait. Post-close signalling is refused
+    // because the numeric group id is no longer identity-bound; the outcome
+    // is the named termination-unconfirmed class, not a fabricated pass.
+    const signals: (number | NodeJS.Signals)[] = [];
+    const probeError = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+      if (signal === 0 && pid < 0) return true; // group probe: still present
+      if (signal === 0) throw probeError("ESRCH"); // leader probe: leader gone
+      if (signal !== undefined) signals.push(signal);
+      throw new Error(`post-close signalling must be refused: ${String(signal)}`);
+    }) as typeof process.kill);
+    try {
+      const result = await runCompletionCheck(
+        check("missing-report"),
+        fixtureRoot(),
+        { terminationGraceMs: 250, hardKillWaitMs: 60 },
+      );
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          kind: "termination-unconfirmed",
+          message: expect.stringContaining("post-close signalling was refused"),
+        },
+      });
+      expect(signals).toEqual([]);
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
+  it("reports a process-group probe that fails during the post-close wait as termination-unconfirmed", async () => {
+    // Settled-wait error arm: the first observation sees surviving
+    // descendants, then a later probe fails (EIO) before the deadline. The
+    // runner cannot prove the tree emptied, so it fails closed with the same
+    // named diagnostic class instead of guessing either polarity.
+    let groupProbes = 0;
+    const probeError = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+      if (signal === 0 && pid < 0) {
+        groupProbes += 1;
+        if (groupProbes > 1) throw probeError("EIO");
+        return true;
+      }
+      if (signal === 0) throw probeError("ESRCH");
+      throw new Error(`no signalling may follow an unobservable wait: ${String(signal)}`);
+    }) as typeof process.kill);
+    try {
+      const result = await runCompletionCheck(check("missing-report"), fixtureRoot());
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          kind: "termination-unconfirmed",
+          message: expect.stringContaining("process-tree identity could not be observed"),
+        },
+      });
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
   it("keeps bounded diagnostic tails", async () => {
     const result = execution(await runCompletionCheck(
       check("diagnostic-tail"),

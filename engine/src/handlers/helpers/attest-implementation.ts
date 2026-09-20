@@ -63,23 +63,27 @@ export async function attestOperation(args: readonly string[]): Promise<HookResu
   if (manager === null) return { kind: "error", message: `attest: No task graph at ${statePath}` };
 
   const { taskId, reason } = parsed.value;
-  let obligations: readonly string[] = [];
-  let attestationProofDigest = "";
+  let obligations;
+  let attestationProofDigest;
   try {
-    await manager.update((state) => {
+    ({ obligations, attestationProofDigest } = await manager.updateAndReturn((state) => {
       const task = state.tasks.find((candidate) => candidate.id === taskId);
       if (task === undefined) throw new Error(`no Task ${taskId} in the active task graph`);
       const command = armImplementationAttestation(task, {
         executing: (state.executing_tasks ?? []).includes(taskId),
       });
       if (!command.ok) throw new Error(renderImplementationLifecycleError(command.error));
-      obligations = command.value.plan.obligations;
-      attestationProofDigest = command.value.plan.attestationProofDigest;
       return {
-        ...state,
-        tasks: state.tasks.map((candidate) => candidate.id === taskId ? command.value.task : candidate),
+        state: {
+          ...state,
+          tasks: state.tasks.map((candidate) => candidate.id === taskId ? command.value.task : candidate),
+        },
+        value: {
+          obligations: command.value.plan.obligations,
+          attestationProofDigest: command.value.plan.attestationProofDigest,
+        },
       };
-    });
+    }));
   } catch (error) {
     return { kind: "error", message: `attest failed without changing state: ${error instanceof Error ? error.message : String(error)}` };
   }

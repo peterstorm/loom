@@ -178,4 +178,32 @@ describe("orchestration remediate consumes the escalation recovery", () => {
     expect(await remediateOperation(["--task", "T1", "--receipt", "a".repeat(64), "--reason", "environment", "is", "fixed"]))
       .toMatchObject({ kind: "error" });
   });
+
+  /**
+   * The remaining parser arms the exact-surface sweep does not pin: --task
+   * absence, repeated --receipt/--reason, the 512-character --reason
+   * boundary, and a non-conforming task id. Every one of these is refused by
+   * parseTaskReasonArguments BEFORE any state access — proven by the byte
+   * identity of the installed graph across the whole sweep — and the 512
+   * boundary itself is accepted.
+   */
+  it("refuses malformed arguments at the parser, before state access", async () => {
+    const terminalReceiptId = requireReceipt(installState(implementationEscalatedTaskFields()));
+    const before = readFileSync(statePath, "utf-8");
+    const receipt = "a".repeat(64);
+    expect(await remediateOperation(["--receipt", receipt, "--reason", "r"]))
+      .toMatchObject({ kind: "error", message: "remediate: remediate requires --task <task-id>" });
+    expect(await remediateOperation(["--task", "T1", "--receipt", receipt, "--receipt", "b".repeat(64), "--reason", "r"]))
+      .toMatchObject({ kind: "error", message: "remediate: remediate requires --receipt exactly once" });
+    expect(await remediateOperation(["--task", "T1", "--receipt", receipt, "--reason", "first", "--reason", "second"]))
+      .toMatchObject({ kind: "error", message: "remediate: remediate requires --reason exactly once" });
+    expect(await remediateOperation(["--task", "T1", "--receipt", receipt, "--reason", "x".repeat(513)]))
+      .toMatchObject({ kind: "error", message: "remediate: remediate --reason must be non-empty and at most 512 characters" });
+    expect(await remediateOperation(["--task", "t1", "--receipt", receipt, "--reason", "r"]))
+      .toMatchObject({ kind: "error", message: "remediate: remediate --task must match T\\d+" });
+    expect(readFileSync(statePath, "utf-8")).toBe(before);
+    // The 512 boundary is accepted — the fixture's real terminal receipt.
+    expect(await remediateOperation(["--task", "T1", "--receipt", terminalReceiptId, "--reason", "x".repeat(512)]))
+      .toMatchObject({ kind: "allow" });
+  });
 });

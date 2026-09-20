@@ -629,14 +629,9 @@ function proveNoGitMetadataInAncestorsFrom(cwd: string): void {
   }
 }
 
-/** Resolve Git root without conflating an absent repository with an unavailable probe.
- *
- *  Status 0 with no output is not a documented git outcome, but it has been
- *  observed transiently on loaded macOS runners (twice across the darwin
- *  verification campaign, always inside a real fixture repository). Two
- *  bounded retries discharge the transient; a confirmed anomaly fails with
- *  the full probe evidence — status, output length, stderr, termination
- *  signal — so the operator can attribute it instead of guessing. */
+/** Resolve Git root without conflating an absent repository with an unavailable probe —
+ *  the bounded empty-stdout retry here discharges the transient documented at
+ *  `observeGitProbe`; a confirmed anomaly throws with the full probe evidence. */
 function gitRepositoryRootFrom(cwd: string): string | null {
   type RootProbe =
     | Readonly<{ kind: "root"; root: string; status: number; stdoutLength: number; signal: NodeJS.Signals | null; stderr: string }>
@@ -698,10 +693,6 @@ export function observeTaskGraphProjectBoundary(statePath: string): TaskGraphPro
     : Object.freeze({ kind: "git-repository", root: projectRootForStateFile(absolute, root) });
 }
 
-export function projectRootForTaskGraph(statePath: string): string {
-  return observeTaskGraphProjectBoundary(statePath).root;
-}
-
 /** Find the task graph by walking up from the GIVEN cwd to its git root.
  *  Returns an absolute path so consumers rooted at a different cwd (a spawn
  *  whose declared cwd names a linked worktree) resolve the same file the
@@ -747,10 +738,12 @@ function findTaskGraphPath(): string {
   const override = process.env.LOOM_STATE_PATH;
   if (override !== undefined && pathExistsFailClosed(override)) return override;
   const absolute = findTaskGraphPathFrom(process.cwd());
-  // Preserve the historical relative return for candidates under cwd: every
-  // consumer resolves paths against process.cwd(), so a graph the first loop
-  // found cwd-relative reads the same either way. Walk-up results are never
-  // under cwd (the first loop would have found them), so they stay absolute.
+  // The return is RELATIVE exactly when the resolved absolute path sits under
+  // process.cwd() — whichever loop found it; every consumer resolves paths
+  // against process.cwd(), so the two spellings read the same file. In
+  // practice only the first loop produces such a result: the walk-up root is
+  // cwd itself or an ancestor, so a root-joined candidate is under cwd only
+  // when the cwd-joined probe already found it.
   const underCwd = relative(process.cwd(), absolute);
   return underCwd.startsWith("..") ? absolute : underCwd;
 }

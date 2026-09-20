@@ -63,7 +63,7 @@ import {
 } from "../core/remediation-machine";
 import { compareCandidateRepositoryWitnesses } from "../core/defect-family-accounting";
 import { recaptureRemediationCandidateWorkspace } from "./remediation-candidate";
-import { observeGitProbe } from "../utils/git-probe";
+import { confirmedEmptyPassthrough, observeGitProbe } from "../utils/git-probe";
 
 /** Fixed argument templates. Nothing here is ever built from caller input. */
 const GIT_EXECUTABLE = "git";
@@ -175,25 +175,9 @@ export function runGit(
 const digestOf = (value: string): ArtifactDigest =>
   createHash("sha256").update(value).digest("hex") as ArtifactDigest;
 
-/**
- * Run one Git command, retrying twice when it exits 0 with NO output.
- *
- * Status 0 with an empty stdout is not a documented Git outcome, but the
- * darwin verification campaign observed it transiently on loaded macOS
- * runners — for `rev-parse --show-toplevel` (twice), `rev-parse HEAD^{tree}`
- * (once), and by inference any other short-lived invocation. An empty output
- * that reaches a digesting site silently becomes sha256(""): a plausible
- * witness value that then reads as "repository changed since verification"
- * at install time, or an empty authorized path roster. Both are lies.
- *
- * The retries discharge the transient. They cannot corrupt a legitimate result:
- * for operations that legitimately produce no output (a clean `status`, an
- * empty repository's `ls-files`) the confirmatory re-run returns empty again
- * and the original value flows through. If the transient persists, the raw
- * empty output is returned and the digesting sites' own emptiness guards
- * (`rev-parse` identity and HEAD^{tree} refusals) fail loudly with
- * attribution instead of ingesting a fabricated digest.
- */
+/** Run one Git command, retrying twice when it exits 0 with NO output — the
+ *  canonical transient empty-stdout rationale lives at `observeGitProbe`; a
+ *  confirmed empty passes through to the digesting sites' own guards. */
 function runGitProbingEmpty(
   repositoryRoot: string,
   invocation: GitInvocation,
@@ -202,8 +186,7 @@ function runGitProbingEmpty(
     () => runGit(repositoryRoot, invocation),
     (value) => value.length === 0,
   );
-  if (observed.kind === "failed") return { ok: false, error: observed.error };
-  return success(observed.kind === "confirmed-empty" ? observed.third : observed.value);
+  return confirmedEmptyPassthrough(observed);
 }
 
 /** Split NUL-delimited Git output; a trailing NUL does not produce an empty field. */
@@ -218,6 +201,21 @@ function splitNul(output: Buffer): readonly string[] {
 export type GitRepository = Readonly<{ root: string; gitDir: string }>;
 
 /**
+ * The emptiness guard the transient-retry passthrough feeds: a confirmed
+ * empty that survives the bounded retries reaches here and refuses loudly
+ * with the exact operation, never digesting sha256("") as a witness.
+ */
+function requireNonEmptyGitOutput(
+  operation: string,
+  output: DomainResult<Buffer, GitBoundaryError>,
+  message: string,
+): DomainResult<string, GitBoundaryError> {
+  if (!output.ok) return output;
+  const text = output.value.toString("utf-8").trim();
+  return text.length === 0 ? failure(operation, message) : success(text);
+}
+
+/**
  * Resolve the repository root ONCE and use it as every later invocation's cwd.
  * A relative path is only meaningful against a fixed root, so resolving per
  * call would let the same path mean different files at different moments.
@@ -228,17 +226,13 @@ export function openGitRepository(startDirectory: string): DomainResult<GitRepos
   if (!root.ok) return root;
   const gitDir = runGitProbingEmpty(start, { operation: "rev-parse", args: ["rev-parse", "--absolute-git-dir"] });
   if (!gitDir.ok) return gitDir;
-  const resolvedRoot = root.value.toString("utf-8").trim();
-  if (resolvedRoot.length === 0) {
-    return failure("rev-parse", "git rev-parse --show-toplevel returned no output");
-  }
-  const resolvedGitDir = gitDir.value.toString("utf-8").trim();
-  if (resolvedGitDir.length === 0) {
-    return failure("rev-parse", "git rev-parse --absolute-git-dir returned no output");
-  }
+  const resolvedRoot = requireNonEmptyGitOutput("rev-parse", root, "git rev-parse --show-toplevel returned no output");
+  if (!resolvedRoot.ok) return resolvedRoot;
+  const resolvedGitDir = requireNonEmptyGitOutput("rev-parse", gitDir, "git rev-parse --absolute-git-dir returned no output");
+  if (!resolvedGitDir.ok) return resolvedGitDir;
   return success(canonicalRecord({
-    root: resolvedRoot,
-    gitDir: resolvedGitDir,
+    root: resolvedRoot.value,
+    gitDir: resolvedGitDir.value,
   }));
 }
 
@@ -377,9 +371,8 @@ export function snapshotRepositoryWitness(
   // commit with an empty tree resolves to the well-known empty-tree object.
   // Silence after the transient retry is therefore a malformed observation,
   // never an empty value to digest.
-  if (head.value.toString("utf-8").trim().length === 0) {
-    return failure("rev-parse", "git rev-parse HEAD^{tree} returned no output");
-  }
+  const resolvedHead = requireNonEmptyGitOutput("rev-parse", head, "git rev-parse HEAD^{tree} returned no output");
+  if (!resolvedHead.ok) return resolvedHead;
   const index = runGitProbingEmpty(repository.root, {
     operation: "ls-files",
     args: ["ls-files", "--stage", "-z"],
@@ -392,7 +385,7 @@ export function snapshotRepositoryWitness(
   if (!worktree.ok) return worktree;
 
   return success(canonicalRecord({
-    baseTreeDigest: digestOf(head.value.toString("utf-8").trim()),
+    baseTreeDigest: digestOf(resolvedHead.value),
     indexDigest: digestOf(index.value.toString("utf-8")),
     worktreeDigest: digestOf(worktree.value.toString("utf-8")),
   }));

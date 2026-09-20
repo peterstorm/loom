@@ -18,6 +18,7 @@ import {
 import type { DeclaredArtifactBaseline } from "../src/core/artifact-baseline";
 import { parseAgentRequestAuthority } from "../src/core/orchestration-contract";
 import { parseTaskGraph } from "../src/state-manager";
+import { observeTaskGraphProjectBoundary } from "../src/config";
 import { graphFixture, taskFixture } from "./fixtures/task-lifecycle";
 import { publishInitialBatch } from "../src/handlers/helpers/programs/helpers";
 import { waveGateAuthorityDigest, waveRequests } from "../src/handlers/helpers/programs/wave-gate";
@@ -4011,6 +4012,78 @@ describe("Pi extension review tool_result integration", () => {
       revalidation_required: true,
       implementation_attempt_history: [{ transition: "infrastructure-blocked" }],
     });
+  });
+
+  it("refuses settlement for a TaskGraph outside any Git repository, where the removed ambient fallback would settle it", async () => {
+    // Discriminator for the settlement wiring the round-3 refutation panel
+    // verified unobservable: every other settlement-driving test either
+    // injects the repository probe or pins the graph inside the ambient
+    // checkout, where the TaskGraph Project Boundary observation and the
+    // REMOVED ambient fallback chain (gitRepositoryRootFrom(dirname(statePath))
+    // ?? gitRepositoryRoot() ?? process.cwd()) resolve the identical root. A
+    // graph outside any Git repository splits them: the boundary wiring must
+    // refuse settlement (fail closed, never judging bytes against the ambient
+    // checkout or cwd); the fallback would resolve the ambient repo root,
+    // isRepo() would be true, and the refusal below would never fire —
+    // turning this assertion RED against the vulnerable behavior.
+    const outsideRoot = canonicalTempDir("loom-pi-non-repo-graph-");
+    const outsideStatePath = join(outsideRoot, "state", "active_task_graph.json");
+    mkdirSync(dirname(outsideStatePath), { recursive: true });
+    // Sanity: the boundary observation must prove a non-repository HERE, or
+    // the scenario does not discriminate the two wirings at all.
+    expect(observeTaskGraphProjectBoundary(outsideStatePath).kind).toBe("state-layout");
+    const planPath = join(temp, "non-repo-boundary-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeFileSync(outsideStatePath, JSON.stringify({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks: [{
+        ...initialGraph().tasks[0],
+        verification_policy: { regression: { kind: "required" }, new_tests: { kind: "required" } },
+      }],
+    }, null, 2));
+    const previous = process.env.LOOM_STATE_PATH;
+    process.env.LOOM_STATE_PATH = outsideStatePath;
+    try {
+      const pi = await extension();
+      const session = "019fca39-f989-7510-8e62-50dadbcad4c9";
+      const toolCallId = "call-non-repo-boundary-settlement";
+      const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+      const prompt = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+      expect(await pi.emit("tool_call", {
+        toolName: "subagent", toolCallId,
+        input: { agent: "code-implementer-agent", task: prompt, agentScope: "user" },
+      }, context)).toEqual([undefined]);
+      expect(JSON.parse(readFileSync(outsideStatePath, "utf8")).executing_tasks).toEqual(["T1"]);
+
+      const responses = await pi.emit("tool_result", {
+        toolName: "subagent", toolCallId, content: [],
+        details: { results: [{
+          agent: "code-implementer-agent", task: prompt, exitCode: 0,
+          messages: [{ role: "assistant", content: [{ type: "text", text: "I edited the files but ran no tests." }] }],
+        }] },
+      }, context);
+
+      // The typed non-repository refusal is the exact diagnostic the ambient
+      // fallback can never produce: with the fallback, the probe resolves the
+      // ambient repo root and Git reads succeed, so the settlement would
+      // proceed untrusted WITHOUT any boundary-attributed refusal in the
+      // emitted outcome. Here the boundary root is a proven non-repository,
+      // so the fail-closed Task-local byte observation names it.
+      const rendered = JSON.stringify(responses);
+      expect(rendered).toContain("Task-local byte observation unavailable");
+      expect(rendered).toContain("cannot read Git HEAD");
+      expect(rendered).toContain("Loom Pi subagent evidence processing failed");
+      const state = JSON.parse(readFileSync(outsideStatePath, "utf8"));
+      expect(state.executing_tasks).toEqual([]);
+      expect(state.tasks[0].status).toBe("pending");
+    } finally {
+      if (previous === undefined) delete process.env.LOOM_STATE_PATH;
+      else process.env.LOOM_STATE_PATH = previous;
+      rmSync(outsideRoot, { recursive: true, force: true });
+    }
   });
 
   it("infrastructure-settles same-agent reordered results against their exact reserved slots", async () => {

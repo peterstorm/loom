@@ -146,6 +146,16 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       // Exact runtime entry and transitive implementation bytes are gated by machine-purity.
       "engine/src/core/structured-test-report.ts": ["saxes"],
       "engine/src/core/wave-gate-machine.ts": ["node:crypto"],
+      // Cross-branch pre-provisioning, deliberate: `find-file` today sits in
+      // utils/, which NO boundary rule governs, so BOTH of its entries (the
+      // core `allow` line above and this per-file grant) are INERT — the
+      // per-file lookup only runs for files the core boundary actually
+      // governs. They are kept, not pruned: they are the reviewed grant for
+      // the day find-file moves under core/ (or a boundary comes to govern
+      // utils/), and dropping them now would fail the lint gate on that move
+      // until the grant is re-reviewed. Inert today means zero granted
+      // capability — not stale permission, which only an entry for a file
+      // that HAS dropped its import would be.
       "engine/src/utils/find-file.ts": ["node:fs", "node:path"],
     },
     deny: [

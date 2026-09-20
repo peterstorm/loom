@@ -16,7 +16,7 @@ export type { StandaloneCaptureWitness, StandaloneEvidenceReplayResult, Standalo
 import { parseRunDirectoryReference } from '../../../orchestration/run-directory-handle';
 import { publishStandalonePanelView } from '../../../orchestration/standalone-panel-context';
 import { CURRENT_REVIEWER_PROTOCOL } from '../../../core/reviewer-contract';
-import type { AgentRequestAuthority, SpawnRequest, PublicationAuthorityResolver, SemanticAttempt } from '../../../core/orchestration-contract';
+import { batchPublicationIdentity, type AgentRequestAuthority, type SpawnRequest, type PublicationAuthorityResolver, type SemanticAttempt } from '../../../core/orchestration-contract';
 import { decideAttemptOneSlots } from '../../../core/standalone-attempt-admission';
 import { aggregateStandaloneReview, bindStandaloneCaptureAuthority, captureStandaloneReviewerBytes, canonicalStandaloneResultArtifact, completeStandaloneReviewerCapture, parseStandaloneReviewScope, prepareFreshStandaloneReview, proveStandaloneRosterCompletion, serializeStandaloneReviewAuthority, serializeAdjudicatedStandaloneReview, type FrozenStandaloneReviewAuthority, type StandaloneReviewerProtocolResolver } from '../../../core/standalone-review';
 import { parseStandaloneReviewMachineState, reduceStandaloneReviewMachine, parseStandaloneRefutationCompletion, serializeStandaloneReviewMachineState, startStandaloneReviewMachine, type StandaloneReviewMachineState } from '../../../core/standalone-review-machine';
@@ -24,7 +24,7 @@ import { completePersistentRefutationPanel, panelRequestIdentity, refutationPane
 import { readRunBytesNoFollow, writeRunBytesExclusiveNoFollow } from '../../../orchestration/no-follow-fs';
 import { captureKey } from '../../../core/harness-capture';
 import { type RunDirHandle } from '../../../orchestration/run-directory-handle';
-import { standaloneReviewerProtocolResolver, readPublishedStandaloneResult, deriveChangedPaths, gitText, durableCaptureRejection, durablePublicationDigest, durableRefutationRequests, durableRequests, executableRefutationRequests, failed, metadata, readRegisteredStandaloneAuthority, publicationFile, publicationResolver, publishInitialBatch, recoverOrPublishRefutationRetry, recoverOrPublishStandaloneRetry, refutationRejectionDiagnostic, renderSpawnTask, safeScope, standalonePackets, standalonePublicationEffectId, standaloneRetryTask, type FacadeDriveResult, type ProgramParse, type RegisteredStandaloneProgram } from './helpers';
+import { standaloneReviewerProtocolResolver, readPublishedStandaloneResult, deriveChangedPaths, gitText, durableCaptureRejection, durablePublishedReceipt, durablePublicationDigest, durableRefutationRequests, durableRequests, executableRefutationRequests, failed, metadata, readRegisteredStandaloneAuthority, publicationResolver, publishInitialBatch, recoverOrPublishRefutationRetry, recoverOrPublishStandaloneRetry, refutationRejectionDiagnostic, renderSpawnTask, safeScope, standalonePackets, standalonePublicationEffectId, standaloneRetryTask, type FacadeDriveResult, type ProgramParse, type RegisteredStandaloneProgram } from './helpers';
 
 const preparedSuccessorStarts = new WeakSet<object>();
 
@@ -708,21 +708,19 @@ async function resumeAwaitingResults(
   if (missing.length > 0) {
     const effectId = standalonePublicationEffectId(activeAuthority);
     if (!effectId.ok) return failed(effectId.error.message);
-    const receipt = JSON.parse(readRunBytesNoFollow(
-      `${handle.runDirectory}/artifacts/${publicationFile(effectId.value)}`,
-    ).toString("utf8")) as Record<string, unknown>;
+    // Resume never re-derives request authority from prose: the durable
+    // receipt is parsed (never cast) and must name exactly this run/effect,
+    // or the re-spawn fails closed. The identity digest is a projection of
+    // that parsed receipt.
+    const publication = durablePublishedReceipt(handle, effectId.value);
+    if (publication.kind === "absent") return failed("initial reviewer publication receipt is absent; roster re-spawn cannot proceed");
+    if (publication.kind === "corrupt") return failed(publication.message);
     return { ok: true, action: {
       kind: "spawn-batch",
       runId: handle.runId,
-      publicationIdentity: {
-        schemaVersion: 1,
-        kind: "batch-publication-identity",
-        runId: handle.runId,
-        effectId: effectId.value,
-        publicationDigest: receipt.publicationDigest,
-      },
+      publicationIdentity: batchPublicationIdentity(publication.receipt),
       idempotencyKey: { runId: handle.runId, effectId: effectId.value },
-      receipt,
+      receipt: publication.receipt,
       requests: missing.map((request) => {
         const task = renderSpawnTask(
           handle,

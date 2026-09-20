@@ -5,6 +5,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -222,6 +223,28 @@ describe("repair-task-graph CLI", () => {
     expect(result.stderr).toContain("Refusing lossy repair");
     expect(readFileSync(statePath, "utf-8")).toBe(raw);
     expect(statSync(statePath).mode & 0o777).toBe(0o444);
+  });
+
+  /**
+   * ENOENT is the only absent answer: a PRESENT-but-unreadable graph
+   * (self-referential symlink → ELOOP) used to be reported as "No active task
+   * graph", steering an operator repairing a corrupt state file toward
+   * re-population instead of the permissions/access repair. The fail-closed
+   * probe assumes present, names the real cause, and the guarded read below
+   * fails with the same attribution.
+   */
+  it("reports a present-but-unreadable graph as an access failure, not absence", () => {
+    const root = canonicalTempDir("loom-repair-task-graph-unreadable-");
+    cleanup.push(root);
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    mkdirSync(join(root, ".claude", "state"), { recursive: true });
+    symlinkSync(statePath, statePath); // self-loop: stat throws ELOOP
+
+    const result = runRepair(root, statePath);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("ELOOP");
+    expect(result.stderr).not.toContain("No active task graph");
   });
 
   /**

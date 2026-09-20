@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { taskGraphPath } from "../../config";
+import { readFileSync } from "node:fs";
+import { pathExistsFailClosed, taskGraphPath } from "../../config";
 import { parseTaskGraph, StateManager } from "../../state-manager";
 import type { HookHandler, TaskGraph } from "../../types";
 import { fixFull, validateFull } from "./validate-task-graph";
@@ -94,7 +94,13 @@ const handler: HookHandler = async (stdin, args) => {
   }
 
   const statePath = taskGraphPath();
-  if (!existsSync(statePath)) {
+  // ENOENT is the ONLY absent answer: bare `existsSync` also returns false for
+  // EACCES/ELOOP/ENOTDIR/EIO, which would tell an operator repairing a
+  // present-but-unreadable graph "No active task graph" and steer them toward
+  // re-population instead of fixing permissions. The fail-closed probe names
+  // the real cause and treats it as present; the guarded read below then
+  // fails loudly with the same attribution.
+  if (!pathExistsFailClosed(statePath)) {
     return { kind: "error", message: `No active task graph at ${statePath}` };
   }
 

@@ -73,7 +73,17 @@ function sectionText(packet: ProjectedPacket, label: string): DomainResult<strin
   if (section === undefined) return failed("selected section is absent");
   const text = decode(section.bytes);
   if (!/^[\s]*[\[{]/.test(text)) return { ok: true, value: text };
-  const raw: unknown = JSON.parse(text);
+  // The projected shape is decided by parse outcome, not by the leading byte:
+  // a brace-leading section is probably structured data, but prose or
+  // malformed JSON must project verbatim here rather than escaping as a
+  // throw — the outer catch is reserved for the fatal text DECODE failure,
+  // and its message would misreport valid text as undecodable.
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return { ok: true, value: text };
+  }
   const hidden = new Set(["bytes", "contentBase64", "base64", "postimages", "content"]);
   return { ok: true, value: JSON.stringify(raw, (key, value: unknown) => hidden.has(key) ? "[omitted; select text with --file]" : value, 2) };
 }

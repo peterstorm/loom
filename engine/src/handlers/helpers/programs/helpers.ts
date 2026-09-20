@@ -16,7 +16,7 @@ import { devNull } from 'node:os';
 import { extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { canonicalStructuralEquals, sameAgentRequestAuthority, parseAgentRequestAuthority, type DomainResult, createAtomicInitialPublicationClaimPort, createInitialBatchPublicationReconciler, createInitialPublicationEffectPort, createPublicationAuthorityResolver, parseBatchPublishedReceipt, parseEffectId, parseIssuedSpawnRequest, prepareInitialBatchPublicationIntent, spawnBatchAction, AGENT_REQUIRED_SKILLS, type AgentRequestAuthority, type EffectId, type InitialSpawnRequestInput, type PublicationAuthorityResolver, type SpawnRequest } from '../../../core/orchestration-contract';
+import { canonicalStructuralEquals, sameAgentRequestAuthority, parseAgentRequestAuthority, type DomainResult, createAtomicInitialPublicationClaimPort, createInitialBatchPublicationReconciler, createInitialPublicationEffectPort, createPublicationAuthorityResolver, parseBatchPublishedReceipt, parseEffectId, parseIssuedSpawnRequest, prepareInitialBatchPublicationIntent, spawnBatchAction, AGENT_REQUIRED_SKILLS, type AgentRequestAuthority, type BatchPublishedReceipt, type EffectId, type InitialSpawnRequestInput, type PublicationAuthorityResolver, type SpawnRequest } from '../../../core/orchestration-contract';
 import { serializeAdjudicatedStandaloneReview, STANDALONE_REVIEWER_ROLES, serializeStandaloneReviewAuthority, parseStandaloneReviewAuthority, selectStandaloneReviewers, type FrozenStandaloneReviewAuthority, type StandaloneReviewKind, type StandaloneReviewMetadata } from '../../../core/standalone-review';
 import { safeIoCause } from '../../../core/safe-io-cause';
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ContextPacket } from '../../../core/context-packets';
@@ -919,10 +919,20 @@ export type DurableRequestRecovery =
   | Readonly<{ kind: "found"; requests: readonly SpawnRequest[] }>
   | Readonly<{ kind: "corrupt"; message: string }>;
 
-export function durablePublicationDigest(
+/**
+ * The one durable-publication accessor: the receipt bytes are PARSED, never
+ * cast, and must name exactly this run/effect — reservation or packet hashes
+ * alone do not issue a request. Consumers recover either the parsed receipt
+ * with its proven digest, or the absent/corrupt diagnosis; the digest is a
+ * projection of the parsed receipt, never an independent untyped read.
+ */
+export function durablePublishedReceipt(
   handle: RunDirHandle,
   effectId: EffectId,
-): Readonly<{ kind: "absent" }> | Readonly<{ kind: "found"; digest: string }> | Readonly<{ kind: "corrupt"; message: string }> {
+):
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "found"; receipt: BatchPublishedReceipt; digest: string }>
+  | Readonly<{ kind: "corrupt"; message: string }> {
   const path = `${handle.runDirectory}/artifacts/${publicationFile(effectId)}`;
   let bytes: Buffer;
   try {
@@ -943,7 +953,15 @@ export function durablePublicationDigest(
   if (receipt.value.runId !== handle.runId || receipt.value.effectId !== effectId) {
     return { kind: "corrupt", message: "durable publication receipt does not match run/effect authority" };
   }
-  return { kind: "found", digest: receipt.value.publicationDigest };
+  return { kind: "found", receipt: receipt.value, digest: receipt.value.publicationDigest };
+}
+
+export function durablePublicationDigest(
+  handle: RunDirHandle,
+  effectId: EffectId,
+): Readonly<{ kind: "absent" }> | Readonly<{ kind: "found"; digest: string }> | Readonly<{ kind: "corrupt"; message: string }> {
+  const receipt = durablePublishedReceipt(handle, effectId);
+  return receipt.kind === "found" ? { kind: "found", digest: receipt.digest } : receipt;
 }
 
 export function durableRequests(

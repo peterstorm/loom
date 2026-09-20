@@ -77,6 +77,29 @@ describe("read-only packet command", () => {
     }
   });
 
+  it("projects brace-leading non-JSON section text verbatim and redacts only parseable JSON", () => {
+    // The leading byte guesses a shape; the parse decides it. A malformed or
+    // prose section used to escape sectionText as a throw and die in the outer
+    // catch with the misleading "cannot be decoded safely as text data" —
+    // valid text reported as undecodable.
+    const prose = "{ a brace-leading note that is deliberately not JSON";
+    const structured = JSON.stringify({ note: "visible payload", content: "secret-body" });
+    const note = value(encodeByteSection("reviewer-note", prose));
+    const redacted = value(encodeByteSection("reviewer-note-json", structured));
+    const packet = value(buildReviewerContextPacket({
+      requestId: value(parseRequestId("request:reader-fixture")), role: "code-reviewer", requiredSkill: "none",
+      fixedContext: [note, redacted], variableContext: [],
+    }));
+    const args = ["--packet", "/fixture/packet.json", "--request", packet.requestId, "--digest", packet.digest,
+      "--role", packet.role, "--skill", packet.requiredSkill];
+    const section = (label: string) => projectContextPacket(packet, value(parseContextProjectionArguments([...args, "--section", label])));
+    expect(value(section("reviewer-note"))).toMatchObject({ text: prose });
+    const projected = String((value(section("reviewer-note-json")) as { text: unknown }).text);
+    expect(projected).toContain("[omitted; select text with --file]");
+    expect(projected).not.toContain("secret-body");
+    expect(projected).toContain("visible payload");
+  });
+
   it("fails visibly on unavailable commands, paths, unsafe FS and stale/foreign identity", () => {
     const f = fixture();
     const missing = spawnSync("bun", [join(f.root, "missing-command.ts"), ...f.args], { encoding: "utf8" });

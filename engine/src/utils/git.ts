@@ -89,17 +89,10 @@ function commandFailure(error: unknown): string {
   return [code, status, stderr || message].filter((part): part is string => part !== null && part !== "").join(": ");
 }
 
-/** Run one fixed-argv Git probe, retrying twice when it exits 0 with no output.
- *
- *  Status 0 with empty stdout is not a documented Git outcome, but the darwin
- *  verification campaign observed it transiently on loaded macOS runners for
- *  short-lived rev-parse probes (—show-toplevel twice, HEAD^{tree} once, and
- *  `--verify HEAD` once inside a review-packet CLI child, where it surfaced
- *  as "git returned an invalid HEAD: \"\"" and turned a passing run red). A
- *  confirmed-empty then reaches the caller's existing guards — which all
- *  refuse loudly — instead of a fabricated value. The retries cannot corrupt a
- *  legitimate result: probes that legitimately return nothing re-run and
- *  return nothing again. */
+/** Run one fixed-argv Git probe, retrying twice when it exits 0 with no output —
+ *  the canonical transient empty-stdout rationale and campaign evidence live at
+ *  `observeGitProbe` in utils/git-probe; a confirmed-empty throws here so the
+ *  caller's existing guards refuse loudly instead of ingesting a fabrication. */
 function probeGitWithEmptyRetry(
   args: readonly string[],
   options: ExecFileSyncOptionsWithStringEncoding,
