@@ -417,6 +417,31 @@ function parseSections(raw: unknown, field: string): DomainResult<readonly ByteS
   return success(Object.freeze(sections));
 }
 
+/** Bounded, sanitized cause for the fail-closed packet parsers. The core stays
+ *  free of handler imports, so the shared `boundedThrownCause` pattern is
+ *  inlined here with the same 256-char budget and truncation shape: an
+ *  unexpected parser crash is attributable without a debugger and never leaks
+ *  full input bytes. */
+const CONTEXT_PACKET_CAUSE_LIMIT = 256;
+const boundedPacketCauseText = (value: string): string =>
+  value.length <= CONTEXT_PACKET_CAUSE_LIMIT ? value : `${value.slice(0, CONTEXT_PACKET_CAUSE_LIMIT - 1)}…`;
+const boundedPacketCause = (thrown: unknown, subject: string): { name: string; message: string } => {
+  try {
+    if (thrown instanceof Error) {
+      return {
+        name: boundedPacketCauseText(typeof thrown.name === "string" && thrown.name !== "" ? thrown.name : "Error"),
+        message: boundedPacketCauseText(typeof thrown.message === "string" ? thrown.message : `${subject} inspection failed`),
+      };
+    }
+    return {
+      name: "NonErrorThrown",
+      message: boundedPacketCauseText(typeof thrown === "string" ? thrown : `${subject} inspection failed with a non-Error cause`),
+    };
+  } catch {
+    return { name: "UninspectableCause", message: `${subject} inspection failed with an uninspectable cause` };
+  }
+};
+
 /**
  * Parse an untrusted packet. Section digests are recomputed from the bytes and
  * the packet digest is recomputed from the parsed identity, so a packet whose
@@ -428,8 +453,9 @@ export function parseContextPacket(raw: unknown): DomainResult<ContextPacket, Co
     if (!parsed.ok) return parsed;
     return parsed.value.schemaVersion === 3
       ? failure("schemaVersion", "standalone v3 requires explicit successor Context Packet parsing") : success(parsed.value);
-  } catch {
-    return failure("packet", "context packet could not be inspected safely");
+  } catch (thrown) {
+    const cause = boundedPacketCause(thrown, "context packet");
+    return failure("packet", `context packet could not be inspected safely (${cause.name}: ${cause.message})`);
   }
 }
 
@@ -440,8 +466,9 @@ export function parseStandaloneReviewerContextPacketV3(raw: unknown): DomainResu
     if (!parsed.ok) return parsed;
     return parsed.value.schemaVersion === 3 ? success(parsed.value)
       : failure("schemaVersion", "standalone successor Context Packet must declare schema version 3");
-  } catch {
-    return failure("packet", "standalone successor context packet could not be inspected safely");
+  } catch (thrown) {
+    const cause = boundedPacketCause(thrown, "standalone successor context packet");
+    return failure("packet", `standalone successor context packet could not be inspected safely (${cause.name}: ${cause.message})`);
   }
 }
 

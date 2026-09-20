@@ -267,6 +267,28 @@ describe("no-cross-boundary-imports", () => {
       expect(violations[0].line).toBe(1);
     });
 
+    it("anti-vacuity: a violating import is reported and a clean file is not", () => {
+      // The gate must never silently stop matching and report green. Through
+      // the production defaults: a known-denied cross-boundary import yields
+      // exactly one violation naming the boundary, and the same file's
+      // in-boundary import yields none.
+      const violating = handler(
+        `import { parseTaskGraph } from "../state-manager";\n`,
+        "engine/src/core/example.ts",
+        DEFAULT_BOUNDARIES,
+      );
+      expect(violating).toHaveLength(1);
+      expect(violating[0]?.rule).toBe("no-cross-boundary-imports");
+      expect(violating[0]?.fixHint).toContain('"engine/src/state-manager" is not allowed');
+
+      const clean = handler(
+        `import { canonicalRecord } from "./orchestration-contract";\n`,
+        "engine/src/core/example.ts",
+        DEFAULT_BOUNDARIES,
+      );
+      expect(clean).toEqual([]);
+    });
+
     it("returns empty for files without boundary rules", () => {
       const content = `import { anything } from "anywhere";\n`;
       const violations = handler(content, "some/other/file.ts");

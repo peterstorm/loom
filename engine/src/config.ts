@@ -438,7 +438,7 @@ export const guardedDirs = (): readonly string[] => [
  * (`.evidence.jsonl`), fakes attribution (`.active`), or disarms the gate
  * (`.machine`), and a write into the machine-definitions dir deletes/rewrites
  * the gate's rules. guard-state-file checks these BEFORE the helper allow. */
-export const protectedDirs = (): readonly string[] => [subagentDir(), machinesDir()];
+const protectedDirs = (): readonly string[] => [subagentDir(), machinesDir()];
 
 const toSegments = (dir: string): string[] => dir.split("/").filter((s) => s !== "");
 

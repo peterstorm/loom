@@ -43,7 +43,7 @@ import { renderImplementationLifecycleError } from "./implementation-lifecycle-e
 const MAX_ATTEST_REASON = 512;
 
 /** Parse the operation's exact argument surface; unknown flags fail closed. */
-export function parseAttestArgs(args: readonly string[]):
+function parseAttestArgs(args: readonly string[]):
   | Readonly<{ ok: true; value: { taskId: TaskId; reason: string } }>
   | Readonly<{ ok: false; message: string }> {
   const parsed = parseTaskReasonArguments(args, {

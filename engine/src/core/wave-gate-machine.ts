@@ -355,7 +355,7 @@ export function reduceWaveGate<
  * transition is still checked, at runtime, by the reducer's own
  * `undeclared-transition` refusal.
  */
-export function replayWaveGateTransition(
+function replayWaveGateTransition(
   state: WaveGateState,
   event: WaveGateEvent,
 ): DomainResult<WaveGateState, WaveGateTransitionError> {
@@ -2388,7 +2388,7 @@ export function deriveLoomStatus(snapshot: WaveReadinessSnapshot): LoomStatus {
 }
 
 /** Fail-closed status retains the complete fact inventory; no zero/ready value is fabricated. */
-export function deriveUnavailableLoomStatus(rawReasons: NonEmpty<StatusReason>): LoomStatus {
+function deriveUnavailableLoomStatus(rawReasons: NonEmpty<StatusReason>): LoomStatus {
   const reasons = Object.freeze([...rawReasons]) as NonEmpty<StatusReason>;
   const unavailable = (): Readonly<{ kind: "unavailable"; reasons: NonEmpty<StatusReason> }> =>
     canonicalRecord({ kind: "unavailable", reasons });
@@ -2412,7 +2412,7 @@ export function deriveUnavailableLoomStatus(rawReasons: NonEmpty<StatusReason>):
   });
 }
 
-export function unavailableStatusReason(message: string): StatusReason {
+function unavailableStatusReason(message: string): StatusReason {
   return reason("authority-unavailable", message);
 }
 

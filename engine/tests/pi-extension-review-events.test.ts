@@ -4019,8 +4019,8 @@ describe("Pi extension review tool_result integration", () => {
     // verified unobservable: every other settlement-driving test either
     // injects the repository probe or pins the graph inside the ambient
     // checkout, where the TaskGraph Project Boundary observation and the
-    // REMOVED ambient fallback chain (gitRepositoryRootFrom(dirname(statePath))
-    // ?? gitRepositoryRoot() ?? process.cwd()) resolve the identical root. A
+    // REMOVED ambient fallback chain (git.repositoryRootFrom(dirname(mgr.getPath()))
+    // ?? git.repositoryRoot() ?? process.cwd()) resolve the identical root. A
     // graph outside any Git repository splits them: the boundary wiring must
     // refuse settlement (fail closed, never judging bytes against the ambient
     // checkout or cwd); the fallback would resolve the ambient repo root,

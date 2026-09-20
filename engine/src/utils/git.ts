@@ -152,29 +152,6 @@ export function repositoryRoot(): string | undefined {
   return currentRepoRoot("repositoryRoot");
 }
 
-/** Resolve the repository root FROM an explicit directory — a per-call probe,
- *  not the cached runtime root. The settlement derives its repository from the
- *  task-graph pointer it already holds, whose target lives in the spawn's
- *  repository; the cached root answers for whichever cwd the runtime process
- *  happens to report, which is the misalignment this probe exists to close.
- *  Undefined is never silent: the caller's fallback chain keeps working, but
- *  the failure names itself first. */
-export function repositoryRootFrom(cwd: string): string | undefined {
-  try {
-    const root = probeGitWithEmptyRetry(["rev-parse", "--show-toplevel"], {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    return root;
-  } catch (error) {
-    process.stderr.write(
-      `loom: git rev-parse --show-toplevel failed from ${cwd} (${error instanceof Error ? error.message : String(error)}) — falling back to the runtime repository root\n`,
-    );
-    return undefined;
-  }
-}
-
 export type GitHeadObservation =
   | Readonly<{ ok: true; headSha: string }>
   | Readonly<{ ok: false; error: string }>;
@@ -417,13 +394,6 @@ function diffArgsAt(
   }
 }
 
-function diffArgs(args: readonly string[]): GitDiffResult {
-  const root = currentRepoRoot("diffArgs");
-  return root === undefined
-    ? { ok: false, error: "cannot collect a diff outside a Git repository" }
-    : diffArgsAt(root, args);
-}
-
 /** Binary packet diff from an option-delimited revision through the hardened boundary. */
 export function diffBinaryFileFromRevision(root: string, revision: string, file: string): GitDiffResult {
   return diffArgsAt(root, ["diff", "--binary", "--end-of-options", revision, "--", file]);
@@ -441,9 +411,10 @@ const FULL_POSTIMAGE_CONTEXT = "--unified=2147483647";
 
 /** Diff specific files (unstaged), retaining complete postimage context. */
 export function diffFiles(files: string[]): GitDiffResult {
-  return files.length === 0
-    ? { ok: true, diff: "" }
-    : diffArgs(["diff", FULL_POSTIMAGE_CONTEXT, "--", ...files]);
+  const root = currentRepoRoot("diffFiles");
+  return root === undefined
+    ? { ok: false, error: "cannot collect a diff outside a Git repository" }
+    : diffFilesAt(root, files);
 }
 
 /** Diff specific files (unstaged) from an EXPLICIT root — the same hardened
@@ -458,9 +429,10 @@ export function diffFilesAt(root: string, files: string[]): GitDiffResult {
 
 /** Diff specific files (staged), retaining complete postimage context. */
 export function diffFilesStaged(files: string[]): GitDiffResult {
-  return files.length === 0
-    ? { ok: true, diff: "" }
-    : diffArgs(["diff", "--cached", FULL_POSTIMAGE_CONTEXT, "--", ...files]);
+  const root = currentRepoRoot("diffFilesStaged");
+  return root === undefined
+    ? { ok: false, error: "cannot collect a diff outside a Git repository" }
+    : diffFilesStagedAt(root, files);
 }
 
 /** Diff specific files (staged) from an EXPLICIT root — see `diffFilesAt`. */
@@ -478,9 +450,10 @@ export function diffFilesStagedAt(root: string, files: string[]): GitDiffResult 
  * as an option and can redirect the diff's output to a caller-chosen path.
  */
 export function diffFilesSince(revision: string, files: string[]): GitDiffResult {
-  return files.length === 0
-    ? { ok: true, diff: "" }
-    : diffArgs(["diff", FULL_POSTIMAGE_CONTEXT, "--end-of-options", revision, "HEAD", "--", ...files]);
+  const root = currentRepoRoot("diffFilesSince");
+  return root === undefined
+    ? { ok: false, error: "cannot collect a diff outside a Git repository" }
+    : diffFilesSinceAt(root, revision, files);
 }
 
 /** Diff committed changes from one baseline from an EXPLICIT root —
@@ -536,7 +509,7 @@ export function diffUntracked(file: string): GitDiffResult {
   const root = currentRepoRoot("diffUntracked");
   return root === undefined
     ? { ok: false, error: "cannot diff an untracked file outside a Git repository" }
-    : diffArgsAt(root, ["diff", "--no-index", FULL_POSTIMAGE_CONTEXT, "/dev/null", "--", file], true);
+    : diffUntrackedAt(root, file);
 }
 
 /** Diff one untracked file against /dev/null from an EXPLICIT root —

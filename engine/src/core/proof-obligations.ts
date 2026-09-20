@@ -158,7 +158,7 @@ export type AttestationDriftFailureKind = Extract<
   `proof:${(typeof ATTESTATION_DRIFT_BASE_KINDS)[number]}`
 >;
 
-export const ATTESTATION_DRIFT_FAILURE_KINDS = Object.freeze(
+const ATTESTATION_DRIFT_FAILURE_KINDS = Object.freeze(
   ATTESTATION_DRIFT_BASE_KINDS.map((kind) => `proof:${kind}` as AttestationDriftFailureKind),
 ) as readonly [AttestationDriftFailureKind, ...AttestationDriftFailureKind[]];
 

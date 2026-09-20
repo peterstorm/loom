@@ -6,7 +6,7 @@
  */
 import { createHash } from 'node:crypto';
 import { publishStandalonePanelView, verifyStandalonePanelView } from '../../../orchestration/standalone-panel-context';
-import { parseStandaloneSuccessorRegistration, parseStandaloneSuccessorStartInput, type RegisteredStandaloneSuccessorProgram } from './standalone-successor-registration';
+import { parseStandaloneSuccessorRegistration, parseStandaloneSuccessorStartInput, boundedThrownCause, type RegisteredStandaloneSuccessorProgram } from './standalone-successor-registration';
 import type { PreparedStandaloneSuccessor } from '../../../core/standalone-lineage';
 import { buildStandaloneSuccessorReviewerContext, parseIssuedStandaloneSuccessorReviewer, standaloneSuccessorReviewerRegistration } from '../../../core/standalone-successor-reviewer';
 import type { StandaloneReviewerProtocolResolver } from '../../../core/standalone-review';
@@ -104,7 +104,7 @@ export function parseStandaloneStartInput(raw: unknown): ProgramParse<Registered
   }) };
 }
 
-export function gitPaths(args: readonly string[]): readonly string[] {
+function gitPaths(args: readonly string[]): readonly string[] {
   const result = spawnSync("git", args, { encoding: "buffer", maxBuffer: 16 * 1024 * 1024 });
   // status stays null when the process never ran (git missing from PATH,
   // EACCES); result.error then holds the only real diagnostic.
@@ -147,7 +147,7 @@ export type DerivedChangedPaths = Readonly<{
  * require explicit complete coverage must supply and parse that scope instead
  * of treating this filter as rejection authority.
  */
-export function reviewablePath(path: string): boolean {
+function reviewablePath(path: string): boolean {
   const parsed = parseCanonicalRepositoryRelativePath(path, "standalone review scope path");
   return parsed.ok && !isExcludedRemediationPath(parsed.value);
 }
@@ -181,14 +181,14 @@ export function deriveChangedPaths(): DerivedChangedPaths {
 export const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".java", ".rs", ".py", ".go", ".c", ".cpp"]);
 export const TYPE_EXTENSIONS = new Set([".ts", ".tsx", ".d.ts", ".java", ".rs"]);
 
-export function parseNumstatAdditions(output: string): number {
+function parseNumstatAdditions(output: string): number {
   return output.split("\n").reduce((sum, line) => {
     const additions = Number.parseInt(line.split("\t", 1)[0] ?? "", 10);
     return sum + (Number.isFinite(additions) ? additions : 0);
   }, 0);
 }
 
-export function trackedAdditions(baseline: string, paths: readonly string[]): number {
+function trackedAdditions(baseline: string, paths: readonly string[]): number {
   if (paths.length === 0) return 0;
   const result = spawnSync("git", ["diff", "--numstat", baseline, "--", ...paths], { encoding: "utf8" });
   if (result.error) throw new Error(`git diff could not be spawned: ${result.error.message}`);
@@ -196,7 +196,7 @@ export function trackedAdditions(baseline: string, paths: readonly string[]): nu
   return parseNumstatAdditions(result.stdout ?? "");
 }
 
-export function untrackedAdditions(paths: readonly string[]): number {
+function untrackedAdditions(paths: readonly string[]): number {
   return paths.reduce((sum, path) => {
     const result = spawnSync("git", ["diff", "--no-index", "--numstat", "--", devNull, path], { encoding: "utf8" });
     if (result.error) throw new Error(`git diff could not be spawned: ${result.error.message}`);
@@ -709,8 +709,9 @@ export function parseRegistration(raw: unknown): ProgramParse<RegisteredStandalo
       ...protocol.value, kind: "standalone-review", input: input.value,
       authority: freezeRegistrationAuthority(JSON.parse(serializeStandaloneReviewAuthority(authority.value))),
     }) };
-  } catch {
-    return { ok: false, message: "standalone-review registration cannot be inspected safely" };
+  } catch (thrown) {
+    const cause = boundedThrownCause(thrown, "standalone-registration");
+    return { ok: false, message: `standalone-review registration cannot be inspected safely (${cause.name}: ${cause.message})` };
   }
 }
 
@@ -763,8 +764,9 @@ const registeredProgram = (program: RegisteredFacadeProgram): FacadeRegistration
 export function parseRegisteredFacadeProgram(raw: unknown): FacadeRegistrationParse {
   try {
     return parseFacadeRegistration(raw);
-  } catch {
-    return invalidRegistration("program registration cannot be inspected safely");
+  } catch (thrown) {
+    const cause = boundedThrownCause(thrown, "facade-registration");
+    return invalidRegistration(`program registration cannot be inspected safely (${cause.name}: ${cause.message})`);
   }
 }
 
@@ -1116,7 +1118,7 @@ export async function recoverOrPublishStandaloneRetry(
  * terminal-blocking whole runs. Naming the defect is what makes the retry worth
  * spending.
  */
-export function refutationRetryTask(task: string, diagnostic: string | null): string {
+function refutationRetryTask(task: string, diagnostic: string | null): string {
   return [
     task,
     "",

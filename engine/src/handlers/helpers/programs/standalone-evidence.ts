@@ -18,6 +18,7 @@ import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
 import { boundedStandaloneReadHandle, successorSourceSnapshot } from './standalone-successor-source';
 import { parseRegistration, standaloneReviewerProtocolResolver, durablePublicationDigest, durableRefutationRequests, durableRequests, exactObject, readRegisteredStandaloneAuthority, publicationResolver, standaloneRetryEffectId, type RegisteredStandaloneProgram } from './helpers';
+import { boundedThrownCause } from './standalone-successor-registration';
 import type { ProgramParse } from './program-result';
 
 function standalonePanelSources(handle: RunDirHandle, authority: FrozenStandaloneReviewAuthority) {
@@ -666,7 +667,10 @@ export function readStandaloneCaptureWitnesses(handle: RunDirHandle,
     if (captured.value.size !== witnesses.size) return { ok: false, message: "captured roster includes a foreign unissued slot" };
     if (processWitnesses !== undefined && processWitnesses.size !== witnesses.size) return { ok: false, message: "current-session witness inventory differs from durable captured roster" };
     return { ok: true, value: witnesses };
-  } catch (cause) { return { ok: false, message: cause instanceof Error ? cause.message : String(cause) }; }
+  } catch (thrown) {
+    const cause = boundedThrownCause(thrown, "standalone capture witnesses");
+    return { ok: false, message: `standalone capture witness inspection failed: ${cause.name}: ${cause.message}` };
+  }
 }
 
 /** Source authentication carries already authenticated lineage, avoiding recursive reauthentication. */

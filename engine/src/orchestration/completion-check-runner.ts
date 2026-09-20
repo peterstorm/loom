@@ -324,22 +324,43 @@ function diagnostics(stdout: DiagnosticTail, stderr: DiagnosticTail): Completion
   });
 }
 
-type CommandExecution = Readonly<{
-  process: RawRemediationProcessOutcome;
-  report: CollectedReport | null;
-  diagnostics: CompletionCheckDiagnostics;
-}>;
+/** Spawn-failure and observation are different states, not one state with an
+ *  optional report: a spawn failure can never have collected a report and an
+ *  observed process always has one (possibly `missing`/`unreadable`). The
+ *  report/process pairing is therefore a compile-time property — constructing a
+ *  report on spawn-failure or a null report on observation is a type error, and
+ *  consumers discriminate on `kind` instead of re-deriving the pairing at their
+ *  own sites. The policy parameter keeps the second promise the runner already
+ *  makes by construction: a required-file check never observes a
+ *  `not-required` report, so the remediation overload below can hand its
+ *  consumer an observation whose `not-required` arm does not exist. */
+type ReportPolicy = ProjectCommandCheck["reportPolicy"];
+type RequiredFileReportPolicy = Extract<ReportPolicy, { readonly kind: "required-file" }>;
+type RequiredReportObservation = Exclude<CollectedReport, { readonly kind: "not-required" }>;
 
-type CommandRunnerResult =
-  | Readonly<{ ok: true; value: CommandExecution }>
+type CommandExecution<P extends ReportPolicy = ReportPolicy> =
+  | Readonly<{
+      kind: "spawn-failed";
+      process: Extract<RawRemediationProcessOutcome, { readonly kind: "spawn-failed" }>;
+      diagnostics: CompletionCheckDiagnostics;
+    }>
+  | Readonly<{
+      kind: "observed";
+      process: Extract<RawRemediationProcessOutcome, { readonly kind: "observed" }>;
+      report: P extends RequiredFileReportPolicy ? RequiredReportObservation : CollectedReport;
+      diagnostics: CompletionCheckDiagnostics;
+    }>;
+
+type CommandRunnerResult<P extends ReportPolicy = ReportPolicy> =
+  | Readonly<{ ok: true; value: CommandExecution<P> }>
   | Readonly<{ ok: false; error: CompletionCheckRunnerFailure }>;
 
 function spawnFailure(cause: unknown, output: CompletionCheckDiagnostics): CommandRunnerResult {
   return Object.freeze({
     ok: true,
     value: Object.freeze({
+      kind: "spawn-failed" as const,
       process: Object.freeze({ kind: "spawn-failed", message: messageOf(cause) as NonEmptyString }),
-      report: null,
       diagnostics: output,
     }),
   });
@@ -555,6 +576,7 @@ function observedExecution(
   return Object.freeze({
     ok: true,
     value: Object.freeze({
+      kind: "observed" as const,
       process: Object.freeze({
         kind: "observed" as const,
         exitCode: observation.exitCode,
@@ -573,6 +595,20 @@ function observedExecution(
  * owns a detached process group; no result is returned until that whole group
  * is proven gone. Every expected infrastructure failure is returned as data.
  */
+/** The remediation authority type-pins its command's report policy to
+ *  `required-file`, so its observed executions can never collect a
+ *  `not-required` report — the overload states that promise in the type the
+ *  consumer sees instead of a defensive runtime branch. */
+async function runProjectCommand(
+  selected: AuthorizedRemediationCheck,
+  repositoryRoot: CanonicalRepositoryRoot,
+  options: CompletionCheckRunnerOptions,
+): Promise<CommandRunnerResult<RequiredFileReportPolicy>>;
+async function runProjectCommand(
+  selected: ProjectCommandCheck | AuthorizedRemediationCheck,
+  repositoryRoot: CanonicalRepositoryRoot,
+  options: CompletionCheckRunnerOptions,
+): Promise<CommandRunnerResult>;
 async function runProjectCommand(
   selected: ProjectCommandCheck | AuthorizedRemediationCheck,
   repositoryRoot: CanonicalRepositoryRoot,
@@ -784,11 +820,11 @@ export async function runCompletionCheck(
   if (!root.ok) return root;
   const execution = await runProjectCommand(parsedCheck.value, root.value, options);
   if (!execution.ok) return execution;
-  const outcome: CompletionProcessOutcome = execution.value.process.kind === "spawn-failed"
+  const outcome: CompletionProcessOutcome = execution.value.kind === "spawn-failed"
     ? execution.value.process
     : Object.freeze({
         ...execution.value.process,
-        report: completionReportOutcome(execution.value.report!),
+        report: completionReportOutcome(execution.value.report),
       });
   const checkResult: CompletionCheckResult = Object.freeze({
     checkId: parsedCheck.value.checkId,
@@ -832,11 +868,22 @@ export async function runRemediationCheck(
   if (!root.ok) return root;
   const execution = await runProjectCommand(check, root.value, options);
   if (!execution.ok) return execution;
-  if (execution.value.report !== null && "kind" in execution.value.report &&
-      execution.value.report.kind === "not-required") {
-    return failed({
-      kind: "invalid-runner-authority",
-      message: "required remediation report observation unexpectedly became not-required",
+  // A spawn failure never collected a report; an observed required-file check
+  // always has one whose `not-required` arm does not exist (see the
+  // `runProjectCommand` overload promise).
+  if (execution.value.kind === "spawn-failed") {
+    return Object.freeze({
+      ok: true,
+      value: Object.freeze({
+        kind: "remediation-check-execution" as const,
+        checkId: check.command.checkId,
+        scope: check.scope,
+        manifestDigest: check.manifestDigest,
+        authorityDigest: check.authorityDigest,
+        process: execution.value.process,
+        report: null,
+        diagnostics: execution.value.diagnostics,
+      }),
     });
   }
   return Object.freeze({
@@ -848,7 +895,7 @@ export async function runRemediationCheck(
       manifestDigest: check.manifestDigest,
       authorityDigest: check.authorityDigest,
       process: execution.value.process,
-      report: execution.value.report === null ? null : remediationReportObservation(execution.value.report),
+      report: remediationReportObservation(execution.value.report),
       diagnostics: execution.value.diagnostics,
     }),
   });

@@ -11,11 +11,6 @@ export type GitProbeObservation<T, E> =
  * Execute one Git observation and retry twice only for a successful empty
  * value. Process adapters supply typed success/failure and define what empty
  * means; callers retain policy for whether confirmed emptiness is legal.
- */
-/**
- * Execute one Git observation and retry twice only for a successful empty
- * value. Process adapters supply typed success/failure and define what empty
- * means; callers retain policy for whether confirmed emptiness is legal.
  *
  * Canonical rationale — every empty-retry call site points here: status 0
  * with an empty stdout is not a documented Git outcome, but the darwin

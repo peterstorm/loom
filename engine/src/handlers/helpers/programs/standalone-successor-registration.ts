@@ -19,8 +19,8 @@ export type RegisteredStandaloneSuccessorProgram = Readonly<{
   input: StandaloneSuccessorStartInput; authority: unknown; currentSource: ByteSection; previousContexts: readonly ByteSection[];
 }>;
 const bad = (message: string): ProgramParse<never> => ({ ok: false, message });
-export const MAX_CAUSE_TEXT = 256;
-export const boundedCauseText = (value: string): string =>
+const MAX_CAUSE_TEXT = 256;
+const boundedCauseText = (value: string): string =>
   value.length <= MAX_CAUSE_TEXT ? value : `${value.slice(0, MAX_CAUSE_TEXT - 1)}…`;
 /**
  * Bounded thrown-cause capture (the boundedParserCause pattern): the fatal

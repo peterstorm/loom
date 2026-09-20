@@ -799,7 +799,7 @@ export type WaveGateAbandonmentStampOutcome =
   | ActiveWaveGateAbandonmentResult
   | Readonly<{ kind: "stamp-failed"; message: string }>;
 
-export async function stampAbandonedWaveGateRegistration(
+async function stampAbandonedWaveGateRegistration(
   runsRoot: string,
   marker: RunAbandonment,
 ): Promise<WaveGateAbandonmentStampOutcome> {

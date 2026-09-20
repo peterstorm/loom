@@ -43,7 +43,7 @@ import {
 } from '../../../core/wave-review-authority';
 import { durableCaptureRejection, durableRefutationRequests, exactObject, executableRefutationRequests, failed, parseRegisteredFacadeProgram, reviewerProtocolResolver, publicationResolver, publishInitialBatch, recoverOrPublishRefutationRetry, refutationRejectionDiagnostic, renderSpawnTask, type FacadeDriveResult, type RegisteredWaveGateProgram } from './helpers';
 
-export const waveGateDeps = Object.freeze({
+const waveGateDeps = Object.freeze({
   loadPlanModels: loadPlanModelsSource,
   filePresence: inspectFilePresence,
   reviewedWorkspace: observeReviewedWorkspace,
@@ -135,7 +135,7 @@ export function waveGateDecisionMismatch(
     : `decision request ${decisionId} is not the exact pending advisory request ${pending.value.requestId}`;
 }
 
-export function waveBlocked(handle: RunDirHandle, message: string): FacadeDriveResult {
+function waveBlocked(handle: RunDirHandle, message: string): FacadeDriveResult {
   return { ok: true, action: { kind: "blocked", runId: handle.runId, diagnostic: { kind: "wave-gate-blocked", message } } };
 }
 
@@ -221,7 +221,7 @@ function replacementWaveGate(
  * invalidated. Review Generation stays stable because implementation bytes did
  * not change; fresh packet, epoch, and Run identities reject stale transcripts.
  */
-export function prepareExhaustedWaveGateRestart(
+function prepareExhaustedWaveGateRestart(
   graph: TaskGraph,
   previousRunId: string,
   previous: RegisteredWaveGateProgram,
@@ -432,7 +432,7 @@ function issuedWaveProtocol(
   return issued.value;
 }
 
-export function resolveWaveReviewerTranscript(
+function resolveWaveReviewerTranscript(
   task: Task, agent: string, bytes: Uint8Array, protocol: IssuedWaveReviewerProtocol,
 ) {
   if (protocol.subject.taskId !== task.id || protocol.request.role !== agent ||
@@ -453,7 +453,7 @@ export function resolveWaveReviewerTranscript(
   return resolveIssuedTaskReviewFindings(protocol, bytes);
 }
 
-export function reviewerRejectionReason(
+function reviewerRejectionReason(
   task: Task, agent: string, bytes: Uint8Array, protocol: IssuedWaveReviewerProtocol,
 ): string | null {
   const resolution = resolveWaveReviewerTranscript(task, agent, bytes, protocol);
@@ -538,7 +538,7 @@ function boundedRetryReason(reason: string): string {
   return bounded;
 }
 
-export function waveRetryDiagnosticText(reason: string): string {
+function waveRetryDiagnosticText(reason: string): string {
   return `${WAVE_RETRY_PREAMBLE}${reason}\n\n${WAVE_RETRY_FIXED_TAIL}`;
 }
 
@@ -968,7 +968,7 @@ function readWaveRequestContext(
   return { ok: true, packet: packet.value, context };
 }
 
-export function waveReviewContextTaskId(context: WaveReviewContextRead): string | null {
+function waveReviewContextTaskId(context: WaveReviewContextRead): string | null {
   return context.kind === "loaded" ? (context.value.taskRun?.taskId ?? null) : null;
 }
 
@@ -1045,7 +1045,7 @@ export function waveRefutationCommitProblem(
     : "Refutation Panel findings differ from the locked current-Wave Finding authority";
 }
 
-export function waveRefutationPreparation(
+function waveRefutationPreparation(
   handle: RunDirHandle,
   readiness: Extract<ReturnType<typeof deriveWaveReadiness>, { ok: true }>["value"],
 ) {
@@ -1159,7 +1159,7 @@ export function persistedWaveAttemptTwoCompatibilityProblem(
   return null;
 }
 
-export async function exhaustedWaveReviewerAttempts(
+async function exhaustedWaveReviewerAttempts(
   handle: RunDirHandle,
   graph: TaskGraph,
   registration: RegisteredWaveGateProgram,
@@ -1490,7 +1490,7 @@ export async function startWaveGateFacade(
   }
 }
 
-export async function markWaveSpecCheckRetryIssued(
+async function markWaveSpecCheckRetryIssued(
   manager: StateManager,
   authority: AgentRequestAuthority,
   batchEpoch: string,

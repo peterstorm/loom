@@ -334,7 +334,7 @@ export function rejectedChildWriteGrantBlock(rejected: boolean): Readonly<{ bloc
     : null;
 }
 
-export function piSystemAgentIdentity(systemPrompt: string): string {
+function piSystemAgentIdentity(systemPrompt: string): string {
   PI_AGENT_ID_MARKER.lastIndex = 0;
   const matches = [...systemPrompt.matchAll(PI_AGENT_ID_MARKER)];
   if (matches.length !== 1) throw new Error("child system prompt must contain exactly one Loom Pi agent identity");
@@ -372,7 +372,7 @@ export function piSpawnCwd(raw: unknown, index: number, defaultCwd: string): str
 /** The string command carried by a well-formed Pi bash call. Malformed
  * external input remains distinguishable so an armed state-file guard can fail
  * closed instead of treating input-shape drift as an allowed empty command. */
-export function piBashCommand(raw: unknown): string | null {
+function piBashCommand(raw: unknown): string | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
   const command = (raw as Record<string, unknown>).command;
   return typeof command === "string" ? command : null;
@@ -552,7 +552,7 @@ function sessionRunBinding(
  * authority cannot be recorded. The tool-call guard catches the failure,
  * rolls back lifecycle reservations, and refuses dispatch.
  */
-export async function recordPiSpawnCorrelators(
+async function recordPiSpawnCorrelators(
   items: readonly Readonly<{ agent: string; task: string }>[],
   rosterIds: readonly string[],
   rawSessionId: string,

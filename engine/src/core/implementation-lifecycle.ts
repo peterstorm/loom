@@ -11,7 +11,7 @@ import {
   type VerificationPolicy,
 } from "./verification-policy";
 
-export const ATTESTATION_VERIFICATION_POLICY: VerificationPolicy = Object.freeze({
+const ATTESTATION_VERIFICATION_POLICY: VerificationPolicy = Object.freeze({
   regression: Object.freeze({ kind: "required" }),
   newTests: Object.freeze({ kind: "waived", reason: "existing-tests-sufficient" }),
 });

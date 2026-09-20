@@ -30,7 +30,7 @@ import { renderImplementationLifecycleError } from "./implementation-lifecycle-e
 const MAX_REMEDIATION_REASON = 512;
 
 /** Parse the operation's exact argument surface; unknown flags fail closed. */
-export function parseRemediationArgs(args: readonly string[]):
+function parseRemediationArgs(args: readonly string[]):
   | Readonly<{ ok: true; value: { taskId: TaskId; terminalReceiptId: string; reason: string } }>
   | Readonly<{ ok: false; message: string }> {
   const parsed = parseTaskReasonArguments(args, {
