@@ -153,7 +153,7 @@ export function observeStandaloneSuccessorSource(scope: readonly string[], readH
 }
 
 export function successorSourceSnapshot(section: ByteSection, scope: readonly string[]): ProgramParse<StandaloneSnapshot> {
-  if (section.label !== "standalone-frozen-source" || section.byteLength !== section.bytes.length || hash(Uint8Array.from(section.bytes)) !== section.digest) {
+  if (section.label !== "standalone-frozen-source" || section.byteLength !== section.bytes.byteLength || hash(Uint8Array.from(section.bytes)) !== section.digest) {
     return fail("frozen successor source section identity differs from its exact bytes");
   }
   const decoded = parseBoundedReviewerJson(Uint8Array.from(section.bytes), SUCCESSOR_CONTEXT_PAYLOAD_BYTES);

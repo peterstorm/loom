@@ -48,7 +48,7 @@ export function parseContextProjectionArguments(args: readonly string[]): Domain
     ...(purpose === undefined ? {} : { purpose }) } };
 }
 
-const decode = (bytes: readonly number[]): string => new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes));
+const decode = (bytes: Iterable<number>): string => new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes));
 const record = (raw: unknown): raw is Record<string, unknown> => typeof raw === "object" && raw !== null && !Array.isArray(raw);
 
 function fileText(packet: ProjectedPacket, path: string): DomainResult<string, string> {

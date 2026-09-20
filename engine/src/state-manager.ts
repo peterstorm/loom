@@ -2480,6 +2480,19 @@ export type RegisteredWaveGateCompletionReplayError = Readonly<{
   message: string;
 }>;
 
+type AbandonedWaveGateRegistration = Extract<
+  ActiveWaveGateRegistration,
+  { terminalOutcome: { kind: "terminal-abandoned" } }
+>;
+
+export type ActiveWaveGateAbandonmentResult =
+  | Readonly<{ kind: "stamped"; registration: AbandonedWaveGateRegistration }>
+  | Readonly<{ kind: "replayed"; registration: AbandonedWaveGateRegistration }>
+  | Readonly<{
+      kind: "not-targeted";
+      reason: "registration-absent" | "authority-mismatch" | "terminal-conflict";
+    }>;
+
 export function findRegisteredWaveGateCompletionReplay(
   graph: TaskGraph,
   authority: ActiveWaveGateRegistration,
@@ -2700,6 +2713,13 @@ export class StateManager {
             `Legacy terminal Wave Gate run ${existing.runId} must be explicitly migrated to terminal history before registering another run`,
           );
         }
+        if (existing.terminalOutcome.supersededBy !== null &&
+            existing.terminalOutcome.supersededBy !== registration.runId) {
+          throw new Error(
+            `Abandoned Wave Gate run ${existing.runId} authorizes successor ${existing.terminalOutcome.supersededBy}, ` +
+            `not ${registration.runId}`,
+          );
+        }
         // An operator-abandoned tombstone is not authority for the Wave: the
         // fresh registration supersedes it below. Roster and digest are still
         // re-proven against the locked state, and the tombstone is NOT
@@ -2732,11 +2752,8 @@ export class StateManager {
    * constructed directly: the stored form is parser-proven, and the state
    * boundary refuses to persist what its own parser would reject.
    *
-   * No-op (returns `null`) when there is no active registration, the run id
-   * does not match, or the registration is already terminal some other way —
-   * the run-directory marker is the operator's decision of record in those
-   * cases and the state simply has nothing to tombstone. A repeat of the
-   * exact same stamp is an idempotent replay.
+   * A non-targeted result names why no protected registration changed. Exact
+   * repeat is a distinct replay result, not another apparent write.
    */
   async abandonActiveWaveGateRegistration(
     abandonment: Readonly<{
@@ -2745,26 +2762,39 @@ export class StateManager {
       reason: string;
       supersededBy: ActiveWaveGateRegistration["runId"] | null;
     }>,
-  ): Promise<ActiveWaveGateRegistration | null> {
-    return this.updateAndReturn((state) => {
+  ): Promise<ActiveWaveGateAbandonmentResult> {
+    return this.updateAndReturn<ActiveWaveGateAbandonmentResult>((state) => {
       const active = state.active_wave_gate;
-      if (active === undefined || active.runsRoot !== abandonment.runsRoot || active.runId !== abandonment.runId) {
-        return { state, value: null };
+      if (active === undefined) {
+        return { state, value: Object.freeze({ kind: "not-targeted" as const, reason: "registration-absent" as const }) };
+      }
+      if (active.runsRoot !== abandonment.runsRoot || active.runId !== abandonment.runId) {
+        return { state, value: Object.freeze({ kind: "not-targeted" as const, reason: "authority-mismatch" as const }) };
       }
       if (active.terminalOutcome !== null) {
-        return active.terminalOutcome.kind === "terminal-abandoned" &&
-          active.terminalOutcome.reason === abandonment.reason &&
-          active.terminalOutcome.supersededBy === abandonment.supersededBy
-          ? { state, value: active }
-          : { state, value: null };
+        if (active.terminalOutcome.kind === "terminal-abandoned" &&
+            active.terminalOutcome.reason === abandonment.reason &&
+            active.terminalOutcome.supersededBy === abandonment.supersededBy) {
+          const registration: AbandonedWaveGateRegistration = Object.freeze({
+            ...active,
+            terminalOutcome: active.terminalOutcome,
+          });
+          return { state, value: Object.freeze({ kind: "replayed" as const, registration }) };
+        }
+        return { state, value: Object.freeze({ kind: "not-targeted" as const, reason: "terminal-conflict" as const }) };
       }
       const outcome = parseActiveWaveGateTerminalOutcome(
         { kind: "terminal-abandoned", reason: abandonment.reason, supersededBy: abandonment.supersededBy },
         active.runId,
       );
-      if (!outcome.ok) throw new Error(`Invalid Wave Gate abandonment stamp: ${outcome.error}`);
-      const stamped: ActiveWaveGateRegistration = Object.freeze({ ...active, terminalOutcome: outcome.value });
-      return { state: { ...state, active_wave_gate: stamped }, value: stamped };
+      if (!outcome.ok || outcome.value?.kind !== "terminal-abandoned") {
+        throw new Error(`Invalid Wave Gate abandonment stamp: ${outcome.ok ? "unexpected outcome" : outcome.error}`);
+      }
+      const stamped = Object.freeze({ ...active, terminalOutcome: outcome.value });
+      return {
+        state: { ...state, active_wave_gate: stamped },
+        value: Object.freeze({ kind: "stamped" as const, registration: stamped }),
+      };
     });
   }
 

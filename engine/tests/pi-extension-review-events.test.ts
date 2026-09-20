@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
@@ -69,7 +69,9 @@ const extension = async (): Promise<FakePi> => {
 };
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
-const temp = canonicalTempDir("loom-pi-review-events-");
+const fixtureBase = join(ROOT, ".loom", "completion-reports");
+mkdirSync(fixtureBase, { recursive: true });
+const temp = realpathSync.native(mkdtempSync(join(fixtureBase, "loom-pi-review-events-")));
 const specCheckPlanPath = join(temp, "spec-check-authority-plan.md");
 const specCheckPlanBytes = "# Plan\n";
 writeFileSync(specCheckPlanPath, specCheckPlanBytes);

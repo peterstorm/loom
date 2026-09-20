@@ -100,7 +100,7 @@ export async function prepareStandaloneSuccessorFacadeStart(runsRoot: string, ru
 export async function startPreparedStandaloneSuccessor(handle: RunDirHandle,
   prepared: Extract<Awaited<ReturnType<typeof prepareStandaloneSuccessorFacadeStart>>, { ok: true }>["value"]): Promise<FacadeDriveResult> {
   if (!preparedSuccessorStarts.has(prepared) || handle.runId !== prepared.authority.runId) return failed("successor start requires this Run's actual bounded preflight");
-  const registered = await handle.registerProgram(prepared.registration);
+  const registered = await handle.registerProgram(JSON.parse(JSON.stringify(prepared.registration)) as unknown);
   if (!registered.ok) return failed(registered.error.message);
   if (await handle.readCheckpoint(16_777_216) !== null) return resumeStandaloneFacade(handle, prepared.registration);
   // Initial publication owns attempt-one packets; freeze only retries here to avoid duplicate serialization/writes.

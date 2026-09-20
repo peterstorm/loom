@@ -554,7 +554,7 @@ function currentWaveRetryDiagnosticText(reason: string): string {
  * `<fixed preamble><non-empty reason>\n\n<fixed schema tail>`.
  */
 export function parseWaveRetryDiagnosticSection(
-  bytes: readonly number[],
+  bytes: Iterable<number>,
   protocolVersion: 1 | 2,
 ): Readonly<{ ok: true; reason: string }> | Readonly<{ ok: false; message: string }> {
   let text: string;
@@ -660,7 +660,7 @@ function persistedWaveReviewerRetry(
   if (!second.ok) throw new Error(second.error.message);
   const problem = persistedWaveAttemptTwoCompatibilityProblem(first, stored[0], protocol.packet, second.value);
   if (problem !== null) throw new Error(problem);
-  if (protocol.protocolVersion === 2 && !canonicalStructuralEquals(derived.packet, second.value)) {
+  if (protocol.protocolVersion === 2 && derived.packet.digest !== second.value.digest) {
     throw new Error("current retry diagnostic differs from the captured attempt-1 rejection");
   }
   return { request: { authority: stored[0], context: { digest: second.value.digest,
@@ -1099,6 +1099,15 @@ export function waveRefutationPreparation(
   return { panel: panel.value, inputs, packets, retryInputs, threshold: defaultRefutationThreshold(plan.value.lenses.length) };
 }
 
+const sameContextSections = (
+  left: ContextPacket["fixedContext"],
+  right: ContextPacket["fixedContext"],
+): boolean => left.length === right.length && left.every((section, index) => {
+  const candidate = right[index];
+  return candidate !== undefined && section.label === candidate.label &&
+    section.byteLength === candidate.byteLength && section.digest === candidate.digest;
+});
+
 export function persistedWaveAttemptTwoCompatibilityProblem(
   attemptOne: AgentRequestAuthority,
   attemptTwo: AgentRequestAuthority,
@@ -1132,13 +1141,13 @@ export function persistedWaveAttemptTwoCompatibilityProblem(
         !canonicalStructuralEquals(first.reviewerProtocol, second.reviewerProtocol))) ||
       second.digest !== attemptTwo.contextDigest || second.requestId !== attemptTwo.requestId || second.role !== first.role ||
       second.requiredSkill !== first.requiredSkill || second.outputContract !== first.outputContract ||
-      !canonicalStructuralEquals(second.fixedContext, first.fixedContext)) {
+      !sameContextSections(second.fixedContext, first.fixedContext)) {
     return "persisted attempt-2 context changed fixed attempt-1 authority";
   }
 
-  const unchangedLegacyContext = canonicalStructuralEquals(second.variableContext, first.variableContext);
+  const unchangedLegacyContext = sameContextSections(second.variableContext, first.variableContext);
   const diagnostic = second.variableContext.length === first.variableContext.length + 1 &&
-    canonicalStructuralEquals(second.variableContext.slice(0, -1), first.variableContext) &&
+    sameContextSections(second.variableContext.slice(0, -1), first.variableContext) &&
     second.variableContext.at(-1)?.label === "wave-review-attempt-1-rejection"
     ? parseWaveRetryDiagnosticSection(second.variableContext.at(-1)!.bytes, first.schemaVersion)
     : ({ ok: false as const, message: "attempt-2 context carries no wave-review-attempt-1-rejection section" });

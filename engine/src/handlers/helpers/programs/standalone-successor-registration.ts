@@ -78,6 +78,16 @@ export function parseStandaloneSuccessorStartInput(raw: unknown): ProgramParse<S
     successor: Object.freeze({ source: source.data, disposition }) }) };
 }
 
+function boundedSectionBytes(raw: unknown, maximum: number): readonly number[] | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const iterable = (raw as { [Symbol.iterator]?: unknown })[Symbol.iterator];
+  if (!Array.isArray(raw) && typeof iterable !== "function") return null;
+  const bytes = Array.from(raw as Iterable<unknown>);
+  return bytes.length <= maximum && bytes.every(byte => Number.isInteger(byte) && (byte as number) >= 0 && (byte as number) <= 255)
+    ? bytes as number[]
+    : null;
+}
+
 /** Structural dispatch only. LC-2 parsing additionally requires independently authenticated nominal successor data. */
 export function parseStandaloneSuccessorRegistration(raw: unknown): ProgramParse<RegisteredStandaloneSuccessorProgram> {
   if (!exact(raw, ["schemaVersion", "kind", "reviewerProtocol", "input", "authority", "currentSource", "previousContexts"]) ||
@@ -86,23 +96,28 @@ export function parseStandaloneSuccessorRegistration(raw: unknown): ProgramParse
   const input = parseStandaloneSuccessorStartInput(raw.input);
   if (!descriptor.ok) return bad(descriptor.error.message);
   if (!input.ok) return input;
-  if (!exact(raw.currentSource, ["label", "bytes", "digest", "byteLength"]) || raw.currentSource.label !== "standalone-frozen-source" ||
-      !Array.isArray(raw.currentSource.bytes) || raw.currentSource.bytes.length > 4_194_304 ||
-      raw.currentSource.bytes.some(byte => !Number.isInteger(byte) || byte < 0 || byte > 255)) return bad("invalid bounded frozen successor source section");
+  if (!exact(raw.currentSource, ["label", "bytes", "digest", "byteLength"]) || raw.currentSource.label !== "standalone-frozen-source") {
+    return bad("invalid bounded frozen successor source section");
+  }
+  const currentBytes = boundedSectionBytes(raw.currentSource.bytes, 4_194_304);
+  if (currentBytes === null) return bad("invalid bounded frozen successor source section");
   try {
-    const decoded = parseBoundedReviewerJson(Uint8Array.from(raw.currentSource.bytes), STANDALONE_LINEAGE_LIMITS.retainedBytes);
+    const decoded = parseBoundedReviewerJson(Uint8Array.from(currentBytes), STANDALONE_LINEAGE_LIMITS.retainedBytes);
     if (!decoded.ok) return bad(decoded.error.message);
-    const section = encodeByteSection("standalone-frozen-source", new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(raw.currentSource.bytes)));
+    const section = encodeByteSection("standalone-frozen-source", new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(currentBytes)));
     if (!section.ok) return bad(`frozen successor source section could not be encoded: ${section.error.message}`);
     if (section.value.digest !== raw.currentSource.digest || section.value.byteLength !== raw.currentSource.byteLength) return bad("frozen successor source section differs from exact bytes");
     if (!Array.isArray(raw.previousContexts) || raw.previousContexts.length > STANDALONE_REVIEWER_ROLES.length * 2 + 1) return bad("bounded predecessor contexts are required");
     const previousContexts: ByteSection[] = [];
     let remaining = 2_097_152;
     for (const previous of raw.previousContexts) {
-      if (!exact(previous, ["label", "bytes", "digest", "byteLength"]) || typeof previous.label !== "string" ||
-          !Array.isArray(previous.bytes) || previous.bytes.length > remaining || previous.bytes.some(byte => !Number.isInteger(byte) || byte < 0 || byte > 255)) return bad("invalid bounded predecessor context section");
-      remaining -= previous.bytes.length;
-      const section = encodeByteSection(previous.label, new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(previous.bytes)));
+      if (!exact(previous, ["label", "bytes", "digest", "byteLength"]) || typeof previous.label !== "string") {
+        return bad("invalid bounded predecessor context section");
+      }
+      const previousBytes = boundedSectionBytes(previous.bytes, remaining);
+      if (previousBytes === null) return bad("invalid bounded predecessor context section");
+      remaining -= previousBytes.length;
+      const section = encodeByteSection(previous.label, new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(previousBytes)));
       if (!section.ok) return bad(`predecessor context section could not be encoded: ${section.error.message}`);
       if (section.value.digest !== previous.digest || section.value.byteLength !== previous.byteLength) return bad("predecessor context section differs from exact bytes");
       previousContexts.push(section.value);

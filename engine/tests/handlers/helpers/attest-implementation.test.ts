@@ -12,10 +12,8 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  attestOperation,
-  planAttestation,
-} from "../../../src/handlers/helpers/attest-implementation";
+import { attestOperation } from "../../../src/handlers/helpers/attest-implementation";
+import { armImplementationAttestation } from "../../../src/core/implementation-lifecycle";
 import {
   deriveImplementationAttestationContext,
   deriveImplementationRetryDisposition,
@@ -23,6 +21,7 @@ import {
 import { evaluateTaskProof } from "../../../src/core/proof-obligations";
 import { parseTaskGraph, StateManager } from "../../../src/state-manager";
 import type { Task } from "../../../src/types";
+import { implementationEscalatedTaskFields } from "../../fixtures/implementation-escalation";
 
 const cleanup: string[] = [];
 let previousLoomStatePath: string | undefined;
@@ -152,7 +151,7 @@ describe("orchestration attest arms implementation re-attestation", () => {
     expect(await attestOperation(["--task", "T1", "--task", "T2", "--reason", "r"])).toMatchObject({ kind: "error" });
   });
 
-  it("plans against a real StateManager graph and refuses completed, implemented, satisfied, and escalated tasks", async () => {
+  it("derives one aggregate command and types completed, implemented, satisfied, and escalated refusals", async () => {
     installState();
     const manager = StateManager.fromPath(statePath);
     if (manager === null) throw new Error("fixture state manager missing");
@@ -160,36 +159,34 @@ describe("orchestration attest arms implementation re-attestation", () => {
     // Test-fixture variants of the same stored Task: the invalid states are not
     // representable through the load boundary, so the cast is confined here.
     const variant = (overrides: Record<string, unknown>): Task => ({ ...pending, ...overrides } as unknown as Task);
-    const plan = planAttestation(pending, { executing: false });
-    expect(plan).toMatchObject({ ok: true });
-    if (!plan.ok) return;
-    expect(plan.value.obligations).toEqual([
+    const command = armImplementationAttestation(pending, { executing: false });
+    expect(command).toMatchObject({ ok: true });
+    if (!command.ok) return;
+    expect(command.value.plan.obligations).toEqual([
       "task-completed", "regression-test-pass", "attempt-scope-attested", "declared-artifact-attested:src/a.ts",
     ]);
-    expect(plan.value.attestationProofDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(command.value.plan.attestationProofDigest).toMatch(/^[0-9a-f]{64}$/);
 
-    expect(planAttestation(variant({ status: "implemented" }), { executing: false })).toMatchObject({
+    expect(armImplementationAttestation(variant({ status: "implemented" }), { executing: false })).toMatchObject({
       ok: false,
-      message: expect.stringContaining("attestation applies only to pending"),
+      error: { kind: "task-not-pending", status: "implemented" },
     });
-    expect(planAttestation(variant({ status: "completed" }), { executing: false })).toMatchObject({ ok: false });
-    expect(planAttestation(variant({ status: "failed" }), { executing: false })).toMatchObject({ ok: false });
-    expect(planAttestation(variant({ reserved_at: "2026-09-19T00:00:00.000Z" }), { executing: false })).toMatchObject({
-      ok: false,
-      message: expect.stringContaining("live implementation attempt"),
-    });
+    expect(armImplementationAttestation(variant({ status: "completed" }), { executing: false }))
+      .toMatchObject({ ok: false, error: { kind: "task-not-pending", status: "completed" } });
+    expect(armImplementationAttestation(variant({ status: "failed" }), { executing: false }))
+      .toMatchObject({ ok: false, error: { kind: "task-not-pending", status: "failed" } });
+    expect(armImplementationAttestation(variant({ reserved_at: "2026-09-19T00:00:00.000Z" }), { executing: false }))
+      .toMatchObject({ ok: false, error: { kind: "live-attempt", operation: "attestation" } });
     const satisfiedProof = evaluateTaskProof(
       { newTestsRequired: true, declaredArtifacts: ["src/a.ts"] },
       { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/a.ts"], newTestsWritten: true, newTestEvidence: "one focused regression" },
     );
     expect(satisfiedProof.state).toBe("satisfied");
-    expect(planAttestation(variant({ proof: satisfiedProof, revalidation_required: true }), { executing: false })).toMatchObject({
-      ok: false,
-      message: expect.stringContaining("already carries satisfied proof"),
-    });
-    expect(planAttestation(variant({ implementation_attestation: true }), { executing: false })).toMatchObject({
-      ok: false,
-      message: expect.stringContaining("already in attestation mode"),
-    });
+    expect(armImplementationAttestation(variant({ proof: satisfiedProof, revalidation_required: true }), { executing: false }))
+      .toMatchObject({ ok: false, error: { kind: "proof-already-satisfied" } });
+    expect(armImplementationAttestation(variant({ implementation_attestation: true }), { executing: false }))
+      .toMatchObject({ ok: false, error: { kind: "already-attested" } });
+    expect(armImplementationAttestation(variant(implementationEscalatedTaskFields()), { executing: false }))
+      .toMatchObject({ ok: false, error: { kind: "terminal-escalation" } });
   });
 });

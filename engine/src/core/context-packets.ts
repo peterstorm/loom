@@ -54,12 +54,25 @@ const CONTEXT_SECTION_FIELDS: ReadonlySet<string> = new Set([
   "bytes",
 ]);
 
+/** Immutable byte sequence. Deliberately not Array-shaped: reflection and
+ * cloning semantics are not part of the Context Packet contract. */
+export type ImmutableByteSequence = Readonly<{
+  readonly [index: number]: number;
+  length: number;
+  byteLength: number;
+  at(index: number): number | undefined;
+  slice(start?: number, end?: number): readonly number[];
+  some(predicate: (byte: number, index: number) => boolean): boolean;
+  toJSON(): readonly number[];
+  [Symbol.iterator](): IterableIterator<number>;
+}>;
+
 /** One labelled, digested run of exact bytes inside a packet. */
 export type ByteSection = Readonly<{
   label: string;
   byteLength: ArtifactByteLength;
   digest: ArtifactDigest;
-  bytes: readonly number[];
+  bytes: ImmutableByteSequence;
 }>;
 
 export type LegacyContextPacket = Readonly<{
@@ -106,46 +119,44 @@ const sealedSectionJson = new WeakMap<ByteSection, string>();
 const isByte = (value: unknown): value is number =>
   typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 255;
 
-const COMPACT_BYTE_STORAGE_THRESHOLD = 64 * 1024;
-const immutableByteStorage = new WeakMap<readonly number[], Uint8Array>();
-function byteIndex(property: PropertyKey, length: number): number | null {
-  if (typeof property !== "string") return null;
-  const index = Number(property);
-  return Number.isInteger(index) && index >= 0 && index < length && String(index) === property ? index : null;
+const immutableByteStorage = new WeakMap<object, Uint8Array>();
+
+function storedBytes(sequence: ImmutableByteSequence): Uint8Array {
+  const stored = immutableByteStorage.get(sequence);
+  if (stored === undefined) throw new TypeError("unrecognized immutable byte sequence");
+  return stored;
 }
 
-/**
- * A frozen dense number[] makes Bun rewrite every indexed property; multi-MiB
- * Context Packet sections consequently spent minutes in Object.freeze. Keep
- * the public readonly-array contract while storing bytes in an unexposed
- * typed array behind a frozen holey-array view. Array indexing, iteration,
- * methods, Buffer.from and JSON.stringify retain their ordinary values; no
- * per-byte mutable property exists for a caller to alter. Small sections stay
- * dense so ordinary reflective/deep-equality behavior remains unchanged.
- */
-function immutableBytes(owned: Uint8Array): readonly number[] {
-  if (owned.length <= COMPACT_BYTE_STORAGE_THRESHOLD) {
-    const dense = Object.freeze(Array.from(owned));
-    immutableByteStorage.set(dense, owned);
-    return dense;
-  }
-  const target = new Array<number>(owned.length);
-  Object.freeze(target);
-  const view = new Proxy(target, {
-    get(array, property, receiver) {
-      if (property === Symbol.iterator) return () => owned.values();
-      const index = byteIndex(property, owned.length);
-      return index === null ? Reflect.get(array, property, receiver) : owned[index];
-    },
-    has(array, property) {
-      return byteIndex(property, owned.length) !== null || Reflect.has(array, property);
+const immutableByteSequencePrototype: ImmutableByteSequence = Object.freeze({
+  get length(): number { return storedBytes(this).byteLength; },
+  get byteLength(): number { return storedBytes(this).byteLength; },
+  at(index: number): number | undefined { return storedBytes(this).at(index); },
+  slice(start?: number, end?: number): readonly number[] {
+    return Object.freeze(Array.from(storedBytes(this).slice(start, end)));
+  },
+  some(predicate: (byte: number, index: number) => boolean): boolean {
+    return storedBytes(this).some(predicate);
+  },
+  toJSON(): readonly number[] { return Array.from(storedBytes(this)); },
+  [Symbol.iterator](): IterableIterator<number> { return storedBytes(this).values(); },
+});
+
+/** Private compact storage with no reflective Array promises. */
+function immutableBytes(owned: Uint8Array): ImmutableByteSequence {
+  const target = Object.create(immutableByteSequencePrototype) as ImmutableByteSequence;
+  const sequence = new Proxy(target, {
+    get(object, property, receiver) {
+      if (typeof property === "string" && /^(?:0|[1-9][0-9]*)$/.test(property)) {
+        return owned.at(Number(property));
+      }
+      return Reflect.get(object, property, receiver);
     },
   });
-  immutableByteStorage.set(view, owned);
-  return view;
+  immutableByteStorage.set(sequence, owned);
+  return Object.freeze(sequence);
 }
 
-function digestBytes(bytes: readonly number[]): string {
+function digestBytes(bytes: ImmutableByteSequence | readonly number[]): string {
   return sha256Bytes(immutableByteStorage.get(bytes) ?? Uint8Array.from(bytes));
 }
 
@@ -156,7 +167,7 @@ function digestBytes(bytes: readonly number[]): string {
 export function encodeByteSection(label: string, text: string): DomainResult<ByteSection, ContextPacketError> {
   if (label.length === 0) return failure("label", "a context section label must not be empty");
   const bytes = immutableBytes(encoder.encode(text));
-  const byteLength = parseArtifactByteLength(bytes.length);
+  const byteLength = parseArtifactByteLength(bytes.byteLength);
   if (!byteLength.ok) return failure("byteLength", byteLength.error.message);
   const section = canonicalRecord({ label, byteLength: byteLength.value,
     digest: digestBytes(bytes) as ArtifactDigest, bytes });
@@ -191,13 +202,15 @@ export function contextPacketDigest(packet: ContextPacketIdentity): ContextDiges
   return sha256Hex(packetIdentity(packet)) as ContextDigest;
 }
 
+export type ByteSectionInput = Readonly<Omit<ByteSection, "bytes"> & { bytes: Iterable<number> }>;
+
 export type ContextPacketInput = Readonly<{
   requestId: RequestId;
   role: string;
   requiredSkill: string;
   outputContract: string;
-  fixedContext: readonly ByteSection[];
-  variableContext: readonly ByteSection[];
+  fixedContext: readonly ByteSectionInput[];
+  variableContext: readonly ByteSectionInput[];
 }>;
 
 /** Build a packet and seal it with its own digest. */
@@ -221,7 +234,7 @@ export function buildContextPacket(input: ContextPacketInput): DomainResult<Lega
       return failure(`${field}.label`, `a context section label must be unique: ${section.label}`);
     }
     labels.add(section.label);
-    if (sealedSections.has(section)) { canonicalSections.push(section); continue; }
+    if (sealedSections.has(section)) { canonicalSections.push(section as ByteSection); continue; }
     // Array.from materializes sparse holes as `undefined`; Array#every on the
     // caller's array would skip them and incorrectly accept a non-byte value.
     const bytes = Array.from(section.bytes);
@@ -267,7 +280,7 @@ function validateReviewerContract(base: LegacyContextPacket,
   for (const expected of expectedSections) {
     const actual = base.fixedContext.find((section) => section.label === expected.label);
     const bytes = encoder.encode(expected.text);
-    if (actual === undefined || actual.bytes.length !== bytes.length || actual.bytes.some((byte, index) => byte !== bytes[index])) {
+    if (actual === undefined || actual.bytes.byteLength !== bytes.length || actual.bytes.some((byte, index) => byte !== bytes[index])) {
       return failure("fixedContext", `${sectionKind} ${expected.label} must contain the exact supported bytes`);
     }
   }
@@ -299,7 +312,7 @@ function buildReviewerContractBase(input: Omit<ContextPacketInput, "outputContra
   if ([...input.fixedContext, ...input.variableContext].some((section) => reservedLabel(section.label))) {
     return failure("sections", "caller sections must not collide with reserved reviewer contract labels");
   }
-  const fixed: ByteSection[] = [...input.fixedContext];
+  const fixed: ByteSectionInput[] = [...input.fixedContext];
   for (const section of sections) {
     const encoded = encodeByteSection(section.label, section.text);
     if (!encoded.ok) return encoded;
@@ -358,6 +371,7 @@ function parseSection(raw: unknown, field: string): DomainResult<ByteSection, Co
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return failure(field, "a context section must be an object");
   }
+  if (sealedSections.has(raw)) return success(raw as ByteSection);
   const record = raw as Record<string, unknown>;
   const undeclaredField = Object.keys(record).find((key) => !CONTEXT_SECTION_FIELDS.has(key));
   if (undeclaredField !== undefined) {
@@ -366,15 +380,20 @@ function parseSection(raw: unknown, field: string): DomainResult<ByteSection, Co
   if (typeof record["label"] !== "string" || record["label"].length === 0) {
     return failure(`${field}.label`, "a context section label must be a non-empty string");
   }
-  if (!Array.isArray(record["bytes"])) return failure(`${field}.bytes`, "a context section must carry its bytes");
-  const bytes = Array.from(record["bytes"] as readonly unknown[]);
+  const rawBytes = record["bytes"];
+  const iterableBytes = typeof rawBytes === "object" && rawBytes !== null &&
+    typeof (rawBytes as { [Symbol.iterator]?: unknown })[Symbol.iterator] === "function";
+  if (!Array.isArray(rawBytes) && !iterableBytes) {
+    return failure(`${field}.bytes`, "a context section must carry iterable bytes");
+  }
+  const bytes = Array.from(rawBytes as Iterable<unknown>);
   if (!bytes.every(isByte)) {
     return failure(`${field}.bytes`, "a context section byte must be an integer from 0 through 255");
   }
   const materialised = immutableBytes(Uint8Array.from(bytes));
-  const byteLength = parseArtifactByteLength(materialised.length);
+  const byteLength = parseArtifactByteLength(materialised.byteLength);
   if (!byteLength.ok) return failure(`${field}.byteLength`, byteLength.error.message);
-  if (record["byteLength"] !== materialised.length) {
+  if (record["byteLength"] !== materialised.byteLength) {
     return failure(`${field}.byteLength`, "a context section length must equal its byte count");
   }
   const digest = digestBytes(materialised);
@@ -427,7 +446,7 @@ export function parseStandaloneReviewerContextPacketV3(raw: unknown): DomainResu
 }
 
 /** Exact JSON.stringify bytes; reuse only constructor/parser-owned immutable sections across the roster. */
-export function serializeStandaloneReviewerContextPacketV3(raw: StandaloneReviewerContextPacketV3): DomainResult<string, ContextPacketError> {
+export function serializeStandaloneReviewerContextPacketV3(raw: unknown): DomainResult<string, ContextPacketError> {
   const parsed = parseStandaloneReviewerContextPacketV3(raw);
   if (!parsed.ok) return parsed;
   const sectionJson = (section: ByteSection): string => {

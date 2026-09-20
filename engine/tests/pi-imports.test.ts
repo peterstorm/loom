@@ -192,7 +192,7 @@ describe("pi/ imports resolve against the engine that has to satisfy them", () =
     expect(IMPORTS.length).toBeGreaterThan(15);
     expect(IMPORTS.some((entry) => entry.values.length > 0)).toBe(true);
     expect(IMPORTS.some((entry) => entry.types.length > 0)).toBe(true);
-    expect(IMPORTS.some((entry) => entry.namespaceOnly)).toBe(true);
+    expect(IMPORTS.every((entry) => entry.namespaceOnly || entry.values.length > 0 || entry.types.length > 0)).toBe(true);
   });
 
   it("names the module every engine specifier points at", () => {

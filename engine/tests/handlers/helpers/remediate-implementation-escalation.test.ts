@@ -12,97 +12,16 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
-import { remediateOperation, planEscalationRemediation } from "../../../src/handlers/helpers/remediate-implementation-escalation";
+import { remediateOperation } from "../../../src/handlers/helpers/remediate-implementation-escalation";
+import { remediateImplementationEscalation } from "../../../src/core/implementation-lifecycle";
 import { deriveImplementationRetryDisposition } from "../../../src/core/implementation-retry";
 import {
-  createImplementationAttemptAuthority,
-  createTaskCompletionSuiteAuthority,
-  settleImplementationAttempt,
-  TASK_BYTE_SCOPE_CHECK_ID_TEXT,
-  type ImplementationAttemptSettlementReceipt,
-} from "../../../src/core/implementation-completion";
-import { TRUSTED_LEDGER_ONLY_POLICY, derivePendingTaskProof } from "../../../src/core/proof-obligations";
+  implementationEscalatedLineage,
+  implementationEscalatedTaskFields,
+} from "../../fixtures/implementation-escalation";
 import { parseTaskGraph } from "../../../src/state-manager";
 import type { Task } from "../../../src/types";
 
-const valueOf = <T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false; error?: { errors?: readonly string[] } | { message: string } }): T => {
-  if (!result.ok) throw new Error("fixture parse failed");
-  return result.value;
-};
-
-const authority = (semanticAttempt: 1 | 2, reservationId: string, second: number) =>
-  valueOf(createImplementationAttemptAuthority({
-    taskId: "T1",
-    wave: 1,
-    semanticAttempt,
-    reservationId,
-    headSha: "a".repeat(40),
-    reservedAt: `2026-09-01T00:00:${String(second).padStart(2, "0")}.000Z`,
-    taskScopeBaseline: [],
-    dirtySetBaseline: [],
-  }));
-
-const suite = (attempt: ReturnType<typeof authority>) => {
-  const authorized = valueOf(createTaskCompletionSuiteAuthority(attempt));
-  return {
-    schemaVersion: 1,
-    kind: "task-completion-suite-result",
-    implementationAuthorityDigest: authorized.implementationAuthorityDigest,
-    suiteDigest: authorized.suiteDigest,
-    checks: [{
-      checkId: TASK_BYTE_SCOPE_CHECK_ID_TEXT,
-      scope: "task",
-      outcome: { kind: "accepted", changedPaths: [] },
-    }],
-  };
-};
-
-const observation = (observedAt: string, taskCompleted: boolean) => ({
-  schemaVersion: 1,
-  kind: "implementation-observed",
-  observedAt,
-  evidence: {
-    taskCompleted,
-    testResult: { verdict: "trusted-pass" },
-    filesModified: [],
-    newTestsWritten: false,
-    newTestEvidence: "waived",
-  },
-  proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
-});
-
-const settle = (
-  attempt: ReturnType<typeof authority>,
-  history: readonly ImplementationAttemptSettlementReceipt[],
-  observed: unknown,
-): ImplementationAttemptSettlementReceipt => {
-  const result = settleImplementationAttempt({
-    id: "T1",
-    status: "pending",
-    proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: [] }),
-    active_implementation_attempt: attempt,
-    implementation_attempt_history: history,
-  }, attempt, attempt, observed, suite(attempt));
-  if (!result.ok || result.value.kind === "ignored") throw new Error("settlement fixture failed");
-  return result.value.receipt;
-};
-
-const escalatedLineage = () => {
-  const retry = settle(authority(1, "rsv-retry", 1), [], observation("2026-09-01T00:01:00.000Z", false));
-  const attempt2 = authority(2, "rsv-escalate", 2);
-  const escalation = settle(attempt2, [retry], observation("2026-09-01T00:02:00.000Z", false));
-  return { retry, attempt2, escalation };
-};
-
-const escalatedTaskFields = () => {
-  const { retry, escalation } = escalatedLineage();
-  return {
-    implementation_attempt_history: [retry, escalation],
-    implementation_retry_protocol: 2,
-    implementation_retry_history_start: 0,
-    terminal_receipt: escalation.receiptId,
-  };
-};
 
 const requireReceipt = (receiptId: string | null): string => {
   if (receiptId === null) throw new Error("escalated fixture must carry a terminal escalation receipt");
@@ -161,7 +80,7 @@ const installState = (taskFields: Record<string, unknown>): string | null => {
 
 describe("orchestration remediate consumes the escalation recovery", () => {
   it("appends one remediation receipt and resets the lineage to a fresh attempt 1", async () => {
-    const terminalReceiptId = requireReceipt(installState(escalatedTaskFields()));
+    const terminalReceiptId = requireReceipt(installState(implementationEscalatedTaskFields()));
     const before = readFileSync(statePath, "utf-8");
 
     const result = await remediateOperation([
@@ -194,7 +113,7 @@ describe("orchestration remediate consumes the escalation recovery", () => {
   });
 
   it("refuses a repeat after the reset without touching state", async () => {
-    const terminalReceiptId = requireReceipt(installState(escalatedTaskFields()));
+    const terminalReceiptId = requireReceipt(installState(implementationEscalatedTaskFields()));
     await remediateOperation(["--task", "T1", "--receipt", terminalReceiptId, "--reason", "first"]);
     const afterFirst = readFileSync(statePath, "utf-8");
 
@@ -208,7 +127,7 @@ describe("orchestration remediate consumes the escalation recovery", () => {
   });
 
   it("refuses a receipt that is not the task's terminal escalation", async () => {
-    installState(escalatedTaskFields());
+    installState(implementationEscalatedTaskFields());
     const wrong = await remediateOperation([
       "--task", "T1", "--receipt", "f".repeat(64), "--reason", "typo",
     ]);
@@ -219,7 +138,7 @@ describe("orchestration remediate consumes the escalation recovery", () => {
 
   it("refuses a live attempt, a legacy lineage, and an unknown task", async () => {
     const terminalReceiptId = requireReceipt(installState({
-      ...escalatedTaskFields(),
+      ...implementationEscalatedTaskFields(),
     }));
     // Live attempt: the task is still bound to executing_tasks.
     const raw = JSON.parse(readFileSync(statePath, "utf-8")) as { executing_tasks: string[] };
@@ -231,14 +150,16 @@ describe("orchestration remediate consumes the escalation recovery", () => {
     expect(live.message).toContain("live implementation attempt");
 
     // Legacy lineage: attempt-1 history with no protocol fields cannot even
-    // load (no compatibility projection) — the plan function refuses it too.
-    const legacyPlan = planEscalationRemediation(
-      { id: "T1", status: "pending", implementation_attempt_history: [escalatedLineage().retry] } as unknown as Task,
-      { executing: false, terminalReceiptId },
+    // load (no compatibility projection) — the aggregate command refuses it too.
+    const legacyCommand = remediateImplementationEscalation(
+      { id: "T1", status: "pending", implementation_attempt_history: [implementationEscalatedLineage().retry] } as unknown as Task,
+      {
+        executing: false,
+        terminalReceiptId,
+        observedAt: "2026-09-01T00:03:00.000Z",
+      },
     );
-    expect(legacyPlan).toMatchObject({ ok: false });
-    if (legacyPlan.ok) return;
-    expect(legacyPlan.message).toContain("attempt history requires protocol-2 retry lineage");
+    expect(legacyCommand).toMatchObject({ ok: false, error: { kind: "invalid-lineage" } });
 
     // Unknown task.
     const unknown = await remediateOperation(["--task", "T9", "--receipt", terminalReceiptId, "--reason", "who"]);
@@ -246,7 +167,7 @@ describe("orchestration remediate consumes the escalation recovery", () => {
   });
 
   it("requires the exact argument surface", async () => {
-    installState(escalatedTaskFields());
+    installState(implementationEscalatedTaskFields());
     expect(await remediateOperation(["--task", "T1"])).toMatchObject({ kind: "error" });
     expect(await remediateOperation(["--task", "T1", "--receipt", "a".repeat(64)]))
       .toMatchObject({ kind: "error" });

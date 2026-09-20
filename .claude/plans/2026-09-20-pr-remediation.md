@@ -41,7 +41,7 @@ Every canonical Finding ID appears exactly once below with status `repaired`. Al
   - `type-design-analyzer-1` → `repaired`
   - `type-design-analyzer-2` → `repaired`
 - DECLARED root cause: attestation reused generic retry/proof machinery without enforcing regression-required policy and zero delta over the complete Task-local Byte Scope.
-- DECLARED invariant: attestation is regression-required, any attempt-scope byte delta is `declared-artifact-drifted`, and drift cannot become an accepted retry baseline.
+- DECLARED invariant: attestation is regression-required, any attempt-scope byte delta is `attempt-scope-drifted`, declared-artifact writes additionally yield `declared-artifact-drifted`, and drift cannot become an accepted retry baseline.
 - Siblings:
   - `engine/src/state-manager.ts` → require regression verification at the load boundary.
   - `engine/src/core/proof-obligations.ts` → reject every attestation attempt with a non-empty complete scope delta.

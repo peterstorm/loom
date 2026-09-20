@@ -679,17 +679,27 @@ function gitRepositoryRootFrom(cwd: string): string | null {
   return observed.value.kind === "not-repository" ? null : observed.value.root;
 }
 
-/** Resolve the project boundary owning one selected TaskGraph. An explicit
- * LOOM_STATE_PATH may live below any repository directory, so only a Git root
- * observed from that State File's parent can authorize relative artifacts. */
-export function projectRootForTaskGraph(statePath: string): string {
+export type TaskGraphProjectBoundary =
+  | Readonly<{ kind: "git-repository"; root: string }>
+  | Readonly<{ kind: "state-layout"; root: string }>;
+
+/** Observe the project boundary owning one authoritative absolute TaskGraph.
+ *
+ * Every selected State File is probed from its own parent, never by resolving
+ * a possibly-relative LOOM_STATE_PATH against the caller's later cwd. A Git
+ * repository supplies first-class boundary authority. Proven non-repositories
+ * retain the canonical/legacy layout fallback used before Git authority was
+ * recorded; Git observation failures throw rather than fabricate a boundary. */
+export function observeTaskGraphProjectBoundary(statePath: string): TaskGraphProjectBoundary {
   const absolute = resolve(statePath);
-  const explicit = process.env.LOOM_STATE_PATH;
-  if (explicit !== undefined && resolve(explicit) === absolute) {
-    const root = gitRepositoryRootFrom(dirname(absolute));
-    if (root !== null) return projectRootForStateFile(absolute, root);
-  }
-  return projectRootForStateFile(absolute);
+  const root = gitRepositoryRootFrom(dirname(absolute));
+  return root === null
+    ? Object.freeze({ kind: "state-layout", root: projectRootForStateFile(absolute) })
+    : Object.freeze({ kind: "git-repository", root: projectRootForStateFile(absolute, root) });
+}
+
+export function projectRootForTaskGraph(statePath: string): string {
+  return observeTaskGraphProjectBoundary(statePath).root;
 }
 
 /** Find the task graph by walking up from the GIVEN cwd to its git root.

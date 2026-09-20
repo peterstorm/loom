@@ -19,53 +19,37 @@
  * state — the reset happened once.
  */
 
-import {
-  planEscalationRemediation as planEscalationRemediationCore,
-  remediateImplementationEscalation,
-  type RemediationPlan,
-} from "../../core/implementation-lifecycle";
-export type { RemediationPlan } from "../../core/implementation-lifecycle";
-import { parseTaskId, type TaskId } from "../../core/task-id";
+import { remediateImplementationEscalation } from "../../core/implementation-lifecycle";
+import type { TaskId } from "../../core/task-id";
 import { taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
-import type { HookResult, Task } from "../../types";
-import { argumentValue, unconsumedValueArguments } from "./cli-args";
+import type { HookResult } from "../../types";
+import { parseTaskReasonArguments } from "./cli-args";
+import { renderImplementationLifecycleError } from "./implementation-lifecycle-errors";
 
 const MAX_REMEDIATION_REASON = 512;
-
-function duplicateFlagError(flag: string): string {
-  return `remediate requires ${flag} exactly once`;
-}
 
 /** Parse the operation's exact argument surface; unknown flags fail closed. */
 export function parseRemediationArgs(args: readonly string[]):
   | Readonly<{ ok: true; value: { taskId: TaskId; terminalReceiptId: string; reason: string } }>
   | Readonly<{ ok: false; message: string }> {
-  const unconsumed = unconsumedValueArguments(args, new Set(["--task", "--receipt", "--reason"]));
-  if (unconsumed.length > 0) return { ok: false, message: `unknown or unconsumed argument(s): ${unconsumed.join(" ")}` };
-  const taskId = argumentValue(args, "--task");
-  const terminalReceiptId = argumentValue(args, "--receipt");
-  const reason = argumentValue(args, "--reason");
-  if (taskId === null) return { ok: false, message: "remediate requires --task <task-id>" };
-  if (terminalReceiptId === null) return { ok: false, message: "remediate requires --receipt <terminal escalation receipt id>" };
-  if (reason === null) return { ok: false, message: "remediate requires --reason <text>" };
-  if (reason.trim().length === 0 || reason.length > MAX_REMEDIATION_REASON) {
-    return { ok: false, message: `remediate --reason must be non-empty and at most ${MAX_REMEDIATION_REASON} characters` };
-  }
-  if (args.filter((arg) => arg === "--task").length > 1) return { ok: false, message: duplicateFlagError("--task") };
-  if (args.filter((arg) => arg === "--receipt").length > 1) return { ok: false, message: duplicateFlagError("--receipt") };
-  if (args.filter((arg) => arg === "--reason").length > 1) return { ok: false, message: duplicateFlagError("--reason") };
-  const parsedTaskId = parseTaskId(taskId, "remediate --task");
-  if (!parsedTaskId.ok) return { ok: false, message: parsedTaskId.error.errors.join("; ") };
-  return { ok: true, value: { taskId: parsedTaskId.value, terminalReceiptId, reason } };
-}
-
-/** Compatibility projection for callers that need only terminal planning. */
-export function planEscalationRemediation(
-  task: Task,
-  input: Readonly<{ executing: boolean; terminalReceiptId: string }>,
-): Readonly<{ ok: true; value: RemediationPlan }> | Readonly<{ ok: false; message: string }> {
-  return planEscalationRemediationCore(task, input);
+  const parsed = parseTaskReasonArguments(args, {
+    operation: "remediate",
+    maximumReasonLength: MAX_REMEDIATION_REASON,
+    additionalRequired: [{
+      flag: "--receipt",
+      missingMessage: "remediate requires --receipt <terminal escalation receipt id>",
+    }],
+  });
+  if (!parsed.ok) return parsed;
+  return {
+    ok: true,
+    value: {
+      taskId: parsed.value.taskId,
+      terminalReceiptId: parsed.value.additionalValues["--receipt"]!,
+      reason: parsed.value.reason,
+    },
+  };
 }
 
 export async function remediateOperation(args: readonly string[]): Promise<HookResult> {
@@ -88,7 +72,7 @@ export async function remediateOperation(args: readonly string[]): Promise<HookR
         terminalReceiptId,
         observedAt,
       });
-      if (!command.ok) throw new Error(command.message);
+      if (!command.ok) throw new Error(renderImplementationLifecycleError(command.error));
       remediationReceiptId = command.value.receipt.receiptId;
       return {
         ...state,

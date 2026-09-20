@@ -100,7 +100,10 @@ export async function prepareStandaloneSuccessorSource(input: StandaloneSuccesso
         ? previous.value.readStandaloneSuccessorContext(request.contextDigest, STANDALONE_LINEAGE_LIMITS.retainedBytes)
         : previous.value.readContext(request.contextDigest, STANDALONE_LINEAGE_LIMITS.retainedBytes);
       const decoded = parseBoundedReviewerJson(bytes, STANDALONE_LINEAGE_LIMITS.retainedBytes);
-      if (!packet.ok || !decoded.ok || !canonicalStructuralEquals(packet.value, decoded.value)) return { ok: false as const, message: "predecessor exact Context Packet bytes changed during observation" };
+      const projectedPacket = packet.ok ? JSON.parse(JSON.stringify(packet.value)) as unknown : null;
+      if (!packet.ok || !decoded.ok || !canonicalStructuralEquals(projectedPacket, decoded.value)) {
+        return { ok: false as const, message: "predecessor exact Context Packet bytes changed during observation" };
+      }
       // Exact published-byte references avoid recursively embedding predecessor packets.
       // Original files stay mandatory: neither source replay nor the reader can fall back.
       const label = `predecessor-context:${role}${request.attempt === 2 ? ":attempt-2" : ""}`;

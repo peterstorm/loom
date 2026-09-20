@@ -272,7 +272,7 @@ describe("completion check process shell", () => {
     expect(result.checkResult.outcome).toMatchObject({ kind: "spawn-failed" });
   });
 
-  it("rejects a successful parent whose redirected descendant survives and kills the whole group", async () => {
+  it("rejects a successful parent whose redirected descendant survives without signalling after leader close", async () => {
     const root = fixtureRoot();
     const sentinel = join(root, "parent-exit-sentinel");
     const result = await runCompletionCheck(check("parent-exits-with-descendant", {
@@ -283,8 +283,23 @@ describe("completion check process shell", () => {
       ok: false,
       error: { kind: "process-tree-survived", exitCode: 0, signal: null },
     });
-    await new Promise((resolve) => setTimeout(resolve, 450));
-    expect(existsSync(sentinel)).toBe(false);
+    expect(existsSync(sentinel)).toBe(true);
+  });
+
+  it("does not signal a same-UID group whose leader PID appeared only after parent close", async () => {
+    const signals: (number | NodeJS.Signals)[] = [];
+    const kill = vi.spyOn(process, "kill").mockImplementation(((_pid: number, signal?: number | NodeJS.Signals) => {
+      if (signal === 0) return true;
+      if (signal !== undefined) signals.push(signal);
+      throw new Error("a recycled group must not be signalled");
+    }) as typeof process.kill);
+    try {
+      const result = execution(await runCompletionCheck(check("missing-report"), fixtureRoot()));
+      expect(result.checkResult.outcome).toMatchObject({ kind: "observed", exitCode: 0, timedOut: false });
+      expect(signals).toEqual([]);
+    } finally {
+      kill.mockRestore();
+    }
   });
 
   it("kills timeout descendants before they can mutate the workspace", async () => {

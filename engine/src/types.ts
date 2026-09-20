@@ -766,7 +766,7 @@ export type ActiveWaveGateTerminalOutcome =
    *  the spec-trace retirement flow can still prove the run from it. */
   | Readonly<{ kind: "terminal-abandoned"; reason: string; supersededBy: OrchestrationRunId | null }>;
 
-export type ActiveWaveGateRegistration = Readonly<{
+type ProtectedWaveGateRegistrationBase = Readonly<{
   schemaVersion: 1;
   kind: "active-wave-gate";
   runId: OrchestrationRunId;
@@ -776,13 +776,23 @@ export type ActiveWaveGateRegistration = Readonly<{
   /** Absolute authoritative parent of this run. Absent only on registrations
    * created before directory authority was persisted. */
   runsRoot?: string;
-  /** Non-null only while reading a legacy terminal registration. New
-   * completions archive it in wave_gate_history and clear active authority.
-   * A `terminal-abandoned` tombstone marks an operator-retired run: no longer
-   * active authority (a fresh `start` supersedes it), but retained in place so
-   * the spec-trace retirement flow can still prove the exact run it abandoned. */
-  terminalOutcome: ActiveWaveGateTerminalOutcome | null;
 }>;
+
+/** Live authority and retained terminal audit are distinct states. */
+export type LiveWaveGateRegistration = Readonly<ProtectedWaveGateRegistrationBase & {
+  terminalOutcome: null;
+}>;
+
+export type RetiredWaveGateRegistration = ActiveWaveGateTerminalOutcome extends infer Outcome
+  ? Outcome extends ActiveWaveGateTerminalOutcome
+    ? Readonly<ProtectedWaveGateRegistrationBase & {
+        /** A retained terminal registration is audit only, never live authority. */
+        terminalOutcome: Outcome;
+      }>
+    : never
+  : never;
+
+export type ActiveWaveGateRegistration = LiveWaveGateRegistration | RetiredWaveGateRegistration;
 
 type CompletedWaveGateRegistrationCommon = Readonly<{
   kind: "completed-wave-gate";

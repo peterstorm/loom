@@ -11,10 +11,12 @@
  * appliers, from a process whose cwd is deliberately elsewhere.
  */
 
+import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { observeTaskGraphProjectBoundary } from "../../src/config";
 import { resolveTransition, projectRootForStateFile } from "../../src/handlers/subagent-stop/advance-phase";
 import {
   applyPhaseAgentPiResult,
@@ -46,6 +48,29 @@ describe("phase artifacts resolve against the graph's project boundary, not cwd"
     expect(projectRootForStateFile(join("/repo", ".claude", "state", "active_task_graph.json"))).toBe("/repo");
     expect(projectRootForStateFile(join("/repo", ".pi", "state", "active_task_graph.json"))).toBe("/repo");
     expect(projectRootForStateFile("/repo/active_task_graph.json")).toBe("/repo");
+  });
+
+  it("retains a relative nested override's Git boundary after cwd changes", () => {
+    const root = tempRoot();
+    const cwd = elsewhere();
+    const statePath = join(root, "custom", "state.json");
+    mkdirSync(join(root, "custom"), { recursive: true });
+    writeFileSync(statePath, "{}\n");
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    const previousCwd = process.cwd();
+    const previousOverride = process.env.LOOM_STATE_PATH;
+    process.env.LOOM_STATE_PATH = "custom/state.json";
+    process.chdir(cwd);
+    try {
+      expect(observeTaskGraphProjectBoundary(statePath)).toEqual({
+        kind: "git-repository",
+        root,
+      });
+    } finally {
+      process.chdir(previousCwd);
+      if (previousOverride === undefined) delete process.env.LOOM_STATE_PATH;
+      else process.env.LOOM_STATE_PATH = previousOverride;
+    }
   });
 
   it("advance-phase observes brainstorm artifacts under an explicit boundary while cwd is elsewhere", () => {
@@ -89,7 +114,10 @@ describe("phase artifacts resolve against the graph's project boundary, not cwd"
     const specDir = ".claude/specs/run";
     const brainstorm = join(specDir, "brainstorm.md");
     mkdirSync(join(root, specDir), { recursive: true });
+    mkdirSync(join(root, "custom"), { recursive: true });
     writeFileSync(join(root, brainstorm), "# Brainstorm\n");
+    writeFileSync(join(root, "custom", "state.json"), "{}\n");
+    execFileSync("git", ["init", "-q"], { cwd: root });
     const previousCwd = process.cwd();
     process.chdir(cwd);
     try {
@@ -138,7 +166,7 @@ describe("phase artifacts resolve against the graph's project boundary, not cwd"
       const applied = await applyPhaseAgentPiResult({
         store, agentType: "brainstorm-agent", completedPhase: "brainstorm" as Phase,
         result, now: "2026-09-19T00:00:00.000Z",
-        phaseArtifactBaseDir: projectRootForStateFile(join(root, ".claude", "state", "active_task_graph.json")),
+        phaseArtifactBaseDir: observeTaskGraphProjectBoundary(join(root, "custom", "state.json")).root,
       });
       expect(applied.processingErrors).toEqual([]);
       expect(store.current().current_phase).toBe("specify");

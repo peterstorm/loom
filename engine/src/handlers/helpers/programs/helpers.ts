@@ -622,7 +622,10 @@ function reviewerCompatibilityBootstrap(handle: RunDirHandle, request: AgentRequ
   const stored = handle.readProgramRegistration();
   if (!stored.ok) throw new Error("reviewer bootstrap registration is unavailable");
   const parsed = parseRegisteredFacadeProgram(stored.value);
-  if (parsed.kind !== "registered" || (parsed.program.kind !== "standalone-review" && parsed.program.kind !== "wave-gate")) throw new Error("reviewer bootstrap requires parsed program registration");
+  if (parsed.kind === "invalid") throw new Error(`reviewer bootstrap registration is invalid: ${parsed.message}`);
+  if (parsed.kind !== "registered" || (parsed.program.kind !== "standalone-review" && parsed.program.kind !== "wave-gate")) {
+    throw new Error("reviewer bootstrap requires parsed program registration");
+  }
   const version = parsed.program.schemaVersion;
   if (version === 3) {
     const published = publishedReviewerRequest(handle, request, 16_777_216);

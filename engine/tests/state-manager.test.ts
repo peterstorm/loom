@@ -1481,13 +1481,14 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
       const foreignRoot = await mgr.abandonActiveWaveGateRegistration({
         runsRoot: "/other-runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
       });
-      expect(foreignRoot).toBeNull();
+      expect(foreignRoot).toEqual({ kind: "not-targeted", reason: "authority-mismatch" });
       expect(mgr.load().active_wave_gate?.terminalOutcome).toBeNull();
 
       const stamped = await mgr.abandonActiveWaveGateRegistration({
         runsRoot: "/runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
       });
-      expect(stamped?.terminalOutcome).toEqual(tombstone());
+      expect(stamped).toMatchObject({ kind: "stamped", registration: { terminalOutcome: tombstone() } });
+      if (stamped.kind !== "stamped") throw new Error("abandonment fixture did not stamp");
       expect(mgr.load().active_wave_gate?.terminalOutcome).toEqual(tombstone());
 
       // Exact replay: same decision, no rewrite.
@@ -1495,20 +1496,20 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
       const replay = await mgr.abandonActiveWaveGateRegistration({
         runsRoot: "/runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
       });
-      expect(replay).toEqual(stamped);
+      expect(replay).toEqual({ kind: "replayed", registration: stamped.registration });
       expect(readFileSync(statePath, "utf-8")).toBe(before);
 
       // A conflicting reason is refused and leaves the stamp intact.
       const conflicting = await mgr.abandonActiveWaveGateRegistration({
         runsRoot: "/runs", runId: runId("run.first"), reason: "a different story", supersededBy: null,
       });
-      expect(conflicting).toBeNull();
+      expect(conflicting).toEqual({ kind: "not-targeted", reason: "terminal-conflict" });
       expect(mgr.load().active_wave_gate?.terminalOutcome).toEqual(tombstone());
 
       // A foreign run id and an absent registration are no-ops.
       expect(await mgr.abandonActiveWaveGateRegistration({
         runsRoot: "/runs", runId: runId("run.other"), reason: "gate terminally blocked", supersededBy: null,
-      })).toBeNull();
+      })).toEqual({ kind: "not-targeted", reason: "authority-mismatch" });
       expect(mgr.load().active_wave_gate?.terminalOutcome).toEqual(tombstone());
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1530,7 +1531,7 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
       const before = readFileSync(statePath, "utf-8");
       expect(await mgr.abandonActiveWaveGateRegistration({
         runsRoot: "/runs", runId: runId("run.done"), reason: "a different story", supersededBy: null,
-      })).toBeNull();
+      })).toEqual({ kind: "not-targeted", reason: "terminal-conflict" });
       expect(readFileSync(statePath, "utf-8")).toBe(before);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1560,6 +1561,28 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
       // poisons later starts for the same Wave, and an abandoned run was
       // never completed.
       expect(after.wave_gate_history).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("binds a named abandonment successor to exactly that fresh registration", async () => {
+    const dir = makeTmpDir();
+    const statePath = join(dir, "active_task_graph.json");
+    const graph = waveGraph as unknown as TaskGraph;
+    writeFileSync(statePath, JSON.stringify(graph));
+    chmodSync(statePath, 0o444);
+    try {
+      const mgr = new StateManager(statePath);
+      await mgr.registerActiveWaveGate(activeGate("run.first", mgr.load()), ["T1"]);
+      await mgr.abandonActiveWaveGateRegistration({
+        runsRoot: "/runs", runId: runId("run.first"), reason: "replaced", supersededBy: runId("run.expected"),
+      });
+
+      await expect(mgr.registerActiveWaveGate(activeGate("run.other", mgr.load()), ["T1"]))
+        .rejects.toThrow("authorizes successor run.expected, not run.other");
+      await mgr.registerActiveWaveGate(activeGate("run.expected", mgr.load()), ["T1"]);
+      expect(mgr.load().active_wave_gate?.runId).toBe("run.expected");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

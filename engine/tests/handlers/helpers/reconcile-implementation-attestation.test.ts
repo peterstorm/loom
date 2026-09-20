@@ -20,12 +20,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  ATTESTATION_VERIFICATION_POLICY,
-  attestedTask,
-} from "../../../src/handlers/helpers/attest-implementation";
+import { armImplementationAttestation } from "../../../src/core/implementation-lifecycle";
 import { derivePendingTaskProof } from "../../../src/core/proof-obligations";
-import { serializeVerificationPolicy } from "../../../src/core/verification-policy";
 import { captureDeclaredArtifactBaseline } from "../../../src/utils/artifact-baseline";
 import { parseTaskGraph } from "../../../src/state-manager";
 
@@ -61,7 +57,7 @@ function fixture(initialBytes: string): Fixture {
   execFileSync("git", ["commit", "--quiet", "-m", "wave 0 already did the work"], { cwd: root });
 
   const attemptBaseline = captureDeclaredArtifactBaseline(root, ["src/a.ts"]);
-  const attested = attestedTask({
+  const armed = armImplementationAttestation({
     id: "T1",
     description: "pre-existing work",
     agent: "code-implementer-agent",
@@ -69,14 +65,11 @@ function fixture(initialBytes: string): Fixture {
     status: "pending",
     depends_on: [],
     file_list: ["src/a.ts"],
-    proof: derivePendingTaskProof({
-      verificationPolicy: ATTESTATION_VERIFICATION_POLICY,
-      declaredArtifacts: ["src/a.ts"],
-      declaredArtifactExpectation: "attested",
-    }),
-    verification_policy: serializeVerificationPolicy(ATTESTATION_VERIFICATION_POLICY),
+    proof: derivePendingTaskProof({ newTestsRequired: true, declaredArtifacts: ["src/a.ts"] }),
     attempt_artifact_baseline: attemptBaseline,
-  } as never);
+  }, { executing: false });
+  if (!armed.ok) throw new Error(`attestation fixture failed: ${armed.error.kind}`);
+  const attested = armed.value.task;
   const graph = {
     current_phase: "execute",
     phase_artifacts: {},

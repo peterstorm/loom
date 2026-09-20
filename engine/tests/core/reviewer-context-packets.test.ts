@@ -72,7 +72,7 @@ describe("reviewer-only v2 Context Packet", () => {
     expect(packet.digest).toBe(sha256Hex(JSON.stringify(identity)));
     const { reviewerProtocol, ...without } = identity;
     expect(packet.digest).not.toBe(sha256Hex(JSON.stringify({ ...without, reviewerProtocol })));
-    expect(contextPacketByteLength(packet)).toBe(packet.fixedContext.reduce((sum, entry) => sum + entry.bytes.length, 0));
+    expect(contextPacketByteLength(packet)).toBe(packet.fixedContext.reduce((sum, entry) => sum + entry.bytes.byteLength, 0));
   });
   it("retains all input bytes without aliasing caller arrays, and freezes every level", () => {
     const data = { ...input, fixedContext: [...input.fixedContext], variableContext: [section("task", "exact\n 🧵 bytes")] };
@@ -85,21 +85,21 @@ describe("reviewer-only v2 Context Packet", () => {
     expect(textOf(packet.variableContext[0])).toBe("exact\n 🧵 bytes");
     for (const value of [packet, packet.reviewerProtocol, packet.fixedContext, packet.variableContext, ...packet.fixedContext, ...packet.fixedContext.map((entry) => entry.bytes)]) expect(Object.isFrozen(value)).toBe(true);
   });
-  it("keeps large parsed sections compact while preserving immutable array behavior", () => {
+  it("keeps large parsed sections compact behind the explicit immutable byte-sequence contract", () => {
     const packet = current({ variableContext: [section("large", "abcd".repeat(150_000))] });
     const serialized = JSON.stringify(packet);
     const parsed = parseContextPacket(JSON.parse(serialized));
     if (!parsed.ok) throw new Error(parsed.error.message);
     const bytes = parsed.value.variableContext[0]!.bytes;
-    expect(Array.isArray(bytes)).toBe(true);
+    expect(Array.isArray(bytes)).toBe(false);
     expect(Object.isFrozen(bytes)).toBe(true);
     expect(Object.keys(bytes)).toEqual([]);
-    expect(bytes.length).toBe(600_000);
+    expect(bytes.byteLength).toBe(600_000);
     expect(bytes.slice(0, 8)).toEqual([97, 98, 99, 100, 97, 98, 99, 100]);
     expect(Buffer.from(bytes).subarray(-4).toString()).toBe("abcd");
     expect(JSON.stringify(parsed.value)).toBe(serialized);
-    expect(() => { (bytes as number[])[0] = 0; }).toThrow();
-    expect(bytes[0]).toBe(97);
+    expect(() => { Object.defineProperty(bytes, "0", { value: 0 }); }).toThrow();
+    expect(bytes.at(0)).toBe(97);
   });
   it("round-trips arbitrary variable bytes and changes identity without changing fixed contract", () => {
     fc.assert(fc.property(fc.string({ maxLength: 100 }), (text) => {
@@ -123,7 +123,9 @@ describe("reviewer-only v2 Context Packet", () => {
         { ...packet, fixedContext: [...remaining, section(expected.label, expected.text + "\n")] },
         { ...packet, fixedContext: packet.fixedContext.map((entry) => entry === owned ? { ...entry, bytes: [0, ...entry.bytes.slice(1)] } : entry) },
       ];
-      for (const replacement of replacements) expect(parseContextPacket(rehash(replacement)).ok).toBe(false);
+      for (const replacement of replacements) {
+        expect(parseContextPacket(rehash(replacement as unknown as ReviewerContextPacketV2)).ok).toBe(false);
+      }
     }
     expect(parseContextPacket(rehash({ ...packet, outputContract: "Emit legacy Machine Summary" })).ok).toBe(false);
   });

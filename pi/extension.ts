@@ -76,7 +76,7 @@ import {
 // with it — every hook below, not just review capture. `engine/tests/pi-imports.test.ts`
 // resolves every engine import in this file against the real exports so the next
 // move of a shared symbol fails a test instead of silently disarming Pi.
-import { isReviewAgent, taskGraphPath, subagentDir, PHASE_AGENT_MAP, IMPL_AGENTS, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS, probePathFailClosed } from "../engine/src/config";
+import { isReviewAgent, taskGraphPath, subagentDir, PHASE_AGENT_MAP, IMPL_AGENTS, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS, probePathFailClosed, observeTaskGraphProjectBoundary } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
 import { currentOrchestrationStatus } from "../engine/src/handlers/helpers/orchestration";
@@ -100,7 +100,6 @@ import {
   unrecordableMissingEvidenceDiagnostic,
 } from "./reserved-results";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
-import * as git from "../engine/src/utils/git";
 
 // Linter integration (PostEdit lint via tool_result)
 import { processToolResult } from "../engine/src/handlers/pi-adapter";
@@ -178,7 +177,6 @@ import {
   registerInteractiveSubagentTool,
 } from "./interactive-subagent";
 import { observeSpawnBatchGraph, spawnEntryAt } from "./spawn-graph";
-import { projectRootForStateFile } from "../engine/src/core/phase-artifact-paths";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 // Capture once, while this extension module is loaded. Fresh CLI processes
@@ -2721,13 +2719,13 @@ export default function (
         // this dispatcher owns stderr and owns which of their diagnostics count as
         // orchestration processing errors.
         const store: TaskGraphStore = mgr;
+        // One observation owns both Pi adapters. A Git failure throws and the
+        // per-result shell records infrastructure failure; it never substitutes
+        // the runtime checkout or cwd for the TaskGraph's project boundary.
+        const projectBoundary = observeTaskGraphProjectBoundary(mgr.getPath());
         const repository: RepositoryProbe = {
-          // The settlement judges the SPAWN's repository: the graph store is
-          // the session's task-graph pointer, whose target lives in the
-          // repository the work happened in — derive the probe root from it
-          // rather than from whichever cwd the runtime process reports.
-          root: () => git.repositoryRootFrom(dirname(mgr.getPath())) ?? git.repositoryRoot() ?? process.cwd(),
-          isRepo: () => git.isGitRepo(),
+          root: () => projectBoundary.root,
+          isRepo: () => projectBoundary.kind === "git-repository",
         };
         const parentPrompt = event.content
           .filter((c: { type: string }) => c.type === "text")
@@ -2762,10 +2760,9 @@ export default function (
             completedPhase,
             result,
             now: new Date().toISOString(),
-            // The run's artifacts live under the checkout that owns the graph,
-            // not under this process's cwd — same derivation the repository
-            // probe above already documents.
-            phaseArtifactBaseDir: projectRootForStateFile(mgr.getPath()),
+            // Phase artifacts and implementation settlement consume the same
+            // TaskGraph Project Boundary observed above.
+            phaseArtifactBaseDir: projectBoundary.root,
           }));
           continue;
         }

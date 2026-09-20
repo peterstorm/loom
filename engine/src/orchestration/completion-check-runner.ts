@@ -413,22 +413,55 @@ function probeLeaderAlive(processGroupId: number): LeaderProbe {
   }
 }
 
-/** EPERM on the group probe with the leader already reaped proves the id was
- *  recycled to a foreign group: the original group dissolves before its id
- *  can be reused, dissolving requires the whole original tree (leader plus
- *  every descendant) to be dead, and our own tree can never contain a member
- *  we are not permitted to signal. Returning "gone" therefore stops the
- *  containment escalation against a group that is no longer ours — without
- *  it, the runner would keep probing (EPERM "error") and eventually fire
- *  its SIGKILL pass at unrelated same-uid processes. */
+/** EPERM with a dead leader proves the original group dissolved and the
+ * numeric id now names foreign authority. This predicate is used only while
+ * terminating a still-live leader; parent-close handling below is stricter. */
 function groupGoneAfterLeaderDeath(
   processGroupId: number,
   probe: ProcessGroupProbe,
 ): boolean {
   if (probe.kind === "gone") return true;
   if (probe.kind !== "eperm") return false;
+  return probeLeaderAlive(processGroupId).kind === "gone";
+}
+
+type ClosedProcessGroupObservation =
+  | Readonly<{ kind: "gone"; reason: "absent" | "recycled-leader" | "foreign-eperm" }>
+  | Readonly<{ kind: "surviving-descendants" }>
+  | Readonly<{ kind: "error"; message: string }>;
+
+/** Classify a group only after Node has reaped the spawned leader.
+ *
+ * At that point a positive PID probe cannot name our leader. If it succeeds,
+ * the PID/PGID has been recycled and no negative-PGID signal is authorized.
+ * A still-present group with no leader can only be observed, never signalled:
+ * once the leader closes there is no atomic identity-bound group signalling
+ * primitive available to Node. */
+function observeClosedProcessGroup(
+  processGroupId: number,
+  group: ProcessGroupProbe = probeProcessGroup(processGroupId),
+): ClosedProcessGroupObservation {
+  if (group.kind === "gone") return Object.freeze({ kind: "gone", reason: "absent" });
+  if (group.kind === "error") return Object.freeze({ kind: "error", message: group.message });
   const leader = probeLeaderAlive(processGroupId);
-  return leader.kind === "gone";
+  if (leader.kind === "error") return Object.freeze({ kind: "error", message: leader.message });
+  if (leader.kind === "present") return Object.freeze({ kind: "gone", reason: "recycled-leader" });
+  return group.kind === "eperm"
+    ? Object.freeze({ kind: "gone", reason: "foreign-eperm" })
+    : Object.freeze({ kind: "surviving-descendants" });
+}
+
+async function waitForClosedProcessGroup(
+  processGroupId: number,
+  maximumWaitMs: number,
+): Promise<ClosedProcessGroupObservation> {
+  const deadline = Date.now() + maximumWaitMs;
+  let observation = observeClosedProcessGroup(processGroupId);
+  while (observation.kind === "surviving-descendants" && Date.now() < deadline) {
+    await delay(Math.min(GROUP_PROBE_INTERVAL_MS, Math.max(1, deadline - Date.now())));
+    observation = observeClosedProcessGroup(processGroupId);
+  }
+  return observation;
 }
 
 function signalProcessGroup(processGroupId: number, signal: "SIGTERM" | "SIGKILL"): string | null {
@@ -643,8 +676,8 @@ async function runProjectCommand(
     if (trigger.observation.kind === "spawn-failed") {
       return spawnFailure(trigger.observation.cause, diagnostics(stdout, stderr));
     }
-    const group = probeProcessGroup(processGroupId);
-    if (groupGoneAfterLeaderDeath(processGroupId, group)) {
+    const initialGroup = observeClosedProcessGroup(processGroupId);
+    if (initialGroup.kind === "gone") {
       return observedExecution(
         repositoryRoot,
         check,
@@ -656,23 +689,31 @@ async function runProjectCommand(
         reportMode,
       );
     }
-    const containment = await terminateProcessGroup(processGroupId, graceMs, hardKillWaitMs);
-    const output = diagnostics(stdout, stderr);
-    if (group.kind === "error" || !containment.ok) {
-      const causes = [group.kind === "error" ? group.message : null, containment.ok ? null : containment.message]
-        .filter((message): message is string => message !== null);
+    if (initialGroup.kind === "error") {
       return failed({
         kind: "termination-unconfirmed",
-        message: `completion parent closed but process-tree containment could not be proven: ${causes.join("; ")}`,
-        diagnostics: output,
+        message: `completion parent closed but process-tree identity could not be observed: ${initialGroup.message}`,
+        diagnostics: diagnostics(stdout, stderr),
+      });
+    }
+    const settled = await waitForClosedProcessGroup(processGroupId, hardKillWaitMs);
+    if (settled.kind !== "gone") {
+      return failed({
+        kind: "termination-unconfirmed",
+        message: settled.kind === "error"
+          ? `completion parent closed but process-tree identity could not be observed: ${settled.message}`
+          : `completion parent closed while process-group ${processGroupId} descendants remained; ` +
+            "post-close signalling was refused because the numeric group id is no longer identity-bound",
+        diagnostics: diagnostics(stdout, stderr),
       });
     }
     return failed({
       kind: "process-tree-survived",
-      message: `completion parent closed while process-group ${processGroupId} descendants remained; the group was terminated`,
+      message: `completion parent closed while process-group ${processGroupId} descendants remained; ` +
+        "the runner waited for them to exit without signalling an unbound numeric group id",
       exitCode: trigger.observation.exitCode,
       signal: trigger.observation.signal,
-      diagnostics: output,
+      diagnostics: diagnostics(stdout, stderr),
     });
   }
 

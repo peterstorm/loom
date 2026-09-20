@@ -36,7 +36,7 @@ export function resolveRepositoryRoot(context = "repository root"): string | und
     return probeGitWithEmptyRetry(["rev-parse", "--show-toplevel"], {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
-    }) || undefined;
+    });
   } catch (error) {
     // Never silent: every downstream helper runs against cwd: undefined and
     // its failures read as "no tests written" — the one indistinguishable
@@ -131,7 +131,6 @@ export function repositoryContext(cwd?: string): GitRepositoryContext {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
     });
-    if (root === "") return { ok: false, error: `git returned an empty repository root for ${base}` };
     const headSha = probeGitWithEmptyRetry(["rev-parse", "--verify", "HEAD"], {
       cwd: root,
       encoding: "utf-8",
@@ -174,11 +173,7 @@ export function repositoryRootFrom(cwd: string): string | undefined {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
     });
-    if (root !== "") return root;
-    process.stderr.write(
-      `loom: git rev-parse --show-toplevel returned an empty root from ${cwd} — falling back to the runtime repository root\n`,
-    );
-    return undefined;
+    return root;
   } catch (error) {
     process.stderr.write(
       `loom: git rev-parse --show-toplevel failed from ${cwd} (${error instanceof Error ? error.message : String(error)}) — falling back to the runtime repository root\n`,

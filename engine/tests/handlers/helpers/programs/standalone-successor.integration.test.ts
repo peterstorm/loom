@@ -229,7 +229,7 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
       const prepared = await f.shell.prepareStandaloneSuccessorFacadeStart(join(root, "runs"), "registration-only", parsed);
       if (!prepared.ok) throw Error(prepared.message);
       const handle = value(f.handles.createRunDirectory(join(root, "runs"), "registration-only"));
-      value(await handle.registerProgram(prepared.value.registration));
+      value(await handle.registerProgram(JSON.parse(JSON.stringify(prepared.value.registration))));
       expect(await handle.readCheckpoint()).toBeNull();
       expect(value(handle.readIssuedRequests())).toEqual([]);
 

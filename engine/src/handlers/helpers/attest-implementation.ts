@@ -4,12 +4,14 @@
  * The inverse of the D3 remediation problem: a Task whose declared artifacts
  * ALREADY carry the completed work (a `populate-task-graph --force` reset, a
  * reopened Wave, an anchor-only repair) cannot be settled by a normal
- * implementation child, because the child itself must move bytes and add new
- * tests against the attempt baseline. Attestation is the sanctioned inverse:
+ * implementation child, because the child itself must move declared-artifact
+ * bytes against the attempt baseline and discharge whichever test obligations
+ * its stored Verification Policy requires. Attestation is the sanctioned inverse:
  * the operator declares the work pre-existing, the next dispatch runs a
  * verify-only child, and the proof's declared-artifact obligations flip to the
- * `attested` arm — satisfied when bytes are UNCHANGED vs the attempt baseline,
- * failed with `declared-artifact-drifted` when the child wrote anything.
+ * `attested` arm — satisfied when bytes are UNCHANGED vs the attempt baseline.
+ * Any scoped write fails `attempt-scope-attested` with `attempt-scope-drifted`;
+ * a declared-artifact write additionally yields `declared-artifact-drifted`.
  *
  * Under the TaskGraph lock this rewrites exactly the proof surface: the
  * attested obligation set, the regression-required/new-tests-waived
@@ -30,51 +32,27 @@
  * repeat refuses "already in attestation mode" without touching state.
  */
 
-import {
-  armImplementationAttestation,
-  type AttestationPlan,
-} from "../../core/implementation-lifecycle";
-export { attestedTask, ATTESTATION_VERIFICATION_POLICY } from "../../core/implementation-lifecycle";
-export type { AttestationPlan } from "../../core/implementation-lifecycle";
-import { parseTaskId, type TaskId } from "../../core/task-id";
+import { armImplementationAttestation } from "../../core/implementation-lifecycle";
+import type { TaskId } from "../../core/task-id";
 import { taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
-import type { HookResult, Task } from "../../types";
-import { argumentValue, unconsumedValueArguments } from "./cli-args";
+import type { HookResult } from "../../types";
+import { parseTaskReasonArguments } from "./cli-args";
+import { renderImplementationLifecycleError } from "./implementation-lifecycle-errors";
 
 const MAX_ATTEST_REASON = 512;
-
-function duplicateFlagError(flag: string): string {
-  return `attest requires ${flag} exactly once`;
-}
 
 /** Parse the operation's exact argument surface; unknown flags fail closed. */
 export function parseAttestArgs(args: readonly string[]):
   | Readonly<{ ok: true; value: { taskId: TaskId; reason: string } }>
   | Readonly<{ ok: false; message: string }> {
-  const unconsumed = unconsumedValueArguments(args, new Set(["--task", "--reason"]));
-  if (unconsumed.length > 0) return { ok: false, message: `unknown or unconsumed argument(s): ${unconsumed.join(" ")}` };
-  const taskId = argumentValue(args, "--task");
-  const reason = argumentValue(args, "--reason");
-  if (taskId === null) return { ok: false, message: "attest requires --task <task-id>" };
-  if (reason === null) return { ok: false, message: "attest requires --reason <text>" };
-  if (reason.trim().length === 0 || reason.length > MAX_ATTEST_REASON) {
-    return { ok: false, message: `attest --reason must be non-empty and at most ${MAX_ATTEST_REASON} characters` };
-  }
-  if (args.filter((arg) => arg === "--task").length > 1) return { ok: false, message: duplicateFlagError("--task") };
-  if (args.filter((arg) => arg === "--reason").length > 1) return { ok: false, message: duplicateFlagError("--reason") };
-  const parsedTaskId = parseTaskId(taskId, "attest --task");
-  if (!parsedTaskId.ok) return { ok: false, message: parsedTaskId.error.errors.join("; ") };
-  return { ok: true, value: { taskId: parsedTaskId.value, reason } };
-}
-
-/** Compatibility projection for callers that need only the plan. */
-export function planAttestation(
-  task: Task,
-  input: Readonly<{ executing: boolean }>,
-): Readonly<{ ok: true; value: AttestationPlan }> | Readonly<{ ok: false; message: string }> {
-  const command = armImplementationAttestation(task, input);
-  return command.ok ? { ok: true, value: command.value.plan } : command;
+  const parsed = parseTaskReasonArguments(args, {
+    operation: "attest",
+    maximumReasonLength: MAX_ATTEST_REASON,
+  });
+  return parsed.ok
+    ? { ok: true, value: { taskId: parsed.value.taskId, reason: parsed.value.reason } }
+    : parsed;
 }
 
 export async function attestOperation(args: readonly string[]): Promise<HookResult> {
@@ -94,7 +72,7 @@ export async function attestOperation(args: readonly string[]): Promise<HookResu
       const command = armImplementationAttestation(task, {
         executing: (state.executing_tasks ?? []).includes(taskId),
       });
-      if (!command.ok) throw new Error(command.message);
+      if (!command.ok) throw new Error(renderImplementationLifecycleError(command.error));
       obligations = command.value.plan.obligations;
       attestationProofDigest = command.value.plan.attestationProofDigest;
       return {
@@ -115,8 +93,8 @@ export async function attestOperation(args: readonly string[]): Promise<HookResu
   }, null, 2)}\n`);
   process.stdout.write(
     `Task ${taskId} is in attestation mode: the next orchestration status dispatch carries the attestation ` +
-    "context line; the child must change NOTHING and run the classified regression. Any write inside the " +
-    "attempt scope settles as declared-artifact-drifted, never as attested.\n",
+    "context line; the child must change NOTHING and run the classified regression. Any scoped write fails " +
+    "with attempt-scope-drifted; declared-artifact writes also fail with declared-artifact-drifted.\n",
   );
   return { kind: "allow" };
 }

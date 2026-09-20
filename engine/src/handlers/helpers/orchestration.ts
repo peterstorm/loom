@@ -73,7 +73,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { isReviewAgent, SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
-import { parseTaskGraph, StateManager } from "../../state-manager";
+import { parseTaskGraph, StateManager, type ActiveWaveGateAbandonmentResult } from "../../state-manager";
 import { observeAnyActiveSubagent } from "../../machine";
 import type {
   ActiveWaveGateRegistration,
@@ -794,20 +794,30 @@ async function inspectOperation(args: readonly string[]): Promise<HookResult> {
  * error tells the operator to repeat the identical command, which replays the
  * marker idempotently and retries the stamp.
  */
-async function stampAbandonedWaveGateRegistration(runsRoot: string, marker: RunAbandonment): Promise<string | null> {
+export type WaveGateAbandonmentStampOutcome =
+  | Readonly<{ kind: "no-graph" }>
+  | ActiveWaveGateAbandonmentResult
+  | Readonly<{ kind: "stamp-failed"; message: string }>;
+
+export async function stampAbandonedWaveGateRegistration(
+  runsRoot: string,
+  marker: RunAbandonment,
+): Promise<WaveGateAbandonmentStampOutcome> {
   const manager = StateManager.fromPath(TASK_GRAPH_PATH);
-  if (manager === null) return null; // no protected graph: nothing to tombstone
+  if (manager === null) return Object.freeze({ kind: "no-graph" });
   try {
-    await manager.abandonActiveWaveGateRegistration({
+    return await manager.abandonActiveWaveGateRegistration({
       runsRoot,
       runId: marker.runId,
       reason: marker.reason,
       supersededBy: marker.supersededBy,
     });
-    return null;
   } catch (error) {
-    return "run abandonment was recorded in the Run Directory, but the protected Wave Gate registration could not be tombstoned: " +
-      `${error instanceof Error ? error.message : String(error)} — repeat the identical abandon command to retry the state stamp`;
+    return Object.freeze({
+      kind: "stamp-failed",
+      message: "run abandonment was recorded in the Run Directory, but the protected Wave Gate registration could not be tombstoned: " +
+        `${error instanceof Error ? error.message : String(error)} — repeat the identical abandon command to retry the state stamp`,
+    });
   }
 }
 
@@ -842,8 +852,10 @@ async function abandonOperation(args: readonly string[]): Promise<HookResult> {
   const abandoned = await bound.value.handle.abandonRun({ supersededBy, reason });
   if (!abandoned.ok) return { kind: "error", message: abandoned.error.message };
   process.stdout.write(`${JSON.stringify(abandoned.value, null, 2)}\n`);
-  const stampFailure = await stampAbandonedWaveGateRegistration(bound.value.handle.identity.runsRoot, abandoned.value);
-  return stampFailure === null ? { kind: "allow" } : { kind: "error", message: stampFailure };
+  const stamp = await stampAbandonedWaveGateRegistration(bound.value.handle.identity.runsRoot, abandoned.value);
+  return stamp.kind === "stamp-failed"
+    ? { kind: "error", message: stamp.message }
+    : { kind: "allow" };
 }
 
 type RegisteredPanelProgram = Readonly<{

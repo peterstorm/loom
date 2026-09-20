@@ -28,6 +28,27 @@ export type AttestationCommand = Readonly<{
   plan: AttestationPlan;
 }>;
 
+export type ImplementationLifecycleError =
+  | Readonly<{ kind: "task-not-pending"; taskId: string; status: Task["status"] }>
+  | Readonly<{ kind: "live-attempt"; taskId: string; operation: "attestation" | "remediation" }>
+  | Readonly<{ kind: "invalid-lineage"; taskId: string; errors: readonly string[] }>
+  | Readonly<{ kind: "terminal-escalation"; taskId: string }>
+  | Readonly<{ kind: "already-attested"; taskId: string }>
+  | Readonly<{ kind: "proof-already-satisfied"; taskId: string }>
+  | Readonly<{ kind: "attestation-context-invalid"; taskId: string; detail: string }>
+  | Readonly<{ kind: "task-already-settled"; taskId: string; status: "completed" | "implemented" }>
+  | Readonly<{ kind: "not-escalated"; taskId: string; disposition: string }>
+  | Readonly<{ kind: "terminal-receipt-mismatch"; taskId: string; expected: string; received: string }>
+  | Readonly<{ kind: "terminal-receipt-missing"; taskId: string; receiptId: string }>
+  | Readonly<{ kind: "remediation-receipt-invalid"; taskId: string; errors: readonly string[] }>;
+
+type LifecycleResult<T> =
+  | Readonly<{ ok: true; value: T }>
+  | Readonly<{ ok: false; error: ImplementationLifecycleError }>;
+
+const lifecycleFailure = (error: ImplementationLifecycleError): Readonly<{ ok: false; error: ImplementationLifecycleError }> =>
+  Object.freeze({ ok: false, error: Object.freeze(error) });
+
 const attestedProofFor = (task: Task): PendingTaskProof =>
   derivePendingTaskProof({
     verificationPolicy: ATTESTATION_VERIFICATION_POLICY,
@@ -35,14 +56,14 @@ const attestedProofFor = (task: Task): PendingTaskProof =>
     declaredArtifactExpectation: "attested",
   });
 
-export function attestedTask(task: Task): Task {
+function attestedTask(task: Task, proof: PendingTaskProof): Task {
   return Object.freeze({
     ...task,
     status: "pending",
     implementation_attestation: true,
     verification_policy: serializeVerificationPolicy(ATTESTATION_VERIFICATION_POLICY),
     new_tests_required: undefined,
-    proof: attestedProofFor(task),
+    proof,
     revalidation_required: undefined,
     legacy_missing_proof: undefined,
   });
@@ -52,31 +73,33 @@ export function attestedTask(task: Task): Task {
 export function armImplementationAttestation(
   task: Task,
   input: Readonly<{ executing: boolean }>,
-): Readonly<{ ok: true; value: AttestationCommand }> | Readonly<{ ok: false; message: string }> {
+): LifecycleResult<AttestationCommand> {
   if (task.status !== "pending") {
-    return { ok: false, message: `Task ${task.id} has status ${task.status}; attestation applies only to pending Tasks with unsatisfied proof` };
+    return lifecycleFailure({ kind: "task-not-pending", taskId: task.id, status: task.status });
   }
   if (task.active_implementation_attempt !== undefined || task.reserved_at !== undefined || input.executing) {
-    return { ok: false, message: `Task ${task.id} carries a live implementation attempt; finish or settle it before attesting` };
+    return lifecycleFailure({ kind: "live-attempt", taskId: task.id, operation: "attestation" });
   }
   const disposition = deriveImplementationRetryDisposition(task);
   if (disposition.kind === "invalid") {
-    return { ok: false, message: `Task ${task.id} has invalid attempt lineage: ${disposition.errors.join("; ")}` };
+    return lifecycleFailure({ kind: "invalid-lineage", taskId: task.id, errors: Object.freeze([...disposition.errors]) });
   }
   if (disposition.kind === "escalated") {
-    return { ok: false, message: `Task ${task.id} has a terminal implementation failure; remediate the escalation before attesting` };
+    return lifecycleFailure({ kind: "terminal-escalation", taskId: task.id });
   }
   if (task.implementation_attestation === true) {
-    return { ok: false, message: `Task ${task.id} is already in attestation mode; nothing to attest` };
+    return lifecycleFailure({ kind: "already-attested", taskId: task.id });
   }
   if (task.proof?.state === "satisfied") {
-    return { ok: false, message: `Task ${task.id} already carries satisfied proof; nothing to attest` };
+    return lifecycleFailure({ kind: "proof-already-satisfied", taskId: task.id });
   }
-  const rewritten = attestedTask(task);
-  const context = deriveImplementationAttestationContext(rewritten);
-  if (!context.ok) return { ok: false, message: `attestation context derivation failed for ${task.id}: ${context.error}` };
   const proof = attestedProofFor(task);
-  return {
+  const rewritten = attestedTask(task, proof);
+  const context = deriveImplementationAttestationContext(rewritten);
+  if (!context.ok) {
+    return lifecycleFailure({ kind: "attestation-context-invalid", taskId: task.id, detail: context.error });
+  }
+  return Object.freeze({
     ok: true,
     value: Object.freeze({
       task: rewritten,
@@ -88,7 +111,7 @@ export function armImplementationAttestation(
         promptAppendix: context.promptAppendix,
       }),
     }),
-  };
+  });
 }
 
 export type RemediationPlan = Readonly<{
@@ -98,36 +121,37 @@ export type RemediationPlan = Readonly<{
   failureKinds: readonly [string, ...string[]];
 }>;
 
-export function planEscalationRemediation(
+function escalationRemediationPlan(
   task: Task,
   input: Readonly<{ executing: boolean; terminalReceiptId: string }>,
-): Readonly<{ ok: true; value: RemediationPlan }> | Readonly<{ ok: false; message: string }> {
+): LifecycleResult<RemediationPlan> {
   if (task.status === "completed" || task.status === "implemented") {
-    return { ok: false, message: `Task ${task.id} already reached ${task.status}; nothing to remediate` };
+    return lifecycleFailure({ kind: "task-already-settled", taskId: task.id, status: task.status });
   }
   if (task.active_implementation_attempt !== undefined || task.reserved_at !== undefined || input.executing) {
-    return { ok: false, message: `Task ${task.id} carries a live implementation attempt; remediation requires a settled lineage` };
+    return lifecycleFailure({ kind: "live-attempt", taskId: task.id, operation: "remediation" });
   }
   const disposition = deriveImplementationRetryDisposition(task);
   if (disposition.kind === "invalid") {
-    return { ok: false, message: `Task ${task.id} has invalid attempt lineage: ${disposition.errors.join("; ")}` };
+    return lifecycleFailure({ kind: "invalid-lineage", taskId: task.id, errors: Object.freeze([...disposition.errors]) });
   }
   if (disposition.kind !== "escalated") {
-    return { ok: false, message: `Task ${task.id} is no longer escalated (current disposition: ${disposition.kind}); nothing to remediate` };
+    return lifecycleFailure({ kind: "not-escalated", taskId: task.id, disposition: disposition.kind });
   }
   if (disposition.receiptId !== input.terminalReceiptId) {
-    return {
-      ok: false,
-      message: `Task ${task.id}'s terminal escalation is receipt ${disposition.receiptId}, not ${input.terminalReceiptId}; ` +
-        "read the exact receipt from orchestration status and repeat",
-    };
+    return lifecycleFailure({
+      kind: "terminal-receipt-mismatch",
+      taskId: task.id,
+      expected: disposition.receiptId,
+      received: input.terminalReceiptId,
+    });
   }
   const terminal = (task.implementation_attempt_history ?? [])
     .find((receipt) => receipt.receiptId === input.terminalReceiptId);
   if (terminal === undefined) {
-    return { ok: false, message: `terminal escalation receipt ${input.terminalReceiptId} is absent from Task ${task.id} history` };
+    return lifecycleFailure({ kind: "terminal-receipt-missing", taskId: task.id, receiptId: input.terminalReceiptId });
   }
-  return {
+  return Object.freeze({
     ok: true,
     value: Object.freeze({
       taskId: task.id,
@@ -135,7 +159,7 @@ export function planEscalationRemediation(
       terminalAuthorityDigest: terminal.authorityDigest,
       failureKinds: disposition.failureKinds,
     }),
-  };
+  });
 }
 
 export type EscalationRemediationCommand = Readonly<{
@@ -148,8 +172,8 @@ export type EscalationRemediationCommand = Readonly<{
 export function remediateImplementationEscalation(
   task: Task,
   input: Readonly<{ executing: boolean; terminalReceiptId: string; observedAt: string }>,
-): Readonly<{ ok: true; value: EscalationRemediationCommand }> | Readonly<{ ok: false; message: string }> {
-  const plan = planEscalationRemediation(task, input);
+): LifecycleResult<EscalationRemediationCommand> {
+  const plan = escalationRemediationPlan(task, input);
   if (!plan.ok) return plan;
   const reservationId = `remediation-${sha256Hex(canonicalJson({
     kind: "escalation-remediation",
@@ -164,8 +188,14 @@ export function remediateImplementationEscalation(
     observedAt: input.observedAt,
     failureKinds: plan.value.failureKinds,
   });
-  if (!receipt.ok) return { ok: false, message: receipt.error.errors.join("; ") };
-  return {
+  if (!receipt.ok) {
+    return lifecycleFailure({
+      kind: "remediation-receipt-invalid",
+      taskId: task.id,
+      errors: Object.freeze([...receipt.error.errors]),
+    });
+  }
+  return Object.freeze({
     ok: true,
     value: Object.freeze({
       task: Object.freeze({
@@ -178,5 +208,5 @@ export function remediateImplementationEscalation(
       plan: plan.value,
       receipt: receipt.value,
     }),
-  };
+  });
 }

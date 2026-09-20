@@ -132,7 +132,7 @@ export type StandaloneReviewedSource = Readonly<{
   files: readonly StandaloneReviewedSourceFile[];
 }>;
 
-function parseScopePacketAuthority(bytes: readonly number[]):
+function parseScopePacketAuthority(bytes: Iterable<number>):
   | Readonly<{ ok: true; value: StandaloneScopePacketAuthority }>
   | Readonly<{ ok: false; message: string }> {
   try {
@@ -164,7 +164,7 @@ function parseScopePacketAuthority(bytes: readonly number[]):
   }
 }
 
-function parseReviewedSource(bytes: readonly number[], scope: readonly string[], sourceVersion: 1 | 2 = 1):
+function parseReviewedSource(bytes: Iterable<number>, scope: readonly string[], sourceVersion: 1 | 2 = 1):
   | Readonly<{ ok: true; value: StandaloneReviewedSource }>
   | Readonly<{ ok: false; message: string }> {
   const malformed = (message: string) => Object.freeze({ ok: false as const, message });
