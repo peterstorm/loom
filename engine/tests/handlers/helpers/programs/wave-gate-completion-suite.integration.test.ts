@@ -240,7 +240,8 @@ describe("Wave Gate façade completion-suite integration", () => {
     });
     expect(readFileSync(join(root, ".claude/state/active_task_graph.json"), "utf8")).toBe(acceptedState);
     expect(sentinelCount(root)).toBe(expectedCount);
-    expect((await resume(root, runId, outside))).toMatchObject({ kind: "spawn-batch" });
+    const resumed = await resume(root, runId, outside);
+    expect(resumed, resumed.kind === "blocked" ? JSON.stringify(resumed) : "").toMatchObject({ kind: "spawn-batch" });
     expect(sentinelCount(root)).toBe(expectedCount);
 
     // Source bytes are workspace evidence, never a new command roster after population.
@@ -306,7 +307,8 @@ describe("Wave Gate façade completion-suite integration", () => {
     );
     expect(existsSync(artifact)).toBe(true);
 
-    expect((await resume(root, runId, outside)).kind).toBe("spawn-batch");
+    const resumedSuite = await resume(root, runId, outside);
+    expect(resumedSuite.kind, JSON.stringify(resumedSuite)).toBe("spawn-batch");
     expect((await cli(root, ["status", "--json"], "", outside))).toMatchObject({
       facts: { waveCompletionSuiteReadiness: { kind: "known", value: { kind: "accepted" } } },
     });
