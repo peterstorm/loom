@@ -732,7 +732,7 @@ export function findingsViewError(raw: unknown, label: string): string | null {
 /**
  * Load-boundary check that `findings` and its two `string[]` views agree.
  *
- * `types.ts` calls the views DERIVED, six writers keep them so, and both the
+ * `types.ts` calls the views DERIVED, seven writers keep them so, and both the
  * wave gate and the GH comment read the views rather than the array. Nothing
  * proved it. Shape validation alone leaves both drift directions open, and the
  * dangerous one is silent: a critical present in `findings` but missing from

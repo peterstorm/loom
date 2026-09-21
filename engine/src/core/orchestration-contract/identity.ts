@@ -31,7 +31,10 @@ const boundedCauseText = (value: string): string =>
     ? value
     : `${value.slice(0, MAX_THROWN_CAUSE_TEXT_LENGTH - 1)}…`;
 
-export type BoundedThrownCause = Readonly<{ name: string; message: string }>;
+/** Local to this module: every consumer reads the plain { name, message } shape
+ *  off `boundedThrownCause`'s return value, so the name never needs to escape
+ *  the kernel (cs-7). */
+type BoundedThrownCause = Readonly<{ name: string; message: string }>;
 
 /**
  * The ONE bounded thrown-cause capture for every fail-closed boundary that

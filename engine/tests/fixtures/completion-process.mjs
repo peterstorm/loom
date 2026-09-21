@@ -49,6 +49,34 @@ switch (mode) {
   case "timeout-with-descendant":
     spawnSentinelDescendant(reportPath, () => setInterval(() => undefined, 1_000));
     break;
+  case "exit-before-close": {
+    // argv: [fixture, mode, sentinelPath, holdMs]. Spawns a grandchild that
+    // INHERITS this process's stdout/stderr (holding the runner's pipe
+    // write-ends), signals readiness, then exits: Node's 'exit' fires (the
+    // leader is reaped) while 'close' stays withheld until the holder
+    // releases the inherited pipes.
+    const holdMs = Number(process.argv[4]);
+    if (!Number.isFinite(holdMs)) throw new Error(`${mode} requires a hold duration`);
+    const holder = spawn(process.execPath, [fixturePath, "pipe-holder", reportPath, String(holdMs)], {
+      stdio: ["ignore", "inherit", "inherit", "ipc"],
+    });
+    holder.once("message", () => {
+      holder.disconnect();
+      holder.unref();
+      process.exit(0);
+    });
+    break;
+  }
+  case "pipe-holder": {
+    const holdMs = Number(process.argv[4]);
+    if (!Number.isFinite(holdMs)) throw new Error("pipe-holder requires a hold duration");
+    process.send?.("ready");
+    setTimeout(() => {
+      if (reportPath !== undefined) writeFileSync(reportPath, "holder survived\n");
+      process.exit(0);
+    }, holdMs);
+    break;
+  }
   case "delayed-sentinel":
     process.send?.("ready");
     process.once("disconnect", () => {

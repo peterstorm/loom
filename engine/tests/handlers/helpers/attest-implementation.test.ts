@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import { attestOperation } from "../../../src/handlers/helpers/attest-implementation";
+import { renderImplementationLifecycleError } from "../../../src/handlers/helpers/implementation-lifecycle-errors";
 import { armImplementationAttestation } from "../../../src/core/implementation-lifecycle";
 import {
   deriveImplementationAttestationContext,
@@ -211,5 +212,43 @@ describe("orchestration attest arms implementation re-attestation", () => {
       .toMatchObject({ ok: false, error: { kind: "already-attested" } });
     expect(armImplementationAttestation(variant(implementationEscalatedTaskFields()), { executing: false }))
       .toMatchObject({ ok: false, error: { kind: "terminal-escalation" } });
+
+    // pr-test-analyzer-2: the last unasserted attest arms. A corrupt lineage
+    // (a history entry the receipt parse refuses) and a history whose stored
+    // retry protocol disagrees with it both surface the invalid-lineage
+    // refusal before any rewrite.
+    const corruptHistory = armImplementationAttestation(
+      variant({ implementation_attempt_history: ["not-a-receipt"] }),
+      { executing: false },
+    );
+    expect(corruptHistory).toMatchObject({ ok: false, error: { kind: "invalid-lineage", taskId: "T1" } });
+    if (corruptHistory.ok || corruptHistory.error.kind !== "invalid-lineage") {
+      throw new Error("expected the invalid-lineage refusal for a corrupt history");
+    }
+    expect(corruptHistory.error.errors.join("; ")).toContain("implementation_attempt_history[0]");
+
+    const protocolDisagreement = armImplementationAttestation(
+      variant({ ...implementationEscalatedTaskFields(), implementation_retry_protocol: 1 }),
+      { executing: false },
+    );
+    expect(protocolDisagreement).toMatchObject({ ok: false, error: { kind: "invalid-lineage", taskId: "T1" } });
+    if (protocolDisagreement.ok || protocolDisagreement.error.kind !== "invalid-lineage") {
+      throw new Error("expected the invalid-lineage refusal for a protocol disagreement");
+    }
+    expect(protocolDisagreement.error.errors.join("; ")).toContain("protocol-2 retry lineage");
+
+    // The attestation-context-invalid arm is defensively unreachable through
+    // the aggregate: attestedTask overwrites every input the context derivation
+    // reads (flag, proof, policy) and the Task id was already proven by the
+    // lineage disposition check, so no cast variant can land in it. Its refusal
+    // prose is pinned here; the derivation's own refusals are pinned
+    // dispatch-side.
+    expect(renderImplementationLifecycleError({
+      kind: "invalid-lineage", taskId: "T1",
+      errors: ["implementation retry protocol 2 requires a valid history start index"],
+    })).toBe("Task T1 has invalid attempt lineage: implementation retry protocol 2 requires a valid history start index");
+    expect(renderImplementationLifecycleError({
+      kind: "attestation-context-invalid", taskId: "T1", detail: "Task T1 carries no attestation proof",
+    })).toBe("attestation context derivation failed for T1: Task T1 carries no attestation proof");
   });
 });

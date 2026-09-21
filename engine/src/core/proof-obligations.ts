@@ -1,3 +1,4 @@
+import { canonicalStructuralEquals } from "./orchestration-contract";
 import {
   parseVerificationPolicy,
   requiresNewTests,
@@ -850,8 +851,6 @@ const parseNonEmptyArray = <T>(
   return head === undefined ? fail([`${path} must be a non-empty array`]) : ok(nonEmpty(head, tail));
 };
 
-const sameValue = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right);
-
 type ParsedProofParts = {
   readonly obligations: NonEmpty<ProofObligation>;
   readonly results: NonEmpty<ProofObligationResult>;
@@ -910,7 +909,11 @@ function parseFailedProof(raw: Record<string, unknown>, parts: ParsedProofParts)
     ? evaluated.value.flatMap((result) => result.state === "failed" ? [result.failure] : [])
     : [];
   if (evaluated.ok && derived.length === 0) errors.push("failed proof must contain at least one failed result");
-  if (evaluated.ok && failures.ok && !sameValue(failures.value, derived)) {
+  // Agreement is structural, not textual: JSON.stringify equality was
+  // key-order-sensitive and undefined-dropping, where the engine's canonical
+  // equality kernel is the exact-fit primitive (silent-failure-hunter-2). Arrays
+  // stay order-sensitive, so positional drift is still refused.
+  if (evaluated.ok && failures.ok && !canonicalStructuralEquals(failures.value, derived)) {
     errors.push("proof.failures must equal the failures derived from proof.results");
   }
   return errors.length > 0 || !failures.ok || !evaluated.ok ? fail(errors) : ok(Object.freeze({
@@ -929,7 +932,7 @@ function parseSatisfiedProof(raw: Record<string, unknown>, parts: ParsedProofPar
   const derived = evaluated.ok
     ? evaluated.value.flatMap((result) => result.state === "satisfied" ? [result.evidence] : [])
     : [];
-  if (evaluated.ok && evidence.ok && !sameValue(evidence.value, derived)) {
+  if (evaluated.ok && evidence.ok && !canonicalStructuralEquals(evidence.value, derived)) {
     errors.push("proof.evidence must equal the evidence derived from proof.results");
   }
   if (errors.length > 0 || !evidence.ok || !evaluated.ok) return fail(errors);

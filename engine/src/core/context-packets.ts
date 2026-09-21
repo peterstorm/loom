@@ -301,9 +301,10 @@ export function buildContextPacket(input: ContextPacketInput): DomainResult<Lega
       return failure(field, "a context section must contain only bytes whose digest and length cover the exact content");
     }
     const bytes = materialized.value;
-    const parsedLength = parseArtifactByteLength(bytes.length);
-    const verified = parsedLength.ok && parsedLength.value === section.byteLength &&
-      digestBytes(bytes) === section.digest;
+    // boundedByteIterable already bounds bytes.length ≤ the declared section
+    // byteLength (an ArtifactByteLength), so the length arm needs no second
+    // range parse (cs-6): the exactness predicate is the equality plus digest.
+    const verified = bytes.length === section.byteLength && digestBytes(bytes) === section.digest;
     if (!verified) {
       return failure(field, "a context section must contain only bytes whose digest and length cover the exact content");
     }
@@ -475,13 +476,9 @@ function parseSections(raw: unknown, field: string): DomainResult<readonly ByteS
 }
 
 /** The bounded-cause capture lives in the orchestration-contract kernel — the
- *  ONE owner shared with the successor registration/capture-witness adapters
- *  (cs-6), so the 256-char budget and truncation shape can no longer drift
- *  between the layers. Re-exported under this module's historical packet-local
- *  name so the projection read-model's import edge is unchanged; the parsers
- *  below call the kernel helper directly with the packet subjects. */
-export { boundedThrownCause as boundedPacketCause } from "./orchestration-contract";
-
+ *  ONE owner (cs-6) — so the 256-char budget and truncation shape cannot drift
+ *  between the layers; the parsers below call the kernel helper directly with
+ *  the packet subjects. */
 /**
  * Parse an untrusted packet. Section digests are recomputed from the bytes and
  * the packet digest is recomputed from the parsed identity, so a packet whose

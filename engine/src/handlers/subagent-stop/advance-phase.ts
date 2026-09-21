@@ -124,6 +124,44 @@ function discoverArtifactWithin(
   return isAbsolute(specDir) ? found : relative(baseDir, found);
 }
 
+/** Resolve the plan artifact for the architecture arm (code-simplifier-5):
+ *  the recorded `plan_file` first, then — when it is unset or unreadable — the
+ *  spec_dir slug's canonical `.claude/plans/<slug>.md` and finally a single
+ *  date-prefixed plan inside that directory. A recorded plan outside
+ *  PLAN_ARTIFACT_DIR is refused, not healed: substring containment carries `..`
+ *  segments through unharmed, exactly as the spec branches resolve containment. */
+function resolvePlanArtifact(
+  state: Pick<TaskGraph, "plan_file" | "spec_dir">,
+  baseDir: string,
+): ReadableSpecArtifact {
+  const recorded = state.plan_file;
+  if (recorded && !resolvesWithin(recorded, PLAN_ARTIFACT_DIR)) {
+    return transitionNotReady(`plan_file ${recorded} is outside ${PLAN_ARTIFACT_DIR}`);
+  }
+  const recordedReadable = recorded !== null && recorded !== "" && phaseArtifactExists(recorded, baseDir);
+  const fallback = recordedReadable ? null : derivedPlanCandidate(state.spec_dir, baseDir);
+  const resolved = fallback ?? recorded;
+  return resolved && phaseArtifactExists(resolved, baseDir)
+    ? { kind: "ready", artifact: resolved }
+    : transitionNotReady(`no readable plan artifact is available inside ${PLAN_ARTIFACT_DIR}`);
+}
+
+/** The fallback candidate for an unset or unreadable recorded plan: the
+ *  spec_dir slug's canonical `.claude/plans/<slug>.md` when readable, else the
+ *  single date-prefixed plan (e.g. `2026-05-18…`) inside `.claude/plans`. Null
+ *  when nothing resolves. */
+function derivedPlanCandidate(specDir: string | null | undefined, baseDir: string): string | null {
+  const slug = !specDir ? "" : (specDir.split("/").pop() ?? "");
+  const bySlug = slug === "" ? null : `.claude/plans/${slug}.md`;
+  if (bySlug !== null && phaseArtifactExists(bySlug, baseDir)) return bySlug;
+  const datePrefix = slug.slice(0, 10); // "2026-05-18"
+  if (datePrefix === "" || !phaseArtifactExists(".claude/plans", baseDir)) return null;
+  const [only] = readdirSync(join(baseDir, ".claude", "plans")).filter(
+    (file: string) => file.startsWith(datePrefix) && file.endsWith(".md"),
+  );
+  return only === undefined ? null : `.claude/plans/${only}`;
+}
+
 export type PhaseTransitionResolution =
   | Readonly<{ kind: "ready"; nextPhase: Phase; artifact: string; skipClarify?: boolean }>
   | Readonly<{ kind: "not-ready"; reason: string; nextPhase?: never; artifact?: never; skipClarify?: never }>;
@@ -269,43 +307,11 @@ export function observePhaseTransition(
       return transitionReady("architecture", spec.artifact);
     })
     .with("architecture", () => {
-      // Try state.plan_file first, fall back to deriving plan path from spec_dir slug
-      let plan = state.plan_file;
-      if (plan && !resolvesWithin(plan, PLAN_ARTIFACT_DIR)) {
-        // plan_file set but not in expected location — reject. Resolved
-        // containment for the same reason as the spec branches: substring
-        // containment carries `..` segments through unharmed.
-        return transitionNotReady(`plan_file ${plan} is outside ${PLAN_ARTIFACT_DIR}`);
-      }
-      if (!plan || !phaseArtifactExists(plan, baseDir)) {
-        // plan_file not set or file missing — try deriving from spec_dir slug
-        if (state.spec_dir) {
-          const slug = state.spec_dir.split("/").pop() ?? "";
-          if (slug) {
-            const candidate = `.claude/plans/${slug}.md`;
-            if (phaseArtifactExists(candidate, baseDir)) plan = candidate;
-          }
-          // Final fallback: look for any plan matching the date prefix
-          if (!plan || !phaseArtifactExists(plan, baseDir)) {
-            const datePrefix = slug.slice(0, 10); // "2026-05-18"
-            if (datePrefix) {
-              const plansDir = join(baseDir, ".claude", "plans");
-              if (phaseArtifactExists(".claude/plans", baseDir)) {
-                const files = readdirSync(plansDir).filter(
-                  (f: string) => f.startsWith(datePrefix) && f.endsWith(".md")
-                );
-                if (files.length === 1) plan = `.claude/plans/${files[0]}`;
-              }
-            }
-          }
-        }
-      }
-      if (!plan || !phaseArtifactExists(plan, baseDir)) {
-        return transitionNotReady(`no readable plan artifact is available inside ${PLAN_ARTIFACT_DIR}`);
-      }
+      const plan = resolvePlanArtifact(state, baseDir);
+      if (plan.kind === "not-ready") return plan;
       return state.skipped_phases.includes("plan-alignment")
-        ? transitionReady("decompose", plan)
-        : transitionReady("plan-alignment", plan);
+        ? transitionReady("decompose", plan.artifact)
+        : transitionReady("plan-alignment", plan.artifact);
     })
     .with("plan-alignment", () => {
       // Loop-back (re-running architecture) is orchestrator-driven via `set-phase` helper,

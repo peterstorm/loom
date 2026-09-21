@@ -7,7 +7,7 @@ import type { PreparedStandaloneSuccessor } from '../../../core/standalone-linea
 import { admitStandaloneSuccessorReviewer } from '../../../core/standalone-successor-reviewer';
 import { standaloneCurrentPanelCriticals, type StandaloneReviewerProtocolResolver } from '../../../core/standalone-review';
 import type { IssuedStandaloneReviewerProtocol } from '../../../core/review-output';
-import { canonicalStructuralEquals, parseEffectId, sameAgentRequestAuthority, parseAgentRequestAuthority, parseIssuedSpawnRequest, type AgentRequestAuthority, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
+import { canonicalStructuralEquals, parseEffectId, sameAgentRequestAuthority, parseAgentRequestAuthority, parseIssuedSpawnRequest, boundedThrownCause, type AgentRequestAuthority, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
 import { aggregateStandaloneReview, bindStandaloneCaptureAuthority, captureStandaloneReviewerBytes, completeStandaloneReviewerCapture, proveStandaloneRosterCompletion, serializeAdjudicatedStandaloneReview, admitStandaloneTranscript, type FrozenStandaloneReviewAuthority, type StandaloneTranscriptAdmission } from '../../../core/standalone-review';
 import { reduceStandaloneReviewMachine, freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion, startStandaloneReviewMachine, type StandaloneReviewMachineState } from '../../../core/standalone-review-machine';
 import { buildStandaloneFindingBrief, defaultRefutationThreshold, reviewSignals, selectReviewLenses } from '../../../core/review-panel';
@@ -18,7 +18,6 @@ import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
 import { boundedStandaloneReadHandle, successorSourceSnapshot } from './standalone-successor-source';
 import { parseRegistration, standaloneReviewerProtocolResolver, durablePublicationDigest, durableRefutationRequests, durableRequests, exactObject, readRegisteredStandaloneAuthority, publicationResolver, standaloneRetryEffectId, type RegisteredStandaloneProgram } from './helpers';
-import { boundedThrownCause } from './standalone-successor-registration';
 import type { ProgramParse } from './program-result';
 
 function standalonePanelSources(handle: RunDirHandle, authority: FrozenStandaloneReviewAuthority) {

@@ -434,7 +434,12 @@ function probeProcessGroup(processGroupId: number): ProcessGroupProbe {
 
 /** Liveness of the group LEADER itself (the spawned check process, positive
  *  pid). While the leader exists — including as an unreaped zombie — the
- *  group is legitimately ours. */
+ *  group is legitimately ours. This invariant holds only while the spawned
+ *  leader is un-reaped (the containment arm driven by
+ *  `terminateProcessGroup`); once Node has reaped the leader, a positive-PID
+ *  probe success names a recycled pid and the reaped-context rule of
+ *  `observeClosedProcessGroup` applies instead — no negative-PGID signal is
+ *  authorized. */
 function probeLeaderAlive(processGroupId: number): LeaderProbe {
   try {
     process.kill(processGroupId, 0);
@@ -462,9 +467,12 @@ export type { ClosedProcessGroupObservation };
  *  the leader is reaped is exactly the all-survivors-changed-uid case (setuid
  *  execution inside a project command), and is indistinguishable from a
  *  foreign id that recycled the numeric group. Claiming either would misreport
- *  surviving descendants as contained. The caller keeps waiting for a provable
- *  ESRCH and refuses at its deadline instead — without escalating to SIGKILL
- *  on an id that may no longer name this check's group.
+ *  surviving descendants as contained. The caller waits for a provable ESRCH
+ *  and refuses at its deadline instead; escalation to SIGKILL happens only
+ *  where the escalation is identity-bound-authorized — while the spawned
+ *  leader is un-reaped (see `decideEpermEscalation` and
+ *  `decideSurvivingEscalation`) — never on an id that may no longer name this
+ *  check's group.
  *
  *  The probe and clock are defaulted ports (see `GroupProbe`/`WallClock`):
  *  production callers omit them; tests pass plain fakes. */
@@ -556,25 +564,115 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }
 
+/** Reaping-phase provenance for the containment decision
+ *  (type-design-analyzer-1): the spawned check's `exit` event is the knowable
+ *  bit. Node reaps the child at `exit`, which precedes `close` whenever a
+ *  descendant holds stdio, so `leader-unreaped` is the only phase in which a
+ *  positive-PID probe success can still name this check's own leader
+ *  (including as an unreaped zombie). */
+type LeaderReapingPhase =
+  | Readonly<{ kind: "leader-unreaped" }>
+  | Readonly<{ kind: "leader-reaped" }>;
+export type { LeaderReapingPhase };
+
+/** The EPERM arm's post-SIGTERM decision, phase-explicit and pure so the
+ *  polarity table is directly testable. In the leader-reaped phase the numeric
+ *  id is no longer identity-bound and the decision refuses further signalling
+ *  whatever the leader probe answers. In the leader-unreaped phase the
+ *  code-reviewer-1 escalation holds: an EPERM group whose leader probe answers
+ *  present is still legitimately ours and escalates, while leader-gone
+ *  (and leader-error, recorded) refuse as the ambiguous states they are. */
+type EpermEscalationDecision =
+  | Readonly<{ kind: "escalate" }>
+  | Readonly<{ kind: "refuse-recycled-id" }>
+  | Readonly<{ kind: "refuse-ambiguous-leader"; leaderMessage: string | null }>;
+export type { EpermEscalationDecision };
+
+function decideEpermEscalation(phase: LeaderReapingPhase, leader: LeaderProbe): EpermEscalationDecision {
+  switch (phase.kind) {
+    case "leader-reaped":
+      return Object.freeze({ kind: "refuse-recycled-id" });
+    case "leader-unreaped":
+      switch (leader.kind) {
+        case "present":
+          return Object.freeze({ kind: "escalate" });
+        case "gone":
+          return Object.freeze({ kind: "refuse-ambiguous-leader", leaderMessage: null });
+        case "error":
+          return Object.freeze({ kind: "refuse-ambiguous-leader", leaderMessage: leader.message });
+      }
+  }
+}
+export { decideEpermEscalation };
+
+/** The plainly-surviving arm's post-SIGTERM decision: escalate only while the
+ *  spawned leader is un-reaped (the id is still identity-bound); in the
+ *  leader-reaped phase the same present group may name recycled authority and
+ *  the decision refuses the SIGKILL the pre-phase code sent unconditionally. */
+type SurvivingEscalationDecision =
+  | Readonly<{ kind: "escalate" }>
+  | Readonly<{ kind: "refuse-recycled-id" }>;
+export type { SurvivingEscalationDecision };
+
+function decideSurvivingEscalation(phase: LeaderReapingPhase): SurvivingEscalationDecision {
+  return phase.kind === "leader-reaped"
+    ? Object.freeze({ kind: "refuse-recycled-id" })
+    : Object.freeze({ kind: "escalate" });
+}
+export { decideSurvivingEscalation };
+
+/** One settled-observation refusal builder for the two post-close-style
+ *  flows (parent closed; leader-reaped trigger). The parent-closed prose is
+ *  byte-pinned and stays identical; only the subject and the surviving
+ *  descendants' trailing clause differ per flow. */
+function settledProcessGroupRefusal(
+  subject: string,
+  survivingClause: string,
+  processGroupId: number,
+  settled: Exclude<ClosedProcessGroupObservation, { readonly kind: "gone" }>,
+): string {
+  switch (settled.kind) {
+    case "error":
+      return `${subject} but process-tree identity could not be observed: ${settled.message}`;
+    case "unconfirmed":
+      return `${subject} but process-group ${processGroupId} dissolution could not be confirmed ` +
+        "(EPERM): a member refuses signalling, so the group is neither provably ours nor provably gone";
+    case "surviving-descendants":
+      return `${subject} while process-group ${processGroupId} descendants remained; ${survivingClause}`;
+  }
+}
+
 async function terminateProcessGroup(
   processGroupId: number,
   graceMs: number,
   hardKillWaitMs: number,
+  reapingPhase: () => LeaderReapingPhase,
   groupProbe: GroupProbe = probeProcessGroup,
   leaderProbe: LeaderLivenessProbe = probeLeaderAlive,
   now: WallClock = Date.now,
 ): Promise<Readonly<{ ok: true }> | Readonly<{ ok: false; message: string }>> {
   const errors: string[] = [];
+  // Phase gate before the first signal (type-design-analyzer-1): once the
+  // spawned leader's exit is observed, the numeric id is no longer
+  // identity-bound and this module sends nothing at all. The trigger arm
+  // routes that state to the closed-path observer; this guard covers a phase
+  // flip between that check and the send.
+  if (reapingPhase().kind === "leader-reaped") {
+    return Object.freeze({
+      ok: false,
+      message: `process-group ${processGroupId} containment refused: the spawned leader already exited, ` +
+        "so the numeric group id is no longer identity-bound and further signalling is unauthorized",
+    });
+  }
   const termError = signalProcessGroup(processGroupId, "SIGTERM");
   if (termError !== null) errors.push(termError);
 
   const afterTerm = await waitForProcessGroupGone(processGroupId, graceMs, groupProbe, now);
   if (afterTerm.kind === "error") errors.push(afterTerm.message);
 
-  // Post-SIGTERM SIGKILL escalation, shared by the two not-provably-gone arms
-  // that MAY escalate: a plainly surviving group, and (code-reviewer-1) an
-  // EPERM group whose leader is still alive. The post-SIGKILL probes use the
-  // same injected ports as the pre-kill wait.
+  // Post-SIGTERM escalation, decided by the phase-explicit decision functions
+  // above. The escalation itself is unchanged: signal, then wait for a
+  // provable ESRCH through the same injected ports as the pre-kill wait.
   const escalateToSigkill = async (): Promise<void> => {
     const killError = signalProcessGroup(processGroupId, "SIGKILL");
     if (killError !== null) errors.push(killError);
@@ -587,27 +685,48 @@ async function terminateProcessGroup(
     }
   };
   // EPERM after SIGTERM cannot prove dissolution ON ITS OWN (uid-changed
-  // survivors vs a recycled foreign id), but the module's own leader invariant
-  // — while the leader exists, including as an unreaped zombie, the group is
-  // legitimately ours — binds the numeric id whenever the leader is still
-  // alive. So the arm now CORRELATES the leader probe (code-reviewer-1): a
-  // provably-ours leader-alive group escalates to SIGKILL exactly like a
-  // plainly surviving one, while the genuinely ambiguous leader-reaped state —
-  // where the id may already name foreign authority — still refuses WITHOUT
-  // any further signal.
+  // survivors vs a recycled foreign id), so the arm correlates the leader
+  // probe AND the reaping phase: in the leader-unreaped phase the module's own
+  // leader invariant — while the leader exists, including as an unreaped
+  // zombie, the group is legitimately ours — binds the numeric id whenever the
+  // leader is still alive, so a leader-alive group escalates to SIGKILL
+  // exactly like a plainly surviving one; the leader-reaped phase — where the
+  // id may already name recycled authority — refuses WITHOUT any further
+  // signal, as does the ambiguous leader-gone/leader-error state.
   if (afterTerm.kind === "eperm") {
     const leader = leaderProbe(processGroupId);
     if (leader.kind === "error") errors.push(leader.message);
-    if (leader.kind === "present") {
-      await escalateToSigkill();
-    } else {
-      errors.push(
-        `process-group ${processGroupId} dissolution could not be confirmed after SIGTERM (EPERM); ` +
-        "signalling an id that may no longer name this check's group is refused",
-      );
+    const decision = decideEpermEscalation(reapingPhase(), leader);
+    switch (decision.kind) {
+      case "escalate":
+        await escalateToSigkill();
+        break;
+      case "refuse-recycled-id":
+        errors.push(
+          `process-group ${processGroupId} dissolution could not be confirmed after SIGTERM (EPERM); ` +
+          "the spawned leader already exited, so the numeric group id may name recycled authority and signalling is refused",
+        );
+        break;
+      case "refuse-ambiguous-leader":
+        errors.push(
+          `process-group ${processGroupId} dissolution could not be confirmed after SIGTERM (EPERM); ` +
+          "signalling an id that may no longer name this check's group is refused",
+        );
+        break;
     }
   } else if (afterTerm.kind !== "gone") {
-    await escalateToSigkill();
+    const decision = decideSurvivingEscalation(reapingPhase());
+    switch (decision.kind) {
+      case "escalate":
+        await escalateToSigkill();
+        break;
+      case "refuse-recycled-id":
+        errors.push(
+          `process-group ${processGroupId} still exists after SIGTERM; the spawned leader already exited, ` +
+          "so the numeric group id may name recycled authority and SIGKILL escalation is refused",
+        );
+        break;
+    }
   }
 
   return errors.length === 0
@@ -757,6 +876,18 @@ async function runProjectCommand(
     return spawnFailure(cause, diagnostics(stdout, stderr));
   }
   const parent = parentObservation(child);
+  // type-design-analyzer-1: the knowable reaping-phase bit. Node reaps the
+  // spawned child at `exit`, which precedes `close` whenever a descendant
+  // holds stdio; once observed, the numeric group id is no longer
+  // identity-bound and no further negative-PGID signal is authorized.
+  let leaderExitObserved = false;
+  child.once("exit", () => {
+    leaderExitObserved = true;
+  });
+  const reapingPhase = (): LeaderReapingPhase =>
+    leaderExitObserved
+      ? Object.freeze({ kind: "leader-reaped" })
+      : Object.freeze({ kind: "leader-unreaped" });
   const processGroupId = child.pid;
   if (processGroupId === undefined) {
     return spawnFailure("spawn returned no process id", diagnostics(stdout, stderr));
@@ -810,13 +941,12 @@ async function runProjectCommand(
     if (settled.kind !== "gone") {
       return failed({
         kind: "termination-unconfirmed",
-        message: settled.kind === "error"
-          ? `completion parent closed but process-tree identity could not be observed: ${settled.message}`
-          : settled.kind === "unconfirmed"
-            ? `completion parent closed but process-group ${processGroupId} dissolution could not be confirmed ` +
-              "(EPERM): a member refuses signalling, so the group is neither provably ours nor provably gone"
-            : `completion parent closed while process-group ${processGroupId} descendants remained; ` +
-              "post-close signalling was refused because the numeric group id is no longer identity-bound",
+        message: settledProcessGroupRefusal(
+          "completion parent closed",
+          "post-close signalling was refused because the numeric group id is no longer identity-bound",
+          processGroupId,
+          settled,
+        ),
         diagnostics: diagnostics(stdout, stderr),
       });
     }
@@ -830,7 +960,81 @@ async function runProjectCommand(
     });
   }
 
-  const containment = await terminateProcessGroup(processGroupId, graceMs, hardKillWaitMs);
+  // type-design-analyzer-1: a timeout/cancellation trigger after the spawned
+  // leader's `exit` was observed runs in the leader-reaped phase — Node reaped
+  // the child (before `close`, which descendants holding stdio can withhold),
+  // so the numeric group id is no longer identity-bound and this module
+  // signals nothing further. The state is exactly the closed-parent
+  // classification: observe, wait for a provable ESRCH, and report
+  // fail-closed. SIGTERM/SIGKILL escalation stays authorized only in the
+  // leader-unreaped phase handled below.
+  if (reapingPhase().kind === "leader-reaped") {
+    const initialGroup = observeClosedProcessGroup(processGroupId);
+    if (initialGroup.kind === "error") {
+      return failed({
+        kind: "termination-unconfirmed",
+        message: `${trigger.kind} completion check ended but process-tree identity could not be observed: ${initialGroup.message}`,
+        diagnostics: diagnostics(stdout, stderr),
+      });
+    }
+    const settled = initialGroup.kind === "gone"
+      ? Object.freeze({ kind: "gone", reason: "absent" } as const)
+      : await waitForClosedProcessGroup(processGroupId, hardKillWaitMs);
+    if (settled.kind !== "gone") {
+      return failed({
+        kind: "termination-unconfirmed",
+        message: settledProcessGroupRefusal(
+          `${trigger.kind} completion check ended`,
+          "post-exit signalling was refused because the numeric group id is no longer identity-bound",
+          processGroupId,
+          settled,
+        ),
+        diagnostics: diagnostics(stdout, stderr),
+      });
+    }
+    const closed = await Promise.race<ParentObservation | null>([
+      parent,
+      delay(hardKillWaitMs).then(() => null),
+    ]);
+    if (closed === null || closed.kind !== "closed") {
+      return failed({
+        kind: "termination-unconfirmed",
+        message: `${trigger.kind} process group is gone but the parent close observation is unavailable`,
+        diagnostics: diagnostics(stdout, stderr),
+      });
+    }
+    if (trigger.kind === "cancelled") {
+      return failed({
+        kind: "cancelled",
+        message: "completion check cancelled after its process group dissolved without signalling",
+        exitCode: closed.exitCode,
+        signal: closed.signal,
+        diagnostics: diagnostics(stdout, stderr),
+      });
+    }
+    if (initialGroup.kind !== "gone") {
+      return failed({
+        kind: "process-tree-survived",
+        message: `${trigger.kind} completion check ended while process-group ${processGroupId} descendants remained; ` +
+          "the runner waited for them to exit without signalling an unbound numeric group id",
+        exitCode: closed.exitCode,
+        signal: closed.signal,
+        diagnostics: diagnostics(stdout, stderr),
+      });
+    }
+    return observedExecution(
+      repositoryRoot,
+      check,
+      beforeReport,
+      stdout,
+      stderr,
+      closed,
+      true,
+      reportMode,
+    );
+  }
+
+  const containment = await terminateProcessGroup(processGroupId, graceMs, hardKillWaitMs, reapingPhase);
   if (!containment.ok) {
     return failed({
       kind: "termination-unconfirmed",

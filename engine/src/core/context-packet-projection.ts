@@ -1,9 +1,9 @@
 /** Read-model only. Expected identity is supplied by delivery, not independent publication proof. */
 import { match } from "ts-pattern";
-import { boundedPacketCause, parseContextPacket, parseStandaloneReviewerContextPacketV3, type ContextPacket, type StandaloneReviewerContextPacketV3 } from "./context-packets";
+import { parseContextPacket, parseStandaloneReviewerContextPacketV3, type ContextPacket, type StandaloneReviewerContextPacketV3 } from "./context-packets";
+import { boundedThrownCause, type DomainResult } from "./orchestration-contract";
 
 type ProjectedPacket = ContextPacket | StandaloneReviewerContextPacketV3;
-import type { DomainResult } from "./orchestration-contract";
 
 type Selection = Readonly<{ offset: number; limit: number }> & (
   | Readonly<{ kind: "index" }>
@@ -66,7 +66,7 @@ function fileText(packet: ProjectedPacket, path: string): DomainResult<string, s
     // Name the failing operation: the frozen-source index parse (not the text
     // decode, which is separately fatal) is what refused a digested-but
     // non-JSON section.
-    const attribution = boundedPacketCause(cause, "frozen source index");
+    const attribution = boundedThrownCause(cause, "frozen source index");
     throw new Error(`frozen source index could not be parsed from the section bytes (${attribution.name}: ${attribution.message})`);
   }
   if (!record(source) || !Array.isArray(source.files)) return failed("frozen source file index is invalid");
@@ -79,7 +79,7 @@ function fileText(packet: ProjectedPacket, path: string): DomainResult<string, s
     try {
       bytes = Uint8Array.from(atob(file.contentBase64), character => character.charCodeAt(0));
     } catch (cause) {
-      const attribution = boundedPacketCause(cause, "binary source content base64");
+      const attribution = boundedThrownCause(cause, "binary source content base64");
       throw new Error(`binary source content could not be decoded from its base64 payload (${attribution.name}: ${attribution.message})`);
     }
     return { ok: true, value: new TextDecoder("utf-8", { fatal: true }).decode(bytes) };
@@ -137,7 +137,13 @@ function project(packet: ProjectedPacket, selection: Selection): DomainResult<un
 /** Rehash exact sections and match every supplied identity field, then expose only a bounded read-model. */
 export function projectContextPacket(raw: unknown, input: ContextProjectionInput): DomainResult<unknown, string> {
   const parsed = input.purpose === "standalone-successor" ? parseStandaloneReviewerContextPacketV3(raw) : parseContextPacket(raw);
-  if (!parsed.ok) return failed("packet integrity or supported contract check failed");
+  // The integrity refusal carries the parser's own field-level diagnostic so a
+  // failed packet read names the failing field and rule instead of one generic
+  // sentence (silent-failure-hunter-1). The refusal stays fail-closed and the
+  // reader boundary surfaces the whole cause.
+  if (!parsed.ok) {
+    return failed(`packet integrity or supported contract check failed (${parsed.error.field}: ${parsed.error.message})`);
+  }
   const packet = parsed.value;
   if (packet.requestId !== input.requestId || packet.digest !== input.digest || packet.role !== input.role || packet.requiredSkill !== input.requiredSkill) return failed("packet differs from expected issued identity");
   try {
@@ -148,7 +154,7 @@ export function projectContextPacket(raw: unknown, input: ContextProjectionInput
     // itself; the fatal UTF-8 text decode reaches only this catch) and the
     // subject names the selection kind, so a --file failure is never reported
     // as a section decode problem.
-    const cause = boundedPacketCause(thrown, "context projection");
+    const cause = boundedThrownCause(thrown, "context projection");
     const subject = input.selection.kind === "file"
       ? `source file ${input.selection.path}`
       : input.selection.kind === "section"

@@ -286,6 +286,45 @@ describe("completion check process shell", () => {
     expect(existsSync(sentinel)).toBe(true);
   });
 
+  it("sends no signal after the leader's exit even when a timeout trigger wins the race first", async () => {
+    // type-design-analyzer-1: the timeout/cancellation trigger can settle
+    // after the spawned leader was already reaped ('exit' precedes 'close'
+    // whenever a descendant holds the runner's stdio pipes). In that
+    // leader-reaped phase the numeric group id is no longer identity-bound,
+    // so the runner sends no signal at all — it classifies and waits exactly
+    // like the closed-parent path, and the surviving descendant exits on its
+    // own. A regression that escalates in the reaped phase turns this red
+    // twice: the recorded signal set is non-empty and the holder is killed
+    // before it can write its sentinel.
+    const root = fixtureRoot();
+    const sentinel = join(root, "holder-survived.txt");
+    const signals: (number | NodeJS.Signals)[] = [];
+    const actualKill = process.kill.bind(process);
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+      if (signal !== undefined && signal !== 0) signals.push(signal);
+      return actualKill(pid, signal);
+    }) as typeof process.kill);
+    try {
+      const result = await runCompletionCheck(check("exit-before-close", {
+        args: ["completion-process.mjs", "exit-before-close", "holder-survived.txt", "1500"],
+        timeoutMs: 400,
+      }), root, { terminationGraceMs: 250, hardKillWaitMs: 4_000 });
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          kind: "process-tree-survived",
+          exitCode: 0,
+          signal: null,
+          message: expect.stringContaining("the runner waited for them to exit without signalling an unbound numeric group id"),
+        },
+      });
+      expect(signals).toEqual([]);
+      expect(existsSync(sentinel)).toBe(true);
+    } finally {
+      kill.mockRestore();
+    }
+  }, 15_000);
+
   it("does not signal a same-UID group whose leader PID appeared only after parent close", async () => {
     const signals: (number | NodeJS.Signals)[] = [];
     const kill = vi.spyOn(process, "kill").mockImplementation(((_pid: number, signal?: number | NodeJS.Signals) => {

@@ -10,10 +10,9 @@ import type { ProgramParse } from "./program-result";
 
 // The bounded thrown-cause capture lives in the orchestration-contract kernel
 // (cs-6: ONE owner for the packet parsers, the projection read-model, and the
-// adapters). Re-exported so the sibling adapters that import it from here keep
-// working; this module's own callsites pass the full "successor …" subject
-// phrase that preserves the historical fallback prose byte-for-byte.
-export { boundedThrownCause } from "../../../core/orchestration-contract";
+// adapters). Sibling adapters import the kernel directly; this module's own
+// callsites pass the full "successor …" subject phrase that preserves the
+// historical fallback prose byte-for-byte.
 
 export type StandaloneSuccessorStartInput = Readonly<{
   schemaVersion: 3; kind: StandaloneReviewKind; files: readonly string[]; dryRun: false;
@@ -66,6 +65,21 @@ function boundedSectionBytes(raw: unknown, maximum: number): Uint8Array | null {
   return parsed.ok ? parsed.value : null;
 }
 
+/** The shared decode → encodeByteSection → digest/byteLength-exactness tail
+ *  (code-simplifier-1): the frozen successor source and each predecessor
+ *  context differ only in the section label and the refusal noun, so both
+ *  register through this one pure step and cannot drift apart. */
+function exactDecodedSection(
+  raw: Record<string, unknown>, bytes: Uint8Array, label: string, noun: string,
+): ProgramParse<ByteSection> {
+  const section = encodeByteSection(label, new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  if (!section.ok) return bad(`${noun} could not be encoded: ${section.error.message}`);
+  if (section.value.digest !== raw.digest || section.value.byteLength !== raw.byteLength) {
+    return bad(`${noun} differs from exact bytes`);
+  }
+  return { ok: true, value: section.value };
+}
+
 /** Structural dispatch only. LC-2 parsing additionally requires independently authenticated nominal successor data. */
 export function parseStandaloneSuccessorRegistration(raw: unknown): ProgramParse<RegisteredStandaloneSuccessorProgram> {
   if (!exact(raw, ["schemaVersion", "kind", "reviewerProtocol", "input", "authority", "currentSource", "previousContexts"]) ||
@@ -82,9 +96,8 @@ export function parseStandaloneSuccessorRegistration(raw: unknown): ProgramParse
   try {
     const decoded = parseBoundedReviewerJson(currentBytes, STANDALONE_LINEAGE_LIMITS.retainedBytes);
     if (!decoded.ok) return bad(decoded.error.message);
-    const section = encodeByteSection("standalone-frozen-source", new TextDecoder("utf-8", { fatal: true }).decode(currentBytes));
-    if (!section.ok) return bad(`frozen successor source section could not be encoded: ${section.error.message}`);
-    if (section.value.digest !== raw.currentSource.digest || section.value.byteLength !== raw.currentSource.byteLength) return bad("frozen successor source section differs from exact bytes");
+    const frozenSource = exactDecodedSection(raw.currentSource, currentBytes, "standalone-frozen-source", "frozen successor source section");
+    if (!frozenSource.ok) return frozenSource;
     if (!Array.isArray(raw.previousContexts) || raw.previousContexts.length > STANDALONE_REVIEWER_ROLES.length * 2 + 1) return bad("bounded predecessor contexts are required");
     const previousContexts: ByteSection[] = [];
     let remaining = 2_097_152;
@@ -95,13 +108,12 @@ export function parseStandaloneSuccessorRegistration(raw: unknown): ProgramParse
       const previousBytes = boundedSectionBytes(previous.bytes, remaining);
       if (previousBytes === null) return bad("invalid bounded predecessor context section");
       remaining -= previousBytes.length;
-      const section = encodeByteSection(previous.label, new TextDecoder("utf-8", { fatal: true }).decode(previousBytes));
-      if (!section.ok) return bad(`predecessor context section could not be encoded: ${section.error.message}`);
-      if (section.value.digest !== previous.digest || section.value.byteLength !== previous.byteLength) return bad("predecessor context section differs from exact bytes");
-      previousContexts.push(section.value);
+      const predecessorSection = exactDecodedSection(previous, previousBytes, previous.label, "predecessor context section");
+      if (!predecessorSection.ok) return predecessorSection;
+      previousContexts.push(predecessorSection.value);
     }
     return { ok: true, value: Object.freeze({ schemaVersion: 3, kind: "standalone-review", reviewerProtocol: descriptor.value,
-      input: input.value, authority: raw.authority, currentSource: section.value, previousContexts: Object.freeze(previousContexts) }) };
+      input: input.value, authority: raw.authority, currentSource: frozenSource.value, previousContexts: Object.freeze(previousContexts) }) };
   } catch (thrown) {
     const cause = boundedThrownCause(thrown, "successor source");
     return bad(`frozen successor source cannot be decoded: ${cause.name}: ${cause.message}`);

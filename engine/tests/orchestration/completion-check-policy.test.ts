@@ -1,20 +1,27 @@
 /**
  * Plain-closure tests for the completion-check runner's containment policy
  * seam (atl-3). The group/leader probes and the wall clock are defaulted
- * ports; these tests drive the exported wait/classification policy with
- * plain fakes and never touch `process.kill` or real time, which is the
- * project's port rule for test doubles.
+ * ports; these tests drive the exported wait/classification/escalation
+ * policy with plain closure fakes and an injected clock, while a passive
+ * `process.kill` spy (via `expectNoSignal`) pins that the faked policy never
+ * sends a signal — the negative-observation proof that the ports fully
+ * replace the real probe.
  */
 
 import { describe, expect, it, vi } from "vitest";
 import {
+  decideEpermEscalation,
+  decideSurvivingEscalation,
   observeClosedProcessGroup,
   waitForClosedProcessGroup,
   waitForProcessGroupGone,
   type ClosedProcessGroupObservation,
+  type EpermEscalationDecision,
   type GroupProbe,
   type LeaderLivenessProbe,
+  type LeaderProbe,
   type ProcessGroupProbe,
+  type SurvivingEscalationDecision,
   type WallClock,
 } from "../../src/orchestration/completion-check-runner";
 
@@ -41,13 +48,25 @@ const steppingClock = (step: number, start = 0): WallClock => {
   };
 };
 
+/** Runs the policy body under a passive `process.kill` spy and asserts the
+ *  spy saw no call — the no-signal invariant stated once, in one place, with
+ *  assertion strength unchanged (it still runs for every caller). */
+const expectNoSignal = async (run: () => Promise<void>): Promise<void> => {
+  const kill = vi.spyOn(process, "kill");
+  try {
+    await run();
+    expect(kill).not.toHaveBeenCalled();
+  } finally {
+    kill.mockRestore();
+  }
+};
+
 describe("the process-group dissolution wait policy (plain fakes, no process global)", () => {
   it("keeps observing through undecided probes and settles on the provable ESRCH", async () => {
     // The policy under test: neither `present` nor `eperm` proves dissolution;
     // only a `gone` probe does. The loop must keep observing until that proof
     // arrives, whatever the intermediate answers.
-    const kill = vi.spyOn(process, "kill");
-    try {
+    await expectNoSignal(async () => {
       const latest = await waitForProcessGroupGone(
         4242,
         1_000,
@@ -55,17 +74,13 @@ describe("the process-group dissolution wait policy (plain fakes, no process glo
         steppingClock(5),
       );
       expect(latest).toEqual({ kind: "gone" });
-      expect(kill).not.toHaveBeenCalled();
-    } finally {
-      kill.mockRestore();
-    }
+    });
   });
 
   it("returns the latest unproven probe at the deadline without any signal", async () => {
     // Deadline refusal: a group that never proves gone ends the wait with the
     // last observation, and the wait itself never signals anything.
-    const kill = vi.spyOn(process, "kill");
-    try {
+    await expectNoSignal(async () => {
       const latest = await waitForProcessGroupGone(
         4242,
         30,
@@ -73,22 +88,14 @@ describe("the process-group dissolution wait policy (plain fakes, no process glo
         steppingClock(10),
       );
       expect(latest).toEqual({ kind: "eperm" });
-      expect(kill).not.toHaveBeenCalled();
-    } finally {
-      kill.mockRestore();
-    }
+    });
   });
 
   it("exits immediately when the injected clock already sits at the deadline", async () => {
-    const probes = scriptedGroupProbe({ kind: "present" }, { kind: "present" });
-    const kill = vi.spyOn(process, "kill");
-    try {
-      const latest = await waitForProcessGroupGone(4242, 0, probes, () => 10_000);
+    await expectNoSignal(async () => {
+      const latest = await waitForProcessGroupGone(4242, 0, scriptedGroupProbe({ kind: "present" }), () => 10_000);
       expect(latest).toEqual({ kind: "present" });
-      expect(kill).not.toHaveBeenCalled();
-    } finally {
-      kill.mockRestore();
-    }
+    });
   });
 });
 
@@ -145,10 +152,52 @@ describe("the closed process-group classification (plain fakes)", () => {
   });
 });
 
+describe("the post-SIGTERM escalation decisions (phase-explicit, plain fakes)", () => {
+  const presentLeaderProbe: LeaderProbe = { kind: "present" };
+  const goneLeaderProbe: LeaderProbe = { kind: "gone" };
+  const errorLeaderProbe: LeaderProbe = { kind: "error", message: "leader probe failed" };
+
+  it("refuses every further signal in the leader-reaped phase, whatever the probes answer", () => {
+    // Once the spawned leader's exit is observed the numeric id is no longer
+    // identity-bound: leader-present names a recycled pid exactly as the
+    // closed classifier reads it, so both decision arms refuse.
+    const decisions: EpermEscalationDecision[] = [
+      decideEpermEscalation({ kind: "leader-reaped" }, presentLeaderProbe),
+      decideEpermEscalation({ kind: "leader-reaped" }, goneLeaderProbe),
+      decideEpermEscalation({ kind: "leader-reaped" }, errorLeaderProbe),
+    ];
+    expect(decisions).toEqual([
+      { kind: "refuse-recycled-id" },
+      { kind: "refuse-recycled-id" },
+      { kind: "refuse-recycled-id" },
+    ]);
+    const surviving: SurvivingEscalationDecision = decideSurvivingEscalation({ kind: "leader-reaped" });
+    expect(surviving).toEqual({ kind: "refuse-recycled-id" });
+  });
+
+  it("escalates the EPERM group exactly when the un-reaped leader probe proves the id ours", () => {
+    expect(decideEpermEscalation({ kind: "leader-unreaped" }, presentLeaderProbe)).toEqual({ kind: "escalate" });
+  });
+
+  it("refuses the ambiguous leader-gone and leader-error EPERM states without a signal", () => {
+    expect(decideEpermEscalation({ kind: "leader-unreaped" }, goneLeaderProbe)).toEqual({
+      kind: "refuse-ambiguous-leader",
+      leaderMessage: null,
+    });
+    expect(decideEpermEscalation({ kind: "leader-unreaped" }, errorLeaderProbe)).toEqual({
+      kind: "refuse-ambiguous-leader",
+      leaderMessage: "leader probe failed",
+    });
+  });
+
+  it("escalates a plainly surviving group only in the leader-unreaped phase", () => {
+    expect(decideSurvivingEscalation({ kind: "leader-unreaped" })).toEqual({ kind: "escalate" });
+  });
+});
+
 describe("the post-close observation wait (plain fakes)", () => {
   it("keeps observing an unconfirmed EPERM group until a provable ESRCH resolves it", async () => {
-    const kill = vi.spyOn(process, "kill");
-    try {
+    await expectNoSignal(async () => {
       const settled = await waitForClosedProcessGroup(
         4242,
         1_000,
@@ -157,15 +206,11 @@ describe("the post-close observation wait (plain fakes)", () => {
         steppingClock(5),
       );
       expect(settled).toEqual({ kind: "gone", reason: "absent" });
-      expect(kill).not.toHaveBeenCalled();
-    } finally {
-      kill.mockRestore();
-    }
+    });
   });
 
   it("resolves surviving descendants to gone once the members exit", async () => {
-    const kill = vi.spyOn(process, "kill");
-    try {
+    await expectNoSignal(async () => {
       const settled = await waitForClosedProcessGroup(
         4242,
         1_000,
@@ -174,15 +219,11 @@ describe("the post-close observation wait (plain fakes)", () => {
         steppingClock(5),
       );
       expect(settled).toEqual({ kind: "gone", reason: "absent" });
-      expect(kill).not.toHaveBeenCalled();
-    } finally {
-      kill.mockRestore();
-    }
+    });
   });
 
   it("expires fail-closed with the last undecided observation", async () => {
-    const kill = vi.spyOn(process, "kill");
-    try {
+    await expectNoSignal(async () => {
       const settled = await waitForClosedProcessGroup(
         4242,
         20,
@@ -194,9 +235,6 @@ describe("the post-close observation wait (plain fakes)", () => {
         steppingClock(10),
       );
       expect(settled).toEqual({ kind: "surviving-descendants" });
-      expect(kill).not.toHaveBeenCalled();
-    } finally {
-      kill.mockRestore();
-    }
+    });
   });
 });
