@@ -710,7 +710,7 @@ export function parseRegistration(raw: unknown): ProgramParse<RegisteredStandalo
       authority: freezeRegistrationAuthority(JSON.parse(serializeStandaloneReviewAuthority(authority.value))),
     }) };
   } catch (thrown) {
-    const cause = boundedThrownCause(thrown, "standalone-registration");
+    const cause = boundedThrownCause(thrown, "successor standalone-registration");
     return { ok: false, message: `standalone-review registration cannot be inspected safely (${cause.name}: ${cause.message})` };
   }
 }
@@ -765,7 +765,7 @@ export function parseRegisteredFacadeProgram(raw: unknown): FacadeRegistrationPa
   try {
     return parseFacadeRegistration(raw);
   } catch (thrown) {
-    const cause = boundedThrownCause(thrown, "facade-registration");
+    const cause = boundedThrownCause(thrown, "successor facade-registration");
     return invalidRegistration(`program registration cannot be inspected safely (${cause.name}: ${cause.message})`);
   }
 }

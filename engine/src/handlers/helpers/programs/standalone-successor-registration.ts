@@ -1,5 +1,5 @@
 /** Explicit successor ingress and frozen source data. These records are not nominal predecessor authority. */
-import { canonicalStructuralEquals } from "../../../core/orchestration-contract";
+import { boundedThrownCause, canonicalStructuralEquals } from "../../../core/orchestration-contract";
 import { parseBoundedReviewerJson } from "../../../core/reviewer-protocol";
 import { parseStandaloneReviewScope, STANDALONE_REVIEWER_ROLES, type StandaloneReviewKind } from "../../../core/standalone-review";
 import { STANDALONE_LINEAGE_LIMITS, STANDALONE_REVIEWER_PROTOCOL_V3, parseStandaloneReviewerProtocolV3,
@@ -7,6 +7,13 @@ import { STANDALONE_LINEAGE_LIMITS, STANDALONE_REVIEWER_PROTOCOL_V3, parseStanda
 import type { StandaloneDispositionPublicationReference } from "../../../core/standalone-lineage";
 import { encodeByteSection, boundedByteIterable, type ByteSection } from "../../../core/context-packets";
 import type { ProgramParse } from "./program-result";
+
+// The bounded thrown-cause capture lives in the orchestration-contract kernel
+// (cs-6: ONE owner for the packet parsers, the projection read-model, and the
+// adapters). Re-exported so the sibling adapters that import it from here keep
+// working; this module's own callsites pass the full "successor …" subject
+// phrase that preserves the historical fallback prose byte-for-byte.
+export { boundedThrownCause } from "../../../core/orchestration-contract";
 
 export type StandaloneSuccessorStartInput = Readonly<{
   schemaVersion: 3; kind: StandaloneReviewKind; files: readonly string[]; dryRun: false;
@@ -19,34 +26,6 @@ export type RegisteredStandaloneSuccessorProgram = Readonly<{
   input: StandaloneSuccessorStartInput; authority: unknown; currentSource: ByteSection; previousContexts: readonly ByteSection[];
 }>;
 const bad = (message: string): ProgramParse<never> => ({ ok: false, message });
-const MAX_CAUSE_TEXT = 256;
-const boundedCauseText = (value: string): string =>
-  value.length <= MAX_CAUSE_TEXT ? value : `${value.slice(0, MAX_CAUSE_TEXT - 1)}…`;
-/**
- * Bounded thrown-cause capture (the boundedParserCause pattern): the fatal
- * TextDecoder decode of hostile predecessor bytes throws here, and the cause
- * is the debugging context the operator needs to distinguish invalid UTF-8
- * bytes from other encoding failures — bounded so no full input is exposed.
- * Shared by both adapters (the transcript adapter and this one), differing only
- * in the per-subject fallback message, so the 256-char budget and truncation
- * shape cannot drift between them.
- */
-export function boundedThrownCause(thrown: unknown, subject: string): { name: string; message: string } {
-  try {
-    if (thrown instanceof Error) {
-      return {
-        name: boundedCauseText(typeof thrown.name === "string" && thrown.name !== "" ? thrown.name : "Error"),
-        message: boundedCauseText(typeof thrown.message === "string" ? thrown.message : `successor ${subject} inspection failed`),
-      };
-    }
-    return {
-      name: "NonErrorThrown",
-      message: boundedCauseText(typeof thrown === "string" ? thrown : `successor ${subject} inspection failed with a non-Error cause`),
-    };
-  } catch {
-    return { name: "UninspectableCause", message: `successor ${subject} inspection failed with an uninspectable cause` };
-  }
-}
 function exact(raw: unknown, keys: readonly string[]): raw is Record<string, unknown> {
   return typeof raw === "object" && raw !== null && !Array.isArray(raw) && Reflect.ownKeys(raw).length === keys.length &&
     keys.every(key => { const field = Object.getOwnPropertyDescriptor(raw, key); return field !== undefined && "value" in field && field.enumerable; });
@@ -124,7 +103,7 @@ export function parseStandaloneSuccessorRegistration(raw: unknown): ProgramParse
     return { ok: true, value: Object.freeze({ schemaVersion: 3, kind: "standalone-review", reviewerProtocol: descriptor.value,
       input: input.value, authority: raw.authority, currentSource: section.value, previousContexts: Object.freeze(previousContexts) }) };
   } catch (thrown) {
-    const cause = boundedThrownCause(thrown, "source");
+    const cause = boundedThrownCause(thrown, "successor source");
     return bad(`frozen successor source cannot be decoded: ${cause.name}: ${cause.message}`);
   }
 }

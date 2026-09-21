@@ -668,7 +668,7 @@ export function readStandaloneCaptureWitnesses(handle: RunDirHandle,
     if (processWitnesses !== undefined && processWitnesses.size !== witnesses.size) return { ok: false, message: "current-session witness inventory differs from durable captured roster" };
     return { ok: true, value: witnesses };
   } catch (thrown) {
-    const cause = boundedThrownCause(thrown, "standalone capture witnesses");
+    const cause = boundedThrownCause(thrown, "successor standalone capture witnesses");
     return { ok: false, message: `standalone capture witness inspection failed: ${cause.name}: ${cause.message}` };
   }
 }

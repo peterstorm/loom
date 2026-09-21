@@ -24,6 +24,7 @@ import {
   parseReviewerProtocolDescriptor, type ReviewerProtocolDescriptor,
 } from "./reviewer-contract";
 import {
+  boundedThrownCause,
   canonicalRecord,
   parseArtifactByteLength,
   parseRequestId,
@@ -473,31 +474,13 @@ function parseSections(raw: unknown, field: string): DomainResult<readonly ByteS
   return success(Object.freeze(sections));
 }
 
-/** Bounded, sanitized cause for the fail-closed packet parsers and the packet
- *  projection read-model. The core stays free of handler imports, so the
- *  shared `boundedThrownCause` pattern is inlined here with the same 256-char
- *  budget and truncation shape, and the projection module consumes it through
- *  the core-internal edge. An unexpected crash is attributable without a
- *  debugger and never leaks full input bytes. */
-const CONTEXT_PACKET_CAUSE_LIMIT = 256;
-const boundedPacketCauseText = (value: string): string =>
-  value.length <= CONTEXT_PACKET_CAUSE_LIMIT ? value : `${value.slice(0, CONTEXT_PACKET_CAUSE_LIMIT - 1)}…`;
-export const boundedPacketCause = (thrown: unknown, subject: string): { name: string; message: string } => {
-  try {
-    if (thrown instanceof Error) {
-      return {
-        name: boundedPacketCauseText(typeof thrown.name === "string" && thrown.name !== "" ? thrown.name : "Error"),
-        message: boundedPacketCauseText(typeof thrown.message === "string" ? thrown.message : `${subject} inspection failed`),
-      };
-    }
-    return {
-      name: "NonErrorThrown",
-      message: boundedPacketCauseText(typeof thrown === "string" ? thrown : `${subject} inspection failed with a non-Error cause`),
-    };
-  } catch {
-    return { name: "UninspectableCause", message: `${subject} inspection failed with an uninspectable cause` };
-  }
-};
+/** The bounded-cause capture lives in the orchestration-contract kernel — the
+ *  ONE owner shared with the successor registration/capture-witness adapters
+ *  (cs-6), so the 256-char budget and truncation shape can no longer drift
+ *  between the layers. Re-exported under this module's historical packet-local
+ *  name so the projection read-model's import edge is unchanged; the parsers
+ *  below call the kernel helper directly with the packet subjects. */
+export { boundedThrownCause as boundedPacketCause } from "./orchestration-contract";
 
 /**
  * Parse an untrusted packet. Section digests are recomputed from the bytes and
@@ -511,7 +494,7 @@ export function parseContextPacket(raw: unknown): DomainResult<ContextPacket, Co
     return parsed.value.schemaVersion === 3
       ? failure("schemaVersion", "standalone v3 requires explicit successor Context Packet parsing") : success(parsed.value);
   } catch (thrown) {
-    const cause = boundedPacketCause(thrown, "context packet");
+    const cause = boundedThrownCause(thrown, "context packet");
     return failure("packet", `context packet could not be inspected safely (${cause.name}: ${cause.message})`);
   }
 }
@@ -524,7 +507,7 @@ export function parseStandaloneReviewerContextPacketV3(raw: unknown): DomainResu
     return parsed.value.schemaVersion === 3 ? success(parsed.value)
       : failure("schemaVersion", "standalone successor Context Packet must declare schema version 3");
   } catch (thrown) {
-    const cause = boundedPacketCause(thrown, "standalone successor context packet");
+    const cause = boundedThrownCause(thrown, "standalone successor context packet");
     return failure("packet", `standalone successor context packet could not be inspected safely (${cause.name}: ${cause.message})`);
   }
 }

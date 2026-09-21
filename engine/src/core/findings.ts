@@ -41,44 +41,38 @@
  * held to the same invariant by `findingsLockstepError` at the load boundary —
  * the enumeration of all seven writers lives on `Task.findings` in types.ts.
  *
+ * This module owns the Finding/ReviewRun/Refutation SHAPES as well (atl-2):
+ * they used to sit in the types.ts catch-all beside `Task`, splitting one
+ * domain concept's identity across three layers (shape here-adjacent,
+ * invariants here, wire schema in core/reviewer-contract). The shapes moved
+ * into this concept's leaf shape volume (core/findings-shape.ts, re-exported
+ * here) — the concept's one home — and types.ts re-exports them so the
+ * ~105-file import surface is unchanged.
+ *
  * Pure module: no I/O, no clock, no randomness.
  */
 
-import {
-  FINDING_SEVERITIES,
-  PRIOR_FINDING_VERDICTS,
-  type ReviewStatus,
-  type Task,
-} from "../types";
-import type {
-  CurrentReviewRunEvidence,
-  LegacyDraftFinding,
-  DraftFinding,
-  Finding,
-  FindingResolutionAssessment,
-  FindingSeverity,
-  NonEmptyRefutations,
-  PriorFindingAssessment,
-  Refutation,
-  RefutedFinding,
-  ResolvedFinding,
-  ReviewRun,
-  ReviewRunEvidence,
-} from "../types";
-import type { FindingIdentity } from "../types";
+import type { ReviewStatus, Task } from "../types";
 import { parseReviewPath, type HeadSha, type PacketId } from "./review-packet";
 import { parseRequestId, parseSlotId, parseOrchestrationRunId } from "./orchestration-contract";
 import { isNoFindingSentinel } from "../utils/no-finding-sentinel";
 import { isExactGitSha } from "./git-sha";
 import { reviewerDraftV2Schema, reviewerPayloadV2Schema, parseReviewerProtocolDescriptor } from "./reviewer-contract";
 
-// The shapes live in types.ts (the schema root, with `Task`); this module owns
-// their BEHAVIOUR. Re-exported so every existing import site keeps working and
-// so "where findings come from" stays one answer.
-export { FINDING_SEVERITIES };
-export type {
+// The Finding/ReviewRun/Refutation SHAPES live in ./findings-shape — a leaf
+// volume of this concept (it imports only ./reviewer-contract), so the
+// schema-root Task fields in types.ts can bind the vocabulary without a
+// cycle: types.ts → findings-shape stays one-way, while this behaviour volume
+// keeps its type-only Task/ReviewStatus edge to types.ts. This module owns
+// the concept and re-exports the whole shape surface, so "where findings come
+// from" stays one answer and every existing import site keeps working.
+import { FINDING_SEVERITIES, PRIOR_FINDING_VERDICTS } from "./findings-shape";
+import type {
+  CurrentReviewRunEvidence,
+  LegacyDraftFinding,
   DraftFinding,
   Finding,
+  FindingIdentity,
   FindingResolutionAssessment,
   FindingSeverity,
   NonEmptyRefutations,
@@ -88,7 +82,39 @@ export type {
   ResolvedFinding,
   ReviewRun,
   ReviewRunEvidence,
-};
+} from "./findings-shape";
+export { FINDING_SEVERITIES, PRIOR_FINDING_VERDICTS } from "./findings-shape";
+export type {
+  AcceptedReviewAuthority,
+  CurrentAcceptedReviewAuthority,
+  CurrentDraftFinding,
+  CurrentReviewRun,
+  CurrentReviewRunEvidence,
+  CurrentReviewRunSlotAuthority,
+  DraftFinding,
+  Finding,
+  FindingIdentity,
+  FindingResolution,
+  FindingResolutionAssessment,
+  FindingSeverity,
+  LegacyAcceptedReviewAuthority,
+  LegacyDraftFinding,
+  LegacyReviewRun,
+  LegacyReviewRunEvidence,
+  LegacyReviewRunSlotAuthority,
+  NonEmptyPriorAssessments,
+  NonEmptyRefutations,
+  PriorFindingAssessment,
+  PriorFindingVerdict,
+  Refutation,
+  RefutedFinding,
+  ResolvedFinding,
+  ReviewRun,
+  ReviewRunEvidence,
+  ReviewRunSlotAuthority,
+  SlotBoundReviewRunEvidence,
+  UnboundReviewRunEvidence,
+} from "./findings-shape";
 
 /** Smart constructor: null when `raw` is not a known severity. */
 export function parseFindingSeverity(raw: unknown): FindingSeverity | null {

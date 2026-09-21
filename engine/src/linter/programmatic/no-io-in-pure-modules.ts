@@ -53,6 +53,7 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/standalone-review.ts",
   "engine/src/core/standalone-review-machine.ts",
   "engine/src/core/findings.ts",
+  "engine/src/core/findings-shape.ts",
   "engine/src/core/review-packet.ts",
   "engine/src/core/git-sha.ts",
   "engine/src/core/panel-kernel.ts",

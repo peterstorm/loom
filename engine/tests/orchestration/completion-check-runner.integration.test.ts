@@ -435,6 +435,50 @@ describe("completion check process shell", () => {
     }
   });
 
+  it("escalates to SIGKILL when the EPERM group probe still finds the leader alive", async () => {
+    // code-reviewer-1: the post-SIGTERM EPERM arm now CORRELATES the leader
+    // probe. While the leader exists (even as an unreaped zombie) the numeric
+    // group id is provably ours by the module's own invariant, so containment
+    // escalates exactly like a plainly surviving group. The unconditional
+    // refusal stays reserved for the ambiguous leader-reaped state pinned by
+    // the neighbouring test.
+    const actualKill = process.kill.bind(process);
+    const signals: (number | NodeJS.Signals)[] = [];
+    let killDispatched = false;
+    const probeError = (code: "EPERM" | "ESRCH"): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+      if (signal === 0) {
+        if (killDispatched) throw probeError("ESRCH"); // post-SIGKILL: group provably gone
+        if (pid < 0) throw probeError("EPERM"); // group probe: an unsignalable member
+        return actualKill(pid, 0); // leader probe: leader still alive
+      }
+      if (signal !== undefined) signals.push(signal);
+      if (signal === "SIGTERM") return actualKill(pid, signal); // trapped by the child
+      if (signal === "SIGKILL") {
+        const sent = actualKill(pid, signal);
+        killDispatched = true;
+        return sent;
+      }
+      return actualKill(pid, signal);
+    }) as typeof process.kill);
+    try {
+      const result = execution(await runCompletionCheck(
+        check("ignore-sigterm", { timeoutMs: 200 }),
+        fixtureRoot(),
+        { terminationGraceMs: 250, hardKillWaitMs: 2_000 },
+      ));
+      expect(result.checkResult.outcome).toMatchObject({
+        kind: "observed",
+        exitCode: null,
+        timedOut: true,
+        signal: "SIGKILL",
+      });
+      expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+    } finally {
+      kill.mockRestore();
+    }
+  }, 15_000);
+
   it("reports a closed group whose EPERM probe cannot prove dissolution as termination-unconfirmed without signalling", async () => {
     // Parent-close unconfirmed arm: the parent closed normally, the group
     // probe answers EPERM (at least one member is unsignalable — or the id is

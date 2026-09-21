@@ -19,6 +19,52 @@ export function boundDiagnosticMessage(message: string): string {
     : `${message.slice(0, MAX_DIAGNOSTIC_MESSAGE_LENGTH - DIAGNOSTIC_TRUNCATION_MARKER.length)}${DIAGNOSTIC_TRUNCATION_MARKER}`;
 }
 
+/** Bounded text budget for a converted thrown cause. Small enough that no
+ *  full hostile input is ever echoed into a refusal, large enough to name the
+ *  defect. Same idea as `boundDiagnosticMessage`, but the marker is the
+ *  single-character ellipsis the packet and successor parsers have always
+ *  used, so their pinned refusal bytes stay identical. */
+export const MAX_THROWN_CAUSE_TEXT_LENGTH = 256;
+
+const boundedCauseText = (value: string): string =>
+  value.length <= MAX_THROWN_CAUSE_TEXT_LENGTH
+    ? value
+    : `${value.slice(0, MAX_THROWN_CAUSE_TEXT_LENGTH - 1)}…`;
+
+export type BoundedThrownCause = Readonly<{ name: string; message: string }>;
+
+/**
+ * The ONE bounded thrown-cause capture for every fail-closed boundary that
+ * converts an unexpected throw into a typed refusal: the Context Packet
+ * parsers, the packet projection read-model, and the successor registration
+ * and capture-witness adapters. It used to be two hand-maintained copies (the
+ * packet core could not import a handler module), and a third layer was one
+ * copy away from minting its own variant.
+ *
+ * The 256-char budget, the Error/NonError/Uninspectable arms, and the `…`
+ * truncation are shared; each caller keeps its own refusal prose and its own
+ * subject phrase (e.g. "context packet", "successor source"), so the message
+ * stays attributable without the capture drifting between layers. The
+ * `UninspectableCause` arm keeps a throwing getter on the thrown value from
+ * crashing the boundary itself.
+ */
+export function boundedThrownCause(thrown: unknown, subject: string): BoundedThrownCause {
+  try {
+    if (thrown instanceof Error) {
+      return {
+        name: boundedCauseText(typeof thrown.name === "string" && thrown.name !== "" ? thrown.name : "Error"),
+        message: boundedCauseText(typeof thrown.message === "string" ? thrown.message : `${subject} inspection failed`),
+      };
+    }
+    return {
+      name: "NonErrorThrown",
+      message: boundedCauseText(typeof thrown === "string" ? thrown : `${subject} inspection failed with a non-Error cause`),
+    };
+  } catch {
+    return { name: "UninspectableCause", message: `${subject} inspection failed with an uninspectable cause` };
+  }
+}
+
 /**
  * Constructs a frozen canonical data record without an Object.prototype chain.
  * Own enumerable fields and symbols retain their descriptors, so discriminants,

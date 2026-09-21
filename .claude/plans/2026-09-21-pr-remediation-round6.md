@@ -89,3 +89,48 @@ Registered (P3): fresh remediation run with `sourceRun: review-fix-20260921T0542
 - Implemented in this round: all 14 accepted advisories (cs-1…cs-5, tda-1, tda-2, sfh-1, sfh-2, pta-1…pta-4, atl-1);
   the 4 deferred advisories remain deferred with published reasons in the disposition policy
   `policy-20260921T060936Z-7bd9a03b` (disposition digest `15ddd29c7a5fd3cd21f702c46f24076c5b4e61d7cc5ca476ddcf6f11c803a25a`).
+
+## Round 6b — the four deferred findings implemented (user override, 2026-09-21)
+
+All four round-6 deferred advisories implemented after the operator said "do deferred":
+
+- **code-reviewer-1** (completion-check-runner.ts): the post-SIGTERM EPERM arm of
+  `terminateProcessGroup` now CORRELATES the leader probe. A provably-ours
+  leader-alive group (the module's own invariant: while the leader exists the group
+  is legitimately ours) escalates to SIGKILL exactly like a plainly surviving group;
+  the unconditional no-signal refusal is reserved for the ambiguous leader-reaped
+  state (byte-identical message, pinned). New integration test with leader-alive +
+  EPERM group probe + SIGKILL escalation.
+- **atl-3** (completion-check-runner.ts): the containment policy's group/leader
+  probes and wall clock are defaulted narrow ports (`GroupProbe`,
+  `LeaderLivenessProbe`, `WallClock`); `waitForProcessGroupGone`,
+  `observeClosedProcessGroup`, and `waitForClosedProcessGroup` are exported so
+  tests drive the deadline/EPERM-polarity policy with plain closures — no
+  `process.kill` spy, no real waiting. New
+  `tests/orchestration/completion-check-policy.test.ts` (9 tests).
+- **cs-6**: ONE bounded thrown-cause capture now lives in the orchestration-contract
+  kernel (`identity.ts`: `boundedThrownCause`, `MAX_THROWN_CAUSE_TEXT_LENGTH`,
+  `BoundedThrownCause`), committed to the curated facade. The packet core and the
+  successor registration adapter dropped their duplicated copies; the packet-local
+  name survives as a re-export for the projection read-model's import edge, and the
+  adapters keep byte-identical fallback prose through full subject phrases
+  ("successor …"). Pinned by `tests/core/bounded-thrown-cause.test.ts`.
+- **atl-2**: the Finding/ReviewRun/Refutation vocabulary moved out of the types.ts
+  catch-all into the Finding concept's core modules — leaf shape volume
+  `core/findings-shape.ts` (pure, imports only reviewer-contract) owned and
+  re-exported by `core/findings.ts`; types.ts re-exports the whole surface so the
+  import scope is unchanged. The leaf volume is what keeps
+  `orchestration-contract-acyclic` green (types.ts binds its Task fields one-way to
+  the leaf; core/findings keeps its type-only Task edge) — the one-file-into-
+  findings variant would have joined the schema root into a cycle the pinned
+  acyclic invariant forbids. `findings-shape.ts` is declared pure in
+  `no-io-in-pure-modules.ts`. Pinned by `tests/core/findings-vocabulary-home.test.ts`.
+
+Two verify-surface violations were caught and fixed during development: the
+kernel facade exported the `BoundedThrownCause` type nothing outside imports
+(removed from the facade line), and the new shape volume joined no cycle but
+needed its pure declaration.
+
+Validation: `engine` typecheck clean; targeted suites green (policy 9, integration
++1, bounded-cause 4, vocabulary-home 2, findings 83, acyclic/public-surface/purity
+533). Full detached `npm run verify`: **9,057 tests / 0 failures + 23/23 smokes**.
