@@ -475,14 +475,15 @@ function parseSections(raw: unknown, field: string): DomainResult<readonly ByteS
   return success(Object.freeze(sections));
 }
 
-/** The bounded-cause capture lives in the orchestration-contract kernel — the
- *  ONE owner (cs-6) — so the 256-char budget and truncation shape cannot drift
- *  between the layers; the parsers below call the kernel helper directly with
- *  the packet subjects. */
 /**
  * Parse an untrusted packet. Section digests are recomputed from the bytes and
  * the packet digest is recomputed from the parsed identity, so a packet whose
  * bytes were edited after publication cannot present its original digest.
+ *
+ * Thrown-cause capture is the kernel's ONE boundedThrownCause
+ * (orchestration-contract): the parsers below call it directly with the packet
+ * subjects, so the 256-char budget and truncation shape cannot drift between
+ * the layers.
  */
 export function parseContextPacket(raw: unknown): DomainResult<ContextPacket, ContextPacketError> {
   try {

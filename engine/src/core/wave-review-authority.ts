@@ -203,6 +203,7 @@ export type WaveSpecCheckDocumentRejection =
   | Readonly<{ kind: "unknown-fields"; fields: readonly string[] }>
   | Readonly<{ kind: "missing-fields"; fields: readonly string[] }>
   | Readonly<{ kind: "path-not-string-or-null" }>
+  | Readonly<{ kind: "path-blank" }>
   | Readonly<{ kind: "null-lockstep" }>
   | Readonly<{ kind: "invalid-digest"; message: string }>;
 
@@ -247,6 +248,13 @@ export function parseWaveSpecCheckDocumentAuthority(raw: unknown): WaveSpecCheck
   const record = raw as Record<string, unknown>;
   if (record.path !== null && typeof record.path !== "string") {
     return { ok: false, rejection: Object.freeze({ kind: "path-not-string-or-null" }) };
+  }
+  // A blank path can never name a document: the shell mints this authority
+  // from a real read at a real path, and `null` is the explicit no-document
+  // state — so blank is only hand-edit or corruption, not an alternate
+  // spelling of either legitimate arm.
+  if (typeof record.path === "string" && record.path.trim() === "") {
+    return { ok: false, rejection: Object.freeze({ kind: "path-blank" }) };
   }
   if ((record.path === null) !== (record.contentDigest === null)) {
     return { ok: false, rejection: Object.freeze({ kind: "null-lockstep" }) };

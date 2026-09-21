@@ -463,6 +463,7 @@ function specCheckDocumentRejectionMessage(label: string, rejection: WaveSpecChe
     case "unknown-fields": return `${label} contains unknown field(s): ${[...rejection.fields].sort().join(", ")}`;
     case "missing-fields": return `${label} is missing field(s): ${rejection.fields.join(", ")}`;
     case "path-not-string-or-null": return `${label}.path must be a string or null`;
+    case "path-blank": return `${label}.path must not be blank when present`;
     case "null-lockstep": return `${label}.path and contentDigest must both be null or both be present`;
     case "invalid-digest": return `${label}.contentDigest: ${rejection.message}`;
   }

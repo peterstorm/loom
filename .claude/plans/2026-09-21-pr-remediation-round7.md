@@ -54,8 +54,11 @@ after refutation 2 surviving critical, 0 refuted critical, 22 advisory.
   `engine/src/handlers/helpers/upgrade-spec-trace.ts` (writer-side proof) and
   `engine/src/core/spec-trace-migration.ts` (reader-side preparation). The new pins drive
   the full helper, which executes both copies; both sibling paths are `repaired` by the
-  same test additions (no third copy: grep over `engine/src` shows the
-  `terminalOutcome.kind !== "terminal-abandoned"` narrowing only in these two files).
+  same test additions. (Grep also surfaces a THIRD textual occurrence of the same
+  narrowing — `engine/src/state-manager.ts:2703` — but that copy governs successor
+  registration after a tombstone ("must be explicitly migrated"), a different decision
+  from the retirement acceptance arm this group declares, so it is outside the group;
+  recorded here so a future re-validation of the declared grep is not surprised by it.)
   No sibling is unresolved or out of scope.
 - **Selected check:** `project:verify` (enrolled root verify command; required report
   `.loom/completion-reports/verify.junit.xml`).

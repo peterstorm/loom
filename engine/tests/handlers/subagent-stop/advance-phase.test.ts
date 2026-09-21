@@ -514,6 +514,32 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
     }
   });
 
+  it("an ambiguous date-prefix match refuses the architecture transition instead of adopting an arbitrary plan", () => {
+    // Round-8 guard pin (all six review criticals): the pre-cs-5 code adopted a
+    // derived plan only when EXACTLY ONE file matched the slug's date prefix and
+    // otherwise refused; the cs-5 extraction had silently become first-of-N.
+    // Two same-date-prefix candidates must yield the loud not-ready refusal so
+    // the operator disambiguates via plan_file instead of the engine pinning an
+    // arbitrary readdir-order plan as the architecture phase artifact.
+    const specDir = join(tmpDir, ".claude", "specs", "2026-07-16-feat");
+    mkdirSync(specDir, { recursive: true });
+    mkdirSync(join(tmpDir, ".claude", "plans"), { recursive: true });
+    writeFileSync(join(tmpDir, ".claude", "plans", "2026-07-16-alpha.md"), "plan alpha");
+    writeFileSync(join(tmpDir, ".claude", "plans", "2026-07-16-beta.md"), "plan beta");
+
+    const state = mkState({
+      current_phase: "architecture",
+      spec_dir: specDir,
+      plan_file: null, // force the date-prefix fallback path
+    });
+
+    const resolution = resolveTransition("architecture", state);
+    expect(resolution).toEqual({
+      kind: "not-ready",
+      reason: "no readable plan artifact is available inside .claude/plans",
+    });
+  });
+
   const withPhaseState = async (
     session: string,
     state: TaskGraph,

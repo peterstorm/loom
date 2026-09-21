@@ -206,6 +206,40 @@ describe("read-only packet command", () => {
     }
   });
 
+  it("carries the parser's field-level diagnostic in the packet-integrity refusal", () => {
+    // code-reviewer-2 / pr-test-analyzer-2: the sfh-1 enrichment is pinned —
+    // flipping a section byte rehashes to a different section digest, and the
+    // refusal must name the failing field and rule instead of the old generic
+    // sentence. A revert to the generic sentence turns this red.
+    const f = fixture();
+    const corrupt = JSON.parse(f.bytes);
+    corrupt.fixedContext[0].bytes[0] ^= 1;
+    const refused = projectContextPacket(corrupt, value(parseContextProjectionArguments(f.args)));
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) {
+      expect(refused.error).toContain("packet integrity or supported contract check failed " +
+        "(fixedContext[0].digest: a context section digest must cover its exact bytes)");
+    }
+  });
+
+  it("bounds hostile packet keys in the packet-integrity refusal", () => {
+    // architecture-tech-lead-3: the parser's field and message can embed raw
+    // undeclared object keys of arbitrary size from a hostile packet file; the
+    // read boundary interpolates them through the kernel's diagnostic bound so
+    // the refusal stays a bounded string.
+    const hostileKey = "k".repeat(10_000);
+    const hostile = { schemaVersion: 1, [hostileKey]: true };
+    const args = ["--packet", "/fixture/packet.json", "--request", "request:reader-fixture",
+      "--digest", "a".repeat(64), "--role", "code-reviewer", "--skill", "none"];
+    const refused = projectContextPacket(hostile, value(parseContextProjectionArguments(args)));
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) {
+      expect(refused.error.startsWith("packet integrity or supported contract check failed (packet.")).toBe(true);
+      expect(refused.error).toContain("…[truncated]");
+      expect(refused.error).not.toContain(hostileKey);
+    }
+  });
+
   it("refuses a flag-shaped token as a flag's value at the argument boundary", () => {
     // tda-2: the shared cli-args grammar — a `--`-prefixed token is a flag,
     // never a value — so a mis-sequenced invocation is refused with its actual

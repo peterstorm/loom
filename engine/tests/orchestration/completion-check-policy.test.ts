@@ -182,11 +182,9 @@ describe("the post-SIGTERM escalation decisions (phase-explicit, plain fakes)", 
   it("refuses the ambiguous leader-gone and leader-error EPERM states without a signal", () => {
     expect(decideEpermEscalation({ kind: "leader-unreaped" }, goneLeaderProbe)).toEqual({
       kind: "refuse-ambiguous-leader",
-      leaderMessage: null,
     });
     expect(decideEpermEscalation({ kind: "leader-unreaped" }, errorLeaderProbe)).toEqual({
       kind: "refuse-ambiguous-leader",
-      leaderMessage: "leader probe failed",
     });
   });
 

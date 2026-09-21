@@ -1,7 +1,7 @@
 /** Read-model only. Expected identity is supplied by delivery, not independent publication proof. */
 import { match } from "ts-pattern";
 import { parseContextPacket, parseStandaloneReviewerContextPacketV3, type ContextPacket, type StandaloneReviewerContextPacketV3 } from "./context-packets";
-import { boundedThrownCause, type DomainResult } from "./orchestration-contract";
+import { boundDiagnosticMessage, boundedThrownCause, type DomainResult } from "./orchestration-contract";
 
 type ProjectedPacket = ContextPacket | StandaloneReviewerContextPacketV3;
 
@@ -140,9 +140,13 @@ export function projectContextPacket(raw: unknown, input: ContextProjectionInput
   // The integrity refusal carries the parser's own field-level diagnostic so a
   // failed packet read names the failing field and rule instead of one generic
   // sentence (silent-failure-hunter-1). The refusal stays fail-closed and the
-  // reader boundary surfaces the whole cause.
+  // reader boundary surfaces the whole cause. Both interpolations pass through
+  // the kernel's diagnostic bound (architecture-tech-lead-3): a hostile packet
+  // can embed arbitrary-size undeclared object keys in the parser's field and
+  // message, and this read boundary must not echo them unbounded.
   if (!parsed.ok) {
-    return failed(`packet integrity or supported contract check failed (${parsed.error.field}: ${parsed.error.message})`);
+    return failed(`packet integrity or supported contract check failed ` +
+      `(${boundDiagnosticMessage(parsed.error.field)}: ${boundDiagnosticMessage(parsed.error.message)})`);
   }
   const packet = parsed.value;
   if (packet.requestId !== input.requestId || packet.digest !== input.digest || packet.role !== input.role || packet.requiredSkill !== input.requiredSkill) return failed("packet differs from expected issued identity");

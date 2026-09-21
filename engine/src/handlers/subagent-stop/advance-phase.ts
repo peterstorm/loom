@@ -148,18 +148,20 @@ function resolvePlanArtifact(
 
 /** The fallback candidate for an unset or unreadable recorded plan: the
  *  spec_dir slug's canonical `.claude/plans/<slug>.md` when readable, else the
- *  single date-prefixed plan (e.g. `2026-05-18…`) inside `.claude/plans`. Null
- *  when nothing resolves. */
+ *  single date-prefixed plan (e.g. `2026-05-18…`) inside `.claude/plans`. An
+ *  ambiguous match list is a refusal, never a guess (restored in round 8:
+ *  the cs-5 extraction had silently dropped the pre-existing exactly-one
+ *  guard and pinned an arbitrary readdir-order plan). */
 function derivedPlanCandidate(specDir: string | null | undefined, baseDir: string): string | null {
   const slug = !specDir ? "" : (specDir.split("/").pop() ?? "");
   const bySlug = slug === "" ? null : `.claude/plans/${slug}.md`;
   if (bySlug !== null && phaseArtifactExists(bySlug, baseDir)) return bySlug;
   const datePrefix = slug.slice(0, 10); // "2026-05-18"
   if (datePrefix === "" || !phaseArtifactExists(".claude/plans", baseDir)) return null;
-  const [only] = readdirSync(join(baseDir, ".claude", "plans")).filter(
+  const files = readdirSync(join(baseDir, ".claude", "plans")).filter(
     (file: string) => file.startsWith(datePrefix) && file.endsWith(".md"),
   );
-  return only === undefined ? null : `.claude/plans/${only}`;
+  return files.length === 1 ? `.claude/plans/${files[0]}` : null;
 }
 
 export type PhaseTransitionResolution =

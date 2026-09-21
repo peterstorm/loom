@@ -81,6 +81,16 @@ describe("the shared wave spec-check-documents grammar", () => {
     expect(parseWaveSpecCheckDocumentAuthority(["path", "contentDigest"])).toMatchObject({
       ok: false, rejection: { kind: "not-an-object" },
     });
+    // tda-1: a blank path can never name a document — the shell mints this
+    // authority from a real read at a real path and `null` is the explicit
+    // no-document state — so blank is refused as hand-edit/corruption, not
+    // accepted as an alternate spelling of either legitimate arm.
+    expect(parseWaveSpecCheckDocumentAuthority({ path: "", contentDigest: SHA })).toMatchObject({
+      ok: false, rejection: { kind: "path-blank" },
+    });
+    expect(parseWaveSpecCheckDocumentAuthority({ path: "   ", contentDigest: SHA })).toMatchObject({
+      ok: false, rejection: { kind: "path-blank" },
+    });
   });
 
   it("keeps the State File load guard's exact refusal prose for every rejection", () => {
@@ -111,6 +121,10 @@ describe("the shared wave spec-check-documents grammar", () => {
     refuses(
       { spec: { path: null, contentDigest: SHA }, plan: { path: null, contentDigest: null } },
       "wave_review_epoch.specCheckDocuments.spec.path and contentDigest must both be null or both be present",
+    );
+    refuses(
+      { spec: { path: "   ", contentDigest: SHA }, plan: { path: null, contentDigest: null } },
+      "wave_review_epoch.specCheckDocuments.spec.path must not be blank when present",
     );
     refuses(
       { spec: { path: "spec.md", contentDigest: "zz" }, plan: { path: null, contentDigest: null } },

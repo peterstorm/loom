@@ -585,7 +585,7 @@ export type { LeaderReapingPhase };
 type EpermEscalationDecision =
   | Readonly<{ kind: "escalate" }>
   | Readonly<{ kind: "refuse-recycled-id" }>
-  | Readonly<{ kind: "refuse-ambiguous-leader"; leaderMessage: string | null }>;
+  | Readonly<{ kind: "refuse-ambiguous-leader" }>;
 export type { EpermEscalationDecision };
 
 function decideEpermEscalation(phase: LeaderReapingPhase, leader: LeaderProbe): EpermEscalationDecision {
@@ -597,9 +597,9 @@ function decideEpermEscalation(phase: LeaderReapingPhase, leader: LeaderProbe): 
         case "present":
           return Object.freeze({ kind: "escalate" });
         case "gone":
-          return Object.freeze({ kind: "refuse-ambiguous-leader", leaderMessage: null });
+          return Object.freeze({ kind: "refuse-ambiguous-leader" });
         case "error":
-          return Object.freeze({ kind: "refuse-ambiguous-leader", leaderMessage: leader.message });
+          return Object.freeze({ kind: "refuse-ambiguous-leader" });
       }
   }
 }
@@ -623,8 +623,10 @@ export { decideSurvivingEscalation };
 
 /** One settled-observation refusal builder for the two post-close-style
  *  flows (parent closed; leader-reaped trigger). The parent-closed prose is
- *  byte-pinned and stays identical; only the subject and the surviving
- *  descendants' trailing clause differ per flow. */
+ *  substring-pinned by three integration fragments (EPERM confirmation,
+ *  identity observation, post-close signalling —
+ *  completion-check-runner.integration.test.ts) and stays identical; only the
+ *  subject and the surviving descendants' trailing clause differ per flow. */
 function settledProcessGroupRefusal(
   subject: string,
   survivingClause: string,
