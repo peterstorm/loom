@@ -677,7 +677,7 @@ const hasTypeScriptTestCall = (code: string): boolean => {
 
 /** Heuristically count added executable test declarations in a diff string (pure). */
 export function countNewTests(diffContent: string): TestCount {
-  const lines = executableAddedLines(diffContent);
+  const { lines } = executableAddedLines(diffContent);
   let java = 0;
   let ts = 0;
   let python = 0;
@@ -998,10 +998,22 @@ function assertionCodeLine(
   return Object.freeze({ code, state });
 }
 
-/** Project path-bound added executable code from complete-postimage patch bytes. */
-function executableAddedLines(diffContent: string): readonly AddedExecutableLine[] {
+/** Project path-bound added executable code from complete-postimage patch bytes.
+ *
+ *  `unattributableFiles` counts diff entries whose header pair could not be
+ *  parsed — malformed patch paths, and Git's C-quoted paths whose decoded
+ *  bytes are not valid UTF-8. Their added lines are dropped from every count
+ *  (fail-closed: nothing is fabricated), and the count lets consumers
+ *  distinguish "no test declarations found" from "test evidence could not be
+ *  projected" instead of publishing the first as a lie about the second. */
+function executableAddedLines(diffContent: string): Readonly<{ lines: readonly AddedExecutableLine[]; unattributableFiles: number }> {
   let entry: DiffEntryScanState = Object.freeze({ kind: "outside" });
   const lines: AddedExecutableLine[] = [];
+  let unattributableFiles = 0;
+  const invalidate = (): DiffEntryScanState => {
+    unattributableFiles += 1;
+    return Object.freeze({ kind: "invalid" });
+  };
   for (const diffLine of diffContent.split("\n")) {
     if (diffLine.startsWith("diff --git ")) {
       entry = Object.freeze({ kind: "prelude-old" });
@@ -1012,22 +1024,22 @@ function executableAddedLines(diffContent: string): readonly AddedExecutableLine
     if (entry.kind === "prelude-old") {
       if (diffLine.startsWith("--- ")) {
         entry = parseGitPatchPath(diffLine.slice(4), "a/") === null
-          ? Object.freeze({ kind: "invalid" })
+          ? invalidate()
           : Object.freeze({ kind: "prelude-new" });
       } else if (diffLine.startsWith("+++ ") || diffLine.startsWith("@@")) {
-        entry = Object.freeze({ kind: "invalid" });
+        entry = invalidate();
       }
       continue;
     }
 
     if (entry.kind === "prelude-new") {
       if (!diffLine.startsWith("+++ ")) {
-        entry = Object.freeze({ kind: "invalid" });
+        entry = invalidate();
         continue;
       }
       const parsed = parseGitPatchPath(diffLine.slice(4), "b/");
       entry = parsed === null
-        ? Object.freeze({ kind: "invalid" })
+        ? invalidate()
         : Object.freeze({ kind: "prelude-hunk", path: parsed.kind === "file" ? parsed.path : null });
       continue;
     }
@@ -1035,7 +1047,7 @@ function executableAddedLines(diffContent: string): readonly AddedExecutableLine
     if (entry.kind === "prelude-hunk") {
       entry = isHunkHeader(diffLine)
         ? Object.freeze({ kind: "hunk", path: entry.path, lexical: INITIAL_ASSERTION_STATE })
-        : Object.freeze({ kind: "invalid" });
+        : invalidate();
       continue;
     }
 
@@ -1050,14 +1062,22 @@ function executableAddedLines(diffContent: string): readonly AddedExecutableLine
       lines.push(Object.freeze({ path: entry.path, code: parsed.code }));
     }
   }
-  return Object.freeze(lines);
+  return Object.freeze({ lines: Object.freeze(lines), unattributableFiles });
+}
+
+/** Modified files whose Git patch headers could not be parsed (malformed or
+ *  undecodable paths), so their added lines reach no count. The count is
+ *  bounded evidence ABOUT evidence: it names a projection gap without ever
+ *  asserting what the dropped files did or did not contain. */
+export function countUnattributableDiffFiles(diffContent: string): number {
+  return executableAddedLines(diffContent).unattributableFiles;
 }
 
 /** Count executable assertions in added diff lines (pure). */
 export function countAssertions(diffContent: string): number {
   let count = 0;
 
-  for (const { path, code } of executableAddedLines(diffContent)) {
+  for (const { path, code } of executableAddedLines(diffContent).lines) {
     if (!isAttributedPath(path)) continue;
     const language = languageOfTestSource(path);
     // Match at most one per line to avoid cross-language double-counting.

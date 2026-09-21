@@ -6,9 +6,10 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync, symlinkSync, mkdirSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildContextPacket, buildReviewerContextPacket, buildStandaloneReviewerContextPacketV3, encodeByteSection } from "../../src/core/context-packets";
+import { sha256Bytes } from "../../src/core/review-packet";
+import { buildContextPacket, buildReviewerContextPacket, buildStandaloneReviewerContextPacketV3, contextPacketDigest, encodeByteSection } from "../../src/core/context-packets";
 import { parseContextProjectionArguments, projectContextPacket } from "../../src/core/context-packet-projection";
-import { parseRequestId } from "../../src/core/orchestration-contract";
+import { parseArtifactDigest, parseRequestId } from "../../src/core/orchestration-contract";
 
 const script = fileURLToPath(new URL("../../../scripts/read-context-packet.ts", import.meta.url));
 const roots: string[] = [];
@@ -131,6 +132,91 @@ describe("read-only packet command", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("read failed");
     expect(result.stdout).toBe("");
+  });
+
+  it("attributes projection refusals to the failing operation and the selection kind", () => {
+    // sfh-2: every refusal stays fail-closed, but the cause, the operation,
+    // and the selection kind are now named — a --file failure is never
+    // reported as a section decode problem, and triage does not need a
+    // debugger.
+    const requestId = value(parseRequestId("request:reader-fixture"));
+
+    // Valid UTF-8 but not JSON: the frozen-source INDEX parse fails, not the
+    // text decode.
+    const nonJson = value(encodeByteSection("standalone-frozen-source", "definitely not json"));
+    const v1 = value(buildContextPacket({
+      requestId, role: "code-reviewer", requiredSkill: "none", outputContract: "Historical contract",
+      fixedContext: [nonJson], variableContext: [],
+    }));
+    const fileArgs = ["--packet", "/fixture/packet.json", "--request", v1.requestId, "--digest", v1.digest,
+      "--role", v1.role, "--skill", v1.requiredSkill, "--file", "src/a.ts"];
+    const indexRefusal = projectContextPacket(v1, value(parseContextProjectionArguments(fileArgs)));
+    expect(indexRefusal.ok).toBe(false);
+    if (!indexRefusal.ok) {
+      expect(indexRefusal.error).toContain("source file src/a.ts cannot be decoded safely as text data");
+      expect(indexRefusal.error).toContain("frozen source index could not be parsed");
+      expect(indexRefusal.error).not.toContain("selected section");
+    }
+
+    // Malformed base64 payload in a binary source file: the base64 decode
+    // names itself.
+    const badBase64Section = value(encodeByteSection("standalone-frozen-source", JSON.stringify({
+      schemaVersion: 1, headRevision: "fixture", files: [{ path: "src/bad.ts", kind: "binary", contentBase64: "!!!" }],
+    })));
+    const v3 = value(buildStandaloneReviewerContextPacketV3({
+      requestId, role: "code-reviewer", requiredSkill: "none", fixedContext: [badBase64Section], variableContext: [],
+    }));
+    const base64Refusal = projectContextPacket(v3, value(parseContextProjectionArguments([
+      "--packet", "/fixture/packet.json", "--request", v3.requestId, "--digest", v3.digest,
+      "--role", v3.role, "--skill", v3.requiredSkill, "--purpose", "standalone-successor", "--file", "src/bad.ts",
+    ])));
+    expect(base64Refusal).toMatchObject({ ok: false });
+    if (!base64Refusal.ok) {
+      expect(base64Refusal.error).toContain("base64 payload");
+      expect(base64Refusal.error).toContain("source file src/bad.ts");
+    }
+
+    // Section bytes that are not valid UTF-8: the fatal text decode reaches
+    // the outer catch, which now carries the bounded cause and names the
+    // section.
+    const hostileBytes = [0xff, 0xfe];
+    const hostileDigest = value(parseArtifactDigest(sha256Bytes(Uint8Array.from(hostileBytes))));
+    const identity = {
+      schemaVersion: 1 as const,
+      requestId,
+      role: "code-reviewer",
+      requiredSkill: "none",
+      outputContract: "Historical contract",
+      fixedContext: [{ label: "hostile-utf8", bytes: hostileBytes, digest: hostileDigest, byteLength: 2 }],
+      variableContext: [],
+    } as const;
+    // The digest helper is typed over the PARSED packet shape; the fixture is
+    // deliberately the untrusted wire form, whose branded fields exist only
+    // after parsing.
+    const identityForDigest = identity as unknown as Parameters<typeof contextPacketDigest>[0];
+    const hostile = { ...identity, digest: contextPacketDigest(identityForDigest) };
+    const sectionRefusal = projectContextPacket(hostile, value(parseContextProjectionArguments([
+      "--packet", "/fixture/packet.json", "--request", identity.requestId, "--digest", hostile.digest,
+      "--role", identity.role, "--skill", identity.requiredSkill, "--section", "hostile-utf8",
+    ])));
+    expect(sectionRefusal).toMatchObject({ ok: false });
+    if (!sectionRefusal.ok) {
+      expect(sectionRefusal.error).toContain("selected section hostile-utf8 cannot be decoded safely as text data (");
+      expect(sectionRefusal.error).toContain("The encoded data was not valid");
+    }
+  });
+
+  it("refuses a flag-shaped token as a flag's value at the argument boundary", () => {
+    // tda-2: the shared cli-args grammar — a `--`-prefixed token is a flag,
+    // never a value — so a mis-sequenced invocation is refused with its actual
+    // cause instead of silently consuming the intended value.
+    const args = ["--packet", "/fixture/packet.json", "--request", "request:reader-fixture",
+      "--digest", "a".repeat(64), "--role", "code-reviewer", "--skill", "none"];
+    for (const extra of [["--file", "--offset"], ["--file", "--offset", "123"], ["--offset", "--limit", "4096"]]) {
+      const refused = parseContextProjectionArguments([...args, ...extra]);
+      expect(refused).toMatchObject({ ok: false });
+      if (!refused.ok) expect(refused.error).toContain("looks like another flag");
+    }
   });
 
   it("pages exact source units under generated valid bounds without mutating the packet", () => {

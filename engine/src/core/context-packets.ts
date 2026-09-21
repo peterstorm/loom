@@ -161,13 +161,16 @@ export function boundedByteIterable(
   return grammarSuccess(Uint8Array.from(bytes));
 }
 
-/** The packet parser's exact prose for each shared-grammar violation. */
-const byteGrammarRefusal = (violation: ByteGrammarViolation): string =>
-  violation.rule === "iterable"
-    ? "a context section must carry iterable bytes"
-    : violation.rule === "byte"
-      ? "a context section byte must be an integer from 0 through 255"
-      : `a context section must not exceed ${violation.maximum} bytes`;
+/** The packet parser's exact prose for each shared-grammar violation. The
+ *  switch is exhaustive over `ByteGrammarViolation`: adding a rule without a
+ *  labelled refusal arm is a noImplicitReturns compile error. */
+const byteGrammarRefusal = (violation: ByteGrammarViolation): string => {
+  switch (violation.rule) {
+    case "iterable": return "a context section must carry iterable bytes";
+    case "byte": return "a context section byte must be an integer from 0 through 255";
+    case "bound": return `a context section must not exceed ${violation.maximum} bytes`;
+  }
+};
 
 const immutableByteStorage = new WeakMap<object, Uint8Array>();
 
@@ -470,15 +473,16 @@ function parseSections(raw: unknown, field: string): DomainResult<readonly ByteS
   return success(Object.freeze(sections));
 }
 
-/** Bounded, sanitized cause for the fail-closed packet parsers. The core stays
- *  free of handler imports, so the shared `boundedThrownCause` pattern is
- *  inlined here with the same 256-char budget and truncation shape: an
- *  unexpected parser crash is attributable without a debugger and never leaks
- *  full input bytes. */
+/** Bounded, sanitized cause for the fail-closed packet parsers and the packet
+ *  projection read-model. The core stays free of handler imports, so the
+ *  shared `boundedThrownCause` pattern is inlined here with the same 256-char
+ *  budget and truncation shape, and the projection module consumes it through
+ *  the core-internal edge. An unexpected crash is attributable without a
+ *  debugger and never leaks full input bytes. */
 const CONTEXT_PACKET_CAUSE_LIMIT = 256;
 const boundedPacketCauseText = (value: string): string =>
   value.length <= CONTEXT_PACKET_CAUSE_LIMIT ? value : `${value.slice(0, CONTEXT_PACKET_CAUSE_LIMIT - 1)}…`;
-const boundedPacketCause = (thrown: unknown, subject: string): { name: string; message: string } => {
+export const boundedPacketCause = (thrown: unknown, subject: string): { name: string; message: string } => {
   try {
     if (thrown instanceof Error) {
       return {

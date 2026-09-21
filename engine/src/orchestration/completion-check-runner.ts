@@ -461,7 +461,7 @@ async function waitForProcessGroupGone(
     await delay(Math.min(GROUP_PROBE_INTERVAL_MS, Math.max(1, deadline - Date.now())));
     latest = probeProcessGroup(processGroupId);
   }
-  return latest.kind === "gone" ? Object.freeze({ kind: "gone" }) : latest;
+  return latest;
 }
 
 /** Classify a group only after Node has reaped the spawned leader.
@@ -476,8 +476,8 @@ async function waitForProcessGroupGone(
  * gone; only a provable ESRCH settles the outcome. */
 function observeClosedProcessGroup(
   processGroupId: number,
-  group: ProcessGroupProbe = probeProcessGroup(processGroupId),
 ): ClosedProcessGroupObservation {
+  const group = probeProcessGroup(processGroupId);
   if (group.kind === "gone") return Object.freeze({ kind: "gone", reason: "absent" });
   if (group.kind === "error") return Object.freeze({ kind: "error", message: group.message });
   const leader = probeLeaderAlive(processGroupId);
@@ -896,22 +896,8 @@ export async function runRemediationCheck(
   if (!execution.ok) return execution;
   // A spawn failure never collected a report; an observed required-file check
   // always has one whose `not-required` arm does not exist (see the
-  // `runProjectCommand` overload promise).
-  if (execution.value.kind === "spawn-failed") {
-    return Object.freeze({
-      ok: true,
-      value: Object.freeze({
-        kind: "remediation-check-execution" as const,
-        checkId: check.command.checkId,
-        scope: check.scope,
-        manifestDigest: check.manifestDigest,
-        authorityDigest: check.authorityDigest,
-        process: execution.value.process,
-        report: null,
-        diagnostics: execution.value.diagnostics,
-      }),
-    });
-  }
+  // `runProjectCommand` overload promise). One envelope, discriminated by the
+  // CommandExecution ADT at the single field the arms differ in.
   return Object.freeze({
     ok: true,
     value: Object.freeze({
@@ -921,7 +907,9 @@ export async function runRemediationCheck(
       manifestDigest: check.manifestDigest,
       authorityDigest: check.authorityDigest,
       process: execution.value.process,
-      report: remediationReportObservation(execution.value.report),
+      report: execution.value.kind === "spawn-failed"
+        ? null
+        : remediationReportObservation(execution.value.report),
       diagnostics: execution.value.diagnostics,
     }),
   });

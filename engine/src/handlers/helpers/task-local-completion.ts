@@ -177,7 +177,14 @@ function waivedNewTestEvidence(requirement: NewTestRequirement): NewTestEvidence
     : parseNewTestEvidence(false, `verification_policy.new_tests waived: ${reason}`);
 }
 
-/** Pure new-test evidence classification from already-collected diff bytes. */
+/** Pure new-test evidence classification from already-collected diff bytes.
+ *
+ *  The zero arms distinguish "no test declarations" from "test evidence could
+ *  not be projected": files with unattributable Git patch paths (malformed or
+ *  undecodable, including C-quoted non-UTF-8 names) contribute nothing to any
+ *  count, so their absence is named instead of being published as a false
+ *  claim about what the modified files contain. The zero-unattributable
+ *  messages are byte-identical to the pre-attribution prose. */
 export function analyzeNewTests(
   diff: string,
   requirement: NewTestRequirement,
@@ -186,6 +193,7 @@ export function analyzeNewTests(
   if (waiver !== null) return waiver;
 
   const tests = git.countNewTests(diff);
+  const unattributable = git.countUnattributableDiffFiles(diff);
   const assertions = tests.total > 0 ? git.countAssertions(diff) : 0;
   if (tests.total > 0 && assertions > 0) {
     const details = [
@@ -199,10 +207,18 @@ export function analyzeNewTests(
       `${tests.total} new test methods, ${assertions} assertions (${details})`,
     );
   }
+  if (tests.total > 0) {
+    return parseNewTestEvidence(
+      false,
+      unattributable > 0
+        ? `${tests.total} test methods but 0 assertions (empty stubs?); additionally, ${unattributable} modified file(s) had unattributable Git patch paths and their added lines are excluded from every count`
+        : `${tests.total} test methods but 0 assertions (empty stubs?)`,
+    );
+  }
   return parseNewTestEvidence(
     false,
-    tests.total > 0
-      ? `${tests.total} test methods but 0 assertions (empty stubs?)`
+    unattributable > 0
+      ? `new-test evidence could not be projected for ${unattributable} modified file(s) with unattributable Git patch paths; test declarations in them are neither confirmed nor denied`
       : "no test declarations found in modified files",
   );
 }

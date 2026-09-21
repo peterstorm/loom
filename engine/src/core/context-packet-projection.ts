@@ -1,6 +1,6 @@
 /** Read-model only. Expected identity is supplied by delivery, not independent publication proof. */
 import { match } from "ts-pattern";
-import { parseContextPacket, parseStandaloneReviewerContextPacketV3, type ContextPacket, type StandaloneReviewerContextPacketV3 } from "./context-packets";
+import { boundedPacketCause, parseContextPacket, parseStandaloneReviewerContextPacketV3, type ContextPacket, type StandaloneReviewerContextPacketV3 } from "./context-packets";
 
 type ProjectedPacket = ContextPacket | StandaloneReviewerContextPacketV3;
 import type { DomainResult } from "./orchestration-contract";
@@ -24,6 +24,11 @@ export function parseContextProjectionArguments(args: readonly string[]): Domain
     const key = args[i]!;
     const value = args[i + 1];
     if (!allowed.includes(key) || fields.has(key) || value === undefined || value.length === 0) return failed("invalid or duplicate reader argument");
+    // The shared CLI grammar (handlers/helpers/cli-args.ts): a `--`-prefixed
+    // token is a flag, never a value, so a mis-sequenced invocation is refused
+    // here with its actual cause instead of silently consuming the intended
+    // value and failing later with an unrelated refusal.
+    if (value.startsWith("--")) return failed(`reader argument ${key} requires a value; ${value} looks like another flag`);
     fields.set(key, value);
   }
   const path = fields.get("--packet"), requestId = fields.get("--request"), digest = fields.get("--digest");
@@ -54,14 +59,29 @@ const record = (raw: unknown): raw is Record<string, unknown> => typeof raw === 
 function fileText(packet: ProjectedPacket, path: string): DomainResult<string, string> {
   const section = [...packet.fixedContext, ...packet.variableContext].find(({ label }) => label === "standalone-frozen-source");
   if (section === undefined) return failed("packet has no standalone frozen source; use the section index for its supplied context");
-  const source: unknown = JSON.parse(decode(section.bytes));
+  let source: unknown;
+  try {
+    source = JSON.parse(decode(section.bytes));
+  } catch (cause) {
+    // Name the failing operation: the frozen-source index parse (not the text
+    // decode, which is separately fatal) is what refused a digested-but
+    // non-JSON section.
+    const attribution = boundedPacketCause(cause, "frozen source index");
+    throw new Error(`frozen source index could not be parsed from the section bytes (${attribution.name}: ${attribution.message})`);
+  }
   if (!record(source) || !Array.isArray(source.files)) return failed("frozen source file index is invalid");
   const files: unknown[] = source.files.filter((file: unknown) => record(file) && file.path === path);
   const file = files[0];
   if (files.length !== 1 || !record(file)) return failed("source file is absent or ambiguous in this packet");
   if (file.kind === "text" && typeof file.content === "string") return { ok: true, value: file.content };
   if (packet.schemaVersion === 3 && file.kind === "binary" && typeof file.contentBase64 === "string") {
-    const bytes = Uint8Array.from(atob(file.contentBase64), character => character.charCodeAt(0));
+    let bytes: Uint8Array;
+    try {
+      bytes = Uint8Array.from(atob(file.contentBase64), character => character.charCodeAt(0));
+    } catch (cause) {
+      const attribution = boundedPacketCause(cause, "binary source content base64");
+      throw new Error(`binary source content could not be decoded from its base64 payload (${attribution.name}: ${attribution.message})`);
+    }
     return { ok: true, value: new TextDecoder("utf-8", { fatal: true }).decode(bytes) };
   }
   return failed("source file is binary or absent; no text projection available");
@@ -120,6 +140,20 @@ export function projectContextPacket(raw: unknown, input: ContextProjectionInput
   if (!parsed.ok) return failed("packet integrity or supported contract check failed");
   const packet = parsed.value;
   if (packet.requestId !== input.requestId || packet.digest !== input.digest || packet.role !== input.role || packet.requiredSkill !== input.requiredSkill) return failed("packet differs from expected issued identity");
-  try { return project(packet, input.selection); }
-  catch { return failed("selected section cannot be decoded safely as text data"); }
+  try {
+    return project(packet, input.selection);
+  } catch (thrown) {
+    // The refusal stays fail-closed, but it is now attributable: the bounded
+    // cause names the operation that threw (each throwing site above names
+    // itself; the fatal UTF-8 text decode reaches only this catch) and the
+    // subject names the selection kind, so a --file failure is never reported
+    // as a section decode problem.
+    const cause = boundedPacketCause(thrown, "context projection");
+    const subject = input.selection.kind === "file"
+      ? `source file ${input.selection.path}`
+      : input.selection.kind === "section"
+        ? `selected section ${input.selection.label}`
+        : "selected section index";
+    return failed(`${subject} cannot be decoded safely as text data (${cause.name}: ${cause.message})`);
+  }
 }

@@ -179,22 +179,105 @@ const parseStringArray = (raw: unknown): readonly string[] | null =>
     ? Object.freeze([...raw])
     : null;
 
-function parseWaveSpecCheckDocument(raw: unknown): WaveSpecCheckDocumentAuthority | null {
-  if (!exactObject(raw, ["path", "contentDigest"]) ||
-      (raw.path !== null && typeof raw.path !== "string")) return null;
-  if (raw.path === null) {
-    return raw.contentDigest === null ? Object.freeze({ path: null, contentDigest: null }) : null;
+/**
+ * The ONE Wave Review Epoch Authority spec-check-documents grammar.
+ *
+ * This persisted authority has exactly two transports — the State File load
+ * guard (state-manager.ts) and the reviewer-context decode
+ * (`decodeWaveReviewContextAuthority` below) — and it used to be maintained as
+ * two hand-written parsers whose acceptance agreed only by manual discipline.
+ * A future single-copy edit could silently desynchronize the load boundary from
+ * the context decode, so a Wave Gate could block after protected installation
+ * with `wave-review-authority specCheckDocuments is invalid` about a graph the
+ * loader itself accepted (or vice versa). One parser, typed rejection facts:
+ * each transport decorates them with its own exact refusal prose, and
+ * acceptance cannot drift because there is only one acceptance.
+ *
+ * Unknown fields are returned UNSORTED; the load guard sorts them for its
+ * diagnostic, matching its established `exactFieldsError` shape. Missing
+ * fields are returned in required-field order. Neither transport accepts an
+ * optional field.
+ */
+export type WaveSpecCheckDocumentRejection =
+  | Readonly<{ kind: "not-an-object" }>
+  | Readonly<{ kind: "unknown-fields"; fields: readonly string[] }>
+  | Readonly<{ kind: "missing-fields"; fields: readonly string[] }>
+  | Readonly<{ kind: "path-not-string-or-null" }>
+  | Readonly<{ kind: "null-lockstep" }>
+  | Readonly<{ kind: "invalid-digest"; message: string }>;
+
+export type WaveSpecCheckDocumentParse =
+  | Readonly<{ ok: true; value: WaveSpecCheckDocumentAuthority }>
+  | Readonly<{ ok: false; rejection: WaveSpecCheckDocumentRejection }>;
+
+export type WaveSpecCheckDocumentsRejection =
+  | Readonly<{ kind: "not-an-object" }>
+  | Readonly<{ kind: "unknown-fields"; fields: readonly string[] }>
+  | Readonly<{ kind: "missing-fields"; fields: readonly string[] }>
+  | Readonly<{ kind: "member"; member: "spec" | "plan"; failure: WaveSpecCheckDocumentRejection }>;
+
+export type WaveSpecCheckDocumentsParse =
+  | Readonly<{ ok: true; value: WaveSpecCheckDocumentsAuthority }>
+  | Readonly<{ ok: false; rejection: WaveSpecCheckDocumentsRejection }>;
+
+/** The three field-set rejections the two authority levels share. */
+type WaveSpecCheckFieldsRejection =
+  | Readonly<{ kind: "not-an-object" }>
+  | Readonly<{ kind: "unknown-fields"; fields: readonly string[] }>
+  | Readonly<{ kind: "missing-fields"; fields: readonly string[] }>;
+
+const specCheckDocumentFieldRejection = (
+  raw: unknown,
+  required: readonly string[],
+): WaveSpecCheckFieldsRejection | null => {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return Object.freeze({ kind: "not-an-object" });
   }
-  if (raw.contentDigest === null) return null;
-  const digest = parseArtifactDigest(raw.contentDigest);
-  return digest.ok ? Object.freeze({ path: raw.path, contentDigest: digest.value }) : null;
+  const record = raw as Record<string, unknown>;
+  const unknownFields = Object.keys(record).filter((field) => !required.includes(field));
+  if (unknownFields.length > 0) return Object.freeze({ kind: "unknown-fields", fields: Object.freeze(unknownFields) });
+  const missingFields = required.filter((field) => !Object.hasOwn(record, field));
+  if (missingFields.length > 0) return Object.freeze({ kind: "missing-fields", fields: Object.freeze(missingFields) });
+  return null;
+};
+
+export function parseWaveSpecCheckDocumentAuthority(raw: unknown): WaveSpecCheckDocumentParse {
+  const shape = specCheckDocumentFieldRejection(raw, ["path", "contentDigest"]);
+  if (shape !== null) return { ok: false, rejection: shape };
+  const record = raw as Record<string, unknown>;
+  if (record.path !== null && typeof record.path !== "string") {
+    return { ok: false, rejection: Object.freeze({ kind: "path-not-string-or-null" }) };
+  }
+  if ((record.path === null) !== (record.contentDigest === null)) {
+    return { ok: false, rejection: Object.freeze({ kind: "null-lockstep" }) };
+  }
+  if (record.path === null) {
+    return { ok: true, value: Object.freeze({ path: null, contentDigest: null }) };
+  }
+  const digest = parseArtifactDigest(record.contentDigest);
+  return digest.ok
+    ? { ok: true, value: Object.freeze({ path: record.path, contentDigest: digest.value }) }
+    : { ok: false, rejection: Object.freeze({ kind: "invalid-digest", message: digest.error.message }) };
+}
+
+export function parseWaveSpecCheckDocumentsAuthority(raw: unknown): WaveSpecCheckDocumentsParse {
+  const shape = specCheckDocumentFieldRejection(raw, ["spec", "plan"]);
+  if (shape !== null) return { ok: false, rejection: shape };
+  const record = raw as Record<string, unknown>;
+  const spec = parseWaveSpecCheckDocumentAuthority(record.spec);
+  if (!spec.ok) {
+    return { ok: false, rejection: Object.freeze({ kind: "member", member: "spec", failure: spec.rejection } as const) };
+  }
+  const plan = parseWaveSpecCheckDocumentAuthority(record.plan);
+  if (!plan.ok) {
+    return { ok: false, rejection: Object.freeze({ kind: "member", member: "plan", failure: plan.rejection } as const) };
+  }
+  return { ok: true, value: Object.freeze({ spec: spec.value, plan: plan.value }) };
 }
 
 function parseWaveSpecCheckDocuments(raw: unknown): WaveSpecCheckDocumentsAuthority | null {
-  if (!exactObject(raw, ["spec", "plan"])) return null;
-  const spec = parseWaveSpecCheckDocument(raw.spec);
-  const plan = parseWaveSpecCheckDocument(raw.plan);
-  return spec === null || plan === null ? null : Object.freeze({ spec, plan });
+  const parsed = parseWaveSpecCheckDocumentsAuthority(raw);
+  return parsed.ok ? parsed.value : null;
 }
 
 export function waveSpecCheckDocumentsMatch(

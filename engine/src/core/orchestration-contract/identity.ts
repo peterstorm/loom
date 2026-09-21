@@ -128,46 +128,55 @@ export function structurallyEqual(left: unknown, right: unknown, seen: Structura
   if (typeof left !== "object" || typeof right !== "object" || left === null || right === null) {
     return false;
   }
+  // A Context Packet's ImmutableByteSequence and its parsed wire form (the
+  // plain number array JSON makes of it) are two spellings of the same
+  // bytes — the packet contract binds them with one digest. Materialize the
+  // tagged sides and let the ordinary array arm below compare them: a
+  // sequence deliberately has no own enumerable keys (Object.keys of a
+  // sequence is empty), so record equality would vacuously accept ANY two
+  // sequences, and an unmaterialized mixed pair would be refused by the same
+  // arm that refuses array-vs-record. A tagged side that cannot iterate
+  // (hostile prototype) refuses instead of throwing. The memo keys the
+  // ORIGINAL pair: a sequence's iteration can never introduce a cycle.
+  let subjectLeft: readonly unknown[] | object = left;
+  let subjectRight: readonly unknown[] | object = right;
+  const leftSequence = hasImmutableByteSequenceTag(left);
+  const rightSequence = hasImmutableByteSequenceTag(right);
+  if (leftSequence || rightSequence) {
+    const materializedLeft = leftSequence ? byteSequenceEntries(left) : left;
+    const materializedRight = rightSequence ? byteSequenceEntries(right) : right;
+    if (materializedLeft === null || materializedRight === null) return false;
+    subjectLeft = materializedLeft;
+    subjectRight = materializedRight;
+  }
   return withPairInProgress(left, right, seen, () => {
-    const leftSequence = hasImmutableByteSequenceTag(left);
-    const rightSequence = hasImmutableByteSequenceTag(right);
-    if (leftSequence || rightSequence) {
-      // A Context Packet's ImmutableByteSequence and its parsed wire form (the
-      // plain number array JSON makes of it) are two spellings of the same
-      // bytes — the packet contract binds them with one digest. Compare the
-      // bytes, never by reflection: a sequence deliberately has no own
-      // enumerable keys (Object.keys of a sequence is empty), so record
-      // equality would vacuously accept ANY two sequences, and the Array arm
-      // would reject the mixed pair the packet round trip produces.
-      const leftEntries = byteSequenceEntries(left, leftSequence);
-      const rightEntries = byteSequenceEntries(right, rightSequence);
-      return leftEntries !== null && rightEntries !== null &&
-        leftEntries.length === rightEntries.length &&
-        leftEntries.every((entry, index) => structurallyEqual(entry, rightEntries[index], seen));
+    if (Array.isArray(subjectLeft) || Array.isArray(subjectRight)) {
+      return Array.isArray(subjectLeft) && Array.isArray(subjectRight) &&
+        subjectLeft.length === subjectRight.length &&
+        subjectLeft.every((entry, index) => structurallyEqual(entry, subjectRight[index], seen));
     }
-    if (Array.isArray(left) || Array.isArray(right)) {
-      return Array.isArray(left) && Array.isArray(right) && left.length === right.length &&
-        left.every((entry, index) => structurallyEqual(entry, right[index], seen));
+    if (subjectLeft instanceof Map || subjectRight instanceof Map) {
+      return mapsEqual(subjectLeft, subjectRight, seen);
     }
-    if (left instanceof Map || right instanceof Map) return mapsEqual(left, right, seen);
-    if (left instanceof Set || right instanceof Set) return setsEqual(left, right, seen);
-    if (left instanceof Date || right instanceof Date) {
-      return left instanceof Date && right instanceof Date && Object.is(left.getTime(), right.getTime());
+    if (subjectLeft instanceof Set || subjectRight instanceof Set) {
+      return setsEqual(subjectLeft, subjectRight, seen);
     }
-    if (left instanceof RegExp || right instanceof RegExp) {
-      return left instanceof RegExp && right instanceof RegExp &&
-        left.source === right.source && left.flags === right.flags;
+    if (subjectLeft instanceof Date || subjectRight instanceof Date) {
+      return subjectLeft instanceof Date && subjectRight instanceof Date &&
+        Object.is(subjectLeft.getTime(), subjectRight.getTime());
     }
-    return recordsEqual(left, right, seen);
+    if (subjectLeft instanceof RegExp || subjectRight instanceof RegExp) {
+      return subjectLeft instanceof RegExp && subjectRight instanceof RegExp &&
+        subjectLeft.source === subjectRight.source && subjectLeft.flags === subjectRight.flags;
+    }
+    return recordsEqual(subjectLeft, subjectRight, seen);
   });
 }
 
-/** Materialize one side of a byte-sequence comparison. A tagged sequence
- *  iterates its bytes; the untagged side must be the plain number array the
- *  wire form is. Anything else (a record, a Map, a hostile tagged non-iterable)
- *  refuses instead of throwing. */
-function byteSequenceEntries(value: unknown, tagged: boolean): readonly unknown[] | null {
-  if (!tagged) return Array.isArray(value) ? (value as readonly unknown[]) : null;
+/** Materialize a tagged byte-sequence side of a comparison: the sequence
+ *  iterates its bytes; anything that cannot iterate (a hostile tagged
+ *  non-iterable) refuses instead of throwing. */
+function byteSequenceEntries(value: unknown): readonly unknown[] | null {
   try {
     return Array.from(value as Iterable<unknown>);
   } catch {

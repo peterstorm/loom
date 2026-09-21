@@ -52,7 +52,6 @@ import type {
   Task,
   TaskGraph,
   WaveReviewEpochAuthority,
-  WaveSpecCheckDocumentAuthority,
   WaveSpecCheckDocumentsAuthority,
 } from "./types";
 import type { DomainResult } from "./core/orchestration-contract";
@@ -80,7 +79,7 @@ import {
 } from "./core/requirement-coverage";
 import { parseStoredSpecCheck } from "./core/spec-check";
 import { reconcileWaveBlock, waveHasBlockCause, type WaveGate } from "./core/wave-gate-model";
-import { waveGateAuthorityDigest } from "./core/wave-review-authority";
+import { waveGateAuthorityDigest, parseWaveSpecCheckDocumentsAuthority, type WaveSpecCheckDocumentRejection, type WaveSpecCheckDocumentsRejection } from "./core/wave-review-authority";
 import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
 import { assertPiCliMutationCompatible, captureLoomRuntimeIdentity } from "./runtime-compatibility";
 import { isExactGitSha } from "./core/git-sha";
@@ -453,29 +452,26 @@ function exactFieldsError(
 const WAVE_REVIEW_EPOCH_FIELDS = ["runId", "wave", "batchEpoch"] as const;
 const WAVE_REVIEW_EPOCH_OPTIONAL_FIELDS = ["specCheckDocuments", "specCheckSlotAuthority", "settledSpecCheckFloor"] as const;
 
-function parseWaveSpecCheckDocument(
-  raw: unknown,
-  label: string,
-): ParseResult<WaveSpecCheckDocumentAuthority> {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    return parseErr(`${label} must be an object`);
+/** Decorate the shared Wave Review Epoch Authority grammar's rejection facts
+ *  with this transport's exact load-guard prose. The labels and messages are
+ *  byte-identical to the pre-shared-parser diagnostics the load-guard suite
+ *  pins; the acceptance itself is now the ONE shared parser, so the load
+ *  boundary and the reviewer-context decode cannot drift. */
+function specCheckDocumentRejectionMessage(label: string, rejection: WaveSpecCheckDocumentRejection): string {
+  switch (rejection.kind) {
+    case "not-an-object": return `${label} must be an object`;
+    case "unknown-fields": return `${label} contains unknown field(s): ${[...rejection.fields].sort().join(", ")}`;
+    case "missing-fields": return `${label} is missing field(s): ${rejection.fields.join(", ")}`;
+    case "path-not-string-or-null": return `${label}.path must be a string or null`;
+    case "null-lockstep": return `${label}.path and contentDigest must both be null or both be present`;
+    case "invalid-digest": return `${label}.contentDigest: ${rejection.message}`;
   }
-  const record = raw as Record<string, unknown>;
-  const fieldsError = exactFieldsError(record, ["path", "contentDigest"], [], label);
-  if (fieldsError !== null) return parseErr(fieldsError);
-  if (record.path !== null && typeof record.path !== "string") {
-    return parseErr(`${label}.path must be a string or null`);
-  }
-  if ((record.path === null) !== (record.contentDigest === null)) {
-    return parseErr(`${label}.path and contentDigest must both be null or both be present`);
-  }
-  if (record.path === null) {
-    return parseOk(Object.freeze({ path: null, contentDigest: null }));
-  }
-  const digest = parseArtifactDigest(record.contentDigest);
-  return digest.ok
-    ? parseOk(Object.freeze({ path: record.path, contentDigest: digest.value }))
-    : parseErr(`${label}.contentDigest: ${digest.error.message}`);
+}
+
+function specCheckDocumentsRejectionMessage(label: string, rejection: WaveSpecCheckDocumentsRejection): string {
+  return rejection.kind === "member"
+    ? specCheckDocumentRejectionMessage(`${label}.${rejection.member}`, rejection.failure)
+    : specCheckDocumentRejectionMessage(label, rejection);
 }
 
 function parseWaveSpecCheckDocuments(
@@ -485,14 +481,10 @@ function parseWaveSpecCheckDocuments(
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return parseErr("wave_review_epoch.specCheckDocuments must be an object when present");
   }
-  const record = raw as Record<string, unknown>;
-  const fieldsError = exactFieldsError(record, ["spec", "plan"], [], "wave_review_epoch.specCheckDocuments");
-  if (fieldsError !== null) return parseErr(fieldsError);
-  const spec = parseWaveSpecCheckDocument(record.spec, "wave_review_epoch.specCheckDocuments.spec");
-  if (!spec.ok) return spec;
-  const plan = parseWaveSpecCheckDocument(record.plan, "wave_review_epoch.specCheckDocuments.plan");
-  if (!plan.ok) return plan;
-  return parseOk(Object.freeze({ spec: spec.value, plan: plan.value }));
+  const parsed = parseWaveSpecCheckDocumentsAuthority(raw);
+  return parsed.ok
+    ? parseOk(parsed.value)
+    : parseErr(specCheckDocumentsRejectionMessage("wave_review_epoch.specCheckDocuments", parsed.rejection));
 }
 
 function parseWaveSpecCheckSlotAuthority(

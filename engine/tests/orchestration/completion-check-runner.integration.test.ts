@@ -329,6 +329,73 @@ describe("completion check process shell", () => {
     });
   });
 
+  it("refuses the timeout outcome when even SIGKILL leaves an EPERM group unprovable, without a third signal", async () => {
+    // Post-SIGKILL EPERM arm (pr-test-analyzer-2): the group survived SIGTERM
+    // (present through the whole grace window), SIGKILL was dispatched, and
+    // the post-SIGKILL probe answers EPERM — a member refuses signalling,
+    // which is still not a dissolution proof. The runner refuses with the
+    // stage-named message and never sends a third signal.
+    const actualKill = process.kill.bind(process);
+    const signals: (number | NodeJS.Signals)[] = [];
+    let killDispatched = false;
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+      if (signal === 0 && pid < 0) {
+        if (killDispatched) throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+        return true; // group survives every pre-SIGKILL probe
+      }
+      if (signal !== undefined) signals.push(signal);
+      if (signal === "SIGKILL") killDispatched = true;
+      return actualKill(pid, signal);
+    }) as typeof process.kill);
+    try {
+      const result = await runCompletionCheck(
+        check("ignore-sigterm", { timeoutMs: 200 }),
+        fixtureRoot(),
+        { terminationGraceMs: 250, hardKillWaitMs: 2_000 },
+      );
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          kind: "termination-unconfirmed",
+          message: expect.stringContaining("dissolution could not be confirmed after SIGKILL (EPERM)"),
+        },
+      });
+      expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+    } finally {
+      kill.mockRestore();
+    }
+  }, 15_000);
+
+  it("refuses the timeout outcome when the group still exists after SIGKILL containment", async () => {
+    // Post-SIGKILL present arm: the group survives even the SIGKILL dispatch
+    // as far as every probe can tell, so containment is unprovable and the
+    // refusal names the exact stage; no third signal follows.
+    const actualKill = process.kill.bind(process);
+    const signals: (number | NodeJS.Signals)[] = [];
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+      if (signal === 0 && pid < 0) return true; // group survives every probe
+      if (signal !== undefined) signals.push(signal);
+      return actualKill(pid, signal);
+    }) as typeof process.kill);
+    try {
+      const result = await runCompletionCheck(
+        check("ignore-sigterm", { timeoutMs: 200 }),
+        fixtureRoot(),
+        { terminationGraceMs: 250, hardKillWaitMs: 2_000 },
+      );
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          kind: "termination-unconfirmed",
+          message: expect.stringContaining("still exists after SIGKILL containment"),
+        },
+      });
+      expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+    } finally {
+      kill.mockRestore();
+    }
+  }, 15_000);
+
   it("refuses the timeout outcome when leader death plus EPERM cannot prove the group dissolved, without signalling", async () => {
     // The pre-round-5 design read EPERM-with-dead-leader as "the original group
     // dissolved and the numeric id now names foreign authority" and claimed a

@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
-import { countNewTests, countAssertions, diffFiles, diffFilesSince, diffFilesStaged, diffUntracked, isTrackedAt, type GitDiffResult } from "../../src/utils/git";
+import { countNewTests, countAssertions, countUnattributableDiffFiles, diffFiles, diffFilesSince, diffFilesStaged, diffUntracked, isTrackedAt, type GitDiffResult } from "../../src/utils/git";
 
 /**
  * Wrap added lines in the exact patch shape Git emits: one `diff --git` entry,
@@ -596,6 +596,38 @@ describe("countNewTests (pure)", () => {
 
     expect(countNewTests(diff).total).toBe(0);
     expect(countAssertions(diff)).toBe(0);
+  });
+
+  it("counts a C-quoted non-UTF-8 path as unattributable instead of silently dropping its lines", () => {
+    // Git C-quotes non-ASCII/control filenames with octal escapes; a path
+    // whose decoded bytes are not valid UTF-8 refuses the fatal decode and its
+    // entry becomes invalid. The added lines are dropped (fail-closed: nothing
+    // is fabricated), and the unattributable count names the projection gap so
+    // the evidence reason can distinguish "no test declarations found" from
+    // "test evidence could not be projected".
+    const diff = [
+      'diff --git "a/tests/caf\\377.test.ts" "b/tests/caf\\377.test.ts"',
+      '--- "a/tests/caf\\377.test.ts"',
+      '+++ "b/tests/caf\\377.test.ts"',
+      "@@ -0,0 +1 @@",
+      '+it("unprojectable", () => expect(1).toBe(1));',
+    ].join("\n");
+
+    expect(countNewTests(diff).total).toBe(0);
+    expect(countAssertions(diff)).toBe(0);
+    expect(countUnattributableDiffFiles(diff)).toBe(1);
+  });
+
+  it("keeps the unattributable count at zero for attributable and /dev/null entries", () => {
+    expect(countUnattributableDiffFiles(patch("example.test.ts", '+it("counted", () => {});'))).toBe(0);
+    const deletion = [
+      "diff --git a/gone.ts b/gone.ts",
+      "--- a/gone.ts",
+      "+++ /dev/null",
+      "@@ -1 +0,0 @@",
+      "-const gone = true;",
+    ].join("\n");
+    expect(countUnattributableDiffFiles(deletion)).toBe(0);
   });
 });
 

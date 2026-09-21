@@ -499,9 +499,27 @@ describe("owned native v3 → canonical replay → authentic guarded P3", { time
       const staged = git(root, ["ls-files", "--stage", "-z"]);
       if (f.registration.schemaVersion !== 3) throw Error("successor required");
       const later = value(await f.standalone.prepareStandaloneSuccessorFacadeStart(f.runsRoot, "later", f.registration.input));
-      const laterHandle = value(f.handles.createRunDirectory(f.runsRoot, "later"));
+      // pta-4 pin of the minted-once seam: registration must publish exactly
+      // JSON.parse(prepared.registrationWire) — a second live-object stringify
+      // would dissolve the 16MB preflight byte budget without any test failing.
+      const wireWrites: string[] = [];
+      const underlyingHandle = value(f.handles.createRunDirectory(f.runsRoot, "later"));
+      const handleRecord = Object.fromEntries(Object.getOwnPropertyNames(underlyingHandle).map((name) => {
+        const member = Reflect.get(underlyingHandle as unknown as object, name, underlyingHandle);
+        return [name, typeof member === "function" ? (member as (...args: unknown[]) => unknown).bind(underlyingHandle) : member];
+      })) as Record<string, unknown> & { registerProgram: (raw: unknown) => Promise<unknown> };
+      const registeredProgram = handleRecord.registerProgram;
+      handleRecord.registerProgram = async (raw: unknown) => {
+        wireWrites.push(JSON.stringify(raw));
+        return registeredProgram(raw);
+      };
+      const laterHandle = Object.freeze(handleRecord) as unknown as RunDirHandle;
       const started = await f.standalone.startPreparedStandaloneSuccessor(laterHandle, later);
       if (!started.ok) throw Error(started.message);
+      // JSON.stringify(JSON.parse(wire)) is byte-identical to the wire: the
+      // wire was itself produced by JSON.stringify, so key order and number
+      // formatting round-trip exactly.
+      expect(wireWrites).toEqual([later.registrationWire]);
       const one = (started.action as { requests: Requests }).requests.slice(0, 1);
       await native.capture(laterHandle, one, [["invalid current JSON"]]);
       await expect(native.verify()).rejects.toThrow("current witnessed Standalone Review rejected: later:");

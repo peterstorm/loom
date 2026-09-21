@@ -76,23 +76,31 @@ export function countMarkers(filePath: string, baseDir: string): number {
   }
 }
 
+/** The two outcomes `readableSpecArtifact` can produce. The declared set
+ *  equals the produced set — the helper never returns a full ready
+ *  transition — so the specify/clarify call sites narrow on the union's own
+ *  `kind` discriminant instead of a typeof convention. */
+type ReadableSpecArtifact =
+  | Readonly<{ kind: "ready"; artifact: string }>
+  | Readonly<{ kind: "not-ready"; reason: string }>;
+
 function readableSpecArtifact(
   state: TaskGraph,
   specDir: SpecArtifactDirectory,
   baseDir: string,
-): PhaseTransitionResolution | string {
+): ReadableSpecArtifact {
   const recorded = state.spec_file;
   if (recorded !== null) {
     if (!resolvesWithin(recorded, specDir)) {
       return transitionNotReady(`spec_file ${recorded} is outside run spec_dir ${specDir}`);
     }
     return phaseArtifactExists(recorded, baseDir)
-      ? recorded
+      ? { kind: "ready", artifact: recorded }
       : transitionNotReady(`recorded spec_file ${recorded} is not readable`);
   }
   const discovered = discoverArtifactWithin(specDir, "spec.md", baseDir);
   return discovered !== null && phaseArtifactExists(discovered, baseDir)
-    ? discovered
+    ? { kind: "ready", artifact: discovered }
     : transitionNotReady(`no readable spec.md is available inside ${specDir}`);
 }
 
@@ -246,19 +254,19 @@ export function observePhaseTransition(
     })
     .with("specify", () => {
       const spec = readableSpecArtifact(state, specDir, baseDir);
-      if (typeof spec !== "string") return spec;
-      const markers = countMarkers(spec, baseDir);
-      if (markers > CLARIFY_THRESHOLD) return transitionReady("clarify", spec);
-      return transitionReady("architecture", spec, true);
+      if (spec.kind === "not-ready") return spec;
+      const markers = countMarkers(spec.artifact, baseDir);
+      if (markers > CLARIFY_THRESHOLD) return transitionReady("clarify", spec.artifact);
+      return transitionReady("architecture", spec.artifact, true);
     })
     .with("clarify", () => {
       const spec = readableSpecArtifact(state, specDir, baseDir);
-      if (typeof spec !== "string") return spec;
-      const markers = countMarkers(spec, baseDir);
+      if (spec.kind === "not-ready") return spec;
+      const markers = countMarkers(spec.artifact, baseDir);
       if (markers > 0) {
-        return transitionNotReady(`${markers} NEEDS CLARIFICATION marker(s) remain unresolved in ${spec}`);
+        return transitionNotReady(`${markers} NEEDS CLARIFICATION marker(s) remain unresolved in ${spec.artifact}`);
       }
-      return transitionReady("architecture", spec);
+      return transitionReady("architecture", spec.artifact);
     })
     .with("architecture", () => {
       // Try state.plan_file first, fall back to deriving plan path from spec_dir slug
