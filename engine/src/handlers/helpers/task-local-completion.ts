@@ -82,6 +82,23 @@ function authorityHead(
   }
 }
 
+/** Engine-owned runtime paths sit outside every Task byte scope by design.
+ *  The active graph and per-session pointers (.claude/state/, .pi/state/) are
+ *  written by the engine inside every attempt window, and review-run
+ *  artifacts (.claude/reviews/, and panel runs under the active spec) are
+ *  minted by orchestration operations, never by the Task — the harness
+ *  gitignore marks all three domains outside review scope for the same
+ *  reason. Paths are canonical repository-relative POSIX. Deriving these
+ *  domains from engine config instead of this stable layout literal is the
+ *  tracked follow-up refinement. */
+const ENGINE_OWNED_PATH_PREFIXES = [".claude/state/", ".pi/state/", ".claude/reviews/"];
+const ENGINE_OWNED_PANEL_RUNS = /^\.claude\/specs\/[^/]+\/panel-runs\//;
+
+export function isEngineOwnedRuntimePath(path: string): boolean {
+  return ENGINE_OWNED_PATH_PREFIXES.some((prefix) => path.startsWith(prefix)) ||
+    ENGINE_OWNED_PANEL_RUNS.test(path);
+}
+
 function observeAvailableTaskScope(
   args: TaskLocalCompletionArgs,
   baselines: RequiredTaskBaselines,
@@ -114,14 +131,13 @@ function observeAvailableTaskScope(
       args.repositoryRoot,
       baselines.proof.map(({ artifact }) => artifact),
     );
-    // The engine itself writes its runtime state (the active task graph and
-    // per-session pointers) inside every attempt window; its review-scope
-    // contract places that state outside the Task byte scope.
-    const engineStateDirs = [".claude", ".pi"].map((harness) => harness.concat("/state/"));
+    // The engine itself writes its runtime state and mints review-run
+    // artifacts inside every attempt window; its review-scope contract
+    // places those domains outside the Task byte scope.
     const repositoryChangedPaths = changedRepositoryArtifactsSince(
       args.repositoryRoot,
       baselines.repository,
-    ).filter((path) => !engineStateDirs.some((engineStateDir) => path.startsWith(engineStateDir)));
+    ).filter((path) => !isEngineOwnedRuntimePath(path));
     observed = buildTaskLocalByteObservation({
       authority: args.authority,
       attemptBaseline: baselines.attempt,
