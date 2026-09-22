@@ -957,14 +957,11 @@ function materializePanelRequest(
   const slotId = parseSlotId(`slot:${createHash("sha256").update(request.id).digest("hex").slice(0, 32)}`);
   const profile = resolveModelProfile(request.modelProfile);
   const role = request.agent as keyof typeof AGENT_REQUIRED_SKILLS;
-  if (!requestId.ok || !slotId.ok || !profile.ok || !Object.hasOwn(AGENT_REQUIRED_SKILLS, role)) {
-    return {
-      ok: false,
-      message: !requestId.ok ? requestId.error.message
-        : !slotId.ok ? slotId.error.message
-        : !profile.ok ? profile.error.message
-        : `unknown panel agent ${request.agent}`,
-    };
+  if (!requestId.ok) return { ok: false, message: requestId.error.message };
+  if (!slotId.ok) return { ok: false, message: slotId.error.message };
+  if (!profile.ok) return { ok: false, message: profile.error.message };
+  if (!Object.hasOwn(AGENT_REQUIRED_SKILLS, role)) {
+    return { ok: false, message: `unknown panel agent ${request.agent}` };
   }
   const requiredSkill = AGENT_REQUIRED_SKILLS[role];
   const authoritySection = encodeByteSection("panel-authority", JSON.stringify({

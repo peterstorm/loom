@@ -59,12 +59,13 @@ const CONTEXT_SECTION_FIELDS: ReadonlySet<string> = new Set([
 /** Immutable byte sequence. Deliberately not Array-shaped: reflection and
  * cloning semantics are not part of the Context Packet contract. */
 export type ImmutableByteSequence = Readonly<{
-  readonly [index: number]: number;
+  readonly [index: number]: number | undefined;
   length: number;
   byteLength: number;
   at(index: number): number | undefined;
   slice(start?: number, end?: number): readonly number[];
   some(predicate: (byte: number, index: number) => boolean): boolean;
+  valueOf(): Uint8Array;
   toJSON(): readonly number[];
   [Symbol.iterator](): IterableIterator<number>;
 }>;
@@ -191,6 +192,7 @@ const immutableByteSequencePrototype: ImmutableByteSequence = Object.freeze({
   some(predicate: (byte: number, index: number) => boolean): boolean {
     return storedBytes(this).some(predicate);
   },
+  valueOf(): Uint8Array { return Uint8Array.from(storedBytes(this)); },
   toJSON(): readonly number[] { return Array.from(storedBytes(this)); },
   [Symbol.iterator](): IterableIterator<number> { return storedBytes(this).values(); },
   // The equality kernel's recognition tag (orchestration-contract/identity.ts).

@@ -172,6 +172,7 @@ function remediationCheck(
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
 });
 
@@ -300,13 +301,12 @@ describe("completion check process shell", () => {
     const sentinel = join(root, "holder-survived.txt");
     const signals: (number | NodeJS.Signals)[] = [];
     const actualKill = process.kill.bind(process);
-    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (signal !== undefined && signal !== 0) signals.push(signal);
       return actualKill(pid, signal);
     }) as typeof process.kill);
-    try {
-      const result = await runCompletionCheck(check("exit-before-close", {
-        args: ["completion-process.mjs", "exit-before-close", "holder-survived.txt", "1500"],
+    const result = await runCompletionCheck(check("exit-before-close", {
+      args: ["completion-process.mjs", "exit-before-close", "holder-survived.txt", "1500"],
         timeoutMs: 400,
       }), root, { terminationGraceMs: 250, hardKillWaitMs: 4_000 });
       expect(result).toMatchObject({
@@ -318,11 +318,8 @@ describe("completion check process shell", () => {
           message: expect.stringContaining("the runner waited for them to exit without signalling an unbound numeric group id"),
         },
       });
-      expect(signals).toEqual([]);
-      expect(existsSync(sentinel)).toBe(true);
-    } finally {
-      kill.mockRestore();
-    }
+    expect(signals).toEqual([]);
+    expect(existsSync(sentinel)).toBe(true);
   }, 15_000);
 
   // pta-4: the leader-reaped arm's remaining classifications. The signal-refusal
@@ -333,35 +330,30 @@ describe("completion check process shell", () => {
   // them. All four send no signal: the numeric group id is no longer
   // identity-bound once the leader is reaped.
   it("classifies a late timeout after the group dissolved as an observed run, not a refusal", async () => {
-    // Already-gone fast path: the trigger settles after the whole group is
-    // provably gone and the parent close is observed, so the late timeout is
-    // recorded on an observed success (timedOut: true) instead of
-    // manufacturing a termination-unconfirmed refusal about a completed run.
+    // Already-gone fast path: the timeout wins after leader exit, the group
+    // probe reports provable dissolution, and the runner then waits for parent
+    // close before recording the observed run with timedOut: true.
     const root = fixtureRoot();
     const sentinel = join(root, "reaped-observed-survivor.txt");
     const signals: (number | NodeJS.Signals)[] = [];
     const actualKill = process.kill.bind(process);
-    const kill = vi.spyOn(process, "kill" ).mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (signal === 0 && pid < 0) throw Object.assign(new Error("ESRCH"), { code: "ESRCH" }); // group probe: provably dissolved
       if (signal !== undefined && signal !== 0) signals.push(signal);
       return actualKill(pid, signal);
     }) as typeof process.kill);
-    try {
-      const result = execution(await runCompletionCheck(check("exit-before-close", {
+    const result = execution(await runCompletionCheck(check("exit-before-close", {
         args: ["completion-process.mjs", "exit-before-close", "reaped-observed-survivor.txt", "2500"],
         timeoutMs: 400,
       }), root, { terminationGraceMs: 250, hardKillWaitMs: 4_000 }));
-      expect(result.checkResult.outcome).toMatchObject({
-        kind: "observed",
-        exitCode: 0,
-        timedOut: true,
-        signal: null,
-      });
-      expect(signals).toEqual([]);
-      expect(existsSync(sentinel)).toBe(true);
-    } finally {
-      kill.mockRestore();
-    }
+    expect(result.checkResult.outcome).toMatchObject({
+      kind: "observed",
+      exitCode: 0,
+      timedOut: true,
+      signal: null,
+    });
+    expect(signals).toEqual([]);
+    expect(existsSync(sentinel)).toBe(true);
   }, 15_000);
 
   it("classifies a cancellation after the group dissolved as cancelled without signalling", async () => {
@@ -373,13 +365,12 @@ describe("completion check process shell", () => {
     const sentinel = join(root, "reaped-cancelled-survivor.txt");
     const signals: (number | NodeJS.Signals)[] = [];
     const actualKill = process.kill.bind(process);
-    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (signal !== undefined && signal !== 0) signals.push(signal);
       return actualKill(pid, signal);
     }) as typeof process.kill);
     const controller = new AbortController();
-    try {
-      const pending = runCompletionCheck(check("exit-before-close", {
+    const pending = runCompletionCheck(check("exit-before-close", {
         args: ["completion-process.mjs", "exit-before-close", "reaped-cancelled-survivor.txt", "3000"],
         timeoutMs: 10_000,
       }), root, { signal: controller.signal, terminationGraceMs: 250, hardKillWaitMs: 4_000 });
@@ -397,11 +388,8 @@ describe("completion check process shell", () => {
           message: expect.stringContaining("cancelled after its process group dissolved without signalling"),
         },
       });
-      expect(signals).toEqual([]);
-      expect(existsSync(sentinel)).toBe(true);
-    } finally {
-      kill.mockRestore();
-    }
+    expect(signals).toEqual([]);
+    expect(existsSync(sentinel)).toBe(true);
   }, 15_000);
 
   it("refuses a leader-reaped outcome when the group id cannot even be observed", async () => {
@@ -410,29 +398,25 @@ describe("completion check process shell", () => {
     // begin to classify and fails closed with the named
     // termination-unconfirmed diagnostic, signalling nothing.
     const signals: (number | NodeJS.Signals)[] = [];
-    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (signal === 0 && pid < 0) throw Object.assign(new Error("EIO"), { code: "EIO" });
       if (signal !== undefined && signal !== 0) {
         throw new Error(`no signalling may follow an unobservable group: ${String(signal)}`);
       }
       return process.kill(pid, signal);
     }) as typeof process.kill);
-    try {
-      const result = await runCompletionCheck(check("exit-before-close", {
+    const result = await runCompletionCheck(check("exit-before-close", {
         args: ["completion-process.mjs", "exit-before-close", "reaped-unobservable-survivor.txt", "1500"],
         timeoutMs: 400,
       }), fixtureRoot(), { terminationGraceMs: 250, hardKillWaitMs: 4_000 });
-      expect(result).toMatchObject({
-        ok: false,
-        error: {
-          kind: "termination-unconfirmed",
-          message: expect.stringContaining("timeout completion check ended but process-tree identity could not be observed"),
-        },
-      });
-      expect(signals).toEqual([]);
-    } finally {
-      kill.mockRestore();
-    }
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        kind: "termination-unconfirmed",
+        message: expect.stringContaining("timeout completion check ended but process-tree identity could not be observed"),
+      },
+    });
+    expect(signals).toEqual([]);
   }, 15_000);
 
   it("refuses a leader-reaped outcome when the dissolved group's parent close is unobservable", async () => {
@@ -442,46 +426,38 @@ describe("completion check process shell", () => {
     // and fails closed without signalling the unbound id.
     const signals: (number | NodeJS.Signals)[] = [];
     const actualKill = process.kill.bind(process);
-    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (signal === 0 && pid < 0) throw Object.assign(new Error("ESRCH"), { code: "ESRCH" }); // group probe: provably dissolved
       if (signal !== undefined && signal !== 0) signals.push(signal);
       return actualKill(pid, signal);
     }) as typeof process.kill);
-    try {
-      const result = await runCompletionCheck(check("exit-before-close", {
+    const result = await runCompletionCheck(check("exit-before-close", {
         // The 8000ms holder keeps the pipes closed-proving write end far past
         // the 400ms hard-kill race even if a fully loaded suite delays the
         // runner's own 400ms timeout trigger by seconds.
         args: ["completion-process.mjs", "exit-before-close", "reaped-uncloseable-survivor.txt", "8000"],
         timeoutMs: 400,
       }), fixtureRoot(), { terminationGraceMs: 250, hardKillWaitMs: 400 });
-      expect(result).toMatchObject({
-        ok: false,
-        error: {
-          kind: "termination-unconfirmed",
-          message: expect.stringContaining("timeout process group is gone but the parent close observation is unavailable"),
-        },
-      });
-      expect(signals).toEqual([]);
-    } finally {
-      kill.mockRestore();
-    }
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        kind: "termination-unconfirmed",
+        message: expect.stringContaining("timeout process group is gone but the parent close observation is unavailable"),
+      },
+    });
+    expect(signals).toEqual([]);
   }, 15_000);
 
   it("does not signal a same-UID group whose leader PID appeared only after parent close", async () => {
     const signals: (number | NodeJS.Signals)[] = [];
-    const kill = vi.spyOn(process, "kill").mockImplementation(((_pid: number, signal?: number | NodeJS.Signals) => {
+    vi.spyOn(process, "kill").mockImplementation(((_pid: number, signal?: number | NodeJS.Signals) => {
       if (signal === 0) return true;
       if (signal !== undefined) signals.push(signal);
       throw new Error("a recycled group must not be signalled");
     }) as typeof process.kill);
-    try {
-      const result = execution(await runCompletionCheck(check("missing-report"), fixtureRoot()));
-      expect(result.checkResult.outcome).toMatchObject({ kind: "observed", exitCode: 0, timedOut: false });
-      expect(signals).toEqual([]);
-    } finally {
-      kill.mockRestore();
-    }
+    const result = execution(await runCompletionCheck(check("missing-report"), fixtureRoot()));
+    expect(result.checkResult.outcome).toMatchObject({ kind: "observed", exitCode: 0, timedOut: false });
+    expect(signals).toEqual([]);
   });
 
   it("kills timeout descendants before they can mutate the workspace", async () => {
@@ -520,7 +496,7 @@ describe("completion check process shell", () => {
     const actualKill = process.kill.bind(process);
     const signals: (number | NodeJS.Signals)[] = [];
     let killDispatched = false;
-    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (signal === 0 && pid < 0) {
         if (killDispatched) throw Object.assign(new Error("EPERM"), { code: "EPERM" });
         return true; // group survives every pre-SIGKILL probe
@@ -529,8 +505,7 @@ describe("completion check process shell", () => {
       if (signal === "SIGKILL") killDispatched = true;
       return actualKill(pid, signal);
     }) as typeof process.kill);
-    try {
-      const result = await runCompletionCheck(
+    const result = await runCompletionCheck(
         check("ignore-sigterm", { timeoutMs: 200 }),
         fixtureRoot(),
         { terminationGraceMs: 250, hardKillWaitMs: 2_000 },
@@ -542,10 +517,7 @@ describe("completion check process shell", () => {
           message: expect.stringContaining("dissolution could not be confirmed after SIGKILL (EPERM)"),
         },
       });
-      expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
-    } finally {
-      kill.mockRestore();
-    }
+    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
   }, 15_000);
 
   it("refuses the timeout outcome when the group still exists after SIGKILL containment", async () => {
@@ -554,28 +526,24 @@ describe("completion check process shell", () => {
     // refusal names the exact stage; no third signal follows.
     const actualKill = process.kill.bind(process);
     const signals: (number | NodeJS.Signals)[] = [];
-    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (signal === 0 && pid < 0) return true; // group survives every probe
       if (signal !== undefined) signals.push(signal);
       return actualKill(pid, signal);
     }) as typeof process.kill);
-    try {
-      const result = await runCompletionCheck(
+    const result = await runCompletionCheck(
         check("ignore-sigterm", { timeoutMs: 200 }),
         fixtureRoot(),
         { terminationGraceMs: 250, hardKillWaitMs: 2_000 },
       );
-      expect(result).toMatchObject({
-        ok: false,
-        error: {
-          kind: "termination-unconfirmed",
-          message: expect.stringContaining("still exists after SIGKILL containment"),
-        },
-      });
-      expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
-    } finally {
-      kill.mockRestore();
-    }
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        kind: "termination-unconfirmed",
+        message: expect.stringContaining("still exists after SIGKILL containment"),
+      },
+    });
+    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
   }, 15_000);
 
   it("refuses the timeout outcome when leader death plus EPERM cannot prove the group dissolved, without signalling", async () => {
@@ -589,7 +557,7 @@ describe("completion check process shell", () => {
     const actualKill = process.kill.bind(process);
     const signals: (number | NodeJS.Signals)[] = [];
     const probeError = (code: "EPERM" | "ESRCH"): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
-    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (signal !== undefined) signals.push(signal);
       if (signal === "SIGTERM") return actualKill(pid, signal);
       if (signal === 0 && pid < 0) throw probeError("EPERM");
@@ -597,8 +565,7 @@ describe("completion check process shell", () => {
       if (signal === "SIGKILL") throw new Error("unconfirmable process group must not be signalled");
       return actualKill(pid, signal);
     }) as typeof process.kill);
-    try {
-      const result = await runCompletionCheck(
+    const result = await runCompletionCheck(
         check("timeout-exit-zero", { timeoutMs: 200 }),
         fixtureRoot(),
         { terminationGraceMs: 250, hardKillWaitMs: 2_000 },
@@ -610,11 +577,8 @@ describe("completion check process shell", () => {
           message: expect.stringContaining("could not be confirmed after SIGTERM (EPERM)"),
         },
       });
-      expect(signals).toContain("SIGTERM");
-      expect(signals).not.toContain("SIGKILL");
-    } finally {
-      kill.mockRestore();
-    }
+    expect(signals).toContain("SIGTERM");
+    expect(signals).not.toContain("SIGKILL");
   });
 
   it("escalates to SIGKILL when the EPERM group probe still finds the leader alive", async () => {
@@ -628,7 +592,7 @@ describe("completion check process shell", () => {
     const signals: (number | NodeJS.Signals)[] = [];
     let killDispatched = false;
     const probeError = (code: "EPERM" | "ESRCH"): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
-    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (signal === 0) {
         if (killDispatched) throw probeError("ESRCH"); // post-SIGKILL: group provably gone
         if (pid < 0) throw probeError("EPERM"); // group probe: an unsignalable member
@@ -643,22 +607,18 @@ describe("completion check process shell", () => {
       }
       return actualKill(pid, signal);
     }) as typeof process.kill);
-    try {
-      const result = execution(await runCompletionCheck(
+    const result = execution(await runCompletionCheck(
         check("ignore-sigterm", { timeoutMs: 200 }),
         fixtureRoot(),
         { terminationGraceMs: 250, hardKillWaitMs: 2_000 },
       ));
-      expect(result.checkResult.outcome).toMatchObject({
-        kind: "observed",
-        exitCode: null,
-        timedOut: true,
-        signal: "SIGKILL",
-      });
-      expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
-    } finally {
-      kill.mockRestore();
-    }
+    expect(result.checkResult.outcome).toMatchObject({
+      kind: "observed",
+      exitCode: null,
+      timedOut: true,
+      signal: "SIGKILL",
+    });
+    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
   }, 15_000);
 
   it("reports a closed group whose EPERM probe cannot prove dissolution as termination-unconfirmed without signalling", async () => {
@@ -670,29 +630,25 @@ describe("completion check process shell", () => {
     // that may not be ours.
     const signals: (number | NodeJS.Signals)[] = [];
     const probeError = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
-    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (signal === 0 && pid < 0) throw probeError("EPERM"); // group probe: unsignalable member (or foreign id)
       if (signal === 0) throw probeError("ESRCH"); // leader probe: leader reaped
       if (signal !== undefined) signals.push(signal);
       throw new Error(`post-close signalling must be refused: ${String(signal)}`);
     }) as typeof process.kill);
-    try {
-      const result = await runCompletionCheck(
+    const result = await runCompletionCheck(
         check("missing-report"),
         fixtureRoot(),
         { hardKillWaitMs: 60 },
       );
-      expect(result).toMatchObject({
-        ok: false,
-        error: {
-          kind: "termination-unconfirmed",
-          message: expect.stringContaining("dissolution could not be confirmed (EPERM)"),
-        },
-      });
-      expect(signals).toEqual([]);
-    } finally {
-      kill.mockRestore();
-    }
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        kind: "termination-unconfirmed",
+        message: expect.stringContaining("dissolution could not be confirmed (EPERM)"),
+      },
+    });
+    expect(signals).toEqual([]);
   });
 
   /**
@@ -710,25 +666,21 @@ describe("completion check process shell", () => {
     // observation and no signalling may follow an unbound id.
     const probeError = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
     const signals: (number | NodeJS.Signals)[] = [];
-    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (signal === 0 && pid < 0) throw probeError("EIO");
       if (signal === 0) return true;
       if (signal !== undefined) signals.push(signal);
       throw new Error(`no descendant signalling may follow an unobservable group: ${String(signal)}`);
     }) as typeof process.kill);
-    try {
-      const result = await runCompletionCheck(check("missing-report"), fixtureRoot());
-      expect(result).toMatchObject({
-        ok: false,
-        error: {
-          kind: "termination-unconfirmed",
-          message: expect.stringContaining("process-tree identity could not be observed"),
-        },
-      });
-      expect(signals).toEqual([]);
-    } finally {
-      kill.mockRestore();
-    }
+    const result = await runCompletionCheck(check("missing-report"), fixtureRoot());
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        kind: "termination-unconfirmed",
+        message: expect.stringContaining("process-tree identity could not be observed"),
+      },
+    });
+    expect(signals).toEqual([]);
   });
 
   it("reports descendants that outlive the post-close wait as termination-unconfirmed without signalling", async () => {
@@ -739,29 +691,25 @@ describe("completion check process shell", () => {
     // is the named termination-unconfirmed class, not a fabricated pass.
     const signals: (number | NodeJS.Signals)[] = [];
     const probeError = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
-    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (signal === 0 && pid < 0) return true; // group probe: still present
       if (signal === 0) throw probeError("ESRCH"); // leader probe: leader gone
       if (signal !== undefined) signals.push(signal);
       throw new Error(`post-close signalling must be refused: ${String(signal)}`);
     }) as typeof process.kill);
-    try {
-      const result = await runCompletionCheck(
+    const result = await runCompletionCheck(
         check("missing-report"),
         fixtureRoot(),
         { terminationGraceMs: 250, hardKillWaitMs: 60 },
       );
-      expect(result).toMatchObject({
-        ok: false,
-        error: {
-          kind: "termination-unconfirmed",
-          message: expect.stringContaining("post-close signalling was refused"),
-        },
-      });
-      expect(signals).toEqual([]);
-    } finally {
-      kill.mockRestore();
-    }
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        kind: "termination-unconfirmed",
+        message: expect.stringContaining("post-close signalling was refused"),
+      },
+    });
+    expect(signals).toEqual([]);
   });
 
   it("reports a process-group probe that fails during the post-close wait as termination-unconfirmed", async () => {
@@ -771,7 +719,7 @@ describe("completion check process shell", () => {
     // named diagnostic class instead of guessing either polarity.
     let groupProbes = 0;
     const probeError = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
-    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
+    vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (signal === 0 && pid < 0) {
         groupProbes += 1;
         if (groupProbes > 1) throw probeError("EIO");
@@ -780,18 +728,14 @@ describe("completion check process shell", () => {
       if (signal === 0) throw probeError("ESRCH");
       throw new Error(`no signalling may follow an unobservable wait: ${String(signal)}`);
     }) as typeof process.kill);
-    try {
-      const result = await runCompletionCheck(check("missing-report"), fixtureRoot());
-      expect(result).toMatchObject({
-        ok: false,
-        error: {
-          kind: "termination-unconfirmed",
-          message: expect.stringContaining("process-tree identity could not be observed"),
-        },
-      });
-    } finally {
-      kill.mockRestore();
-    }
+    const result = await runCompletionCheck(check("missing-report"), fixtureRoot());
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        kind: "termination-unconfirmed",
+        message: expect.stringContaining("process-tree identity could not be observed"),
+      },
+    });
   });
 
   it("keeps bounded diagnostic tails", async () => {

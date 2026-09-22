@@ -85,6 +85,7 @@ describe("parseSpecArtifactDirectory", () => {
   });
 
   it.each([
+    ["absolute path even beneath the ambient project", `${process.cwd()}/.claude/specs/run`],
     ["absolute escape", "/tmp/foreign-specs"],
     ["relative escape", ".claude/specs/../../foreign-specs"],
     ["sibling prefix", ".claude/specs-foreign/run"],
@@ -93,6 +94,14 @@ describe("parseSpecArtifactDirectory", () => {
       ok: false,
       message: expect.stringContaining("outside .claude/specs"),
     });
+  });
+});
+
+describe("resolvesWithin", () => {
+  it("resolves relative authority against the supplied project root, never ambient cwd", () => {
+    expect(resolvesWithin(".claude/specs/run/spec.md", ".claude/specs/run", "/worktree-b")).toBe(true);
+    expect(resolvesWithin("/checkout-a/.claude/specs/run/spec.md", ".claude/specs/run", "/worktree-b")).toBe(false);
+    expect(resolvesWithin("/worktree-b/.claude/specs/run/spec.md", ".claude/specs/run", "/worktree-b")).toBe(true);
   });
 });
 

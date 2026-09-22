@@ -1,5 +1,10 @@
 import type { Task } from "../types";
-import { createEscalationRemediationReceipt, type ImplementationAttemptSettlementReceipt } from "./implementation-completion";
+import {
+  createEscalationRemediationReceipt,
+  type ImplementationAttemptSettlementReceipt,
+  type ImplementationAuthorityDigest,
+  type ImplementationSettlementReceiptId,
+} from "./implementation-completion";
 import {
   deriveImplementationAttestationContext,
   deriveImplementationRetryDisposition,
@@ -116,8 +121,8 @@ export function armImplementationAttestation(
 
 export type RemediationPlan = Readonly<{
   taskId: string;
-  terminalReceiptId: string;
-  terminalAuthorityDigest: string;
+  terminalReceiptId: ImplementationSettlementReceiptId;
+  terminalAuthorityDigest: ImplementationAuthorityDigest;
   failureKinds: readonly [string, ...string[]];
 }>;
 
@@ -155,7 +160,7 @@ function escalationRemediationPlan(
     ok: true,
     value: Object.freeze({
       taskId: task.id,
-      terminalReceiptId: input.terminalReceiptId,
+      terminalReceiptId: disposition.receiptId,
       terminalAuthorityDigest: terminal.authorityDigest,
       failureKinds: disposition.failureKinds,
     }),

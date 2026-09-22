@@ -103,6 +103,29 @@ describe("phase artifacts resolve against the graph's project boundary, not cwd"
     }
   });
 
+  it("refuses an absolute persisted spec_dir from the runtime checkout", () => {
+    const graphRoot = tempRoot();
+    const runtimeRoot = elsewhere();
+    const foreignSpecDir = join(runtimeRoot, ".claude", "specs", "run");
+    mkdirSync(foreignSpecDir, { recursive: true });
+    writeFileSync(join(foreignSpecDir, "brainstorm.md"), "# Foreign brainstorm\n");
+    const state = {
+      current_phase: "init",
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      spec_dir: foreignSpecDir,
+      tasks: [],
+      wave_gates: {},
+    } as unknown as TaskGraph;
+
+    expect(resolveTransition("brainstorm", state, graphRoot)).toEqual({
+      kind: "not-ready",
+      reason: expect.stringContaining("not project-relative"),
+    });
+  });
+
   it("the Pi phase applier advances a worktree-shaped run whose cwd is elsewhere", async () => {
     const root = tempRoot();
     const cwd = elsewhere();

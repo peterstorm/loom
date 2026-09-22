@@ -725,6 +725,7 @@ function preparePiPhaseResult(
   state: TaskGraph,
   completedPhase: Phase,
   writtenPaths: readonly string[],
+  phaseArtifactBaseDir: string,
 ): PiPhasePreparation {
   if (!isPhaseResultEligible(state.current_phase, completedPhase)) {
     const currentIndex = PHASES.indexOf(state.current_phase);
@@ -737,7 +738,7 @@ function preparePiPhaseResult(
   }
   const specDir = parseSpecArtifactDirectory(state.spec_dir);
   if (!specDir.ok) throw new Error(specDir.message);
-  const updates = phaseArtifactUpdates(writtenPaths, specDir.value);
+  const updates = phaseArtifactUpdates(writtenPaths, specDir.value, phaseArtifactBaseDir);
   return Object.freeze({
     kind: "eligible",
     state: Object.keys(updates).length === 0 ? state : { ...state, ...updates },
@@ -750,9 +751,14 @@ function reducePiPhaseTransition(
   completedPhase: Phase,
   transition: PhaseTransition,
   now: string,
+  phaseArtifactBaseDir: string,
 ): TaskGraph {
   if (!isPhaseResultEligible(state.current_phase, completedPhase)) return state;
-  const artifactUpdates = phaseArtifactUpdates([transition.artifact], state.spec_dir ?? undefined);
+  const artifactUpdates = phaseArtifactUpdates(
+    [transition.artifact],
+    state.spec_dir ?? undefined,
+    phaseArtifactBaseDir,
+  );
   return {
     ...state,
     current_phase: transition.nextPhase,
@@ -781,13 +787,23 @@ function phaseMismatchOutcome(
 
 function reduceLockedPiPhaseResult(
   locked: TaskGraph,
-  args: Readonly<{ agentType: string; completedPhase: Phase; now: string }>,
+  args: Readonly<{
+    agentType: string;
+    completedPhase: Phase;
+    now: string;
+    phaseArtifactBaseDir: string;
+  }>,
   writtenPaths: readonly string[],
   observation: PhaseTransitionObservation | null,
 ): Readonly<{ state: TaskGraph; value: PiResultOutcome }> {
   let prepared: PiPhasePreparation;
   try {
-    prepared = preparePiPhaseResult(locked, args.completedPhase, writtenPaths);
+    prepared = preparePiPhaseResult(
+      locked,
+      args.completedPhase,
+      writtenPaths,
+      args.phaseArtifactBaseDir,
+    );
   } catch (error) {
     const diagnostic = `${args.agentType} phase artifact extraction failed: ` +
       `${error instanceof Error ? error.message : String(error)}`;
@@ -819,7 +835,13 @@ function reduceLockedPiPhaseResult(
       };
     }
     return {
-      state: reducePiPhaseTransition(prepared.state, args.completedPhase, transition, args.now),
+      state: reducePiPhaseTransition(
+        prepared.state,
+        args.completedPhase,
+        transition,
+        args.now,
+        args.phaseArtifactBaseDir,
+      ),
       value: outcome(),
     };
   } catch (error) {
@@ -861,7 +883,12 @@ export async function applyPhaseAgentPiResult(args: Readonly<{
   const writtenPaths = writtenPathsOf(parsed.value);
   try {
     const observedState = args.store.load();
-    const prepared = preparePiPhaseResult(observedState, args.completedPhase, writtenPaths);
+    const prepared = preparePiPhaseResult(
+      observedState,
+      args.completedPhase,
+      writtenPaths,
+      args.phaseArtifactBaseDir,
+    );
     const observation = prepared.kind === "eligible"
       ? (() => {
           const specDir = parseSpecArtifactDirectory(prepared.state.spec_dir);

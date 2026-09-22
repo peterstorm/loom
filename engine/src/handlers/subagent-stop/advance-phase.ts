@@ -7,7 +7,7 @@
  * which includes init as the first phase).
  */
 
-import { accessSync, constants as fsConstants, readFileSync, readdirSync } from "node:fs";
+import { accessSync, constants as fsConstants, readFileSync, readdirSync, statSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { match } from "ts-pattern";
 import type { HookHandler, HookResult, Phase, TaskGraph } from "../../types";
@@ -45,11 +45,13 @@ function withinBoundary(path: string, baseDir: string): string {
   return isAbsolute(path) ? path : join(baseDir, path);
 }
 
-/** ENOENT is absence; every other readability failure reaches the diagnostic boundary. */
+/** ENOENT is absence; every other readability failure reaches the diagnostic boundary.
+ * A phase document is a regular file, never merely a readable filesystem entry. */
 function phaseArtifactExists(path: string, baseDir: string): boolean {
   try {
-    accessSync(withinBoundary(path, baseDir), fsConstants.R_OK);
-    return true;
+    const absolute = withinBoundary(path, baseDir);
+    accessSync(absolute, fsConstants.R_OK);
+    return statSync(absolute).isFile();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw new Error(
@@ -91,7 +93,7 @@ function readableSpecArtifact(
 ): ReadableSpecArtifact {
   const recorded = state.spec_file;
   if (recorded !== null) {
-    if (!resolvesWithin(recorded, specDir)) {
+    if (!resolvesWithin(recorded, specDir, baseDir)) {
       return transitionNotReady(`spec_file ${recorded} is outside run spec_dir ${specDir}`);
     }
     return phaseArtifactExists(recorded, baseDir)
@@ -124,44 +126,66 @@ function discoverArtifactWithin(
   return isAbsolute(specDir) ? found : relative(baseDir, found);
 }
 
-/** Resolve the plan artifact for the architecture arm (code-simplifier-5):
- *  the recorded `plan_file` first, then — when it is unset or unreadable — the
- *  spec_dir slug's canonical `.claude/plans/<slug>.md` and finally a single
- *  date-prefixed plan inside that directory. A recorded plan outside
- *  PLAN_ARTIFACT_DIR is refused, not healed: substring containment carries `..`
- *  segments through unharmed, exactly as the spec branches resolve containment. */
+/** Resolve the Plan artifact for the architecture arm: recorded authority
+ * first, then the canonical slug path, then an exact-one date-prefix fallback.
+ * Every candidate must be a readable regular file and all containment is
+ * resolved against the TaskGraph Project Boundary. */
 function resolvePlanArtifact(
   state: Pick<TaskGraph, "plan_file" | "spec_dir">,
   baseDir: string,
 ): ReadableSpecArtifact {
   const recorded = state.plan_file;
-  if (recorded && !resolvesWithin(recorded, PLAN_ARTIFACT_DIR)) {
+  if (recorded && !resolvesWithin(recorded, PLAN_ARTIFACT_DIR, baseDir)) {
     return transitionNotReady(`plan_file ${recorded} is outside ${PLAN_ARTIFACT_DIR}`);
   }
-  const recordedReadable = recorded !== null && recorded !== "" && phaseArtifactExists(recorded, baseDir);
-  const fallback = recordedReadable ? null : derivedPlanCandidate(state.spec_dir, baseDir);
-  const resolved = fallback ?? recorded;
-  return resolved && phaseArtifactExists(resolved, baseDir)
-    ? { kind: "ready", artifact: resolved }
+  if (recorded !== null && recorded !== "" && phaseArtifactExists(recorded, baseDir)) {
+    return { kind: "ready", artifact: recorded };
+  }
+  const fallback = derivedPlanCandidate(state.spec_dir, baseDir);
+  if (fallback.kind === "ambiguous") {
+    return transitionNotReady(
+      `multiple readable plan artifacts match ${fallback.datePrefix} inside ${PLAN_ARTIFACT_DIR}; ` +
+      "set plan_file or remove the extra candidates",
+    );
+  }
+  return fallback.kind === "candidate"
+    ? { kind: "ready", artifact: fallback.path }
     : transitionNotReady(`no readable plan artifact is available inside ${PLAN_ARTIFACT_DIR}`);
 }
 
-/** The fallback candidate for an unset or unreadable recorded plan: the
- *  spec_dir slug's canonical `.claude/plans/<slug>.md` when readable, else the
- *  single date-prefixed plan (e.g. `2026-05-18…`) inside `.claude/plans`. An
- *  ambiguous match list is a refusal, never a guess (restored in round 8:
- *  the cs-5 extraction had silently dropped the pre-existing exactly-one
- *  guard and pinned an arbitrary readdir-order plan). */
-function derivedPlanCandidate(specDir: string | null | undefined, baseDir: string): string | null {
+type DerivedPlanCandidate =
+  | Readonly<{ kind: "candidate"; path: string }>
+  | Readonly<{ kind: "unavailable" }>
+  | Readonly<{ kind: "ambiguous"; datePrefix: string }>;
+
+/** Resolve the documented fallback without guessing: zero valid candidates is
+ * unavailable, one is authority, and multiple remain an explicit ambiguity. */
+function derivedPlanCandidate(
+  specDir: string | null | undefined,
+  baseDir: string,
+): DerivedPlanCandidate {
   const slug = !specDir ? "" : (specDir.split("/").pop() ?? "");
   const bySlug = slug === "" ? null : `.claude/plans/${slug}.md`;
-  if (bySlug !== null && phaseArtifactExists(bySlug, baseDir)) return bySlug;
-  const datePrefix = slug.slice(0, 10); // "2026-05-18"
-  if (datePrefix === "" || !phaseArtifactExists(".claude/plans", baseDir)) return null;
-  const files = readdirSync(join(baseDir, ".claude", "plans")).filter(
-    (file: string) => file.startsWith(datePrefix) && file.endsWith(".md"),
-  );
-  return files.length === 1 ? `.claude/plans/${files[0]}` : null;
+  if (bySlug !== null && phaseArtifactExists(bySlug, baseDir)) {
+    return Object.freeze({ kind: "candidate", path: bySlug });
+  }
+  const datePrefix = slug.slice(0, 10);
+  if (datePrefix === "") return Object.freeze({ kind: "unavailable" });
+  let names: string[];
+  try {
+    names = readdirSync(join(baseDir, ".claude", "plans"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return Object.freeze({ kind: "unavailable" });
+    throw error;
+  }
+  const candidates = names
+    .filter((name) => name.startsWith(datePrefix) && name.endsWith(".md"))
+    .map((name) => `.claude/plans/${name}`)
+    .filter((path) => phaseArtifactExists(path, baseDir));
+  if (candidates.length === 0) return Object.freeze({ kind: "unavailable" });
+  return candidates.length === 1
+    ? Object.freeze({ kind: "candidate", path: candidates[0]! })
+    : Object.freeze({ kind: "ambiguous", datePrefix });
 }
 
 export type PhaseTransitionResolution =
@@ -391,14 +415,14 @@ const handler: HookHandler = async (stdin) => {
   }
   const initialPhaseRefusal = phaseAuthorityRefusal(currentState.current_phase, completedPhase);
   if (initialPhaseRefusal !== null) return initialPhaseRefusal;
-  const initialSpecDir = parseSpecArtifactDirectory(currentState.spec_dir);
-  if (!initialSpecDir.ok) {
-    return { kind: "error", message: `advance-phase: ${initialSpecDir.message}; phase NOT advanced` };
-  }
   // Every relative artifact path is probed against the project root that owns
   // this TaskGraph, not process.cwd(): the runtime's cwd may be a different
   // checkout (a parent session in the main checkout advancing a worktree run).
   const artifactBaseDir = observeTaskGraphProjectBoundary(mgr.getPath()).root;
+  const initialSpecDir = parseSpecArtifactDirectory(currentState.spec_dir);
+  if (!initialSpecDir.ok) {
+    return { kind: "error", message: `advance-phase: ${initialSpecDir.message}; phase NOT advanced` };
+  }
 
   // Extract artifacts from transcript before checking transition. Resolved,
   // not read off the payload: without the derived fallback a harness that
@@ -428,12 +452,12 @@ const handler: HookHandler = async (stdin) => {
     const updates: { spec_file?: string; plan_file?: string } = {};
     try {
       if (artifacts.spec_file &&
-          classifyPhaseArtifact(artifacts.spec_file, initialSpecDir.value) === "spec" &&
+          classifyPhaseArtifact(artifacts.spec_file, initialSpecDir.value, artifactBaseDir) === "spec" &&
           phaseArtifactExists(artifacts.spec_file, artifactBaseDir)) {
         updates.spec_file = artifacts.spec_file;
       }
       if (currentState.plan_file === null && artifacts.plan_file &&
-          classifyPhaseArtifact(artifacts.plan_file, initialSpecDir.value) === "plan" &&
+          classifyPhaseArtifact(artifacts.plan_file, initialSpecDir.value, artifactBaseDir) === "plan" &&
           phaseArtifactExists(artifacts.plan_file, artifactBaseDir)) {
         updates.plan_file = artifacts.plan_file;
       }

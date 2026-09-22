@@ -21,7 +21,7 @@
  * precondition of classification.
  */
 
-import { basename, dirname, extname, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 
 /** Where a `spec.md` may live when the run declares no narrower `spec_dir`. */
 export const SPEC_ARTIFACT_DIR = ".claude/specs";
@@ -66,30 +66,41 @@ export type SpecArtifactDirectoryParse =
   | Readonly<{ ok: true; value: SpecArtifactDirectory }>
   | Readonly<{ ok: false; message: string }>;
 
-/** Parse untrusted persisted `spec_dir` before it can address the filesystem. */
+/** Parse untrusted persisted `spec_dir` before it can address the filesystem.
+ *
+ * Persisted phase directories are project-relative authority. An absolute
+ * value is not repaired against whichever checkout the runtime happens to use:
+ * it is refused before any shell can probe it.
+ */
 export function parseSpecArtifactDirectory(raw: string | null | undefined): SpecArtifactDirectoryParse {
   const candidate = raw ?? SPEC_ARTIFACT_DIR;
-  const root = resolve(SPEC_ARTIFACT_DIR);
-  const resolvedCandidate = resolve(candidate);
-  if (resolvedCandidate !== root && !resolvesWithin(candidate, SPEC_ARTIFACT_DIR)) {
+  if (isAbsolute(candidate) ||
+      (candidate !== SPEC_ARTIFACT_DIR && !resolvesWithin(candidate, SPEC_ARTIFACT_DIR))) {
     return Object.freeze({
       ok: false,
-      message: `spec_dir ${candidate} is outside ${SPEC_ARTIFACT_DIR}`,
+      message: `spec_dir ${candidate} is outside ${SPEC_ARTIFACT_DIR} or is not project-relative`,
     });
   }
   return Object.freeze({ ok: true, value: candidate as SpecArtifactDirectory });
 }
 
 /**
- * Does `candidate` RESOLVE inside `directory` (both taken relative to cwd)?
+ * Does `candidate` RESOLVE inside `directory` under one explicit project root?
  *
  * Lexical containment after `resolve`, so `..` segments are collapsed before
  * the comparison rather than being carried along inside a string that still
  * "contains" the directory name. Equality with the directory itself is not
  * containment — an artifact must be a file under it, not the directory.
+ * Compatibility callers may omit `baseDir`; production artifact shells pass
+ * the TaskGraph Project Boundary explicitly.
  */
-export function resolvesWithin(candidate: string, directory: string): boolean {
-  const fromDirectory = relative(resolve(directory), resolve(candidate));
+export function resolvesWithin(
+  candidate: string,
+  directory: string,
+  baseDir: string = process.cwd(),
+): boolean {
+  const within = (path: string): string => isAbsolute(path) ? resolve(path) : resolve(baseDir, path);
+  const fromDirectory = relative(within(directory), within(candidate));
   return fromDirectory !== "" &&
     fromDirectory !== ".." &&
     !fromDirectory.startsWith(`..${sep}`) &&
@@ -116,10 +127,11 @@ export type PhaseArtifactKind = "spec" | "plan";
 export function classifyPhaseArtifact(
   filePath: string,
   specDir: string = SPEC_ARTIFACT_DIR,
+  baseDir: string = process.cwd(),
 ): PhaseArtifactKind | null {
   if (filePath.length === 0) return null;
-  if (basename(filePath) === "spec.md" && resolvesWithin(filePath, specDir)) return "spec";
-  if (extname(filePath) === ".md" && resolvesWithin(filePath, PLAN_ARTIFACT_DIR)) return "plan";
+  if (basename(filePath) === "spec.md" && resolvesWithin(filePath, specDir, baseDir)) return "spec";
+  if (extname(filePath) === ".md" && resolvesWithin(filePath, PLAN_ARTIFACT_DIR, baseDir)) return "plan";
   return null;
 }
 
@@ -143,10 +155,11 @@ export type PhaseArtifactUpdates = Readonly<{
 export function phaseArtifactUpdates(
   writtenPaths: readonly string[],
   specDir: string = SPEC_ARTIFACT_DIR,
+  baseDir: string = process.cwd(),
 ): PhaseArtifactUpdates {
   const updates: { spec_file?: string; plan_file?: string } = {};
   for (const path of writtenPaths) {
-    const kind = classifyPhaseArtifact(path, specDir);
+    const kind = classifyPhaseArtifact(path, specDir, baseDir);
     if (kind === "spec") updates.spec_file = path;
     if (kind === "plan") updates.plan_file = path;
   }

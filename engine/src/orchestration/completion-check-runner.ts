@@ -597,7 +597,6 @@ function decideEpermEscalation(phase: LeaderReapingPhase, leader: LeaderProbe): 
         case "present":
           return Object.freeze({ kind: "escalate" });
         case "gone":
-          return Object.freeze({ kind: "refuse-ambiguous-leader" });
         case "error":
           return Object.freeze({ kind: "refuse-ambiguous-leader" });
       }

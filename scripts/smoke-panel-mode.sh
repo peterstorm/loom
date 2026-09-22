@@ -76,7 +76,8 @@ cleanup() {
 trap cleanup EXIT
 
 SLUG="2026-07-17-smoke-panel"
-SPEC_DIR="$TMP/.claude/specs/$SLUG"
+SPEC_DIR_REL=".claude/specs/$SLUG"
+SPEC_DIR="$TMP/$SPEC_DIR_REL"
 PLANS_DIR="$TMP/.claude/plans"
 STATE="$TMP/.claude/state/active_task_graph.json"
 
@@ -111,8 +112,8 @@ write_state() {
   "current_phase": "$phase",
   "phase_artifacts": {},
   "skipped_phases": ["brainstorm", "specify", "clarify"],
-  "spec_dir": "$SPEC_DIR",
-  "spec_file": "$SPEC_DIR/spec.md",
+  "spec_dir": "$SPEC_DIR_REL",
+  "spec_file": "$SPEC_DIR_REL/spec.md",
   "plan_file": $plan_file,
   "tasks": [],
   "current_wave": 1,

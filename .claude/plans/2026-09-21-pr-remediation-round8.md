@@ -118,7 +118,7 @@ architecture-tech-lead-3, code-simplifier-2, code-simplifier-4.
   refusal messages mutated). The parent-close pin's timing margins are hardened
   (8000ms pipe-holder vs. 400ms hard-kill race) so a fully loaded suite cannot flake it.
 - type-design-analyzer-1 (minimal accepted form): `parseWaveSpecCheckDocumentAuthority`
-  refused any non-null string path, including blank ones; it now refuses empty and
+  accepted any non-null string path, including blank ones; it now refuses empty and
   whitespace-only paths with a new `path-blank` rejection fact, decorated by the State
   File load guard as `wave_review_epoch.specCheckDocuments.<member>.path must not be
   blank when present`. Engine mints are unaffected (authority is minted from a real read
@@ -194,9 +194,10 @@ hostile-key test).
   and this plan's own parent-close pin timing fragility — FIXED by hardening the fixture
   margins (see pr-test-analyzer-4). Spot-checked isolated reruns: the three largest
   failing files (`verification-command`, `machine-purity`, `reviewer-protocol-native`)
-  pass 576/576 in isolation; the integration file passes 38/38 in isolation. All
-  full-suite failures are pre-existing environment/load nondeterminism; every test
-  covering the touched modules passes repeatedly in isolation.
+  pass 576/576 in isolation; the integration file passes 38/38 in isolation. After the
+  new timing failure was fixed, the remaining observed full-suite failures were
+  attributed to pre-existing environment/load nondeterminism; every test covering the
+  touched modules passes repeatedly in isolation.
 
 The registered remediation runner must freshly observe `project:verify` and its exact
 structured report; development runs above never substitute for it.

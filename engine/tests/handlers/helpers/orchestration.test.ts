@@ -164,6 +164,35 @@ function passingWaveTaskProof() {
   return proof;
 }
 
+/** One valid implemented review Task; scenarios override only the authority
+ * fact they exercise instead of restating the whole accepted baseline. */
+function reviewReadyTask(
+  proof: ReturnType<typeof passingWaveTaskProof>,
+  overrides: Partial<Task> = {},
+): Task {
+  return {
+    id: "T1",
+    description: "review target",
+    agent: "code-implementer-agent",
+    wave: 1,
+    status: "implemented",
+    proof,
+    depends_on: [],
+    file_list: ["src/x.ts"],
+    files_modified: ["src/x.ts"],
+    test_result: { verdict: "trusted-pass" },
+    test_evidence: "passed",
+    new_tests_written: true,
+    new_test_evidence: "present",
+    review_status: "passed",
+    review_generation: 0,
+    findings: [],
+    critical_findings: [],
+    advisory_findings: [],
+    ...overrides,
+  } as unknown as Task;
+}
+
 function replayFromCapturedEvidence(handle: RunDirHandle) {
   const registration = handle.readProgramRegistration();
   if (!registration.ok || registration.value === null) throw new Error("expected standalone registration");
@@ -1290,17 +1319,11 @@ describe("orchestration CLI", () => {
     const proof = passingWaveTaskProof();
     expect(proof.state).toBe("satisfied");
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
-    const graph = {
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {},
-      tasks: [{
-        id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-        new_test_evidence: "present", review_status: "passed", review_generation: 0,
-        critical_findings: [], advisory_findings: [],
-      }],
-    };
+    const graph = executeGraph({
+      spec_file: null,
+      plan_file: null,
+      tasks: [reviewReadyTask(proof)],
+    });
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
     const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-missing-task-runs-")));
@@ -1332,17 +1355,11 @@ describe("orchestration CLI", () => {
     const proof = passingWaveTaskProof();
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {},
-      tasks: [{
-        id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-        new_test_evidence: "present", review_status: "passed", review_generation: 0,
-        findings: [], critical_findings: [], advisory_findings: [],
-      }],
-    }));
+    writeFileSync(statePath, JSON.stringify(executeGraph({
+      spec_file: null,
+      plan_file: null,
+      tasks: [reviewReadyTask(proof)],
+    })));
     const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-stale-request-runs-")));
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-stale-request");

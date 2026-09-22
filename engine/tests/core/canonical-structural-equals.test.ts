@@ -156,6 +156,15 @@ describe("canonicalStructuralEquals", () => {
       expect(canonicalStructuralEquals(first, second)).toBe(true);
     });
 
+    it("types absent indexed bytes honestly and never exposes mutable backing storage", () => {
+      const bytes = section("scope", "exact bytes").bytes;
+      expect(bytes[-1]).toBeUndefined();
+      expect(bytes[bytes.length]).toBeUndefined();
+      const ownedCopy = bytes.valueOf();
+      ownedCopy[0] = 0;
+      expect(bytes[0]).not.toBe(0);
+    });
+
     it("separates two sequences whose bytes differ, where record equality was vacuously true", () => {
       const first = section("a", "left bytes").bytes;
       const second = section("b", "right bytes").bytes;

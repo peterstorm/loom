@@ -115,6 +115,14 @@ function textPage(text: string, selection: Selection): DomainResult<unknown, str
     totalUnits: text.length, text: text.slice(selection.offset, end) } };
 }
 
+function projectionSubject(selection: Selection): string {
+  switch (selection.kind) {
+    case "file": return `source file ${selection.path}`;
+    case "section": return `selected section ${selection.label}`;
+    case "index": return "selected section index";
+  }
+}
+
 function project(packet: ProjectedPacket, selection: Selection): DomainResult<unknown, string> {
   return match(selection)
     .with({ kind: "index" }, ({ offset, limit }) => {
@@ -159,11 +167,8 @@ export function projectContextPacket(raw: unknown, input: ContextProjectionInput
     // subject names the selection kind, so a --file failure is never reported
     // as a section decode problem.
     const cause = boundedThrownCause(thrown, "context projection");
-    const subject = input.selection.kind === "file"
-      ? `source file ${input.selection.path}`
-      : input.selection.kind === "section"
-        ? `selected section ${input.selection.label}`
-        : "selected section index";
-    return failed(`${subject} cannot be decoded safely as text data (${cause.name}: ${cause.message})`);
+    return failed(
+      `${projectionSubject(input.selection)} cannot be decoded safely as text data (${cause.name}: ${cause.message})`,
+    );
   }
 }
