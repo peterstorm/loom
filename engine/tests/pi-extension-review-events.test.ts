@@ -144,6 +144,7 @@ const specCheckGraph = (overrides: Record<string, unknown> = {}) => {
       runId: "run.pi-spec-check",
       wave: 1,
       batchEpoch: "b".repeat(64),
+      settledSpecCheckFloor: { kind: "settled", count: 0 },
       specCheckSlotAuthority: { slot_id: "wave-slot:spec-check", attempted: 1 },
     },
     ...overrides,
@@ -5798,6 +5799,95 @@ describe("Pi extension review tool_result integration", () => {
     } finally {
       updateAndReturn.mockRestore();
       stderr.mockRestore();
+    }
+  });
+
+  it("settles project-relative spec-check documents against the TaskGraph root, not runtime cwd", async () => {
+    const graphRoot = canonicalTempDir("loom-pi-spec-check-graph-");
+    const runtimeRoot = canonicalTempDir("loom-pi-spec-check-runtime-");
+    const graphStatePath = join(graphRoot, ".claude", "state", "active_task_graph.json");
+    const specFile = ".claude/specs/split/spec.md";
+    const planFile = ".claude/plans/split.md";
+    const graphSpec = "# Graph-owned Spec\n";
+    const graphPlan = "# Graph-owned Plan\n";
+    const runtimeSpec = "# Runtime Spec must not settle\n";
+    const runtimePlan = "# Runtime Plan must not settle\n";
+    const previousState = process.env.LOOM_STATE_PATH;
+    const previousCwd = process.cwd();
+
+    for (const [root, spec, plan] of [
+      [graphRoot, graphSpec, graphPlan],
+      [runtimeRoot, runtimeSpec, runtimePlan],
+    ] as const) {
+      mkdirSync(dirname(join(root, specFile)), { recursive: true });
+      mkdirSync(dirname(join(root, planFile)), { recursive: true });
+      writeFileSync(join(root, specFile), spec);
+      writeFileSync(join(root, planFile), plan);
+    }
+    mkdirSync(dirname(graphStatePath), { recursive: true });
+
+    try {
+      process.chdir(graphRoot);
+      const graph = specCheckGraph({
+        spec_file: specFile,
+        plan_file: planFile,
+        phase_artifacts: { architecture: planFile },
+      });
+      writeFileSync(graphStatePath, JSON.stringify(graph, null, 2));
+      process.env.LOOM_STATE_PATH = graphStatePath;
+      process.chdir(runtimeRoot);
+
+      const pi = await extension();
+      const session = "019fca39-f989-7510-8e62-50dadbcad4c8";
+      const toolCallId = "call-split-root-spec-check";
+      const context = { cwd: runtimeRoot, sessionManager: { getSessionId: () => session } };
+      const task = "Follow the preloaded spec-check skill with --wave 1 --tasks T1.";
+      expect(await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: { agent: "spec-check-invoker", task, agentScope: "user" },
+      }, context)).toEqual([undefined]);
+
+      await pi.emit("tool_result", {
+        toolName: "subagent",
+        toolCallId,
+        content: [],
+        details: {
+          results: [{
+            agent: "spec-check-invoker",
+            task,
+            exitCode: 0,
+            messages: [{
+              role: "assistant",
+              content: [{
+                type: "text",
+                text: "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED",
+              }],
+            }],
+          }],
+        },
+      }, context);
+
+      const settled = JSON.parse(readFileSync(graphStatePath, "utf8"));
+      expect(settled.spec_check).toMatchObject({ wave: 1, verdict: "PASSED" });
+      expect(settled.wave_review_epoch.specCheckDocuments).toEqual({
+        spec: {
+          path: specFile,
+          contentDigest: createHash("sha256").update(graphSpec).digest("hex"),
+        },
+        plan: {
+          path: planFile,
+          contentDigest: createHash("sha256").update(graphPlan).digest("hex"),
+        },
+      });
+      expect(createHash("sha256").update(runtimeSpec).digest("hex"))
+        .not.toBe(settled.wave_review_epoch.specCheckDocuments.spec.contentDigest);
+    } finally {
+      process.chdir(previousCwd);
+      restoreEnv("LOOM_STATE_PATH", previousState);
+      try { chmodSync(graphStatePath, 0o644); } catch { /* fixture may not have been persisted */ }
+      rmSync(graphRoot, { recursive: true, force: true });
+      rmSync(runtimeRoot, { recursive: true, force: true });
     }
   });
 
