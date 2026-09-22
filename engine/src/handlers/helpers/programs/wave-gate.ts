@@ -182,6 +182,13 @@ function resetWaveGateGraph(graph: TaskGraph, taskIds: readonly string[]): TaskG
     spec_check: undefined,
     wave_review_epoch: undefined,
     active_wave_gate: undefined,
+    // The completion-suite receipt binds to the outgoing gate's runId,
+    // authorityDigest, and revision. Leaving it behind makes every replacement
+    // graph fail the state-manager lockstep invariant before it can persist —
+    // the restart and orphan-recovery replacements then die as uncaught
+    // internal failures after already registering the replacement run. A
+    // replacement gate re-establishes the suite on its own start.
+    active_wave_completion_suite: undefined,
   };
 }
 

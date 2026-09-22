@@ -614,6 +614,38 @@ describe("prepareOrphanedWaveGateRecovery", () => {
       orphanRecovery: { previousRunId: activeRunId, previousAuthorityDigest: authorityDigest },
     });
   });
+
+  it("clears the completion-suite receipt so the replacement graph satisfies the lockstep invariant", () => {
+    // The suite receipt binds to the outgoing gate (runId/authorityDigest/
+    // revision). Leaving it behind while installing the replacement gate made
+    // every restart/orphan-recovery persist fail the state-manager invariant
+    // as an uncaught internal failure (the r2→r3 restart crash).
+    const g = {
+      ...graph(),
+      verification_manifest: { manifestDigest: "m".repeat(64), checks: [] },
+      active_wave_completion_suite: {
+        schemaVersion: 1,
+        kind: "wave-completion-suite",
+        runId: activeRunId,
+        wave: 1,
+        revision: 0,
+        authorityDigest,
+        manifestDigest: "m".repeat(64),
+        checks: [],
+      },
+    } as unknown as TaskGraph;
+    const prepared = prepareOrphanedWaveGateRecovery(
+      g,
+      { runId: activeRunId, wave: 1, authorityDigest },
+      "/runs",
+      "run.orphan-replacement",
+      "/runs",
+    );
+    if (!prepared.ok) throw new Error(prepared.message);
+    const next = prepared.value.graph;
+    expect(next.active_wave_completion_suite).toBeUndefined();
+    expect(next.active_wave_gate).toMatchObject({ runId: "run.orphan-replacement" });
+  });
 });
 
 // --- CLI --------------------------------------------------------------------
