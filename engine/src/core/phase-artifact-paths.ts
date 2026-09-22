@@ -48,8 +48,7 @@ export function projectRootForStateFile(statePath: string, repositoryRoot?: stri
   const absoluteStatePath = resolve(statePath);
   if (repositoryRoot !== undefined) {
     const root = resolve(repositoryRoot);
-    const fromRoot = relative(root, absoluteStatePath);
-    if (fromRoot === "" || fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || fromRoot.startsWith("/")) {
+    if (!resolvesWithin(absoluteStatePath, root, root)) {
       throw new Error(`State File ${absoluteStatePath} is outside observed project root ${root}`);
     }
     return root;

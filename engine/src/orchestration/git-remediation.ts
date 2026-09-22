@@ -207,11 +207,10 @@ export type GitRepository = Readonly<{ root: string; gitDir: string }>;
  */
 function requireNonEmptyGitOutput(
   operation: string,
-  output: DomainResult<Buffer, GitBoundaryError>,
+  output: Buffer,
   message: string,
 ): DomainResult<string, GitBoundaryError> {
-  if (!output.ok) return output;
-  const text = output.value.toString("utf-8").trim();
+  const text = output.toString("utf-8").trim();
   return text.length === 0 ? failure(operation, message) : success(text);
 }
 
@@ -226,9 +225,9 @@ export function openGitRepository(startDirectory: string): DomainResult<GitRepos
   if (!root.ok) return root;
   const gitDir = runGitProbingEmpty(start, { operation: "rev-parse", args: ["rev-parse", "--absolute-git-dir"] });
   if (!gitDir.ok) return gitDir;
-  const resolvedRoot = requireNonEmptyGitOutput("rev-parse", root, "git rev-parse --show-toplevel returned no output");
+  const resolvedRoot = requireNonEmptyGitOutput("rev-parse", root.value, "git rev-parse --show-toplevel returned no output");
   if (!resolvedRoot.ok) return resolvedRoot;
-  const resolvedGitDir = requireNonEmptyGitOutput("rev-parse", gitDir, "git rev-parse --absolute-git-dir returned no output");
+  const resolvedGitDir = requireNonEmptyGitOutput("rev-parse", gitDir.value, "git rev-parse --absolute-git-dir returned no output");
   if (!resolvedGitDir.ok) return resolvedGitDir;
   return success(canonicalRecord({
     root: resolvedRoot.value,
@@ -371,7 +370,7 @@ export function snapshotRepositoryWitness(
   // commit with an empty tree resolves to the well-known empty-tree object.
   // Silence after the transient retry is therefore a malformed observation,
   // never an empty value to digest.
-  const resolvedHead = requireNonEmptyGitOutput("rev-parse", head, "git rev-parse HEAD^{tree} returned no output");
+  const resolvedHead = requireNonEmptyGitOutput("rev-parse", head.value, "git rev-parse HEAD^{tree} returned no output");
   if (!resolvedHead.ok) return resolvedHead;
   const index = runGitProbingEmpty(repository.root, {
     operation: "ls-files",

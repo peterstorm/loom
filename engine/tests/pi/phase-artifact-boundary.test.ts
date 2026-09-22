@@ -126,6 +126,65 @@ describe("phase artifacts resolve against the graph's project boundary, not cwd"
     });
   });
 
+  it("the Pi phase applier refuses a foreign transcript Plan when cwd and graph roots differ", async () => {
+    const graphRoot = tempRoot();
+    const runtimeRoot = elsewhere();
+    const specDir = ".claude/specs/2026-09-22-pi-plan";
+    const selectedPlan = ".claude/plans/2026-09-22-pi-plan.md";
+    const foreignPlan = join(runtimeRoot, ".claude", "plans", "foreign.md");
+    mkdirSync(join(graphRoot, ".claude", "plans"), { recursive: true });
+    mkdirSync(join(runtimeRoot, ".claude", "plans"), { recursive: true });
+    writeFileSync(join(graphRoot, selectedPlan), "# Graph-owned Plan\n");
+    writeFileSync(foreignPlan, "# Foreign runtime Plan\n");
+    const parsed = parseTaskGraph({
+      current_phase: "architecture",
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      spec_dir: specDir,
+      tasks: [],
+      wave_gates: {},
+    });
+    if (!parsed.ok) throw new Error(parsed.error);
+    let current: ParsedTaskGraph = parsed.value;
+    const store: TaskGraphStore & { current(): TaskGraph } = {
+      load: () => current,
+      update: async (mutate) => { current = mutate(current) as ParsedTaskGraph; },
+      updateAndReturn: async (mutate) => {
+        const applied = mutate(current);
+        current = applied.state as ParsedTaskGraph;
+        return applied.value;
+      },
+      current: () => current,
+    };
+    const result = {
+      agent: "architecture-agent",
+      task: "architecture",
+      exitCode: 0,
+      messages: [{
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call-plan", name: "write", arguments: { path: foreignPlan } }],
+      }],
+    };
+
+    const applied = await applyPhaseAgentPiResult({
+      store,
+      agentType: "architecture-agent",
+      completedPhase: "architecture",
+      result,
+      now: "2026-09-22T00:00:00.000Z",
+      phaseArtifactBaseDir: graphRoot,
+    });
+
+    expect(applied.processingErrors).toEqual([]);
+    expect(store.current()).toMatchObject({
+      current_phase: "plan-alignment",
+      plan_file: selectedPlan,
+      phase_artifacts: { architecture: selectedPlan },
+    });
+  });
+
   it("the Pi phase applier advances a worktree-shaped run whose cwd is elsewhere", async () => {
     const root = tempRoot();
     const cwd = elsewhere();

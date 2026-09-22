@@ -160,6 +160,39 @@ describe("advance-phase artifact authority", () => {
     });
   });
 
+  it("rejects a foreign transcript spec through the real handler when cwd and graph roots differ", async () => {
+    const session = `artifact-split-root-${process.pid}-${Date.now()}`;
+    const graphRoot = join(tmpDir, "graph-root");
+    const runtimeRoot = join(tmpDir, "runtime-root");
+    const statePath = join(graphRoot, "custom", "state.json");
+    const pointerPath = join(SUBAGENT_DIR, `${session}.task_graph`);
+    const specDir = ".claude/specs/2026-09-22-split-root";
+    mkdirSync(join(graphRoot, specDir), { recursive: true });
+    mkdirSync(join(graphRoot, "custom"), { recursive: true });
+    mkdirSync(join(runtimeRoot, specDir), { recursive: true });
+    writeFileSync(join(graphRoot, specDir, "spec.md"), "# Graph-owned spec\n");
+    const foreignSpec = join(runtimeRoot, specDir, "spec.md");
+    writeFileSync(foreignSpec, "# Foreign runtime spec\n");
+    const transcript = join(runtimeRoot, "transcript.jsonl");
+    writeFileSync(transcript, writeLine(foreignSpec));
+    writeFileSync(statePath, JSON.stringify(mkState({ spec_dir: specDir })));
+    mkdirSync(SUBAGENT_DIR, { recursive: true });
+    writeFileSync(pointerPath, statePath);
+    expect(spawnSync("git", ["init", "--quiet"], { cwd: graphRoot }).status).toBe(0);
+    process.chdir(runtimeRoot);
+    try {
+      expect(await specifyResult(session, transcript)).toMatchObject({ kind: "passthrough" });
+      expect(JSON.parse(readFileSync(statePath, "utf8"))).toMatchObject({
+        current_phase: "architecture",
+        spec_file: null,
+        phase_artifacts: { specify: `${specDir}/spec.md` },
+      });
+    } finally {
+      process.chdir(tmpDir);
+      rmSync(pointerPath, { force: true });
+    }
+  });
+
   it("resolves a noncanonical LOOM_STATE_PATH against its owning Git project", async () => {
     const session = `artifact-custom-state-${process.pid}-${Date.now()}`;
     expect(spawnSync("git", ["init", "--quiet"], { cwd: tmpDir }).status).toBe(0);

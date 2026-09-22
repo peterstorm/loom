@@ -619,6 +619,7 @@ type FailedPiResultArgs = Readonly<{
   result: PiSubagentResult;
   reservedSlot: ReservedSlot | undefined;
   now: string;
+  projectRoot?: string;
 }>;
 
 async function applyFailedSpecCheckResult(
@@ -634,7 +635,11 @@ async function applyFailedSpecCheckResult(
   }
   let specObservation;
   try {
-    specObservation = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
+    specObservation = observeWaveSpecCheckDocuments(
+      observedState.spec_file,
+      observedState.plan_file,
+      args.projectRoot,
+    );
   } catch (cause) {
     const diagnostic = `spec-check document observation failed: ${cause instanceof Error ? cause.message : String(cause)}`;
     return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);
@@ -1790,6 +1795,7 @@ export async function applySpecCheckPiResult(args: Readonly<{
   result: PiSubagentResult;
   reservedSlot: ReservedSlot | undefined;
   now: string;
+  projectRoot?: string;
 }>): Promise<PiResultOutcome> {
   const parsedMessages = parsePiMessages(args.result.messages);
   const observation: PiSpecCheckObservation = parsedMessages.ok
@@ -1800,7 +1806,11 @@ export async function applySpecCheckPiResult(args: Readonly<{
       };
   try {
     const observedState = args.store.load();
-    const specObservation = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
+    const specObservation = observeWaveSpecCheckDocuments(
+      observedState.spec_file,
+      observedState.plan_file,
+      args.projectRoot,
+    );
     return await args.store.updateAndReturn((state) =>
       reducePiSpecCheckResult(state, args.reservedSlot?.specCheckAuthority, observation,
         specObservation.authority, args.now));

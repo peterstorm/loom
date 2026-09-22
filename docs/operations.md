@@ -770,7 +770,7 @@ Without `LOOM_RUN_MODEL_CALIBRATION=1`, the script exits without running models.
 
 ### Locked bootstrap and mandatory full gate
 
-The development/CI baseline is a full-history Git checkout on non-root Linux, Node **22.23.2**, Bun **1.3.13**, npm, Git, jq, Bash **4+**, and GNU `timeout` on PATH. The existing macOS 13+ runtime support includes the anchored report reset (re-proven parent path on darwin); macOS is additionally assumed to need the development tools, including GNU coreutils and a suitable Bash. Full history is required because deterministic tests resolve the committed model-calibration corpus against historical revisions available through remote refs. A normal full clone checked out on `main` contains those objects; for an existing single-branch shallow clone, fetch every remote head before verification:
+The development/CI baseline is a full-history Git checkout on a non-root account with Node **22.23.2**, Bun **1.3.13**, npm, Git, and jq. Linux additionally requires Bash **4+** and GNU `timeout` on PATH. The macOS 13+ CI job uses Apple's Bash 3.2 and does not require GNU coreutils; its runtime support includes anchored report reset through a re-proven parent path. Full history is required because deterministic tests resolve the committed model-calibration corpus against historical revisions available through remote refs. A normal full clone checked out on `main` contains those objects; for an existing single-branch shallow clone, fetch every remote head before verification:
 
 ```bash
 git fetch --unshallow origin '+refs/heads/*:refs/remotes/origin/*' --tags
@@ -786,7 +786,7 @@ npm run verify
 
 Both locks are required: root dependencies supply Pi/runtime resources; engine dependencies supply the compiler and Vitest. `preverify` checks required tools, executable local Vitest/Pi, and that Pi resolves to the root-local locked CLI through npm's PATH. No global/latest Pi or network-fetching compiler fallback is accepted. Local preflight checks availability, not exact runtime versions; CI explicitly checks the pinned Node/Bun versions.
 
-The same **root `npm run verify`** runs locally, in `.github/workflows/ci.yml` for PRs/branch pushes/tags, and through this repository's runtime Verification Manifest. CI checks out full history with `fetch-depth: 0`, installs both frozen graphs, preserves failures through `pipefail`, and attempts log artifact upload even after failure. It has a 30-minute job budget; the manifest separately bounds its command to 30 minutes. Neither is proof of a successful hosted CI run.
+The same **root `npm run verify`** runs locally, in `.github/workflows/ci.yml` for PRs/branch pushes/tags, and through this repository's runtime Verification Manifest. CI checks out full history with `fetch-depth: 0`, installs both frozen graphs, preserves failures through `pipefail`, and attempts log artifact upload even after failure. It has a 60-minute job budget; the manifest separately bounds its command to 30 minutes. Neither is proof of a successful hosted CI run.
 
 Root `verify` delegates to engine `verify`: prerequisites → typecheck → existing `test`. That test script runs the entire existing Vitest suite (including property/integration tests) followed by all six unchanged smoke commands, once each on success:
 

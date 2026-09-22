@@ -33,7 +33,6 @@
  */
 
 import { armImplementationAttestation } from "../../core/implementation-lifecycle";
-import type { TaskId } from "../../core/task-id";
 import { taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
 import type { HookResult } from "../../types";
@@ -42,21 +41,11 @@ import { renderImplementationLifecycleError } from "./implementation-lifecycle-e
 
 const MAX_ATTEST_REASON = 512;
 
-/** Parse the operation's exact argument surface; unknown flags fail closed. */
-function parseAttestArgs(args: readonly string[]):
-  | Readonly<{ ok: true; value: { taskId: TaskId; reason: string } }>
-  | Readonly<{ ok: false; message: string }> {
+export async function attestOperation(args: readonly string[]): Promise<HookResult> {
   const parsed = parseTaskReasonArguments(args, {
     operation: "attest",
     maximumReasonLength: MAX_ATTEST_REASON,
   });
-  return parsed.ok
-    ? { ok: true, value: { taskId: parsed.value.taskId, reason: parsed.value.reason } }
-    : parsed;
-}
-
-export async function attestOperation(args: readonly string[]): Promise<HookResult> {
-  const parsed = parseAttestArgs(args);
   if (!parsed.ok) return { kind: "error", message: `attest: ${parsed.message}` };
   const statePath = taskGraphPath();
   const manager = StateManager.fromPath(statePath);

@@ -28,11 +28,11 @@
 // symbol registry and this facade is its single naming authority.
 // boundedThrownCause: the ONE bounded thrown-cause capture shared by the
 // packet parsers, the packet projection read-model, and the successor
-// registration/capture-witness adapters (cs-6). Committed as kernel API for
-// the same reason: every layer imports the kernel, so one owner cannot drift.
+// registration/capture-witness adapters. Committed as kernel API because every
+// layer imports the kernel, so one owner cannot drift.
 // boundDiagnosticMessage: the kernel's per-string refusal budget, committed for
 // the same reason — the projection read-model bounds the parser's field-level
-// diagnostic through it at the read boundary (architecture-tech-lead-3).
+// diagnostic through it at the read boundary.
 export { MAX_DIAGNOSTIC_MESSAGE_LENGTH, MAX_THROWN_CAUSE_TEXT_LENGTH, boundDiagnosticMessage, boundedThrownCause, canonicalRecord, canonicalStructuralEquals, parseArtifactByteLength, parseArtifactDigest, parseContextDigest, parseEffectId, parseOrchestrationRunId, parseRequestId, parseSlotId, IMMUTABLE_BYTE_SEQUENCE_TAG, type ArtifactByteLength, type ArtifactDigest, type ContextDigest, type DomainResult, type EffectId, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
 export { fieldFailureError } from './errors';
 export { MAX_DENSE_DATA_ARRAY_LENGTH, MAX_SEMANTIC_PAYLOAD_ARRAY_LENGTH, digestRawTranscriptBytes } from './bytes';

@@ -148,6 +148,26 @@ describe("applyEligiblePhaseTransition", () => {
       updated_at: "2026-08-31T00:00:00.000Z",
     });
   });
+
+  it("promotes an architecture fallback to current Plan authority atomically", () => {
+    const missing = ".claude/plans/missing.md";
+    const selected = ".claude/plans/2026-09-22-selected.md";
+    const state = mkState({ current_phase: "architecture", plan_file: missing });
+
+    const next = applyEligiblePhaseTransition(
+      state,
+      "architecture",
+      { nextPhase: "plan-alignment", artifact: selected },
+      "2026-09-22T00:00:00.000Z",
+    );
+
+    expect(state.plan_file).toBe(missing);
+    expect(next).toMatchObject({
+      current_phase: "plan-alignment",
+      plan_file: selected,
+      phase_artifacts: { architecture: selected },
+    });
+  });
 });
 
 // ── resolveTransition ─────────────────────────────────────────────
@@ -233,6 +253,21 @@ describe("resolveTransition", () => {
 
     expect(() => resolveTransition("specify", mkState({ spec_file: specFile })))
       .toThrow(/cannot access phase artifact/);
+  });
+
+  it("refuses a project-local spec symlink whose target is outside the project", () => {
+    const externalRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-external-spec-")));
+    const externalSpec = join(externalRoot, "spec.md");
+    const localSpec = join(tmpDir, ".claude", "specs", "feat", "spec.md");
+    mkdirSync(join(tmpDir, ".claude", "specs", "feat"), { recursive: true });
+    writeFileSync(externalSpec, "external authority");
+    symlinkSync(externalSpec, localSpec);
+    try {
+      expect(() => resolveTransition("specify", mkState({ spec_file: localSpec })))
+        .toThrow(/cannot access phase artifact/);
+    } finally {
+      rmSync(externalRoot, { recursive: true, force: true });
+    }
   });
 
   it("specify reports an out-of-scope spec artifact without falling back", () => {
@@ -354,6 +389,21 @@ describe("resolveTransition", () => {
 
     expect(() => resolveTransition("architecture", mkState({ plan_file: planFile })))
       .toThrow(/cannot access phase artifact/);
+  });
+
+  it("refuses a Plan reached through a symlinked ancestor", () => {
+    const externalRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-external-plan-")));
+    writeFileSync(join(externalRoot, "plan.md"), "external authority");
+    mkdirSync(join(tmpDir, ".claude"), { recursive: true });
+    symlinkSync(externalRoot, join(tmpDir, ".claude", "plans"));
+    try {
+      expect(() => resolveTransition(
+        "architecture",
+        mkState({ plan_file: ".claude/plans/plan.md" }),
+      )).toThrow(/cannot access phase artifact/);
+    } finally {
+      rmSync(externalRoot, { recursive: true, force: true });
+    }
   });
 
   it("refuses a readable directory whose name looks like the sole date-prefixed Plan", () => {

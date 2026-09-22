@@ -7,7 +7,7 @@
  * which includes init as the first phase).
  */
 
-import { accessSync, constants as fsConstants, readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { match } from "ts-pattern";
 import type { HookHandler, HookResult, Phase, TaskGraph } from "../../types";
@@ -27,6 +27,7 @@ import {
   type SpecArtifactDirectory,
 } from "../../core/phase-artifact-paths";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
+import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
 
 // Re-exported because this module's own containment rule moved to the pure core
 // so the Pi shell could share it verbatim; the name stays importable from here.
@@ -45,17 +46,20 @@ function withinBoundary(path: string, baseDir: string): string {
   return isAbsolute(path) ? path : join(baseDir, path);
 }
 
-/** ENOENT is absence; every other readability failure reaches the diagnostic boundary.
- * A phase document is a regular file, never merely a readable filesystem entry. */
+/** ENOENT is absence and a directory is not a document; every other
+ * readability failure reaches the diagnostic boundary. The anchored reader
+ * rejects leaf and ancestor symlinks, so lexical containment cannot import
+ * bytes from outside the project boundary. */
 function phaseArtifactExists(path: string, baseDir: string): boolean {
   try {
-    const absolute = withinBoundary(path, baseDir);
-    accessSync(absolute, fsConstants.R_OK);
-    return statSync(absolute).isFile();
+    readRunBytesNoFollow(withinBoundary(path, baseDir));
+    return true;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "EISDIR") return false;
     throw new Error(
       `cannot access phase artifact ${path}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
     );
   }
 }
@@ -69,7 +73,8 @@ function phaseArtifactExists(path: string, baseDir: string): boolean {
  * compatibility shell `resolveTransition`. */
 export function countMarkers(filePath: string, baseDir: string): number {
   try {
-    return (readFileSync(withinBoundary(filePath, baseDir), "utf-8").match(/NEEDS CLARIFICATION/g) ?? []).length;
+    return (readRunBytesNoFollow(withinBoundary(filePath, baseDir)).toString("utf-8")
+      .match(/NEEDS CLARIFICATION/g) ?? []).length;
   } catch (error) {
     throw new Error(
       `cannot read phase artifact ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
@@ -233,6 +238,7 @@ export function applyEligiblePhaseTransition(
   return {
     ...state,
     current_phase: transition.nextPhase,
+    ...(completedPhase === "architecture" ? { plan_file: transition.artifact } : {}),
     phase_artifacts: {
       ...state.phase_artifacts,
       [completedPhase]: transition.artifact,

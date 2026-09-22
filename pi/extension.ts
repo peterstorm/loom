@@ -2747,6 +2747,7 @@ export default function (
             result,
             reservedSlot: reservedItem,
             now: new Date().toISOString(),
+            projectRoot: projectBoundary.root,
           }));
           continue;
         }
@@ -2799,6 +2800,7 @@ export default function (
             result,
             reservedSlot: reservedItem,
             now: new Date().toISOString(),
+            projectRoot: projectBoundary.root,
           }));
           continue;
         }

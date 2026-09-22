@@ -18,6 +18,7 @@ import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-
 import { stripNamespace } from "../../utils/strip-namespace";
 import { observeWaveSpecCheckDocuments } from "../../orchestration/wave-spec-check-documents";
 import { epochSettledFloor } from "../../core/wave-review-authority";
+import { observeTaskGraphProjectBoundary } from "../../config";
 
 export const runStoreSpecCheckFindings = async (
   stdin: string,
@@ -74,7 +75,11 @@ export const runStoreSpecCheckFindings = async (
   let observation;
   try {
     const observedState = manager.load();
-    observation = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
+    observation = observeWaveSpecCheckDocuments(
+      observedState.spec_file,
+      observedState.plan_file,
+      observeTaskGraphProjectBoundary(manager.getPath()).root,
+    );
   } catch (error) {
     return {
       kind: "error",

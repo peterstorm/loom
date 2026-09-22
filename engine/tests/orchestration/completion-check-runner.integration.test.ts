@@ -98,6 +98,7 @@ function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonl
 }
 
 const digest = (character: string): string => character.repeat(64);
+const probeError = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
 
 function remediationCheck(
   root: CanonicalRepositoryRoot,
@@ -338,7 +339,7 @@ describe("completion check process shell", () => {
     const signals: (number | NodeJS.Signals)[] = [];
     const actualKill = process.kill.bind(process);
     vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
-      if (signal === 0 && pid < 0) throw Object.assign(new Error("ESRCH"), { code: "ESRCH" }); // group probe: provably dissolved
+      if (signal === 0 && pid < 0) throw probeError("ESRCH"); // group probe: provably dissolved
       if (signal !== undefined && signal !== 0) signals.push(signal);
       return actualKill(pid, signal);
     }) as typeof process.kill);
@@ -399,7 +400,7 @@ describe("completion check process shell", () => {
     // termination-unconfirmed diagnostic, signalling nothing.
     const signals: (number | NodeJS.Signals)[] = [];
     vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
-      if (signal === 0 && pid < 0) throw Object.assign(new Error("EIO"), { code: "EIO" });
+      if (signal === 0 && pid < 0) throw probeError("EIO");
       if (signal !== undefined && signal !== 0) {
         throw new Error(`no signalling may follow an unobservable group: ${String(signal)}`);
       }
@@ -427,7 +428,7 @@ describe("completion check process shell", () => {
     const signals: (number | NodeJS.Signals)[] = [];
     const actualKill = process.kill.bind(process);
     vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
-      if (signal === 0 && pid < 0) throw Object.assign(new Error("ESRCH"), { code: "ESRCH" }); // group probe: provably dissolved
+      if (signal === 0 && pid < 0) throw probeError("ESRCH"); // group probe: provably dissolved
       if (signal !== undefined && signal !== 0) signals.push(signal);
       return actualKill(pid, signal);
     }) as typeof process.kill);
@@ -498,7 +499,7 @@ describe("completion check process shell", () => {
     let killDispatched = false;
     vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (signal === 0 && pid < 0) {
-        if (killDispatched) throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+        if (killDispatched) throw probeError("EPERM");
         return true; // group survives every pre-SIGKILL probe
       }
       if (signal !== undefined) signals.push(signal);
@@ -556,7 +557,6 @@ describe("completion check process shell", () => {
     // an id that may no longer name this check's group.
     const actualKill = process.kill.bind(process);
     const signals: (number | NodeJS.Signals)[] = [];
-    const probeError = (code: "EPERM" | "ESRCH"): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
     vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (signal !== undefined) signals.push(signal);
       if (signal === "SIGTERM") return actualKill(pid, signal);
@@ -591,7 +591,6 @@ describe("completion check process shell", () => {
     const actualKill = process.kill.bind(process);
     const signals: (number | NodeJS.Signals)[] = [];
     let killDispatched = false;
-    const probeError = (code: "EPERM" | "ESRCH"): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
     vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (signal === 0) {
         if (killDispatched) throw probeError("ESRCH"); // post-SIGKILL: group provably gone
@@ -629,7 +628,6 @@ describe("completion check process shell", () => {
     // refusal, the wait expires fail-closed, and no signal ever follows an id
     // that may not be ours.
     const signals: (number | NodeJS.Signals)[] = [];
-    const probeError = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
     vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (signal === 0 && pid < 0) throw probeError("EPERM"); // group probe: unsignalable member (or foreign id)
       if (signal === 0) throw probeError("ESRCH"); // leader probe: leader reaped
@@ -664,7 +662,6 @@ describe("completion check process shell", () => {
     // closed but the group id cannot even be observed (EIO here — neither
     // ESRCH-gone nor EPERM-eperm), so the exit may not count as a successful
     // observation and no signalling may follow an unbound id.
-    const probeError = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
     const signals: (number | NodeJS.Signals)[] = [];
     vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (signal === 0 && pid < 0) throw probeError("EIO");
@@ -690,7 +687,6 @@ describe("completion check process shell", () => {
     // because the numeric group id is no longer identity-bound; the outcome
     // is the named termination-unconfirmed class, not a fabricated pass.
     const signals: (number | NodeJS.Signals)[] = [];
-    const probeError = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
     vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (signal === 0 && pid < 0) return true; // group probe: still present
       if (signal === 0) throw probeError("ESRCH"); // leader probe: leader gone
@@ -718,7 +714,6 @@ describe("completion check process shell", () => {
     // runner cannot prove the tree emptied, so it fails closed with the same
     // named diagnostic class instead of guessing either polarity.
     let groupProbes = 0;
-    const probeError = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
     vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: number | NodeJS.Signals) => {
       if (signal === 0 && pid < 0) {
         groupProbes += 1;

@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import fc from "fast-check";
@@ -320,6 +320,70 @@ describe("registered Wave spec-check scope", () => {
       .rejects.toThrow("packet context changed");
     expect(manager.load().spec_check).toBeUndefined();
     expect(manager.load().wave_review_epoch?.batchEpoch).toBe(batch.batchEpoch);
+  });
+
+  it("binds relative spec/Plan bytes to the graph root when cwd is another checkout", () => {
+    const graphRoot = canonicalTempDir("loom-wave-graph-root-");
+    const runtimeRoot = canonicalTempDir("loom-wave-runtime-root-");
+    cleanup.push(graphRoot, runtimeRoot);
+    const specFile = ".claude/specs/split/spec.md";
+    const planFile = ".claude/plans/split.md";
+    for (const root of [graphRoot, runtimeRoot]) {
+      mkdirSync(join(root, ".claude", "specs", "split"), { recursive: true });
+      mkdirSync(join(root, ".claude", "plans"), { recursive: true });
+    }
+    writeFileSync(join(graphRoot, specFile), "# Graph specification\n");
+    writeFileSync(join(graphRoot, planFile), "# Graph Plan\n");
+    writeFileSync(join(runtimeRoot, specFile), "# Foreign runtime specification\n");
+    writeFileSync(join(runtimeRoot, planFile), "# Foreign runtime Plan\n");
+    const runsRoot = join(runtimeRoot, "runs");
+    mkdirSync(runsRoot);
+    const created = createRunDirectory(runsRoot, "run.split-root");
+    if (!created.ok) throw new Error(created.error.message);
+    const parsed = parseTaskGraph({
+      spec_trace_version: 2,
+      current_phase: "execute",
+      current_wave: 1,
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: specFile,
+      plan_file: planFile,
+      wave_gates: {},
+      tasks: [taskFixture({
+        id: "T1", description: "bind graph documents", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", depends_on: [], spec_anchors: [], spec_contributions: [], file_list: [],
+      })],
+    });
+    if (!parsed.ok) throw new Error(parsed.error);
+    const registration: RegisteredWaveGateProgram = {
+      schemaVersion: 1, kind: "wave-gate", input: { wave: 1 }, taskIds: ["T1"], authorityDigest: "a".repeat(64),
+    };
+    const previousCwd = process.cwd();
+    process.chdir(runtimeRoot);
+    try {
+      const batch = waveRequests(created.value, registration, parsed.value, 1, graphRoot);
+      const graphDocuments = observeWaveSpecCheckDocuments(specFile, planFile, graphRoot).authority;
+      const foreignDocuments = observeWaveSpecCheckDocuments(specFile, planFile, runtimeRoot).authority;
+      expect(batch.specCheckDocuments).toEqual(graphDocuments);
+      expect(batch.specCheckDocuments).not.toEqual(foreignDocuments);
+    } finally {
+      process.chdir(previousCwd);
+    }
+  });
+
+  it("refuses a relative Wave document reached through a symlink", () => {
+    const graphRoot = canonicalTempDir("loom-wave-symlink-root-");
+    const externalRoot = canonicalTempDir("loom-wave-symlink-external-");
+    cleanup.push(graphRoot, externalRoot);
+    mkdirSync(join(graphRoot, ".claude", "specs"), { recursive: true });
+    writeFileSync(join(externalRoot, "spec.md"), "external authority");
+    symlinkSync(externalRoot, join(graphRoot, ".claude", "specs", "linked"));
+
+    expect(() => observeWaveSpecCheckDocuments(
+      ".claude/specs/linked/spec.md",
+      null,
+      graphRoot,
+    )).toThrow(/cannot read Wave spec-check document/);
   });
 
   it("moves the batch epoch after either exact spec or plan bytes change", () => {
