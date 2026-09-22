@@ -114,10 +114,14 @@ function observeAvailableTaskScope(
       args.repositoryRoot,
       baselines.proof.map(({ artifact }) => artifact),
     );
+    // The engine itself writes its runtime state (the active task graph and
+    // per-session pointers) inside every attempt window; its review-scope
+    // contract places that state outside the Task byte scope.
+    const engineStateDirs = [".claude", ".pi"].map((harness) => harness.concat("/state/"));
     const repositoryChangedPaths = changedRepositoryArtifactsSince(
       args.repositoryRoot,
       baselines.repository,
-    );
+    ).filter((path) => !engineStateDirs.some((engineStateDir) => path.startsWith(engineStateDir)));
     observed = buildTaskLocalByteObservation({
       authority: args.authority,
       attemptBaseline: baselines.attempt,
