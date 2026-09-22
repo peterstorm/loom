@@ -93,6 +93,7 @@ function ports(
   return {
     repository: {
       root: "/fixture",
+      authoritativeStatePath: "/fixture/.claude/state/active_task_graph.json",
       observeTaskLocal: () => buildTaskLocalByteObservation({
         authority: attempt,
         attemptBaseline: [],
@@ -130,6 +131,7 @@ describe("shared exact implementation settlement shell", () => {
       ...ports(attempt),
       repository: {
         root: "/fixture",
+        authoritativeStatePath: "/fixture/.claude/state/active_task_graph.json",
         observeTaskLocal: (args) => {
           observedSiblingPaths = args.siblingOwnedPaths;
           return buildTaskLocalByteObservation({
@@ -178,6 +180,7 @@ describe("shared exact implementation settlement shell", () => {
       ...ports(attempt),
       repository: {
         root: "/fixture",
+        authoritativeStatePath: "/fixture/.claude/state/active_task_graph.json",
         observeTaskLocal: () => unavailableTaskLocalByteObservation(attempt, "HEAD drift"),
       },
     };
@@ -192,6 +195,7 @@ describe("shared exact implementation settlement shell", () => {
       ...ports(attempt),
       repository: {
         root: "/fixture",
+        authoritativeStatePath: "/fixture/.claude/state/active_task_graph.json",
         observeTaskLocal: () => { throw new Error("worktree unreadable"); },
       },
     };

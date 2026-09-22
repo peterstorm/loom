@@ -513,7 +513,7 @@ export const runUpdateTaskStatus = async (
     const observedAt = parseIsoInstant(new Date().toISOString(), "Claude implementation observation instant");
     if (!observedAt.ok) return { kind: "error", message: observedAt.error.errors.join("; ") };
     const modernOutcome: { settlement?: ImplementationSettlementApplicationResult } = {};
-    const settlementPorts = productionExactSettlementPorts(repositoryRoot);
+    const settlementPorts = productionExactSettlementPorts(repositoryRoot, mgr.getPath());
     await mgr.update((locked) => {
       const settled = settleExactImplementation(locked, {
         transport: "Claude",

@@ -75,11 +75,11 @@ export const runStoreSpecCheckFindings = async (
   let observation;
   try {
     const observedState = manager.load();
-    observation = observeWaveSpecCheckDocuments(
-      observedState.spec_file,
-      observedState.plan_file,
-      observeTaskGraphProjectBoundary(manager.getPath()).root,
-    );
+    observation = observeWaveSpecCheckDocuments({
+      specFile: observedState.spec_file,
+      planFile: observedState.plan_file,
+      projectRoot: observeTaskGraphProjectBoundary(manager.getPath()).root,
+    });
   } catch (error) {
     return {
       kind: "error",

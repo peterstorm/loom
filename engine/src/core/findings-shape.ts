@@ -26,8 +26,8 @@ export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
 /**
  * A normalized reviewer finding draft: claim whitespace is canonicalized and
  * optional locations are sanitized before this shape is constructed. It
- * deliberately carries NO identity — the minting below is the only place
- * identity is derived.
+ * deliberately carries NO identity — `attributeFindings` in core/findings.ts
+ * is the only place identity is derived.
  */
 export interface LegacyDraftFinding {
   readonly protocolVersion?: never;

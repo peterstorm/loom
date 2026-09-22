@@ -98,6 +98,8 @@ const isReviewAgent = (agentType: string): boolean => REVIEW_AGENTS.has(agentTyp
  * should own.
  */
 export type TaskGraphStore = Readonly<{
+  /** Exact State File authority when the production StateManager backs this port. */
+  getPath?(): string;
   load(): ParsedTaskGraph;
   update(mutate: (state: ParsedTaskGraph) => TaskGraph): Promise<void>;
   updateAndReturn<T>(
@@ -635,11 +637,11 @@ async function applyFailedSpecCheckResult(
   }
   let specObservation;
   try {
-    specObservation = observeWaveSpecCheckDocuments(
-      observedState.spec_file,
-      observedState.plan_file,
-      args.projectRoot,
-    );
+    specObservation = observeWaveSpecCheckDocuments({
+      specFile: observedState.spec_file,
+      planFile: observedState.plan_file,
+      projectRoot: args.projectRoot ?? process.cwd(),
+    });
   } catch (cause) {
     const diagnostic = `spec-check document observation failed: ${cause instanceof Error ? cause.message : String(cause)}`;
     return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);
@@ -1416,7 +1418,10 @@ async function settleExactPiInfrastructure(
 }
 
 function piExactSettlementPorts(args: ExactPiSettlementArgs): ExactImplementationSettlementPorts {
-  const production = productionExactSettlementPorts(args.repository.root());
+  const production = productionExactSettlementPorts(
+    args.repository.root(),
+    args.store.getPath?.(),
+  );
   return Object.freeze({
     ...production,
     newTests: Object.freeze({
@@ -1806,11 +1811,11 @@ export async function applySpecCheckPiResult(args: Readonly<{
       };
   try {
     const observedState = args.store.load();
-    const specObservation = observeWaveSpecCheckDocuments(
-      observedState.spec_file,
-      observedState.plan_file,
-      args.projectRoot,
-    );
+    const specObservation = observeWaveSpecCheckDocuments({
+      specFile: observedState.spec_file,
+      planFile: observedState.plan_file,
+      projectRoot: args.projectRoot ?? process.cwd(),
+    });
     return await args.store.updateAndReturn((state) =>
       reducePiSpecCheckResult(state, args.reservedSlot?.specCheckAuthority, observation,
         specObservation.authority, args.now));

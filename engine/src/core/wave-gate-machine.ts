@@ -85,6 +85,7 @@ import {
   type RequestId,
   type ProtectedWaveStateCommitted,
 } from "./orchestration-contract";
+import { preserveAcceptedReviewRunFindings } from "./findings";
 import {
   buildFindingBrief,
   reviewSignals,
@@ -1193,6 +1194,38 @@ export function evaluateWaveGate(state: TaskGraph, waveArg: number | null, deps:
   return failed === undefined
     ? passedGateDecision(state, authority.wave, checks, waveTasks)
     : failedGateDecision(authority.wave, checks, failed.reason);
+}
+
+/**
+ * Retire one Wave review generation as a single aggregate transition.
+ *
+ * Every authority field invalidated by a replacement gate lives here so
+ * restart and orphan recovery cannot drift through shell-local object spreads.
+ * Accepted Findings survive; only packet-bound review evidence is retired.
+ */
+export function resetWaveGateReviewAuthority(
+  graph: TaskGraph,
+  taskIds: readonly string[],
+): TaskGraph {
+  return canonicalRecord({
+    ...graph,
+    tasks: Object.freeze(graph.tasks.map((task) => {
+      if (!taskIds.includes(task.id) || task.review_run === undefined) return task;
+      const preserved = preserveAcceptedReviewRunFindings(task);
+      return canonicalRecord({
+        ...preserved,
+        review_status: "pending" as const,
+        review_generation: task.review_generation,
+        review_run: undefined,
+        review_error: undefined,
+        review_evidence_failures: undefined,
+      });
+    })),
+    spec_check: undefined,
+    wave_review_epoch: undefined,
+    active_wave_gate: undefined,
+    active_wave_completion_suite: undefined,
+  });
 }
 
 export function applyGateDecision(state: TaskGraph, decision: GateDecision): TaskGraph {

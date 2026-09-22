@@ -59,14 +59,18 @@ const record = (raw: unknown): raw is Record<string, unknown> => typeof raw === 
 function fileText(packet: ProjectedPacket, path: string): DomainResult<string, string> {
   const section = [...packet.fixedContext, ...packet.variableContext].find(({ label }) => label === "standalone-frozen-source");
   if (section === undefined) return failed("packet has no standalone frozen source; use the section index for its supplied context");
+  let text: string;
+  try {
+    text = decode(section.bytes);
+  } catch (cause) {
+    const attribution = boundedThrownCause(cause, "frozen source index UTF-8");
+    throw new Error(`frozen source index could not be decoded as UTF-8 (${attribution.name}: ${attribution.message})`);
+  }
   let source: unknown;
   try {
-    source = JSON.parse(decode(section.bytes));
+    source = JSON.parse(text);
   } catch (cause) {
-    // Name the failing operation: the frozen-source index parse (not the text
-    // decode, which is separately fatal) is what refused a digested-but
-    // non-JSON section.
-    const attribution = boundedThrownCause(cause, "frozen source index");
+    const attribution = boundedThrownCause(cause, "frozen source index JSON");
     throw new Error(`frozen source index could not be parsed from the section bytes (${attribution.name}: ${attribution.message})`);
   }
   if (!record(source) || !Array.isArray(source.files)) return failed("frozen source file index is invalid");

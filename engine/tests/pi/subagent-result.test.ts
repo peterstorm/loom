@@ -846,6 +846,7 @@ describe("applyFailedPiResult", () => {
         result: result({ agent: "spec-check-invoker", exitCode: 1 }),
         reservedSlot: fixture.reservedSlot,
         now: NOW,
+        projectRoot: root,
       });
       expect(applied.processingErrors).toEqual([
         expect.stringContaining("spec-check document observation failed"),
@@ -1296,6 +1297,7 @@ describe("applySpecCheckPiResult", () => {
         result: result({ agent: "spec-check-invoker", messages: assistantText(specCheckText(0)) }),
         reservedSlot: { agentType: "spec-check-invoker", taskId: null, specCheckAuthority: authority },
         now: NOW,
+        projectRoot: root,
       });
 
       expect(applied.processingErrors).toEqual([

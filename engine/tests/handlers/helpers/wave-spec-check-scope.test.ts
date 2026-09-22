@@ -1,5 +1,5 @@
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
@@ -49,6 +49,17 @@ const decodeRequestId = (raw: string) => {
 
 const cleanup: string[] = [];
 afterEach(() => { for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true }); });
+
+const projectRootForDocuments = (specFile: string | null, planFile: string | null): string => {
+  const document = specFile ?? planFile;
+  return document === null ? process.cwd() : dirname(document);
+};
+
+const observeDocuments = (
+  specFile: string | null,
+  planFile: string | null,
+  projectRoot = projectRootForDocuments(specFile, planFile),
+) => observeWaveSpecCheckDocuments({ specFile, planFile, projectRoot });
 
 describe("registered Wave spec-check scope", () => {
   it("defensively freezes arbitrary trace and file arrays", () => {
@@ -113,7 +124,7 @@ describe("registered Wave spec-check scope", () => {
     const parsedGraph = parseTaskGraph(graph);
     expect(parsedGraph.ok).toBe(true);
     if (!parsedGraph.ok) return;
-    const batch = waveRequests(created.value, registration, parsedGraph.value, 1);
+    const batch = waveRequests(created.value, registration, parsedGraph.value, 1, process.cwd());
     const specRequest = batch.requests.find(({ authority }) =>
       (authority as AgentRequestAuthority).role === "spec-check-invoker");
     expect(specRequest).toBeDefined();
@@ -202,7 +213,7 @@ describe("registered Wave spec-check scope", () => {
     writeFileSync(statePath, JSON.stringify(parsed.value));
     const manager = new StateManager(statePath);
 
-    const batch = waveRequests(created.value, registration, parsed.value, 1);
+    const batch = waveRequests(created.value, registration, parsed.value, 1, root);
     const authorities = batch.requests.map(({ authority }) => authority as AgentRequestAuthority);
     expect(authorities.map(({ role }) => role)).toEqual([
       "spec-check-invoker",
@@ -314,7 +325,7 @@ describe("registered Wave spec-check scope", () => {
       tasks: parsed.value.tasks.map((task) => ({ ...task, review_generation: (task.review_generation ?? 0) + 1 })),
     });
     if (!conflictingGraph.ok) throw new Error(conflictingGraph.error);
-    const conflictingBatch = waveRequests(created.value, registration, conflictingGraph.value, 1);
+    const conflictingBatch = waveRequests(created.value, registration, conflictingGraph.value, 1, root);
     expect(conflictingBatch.batchEpoch).not.toBe(batch.batchEpoch);
     await expect(installWaveReviewRuns(manager, registration, conflictingBatch))
       .rejects.toThrow("packet context changed");
@@ -362,8 +373,8 @@ describe("registered Wave spec-check scope", () => {
     process.chdir(runtimeRoot);
     try {
       const batch = waveRequests(created.value, registration, parsed.value, 1, graphRoot);
-      const graphDocuments = observeWaveSpecCheckDocuments(specFile, planFile, graphRoot).authority;
-      const foreignDocuments = observeWaveSpecCheckDocuments(specFile, planFile, runtimeRoot).authority;
+      const graphDocuments = observeDocuments(specFile, planFile, graphRoot).authority;
+      const foreignDocuments = observeDocuments(specFile, planFile, runtimeRoot).authority;
       expect(batch.specCheckDocuments).toEqual(graphDocuments);
       expect(batch.specCheckDocuments).not.toEqual(foreignDocuments);
     } finally {
@@ -379,11 +390,22 @@ describe("registered Wave spec-check scope", () => {
     writeFileSync(join(externalRoot, "spec.md"), "external authority");
     symlinkSync(externalRoot, join(graphRoot, ".claude", "specs", "linked"));
 
-    expect(() => observeWaveSpecCheckDocuments(
+    expect(() => observeDocuments(
       ".claude/specs/linked/spec.md",
       null,
       graphRoot,
     )).toThrow(/cannot read Wave spec-check document/);
+  });
+
+  it("refuses an absolute Wave document outside the TaskGraph Project Boundary", () => {
+    const graphRoot = canonicalTempDir("loom-wave-absolute-boundary-");
+    const externalRoot = canonicalTempDir("loom-wave-absolute-external-");
+    cleanup.push(graphRoot, externalRoot);
+    const externalSpec = join(externalRoot, "spec.md");
+    writeFileSync(externalSpec, "# Foreign specification\n");
+
+    expect(() => observeDocuments(externalSpec, null, graphRoot))
+      .toThrow(/outside TaskGraph Project Boundary/);
   });
 
   it("moves the batch epoch after either exact spec or plan bytes change", () => {
@@ -420,12 +442,12 @@ describe("registered Wave spec-check scope", () => {
       authorityDigest: "a".repeat(64),
     };
 
-    const first = waveRequests(created.value, registration, parsed.value, 1);
+    const first = waveRequests(created.value, registration, parsed.value, 1, root);
     writeFileSync(specFile, "spec two");
-    const specChanged = waveRequests(created.value, registration, parsed.value, 1);
+    const specChanged = waveRequests(created.value, registration, parsed.value, 1, root);
     writeFileSync(specFile, "spec one");
     writeFileSync(planFile, "plan two");
-    const planChanged = waveRequests(created.value, registration, parsed.value, 1);
+    const planChanged = waveRequests(created.value, registration, parsed.value, 1, root);
 
     expect(specChanged.batchEpoch).not.toBe(first.batchEpoch);
     expect(specChanged.specCheckDocuments.spec.contentDigest)
@@ -475,7 +497,7 @@ describe("registered Wave spec-check scope", () => {
     const statePath = join(root, "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(parsed.value));
     const manager = new StateManager(statePath);
-    const batch = waveRequests(created.value, registration, parsed.value, 1);
+    const batch = waveRequests(created.value, registration, parsed.value, 1, root);
     writeFileSync(planFile, "plan after");
 
     await expect(installWaveReviewRuns(manager, registration, batch))
@@ -525,7 +547,7 @@ describe("Wave reviewer slot identity projection", () => {
     cleanup.push(runsRoot);
     const created = createRunDirectory(runsRoot, "run.identity");
     if (!created.ok) throw new Error(created.error.message);
-    return waveRequests(created.value, registration, preparedGraph, attempt).requests.map(({ authority }) =>
+    return waveRequests(created.value, registration, preparedGraph, attempt, process.cwd()).requests.map(({ authority }) =>
       `${(authority as AgentRequestAuthority).slotId}@${(authority as AgentRequestAuthority).requestId}`);
   }
 
@@ -561,7 +583,7 @@ describe("Wave reviewer slot identity projection", () => {
       const legacy = { ...plain, schemaVersion: 1 as const, input: { wave: 1 } };
       const current = { ...legacy, schemaVersion: 2 as const, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL };
       const workspace = [{ taskId: "T1", scope: ["engine/src/core/wave-review-authority.ts"], headSha: "b".repeat(64) }];
-      const observation = observeWaveSpecCheckDocuments(null, null);
+      const observation = observeDocuments(null, null);
       const first = prepareWaveReviewBatch(runId.value, legacy, graph, 1, workspace, observation);
       const second = prepareWaveReviewBatch(runId.value, current, graph, 1, workspace, observation);
       if (!first.ok || !second.ok) throw new Error("versioned preparation must succeed");
@@ -636,7 +658,7 @@ describe("Requirement Coverage Projection in the spec-check packet", () => {
       input: { wave: 1 },
       taskIds: tasks.map(({ id }) => id),
       authorityDigest: "a".repeat(64),
-    }, parsedGraph.value, 1);
+    }, parsedGraph.value, 1, projectRootForDocuments(parsedGraph.value.spec_file, parsedGraph.value.plan_file));
     const specRequest = batch.requests.find(({ authority }) =>
       (authority as AgentRequestAuthority).role === "spec-check-invoker");
     const digest = (specRequest!.authority as AgentRequestAuthority).contextDigest;
@@ -693,7 +715,7 @@ describe("Requirement Coverage Projection in the spec-check packet", () => {
     const batch = waveRequests(created.value, {
       schemaVersion: 1, kind: "wave-gate", input: { wave: 1 }, taskIds: ["T1"],
       authorityDigest: "a".repeat(64),
-    }, parsedGraph.value, 1);
+    }, parsedGraph.value, 1, projectRootForDocuments(parsedGraph.value.spec_file, parsedGraph.value.plan_file));
     for (const request of batch.requests) {
       const authority = request.authority as AgentRequestAuthority;
       const packet = batch.packets.find((candidate) => candidate.digest === authority.contextDigest);
@@ -828,10 +850,10 @@ describe("Wave spec-check authority guards", () => {
     // it was not derived from. Deleting it used to leave every test green.
     const specFile = specFileIn(spec);
     const other = specFileIn(spec.replace("FR-001", "FR-002"));
-    const honest = observeWaveSpecCheckDocuments(specFile, null);
+    const honest = observeDocuments(specFile, null);
     const mismatched = Object.freeze({
       authority: honest.authority,
-      specIndex: observeWaveSpecCheckDocuments(other, null).specIndex,
+      specIndex: observeDocuments(other, null).specIndex,
     });
     const prepared = prepareWaveReviewBatch(
       runId(), registration, graphWith(specFile), 1, workspace, mismatched,
@@ -844,7 +866,7 @@ describe("Wave spec-check authority guards", () => {
     // Same path, different bytes: only the digest comparison catches this, and
     // it is what makes the module's "one read" claim true rather than asserted.
     const specFile = specFileIn(spec);
-    const honest = observeWaveSpecCheckDocuments(specFile, null);
+    const honest = observeDocuments(specFile, null);
     const forged = Object.freeze({
       authority: honest.authority,
       specIndex: projectSpecBytes(specFile, Buffer.from(spec.replace("FR-001", "FR-009"), "utf8")),
@@ -858,7 +880,7 @@ describe("Wave spec-check authority guards", () => {
 
   it("refuses an unparsed result derived from different bytes at the same path", () => {
     const specFile = specFileIn(spec);
-    const honest = observeWaveSpecCheckDocuments(specFile, null);
+    const honest = observeDocuments(specFile, null);
     const mismatched = Object.freeze({
       authority: honest.authority,
       specIndex: projectSpecBytes(specFile, Buffer.from("# not a canonical specification", "utf8")),
@@ -874,7 +896,7 @@ describe("Wave spec-check authority guards", () => {
     const specFile = specFileIn(spec);
     const prepared = prepareWaveReviewBatch(
       runId(), registration, graphWith(specFile), 1, workspace,
-      observeWaveSpecCheckDocuments(specFile, null),
+      observeDocuments(specFile, null),
     );
     if (!prepared.ok) throw new Error(prepared.error.message);
     expect(prepared.ok).toBe(true);

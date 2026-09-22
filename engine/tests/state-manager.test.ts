@@ -9,6 +9,11 @@ import { derivePendingTaskProof, evaluateTaskProof } from "../src/core/proof-obl
 import { waveGateAuthorityDigest } from "../src/core/wave-review-authority";
 import { parseOrchestrationRunId } from "../src/core/orchestration-contract";
 import type { TaskId } from "../src/core/task-id";
+import {
+  authorizeWaveCompletionSuite,
+  defaultVerificationManifest,
+} from "../src/core/verification-manifest";
+import { evaluateWaveCompletionSuite } from "../src/core/completion-suite";
 
 function makeTmpDir(): string {
   const dir = join(tmpdir(), `loom-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -1389,6 +1394,34 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
     runsRoot: "/runs",
     terminalOutcome,
   });
+  const acceptedCompletionSuite = (active: NonNullable<TaskGraph["active_wave_gate"]>) => {
+    const manifest = defaultVerificationManifest();
+    const authorized = authorizeWaveCompletionSuite(manifest, active, "c".repeat(64));
+    if (!authorized.ok) throw new Error(authorized.error.errors.join("; "));
+    const evaluated = evaluateWaveCompletionSuite(authorized.value, {
+      kind: "wave-completion-suite-result",
+      runId: active.runId,
+      wave: active.wave,
+      revision: active.revision,
+      authorityDigest: active.authorityDigest,
+      manifestDigest: manifest.manifestDigest,
+      suiteDigest: authorized.value.suiteDigest,
+      workspaceDigest: authorized.value.workspaceDigest,
+      checks: authorized.value.checks.map((check) => ({
+        checkId: check.checkId,
+        scope: check.scope,
+        outcome: {
+          kind: "observed" as const,
+          exitCode: 0,
+          timedOut: false,
+          signal: null,
+          report: { kind: "not-required" as const },
+        },
+      })),
+    });
+    if (evaluated.kind !== "accepted") throw new Error("completion-suite fixture was not accepted");
+    return evaluated.receipt;
+  };
 
   it("parses a terminal-abandoned tombstone and exempts it from the nonterminal phase/wave conflict", () => {
     // A tombstone may exist on a graph that has since left the abandoned
@@ -1477,12 +1510,18 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
     try {
       const mgr = new StateManager(statePath);
       await mgr.registerActiveWaveGate(activeGate("run.first", mgr.load()), ["T1"]);
+      await mgr.update((locked) => ({
+        ...locked,
+        active_wave_completion_suite: acceptedCompletionSuite(locked.active_wave_gate!),
+      }));
+      expect(mgr.load().active_wave_completion_suite).toBeDefined();
 
       const foreignRoot = await mgr.abandonActiveWaveGateRegistration({
         runsRoot: "/other-runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
       });
       expect(foreignRoot).toEqual({ kind: "not-targeted", reason: "authority-mismatch" });
       expect(mgr.load().active_wave_gate?.terminalOutcome).toBeNull();
+      expect(mgr.load().active_wave_completion_suite).toBeDefined();
 
       const stamped = await mgr.abandonActiveWaveGateRegistration({
         runsRoot: "/runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
@@ -1490,6 +1529,7 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
       expect(stamped).toMatchObject({ kind: "stamped", registration: { terminalOutcome: tombstone() } });
       if (stamped.kind !== "stamped") throw new Error("abandonment fixture did not stamp");
       expect(mgr.load().active_wave_gate?.terminalOutcome).toEqual(tombstone());
+      expect(mgr.load().active_wave_completion_suite).toBeUndefined();
 
       // Exact replay: same decision, no rewrite.
       const before = readFileSync(statePath, "utf-8");

@@ -152,7 +152,7 @@ async function legacyPrefix(p: ReturnType<typeof project>) {
   await manager.registerActiveWaveGate({ schemaVersion: 1, kind: "active-wave-gate", runId: handle.runId, wave: 1,
     authorityDigest: registered.authorityDigest, revision: 0, terminalOutcome: null, runsRoot: p.runsRoot }, ["T1"]);
   return withFixturePiSession(p.root, async () => {
-    const batch = waveRequests(handle, registered, manager.load(), 1);
+    const batch = waveRequests(handle, registered, manager.load(), 1, p.root);
     const published = await publishInitialBatch(handle, batch.requests, batch.packets, "wave-gate-current");
     if (!published.ok) throw new Error(published.message);
     await installWaveReviewRuns(manager, registered, batch);

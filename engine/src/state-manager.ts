@@ -2785,7 +2785,10 @@ export class StateManager {
       }
       const stamped = Object.freeze({ ...active, terminalOutcome: outcome.value });
       return {
-        state: { ...state, active_wave_gate: stamped },
+        // Terminalizing the gate retires its correlated live-suite authority in
+        // the same locked transition. Retaining it would make the produced
+        // graph unparseable: live suites require a nonterminal active gate.
+        state: { ...state, active_wave_gate: stamped, active_wave_completion_suite: undefined },
         value: Object.freeze({ kind: "stamped" as const, registration: stamped }),
       };
     });

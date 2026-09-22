@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import { parseArtifactDigest } from "../core/orchestration-contract";
 import type { SpecIndexAvailability, WaveSpecCheckObservation } from "../core/wave-review-authority";
 import { projectSpecBytes } from "./spec-index-observation";
@@ -24,19 +24,27 @@ type ObservedDocument =
  * not a degradation. Gate evidence must name exact bytes, so there is no
  * `unreadable` outcome on this path — the observation throws instead.
  */
-function observeDocument(path: string | null, projectRoot?: string): ObservedDocument {
+function documentPathWithinProject(path: string, projectRoot: string): string {
+  const root = resolve(projectRoot);
+  const absolute = resolve(root, path);
+  const fromRoot = relative(root, absolute);
+  if (fromRoot === "" || fromRoot === ".." || fromRoot.startsWith("../") ||
+      fromRoot.startsWith("..\\") || isAbsolute(fromRoot)) {
+    throw new Error(`Wave spec-check document ${path} is outside TaskGraph Project Boundary ${root}`);
+  }
+  return absolute;
+}
+
+function observeDocument(path: string | null, projectRoot: string): ObservedDocument {
   if (path === null) {
     return Object.freeze({
       kind: "absent",
       authority: Object.freeze({ path: null, contentDigest: null }),
     });
   }
-  if (!isAbsolute(path) && projectRoot === undefined) {
-    throw new Error(`cannot read project-relative Wave spec-check document ${path} without a TaskGraph Project Boundary`);
-  }
   let bytes: Buffer;
   try {
-    bytes = readRunBytesNoFollow(isAbsolute(path) ? path : resolve(projectRoot!, path));
+    bytes = readRunBytesNoFollow(documentPathWithinProject(path, projectRoot));
   } catch (error) {
     throw new Error(
       `cannot read Wave spec-check document ${path}: ${error instanceof Error ? error.message : String(error)}`,
@@ -59,14 +67,19 @@ function indexOf(spec: ObservedDocument): SpecIndexAvailability {
     : projectSpecBytes(spec.authority.path, spec.bytes);
 }
 
-/** Imperative-shell byte observation. Call before entering any TaskGraph lock. */
+export type WaveSpecCheckDocumentObservationRequest = Readonly<{
+  specFile: string | null;
+  planFile: string | null;
+  projectRoot: string;
+}>;
+
+/** Imperative-shell byte observation. Call before entering any TaskGraph lock.
+ * One request binds both document names to one required Project Boundary. */
 export function observeWaveSpecCheckDocuments(
-  specFile: string | null,
-  planFile: string | null,
-  projectRoot?: string,
+  request: WaveSpecCheckDocumentObservationRequest,
 ): WaveSpecCheckObservation {
-  const spec = observeDocument(specFile, projectRoot);
-  const plan = observeDocument(planFile, projectRoot);
+  const spec = observeDocument(request.specFile, request.projectRoot);
+  const plan = observeDocument(request.planFile, request.projectRoot);
   return Object.freeze({
     authority: Object.freeze({ spec: spec.authority, plan: plan.authority }),
     specIndex: indexOf(spec),

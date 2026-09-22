@@ -315,7 +315,7 @@ async function piCaptureRun(runSuffix: string, contextText = "Pi capture context
   const previous = process.cwd();
   process.chdir(repository);
   let batch: ReturnType<typeof waveRequests>;
-  try { batch = waveRequests(opened.value, registration, graph, 1); } finally { process.chdir(previous); }
+  try { batch = waveRequests(opened.value, registration, graph, 1, repository); } finally { process.chdir(previous); }
   const source = batch.packets.find(({ role }) => role === "code-reviewer");
   if (source === undefined) throw new Error("historical Wave fixture lacks reviewer packet");
   const packet = buildContextPacket({ ...source, requestId, fixedContext: [...source.fixedContext, section.value] });

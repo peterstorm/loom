@@ -479,8 +479,8 @@ function projectLineage(
  *
  * A Task with NO settlement history is a fresh lineage: the first modern
  * registration writes the protocol-2 fields. Attempt history WITHOUT them is
- * refused — there is no read-only compatibility projection; such a Task must
- * be re-registered through a modern implementation dispatch (or re-populated).
+ * refused at the StateManager load boundary, before a modern dispatch can run;
+ * recovery requires TaskGraph re-population or an explicit offline migration.
  */
 export function deriveImplementationRetryDisposition(
   task: RetryableImplementationTask,

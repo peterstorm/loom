@@ -657,7 +657,7 @@ describe("Wave review epoch installation", () => {
       if (!opened.ok) return;
       expect((await opened.value.registerProgram(registration)).ok).toBe(true);
       const manager = new StateManager(statePath);
-      const batch = waveRequests(opened.value, registration, manager.load(), 1);
+      const batch = waveRequests(opened.value, registration, manager.load(), 1, root);
       const specCheckAuthority = batch.requests
         .map(({ authority }) => authority as AgentRequestAuthority)
         .find(({ role }) => role === "spec-check-invoker");

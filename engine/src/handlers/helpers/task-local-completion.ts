@@ -7,7 +7,7 @@
  */
 
 import { lstatSync } from "node:fs";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import type { Task } from "../../types";
 import {
   buildTaskLocalByteObservation,
@@ -35,6 +35,7 @@ export type TaskLocalCompletionArgs = Readonly<{
   parserModifiedPaths: readonly string[];
   parserPathLabel: string;
   siblingOwnedPaths: readonly string[];
+  authoritativeStatePath?: string;
 }>;
 
 type RequiredTaskBaselines = Readonly<{
@@ -82,21 +83,26 @@ function authorityHead(
   }
 }
 
-/** Engine-owned runtime paths sit outside every Task byte scope by design.
- *  The active graph and per-session pointers (.claude/state/, .pi/state/) are
- *  written by the engine inside every attempt window, and review-run
- *  artifacts (.claude/reviews/, and panel runs under the active spec) are
- *  minted by orchestration operations, never by the Task — the harness
- *  gitignore marks all three domains outside review scope for the same
- *  reason. Paths are canonical repository-relative POSIX. Deriving these
- *  domains from engine config instead of this stable layout literal is the
- *  tracked follow-up refinement. */
-const ENGINE_OWNED_PATH_PREFIXES = [".claude/state/", ".pi/state/", ".claude/reviews/"];
-const ENGINE_OWNED_PANEL_RUNS = /^\.claude\/specs\/[^/]+\/panel-runs\//;
+/** Project the exact authoritative State File into repository-relative path
+ *  authority. A State File outside this repository cannot appear in its Git
+ *  change observation and therefore needs no exclusion. */
+export function authoritativeStateRepositoryPath(
+  repositoryRoot: string,
+  authoritativeStatePath: string,
+): string | null {
+  const root = resolve(repositoryRoot);
+  const absoluteStatePath = resolve(authoritativeStatePath);
+  const fromRoot = relative(root, absoluteStatePath);
+  if (fromRoot === "" || fromRoot === ".." || fromRoot.startsWith("../") ||
+      fromRoot.startsWith("..\\") || isAbsolute(fromRoot)) return null;
+  return canonicalRepositoryPaths(root, [absoluteStatePath], "authoritative State File")[0] ?? null;
+}
 
-export function isEngineOwnedRuntimePath(path: string): boolean {
-  return ENGINE_OWNED_PATH_PREFIXES.some((prefix) => path.startsWith(prefix)) ||
-    ENGINE_OWNED_PANEL_RUNS.test(path);
+/** Engine ownership is exact authority, never trust inferred from a namespace.
+ *  Git-ignored runtime artifacts do not enter repositoryChangedPaths; a
+ *  Git-visible review or panel artifact is therefore ordinary unowned evidence. */
+export function isEngineOwnedRuntimePath(path: string, authoritativeStatePath: string | null): boolean {
+  return authoritativeStatePath !== null && path === authoritativeStatePath;
 }
 
 function observeAvailableTaskScope(
@@ -131,13 +137,16 @@ function observeAvailableTaskScope(
       args.repositoryRoot,
       baselines.proof.map(({ artifact }) => artifact),
     );
-    // The engine itself writes its runtime state and mints review-run
-    // artifacts inside every attempt window; its review-scope contract
-    // places those domains outside the Task byte scope.
+    const authoritativeStatePath = args.authoritativeStatePath === undefined
+      ? null
+      : authoritativeStateRepositoryPath(args.repositoryRoot, args.authoritativeStatePath);
+    // Only the exact State File selected for this settlement is engine-owned.
+    // Ignored runtime artifacts never enter the Git-visible observation; every
+    // other changed path remains byte-scope evidence regardless of namespace.
     const repositoryChangedPaths = changedRepositoryArtifactsSince(
       args.repositoryRoot,
       baselines.repository,
-    ).filter((path) => !isEngineOwnedRuntimePath(path));
+    ).filter((path) => !isEngineOwnedRuntimePath(path, authoritativeStatePath));
     observed = buildTaskLocalByteObservation({
       authority: args.authority,
       attemptBaseline: baselines.attempt,

@@ -13,6 +13,11 @@ import {
 import { REVIEWER_PAYLOAD_EXAMPLE_V2, type ReviewerDraftV2 } from "../../../src/core/reviewer-contract";
 import { WAVE_REVIEW_AGENTS, type GateDeps } from "../../../src/core/wave-gate-machine";
 import { evaluateTaskProof } from "../../../src/core/proof-obligations";
+import {
+  authorizeWaveCompletionSuite,
+  defaultVerificationManifest,
+} from "../../../src/core/verification-manifest";
+import { evaluateWaveCompletionSuite } from "../../../src/core/completion-suite";
 import { parseAgentRequestAuthority, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
 import { agentRequestAuthority } from "../../fixtures/agent-request-authority";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } from "../../fixtures/pi-session";
@@ -162,6 +167,35 @@ function passingWaveTaskProof() {
   );
   if (proof.state !== "satisfied") throw new Error("passing Wave Task proof fixture must be satisfied");
   return proof;
+}
+
+function acceptedWaveCompletionSuite(active: NonNullable<TaskGraph["active_wave_gate"]>) {
+  const manifest = defaultVerificationManifest();
+  const authorized = authorizeWaveCompletionSuite(manifest, active, "c".repeat(64));
+  if (!authorized.ok) throw new Error(authorized.error.errors.join("; "));
+  const evaluated = evaluateWaveCompletionSuite(authorized.value, {
+    kind: "wave-completion-suite-result",
+    runId: active.runId,
+    wave: active.wave,
+    revision: active.revision,
+    authorityDigest: active.authorityDigest,
+    manifestDigest: manifest.manifestDigest,
+    suiteDigest: authorized.value.suiteDigest,
+    workspaceDigest: authorized.value.workspaceDigest,
+    checks: authorized.value.checks.map((check) => ({
+      checkId: check.checkId,
+      scope: check.scope,
+      outcome: {
+        kind: "observed" as const,
+        exitCode: 0,
+        timedOut: false,
+        signal: null,
+        report: { kind: "not-required" as const },
+      },
+    })),
+  });
+  if (evaluated.kind !== "accepted") throw new Error("completion-suite fixture was not accepted");
+  return evaluated.receipt;
 }
 
 /** One valid implemented review Task; scenarios override only the authority
@@ -719,7 +753,7 @@ describe("orchestration CLI", () => {
     await manager.registerActiveWaveGate({ schemaVersion: 1, kind: "active-wave-gate", runId: handle.value.runId,
       wave: 1, authorityDigest: registration.authorityDigest, revision: 0, terminalOutcome: null, runsRoot }, taskIds);
     await withFixturePiSession(root, async () => {
-      const batch = waveRequests(handle.value, registration, manager.load(), 1);
+      const batch = waveRequests(handle.value, registration, manager.load(), 1, root);
       const published = await publishInitialBatch(handle.value, batch.requests, batch.packets, "wave-gate-current");
       if (!published.ok) throw new Error(published.message);
       await installWaveReviewRuns(manager, registration, batch);
@@ -2536,6 +2570,16 @@ describe("orchestration CLI", () => {
       diagnostic: { message: expect.stringContaining("attempt 2 exhausted") },
     });
 
+    // Manifest-bearing runs retain an accepted suite after review exhaustion.
+    // Restart must retire it with the old gate before installing replacement
+    // authority; otherwise the StateManager lockstep parser refuses the write.
+    const manager = new StateManager(statePath);
+    await manager.update((locked) => ({
+      ...locked,
+      active_wave_completion_suite: acceptedWaveCompletionSuite(locked.active_wave_gate!),
+    }));
+    expect(manager.load().active_wave_completion_suite).toBeDefined();
+
     const replacementRun = join(runsRoot, "run.wave-replacement");
     mkdirSync(replacementRun);
     const restarted = (await runCli([
@@ -2564,6 +2608,7 @@ describe("orchestration CLI", () => {
       }[];
     };
     expect(restartedGraph.active_wave_gate).toMatchObject({ runId: "run.wave-replacement", wave: 1 });
+    expect((restartedGraph as TaskGraph).active_wave_completion_suite).toBeUndefined();
     expect(restartedGraph.wave_review_epoch).toMatchObject({ runId: "run.wave-replacement" });
     expect(restartedGraph.tasks[0]).toMatchObject({
       review_generation: 0,

@@ -12,13 +12,12 @@ export type GitProbeObservation<T, E> =
  * value. Process adapters supply typed success/failure and define what empty
  * means; callers retain policy for whether confirmed emptiness is legal.
  *
- * Canonical rationale — every empty-retry call site points here: status 0
- * with an empty stdout is not a documented Git outcome, but the darwin
- * verification campaign observed it transiently on loaded macOS runners —
- * for `rev-parse --show-toplevel` (twice), `rev-parse HEAD^{tree}` (once),
- * `--verify HEAD` (once inside a review-packet CLI child, where it surfaced
- * as `git returned an invalid HEAD: ""`), and by inference any other
- * short-lived invocation. The bounded retries discharge the transient; they
+ * Canonical rationale — every empty-retry call site points here: the listed
+ * output-producing probes require non-empty stdout, but the darwin verification
+ * campaign observed transient empty success for `rev-parse --show-toplevel`
+ * (twice), `rev-parse HEAD^{tree}` (once), and `--verify HEAD` (once inside a
+ * review-packet CLI child, where it surfaced as `git returned an invalid HEAD:
+ * ""`). The bounded retries discharge that observed transient; they
  * cannot corrupt a legitimate result, because an operation that legitimately
  * produces no output re-runs and returns empty again. A confirmed-empty is
  * handed back to the caller, whose own emptiness guards refuse loudly with

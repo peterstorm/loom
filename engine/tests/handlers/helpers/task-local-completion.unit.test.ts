@@ -1,24 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { isEngineOwnedRuntimePath } from "../../../src/handlers/helpers/task-local-completion";
+import {
+  authoritativeStateRepositoryPath,
+  isEngineOwnedRuntimePath,
+} from "../../../src/handlers/helpers/task-local-completion";
 
-describe("isEngineOwnedRuntimePath", () => {
-  it("claims the harness state and review-run artifact domains", () => {
-    expect(isEngineOwnedRuntimePath(".claude/state/active_task_graph.json")).toBe(true);
-    expect(isEngineOwnedRuntimePath(".pi/state/pointers.json")).toBe(true);
-    expect(isEngineOwnedRuntimePath(
-      ".claude/reviews/wave-gate-runs/run.x/authority.json",
-    )).toBe(true);
-    expect(isEngineOwnedRuntimePath(".claude/reviews/wave-14-advisory-triage.md")).toBe(true);
-    expect(isEngineOwnedRuntimePath(
-      ".claude/specs/2026-08-02-baby-adventure/panel-runs/run.abc/interview.md",
-    )).toBe(true);
+describe("exact Task-local runtime ownership", () => {
+  it("projects only an in-repository authoritative State File", () => {
+    expect(authoritativeStateRepositoryPath(
+      "/project",
+      "/project/.custom/state/active_task_graph.json",
+    )).toBe(".custom/state/active_task_graph.json");
+    expect(authoritativeStateRepositoryPath("/project", "/other/state.json")).toBeNull();
   });
 
-  it("leaves every Task-scope path unclaimed", () => {
-    expect(isEngineOwnedRuntimePath("src/features/tracking/ui/FavoritesView.tsx")).toBe(false);
-    expect(isEngineOwnedRuntimePath(".claude/plans/2026-08-02-baby-adventure.md")).toBe(false);
-    expect(isEngineOwnedRuntimePath(".claude/specs/2026-08-02-baby-adventure/spec.md")).toBe(false);
-    expect(isEngineOwnedRuntimePath(".claude/specs/nested/other/panel-runs-suffix.md")).toBe(false);
-    expect(isEngineOwnedRuntimePath("reviews/run.json")).toBe(false);
+  it("claims only the exact authoritative State File", () => {
+    const statePath = ".custom/state/active_task_graph.json";
+    expect(isEngineOwnedRuntimePath(statePath, statePath)).toBe(true);
+    expect(isEngineOwnedRuntimePath(".claude/state/other.json", statePath)).toBe(false);
+    expect(isEngineOwnedRuntimePath(
+      ".claude/reviews/wave-gate-runs/run.x/authority.json",
+      statePath,
+    )).toBe(false);
+    expect(isEngineOwnedRuntimePath(
+      ".claude/specs/feature/panel-runs/run.abc/interview.md",
+      statePath,
+    )).toBe(false);
   });
 });
