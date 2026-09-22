@@ -1312,7 +1312,7 @@ describe("orchestration CLI", () => {
     const remediationResumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", remediationRun], "", root));
     expect(remediationResumed.status).not.toBe(0);
     expect(remediationResumed.stderr).toContain(`remediation checkpoint is invalid JSON for ${remediationRun}:`);
-  });
+  }, 30_000);
 
   it("rejects a Wave reviewer submission when its packet-bound task disappeared", async () => {
     const root = repository();
@@ -3292,7 +3292,7 @@ describe("orchestration CLI", () => {
     });
     const replay = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, piEnv));
     expect(JSON.parse(replay.stdout).kind, JSON.stringify(JSON.parse(replay.stdout))).toBe("done");
-  });
+  }, 30_000);
 
   it("returns an actionable failure when an existing result cannot be verified", async () => {
     const root = repository();
@@ -3437,7 +3437,7 @@ describe("orchestration CLI", () => {
     const done = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(done.status, done.stderr).toBe(0);
     expect(JSON.parse(done.stdout).kind, JSON.stringify(JSON.parse(done.stdout))).toBe("done");
-  });
+  }, 30_000);
 
   /**
    * A repository with one committed-then-edited file, and a standalone review
@@ -3535,7 +3535,7 @@ describe("orchestration CLI", () => {
     expect(JSON.parse(fresh.stdout).kind, JSON.stringify(JSON.parse(fresh.stdout))).toBe("done");
     expect(git(["diff", "--cached", "--name-only"]).stdout.trim().split("\n").sort())
       .toEqual(["a.txt", "pin.test.ts"]);
-  });
+  }, 30_000);
 
   it("records a user decision durably in the run's event log", async () => {
     const root = project();
@@ -3629,7 +3629,7 @@ describe("orchestration CLI", () => {
       expect(started.status, started.stderr).toBe(0);
       expect(resumedByPath.status, resumedByPath.stderr).toBe(0);
       expect(JSON.parse(resumedByName.stdout)).toEqual(JSON.parse(resumedByPath.stdout));
-    });
+    }, 30_000);
 
     it("still refuses a run directory that is not a direct child of its runs-root", async () => {
       const root = project();
@@ -4186,7 +4186,7 @@ describe("orchestration CLI", () => {
       expect(resumed.status).not.toBe(0);
       expect(resumed.stderr).toContain("was abandoned (superseded by run.abandon-replacement)");
       expect(resumed.stderr).toContain("advance the run that replaced it instead");
-    });
+    }, 30_000);
 
     /**
      * `bindLiveRun`'s docstring says an UNREADABLE marker refuses too, and that
@@ -4216,7 +4216,11 @@ describe("orchestration CLI", () => {
       // retaining a retired run at all.
       const inspected = (await runCli(["inspect", "--runs-root", runsRoot, "--run", "run.abandon-corrupt"], "", root));
       expect(inspected.status, inspected.stderr).toBe(0);
-    });
+      // Seven cold bun CLI children (the fixture's start, five refusals, one
+      // inspect): the 15s default expired on a loaded darwin runner while
+      // every step ran its bounded course — the same head room the other
+      // cold-CLI rows carry.
+    }, 60_000);
 
     /**
      * The marker is immutable, so a typo'd or cross-root pointer would be
@@ -4269,7 +4273,7 @@ describe("orchestration CLI", () => {
       const conflicting = (await abandon("a different story"));
       expect(conflicting.status).not.toBe(0);
       expect(conflicting.stderr).toContain("already abandoned under a different marker");
-    });
+    }, 30_000);
 
     /**
      * Abandoning a run that OWNS the protected Wave Gate registration must

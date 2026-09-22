@@ -122,8 +122,13 @@ describe("canonical verification command", () => {
     expect(enginePackage.scripts.typecheck).toBe("bun scripts/typecheck.ts");
     expect(enginePackage.scripts["typecheck:unused"]).toBe("npm run typecheck");
     expect(enginePackage.scripts.test).toBe("npm run test:unit && env -u PI_CODING_AGENT npm run test:smoke");
-    expect(enginePackage.scripts["test:unit"]).toBe("env -u PI_CODING_AGENT vitest run --testTimeout=15000 --maxWorkers=4 --reporter=default --reporter=junit --outputFile=../.loom/completion-reports/verify.junit.xml");
+    expect(enginePackage.scripts["test:unit"]).toBe("env -u PI_CODING_AGENT vitest run --testTimeout=15000 --reporter=default --reporter=junit --outputFile=../.loom/completion-reports/verify.junit.xml");
     expect(enginePackage.scripts["test:smoke"]).toBe(smokeFiles.map(([path]) => `${path.endsWith(".ts") ? "bun" : "bash"} ../${path}`).join(" && "));
+    // The worker budget is part of the canonical command: it moved out of the
+    // CLI flag into a checked config so it can differ by platform (macos-15 CI
+    // runners expose 3 vCPUs; four forked workers starved the Vitest main
+    // thread past its 60s RPC deadline and failed fully green runs).
+    expect(readFileSync("vitest.config.ts", "utf8")).toContain('maxWorkers: process.platform === "darwin" ? 2 : 4');
   });
 
   it("missing local Pi is blocked even if a global Pi is on PATH", async () => {
