@@ -12,6 +12,7 @@ import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import type { TaskGraph } from "../../src/types";
+import type { TaskGraphProjectBoundary } from "../../src/config";
 import { parseTaskGraph, type ParsedTaskGraph } from "../../src/state-manager";
 import { derivePendingTaskProof, evaluateTaskProof } from "../../src/core/proof-obligations";
 import { applyCompletionInfrastructureFailure } from "../../src/core/implementation-application";
@@ -28,11 +29,11 @@ import {
   captureRepositoryChangeBaseline,
 } from "../../src/utils/artifact-baseline";
 import {
-  applyFailedPiResult,
-  applyImplementationPiResult,
+  applyFailedPiResult as applyFailedPiResultWithBoundary,
+  applyImplementationPiResult as applyImplementationPiResultWithAuthority,
   applyPhaseAgentPiResult,
   applyReviewPiResult,
-  applySpecCheckPiResult,
+  applySpecCheckPiResult as applySpecCheckPiResultWithBoundary,
   currentPiReviewAuthority,
   currentPiSpecCheckAuthority,
   piSubagentFailureSignals,
@@ -57,6 +58,34 @@ import {
  */
 
 const NOW = "2026-08-16T00:00:00.000Z";
+const projectBoundaryAt = (root: string): TaskGraphProjectBoundary =>
+  Object.freeze({ kind: "state-layout", root });
+const DEFAULT_PROJECT_BOUNDARY = projectBoundaryAt(process.cwd());
+
+type FailedPiArgs = Parameters<typeof applyFailedPiResultWithBoundary>[0];
+const applyFailedPiResult = (
+  args: Omit<FailedPiArgs, "projectBoundary"> & Partial<Pick<FailedPiArgs, "projectBoundary">>,
+) => applyFailedPiResultWithBoundary({
+  ...args,
+  projectBoundary: args.projectBoundary ?? DEFAULT_PROJECT_BOUNDARY,
+});
+
+type ImplementationPiArgs = Parameters<typeof applyImplementationPiResultWithAuthority>[0];
+const applyImplementationPiResult = (
+  args: Omit<ImplementationPiArgs, "authoritativeStatePath"> &
+    Partial<Pick<ImplementationPiArgs, "authoritativeStatePath">>,
+) => applyImplementationPiResultWithAuthority({
+  ...args,
+  authoritativeStatePath: args.authoritativeStatePath ?? join(args.repository.root(), ".loom-test-state.json"),
+});
+
+type SpecCheckPiArgs = Parameters<typeof applySpecCheckPiResultWithBoundary>[0];
+const applySpecCheckPiResult = (
+  args: Omit<SpecCheckPiArgs, "projectBoundary"> & Partial<Pick<SpecCheckPiArgs, "projectBoundary">>,
+) => applySpecCheckPiResultWithBoundary({
+  ...args,
+  projectBoundary: args.projectBoundary ?? DEFAULT_PROJECT_BOUNDARY,
+});
 const parsedWaveRunId = parseOrchestrationRunId("run.pi-spec-check");
 const parsedWaveAuthorityDigest = parseArtifactDigest("a".repeat(64));
 const parsedWaveBatchEpoch = parseArtifactDigest("b".repeat(64));
@@ -846,7 +875,7 @@ describe("applyFailedPiResult", () => {
         result: result({ agent: "spec-check-invoker", exitCode: 1 }),
         reservedSlot: fixture.reservedSlot,
         now: NOW,
-        projectRoot: root,
+        projectBoundary: projectBoundaryAt(root),
       });
       expect(applied.processingErrors).toEqual([
         expect.stringContaining("spec-check document observation failed"),
@@ -1297,7 +1326,7 @@ describe("applySpecCheckPiResult", () => {
         result: result({ agent: "spec-check-invoker", messages: assistantText(specCheckText(0)) }),
         reservedSlot: { agentType: "spec-check-invoker", taskId: null, specCheckAuthority: authority },
         now: NOW,
-        projectRoot: root,
+        projectBoundary: projectBoundaryAt(root),
       });
 
       expect(applied.processingErrors).toEqual([
@@ -2121,6 +2150,49 @@ describe("applyImplementationPiResult", () => {
         label: expect.stringMatching(/^pi-structured: /),
       });
       expect(task.proof.evidence).not.toContainEqual(expect.objectContaining({ kind: "new-tests" }));
+    }
+  });
+
+  it("excludes the exact custom State File through the production Pi settlement adapter", async () => {
+    const repositoryRoot = canonicalTempDir("loom-pi-custom-state-authority-");
+    const statePath = join(repositoryRoot, ".loom-state", "custom-task-graph.json");
+    mkdirSync(join(repositoryRoot, ".loom-state"), { recursive: true });
+    execFileSync("git", ["init", "--quiet"], { cwd: repositoryRoot });
+    execFileSync("git", ["config", "user.email", "loom@example.test"], { cwd: repositoryRoot });
+    execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: repositoryRoot });
+    writeFileSync(statePath, "baseline state bytes\n");
+    execFileSync("git", ["add", ".loom-state/custom-task-graph.json"], { cwd: repositoryRoot });
+    execFileSync("git", ["commit", "--quiet", "-m", "state baseline"], { cwd: repositoryRoot });
+
+    try {
+      const modern = modernize(implementationGraph({
+        file_list: [],
+        verification_policy: {
+          regression: { kind: "waived", reason: "documentation-only" },
+          new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
+        },
+      }), repositoryRoot, "pi-custom-state-authority");
+      const store = fakeStore(modern.graph);
+      writeFileSync(statePath, "engine-updated state bytes\n");
+
+      const applied = await applyImplementationPiResult({
+        store,
+        repository: repositoryAt(repositoryRoot),
+        authoritativeStatePath: statePath,
+        agentType: "code-implementer-agent",
+        result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages: [] }),
+        reservedSlot: modern.reservedSlot,
+        parentPrompt: "",
+      });
+
+      expect(applied.processingErrors).toEqual([]);
+      expect(store.current().tasks[0]).toMatchObject({
+        status: "implemented",
+        implementation_attempt_history: [{ transition: "implemented" }],
+      });
+      expect(store.current().tasks[0]?.unresolved_repository_paths).toBeUndefined();
+    } finally {
+      rmSync(repositoryRoot, { recursive: true, force: true });
     }
   });
 

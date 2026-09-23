@@ -78,7 +78,7 @@ export const runStoreSpecCheckFindings = async (
     observation = observeWaveSpecCheckDocuments({
       specFile: observedState.spec_file,
       planFile: observedState.plan_file,
-      projectRoot: observeTaskGraphProjectBoundary(manager.getPath()).root,
+      projectBoundary: observeTaskGraphProjectBoundary(manager.getPath()),
     });
   } catch (error) {
     return {

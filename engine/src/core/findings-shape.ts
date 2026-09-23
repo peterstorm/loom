@@ -87,7 +87,9 @@ export type SlotBoundReviewRunEvidence = Readonly<ReviewRunEvidenceBase & {
   readonly attempted: 1 | 2;
 }>;
 
-/** Evidence staged by one reviewer. It is not activated until the whole run completes. */
+/** Evidence staged by one reviewer. It activates only through successful
+ * whole-run finalization or the narrower incomplete-run retirement path, which
+ * preserves accepted new Findings while withholding prior-Finding resolutions. */
 export type LegacyReviewRunEvidence = UnboundReviewRunEvidence | SlotBoundReviewRunEvidence;
 export type CurrentReviewRunEvidence = Readonly<ReviewRunEvidenceBase & {
   protocolVersion: 2;

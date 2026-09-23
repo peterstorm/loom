@@ -53,6 +53,7 @@ import type {
   WaveSpecCheckSlotAuthority,
 } from "../engine/src/types";
 import type { ParsedTaskGraph } from "../engine/src/state-manager";
+import type { TaskGraphProjectBoundary } from "../engine/src/config";
 import {
   parseIsoInstant,
   type ImplementationAttemptAuthority,
@@ -98,8 +99,6 @@ const isReviewAgent = (agentType: string): boolean => REVIEW_AGENTS.has(agentTyp
  * should own.
  */
 export type TaskGraphStore = Readonly<{
-  /** Exact State File authority when the production StateManager backs this port. */
-  getPath?(): string;
   load(): ParsedTaskGraph;
   update(mutate: (state: ParsedTaskGraph) => TaskGraph): Promise<void>;
   updateAndReturn<T>(
@@ -621,7 +620,7 @@ type FailedPiResultArgs = Readonly<{
   result: PiSubagentResult;
   reservedSlot: ReservedSlot | undefined;
   now: string;
-  projectRoot?: string;
+  projectBoundary: TaskGraphProjectBoundary;
 }>;
 
 async function applyFailedSpecCheckResult(
@@ -640,7 +639,7 @@ async function applyFailedSpecCheckResult(
     specObservation = observeWaveSpecCheckDocuments({
       specFile: observedState.spec_file,
       planFile: observedState.plan_file,
-      projectRoot: args.projectRoot ?? process.cwd(),
+      projectBoundary: args.projectBoundary,
     });
   } catch (cause) {
     const diagnostic = `spec-check document observation failed: ${cause instanceof Error ? cause.message : String(cause)}`;
@@ -1359,6 +1358,7 @@ async function applyLegacyImplementationQuarantine(
 type ImplementationPiResultArgs = Readonly<{
   store: TaskGraphStore;
   repository: RepositoryProbe;
+  authoritativeStatePath: string;
   agentType: string;
   result: PiSubagentResult;
   reservedSlot: ReservedSlot | undefined;
@@ -1420,7 +1420,7 @@ async function settleExactPiInfrastructure(
 function piExactSettlementPorts(args: ExactPiSettlementArgs): ExactImplementationSettlementPorts {
   const production = productionExactSettlementPorts(
     args.repository.root(),
-    args.store.getPath?.(),
+    args.authoritativeStatePath,
   );
   return Object.freeze({
     ...production,
@@ -1800,7 +1800,7 @@ export async function applySpecCheckPiResult(args: Readonly<{
   result: PiSubagentResult;
   reservedSlot: ReservedSlot | undefined;
   now: string;
-  projectRoot?: string;
+  projectBoundary: TaskGraphProjectBoundary;
 }>): Promise<PiResultOutcome> {
   const parsedMessages = parsePiMessages(args.result.messages);
   const observation: PiSpecCheckObservation = parsedMessages.ok
@@ -1814,7 +1814,7 @@ export async function applySpecCheckPiResult(args: Readonly<{
     const specObservation = observeWaveSpecCheckDocuments({
       specFile: observedState.spec_file,
       planFile: observedState.plan_file,
-      projectRoot: args.projectRoot ?? process.cwd(),
+      projectBoundary: args.projectBoundary,
     });
     return await args.store.updateAndReturn((state) =>
       reducePiSpecCheckResult(state, args.reservedSlot?.specCheckAuthority, observation,

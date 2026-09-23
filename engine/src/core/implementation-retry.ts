@@ -3,7 +3,8 @@
  *
  * Settlement history is the only semantic-attempt budget. Infrastructure
  * receipts never advance it; an exact attempt-1 retry receipt authorizes one
- * attempt 2; an attempt-2 escalation receipt is terminal.
+ * attempt 2; an attempt-2 escalation receipt is terminal for automatic
+ * implementation dispatch until explicit remediation closes it.
  */
 
 import { readDenseDataArray, readExactDataRecord } from "./orchestration-contract/bytes";

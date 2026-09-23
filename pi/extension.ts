@@ -66,7 +66,6 @@ import {
   type PiSpecCheckAttemptAuthority,
   type PiSubagentResultEntry,
   type RepositoryProbe,
-  type TaskGraphStore,
 } from "./subagent-result";
 
 // `isReviewAgent` lives in `config`, NOT in `core/review-output` beside the
@@ -2718,7 +2717,7 @@ export default function (
         // the state store and the repository as ports. They decide and persist;
         // this dispatcher owns stderr and owns which of their diagnostics count as
         // orchestration processing errors.
-        const store: TaskGraphStore = mgr;
+        const store = mgr;
         // One observation owns both Pi adapters. A Git failure throws and the
         // per-result shell records infrastructure failure; it never substitutes
         // the runtime checkout or cwd for the TaskGraph's project boundary.
@@ -2747,7 +2746,7 @@ export default function (
             result,
             reservedSlot: reservedItem,
             now: new Date().toISOString(),
-            projectRoot: projectBoundary.root,
+            projectBoundary,
           }));
           continue;
         }
@@ -2773,6 +2772,7 @@ export default function (
           emit(await applyImplementationPiResult({
             store,
             repository,
+            authoritativeStatePath: mgr.getPath(),
             agentType,
             result,
             reservedSlot: reservedItem,
@@ -2800,7 +2800,7 @@ export default function (
             result,
             reservedSlot: reservedItem,
             now: new Date().toISOString(),
-            projectRoot: projectBoundary.root,
+            projectBoundary,
           }));
           continue;
         }

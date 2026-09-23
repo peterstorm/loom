@@ -10,7 +10,7 @@ import { buildContextPacket, encodeByteSection, parseContextPacket, contextPacke
 import { CURRENT_REVIEWER_PROTOCOL } from '../../../core/reviewer-contract';
 import { captureKey } from '../../../core/harness-capture';
 import { inspectRunDirectoryEntry, type RunDirHandle } from '../../../orchestration/run-directory-handle';
-import { observeTaskGraphProjectBoundary, TASK_GRAPH_PATH } from '../../../config';
+import { observeTaskGraphProjectBoundary, TASK_GRAPH_PATH, type TaskGraphProjectBoundary } from '../../../config';
 import { StateManager } from '../../../state-manager';
 import { commitWaveGateCompletion, deriveWaveAdvisoryDecisionRequest, deriveWaveGateDriveStep, deriveWaveReadiness, deriveWaveRefutationPlan, resetWaveGateReviewAuthority, waveAdvisoryDecisionActionRequest, WAVE_REVIEW_AGENTS, type WaveAdvisoryDecisionRequest } from '../../../core/wave-gate-machine';
 import { inspectFilePresence, loadPlanModelsSource } from '../complete-wave-gate';
@@ -368,7 +368,7 @@ export function waveRequests(
   registration: RegisteredWaveGateProgram,
   graph: ReturnType<StateManager["load"]>,
   attempt: 1 | 2,
-  projectRoot: string,
+  projectBoundary: TaskGraphProjectBoundary,
 ): WaveRequestBatch {
   const wave = registration.input.wave;
   if (wave === null) throw new Error("registered Wave review authority lacks an exact Wave");
@@ -389,7 +389,7 @@ export function waveRequests(
     observeWaveSpecCheckDocuments({
       specFile: graph.spec_file,
       planFile: graph.plan_file,
-      projectRoot,
+      projectBoundary,
     }),
   );
   if (!prepared.ok) throw new Error(prepared.error.message);
@@ -791,7 +791,7 @@ export async function installWaveReviewRuns(
   const currentObservation = observeWaveSpecCheckDocuments({
     specFile: batch.specCheckDocuments.spec.path,
     planFile: batch.specCheckDocuments.plan.path,
-    projectRoot: observeTaskGraphProjectBoundary(manager.getPath()).root,
+    projectBoundary: observeTaskGraphProjectBoundary(manager.getPath()),
   });
   const currentDocuments = currentObservation.authority;
   await manager.update((locked) => {
@@ -1592,7 +1592,7 @@ export async function applyWaveFacadeSubmission(
       const currentObservation = observeWaveSpecCheckDocuments({
         specFile: specCheckDocuments.spec.path,
         planFile: specCheckDocuments.plan.path,
-        projectRoot: observeTaskGraphProjectBoundary(manager.getPath()).root,
+        projectBoundary: observeTaskGraphProjectBoundary(manager.getPath()),
       });
       const currentDocuments = currentObservation.authority;
       const parsed = parseSpecCheckOutput(typeof raw === "string" ? raw : Buffer.from(raw).toString("utf8"));
@@ -1746,7 +1746,7 @@ export async function resumeWaveGateFacade(
       const currentDocuments = observeWaveSpecCheckDocuments({
         specFile: graph.spec_file,
         planFile: graph.plan_file,
-        projectRoot: observeTaskGraphProjectBoundary(manager.getPath()).root,
+        projectBoundary: observeTaskGraphProjectBoundary(manager.getPath()),
       }).authority;
       if (!waveSpecCheckDocumentsMatch(graph.wave_review_epoch.specCheckDocuments, currentDocuments)) {
         return waveBlocked(handle, "current spec/plan bytes differ from the active Wave spec-check authority; refresh spec-check evidence");
@@ -1786,7 +1786,7 @@ export async function resumeWaveGateFacade(
         registration,
         graph,
         1,
-        observeTaskGraphProjectBoundary(manager.getPath()).root,
+        observeTaskGraphProjectBoundary(manager.getPath()),
       );
       // Publication is deterministic and idempotent per context/request slot.
       // Re-running the complete effect reconciles a crash after any strict
@@ -1819,7 +1819,7 @@ export async function resumeWaveGateFacade(
         registration,
         refreshed,
         1,
-        observeTaskGraphProjectBoundary(manager.getPath()).root,
+        observeTaskGraphProjectBoundary(manager.getPath()),
       );
       await installWaveReviewRuns(manager, registration, batch);
       const published = await publishInitialBatch(handle, batch.requests, batch.packets, "wave-gate-current");
@@ -1857,7 +1857,7 @@ export async function resumeWaveGateFacade(
           registration,
           refreshed,
           1,
-          observeTaskGraphProjectBoundary(manager.getPath()).root,
+          observeTaskGraphProjectBoundary(manager.getPath()),
         );
         if (expectedBatch.batchEpoch !== epoch.batchEpoch) {
           return waveBlocked(handle, "persisted current Wave review batch differs from deterministic protected authority");
@@ -2320,7 +2320,7 @@ export async function resumeWaveGateFacade(
     const completionDocuments = observeWaveSpecCheckDocuments({
       specFile: refreshed.spec_file,
       planFile: refreshed.plan_file,
-      projectRoot: observeTaskGraphProjectBoundary(manager.getPath()).root,
+      projectBoundary: observeTaskGraphProjectBoundary(manager.getPath()),
     }).authority;
     const committed = await manager.commitActiveWaveGateCompletion((locked) => {
       if (locked.spec_file !== refreshed.spec_file || locked.plan_file !== refreshed.plan_file ||

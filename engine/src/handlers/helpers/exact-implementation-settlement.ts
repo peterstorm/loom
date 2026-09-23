@@ -1,5 +1,4 @@
 import type { Task, TaskGraph, TaskTestResult } from "../../types";
-import { taskGraphPath } from "../../config";
 import {
   settleObservedImplementation,
   settleUnavailableImplementation,
@@ -63,7 +62,7 @@ export type ExactImplementationSettlement = Readonly<{
 
 export function productionExactSettlementPorts(
   repositoryRoot: string,
-  authoritativeStatePath = taskGraphPath(),
+  authoritativeStatePath: string,
 ): ExactImplementationSettlementPorts {
   return Object.freeze({
     repository: Object.freeze({

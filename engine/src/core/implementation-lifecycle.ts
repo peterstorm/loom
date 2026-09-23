@@ -1,13 +1,14 @@
 import type { Task } from "../types";
 import {
   createEscalationRemediationReceipt,
-  type ImplementationAttemptSettlementReceipt,
+  type EscalationRemediatedSettlementReceipt,
   type ImplementationAuthorityDigest,
   type ImplementationSettlementReceiptId,
 } from "./implementation-completion";
 import {
   deriveImplementationAttestationContext,
   deriveImplementationRetryDisposition,
+  type ImplementationRetryDisposition,
 } from "./implementation-retry";
 import { derivePendingTaskProof, type PendingTaskProof } from "./proof-obligations";
 import { canonicalJson, sha256Hex } from "./review-packet";
@@ -42,7 +43,11 @@ export type ImplementationLifecycleError =
   | Readonly<{ kind: "proof-already-satisfied"; taskId: string }>
   | Readonly<{ kind: "attestation-context-invalid"; taskId: string; detail: string }>
   | Readonly<{ kind: "task-already-settled"; taskId: string; status: "completed" | "implemented" }>
-  | Readonly<{ kind: "not-escalated"; taskId: string; disposition: string }>
+  | Readonly<{
+      kind: "not-escalated";
+      taskId: string;
+      disposition: Extract<ImplementationRetryDisposition, { kind: "initial" | "retry" }>["kind"];
+    }>
   | Readonly<{ kind: "terminal-receipt-mismatch"; taskId: string; expected: string; received: string }>
   | Readonly<{ kind: "terminal-receipt-missing"; taskId: string; receiptId: string }>
   | Readonly<{ kind: "remediation-receipt-invalid"; taskId: string; errors: readonly string[] }>;
@@ -170,7 +175,7 @@ function escalationRemediationPlan(
 export type EscalationRemediationCommand = Readonly<{
   task: Task;
   plan: RemediationPlan;
-  receipt: ImplementationAttemptSettlementReceipt;
+  receipt: EscalationRemediatedSettlementReceipt;
 }>;
 
 /** Pure aggregate command: terminal eligibility, exact receipt and updated Task are inseparable. */

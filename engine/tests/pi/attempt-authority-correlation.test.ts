@@ -99,6 +99,7 @@ describe("Pi exact implementation authority correlation", () => {
         implementationAuthority: attempt,
       },
       now: "2026-08-24T00:01:00.000Z",
+      projectBoundary: { kind: "state-layout", root: process.cwd() },
     });
 
     expect(result.processingErrors).toEqual([]);
@@ -157,6 +158,7 @@ describe("Pi exact implementation authority correlation", () => {
         implementationAuthority: oldAttempt,
       },
       now: "2026-08-24T00:01:00.000Z",
+      projectBoundary: { kind: "state-layout", root: process.cwd() },
     });
 
     expect(result.processingErrors).toEqual([]);

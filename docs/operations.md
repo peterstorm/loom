@@ -119,6 +119,8 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration abandon \
 
 The marker removes nothing. It is written once and is immutable: an identical repeat succeeds, a different one is refused, a run may not supersede itself, and the replacement must already exist as a direct child of the same runs root. Afterwards `inspect` still reads the run’s evidence, but every operation that would advance it — `resume`, `submit`, `correlate`, `decide`, `restart`, `complete` — refuses, and no recovery can adopt it as a pristine replacement. `--superseded-by` is optional; omit it when a run is retired without a successor.
 
+When the abandoned Run owns the matching protected Wave Gate, the same command also stamps that registration `terminal-abandoned` under the TaskGraph lock and clears its `active_wave_completion_suite`. This protected-state mutation authorizes a later successor start without deleting the tombstone audit. The immutable Run marker is published first; if the subsequent protected-state stamp fails, the command reports the marker-only partial outcome. Repeat the **identical** `abandon` command: marker publication reconciles idempotently and the helper retries the state stamp. Do not choose a new reason or successor, delete the marker, or edit protected state by hand.
+
 ### Pi batch limit
 
 Pi’s native subagent transport accepts at most eight requests per call. Partition a larger engine-issued batch into ordered chunks of at most eight without changing any request. Resume only after all chunks finish.

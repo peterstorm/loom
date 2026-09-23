@@ -786,8 +786,9 @@ async function inspectOperation(args: readonly string[]): Promise<HookResult> {
  * exceptional spec-trace retirement. Stamping the SAME terminal decision — the
  * marker's own runId/reason/supersededBy, re-proven by the state parser — into
  * the registration under the TaskGraph lock closes that loop while keeping
- * history: the tombstone stays in place until a successor start supersedes it,
- * and `upgrade-spec-trace --retire-abandoned-run` can still prove the run.
+ * history: the tombstone stays in place until a successor start supersedes it
+ * or explicit spec-trace retirement clears it; the retirement path can still
+ * prove the abandoned run before clearing that active scope.
  *
  * The receipt is emitted before this runs — the marker is already immutable on
  * disk — so a stamp failure cannot unreport the abandonment; the returned

@@ -7,7 +7,7 @@ import { createRunDirectory } from "../../../src/orchestration/run-directory-han
 import {
   handleWaveReviewContext,
   installWaveReviewRuns,
-  waveRequests,
+  waveRequests as waveRequestsWithBoundary,
   waveSpecCheckScope,
 } from "../../../src/handlers/helpers/programs/wave-gate";
 import type { RegisteredWaveGateProgram } from "../../../src/handlers/helpers/programs/helpers";
@@ -55,11 +55,23 @@ const projectRootForDocuments = (specFile: string | null, planFile: string | nul
   return document === null ? process.cwd() : dirname(document);
 };
 
+const projectBoundaryAt = (root: string) => Object.freeze({ kind: "state-layout" as const, root });
+
+function waveRequests(
+  handle: Parameters<typeof waveRequestsWithBoundary>[0],
+  registration: Parameters<typeof waveRequestsWithBoundary>[1],
+  graph: Parameters<typeof waveRequestsWithBoundary>[2],
+  attempt: Parameters<typeof waveRequestsWithBoundary>[3],
+  projectRoot: string,
+): ReturnType<typeof waveRequestsWithBoundary> {
+  return waveRequestsWithBoundary(handle, registration, graph, attempt, projectBoundaryAt(projectRoot));
+}
+
 const observeDocuments = (
   specFile: string | null,
   planFile: string | null,
   projectRoot = projectRootForDocuments(specFile, planFile),
-) => observeWaveSpecCheckDocuments({ specFile, planFile, projectRoot });
+) => observeWaveSpecCheckDocuments({ specFile, planFile, projectBoundary: projectBoundaryAt(projectRoot) });
 
 describe("registered Wave spec-check scope", () => {
   it("defensively freezes arbitrary trace and file arrays", () => {
