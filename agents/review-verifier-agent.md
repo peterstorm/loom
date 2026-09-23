@@ -86,6 +86,12 @@ The exact shape:
   stored, so do not rely on them.
 - `criterion` must exactly equal the lens in your prompt.
 
+Before emitting, mechanically re-check the two brace facts admission depends
+on: the verdict object is the ONLY balanced brace pair in your final message,
+and every brace inside a `reasoning` string is balanced (an unbalanced brace in
+a quoted reasoning string can corrupt the object's tail). Count your object's
+opening and closing braces equal before you send it.
+
 The parent orchestrator validates this output against the manifest and lens.
 Malformed or mismatched output is rejected and this verifier is retried.
 
