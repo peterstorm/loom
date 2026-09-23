@@ -854,6 +854,11 @@ async function abandonOperation(args: readonly string[]): Promise<HookResult> {
   if (!abandoned.ok) return { kind: "error", message: abandoned.error.message };
   process.stdout.write(`${JSON.stringify(abandoned.value, null, 2)}\n`);
   const stamp = await stampAbandonedWaveGateRegistration(bound.value.handle.identity.runsRoot, abandoned.value);
+  if (stamp.kind === "not-targeted") {
+    process.stderr.write(
+      `orchestration abandon: run ${abandoned.value.runId} was marked abandoned, but no protected Wave Gate registration was tombstoned (${stamp.reason})\n`,
+    );
+  }
   return stamp.kind === "stamp-failed"
     ? { kind: "error", message: stamp.message }
     : { kind: "allow" };

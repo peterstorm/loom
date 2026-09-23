@@ -78,6 +78,16 @@ describe("unconsumedValueArguments", () => {
     expect(unconsumedValueArguments(["--task", "--reason", "why"], flags)).toEqual([]);
     expect(argumentValue(["--task", "--reason", "why"], "--task")).toBeNull();
   });
+
+  it.each([undefined, "", "--next", "--", "-", "value", " spaced "])(
+    "uses the same value-token grammar for parsing and consumption: %s",
+    (value) => {
+      const args = value === undefined ? ["--task"] : ["--task", value];
+      const accepted = argumentValue(args, "--task") !== null;
+      const remainder = unconsumedValueArguments(args, flags);
+      expect(remainder).toEqual(accepted || value === undefined ? [] : [value]);
+    },
+  );
 });
 
 describe("hasFlag", () => {

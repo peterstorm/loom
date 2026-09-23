@@ -15,11 +15,14 @@
  */
 import { parseTaskId, type TaskId } from "../../core/task-id";
 
+const isFlagValue = (value: string | undefined): value is string =>
+  value !== undefined && value !== "" && !value.startsWith("--");
+
 export function argumentValue(args: readonly string[], flag: string): string | null {
   const index = args.indexOf(flag);
   if (index < 0) return null;
   const value = args[index + 1];
-  return value === undefined || value === "" || value.startsWith("--") ? null : value;
+  return isFlagValue(value) ? value : null;
 }
 
 /** Return every token not consumed by the recognized value-flag grammar.
@@ -34,7 +37,7 @@ export function unconsumedValueArguments(args: readonly string[], flags: Readonl
       continue;
     }
     const value = args[index + 1];
-    if (value !== undefined && value.length > 0 && !value.startsWith("--")) index += 1;
+    if (isFlagValue(value)) index += 1;
   }
   return Object.freeze(unconsumed);
 }
