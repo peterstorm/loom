@@ -248,12 +248,18 @@ describe("historical baseline recovery CLI", () => {
     // cumulative write attribution.
     const laterBytes = "export const driftedLater = true;\n";
     writeFileSync(join(root, "src", "a.ts"), laterBytes);
+    // Both linked worktrees begin at the same HEAD. Only the State File's
+    // worktree differs from the historical baseline; ambient bytes do not.
+    const ambient = canonicalTempDir("loom-proof-ambient-");
+    cleanup.push(ambient);
+    execFileSync("git", ["worktree", "add", "--detach", ambient, "HEAD"], { cwd: root });
+    rmSync(join(ambient, "src", "a.ts"));
     const recovered = spawnSync("bun", [
       CLI, "helper", "reconcile-implementation-proof", "--wave", "2",
       "--baseline-sha", historical,
       "--packet", `T5=${packetRelative}`,
     ], {
-      cwd: root, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: statePath },
+      cwd: ambient, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: statePath },
     });
     expect(recovered.status, recovered.stderr).toBe(0);
     expect(readFileSync(join(root, "src", "a.ts"), "utf-8")).toBe(laterBytes);

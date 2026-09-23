@@ -67,6 +67,7 @@ import { PI_STRUCTURED_EVIDENCE_POLICY } from "../engine/src/core/proof-obligati
 import {
   collectNewTestEvidence,
   describeNewTestObservationError,
+  realDiffDepsAt,
 } from "../engine/src/handlers/helpers/task-local-completion";
 import {
   productionExactSettlementPorts,
@@ -1327,6 +1328,7 @@ async function applyLegacyImplementationQuarantine(
       cumulativeFiles,
       verificationPolicy.newTests,
       currentTarget.start_sha,
+      realDiffDepsAt(root),
     );
     if (!newTestObservation.ok) {
       return quarantineCompletionAuthority(

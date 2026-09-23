@@ -748,6 +748,27 @@ function parentObservation(child: ChildProcess): Promise<ParentObservation> {
   });
 }
 
+async function waitForParentClose(
+  parent: Promise<ParentObservation>,
+  hardKillWaitMs: number,
+  trigger: "timeout" | "cancelled",
+  stdout: DiagnosticTail,
+  stderr: DiagnosticTail,
+): Promise<Readonly<{ ok: true; value: Extract<ParentObservation, { kind: "closed" }> }> |
+  Readonly<{ ok: false; error: CompletionCheckRunnerFailure }>> {
+  const closed = await Promise.race<ParentObservation | null>([
+    parent,
+    delay(hardKillWaitMs).then(() => null),
+  ]);
+  return closed !== null && closed.kind === "closed"
+    ? Object.freeze({ ok: true, value: closed })
+    : failed({
+        kind: "termination-unconfirmed",
+        message: `${trigger} process group is gone but the parent close observation is unavailable`,
+        diagnostics: diagnostics(stdout, stderr),
+      });
+}
+
 function observedExecution(
   root: CanonicalRepositoryRoot,
   check: RunnerCommand,
@@ -993,17 +1014,9 @@ async function runProjectCommand(
         diagnostics: diagnostics(stdout, stderr),
       });
     }
-    const closed = await Promise.race<ParentObservation | null>([
-      parent,
-      delay(hardKillWaitMs).then(() => null),
-    ]);
-    if (closed === null || closed.kind !== "closed") {
-      return failed({
-        kind: "termination-unconfirmed",
-        message: `${trigger.kind} process group is gone but the parent close observation is unavailable`,
-        diagnostics: diagnostics(stdout, stderr),
-      });
-    }
+    const parentClose = await waitForParentClose(parent, hardKillWaitMs, trigger.kind, stdout, stderr);
+    if (!parentClose.ok) return parentClose;
+    const closed = parentClose.value;
     if (trigger.kind === "cancelled") {
       return failed({
         kind: "cancelled",
@@ -1043,17 +1056,9 @@ async function runProjectCommand(
       diagnostics: diagnostics(stdout, stderr),
     });
   }
-  const closed = await Promise.race<ParentObservation | null>([
-    parent,
-    delay(hardKillWaitMs).then(() => null),
-  ]);
-  if (closed === null || closed.kind !== "closed") {
-    return failed({
-      kind: "termination-unconfirmed",
-      message: `${trigger.kind} process group is gone but the parent close observation is unavailable`,
-      diagnostics: diagnostics(stdout, stderr),
-    });
-  }
+  const parentClose = await waitForParentClose(parent, hardKillWaitMs, trigger.kind, stdout, stderr);
+  if (!parentClose.ok) return parentClose;
+  const closed = parentClose.value;
   if (trigger.kind === "cancelled") {
     return failed({
       kind: "cancelled",

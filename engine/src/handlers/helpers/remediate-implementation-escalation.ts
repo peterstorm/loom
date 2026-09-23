@@ -46,7 +46,7 @@ function parseRemediationArgs(args: readonly string[]):
     ok: true,
     value: {
       taskId: parsed.value.taskId,
-      terminalReceiptId: parsed.value.additionalValues["--receipt"]!,
+      terminalReceiptId: parsed.value.additionalValues["--receipt"],
       reason: parsed.value.reason,
     },
   };

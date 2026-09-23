@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { argumentValue, hasFlag, unconsumedValueArguments } from "../../../src/handlers/helpers/cli-args";
+import { argumentValue, hasFlag, parseTaskReasonArguments, unconsumedValueArguments } from "../../../src/handlers/helpers/cli-args";
 
 describe("argumentValue", () => {
   it("reads the value that follows the flag", () => {
@@ -88,6 +88,30 @@ describe("unconsumedValueArguments", () => {
       expect(remainder).toEqual(accepted || value === undefined ? [] : [value]);
     },
   );
+});
+
+describe("parseTaskReasonArguments", () => {
+  const grammar = {
+    operation: "remediate",
+    maximumReasonLength: 512,
+    additionalRequired: [{ flag: "--receipt", missingMessage: "receipt required" }],
+  } as const;
+
+  it("returns a parsed value keyed only by the admitted additional flag", () => {
+    const result = parseTaskReasonArguments(["--task", "T1", "--receipt", "r1", "--reason", "valid"], grammar);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.additionalValues["--receipt"]).toBe("r1");
+    if (Date.now() < 0) {
+      // @ts-expect-error a flag absent from the grammar cannot be read as a parsed value.
+      expect(result.value.additionalValues["--reciept"]).toBeUndefined();
+    }
+  });
+
+  it("retains an empty value token for the whole-argv unknown-argument error", () => {
+    expect(parseTaskReasonArguments(["--task", "T1", "--receipt", "", "--reason", "valid"], grammar))
+      .toEqual({ ok: false, message: "unknown or unconsumed argument(s): " });
+  });
 });
 
 describe("hasFlag", () => {

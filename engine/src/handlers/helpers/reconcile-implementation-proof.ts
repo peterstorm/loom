@@ -8,7 +8,7 @@ import {
   type TaskGraph,
 } from "../../types";
 import { newWaveGate } from "../../types";
-import { taskGraphPath } from "../../config";
+import { observeTaskGraphProjectBoundary, taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
 import {
   evaluateTaskProof,
@@ -25,7 +25,6 @@ import {
   changedDeclaredArtifactsSince,
   changedDeclaredArtifactsSinceRevision,
 } from "../../utils/artifact-baseline";
-import * as git from "../../utils/git";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
 import {
   isWaveComplete,
@@ -35,6 +34,7 @@ import {
 import {
   collectNewTestEvidence,
   describeNewTestObservationError,
+  realDiffDepsAt,
 } from "./task-local-completion";
 import { parseWaveArg } from "./wave-args";
 import { isExactGitSha } from "../../core/git-sha";
@@ -313,10 +313,17 @@ const handler: HookHandler = async (_stdin, args) => {
   const statePath = taskGraphPath();
   const manager = StateManager.fromPath(statePath);
   if (!manager) return { kind: "error", message: `No task graph at ${statePath}` };
-  const root = git.repositoryRoot();
-  if (!root || !git.isGitRepo()) {
-    return { kind: "error", message: "reconcile-implementation-proof requires a git repository" };
+  let root: string;
+  try {
+    const boundary = observeTaskGraphProjectBoundary(manager.getPath());
+    if (boundary.kind !== "git-repository") {
+      return { kind: "error", message: "reconcile-implementation-proof requires a git repository" };
+    }
+    root = boundary.root;
+  } catch (error) {
+    return { kind: "error", message: reconciliationFailureMessage(error) };
   }
+  const diffDeps = realDiffDepsAt(root);
   if (recoveredBaselineSha !== null) {
     try {
       execFileSync("git", ["cat-file", "-e", `${recoveredBaselineSha}^{commit}`], {
@@ -416,6 +423,7 @@ const handler: HookHandler = async (_stdin, args) => {
           sourceTask.files_modified ?? [],
           taskVerificationPolicy(sourceTask).newTests,
           sourceTask.start_sha,
+          diffDeps,
         );
         if (!collectedNewTests.ok) {
           throw new Error(

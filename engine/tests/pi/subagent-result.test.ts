@@ -4,7 +4,7 @@ import {
   type SettledFloor,
 } from "../../src/core/requirement-coverage";
 import { capturedSpecCheck } from "../../src/core/spec-check";
-import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -2291,6 +2291,56 @@ describe("applyImplementationPiResult", () => {
       tests_passed: true,
       reviews_complete: true,
     });
+  });
+
+  it("collects legacy new-test evidence from the linked worktree rather than the Pi process checkout", async () => {
+    const ambient = canonicalTempDir("loom-pi-legacy-ambient-");
+    const worktree = canonicalTempDir("loom-pi-legacy-worktree-");
+    const priorProjectDir = process.env.CLAUDE_PROJECT_DIR;
+    const testPath = "tests/linked-worktree.test.ts";
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: ambient });
+      mkdirSync(join(ambient, "tests"));
+      writeFileSync(join(ambient, testPath), "export {};\n");
+      execFileSync("git", ["add", testPath], { cwd: ambient });
+      execFileSync("git", ["-c", "user.name=Loom Tests", "-c", "user.email=loom@example.test", "commit", "--quiet", "-m", "baseline"], { cwd: ambient });
+      execFileSync("git", ["worktree", "add", "--detach", worktree, "HEAD"], { cwd: ambient });
+      process.env.CLAUDE_PROJECT_DIR = ambient;
+      const baseline = captureDeclaredArtifactBaseline(worktree, [testPath]);
+      const store = fakeStore(implementationGraph({
+        file_list: [testPath],
+        files_modified: [testPath],
+        artifact_baseline: baseline,
+        attempt_artifact_baseline: baseline,
+        start_sha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktree, encoding: "utf8" }).trim(),
+        verification_policy: {
+          regression: { kind: "waived", reason: "documentation-only" },
+          new_tests: { kind: "required" },
+        },
+      }));
+      writeFileSync(join(worktree, testPath), 'export {};\n\nit("observes the worktree", () => {\n  expect(true).toBe(true);\n});\n');
+
+      const applied = await applyImplementationPiResult({
+        store,
+        repository: repositoryAt(worktree),
+        agentType: "code-implementer-agent",
+        result: result({ agent: "code-implementer-agent", messages: [writeCall(testPath)] }),
+        reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+        parentPrompt: "",
+      });
+      expect(applied.processingErrors).toEqual([]);
+      expect(store.current().tasks[0]?.new_test_observation).toMatchObject({
+        kind: "written", written: true,
+        evidence: expect.stringContaining("1 new test methods, 1 assertions"),
+      });
+      expect(store.current().tasks[0]?.status).toBe("pending"); // legacy authority never certifies completion
+      expect(readFileSync(join(ambient, testPath), "utf8")).toBe("export {};\n");
+    } finally {
+      if (priorProjectDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = priorProjectDir;
+      rmSync(worktree, { recursive: true, force: true });
+      rmSync(ambient, { recursive: true, force: true });
+    }
   });
 
   it("accepts attributed new-test evidence without regression evidence when explicit policy waives only regression", async () => {

@@ -9,9 +9,9 @@
  * argument parsing is silent: the wrong copy simply reads a different command
  * line than the operator typed.
  *
- * The shared form takes the union of the guards, so a missing value, an empty
- * value, and a `--`-prefixed value are all "absent". `--run --json` never reads
- * as `run = "--json"`.
+ * `argumentValue` treats a missing, empty, or `--`-prefixed value as absent;
+ * the whole-argv parser also retains empty tokens as unconsumed arguments.
+ * `--run --json` never reads as `run = "--json"`.
  */
 import { parseTaskId, type TaskId } from "../../core/task-id";
 
@@ -42,23 +42,23 @@ export function unconsumedValueArguments(args: readonly string[], flags: Readonl
   return Object.freeze(unconsumed);
 }
 
-export type TaskReasonArguments = Readonly<{
+export type TaskReasonArguments<Flag extends string = never> = Readonly<{
   taskId: TaskId;
   reason: string;
-  additionalValues: Readonly<Record<string, string>>;
+  additionalValues: Readonly<Record<Flag, string>>;
 }>;
 
-export type TaskReasonArgumentGrammar = Readonly<{
+export type TaskReasonArgumentGrammar<Flag extends string = never> = Readonly<{
   operation: string;
   maximumReasonLength: number;
-  additionalRequired?: readonly Readonly<{ flag: string; missingMessage: string }>[];
+  additionalRequired?: readonly Readonly<{ flag: Flag; missingMessage: string }>[];
 }>;
 
 /** Parse the exact shared task/reason grammar plus operation-specific values. */
-export function parseTaskReasonArguments(
+export function parseTaskReasonArguments<const Flag extends string>(
   args: readonly string[],
-  grammar: TaskReasonArgumentGrammar,
-): Readonly<{ ok: true; value: TaskReasonArguments }> | Readonly<{ ok: false; message: string }> {
+  grammar: TaskReasonArgumentGrammar<Flag>,
+): Readonly<{ ok: true; value: TaskReasonArguments<Flag> }> | Readonly<{ ok: false; message: string }> {
   const additional = grammar.additionalRequired ?? [];
   const flags = new Set(["--task", "--reason", ...additional.map(({ flag }) => flag)]);
   const unconsumed = unconsumedValueArguments(args, flags);
@@ -93,7 +93,8 @@ export function parseTaskReasonArguments(
     value: Object.freeze({
       taskId: taskId.value,
       reason,
-      additionalValues: Object.freeze(additionalValues),
+      // The loop above populated every grammar-admitted Flag or returned an error.
+      additionalValues: Object.freeze(additionalValues) as Readonly<Record<Flag, string>>,
     }),
   };
 }
