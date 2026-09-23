@@ -1,5 +1,5 @@
 import {
-  parseNewTestEvidence,
+  NEW_TEST_EVIDENCE_NOT_WRITTEN,
   storedNewTestEvidence,
   type NewTestEvidence,
   type Task,
@@ -230,8 +230,9 @@ export type UntrustedStopResolution = Readonly<{
   filesModified: readonly string[];
   changedDeclaredArtifacts: readonly string[];
   bytesChangedSinceAttempt: boolean;
-  newTestsWritten: boolean;
-  newTestEvidence: string;
+  /** One parsed ADT, produced once at the transport boundary; core never
+   *  re-coerces a boolean/string pair into evidence (type-design-analyzer-1). */
+  newTests: NewTestEvidence;
 }>;
 
 export type AppliedStopResolution = Readonly<{
@@ -354,10 +355,7 @@ export function applyUntrustedStopResolution(
     codeChanged,
   );
   const cumulativeFiles = cumulativeModifiedPaths(target.files_modified, resolution.filesModified);
-  const currentNewTests = parseNewTestEvidence(
-    resolution.newTestsWritten,
-    resolution.newTestEvidence,
-  );
+  const currentNewTests = resolution.newTests;
   const proofTestResult = preserveExistingTrusted ? target.test_result : resolution.testResult;
   const proofArtifactsChanged = attributedChangedArtifacts(
     resolution.changedDeclaredArtifacts,
@@ -398,8 +396,9 @@ export type IncomingImplementationEvidence = Readonly<{
   taskCompleted: boolean;
   testResult?: TaskTestResult;
   testEvidence?: string;
-  newTestsWritten?: boolean;
-  newTestEvidence?: string;
+  /** One parsed ADT when the transport carried one; absent reads as the
+   *  canonical not-written observation (type-design-analyzer-1). */
+  newTests?: NewTestEvidence;
 }>;
 
 export type NormalizedImplementationEvidence = Readonly<{
@@ -439,7 +438,7 @@ export function normalizeImplementationEvidence(
           ...(incoming.testEvidence === undefined ? {} : { testEvidence: incoming.testEvidence }),
         }),
     cumulativeModifiedPaths: bytes.cumulativeModifiedPaths,
-    newTests: parseNewTestEvidence(incoming.newTestsWritten, incoming.newTestEvidence),
+    newTests: incoming.newTests ?? NEW_TEST_EVIDENCE_NOT_WRITTEN,
   });
 }
 

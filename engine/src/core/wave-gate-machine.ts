@@ -1305,6 +1305,9 @@ export type WaveGateNextActionError = Readonly<{
   message: string;
 }>;
 
+const nextActionFailure = (message: string): DomainResult<WaveGateNextAction, WaveGateNextActionError> =>
+  canonicalRecord({ ok: false, error: canonicalRecord({ kind: "wave-gate-next-action-rejected", message }) });
+
 function lifecycleCheckpointIdentityIsExact(
   state: WaveGateState,
   registration: ActiveWaveGateRegistration,
@@ -1359,16 +1362,10 @@ export function proveWaveGateNextAction(
   action: ExternalAction,
 ): DomainResult<WaveGateNextAction, WaveGateNextActionError> {
   if (!lifecycleMatchesSnapshot(state, snapshot)) {
-    return canonicalRecord({ ok: false, error: canonicalRecord({
-      kind: "wave-gate-next-action-rejected",
-      message: "next action lifecycle is disconnected from the exact protected Wave readiness snapshot",
-    }) });
+    return nextActionFailure("next action lifecycle is disconnected from the exact protected Wave readiness snapshot");
   }
   if (action.runId !== state.runId) {
-    return canonicalRecord({ ok: false, error: canonicalRecord({
-      kind: "wave-gate-next-action-rejected",
-      message: "next action belongs to a different Wave Gate run",
-    }) });
+    return nextActionFailure("next action belongs to a different Wave Gate run");
   }
   const binding = actionBinding(state);
   let proven: WaveGateNextAction | null = null;
@@ -1382,10 +1379,7 @@ export function proveWaveGateNextAction(
     proven = canonicalRecord({ kind: "completed", lifecycle: "done", action, binding });
   }
   if (proven === null) {
-    return canonicalRecord({ ok: false, error: canonicalRecord({
-      kind: "wave-gate-next-action-rejected",
-      message: `${action.kind} is not authorized from Wave Gate lifecycle state ${state.kind}`,
-    }) });
+    return nextActionFailure(`${action.kind} is not authorized from Wave Gate lifecycle state ${state.kind}`);
   }
   waveNextActionProofs.add(proven);
   return canonicalRecord({ ok: true, value: proven });
@@ -1746,22 +1740,19 @@ export type WaveCompletionCommitError = Readonly<{
   message: string;
 }>;
 
+const commitFailure = (message: string): DomainResult<WaveCompletionCommit, WaveCompletionCommitError> =>
+  canonicalRecord({ ok: false, error: canonicalRecord({ kind: "wave-completion-commit-rejected", message }) });
+
 /** Pure atomic payload: shell persists this graph and returns this receipt in
  * one StateManager transaction. No task/wave mutation is exposed separately. */
 export function commitWaveGateCompletion(
   snapshot: WaveReadinessSnapshot,
 ): DomainResult<WaveCompletionCommit, WaveCompletionCommitError> {
   if (!waveReadinessProofs.has(snapshot)) {
-    return canonicalRecord({ ok: false, error: canonicalRecord({
-      kind: "wave-completion-commit-rejected",
-      message: "completion requires a parser-derived canonical readiness proof",
-    }) });
+    return commitFailure("completion requires a parser-derived canonical readiness proof");
   }
   if (snapshot.graph.active_wave_gate !== snapshot.registration) {
-    return canonicalRecord({ ok: false, error: canonicalRecord({
-      kind: "wave-completion-commit-rejected",
-      message: "snapshot graph active_wave_gate is not the exact readiness registration",
-    }) });
+    return commitFailure("snapshot graph active_wave_gate is not the exact readiness registration");
   }
   const currentAuthority = completionAuthority(
     snapshot.graph,
@@ -1774,20 +1765,14 @@ export function commitWaveGateCompletion(
     currentAuthority.readinessDigest !== snapshot.readinessDigest ||
     currentAuthority.completionIntent.effectId !== snapshot.completionIntent.effectId
   ) {
-    return canonicalRecord({ ok: false, error: canonicalRecord({
-      kind: "wave-completion-commit-rejected",
-      message: "completion readiness authority drifted after proof derivation",
-    }) });
+    return commitFailure("completion readiness authority drifted after proof derivation");
   }
   if (snapshot.gateDecision.verdict.kind !== "pass") {
     const eligibility = snapshot.facts.waveGateCompletionEligibility;
     const failures = eligibility.kind === "known" && eligibility.value.kind === "ineligible"
       ? eligibility.value.failedPrerequisites
       : [snapshot.gateDecision.verdict.reason];
-    return canonicalRecord({ ok: false, error: canonicalRecord({
-      kind: "wave-completion-commit-rejected",
-      message: `completion readiness is ineligible: ${failures.join("; ")}`,
-    }) });
+    return commitFailure(`completion readiness is ineligible: ${failures.join("; ")}`);
   }
   const receipt: ProtectedWaveStateCommitted = canonicalRecord({
     kind: "protected-wave-state-committed",
@@ -1798,17 +1783,11 @@ export function commitWaveGateCompletion(
   });
   const reconciled = reconcileEffectReceipt(snapshot.completionIntent, receipt);
   if (!reconciled.ok || reconciled.value.kind !== "protected-wave-state-committed") {
-    return canonicalRecord({ ok: false, error: canonicalRecord({
-      kind: "wave-completion-commit-rejected",
-      message: reconciled.ok ? "completion produced the wrong receipt kind" : reconciled.error.message,
-    }) });
+    return commitFailure(reconciled.ok ? "completion produced the wrong receipt kind" : reconciled.error.message);
   }
   const advanced = applyGateDecision(snapshot.graph, snapshot.gateDecision);
   if (advanced === snapshot.graph) {
-    return canonicalRecord({ ok: false, error: canonicalRecord({
-      kind: "wave-completion-commit-rejected",
-      message: "locked active/current Wave authority drifted before completion",
-    }) });
+    return commitFailure("locked active/current Wave authority drifted before completion");
   }
   const activeCompletionSuite = snapshot.graph.active_wave_completion_suite;
   const completedRegistration: CompletedWaveGateRegistration = activeCompletionSuite === undefined
@@ -1833,10 +1812,7 @@ export function commitWaveGateCompletion(
       });
   const priorHistory = advanced.wave_gate_history ?? [];
   if (priorHistory.some((entry) => entry.runId === completedRegistration.runId)) {
-    return canonicalRecord({ ok: false, error: canonicalRecord({
-      kind: "wave-completion-commit-rejected",
-      message: `Wave Gate run ${completedRegistration.runId} is already terminal in history`,
-    }) });
+    return commitFailure(`Wave Gate run ${completedRegistration.runId} is already terminal in history`);
   }
   const {
     active_wave_gate: _retired,

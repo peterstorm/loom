@@ -16,6 +16,7 @@ import { devNull } from 'node:os';
 import { extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { observeGitProbe } from '../../../utils/git-probe';
 import { canonicalStructuralEquals, sameAgentRequestAuthority, parseAgentRequestAuthority, boundedThrownCause, type DomainResult, createAtomicInitialPublicationClaimPort, createInitialBatchPublicationReconciler, createInitialPublicationEffectPort, createPublicationAuthorityResolver, parseBatchPublishedReceipt, parseEffectId, parseIssuedSpawnRequest, prepareInitialBatchPublicationIntent, spawnBatchAction, AGENT_REQUIRED_SKILLS, type AgentRequestAuthority, type BatchPublishedReceipt, type EffectId, type InitialSpawnRequestInput, type PublicationAuthorityResolver, type SpawnRequest } from '../../../core/orchestration-contract';
 import { serializeAdjudicatedStandaloneReview, STANDALONE_REVIEWER_ROLES, serializeStandaloneReviewAuthority, parseStandaloneReviewAuthority, selectStandaloneReviewers, type FrozenStandaloneReviewAuthority, type StandaloneReviewKind, type StandaloneReviewMetadata } from '../../../core/standalone-review';
 import { safeIoCause } from '../../../core/safe-io-cause';
@@ -104,20 +105,60 @@ export function parseStandaloneStartInput(raw: unknown): ProgramParse<Registered
   }) };
 }
 
+/**
+ * The caller decision a confirmed-empty Git observation is handed to. The
+ * canonical transient rationale lives at `observeGitProbe` (utils/git-probe):
+ * the darwin verification campaign observed transient status-0/empty-stdout
+ * success for HEAD/root probes, and the bounded retries discharge exactly
+ * that. A still-empty answer is never ingested silently into review scope
+ * authority — it reaches one of these two explicit decisions:
+ *
+ * - "refuse" — the output cannot legitimately be empty (a HEAD revision);
+ *   throw loudly with attribution instead of freezing fabricated authority.
+ * - "legitimate" — emptiness is a real answer of this probe (a path listing
+ *   with no entries, numstat with no content delta, a clean-worktree status);
+ *   pass the empty value through after the retry budget was spent.
+ */
+type GitEmptyDecision = "refuse" | "legitimate";
+
 function gitPaths(args: readonly string[]): readonly string[] {
-  const result = spawnSync("git", args, { encoding: "buffer", maxBuffer: 16 * 1024 * 1024 });
-  // status stays null when the process never ran (git missing from PATH,
-  // EACCES); result.error then holds the only real diagnostic.
-  if (result.error) throw new Error(`git ${args[0]} could not be spawned: ${result.error.message}`);
-  if (result.status !== 0) throw new Error((result.stderr ?? Buffer.alloc(0)).toString("utf8").trim() || `git ${args[0]} failed`);
-  return Object.freeze((result.stdout ?? Buffer.alloc(0)).toString("utf8").split("\0").filter(Boolean).sort());
+  const observed = observeGitProbe(() => {
+    const result = spawnSync("git", args, { encoding: "buffer", maxBuffer: 16 * 1024 * 1024 });
+    // status stays null when the process never ran (git missing from PATH,
+    // EACCES); result.error then holds the only real diagnostic.
+    if (result.error) return { ok: false as const, error: new Error(`git ${args[0]} could not be spawned: ${result.error.message}`) };
+    if (result.status !== 0) {
+      return { ok: false as const, error: new Error((result.stderr ?? Buffer.alloc(0)).toString("utf8").trim() || `git ${args[0]} failed`) };
+    }
+    return { ok: true as const, value: (result.stdout ?? Buffer.alloc(0)).toString("utf8").split("\0").filter(Boolean).sort() };
+  }, (paths) => paths.length === 0);
+  if (observed.kind === "failed") throw observed.error;
+  // Explicit caller decision: a path listing that is empty after bounded
+  // retries names an empty family — it is never a fabricated observation.
+  return Object.freeze(observed.kind === "confirmed-empty" ? [] : [...observed.value]);
 }
 
-export function gitText(args: readonly string[]): string {
-  const result = spawnSync("git", args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
-  if (result.error) throw new Error(`git ${args[0]} could not be spawned: ${result.error.message}`);
-  if (result.status !== 0) throw new Error((result.stderr ?? "").trim() || `git ${args[0]} failed`);
-  return (result.stdout ?? "").trim();
+/**
+ * One fixed-argv Git probe for text authority, retried twice on status-0
+ * empty stdout. The `empty` argument is the caller's confirmed-empty decision
+ * (see `GitEmptyDecision`) and is required at every call site so the policy
+ * for text authority is visible where the value is consumed, never defaulted.
+ */
+export function gitText(args: readonly string[], empty: GitEmptyDecision): string {
+  const observed = observeGitProbe(() => {
+    const result = spawnSync("git", args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+    if (result.error) return { ok: false as const, error: new Error(`git ${args[0]} could not be spawned: ${result.error.message}`) };
+    if (result.status !== 0) return { ok: false as const, error: new Error((result.stderr ?? "").trim() || `git ${args[0]} failed`) };
+    return { ok: true as const, value: (result.stdout ?? "").trim() };
+  }, (value) => value === "");
+  if (observed.kind === "failed") throw observed.error;
+  if (observed.kind === "confirmed-empty") {
+    if (empty === "refuse") {
+      throw new Error(`git ${args.join(" ")} returned empty output after bounded retries; review scope authority cannot be fabricated from an empty observation`);
+    }
+    return "";
+  }
+  return observed.value;
 }
 
 export type CanonicalChangedPaths = Readonly<{
@@ -153,11 +194,23 @@ function reviewablePath(path: string): boolean {
 }
 
 export function deriveChangedPaths(): DerivedChangedPaths {
-  const head = gitText(["rev-parse", "HEAD"]);
+  // A HEAD revision can never legitimately be empty: a confirmed-empty answer
+  // after the bounded retry refuses instead of freezing `head_revision: ""`.
+  const head = gitText(["rev-parse", "HEAD"], "refuse");
   let base: string | null = null;
   for (const candidate of ["origin/main", "origin/master", "main", "master"]) {
-    const probe = spawnSync("git", ["merge-base", candidate, head], { encoding: "utf8" });
-    if (probe.status === 0 && probe.stdout.trim() !== "") { base = probe.stdout.trim(); break; }
+    const observed = observeGitProbe(() => {
+      const probe = spawnSync("git", ["merge-base", candidate, head], { encoding: "utf8" });
+      if (probe.error) return { ok: false as const, error: new Error(`git merge-base could not be spawned: ${probe.error.message}`) };
+      if (probe.status !== 0) return { ok: false as const, error: new Error((probe.stderr ?? "").trim() || `git merge-base failed for ${candidate}`) };
+      return { ok: true as const, value: probe.stdout?.trim() ?? "" };
+    }, (value) => value === "");
+    // Explicit caller decision: like a non-zero exit, a candidate that is
+    // empty after bounded retries names "no merge base" — skip to the next
+    // candidate rather than digesting a possibly-fabricated base revision.
+    if (observed.kind === "failed" || observed.kind === "confirmed-empty") continue;
+    base = observed.value;
+    break;
   }
   const untracked = gitPaths(["ls-files", "--others", "--exclude-standard", "-z", "--"]).filter(reviewablePath);
   const trackedUnstaged = gitPaths(["diff", "--name-only", "-z", "--"]).filter(reviewablePath);
@@ -190,21 +243,34 @@ function parseNumstatAdditions(output: string): number {
 
 function trackedAdditions(baseline: string, paths: readonly string[]): number {
   if (paths.length === 0) return 0;
-  const result = spawnSync("git", ["diff", "--numstat", baseline, "--", ...paths], { encoding: "utf8" });
-  if (result.error) throw new Error(`git diff could not be spawned: ${result.error.message}`);
-  if (result.status !== 0) throw new Error((result.stderr ?? "").trim() || "git diff --numstat failed");
-  return parseNumstatAdditions(result.stdout ?? "");
+  const observed = observeGitProbe(() => {
+    const result = spawnSync("git", ["diff", "--numstat", baseline, "--", ...paths], { encoding: "utf8" });
+    if (result.error) return { ok: false as const, error: new Error(`git diff could not be spawned: ${result.error.message}`) };
+    if (result.status !== 0) return { ok: false as const, error: new Error((result.stderr ?? "").trim() || "git diff --numstat failed") };
+    return { ok: true as const, value: result.stdout ?? "" };
+  }, (output) => output === "");
+  if (observed.kind === "failed") throw observed.error;
+  // Explicit caller decision: numstat legitimately produces no lines when
+  // there is no content delta to count, so confirmed-empty means zero
+  // additions — never a fabricated count reaching reviewer selection.
+  return parseNumstatAdditions(observed.kind === "confirmed-empty" ? observed.third : observed.value);
 }
 
 function untrackedAdditions(paths: readonly string[]): number {
   return paths.reduce((sum, path) => {
-    const result = spawnSync("git", ["diff", "--no-index", "--numstat", "--", devNull, path], { encoding: "utf8" });
-    if (result.error) throw new Error(`git diff could not be spawned: ${result.error.message}`);
-    const diagnostic = (result.stderr ?? "").trim();
-    if ((result.status !== 0 && result.status !== 1) || diagnostic !== "") {
-      throw new Error(diagnostic || `cannot measure untracked additions for ${path}`);
-    }
-    return sum + parseNumstatAdditions(result.stdout ?? "");
+    const observed = observeGitProbe(() => {
+      const result = spawnSync("git", ["diff", "--no-index", "--numstat", "--", devNull, path], { encoding: "utf8" });
+      if (result.error) return { ok: false as const, error: new Error(`git diff could not be spawned: ${result.error.message}`) };
+      const diagnostic = (result.stderr ?? "").trim();
+      if ((result.status !== 0 && result.status !== 1) || diagnostic !== "") {
+        return { ok: false as const, error: new Error(diagnostic || `cannot measure untracked additions for ${path}`) };
+      }
+      return { ok: true as const, value: result.stdout ?? "" };
+    }, (output) => output === "");
+    if (observed.kind === "failed") throw observed.error;
+    // Explicit caller decision: an empty untracked file has no additions to
+    // count, so numstat legitimately answers empty after the retries.
+    return sum + parseNumstatAdditions(observed.kind === "confirmed-empty" ? observed.third : observed.value);
   }, 0);
 }
 

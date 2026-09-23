@@ -69,8 +69,7 @@ function phaseArtifactExists(path: string, baseDir: string): boolean {
  * `baseDir` is REQUIRED: the artifact is probed against the project boundary
  * that owns the TaskGraph, never the caller's ambient cwd — an optional base
  * here silently reintroduces the cross-checkout drift this seam was built to
- * close. The only cwd default in the module lives on the documented
- * compatibility shell `resolveTransition`. */
+ * close. */
 export function countMarkers(filePath: string, baseDir: string): number {
   try {
     return (readRunBytesNoFollow(withinBoundary(filePath, baseDir)).toString("utf-8")
@@ -305,9 +304,8 @@ function phaseAuthorityRefusal(current: Phase, completed: Phase): HookResult | n
  * probed against: production callers pass the root derived from the TaskGraph's
  * own location (`projectRootForStateFile`), because the runtime's cwd may be a
  * different checkout than the run being advanced. Requiring the argument makes
- * the omission a compile error instead of a silent cross-checkout drift; the
- * historical cwd anchoring survives only on the compatibility shell
- * `resolveTransition`, whose default documents itself as such.
+ * the omission a compile error instead of a silent cross-checkout drift; there
+ * is no cwd default anywhere in this concept.
  */
 export function observePhaseTransition(
   completedPhase: Phase,
@@ -361,22 +359,6 @@ export function observePhaseTransition(
     .with("execute", () => transitionNotReady("execute is terminal and has no next phase"))
     .exhaustive();
   return Object.freeze({ authority: transitionAuthority(state), resolution });
-}
-
-/** Compatibility shell for direct callers: parse scope, then observe.
- *  This is the module's ONLY cwd default — production callers observe through
- *  `observePhaseTransition` with an explicit graph-derived base (required
- *  there), so a harness adapter cannot reintroduce the worktree/cwd-drift
- *  failure by omission. */
-export function resolveTransition(
-  completedPhase: Phase,
-  state: TaskGraph,
-  baseDir: string = process.cwd(),
-): PhaseTransitionResolution {
-  const parsedSpecDir = parseSpecArtifactDirectory(state.spec_dir);
-  return parsedSpecDir.ok
-    ? observePhaseTransition(completedPhase, state, parsedSpecDir.value, baseDir).resolution
-    : transitionNotReady(parsedSpecDir.message);
 }
 
 const handler: HookHandler = async (stdin) => {

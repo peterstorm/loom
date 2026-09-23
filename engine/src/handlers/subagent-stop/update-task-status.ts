@@ -12,7 +12,7 @@
 
 import { readFileSync, realpathSync } from "node:fs";
 import type { HookHandler, HookResult } from "../../types";
-import { legacyTestsPassedNote } from "../../types";
+import { NEW_TEST_EVIDENCE_NOT_WRITTEN, legacyTestsPassedNote } from "../../types";
 import { IMPL_AGENTS, machinesDir, observeTaskGraphProjectBoundary } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
@@ -581,8 +581,7 @@ export const runUpdateTaskStatus = async (
         filesModified,
         changedDeclaredArtifacts: [],
         bytesChangedSinceAttempt: false,
-        newTestsWritten: false,
-        newTestEvidence: "",
+        newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
       }, TRUSTED_LEDGER_ONLY_POLICY).state;
     }
 
@@ -624,8 +623,7 @@ export const runUpdateTaskStatus = async (
       filesModified,
       changedDeclaredArtifacts: comparison.changedDeclaredArtifacts,
       bytesChangedSinceAttempt: comparison.bytesChangedSinceAttempt,
-      newTestsWritten: currentNewTestEvidence.written,
-      newTestEvidence: currentNewTestEvidence.evidence,
+      newTests: currentNewTestEvidence,
     }, TRUSTED_LEDGER_ONLY_POLICY);
     skippedExistingVerdict = applied.skipped;
     return applied.state;

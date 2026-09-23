@@ -15,6 +15,7 @@ import {
   applyUntrustedStopResolution,
   cumulativeModifiedPaths,
 } from "../engine/src/core/implementation-application";
+import { NEW_TEST_EVIDENCE_NOT_WRITTEN } from "../engine/src/types";
 import { extractTestEvidence, testEvidenceOf, type TestEvidence } from "../engine/src/core/test-evidence";
 import {
   isPhaseResultEligible,
@@ -40,6 +41,7 @@ import {
 } from "../engine/src/core/wave-review-authority";
 import { observeWaveSpecCheckDocuments } from "../engine/src/orchestration/wave-spec-check-documents";
 import {
+  SPEC_ARTIFACT_DIR,
   parseSpecArtifactDirectory,
   phaseArtifactUpdates,
 } from "../engine/src/core/phase-artifact-paths";
@@ -763,7 +765,9 @@ function reducePiPhaseTransition(
   if (!isPhaseResultEligible(state.current_phase, completedPhase)) return state;
   const artifactUpdates = phaseArtifactUpdates(
     [transition.artifact],
-    state.spec_dir ?? undefined,
+    // A null spec_dir keeps the shared default root — the exact value the
+    // retired parameter default supplied.
+    state.spec_dir ?? SPEC_ARTIFACT_DIR,
     phaseArtifactBaseDir,
   );
   return {
@@ -1147,8 +1151,7 @@ function malformedTranscriptResolutionState(args: Readonly<{
     filesModified: [],
     changedDeclaredArtifacts: comparison.changedDeclaredArtifacts,
     bytesChangedSinceAttempt: comparison.bytesChangedSinceAttempt,
-    newTestsWritten: false,
-    newTestEvidence: "",
+    newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
   }).state, args.taskId, args.reservedSlot);
 }
 
@@ -1293,8 +1296,7 @@ async function applyLegacyImplementationQuarantine(
         filesModified: args.filesModified,
         changedDeclaredArtifacts: [],
         bytesChangedSinceAttempt: false,
-        newTestsWritten: false,
-        newTestEvidence: "",
+        newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
       });
       skippedExistingVerdict = applied.skipped;
       return clearCurrentReservedAuthority(applied.state, args.taskId, args.reservedSlot);
@@ -1344,8 +1346,7 @@ async function applyLegacyImplementationQuarantine(
       filesModified: args.filesModified,
       changedDeclaredArtifacts: comparison.changedDeclaredArtifacts,
       bytesChangedSinceAttempt: comparison.bytesChangedSinceAttempt,
-      newTestsWritten: newTestEvidence.written,
-      newTestEvidence: newTestEvidence.evidence,
+      newTests: newTestEvidence,
     });
     skippedExistingVerdict = applied.skipped;
     return clearCurrentReservedAuthority(applied.state, args.taskId, args.reservedSlot);

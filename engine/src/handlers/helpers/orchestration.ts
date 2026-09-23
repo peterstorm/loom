@@ -26,6 +26,7 @@
  *                               --request <decision-id>   (decision on stdin)
  *   helper orchestration remediate --task <task-id> --receipt <terminal escalation receipt id>
  *                               --reason <text>
+ *   helper orchestration attest --task <task-id> --reason <text>
  *
  * Every `--run`, `--new-run`, and remediation `sourceRun` accepts either the
  * bare run id or a full path to that same direct child of its runs-root. The

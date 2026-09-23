@@ -28,7 +28,6 @@ import {
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
 import {
   isWaveComplete,
-  parseNewTestEvidence,
   type NewTestEvidence,
 } from "../../core/implementation-application";
 import {
@@ -224,16 +223,13 @@ function taskCompletionWasObserved(task: Task): boolean {
 export function reconcileTaskFromStoredEvidence(
   task: Task,
   proofArtifactsChanged: readonly string[],
-  collectedNewTests: NewTestEvidence | Readonly<{ written: boolean; evidence: string }>,
+  collectedNewTests: NewTestEvidence,
   allowLegacyPositiveMigration = false,
 ): Task {
   if (task.status === "completed") return task;
-  const normalizedNewTests = parseNewTestEvidence(
-    collectedNewTests.written,
-    collectedNewTests.evidence,
-  );
-  const newTestsWritten = normalizedNewTests.written;
-  const newTestEvidence = normalizedNewTests.evidence;
+  // The ADT arrives parsed; no legacy-pair re-coercion here.
+  const newTestsWritten = collectedNewTests.written;
+  const newTestEvidence = collectedNewTests.evidence;
   const proof = evaluateTaskProof(
     {
       verificationPolicy: taskVerificationPolicy(task),
@@ -257,9 +253,13 @@ export function reconcileTaskFromStoredEvidence(
       proof,
       revalidation_required: undefined,
       legacy_missing_proof: undefined,
-      ...storedNewTestEvidence(normalizedNewTests),
+      ...storedNewTestEvidence(collectedNewTests),
     };
   }
+  // The duplicated pending shape is load-bearing, not noise: Task's ADT makes
+  // `revalidation_required: true` a literal on the satisfied arm, so the two
+  // objects must be built per-arm for TS to prove the legal state. Collapsing
+  // them into one ternary-carrying object fails to typecheck (TS2322).
   return proof.state === "satisfied"
     ? {
         ...task,
@@ -267,7 +267,7 @@ export function reconcileTaskFromStoredEvidence(
         proof,
         revalidation_required: true,
         legacy_missing_proof: undefined,
-        ...storedNewTestEvidence(normalizedNewTests),
+        ...storedNewTestEvidence(collectedNewTests),
       }
     : {
         ...task,
@@ -275,7 +275,7 @@ export function reconcileTaskFromStoredEvidence(
         proof,
         revalidation_required: task.revalidation_required,
         legacy_missing_proof: undefined,
-        ...storedNewTestEvidence(normalizedNewTests),
+        ...storedNewTestEvidence(collectedNewTests),
       };
 }
 
@@ -349,9 +349,9 @@ const handler: HookHandler = async (_stdin, args) => {
   }
 
   let wave = requestedWave ?? 1;
-  let reconciled: TaskGraph | null = null;
+  let published: TaskGraph;
   try {
-    await manager.update((state) => {
+    published = await manager.updateAndReturn((state) => {
       wave = requestedWave ?? state.current_wave ?? 1;
       if (!state.tasks.some((task) => task.wave === wave)) {
         throw new Error(`Wave ${wave} has no tasks`);
@@ -443,7 +443,7 @@ const handler: HookHandler = async (_stdin, args) => {
         tasks,
         ...(recoveredWritesApplied && state.spec_check?.wave === wave ? { spec_check: undefined } : {}),
       };
-      reconciled = {
+      const stateWithGate: TaskGraph = {
         ...resolved,
         wave_gates: {
           ...resolved.wave_gates,
@@ -454,16 +454,13 @@ const handler: HookHandler = async (_stdin, args) => {
           },
         },
       };
-      return reconciled;
+      return { state: stateWithGate, value: stateWithGate };
     });
   } catch (error) {
     return { kind: "error", message: reconciliationFailureMessage(error) };
   }
 
-  if (reconciled === null) {
-    return { kind: "error", message: "reconcile-implementation-proof produced no state" };
-  }
-  const tasks = (reconciled as TaskGraph).tasks.filter((task) => task.wave === wave);
+  const tasks = published.tasks.filter((task) => task.wave === wave);
   for (const task of tasks) {
     process.stderr.write(
       `${task.id}: status=${task.status}, proof=${task.proof?.state ?? "missing"}` +

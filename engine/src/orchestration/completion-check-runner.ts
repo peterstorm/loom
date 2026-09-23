@@ -643,6 +643,45 @@ function settledProcessGroupRefusal(
   }
 }
 
+/** Shared closed-group classifier for the two no-signalling flows (the parent
+ *  closed on its own; a trigger that arrived after the spawned leader's exit).
+ *  Both observe once, wait for a provable ESRCH, and settle — only the subject
+ *  wording and the surviving clause differ. The return separates an initial
+ *  dissolution (nothing ever survived) from a dissolution reached only during
+ *  the wait (descendants did survive for a while), because only the second is
+ *  a process-tree-survived refusal; the first proceeds to normal observation. */
+type ClosedGroupSettlement =
+  | Readonly<{ kind: "initially-gone" }>
+  | Readonly<{ kind: "settled-after-survivors" }>
+  | Readonly<{ kind: "unconfirmed"; message: string }>;
+
+async function settleClosedProcessGroup(
+  subject: string,
+  survivingClause: string,
+  processGroupId: number,
+  hardKillWaitMs: number,
+): Promise<ClosedGroupSettlement> {
+  const initialGroup = observeClosedProcessGroup(processGroupId);
+  if (initialGroup.kind === "error") {
+    return Object.freeze({
+      kind: "unconfirmed" as const,
+      message: `${subject} but process-tree identity could not be observed: ${initialGroup.message}`,
+    });
+  }
+  const settled = initialGroup.kind === "gone"
+    ? Object.freeze({ kind: "gone", reason: "absent" } as const)
+    : await waitForClosedProcessGroup(processGroupId, hardKillWaitMs);
+  if (settled.kind !== "gone") {
+    return Object.freeze({
+      kind: "unconfirmed" as const,
+      message: settledProcessGroupRefusal(subject, survivingClause, processGroupId, settled),
+    });
+  }
+  return initialGroup.kind === "gone"
+    ? Object.freeze({ kind: "initially-gone" as const })
+    : Object.freeze({ kind: "settled-after-survivors" as const });
+}
+
 async function terminateProcessGroup(
   processGroupId: number,
   graceMs: number,
@@ -756,12 +795,24 @@ async function waitForParentClose(
   stderr: DiagnosticTail,
 ): Promise<Readonly<{ ok: true; value: Extract<ParentObservation, { kind: "closed" }> }> |
   Readonly<{ ok: false; error: CompletionCheckRunnerFailure }>> {
-  const closed = await Promise.race<ParentObservation | null>([
+  const observation = await Promise.race<ParentObservation | null>([
     parent,
     delay(hardKillWaitMs).then(() => null),
   ]);
-  return closed !== null && closed.kind === "closed"
-    ? Object.freeze({ ok: true, value: closed })
+  // The deadline arm is the ordinary race: close simply never arrived. A raced
+  // spawn-failed observation is different evidence — the child errored
+  // asynchronously (e.g. the executable vanished after pid assignment), the
+  // group dissolved because nothing ever ran, and the errno names the cause.
+  // Reporting that as an unexplained unavailable close would hide it.
+  if (observation !== null && observation.kind === "spawn-failed") {
+    return failed({
+      kind: "termination-unconfirmed",
+      message: `${trigger} process group is gone but the spawned process had failed to start: ${messageOf(observation.cause)}`,
+      diagnostics: diagnostics(stdout, stderr),
+    });
+  }
+  return observation !== null && observation.kind === "closed"
+    ? Object.freeze({ ok: true, value: observation })
     : failed({
         kind: "termination-unconfirmed",
         message: `${trigger} process group is gone but the parent close observation is unavailable`,
@@ -939,8 +990,20 @@ async function runProjectCommand(
     if (trigger.observation.kind === "spawn-failed") {
       return spawnFailure(trigger.observation.cause, diagnostics(stdout, stderr));
     }
-    const initialGroup = observeClosedProcessGroup(processGroupId);
-    if (initialGroup.kind === "gone") {
+    const settledGroup = await settleClosedProcessGroup(
+      "completion parent closed",
+      "post-close signalling was refused because the numeric group id is no longer identity-bound",
+      processGroupId,
+      hardKillWaitMs,
+    );
+    if (settledGroup.kind === "unconfirmed") {
+      return failed({
+        kind: "termination-unconfirmed",
+        message: settledGroup.message,
+        diagnostics: diagnostics(stdout, stderr),
+      });
+    }
+    if (settledGroup.kind === "initially-gone") {
       return observedExecution(
         repositoryRoot,
         check,
@@ -951,26 +1014,6 @@ async function runProjectCommand(
         false,
         reportMode,
       );
-    }
-    if (initialGroup.kind === "error") {
-      return failed({
-        kind: "termination-unconfirmed",
-        message: `completion parent closed but process-tree identity could not be observed: ${initialGroup.message}`,
-        diagnostics: diagnostics(stdout, stderr),
-      });
-    }
-    const settled = await waitForClosedProcessGroup(processGroupId, hardKillWaitMs);
-    if (settled.kind !== "gone") {
-      return failed({
-        kind: "termination-unconfirmed",
-        message: settledProcessGroupRefusal(
-          "completion parent closed",
-          "post-close signalling was refused because the numeric group id is no longer identity-bound",
-          processGroupId,
-          settled,
-        ),
-        diagnostics: diagnostics(stdout, stderr),
-      });
     }
     return failed({
       kind: "process-tree-survived",
@@ -991,26 +1034,16 @@ async function runProjectCommand(
   // fail-closed. SIGTERM/SIGKILL escalation stays authorized only in the
   // leader-unreaped phase handled below.
   if (reapingPhase().kind === "leader-reaped") {
-    const initialGroup = observeClosedProcessGroup(processGroupId);
-    if (initialGroup.kind === "error") {
+    const settledGroup = await settleClosedProcessGroup(
+      `${trigger.kind} completion check ended`,
+      "post-exit signalling was refused because the numeric group id is no longer identity-bound",
+      processGroupId,
+      hardKillWaitMs,
+    );
+    if (settledGroup.kind === "unconfirmed") {
       return failed({
         kind: "termination-unconfirmed",
-        message: `${trigger.kind} completion check ended but process-tree identity could not be observed: ${initialGroup.message}`,
-        diagnostics: diagnostics(stdout, stderr),
-      });
-    }
-    const settled = initialGroup.kind === "gone"
-      ? Object.freeze({ kind: "gone", reason: "absent" } as const)
-      : await waitForClosedProcessGroup(processGroupId, hardKillWaitMs);
-    if (settled.kind !== "gone") {
-      return failed({
-        kind: "termination-unconfirmed",
-        message: settledProcessGroupRefusal(
-          `${trigger.kind} completion check ended`,
-          "post-exit signalling was refused because the numeric group id is no longer identity-bound",
-          processGroupId,
-          settled,
-        ),
+        message: settledGroup.message,
         diagnostics: diagnostics(stdout, stderr),
       });
     }
@@ -1026,7 +1059,7 @@ async function runProjectCommand(
         diagnostics: diagnostics(stdout, stderr),
       });
     }
-    if (initialGroup.kind !== "gone") {
+    if (settledGroup.kind === "settled-after-survivors") {
       return failed({
         kind: "process-tree-survived",
         message: `${trigger.kind} completion check ended while process-group ${processGroupId} descendants remained; ` +

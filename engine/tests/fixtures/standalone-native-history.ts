@@ -11,7 +11,7 @@ export async function startNativeLegacyReview(handle: RunDirHandle) {
   const history = await import("./standalone-reviewer-protocol");
   const machine = await import("../../src/core/standalone-review-machine");
   const scope = ["src/repair.mjs", "src/types.ts", "README.md"];
-  const head = helpers.gitText(["rev-parse", "HEAD"]);
+  const head = helpers.gitText(["rev-parse", "HEAD"], "refuse");
   const source = helpers.frozenScopeSection(scope, head);
   const contexts: ContextPacket[] = [];
   const roster = core.STANDALONE_REVIEWER_ROLES.map(role => {

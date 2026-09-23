@@ -1,10 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import advancePhaseHandler, {
   applyEligiblePhaseTransition,
-  resolveTransition,
   countMarkers,
   isPhaseResultEligible,
+  observePhaseTransition,
+  type PhaseTransitionResolution,
 } from "../../../src/handlers/subagent-stop/advance-phase";
+import { parseSpecArtifactDirectory } from "../../../src/core/phase-artifact-paths";
 import { findFile } from "../../../src/utils/find-file";
 import {
   ARCH_PANEL_AGENTS,
@@ -14,13 +16,13 @@ import {
   SUBAGENT_DIR,
 } from "../../../src/config";
 import { stripNamespace } from "../../../src/utils/strip-namespace";
-import type { TaskGraph } from "../../../src/types";
+import type { Phase, TaskGraph } from "../../../src/types";
 import { StateManager } from "../../../src/state-manager";
 import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-/** Minimal TaskGraph for resolveTransition */
+/** Minimal TaskGraph for transition tests */
 function mkState(overrides: Partial<TaskGraph> = {}): TaskGraph {
   return {
     current_phase: "init",
@@ -170,9 +172,23 @@ describe("applyEligiblePhaseTransition", () => {
   });
 });
 
-// ── resolveTransition ─────────────────────────────────────────────
+// ── phase transitions (production parse-and-observe) ─────────────────────────────────────────────
 
-describe("resolveTransition", () => {
+/**
+ * The retired cwd-defaulted compatibility shell's parse-and-observe sequence,
+ * bound to an EXPLICIT project boundary: production callers pass the root
+ * derived from the TaskGraph's own location, so the tests drive exactly that
+ * path instead of any ambient-cwd spelling.
+ */
+const makeTransitionResolver = (baseDir: () => string) =>
+  (completedPhase: Phase, state: TaskGraph): PhaseTransitionResolution => {
+    const parsedSpecDir = parseSpecArtifactDirectory(state.spec_dir);
+    return parsedSpecDir.ok
+      ? observePhaseTransition(completedPhase, state, parsedSpecDir.value, baseDir()).resolution
+      : { kind: "not-ready", reason: parsedSpecDir.message };
+  };
+
+describe("phase transitions", () => {
   let tmpDir: string;
   let origCwd: string;
 
@@ -186,6 +202,8 @@ describe("resolveTransition", () => {
     process.chdir(origCwd);
     rmSync(tmpDir, { recursive: true, force: true });
   });
+
+  const resolveTransition = makeTransitionResolver(() => tmpDir);
 
   // ── brainstorm ──
 
@@ -549,10 +567,12 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("panel agents are not PHASE_AGENT_MAP members — handler short-circuits before resolveTransition", () => {
+  const resolveTransition = makeTransitionResolver(() => tmpDir);
+
+  it("panel agents are not PHASE_AGENT_MAP members — handler short-circuits before the phase transition", () => {
     // advance-phase looks up `PHASE_AGENT_MAP[stripNamespace(agent_type)]`
     // and returns passthrough on undefined. Panel agents must miss this map, or
-    // their SubagentStop would run resolveTransition and could advance the phase.
+    // their SubagentStop would run the transition observer and could advance the phase.
     for (const agent of ARCH_PANEL_AGENTS) {
       expect(PHASE_AGENT_MAP[stripNamespace(agent)]).toBeUndefined();
       expect(PHASE_AGENT_MAP[stripNamespace(`loom:${agent}`)]).toBeUndefined();
@@ -565,8 +585,8 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
     const specDir = ".claude/specs/2026-07-16-feat";
     mkdirSync(join(tmpDir, specDir), { recursive: true });
     mkdirSync(join(tmpDir, ".claude", "plans"), { recursive: true });
-    // A same-date-prefix plan the date-prefix fallback in resolveTransition
-    // ("architecture" case) would happily pick up.
+    // A same-date-prefix plan the date-prefix fallback in the architecture
+    // transition case would happily pick up.
     writeFileSync(join(tmpDir, ".claude", "plans", "2026-07-16-stale.md"), "stale plan");
 
     const state = mkState({
@@ -582,7 +602,7 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
     expect(wouldAdvance!.nextPhase).toBe("plan-alignment");
 
     // The ONLY thing preventing that is panel agents missing from PHASE_AGENT_MAP,
-    // so the handler returns passthrough before resolveTransition is ever called.
+    // so the handler returns passthrough before any transition is ever evaluated.
     for (const agent of ARCH_PANEL_AGENTS) {
       expect(PHASE_AGENT_MAP[stripNamespace(agent)]).toBeUndefined();
     }

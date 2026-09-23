@@ -4032,7 +4032,11 @@ describe("Pi extension review tool_result integration", () => {
     // isRepo() would be true, and the refusal below would never fire —
     // turning this assertion RED against the vulnerable behavior.
     const outsideRoot = canonicalTempDir("loom-pi-non-repo-graph-");
-    const outsideStatePath = join(outsideRoot, "state", "active_task_graph.json");
+    // Canonical Pi state location: `projectRootForStateFile` refuses
+    // undocumented layouts, so the discriminator's non-repository proof must
+    // live at a documented shape — outside any Git repository is what matters,
+    // not where under the root the file sits.
+    const outsideStatePath = join(outsideRoot, ".pi", "state", "active_task_graph.json");
     mkdirSync(dirname(outsideStatePath), { recursive: true });
     // Sanity: the boundary observation must prove a non-repository HERE, or
     // the scenario does not discriminate the two wirings at all.

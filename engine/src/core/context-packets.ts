@@ -18,6 +18,7 @@ import { match } from "ts-pattern";
 import { STANDALONE_REVIEWER_PROTOCOL_V3, STANDALONE_REVIEWER_FIXED_SECTIONS_V3, parseStandaloneReviewerProtocolV3 } from "./standalone-lineage-contract";
 import { sha256Bytes, sha256Hex } from "./review-packet";
 import { isStandaloneReviewAgent } from "./model-profiles";
+import { isRecord } from "./plain-record";
 import { readExactDataRecord } from "./orchestration-contract/bytes";
 import {
   CURRENT_REVIEWER_PROTOCOL, REVIEWER_FIXED_SECTIONS, REVIEWER_OUTPUT_CONTRACT,
@@ -434,7 +435,7 @@ function requiredFieldProblem(input: ContextPacketInput): Readonly<{ field: stri
 }
 
 function parseSection(raw: unknown, field: string): DomainResult<ByteSection, ContextPacketError> {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isRecord(raw)) {
     return failure(field, "a context section must be an object");
   }
   if (sealedSections.has(raw)) return success(raw as ByteSection);
@@ -533,7 +534,7 @@ export function serializeStandaloneReviewerContextPacketV3(raw: unknown): Domain
 }
 
 function parseContextPacketHeader(raw: unknown): DomainResult<Record<string, unknown>, ContextPacketError> {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isRecord(raw)) {
     return failure("packet", "a context packet must be an object");
   }
   let record = raw as Record<string, unknown>;

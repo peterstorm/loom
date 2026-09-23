@@ -123,11 +123,20 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/core/reviewer-protocol.ts": ["jsonc-parser"],
     },
     perFileAllow: {
-      // The direct-edit guard normalizes panel/spec-artifact targets with pure
-      // path math (posix.normalize) before the prefix test — no filesystem I/O.
+      // Cross-branch pre-provisioning, INERT in this checkout: the feature-
+      // branch `block-direct-edits` normalizes panel/spec-artifact targets
+      // with pure path math (posix.normalize) before the prefix test, but the
+      // module checked in at this HEAD makes no node:path import (the
+      // normalization landed only on feat/defect-stale-flow and
+      // feat/grammar-constrained-decoding). Same tolerance as the find-file
+      // entry below: stale permission, not a lint failure.
       "engine/src/core/block-direct-edits.ts": ["node:path"],
-      // The emission ingestion folds a digest over captured payload bytes —
-      // digest-only hashing, mirroring review-packet/panel-program.
+      // Cross-branch pre-provisioning, INERT in this checkout: the feature-
+      // branch `emission-ingestion` folds a digest over captured payload
+      // bytes (digest-only hashing, mirroring review-packet/panel-program),
+      // but that module does not exist on this branch — the only occurrence
+      // of its name in this tree is this grant line. Same tolerance as the
+      // find-file entry below: stale permission, not a lint failure.
       "engine/src/core/emission-ingestion.ts": ["node:crypto"],
       "engine/src/core/harness-capture.ts": ["node:crypto"],
       "engine/src/core/harness-resources.ts": ["node:crypto", "node:path"],

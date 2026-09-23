@@ -41,7 +41,9 @@ export const PLAN_ARTIFACT_DIR = ".claude/plans";
  *
  * The canonical locations are `<root>/.claude/state/active_task_graph.json`
  * and `<root>/.pi/state/active_task_graph.json`; the legacy walk-up shape
- * places the file directly in the root. Path math only — the same purity
+ * places the file directly in the root. Only those shapes name a root: the
+ * name-based fallback below refuses any other accepted pointer instead of
+ * guessing a directory one level too high. Path math only — the same purity
  * contract as the rest of this module.
  */
 export function projectRootForStateFile(statePath: string, repositoryRoot?: string): string {
@@ -54,7 +56,13 @@ export function projectRootForStateFile(statePath: string, repositoryRoot?: stri
     return root;
   }
   const parent = dirname(absoluteStatePath);
-  return basename(parent) === "state" ? dirname(dirname(parent)) : parent;
+  if (basename(parent) !== "state") return parent;
+  const oneUp = dirname(parent);
+  if (basename(oneUp) === ".claude" || basename(oneUp) === ".pi") return dirname(oneUp);
+  throw new Error(
+    `State File ${absoluteStatePath} is not at a documented canonical location ` +
+    '(<root>/.claude/state/, <root>/.pi/state/, or directly in the root); refusing to derive a project boundary heuristically',
+  );
 }
 
 declare const SPEC_ARTIFACT_DIRECTORY: unique symbol;
@@ -74,7 +82,10 @@ export type SpecArtifactDirectoryParse =
 export function parseSpecArtifactDirectory(raw: string | null | undefined): SpecArtifactDirectoryParse {
   const candidate = raw ?? SPEC_ARTIFACT_DIR;
   if (isAbsolute(candidate) ||
-      (candidate !== SPEC_ARTIFACT_DIR && !resolvesWithin(candidate, SPEC_ARTIFACT_DIR))) {
+      // Both sides are project-relative, so the containment comparison is
+      // invariant in the base; the parse target itself is the explicit anchor
+      // (never an ambient cwd default).
+      (candidate !== SPEC_ARTIFACT_DIR && !resolvesWithin(candidate, SPEC_ARTIFACT_DIR, SPEC_ARTIFACT_DIR))) {
     return Object.freeze({
       ok: false,
       message: `spec_dir ${candidate} is outside ${SPEC_ARTIFACT_DIR} or is not project-relative`,
@@ -90,13 +101,15 @@ export function parseSpecArtifactDirectory(raw: string | null | undefined): Spec
  * the comparison rather than being carried along inside a string that still
  * "contains" the directory name. Equality with the directory itself is not
  * containment — an artifact must be a file under it, not the directory.
- * Compatibility callers may omit `baseDir`; production artifact shells pass
- * the TaskGraph Project Boundary explicitly.
+ * `baseDir` is required: the TaskGraph Project Boundary every relative
+ * candidate is resolved against. There is no cwd default — an omitted base
+ * would silently reintroduce the cross-checkout drift this seam was built to
+ * close.
  */
 export function resolvesWithin(
   candidate: string,
   directory: string,
-  baseDir: string = process.cwd(),
+  baseDir: string,
 ): boolean {
   const within = (path: string): string => isAbsolute(path) ? resolve(path) : resolve(baseDir, path);
   const fromDirectory = relative(within(directory), within(candidate));
@@ -125,8 +138,8 @@ export type PhaseArtifactKind = "spec" | "plan";
  */
 export function classifyPhaseArtifact(
   filePath: string,
-  specDir: string = SPEC_ARTIFACT_DIR,
-  baseDir: string = process.cwd(),
+  specDir: string,
+  baseDir: string,
 ): PhaseArtifactKind | null {
   if (filePath.length === 0) return null;
   if (basename(filePath) === "spec.md" && resolvesWithin(filePath, specDir, baseDir)) return "spec";
@@ -153,8 +166,8 @@ export type PhaseArtifactUpdates = Readonly<{
  */
 export function phaseArtifactUpdates(
   writtenPaths: readonly string[],
-  specDir: string = SPEC_ARTIFACT_DIR,
-  baseDir: string = process.cwd(),
+  specDir: string,
+  baseDir: string,
 ): PhaseArtifactUpdates {
   const updates: { spec_file?: string; plan_file?: string } = {};
   for (const path of writtenPaths) {

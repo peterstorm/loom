@@ -17,7 +17,7 @@ import reopenCompletedWaveHandler, {
   reopenCompletedWave,
   type WaveReopeningProof,
 } from "../../src/handlers/helpers/reopen-completed-wave";
-import { parseNewTestEvidence, type Task, type TaskGraph } from "../../src/types";
+import { NEW_TEST_EVIDENCE_NOT_WRITTEN, parseNewTestEvidence, type Task, type TaskGraph } from "../../src/types";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
 import { applyUntrustedStopResolution } from "../../src/core/implementation-application";
 import {
@@ -369,8 +369,7 @@ describe("reopen completed Wave", () => {
         filesModified: ["src/a.ts"],
         changedDeclaredArtifacts: ["src/a.ts"],
         bytesChangedSinceAttempt: false,
-        newTestsWritten: false,
-        newTestEvidence: "",
+        newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
       };
       const revalidated = ["T19", "T22"].reduce<TaskGraph>((state, taskId) =>
         applyUntrustedStopResolution({ ...state, executing_tasks: [taskId] }, taskId, freshStop).state,

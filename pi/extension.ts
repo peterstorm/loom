@@ -35,6 +35,7 @@ import {
 } from "../engine/src/handlers/task-execution";
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
 import { admitPiSpawnBatch, MAX_PI_ORCHESTRATION_BATCH_SIZE } from "../engine/src/core/spawn-admission";
+import { isRecord } from "../engine/src/core/plain-record";
 
 
 // Engine SubagentStop logic (harness-agnostic functions already exported)
@@ -352,7 +353,7 @@ function piSpawnItem(raw: Record<string, unknown>, index: number): Record<string
 }
 
 export function piSpawnCwd(raw: unknown, index: number, defaultCwd: string): string {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isRecord(raw)) {
     throw new Error("Pi subagent input must be an object before cwd resolution");
   }
   const input = raw as Record<string, unknown>;
@@ -372,7 +373,7 @@ export function piSpawnCwd(raw: unknown, index: number, defaultCwd: string): str
  * external input remains distinguishable so an armed state-file guard can fail
  * closed instead of treating input-shape drift as an allowed empty command. */
 function piBashCommand(raw: unknown): string | null {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  if (!isRecord(raw)) return null;
   const command = (raw as Record<string, unknown>).command;
   return typeof command === "string" ? command : null;
 }
@@ -390,7 +391,7 @@ const writeTarget = (input: Record<string, unknown>, path: string): PiWriteTarge
 
 /** Parse every target before a scoped write can proceed; no partial batch exists. */
 export function piWriteTargetPaths(raw: unknown): PiWriteTargetPathsResult {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isRecord(raw)) {
     return Object.freeze({ ok: false, error: "write input must be a plain object" });
   }
   const input = raw as Record<string, unknown>;
@@ -400,7 +401,7 @@ export function piWriteTargetPaths(raw: unknown): PiWriteTargetPathsResult {
   }
   const paths: string[] = [];
   for (const [index, edit] of input.edits.entries()) {
-    if (typeof edit !== "object" || edit === null || Array.isArray(edit)) {
+    if (!isRecord(edit)) {
       return Object.freeze({ ok: false, error: `write input.edits[${index}] must be a plain object` });
     }
     const parsed = writeTarget(edit as Record<string, unknown>, `write input.edits[${index}]`);
@@ -412,7 +413,7 @@ export function piWriteTargetPaths(raw: unknown): PiWriteTargetPathsResult {
 }
 
 export function replacePiSpawnTask(raw: unknown, index: number, task: string): void {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isRecord(raw)) {
     throw new Error("Pi subagent input must be an object before write-grant injection");
   }
   const input = raw as Record<string, unknown>;
@@ -1679,7 +1680,7 @@ export default function (
           }
           dispatchTaskExecutionSpawns = Object.freeze(taskExecutionSpawns.map((spawn, index) => {
             if (spawn.kind !== "implementation") return spawn;
-            if (typeof event.input !== "object" || event.input === null || Array.isArray(event.input)) {
+            if (!isRecord(event.input)) {
               throw new Error("Pi implementation input became malformed before dispatch registration");
             }
             const prompt = piSpawnItem(event.input as Record<string, unknown>, index).task;
@@ -2355,7 +2356,7 @@ export default function (
     };
 
     const rawDetails: unknown = event.details;
-    const details = typeof rawDetails === "object" && rawDetails !== null && !Array.isArray(rawDetails)
+    const details = isRecord(rawDetails)
       ? rawDetails as Record<string, unknown>
       : null;
     const hasResults = details !== null && Object.hasOwn(details, "results");

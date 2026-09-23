@@ -96,6 +96,9 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/implementation-retry.ts",
   "engine/src/core/implementation-completion.ts",
   "engine/src/core/task-id.ts",
+  // The ONE shared plain-record wire guard (state-file-wire, findings,
+  // context-packets): a dependency-free pure predicate leaf.
+  "engine/src/core/plain-record.ts",
 ];
 
 /** Import specifiers that indicate I/O capability or ambient non-determinism */

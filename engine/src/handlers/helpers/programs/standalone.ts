@@ -55,9 +55,13 @@ function initialStandaloneRequests(authority: FrozenStandaloneReviewAuthority) {
   });
 }
 
-const successorGitAuthorityWitness = (): string => gitText([
-  "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all",
-]);
+const successorGitAuthorityWitness = (): string =>
+  // A clean worktree legitimately produces empty porcelain output, so the
+  // confirmed-empty decision here is "legitimate" — accepted only after the
+  // bounded retry, never from a single unobserved success.
+  gitText([
+    "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all",
+  ], "legitimate");
 
 export async function prepareStandaloneSuccessorFacadeStart(runsRoot: string, run: string, input: StandaloneSuccessorStartInput) {
   try {

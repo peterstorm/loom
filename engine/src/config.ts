@@ -39,7 +39,7 @@ export const PHASE_ORDER: readonly Phase[] = PHASES;
  *  declare — they all run in ARCH_PANEL_PHASE by construction — so
  *  `{ kind: "arch-panel", phase: "decompose" }` is unrepresentable rather
  *  than policed by a load-time throw. Normal phase-agent completion is handed
- *  to resolveTransition, while panel-agent completion is intentionally
+ *  to the phase-transition observer, while panel-agent completion is intentionally
  *  ignored by advance-phase so the architecture phase cannot advance
  *  mid-panel. Exact-name phase/panel disjointness is structural (one catalog
  *  key, one kind); the runtime guard below remains for suffix-variant
@@ -100,7 +100,7 @@ function frozenSet<T>(values: Iterable<T>): ReadonlySet<T> {
  *  (kind `arch-panel`). Recognized by phase validation as architecture-phase
  *  work, but INVISIBLE to advance-phase — never in PHASE_AGENT_MAP so only
  *  architecture-agent's SubagentStop advances the phase. If a designer/judge were
- *  a phase agent, its completion would fire resolveTransition and the date-prefix
+ *  a phase agent, its completion would fire a phase transition and the date-prefix
  *  plan fallback could advance the phase mid-panel. The disjointness is structural
  *  for exact names (one key, one kind) AND enforced at module load (the guard
  *  below throws on import) for suffix-variant collisions — belt and suspenders.

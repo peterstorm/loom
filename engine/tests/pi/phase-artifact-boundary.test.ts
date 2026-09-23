@@ -16,7 +16,8 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { observeTaskGraphProjectBoundary } from "../../src/config";
-import { resolveTransition, projectRootForStateFile } from "../../src/handlers/subagent-stop/advance-phase";
+import { projectRootForStateFile, observePhaseTransition } from "../../src/handlers/subagent-stop/advance-phase";
+import { parseSpecArtifactDirectory } from "../../src/core/phase-artifact-paths";
 import {
   applyPhaseAgentPiResult,
   type TaskGraphStore,
@@ -37,6 +38,14 @@ const tempRoot = (): string => trackedTempDir("loom-phase-boundary-");
 afterEach(() => {
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
 });
+
+/** The production parse-and-observe sequence, with the probe boundary explicit. */
+const observeTransitionAt = (completedPhase: Phase, state: TaskGraph, baseDir: string) => {
+  const parsedSpecDir = parseSpecArtifactDirectory(state.spec_dir);
+  return parsedSpecDir.ok
+    ? observePhaseTransition(completedPhase, state, parsedSpecDir.value, baseDir).resolution
+    : ({ kind: "not-ready", reason: parsedSpecDir.message } as const);
+};
 
 describe("phase artifacts resolve against the graph's project boundary, not cwd", () => {
   it("projectRootForStateFile derives the .claude-owning root from the state path", () => {
@@ -90,14 +99,15 @@ describe("phase artifacts resolve against the graph's project boundary, not cwd"
 
       // The boundary-anchored observation finds the artifact the cwd-anchored
       // one cannot see.
-      expect(resolveTransition("brainstorm", state, root)).toEqual({
+      expect(observeTransitionAt("brainstorm", state, root)).toEqual({
         kind: "ready",
         nextPhase: "specify",
         artifact: join(specDir, "brainstorm.md"),
       });
-      // The compatibility default (cwd) refuses — the exact failure the
-      // worktree scenario produced.
-      expect(resolveTransition("brainstorm", state).kind).toBe("not-ready");
+      // The cwd-anchored spelling refuses — the exact failure the worktree
+      // scenario produced. (There is no cwd default anywhere in the concept;
+      // this drives the ambient-cwd choice explicitly to keep the contrast.)
+      expect(observeTransitionAt("brainstorm", state, process.cwd()).kind).toBe("not-ready");
     } finally {
       process.chdir(previousCwd);
     }
@@ -120,7 +130,7 @@ describe("phase artifacts resolve against the graph's project boundary, not cwd"
       wave_gates: {},
     } as unknown as TaskGraph;
 
-    expect(resolveTransition("brainstorm", state, graphRoot)).toEqual({
+    expect(observeTransitionAt("brainstorm", state, graphRoot)).toEqual({
       kind: "not-ready",
       reason: expect.stringContaining("not project-relative"),
     });

@@ -229,6 +229,12 @@ export function parseNewTestEvidence(written: unknown, evidence: unknown): NewTe
     : Object.freeze({ kind: "not-written", written: false, evidence: text });
 }
 
+/** The canonical absent new-test observation: nothing written, no evidence.
+ *  Producers with no transport evidence hand this exact value to the ADT
+ *  instead of re-running the legacy pair parser on empty input. */
+export const NEW_TEST_EVIDENCE_NOT_WRITTEN: NewTestEvidence =
+  Object.freeze({ kind: "not-written", written: false, evidence: "" });
+
 export function parseStoredNewTestEvidence(raw: unknown):
   | Readonly<{ ok: true; value: NewTestEvidence }>
   | Readonly<{ ok: false; error: string }> {

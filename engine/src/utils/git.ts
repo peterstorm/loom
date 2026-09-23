@@ -1,9 +1,9 @@
 /**
  * Git utilities — pure functions for test counting, thin wrappers for I/O
- * Uses node:child_process (bun-compatible) — execFileSync for user input, execSync for fixed commands
+ * Uses node:child_process (bun-compatible) — execFileSync for every spawned Git command
  */
 
-import { execSync, execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
+import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -169,21 +169,6 @@ export function observeExactHead(root: string): GitHeadObservation {
       : { ok: false, error: `git returned an invalid HEAD for ${root}: ${JSON.stringify(headSha)}` };
   } catch (error) {
     return { ok: false, error: `cannot read Git HEAD for ${root}: ${commandFailure(error)}` };
-  }
-}
-
-export function isGitRepo(): boolean {
-  const root = currentRepoRoot("isGitRepo");
-  try {
-    execSync("git rev-parse --git-dir", { cwd: root, stdio: "ignore" });
-    return true;
-  } catch (error) {
-    process.stderr.write(
-      `loom: isGitRepo could not verify a git repository` +
-        `${root === undefined ? " (repo root unresolved)" : ` at ${root}`}: ` +
-        `${error instanceof Error ? error.message : String(error)} — new-test evidence will read as 'no tests written'\n`,
-    );
-    return false;
   }
 }
 
