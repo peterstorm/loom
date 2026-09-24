@@ -63,6 +63,7 @@ import {
 } from "../core/remediation-machine";
 import { compareCandidateRepositoryWitnesses } from "../core/defect-family-accounting";
 import { recaptureRemediationCandidateWorkspace } from "./remediation-candidate";
+import { confirmedEmptyPassthrough, observeGitProbe } from "../utils/git-probe";
 
 /** Fixed argument templates. Nothing here is ever built from caller input. */
 const GIT_EXECUTABLE = "git";
@@ -174,6 +175,20 @@ export function runGit(
 const digestOf = (value: string): ArtifactDigest =>
   createHash("sha256").update(value).digest("hex") as ArtifactDigest;
 
+/** Run one Git command, retrying twice when it exits 0 with NO output — the
+ *  canonical transient empty-stdout rationale lives at `observeGitProbe`; a
+ *  confirmed empty passes through to the digesting sites' own guards. */
+function runGitProbingEmpty(
+  repositoryRoot: string,
+  invocation: GitInvocation,
+): DomainResult<Buffer, GitBoundaryError> {
+  const observed = observeGitProbe(
+    () => runGit(repositoryRoot, invocation),
+    (value) => value.length === 0,
+  );
+  return confirmedEmptyPassthrough(observed);
+}
+
 /** Split NUL-delimited Git output; a trailing NUL does not produce an empty field. */
 function splitNul(output: Buffer): readonly string[] {
   return output.toString("utf-8").split("\0").filter((entry) => entry.length > 0);
@@ -186,19 +201,37 @@ function splitNul(output: Buffer): readonly string[] {
 export type GitRepository = Readonly<{ root: string; gitDir: string }>;
 
 /**
+ * The emptiness guard the transient-retry passthrough feeds: a confirmed
+ * empty that survives the bounded retries reaches here and refuses loudly
+ * with the exact operation, never digesting sha256("") as a witness.
+ */
+function requireNonEmptyGitOutput(
+  operation: string,
+  output: Buffer,
+  message: string,
+): DomainResult<string, GitBoundaryError> {
+  const text = output.toString("utf-8").trim();
+  return text.length === 0 ? failure(operation, message) : success(text);
+}
+
+/**
  * Resolve the repository root ONCE and use it as every later invocation's cwd.
  * A relative path is only meaningful against a fixed root, so resolving per
  * call would let the same path mean different files at different moments.
  */
 export function openGitRepository(startDirectory: string): DomainResult<GitRepository, GitBoundaryError> {
   const start = resolve(startDirectory);
-  const root = runGit(start, { operation: "rev-parse", args: ["rev-parse", "--show-toplevel"] });
+  const root = runGitProbingEmpty(start, { operation: "rev-parse", args: ["rev-parse", "--show-toplevel"] });
   if (!root.ok) return root;
-  const gitDir = runGit(start, { operation: "rev-parse", args: ["rev-parse", "--absolute-git-dir"] });
+  const gitDir = runGitProbingEmpty(start, { operation: "rev-parse", args: ["rev-parse", "--absolute-git-dir"] });
   if (!gitDir.ok) return gitDir;
+  const resolvedRoot = requireNonEmptyGitOutput("rev-parse", root.value, "git rev-parse --show-toplevel returned no output");
+  if (!resolvedRoot.ok) return resolvedRoot;
+  const resolvedGitDir = requireNonEmptyGitOutput("rev-parse", gitDir.value, "git rev-parse --absolute-git-dir returned no output");
+  if (!resolvedGitDir.ok) return resolvedGitDir;
   return success(canonicalRecord({
-    root: root.value.toString("utf-8").trim(),
-    gitDir: gitDir.value.toString("utf-8").trim(),
+    root: resolvedRoot.value,
+    gitDir: resolvedGitDir.value,
   }));
 }
 
@@ -234,7 +267,7 @@ function changeOf(code: string, present: boolean): ObservedDirtyPath["change"] {
 export function observeStagedPaths(
   repository: GitRepository,
 ): DomainResult<readonly string[], GitBoundaryError> {
-  const output = runGit(repository.root, {
+  const output = runGitProbingEmpty(repository.root, {
     operation: "diff-index-staged",
     args: ["diff-index", "--cached", "--name-only", "-z", "HEAD"],
   });
@@ -244,7 +277,7 @@ export function observeStagedPaths(
 export function observeDirtyPaths(
   repository: GitRepository,
 ): DomainResult<readonly ObservedDirtyPath[], GitBoundaryError> {
-  const output = runGit(repository.root, {
+  const output = runGitProbingEmpty(repository.root, {
     operation: "status",
     args: ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
   });
@@ -331,21 +364,27 @@ export type RepositoryWitnessInput = Readonly<{
 export function snapshotRepositoryWitness(
   repository: GitRepository,
 ): DomainResult<RepositoryWitnessInput, GitBoundaryError> {
-  const head = runGit(repository.root, { operation: "rev-parse", args: ["rev-parse", "HEAD^{tree}"] });
+  const head = runGitProbingEmpty(repository.root, { operation: "rev-parse", args: ["rev-parse", "HEAD^{tree}"] });
   if (!head.ok) return head;
-  const index = runGit(repository.root, {
+  // A repository that reaches the witness always has a HEAD commit; even a
+  // commit with an empty tree resolves to the well-known empty-tree object.
+  // Silence after the transient retry is therefore a malformed observation,
+  // never an empty value to digest.
+  const resolvedHead = requireNonEmptyGitOutput("rev-parse", head.value, "git rev-parse HEAD^{tree} returned no output");
+  if (!resolvedHead.ok) return resolvedHead;
+  const index = runGitProbingEmpty(repository.root, {
     operation: "ls-files",
     args: ["ls-files", "--stage", "-z"],
   });
   if (!index.ok) return index;
-  const worktree = runGit(repository.root, {
+  const worktree = runGitProbingEmpty(repository.root, {
     operation: "status",
     args: ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
   });
   if (!worktree.ok) return worktree;
 
   return success(canonicalRecord({
-    baseTreeDigest: digestOf(head.value.toString("utf-8").trim()),
+    baseTreeDigest: digestOf(resolvedHead.value),
     indexDigest: digestOf(index.value.toString("utf-8")),
     worktreeDigest: digestOf(worktree.value.toString("utf-8")),
   }));
@@ -487,7 +526,7 @@ export function readStagedPaths(
   const present = requireTemporaryIndex(temporary, "diff-index");
   if (!present.ok) return present;
 
-  const output = runGit(repository.root, {
+  const output = runGitProbingEmpty(repository.root, {
     operation: "diff-index",
     args: ["diff-index", "--cached", "--name-only", "-z", "HEAD"],
     indexFile: temporary.path,
@@ -510,7 +549,7 @@ export function digestTemporaryIndex(
   const present = requireTemporaryIndex(temporary, "ls-files");
   if (!present.ok) return present;
 
-  const output = runGit(repository.root, {
+  const output = runGitProbingEmpty(repository.root, {
     operation: "ls-files",
     args: ["ls-files", "--stage", "-z"],
     indexFile: temporary.path,
@@ -543,7 +582,7 @@ export function installVerifiedIndex(
   const present = requireTemporaryIndex(temporary, "install");
   if (!present.ok) return present;
 
-  const indexLocation = runGit(repository.root, {
+  const indexLocation = runGitProbingEmpty(repository.root, {
     operation: "rev-parse-index",
     args: ["rev-parse", "--git-path", "index"],
   });

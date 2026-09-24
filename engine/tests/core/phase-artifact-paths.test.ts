@@ -6,6 +6,7 @@ import {
   classifyPhaseArtifact,
   parseSpecArtifactDirectory,
   phaseArtifactUpdates,
+  projectRootForStateFile,
   resolvesWithin,
 } from "../../src/core/phase-artifact-paths";
 
@@ -16,42 +17,46 @@ import {
  * resolved reading, with no filesystem involved: nothing here asks whether a
  * path exists, which is exactly why the rule can be tested at all.
  */
+
+/** The seam requires an explicit boundary; no production caller defaults it. */
+const BOUNDARY = "/worktree-b";
+
 describe("classifyPhaseArtifact", () => {
   it("accepts a spec and a plan inside their own directories", () => {
-    expect(classifyPhaseArtifact(".claude/specs/2026-08-16-thing/spec.md")).toBe("spec");
-    expect(classifyPhaseArtifact(".claude/plans/2026-08-16-thing.md")).toBe("plan");
+    expect(classifyPhaseArtifact(".claude/specs/2026-08-16-thing/spec.md", SPEC_ARTIFACT_DIR, BOUNDARY)).toBe("spec");
+    expect(classifyPhaseArtifact(".claude/plans/2026-08-16-thing.md", SPEC_ARTIFACT_DIR, BOUNDARY)).toBe("plan");
   });
 
   it("refuses a traversal path that merely CONTAINS the directory name", () => {
     // The substring form both harnesses used returned true for this.
     const escape = ".claude/specs/../../../../tmp/evil/spec.md";
     expect(escape.includes(".claude/specs/")).toBe(true);
-    expect(classifyPhaseArtifact(escape)).toBeNull();
+    expect(classifyPhaseArtifact(escape, SPEC_ARTIFACT_DIR, BOUNDARY)).toBeNull();
 
     const planEscape = ".claude/plans/../../../../tmp/evil/plan.md";
     expect(planEscape.includes(".claude/plans/")).toBe(true);
-    expect(classifyPhaseArtifact(planEscape)).toBeNull();
+    expect(classifyPhaseArtifact(planEscape, SPEC_ARTIFACT_DIR, BOUNDARY)).toBeNull();
   });
 
   it("scopes a spec to the run's own spec_dir when it has one", () => {
     const specDir = ".claude/specs/2026-08-16-mine";
-    expect(classifyPhaseArtifact(`${specDir}/spec.md`, specDir)).toBe("spec");
+    expect(classifyPhaseArtifact(`${specDir}/spec.md`, specDir, BOUNDARY)).toBe("spec");
     // A sibling run's spec is a real spec.md in the shared root, and must not
     // be adopted by a run scoped elsewhere.
-    expect(classifyPhaseArtifact(".claude/specs/2026-08-16-theirs/spec.md", specDir)).toBeNull();
+    expect(classifyPhaseArtifact(".claude/specs/2026-08-16-theirs/spec.md", specDir, BOUNDARY)).toBeNull();
   });
 
   it("judges the filename by segment, not by suffix", () => {
     // `endsWith("/spec.md")` accepted this; `basename` does not.
-    expect(classifyPhaseArtifact(".claude/specs/run/notspec.md")).toBeNull();
+    expect(classifyPhaseArtifact(".claude/specs/run/notspec.md", SPEC_ARTIFACT_DIR, BOUNDARY)).toBeNull();
     // `endsWith(".md")` accepts a final segment that is literally `.md`.
-    expect(classifyPhaseArtifact(".claude/plans/.md")).toBeNull();
+    expect(classifyPhaseArtifact(".claude/plans/.md", SPEC_ARTIFACT_DIR, BOUNDARY)).toBeNull();
   });
 
   it("refuses the directories themselves and the empty path", () => {
-    expect(classifyPhaseArtifact(SPEC_ARTIFACT_DIR)).toBeNull();
-    expect(classifyPhaseArtifact(PLAN_ARTIFACT_DIR)).toBeNull();
-    expect(classifyPhaseArtifact("")).toBeNull();
+    expect(classifyPhaseArtifact(SPEC_ARTIFACT_DIR, SPEC_ARTIFACT_DIR, BOUNDARY)).toBeNull();
+    expect(classifyPhaseArtifact(PLAN_ARTIFACT_DIR, SPEC_ARTIFACT_DIR, BOUNDARY)).toBeNull();
+    expect(classifyPhaseArtifact("", SPEC_ARTIFACT_DIR, BOUNDARY)).toBeNull();
   });
 
   it("never classifies a path that escapes its directory, for any tail", () => {
@@ -59,10 +64,40 @@ describe("classifyPhaseArtifact", () => {
       fc.array(fc.constantFrom("..", "a", "b", "sub"), { minLength: 1, maxLength: 6 }),
       (segments) => {
         const candidate = [SPEC_ARTIFACT_DIR, ...segments, "spec.md"].join("/");
-        const classified = classifyPhaseArtifact(candidate);
-        return classified === null || resolvesWithin(candidate, SPEC_ARTIFACT_DIR);
+        const classified = classifyPhaseArtifact(candidate, SPEC_ARTIFACT_DIR, BOUNDARY);
+        return classified === null || resolvesWithin(candidate, SPEC_ARTIFACT_DIR, BOUNDARY);
       },
     ));
+  });
+});
+
+describe("projectRootForStateFile", () => {
+  it("uses explicit project authority for a noncanonical nested State File", () => {
+    expect(projectRootForStateFile("/repo/custom/state.json", "/repo")).toBe("/repo");
+  });
+
+  it("rejects a State File outside the explicit project boundary", () => {
+    expect(() => projectRootForStateFile("/elsewhere/state.json", "/repo")).toThrow("outside observed project root");
+  });
+
+  it("derives the root for both canonical two-level locations", () => {
+    expect(projectRootForStateFile("/repo/.claude/state/active_task_graph.json")).toBe("/repo");
+    expect(projectRootForStateFile("/repo/.pi/state/active_task_graph.json")).toBe("/repo");
+  });
+
+  it("derives the root for the legacy walk-up shape", () => {
+    expect(projectRootForStateFile("/repo/active_task_graph.json")).toBe("/repo");
+  });
+
+  it("refuses an undocumented one-deep `state/` pointer instead of deriving the parent of the root", () => {
+    // The old fallback returned /parent-of-repo for this shape — one level too
+    // high against its own documented contract ("the directory containing
+    // .claude/"). An accepted pointer at an undocumented location must be
+    // refused, not heuristically re-rooted.
+    expect(() => projectRootForStateFile("/repo/state/active_task_graph.json"))
+      .toThrow("not at a documented canonical location");
+    expect(() => projectRootForStateFile("/repo/nested/state/active_task_graph.json"))
+      .toThrow("not at a documented canonical location");
   });
 });
 
@@ -74,6 +109,7 @@ describe("parseSpecArtifactDirectory", () => {
   });
 
   it.each([
+    ["absolute path even beneath the ambient project", `${process.cwd()}/.claude/specs/run`],
     ["absolute escape", "/tmp/foreign-specs"],
     ["relative escape", ".claude/specs/../../foreign-specs"],
     ["sibling prefix", ".claude/specs-foreign/run"],
@@ -85,11 +121,19 @@ describe("parseSpecArtifactDirectory", () => {
   });
 });
 
+describe("resolvesWithin", () => {
+  it("resolves relative authority against the supplied project root, never ambient cwd", () => {
+    expect(resolvesWithin(".claude/specs/run/spec.md", ".claude/specs/run", "/worktree-b")).toBe(true);
+    expect(resolvesWithin("/checkout-a/.claude/specs/run/spec.md", ".claude/specs/run", "/worktree-b")).toBe(false);
+    expect(resolvesWithin("/worktree-b/.claude/specs/run/spec.md", ".claude/specs/run", "/worktree-b")).toBe(true);
+  });
+});
+
 describe("phaseArtifactUpdates", () => {
   it("returns only the fields the writes justify", () => {
-    expect(phaseArtifactUpdates([])).toEqual({});
-    expect(phaseArtifactUpdates(["README.md", "engine/src/x.ts"])).toEqual({});
-    expect(phaseArtifactUpdates([".claude/plans/p.md"])).toEqual({ plan_file: ".claude/plans/p.md" });
+    expect(phaseArtifactUpdates([], SPEC_ARTIFACT_DIR, BOUNDARY)).toEqual({});
+    expect(phaseArtifactUpdates(["README.md", "engine/src/x.ts"], SPEC_ARTIFACT_DIR, BOUNDARY)).toEqual({});
+    expect(phaseArtifactUpdates([".claude/plans/p.md"], SPEC_ARTIFACT_DIR, BOUNDARY)).toEqual({ plan_file: ".claude/plans/p.md" });
   });
 
   it("lets the last write of each kind win", () => {
@@ -97,13 +141,13 @@ describe("phaseArtifactUpdates", () => {
       ".claude/specs/run/spec.md",
       ".claude/plans/first.md",
       ".claude/plans/second.md",
-    ])).toEqual({
+    ], SPEC_ARTIFACT_DIR, BOUNDARY)).toEqual({
       spec_file: ".claude/specs/run/spec.md",
       plan_file: ".claude/plans/second.md",
     });
   });
 
   it("drops a traversal write entirely rather than recording it", () => {
-    expect(phaseArtifactUpdates([".claude/specs/../../../tmp/evil/spec.md"])).toEqual({});
+    expect(phaseArtifactUpdates([".claude/specs/../../../tmp/evil/spec.md"], SPEC_ARTIFACT_DIR, BOUNDARY)).toEqual({});
   });
 });

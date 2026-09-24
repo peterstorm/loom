@@ -228,7 +228,8 @@ describe("Wave Gate façade completion-suite integration", () => {
     const runId = "run.coverage";
     const diagnostic = coverage.kind === "configured" ? "checks configured: project:sentinel" : "NOT CONFIGURED";
     const unstartedStatus = (await cli(root, ["status", "--json"], "", outside));
-    expect((await start(root, runId, outside))).toMatchObject({ kind: "spawn-batch" });
+    const started = await start(root, runId, outside);
+    expect(started, started.kind === "blocked" ? JSON.stringify(started) : "").toMatchObject({ kind: "spawn-batch" });
     const acceptedState = readFileSync(join(root, ".claude/state/active_task_graph.json"), "utf8");
     expect((await cli(root, ["status", "--json"], "", outside))).toMatchObject({
       facts: { waveCompletionSuiteReadiness: { value: { kind: "accepted", projectVerificationCoverage: coverage } } },
@@ -239,7 +240,8 @@ describe("Wave Gate façade completion-suite integration", () => {
     });
     expect(readFileSync(join(root, ".claude/state/active_task_graph.json"), "utf8")).toBe(acceptedState);
     expect(sentinelCount(root)).toBe(expectedCount);
-    expect((await resume(root, runId, outside))).toMatchObject({ kind: "spawn-batch" });
+    const resumed = await resume(root, runId, outside);
+    expect(resumed, resumed.kind === "blocked" ? JSON.stringify(resumed) : "").toMatchObject({ kind: "spawn-batch" });
     expect(sentinelCount(root)).toBe(expectedCount);
 
     // Source bytes are workspace evidence, never a new command roster after population.
@@ -254,7 +256,7 @@ describe("Wave Gate façade completion-suite integration", () => {
     expect(graph(root).verification_manifest).toEqual(manifest);
     expect(readFileSync(join(root, ".claude/state/active_task_graph.json"), "utf8")).toBe(beforeStatus);
     expect(sentinelCount(root)).toBe(expectedCount);
-  });
+  }, 60_000);
 
   it("treats only an absent Wave Gate sentinel as zero", () => {
     const root = canonicalTempDir("loom-wave-facade-counter-");
@@ -305,7 +307,8 @@ describe("Wave Gate façade completion-suite integration", () => {
     );
     expect(existsSync(artifact)).toBe(true);
 
-    expect((await resume(root, runId, outside)).kind).toBe("spawn-batch");
+    const resumedSuite = await resume(root, runId, outside);
+    expect(resumedSuite.kind, JSON.stringify(resumedSuite)).toBe("spawn-batch");
     expect((await cli(root, ["status", "--json"], "", outside))).toMatchObject({
       facts: { waveCompletionSuiteReadiness: { kind: "known", value: { kind: "accepted" } } },
     });

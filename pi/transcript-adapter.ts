@@ -3,7 +3,7 @@
 import { attributeExit, classifyTestCommandDetailed, type ClassifiedTestCommand } from "../engine/src/machine";
 import { splitCommandSegmentsWithOps, stripComment, stripEnvPrefix } from "../engine/src/core/shell-command";
 import { extractTestEvidence } from "../engine/src/core/test-evidence";
-import { boundedThrownCause } from "../engine/src/handlers/helpers/programs/standalone-successor-registration";
+import { boundedThrownCause } from "../engine/src/core/orchestration-contract";
 
 const TOOL_NAME_MAP: Readonly<Record<string, string>> = Object.freeze({
   bash: "Bash",

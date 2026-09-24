@@ -33,6 +33,10 @@ import {
   parseIsoInstant,
   parseReservationId,
 } from "../../../src/core/implementation-completion";
+import {
+  authorizeImplementationSpawn,
+  createImplementationAttemptContext,
+} from "../../../src/core/implementation-retry";
 import { taskFixture } from "../../fixtures/task-lifecycle";
 import type { TaskGraph } from "../../../src/types";
 
@@ -58,6 +62,11 @@ const createdAuthority = createImplementationAttemptAuthority({
   taskScopeBaseline: [], dirtySetBaseline: [],
 });
 if (!createdAuthority.ok) throw new Error(createdAuthority.error.errors.join("; "));
+// Protocol-2 lineage fields are part of every modern registration: the
+// rollback settlement appends a reclaimed receipt and the updated graph must
+// parse (a receipt-bearing Task without the lineage fields fails closed).
+const rosterAdmission = authorizeImplementationSpawn({ id: "T1" }, "Task ID: T1");
+if (!rosterAdmission.ok) throw new Error(rosterAdmission.error);
 const modernGraph: TaskGraph = {
   current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
   spec_file: null, plan_file: null, current_wave: 1, executing_tasks: ["T1"],
@@ -65,6 +74,13 @@ const modernGraph: TaskGraph = {
     id: "T1", description: "roster", agent: "code-implementer-agent",
     wave: 1, status: "pending", depends_on: [], file_list: [],
     active_implementation_attempt: createdAuthority.value,
+    active_implementation_context: createImplementationAttemptContext({
+      authority: createdAuthority.value,
+      prompt: "Task ID: T1",
+      admission: rosterAdmission,
+    }),
+    implementation_retry_protocol: 2,
+    implementation_retry_history_start: 0,
     attempt_artifact_baseline: [], attempt_repository_baseline: [],
     reserved_at: createdAuthority.value.reservedAt,
   })],

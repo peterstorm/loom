@@ -13,6 +13,7 @@
 
 import { describe, expect, it } from "vitest";
 import { canonicalRecord, canonicalStructuralEquals } from "../../src/core/orchestration-contract";
+import { encodeByteSection } from "../../src/core/context-packets";
 
 const jsonRoundTrip = <T>(value: T): unknown => JSON.parse(JSON.stringify(value)) as unknown;
 
@@ -123,6 +124,65 @@ describe("canonicalStructuralEquals", () => {
 
     it("refuses null against a record", () => {
       expect(canonicalStructuralEquals(null, {})).toBe(false);
+    });
+  });
+
+  // The Context Packet's ImmutableByteSequence is a Proxy with no own
+  // enumerable string keys, so record equality compared any two sequences
+  // vacuously (empty key sets), and the Array arm rejected the sequence vs its
+  // own parsed wire form. Both directions are pinned here: the packet round
+  // trip must compare equal, and two DIFFERENT byte runs must separate.
+  describe("Context Packet byte sequences", () => {
+    const section = (label: string, text: string) => {
+      const encoded = encodeByteSection(label, text);
+      if (!encoded.ok) throw new Error(encoded.error.message);
+      return encoded.value;
+    };
+    // A sequence frozen on the prototype serializes to a dense number array,
+    // and the parsed wire form is an ordinary plain array again.
+    const wireBytes = (label: string, text: string): unknown =>
+      (jsonRoundTrip({ bytes: section(label, text).bytes }) as { bytes: unknown }).bytes;
+
+    it("equates a sequence with its own parsed wire form, in both argument orders", () => {
+      const bytes = section("scope", "exact bytes").bytes;
+      const wire = wireBytes("scope", "exact bytes");
+      expect(canonicalStructuralEquals(bytes, wire)).toBe(true);
+      expect(canonicalStructuralEquals(wire, bytes)).toBe(true);
+    });
+
+    it("equates two sequences carrying the same bytes", () => {
+      const first = section("a", "same").bytes;
+      const second = section("b", "same").bytes;
+      expect(canonicalStructuralEquals(first, second)).toBe(true);
+    });
+
+    it("types absent indexed bytes honestly and never exposes mutable backing storage", () => {
+      const bytes = section("scope", "exact bytes").bytes;
+      expect(bytes[-1]).toBeUndefined();
+      expect(bytes[bytes.length]).toBeUndefined();
+      const ownedCopy = bytes.valueOf();
+      ownedCopy[0] = 0;
+      expect(bytes[0]).not.toBe(0);
+    });
+
+    it("separates two sequences whose bytes differ, where record equality was vacuously true", () => {
+      const first = section("a", "left bytes").bytes;
+      const second = section("b", "right bytes").bytes;
+      expect(canonicalStructuralEquals(first, second)).toBe(false);
+    });
+
+    it("refuses a sequence compared against a non-array record", () => {
+      const bytes = section("scope", "exact bytes").bytes;
+      expect(canonicalStructuralEquals(bytes, { 0: 101 })).toBe(false);
+      expect(canonicalStructuralEquals(bytes, new Map([[0, 101]]))).toBe(false);
+    });
+
+    it("compares sequences nested inside records position by position", () => {
+      const left = { label: "scope", bytes: section("scope", "same").bytes };
+      const right = { label: "scope", bytes: wireBytes("scope", "same") };
+      expect(canonicalStructuralEquals(left, right)).toBe(true);
+      const differing = { label: "scope", bytes: wireBytes("scope", "other") };
+      expect(canonicalStructuralEquals(left, differing)).toBe(false);
     });
   });
 

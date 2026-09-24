@@ -4,7 +4,7 @@ import {
   type SettledFloor,
 } from "../../src/core/requirement-coverage";
 import { capturedSpecCheck } from "../../src/core/spec-check";
-import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -12,6 +12,7 @@ import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import type { TaskGraph } from "../../src/types";
+import type { TaskGraphProjectBoundary } from "../../src/config";
 import { parseTaskGraph, type ParsedTaskGraph } from "../../src/state-manager";
 import { derivePendingTaskProof, evaluateTaskProof } from "../../src/core/proof-obligations";
 import { applyCompletionInfrastructureFailure } from "../../src/core/implementation-application";
@@ -28,11 +29,11 @@ import {
   captureRepositoryChangeBaseline,
 } from "../../src/utils/artifact-baseline";
 import {
-  applyFailedPiResult,
-  applyImplementationPiResult,
+  applyFailedPiResult as applyFailedPiResultWithBoundary,
+  applyImplementationPiResult as applyImplementationPiResultWithAuthority,
   applyPhaseAgentPiResult,
   applyReviewPiResult,
-  applySpecCheckPiResult,
+  applySpecCheckPiResult as applySpecCheckPiResultWithBoundary,
   currentPiReviewAuthority,
   currentPiSpecCheckAuthority,
   piSubagentFailureSignals,
@@ -57,6 +58,34 @@ import {
  */
 
 const NOW = "2026-08-16T00:00:00.000Z";
+const projectBoundaryAt = (root: string): TaskGraphProjectBoundary =>
+  Object.freeze({ kind: "state-layout", root });
+const DEFAULT_PROJECT_BOUNDARY = projectBoundaryAt(process.cwd());
+
+type FailedPiArgs = Parameters<typeof applyFailedPiResultWithBoundary>[0];
+const applyFailedPiResult = (
+  args: Omit<FailedPiArgs, "projectBoundary"> & Partial<Pick<FailedPiArgs, "projectBoundary">>,
+) => applyFailedPiResultWithBoundary({
+  ...args,
+  projectBoundary: args.projectBoundary ?? DEFAULT_PROJECT_BOUNDARY,
+});
+
+type ImplementationPiArgs = Parameters<typeof applyImplementationPiResultWithAuthority>[0];
+const applyImplementationPiResult = (
+  args: Omit<ImplementationPiArgs, "authoritativeStatePath"> &
+    Partial<Pick<ImplementationPiArgs, "authoritativeStatePath">>,
+) => applyImplementationPiResultWithAuthority({
+  ...args,
+  authoritativeStatePath: args.authoritativeStatePath ?? join(args.repository.root(), ".loom-test-state.json"),
+});
+
+type SpecCheckPiArgs = Parameters<typeof applySpecCheckPiResultWithBoundary>[0];
+const applySpecCheckPiResult = (
+  args: Omit<SpecCheckPiArgs, "projectBoundary"> & Partial<Pick<SpecCheckPiArgs, "projectBoundary">>,
+) => applySpecCheckPiResultWithBoundary({
+  ...args,
+  projectBoundary: args.projectBoundary ?? DEFAULT_PROJECT_BOUNDARY,
+});
 const parsedWaveRunId = parseOrchestrationRunId("run.pi-spec-check");
 const parsedWaveAuthorityDigest = parseArtifactDigest("a".repeat(64));
 const parsedWaveBatchEpoch = parseArtifactDigest("b".repeat(64));
@@ -322,6 +351,7 @@ describe("applyPhaseAgentPiResult", () => {
         completedPhase: "brainstorm",
         result: result({ agent: "brainstorm-agent", messages: [writeCall(brainstorm)] }),
         now: NOW,
+        phaseArtifactBaseDir: root,
       });
 
       expect(applied.processingErrors).toEqual([]);
@@ -341,6 +371,7 @@ describe("applyPhaseAgentPiResult", () => {
       completedPhase: "specify",
       result: result({ agent: "specify-agent", messages: [writeCall(".claude/specs/run/spec.md")] }),
       now: NOW,
+      phaseArtifactBaseDir: process.cwd(),
     });
 
     expect(applied.processingErrors).toEqual([
@@ -360,6 +391,7 @@ describe("applyPhaseAgentPiResult", () => {
         messages: [writeCall(".claude/specs/run/../../../../tmp/evil/spec.md")],
       }),
       now: NOW,
+      phaseArtifactBaseDir: process.cwd(),
     });
 
     expect(store.current().spec_file).toBeNull();
@@ -373,6 +405,7 @@ describe("applyPhaseAgentPiResult", () => {
       completedPhase: "specify",
       result: result({ agent: "specify-agent", messages: [{ role: 42 }] }),
       now: NOW,
+      phaseArtifactBaseDir: process.cwd(),
     });
 
     expect(applied.processingErrors).toHaveLength(1);
@@ -405,6 +438,7 @@ describe("applyPhaseAgentPiResult", () => {
         messages: [writeCall(".claude/specs/stale/spec.md")],
       }),
       now: NOW,
+      phaseArtifactBaseDir: process.cwd(),
     });
 
     expect(applied.processingErrors).toEqual([]);
@@ -423,6 +457,7 @@ describe("applyPhaseAgentPiResult", () => {
       completedPhase: "architecture",
       result: result({ agent: "architecture-agent", messages: [] }),
       now: NOW,
+      phaseArtifactBaseDir: process.cwd(),
     });
 
     expect(applied.processingErrors).toEqual([
@@ -840,6 +875,7 @@ describe("applyFailedPiResult", () => {
         result: result({ agent: "spec-check-invoker", exitCode: 1 }),
         reservedSlot: fixture.reservedSlot,
         now: NOW,
+        projectBoundary: projectBoundaryAt(root),
       });
       expect(applied.processingErrors).toEqual([
         expect.stringContaining("spec-check document observation failed"),
@@ -1290,6 +1326,7 @@ describe("applySpecCheckPiResult", () => {
         result: result({ agent: "spec-check-invoker", messages: assistantText(specCheckText(0)) }),
         reservedSlot: { agentType: "spec-check-invoker", taskId: null, specCheckAuthority: authority },
         now: NOW,
+        projectBoundary: projectBoundaryAt(root),
       });
 
       expect(applied.processingErrors).toEqual([
@@ -1421,6 +1458,10 @@ describe("applyImplementationPiResult", () => {
       dirtySetBaseline: repositoryBaseline,
     });
     if (!authority.ok) throw new Error(authority.error.errors.join("; "));
+    // Protocol-2 lineage fields are part of every modern registration; the
+    // settlement parse refuses a receipt-bearing Task without them.
+    const admission = authorizeImplementationSpawn({ id: task.id }, "Task ID: T1");
+    if (!admission.ok) throw new Error(admission.error);
     return {
       graph: {
         ...state,
@@ -1437,6 +1478,13 @@ describe("applyImplementationPiResult", () => {
           attempt_artifact_baseline: attemptBaseline,
           attempt_repository_baseline: repositoryBaseline,
           active_implementation_attempt: authority.value,
+          active_implementation_context: createImplementationAttemptContext({
+            authority: authority.value,
+            prompt: "Task ID: T1",
+            admission,
+          }),
+          implementation_retry_protocol: 2,
+          implementation_retry_history_start: 0,
           reserved_at: authority.value.reservedAt,
         })],
       },
@@ -2105,6 +2153,49 @@ describe("applyImplementationPiResult", () => {
     }
   });
 
+  it("excludes the exact custom State File through the production Pi settlement adapter", async () => {
+    const repositoryRoot = canonicalTempDir("loom-pi-custom-state-authority-");
+    const statePath = join(repositoryRoot, ".loom-state", "custom-task-graph.json");
+    mkdirSync(join(repositoryRoot, ".loom-state"), { recursive: true });
+    execFileSync("git", ["init", "--quiet"], { cwd: repositoryRoot });
+    execFileSync("git", ["config", "user.email", "loom@example.test"], { cwd: repositoryRoot });
+    execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: repositoryRoot });
+    writeFileSync(statePath, "baseline state bytes\n");
+    execFileSync("git", ["add", ".loom-state/custom-task-graph.json"], { cwd: repositoryRoot });
+    execFileSync("git", ["commit", "--quiet", "-m", "state baseline"], { cwd: repositoryRoot });
+
+    try {
+      const modern = modernize(implementationGraph({
+        file_list: [],
+        verification_policy: {
+          regression: { kind: "waived", reason: "documentation-only" },
+          new_tests: { kind: "waived", reason: "existing-tests-sufficient" },
+        },
+      }), repositoryRoot, "pi-custom-state-authority");
+      const store = fakeStore(modern.graph);
+      writeFileSync(statePath, "engine-updated state bytes\n");
+
+      const applied = await applyImplementationPiResult({
+        store,
+        repository: repositoryAt(repositoryRoot),
+        authoritativeStatePath: statePath,
+        agentType: "code-implementer-agent",
+        result: result({ agent: "code-implementer-agent", task: "Task ID: T1", messages: [] }),
+        reservedSlot: modern.reservedSlot,
+        parentPrompt: "",
+      });
+
+      expect(applied.processingErrors).toEqual([]);
+      expect(store.current().tasks[0]).toMatchObject({
+        status: "implemented",
+        implementation_attempt_history: [{ transition: "implemented" }],
+      });
+      expect(store.current().tasks[0]?.unresolved_repository_paths).toBeUndefined();
+    } finally {
+      rmSync(repositoryRoot, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     ["wrong", "Task ID: T2"],
     ["missing", "implementation completed"],
@@ -2200,6 +2291,56 @@ describe("applyImplementationPiResult", () => {
       tests_passed: true,
       reviews_complete: true,
     });
+  });
+
+  it("collects legacy new-test evidence from the linked worktree rather than the Pi process checkout", async () => {
+    const ambient = canonicalTempDir("loom-pi-legacy-ambient-");
+    const worktree = canonicalTempDir("loom-pi-legacy-worktree-");
+    const priorProjectDir = process.env.CLAUDE_PROJECT_DIR;
+    const testPath = "tests/linked-worktree.test.ts";
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: ambient });
+      mkdirSync(join(ambient, "tests"));
+      writeFileSync(join(ambient, testPath), "export {};\n");
+      execFileSync("git", ["add", testPath], { cwd: ambient });
+      execFileSync("git", ["-c", "user.name=Loom Tests", "-c", "user.email=loom@example.test", "commit", "--quiet", "-m", "baseline"], { cwd: ambient });
+      execFileSync("git", ["worktree", "add", "--detach", worktree, "HEAD"], { cwd: ambient });
+      process.env.CLAUDE_PROJECT_DIR = ambient;
+      const baseline = captureDeclaredArtifactBaseline(worktree, [testPath]);
+      const store = fakeStore(implementationGraph({
+        file_list: [testPath],
+        files_modified: [testPath],
+        artifact_baseline: baseline,
+        attempt_artifact_baseline: baseline,
+        start_sha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktree, encoding: "utf8" }).trim(),
+        verification_policy: {
+          regression: { kind: "waived", reason: "documentation-only" },
+          new_tests: { kind: "required" },
+        },
+      }));
+      writeFileSync(join(worktree, testPath), 'export {};\n\nit("observes the worktree", () => {\n  expect(true).toBe(true);\n});\n');
+
+      const applied = await applyImplementationPiResult({
+        store,
+        repository: repositoryAt(worktree),
+        agentType: "code-implementer-agent",
+        result: result({ agent: "code-implementer-agent", messages: [writeCall(testPath)] }),
+        reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+        parentPrompt: "",
+      });
+      expect(applied.processingErrors).toEqual([]);
+      expect(store.current().tasks[0]?.new_test_observation).toMatchObject({
+        kind: "written", written: true,
+        evidence: expect.stringContaining("1 new test methods, 1 assertions"),
+      });
+      expect(store.current().tasks[0]?.status).toBe("pending"); // legacy authority never certifies completion
+      expect(readFileSync(join(ambient, testPath), "utf8")).toBe("export {};\n");
+    } finally {
+      if (priorProjectDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = priorProjectDir;
+      rmSync(worktree, { recursive: true, force: true });
+      rmSync(ambient, { recursive: true, force: true });
+    }
   });
 
   it("accepts attributed new-test evidence without regression evidence when explicit policy waives only regression", async () => {

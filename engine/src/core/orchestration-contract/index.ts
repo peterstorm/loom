@@ -21,12 +21,24 @@
  * Pure module: no I/O, no clock, no randomness.
  */
 
-export { MAX_DIAGNOSTIC_MESSAGE_LENGTH, canonicalRecord, canonicalStructuralEquals, parseArtifactByteLength, parseArtifactDigest, parseContextDigest, parseEffectId, parseOrchestrationRunId, parseRequestId, parseSlotId, type ArtifactByteLength, type ArtifactDigest, type ContextDigest, type DomainResult, type EffectId, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
+// IMMUTABLE_BYTE_SEQUENCE_TAG: the well-known recognition tag the Context
+// Packet's ImmutableByteSequence prototype carries (context-packets.ts). The
+// equality kernel must recognize sequences without importing the packet module
+// — the dependency runs the other way — so the tag travels through the global
+// symbol registry and this facade is its single naming authority.
+// boundedThrownCause: the ONE bounded thrown-cause capture shared by the
+// packet parsers, the packet projection read-model, and the successor
+// registration/capture-witness adapters. Committed as kernel API because every
+// layer imports the kernel, so one owner cannot drift.
+// boundDiagnosticMessage: the kernel's per-string refusal budget, committed for
+// the same reason — the projection read-model bounds the parser's field-level
+// diagnostic through it at the read boundary.
+export { MAX_DIAGNOSTIC_MESSAGE_LENGTH, MAX_THROWN_CAUSE_TEXT_LENGTH, boundDiagnosticMessage, boundedThrownCause, canonicalRecord, canonicalStructuralEquals, parseArtifactByteLength, parseArtifactDigest, parseContextDigest, parseEffectId, parseOrchestrationRunId, parseRequestId, parseSlotId, IMMUTABLE_BYTE_SEQUENCE_TAG, type ArtifactByteLength, type ArtifactDigest, type ContextDigest, type DomainResult, type EffectId, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
 export { fieldFailureError } from './errors';
 export { MAX_DENSE_DATA_ARRAY_LENGTH, MAX_SEMANTIC_PAYLOAD_ARRAY_LENGTH, digestRawTranscriptBytes } from './bytes';
 export { AGENT_REQUIRED_SKILLS, parseFixedArtifactSlot } from './artifacts';
 export { sameAgentRequestAuthority, parseAgentRequestAuthority, parseStoredAgentRequestAuthority, parseAgentRosterSlot, parseArtifactRef, parseExactRoster, type AgentRequestAuthority, type AgentRosterSlot, type ArtifactRef, type ExactRoster, type RosterViolation } from './roster';
-export { createAtomicInitialPublicationClaimPort, createInitialBatchPublicationReconciler, createInitialPublicationEffectPort, createPublicationAuthorityResolver, parseBatchPublishedReceipt, parseIssuedSpawnRequest, prepareInitialBatchPublicationIntent, type AtomicInitialPublicationClaim, type BatchPublicationIdentity, type BatchPublishedReceipt, type InitialBatchPublicationIntent, type InitialPublicationEffectExecutor, type InitialPublicationEffectPort, type InitialPublicationIssuanceAuthority, type InitialSpawnRequestInput, type PublicationAuthorityResolver, type RegisteredBatchPublicationAuthority, type SpawnRequest, type TrustedPublicationRegistrationLoader } from './publication';
+export { batchPublicationIdentity, createAtomicInitialPublicationClaimPort, createInitialBatchPublicationReconciler, createInitialPublicationEffectPort, createPublicationAuthorityResolver, parseBatchPublishedReceipt, parseIssuedSpawnRequest, prepareInitialBatchPublicationIntent, type AtomicInitialPublicationClaim, type BatchPublicationIdentity, type BatchPublishedReceipt, type InitialBatchPublicationIntent, type InitialPublicationEffectExecutor, type InitialPublicationEffectPort, type InitialPublicationIssuanceAuthority, type InitialSpawnRequestInput, type PublicationAuthorityResolver, type RegisteredBatchPublicationAuthority, type SpawnRequest, type TrustedPublicationRegistrationLoader } from './publication';
 export { acceptedAgentResult, parseCompleteRoster, type AcceptedAgentResult, type CompleteRoster, type CompleteRosterError, type SemanticPayloadParseError, type SemanticPayloadParser } from './completion';
 export { infrastructureRetryDiagnostic, semanticRetryDiagnostic, terminalBlockedDiagnostic, type BlockedDiagnostic, type InfrastructureRetryDiagnostic, type TerminalBlockedDiagnostic } from './diagnostics';
 export { awaitUserAction, blockedAction, doneAction, issueInitialSpawnRequests, parseBlockedDiagnostic, rehydrateIssuedSpawnRequests, spawnBatchAction, type AwaitUserAction, type BlockedAction, type DoneAction, type ExternalAction, type SpawnBatchAction } from './actions';

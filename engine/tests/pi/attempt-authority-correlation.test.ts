@@ -72,6 +72,8 @@ describe("Pi exact implementation authority correlation", () => {
         wave: 1, status: "pending", depends_on: [], file_list: [],
         active_implementation_attempt: attempt,
         active_implementation_context: context,
+        implementation_retry_protocol: 2,
+        implementation_retry_history_start: 0,
         artifact_baseline: [],
         attempt_artifact_baseline: [],
         attempt_repository_baseline: [],
@@ -97,6 +99,7 @@ describe("Pi exact implementation authority correlation", () => {
         implementationAuthority: attempt,
       },
       now: "2026-08-24T00:01:00.000Z",
+      projectBoundary: { kind: "state-layout", root: process.cwd() },
     });
 
     expect(result.processingErrors).toEqual([]);
@@ -155,6 +158,7 @@ describe("Pi exact implementation authority correlation", () => {
         implementationAuthority: oldAttempt,
       },
       now: "2026-08-24T00:01:00.000Z",
+      projectBoundary: { kind: "state-layout", root: process.cwd() },
     });
 
     expect(result.processingErrors).toEqual([]);

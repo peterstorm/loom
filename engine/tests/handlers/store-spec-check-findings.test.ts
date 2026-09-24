@@ -451,8 +451,11 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
   });
 
   it("rejects absent and stale request authority on a modern Wave without changing spec evidence", async () => {
-    const tmpDir = join(tmpdir(), `spec-check-authority-${Date.now()}`);
-    mkdirSync(tmpDir, { recursive: true });
+    const tmpRoot = join(tmpdir(), `spec-check-authority-${Date.now()}`);
+    mkdirSync(tmpRoot, { recursive: true });
+    // macOS tmpdir() sits behind /var → /private/var; canonicalize the fixture
+    // root so the anchored primitives' base-resolution matches production.
+    const tmpDir = realpathSync.native(tmpRoot);
     const statePath = join(tmpDir, "active_task_graph.json");
     const runId = parseOrchestrationRunId("run.spec-authority");
     const slotId = parseSlotId("wave-slot:spec-check");
@@ -572,8 +575,11 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
 
   it("rejects authority-free spec-check evidence after modern Wave authority is retired", async () => {
     const { SUBAGENT_DIR } = await import("../../src/config");
-    const tmpDir = join(tmpdir(), `spec-check-retired-modern-${Date.now()}`);
-    mkdirSync(tmpDir, { recursive: true });
+    const tmpRoot = join(tmpdir(), `spec-check-retired-modern-${Date.now()}`);
+    mkdirSync(tmpRoot, { recursive: true });
+    // macOS tmpdir() sits behind /var → /private/var; canonicalize the fixture
+    // root so the anchored primitives' base-resolution matches production.
+    const tmpDir = realpathSync.native(tmpRoot);
     const statePath = join(tmpDir, "active_task_graph.json");
     const initial = {
       spec_trace_version: 2,
@@ -794,8 +800,11 @@ describe("handler fail-closed paths (round-10 Fix 2 + gap 20)", () => {
 
   it("existing unreadable transcript records its concrete EVIDENCE_CAPTURE_FAILED cause", async () => {
     const { SUBAGENT_DIR } = await import("../../src/config");
-    const tmpDir = join(tmpdir(), `spec-check-unreadable-${Date.now()}`);
-    mkdirSync(tmpDir, { recursive: true });
+    const tmpRoot = join(tmpdir(), `spec-check-unreadable-${Date.now()}`);
+    mkdirSync(tmpRoot, { recursive: true });
+    // macOS tmpdir() sits behind /var → /private/var; canonicalize the fixture
+    // root so the anchored primitives' base-resolution matches production.
+    const tmpDir = realpathSync.native(tmpRoot);
     const statePath = join(tmpDir, "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute",

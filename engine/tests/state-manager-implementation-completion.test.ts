@@ -231,6 +231,8 @@ describe("Task attempt authority StateManager lockstep", () => {
       attempt_repository_baseline: repositoryBaseline,
       reserved_at: active.reservedAt,
       implementation_attempt_history: [receipt],
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
     }, { executing_tasks: ["T1"] }));
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
@@ -284,12 +286,16 @@ describe("Task attempt authority StateManager lockstep", () => {
     const retry = deriveImplementationRetryDisposition({
       id: "T1",
       implementation_attempt_history: [staleRetry],
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
     });
     if (retry.kind !== "retry") throw new Error("retry fixture failed");
     const prompt = `Task ID: T1\n${retry.promptAppendix}`;
     const staleAdmission = authorizeImplementationSpawn({
       id: "T1",
       implementation_attempt_history: [staleRetry],
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
     }, prompt);
     if (!staleAdmission.ok) throw new Error(staleAdmission.error);
     const staleContext = createImplementationAttemptContext({ authority: active, prompt, admission: staleAdmission });
@@ -347,7 +353,7 @@ describe("Task attempt authority StateManager lockstep", () => {
     );
   });
 
-  it("loads pre-protocol Slice-3 attempt-1 histories without rewriting receipts", () => {
+  it("refuses attempt history without protocol-2 retry lineage", () => {
     const retry = receiptFor(authority("legacy-retry"), false);
     const implemented = receiptFor(authority("legacy-implemented"), true);
     const infrastructure = infrastructureReceiptFor(authority("legacy-infrastructure"));
@@ -357,18 +363,39 @@ describe("Task attempt authority StateManager lockstep", () => {
       [retry, implemented],
       [retry, infrastructure],
       [retry, repeatedRetry],
+      [retry],
+    ]) {
+      expect(errorOf(graph({
+        ...baseTask(),
+        proof: pendingProof(),
+        implementation_attempt_history: history,
+      }))).toContain("attempt history requires protocol-2 retry lineage");
+    }
+    // With the protocol-2 fields the SAME receipts parse when wire order is
+    // legal: attempt-1 retry authorization followed only by attempt-2 work.
+    const attempt2Implemented = receiptFor(authority("legacy-impl-2", 2), true);
+    const attempt2Infrastructure = infrastructureReceiptFor(authority("legacy-infra-2", 2));
+    const attempt2Escalation = receiptFor(authority("legacy-esc-2", 2), false);
+    for (const history of [
+      [retry],
+      [retry, attempt2Implemented],
+      [retry, attempt2Infrastructure],
+      [retry, attempt2Escalation],
     ]) {
       const parsed = parseTaskGraph(graph({
         ...baseTask(),
         proof: pendingProof(),
         implementation_attempt_history: history,
+        implementation_retry_protocol: 2,
+        implementation_retry_history_start: 0,
       }));
       expect(parsed.ok).toBe(true);
       if (parsed.ok) {
         expect(parsed.value.tasks[0]?.implementation_attempt_history).toEqual(history);
-        expect(parsed.value.tasks[0]?.implementation_retry_protocol).toBeUndefined();
       }
     }
+    // An empty history is a fresh lineage with or without protocol metadata.
+    expect(parseTaskGraph(graph({ ...baseTask(), proof: pendingProof() })).ok).toBe(true);
   });
 
   it("rejects active modern authority on the legacy-missing-Proof lifecycle", () => {
@@ -412,12 +439,72 @@ describe("Task attempt authority StateManager lockstep", () => {
     }, { executing_tasks: ["T1"] }))).toContain("receiptId does not match");
   });
 
+  it("pins the three previously unpinned Task-attempt load guards", () => {
+    // pr-test-analyzer-1: the chain's sibling refusals each carry a dedicated
+    // pin; these three rows close the same gap for the identity, escalation,
+    // and semantic-attempt guards so dropping one fails a suite.
+    const activeGraph = (active: ImplementationAttemptAuthority, overrides: Record<string, unknown> = {}) => graph({
+      ...baseTask(),
+      proof: pendingProof(),
+      active_implementation_attempt: active,
+      attempt_artifact_baseline: attemptBaseline,
+      attempt_repository_baseline: repositoryBaseline,
+      reserved_at: active.reservedAt,
+      ...overrides,
+    }, { executing_tasks: ["T1"] });
+    const foreign = valueOf(createImplementationAttemptAuthority({
+      taskId: "T2",
+      wave: 1,
+      semanticAttempt: 1,
+      reservationId: "foreign-identity",
+      headSha: "c".repeat(40),
+      reservedAt: "2026-08-23T00:00:00.000Z",
+      taskScopeBaseline: attemptBaseline,
+      dirtySetBaseline: repositoryBaseline,
+    }));
+    expect(errorOf(activeGraph(foreign))).toContain("active_implementation_attempt must match Task id and Wave");
+
+    const escalatedHistory = [
+      receiptFor(authority("pin-esc-retry"), false),
+      receiptFor(authority("pin-esc-2", 2), false),
+    ];
+    const escalatedDisposition = deriveImplementationRetryDisposition({
+      id: "T1",
+      implementation_attempt_history: escalatedHistory,
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
+    });
+    if (escalatedDisposition.kind !== "escalated") throw new Error("escalation fixture failed");
+    const activeOnEscalated = authority("pin-esc-active");
+    expect(errorOf(activeGraph(activeOnEscalated, {
+      implementation_attempt_history: escalatedHistory,
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
+    }))).toContain("escalated implementation lineage cannot carry an active attempt");
+
+    const retryHistory = [receiptFor(authority("pin-contradiction-retry"), false)];
+    const retryDisposition = deriveImplementationRetryDisposition({
+      id: "T1",
+      implementation_attempt_history: retryHistory,
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
+    });
+    if (retryDisposition.kind !== "retry") throw new Error("retry fixture failed");
+    const staleSemantic = authority("pin-contradiction-active");
+    expect(errorOf(activeGraph(staleSemantic, {
+      implementation_attempt_history: retryHistory,
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
+    }))).toContain("active_implementation_attempt semantic attempt contradicts settlement history");
+  });
+
   it("rejects an active authority whose digest or reservation already appears in history", () => {
     const active = authority("reused-reservation");
     const valid = {
       ...baseTask(),
       proof: pendingProof(),
       active_implementation_attempt: active,
+      active_implementation_context: initialContext(active),
       attempt_artifact_baseline: attemptBaseline,
       attempt_repository_baseline: repositoryBaseline,
       reserved_at: active.reservedAt,
@@ -425,6 +512,8 @@ describe("Task attempt authority StateManager lockstep", () => {
     expect(errorOf(graph({
       ...valid,
       implementation_attempt_history: [receiptFor(active)],
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
     }, { executing_tasks: ["T1"] }))).toContain("must be absent from implementation_attempt_history");
 
     const differentDigestSameReservation = valueOf(createImplementationAttemptAuthority({
@@ -441,6 +530,8 @@ describe("Task attempt authority StateManager lockstep", () => {
     expect(errorOf(graph({
       ...valid,
       implementation_attempt_history: [receiptFor(differentDigestSameReservation)],
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
     }, { executing_tasks: ["T1"] }))).toContain("must be absent from implementation_attempt_history");
   });
 

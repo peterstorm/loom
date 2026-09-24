@@ -15,11 +15,14 @@ describe("Pi package manifest", () => {
     expect(existsSync(resolve(repoRoot, "pi/loom-bridge.ts"))).toBe(false);
   });
 
-  it("registers only top-level slash command templates as prompts", () => {
-    expect(pkg.pi.prompts).toEqual(["./commands/*.md"]);
-  });
-
-  it("does not point skills at nonexistent command directories", () => {
-    expect(pkg.pi.skills).toEqual(["./skills", "./commands/vercel-react-best-practices"]);
+  it("declares empty skills and prompts; the extension renders them from the package trees", () => {
+    // Empty arrays, NOT omitted keys: Pi's convention-dir fallback would
+    // otherwise load the raw `skills/` tree whenever a settings filter is
+    // present for the package, while the extension's resources_discover
+    // handler already supplies the RENDERED copies — two sources for the
+    // same names produce startup collision warnings and Pi keeps the
+    // unrendered file (literal ${CLAUDE_PLUGIN_ROOT} paths).
+    expect(pkg.pi.prompts).toEqual([]);
+    expect(pkg.pi.skills).toEqual([]);
   });
 });

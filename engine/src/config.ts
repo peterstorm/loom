@@ -22,6 +22,8 @@ import {
   WAVE_REVIEW_AGENTS,
 } from "./core/model-profiles";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "./core/verification-manifest";
+import { projectRootForStateFile } from "./core/phase-artifact-paths";
+import { observeGitProbe } from "./utils/git-probe";
 
 export { WAVE_REVIEW_AGENTS };
 
@@ -37,7 +39,7 @@ export const PHASE_ORDER: readonly Phase[] = PHASES;
  *  declare — they all run in ARCH_PANEL_PHASE by construction — so
  *  `{ kind: "arch-panel", phase: "decompose" }` is unrepresentable rather
  *  than policed by a load-time throw. Normal phase-agent completion is handed
- *  to resolveTransition, while panel-agent completion is intentionally
+ *  to the phase-transition observer, while panel-agent completion is intentionally
  *  ignored by advance-phase so the architecture phase cannot advance
  *  mid-panel. Exact-name phase/panel disjointness is structural (one catalog
  *  key, one kind); the runtime guard below remains for suffix-variant
@@ -98,7 +100,7 @@ function frozenSet<T>(values: Iterable<T>): ReadonlySet<T> {
  *  (kind `arch-panel`). Recognized by phase validation as architecture-phase
  *  work, but INVISIBLE to advance-phase — never in PHASE_AGENT_MAP so only
  *  architecture-agent's SubagentStop advances the phase. If a designer/judge were
- *  a phase agent, its completion would fire resolveTransition and the date-prefix
+ *  a phase agent, its completion would fire a phase transition and the date-prefix
  *  plan fallback could advance the phase mid-panel. The disjointness is structural
  *  for exact names (one key, one kind) AND enforced at module load (the guard
  *  below throws on import) for suffix-variant collisions — belt and suspenders.
@@ -436,7 +438,7 @@ export const guardedDirs = (): readonly string[] => [
  * (`.evidence.jsonl`), fakes attribution (`.active`), or disarms the gate
  * (`.machine`), and a write into the machine-definitions dir deletes/rewrites
  * the gate's rules. guard-state-file checks these BEFORE the helper allow. */
-export const protectedDirs = (): readonly string[] => [subagentDir(), machinesDir()];
+const protectedDirs = (): readonly string[] => [subagentDir(), machinesDir()];
 
 const toSegments = (dir: string): string[] => dir.split("/").filter((s) => s !== "");
 
@@ -638,27 +640,68 @@ export function gitRepositoryRoot(): string | null {
 
 /** The cwd-explicit core (the spawn-cwd runtime polarity): the probe runs with
  *  the explicit cwd, so the governing graph lives in the repository the caller
- *  declares. */
+ *  declares — the bounded empty-stdout retry here discharges the transient
+ *  documented at `observeGitProbe`; a confirmed anomaly throws with the full
+ *  probe evidence. */
 function gitRepositoryRootFrom(cwd: string): string | null {
-  const probe = spawnSync("git", ["rev-parse", "--show-toplevel"], {
-    encoding: "utf-8",
-    cwd,
-    env: { ...process.env, LANG: "C", LC_ALL: "C" },
-  });
-  if (probe.error !== undefined) {
-    throw new Error(`git rev-parse could not start: ${probe.error.message}`);
+  type RootProbe =
+    | Readonly<{ kind: "root"; root: string; status: number; stdoutLength: number; signal: NodeJS.Signals | null; stderr: string }>
+    | Readonly<{ kind: "not-repository" }>;
+  const observed = observeGitProbe<RootProbe, Error>(() => {
+    const probe = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+      encoding: "utf-8",
+      cwd,
+      env: { ...process.env, LANG: "C", LC_ALL: "C" },
+    });
+    if (probe.error !== undefined) {
+      return { ok: false, error: new Error(`git rev-parse could not start: ${probe.error.message}`) };
+    }
+    if (probe.status === 0) {
+      return { ok: true, value: Object.freeze({ kind: "root", root: probe.stdout.trim(), status: probe.status,
+        stdoutLength: probe.stdout.length, signal: probe.signal, stderr: probe.stderr.trim() }) };
+    }
+    if (probe.status === 128 && NOT_A_GIT_REPOSITORY.test(probe.stderr)) {
+      try {
+        proveNoGitMetadataInAncestorsFrom(cwd);
+        return { ok: true, value: Object.freeze({ kind: "not-repository" }) };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error : new Error(String(error)) };
+      }
+    }
+    const outcome = probe.signal === null ? `exit ${probe.status ?? "unknown"}` : `signal ${probe.signal}`;
+    return { ok: false, error: new Error(`git rev-parse failed (${outcome}): ${probe.stderr.trim() || "no diagnostic"}`) };
+  }, (value) => value.kind === "root" && value.root === "");
+  if (observed.kind === "failed") throw observed.error;
+  if (observed.kind === "confirmed-empty") {
+    const probe = observed.third;
+    if (probe.kind !== "root") throw new Error("confirmed-empty Git root probe has contradictory not-repository outcome");
+    throw new Error(
+      `git rev-parse returned an empty repository root for ${cwd} (confirmed after bounded retries)` +
+      ` status=${probe.status} stdoutLength=${probe.stdoutLength}` +
+      ` signal=${probe.signal ?? "none"}` +
+      (probe.stderr === "" ? "" : ` stderr: ${probe.stderr}`),
+    );
   }
-  if (probe.status === 0) {
-    const root = probe.stdout.trim();
-    if (root === "") throw new Error("git rev-parse returned an empty repository root");
-    return root;
-  }
-  if (probe.status === 128 && NOT_A_GIT_REPOSITORY.test(probe.stderr)) {
-    proveNoGitMetadataInAncestorsFrom(cwd);
-    return null;
-  }
-  const outcome = probe.signal === null ? `exit ${probe.status ?? "unknown"}` : `signal ${probe.signal}`;
-  throw new Error(`git rev-parse failed (${outcome}): ${probe.stderr.trim() || "no diagnostic"}`);
+  return observed.value.kind === "not-repository" ? null : observed.value.root;
+}
+
+export type TaskGraphProjectBoundary =
+  | Readonly<{ kind: "git-repository"; root: string }>
+  | Readonly<{ kind: "state-layout"; root: string }>;
+
+/** Observe the project boundary owning one authoritative absolute TaskGraph.
+ *
+ * Every selected State File is probed from its own parent, never by resolving
+ * a possibly-relative LOOM_STATE_PATH against the caller's later cwd. A Git
+ * repository supplies first-class boundary authority. Proven non-repositories
+ * retain the canonical/legacy layout fallback used before Git authority was
+ * recorded; Git observation failures throw rather than fabricate a boundary. */
+export function observeTaskGraphProjectBoundary(statePath: string): TaskGraphProjectBoundary {
+  const absolute = resolve(statePath);
+  const root = gitRepositoryRootFrom(dirname(absolute));
+  return root === null
+    ? Object.freeze({ kind: "state-layout", root: projectRootForStateFile(absolute) })
+    : Object.freeze({ kind: "git-repository", root: projectRootForStateFile(absolute, root) });
 }
 
 /** Find the task graph by walking up from the GIVEN cwd to its git root.
@@ -706,10 +749,12 @@ function findTaskGraphPath(): string {
   const override = process.env.LOOM_STATE_PATH;
   if (override !== undefined && pathExistsFailClosed(override)) return override;
   const absolute = findTaskGraphPathFrom(process.cwd());
-  // Preserve the historical relative return for candidates under cwd: every
-  // consumer resolves paths against process.cwd(), so a graph the first loop
-  // found cwd-relative reads the same either way. Walk-up results are never
-  // under cwd (the first loop would have found them), so they stay absolute.
+  // The return is RELATIVE exactly when the resolved absolute path sits under
+  // process.cwd() — whichever loop found it; every consumer resolves paths
+  // against process.cwd(), so the two spellings read the same file. In
+  // practice only the first loop produces such a result: the walk-up root is
+  // cwd itself or an ancestor, so a root-joined candidate is under cwd only
+  // when the cwd-joined probe already found it.
   const underCwd = relative(process.cwd(), absolute);
   return underCwd.startsWith("..") ? absolute : underCwd;
 }

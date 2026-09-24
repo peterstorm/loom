@@ -12,8 +12,8 @@
 
 import { readFileSync, realpathSync } from "node:fs";
 import type { HookHandler, HookResult } from "../../types";
-import { legacyTestsPassedNote } from "../../types";
-import { IMPL_AGENTS, machinesDir } from "../../config";
+import { NEW_TEST_EVIDENCE_NOT_WRITTEN, legacyTestsPassedNote } from "../../types";
+import { IMPL_AGENTS, machinesDir, observeTaskGraphProjectBoundary } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { extractTaskId } from "../../utils/extract-task-id";
@@ -26,7 +26,6 @@ import { parseTranscript } from "../../parsers/parse-transcript";
 import { parseFilesModified } from "../../parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../parsers/parse-bash-test-output";
 import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
-import * as git from "../../utils/git";
 import {
   epochOf,
   eventsForEpoch,
@@ -64,6 +63,7 @@ import {
 import {
   collectNewTestEvidence,
   describeNewTestObservationError,
+  realDiffDepsAt,
 } from "../helpers/task-local-completion";
 import {
   productionExactSettlementPorts,
@@ -364,10 +364,20 @@ export const runUpdateTaskStatus = async (
     };
   }
 
+  let repositoryRoot: string;
+  try {
+    repositoryRoot = observeTaskGraphProjectBoundary(mgr.getPath()).root;
+  } catch (error) {
+    const reason = `Claude TaskGraph project boundary unavailable: ${error instanceof Error ? error.message : String(error)}`;
+    return authority === null
+      ? { kind: "error", message: `update-task-status: ${reason}; execution authority was preserved` }
+      : settleModernTranscriptUnavailable(mgr, authority, reason);
+  }
+
   let filesModified: string[];
   try {
     filesModified = [...canonicalRepositoryPaths(
-      git.repositoryRoot() ?? process.cwd(),
+      repositoryRoot,
       rawFilesModified,
       "transcript files_modified",
     )];
@@ -508,12 +518,11 @@ export const runUpdateTaskStatus = async (
   // real red run would wedge the task forever (the gate treats trusted-fail
   // as missing evidence and store-test-evidence also refuses trusted).
   // A completed task is never reopened, at any trust level.
-  const repositoryRoot = git.repositoryRoot() ?? process.cwd();
   if (authority !== null) {
     const observedAt = parseIsoInstant(new Date().toISOString(), "Claude implementation observation instant");
     if (!observedAt.ok) return { kind: "error", message: observedAt.error.errors.join("; ") };
     const modernOutcome: { settlement?: ImplementationSettlementApplicationResult } = {};
-    const settlementPorts = productionExactSettlementPorts(repositoryRoot);
+    const settlementPorts = productionExactSettlementPorts(repositoryRoot, mgr.getPath());
     await mgr.update((locked) => {
       const settled = settleExactImplementation(locked, {
         transport: "Claude",
@@ -572,8 +581,7 @@ export const runUpdateTaskStatus = async (
         filesModified,
         changedDeclaredArtifacts: [],
         bytesChangedSinceAttempt: false,
-        newTestsWritten: false,
-        newTestEvidence: "",
+        newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
       }, TRUSTED_LEDGER_ONLY_POLICY).state;
     }
 
@@ -600,6 +608,7 @@ export const runUpdateTaskStatus = async (
       cumulativeFiles,
       verificationPolicy.newTests,
       target.start_sha,
+      realDiffDepsAt(repositoryRoot),
     );
     if (!newTestObservation.ok) {
       newTestEvidenceFailure = `update-task-status: cannot collect new-test evidence for ${taskId}: ` +
@@ -614,8 +623,7 @@ export const runUpdateTaskStatus = async (
       filesModified,
       changedDeclaredArtifacts: comparison.changedDeclaredArtifacts,
       bytesChangedSinceAttempt: comparison.bytesChangedSinceAttempt,
-      newTestsWritten: currentNewTestEvidence.written,
-      newTestEvidence: currentNewTestEvidence.evidence,
+      newTests: currentNewTestEvidence,
     }, TRUSTED_LEDGER_ONLY_POLICY);
     skippedExistingVerdict = applied.skipped;
     return applied.state;

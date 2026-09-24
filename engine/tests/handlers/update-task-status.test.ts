@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -673,19 +674,25 @@ describe("update-task-status — transcript path resolution", () => {
     const tmpDir = realpathSync.native(tmpRoot);
     const configDir = join(tmpDir, "config");
     mkdirSync(configDir, { recursive: true });
-    const statePath = join(tmpDir, "graph.json");
-    const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
-    // A case that plants a write into THIS repository must declare this
-    // repository as the project: the handler canonicalizes modified paths
-    // against the live `CLAUDE_PROJECT_DIR`, so a temp project dir plus a
-    // real-repo path is a combination production cannot produce, and it only
-    // used to pass because the git helpers answered from a root frozen at
-    // import time. Transcript isolation still comes from CLAUDE_CONFIG_DIR
-    // and the unique session id, not from the project dir.
-    const projectDir = opts.modifiedPath ? repoRoot : join(tmpDir, "project");
+    const statePath = opts.modifiedPath
+      ? join(tmpDir, ".claude", "state", "active_task_graph.json")
+      : join(tmpDir, "graph.json");
+    // The State File and modified artifact must belong to the SAME project;
+    // ambient CLAUDE_PROJECT_DIR is not settlement authority. Keep this
+    // no-op Write scenario in an isolated repository instead of pointing a
+    // temp State File at this checkout's source bytes.
+    const projectDir = opts.modifiedPath ? tmpDir : join(tmpDir, "project");
     mkdirSync(projectDir, { recursive: true });
+    if (opts.modifiedPath) {
+      mkdirSync(join(tmpDir, ".claude", "state"), { recursive: true });
+      mkdirSync(join(tmpDir, "engine", "src"), { recursive: true });
+      writeFileSync(join(tmpDir, "engine", "src", "types.ts"), readFileSync(opts.modifiedPath));
+      execFileSync("git", ["init", "-q"], { cwd: tmpDir });
+      execFileSync("git", ["add", "engine/src/types.ts"], { cwd: tmpDir });
+      execFileSync("git", ["-c", "user.name=Loom Test", "-c", "user.email=loom@example.test", "commit", "-qm", "baseline"], { cwd: tmpDir });
+    }
     const artifactBaseline = opts.modifiedPath
-      ? captureDeclaredArtifactBaseline(repoRoot, ["engine/src/types.ts"])
+      ? captureDeclaredArtifactBaseline(tmpDir, ["engine/src/types.ts"])
       : undefined;
     writeFileSync(statePath, JSON.stringify({
       current_phase: "execute",
@@ -731,7 +738,7 @@ describe("update-task-status — transcript path resolution", () => {
           message: { content: [
             { type: "text", text: `**Task ID:** ${opts.transcriptTaskId ?? "T1"}\n\nImplemented the thing.` },
             ...(opts.modifiedPath
-              ? [{ type: "tool_use", name: "Write", input: { file_path: opts.modifiedPath } }]
+              ? [{ type: "tool_use", name: "Write", input: { file_path: join(tmpDir, "engine", "src", "types.ts") } }]
               : []),
           ] },
         }) + "\n",

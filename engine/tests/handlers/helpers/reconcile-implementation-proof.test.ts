@@ -25,6 +25,7 @@ import {
   reconciliationFailureMessage,
 } from "../../../src/handlers/helpers/reconcile-implementation-proof";
 import type { Task } from "../../../src/types";
+import { NEW_TEST_EVIDENCE_NOT_WRITTEN, parseNewTestEvidence } from "../../../src/types";
 import { taskFixture } from "../../fixtures/task-lifecycle";
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
@@ -107,6 +108,41 @@ describe("recovery arguments", () => {
 });
 
 describe("historical baseline recovery CLI", () => {
+  it("refuses a non-Git State File with its exact refusal message and a byte-identical State File", () => {
+    const root = canonicalTempDir("loom-proof-nongit-");
+    cleanup.push(root);
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    mkdirSync(join(root, ".claude", "state"), { recursive: true });
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, current_wave: 2, executing_tasks: [],
+      spec_check: {
+        wave: 2, run_at: "before recovery", verdict: "PASSED",
+        critical_count: 0, high_count: 0,
+        critical_findings: [], high_findings: [], medium_findings: [],
+      },
+      wave_gates: {
+        "2": { impl_complete: true, tests_passed: true, reviews_complete: true, blocked: false },
+      },
+      tasks: [{
+        id: "T5", description: "implementation", agent: "code-implementer-agent",
+        wave: 2, status: "implemented", legacy_missing_proof: true, depends_on: [], new_tests_required: false,
+        review_status: "evidence_capture_failed",
+        review_error: "review transcript missing evidence",
+        review_evidence_failures: ["code-reviewer"],
+        file_list: ["src/a.ts"], files_modified: ["latest-only.ts"],
+      }],
+    }, null, 2));
+    const before = readFileSync(statePath);
+
+    const refusal = spawnSync("bun", [CLI, "helper", "reconcile-implementation-proof", "--wave", "2"], {
+      cwd: root, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: statePath },
+    });
+    expect(refusal.status).not.toBe(0);
+    expect(refusal.stderr).toContain("reconcile-implementation-proof requires a git repository");
+    expect(readFileSync(statePath).equals(before)).toBe(true);
+  });
+
   it("atomically replaces poisoned boundaries with an audited ancestor commit", () => {
     const root = canonicalTempDir("loom-proof-recovery-");
     cleanup.push(root);
@@ -248,12 +284,18 @@ describe("historical baseline recovery CLI", () => {
     // cumulative write attribution.
     const laterBytes = "export const driftedLater = true;\n";
     writeFileSync(join(root, "src", "a.ts"), laterBytes);
+    // Both linked worktrees begin at the same HEAD. Only the State File's
+    // worktree differs from the historical baseline; ambient bytes do not.
+    const ambient = canonicalTempDir("loom-proof-ambient-");
+    cleanup.push(ambient);
+    execFileSync("git", ["worktree", "add", "--detach", ambient, "HEAD"], { cwd: root });
+    rmSync(join(ambient, "src", "a.ts"));
     const recovered = spawnSync("bun", [
       CLI, "helper", "reconcile-implementation-proof", "--wave", "2",
       "--baseline-sha", historical,
       "--packet", `T5=${packetRelative}`,
     ], {
-      cwd: root, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: statePath },
+      cwd: ambient, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: statePath },
     });
     expect(recovered.status, recovered.stderr).toBe(0);
     expect(readFileSync(join(root, "src", "a.ts"), "utf-8")).toBe(laterBytes);
@@ -287,7 +329,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
     const reconciled = reconcileTaskFromStoredEvidence(
       failedTask(),
       ["src/a.ts"],
-      { written: false, evidence: "" },
+      NEW_TEST_EVIDENCE_NOT_WRITTEN,
     );
 
     expect(reconciled.status).toBe("pending");
@@ -326,7 +368,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
     const reconciled = reconcileTaskFromStoredEvidence(
       withProof,
       ["src/a.ts"],
-      { written: false, evidence: "" },
+      NEW_TEST_EVIDENCE_NOT_WRITTEN,
     );
 
     expect(reconciled.status).toBe("pending");
@@ -347,7 +389,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
         },
       },
       ["src/a.ts"],
-      { written: true, evidence: "1 new test method, 2 assertions" },
+      parseNewTestEvidence(true, "1 new test method, 2 assertions"),
     );
     const newTestsWaived = reconcileTaskFromStoredEvidence(
       {
@@ -359,7 +401,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
         },
       },
       ["src/a.ts"],
-      { written: false, evidence: "" },
+      NEW_TEST_EVIDENCE_NOT_WRITTEN,
     );
 
     expect(regressionWaived.status).toBe("pending");
@@ -395,7 +437,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
     const migrated = reconcileTaskFromStoredEvidence(
       legacy,
       ["src/a.ts"],
-      { written: false, evidence: "verification waived" },
+      parseNewTestEvidence(false, "verification waived"),
       true,
     );
     expect(migrated).toMatchObject({ status: "implemented", proof: { state: "satisfied" } });
@@ -406,7 +448,7 @@ describe("reconcileTaskFromStoredEvidence", () => {
     const reconciled = reconcileTaskFromStoredEvidence(
       failedTask(false),
       ["src/a.ts"],
-      { written: true, evidence: "1 new test method, 2 assertions" },
+      parseNewTestEvidence(true, "1 new test method, 2 assertions"),
     );
 
     expect(reconciled.status).toBe("pending");

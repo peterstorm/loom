@@ -16,6 +16,7 @@ import {
   type UntrustedStopResolution,
 } from "../../src/core/implementation-application";
 import type { Task, TaskGraph, TaskTestResult } from "../../src/types";
+import { NEW_TEST_EVIDENCE_NOT_WRITTEN, parseNewTestEvidence } from "../../src/types";
 import { taskFixture, type TaskFixtureInput } from "../fixtures/task-lifecycle";
 import { capturedSpecCheck } from "../../src/core/spec-check";
 
@@ -47,8 +48,7 @@ const untrustedPass: UntrustedStopResolution = {
   filesModified: ["src/a.ts", "tests/a.test.ts"],
   changedDeclaredArtifacts: ["src/a.ts", "tests/a.test.ts"],
   bytesChangedSinceAttempt: true,
-  newTestsWritten: true,
-  newTestEvidence: "2 new test methods, 4 assertions",
+  newTests: parseNewTestEvidence(true, "2 new test methods, 4 assertions"),
 };
 
 describe("applyUntrustedStopResolution — trust and freshness are re-checked atomically", () => {
@@ -76,8 +76,7 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
       ...untrustedPass,
       testResult: { verdict: "untrusted", passed: false, label: "pi-structured: bun: 1 fail", provenance: "pi-structured" },
       testEvidence: "pi-structured: bun: 1 fail",
-      newTestsWritten: false,
-      newTestEvidence: "",
+      newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
     };
 
     const applied = applyUntrustedStopResolution(s, "T1", latestFailure);
@@ -107,8 +106,7 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
       testEvidence: "implementation process failed",
       filesModified: [],
       changedDeclaredArtifacts: ["src/a.ts"],
-      newTestsWritten: false,
-      newTestEvidence: "",
+      newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
     };
 
     const applied = applyUntrustedStopResolution(s, "T1", failedChild);
@@ -139,8 +137,7 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
       filesModified: [],
       changedDeclaredArtifacts: [],
       bytesChangedSinceAttempt: false,
-      newTestsWritten: false,
-      newTestEvidence: "",
+      newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
     };
 
     const applied = applyUntrustedStopResolution(s, "T1", noWriteFailure);
@@ -171,8 +168,7 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
       filesModified: [],
       changedDeclaredArtifacts: [],
       bytesChangedSinceAttempt: true,
-      newTestsWritten: false,
-      newTestEvidence: "",
+      newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
     };
 
     const applied = applyUntrustedStopResolution(s, "T1", unobservedChange);
@@ -237,7 +233,7 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
     expect(t1.new_test_observation).toEqual({
       kind: "written",
       written: true,
-      evidence: untrustedPass.newTestEvidence,
+      evidence: untrustedPass.newTests.evidence,
     });
     expect(applied.state.executing_tasks).toEqual(["T3"]);
     expect(applied.state.wave_gates["1"].impl_complete).toBe(false);
@@ -266,8 +262,7 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
       ...untrustedPass,
       filesModified: ["src/new.ts"],
       changedDeclaredArtifacts: [],
-      newTestsWritten: false,
-      newTestEvidence: "",
+      newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
     };
 
     const applied = applyUntrustedStopResolution(s, "T1", retry);
@@ -298,8 +293,7 @@ describe("applyUntrustedStopResolution — trust and freshness are re-checked at
     };
     const failedResolution: UntrustedStopResolution = {
       ...untrustedPass,
-      newTestsWritten: false,
-      newTestEvidence: "",
+      newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
     };
 
     const applied = applyUntrustedStopResolution(stale, "T1", failedResolution);

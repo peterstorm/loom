@@ -2,7 +2,6 @@
  * Shared Loom schemas and Hook result/input types.
  */
 
-import type { ReviewerDraftV2, ReviewerProtocolDescriptor } from "./core/reviewer-contract";
 import type {
   FailedTaskProof,
   PendingTaskProof,
@@ -158,231 +157,54 @@ export function legacyTestsPassedNote(task: unknown): string | null {
 
 // --- Review findings ---
 //
-// The finding SHAPES live here with `Task` to avoid a shape-level cycle:
-// core/findings consumes Task while Task carries findings. Declaring the shapes
-// in core/findings and importing them back here made those two declarations
-// mutually dependent. core/findings still OWNS the finding
-// aggregate (minting identity, proving lockstep, and its review-path writers)
-// and re-exports these so no import site had to move.
-
-/** Severity tuple — the source of truth `parseFindingSeverity` proves against. */
-export const FINDING_SEVERITIES = ["critical", "advisory"] as const;
-export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
-
-/**
- * A normalized reviewer finding draft: claim whitespace is canonicalized and
- * optional locations are sanitized before this shape is constructed. It
- * deliberately carries NO identity — see core/findings.
- */
-export interface LegacyDraftFinding {
-  readonly protocolVersion?: never;
-  readonly basis?: never;
-  readonly reason?: never;
-  readonly severity: FindingSeverity;
-  /** Unverified reviewer-supplied single-line location hint, or null. */
-  readonly file: string | null;
-  /** 1-based line, or null. */
-  readonly line: number | null;
-  /** The single assertion a verifier will try to refute. */
-  readonly claim: string;
-}
-
-/** Exact current wire data plus its engine-owned durable discriminator. */
-export type CurrentDraftFinding = ReviewerDraftV2 & Readonly<{ protocolVersion: 2 }>;
-export type DraftFinding = LegacyDraftFinding | CurrentDraftFinding;
-export type FindingIdentity = Readonly<{ id: string; agent: string }> & (
-  | Readonly<{ review_generation?: never; review_packet_id?: never }>
-  | Readonly<{ review_generation: number; review_packet_id: string }>
-);
-/** `attributeFindings` mints identity; stored parsers rehydrate it without changing current evidence. */
-export type Finding = DraftFinding & FindingIdentity;
-
-export const PRIOR_FINDING_VERDICTS = ["resolved_by_remediation", "still_present"] as const;
-export type PriorFindingVerdict = (typeof PRIOR_FINDING_VERDICTS)[number];
-
-/** One reviewer's explicit assessment of one finding that pre-dates the run. */
-export interface PriorFindingAssessment {
-  readonly finding_id: string;
-  readonly verdict: PriorFindingVerdict;
-  readonly reason: string;
-}
-
-interface ReviewRunEvidenceBase {
-  readonly agent: string;
-  readonly prior_assessments: readonly PriorFindingAssessment[];
-}
-
-/** Evidence from a legacy/non-Wave packet that has no engine-issued slot. */
-export type UnboundReviewRunEvidence = Readonly<ReviewRunEvidenceBase & {
-  readonly protocolVersion?: never;
-  readonly new_findings: readonly LegacyDraftFinding[];
-  readonly request_id?: never;
-  readonly context_digest?: never;
-  readonly slot_id?: never;
-  readonly attempted?: never;
-}>;
-
-/** Evidence whose transcript was accepted under one exact engine-issued slot attempt. */
-export type SlotBoundReviewRunEvidence = Readonly<ReviewRunEvidenceBase & {
-  readonly protocolVersion?: never;
-  readonly new_findings: readonly LegacyDraftFinding[];
-  readonly request_id?: never;
-  readonly context_digest?: never;
-  readonly slot_id: string;
-  readonly attempted: 1 | 2;
-}>;
-
-/** Evidence staged by one reviewer. It is not activated until the whole run completes. */
-export type LegacyReviewRunEvidence = UnboundReviewRunEvidence | SlotBoundReviewRunEvidence;
-export type CurrentReviewRunEvidence = Readonly<ReviewRunEvidenceBase & {
-  protocolVersion: 2;
-  new_findings: readonly CurrentDraftFinding[];
-  slot_id: string;
-  attempted: 1 | 2;
-  request_id: string;
-  context_digest: string;
-}>;
-export type ReviewRunEvidence = LegacyReviewRunEvidence | CurrentReviewRunEvidence;
-
-/** Engine-issued semantic-slot authority for one member of an active Review
- * Run. Legacy runs may omit this field, but exact-slot Wave recovery refuses
- * such runs rather than accepting caller-authored attempt evidence. */
-type ReviewRunSlotBase = Readonly<{ agent: string; slot_id: string; attempted: 1 | 2 }>;
-export type LegacyReviewRunSlotAuthority = ReviewRunSlotBase & Readonly<{ request_id?: never; context_digest?: never }>;
-export type CurrentReviewRunSlotAuthority = ReviewRunSlotBase & Readonly<{ request_id: string; context_digest: string }>;
-export type ReviewRunSlotAuthority = LegacyReviewRunSlotAuthority | CurrentReviewRunSlotAuthority;
-
-/**
- * In-progress, packet-bound review run. Every expected reviewer must cover every
- * prior finding exactly once before any prior finding can leave the active set.
- */
-type ReviewRunBase = Readonly<{
-  generation: number;
-  packet_id: string;
-  head_sha: string;
-  expected_agents: readonly [string, ...string[]];
-  prior_finding_ids: readonly string[];
-}>;
-
-type ReviewRunWorkspaceAuthority =
-  | Readonly<{
-      workspace_scope?: never;
-      workspace_head_sha?: never;
-      wave_gate_run_id?: never;
-      wave_gate_authority_digest?: never;
-    }>
-  | Readonly<{
-      /** Exact Wave authority that issued this byte snapshot. */
-      workspace_scope: readonly string[];
-      workspace_head_sha: string;
-      wave_gate_run_id: string;
-      wave_gate_authority_digest: string;
-    }>;
-
-/** Workspace authority is either wholly absent on an unbound/legacy run or complete. */
-export type LegacyReviewRun = Readonly<ReviewRunBase & ReviewRunWorkspaceAuthority & {
-  reviewer_protocol?: never;
-  evidence: readonly LegacyReviewRunEvidence[];
-  slot_authority?: readonly [LegacyReviewRunSlotAuthority, ...LegacyReviewRunSlotAuthority[]];
-}>;
-export type CurrentReviewRun = Readonly<ReviewRunBase & Extract<ReviewRunWorkspaceAuthority, { workspace_scope: readonly string[] }> & {
-  reviewer_protocol: ReviewerProtocolDescriptor;
-  evidence: readonly CurrentReviewRunEvidence[];
-  slot_authority: readonly [CurrentReviewRunSlotAuthority, ...CurrentReviewRunSlotAuthority[]];
-}>;
-export type ReviewRun = LegacyReviewRun | CurrentReviewRun;
-
-type AcceptedReviewAuthorityBase = Readonly<{
-  generation: number;
-  packet_id: string;
-  head_sha: string;
-  scope: readonly string[];
-}>;
-
-type AcceptedReviewRunAuthority =
-  | Readonly<{ run_id?: never; authority_digest?: never }>
-  | Readonly<{ run_id: string; authority_digest: string }>;
-
-/** Review authority retained after a roster closes. It is the immutable source
- * for completion integrity and completed-Wave reopening; graph summaries are
- * never substituted for it. Run authority is either wholly absent for legacy
- * evidence or complete, so a partially bound accepted run is unrepresentable. */
-export type LegacyAcceptedReviewAuthority = Readonly<AcceptedReviewAuthorityBase & AcceptedReviewRunAuthority & { reviewer_protocol?: never }>;
-export type CurrentAcceptedReviewAuthority = Readonly<AcceptedReviewAuthorityBase & {
-  run_id: string;
-  authority_digest: string;
-  reviewer_protocol: ReviewerProtocolDescriptor;
-}>;
-export type AcceptedReviewAuthority = LegacyAcceptedReviewAuthority | CurrentAcceptedReviewAuthority;
-
-export interface FindingResolutionAssessment extends PriorFindingAssessment {
-  readonly agent: string;
-}
-
-export type NonEmptyPriorAssessments = readonly [
+// The Finding/ReviewRun/Refutation vocabulary lives in the Finding concept's
+// core modules — the leaf shape volume core/findings-shape.ts plus its
+// behaviour owner core/findings.ts (the wave-gate extraction pattern, one
+// concept one owner). The shapes used to sit here beside `Task` to avoid a
+// shape-level cycle; the leaf volume is what keeps the module graph acyclic:
+// types.ts binds its schema-root Task fields to findings-shape one-way, and
+// core/findings keeps its type-only Task/ReviewStatus edge to this file.
+// Re-exported here so the import surface is unchanged; only the dependency
+// arrow moved. See core/findings-shape.ts and core/findings.ts.
+export { FINDING_SEVERITIES, PRIOR_FINDING_VERDICTS } from "./core/findings-shape";
+import type {
+  AcceptedReviewAuthority,
+  Finding,
+  RefutedFinding,
+  ResolvedFinding,
+  ReviewRun,
+} from "./core/findings-shape";
+export type {
+  AcceptedReviewAuthority,
+  CurrentAcceptedReviewAuthority,
+  CurrentDraftFinding,
+  CurrentReviewRun,
+  CurrentReviewRunEvidence,
+  CurrentReviewRunSlotAuthority,
+  DraftFinding,
+  Finding,
+  FindingIdentity,
+  FindingResolution,
   FindingResolutionAssessment,
-  ...FindingResolutionAssessment[],
-];
-
-/** Why a previously valid finding left the active set after implementation. */
-export interface FindingResolution {
-  readonly kind: "resolved_by_remediation";
-  readonly generation: number;
-  readonly packet_id: string;
-  readonly head_sha: string;
-  readonly expected_agents: readonly [string, ...string[]];
-  readonly assessments: NonEmptyPriorAssessments;
-}
-
-/** A remediated finding, kept separately from findings a panel proved false. */
-export interface ResolvedFinding {
-  readonly finding: Finding;
-  readonly resolution: FindingResolution;
-}
-
-/**
- * One verifier's refutation: the lens that voted to kill a finding, and why.
- *
- * A pair, not two positionally-aligned arrays. The parallel-array form let a
- * lens list and a reason list disagree in length, which no reader could detect
- * and only a runtime check in the parser could reject; here the misalignment is
- * unrepresentable.
- *
- * `lens` is the open string form on purpose: a refutation record OUTLIVES the
- * lens table that produced it, and a stored audit trail must not become
- * unreadable because a lens was later renamed or retired.
- */
-export interface Refutation {
-  readonly lens: string;
-  readonly reason: string;
-}
-
-/**
- * One or more refutations.
- *
- * A refuted finding always has at least one — `countRefutationVotes` (reached
- * per finding from `tallyRefutations`) destructures `[head, ...tail]` at the
- * vote site specifically to establish it, and
- * `parseStoredRefutation` rejects an empty list on the way back in. The
- * invariant was proven on write and on read and then forgotten by the type in
- * between, so `RefutedFinding` documented in a comment what `AdjudicatedFinding`
- * and `FindingOutcome` already express. It lives here rather than in
- * `core/findings` because the stored shape is what needs it: `types.ts` cannot
- * import `core/findings`, which imports `types.ts`.
- */
-export type NonEmptyRefutations = readonly [Refutation, ...Refutation[]];
-
-/**
- * A finding a refutation panel killed, together with why.
- *
- * Recorded, never deleted: a wrong refutation is a shipped bug, and a silently
- * dropped critical finding is indistinguishable from one that was never found.
- */
-export interface RefutedFinding {
-  readonly finding: Finding;
-  /** The lenses that refuted it, with their reasoning, in lens order. */
-  readonly refutations: NonEmptyRefutations;
-}
+  FindingSeverity,
+  LegacyAcceptedReviewAuthority,
+  LegacyDraftFinding,
+  LegacyReviewRun,
+  LegacyReviewRunEvidence,
+  LegacyReviewRunSlotAuthority,
+  NonEmptyPriorAssessments,
+  NonEmptyRefutations,
+  PriorFindingAssessment,
+  PriorFindingVerdict,
+  Refutation,
+  RefutedFinding,
+  ResolvedFinding,
+  ReviewRun,
+  ReviewRunEvidence,
+  ReviewRunSlotAuthority,
+  SlotBoundReviewRunEvidence,
+  UnboundReviewRunEvidence,
+} from "./core/findings-shape";
 
 export interface RecoveredArtifactWriteEvidence {
   readonly baseline_sha: string;
@@ -406,6 +228,12 @@ export function parseNewTestEvidence(written: unknown, evidence: unknown): NewTe
     ? Object.freeze({ kind: "written", written: true, evidence: text as NonEmptyNewTestEvidence })
     : Object.freeze({ kind: "not-written", written: false, evidence: text });
 }
+
+/** The canonical absent new-test observation: nothing written, no evidence.
+ *  Producers with no transport evidence hand this exact value to the ADT
+ *  instead of re-running the legacy pair parser on empty input. */
+export const NEW_TEST_EVIDENCE_NOT_WRITTEN: NewTestEvidence =
+  Object.freeze({ kind: "not-written", written: false, evidence: "" });
 
 export function parseStoredNewTestEvidence(raw: unknown):
   | Readonly<{ ok: true; value: NewTestEvidence }>
@@ -598,11 +426,24 @@ interface TaskCommonMetadataBase {
   readonly start_sha?: string;
   readonly failure_reason?: string;
   readonly retry_count?: number;
-  /** Strict bounded-retry lineage marker. Histories without protocol-2 metadata
-   * use the read-only Slice-3 compatibility projection until their next engine registration. */
+  /** Strict bounded-retry lineage marker. Attempt history REQUIRES protocol-2
+   * metadata; there is no read-only compatibility projection — a history
+   * without it fails closed at load, and the Task must be re-registered
+   * through a modern implementation dispatch (or re-populated). */
   readonly implementation_retry_protocol?: 2;
   readonly implementation_retry_history_start?: number;
   readonly implementation_retry_predecessor_receipt_id?: ImplementationSettlementReceiptId;
+  /**
+   * Attestation mode: the declared artifacts already carry the completed work,
+   * so the dispatched child must prove EXISTING bytes instead of producing new
+   * ones. The proof's declared-artifact obligations carry the `attested` arm
+   * (satisfied when bytes are unchanged vs the attempt baseline; a write is
+   * drift), the stored policy waives new tests, and the child's prompt must
+   * bind the engine-derived attestation context. Load-locked: a Task carrying
+   * this flag without attested obligations, or obligations without the flag,
+   * is refused by the TaskGraph task validator.
+   */
+  readonly implementation_attestation?: true;
   /** Immutable exact receipts; append-only settlement audit in wire order. */
   readonly implementation_attempt_history?: readonly ImplementationAttemptSettlementReceipt[];
 }
@@ -744,9 +585,16 @@ export type SpecCheck = CapturedSpecCheck | EvidenceFailedSpecCheck;
  */
 export type ActiveWaveGateTerminalOutcome =
   | Readonly<{ kind: "done"; outcome: ArtifactRef }>
-  | Readonly<{ kind: "terminal-blocked"; diagnostic: TerminalBlockedDiagnostic }>;
+  | Readonly<{ kind: "terminal-blocked"; diagnostic: TerminalBlockedDiagnostic }>
+  /** The operator's terminal decision recorded by `helper orchestration abandon`.
+   *  Fields mirror the run directory's immutable abandonment marker exactly —
+   *  no invented timestamp — so the state stamp and the on-disk marker can
+   *  never disagree about why the run ended or what replaced it. A tombstoned
+   *  registration is no longer active authority: `start` supersedes it, while
+   *  the spec-trace retirement flow can still prove the run from it. */
+  | Readonly<{ kind: "terminal-abandoned"; reason: string; supersededBy: OrchestrationRunId | null }>;
 
-export type ActiveWaveGateRegistration = Readonly<{
+type ProtectedWaveGateRegistrationBase = Readonly<{
   schemaVersion: 1;
   kind: "active-wave-gate";
   runId: OrchestrationRunId;
@@ -756,10 +604,23 @@ export type ActiveWaveGateRegistration = Readonly<{
   /** Absolute authoritative parent of this run. Absent only on registrations
    * created before directory authority was persisted. */
   runsRoot?: string;
-  /** Non-null only while reading a legacy terminal registration. New
-   * completions archive it in wave_gate_history and clear active authority. */
-  terminalOutcome: ActiveWaveGateTerminalOutcome | null;
 }>;
+
+/** Live authority and retained terminal audit are distinct states. */
+export type LiveWaveGateRegistration = Readonly<ProtectedWaveGateRegistrationBase & {
+  terminalOutcome: null;
+}>;
+
+export type RetiredWaveGateRegistration = ActiveWaveGateTerminalOutcome extends infer Outcome
+  ? Outcome extends ActiveWaveGateTerminalOutcome
+    ? Readonly<ProtectedWaveGateRegistrationBase & {
+        /** A retained terminal registration is audit only, never live authority. */
+        terminalOutcome: Outcome;
+      }>
+    : never
+  : never;
+
+export type ActiveWaveGateRegistration = LiveWaveGateRegistration | RetiredWaveGateRegistration;
 
 type CompletedWaveGateRegistrationCommon = Readonly<{
   kind: "completed-wave-gate";
@@ -1050,7 +911,7 @@ export type WaveImplementationDispatch =
       kind: "initial-implementation";
       taskId: string;
       semanticAttempt: 1;
-      promptAppendix: null;
+      promptAppendix: string | null;
     }>
   | Readonly<{
       kind: "retry-implementation";

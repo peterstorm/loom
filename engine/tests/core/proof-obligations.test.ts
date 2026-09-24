@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 
+import { canonicalStructuralEquals } from "../../src/core/orchestration-contract";
 import {
   TRUSTED_LEDGER_ONLY_POLICY,
   PI_STRUCTURED_EVIDENCE_POLICY,
@@ -343,6 +344,41 @@ describe("unknown-input parsers", () => {
     if (!aggregate.ok) {
       expect(aggregate.errors).toContain("proof.evidence must equal the evidence derived from proof.results");
     }
+  });
+
+  it("accepts key-order-permuted but structurally-equal aggregate evidence (kernel equality, not textual)", () => {
+    // pr-test-analyzer-3 pin, widening arm: the sfh-2 swap replaced the
+    // key-order-sensitive JSON.stringify comparison with the kernel's
+    // canonical structural equality, whose record arm matches keys by
+    // identity, not position. A persisted proof whose stored evidence spells
+    // the same record in a different key order is therefore ACCEPTED where the
+    // old textual comparison refused; a revert to textual equality turns this
+    // test red.
+    const satisfied = evaluateTaskProof(input, completeEvidence);
+    const original = JSON.parse(JSON.stringify(satisfied));
+    const permuted = JSON.parse(JSON.stringify(satisfied));
+    const reordered = Object.fromEntries(Object.entries(permuted.evidence[1]).reverse());
+    permuted.evidence[1] = reordered;
+    // The permutation is real: the textual spellings differ.
+    expect(JSON.stringify(permuted.evidence[1])).not.toBe(JSON.stringify(original.evidence[1]));
+    expect(parseTaskProof(permuted).ok).toBe(true);
+  });
+
+  it("reads an own undefined-valued key as distinct from an absent key (kernel equality, not textual)", () => {
+    // pr-test-analyzer-3 pin, narrowing arm: JSON.stringify DROPPED
+    // undefined-valued own keys, so the old textual comparison silently agreed
+    // with a record carrying one; the kernel reads it as a distinct key and
+    // refuses. Pinned at the kernel seam — through parseTaskProof the
+    // element-parse exact-record arm refuses the same shape first (both
+    // layers fail closed), so the kernel pin is the discriminating one.
+    expect(canonicalStructuralEquals({ kind: "task-completed", extra: undefined }, { kind: "task-completed" })).toBe(false);
+    // The same record without the key is equal (the absent key is not a
+    // distinct fact), and key order never decides.
+    expect(canonicalStructuralEquals({ extra: undefined, kind: "task-completed" }, { kind: "task-completed", extra: undefined })).toBe(true);
+    expect(canonicalStructuralEquals(
+      { verdict: "trusted-pass", provenance: "evidence-ledger", kind: "regression-test-pass" },
+      { kind: "regression-test-pass", provenance: "evidence-ledger", verdict: "trusted-pass" },
+    )).toBe(true);
   });
 
   it("accepts a valid explicit Verification Policy obligation input", () => {

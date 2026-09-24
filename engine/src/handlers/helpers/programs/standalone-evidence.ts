@@ -7,7 +7,7 @@ import type { PreparedStandaloneSuccessor } from '../../../core/standalone-linea
 import { admitStandaloneSuccessorReviewer } from '../../../core/standalone-successor-reviewer';
 import { standaloneCurrentPanelCriticals, type StandaloneReviewerProtocolResolver } from '../../../core/standalone-review';
 import type { IssuedStandaloneReviewerProtocol } from '../../../core/review-output';
-import { canonicalStructuralEquals, parseEffectId, sameAgentRequestAuthority, parseAgentRequestAuthority, parseIssuedSpawnRequest, type AgentRequestAuthority, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
+import { canonicalStructuralEquals, parseEffectId, sameAgentRequestAuthority, parseAgentRequestAuthority, parseIssuedSpawnRequest, boundedThrownCause, type AgentRequestAuthority, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
 import { aggregateStandaloneReview, bindStandaloneCaptureAuthority, captureStandaloneReviewerBytes, completeStandaloneReviewerCapture, proveStandaloneRosterCompletion, serializeAdjudicatedStandaloneReview, admitStandaloneTranscript, type FrozenStandaloneReviewAuthority, type StandaloneTranscriptAdmission } from '../../../core/standalone-review';
 import { reduceStandaloneReviewMachine, freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion, startStandaloneReviewMachine, type StandaloneReviewMachineState } from '../../../core/standalone-review-machine';
 import { buildStandaloneFindingBrief, defaultRefutationThreshold, reviewSignals, selectReviewLenses } from '../../../core/review-panel';
@@ -132,7 +132,7 @@ export type StandaloneReviewedSource = Readonly<{
   files: readonly StandaloneReviewedSourceFile[];
 }>;
 
-function parseScopePacketAuthority(bytes: readonly number[]):
+function parseScopePacketAuthority(bytes: Iterable<number>):
   | Readonly<{ ok: true; value: StandaloneScopePacketAuthority }>
   | Readonly<{ ok: false; message: string }> {
   try {
@@ -164,7 +164,7 @@ function parseScopePacketAuthority(bytes: readonly number[]):
   }
 }
 
-function parseReviewedSource(bytes: readonly number[], scope: readonly string[], sourceVersion: 1 | 2 = 1):
+function parseReviewedSource(bytes: Iterable<number>, scope: readonly string[], sourceVersion: 1 | 2 = 1):
   | Readonly<{ ok: true; value: StandaloneReviewedSource }>
   | Readonly<{ ok: false; message: string }> {
   const malformed = (message: string) => Object.freeze({ ok: false as const, message });
@@ -666,7 +666,10 @@ export function readStandaloneCaptureWitnesses(handle: RunDirHandle,
     if (captured.value.size !== witnesses.size) return { ok: false, message: "captured roster includes a foreign unissued slot" };
     if (processWitnesses !== undefined && processWitnesses.size !== witnesses.size) return { ok: false, message: "current-session witness inventory differs from durable captured roster" };
     return { ok: true, value: witnesses };
-  } catch (cause) { return { ok: false, message: cause instanceof Error ? cause.message : String(cause) }; }
+  } catch (thrown) {
+    const cause = boundedThrownCause(thrown, "successor standalone capture witnesses");
+    return { ok: false, message: `standalone capture witness inspection failed: ${cause.name}: ${cause.message}` };
+  }
 }
 
 /** Source authentication carries already authenticated lineage, avoiding recursive reauthentication. */

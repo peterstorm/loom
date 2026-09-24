@@ -19,6 +19,7 @@ import {
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { capturedSpecCheck } from "../../src/core/spec-check";
 import type { Task, TaskGraph } from "../../src/types";
+import { NEW_TEST_EVIDENCE_NOT_WRITTEN, parseNewTestEvidence } from "../../src/types";
 
 const digest = (value: string) => value.repeat(64).slice(0, 64);
 const baseline = (path: string, value: string | null) => [{
@@ -111,8 +112,7 @@ function graph(task: Task): TaskGraph {
 
 const completedEvidence = {
   taskCompleted: true,
-  newTestsWritten: false,
-  newTestEvidence: "verification_policy.new_tests waived: legacy-new-tests-required-false",
+  newTests: parseNewTestEvidence(false, "verification_policy.new_tests waived: legacy-new-tests-required-false"),
 };
 
 function expectApplied(result: ReturnType<typeof settleObservedImplementation>) {
@@ -256,11 +256,11 @@ describe("Task-local byte-scope application core", () => {
 });
 
 describe("shared evidence preservation", () => {
-  it("normalizes legacy written+empty evidence to the not-written ADT arm", () => {
+  it("reads an absent new-test ADT as the canonical not-written observation", () => {
     const attempt = authority();
     const normalized = normalizeImplementationEvidence(
       pendingTask(attempt),
-      { taskCompleted: true, newTestsWritten: true, newTestEvidence: "" },
+      { taskCompleted: true },
       observedBytes(attempt),
     );
     expect(normalized.newTests).toEqual({ kind: "not-written", written: false, evidence: "" });
@@ -365,7 +365,7 @@ describe("exact transition application", () => {
           taskCompleted: true,
           testResult: { verdict: "trusted-fail" },
           testEvidence: "red",
-          newTestsWritten: false,
+          newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
         },
         TRUSTED_LEDGER_ONLY_POLICY,
         observedBytes(attempt),

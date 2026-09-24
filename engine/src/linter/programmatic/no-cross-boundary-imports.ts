@@ -94,6 +94,14 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       // capability policed is protected-state WRITING: `engine/src/state-manager`
       // stays unlisted, and `validate-phase-order` takes its state read as an
       // injected dependency instead.
+      // NOTE: unlike the per-file grant below, this is a LIVE import grant —
+      // no deny matches and no per-file lookup is needed, so any governed
+      // core file may import `engine/src/utils/find-file` through it today.
+      // It is live-but-unused: no current core file has exercised it. It is
+      // permission to read the filesystem walk, never to write protected
+      // state. Should find-file move under core/, imports would resolve to
+      // the new core path (already covered by this boundary's `./`), and this
+      // line would go dead rather than gate-breaking.
       "engine/src/utils/find-file",
       "ts-pattern",
     ],
@@ -154,6 +162,19 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       // Exact runtime entry and transitive implementation bytes are gated by machine-purity.
       "engine/src/core/structured-test-report.ts": ["saxes"],
       "engine/src/core/wave-gate-machine.ts": ["node:crypto"],
+      // Cross-branch pre-provisioning, deliberate. TODAY this per-file grant
+      // is INERT with zero granted capability: `find-file` sits in utils/,
+      // which NO boundary rule governs, so the per-file lookup only runs for
+      // files the core boundary actually governs, and this entry never
+      // matches. (The core `allow` line naming the module is a different
+      // case — a live, unused IMPORT grant; see its comment above.) The entry
+      // is kept, not pruned: it is the reviewed node:-capability grant for
+      // the day a boundary comes to govern utils/, where dropping it now
+      // would indeed fail that future gate until re-reviewed. A move of
+      // find-file under core/ would NOT be rescued by this entry — the moved
+      // file's `node:` imports would need a fresh capability entry at the new
+      // path, re-reviewed at that move — and the stale utils-path entry would
+      // simply go dead.
       "engine/src/utils/find-file.ts": ["node:fs", "node:path"],
     },
     deny: [

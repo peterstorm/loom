@@ -15,6 +15,7 @@ import {
   applyUntrustedStopResolution,
   cumulativeModifiedPaths,
 } from "../engine/src/core/implementation-application";
+import { NEW_TEST_EVIDENCE_NOT_WRITTEN } from "../engine/src/types";
 import { extractTestEvidence, testEvidenceOf, type TestEvidence } from "../engine/src/core/test-evidence";
 import {
   isPhaseResultEligible,
@@ -40,6 +41,7 @@ import {
 } from "../engine/src/core/wave-review-authority";
 import { observeWaveSpecCheckDocuments } from "../engine/src/orchestration/wave-spec-check-documents";
 import {
+  SPEC_ARTIFACT_DIR,
   parseSpecArtifactDirectory,
   phaseArtifactUpdates,
 } from "../engine/src/core/phase-artifact-paths";
@@ -53,6 +55,7 @@ import type {
   WaveSpecCheckSlotAuthority,
 } from "../engine/src/types";
 import type { ParsedTaskGraph } from "../engine/src/state-manager";
+import type { TaskGraphProjectBoundary } from "../engine/src/config";
 import {
   parseIsoInstant,
   type ImplementationAttemptAuthority,
@@ -66,6 +69,7 @@ import { PI_STRUCTURED_EVIDENCE_POLICY } from "../engine/src/core/proof-obligati
 import {
   collectNewTestEvidence,
   describeNewTestObservationError,
+  realDiffDepsAt,
 } from "../engine/src/handlers/helpers/task-local-completion";
 import {
   productionExactSettlementPorts,
@@ -681,6 +685,7 @@ type FailedPiResultArgs = Readonly<{
   result: PiSubagentResult;
   reservedSlot: ReservedSlot | undefined;
   now: string;
+  projectBoundary: TaskGraphProjectBoundary;
 }>;
 
 async function applyFailedSpecCheckResult(
@@ -696,7 +701,11 @@ async function applyFailedSpecCheckResult(
   }
   let specObservation;
   try {
-    specObservation = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
+    specObservation = observeWaveSpecCheckDocuments({
+      specFile: observedState.spec_file,
+      planFile: observedState.plan_file,
+      projectBoundary: args.projectBoundary,
+    });
   } catch (cause) {
     const diagnostic = `spec-check document observation failed: ${cause instanceof Error ? cause.message : String(cause)}`;
     return outcome([`loom(pi): ${diagnostic}`], [diagnostic]);
@@ -787,6 +796,7 @@ function preparePiPhaseResult(
   state: TaskGraph,
   completedPhase: Phase,
   writtenPaths: readonly string[],
+  phaseArtifactBaseDir: string,
 ): PiPhasePreparation {
   if (!isPhaseResultEligible(state.current_phase, completedPhase)) {
     const currentIndex = PHASES.indexOf(state.current_phase);
@@ -799,7 +809,7 @@ function preparePiPhaseResult(
   }
   const specDir = parseSpecArtifactDirectory(state.spec_dir);
   if (!specDir.ok) throw new Error(specDir.message);
-  const updates = phaseArtifactUpdates(writtenPaths, specDir.value);
+  const updates = phaseArtifactUpdates(writtenPaths, specDir.value, phaseArtifactBaseDir);
   return Object.freeze({
     kind: "eligible",
     state: Object.keys(updates).length === 0 ? state : { ...state, ...updates },
@@ -812,9 +822,16 @@ function reducePiPhaseTransition(
   completedPhase: Phase,
   transition: PhaseTransition,
   now: string,
+  phaseArtifactBaseDir: string,
 ): TaskGraph {
   if (!isPhaseResultEligible(state.current_phase, completedPhase)) return state;
-  const artifactUpdates = phaseArtifactUpdates([transition.artifact], state.spec_dir ?? undefined);
+  const artifactUpdates = phaseArtifactUpdates(
+    [transition.artifact],
+    // A null spec_dir keeps the shared default root — the exact value the
+    // retired parameter default supplied.
+    state.spec_dir ?? SPEC_ARTIFACT_DIR,
+    phaseArtifactBaseDir,
+  );
   return {
     ...state,
     current_phase: transition.nextPhase,
@@ -843,13 +860,23 @@ function phaseMismatchOutcome(
 
 function reduceLockedPiPhaseResult(
   locked: TaskGraph,
-  args: Readonly<{ agentType: string; completedPhase: Phase; now: string }>,
+  args: Readonly<{
+    agentType: string;
+    completedPhase: Phase;
+    now: string;
+    phaseArtifactBaseDir: string;
+  }>,
   writtenPaths: readonly string[],
   observation: PhaseTransitionObservation | null,
 ): Readonly<{ state: TaskGraph; value: PiResultOutcome }> {
   let prepared: PiPhasePreparation;
   try {
-    prepared = preparePiPhaseResult(locked, args.completedPhase, writtenPaths);
+    prepared = preparePiPhaseResult(
+      locked,
+      args.completedPhase,
+      writtenPaths,
+      args.phaseArtifactBaseDir,
+    );
   } catch (error) {
     const diagnostic = `${args.agentType} phase artifact extraction failed: ` +
       `${error instanceof Error ? error.message : String(error)}`;
@@ -881,7 +908,13 @@ function reduceLockedPiPhaseResult(
       };
     }
     return {
-      state: reducePiPhaseTransition(prepared.state, args.completedPhase, transition, args.now),
+      state: reducePiPhaseTransition(
+        prepared.state,
+        args.completedPhase,
+        transition,
+        args.now,
+        args.phaseArtifactBaseDir,
+      ),
       value: outcome(),
     };
   } catch (error) {
@@ -906,6 +939,14 @@ export async function applyPhaseAgentPiResult(args: Readonly<{
   completedPhase: Phase;
   result: PiSubagentResult;
   now: string;
+  /** The project boundary the run's artifacts live under, derived from the
+   *  TaskGraph's own location. REQUIRED: phase artifacts are stored
+   *  project-relative, so probing them against the Pi process's cwd searches
+   *  the wrong checkout whenever the parent session is rooted elsewhere than
+   *  the graph (the worktree case). Production callers pass
+   *  `observeTaskGraphProjectBoundary(...).root`; requiring the argument makes
+   *  the omission a compile error instead of a silent cross-checkout drift. */
+  phaseArtifactBaseDir: string;
 }>): Promise<PiResultOutcome> {
   const parsed = parsePiMessages(args.result.messages);
   if (!parsed.ok) {
@@ -915,12 +956,18 @@ export async function applyPhaseAgentPiResult(args: Readonly<{
   const writtenPaths = writtenPathsOf(parsed.value);
   try {
     const observedState = args.store.load();
-    const prepared = preparePiPhaseResult(observedState, args.completedPhase, writtenPaths);
+    const prepared = preparePiPhaseResult(
+      observedState,
+      args.completedPhase,
+      writtenPaths,
+      args.phaseArtifactBaseDir,
+    );
     const observation = prepared.kind === "eligible"
       ? (() => {
           const specDir = parseSpecArtifactDirectory(prepared.state.spec_dir);
           if (!specDir.ok) throw new Error(specDir.message);
-          return observePhaseTransition(args.completedPhase, prepared.state, specDir.value);
+          return observePhaseTransition(args.completedPhase, prepared.state, specDir.value,
+            args.phaseArtifactBaseDir);
         })()
       : null;
     return await args.store.updateAndReturn((locked) =>
@@ -1166,8 +1213,7 @@ function malformedTranscriptResolutionState(args: Readonly<{
     filesModified: [],
     changedDeclaredArtifacts: comparison.changedDeclaredArtifacts,
     bytesChangedSinceAttempt: comparison.bytesChangedSinceAttempt,
-    newTestsWritten: false,
-    newTestEvidence: "",
+    newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
   }).state, args.taskId, args.reservedSlot);
 }
 
@@ -1312,8 +1358,7 @@ async function applyLegacyImplementationQuarantine(
         filesModified: args.filesModified,
         changedDeclaredArtifacts: [],
         bytesChangedSinceAttempt: false,
-        newTestsWritten: false,
-        newTestEvidence: "",
+        newTests: NEW_TEST_EVIDENCE_NOT_WRITTEN,
       });
       skippedExistingVerdict = applied.skipped;
       return clearCurrentReservedAuthority(applied.state, args.taskId, args.reservedSlot);
@@ -1347,6 +1392,7 @@ async function applyLegacyImplementationQuarantine(
       cumulativeFiles,
       verificationPolicy.newTests,
       currentTarget.start_sha,
+      realDiffDepsAt(root),
     );
     if (!newTestObservation.ok) {
       return quarantineCompletionAuthority(
@@ -1362,8 +1408,7 @@ async function applyLegacyImplementationQuarantine(
       filesModified: args.filesModified,
       changedDeclaredArtifacts: comparison.changedDeclaredArtifacts,
       bytesChangedSinceAttempt: comparison.bytesChangedSinceAttempt,
-      newTestsWritten: newTestEvidence.written,
-      newTestEvidence: newTestEvidence.evidence,
+      newTests: newTestEvidence,
     });
     skippedExistingVerdict = applied.skipped;
     return clearCurrentReservedAuthority(applied.state, args.taskId, args.reservedSlot);
@@ -1378,6 +1423,7 @@ async function applyLegacyImplementationQuarantine(
 type ImplementationPiResultArgs = Readonly<{
   store: TaskGraphStore;
   repository: RepositoryProbe;
+  authoritativeStatePath: string;
   agentType: string;
   result: PiSubagentResult;
   reservedSlot: ReservedSlot | undefined;
@@ -1437,7 +1483,10 @@ async function settleExactPiInfrastructure(
 }
 
 function piExactSettlementPorts(args: ExactPiSettlementArgs): ExactImplementationSettlementPorts {
-  const production = productionExactSettlementPorts(args.repository.root());
+  const production = productionExactSettlementPorts(
+    args.repository.root(),
+    args.authoritativeStatePath,
+  );
   return Object.freeze({
     ...production,
     newTests: Object.freeze({
@@ -1816,6 +1865,7 @@ export async function applySpecCheckPiResult(args: Readonly<{
   result: PiSubagentResult;
   reservedSlot: ReservedSlot | undefined;
   now: string;
+  projectBoundary: TaskGraphProjectBoundary;
 }>): Promise<PiResultOutcome> {
   const parsedMessages = parsePiMessages(args.result.messages);
   const observation: PiSpecCheckObservation = parsedMessages.ok
@@ -1826,7 +1876,11 @@ export async function applySpecCheckPiResult(args: Readonly<{
       };
   try {
     const observedState = args.store.load();
-    const specObservation = observeWaveSpecCheckDocuments(observedState.spec_file, observedState.plan_file);
+    const specObservation = observeWaveSpecCheckDocuments({
+      specFile: observedState.spec_file,
+      planFile: observedState.plan_file,
+      projectBoundary: args.projectBoundary,
+    });
     return await args.store.updateAndReturn((state) =>
       reducePiSpecCheckResult(state, args.reservedSlot?.specCheckAuthority, observation,
         specObservation.authority, args.now));

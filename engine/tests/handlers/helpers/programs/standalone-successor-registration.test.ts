@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { parseStandaloneSuccessorStartInput, parseStandaloneSuccessorRegistration } from "../../../../src/handlers/helpers/programs/standalone-successor-registration";
 import { parseStandaloneStartInput, parseRegisteredFacadeProgram } from "../../../../src/handlers/helpers/programs/helpers";
+import { encodeByteSection } from "../../../../src/core/context-packets";
 import { STANDALONE_REVIEWER_PROTOCOL_V3 } from "../../../../src/core/standalone-lineage-contract";
 import { CURRENT_REVIEWER_PROTOCOL } from "../../../../src/core/reviewer-contract";
 const input = { schemaVersion: 3, kind: "types", files: ["a.ts"], dryRun: false,
@@ -38,5 +39,33 @@ describe("explicit bounded successor registration ingress", () => {
     expect(parseStandaloneSuccessorStartInput({ ...input, files: Array.from({ length: 4097 }, (_, i) => `a${i}.ts`) }).ok).toBe(false);
     expect(parseStandaloneSuccessorStartInput({ ...input, latest: true }).ok).toBe(false);
     expect(parseStandaloneSuccessorRegistration({ schemaVersion: 3, kind: "standalone-review", reviewerProtocol: STANDALONE_REVIEWER_PROTOCOL_V3, input, authority: {} }).ok).toBe(false);
+  });
+
+  it("admits the exact encoded frozen-source shape and refuses every byte shape the shared packet grammar refuses", () => {
+    // The section byte grammar is owned by the packet core; the registration
+    // adapter consumes it. This pin keeps the successor path from drifting:
+    // the exact encoded section is admitted, and each hostile byte shape the
+    // packet parser refuses collapses to the same registration refusal.
+    const section = encodeByteSection("standalone-frozen-source", JSON.stringify({ kind: "fixture" }));
+    if (!section.ok) throw new Error(section.error.message);
+    const registration = (bytes: unknown) => ({
+      schemaVersion: 3,
+      kind: "standalone-review",
+      reviewerProtocol: STANDALONE_REVIEWER_PROTOCOL_V3,
+      input,
+      authority: {},
+      currentSource: { label: "standalone-frozen-source", bytes, digest: section.value.digest, byteLength: section.value.byteLength },
+      previousContexts: [],
+    });
+    const admitted = parseStandaloneSuccessorRegistration(registration(section.value.bytes));
+    expect(admitted.ok).toBe(true);
+    if (admitted.ok) {
+      expect(admitted.value.currentSource.digest).toBe(section.value.digest);
+      expect(admitted.value.currentSource.byteLength).toBe(section.value.byteLength);
+      expect(admitted.value.previousContexts).toEqual([]);
+    }
+    for (const hostile of ["abc", 42, {}, null, [300], [1, -1], [1, undefined]]) {
+      expect(parseStandaloneSuccessorRegistration(registration(hostile)).ok, JSON.stringify(hostile)).toBe(false);
+    }
   });
 });

@@ -96,6 +96,18 @@ Emit only the issued JSON payload. The analysis dimensions above help inspect ty
 - Using primitive types where domain types would be clearer (primitive obsession)
 - Mutable aggregates (state transitions should produce new instances, not mutate)
 
+## Payload emission hygiene (mechanical preflight before you emit)
+
+Admission is strict and deterministic; a shape-violating payload fails closed and burns the bounded retry. Run this mechanical preflight on the composed payload BEFORE emitting your final message (for the issued v2 grammar below; for a v3 successor request apply the same preflight against that packet's frozen schema):
+
+1. **Exactly one JSON object.** The payload must be the only balanced, parseable JSON object in the final message. Any second balanced brace pair anywhere in the message (prose, examples, inline fixtures) makes extraction ambiguous and fails admission.
+2. **Parse check.** Long single-line payloads commonly lose the final closing brace. Write the payload to a scratch file and run `bun -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")); console.log("parses")' /tmp/payload.json` — fix and re-run until it prints `parses`. Only then emit.
+3. **Strict evidence key sets.** The issued schema is strictObject at every object: no extra keys, none missing. For the current v2 grammar the evidence union is:
+   - `execution-trace`: exactly `kind, preconditions, steps, observed, expected, reference` — never an `execution` key.
+   - `reproduction`: exactly `kind, execution` (`"not-executed"` or `"reviewer-reported"`), `setup, input, observed, expected, reference`.
+4. **Basis completeness.** `critical` requires the complete basis: `evidence`, `violatedContract{reference,statement}`, `consequence{affected,preconditions,impact,evidenceLimits}`, `truthConfidence` (0–100), `severityRationale`. `advisory` requires `reason`; an optional `basis`, if present, must be complete — never null or partial.
+5. **Bounded sizes.** claim/reason/severityRationale ≤ 4096 UTF-8 bytes; reference ≤ 2048; narrative evidence fields ≤ 8192; preconditions/steps ≤ 32 entries; ≤ 128 findings; ≤ 32 nesting depth; ≤ 1048576 bytes; no BOM; no duplicate keys; `file: null` requires `line: null`.
+
 ## Reviewer wire contract (current v2 only)
 
 <!-- wire-contract:start — stamped from agents/_shared/wire-contract.md; edit the fragment, then run scripts/stamp-wire-contract.ts -->

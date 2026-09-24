@@ -243,7 +243,11 @@ function reviewerOutput(
   });
 }
 
-function refutationOutput(runDir: string, request: SpawnRequest): string {
+function refutationOutput(
+  runDir: string,
+  request: SpawnRequest,
+  verdict: "refuted" | "upheld" = "refuted",
+): string {
   const contextPath = join(runDir, "contexts", `${request.authority.contextDigest}.json`);
   const packet = record(JSON.parse(readFileSync(contextPath, "utf8")) as unknown, "refutation context packet");
   check(Array.isArray(packet.fixedContext), "refutation context has no fixedContext");
@@ -257,7 +261,7 @@ function refutationOutput(runDir: string, request: SpawnRequest): string {
   const verdicts = authority.findings.map((candidate, index) => {
     const finding = record(candidate, `refutation finding[${index}]`);
     check(typeof finding.id === "string", "refutation finding id is missing");
-    return { finding_id: finding.id, verdict: "refuted", reasoning: `refuted through ${authority.lens}` };
+    return { finding_id: finding.id, verdict, reasoning: `${verdict} through ${authority.lens}` };
   });
   return JSON.stringify({ criterion: authority.lens, verdicts });
 }
@@ -317,6 +321,126 @@ function standaloneAndRemediationSmoke(): void {
   check(git(cwd, ["diff", "--cached", "--name-only"]) === changedPath, "remediation installed a non-authoritative staged set");
   process.stdout.write("  ✓ standalone critical → automatic refutation → durable done\n");
   process.stdout.write("  ✓ remediation authoritative result → verified real Git index installation\n");
+}
+
+/** Drive the non-zero-critical remediation path through a fresh report and
+ * the real Git index adapter; the zero-critical smoke above intentionally
+ * skips both defect-family checks and completion-check execution. */
+function criticalRemediationSmoke(): void {
+  const cwd = repository("critical-remediation");
+  const changedPath = "src/repair.mjs";
+  const testPath = "tests/repair.test.mjs";
+  const reportPath = ".loom/completion-reports/smoke-repair.junit.xml";
+  mkdirSync(join(cwd, "src"), { recursive: true });
+  mkdirSync(join(cwd, ".loom", "completion-reports"), { recursive: true });
+  writeFileSync(join(cwd, changedPath), "export const repaired = () => false;\n");
+  writeFileSync(join(cwd, ".gitignore"), `${reportPath}\n`);
+  writeFileSync(join(cwd, ".loom", "verification-manifest.json"), JSON.stringify({
+    schemaVersion: 1,
+    kind: "loom-verification-manifest",
+    checks: [{
+      id: "smoke:critical-remediation",
+      scope: "wave",
+      executable: "node",
+      args: [
+        "--test",
+        "--test-reporter=junit",
+        `--test-reporter-destination=${reportPath}`,
+        testPath,
+      ],
+      cwd: ".",
+      timeoutMs: 15_000,
+      report: { kind: "required-file", path: reportPath },
+    }],
+  }, null, 2));
+  git(cwd, ["add", ".gitignore", ".loom/verification-manifest.json", changedPath]);
+  git(cwd, ["commit", "-qm", "vulnerable baseline"]);
+  writeFileSync(join(cwd, changedPath), "export const repaired = () => false; // reviewed vulnerable state\n");
+
+  const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-facade-smoke-critical-runs-")));
+  temporaryRoots.push(runsRoot);
+  const reviewRun = join(runsRoot, "run.critical-source");
+  const initial = asSpawnBatch(run(cwd, [
+    "start", "standalone-review", "--runs-root", runsRoot, "--run", reviewRun,
+  ], JSON.stringify({ kind: "code", files: [changedPath], dryRun: false })), "critical source start");
+
+  let next: unknown = initial;
+  for (const [index, request] of initial.requests.entries()) {
+    next = submit(cwd, runsRoot, reviewRun, request,
+      reviewerOutput(reviewRun, request, index === 0 ? "critical" : "clean", changedPath));
+  }
+  const panel = asSpawnBatch(next, "critical source refutation");
+  for (const request of panel.requests) {
+    next = submit(cwd, runsRoot, reviewRun, request, refutationOutput(reviewRun, request, "upheld"));
+  }
+  asDone(next, "critical source adjudication");
+  const result = record(JSON.parse(readFileSync(join(reviewRun, "result.json"), "utf8")), "critical source result");
+  check(Array.isArray(result.surviving_critical_findings) && result.surviving_critical_findings.length === 1,
+    "critical source must retain exactly one surviving critical");
+  const finding = record(result.surviving_critical_findings[0], "critical source surviving finding");
+  check(typeof finding.id === "string", "critical source finding id is missing");
+
+  writeFileSync(join(cwd, changedPath), "export const repaired = () => true;\n");
+  mkdirSync(join(cwd, "tests"), { recursive: true });
+  writeFileSync(join(cwd, testPath), [
+    'import test from "node:test";',
+    'import assert from "node:assert/strict";',
+    'import { repaired } from "../src/repair.mjs";',
+    'test("critical repair", () => assert.equal(repaired(), true));',
+    "",
+  ].join("\n"));
+  // A stale failing report must be removed before the enrolled command creates
+  // fresh evidence; merely touching or reusing these bytes cannot pass.
+  writeFileSync(join(cwd, reportPath), '<testsuite tests="1" failures="1"/>');
+
+  const remediationRun = join(runsRoot, "run.critical-remediation");
+  const remediated = asDone(run(cwd, [
+    "start", "remediation", "--runs-root", runsRoot, "--run", remediationRun,
+  ], JSON.stringify({
+    sourceRunsRoot: runsRoot,
+    sourceRun: reviewRun,
+    supportPaths: [testPath],
+    defectFamily: {
+      kind: "declared-defect-family-accounting",
+      provenance: "DECLARED",
+      dispositions: [{ findingId: finding.id, status: "repaired", repairGroupId: "group.smoke-repair" }],
+      groups: [{
+        kind: "declared-repair-group",
+        provenance: "DECLARED",
+        repairGroupId: "group.smoke-repair",
+        findingIds: [finding.id],
+        rootCause: { provenance: "DECLARED", statement: "The reviewed predicate returned the vulnerable value." },
+        invariant: { provenance: "DECLARED", statement: "The repaired predicate returns the accepted value." },
+        siblings: { kind: "none-declared", provenance: "DECLARED", reason: "The fixture has no sibling implementation paths." },
+        checks: [{
+          checkId: "smoke:critical-remediation",
+          historicalRed: {
+            kind: "historical-red",
+            provenance: "DECLARED",
+            statement: "The regression assertion fails against the reviewed vulnerable predicate.",
+            reference: null,
+          },
+        }],
+      }],
+    },
+  })), "critical remediation start");
+  const outcome = record(remediated.outcome, "critical remediation outcome");
+  check(outcome.kind === "remediation-installed", "critical remediation did not install the verified index");
+  const assessment = record(outcome.defectFamilyAssessment, "critical remediation assessment");
+  check(assessment.status === "repair-checked", "critical remediation did not become repair-checked");
+  check(Array.isArray(assessment.repairedChecks) && assessment.repairedChecks.length === 1,
+    "critical remediation did not retain exactly one engine-observed check");
+  const observedCheck = record(assessment.repairedChecks[0], "critical remediation observed check");
+  const report = record(observedCheck.report, "critical remediation report");
+  const summary = record(report.summary, "critical remediation report summary");
+  check(summary.total === 1 && summary.failed === 0, "critical remediation report was not a fresh passing one-test report");
+  check(record(outcome.installation, "critical remediation installation").kind === "verified-index-installed",
+    "critical remediation lacks an actual installation receipt");
+  asDone(run(cwd, ["resume", "--runs-root", runsRoot, "--run", remediationRun]),
+    "critical remediation terminal replay");
+  check(git(cwd, ["diff", "--cached", "--name-only"]) === [changedPath, testPath].sort().join("\n"),
+    "critical remediation installed a non-authoritative staged set");
+  process.stdout.write("  ✓ surviving critical → fresh required report → repair-checked exact index installation\n");
 }
 
 /**
@@ -603,6 +727,7 @@ function waveGateSmoke(): void {
 
 process.stdout.write("Orchestration façade smoke test (fresh CLI process at every boundary)\n");
 standaloneAndRemediationSmoke();
+criticalRemediationSmoke();
 standaloneReviewerRetrySmoke();
 standaloneRetryTerminalBlockSmoke();
 waveGateCriticalRefutationSmoke();

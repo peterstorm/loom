@@ -901,7 +901,8 @@ export type ImplementationSettlementKind =
   | "implemented"
   | "retry-required"
   | "escalation-required"
-  | "infrastructure-blocked";
+  | "infrastructure-blocked"
+  | "escalation-remediated";
 
 type SettlementReceiptBase = Readonly<{
   schemaVersion: 1;
@@ -943,13 +944,28 @@ export type InfrastructureBlockedSettlementReceipt = SettlementReceiptBase & Rea
   failureKinds: NonEmptyFailureKinds;
 }>;
 
+/** Operator-sanctioned retirement of one terminal escalation. It closes the
+ * remediated attempt-2 lineage (resetting the semantic-attempt walk to a fresh
+ * attempt 1 on the current tree) while every prior receipt stays in history as
+ * the audit trail. The reservationId is the remediation event's own identity —
+ * NOT the escalated attempt's reservation, which its own escalation receipt
+ * already holds — and the authorityDigest is the terminal attempt-2
+ * authority's digest, tying the retirement to the exact escalated attempt. */
+export type EscalationRemediatedSettlementReceipt = SettlementReceiptBase & Readonly<{
+  semanticAttempt: SemanticAttempt & 2;
+  transition: "escalation-remediated";
+  consumesSemanticAttempt: false;
+  failureKinds: NonEmptyFailureKinds;
+}>;
+
 /** Receipt transition relations are represented by the union, not booleans
  * callers can combine independently. */
 export type ImplementationAttemptSettlementReceipt =
   | ImplementedSettlementReceipt
   | RetryRequiredSettlementReceipt
   | EscalationRequiredSettlementReceipt
-  | InfrastructureBlockedSettlementReceipt;
+  | InfrastructureBlockedSettlementReceipt
+  | EscalationRemediatedSettlementReceipt;
 
 type ReceiptBody = ImplementationAttemptSettlementReceipt extends infer Receipt
   ? Receipt extends ImplementationAttemptSettlementReceipt
@@ -1054,6 +1070,12 @@ function parseReceiptBody(args: ReceiptBodyInput): Parsed<ReceiptBody> {
       ? success(freeze({ ...common, semanticAttempt: args.semanticAttempt,
           transition: "infrastructure-blocked", consumesSemanticAttempt: false, failureKinds: failures }))
       : failure(["infrastructure-blocked receipt must carry failures without consuming a semantic attempt"]);
+  }
+  if (args.transition === "escalation-remediated") {
+    return args.consumesSemanticAttempt === false && failures !== null && args.semanticAttempt === 2
+      ? success(freeze({ ...common, semanticAttempt: args.semanticAttempt,
+          transition: "escalation-remediated", consumesSemanticAttempt: false, failureKinds: failures }))
+      : failure(["escalation-remediated receipt requires semantic attempt 2, carries failures, and consumes none"]);
   }
   return args.transition === "retry-required" || args.transition === "escalation-required"
     ? parseConsumedReceiptBody(args, common, failures)
@@ -1254,6 +1276,57 @@ export function createReclaimedImplementationAttemptReceipt(
           ["reservation-reclaimed"],
         ))
       : failure(errors);
+  });
+}
+
+/**
+ * Mint the operator-sanctioned retirement of one terminal escalation.
+ *
+ * The remediation receipt closes the escalated attempt-2 lineage so the next
+ * dispatch mints a fresh attempt-1 authority on the current tree. It carries
+ * the escalated attempt's authorityDigest (tying it to the exact attempt being
+ * remediated) and its own reservationId, because the escalated attempt's
+ * reservation is already held by its escalation-required receipt and history
+ * reservation identities are unique. The failure kinds are the terminal
+ * escalation's kinds, restated for the audit trail.
+ */
+export function createEscalationRemediationReceipt(raw: unknown): Parsed<EscalationRemediatedSettlementReceipt> {
+  return total(() => {
+    const record = exactRecord(raw, [
+      "taskId", "reservationId", "authorityDigest", "observedAt", "failureKinds",
+    ], "escalationRemediationInput");
+    if (!record.ok) return record;
+    const taskId = parseTaskId(record.value.taskId, "escalationRemediationInput.taskId");
+    const reservationId = parseReservationId(record.value.reservationId, "escalationRemediationInput.reservationId");
+    const authorityDigest = parseImplementationAuthorityDigest(
+      record.value.authorityDigest,
+      "escalationRemediationInput.authorityDigest",
+    );
+    const observedAt = parseIsoInstant(record.value.observedAt, "escalationRemediationInput.observedAt");
+    const parsedFailures = parseFailureKinds(record.value.failureKinds, "escalationRemediationInput.failureKinds");
+    const parseErrors = [taskId, reservationId, authorityDigest, observedAt, parsedFailures]
+      .flatMap((result) => result.ok ? [] : result.error.errors);
+    if (parseErrors.length > 0 || !taskId.ok || !reservationId.ok || !authorityDigest.ok ||
+        !observedAt.ok || !parsedFailures.ok) {
+      return failure(parseErrors);
+    }
+    const body = parseReceiptBody({
+      taskId: taskId.value,
+      reservationId: reservationId.value,
+      authorityDigest: authorityDigest.value,
+      // Parser proof site: the remediation arm admits only attempt 2.
+      semanticAttempt: 2 as SemanticAttempt,
+      observedAt: observedAt.value,
+      transition: "escalation-remediated",
+      consumesSemanticAttempt: false,
+      failureKinds: parsedFailures.value,
+    });
+    if (!body.ok || body.value.transition !== "escalation-remediated") {
+      return failure(body.ok
+        ? ["escalation remediation receipt transition invariant failed"]
+        : body.error.errors);
+    }
+    return success(freeze({ ...body.value, receiptId: receiptId(body.value) }) as EscalationRemediatedSettlementReceipt);
   });
 }
 

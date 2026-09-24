@@ -135,7 +135,7 @@ describe("context packet required fields", () => {
     const digest = built.value.digest;
     callerBytes[0] = 0;
 
-    expect(built.value.fixedContext[0]?.bytes).toEqual([97, 98, 99]);
+    expect(Array.from(built.value.fixedContext[0]!.bytes)).toEqual([97, 98, 99]);
     expect(built.value.digest).toBe(digest);
     expect(Object.isFrozen(built.value.fixedContext[0]?.bytes)).toBe(true);
   });

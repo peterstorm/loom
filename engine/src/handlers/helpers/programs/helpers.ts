@@ -15,8 +15,9 @@ import { parseRegisteredStandaloneDispositionProgram, type RegisteredStandaloneD
 import { devNull } from 'node:os';
 import { extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
-import { canonicalStructuralEquals, sameAgentRequestAuthority, parseAgentRequestAuthority, type DomainResult, createAtomicInitialPublicationClaimPort, createInitialBatchPublicationReconciler, createInitialPublicationEffectPort, createPublicationAuthorityResolver, parseBatchPublishedReceipt, parseEffectId, parseIssuedSpawnRequest, prepareInitialBatchPublicationIntent, spawnBatchAction, AGENT_REQUIRED_SKILLS, type AgentRequestAuthority, type EffectId, type InitialSpawnRequestInput, type PublicationAuthorityResolver, type SpawnRequest } from '../../../core/orchestration-contract';
+import { spawnSync, type SpawnSyncOptions, type SpawnSyncReturns } from 'node:child_process';
+import { observeGitProbe, type GitProbeObservation, type GitProbeStep } from '../../../utils/git-probe';
+import { canonicalStructuralEquals, sameAgentRequestAuthority, parseAgentRequestAuthority, boundedThrownCause, type DomainResult, createAtomicInitialPublicationClaimPort, createInitialBatchPublicationReconciler, createInitialPublicationEffectPort, createPublicationAuthorityResolver, parseBatchPublishedReceipt, parseEffectId, parseIssuedSpawnRequest, parseRequestId, prepareInitialBatchPublicationIntent, spawnBatchAction, AGENT_REQUIRED_SKILLS, type AgentRequestAuthority, type BatchPublishedReceipt, type EffectId, type InitialSpawnRequestInput, type PublicationAuthorityResolver, type SpawnRequest } from '../../../core/orchestration-contract';
 import { serializeAdjudicatedStandaloneReview, STANDALONE_REVIEWER_ROLES, serializeStandaloneReviewAuthority, parseStandaloneReviewAuthority, selectStandaloneReviewers, type FrozenStandaloneReviewAuthority, type StandaloneReviewKind, type StandaloneReviewMetadata } from '../../../core/standalone-review';
 import { safeIoCause } from '../../../core/safe-io-cause';
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ContextPacket } from '../../../core/context-packets';
@@ -104,20 +105,147 @@ export function parseStandaloneStartInput(raw: unknown): ProgramParse<Registered
   }) };
 }
 
-export function gitPaths(args: readonly string[]): readonly string[] {
-  const result = spawnSync("git", args, { encoding: "buffer", maxBuffer: 16 * 1024 * 1024 });
-  // status stays null when the process never ran (git missing from PATH,
-  // EACCES); result.error then holds the only real diagnostic.
-  if (result.error) throw new Error(`git ${args[0]} could not be spawned: ${result.error.message}`);
-  if (result.status !== 0) throw new Error((result.stderr ?? Buffer.alloc(0)).toString("utf8").trim() || `git ${args[0]} failed`);
-  return Object.freeze((result.stdout ?? Buffer.alloc(0)).toString("utf8").split("\0").filter(Boolean).sort());
+/**
+ * The caller decision a confirmed-empty Git observation is handed to. The
+ * canonical transient rationale lives at `observeGitProbe` (utils/git-probe):
+ * the darwin verification campaign observed transient status-0/empty-stdout
+ * success for HEAD/root probes, and the bounded retries discharge exactly
+ * that. A still-empty answer is never ingested silently into review scope
+ * authority — it reaches one of these two explicit decisions:
+ *
+ * - "refuse" — the output cannot legitimately be empty (a HEAD revision, or
+ *   any `--branch` status probe, which always emits branch header lines);
+ *   throw loudly with attribution instead of freezing fabricated authority.
+ * - "legitimate" — emptiness is a real answer of this probe (a path listing
+ *   with no entries, tracked numstat with no content delta); pass the empty
+ *   value through after the retry budget was spent.
+ */
+type GitEmptyDecision = "refuse" | "legitimate";
+type CandidateReference = Readonly<{ kind: "missing" }> | Readonly<{ kind: "present"; revision: string }>;
+type MergeBaseCandidate = Readonly<{ kind: "no-base" }> | Readonly<{ kind: "base"; revision: string }>;
+
+/** Spawn stdout/stderr text with Buffer's default UTF-8 decoding and an empty fallback. */
+function spawnText(stream: string | Buffer | undefined): string {
+  return stream?.toString() ?? "";
 }
 
-export function gitText(args: readonly string[]): string {
-  const result = spawnSync("git", args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
-  if (result.error) throw new Error(`git ${args[0]} could not be spawned: ${result.error.message}`);
-  if (result.status !== 0) throw new Error((result.stderr ?? "").trim() || `git ${args[0]} failed`);
-  return (result.stdout ?? "").trim();
+/** Shared stderr-fallback refusal for a non-zero Git exit: the caller's exact
+ *  fallback label passes through verbatim, so per-site message labels stay
+ *  the only visible variation. */
+function stderrRefusal(
+  stderr: string | Buffer | undefined,
+  fallback: string,
+): Readonly<{ ok: false; error: Error }> {
+  return { ok: false as const, error: new Error(spawnText(stderr).trim() || fallback) };
+}
+
+/** Fatal UTF-8 decode of one NUL-delimited Git path listing: a chunk whose
+ *  bytes are not valid UTF-8 refuses with attribution instead of entering
+ *  scope authority as a U+FFFD-mangled path that can never match the real
+ *  worktree file (the same contract workspace-digest parseListedPaths
+ *  enforces for its listings). Bytes travel through a latin1 round-trip so
+ *  the NUL separators split on byte boundaries before any decoding. */
+function decodeListedPaths(stdout: string | Buffer | undefined): GitProbeStep<readonly string[], Error> {
+  const chunks = Buffer.from(stdout ?? new Uint8Array(0)).toString("binary").split("\0");
+  const decoded: string[] = [];
+  for (const [index, binary] of chunks.entries()) {
+    if (binary === "") continue;
+    try {
+      decoded.push(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(binary, "binary")));
+    } catch (cause) {
+      return { ok: false as const, error: new Error(`git path ${index} is not UTF-8: ${cause instanceof Error ? cause.message : String(cause)}`) };
+    }
+  }
+  return { ok: true as const, value: Object.freeze(decoded.sort()) };
+}
+
+/** The one scope-authority refusal for a confirmed-empty Git observation,
+ *  stated once so every scope probe's attribution stays byte-identical and
+ *  cannot drift apart under lockstep edits. */
+function scopeEmptyRefusal(subject: string): Error {
+  return new Error(`git ${subject} returned empty output after bounded retries; review scope authority cannot be fabricated from an empty observation`);
+}
+
+type ConfirmedEmptyObservation<T> = Extract<GitProbeObservation<T, Error>, { kind: "confirmed-empty" }>;
+
+/** One shared post-observation resolution for the module's Git probes: a
+ *  failed observation throws with the probe's own attribution, a confirmed
+ *  empty reaches the caller's explicit per-site decision, and an observed
+ *  value passes through. The transient-empty rationale lives at
+ *  `observeGitProbe`; this helper only states the shared resolution tail
+ *  once — each call site keeps its true per-site policy (empty decision,
+ *  value decode) visible as parameters. */
+function resolveObservation<T, R>(
+  observed: GitProbeObservation<T, Error>,
+  confirmedEmpty: (observation: ConfirmedEmptyObservation<T>) => R,
+  observedValue: (value: T) => R,
+): R {
+  if (observed.kind === "failed") throw observed.error;
+  if (observed.kind === "confirmed-empty") return confirmedEmpty(observed);
+  return observedValue(observed.value);
+}
+
+/** One file-local shape for the module's six spawnSync→probe wraps
+ *  (gitPaths, gitText, candidateReference, candidateMergeBase,
+ *  trackedAdditions, untrackedAdditions): the adapter states the shared
+ *  spawn-failure refusal once, and each call site passes only its own spawn
+ *  options, value decode, and refusal labels — the real per-site differences
+ *  (buffer vs utf8 stderr decoding, the no-index probe's status-1 acceptance,
+ *  message labels) stay visible as parameters instead of a diff across six
+ *  near-identical blocks. */
+function gitSpawnProbe<T>(
+  args: readonly string[],
+  options: SpawnSyncOptions,
+  classify: (result: SpawnSyncReturns<string | Buffer>) => GitProbeStep<T, Error>,
+): () => GitProbeStep<T, Error> {
+  return () => {
+    const result = spawnSync("git", [...args], options);
+    if (result.error) {
+      return { ok: false as const, error: new Error(`git ${args[0]} could not be spawned: ${result.error.message}`) };
+    }
+    return classify(result);
+  };
+}
+
+function gitPaths(args: readonly string[], empty: GitEmptyDecision): readonly string[] {
+  const frozenPaths = (paths: readonly string[]): readonly string[] => Object.freeze([...paths]);
+  return resolveObservation(
+    observeGitProbe(
+      gitSpawnProbe(args, { encoding: "buffer", maxBuffer: 16 * 1024 * 1024 }, (result) =>
+        result.status !== 0
+          ? stderrRefusal(result.stderr, `git ${args[0]} failed`)
+          : decodeListedPaths(result.stdout)),
+      (paths) => paths.length === 0,
+    ),
+    (confirmed) => {
+      if (empty === "refuse") throw scopeEmptyRefusal(args.join(" "));
+      return frozenPaths(confirmed.third);
+    },
+    frozenPaths,
+  );
+}
+
+/**
+ * One fixed-argv Git probe for text authority, retried twice on status-0
+ * empty stdout. The `empty` argument is the caller's confirmed-empty decision
+ * (see `GitEmptyDecision`) and is required at every call site so the policy
+ * for text authority is visible where the value is consumed, never defaulted.
+ */
+export function gitText(args: readonly string[], empty: GitEmptyDecision): string {
+  return resolveObservation(
+    observeGitProbe(
+      gitSpawnProbe(args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }, (result) =>
+        result.status !== 0
+          ? stderrRefusal(result.stderr, `git ${args[0]} failed`)
+          : { ok: true as const, value: spawnText(result.stdout).trim() }),
+      (value) => value === "",
+    ),
+    (confirmed) => {
+      if (empty === "refuse") throw scopeEmptyRefusal(args.join(" "));
+      return confirmed.third;
+    },
+    (value) => value,
+  );
 }
 
 export type CanonicalChangedPaths = Readonly<{
@@ -147,29 +275,71 @@ export type DerivedChangedPaths = Readonly<{
  * require explicit complete coverage must supply and parse that scope instead
  * of treating this filter as rejection authority.
  */
-export function reviewablePath(path: string): boolean {
+function reviewablePath(path: string): boolean {
   const parsed = parseCanonicalRepositoryRelativePath(path, "standalone review scope path");
   return parsed.ok && !isExcludedRemediationPath(parsed.value);
 }
 
+function candidateReference(candidate: string): CandidateReference {
+  return resolveObservation(
+    observeGitProbe(
+      gitSpawnProbe<CandidateReference>(["rev-parse", "--verify", "--quiet", "--end-of-options", `${candidate}^{commit}`],
+        { encoding: "utf8" }, (result) => {
+          if (result.status === 1 && spawnText(result.stdout).trim() === "" && spawnText(result.stderr).trim() === "") {
+            return { ok: true, value: { kind: "missing" } };
+          }
+          if (result.status !== 0) return stderrRefusal(result.stderr, `git cannot observe candidate ${candidate}`);
+          return { ok: true, value: { kind: "present", revision: spawnText(result.stdout).trim() } };
+        }),
+      (value) => value.kind === "present" && value.revision === "",
+    ),
+    () => { throw scopeEmptyRefusal(`candidate ${candidate}`); },
+    (value) => value,
+  );
+}
+
+function candidateMergeBase(candidate: string, head: string): MergeBaseCandidate {
+  return resolveObservation(
+    observeGitProbe(
+      gitSpawnProbe<MergeBaseCandidate>(["merge-base", candidate, head], { encoding: "utf8" }, (result) => {
+        if (result.status === 1 && spawnText(result.stdout).trim() === "" && spawnText(result.stderr).trim() === "") {
+          return { ok: true, value: { kind: "no-base" } };
+        }
+        if (result.status !== 0) return stderrRefusal(result.stderr, `git merge-base failed for ${candidate}`);
+        return { ok: true, value: { kind: "base", revision: spawnText(result.stdout).trim() } };
+      }),
+      (value) => value.kind === "base" && value.revision === "",
+    ),
+    () => { throw scopeEmptyRefusal(`merge-base ${candidate} ${head}`); },
+    (value) => value,
+  );
+}
+
 export function deriveChangedPaths(): DerivedChangedPaths {
-  const head = gitText(["rev-parse", "HEAD"]);
+  // A HEAD revision can never legitimately be empty: a confirmed-empty answer
+  // after the bounded retry refuses instead of freezing `head_revision: ""`.
+  const head = gitText(["rev-parse", "HEAD"], "refuse");
   let base: string | null = null;
   for (const candidate of ["origin/main", "origin/master", "main", "master"]) {
-    const probe = spawnSync("git", ["merge-base", candidate, head], { encoding: "utf8" });
-    if (probe.status === 0 && probe.stdout.trim() !== "") { base = probe.stdout.trim(); break; }
+    // A missing ref is distinct from an error: real temporary repositories
+    // often have no origin/main, and merge-base reports that absence as 128.
+    if (candidateReference(candidate).kind === "missing") continue;
+    const observed = candidateMergeBase(candidate, head);
+    if (observed.kind === "no-base") continue;
+    base = observed.revision;
+    break;
   }
-  const untracked = gitPaths(["ls-files", "--others", "--exclude-standard", "-z", "--"]).filter(reviewablePath);
-  const trackedUnstaged = gitPaths(["diff", "--name-only", "-z", "--"]).filter(reviewablePath);
-  const stagedAdded = gitPaths(["diff", "--cached", "--name-only", "--diff-filter=A", "-z", "--"]).filter(reviewablePath);
+  const untracked = gitPaths(["ls-files", "--others", "--exclude-standard", "-z", "--"], "legitimate").filter(reviewablePath);
+  const trackedUnstaged = gitPaths(["diff", "--name-only", "-z", "--"], "legitimate").filter(reviewablePath);
+  const stagedAdded = gitPaths(["diff", "--cached", "--name-only", "--diff-filter=A", "-z", "--"], "legitimate").filter(reviewablePath);
   const committedAdded = base === null
     ? []
-    : gitPaths(["diff", "--name-only", "--diff-filter=A", "-z", `${base}...${head}`, "--"]).filter(reviewablePath);
+    : gitPaths(["diff", "--name-only", "--diff-filter=A", "-z", `${base}...${head}`, "--"], "legitimate").filter(reviewablePath);
   return Object.freeze({
     authority: Object.freeze({
       unstaged: Object.freeze([...new Set([...trackedUnstaged, ...untracked])].sort()),
-      staged: gitPaths(["diff", "--cached", "--name-only", "-z", "--"]).filter(reviewablePath),
-      committed: base === null ? Object.freeze([]) : gitPaths(["diff", "--name-only", "-z", `${base}...${head}`, "--"]).filter(reviewablePath),
+      staged: gitPaths(["diff", "--cached", "--name-only", "-z", "--"], "legitimate").filter(reviewablePath),
+      committed: base === null ? Object.freeze([]) : gitPaths(["diff", "--name-only", "-z", `${base}...${head}`, "--"], "legitimate").filter(reviewablePath),
       base_revision: base,
       head_revision: head,
     }),
@@ -181,30 +351,51 @@ export function deriveChangedPaths(): DerivedChangedPaths {
 export const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".java", ".rs", ".py", ".go", ".c", ".cpp"]);
 export const TYPE_EXTENSIONS = new Set([".ts", ".tsx", ".d.ts", ".java", ".rs"]);
 
-export function parseNumstatAdditions(output: string): number {
+function parseNumstatAdditions(output: string): number {
   return output.split("\n").reduce((sum, line) => {
     const additions = Number.parseInt(line.split("\t", 1)[0] ?? "", 10);
     return sum + (Number.isFinite(additions) ? additions : 0);
   }, 0);
 }
 
-export function trackedAdditions(baseline: string, paths: readonly string[]): number {
+function trackedAdditions(baseline: string, paths: readonly string[]): number {
   if (paths.length === 0) return 0;
-  const result = spawnSync("git", ["diff", "--numstat", baseline, "--", ...paths], { encoding: "utf8" });
-  if (result.error) throw new Error(`git diff could not be spawned: ${result.error.message}`);
-  if (result.status !== 0) throw new Error((result.stderr ?? "").trim() || "git diff --numstat failed");
-  return parseNumstatAdditions(result.stdout ?? "");
+  return resolveObservation(
+    observeGitProbe(
+      gitSpawnProbe(["diff", "--numstat", baseline, "--", ...paths], { encoding: "utf8" }, (result) =>
+        result.status !== 0
+          ? stderrRefusal(result.stderr, "git diff --numstat failed")
+          : { ok: true as const, value: spawnText(result.stdout) }),
+      (output) => output === "",
+    ),
+    // Explicit caller decision: numstat legitimately produces no lines when
+    // there is no content delta to count, so confirmed-empty means zero
+    // additions — never a fabricated count reaching reviewer selection.
+    (confirmed) => parseNumstatAdditions(confirmed.third),
+    parseNumstatAdditions,
+  );
 }
 
-export function untrackedAdditions(paths: readonly string[]): number {
+function untrackedAdditions(paths: readonly string[]): number {
   return paths.reduce((sum, path) => {
-    const result = spawnSync("git", ["diff", "--no-index", "--numstat", "--", devNull, path], { encoding: "utf8" });
-    if (result.error) throw new Error(`git diff could not be spawned: ${result.error.message}`);
-    const diagnostic = (result.stderr ?? "").trim();
-    if ((result.status !== 0 && result.status !== 1) || diagnostic !== "") {
-      throw new Error(diagnostic || `cannot measure untracked additions for ${path}`);
-    }
-    return sum + parseNumstatAdditions(result.stdout ?? "");
+    return sum + resolveObservation(
+      observeGitProbe(
+        gitSpawnProbe(["diff", "--no-index", "--numstat", "--", devNull, path], { encoding: "utf8" }, (result) => {
+          const diagnostic = spawnText(result.stderr).trim();
+          if ((result.status !== 0 && result.status !== 1) || diagnostic !== "") {
+            return { ok: false as const, error: new Error(diagnostic || `cannot measure untracked additions for ${path}`) };
+          }
+          return { ok: true as const, value: spawnText(result.stdout) };
+        }),
+        (output) => output === "",
+      ),
+      // No-index numstat emits a row even for an empty file. An empty success
+      // after bounded retries cannot authorize zero additions, because that
+      // could suppress an automatically required reviewer. This refusal is a
+      // measurement invariant, not scope authority, so it stays site-local.
+      () => { throw new Error(`cannot measure untracked additions for ${path}: empty output after bounded retries`); },
+      parseNumstatAdditions,
+    );
   }, 0);
 }
 
@@ -317,12 +508,17 @@ export function standalonePackets(
   const sourceSection = frozenScopeSection(scope, headRevision);
   const packets: ContextPacket[] = [];
   const contexts = reviewers.map((role) => {
-    const attempts = ([1, 2] as const).map((attempt) => {
-      const requestId = standaloneRequestId(runId, role, attempt);
+    const buildAttempt = (attempt: 1 | 2) => {
+      // The branded RequestId is minted through its parser, never asserted by
+      // a cast: the template can only pass today, and a future template edit
+      // that leaves the grammar refuses here instead of minting invalid
+      // packet identity (type-design-analyzer-1).
+      const requestId = parseRequestId(standaloneRequestId(runId, role, attempt));
+      if (!requestId.ok) throw new Error(requestId.error.message);
       const section = encodeByteSection("standalone-review-authority", JSON.stringify({ runId, scope, role, attempt }));
       if (!section.ok) throw new Error(section.error.message);
       const packet = buildReviewerContextPacket({
-        requestId: requestId as never,
+        requestId: requestId.value,
         role,
         requiredSkill: AGENT_REQUIRED_SKILLS[role] ?? "none",
         fixedContext: Object.freeze([section.value, sourceSection]),
@@ -331,8 +527,10 @@ export function standalonePackets(
       if (!packet.ok) throw new Error(packet.error.message);
       packets.push(packet.value);
       return packet.value.digest;
-    });
-    return Object.freeze({ attempts: Object.freeze(attempts) as unknown as readonly [string, string] });
+    };
+    // Structural two-tuple: the attempt pair's shape is compiler-proven, not
+    // asserted by a cast (type-design-analyzer-1).
+    return Object.freeze({ attempts: Object.freeze([buildAttempt(1), buildAttempt(2)] as const) });
   });
   return Object.freeze({ contexts: Object.freeze(contexts), packets: Object.freeze(packets) });
 }
@@ -622,7 +820,10 @@ function reviewerCompatibilityBootstrap(handle: RunDirHandle, request: AgentRequ
   const stored = handle.readProgramRegistration();
   if (!stored.ok) throw new Error("reviewer bootstrap registration is unavailable");
   const parsed = parseRegisteredFacadeProgram(stored.value);
-  if (parsed.kind !== "registered" || (parsed.program.kind !== "standalone-review" && parsed.program.kind !== "wave-gate")) throw new Error("reviewer bootstrap requires parsed program registration");
+  if (parsed.kind === "invalid") throw new Error(`reviewer bootstrap registration is invalid: ${parsed.message}`);
+  if (parsed.kind !== "registered" || (parsed.program.kind !== "standalone-review" && parsed.program.kind !== "wave-gate")) {
+    throw new Error("reviewer bootstrap requires parsed program registration");
+  }
   const version = parsed.program.schemaVersion;
   if (version === 3) {
     const published = publishedReviewerRequest(handle, request, 16_777_216);
@@ -706,8 +907,9 @@ export function parseRegistration(raw: unknown): ProgramParse<RegisteredStandalo
       ...protocol.value, kind: "standalone-review", input: input.value,
       authority: freezeRegistrationAuthority(JSON.parse(serializeStandaloneReviewAuthority(authority.value))),
     }) };
-  } catch {
-    return { ok: false, message: "standalone-review registration cannot be inspected safely" };
+  } catch (thrown) {
+    const cause = boundedThrownCause(thrown, "successor standalone-registration");
+    return { ok: false, message: `standalone-review registration cannot be inspected safely (${cause.name}: ${cause.message})` };
   }
 }
 
@@ -760,8 +962,9 @@ const registeredProgram = (program: RegisteredFacadeProgram): FacadeRegistration
 export function parseRegisteredFacadeProgram(raw: unknown): FacadeRegistrationParse {
   try {
     return parseFacadeRegistration(raw);
-  } catch {
-    return invalidRegistration("program registration cannot be inspected safely");
+  } catch (thrown) {
+    const cause = boundedThrownCause(thrown, "successor facade-registration");
+    return invalidRegistration(`program registration cannot be inspected safely (${cause.name}: ${cause.message})`);
   }
 }
 
@@ -916,10 +1119,20 @@ export type DurableRequestRecovery =
   | Readonly<{ kind: "found"; requests: readonly SpawnRequest[] }>
   | Readonly<{ kind: "corrupt"; message: string }>;
 
-export function durablePublicationDigest(
+/**
+ * The one durable-publication accessor: the receipt bytes are PARSED, never
+ * cast, and must name exactly this run/effect — reservation or packet hashes
+ * alone do not issue a request. Consumers recover either the parsed receipt
+ * with its proven digest, or the absent/corrupt diagnosis; the digest is a
+ * projection of the parsed receipt, never an independent untyped read.
+ */
+export function durablePublishedReceipt(
   handle: RunDirHandle,
   effectId: EffectId,
-): Readonly<{ kind: "absent" }> | Readonly<{ kind: "found"; digest: string }> | Readonly<{ kind: "corrupt"; message: string }> {
+):
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "found"; receipt: BatchPublishedReceipt; digest: string }>
+  | Readonly<{ kind: "corrupt"; message: string }> {
   const path = `${handle.runDirectory}/artifacts/${publicationFile(effectId)}`;
   let bytes: Buffer;
   try {
@@ -940,7 +1153,15 @@ export function durablePublicationDigest(
   if (receipt.value.runId !== handle.runId || receipt.value.effectId !== effectId) {
     return { kind: "corrupt", message: "durable publication receipt does not match run/effect authority" };
   }
-  return { kind: "found", digest: receipt.value.publicationDigest };
+  return { kind: "found", receipt: receipt.value, digest: receipt.value.publicationDigest };
+}
+
+export function durablePublicationDigest(
+  handle: RunDirHandle,
+  effectId: EffectId,
+): Readonly<{ kind: "absent" }> | Readonly<{ kind: "found"; digest: string }> | Readonly<{ kind: "corrupt"; message: string }> {
+  const receipt = durablePublishedReceipt(handle, effectId);
+  return receipt.kind === "found" ? { kind: "found", digest: receipt.digest } : receipt;
 }
 
 export function durableRequests(
@@ -1095,7 +1316,7 @@ export async function recoverOrPublishStandaloneRetry(
  * terminal-blocking whole runs. Naming the defect is what makes the retry worth
  * spending.
  */
-export function refutationRetryTask(task: string, diagnostic: string | null): string {
+function refutationRetryTask(task: string, diagnostic: string | null): string {
   return [
     task,
     "",

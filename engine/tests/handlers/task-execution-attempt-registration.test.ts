@@ -236,7 +236,7 @@ describe("modern implementation attempt registration", () => {
       testResult: { verdict: "trusted-pass" },
       testEvidence: "focused integration pass",
       proofEvaluationPolicy: TRUSTED_LEDGER_ONLY_POLICY,
-    }, productionExactSettlementPorts(repo.root)).application.state);
+    }, productionExactSettlementPorts(repo.root, repo.statePath)).application.state);
 
     const first = await registerTaskExecutionBatch([spawn("T1")]);
     if (first.kind !== "registered") throw new Error(first.message);

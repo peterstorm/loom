@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
@@ -18,6 +18,7 @@ import {
 import type { DeclaredArtifactBaseline } from "../src/core/artifact-baseline";
 import { parseAgentRequestAuthority } from "../src/core/orchestration-contract";
 import { parseTaskGraph } from "../src/state-manager";
+import { observeTaskGraphProjectBoundary } from "../src/config";
 import { graphFixture, taskFixture } from "./fixtures/task-lifecycle";
 import { publishInitialBatch } from "../src/handlers/helpers/programs/helpers";
 import { waveGateAuthorityDigest, waveRequests } from "../src/handlers/helpers/programs/wave-gate";
@@ -69,7 +70,9 @@ const extension = async (): Promise<FakePi> => {
 };
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
-const temp = canonicalTempDir("loom-pi-review-events-");
+const fixtureBase = join(ROOT, ".loom", "completion-reports");
+mkdirSync(fixtureBase, { recursive: true });
+const temp = realpathSync.native(mkdtempSync(join(fixtureBase, "loom-pi-review-events-")));
 const specCheckPlanPath = join(temp, "spec-check-authority-plan.md");
 const specCheckPlanBytes = "# Plan\n";
 writeFileSync(specCheckPlanPath, specCheckPlanBytes);
@@ -141,6 +144,7 @@ const specCheckGraph = (overrides: Record<string, unknown> = {}) => {
       runId: "run.pi-spec-check",
       wave: 1,
       batchEpoch: "b".repeat(64),
+      settledSpecCheckFloor: { kind: "settled", count: 0 },
       specCheckSlotAuthority: { slot_id: "wave-slot:spec-check", attempted: 1 },
     },
     ...overrides,
@@ -311,7 +315,11 @@ async function piCaptureRun(runSuffix: string, contextText = "Pi capture context
   const previous = process.cwd();
   process.chdir(repository);
   let batch: ReturnType<typeof waveRequests>;
-  try { batch = waveRequests(opened.value, registration, graph, 1); } finally { process.chdir(previous); }
+  try {
+    batch = waveRequests(opened.value, registration, graph, 1, { kind: "git-repository", root: repository });
+  } finally {
+    process.chdir(previous);
+  }
   const source = batch.packets.find(({ role }) => role === "code-reviewer");
   if (source === undefined) throw new Error("historical Wave fixture lacks reviewer packet");
   const packet = buildContextPacket({ ...source, requestId, fixedContext: [...source.fixedContext, section.value] });
@@ -4011,6 +4019,82 @@ describe("Pi extension review tool_result integration", () => {
     });
   });
 
+  it("refuses settlement for a TaskGraph outside any Git repository, where the removed ambient fallback would settle it", async () => {
+    // Discriminator for the settlement wiring the round-3 refutation panel
+    // verified unobservable: every other settlement-driving test either
+    // injects the repository probe or pins the graph inside the ambient
+    // checkout, where the TaskGraph Project Boundary observation and the
+    // REMOVED ambient fallback chain (git.repositoryRootFrom(dirname(mgr.getPath()))
+    // ?? git.repositoryRoot() ?? process.cwd()) resolve the identical root. A
+    // graph outside any Git repository splits them: the boundary wiring must
+    // refuse settlement (fail closed, never judging bytes against the ambient
+    // checkout or cwd); the fallback would resolve the ambient repo root,
+    // isRepo() would be true, and the refusal below would never fire —
+    // turning this assertion RED against the vulnerable behavior.
+    const outsideRoot = canonicalTempDir("loom-pi-non-repo-graph-");
+    // Canonical Pi state location: `projectRootForStateFile` refuses
+    // undocumented layouts, so the discriminator's non-repository proof must
+    // live at a documented shape — outside any Git repository is what matters,
+    // not where under the root the file sits.
+    const outsideStatePath = join(outsideRoot, ".pi", "state", "active_task_graph.json");
+    mkdirSync(dirname(outsideStatePath), { recursive: true });
+    // Sanity: the boundary observation must prove a non-repository HERE, or
+    // the scenario does not discriminate the two wirings at all.
+    expect(observeTaskGraphProjectBoundary(outsideStatePath).kind).toBe("state-layout");
+    const planPath = join(temp, "non-repo-boundary-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeFileSync(outsideStatePath, JSON.stringify({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks: [{
+        ...initialGraph().tasks[0],
+        verification_policy: { regression: { kind: "required" }, new_tests: { kind: "required" } },
+      }],
+    }, null, 2));
+    const previous = process.env.LOOM_STATE_PATH;
+    process.env.LOOM_STATE_PATH = outsideStatePath;
+    try {
+      const pi = await extension();
+      const session = "019fca39-f989-7510-8e62-50dadbcad4c9";
+      const toolCallId = "call-non-repo-boundary-settlement";
+      const context = { cwd: ROOT, sessionManager: { getSessionId: () => session } };
+      const prompt = "Task ID: T1\nUse the code-implementer skill. Implement and test.";
+      expect(await pi.emit("tool_call", {
+        toolName: "subagent", toolCallId,
+        input: { agent: "code-implementer-agent", task: prompt, agentScope: "user" },
+      }, context)).toEqual([undefined]);
+      expect(JSON.parse(readFileSync(outsideStatePath, "utf8")).executing_tasks).toEqual(["T1"]);
+
+      const responses = await pi.emit("tool_result", {
+        toolName: "subagent", toolCallId, content: [],
+        details: { results: [{
+          agent: "code-implementer-agent", task: prompt, exitCode: 0,
+          messages: [{ role: "assistant", content: [{ type: "text", text: "I edited the files but ran no tests." }] }],
+        }] },
+      }, context);
+
+      // The typed non-repository refusal is the exact diagnostic the ambient
+      // fallback can never produce: with the fallback, the probe resolves the
+      // ambient repo root and Git reads succeed, so the settlement would
+      // proceed untrusted WITHOUT any boundary-attributed refusal in the
+      // emitted outcome. Here the boundary root is a proven non-repository,
+      // so the fail-closed Task-local byte observation names it.
+      const rendered = JSON.stringify(responses);
+      expect(rendered).toContain("Task-local byte observation unavailable");
+      expect(rendered).toContain("cannot read Git HEAD");
+      expect(rendered).toContain("Loom Pi subagent evidence processing failed");
+      const state = JSON.parse(readFileSync(outsideStatePath, "utf8"));
+      expect(state.executing_tasks).toEqual([]);
+      expect(state.tasks[0].status).toBe("pending");
+    } finally {
+      if (previous === undefined) delete process.env.LOOM_STATE_PATH;
+      else process.env.LOOM_STATE_PATH = previous;
+      rmSync(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
   it("infrastructure-settles same-agent reordered results against their exact reserved slots", async () => {
     const planPath = join(temp, "reordered-implementation-finalization-plan.md");
     writeFileSync(planPath, "# Plan\n");
@@ -5723,6 +5807,95 @@ describe("Pi extension review tool_result integration", () => {
     } finally {
       updateAndReturn.mockRestore();
       stderr.mockRestore();
+    }
+  });
+
+  it("settles project-relative spec-check documents against the TaskGraph root, not runtime cwd", async () => {
+    const graphRoot = canonicalTempDir("loom-pi-spec-check-graph-");
+    const runtimeRoot = canonicalTempDir("loom-pi-spec-check-runtime-");
+    const graphStatePath = join(graphRoot, ".claude", "state", "active_task_graph.json");
+    const specFile = ".claude/specs/split/spec.md";
+    const planFile = ".claude/plans/split.md";
+    const graphSpec = "# Graph-owned Spec\n";
+    const graphPlan = "# Graph-owned Plan\n";
+    const runtimeSpec = "# Runtime Spec must not settle\n";
+    const runtimePlan = "# Runtime Plan must not settle\n";
+    const previousState = process.env.LOOM_STATE_PATH;
+    const previousCwd = process.cwd();
+
+    for (const [root, spec, plan] of [
+      [graphRoot, graphSpec, graphPlan],
+      [runtimeRoot, runtimeSpec, runtimePlan],
+    ] as const) {
+      mkdirSync(dirname(join(root, specFile)), { recursive: true });
+      mkdirSync(dirname(join(root, planFile)), { recursive: true });
+      writeFileSync(join(root, specFile), spec);
+      writeFileSync(join(root, planFile), plan);
+    }
+    mkdirSync(dirname(graphStatePath), { recursive: true });
+
+    try {
+      process.chdir(graphRoot);
+      const graph = specCheckGraph({
+        spec_file: specFile,
+        plan_file: planFile,
+        phase_artifacts: { architecture: planFile },
+      });
+      writeFileSync(graphStatePath, JSON.stringify(graph, null, 2));
+      process.env.LOOM_STATE_PATH = graphStatePath;
+      process.chdir(runtimeRoot);
+
+      const pi = await extension();
+      const session = "019fca39-f989-7510-8e62-50dadbcad4c8";
+      const toolCallId = "call-split-root-spec-check";
+      const context = { cwd: runtimeRoot, sessionManager: { getSessionId: () => session } };
+      const task = "Follow the preloaded spec-check skill with --wave 1 --tasks T1.";
+      expect(await pi.emit("tool_call", {
+        toolName: "subagent",
+        toolCallId,
+        input: { agent: "spec-check-invoker", task, agentScope: "user" },
+      }, context)).toEqual([undefined]);
+
+      await pi.emit("tool_result", {
+        toolName: "subagent",
+        toolCallId,
+        content: [],
+        details: {
+          results: [{
+            agent: "spec-check-invoker",
+            task,
+            exitCode: 0,
+            messages: [{
+              role: "assistant",
+              content: [{
+                type: "text",
+                text: "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED",
+              }],
+            }],
+          }],
+        },
+      }, context);
+
+      const settled = JSON.parse(readFileSync(graphStatePath, "utf8"));
+      expect(settled.spec_check).toMatchObject({ wave: 1, verdict: "PASSED" });
+      expect(settled.wave_review_epoch.specCheckDocuments).toEqual({
+        spec: {
+          path: specFile,
+          contentDigest: createHash("sha256").update(graphSpec).digest("hex"),
+        },
+        plan: {
+          path: planFile,
+          contentDigest: createHash("sha256").update(graphPlan).digest("hex"),
+        },
+      });
+      expect(createHash("sha256").update(runtimeSpec).digest("hex"))
+        .not.toBe(settled.wave_review_epoch.specCheckDocuments.spec.contentDigest);
+    } finally {
+      process.chdir(previousCwd);
+      restoreEnv("LOOM_STATE_PATH", previousState);
+      try { chmodSync(graphStatePath, 0o644); } catch { /* fixture may not have been persisted */ }
+      rmSync(graphRoot, { recursive: true, force: true });
+      rmSync(runtimeRoot, { recursive: true, force: true });
     }
   });
 

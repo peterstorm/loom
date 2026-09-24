@@ -26,12 +26,16 @@ afterEach(() => {
  * authoritative spec at any file on disk.
  */
 describe("phase-artifact path containment", () => {
+  // The boundary is an explicit argument everywhere now; these relative
+  // candidates were previously resolved against the ambient cwd default.
+  const boundary = process.cwd();
+
   it.each([
     ".claude/specs/2026-08-15-feature/spec.md",
     "./.claude/specs/nested/deep/spec.md",
     ".claude/specs/a/../b/spec.md",
   ])("accepts %s, which really is inside the directory", (candidate) => {
-    expect(resolvesWithin(candidate, ".claude/specs")).toBe(true);
+    expect(resolvesWithin(candidate, ".claude/specs", boundary)).toBe(true);
   });
 
   it.each([
@@ -42,17 +46,17 @@ describe("phase-artifact path containment", () => {
     "../.claude/specs/spec.md",
     "docs/.claude/specs/spec.md",
   ])("refuses %s, which only LOOKS inside it", (candidate) => {
-    expect(resolvesWithin(candidate, ".claude/specs")).toBe(false);
+    expect(resolvesWithin(candidate, ".claude/specs", boundary)).toBe(false);
   });
 
   it("refuses the directory itself — an artifact must be a file under it", () => {
-    expect(resolvesWithin(".claude/specs", ".claude/specs")).toBe(false);
-    expect(resolvesWithin(".claude/specs/", ".claude/specs")).toBe(false);
+    expect(resolvesWithin(".claude/specs", ".claude/specs", boundary)).toBe(false);
+    expect(resolvesWithin(".claude/specs/", ".claude/specs", boundary)).toBe(false);
   });
 
   it("keeps the two artifact directories distinct", () => {
-    expect(resolvesWithin(".claude/plans/p.md", ".claude/specs")).toBe(false);
-    expect(resolvesWithin(".claude/specs/s.md", ".claude/plans")).toBe(false);
+    expect(resolvesWithin(".claude/plans/p.md", ".claude/specs", boundary)).toBe(false);
+    expect(resolvesWithin(".claude/specs/s.md", ".claude/plans", boundary)).toBe(false);
   });
 });
 

@@ -24,6 +24,9 @@
  *                                 --operation <operation-id>
  *   helper orchestration decide --run <run-directory> --runs-root <root>
  *                               --request <decision-id>   (decision on stdin)
+ *   helper orchestration remediate --task <task-id> --receipt <terminal escalation receipt id>
+ *                               --reason <text>
+ *   helper orchestration attest --task <task-id> --reason <text>
  *
  * Every `--run`, `--new-run`, and remediation `sourceRun` accepts either the
  * bare run id or a full path to that same direct child of its runs-root. The
@@ -71,7 +74,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { isReviewAgent, SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
-import { parseTaskGraph } from "../../state-manager";
+import { parseTaskGraph, StateManager, type ActiveWaveGateAbandonmentResult } from "../../state-manager";
 import { observeAnyActiveSubagent } from "../../machine";
 import type {
   ActiveWaveGateRegistration,
@@ -94,7 +97,7 @@ import {
   observeCurrentWaveCompletionResult,
   observeCurrentWaveWorkspace,
 } from "./wave-completion-suite";
-import { createRunDirectory, inspectRunDirectoryEntry, openRegisteredRunDirectory, openRunDirectory, type RunDirHandle } from "../../orchestration/run-directory-handle";
+import { createRunDirectory, inspectRunDirectoryEntry, openRegisteredRunDirectory, openRunDirectory, type RunAbandonment, type RunDirHandle } from "../../orchestration/run-directory-handle";
 import {
   deriveRunInspection,
   observed,
@@ -168,6 +171,8 @@ import {
   type RegisteredWaveGateProgram,
 } from "./programs";
 import { parseBoundedReviewerJson } from '../../core/reviewer-protocol';
+import { remediateOperation } from "./remediate-implementation-escalation";
+import { attestOperation } from "./attest-implementation";
 import { renderStandaloneReviewSummary } from "../../core/standalone-review";
 import { serializeStandaloneReviewMachineState } from "../../core/standalone-review-machine";
 import { argumentValue, hasFlag } from "./cli-args";
@@ -180,7 +185,7 @@ import { prepareStandaloneDispositionFacadeStart, startStandaloneDispositionFaca
   resumeStandaloneDispositionFacade, inspectStandaloneDispositionFacade, readSelectedStandaloneDisposition,
   STANDALONE_DISPOSITION_EVENT_RESOURCE_POLICY } from "./programs/standalone-disposition";
 
-const OPERATIONS = ["status", "inspect", "start", "restart", "recover-orphan", "resume", "submit", "correlate", "complete", "decide", "abandon"] as const;
+const OPERATIONS = ["status", "inspect", "start", "restart", "recover-orphan", "resume", "submit", "correlate", "complete", "decide", "abandon", "remediate", "attest"] as const;
 type Operation = (typeof OPERATIONS)[number];
 
 const isOperation = (value: string | undefined): value is Operation =>
@@ -213,6 +218,10 @@ function usage(): HookResult {
       "  correlate --runs-root <root> --run <run-directory> --request <id> --harness <pi|claude> --native-id <id> --agent <role>",
       "  complete --runs-root <root> --run <run-directory> --operation <id>",
       "  decide  --runs-root <root> --run <run-directory> --request <decision-id>",
+  "  remediate --task <task-id> --receipt <terminal escalation receipt id> --reason <text>",
+  "          (retires the exact terminal implementation escalation so the next status offers a fresh attempt-1 dispatch; prior receipts stay in history)",
+  "  attest   --task <task-id> --reason <text>",
+  "          (arms implementation re-attestation: rewrites the Task's pending proof to attested obligations + regression-only policy; the next dispatch runs a verify-only child whose writes settle as drift, never as attested)",
     ].join("\n"),
   };
 }
@@ -769,6 +778,52 @@ async function inspectOperation(args: readonly string[]): Promise<HookResult> {
 }
 
 /**
+ * Tombstone the Wave Gate registration that names this run, if the protected
+ * graph carries one.
+ *
+ * The run-directory marker alone never lifted the state's active authority, so
+ * an abandoned Wave Gate run kept owning its Wave forever: `start` refused any
+ * successor with "already owns wave" and the only sanctioned escape was the
+ * exceptional spec-trace retirement. Stamping the SAME terminal decision — the
+ * marker's own runId/reason/supersededBy, re-proven by the state parser — into
+ * the registration under the TaskGraph lock closes that loop while keeping
+ * history: the tombstone stays in place until a successor start supersedes it
+ * or explicit spec-trace retirement clears it; the retirement path can still
+ * prove the abandoned run before clearing that active scope.
+ *
+ * The receipt is emitted before this runs — the marker is already immutable on
+ * disk — so a stamp failure cannot unreport the abandonment; the returned
+ * error tells the operator to repeat the identical command, which replays the
+ * marker idempotently and retries the stamp.
+ */
+export type WaveGateAbandonmentStampOutcome =
+  | Readonly<{ kind: "no-graph" }>
+  | ActiveWaveGateAbandonmentResult
+  | Readonly<{ kind: "stamp-failed"; message: string }>;
+
+async function stampAbandonedWaveGateRegistration(
+  runsRoot: string,
+  marker: RunAbandonment,
+): Promise<WaveGateAbandonmentStampOutcome> {
+  const manager = StateManager.fromPath(TASK_GRAPH_PATH);
+  if (manager === null) return Object.freeze({ kind: "no-graph" });
+  try {
+    return await manager.abandonActiveWaveGateRegistration({
+      runsRoot,
+      runId: marker.runId,
+      reason: marker.reason,
+      supersededBy: marker.supersededBy,
+    });
+  } catch (error) {
+    return Object.freeze({
+      kind: "stamp-failed",
+      message: "run abandonment was recorded in the Run Directory, but the protected Wave Gate registration could not be tombstoned: " +
+        `${error instanceof Error ? error.message : String(error)} — repeat the identical abandon command to retry the state stamp`,
+    });
+  }
+}
+
+/**
  * Record that an operator is finished with a run, and by what it was replaced.
  *
  * The replacement is proven to exist as a real direct child of the SAME
@@ -799,7 +854,15 @@ async function abandonOperation(args: readonly string[]): Promise<HookResult> {
   const abandoned = await bound.value.handle.abandonRun({ supersededBy, reason });
   if (!abandoned.ok) return { kind: "error", message: abandoned.error.message };
   process.stdout.write(`${JSON.stringify(abandoned.value, null, 2)}\n`);
-  return { kind: "allow" };
+  const stamp = await stampAbandonedWaveGateRegistration(bound.value.handle.identity.runsRoot, abandoned.value);
+  if (stamp.kind === "not-targeted") {
+    process.stderr.write(
+      `orchestration abandon: run ${abandoned.value.runId} was marked abandoned, but no protected Wave Gate registration was tombstoned (${stamp.reason})\n`,
+    );
+  }
+  return stamp.kind === "stamp-failed"
+    ? { kind: "error", message: stamp.message }
+    : { kind: "allow" };
 }
 
 type RegisteredPanelProgram = Readonly<{
@@ -901,14 +964,11 @@ function materializePanelRequest(
   const slotId = parseSlotId(`slot:${createHash("sha256").update(request.id).digest("hex").slice(0, 32)}`);
   const profile = resolveModelProfile(request.modelProfile);
   const role = request.agent as keyof typeof AGENT_REQUIRED_SKILLS;
-  if (!requestId.ok || !slotId.ok || !profile.ok || !Object.hasOwn(AGENT_REQUIRED_SKILLS, role)) {
-    return {
-      ok: false,
-      message: !requestId.ok ? requestId.error.message
-        : !slotId.ok ? slotId.error.message
-        : !profile.ok ? profile.error.message
-        : `unknown panel agent ${request.agent}`,
-    };
+  if (!requestId.ok) return { ok: false, message: requestId.error.message };
+  if (!slotId.ok) return { ok: false, message: slotId.error.message };
+  if (!profile.ok) return { ok: false, message: profile.error.message };
+  if (!Object.hasOwn(AGENT_REQUIRED_SKILLS, role)) {
+    return { ok: false, message: `unknown panel agent ${request.agent}` };
   }
   const requiredSkill = AGENT_REQUIRED_SKILLS[role];
   const authoritySection = encodeByteSection("panel-authority", JSON.stringify({
@@ -1993,6 +2053,10 @@ const handler: HookHandler = async (stdin, args) => {
       return completeOperation(rest);
     case "decide":
       return decideOperation(stdin, rest);
+    case "remediate":
+      return remediateOperation(rest);
+    case "attest":
+      return attestOperation(rest);
   }
 };
 

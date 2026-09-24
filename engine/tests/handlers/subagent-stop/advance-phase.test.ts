@@ -1,10 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import advancePhaseHandler, {
   applyEligiblePhaseTransition,
-  resolveTransition,
   countMarkers,
   isPhaseResultEligible,
+  observePhaseTransition,
+  type PhaseTransitionResolution,
 } from "../../../src/handlers/subagent-stop/advance-phase";
+import { parseSpecArtifactDirectory } from "../../../src/core/phase-artifact-paths";
 import { findFile } from "../../../src/utils/find-file";
 import {
   ARCH_PANEL_AGENTS,
@@ -14,13 +16,13 @@ import {
   SUBAGENT_DIR,
 } from "../../../src/config";
 import { stripNamespace } from "../../../src/utils/strip-namespace";
-import type { TaskGraph } from "../../../src/types";
+import type { Phase, TaskGraph } from "../../../src/types";
 import { StateManager } from "../../../src/state-manager";
 import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-/** Minimal TaskGraph for resolveTransition */
+/** Minimal TaskGraph for transition tests */
 function mkState(overrides: Partial<TaskGraph> = {}): TaskGraph {
   return {
     current_phase: "init",
@@ -45,23 +47,23 @@ describe("countMarkers", () => {
   it("counts NEEDS CLARIFICATION markers", () => {
     const f = join(tmpDir, "spec.md");
     writeFileSync(f, "FR-1\n[NEEDS CLARIFICATION] auth?\nFR-2\n[NEEDS CLARIFICATION] rate limit?\n[NEEDS CLARIFICATION] timeout?");
-    expect(countMarkers(f)).toBe(3);
+    expect(countMarkers(f, tmpDir)).toBe(3);
   });
 
   it("returns 0 for clean file", () => {
     const f = join(tmpDir, "spec.md");
     writeFileSync(f, "All clear.");
-    expect(countMarkers(f)).toBe(0);
+    expect(countMarkers(f, tmpDir)).toBe(0);
   });
 
   it("fails closed for a missing marker artifact", () => {
-    expect(() => countMarkers(join(tmpDir, "nope.md"))).toThrow(/cannot read phase artifact/);
+    expect(() => countMarkers(join(tmpDir, "nope.md"), tmpDir)).toThrow(/cannot read phase artifact/);
   });
 
   it("returns 0 for empty file", () => {
     const f = join(tmpDir, "e.md");
     writeFileSync(f, "");
-    expect(countMarkers(f)).toBe(0);
+    expect(countMarkers(f, tmpDir)).toBe(0);
   });
 });
 
@@ -148,11 +150,45 @@ describe("applyEligiblePhaseTransition", () => {
       updated_at: "2026-08-31T00:00:00.000Z",
     });
   });
+
+  it("promotes an architecture fallback to current Plan authority atomically", () => {
+    const missing = ".claude/plans/missing.md";
+    const selected = ".claude/plans/2026-09-22-selected.md";
+    const state = mkState({ current_phase: "architecture", plan_file: missing });
+
+    const next = applyEligiblePhaseTransition(
+      state,
+      "architecture",
+      { nextPhase: "plan-alignment", artifact: selected },
+      "2026-09-22T00:00:00.000Z",
+    );
+
+    expect(state.plan_file).toBe(missing);
+    expect(next).toMatchObject({
+      current_phase: "plan-alignment",
+      plan_file: selected,
+      phase_artifacts: { architecture: selected },
+    });
+  });
 });
 
-// ── resolveTransition ─────────────────────────────────────────────
+// ── phase transitions (production parse-and-observe) ─────────────────────────────────────────────
 
-describe("resolveTransition", () => {
+/**
+ * The retired cwd-defaulted compatibility shell's parse-and-observe sequence,
+ * bound to an EXPLICIT project boundary: production callers pass the root
+ * derived from the TaskGraph's own location, so the tests drive exactly that
+ * path instead of any ambient-cwd spelling.
+ */
+const makeTransitionResolver = (baseDir: () => string) =>
+  (completedPhase: Phase, state: TaskGraph): PhaseTransitionResolution => {
+    const parsedSpecDir = parseSpecArtifactDirectory(state.spec_dir);
+    return parsedSpecDir.ok
+      ? observePhaseTransition(completedPhase, state, parsedSpecDir.value, baseDir()).resolution
+      : { kind: "not-ready", reason: parsedSpecDir.message };
+  };
+
+describe("phase transitions", () => {
   let tmpDir: string;
   let origCwd: string;
 
@@ -166,6 +202,8 @@ describe("resolveTransition", () => {
     process.chdir(origCwd);
     rmSync(tmpDir, { recursive: true, force: true });
   });
+
+  const resolveTransition = makeTransitionResolver(() => tmpDir);
 
   // ── brainstorm ──
 
@@ -233,6 +271,21 @@ describe("resolveTransition", () => {
 
     expect(() => resolveTransition("specify", mkState({ spec_file: specFile })))
       .toThrow(/cannot access phase artifact/);
+  });
+
+  it("refuses a project-local spec symlink whose target is outside the project", () => {
+    const externalRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-external-spec-")));
+    const externalSpec = join(externalRoot, "spec.md");
+    const localSpec = join(tmpDir, ".claude", "specs", "feat", "spec.md");
+    mkdirSync(join(tmpDir, ".claude", "specs", "feat"), { recursive: true });
+    writeFileSync(externalSpec, "external authority");
+    symlinkSync(externalSpec, localSpec);
+    try {
+      expect(() => resolveTransition("specify", mkState({ spec_file: localSpec })))
+        .toThrow(/cannot access phase artifact/);
+    } finally {
+      rmSync(externalRoot, { recursive: true, force: true });
+    }
   });
 
   it("specify reports an out-of-scope spec artifact without falling back", () => {
@@ -356,23 +409,62 @@ describe("resolveTransition", () => {
       .toThrow(/cannot access phase artifact/);
   });
 
+  it("refuses a Plan reached through a symlinked ancestor", () => {
+    const externalRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-external-plan-")));
+    writeFileSync(join(externalRoot, "plan.md"), "external authority");
+    mkdirSync(join(tmpDir, ".claude"), { recursive: true });
+    symlinkSync(externalRoot, join(tmpDir, ".claude", "plans"));
+    try {
+      expect(() => resolveTransition(
+        "architecture",
+        mkState({ plan_file: ".claude/plans/plan.md" }),
+      )).toThrow(/cannot access phase artifact/);
+    } finally {
+      rmSync(externalRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a readable directory whose name looks like the sole date-prefixed Plan", () => {
+    const specDir = ".claude/specs/2026-07-16-feature";
+    mkdirSync(join(tmpDir, specDir), { recursive: true });
+    mkdirSync(join(tmpDir, ".claude", "plans", "2026-07-16-not-a-plan.md"), { recursive: true });
+
+    expect(resolveTransition("architecture", mkState({ spec_dir: specDir, plan_file: null }))).toEqual({
+      kind: "not-ready",
+      reason: "no readable plan artifact is available inside .claude/plans",
+    });
+  });
+
+  it("ignores a Plan-shaped directory when exactly one readable regular Plan file also matches", () => {
+    const specDir = ".claude/specs/2026-07-16-feature";
+    mkdirSync(join(tmpDir, specDir), { recursive: true });
+    mkdirSync(join(tmpDir, ".claude", "plans", "2026-07-16-directory.md"), { recursive: true });
+    writeFileSync(join(tmpDir, ".claude", "plans", "2026-07-16-plan.md"), "plan");
+
+    expect(resolveTransition("architecture", mkState({ spec_dir: specDir, plan_file: null }))).toEqual({
+      kind: "ready",
+      nextPhase: "plan-alignment",
+      artifact: ".claude/plans/2026-07-16-plan.md",
+    });
+  });
+
   // ── plan-alignment ──
 
   it("plan-alignment → decompose when gap report exists in spec_dir", () => {
-    const specDir = join(tmpDir, ".claude", "specs");
-    mkdirSync(specDir, { recursive: true });
-    const gapReport = join(specDir, "plan-alignment.md");
+    const specDir = ".claude/specs";
+    mkdirSync(join(tmpDir, specDir), { recursive: true });
+    const gapReport = join(tmpDir, specDir, "plan-alignment.md");
     writeFileSync(gapReport, "gap report");
 
     const r = resolveTransition("plan-alignment", mkState({ spec_dir: specDir }));
     expect(r).not.toBeNull();
     expect(r!.nextPhase).toBe("decompose");
-    expect(r!.artifact).toBe(gapReport);
+    expect(r!.artifact).toBe(`${specDir}/plan-alignment.md`);
   });
 
   it("plan-alignment reports a missing gap report", () => {
-    const specDir = join(tmpDir, ".claude", "specs");
-    mkdirSync(specDir, { recursive: true });
+    const specDir = ".claude/specs";
+    mkdirSync(join(tmpDir, specDir), { recursive: true });
 
     expect(resolveTransition("plan-alignment", mkState({ spec_dir: specDir }))).toMatchObject({
       kind: "not-ready",
@@ -399,8 +491,8 @@ describe("resolveTransition", () => {
   });
 
   it("plan-alignment → decompose when gap report in nested subdir of spec_dir", () => {
-    const specDir = join(tmpDir, ".claude", "specs");
-    const nested = join(specDir, "feat");
+    const specDir = ".claude/specs";
+    const nested = join(tmpDir, specDir, "feat");
     mkdirSync(nested, { recursive: true });
     const gapReport = join(nested, "plan-alignment.md");
     writeFileSync(gapReport, "nested gap");
@@ -408,7 +500,7 @@ describe("resolveTransition", () => {
     const r = resolveTransition("plan-alignment", mkState({ spec_dir: specDir }));
     expect(r).not.toBeNull();
     expect(r!.nextPhase).toBe("decompose");
-    expect(r!.artifact).toBe(gapReport);
+    expect(r!.artifact).toBe(`${specDir}/feat/plan-alignment.md`);
   });
 
   // ── loop-back: architecture re-run routes to plan-alignment again ──
@@ -475,10 +567,12 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("panel agents are not PHASE_AGENT_MAP members — handler short-circuits before resolveTransition", () => {
+  const resolveTransition = makeTransitionResolver(() => tmpDir);
+
+  it("panel agents are not PHASE_AGENT_MAP members — handler short-circuits before the phase transition", () => {
     // advance-phase looks up `PHASE_AGENT_MAP[stripNamespace(agent_type)]`
     // and returns passthrough on undefined. Panel agents must miss this map, or
-    // their SubagentStop would run resolveTransition and could advance the phase.
+    // their SubagentStop would run the transition observer and could advance the phase.
     for (const agent of ARCH_PANEL_AGENTS) {
       expect(PHASE_AGENT_MAP[stripNamespace(agent)]).toBeUndefined();
       expect(PHASE_AGENT_MAP[stripNamespace(`loom:${agent}`)]).toBeUndefined();
@@ -488,11 +582,11 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
   it("TRAP: a same-date-prefix plan on disk would advance IF a panel agent reached the architecture case — proving the map gate is load-bearing", () => {
     // Reproduce the exact hazard from design constraint 2: a stale same-day plan
     // sits in .claude/plans/ while a designer/judge completes mid-panel.
-    const specDir = join(tmpDir, ".claude", "specs", "2026-07-16-feat");
-    mkdirSync(specDir, { recursive: true });
+    const specDir = ".claude/specs/2026-07-16-feat";
+    mkdirSync(join(tmpDir, specDir), { recursive: true });
     mkdirSync(join(tmpDir, ".claude", "plans"), { recursive: true });
-    // A same-date-prefix plan the date-prefix fallback in resolveTransition
-    // ("architecture" case) would happily pick up.
+    // A same-date-prefix plan the date-prefix fallback in the architecture
+    // transition case would happily pick up.
     writeFileSync(join(tmpDir, ".claude", "plans", "2026-07-16-stale.md"), "stale plan");
 
     const state = mkState({
@@ -508,10 +602,33 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
     expect(wouldAdvance!.nextPhase).toBe("plan-alignment");
 
     // The ONLY thing preventing that is panel agents missing from PHASE_AGENT_MAP,
-    // so the handler returns passthrough before resolveTransition is ever called.
+    // so the handler returns passthrough before any transition is ever evaluated.
     for (const agent of ARCH_PANEL_AGENTS) {
       expect(PHASE_AGENT_MAP[stripNamespace(agent)]).toBeUndefined();
     }
+  });
+
+  it("an ambiguous date-prefix match refuses the architecture transition instead of adopting an arbitrary plan", () => {
+    // Multiple valid fallback candidates remain an explicit refusal: the
+    // operator must disambiguate through plan_file or the filesystem.
+    const specDir = ".claude/specs/2026-07-16-feat";
+    mkdirSync(join(tmpDir, specDir), { recursive: true });
+    mkdirSync(join(tmpDir, ".claude", "plans"), { recursive: true });
+    writeFileSync(join(tmpDir, ".claude", "plans", "2026-07-16-alpha.md"), "plan alpha");
+    writeFileSync(join(tmpDir, ".claude", "plans", "2026-07-16-beta.md"), "plan beta");
+
+    const state = mkState({
+      current_phase: "architecture",
+      spec_dir: specDir,
+      plan_file: null, // force the date-prefix fallback path
+    });
+
+    const resolution = resolveTransition("architecture", state);
+    expect(resolution).toEqual({
+      kind: "not-ready",
+      reason: "multiple readable plan artifacts match 2026-07-16 inside .claude/plans; " +
+        "set plan_file or remove the extra candidates",
+    });
   });
 
   const withPhaseState = async (

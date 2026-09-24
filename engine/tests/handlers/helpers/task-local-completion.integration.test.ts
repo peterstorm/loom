@@ -114,6 +114,46 @@ describe("Task-local completion observation shell", () => {
     expect(observed.invalidationBytesChanged).toBe(false);
   });
 
+  it("excludes the exact configured State File from Task attribution", () => {
+    const fixture = repository();
+    const statePath = join(fixture.root, ".custom", "state", "active_task_graph.json");
+    mkdirSync(join(fixture.root, ".custom", "state"), { recursive: true });
+    writeFileSync(statePath, "{\"revision\":1}\n");
+
+    const observed = observeTaskLocalCompletion({
+      repositoryRoot: fixture.root,
+      task: fixture.task,
+      authority: fixture.authority,
+      parserModifiedPaths: [],
+      parserPathLabel: "test transcript paths",
+      siblingOwnedPaths: [],
+      authoritativeStatePath: statePath,
+    });
+
+    expect(observed.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+  });
+
+  it("keeps an unowned review-namespace write as out-of-scope evidence", () => {
+    const fixture = repository();
+    mkdirSync(join(fixture.root, ".claude", "reviews"), { recursive: true });
+    writeFileSync(join(fixture.root, ".claude", "reviews", "forged-authority.json"), "{}\n");
+
+    const observed = observeTaskLocalCompletion({
+      repositoryRoot: fixture.root,
+      task: fixture.task,
+      authority: fixture.authority,
+      parserModifiedPaths: [],
+      parserPathLabel: "test transcript paths",
+      siblingOwnedPaths: [],
+      authoritativeStatePath: join(fixture.root, ".claude", "state", "active_task_graph.json"),
+    });
+
+    expect(observed.suite.checks[0]?.outcome).toEqual({
+      kind: "out-of-scope-writes",
+      paths: [".claude/reviews/forged-authority.json"],
+    });
+  });
+
   it("blocks on an unowned foreign delta until its bytes return to the retained baseline", () => {
     const fixture = repository();
     const carriedTask = taskFixture({ ...fixture.task, unresolved_repository_paths: ["sibling.ts"] });

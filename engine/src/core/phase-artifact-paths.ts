@@ -21,12 +21,49 @@
  * precondition of classification.
  */
 
-import { basename, extname, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 
 /** Where a `spec.md` may live when the run declares no narrower `spec_dir`. */
 export const SPEC_ARTIFACT_DIR = ".claude/specs";
 /** Where a plan may live. Runs never narrow this one. */
 export const PLAN_ARTIFACT_DIR = ".claude/plans";
+
+/**
+ * The project boundary that owns a state file: the directory containing
+ * `.claude/`.
+ *
+ * Phase artifacts are stored as project-relative paths, so every filesystem
+ * probe of one must resolve against THIS root — not `process.cwd()`. The
+ * runtime's cwd names where the orchestrator happens to run (a parent session
+ * rooted in the main checkout), while the graph names where the artifacts
+ * live (a linked worktree); anchoring probes to cwd made phase advancement
+ * look for the run's spec/plan in the wrong repository and refuse to advance.
+ *
+ * The canonical locations are `<root>/.claude/state/active_task_graph.json`
+ * and `<root>/.pi/state/active_task_graph.json`; the legacy walk-up shape
+ * places the file directly in the root. Only those shapes name a root: the
+ * name-based fallback below refuses any other accepted pointer instead of
+ * guessing a directory one level too high. Path math only — the same purity
+ * contract as the rest of this module.
+ */
+export function projectRootForStateFile(statePath: string, repositoryRoot?: string): string {
+  const absoluteStatePath = resolve(statePath);
+  if (repositoryRoot !== undefined) {
+    const root = resolve(repositoryRoot);
+    if (!resolvesWithin(absoluteStatePath, root, root)) {
+      throw new Error(`State File ${absoluteStatePath} is outside observed project root ${root}`);
+    }
+    return root;
+  }
+  const parent = dirname(absoluteStatePath);
+  if (basename(parent) !== "state") return parent;
+  const oneUp = dirname(parent);
+  if (basename(oneUp) === ".claude" || basename(oneUp) === ".pi") return dirname(oneUp);
+  throw new Error(
+    `State File ${absoluteStatePath} is not at a documented canonical location ` +
+    '(<root>/.claude/state/, <root>/.pi/state/, or directly in the root); refusing to derive a project boundary heuristically',
+  );
+}
 
 declare const SPEC_ARTIFACT_DIRECTORY: unique symbol;
 /** Parser-minted phase-artifact search authority beneath `.claude/specs`. */
@@ -36,30 +73,46 @@ export type SpecArtifactDirectoryParse =
   | Readonly<{ ok: true; value: SpecArtifactDirectory }>
   | Readonly<{ ok: false; message: string }>;
 
-/** Parse untrusted persisted `spec_dir` before it can address the filesystem. */
+/** Parse untrusted persisted `spec_dir` before it can address the filesystem.
+ *
+ * Persisted phase directories are project-relative authority. An absolute
+ * value is not repaired against whichever checkout the runtime happens to use:
+ * it is refused before any shell can probe it.
+ */
 export function parseSpecArtifactDirectory(raw: string | null | undefined): SpecArtifactDirectoryParse {
   const candidate = raw ?? SPEC_ARTIFACT_DIR;
-  const root = resolve(SPEC_ARTIFACT_DIR);
-  const resolvedCandidate = resolve(candidate);
-  if (resolvedCandidate !== root && !resolvesWithin(candidate, SPEC_ARTIFACT_DIR)) {
+  if (isAbsolute(candidate) ||
+      // Both sides are project-relative, so the containment comparison is
+      // invariant in the base; the parse target itself is the explicit anchor
+      // (never an ambient cwd default).
+      (candidate !== SPEC_ARTIFACT_DIR && !resolvesWithin(candidate, SPEC_ARTIFACT_DIR, SPEC_ARTIFACT_DIR))) {
     return Object.freeze({
       ok: false,
-      message: `spec_dir ${candidate} is outside ${SPEC_ARTIFACT_DIR}`,
+      message: `spec_dir ${candidate} is outside ${SPEC_ARTIFACT_DIR} or is not project-relative`,
     });
   }
   return Object.freeze({ ok: true, value: candidate as SpecArtifactDirectory });
 }
 
 /**
- * Does `candidate` RESOLVE inside `directory` (both taken relative to cwd)?
+ * Does `candidate` RESOLVE inside `directory` under one explicit project root?
  *
  * Lexical containment after `resolve`, so `..` segments are collapsed before
  * the comparison rather than being carried along inside a string that still
  * "contains" the directory name. Equality with the directory itself is not
  * containment — an artifact must be a file under it, not the directory.
+ * `baseDir` is required: the TaskGraph Project Boundary every relative
+ * candidate is resolved against. There is no cwd default — an omitted base
+ * would silently reintroduce the cross-checkout drift this seam was built to
+ * close.
  */
-export function resolvesWithin(candidate: string, directory: string): boolean {
-  const fromDirectory = relative(resolve(directory), resolve(candidate));
+export function resolvesWithin(
+  candidate: string,
+  directory: string,
+  baseDir: string,
+): boolean {
+  const within = (path: string): string => isAbsolute(path) ? resolve(path) : resolve(baseDir, path);
+  const fromDirectory = relative(within(directory), within(candidate));
   return fromDirectory !== "" &&
     fromDirectory !== ".." &&
     !fromDirectory.startsWith(`..${sep}`) &&
@@ -85,11 +138,12 @@ export type PhaseArtifactKind = "spec" | "plan";
  */
 export function classifyPhaseArtifact(
   filePath: string,
-  specDir: string = SPEC_ARTIFACT_DIR,
+  specDir: string,
+  baseDir: string,
 ): PhaseArtifactKind | null {
   if (filePath.length === 0) return null;
-  if (basename(filePath) === "spec.md" && resolvesWithin(filePath, specDir)) return "spec";
-  if (extname(filePath) === ".md" && resolvesWithin(filePath, PLAN_ARTIFACT_DIR)) return "plan";
+  if (basename(filePath) === "spec.md" && resolvesWithin(filePath, specDir, baseDir)) return "spec";
+  if (extname(filePath) === ".md" && resolvesWithin(filePath, PLAN_ARTIFACT_DIR, baseDir)) return "plan";
   return null;
 }
 
@@ -112,11 +166,12 @@ export type PhaseArtifactUpdates = Readonly<{
  */
 export function phaseArtifactUpdates(
   writtenPaths: readonly string[],
-  specDir: string = SPEC_ARTIFACT_DIR,
+  specDir: string,
+  baseDir: string,
 ): PhaseArtifactUpdates {
   const updates: { spec_file?: string; plan_file?: string } = {};
   for (const path of writtenPaths) {
-    const kind = classifyPhaseArtifact(path, specDir);
+    const kind = classifyPhaseArtifact(path, specDir, baseDir);
     if (kind === "spec") updates.spec_file = path;
     if (kind === "plan") updates.plan_file = path;
   }

@@ -10,15 +10,15 @@ import { buildContextPacket, encodeByteSection, parseContextPacket, contextPacke
 import { CURRENT_REVIEWER_PROTOCOL } from '../../../core/reviewer-contract';
 import { captureKey } from '../../../core/harness-capture';
 import { inspectRunDirectoryEntry, type RunDirHandle } from '../../../orchestration/run-directory-handle';
-import { TASK_GRAPH_PATH } from '../../../config';
+import { observeTaskGraphProjectBoundary, TASK_GRAPH_PATH, type TaskGraphProjectBoundary } from '../../../config';
 import { StateManager } from '../../../state-manager';
-import { commitWaveGateCompletion, deriveWaveAdvisoryDecisionRequest, deriveWaveGateDriveStep, deriveWaveReadiness, deriveWaveRefutationPlan, waveAdvisoryDecisionActionRequest, WAVE_REVIEW_AGENTS, type WaveAdvisoryDecisionRequest } from '../../../core/wave-gate-machine';
+import { commitWaveGateCompletion, deriveWaveAdvisoryDecisionRequest, deriveWaveGateDriveStep, deriveWaveReadiness, deriveWaveRefutationPlan, resetWaveGateReviewAuthority, waveAdvisoryDecisionActionRequest, WAVE_REVIEW_AGENTS, type WaveAdvisoryDecisionRequest } from '../../../core/wave-gate-machine';
 import { inspectFilePresence, loadPlanModelsSource } from '../complete-wave-gate';
 import { runFullTierWaveLint } from '../lint-wave-gate';
 import { ensureWaveCompletionSuite, observeCurrentWaveWorkspace } from '../wave-completion-suite';
 import { observeReviewedWorkspace } from '../reviewed-workspace';
 import { observeWaveSpecCheckDocuments } from '../../../orchestration/wave-spec-check-documents';
-import { applyFindingOutcomes, preserveAcceptedReviewRunFindings } from '../../../core/findings';
+import { applyFindingOutcomes } from '../../../core/findings';
 import { buildFindingBrief } from '../../../core/review-panel';
 import { applyReviewResolution, constrainReviewResolutionToScope, parseReviewerEvidence, resolveTaskReviewFindings, resolveIssuedTaskReviewFindings, type IssuedReviewerProtocol, type IssuedWaveReviewerProtocol } from '../../../core/review-output';
 import type { CurrentReviewRunSlotAuthority, LegacyReviewRunSlotAuthority, Task, TaskGraph } from '../../../types';
@@ -43,7 +43,7 @@ import {
 } from '../../../core/wave-review-authority';
 import { durableCaptureRejection, durableRefutationRequests, exactObject, executableRefutationRequests, failed, parseRegisteredFacadeProgram, reviewerProtocolResolver, publicationResolver, publishInitialBatch, recoverOrPublishRefutationRetry, refutationRejectionDiagnostic, renderSpawnTask, type FacadeDriveResult, type RegisteredWaveGateProgram } from './helpers';
 
-export const waveGateDeps = Object.freeze({
+const waveGateDeps = Object.freeze({
   loadPlanModels: loadPlanModelsSource,
   filePresence: inspectFilePresence,
   reviewedWorkspace: observeReviewedWorkspace,
@@ -135,7 +135,7 @@ export function waveGateDecisionMismatch(
     : `decision request ${decisionId} is not the exact pending advisory request ${pending.value.requestId}`;
 }
 
-export function waveBlocked(handle: RunDirHandle, message: string): FacadeDriveResult {
+function waveBlocked(handle: RunDirHandle, message: string): FacadeDriveResult {
   return { ok: true, action: { kind: "blocked", runId: handle.runId, diagnostic: { kind: "wave-gate-blocked", message } } };
 }
 
@@ -158,32 +158,6 @@ export type WaveGateRestartPreparation = Readonly<{
 export type WaveGateRestartResult =
   | Readonly<{ ok: true; value: WaveGateRestartPreparation }>
   | Readonly<{ ok: false; message: string }>;
-
-function retireActiveReviewRun(task: Task): Task {
-  const preserved = preserveAcceptedReviewRunFindings(task);
-  return {
-    ...preserved,
-    review_status: "pending",
-    // Packet retirement changes no implementation bytes. Keep generation
-    // stable; fresh packet/run identities make old transcripts stale.
-    review_generation: task.review_generation,
-    review_run: undefined,
-    review_error: undefined,
-    review_evidence_failures: undefined,
-  };
-}
-
-function resetWaveGateGraph(graph: TaskGraph, taskIds: readonly string[]): TaskGraph {
-  return {
-    ...graph,
-    tasks: graph.tasks.map((task) => taskIds.includes(task.id) && task.review_run !== undefined
-      ? retireActiveReviewRun(task)
-      : task),
-    spec_check: undefined,
-    wave_review_epoch: undefined,
-    active_wave_gate: undefined,
-  };
-}
 
 function replacementWaveGate(
   resetGraph: TaskGraph,
@@ -221,7 +195,7 @@ function replacementWaveGate(
  * invalidated. Review Generation stays stable because implementation bytes did
  * not change; fresh packet, epoch, and Run identities reject stale transcripts.
  */
-export function prepareExhaustedWaveGateRestart(
+function prepareExhaustedWaveGateRestart(
   graph: TaskGraph,
   previousRunId: string,
   previous: RegisteredWaveGateProgram,
@@ -275,7 +249,7 @@ export function prepareExhaustedWaveGateRestart(
       message: `Wave Gate restart refused before final-attempt rejection for: ${nonExhausted.map(({ task, slot }) => `${task.id}/${slot.agent}`).join(", ")}`,
     };
   }
-  const resetGraph = resetWaveGateGraph(graph, previous.taskIds);
+  const resetGraph = resetWaveGateReviewAuthority(graph, previous.taskIds);
   const replacement = replacementWaveGate(resetGraph, wave, previous.taskIds, nextRunId, nextRunsRoot);
   if (!replacement.ok) return replacement;
   const exhaustedSlots = Object.freeze(outstanding.map(({ task, slot }) => `${task.id}/${slot.agent}`));
@@ -344,7 +318,7 @@ export function prepareOrphanedWaveGateRecovery(
   const taskIds = Object.freeze(graph.tasks.filter(({ wave }) => wave === expected.wave).map(({ id }) => id));
   if (taskIds.length === 0) return { ok: false, message: `active Wave ${expected.wave} has no protected tasks` };
 
-  const resetGraph = resetWaveGateGraph(graph, taskIds);
+  const resetGraph = resetWaveGateReviewAuthority(graph, taskIds);
   const replacement = replacementWaveGate(resetGraph, expected.wave, taskIds, nextRunId, nextRunsRoot);
   if (!replacement.ok) return replacement;
 
@@ -394,6 +368,7 @@ export function waveRequests(
   registration: RegisteredWaveGateProgram,
   graph: ReturnType<StateManager["load"]>,
   attempt: 1 | 2,
+  projectBoundary: TaskGraphProjectBoundary,
 ): WaveRequestBatch {
   const wave = registration.input.wave;
   if (wave === null) throw new Error("registered Wave review authority lacks an exact Wave");
@@ -411,7 +386,11 @@ export function waveRequests(
     graph,
     attempt,
     observeReviewedWorkspace(tasks),
-    observeWaveSpecCheckDocuments(graph.spec_file, graph.plan_file),
+    observeWaveSpecCheckDocuments({
+      specFile: graph.spec_file,
+      planFile: graph.plan_file,
+      projectBoundary,
+    }),
   );
   if (!prepared.ok) throw new Error(prepared.error.message);
   return prepared.value;
@@ -432,7 +411,7 @@ function issuedWaveProtocol(
   return issued.value;
 }
 
-export function resolveWaveReviewerTranscript(
+function resolveWaveReviewerTranscript(
   task: Task, agent: string, bytes: Uint8Array, protocol: IssuedWaveReviewerProtocol,
 ) {
   if (protocol.subject.taskId !== task.id || protocol.request.role !== agent ||
@@ -453,7 +432,7 @@ export function resolveWaveReviewerTranscript(
   return resolveIssuedTaskReviewFindings(protocol, bytes);
 }
 
-export function reviewerRejectionReason(
+function reviewerRejectionReason(
   task: Task, agent: string, bytes: Uint8Array, protocol: IssuedWaveReviewerProtocol,
 ): string | null {
   const resolution = resolveWaveReviewerTranscript(task, agent, bytes, protocol);
@@ -538,7 +517,7 @@ function boundedRetryReason(reason: string): string {
   return bounded;
 }
 
-export function waveRetryDiagnosticText(reason: string): string {
+function waveRetryDiagnosticText(reason: string): string {
   return `${WAVE_RETRY_PREAMBLE}${reason}\n\n${WAVE_RETRY_FIXED_TAIL}`;
 }
 
@@ -554,7 +533,7 @@ function currentWaveRetryDiagnosticText(reason: string): string {
  * `<fixed preamble><non-empty reason>\n\n<fixed schema tail>`.
  */
 export function parseWaveRetryDiagnosticSection(
-  bytes: readonly number[],
+  bytes: Iterable<number>,
   protocolVersion: 1 | 2,
 ): Readonly<{ ok: true; reason: string }> | Readonly<{ ok: false; message: string }> {
   let text: string;
@@ -660,7 +639,7 @@ function persistedWaveReviewerRetry(
   if (!second.ok) throw new Error(second.error.message);
   const problem = persistedWaveAttemptTwoCompatibilityProblem(first, stored[0], protocol.packet, second.value);
   if (problem !== null) throw new Error(problem);
-  if (protocol.protocolVersion === 2 && !canonicalStructuralEquals(derived.packet, second.value)) {
+  if (protocol.protocolVersion === 2 && derived.packet.digest !== second.value.digest) {
     throw new Error("current retry diagnostic differs from the captured attempt-1 rejection");
   }
   return { request: { authority: stored[0], context: { digest: second.value.digest,
@@ -809,10 +788,11 @@ export async function installWaveReviewRuns(
     preinstall.tasks.filter(({ id }) => registration.taskIds.includes(id)),
   );
   const workspaceByTask = new Map(observedWorkspaces.map((observation) => [observation.taskId, observation]));
-  const currentObservation = observeWaveSpecCheckDocuments(
-    batch.specCheckDocuments.spec.path,
-    batch.specCheckDocuments.plan.path,
-  );
+  const currentObservation = observeWaveSpecCheckDocuments({
+    specFile: batch.specCheckDocuments.spec.path,
+    planFile: batch.specCheckDocuments.plan.path,
+    projectBoundary: observeTaskGraphProjectBoundary(manager.getPath()),
+  });
   const currentDocuments = currentObservation.authority;
   await manager.update((locked) => {
     const wave = registration.input.wave;
@@ -968,7 +948,7 @@ function readWaveRequestContext(
   return { ok: true, packet: packet.value, context };
 }
 
-export function waveReviewContextTaskId(context: WaveReviewContextRead): string | null {
+function waveReviewContextTaskId(context: WaveReviewContextRead): string | null {
   return context.kind === "loaded" ? (context.value.taskRun?.taskId ?? null) : null;
 }
 
@@ -1045,7 +1025,7 @@ export function waveRefutationCommitProblem(
     : "Refutation Panel findings differ from the locked current-Wave Finding authority";
 }
 
-export function waveRefutationPreparation(
+function waveRefutationPreparation(
   handle: RunDirHandle,
   readiness: Extract<ReturnType<typeof deriveWaveReadiness>, { ok: true }>["value"],
 ) {
@@ -1099,6 +1079,15 @@ export function waveRefutationPreparation(
   return { panel: panel.value, inputs, packets, retryInputs, threshold: defaultRefutationThreshold(plan.value.lenses.length) };
 }
 
+const sameContextSections = (
+  left: ContextPacket["fixedContext"],
+  right: ContextPacket["fixedContext"],
+): boolean => left.length === right.length && left.every((section, index) => {
+  const candidate = right[index];
+  return candidate !== undefined && section.label === candidate.label &&
+    section.byteLength === candidate.byteLength && section.digest === candidate.digest;
+});
+
 export function persistedWaveAttemptTwoCompatibilityProblem(
   attemptOne: AgentRequestAuthority,
   attemptTwo: AgentRequestAuthority,
@@ -1132,13 +1121,13 @@ export function persistedWaveAttemptTwoCompatibilityProblem(
         !canonicalStructuralEquals(first.reviewerProtocol, second.reviewerProtocol))) ||
       second.digest !== attemptTwo.contextDigest || second.requestId !== attemptTwo.requestId || second.role !== first.role ||
       second.requiredSkill !== first.requiredSkill || second.outputContract !== first.outputContract ||
-      !canonicalStructuralEquals(second.fixedContext, first.fixedContext)) {
+      !sameContextSections(second.fixedContext, first.fixedContext)) {
     return "persisted attempt-2 context changed fixed attempt-1 authority";
   }
 
-  const unchangedLegacyContext = canonicalStructuralEquals(second.variableContext, first.variableContext);
+  const unchangedLegacyContext = sameContextSections(second.variableContext, first.variableContext);
   const diagnostic = second.variableContext.length === first.variableContext.length + 1 &&
-    canonicalStructuralEquals(second.variableContext.slice(0, -1), first.variableContext) &&
+    sameContextSections(second.variableContext.slice(0, -1), first.variableContext) &&
     second.variableContext.at(-1)?.label === "wave-review-attempt-1-rejection"
     ? parseWaveRetryDiagnosticSection(second.variableContext.at(-1)!.bytes, first.schemaVersion)
     : ({ ok: false as const, message: "attempt-2 context carries no wave-review-attempt-1-rejection section" });
@@ -1150,7 +1139,7 @@ export function persistedWaveAttemptTwoCompatibilityProblem(
   return null;
 }
 
-export async function exhaustedWaveReviewerAttempts(
+async function exhaustedWaveReviewerAttempts(
   handle: RunDirHandle,
   graph: TaskGraph,
   registration: RegisteredWaveGateProgram,
@@ -1481,7 +1470,7 @@ export async function startWaveGateFacade(
   }
 }
 
-export async function markWaveSpecCheckRetryIssued(
+async function markWaveSpecCheckRetryIssued(
   manager: StateManager,
   authority: AgentRequestAuthority,
   batchEpoch: string,
@@ -1600,10 +1589,11 @@ export async function applyWaveFacadeSubmission(
       if (specCheckDocuments === null) {
         return { ok: false, message: "Wave spec-check request predates byte-bound document authority" };
       }
-      const currentObservation = observeWaveSpecCheckDocuments(
-        specCheckDocuments.spec.path,
-        specCheckDocuments.plan.path,
-      );
+      const currentObservation = observeWaveSpecCheckDocuments({
+        specFile: specCheckDocuments.spec.path,
+        planFile: specCheckDocuments.plan.path,
+        projectBoundary: observeTaskGraphProjectBoundary(manager.getPath()),
+      });
       const currentDocuments = currentObservation.authority;
       const parsed = parseSpecCheckOutput(typeof raw === "string" ? raw : Buffer.from(raw).toString("utf8"));
       const wave = context.wave;
@@ -1753,7 +1743,11 @@ export async function resumeWaveGateFacade(
       return waveBlocked(handle, "protected active Wave Gate authority differs from the registered façade run");
     }
     if (graph.wave_review_epoch !== undefined) {
-      const currentDocuments = observeWaveSpecCheckDocuments(graph.spec_file, graph.plan_file).authority;
+      const currentDocuments = observeWaveSpecCheckDocuments({
+        specFile: graph.spec_file,
+        planFile: graph.plan_file,
+        projectBoundary: observeTaskGraphProjectBoundary(manager.getPath()),
+      }).authority;
       if (!waveSpecCheckDocumentsMatch(graph.wave_review_epoch.specCheckDocuments, currentDocuments)) {
         return waveBlocked(handle, "current spec/plan bytes differ from the active Wave spec-check authority; refresh spec-check evidence");
       }
@@ -1787,7 +1781,13 @@ export async function resumeWaveGateFacade(
     const initialBatchMissingOrPartial = graph.wave_review_epoch === undefined &&
       graph.tasks.every((task) => !registration.taskIds.includes(task.id) || task.review_run === undefined);
     if (initialBatchMissingOrPartial) {
-      const batch = waveRequests(handle, registration, graph, 1);
+      const batch = waveRequests(
+        handle,
+        registration,
+        graph,
+        1,
+        observeTaskGraphProjectBoundary(manager.getPath()),
+      );
       // Publication is deterministic and idempotent per context/request slot.
       // Re-running the complete effect reconciles a crash after any strict
       // prefix of requests was reserved instead of treating partial issuance
@@ -1814,7 +1814,13 @@ export async function resumeWaveGateFacade(
       registration.taskIds.includes(task.id) && task.review_run === undefined &&
       task.review_status !== "passed" && task.review_status !== "blocked");
     if (!hasCollectingPacket && needsFreshPacket) {
-      const batch = waveRequests(handle, registration, refreshed, 1);
+      const batch = waveRequests(
+        handle,
+        registration,
+        refreshed,
+        1,
+        observeTaskGraphProjectBoundary(manager.getPath()),
+      );
       await installWaveReviewRuns(manager, registration, batch);
       const published = await publishInitialBatch(handle, batch.requests, batch.packets, "wave-gate-current");
       return published.ok ? { ok: true, action: published.action } : failed(published.message);
@@ -1846,7 +1852,13 @@ export async function resumeWaveGateFacade(
       candidates.sort((left, right) => rank(left) - rank(right));
       const expectedCount = 1 + registration.taskIds.length * WAVE_REVIEW_AGENTS.length;
       if (candidates.length !== expectedCount || candidates.some((candidate, index) => rank(candidate) !== index)) {
-        const expectedBatch = waveRequests(handle, registration, refreshed, 1);
+        const expectedBatch = waveRequests(
+          handle,
+          registration,
+          refreshed,
+          1,
+          observeTaskGraphProjectBoundary(manager.getPath()),
+        );
         if (expectedBatch.batchEpoch !== epoch.batchEpoch) {
           return waveBlocked(handle, "persisted current Wave review batch differs from deterministic protected authority");
         }
@@ -2305,7 +2317,11 @@ export async function resumeWaveGateFacade(
     }
     const lint = runFullTierWaveLint(current.value.waveTasks);
     if (lint.kind === "block") return waveBlocked(handle, lint.message);
-    const completionDocuments = observeWaveSpecCheckDocuments(refreshed.spec_file, refreshed.plan_file).authority;
+    const completionDocuments = observeWaveSpecCheckDocuments({
+      specFile: refreshed.spec_file,
+      planFile: refreshed.plan_file,
+      projectBoundary: observeTaskGraphProjectBoundary(manager.getPath()),
+    }).authority;
     const committed = await manager.commitActiveWaveGateCompletion((locked) => {
       if (locked.spec_file !== refreshed.spec_file || locked.plan_file !== refreshed.plan_file ||
           !waveSpecCheckDocumentsMatch(locked.wave_review_epoch?.specCheckDocuments, completionDocuments)) {

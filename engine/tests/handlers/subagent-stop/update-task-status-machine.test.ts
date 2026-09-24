@@ -21,7 +21,7 @@ import { parseEpoch } from "../../../src/machine";
 import type { EvidenceRecord, Requirement } from "../../../src/machine";
 import { reportSummary } from "../../machine/report-summary";
 import { evaluateTaskProof } from "../../../src/core/proof-obligations";
-import * as git from "../../../src/utils/git";
+import * as config from "../../../src/config";
 
 const run = `uts-machine-${process.pid}-${Date.now()}`;
 const sid = (name: string) => `${run}-${name}`;
@@ -529,19 +529,15 @@ describe("locked implementation settlement failures", () => {
       message: { content: [{ type: "text", text: "**Task ID:** T1\n\nRetry finished." }] },
     }) + "\n");
 
-    let rootReads = 0;
-    vi.spyOn(git, "repositoryRoot").mockImplementation(() => {
-      rootReads += 1;
-      if (rootReads === 2) {
-        const locked = JSON.parse(readFileSync(statePath, "utf-8"));
-        locked.tasks[0].attempt_artifact_baseline = [{
-          artifact,
-          snapshot: { kind: "sha256", digest: digest("old bytes\n") },
-        }];
-        chmodSync(statePath, 0o600);
-        writeFileSync(statePath, JSON.stringify(locked));
-      }
-      return repositoryRoot;
+    vi.spyOn(config, "observeTaskGraphProjectBoundary").mockImplementation(() => {
+      const locked = JSON.parse(readFileSync(statePath, "utf-8"));
+      locked.tasks[0].attempt_artifact_baseline = [{
+        artifact,
+        snapshot: { kind: "sha256", digest: digest("old bytes\n") },
+      }];
+      chmodSync(statePath, 0o600);
+      writeFileSync(statePath, JSON.stringify(locked));
+      return { kind: "git-repository", root: repositoryRoot };
     });
 
     const result = await runUpdateTaskStatus(JSON.stringify({
@@ -580,10 +576,8 @@ describe("locked implementation settlement failures", () => {
       type: "assistant",
       message: { content: [{ type: "text", text: "**Task ID:** T1\n\nRetry finished." }] },
     }) + "\n");
-    let rootReads = 0;
-    vi.spyOn(git, "repositoryRoot").mockImplementation(() => {
-      rootReads += 1;
-      return rootReads === 1 ? process.cwd() : "/nonexistent/loom-baseline-root";
+    vi.spyOn(config, "observeTaskGraphProjectBoundary").mockReturnValue({
+      kind: "git-repository", root: "/nonexistent/loom-baseline-root",
     });
 
     const result = await runUpdateTaskStatus(JSON.stringify({

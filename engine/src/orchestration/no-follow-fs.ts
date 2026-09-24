@@ -343,6 +343,11 @@ export function openChildDirectoryNoFollow(directory: AnchoredDirectory, name: s
   return anchorFor(openSync(childPath, dirFlags()), childPath);
 }
 
+/** ENOENT is the one errno every absence-handling catch below treats as an
+ *  expected answer; every other errno is damage an operator must see. */
+const isEnoent = (error: unknown): boolean =>
+  (error as NodeJS.ErrnoException).code === "ENOENT";
+
 function closeFileDescriptor(
   fileDescriptor: number | null,
   primaryError: unknown,
@@ -514,7 +519,7 @@ function writeDirectoryFileAtomicPreparedNoFollow(
     try {
       unlinkSync(anchoredChildPath(directory, temporary));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") cleanupError = error;
+      if (!isEnoent(error)) cleanupError = error;
     }
   }
   if (primaryError !== null && cleanupError !== null) {
@@ -560,7 +565,7 @@ export function removeDirectoryFileNoFollow(directory: AnchoredDirectory, name: 
   try {
     unlinkSync(anchoredChildPath(directory, name));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (!isEnoent(error)) throw error;
   }
 }
 
@@ -618,7 +623,7 @@ function directoryEntryExistsNoFollow(directory: AnchoredDirectory, name: string
     readDirectoryFileNoFollow(directory, name);
     return true;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    if (isEnoent(error)) return false;
     throw error;
   }
 }
@@ -695,7 +700,7 @@ function settleRecoveryGuardTomb(
   try {
     tomb = readRecoveryGuardSnapshot(directory, tombName);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    if (isEnoent(error)) return true;
     throw new Error(
       `cannot inspect recovery guard tomb ${tombName}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
@@ -716,7 +721,7 @@ function settleRecoveryGuardTomb(
         const canonical = readRecoveryGuardSnapshot(directory, recoveryName);
         if (!sameRecoveryGuard(canonical, tomb)) return false;
       } catch (readError) {
-        if ((readError as NodeJS.ErrnoException).code === "ENOENT") return false;
+        if (isEnoent(readError)) return false;
         throw readError;
       }
     }
@@ -750,7 +755,7 @@ function reclaimAbandonedRecoveryGuard(
   try {
     observed = readRecoveryGuardSnapshot(directory, recoveryName);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    if (isEnoent(error)) return false;
     throw new Error(
       `cannot inspect recovery guard ${recoveryName}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
@@ -762,7 +767,7 @@ function reclaimAbandonedRecoveryGuard(
   try {
     renameSync(anchoredChildPath(directory, recoveryName), anchoredChildPath(directory, tombName));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    if (isEnoent(error)) return false;
     throw new Error(
       `cannot claim abandoned recovery guard ${recoveryName}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
@@ -780,7 +785,7 @@ function removeOwnedRecoveryEntry(
   try {
     observed = readDirectoryFileNoFollow(directory, name).toString("utf-8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    if (isEnoent(error)) return;
     throw new Error(
       `cannot inspect recovery guard ${name}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
@@ -790,7 +795,7 @@ function removeOwnedRecoveryEntry(
   try {
     unlinkSync(anchoredChildPath(directory, name));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    if (isEnoent(error)) return;
     throw new Error(
       `cannot remove recovery guard ${name}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
@@ -871,7 +876,7 @@ export function recoverStaleDirectoryLock(
       // A vanished lock is the one expected race — recovery stands down. Any
       // other read failure (EACCES/EPERM, ELOOP, ENOTDIR, EIO, corruption) is
       // an attack or damage an operator must see, not contention.
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      if (isEnoent(error)) return false;
       throw new Error(
         `cannot inspect lock ${lockName}: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -887,7 +892,7 @@ export function recoverStaleDirectoryLock(
       renameSync(anchoredChildPath(directory, lockName), anchoredChildPath(directory, tomb));
       afterTombstoned(tomb);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      if (isEnoent(error)) return false;
       throw new Error(
         `cannot tombstone stale lock ${lockName}: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -900,7 +905,7 @@ export function recoverStaleDirectoryLock(
       // Absent tombstone is the expected race (restore below). Anything else
       // (EACCES/EPERM, EIO, ELOOP, ENOTDIR, corrupt contents) is damage an
       // operator must see, not quiet contention.
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") tombOwner = null;
+      if (isEnoent(error)) tombOwner = null;
       else {
         throw new Error(
           `cannot verify tombstoned lock ${tomb}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1249,29 +1254,50 @@ function readAnchoredRunFile(path: string, maximumBytes?: number): Buffer {
     readDirectoryFileNoFollow(parent, basename(path), maximumBytes));
 }
 
-/** Freshness requires descriptor-relative unlink, not a proved-then-reused
- * absolute pathname. Darwin's real-path anchor cannot supply this guarantee. */
+/**
+ * Reset one report artifact relative to an anchored parent, never following a
+ * leaf: lstat refuses directories and symlinks, and `unlink(2)` removes the
+ * link itself.
+ *
+ * Linux addresses the leaf through the retained descriptor, so a parent
+ * renamed and replaced by a foreign symlink cannot redirect the reset.
+ * Darwin has no descriptor-relative unlink: the parent's whole path is
+ * RE-PROVED with `O_NOFOLLOW_ANY` plus an identity check immediately before
+ * the leaf mutation (the same proof `ensureRelativeDirectoryNoFollow` uses
+ * before mkdir), and the unlink goes through that proven pathname. A parent
+ * renamed and replaced by a planted symlink is refused by the re-proof; a
+ * swap inside the proof-to-unlink gap remains the documented darwin risk —
+ * the same one every other anchored leaf mutation accepts on this platform.
+ */
 export function removeDirectoryRegularFileNoFollow(directory: AnchoredDirectory, name: string): void {
   assertAnchoredDirectory(directory);
-  if (directory.anchor !== "descriptor") throw new Error("report reset requires descriptor-anchored unlink; platform unsupported");
+  if (directory.anchor === "real-path") {
+    try {
+      proveDarwinParentPath(directory);
+    } catch (error) {
+      throw new Error(
+        `report reset requires descriptor-anchored unlink; darwin parent re-proof failed: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+    }
+  }
   const path = anchoredChildPath(directory, name);
   try {
     if (!lstatSync(path).isFile()) throw new Error("report reset requires a regular file, never a directory or symlink");
     // unlink never follows a swapped leaf link and never removes a directory.
     unlinkSync(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (!isEnoent(error)) throw error;
   }
 }
 
 /** ENOENT (including an absent parent) is the only idempotent absence. */
 export function removeRunRegularFileNoFollow(path: string): void {
-  if (process.platform !== "linux") throw new Error("report reset requires descriptor-anchored unlink; platform unsupported");
   try {
     withOpenedDirectoryNoFollow(dirname(path), `report reset of ${basename(path)}`, (parent) =>
       removeDirectoryRegularFileNoFollow(parent, basename(path)));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (!isEnoent(error)) throw error;
   }
 }
 

@@ -35,6 +35,7 @@ import {
 } from "../engine/src/handlers/task-execution";
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
 import { admitPiSpawnBatch, MAX_PI_ORCHESTRATION_BATCH_SIZE } from "../engine/src/core/spawn-admission";
+import { isRecord } from "../engine/src/core/plain-record";
 
 
 // Engine SubagentStop logic (harness-agnostic functions already exported)
@@ -67,7 +68,6 @@ import {
   type PiSpecCheckAttemptAuthority,
   type PiSubagentResultEntry,
   type RepositoryProbe,
-  type TaskGraphStore,
 } from "./subagent-result";
 
 // `isReviewAgent` lives in `config`, NOT in `core/review-output` beside the
@@ -77,7 +77,7 @@ import {
 // with it — every hook below, not just review capture. `engine/tests/pi-imports.test.ts`
 // resolves every engine import in this file against the real exports so the next
 // move of a shared symbol fails a test instead of silently disarming Pi.
-import { isReviewAgent, taskGraphPath, subagentDir, PHASE_AGENT_MAP, IMPL_AGENTS, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS, probePathFailClosed, gitRepositoryRoot } from "../engine/src/config";
+import { isReviewAgent, taskGraphPath, subagentDir, PHASE_AGENT_MAP, IMPL_AGENTS, PROJECT_RULES_DIR, STALE_SUBAGENT_TTL_MS, probePathFailClosed, gitRepositoryRoot, observeTaskGraphProjectBoundary } from "../engine/src/config";
 import { sweepStaleSessions } from "../engine/src/handlers/session-start/cleanup-stale-subagents";
 import { StateManager } from "../engine/src/state-manager";
 import { currentOrchestrationStatus } from "../engine/src/handlers/helpers/orchestration";
@@ -101,7 +101,6 @@ import {
   unrecordableMissingEvidenceDiagnostic,
 } from "./reserved-results";
 import { extractTaskId } from "../engine/src/utils/extract-task-id";
-import * as git from "../engine/src/utils/git";
 
 // Linter integration (PostEdit lint via tool_result)
 import { processToolResult } from "../engine/src/handlers/pi-adapter";
@@ -336,7 +335,7 @@ export function rejectedChildWriteGrantBlock(rejected: boolean): Readonly<{ bloc
     : null;
 }
 
-export function piSystemAgentIdentity(systemPrompt: string): string {
+function piSystemAgentIdentity(systemPrompt: string): string {
   PI_AGENT_ID_MARKER.lastIndex = 0;
   const matches = [...systemPrompt.matchAll(PI_AGENT_ID_MARKER)];
   if (matches.length !== 1) throw new Error("child system prompt must contain exactly one Loom Pi agent identity");
@@ -355,7 +354,7 @@ function piSpawnItem(raw: Record<string, unknown>, index: number): Record<string
 }
 
 export function piSpawnCwd(raw: unknown, index: number, defaultCwd: string): string {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isRecord(raw)) {
     throw new Error("Pi subagent input must be an object before cwd resolution");
   }
   const input = raw as Record<string, unknown>;
@@ -374,8 +373,8 @@ export function piSpawnCwd(raw: unknown, index: number, defaultCwd: string): str
 /** The string command carried by a well-formed Pi bash call. Malformed
  * external input remains distinguishable so an armed state-file guard can fail
  * closed instead of treating input-shape drift as an allowed empty command. */
-export function piBashCommand(raw: unknown): string | null {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+function piBashCommand(raw: unknown): string | null {
+  if (!isRecord(raw)) return null;
   const command = (raw as Record<string, unknown>).command;
   return typeof command === "string" ? command : null;
 }
@@ -393,7 +392,7 @@ const writeTarget = (input: Record<string, unknown>, path: string): PiWriteTarge
 
 /** Parse every target before a scoped write can proceed; no partial batch exists. */
 export function piWriteTargetPaths(raw: unknown): PiWriteTargetPathsResult {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isRecord(raw)) {
     return Object.freeze({ ok: false, error: "write input must be a plain object" });
   }
   const input = raw as Record<string, unknown>;
@@ -403,7 +402,7 @@ export function piWriteTargetPaths(raw: unknown): PiWriteTargetPathsResult {
   }
   const paths: string[] = [];
   for (const [index, edit] of input.edits.entries()) {
-    if (typeof edit !== "object" || edit === null || Array.isArray(edit)) {
+    if (!isRecord(edit)) {
       return Object.freeze({ ok: false, error: `write input.edits[${index}] must be a plain object` });
     }
     const parsed = writeTarget(edit as Record<string, unknown>, `write input.edits[${index}]`);
@@ -438,7 +437,7 @@ const panelGuardTargets = (rawInput: unknown, cwd: string): readonly string[] =>
 };
 
 export function replacePiSpawnTask(raw: unknown, index: number, task: string): void {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isRecord(raw)) {
     throw new Error("Pi subagent input must be an object before write-grant injection");
   }
   const input = raw as Record<string, unknown>;
@@ -577,7 +576,7 @@ function sessionRunBinding(
  * authority cannot be recorded. The tool-call guard catches the failure,
  * rolls back lifecycle reservations, and refuses dispatch.
  */
-export async function recordPiSpawnCorrelators(
+async function recordPiSpawnCorrelators(
   items: readonly Readonly<{ agent: string; task: string }>[],
   rosterIds: readonly string[],
   rawSessionId: string,
@@ -1268,11 +1267,14 @@ export default function (
   const rejectedChildWriteGrantSessions = new Set<string>();
 
   // ─── Resource Discovery ───────────────────────────────────────────────
-  // The package.json "pi" manifest declares the raw skills/ and command
-  // templates so the package loads first-class without this handler. This
-  // handler adds the RENDERED, content-addressed copies (package-relative
-  // tokens expanded) under the Loom resource cache — the paths the extension
-  // and spawn admission actually read.
+  // The package.json "pi" manifest declares NO raw skills or prompt
+  // templates (empty arrays): pi would otherwise load the unrendered trees
+  // AND the rendered copies below, warn about every same-name collision,
+  // and keep the unrendered file first. This handler is therefore the
+  // package's single skill/prompt source — RENDERED, content-addressed
+  // copies (package-relative tokens expanded) under the Loom resource
+  // cache — and materialization is fatal on failure so a broken install
+  // cannot silently ship unexpanded ${CLAUDE_PLUGIN_ROOT} paths.
 
   // Pi does not expand Claude Code's CLAUDE_PLUGIN_ROOT token in markdown.
   // Render package-owned prompts and skills from THIS extension's import URL;
@@ -1708,7 +1710,7 @@ export default function (
           }
           dispatchTaskExecutionSpawns = Object.freeze(taskExecutionSpawns.map((spawn, index) => {
             if (spawn.kind !== "implementation") return spawn;
-            if (typeof event.input !== "object" || event.input === null || Array.isArray(event.input)) {
+            if (!isRecord(event.input)) {
               throw new Error("Pi implementation input became malformed before dispatch registration");
             }
             const prompt = piSpawnItem(event.input as Record<string, unknown>, index).task;
@@ -2384,7 +2386,7 @@ export default function (
     };
 
     const rawDetails: unknown = event.details;
-    const details = typeof rawDetails === "object" && rawDetails !== null && !Array.isArray(rawDetails)
+    const details = isRecord(rawDetails)
       ? rawDetails as Record<string, unknown>
       : null;
     const hasResults = details !== null && Object.hasOwn(details, "results");
@@ -2757,14 +2759,14 @@ export default function (
         // the state store and the repository as ports. They decide and persist;
         // this dispatcher owns stderr and owns which of their diagnostics count as
         // orchestration processing errors.
-        const store: TaskGraphStore = mgr;
+        const store = mgr;
+        // One observation owns both Pi adapters. A Git failure throws and the
+        // per-result shell records infrastructure failure; it never substitutes
+        // the runtime checkout or cwd for the TaskGraph's project boundary.
+        const projectBoundary = observeTaskGraphProjectBoundary(mgr.getPath());
         const repository: RepositoryProbe = {
-          // The settlement judges the SPAWN's repository: the graph store is
-          // the session's task-graph pointer, whose target lives in the
-          // repository the work happened in — derive the probe root from it
-          // rather than from whichever cwd the runtime process reports.
-          root: () => git.repositoryRootFrom(dirname(mgr.getPath())) ?? git.repositoryRoot() ?? process.cwd(),
-          isRepo: () => git.isGitRepo(),
+          root: () => projectBoundary.root,
+          isRepo: () => projectBoundary.kind === "git-repository",
         };
         const parentPrompt = event.content
           .filter((c: { type: string }) => c.type === "text")
@@ -2786,6 +2788,7 @@ export default function (
             result,
             reservedSlot: reservedItem,
             now: new Date().toISOString(),
+            projectBoundary,
           }));
           continue;
         }
@@ -2799,6 +2802,9 @@ export default function (
             completedPhase,
             result,
             now: new Date().toISOString(),
+            // Phase artifacts and implementation settlement consume the same
+            // TaskGraph Project Boundary observed above.
+            phaseArtifactBaseDir: projectBoundary.root,
           }));
           continue;
         }
@@ -2808,6 +2814,7 @@ export default function (
           emit(await applyImplementationPiResult({
             store,
             repository,
+            authoritativeStatePath: mgr.getPath(),
             agentType,
             result,
             reservedSlot: reservedItem,
@@ -2835,6 +2842,7 @@ export default function (
             result,
             reservedSlot: reservedItem,
             now: new Date().toISOString(),
+            projectBoundary,
           }));
           continue;
         }

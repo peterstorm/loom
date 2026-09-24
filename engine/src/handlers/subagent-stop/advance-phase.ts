@@ -7,10 +7,11 @@
  * which includes init as the first phase).
  */
 
-import { accessSync, constants as fsConstants, readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { isAbsolute, join, relative } from "node:path";
 import { match } from "ts-pattern";
 import type { HookHandler, HookResult, Phase, TaskGraph } from "../../types";
-import { PHASE_AGENT_MAP, PHASE_ORDER, CLARIFY_THRESHOLD } from "../../config";
+import { PHASE_AGENT_MAP, PHASE_ORDER, CLARIFY_THRESHOLD, observeTaskGraphProjectBoundary } from "../../config";
 import { StateManager } from "../../state-manager";
 import { parsePhaseArtifacts } from "../../parsers/parse-phase-artifacts";
 import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
@@ -21,32 +22,58 @@ import {
   PLAN_ARTIFACT_DIR,
   classifyPhaseArtifact,
   parseSpecArtifactDirectory,
+  projectRootForStateFile,
   resolvesWithin,
   type SpecArtifactDirectory,
 } from "../../core/phase-artifact-paths";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
+import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
 
 // Re-exported because this module's own containment rule moved to the pure core
 // so the Pi shell could share it verbatim; the name stays importable from here.
-export { resolvesWithin };
+export { resolvesWithin, projectRootForStateFile };
 
-/** ENOENT is absence; every other readability failure reaches the diagnostic boundary. */
-function phaseArtifactExists(path: string): boolean {
+/**
+ * Resolve a stored artifact path against the boundary that owns the TaskGraph.
+ *
+ * Artifacts are stored project-relative; the probe base is the project root
+ * derived from the graph's own location (`projectRootForStateFile`), never
+ * `process.cwd()` — the orchestrator may be rooted in a different checkout
+ * than the run it advances. Absolute paths (test fixtures, session-pointer
+ * targets) pass through untouched.
+ */
+function withinBoundary(path: string, baseDir: string): string {
+  return isAbsolute(path) ? path : join(baseDir, path);
+}
+
+/** ENOENT is absence and a directory is not a document; every other
+ * readability failure reaches the diagnostic boundary. The anchored reader
+ * rejects leaf and ancestor symlinks, so lexical containment cannot import
+ * bytes from outside the project boundary. */
+function phaseArtifactExists(path: string, baseDir: string): boolean {
   try {
-    accessSync(path, fsConstants.R_OK);
+    readRunBytesNoFollow(withinBoundary(path, baseDir));
     return true;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "EISDIR") return false;
     throw new Error(
       `cannot access phase artifact ${path}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
     );
   }
 }
 
-/** Count NEEDS CLARIFICATION markers; unreadable authority fails the transition. */
-export function countMarkers(filePath: string): number {
+/** Count NEEDS CLARIFICATION markers; unreadable authority fails the transition.
+ *
+ * `baseDir` is REQUIRED: the artifact is probed against the project boundary
+ * that owns the TaskGraph, never the caller's ambient cwd — an optional base
+ * here silently reintroduces the cross-checkout drift this seam was built to
+ * close. */
+export function countMarkers(filePath: string, baseDir: string): number {
   try {
-    return (readFileSync(filePath, "utf-8").match(/NEEDS CLARIFICATION/g) ?? []).length;
+    return (readRunBytesNoFollow(withinBoundary(filePath, baseDir)).toString("utf-8")
+      .match(/NEEDS CLARIFICATION/g) ?? []).length;
   } catch (error) {
     throw new Error(
       `cannot read phase artifact ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
@@ -55,23 +82,114 @@ export function countMarkers(filePath: string): number {
   }
 }
 
+/** The two outcomes `readableSpecArtifact` can produce. The declared set
+ *  equals the produced set — the helper never returns a full ready
+ *  transition — so the specify/clarify call sites narrow on the union's own
+ *  `kind` discriminant instead of a typeof convention. */
+type ReadableSpecArtifact =
+  | Readonly<{ kind: "ready"; artifact: string }>
+  | Readonly<{ kind: "not-ready"; reason: string }>;
+
 function readableSpecArtifact(
   state: TaskGraph,
   specDir: SpecArtifactDirectory,
-): PhaseTransitionResolution | string {
+  baseDir: string,
+): ReadableSpecArtifact {
   const recorded = state.spec_file;
   if (recorded !== null) {
-    if (!resolvesWithin(recorded, specDir)) {
+    if (!resolvesWithin(recorded, specDir, baseDir)) {
       return transitionNotReady(`spec_file ${recorded} is outside run spec_dir ${specDir}`);
     }
-    return phaseArtifactExists(recorded)
-      ? recorded
+    return phaseArtifactExists(recorded, baseDir)
+      ? { kind: "ready", artifact: recorded }
       : transitionNotReady(`recorded spec_file ${recorded} is not readable`);
   }
-  const discovered = findFile(specDir, "spec.md");
-  return discovered !== null && phaseArtifactExists(discovered)
-    ? discovered
+  const discovered = discoverArtifactWithin(specDir, "spec.md", baseDir);
+  return discovered !== null && phaseArtifactExists(discovered, baseDir)
+    ? { kind: "ready", artifact: discovered }
     : transitionNotReady(`no readable spec.md is available inside ${specDir}`);
+}
+
+/**
+ * Find an artifact under `specDir` and return it in the form it is STORED in.
+ *
+ * A relative `specDir` is boundary-joined and the found path is re-relativized
+ * against the boundary, so the stored form stays canonical project-relative.
+ * An absolute `specDir` is searched directly and the absolute hit is returned,
+ * exactly as the pre-boundary behavior did — `join` would otherwise splice a
+ * relative base onto an absolute path and search a directory that does not
+ * exist.
+ */
+function discoverArtifactWithin(
+  specDir: string,
+  filename: string,
+  baseDir: string,
+): string | null {
+  const found = findFile(withinBoundary(specDir, baseDir), filename);
+  if (found === null) return null;
+  return isAbsolute(specDir) ? found : relative(baseDir, found);
+}
+
+/** Resolve the Plan artifact for the architecture arm: recorded authority
+ * first, then the canonical slug path, then an exact-one date-prefix fallback.
+ * Every candidate must be a readable regular file and all containment is
+ * resolved against the TaskGraph Project Boundary. */
+function resolvePlanArtifact(
+  state: Pick<TaskGraph, "plan_file" | "spec_dir">,
+  baseDir: string,
+): ReadableSpecArtifact {
+  const recorded = state.plan_file;
+  if (recorded && !resolvesWithin(recorded, PLAN_ARTIFACT_DIR, baseDir)) {
+    return transitionNotReady(`plan_file ${recorded} is outside ${PLAN_ARTIFACT_DIR}`);
+  }
+  if (recorded !== null && recorded !== "" && phaseArtifactExists(recorded, baseDir)) {
+    return { kind: "ready", artifact: recorded };
+  }
+  const fallback = derivedPlanCandidate(state.spec_dir, baseDir);
+  if (fallback.kind === "ambiguous") {
+    return transitionNotReady(
+      `multiple readable plan artifacts match ${fallback.datePrefix} inside ${PLAN_ARTIFACT_DIR}; ` +
+      "set plan_file or remove the extra candidates",
+    );
+  }
+  return fallback.kind === "candidate"
+    ? { kind: "ready", artifact: fallback.path }
+    : transitionNotReady(`no readable plan artifact is available inside ${PLAN_ARTIFACT_DIR}`);
+}
+
+type DerivedPlanCandidate =
+  | Readonly<{ kind: "candidate"; path: string }>
+  | Readonly<{ kind: "unavailable" }>
+  | Readonly<{ kind: "ambiguous"; datePrefix: string }>;
+
+/** Resolve the documented fallback without guessing: zero valid candidates is
+ * unavailable, one is authority, and multiple remain an explicit ambiguity. */
+function derivedPlanCandidate(
+  specDir: string | null | undefined,
+  baseDir: string,
+): DerivedPlanCandidate {
+  const slug = !specDir ? "" : (specDir.split("/").pop() ?? "");
+  const bySlug = slug === "" ? null : `.claude/plans/${slug}.md`;
+  if (bySlug !== null && phaseArtifactExists(bySlug, baseDir)) {
+    return Object.freeze({ kind: "candidate", path: bySlug });
+  }
+  const datePrefix = slug.slice(0, 10);
+  if (datePrefix === "") return Object.freeze({ kind: "unavailable" });
+  let names: string[];
+  try {
+    names = readdirSync(join(baseDir, ".claude", "plans"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return Object.freeze({ kind: "unavailable" });
+    throw error;
+  }
+  const candidates = names
+    .filter((name) => name.startsWith(datePrefix) && name.endsWith(".md"))
+    .map((name) => `.claude/plans/${name}`)
+    .filter((path) => phaseArtifactExists(path, baseDir));
+  if (candidates.length === 0) return Object.freeze({ kind: "unavailable" });
+  return candidates.length === 1
+    ? Object.freeze({ kind: "candidate", path: candidates[0]! })
+    : Object.freeze({ kind: "ambiguous", datePrefix });
 }
 
 export type PhaseTransitionResolution =
@@ -119,6 +237,7 @@ export function applyEligiblePhaseTransition(
   return {
     ...state,
     current_phase: transition.nextPhase,
+    ...(completedPhase === "architecture" ? { plan_file: transition.artifact } : {}),
     phase_artifacts: {
       ...state.phase_artifacts,
       [completedPhase]: transition.artifact,
@@ -179,75 +298,55 @@ function phaseAuthorityRefusal(current: Phase, completed: Phase): HookResult | n
       };
 }
 
-/** Imperative-shell observation of phase artifacts. Never call under the TaskGraph lock. */
+/** Imperative-shell observation of phase artifacts. Never call under the TaskGraph lock.
+ *
+ * `baseDir` is REQUIRED — the project boundary every relative artifact path is
+ * probed against: production callers pass the root derived from the TaskGraph's
+ * own location (`projectRootForStateFile`), because the runtime's cwd may be a
+ * different checkout than the run being advanced. Requiring the argument makes
+ * the omission a compile error instead of a silent cross-checkout drift; there
+ * is no cwd default anywhere in this concept.
+ */
 export function observePhaseTransition(
   completedPhase: Phase,
   state: TaskGraph,
   specDir: SpecArtifactDirectory,
+  baseDir: string,
 ): PhaseTransitionObservation {
   const resolution = match(completedPhase)
     .with("brainstorm", () => {
       // The parser supplies the current run directory, or the legacy root fallback.
-      const file = findFile(specDir, "brainstorm.md");
+      const file = discoverArtifactWithin(specDir, "brainstorm.md", baseDir);
       if (!file) return transitionNotReady(`brainstorm.md was not found under ${specDir}`);
       return transitionReady("specify", file);
     })
     .with("specify", () => {
-      const spec = readableSpecArtifact(state, specDir);
-      if (typeof spec !== "string") return spec;
-      const markers = countMarkers(spec);
-      if (markers > CLARIFY_THRESHOLD) return transitionReady("clarify", spec);
-      return transitionReady("architecture", spec, true);
+      const spec = readableSpecArtifact(state, specDir, baseDir);
+      if (spec.kind === "not-ready") return spec;
+      const markers = countMarkers(spec.artifact, baseDir);
+      if (markers > CLARIFY_THRESHOLD) return transitionReady("clarify", spec.artifact);
+      return transitionReady("architecture", spec.artifact, true);
     })
     .with("clarify", () => {
-      const spec = readableSpecArtifact(state, specDir);
-      if (typeof spec !== "string") return spec;
-      const markers = countMarkers(spec);
+      const spec = readableSpecArtifact(state, specDir, baseDir);
+      if (spec.kind === "not-ready") return spec;
+      const markers = countMarkers(spec.artifact, baseDir);
       if (markers > 0) {
-        return transitionNotReady(`${markers} NEEDS CLARIFICATION marker(s) remain unresolved in ${spec}`);
+        return transitionNotReady(`${markers} NEEDS CLARIFICATION marker(s) remain unresolved in ${spec.artifact}`);
       }
-      return transitionReady("architecture", spec);
+      return transitionReady("architecture", spec.artifact);
     })
     .with("architecture", () => {
-      // Try state.plan_file first, fall back to deriving plan path from spec_dir slug
-      let plan = state.plan_file;
-      if (plan && !resolvesWithin(plan, PLAN_ARTIFACT_DIR)) {
-        // plan_file set but not in expected location — reject. Resolved
-        // containment for the same reason as the spec branches: substring
-        // containment carries `..` segments through unharmed.
-        return transitionNotReady(`plan_file ${plan} is outside ${PLAN_ARTIFACT_DIR}`);
-      }
-      if (!plan || !phaseArtifactExists(plan)) {
-        // plan_file not set or file missing — try deriving from spec_dir slug
-        if (state.spec_dir) {
-          const slug = state.spec_dir.split("/").pop() ?? "";
-          if (slug) {
-            const candidate = `.claude/plans/${slug}.md`;
-            if (phaseArtifactExists(candidate)) plan = candidate;
-          }
-          // Final fallback: look for any plan matching the date prefix
-          if (!plan || !phaseArtifactExists(plan)) {
-            const datePrefix = slug.slice(0, 10); // "2026-05-18"
-            if (datePrefix && phaseArtifactExists(".claude/plans")) {
-              const files = readdirSync(".claude/plans").filter(
-                (f: string) => f.startsWith(datePrefix) && f.endsWith(".md")
-              );
-              if (files.length === 1) plan = `.claude/plans/${files[0]}`;
-            }
-          }
-        }
-      }
-      if (!plan || !phaseArtifactExists(plan)) {
-        return transitionNotReady(`no readable plan artifact is available inside ${PLAN_ARTIFACT_DIR}`);
-      }
+      const plan = resolvePlanArtifact(state, baseDir);
+      if (plan.kind === "not-ready") return plan;
       return state.skipped_phases.includes("plan-alignment")
-        ? transitionReady("decompose", plan)
-        : transitionReady("plan-alignment", plan);
+        ? transitionReady("decompose", plan.artifact)
+        : transitionReady("plan-alignment", plan.artifact);
     })
     .with("plan-alignment", () => {
       // Loop-back (re-running architecture) is orchestrator-driven via `set-phase` helper,
       // not handled in this hook. We only advance to decompose when the gap report exists.
-      const gapReport = findFile(specDir, "plan-alignment.md");
+      const gapReport = discoverArtifactWithin(specDir, "plan-alignment.md", baseDir);
       if (!gapReport) {
         return transitionNotReady(`plan-alignment.md was not found under ${specDir}`);
       }
@@ -260,17 +359,6 @@ export function observePhaseTransition(
     .with("execute", () => transitionNotReady("execute is terminal and has no next phase"))
     .exhaustive();
   return Object.freeze({ authority: transitionAuthority(state), resolution });
-}
-
-/** Compatibility shell for direct callers: parse scope, then observe. */
-export function resolveTransition(
-  completedPhase: Phase,
-  state: TaskGraph,
-): PhaseTransitionResolution {
-  const parsedSpecDir = parseSpecArtifactDirectory(state.spec_dir);
-  return parsedSpecDir.ok
-    ? observePhaseTransition(completedPhase, state, parsedSpecDir.value).resolution
-    : transitionNotReady(parsedSpecDir.message);
 }
 
 const handler: HookHandler = async (stdin) => {
@@ -315,6 +403,10 @@ const handler: HookHandler = async (stdin) => {
   }
   const initialPhaseRefusal = phaseAuthorityRefusal(currentState.current_phase, completedPhase);
   if (initialPhaseRefusal !== null) return initialPhaseRefusal;
+  // Every relative artifact path is probed against the project root that owns
+  // this TaskGraph, not process.cwd(): the runtime's cwd may be a different
+  // checkout (a parent session in the main checkout advancing a worktree run).
+  const artifactBaseDir = observeTaskGraphProjectBoundary(mgr.getPath()).root;
   const initialSpecDir = parseSpecArtifactDirectory(currentState.spec_dir);
   if (!initialSpecDir.ok) {
     return { kind: "error", message: `advance-phase: ${initialSpecDir.message}; phase NOT advanced` };
@@ -348,13 +440,13 @@ const handler: HookHandler = async (stdin) => {
     const updates: { spec_file?: string; plan_file?: string } = {};
     try {
       if (artifacts.spec_file &&
-          classifyPhaseArtifact(artifacts.spec_file, initialSpecDir.value) === "spec" &&
-          phaseArtifactExists(artifacts.spec_file)) {
+          classifyPhaseArtifact(artifacts.spec_file, initialSpecDir.value, artifactBaseDir) === "spec" &&
+          phaseArtifactExists(artifacts.spec_file, artifactBaseDir)) {
         updates.spec_file = artifacts.spec_file;
       }
       if (currentState.plan_file === null && artifacts.plan_file &&
-          classifyPhaseArtifact(artifacts.plan_file, initialSpecDir.value) === "plan" &&
-          phaseArtifactExists(artifacts.plan_file)) {
+          classifyPhaseArtifact(artifacts.plan_file, initialSpecDir.value, artifactBaseDir) === "plan" &&
+          phaseArtifactExists(artifacts.plan_file, artifactBaseDir)) {
         updates.plan_file = artifacts.plan_file;
       }
     } catch (e) {
@@ -408,7 +500,7 @@ const handler: HookHandler = async (stdin) => {
 
   let observation: PhaseTransitionObservation;
   try {
-    observation = observePhaseTransition(completedPhase, state, specDir.value);
+    observation = observePhaseTransition(completedPhase, state, specDir.value, artifactBaseDir);
   } catch (error) {
     return {
       kind: "error",

@@ -76,7 +76,8 @@ cleanup() {
 trap cleanup EXIT
 
 SLUG="2026-07-17-smoke-panel"
-SPEC_DIR="$TMP/.claude/specs/$SLUG"
+SPEC_DIR_REL=".claude/specs/$SLUG"
+SPEC_DIR="$TMP/$SPEC_DIR_REL"
 PLANS_DIR="$TMP/.claude/plans"
 STATE="$TMP/.claude/state/active_task_graph.json"
 
@@ -111,8 +112,8 @@ write_state() {
   "current_phase": "$phase",
   "phase_artifacts": {},
   "skipped_phases": ["brainstorm", "specify", "clarify"],
-  "spec_dir": "$SPEC_DIR",
-  "spec_file": "$SPEC_DIR/spec.md",
+  "spec_dir": "$SPEC_DIR_REL",
+  "spec_file": "$SPEC_DIR_REL/spec.md",
   "plan_file": $plan_file,
   "tasks": [],
   "current_wave": 1,
@@ -263,7 +264,22 @@ rc="$(run_gate architecture-agent "finalize: approach gate over panel candidates
 # plan_file is left null so resolveTransition must derive the plan path from the
 # spec_dir slug (`.claude/plans/2026-07-17-smoke-panel.md`, resolved against the
 # $TMP cwd) — exercising the real slug-derive fallback, not a pre-set absolute.
-echo "[6] subagent-stop: architecture-agent completion advances architecture → plan-alignment"
+# First put a symlink in that exact slot: lexical containment is insufficient,
+# and the real hook must fail closed without importing its external bytes.
+echo "[6] subagent-stop: architecture Plan authority rejects symlinks, then advances atomically"
+printf '# external plan\n' > "$TMP/external-plan.md"
+ln -s "$TMP/external-plan.md" "$PLANS_DIR/$SLUG.md"
+write_state "architecture" "null"
+src="$(run_stop architecture-agent)"
+after="$(phase_now)"
+if [ "$src" != "0" ] && [ "$after" = "architecture" ] \
+  && grep -q "cannot access phase artifact" "$GATE_ERR"; then
+  ok "symlinked Plan REJECTED without advancing phase authority"
+else
+  bad "expected symlink refusal with phase unchanged, got exit $src / phase '$after' / $(tr '\n' ' ' < "$GATE_ERR")"
+fi
+rm "$PLANS_DIR/$SLUG.md"
+
 printf '# real plan\n' > "$PLANS_DIR/$SLUG.md"
 write_state "architecture" "null"
 src="$(run_stop architecture-agent)"
@@ -273,6 +289,14 @@ if [ "$src" != "0" ]; then
 else
   after="$(phase_now)"
   [ "$after" = "plan-alignment" ] && ok "phase advanced to plan-alignment" || bad "expected plan-alignment, got '$after'"
+  expected_plan=".claude/plans/$SLUG.md"
+  plan_authority="$(jq -r '.plan_file' "$STATE")"
+  phase_authority="$(jq -r '.phase_artifacts.architecture' "$STATE")"
+  if [ "$plan_authority" = "$expected_plan" ] && [ "$phase_authority" = "$expected_plan" ]; then
+    ok "Plan fallback atomically promoted into plan_file and phase_artifacts.architecture"
+  else
+    bad "Plan authority diverged: plan_file='$plan_authority' phase_artifact='$phase_authority' expected='$expected_plan'"
+  fi
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════

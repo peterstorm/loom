@@ -1,9 +1,9 @@
 /** Read-model only. Expected identity is supplied by delivery, not independent publication proof. */
 import { match } from "ts-pattern";
 import { parseContextPacket, parseStandaloneReviewerContextPacketV3, type ContextPacket, type StandaloneReviewerContextPacketV3 } from "./context-packets";
+import { boundDiagnosticMessage, boundedThrownCause, type DomainResult } from "./orchestration-contract";
 
 type ProjectedPacket = ContextPacket | StandaloneReviewerContextPacketV3;
-import type { DomainResult } from "./orchestration-contract";
 
 type Selection = Readonly<{ offset: number; limit: number }> & (
   | Readonly<{ kind: "index" }>
@@ -24,6 +24,11 @@ export function parseContextProjectionArguments(args: readonly string[]): Domain
     const key = args[i]!;
     const value = args[i + 1];
     if (!allowed.includes(key) || fields.has(key) || value === undefined || value.length === 0) return failed("invalid or duplicate reader argument");
+    // The shared CLI grammar (handlers/helpers/cli-args.ts): a `--`-prefixed
+    // token is a flag, never a value, so a mis-sequenced invocation is refused
+    // here with its actual cause instead of silently consuming the intended
+    // value and failing later with an unrelated refusal.
+    if (value.startsWith("--")) return failed(`reader argument ${key} requires a value; ${value} looks like another flag`);
     fields.set(key, value);
   }
   const path = fields.get("--packet"), requestId = fields.get("--request"), digest = fields.get("--digest");
@@ -48,20 +53,39 @@ export function parseContextProjectionArguments(args: readonly string[]): Domain
     ...(purpose === undefined ? {} : { purpose }) } };
 }
 
-const decode = (bytes: readonly number[]): string => new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes));
+const decode = (bytes: Iterable<number>): string => new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes));
 const record = (raw: unknown): raw is Record<string, unknown> => typeof raw === "object" && raw !== null && !Array.isArray(raw);
 
 function fileText(packet: ProjectedPacket, path: string): DomainResult<string, string> {
   const section = [...packet.fixedContext, ...packet.variableContext].find(({ label }) => label === "standalone-frozen-source");
   if (section === undefined) return failed("packet has no standalone frozen source; use the section index for its supplied context");
-  const source: unknown = JSON.parse(decode(section.bytes));
+  let text: string;
+  try {
+    text = decode(section.bytes);
+  } catch (cause) {
+    const attribution = boundedThrownCause(cause, "frozen source index UTF-8");
+    throw new Error(`frozen source index could not be decoded as UTF-8 (${attribution.name}: ${attribution.message})`);
+  }
+  let source: unknown;
+  try {
+    source = JSON.parse(text);
+  } catch (cause) {
+    const attribution = boundedThrownCause(cause, "frozen source index JSON");
+    throw new Error(`frozen source index could not be parsed from the section bytes (${attribution.name}: ${attribution.message})`);
+  }
   if (!record(source) || !Array.isArray(source.files)) return failed("frozen source file index is invalid");
   const files: unknown[] = source.files.filter((file: unknown) => record(file) && file.path === path);
   const file = files[0];
   if (files.length !== 1 || !record(file)) return failed("source file is absent or ambiguous in this packet");
   if (file.kind === "text" && typeof file.content === "string") return { ok: true, value: file.content };
   if (packet.schemaVersion === 3 && file.kind === "binary" && typeof file.contentBase64 === "string") {
-    const bytes = Uint8Array.from(atob(file.contentBase64), character => character.charCodeAt(0));
+    let bytes: Uint8Array;
+    try {
+      bytes = Uint8Array.from(atob(file.contentBase64), character => character.charCodeAt(0));
+    } catch (cause) {
+      const attribution = boundedThrownCause(cause, "binary source content base64");
+      throw new Error(`binary source content could not be decoded from its base64 payload (${attribution.name}: ${attribution.message})`);
+    }
     return { ok: true, value: new TextDecoder("utf-8", { fatal: true }).decode(bytes) };
   }
   return failed("source file is binary or absent; no text projection available");
@@ -73,7 +97,17 @@ function sectionText(packet: ProjectedPacket, label: string): DomainResult<strin
   if (section === undefined) return failed("selected section is absent");
   const text = decode(section.bytes);
   if (!/^[\s]*[\[{]/.test(text)) return { ok: true, value: text };
-  const raw: unknown = JSON.parse(text);
+  // The projected shape is decided by parse outcome, not by the leading byte:
+  // a brace-leading section is probably structured data, but prose or
+  // malformed JSON must project verbatim here rather than escaping as a
+  // throw — the outer catch is reserved for the fatal text DECODE failure,
+  // and its message would misreport valid text as undecodable.
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return { ok: true, value: text };
+  }
   const hidden = new Set(["bytes", "contentBase64", "base64", "postimages", "content"]);
   return { ok: true, value: JSON.stringify(raw, (key, value: unknown) => hidden.has(key) ? "[omitted; select text with --file]" : value, 2) };
 }
@@ -83,6 +117,14 @@ function textPage(text: string, selection: Selection): DomainResult<unknown, str
   const end = Math.min(text.length, selection.offset + selection.limit);
   return { ok: true, value: { offset: selection.offset, nextOffset: end < text.length ? end : null,
     totalUnits: text.length, text: text.slice(selection.offset, end) } };
+}
+
+function projectionSubject(selection: Selection): string {
+  switch (selection.kind) {
+    case "file": return `source file ${selection.path}`;
+    case "section": return `selected section ${selection.label}`;
+    case "index": return "selected section index";
+  }
 }
 
 function project(packet: ProjectedPacket, selection: Selection): DomainResult<unknown, string> {
@@ -107,9 +149,30 @@ function project(packet: ProjectedPacket, selection: Selection): DomainResult<un
 /** Rehash exact sections and match every supplied identity field, then expose only a bounded read-model. */
 export function projectContextPacket(raw: unknown, input: ContextProjectionInput): DomainResult<unknown, string> {
   const parsed = input.purpose === "standalone-successor" ? parseStandaloneReviewerContextPacketV3(raw) : parseContextPacket(raw);
-  if (!parsed.ok) return failed("packet integrity or supported contract check failed");
+  // The integrity refusal carries the parser's own field-level diagnostic so a
+  // failed packet read names the failing field and rule instead of one generic
+  // sentence (silent-failure-hunter-1). The refusal stays fail-closed and the
+  // reader boundary surfaces the whole cause. Both interpolations pass through
+  // the kernel's diagnostic bound (architecture-tech-lead-3): a hostile packet
+  // can embed arbitrary-size undeclared object keys in the parser's field and
+  // message, and this read boundary must not echo them unbounded.
+  if (!parsed.ok) {
+    return failed(`packet integrity or supported contract check failed ` +
+      `(${boundDiagnosticMessage(parsed.error.field)}: ${boundDiagnosticMessage(parsed.error.message)})`);
+  }
   const packet = parsed.value;
   if (packet.requestId !== input.requestId || packet.digest !== input.digest || packet.role !== input.role || packet.requiredSkill !== input.requiredSkill) return failed("packet differs from expected issued identity");
-  try { return project(packet, input.selection); }
-  catch { return failed("selected section cannot be decoded safely as text data"); }
+  try {
+    return project(packet, input.selection);
+  } catch (thrown) {
+    // The refusal stays fail-closed, but it is now attributable: the bounded
+    // cause names the operation that threw (each throwing site above names
+    // itself; the fatal UTF-8 text decode reaches only this catch) and the
+    // subject names the selection kind, so a --file failure is never reported
+    // as a section decode problem.
+    const cause = boundedThrownCause(thrown, "context projection");
+    return failed(
+      `${projectionSubject(input.selection)} cannot be decoded safely as text data (${cause.name}: ${cause.message})`,
+    );
+  }
 }

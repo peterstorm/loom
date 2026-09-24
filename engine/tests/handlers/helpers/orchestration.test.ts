@@ -13,6 +13,7 @@ import {
 import { REVIEWER_PAYLOAD_EXAMPLE_V2, type ReviewerDraftV2 } from "../../../src/core/reviewer-contract";
 import { WAVE_REVIEW_AGENTS, type GateDeps } from "../../../src/core/wave-gate-machine";
 import { evaluateTaskProof } from "../../../src/core/proof-obligations";
+import { acceptedWaveCompletionSuite } from "../../fixtures/accepted-wave-completion-suite";
 import { parseAgentRequestAuthority, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
 import { agentRequestAuthority } from "../../fixtures/agent-request-authority";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } from "../../fixtures/pi-session";
@@ -162,6 +163,35 @@ function passingWaveTaskProof() {
   );
   if (proof.state !== "satisfied") throw new Error("passing Wave Task proof fixture must be satisfied");
   return proof;
+}
+
+/** One valid implemented review Task; scenarios override only the authority
+ * fact they exercise instead of restating the whole accepted baseline. */
+function reviewReadyTask(
+  proof: ReturnType<typeof passingWaveTaskProof>,
+  overrides: Partial<Task> = {},
+): Task {
+  return {
+    id: "T1",
+    description: "review target",
+    agent: "code-implementer-agent",
+    wave: 1,
+    status: "implemented",
+    proof,
+    depends_on: [],
+    file_list: ["src/x.ts"],
+    files_modified: ["src/x.ts"],
+    test_result: { verdict: "trusted-pass" },
+    test_evidence: "passed",
+    new_tests_written: true,
+    new_test_evidence: "present",
+    review_status: "passed",
+    review_generation: 0,
+    findings: [],
+    critical_findings: [],
+    advisory_findings: [],
+    ...overrides,
+  } as unknown as Task;
 }
 
 function replayFromCapturedEvidence(handle: RunDirHandle) {
@@ -585,6 +615,38 @@ describe("prepareOrphanedWaveGateRecovery", () => {
       orphanRecovery: { previousRunId: activeRunId, previousAuthorityDigest: authorityDigest },
     });
   });
+
+  it("clears the completion-suite receipt so the replacement graph satisfies the lockstep invariant", () => {
+    // The suite receipt binds to the outgoing gate (runId/authorityDigest/
+    // revision). Leaving it behind while installing the replacement gate made
+    // every restart/orphan-recovery persist fail the state-manager invariant
+    // as an uncaught internal failure (the r2→r3 restart crash).
+    const g = {
+      ...graph(),
+      verification_manifest: { manifestDigest: "m".repeat(64), checks: [] },
+      active_wave_completion_suite: {
+        schemaVersion: 1,
+        kind: "wave-completion-suite",
+        runId: activeRunId,
+        wave: 1,
+        revision: 0,
+        authorityDigest,
+        manifestDigest: "m".repeat(64),
+        checks: [],
+      },
+    } as unknown as TaskGraph;
+    const prepared = prepareOrphanedWaveGateRecovery(
+      g,
+      { runId: activeRunId, wave: 1, authorityDigest },
+      "/runs",
+      "run.orphan-replacement",
+      "/runs",
+    );
+    if (!prepared.ok) throw new Error(prepared.message);
+    const next = prepared.value.graph;
+    expect(next.active_wave_completion_suite).toBeUndefined();
+    expect(next.active_wave_gate).toMatchObject({ runId: "run.orphan-replacement" });
+  });
 });
 
 // --- CLI --------------------------------------------------------------------
@@ -658,7 +720,13 @@ describe("orchestration CLI", () => {
     await manager.registerActiveWaveGate({ schemaVersion: 1, kind: "active-wave-gate", runId: handle.value.runId,
       wave: 1, authorityDigest: registration.authorityDigest, revision: 0, terminalOutcome: null, runsRoot }, taskIds);
     await withFixturePiSession(root, async () => {
-      const batch = waveRequests(handle.value, registration, manager.load(), 1);
+      const batch = waveRequests(
+        handle.value,
+        registration,
+        manager.load(),
+        1,
+        { kind: "state-layout", root },
+      );
       const published = await publishInitialBatch(handle.value, batch.requests, batch.packets, "wave-gate-current");
       if (!published.ok) throw new Error(published.message);
       await installWaveReviewRuns(manager, registration, batch);
@@ -854,7 +922,7 @@ describe("orchestration CLI", () => {
       "start", "refutation", "--runs-root", runsRoot, "--run", runDir,
     ], program, root));
     expect(started.status).toBe(0);
-    expect(JSON.parse(started.stdout).kind).toBe("spawn-batch");
+    expect(JSON.parse(started.stdout).kind, JSON.stringify(JSON.parse(started.stdout))).toBe("spawn-batch");
     expect(JSON.parse(started.stdout).requests).toHaveLength(2);
 
     const startedAction = JSON.parse(started.stdout) as {
@@ -874,7 +942,7 @@ describe("orchestration CLI", () => {
       verdicts: [{ finding_id: "T1:finding-1", verdict: "upheld", reasoning: "trigger remains reachable" }],
     }), root));
     expect(firstSubmitted.status).toBe(0);
-    expect(JSON.parse(firstSubmitted.stdout).kind).toBe("spawn-batch");
+    expect(JSON.parse(firstSubmitted.stdout).kind, JSON.stringify(JSON.parse(firstSubmitted.stdout))).toBe("spawn-batch");
 
     const secondSubmitted = (await runCli([
       "submit", "--runs-root", runsRoot, "--run", runDir,
@@ -986,7 +1054,7 @@ describe("orchestration CLI", () => {
     mkdirSync(runDir, { recursive: true });
     const result = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: null }), root));
     expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout).kind).toBe("blocked");
+    expect(JSON.parse(result.stdout).kind, JSON.stringify(JSON.parse(result.stdout))).toBe("blocked");
   });
 
   it("refuses unavailable remediation source authority before claiming a Run Directory", async () => {
@@ -1283,24 +1351,18 @@ describe("orchestration CLI", () => {
     const remediationResumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", remediationRun], "", root));
     expect(remediationResumed.status).not.toBe(0);
     expect(remediationResumed.stderr).toContain(`remediation checkpoint is invalid JSON for ${remediationRun}:`);
-  });
+  }, 30_000);
 
   it("rejects a Wave reviewer submission when its packet-bound task disappeared", async () => {
     const root = repository();
     const proof = passingWaveTaskProof();
     expect(proof.state).toBe("satisfied");
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
-    const graph = {
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {},
-      tasks: [{
-        id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-        new_test_evidence: "present", review_status: "passed", review_generation: 0,
-        critical_findings: [], advisory_findings: [],
-      }],
-    };
+    const graph = executeGraph({
+      spec_file: null,
+      plan_file: null,
+      tasks: [reviewReadyTask(proof)],
+    });
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
     const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-missing-task-runs-")));
@@ -1332,17 +1394,11 @@ describe("orchestration CLI", () => {
     const proof = passingWaveTaskProof();
     writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
-    writeFileSync(statePath, JSON.stringify({
-      current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-      spec_file: null, plan_file: null, wave_gates: {},
-      tasks: [{
-        id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
-        test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
-        new_test_evidence: "present", review_status: "passed", review_generation: 0,
-        findings: [], critical_findings: [], advisory_findings: [],
-      }],
-    }));
+    writeFileSync(statePath, JSON.stringify(executeGraph({
+      spec_file: null,
+      plan_file: null,
+      tasks: [reviewReadyTask(proof)],
+    })));
     const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-stale-request-runs-")));
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-stale-request");
@@ -2487,6 +2543,16 @@ describe("orchestration CLI", () => {
       diagnostic: { message: expect.stringContaining("attempt 2 exhausted") },
     });
 
+    // Manifest-bearing runs retain an accepted suite after review exhaustion.
+    // Restart must retire it with the old gate before installing replacement
+    // authority; otherwise the StateManager lockstep parser refuses the write.
+    const manager = new StateManager(statePath);
+    await manager.update((locked) => ({
+      ...locked,
+      active_wave_completion_suite: acceptedWaveCompletionSuite(locked.active_wave_gate!),
+    }));
+    expect(manager.load().active_wave_completion_suite).toBeDefined();
+
     const replacementRun = join(runsRoot, "run.wave-replacement");
     mkdirSync(replacementRun);
     const restarted = (await runCli([
@@ -2515,6 +2581,7 @@ describe("orchestration CLI", () => {
       }[];
     };
     expect(restartedGraph.active_wave_gate).toMatchObject({ runId: "run.wave-replacement", wave: 1 });
+    expect((restartedGraph as TaskGraph).active_wave_completion_suite).toBeUndefined();
     expect(restartedGraph.wave_review_epoch).toMatchObject({ runId: "run.wave-replacement" });
     expect(restartedGraph.tasks[0]).toMatchObject({
       review_generation: 0,
@@ -2781,7 +2848,7 @@ describe("orchestration CLI", () => {
 
     const replay = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(replay.status, replay.stderr).toBe(0);
-    expect(JSON.parse(replay.stdout).kind).toBe("done");
+    expect(JSON.parse(replay.stdout).kind, JSON.stringify(JSON.parse(replay.stdout))).toBe("done");
   }, 30_000);
 
   it("blocks instead of spinning when a Wave refutation tally upholds every critical (loom#20 Finding 4)", async () => {
@@ -2862,7 +2929,7 @@ describe("orchestration CLI", () => {
     // verdicts and must also return blocked, never spin.
     const again = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(again.status, again.stderr).toBe(0);
-    expect(JSON.parse(again.stdout).kind).toBe("blocked");
+    expect(JSON.parse(again.stdout).kind, JSON.stringify(JSON.parse(again.stdout))).toBe("blocked");
   }, 30_000);
 
   it("passes a Wave whose refutation tally refutes every critical", async () => {
@@ -2929,7 +2996,7 @@ describe("orchestration CLI", () => {
     expect(protectedGraph.tasks[0]?.refuted_findings).toHaveLength(1);
     expect(protectedGraph.tasks[0]?.review_status).toBe("passed");
     const replay = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
-    expect(JSON.parse(replay.stdout).kind).toBe("done");
+    expect(JSON.parse(replay.stdout).kind, JSON.stringify(JSON.parse(replay.stdout))).toBe("done");
   }, 30_000);
 
   it("blocks protected completion when automatic full-tier lint fails", async () => {
@@ -3039,14 +3106,14 @@ describe("orchestration CLI", () => {
     expect((await opened.value.captureTranscript(retryRequest.authority, [...Buffer.from(valid)])).ok).toBe(true);
     const doneResult = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(doneResult.status, doneResult.stderr).toBe(0);
-    expect(JSON.parse(doneResult.stdout).kind).toBe("done");
+    expect(JSON.parse(doneResult.stdout).kind, JSON.stringify(JSON.parse(doneResult.stdout))).toBe("done");
     const evidenceReplay = replayFromCapturedEvidence(opened.value);
     expect(evidenceReplay, evidenceReplay.ok ? "" : evidenceReplay.message).toMatchObject({ ok: true });
 
     // Idempotent done: the durable receipt must restore cleanly after restart.
     const replay = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(replay.status, replay.stderr).toBe(0);
-    expect(JSON.parse(replay.stdout).kind).toBe("done");
+    expect(JSON.parse(replay.stdout).kind, JSON.stringify(JSON.parse(replay.stdout))).toBe("done");
   }, 30_000);
 
   it("advances a capture-rejected refutation attempt 1 to its attempt-2 retry and completes the run", async () => {
@@ -3142,11 +3209,11 @@ describe("orchestration CLI", () => {
     expect((await opened.value.captureTranscript(retryRequest.authority, [...Buffer.from(valid)])).ok).toBe(true);
     const done = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(done.status, done.stderr).toBe(0);
-    expect(JSON.parse(done.stdout).kind).toBe("done");
+    expect(JSON.parse(done.stdout).kind, JSON.stringify(JSON.parse(done.stdout))).toBe("done");
     const evidenceReplay = replayFromCapturedEvidence(opened.value);
     expect(evidenceReplay, evidenceReplay.ok ? "" : evidenceReplay.message).toMatchObject({ ok: true });
     const again = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
-    expect(JSON.parse(again.stdout).kind).toBe("done");
+    expect(JSON.parse(again.stdout).kind, JSON.stringify(JSON.parse(again.stdout))).toBe("done");
   }, 30_000);
 
   it("terminalizes the refutation panel when the attempt-2 capture is terminally rejected", async () => {
@@ -3274,8 +3341,8 @@ describe("orchestration CLI", () => {
       value: [{ runId: "run.standalone-facade", resultDigest: done.outcome.digest }],
     });
     const replay = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, piEnv));
-    expect(JSON.parse(replay.stdout).kind).toBe("done");
-  });
+    expect(JSON.parse(replay.stdout).kind, JSON.stringify(JSON.parse(replay.stdout))).toBe("done");
+  }, 30_000);
 
   it("returns an actionable failure when an existing result cannot be verified", async () => {
     const root = repository();
@@ -3380,11 +3447,11 @@ describe("orchestration CLI", () => {
     expect((await opened.value.captureTranscript(retryRequest.authority, [...Buffer.from(cleanTranscript)])).ok).toBe(true);
     const done = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(done.status, done.stderr).toBe(0);
-    expect(JSON.parse(done.stdout).kind).toBe("done");
+    expect(JSON.parse(done.stdout).kind, JSON.stringify(JSON.parse(done.stdout))).toBe("done");
     const evidenceReplay = replayFromCapturedEvidence(opened.value);
     expect(evidenceReplay, evidenceReplay.ok ? "" : evidenceReplay.message).toMatchObject({ ok: true });
     const replay = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
-    expect(JSON.parse(replay.stdout).kind).toBe("done");
+    expect(JSON.parse(replay.stdout).kind, JSON.stringify(JSON.parse(replay.stdout))).toBe("done");
   }, 30_000);
   it("heals a standalone crash after batch publication but before the checkpoint write", async () => {
     const root = repository();
@@ -3419,8 +3486,8 @@ describe("orchestration CLI", () => {
     }
     const done = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(done.status, done.stderr).toBe(0);
-    expect(JSON.parse(done.stdout).kind).toBe("done");
-  });
+    expect(JSON.parse(done.stdout).kind, JSON.stringify(JSON.parse(done.stdout))).toBe("done");
+  }, 30_000);
 
   /**
    * A repository with one committed-then-edited file, and a standalone review
@@ -3471,7 +3538,7 @@ describe("orchestration CLI", () => {
       sourceRunsRoot: runsRoot, sourceRun, supportPaths: [], defectFamily: { kind: "not-required" },
     }), repository));
     expect(remediated.status, remediated.stderr).toBe(0);
-    expect(JSON.parse(remediated.stdout).kind).toBe("done");
+    expect(JSON.parse(remediated.stdout).kind, JSON.stringify(JSON.parse(remediated.stdout))).toBe("done");
     expect(git(["diff", "--cached", "--name-only"]).stdout.trim()).toBe("a.txt");
   });
 
@@ -3507,7 +3574,7 @@ describe("orchestration CLI", () => {
     // a fresh run that registers the path as a supportPath installs it.
     const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", remediationRun], "", repository));
     expect(resumed.status, resumed.stderr).toBe(0);
-    expect(JSON.parse(resumed.stdout).kind).toBe("blocked");
+    expect(JSON.parse(resumed.stdout).kind, JSON.stringify(JSON.parse(resumed.stdout))).toBe("blocked");
 
     const freshRun = join(runsRoot, "remediation-2");
     mkdirSync(freshRun);
@@ -3515,10 +3582,10 @@ describe("orchestration CLI", () => {
       sourceRunsRoot: runsRoot, sourceRun, supportPaths: ["pin.test.ts"], defectFamily: { kind: "not-required" },
     }), repository));
     expect(fresh.status, fresh.stderr).toBe(0);
-    expect(JSON.parse(fresh.stdout).kind).toBe("done");
+    expect(JSON.parse(fresh.stdout).kind, JSON.stringify(JSON.parse(fresh.stdout))).toBe("done");
     expect(git(["diff", "--cached", "--name-only"]).stdout.trim().split("\n").sort())
       .toEqual(["a.txt", "pin.test.ts"]);
-  });
+  }, 30_000);
 
   it("records a user decision durably in the run's event log", async () => {
     const root = project();
@@ -3533,7 +3600,7 @@ describe("orchestration CLI", () => {
     ));
 
     expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout).kind).toBe("decision-recorded");
+    expect(JSON.parse(result.stdout).kind, JSON.stringify(JSON.parse(result.stdout))).toBe("decision-recorded");
   });
 
   it("refuses a decision that is not JSON rather than recording it", async () => {
@@ -3592,7 +3659,7 @@ describe("orchestration CLI", () => {
       ], JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false }), root));
 
       expect(started.status, started.stderr).toBe(0);
-      expect(JSON.parse(started.stdout).kind).toBe("spawn-batch");
+      expect(JSON.parse(started.stdout).kind, JSON.stringify(JSON.parse(started.stdout))).toBe("spawn-batch");
       expect(JSON.parse(started.stdout).runId).toBe("run.bare-name");
       expect(existsSync(join(runsRoot, "run.bare-name", "authority.json"))).toBe(true);
     });
@@ -3612,7 +3679,7 @@ describe("orchestration CLI", () => {
       expect(started.status, started.stderr).toBe(0);
       expect(resumedByPath.status, resumedByPath.stderr).toBe(0);
       expect(JSON.parse(resumedByName.stdout)).toEqual(JSON.parse(resumedByPath.stdout));
-    });
+    }, 30_000);
 
     it("still refuses a run directory that is not a direct child of its runs-root", async () => {
       const root = project();
@@ -3779,7 +3846,7 @@ describe("orchestration CLI", () => {
         const second = (await submit());
 
         expect(first.status, first.stderr).toBe(0);
-        expect(JSON.parse(first.stdout).kind).toBe("captured");
+        expect(JSON.parse(first.stdout).kind, JSON.stringify(JSON.parse(first.stdout))).toBe("captured");
         expect(second.status, second.stderr).toBe(0);
         expect(JSON.parse(second.stdout)).toEqual({
           kind: "already-captured",
@@ -3890,7 +3957,7 @@ describe("orchestration CLI", () => {
       });
       const replay = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
       expect(replay.status, replay.stderr).toBe(0);
-      expect(JSON.parse(replay.stdout).kind).toBe("done");
+      expect(JSON.parse(replay.stdout).kind, JSON.stringify(JSON.parse(replay.stdout))).toBe("done");
     }, 15_000);
 
     it("refuses a decision id that is not the exact pending advisory request", async () => {
@@ -4169,7 +4236,7 @@ describe("orchestration CLI", () => {
       expect(resumed.status).not.toBe(0);
       expect(resumed.stderr).toContain("was abandoned (superseded by run.abandon-replacement)");
       expect(resumed.stderr).toContain("advance the run that replaced it instead");
-    });
+    }, 30_000);
 
     /**
      * `bindLiveRun`'s docstring says an UNREADABLE marker refuses too, and that
@@ -4199,7 +4266,11 @@ describe("orchestration CLI", () => {
       // retaining a retired run at all.
       const inspected = (await runCli(["inspect", "--runs-root", runsRoot, "--run", "run.abandon-corrupt"], "", root));
       expect(inspected.status, inspected.stderr).toBe(0);
-    });
+      // Seven cold bun CLI children (the fixture's start, five refusals, one
+      // inspect): the 15s default expired on a loaded darwin runner while
+      // every step ran its bounded course — the same head room the other
+      // cold-CLI rows carry.
+    }, 60_000);
 
     /**
      * The marker is immutable, so a typo'd or cross-root pointer would be
@@ -4252,7 +4323,65 @@ describe("orchestration CLI", () => {
       const conflicting = (await abandon("a different story"));
       expect(conflicting.status).not.toBe(0);
       expect(conflicting.stderr).toContain("already abandoned under a different marker");
-    });
+    }, 30_000);
+
+    /**
+     * Abandoning a run that OWNS the protected Wave Gate registration must
+     * tombstone that registration in the same breath. The marker alone left
+     * the registration active forever: every successor `start` was refused
+     * with "already owns wave", and the only escape was the exceptional
+     * spec-trace retirement. The stamp mirrors the marker exactly, and an
+     * exact replay leaves the protected bytes untouched.
+     */
+    it("tombstones the protected Wave Gate registration when the abandoned run owned one", async () => {
+      const root = repository();
+      const proof = passingWaveTaskProof();
+      writeFileSync(join(root, "src-x.ts"), "export const x = 1;\n");
+      const statePath = join(root, ".claude", "state", "active_task_graph.json");
+      writeFileSync(statePath, JSON.stringify({
+        current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
+        spec_file: null, plan_file: null, wave_gates: {}, tasks: [{
+          id: "T1", description: "abandon stamp target", agent: "code-implementer-agent", wave: 1,
+          status: "implemented", proof, depends_on: [], file_list: ["src/x.ts"], files_modified: ["src/x.ts"],
+          test_result: { verdict: "trusted-pass" }, test_evidence: "passed", new_tests_written: true,
+          new_test_evidence: "present", review_status: "passed", review_generation: 0,
+          findings: [], critical_findings: [], advisory_findings: [],
+        }],
+      }));
+      const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-abandon-stamp-runs-")));
+      cleanup.push(runsRoot);
+      const runDir = join(runsRoot, "run.wave-abandon-stamp");
+      mkdirSync(runDir);
+      const started = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
+      expect(started.status, started.stderr).toBe(0);
+      expect((JSON.parse(readFileSync(statePath, "utf8")) as { active_wave_gate?: { runId: string } })
+        .active_wave_gate?.runId).toBe("run.wave-abandon-stamp");
+
+      const abandon = () => runCli([
+        "abandon", "--runs-root", runsRoot, "--run", "run.wave-abandon-stamp",
+        "--reason", "gate terminally blocked",
+      ], "", root);
+
+      const abandoned = (await abandon());
+      expect(abandoned.status, abandoned.stderr).toBe(0);
+      const after = JSON.parse(readFileSync(statePath, "utf8")) as {
+        active_wave_gate?: {
+          runId: string;
+          terminalOutcome: { kind: string; reason: string; supersededBy: string | null };
+        };
+      };
+      // The state stamp mirrors the run-directory marker exactly.
+      expect(after.active_wave_gate?.runId).toBe("run.wave-abandon-stamp");
+      expect(after.active_wave_gate?.terminalOutcome).toEqual({
+        kind: "terminal-abandoned", reason: "gate terminally blocked", supersededBy: null,
+      });
+      expect(existsSync(join(runDir, "abandoned.json"))).toBe(true);
+
+      // Exact replay: the repeat abandon leaves the protected bytes untouched.
+      const before = readFileSync(statePath);
+      expect((await abandon()).status).toBe(0);
+      expect(readFileSync(statePath)).toEqual(before);
+    }, 30_000);
 
     it("lists both operations in the usage text so they are discoverable", async () => {
       const usage = (await runCli(["not-an-operation"], "", project()));

@@ -29,6 +29,10 @@ import { countActiveAgents, machineBindingPath, parseSessionId } from "../../src
 import { taskFixture } from "../fixtures/task-lifecycle";
 import type { Task, TaskGraph } from "../../src/types";
 import { derivePendingTaskProof } from "../../src/core/proof-obligations";
+import {
+  authorizeImplementationSpawn,
+  createImplementationAttemptContext,
+} from "../../src/core/implementation-retry";
 
 const roots: string[] = [];
 const previousDir = process.env.LOOM_SUBAGENT_DIR;
@@ -82,6 +86,10 @@ function modernGraph(
   attempt = authority(),
   taskOverrides: Partial<Task> = {},
 ): TaskGraph {
+  // Protocol-2 lineage fields are part of every modern registration; the
+  // settlement path appends receipts and the updated graph must parse.
+  const admission = authorizeImplementationSpawn({ id: "T1" }, "Task ID: T1");
+  if (!admission.ok) throw new Error(admission.error);
   const task = taskFixture({
     id: "T1",
     description: "implementation",
@@ -91,6 +99,13 @@ function modernGraph(
     depends_on: [],
     file_list: [],
     active_implementation_attempt: attempt,
+    active_implementation_context: createImplementationAttemptContext({
+      authority: attempt,
+      prompt: "Task ID: T1",
+      admission,
+    }),
+    implementation_retry_protocol: 2,
+    implementation_retry_history_start: 0,
     artifact_baseline: [],
     attempt_artifact_baseline: [],
     attempt_repository_baseline: [],
@@ -344,6 +359,61 @@ describe("Claude implementation authority sidecar", () => {
     });
     expect(stored.tasks[0]?.active_implementation_attempt).toBeUndefined();
     expect(stored.wave_gates["1"]?.impl_complete).toBe(true);
+  });
+
+  it("excludes the session-selected custom State File through the production Claude settlement adapter", async () => {
+    const dir = root();
+    const statePath = join(dir, "custom-state.json");
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute",
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      current_wave: 1,
+      executing_tasks: [],
+      tasks: [],
+      wave_gates: {},
+    }, null, 2));
+    execFileSync("git", ["add", "custom-state.json"], { cwd: dir });
+    execFileSync("git", ["commit", "--quiet", "-m", "custom state baseline"], { cwd: dir });
+
+    const attempt = authority("T1", "claude-custom-state-authority");
+    const verificationPolicy = {
+      regression: { kind: "waived" as const, reason: "documentation-only" as const },
+      newTests: { kind: "waived" as const, reason: "existing-tests-sufficient" as const },
+    };
+    modernGraph(statePath, attempt, {
+      verification_policy: {
+        regression: verificationPolicy.regression,
+        new_tests: verificationPolicy.newTests,
+      },
+      new_tests_required: undefined,
+      proof: derivePendingTaskProof({ verificationPolicy, declaredArtifacts: [] }),
+    });
+    mkdirSync(process.env.LOOM_SUBAGENT_DIR!, { recursive: true });
+    writeFileSync(join(process.env.LOOM_SUBAGENT_DIR!, `${SESSION}.task_graph`), statePath);
+    const ambientStatePath = join(process.env.LOOM_SUBAGENT_DIR!, "ambient-state.json");
+    writeFileSync(ambientStatePath, "ignored ambient state\n");
+    process.env.LOOM_STATE_PATH = ambientStatePath;
+    const transcriptPath = join(dir, "agent.jsonl");
+    transcript(transcriptPath, [user("Task ID: T1"), assistant("implementation finished")]);
+    publishImplementationAttemptSidecar({
+      sessionId: SESSION,
+      agentId: AGENT,
+      taskGraphPath: statePath,
+      authority: attempt,
+    });
+
+    const result = await dispatch(startInput(transcriptPath), []);
+
+    expect(result.kind).toBe("passthrough");
+    const stored = JSON.parse(readFileSync(statePath, "utf8")) as TaskGraph;
+    expect(stored.tasks[0]).toMatchObject({
+      status: "implemented",
+      implementation_attempt_history: [{ transition: "implemented" }],
+    });
+    expect(stored.tasks[0]?.unresolved_repository_paths).toBeUndefined();
   });
 
   it("accepts and settles the real nested tool_reference and image transcript fixture", async () => {

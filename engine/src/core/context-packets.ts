@@ -18,15 +18,18 @@ import { match } from "ts-pattern";
 import { STANDALONE_REVIEWER_PROTOCOL_V3, STANDALONE_REVIEWER_FIXED_SECTIONS_V3, parseStandaloneReviewerProtocolV3 } from "./standalone-lineage-contract";
 import { sha256Bytes, sha256Hex } from "./review-packet";
 import { isStandaloneReviewAgent } from "./model-profiles";
+import { isRecord } from "./plain-record";
 import { readExactDataRecord } from "./orchestration-contract/bytes";
 import {
   CURRENT_REVIEWER_PROTOCOL, REVIEWER_FIXED_SECTIONS, REVIEWER_OUTPUT_CONTRACT,
   parseReviewerProtocolDescriptor, type ReviewerProtocolDescriptor,
 } from "./reviewer-contract";
 import {
+  boundedThrownCause,
   canonicalRecord,
   parseArtifactByteLength,
   parseRequestId,
+  IMMUTABLE_BYTE_SEQUENCE_TAG,
   type ArtifactByteLength,
   type ArtifactDigest,
   type ContextDigest,
@@ -54,12 +57,26 @@ const CONTEXT_SECTION_FIELDS: ReadonlySet<string> = new Set([
   "bytes",
 ]);
 
+/** Immutable byte sequence. Deliberately not Array-shaped: reflection and
+ * cloning semantics are not part of the Context Packet contract. */
+export type ImmutableByteSequence = Readonly<{
+  readonly [index: number]: number | undefined;
+  length: number;
+  byteLength: number;
+  at(index: number): number | undefined;
+  slice(start?: number, end?: number): readonly number[];
+  some(predicate: (byte: number, index: number) => boolean): boolean;
+  valueOf(): Uint8Array;
+  toJSON(): readonly number[];
+  [Symbol.iterator](): IterableIterator<number>;
+}>;
+
 /** One labelled, digested run of exact bytes inside a packet. */
 export type ByteSection = Readonly<{
   label: string;
   byteLength: ArtifactByteLength;
   digest: ArtifactDigest;
-  bytes: readonly number[];
+  bytes: ImmutableByteSequence;
 }>;
 
 export type LegacyContextPacket = Readonly<{
@@ -106,8 +123,102 @@ const sealedSectionJson = new WeakMap<ByteSection, string>();
 const isByte = (value: unknown): value is number =>
   typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 255;
 
-function digestBytes(bytes: readonly number[]): string {
-  return sha256Bytes(Uint8Array.from(bytes));
+/** The ONE owner of the Context Packet byte grammar: a dense iterable of
+ *  integers 0–255 whose count stays within `maximum`.
+ *
+ *  `Array.from` materializes sparse holes as `undefined`, which fails the byte
+ *  test — density is enforced by the same check, not by a separate pass. Every
+ *  byte-section consumer (packet build, packet parse, and the successor
+ *  registration parser) accepts bytes ONLY through this validator, so the
+ *  successor path cannot drift from the packet parser on what a legal section
+ *  is. The violation is typed so each caller can keep its own exact refusal
+ *  prose while sharing the grammar itself. */
+export type ByteGrammarViolation =
+  | Readonly<{ rule: "iterable" }>
+  | Readonly<{ rule: "bound"; count: number; maximum: number }>
+  | Readonly<{ rule: "byte" }>;
+
+const grammarFailure = (violation: ByteGrammarViolation): DomainResult<Uint8Array, ByteGrammarViolation> =>
+  ({ ok: false, error: canonicalRecord(violation) });
+const grammarSuccess = (bytes: Uint8Array): DomainResult<Uint8Array, ByteGrammarViolation> =>
+  ({ ok: true, value: bytes });
+
+const MAX_SAFE_BYTE_BOUND: number = Number.MAX_SAFE_INTEGER;
+
+export function boundedByteIterable(
+  raw: unknown,
+  maximum: number,
+): DomainResult<Uint8Array, ByteGrammarViolation> {
+  if (!Array.isArray(raw) &&
+      !(typeof raw === "object" && raw !== null &&
+        typeof (raw as { [Symbol.iterator]?: unknown })[Symbol.iterator] === "function")) {
+    return grammarFailure({ rule: "iterable" });
+  }
+  const bytes = Array.from(raw as Iterable<unknown>);
+  if (bytes.length > maximum) {
+    return grammarFailure({ rule: "bound", count: bytes.length, maximum });
+  }
+  if (!bytes.every(isByte)) {
+    return grammarFailure({ rule: "byte" });
+  }
+  return grammarSuccess(Uint8Array.from(bytes));
+}
+
+/** The packet parser's exact prose for each shared-grammar violation. The
+ *  switch is exhaustive over `ByteGrammarViolation`: adding a rule without a
+ *  labelled refusal arm is a noImplicitReturns compile error. */
+const byteGrammarRefusal = (violation: ByteGrammarViolation): string => {
+  switch (violation.rule) {
+    case "iterable": return "a context section must carry iterable bytes";
+    case "byte": return "a context section byte must be an integer from 0 through 255";
+    case "bound": return `a context section must not exceed ${violation.maximum} bytes`;
+  }
+};
+
+const immutableByteStorage = new WeakMap<object, Uint8Array>();
+
+function storedBytes(sequence: ImmutableByteSequence): Uint8Array {
+  const stored = immutableByteStorage.get(sequence);
+  if (stored === undefined) throw new TypeError("unrecognized immutable byte sequence");
+  return stored;
+}
+
+const immutableByteSequencePrototype: ImmutableByteSequence = Object.freeze({
+  get length(): number { return storedBytes(this).byteLength; },
+  get byteLength(): number { return storedBytes(this).byteLength; },
+  at(index: number): number | undefined { return storedBytes(this).at(index); },
+  slice(start?: number, end?: number): readonly number[] {
+    return Object.freeze(Array.from(storedBytes(this).slice(start, end)));
+  },
+  some(predicate: (byte: number, index: number) => boolean): boolean {
+    return storedBytes(this).some(predicate);
+  },
+  valueOf(): Uint8Array { return Uint8Array.from(storedBytes(this)); },
+  toJSON(): readonly number[] { return Array.from(storedBytes(this)); },
+  [Symbol.iterator](): IterableIterator<number> { return storedBytes(this).values(); },
+  // The equality kernel's recognition tag (orchestration-contract/identity.ts).
+  // Enumerable symbol keys stay invisible to Object.keys, spread-free JSON, and
+  // the wire form, so this does not widen the sequence contract.
+  [IMMUTABLE_BYTE_SEQUENCE_TAG]: true,
+} as ImmutableByteSequence);
+
+/** Private compact storage with no reflective Array promises. */
+function immutableBytes(owned: Uint8Array): ImmutableByteSequence {
+  const target = Object.create(immutableByteSequencePrototype) as ImmutableByteSequence;
+  const sequence = new Proxy(target, {
+    get(object, property, receiver) {
+      if (typeof property === "string" && /^(?:0|[1-9][0-9]*)$/.test(property)) {
+        return owned.at(Number(property));
+      }
+      return Reflect.get(object, property, receiver);
+    },
+  });
+  immutableByteStorage.set(sequence, owned);
+  return Object.freeze(sequence);
+}
+
+function digestBytes(bytes: ImmutableByteSequence | readonly number[] | Uint8Array): string {
+  return sha256Bytes(immutableByteStorage.get(bytes) ?? Uint8Array.from(bytes));
 }
 
 /**
@@ -116,11 +227,11 @@ function digestBytes(bytes: readonly number[]): string {
  */
 export function encodeByteSection(label: string, text: string): DomainResult<ByteSection, ContextPacketError> {
   if (label.length === 0) return failure("label", "a context section label must not be empty");
-  const bytes = Array.from(encoder.encode(text));
-  const byteLength = parseArtifactByteLength(bytes.length);
+  const bytes = immutableBytes(encoder.encode(text));
+  const byteLength = parseArtifactByteLength(bytes.byteLength);
   if (!byteLength.ok) return failure("byteLength", byteLength.error.message);
   const section = canonicalRecord({ label, byteLength: byteLength.value,
-    digest: digestBytes(bytes) as ArtifactDigest, bytes: Object.freeze(bytes) });
+    digest: digestBytes(bytes) as ArtifactDigest, bytes });
   sealedSections.add(section);
   return success(section);
 }
@@ -152,13 +263,15 @@ export function contextPacketDigest(packet: ContextPacketIdentity): ContextDiges
   return sha256Hex(packetIdentity(packet)) as ContextDigest;
 }
 
+export type ByteSectionInput = Readonly<Omit<ByteSection, "bytes"> & { bytes: Iterable<number> }>;
+
 export type ContextPacketInput = Readonly<{
   requestId: RequestId;
   role: string;
   requiredSkill: string;
   outputContract: string;
-  fixedContext: readonly ByteSection[];
-  variableContext: readonly ByteSection[];
+  fixedContext: readonly ByteSectionInput[];
+  variableContext: readonly ByteSectionInput[];
 }>;
 
 /** Build a packet and seal it with its own digest. */
@@ -182,13 +295,19 @@ export function buildContextPacket(input: ContextPacketInput): DomainResult<Lega
       return failure(`${field}.label`, `a context section label must be unique: ${section.label}`);
     }
     labels.add(section.label);
-    if (sealedSections.has(section)) { canonicalSections.push(section); continue; }
-    // Array.from materializes sparse holes as `undefined`; Array#every on the
-    // caller's array would skip them and incorrectly accept a non-byte value.
-    const bytes = Array.from(section.bytes);
-    const parsedLength = parseArtifactByteLength(bytes.length);
-    const verified = bytes.every(isByte) && parsedLength.ok && parsedLength.value === section.byteLength &&
-      digestBytes(bytes) === section.digest;
+    if (sealedSections.has(section)) { canonicalSections.push(section as ByteSection); continue; }
+    // The byte grammar lives in `boundedByteIterable`: iterability, the 0–255
+    // integer test, and the bound (the section's own declared byteLength —
+    // over-length bytes fail here exactly as the length equality below would).
+    const materialized = boundedByteIterable(section.bytes, section.byteLength);
+    if (!materialized.ok) {
+      return failure(field, "a context section must contain only bytes whose digest and length cover the exact content");
+    }
+    const bytes = materialized.value;
+    // boundedByteIterable already bounds bytes.length ≤ the declared section
+    // byteLength (an ArtifactByteLength), so the length arm needs no second
+    // range parse (cs-6): the exactness predicate is the equality plus digest.
+    const verified = bytes.length === section.byteLength && digestBytes(bytes) === section.digest;
     if (!verified) {
       return failure(field, "a context section must contain only bytes whose digest and length cover the exact content");
     }
@@ -196,7 +315,7 @@ export function buildContextPacket(input: ContextPacketInput): DomainResult<Lega
       label: section.label,
       byteLength: section.byteLength,
       digest: section.digest,
-      bytes: Object.freeze([...bytes]),
+      bytes: immutableBytes(bytes),
     }));
   }
   const fixedContext = canonicalSections.slice(0, input.fixedContext.length);
@@ -228,7 +347,7 @@ function validateReviewerContract(base: LegacyContextPacket,
   for (const expected of expectedSections) {
     const actual = base.fixedContext.find((section) => section.label === expected.label);
     const bytes = encoder.encode(expected.text);
-    if (actual === undefined || actual.bytes.length !== bytes.length || actual.bytes.some((byte, index) => byte !== bytes[index])) {
+    if (actual === undefined || actual.bytes.byteLength !== bytes.length || actual.bytes.some((byte, index) => byte !== bytes[index])) {
       return failure("fixedContext", `${sectionKind} ${expected.label} must contain the exact supported bytes`);
     }
   }
@@ -260,7 +379,7 @@ function buildReviewerContractBase(input: Omit<ContextPacketInput, "outputContra
   if ([...input.fixedContext, ...input.variableContext].some((section) => reservedLabel(section.label))) {
     return failure("sections", "caller sections must not collide with reserved reviewer contract labels");
   }
-  const fixed: ByteSection[] = [...input.fixedContext];
+  const fixed: ByteSectionInput[] = [...input.fixedContext];
   for (const section of sections) {
     const encoded = encodeByteSection(section.label, section.text);
     if (!encoded.ok) return encoded;
@@ -316,9 +435,10 @@ function requiredFieldProblem(input: ContextPacketInput): Readonly<{ field: stri
 }
 
 function parseSection(raw: unknown, field: string): DomainResult<ByteSection, ContextPacketError> {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isRecord(raw)) {
     return failure(field, "a context section must be an object");
   }
+  if (sealedSections.has(raw)) return success(raw as ByteSection);
   const record = raw as Record<string, unknown>;
   const undeclaredField = Object.keys(record).find((key) => !CONTEXT_SECTION_FIELDS.has(key));
   if (undeclaredField !== undefined) {
@@ -327,15 +447,14 @@ function parseSection(raw: unknown, field: string): DomainResult<ByteSection, Co
   if (typeof record["label"] !== "string" || record["label"].length === 0) {
     return failure(`${field}.label`, "a context section label must be a non-empty string");
   }
-  if (!Array.isArray(record["bytes"])) return failure(`${field}.bytes`, "a context section must carry its bytes");
-  const bytes = Array.from(record["bytes"] as readonly unknown[]);
-  if (!bytes.every(isByte)) {
-    return failure(`${field}.bytes`, "a context section byte must be an integer from 0 through 255");
+  const materialisedBytes = boundedByteIterable(record["bytes"], MAX_SAFE_BYTE_BOUND);
+  if (!materialisedBytes.ok) {
+    return failure(`${field}.bytes`, byteGrammarRefusal(materialisedBytes.error));
   }
-  const materialised = bytes as readonly number[];
-  const byteLength = parseArtifactByteLength(materialised.length);
+  const materialised = immutableBytes(materialisedBytes.value);
+  const byteLength = parseArtifactByteLength(materialised.byteLength);
   if (!byteLength.ok) return failure(`${field}.byteLength`, byteLength.error.message);
-  if (record["byteLength"] !== materialised.length) {
+  if (record["byteLength"] !== materialised.byteLength) {
     return failure(`${field}.byteLength`, "a context section length must equal its byte count");
   }
   const digest = digestBytes(materialised);
@@ -343,7 +462,7 @@ function parseSection(raw: unknown, field: string): DomainResult<ByteSection, Co
     return failure(`${field}.digest`, "a context section digest must cover its exact bytes");
   }
   const section = canonicalRecord({ label: record["label"], byteLength: byteLength.value,
-    digest: digest as ArtifactDigest, bytes: Object.freeze(materialised) });
+    digest: digest as ArtifactDigest, bytes: materialised });
   sealedSections.add(section);
   return success(section);
 }
@@ -363,6 +482,11 @@ function parseSections(raw: unknown, field: string): DomainResult<readonly ByteS
  * Parse an untrusted packet. Section digests are recomputed from the bytes and
  * the packet digest is recomputed from the parsed identity, so a packet whose
  * bytes were edited after publication cannot present its original digest.
+ *
+ * Thrown-cause capture is the kernel's ONE boundedThrownCause
+ * (orchestration-contract): the parsers below call it directly with the packet
+ * subjects, so the 256-char budget and truncation shape cannot drift between
+ * the layers.
  */
 export function parseContextPacket(raw: unknown): DomainResult<ContextPacket, ContextPacketError> {
   try {
@@ -370,8 +494,9 @@ export function parseContextPacket(raw: unknown): DomainResult<ContextPacket, Co
     if (!parsed.ok) return parsed;
     return parsed.value.schemaVersion === 3
       ? failure("schemaVersion", "standalone v3 requires explicit successor Context Packet parsing") : success(parsed.value);
-  } catch {
-    return failure("packet", "context packet could not be inspected safely");
+  } catch (thrown) {
+    const cause = boundedThrownCause(thrown, "context packet");
+    return failure("packet", `context packet could not be inspected safely (${cause.name}: ${cause.message})`);
   }
 }
 
@@ -382,13 +507,14 @@ export function parseStandaloneReviewerContextPacketV3(raw: unknown): DomainResu
     if (!parsed.ok) return parsed;
     return parsed.value.schemaVersion === 3 ? success(parsed.value)
       : failure("schemaVersion", "standalone successor Context Packet must declare schema version 3");
-  } catch {
-    return failure("packet", "standalone successor context packet could not be inspected safely");
+  } catch (thrown) {
+    const cause = boundedThrownCause(thrown, "standalone successor context packet");
+    return failure("packet", `standalone successor context packet could not be inspected safely (${cause.name}: ${cause.message})`);
   }
 }
 
 /** Exact JSON.stringify bytes; reuse only constructor/parser-owned immutable sections across the roster. */
-export function serializeStandaloneReviewerContextPacketV3(raw: StandaloneReviewerContextPacketV3): DomainResult<string, ContextPacketError> {
+export function serializeStandaloneReviewerContextPacketV3(raw: unknown): DomainResult<string, ContextPacketError> {
   const parsed = parseStandaloneReviewerContextPacketV3(raw);
   if (!parsed.ok) return parsed;
   const sectionJson = (section: ByteSection): string => {
@@ -408,7 +534,7 @@ export function serializeStandaloneReviewerContextPacketV3(raw: StandaloneReview
 }
 
 function parseContextPacketHeader(raw: unknown): DomainResult<Record<string, unknown>, ContextPacketError> {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isRecord(raw)) {
     return failure("packet", "a context packet must be an object");
   }
   let record = raw as Record<string, unknown>;

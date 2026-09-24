@@ -36,6 +36,7 @@ export type ExactImplementationTransportFacts = Readonly<{
 
 export type ExactSettlementRepositoryPort = Readonly<{
   root: string;
+  authoritativeStatePath: string;
   observeTaskLocal: (args: TaskLocalCompletionArgs) => TaskLocalByteObservation;
 }>;
 
@@ -61,10 +62,12 @@ export type ExactImplementationSettlement = Readonly<{
 
 export function productionExactSettlementPorts(
   repositoryRoot: string,
+  authoritativeStatePath: string,
 ): ExactImplementationSettlementPorts {
   return Object.freeze({
     repository: Object.freeze({
       root: repositoryRoot,
+      authoritativeStatePath,
       observeTaskLocal: observeTaskLocalCompletion,
     }),
     newTests: Object.freeze({
@@ -149,6 +152,7 @@ export function settleExactImplementation(
       parserModifiedPaths: facts.parserModifiedPaths,
       parserPathLabel: facts.parserPathLabel,
       siblingOwnedPaths,
+      authoritativeStatePath: ports.repository.authoritativeStatePath,
     });
   } catch (error) {
     return unavailable(
@@ -196,8 +200,7 @@ export function settleExactImplementation(
         taskCompleted: facts.taskCompleted,
         testResult: facts.testResult,
         testEvidence: facts.testEvidence,
-        newTestsWritten: newTests.value.written,
-        newTestEvidence: newTests.value.evidence,
+        newTests: newTests.value,
       },
       facts.proofEvaluationPolicy,
       bytes,

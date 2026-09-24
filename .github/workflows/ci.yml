@@ -1,4 +1,4 @@
-name: Linux verification
+name: Verification
 
 on:
   pull_request:
@@ -11,8 +11,23 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    strategy:
+      # A red macOS run must not cancel the in-flight Linux run: the two
+      # exercise different filesystem strategies, so each failure is its own
+      # diagnosis.
+      fail-fast: false
+      # macOS exists for a reason the Linux job can never cover: the
+      # anchored no-follow filesystem layer (engine/src/orchestration/
+      # no-follow-fs.ts) takes a darwin branch (O_NOFOLLOW_ANY-proven real
+      # path) that Linux CI never executes. Pin the newest standard macOS
+      # runner; it is free on public repositories.
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    # The engine unit suite alone runs ~8.5 minutes on a fast Linux box and
+    # GitHub's macOS runners are materially slower; 30 minutes left no head
+    # room for the macOS leg, so each job's budget is generous.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,21 +38,33 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.3.13"
-      - name: Required Linux tools
+      - name: Required tools
         shell: bash
         run: |
           set -euo pipefail
           test "$(id -u)" -ne 0
-          test "$(uname -s)" = Linux
-          test "$BASH_VERSINFO" -ge 4
-          for tool in jq bash git timeout node npm bun; do
-            command -v "$tool"
-          done
           test "$(node --version)" = v22.23.2
           test "$(bun --version)" = 1.3.13
+          for tool in jq bash git node npm bun; do
+            command -v "$tool"
+          done
           jq --version
           git --version
-          timeout --version
+          case "$(uname -s)" in
+            Linux)
+              test "$BASH_VERSINFO" -ge 4
+              command -v timeout
+              timeout --version
+              ;;
+            Darwin)
+              # No GNU coreutils required: the smoke scripts already degrade
+              # gracefully when `timeout` is absent.
+              ;;
+            *)
+              echo "unexpected platform: $(uname -s)" >&2
+              exit 1
+              ;;
+          esac
       - name: Install both locked dependency graphs
         shell: bash
         run: |
@@ -65,6 +92,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: linux-verification-log
+          # Per-OS names: a shared name made the second leg's upload overwrite
+          # (or collide with) the first's artifact.
+          name: verification-log-${{ matrix.os }}
           path: verification.log
           if-no-files-found: warn

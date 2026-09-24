@@ -1,13 +1,14 @@
 /**
  * Git utilities — pure functions for test counting, thin wrappers for I/O
- * Uses node:child_process (bun-compatible) — execFileSync for user input, execSync for fixed commands
+ * Uses node:child_process (bun-compatible) — execFileSync for every spawned Git command
  */
 
-import { execSync, execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
+import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { isExactGitSha } from "../core/git-sha";
+import { observeGitProbe } from "./git-probe";
 
 /**
  * Resolve the git repository root FRESH: CLAUDE_PROJECT_DIR > git rev-parse >
@@ -32,14 +33,18 @@ import { isExactGitSha } from "../core/git-sha";
 export function resolveRepositoryRoot(context = "repository root"): string | undefined {
   if (process.env.CLAUDE_PROJECT_DIR) return process.env.CLAUDE_PROJECT_DIR;
   try {
-    return execSync("git rev-parse --show-toplevel", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim() || undefined;
+    return probeGitWithEmptyRetry(["rev-parse", "--show-toplevel"], {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
   } catch (error) {
-    // Never silent: every downstream helper runs against cwd: undefined and
-    // its failures read as "no tests written" — the one indistinguishable
-    // lie this module must not tell without a trace.
+    // Never silent, and never falsely reassuring: an unresolved root leaves
+    // this module's helpers refusing with typed errors (never spawning Git
+    // with cwd: undefined), so the warning names the resolution failure that
+    // the helpers' loud refusals will point back to.
     process.stderr.write(
       `loom: git rev-parse --show-toplevel failed at ${context} (${error instanceof Error ? error.message : String(error)}) — ` +
-        `remaining git helpers run against process.cwd and their failures will read as absent evidence\n`,
+        `git helpers refuse their observations until a repository root resolves\n`,
     );
     return undefined;
   }
@@ -85,6 +90,28 @@ function commandFailure(error: unknown): string {
   return [code, status, stderr || message].filter((part): part is string => part !== null && part !== "").join(": ");
 }
 
+/** Run one fixed-argv Git probe, retrying twice when it exits 0 with no output —
+ *  the canonical transient empty-stdout rationale and campaign evidence live at
+ *  `observeGitProbe` in utils/git-probe; a confirmed-empty throws here so the
+ *  caller's existing guards refuse loudly instead of ingesting a fabrication. */
+function probeGitWithEmptyRetry(
+  args: readonly string[],
+  options: ExecFileSyncOptionsWithStringEncoding,
+): string {
+  const observed = observeGitProbe(() => {
+    try {
+      return { ok: true as const, value: execFileSync("git", args, options).trim() };
+    } catch (error) {
+      return { ok: false as const, error };
+    }
+  }, (value) => value === "");
+  if (observed.kind === "failed") throw observed.error;
+  if (observed.kind === "confirmed-empty") {
+    throw new Error(`git ${args.join(" ")} returned empty output after bounded retries`);
+  }
+  return observed.value;
+}
+
 /** Resolve the repository root and exact HEAD as one typed proof boundary.
  *  An explicit `cwd` (a spawn's declared cwd naming a linked worktree) wins
  *  over the ambient environment: the spawn cwd is the boundary-trusted source
@@ -93,17 +120,16 @@ function commandFailure(error: unknown): string {
 export function repositoryContext(cwd?: string): GitRepositoryContext {
   const base = cwd ?? (process.env.CLAUDE_PROJECT_DIR || process.cwd());
   try {
-    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+    const root = probeGitWithEmptyRetry(["rev-parse", "--show-toplevel"], {
       cwd: base,
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
-    if (root === "") return { ok: false, error: `git returned an empty repository root for ${base}` };
-    const headSha = execFileSync("git", ["rev-parse", "--verify", "HEAD"], {
+    });
+    const headSha = probeGitWithEmptyRetry(["rev-parse", "--verify", "HEAD"], {
       cwd: root,
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
+    });
     if (!isExactGitSha(headSha)) {
       return { ok: false, error: `git returned an invalid HEAD for ${root}: ${JSON.stringify(headSha)}` };
     }
@@ -127,33 +153,6 @@ export function repositoryRoot(): string | undefined {
   return currentRepoRoot("repositoryRoot");
 }
 
-/** Resolve the repository root FROM an explicit directory — a per-call probe,
- *  not the cached runtime root. The settlement derives its repository from the
- *  task-graph pointer it already holds, whose target lives in the spawn's
- *  repository; the cached root answers for whichever cwd the runtime process
- *  happens to report, which is the misalignment this probe exists to close.
- *  Undefined is never silent: the caller's fallback chain keeps working, but
- *  the failure names itself first. */
-export function repositoryRootFrom(cwd: string): string | undefined {
-  try {
-    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
-    if (root !== "") return root;
-    process.stderr.write(
-      `loom: git rev-parse --show-toplevel returned an empty root from ${cwd} — falling back to the runtime repository root\n`,
-    );
-    return undefined;
-  } catch (error) {
-    process.stderr.write(
-      `loom: git rev-parse --show-toplevel failed from ${cwd} (${error instanceof Error ? error.message : String(error)}) — falling back to the runtime repository root\n`,
-    );
-    return undefined;
-  }
-}
-
 export type GitHeadObservation =
   | Readonly<{ ok: true; headSha: string }>
   | Readonly<{ ok: false; error: string }>;
@@ -161,31 +160,16 @@ export type GitHeadObservation =
 /** Fixed-argv exact HEAD observation for implementation authority checks. */
 export function observeExactHead(root: string): GitHeadObservation {
   try {
-    const headSha = execFileSync("git", ["rev-parse", "--verify", "HEAD"], {
+    const headSha = probeGitWithEmptyRetry(["rev-parse", "--verify", "HEAD"], {
       cwd: root,
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
+    });
     return isExactGitSha(headSha)
       ? { ok: true, headSha }
       : { ok: false, error: `git returned an invalid HEAD for ${root}: ${JSON.stringify(headSha)}` };
   } catch (error) {
     return { ok: false, error: `cannot read Git HEAD for ${root}: ${commandFailure(error)}` };
-  }
-}
-
-export function isGitRepo(): boolean {
-  const root = currentRepoRoot("isGitRepo");
-  try {
-    execSync("git rev-parse --git-dir", { cwd: root, stdio: "ignore" });
-    return true;
-  } catch (error) {
-    process.stderr.write(
-      `loom: isGitRepo could not verify a git repository` +
-        `${root === undefined ? " (repo root unresolved)" : ` at ${root}`}: ` +
-        `${error instanceof Error ? error.message : String(error)} — new-test evidence will read as 'no tests written'\n`,
-    );
-    return false;
   }
 }
 
@@ -268,12 +252,12 @@ type ShadowGitAuthority = Readonly<{
 }>;
 
 function gitProbe(root: string, args: readonly string[]): string {
-  return execFileSync("git", ["-c", "core.fsmonitor=false", ...args], {
+  return probeGitWithEmptyRetry(["-c", "core.fsmonitor=false", ...args], {
     cwd: root,
     encoding: "utf8",
     env: diffEnvironment(),
     stdio: ["ignore", "pipe", "pipe"],
-  }).trim();
+  });
 }
 
 function absoluteGitPath(root: string, observed: string, label: string): string {
@@ -396,13 +380,6 @@ function diffArgsAt(
   }
 }
 
-function diffArgs(args: readonly string[]): GitDiffResult {
-  const root = currentRepoRoot("diffArgs");
-  return root === undefined
-    ? { ok: false, error: "cannot collect a diff outside a Git repository" }
-    : diffArgsAt(root, args);
-}
-
 /** Binary packet diff from an option-delimited revision through the hardened boundary. */
 export function diffBinaryFileFromRevision(root: string, revision: string, file: string): GitDiffResult {
   return diffArgsAt(root, ["diff", "--binary", "--end-of-options", revision, "--", file]);
@@ -420,9 +397,10 @@ const FULL_POSTIMAGE_CONTEXT = "--unified=2147483647";
 
 /** Diff specific files (unstaged), retaining complete postimage context. */
 export function diffFiles(files: string[]): GitDiffResult {
-  return files.length === 0
-    ? { ok: true, diff: "" }
-    : diffArgs(["diff", FULL_POSTIMAGE_CONTEXT, "--", ...files]);
+  const root = currentRepoRoot("diffFiles");
+  return root === undefined
+    ? { ok: false, error: "cannot collect a diff outside a Git repository" }
+    : diffFilesAt(root, files);
 }
 
 /** Diff specific files (unstaged) from an EXPLICIT root — the same hardened
@@ -437,9 +415,10 @@ export function diffFilesAt(root: string, files: string[]): GitDiffResult {
 
 /** Diff specific files (staged), retaining complete postimage context. */
 export function diffFilesStaged(files: string[]): GitDiffResult {
-  return files.length === 0
-    ? { ok: true, diff: "" }
-    : diffArgs(["diff", "--cached", FULL_POSTIMAGE_CONTEXT, "--", ...files]);
+  const root = currentRepoRoot("diffFilesStaged");
+  return root === undefined
+    ? { ok: false, error: "cannot collect a diff outside a Git repository" }
+    : diffFilesStagedAt(root, files);
 }
 
 /** Diff specific files (staged) from an EXPLICIT root — see `diffFilesAt`. */
@@ -457,9 +436,10 @@ export function diffFilesStagedAt(root: string, files: string[]): GitDiffResult 
  * as an option and can redirect the diff's output to a caller-chosen path.
  */
 export function diffFilesSince(revision: string, files: string[]): GitDiffResult {
-  return files.length === 0
-    ? { ok: true, diff: "" }
-    : diffArgs(["diff", FULL_POSTIMAGE_CONTEXT, "--end-of-options", revision, "HEAD", "--", ...files]);
+  const root = currentRepoRoot("diffFilesSince");
+  return root === undefined
+    ? { ok: false, error: "cannot collect a diff outside a Git repository" }
+    : diffFilesSinceAt(root, revision, files);
 }
 
 /** Diff committed changes from one baseline from an EXPLICIT root —
@@ -515,7 +495,7 @@ export function diffUntracked(file: string): GitDiffResult {
   const root = currentRepoRoot("diffUntracked");
   return root === undefined
     ? { ok: false, error: "cannot diff an untracked file outside a Git repository" }
-    : diffArgsAt(root, ["diff", "--no-index", FULL_POSTIMAGE_CONTEXT, "/dev/null", "--", file], true);
+    : diffUntrackedAt(root, file);
 }
 
 /** Diff one untracked file against /dev/null from an EXPLICIT root —
@@ -683,7 +663,7 @@ const hasTypeScriptTestCall = (code: string): boolean => {
 
 /** Heuristically count added executable test declarations in a diff string (pure). */
 export function countNewTests(diffContent: string): TestCount {
-  const lines = executableAddedLines(diffContent);
+  const { lines } = executableAddedLines(diffContent);
   let java = 0;
   let ts = 0;
   let python = 0;
@@ -1004,10 +984,22 @@ function assertionCodeLine(
   return Object.freeze({ code, state });
 }
 
-/** Project path-bound added executable code from complete-postimage patch bytes. */
-function executableAddedLines(diffContent: string): readonly AddedExecutableLine[] {
+/** Project path-bound added executable code from complete-postimage patch bytes.
+ *
+ *  `unattributableFiles` counts diff entries whose header pair could not be
+ *  parsed — malformed patch paths, and Git's C-quoted paths whose decoded
+ *  bytes are not valid UTF-8. Their added lines are dropped from every count
+ *  (fail-closed: nothing is fabricated), and the count lets consumers
+ *  distinguish "no test declarations found" from "test evidence could not be
+ *  projected" instead of publishing the first as a lie about the second. */
+function executableAddedLines(diffContent: string): Readonly<{ lines: readonly AddedExecutableLine[]; unattributableFiles: number }> {
   let entry: DiffEntryScanState = Object.freeze({ kind: "outside" });
   const lines: AddedExecutableLine[] = [];
+  let unattributableFiles = 0;
+  const invalidate = (): DiffEntryScanState => {
+    unattributableFiles += 1;
+    return Object.freeze({ kind: "invalid" });
+  };
   for (const diffLine of diffContent.split("\n")) {
     if (diffLine.startsWith("diff --git ")) {
       entry = Object.freeze({ kind: "prelude-old" });
@@ -1018,22 +1010,22 @@ function executableAddedLines(diffContent: string): readonly AddedExecutableLine
     if (entry.kind === "prelude-old") {
       if (diffLine.startsWith("--- ")) {
         entry = parseGitPatchPath(diffLine.slice(4), "a/") === null
-          ? Object.freeze({ kind: "invalid" })
+          ? invalidate()
           : Object.freeze({ kind: "prelude-new" });
       } else if (diffLine.startsWith("+++ ") || diffLine.startsWith("@@")) {
-        entry = Object.freeze({ kind: "invalid" });
+        entry = invalidate();
       }
       continue;
     }
 
     if (entry.kind === "prelude-new") {
       if (!diffLine.startsWith("+++ ")) {
-        entry = Object.freeze({ kind: "invalid" });
+        entry = invalidate();
         continue;
       }
       const parsed = parseGitPatchPath(diffLine.slice(4), "b/");
       entry = parsed === null
-        ? Object.freeze({ kind: "invalid" })
+        ? invalidate()
         : Object.freeze({ kind: "prelude-hunk", path: parsed.kind === "file" ? parsed.path : null });
       continue;
     }
@@ -1041,7 +1033,7 @@ function executableAddedLines(diffContent: string): readonly AddedExecutableLine
     if (entry.kind === "prelude-hunk") {
       entry = isHunkHeader(diffLine)
         ? Object.freeze({ kind: "hunk", path: entry.path, lexical: INITIAL_ASSERTION_STATE })
-        : Object.freeze({ kind: "invalid" });
+        : invalidate();
       continue;
     }
 
@@ -1056,14 +1048,22 @@ function executableAddedLines(diffContent: string): readonly AddedExecutableLine
       lines.push(Object.freeze({ path: entry.path, code: parsed.code }));
     }
   }
-  return Object.freeze(lines);
+  return Object.freeze({ lines: Object.freeze(lines), unattributableFiles });
+}
+
+/** Modified files whose Git patch headers could not be parsed (malformed or
+ *  undecodable paths), so their added lines reach no count. The count is
+ *  bounded evidence ABOUT evidence: it names a projection gap without ever
+ *  asserting what the dropped files did or did not contain. */
+export function countUnattributableDiffFiles(diffContent: string): number {
+  return executableAddedLines(diffContent).unattributableFiles;
 }
 
 /** Count executable assertions in added diff lines (pure). */
 export function countAssertions(diffContent: string): number {
   let count = 0;
 
-  for (const { path, code } of executableAddedLines(diffContent)) {
+  for (const { path, code } of executableAddedLines(diffContent).lines) {
     if (!isAttributedPath(path)) continue;
     const language = languageOfTestSource(path);
     // Match at most one per line to avoid cross-language double-counting.

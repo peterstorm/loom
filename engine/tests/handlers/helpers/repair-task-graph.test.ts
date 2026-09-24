@@ -5,6 +5,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -222,5 +223,61 @@ describe("repair-task-graph CLI", () => {
     expect(result.stderr).toContain("Refusing lossy repair");
     expect(readFileSync(statePath, "utf-8")).toBe(raw);
     expect(statSync(statePath).mode & 0o777).toBe(0o444);
+  });
+
+  /**
+   * ENOENT is the only absent answer: a PRESENT-but-unreadable graph
+   * (self-referential symlink → ELOOP) used to be reported as "No active task
+   * graph", steering an operator repairing a corrupt state file toward
+   * re-population instead of the permissions/access repair. The fail-closed
+   * probe assumes present, names the real cause, and the guarded read below
+   * fails with the same attribution.
+   */
+  it("reports a present-but-unreadable graph as an access failure, not absence", () => {
+    const root = canonicalTempDir("loom-repair-task-graph-unreadable-");
+    cleanup.push(root);
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    mkdirSync(join(root, ".claude", "state"), { recursive: true });
+    symlinkSync(statePath, statePath); // self-loop: stat throws ELOOP
+
+    const result = runRepair(root, statePath);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("ELOOP");
+    expect(result.stderr).not.toContain("No active task graph");
+  });
+
+  /**
+   * The repair source is always the graph on disk. This helper sits beside
+   * payload-driven installers whose invocations pipe JSON, so a piped payload
+   * here used to vanish silently while the helper repaired from disk and
+   * reported success — the operator had no way to know their bytes were never
+   * read.
+   */
+  it("refuses non-empty stdin instead of silently repairing from disk", () => {
+    const { root, statePath } = fixtureState(JSON.stringify(corruptEvidencePair(), null, 2));
+
+    const result = spawnSync("bun", [CLI, "helper", "repair-task-graph"], {
+      cwd: root,
+      encoding: "utf-8",
+      env: { ...process.env, LOOM_STATE_PATH: statePath },
+      input: JSON.stringify({ "operator": "believed this would be installed" }),
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("accepts no stdin");
+    expect(result.stderr).toContain("piped byte(s) would have been silently ignored");
+    // The corrupt graph is untouched: the refusal happens before any repair.
+    expect(readFileSync(statePath, "utf-8")).toBe(JSON.stringify(corruptEvidencePair(), null, 2));
+
+    // An empty (whitespace-only) stdin stays the sanctioned no-arg invocation.
+    const empty = spawnSync("bun", [CLI, "helper", "repair-task-graph"], {
+      cwd: root,
+      encoding: "utf-8",
+      env: { ...process.env, LOOM_STATE_PATH: statePath },
+      input: "\n",
+    });
+    expect(empty.status, empty.stderr).toBe(0);
+    expect(empty.stderr).toContain("Repaired task graph atomically");
   });
 });

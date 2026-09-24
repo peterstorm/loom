@@ -16,7 +16,7 @@ export type { StandaloneCaptureWitness, StandaloneEvidenceReplayResult, Standalo
 import { parseRunDirectoryReference } from '../../../orchestration/run-directory-handle';
 import { publishStandalonePanelView } from '../../../orchestration/standalone-panel-context';
 import { CURRENT_REVIEWER_PROTOCOL } from '../../../core/reviewer-contract';
-import type { AgentRequestAuthority, SpawnRequest, PublicationAuthorityResolver, SemanticAttempt } from '../../../core/orchestration-contract';
+import { batchPublicationIdentity, type AgentRequestAuthority, type SpawnRequest, type PublicationAuthorityResolver, type SemanticAttempt } from '../../../core/orchestration-contract';
 import { decideAttemptOneSlots } from '../../../core/standalone-attempt-admission';
 import { aggregateStandaloneReview, bindStandaloneCaptureAuthority, captureStandaloneReviewerBytes, canonicalStandaloneResultArtifact, completeStandaloneReviewerCapture, parseStandaloneReviewScope, prepareFreshStandaloneReview, proveStandaloneRosterCompletion, serializeStandaloneReviewAuthority, serializeAdjudicatedStandaloneReview, type FrozenStandaloneReviewAuthority, type StandaloneReviewerProtocolResolver } from '../../../core/standalone-review';
 import { parseStandaloneReviewMachineState, reduceStandaloneReviewMachine, parseStandaloneRefutationCompletion, serializeStandaloneReviewMachineState, startStandaloneReviewMachine, type StandaloneReviewMachineState } from '../../../core/standalone-review-machine';
@@ -24,7 +24,7 @@ import { completePersistentRefutationPanel, panelRequestIdentity, refutationPane
 import { readRunBytesNoFollow, writeRunBytesExclusiveNoFollow } from '../../../orchestration/no-follow-fs';
 import { captureKey } from '../../../core/harness-capture';
 import { type RunDirHandle } from '../../../orchestration/run-directory-handle';
-import { standaloneReviewerProtocolResolver, readPublishedStandaloneResult, deriveChangedPaths, gitText, durableCaptureRejection, durablePublicationDigest, durableRefutationRequests, durableRequests, executableRefutationRequests, failed, metadata, readRegisteredStandaloneAuthority, publicationFile, publicationResolver, publishInitialBatch, recoverOrPublishRefutationRetry, recoverOrPublishStandaloneRetry, refutationRejectionDiagnostic, renderSpawnTask, safeScope, standalonePackets, standalonePublicationEffectId, standaloneRetryTask, type FacadeDriveResult, type ProgramParse, type RegisteredStandaloneProgram } from './helpers';
+import { standaloneReviewerProtocolResolver, readPublishedStandaloneResult, deriveChangedPaths, gitText, durableCaptureRejection, durablePublishedReceipt, durablePublicationDigest, durableRefutationRequests, durableRequests, executableRefutationRequests, failed, metadata, readRegisteredStandaloneAuthority, publicationResolver, publishInitialBatch, recoverOrPublishRefutationRetry, recoverOrPublishStandaloneRetry, refutationRejectionDiagnostic, renderSpawnTask, safeScope, standalonePackets, standalonePublicationEffectId, standaloneRetryTask, type FacadeDriveResult, type ProgramParse, type RegisteredStandaloneProgram } from './helpers';
 
 const preparedSuccessorStarts = new WeakSet<object>();
 
@@ -55,9 +55,15 @@ function initialStandaloneRequests(authority: FrozenStandaloneReviewAuthority) {
   });
 }
 
-const successorGitAuthorityWitness = (): string => gitText([
-  "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all",
-]);
+const successorGitAuthorityWitness = (): string =>
+  // With --branch, git always emits branch header lines on stdout (verified
+  // across clean, dirty, unborn-HEAD, and -z forms), so this probe can never
+  // legitimately answer empty: the confirmed-empty decision here is "refuse" —
+  // a confirmed-empty throws loudly with attribution instead of passing a
+  // fabricated empty witness that could never detect change.
+  gitText([
+    "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all",
+  ], "refuse");
 
 export async function prepareStandaloneSuccessorFacadeStart(runsRoot: string, run: string, input: StandaloneSuccessorStartInput) {
   try {
@@ -90,8 +96,14 @@ export async function prepareStandaloneSuccessorFacadeStart(runsRoot: string, ru
       previousContexts: Object.freeze(lineage.value.packets[0]!.variableContext.slice(1)),
       authority: JSON.parse(serializeStandaloneReviewAuthority(prepared.value.authority), (_key: string, value: unknown) =>
         typeof value === "object" && value !== null ? Object.freeze(value) : value) });
-    if (Buffer.byteLength(JSON.stringify(registration)) > 16_777_216) return { ok: false as const, message: "successor registration exceeds byte budget" };
-    const start = Object.freeze({ registration, authority: prepared.value.authority, packets: lineage.value.packets });
+    // Mint the registration's wire bytes ONCE at preflight: the start token
+    // carries these exact bytes and registration publishes them verbatim, so
+    // JSON.stringify's silent-drop semantics are confined to this one seam and
+    // the registered program is byte-identical to the preflight-proved form
+    // instead of a second stringify's re-projection.
+    const registrationWire = JSON.stringify(registration);
+    if (Buffer.byteLength(registrationWire) > 16_777_216) return { ok: false as const, message: "successor registration exceeds byte budget" };
+    const start = Object.freeze({ registration, registrationWire, authority: prepared.value.authority, packets: lineage.value.packets });
     preparedSuccessorStarts.add(start);
     return { ok: true as const, value: start };
   } catch (cause) { return { ok: false as const, message: cause instanceof Error ? cause.message : String(cause) }; }
@@ -100,7 +112,9 @@ export async function prepareStandaloneSuccessorFacadeStart(runsRoot: string, ru
 export async function startPreparedStandaloneSuccessor(handle: RunDirHandle,
   prepared: Extract<Awaited<ReturnType<typeof prepareStandaloneSuccessorFacadeStart>>, { ok: true }>["value"]): Promise<FacadeDriveResult> {
   if (!preparedSuccessorStarts.has(prepared) || handle.runId !== prepared.authority.runId) return failed("successor start requires this Run's actual bounded preflight");
-  const registered = await handle.registerProgram(prepared.registration);
+  // Registration publishes the preflight-MINTED wire bytes, parsed — never a
+  // second live-object stringify.
+  const registered = await handle.registerProgram(JSON.parse(prepared.registrationWire) as unknown);
   if (!registered.ok) return failed(registered.error.message);
   if (await handle.readCheckpoint(16_777_216) !== null) return resumeStandaloneFacade(handle, prepared.registration);
   // Initial publication owns attempt-one packets; freeze only retries here to avoid duplicate serialization/writes.
@@ -538,6 +552,26 @@ async function resumeAwaitingRefutation(
   return finalizeStandaloneState(handle, ready.value);
 }
 
+async function terminalBlockStandaloneAttemptTwo(
+  handle: RunDirHandle,
+  machine: StandaloneReviewMachineState,
+  request: AgentRequestAuthority,
+  diagnostic: string,
+  failureLabel: string,
+): Promise<FacadeDriveResult> {
+  const terminal = reduceStandaloneReviewMachine(machine, {
+    kind: "result-rejected", request, message: diagnostic,
+  });
+  if (!terminal.ok || terminal.value.kind !== "terminal-blocked") {
+    return failed(terminal.ok ? `${failureLabel} did not terminal-block` : terminal.error.message);
+  }
+  // Append before committing the checkpoint; resume re-derives a failed append
+  // and the journal's dedup key makes a completed append idempotent.
+  await appendStandaloneRejection(handle, request, 2, diagnostic);
+  await handle.writeCheckpoint(serializeStandaloneReviewMachineState(terminal.value));
+  return { ok: true, action: { kind: "blocked", runId: handle.runId, diagnostic: terminal.value } };
+}
+
 async function resumeAwaitingResults(
   handle: RunDirHandle,
   state: Extract<StandaloneReviewMachineState, { kind: "awaiting-results" }>,
@@ -653,16 +687,7 @@ async function resumeAwaitingResults(
     if (!captured.value.has(captureKey(request.authority.slotId, request.authority.attempt))) {
       const rejection = request.authority.attempt === 2 ? await durableCaptureRejection(handle, request.authority) : null;
       if (rejection !== null) {
-        const terminal = reduceStandaloneReviewMachine(machine, { kind: "result-rejected", request: request.authority, message: rejection });
-        if (!terminal.ok || terminal.value.kind !== "terminal-blocked") {
-          return failed(terminal.ok ? "final capture rejection did not terminal-block" : terminal.error.message);
-        }
-        // Audit event before the terminal checkpoint commit: a failed append
-        // leaves the machine awaiting results, so the next resume re-derives
-        // and retries it; the journal dedup key makes the repeat idempotent.
-        await appendStandaloneRejection(handle, request.authority, 2, rejection);
-        await handle.writeCheckpoint(serializeStandaloneReviewMachineState(terminal.value));
-        return { ok: true, action: { kind: "blocked", runId: handle.runId, diagnostic: terminal.value } };
+        return terminalBlockStandaloneAttemptTwo(handle, machine, request.authority, rejection, "final capture rejection");
       }
       missing.push(request);
       continue;
@@ -676,21 +701,9 @@ async function resumeAwaitingResults(
         bytes.value,
       );
       if (!admission.ok) {
-        const problems = [...admission.problems];
-        const terminal = reduceStandaloneReviewMachine(machine, {
-          kind: "result-rejected",
-          request: { runId: handle.runId, slotId: request.authority.slotId, requestId: request.authority.requestId, attempt: 2 },
-          message: problems.join("; "),
-        });
-        if (!terminal.ok || terminal.value.kind !== "terminal-blocked") {
-          return failed(terminal.ok ? "standalone attempt-2 rejection did not terminal-block" : terminal.error.message);
-        }
-        // Audit event before the terminal checkpoint commit: a failed append
-        // leaves the machine awaiting results, so the next resume re-derives
-        // and retries it; the journal dedup key makes the repeat idempotent.
-        await appendStandaloneRejection(handle, request.authority, 2, problems.join("; "));
-        await handle.writeCheckpoint(serializeStandaloneReviewMachineState(terminal.value));
-        return { ok: true, action: { kind: "blocked", runId: handle.runId, diagnostic: terminal.value } };
+        return terminalBlockStandaloneAttemptTwo(
+          handle, machine, request.authority, admission.problems.join("; "), "standalone attempt-2 rejection",
+        );
       }
     }
     const prepared = captureStandaloneReviewerBytes(captureAuthority.value, request.authority.requestId, bytes.value);
@@ -708,21 +721,19 @@ async function resumeAwaitingResults(
   if (missing.length > 0) {
     const effectId = standalonePublicationEffectId(activeAuthority);
     if (!effectId.ok) return failed(effectId.error.message);
-    const receipt = JSON.parse(readRunBytesNoFollow(
-      `${handle.runDirectory}/artifacts/${publicationFile(effectId.value)}`,
-    ).toString("utf8")) as Record<string, unknown>;
+    // Resume never re-derives request authority from prose: the durable
+    // receipt is parsed (never cast) and must name exactly this run/effect,
+    // or the re-spawn fails closed. The identity digest is a projection of
+    // that parsed receipt.
+    const publication = durablePublishedReceipt(handle, effectId.value);
+    if (publication.kind === "absent") return failed("initial reviewer publication receipt is absent; roster re-spawn cannot proceed");
+    if (publication.kind === "corrupt") return failed(publication.message);
     return { ok: true, action: {
       kind: "spawn-batch",
       runId: handle.runId,
-      publicationIdentity: {
-        schemaVersion: 1,
-        kind: "batch-publication-identity",
-        runId: handle.runId,
-        effectId: effectId.value,
-        publicationDigest: receipt.publicationDigest,
-      },
+      publicationIdentity: batchPublicationIdentity(publication.receipt),
       idempotencyKey: { runId: handle.runId, effectId: effectId.value },
-      receipt,
+      receipt: publication.receipt,
       requests: missing.map((request) => {
         const task = renderSpawnTask(
           handle,

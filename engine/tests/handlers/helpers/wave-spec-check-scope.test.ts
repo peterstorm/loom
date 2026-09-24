@@ -1,13 +1,13 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import fc from "fast-check";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { createRunDirectory } from "../../../src/orchestration/run-directory-handle";
 import {
   handleWaveReviewContext,
   installWaveReviewRuns,
-  waveRequests,
+  waveRequests as waveRequestsWithBoundary,
   waveSpecCheckScope,
 } from "../../../src/handlers/helpers/programs/wave-gate";
 import type { RegisteredWaveGateProgram } from "../../../src/handlers/helpers/programs/helpers";
@@ -50,6 +50,29 @@ const decodeRequestId = (raw: string) => {
 const cleanup: string[] = [];
 afterEach(() => { for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true }); });
 
+const projectRootForDocuments = (specFile: string | null, planFile: string | null): string => {
+  const document = specFile ?? planFile;
+  return document === null ? process.cwd() : dirname(document);
+};
+
+const projectBoundaryAt = (root: string) => Object.freeze({ kind: "state-layout" as const, root });
+
+function waveRequests(
+  handle: Parameters<typeof waveRequestsWithBoundary>[0],
+  registration: Parameters<typeof waveRequestsWithBoundary>[1],
+  graph: Parameters<typeof waveRequestsWithBoundary>[2],
+  attempt: Parameters<typeof waveRequestsWithBoundary>[3],
+  projectRoot: string,
+): ReturnType<typeof waveRequestsWithBoundary> {
+  return waveRequestsWithBoundary(handle, registration, graph, attempt, projectBoundaryAt(projectRoot));
+}
+
+const observeDocuments = (
+  specFile: string | null,
+  planFile: string | null,
+  projectRoot = projectRootForDocuments(specFile, planFile),
+) => observeWaveSpecCheckDocuments({ specFile, planFile, projectBoundary: projectBoundaryAt(projectRoot) });
+
 describe("registered Wave spec-check scope", () => {
   it("defensively freezes arbitrary trace and file arrays", () => {
     fc.assert(fc.property(
@@ -73,7 +96,7 @@ describe("registered Wave spec-check scope", () => {
   });
 
   it("freezes the exact current-Wave roster, completion claims, contributions, and declared files", () => {
-    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-spec-scope-"));
+    const runsRoot = canonicalTempDir("loom-wave-spec-scope-");
     cleanup.push(runsRoot);
     const created = createRunDirectory(runsRoot, "run.scope");
     if (!created.ok) throw new Error(created.error.message);
@@ -113,7 +136,7 @@ describe("registered Wave spec-check scope", () => {
     const parsedGraph = parseTaskGraph(graph);
     expect(parsedGraph.ok).toBe(true);
     if (!parsedGraph.ok) return;
-    const batch = waveRequests(created.value, registration, parsedGraph.value, 1);
+    const batch = waveRequests(created.value, registration, parsedGraph.value, 1, process.cwd());
     const specRequest = batch.requests.find(({ authority }) =>
       (authority as AgentRequestAuthority).role === "spec-check-invoker");
     expect(specRequest).toBeDefined();
@@ -153,7 +176,7 @@ describe("registered Wave spec-check scope", () => {
   });
 
   it("installs the exact pure preparation roster, contexts, epoch, and reviewer slots", async () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-wave-authority-install-"));
+    const root = canonicalTempDir("loom-wave-authority-install-");
     cleanup.push(root);
     const runsRoot = join(root, "runs");
     mkdirSync(runsRoot);
@@ -202,7 +225,7 @@ describe("registered Wave spec-check scope", () => {
     writeFileSync(statePath, JSON.stringify(parsed.value));
     const manager = new StateManager(statePath);
 
-    const batch = waveRequests(created.value, registration, parsed.value, 1);
+    const batch = waveRequests(created.value, registration, parsed.value, 1, root);
     const authorities = batch.requests.map(({ authority }) => authority as AgentRequestAuthority);
     expect(authorities.map(({ role }) => role)).toEqual([
       "spec-check-invoker",
@@ -314,7 +337,7 @@ describe("registered Wave spec-check scope", () => {
       tasks: parsed.value.tasks.map((task) => ({ ...task, review_generation: (task.review_generation ?? 0) + 1 })),
     });
     if (!conflictingGraph.ok) throw new Error(conflictingGraph.error);
-    const conflictingBatch = waveRequests(created.value, registration, conflictingGraph.value, 1);
+    const conflictingBatch = waveRequests(created.value, registration, conflictingGraph.value, 1, root);
     expect(conflictingBatch.batchEpoch).not.toBe(batch.batchEpoch);
     await expect(installWaveReviewRuns(manager, registration, conflictingBatch))
       .rejects.toThrow("packet context changed");
@@ -322,8 +345,83 @@ describe("registered Wave spec-check scope", () => {
     expect(manager.load().wave_review_epoch?.batchEpoch).toBe(batch.batchEpoch);
   });
 
+  it("binds relative spec/Plan bytes to the graph root when cwd is another checkout", () => {
+    const graphRoot = canonicalTempDir("loom-wave-graph-root-");
+    const runtimeRoot = canonicalTempDir("loom-wave-runtime-root-");
+    cleanup.push(graphRoot, runtimeRoot);
+    const specFile = ".claude/specs/split/spec.md";
+    const planFile = ".claude/plans/split.md";
+    for (const root of [graphRoot, runtimeRoot]) {
+      mkdirSync(join(root, ".claude", "specs", "split"), { recursive: true });
+      mkdirSync(join(root, ".claude", "plans"), { recursive: true });
+    }
+    writeFileSync(join(graphRoot, specFile), "# Graph specification\n");
+    writeFileSync(join(graphRoot, planFile), "# Graph Plan\n");
+    writeFileSync(join(runtimeRoot, specFile), "# Foreign runtime specification\n");
+    writeFileSync(join(runtimeRoot, planFile), "# Foreign runtime Plan\n");
+    const runsRoot = join(runtimeRoot, "runs");
+    mkdirSync(runsRoot);
+    const created = createRunDirectory(runsRoot, "run.split-root");
+    if (!created.ok) throw new Error(created.error.message);
+    const parsed = parseTaskGraph({
+      spec_trace_version: 2,
+      current_phase: "execute",
+      current_wave: 1,
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: specFile,
+      plan_file: planFile,
+      wave_gates: {},
+      tasks: [taskFixture({
+        id: "T1", description: "bind graph documents", agent: "code-implementer-agent", wave: 1,
+        status: "implemented", depends_on: [], spec_anchors: [], spec_contributions: [], file_list: [],
+      })],
+    });
+    if (!parsed.ok) throw new Error(parsed.error);
+    const registration: RegisteredWaveGateProgram = {
+      schemaVersion: 1, kind: "wave-gate", input: { wave: 1 }, taskIds: ["T1"], authorityDigest: "a".repeat(64),
+    };
+    const previousCwd = process.cwd();
+    process.chdir(runtimeRoot);
+    try {
+      const batch = waveRequests(created.value, registration, parsed.value, 1, graphRoot);
+      const graphDocuments = observeDocuments(specFile, planFile, graphRoot).authority;
+      const foreignDocuments = observeDocuments(specFile, planFile, runtimeRoot).authority;
+      expect(batch.specCheckDocuments).toEqual(graphDocuments);
+      expect(batch.specCheckDocuments).not.toEqual(foreignDocuments);
+    } finally {
+      process.chdir(previousCwd);
+    }
+  });
+
+  it("refuses a relative Wave document reached through a symlink", () => {
+    const graphRoot = canonicalTempDir("loom-wave-symlink-root-");
+    const externalRoot = canonicalTempDir("loom-wave-symlink-external-");
+    cleanup.push(graphRoot, externalRoot);
+    mkdirSync(join(graphRoot, ".claude", "specs"), { recursive: true });
+    writeFileSync(join(externalRoot, "spec.md"), "external authority");
+    symlinkSync(externalRoot, join(graphRoot, ".claude", "specs", "linked"));
+
+    expect(() => observeDocuments(
+      ".claude/specs/linked/spec.md",
+      null,
+      graphRoot,
+    )).toThrow(/cannot read Wave spec-check document/);
+  });
+
+  it("refuses an absolute Wave document outside the TaskGraph Project Boundary", () => {
+    const graphRoot = canonicalTempDir("loom-wave-absolute-boundary-");
+    const externalRoot = canonicalTempDir("loom-wave-absolute-external-");
+    cleanup.push(graphRoot, externalRoot);
+    const externalSpec = join(externalRoot, "spec.md");
+    writeFileSync(externalSpec, "# Foreign specification\n");
+
+    expect(() => observeDocuments(externalSpec, null, graphRoot))
+      .toThrow(/outside TaskGraph Project Boundary/);
+  });
+
   it("moves the batch epoch after either exact spec or plan bytes change", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-wave-document-bytes-"));
+    const root = canonicalTempDir("loom-wave-document-bytes-");
     cleanup.push(root);
     const runsRoot = join(root, "runs");
     mkdirSync(runsRoot);
@@ -356,12 +454,12 @@ describe("registered Wave spec-check scope", () => {
       authorityDigest: "a".repeat(64),
     };
 
-    const first = waveRequests(created.value, registration, parsed.value, 1);
+    const first = waveRequests(created.value, registration, parsed.value, 1, root);
     writeFileSync(specFile, "spec two");
-    const specChanged = waveRequests(created.value, registration, parsed.value, 1);
+    const specChanged = waveRequests(created.value, registration, parsed.value, 1, root);
     writeFileSync(specFile, "spec one");
     writeFileSync(planFile, "plan two");
-    const planChanged = waveRequests(created.value, registration, parsed.value, 1);
+    const planChanged = waveRequests(created.value, registration, parsed.value, 1, root);
 
     expect(specChanged.batchEpoch).not.toBe(first.batchEpoch);
     expect(specChanged.specCheckDocuments.spec.contentDigest)
@@ -372,7 +470,7 @@ describe("registered Wave spec-check scope", () => {
   });
 
   it("rejects installation when document bytes drift after unlocked observation", async () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-wave-document-install-"));
+    const root = canonicalTempDir("loom-wave-document-install-");
     cleanup.push(root);
     const runsRoot = join(root, "runs");
     mkdirSync(runsRoot);
@@ -411,7 +509,7 @@ describe("registered Wave spec-check scope", () => {
     const statePath = join(root, "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(parsed.value));
     const manager = new StateManager(statePath);
-    const batch = waveRequests(created.value, registration, parsed.value, 1);
+    const batch = waveRequests(created.value, registration, parsed.value, 1, root);
     writeFileSync(planFile, "plan after");
 
     await expect(installWaveReviewRuns(manager, registration, batch))
@@ -457,11 +555,11 @@ describe("Wave reviewer slot identity projection", () => {
   };
 
   function identitiesFor(registration: RegisteredWaveGateProgram, attempt: 1 | 2): readonly string[] {
-    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-slot-identity-"));
+    const runsRoot = canonicalTempDir("loom-wave-slot-identity-");
     cleanup.push(runsRoot);
     const created = createRunDirectory(runsRoot, "run.identity");
     if (!created.ok) throw new Error(created.error.message);
-    return waveRequests(created.value, registration, preparedGraph, attempt).requests.map(({ authority }) =>
+    return waveRequests(created.value, registration, preparedGraph, attempt, process.cwd()).requests.map(({ authority }) =>
       `${(authority as AgentRequestAuthority).slotId}@${(authority as AgentRequestAuthority).requestId}`);
   }
 
@@ -497,7 +595,7 @@ describe("Wave reviewer slot identity projection", () => {
       const legacy = { ...plain, schemaVersion: 1 as const, input: { wave: 1 } };
       const current = { ...legacy, schemaVersion: 2 as const, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL };
       const workspace = [{ taskId: "T1", scope: ["engine/src/core/wave-review-authority.ts"], headSha: "b".repeat(64) }];
-      const observation = observeWaveSpecCheckDocuments(null, null);
+      const observation = observeDocuments(null, null);
       const first = prepareWaveReviewBatch(runId.value, legacy, graph, 1, workspace, observation);
       const second = prepareWaveReviewBatch(runId.value, current, graph, 1, workspace, observation);
       if (!first.ok || !second.ok) throw new Error("versioned preparation must succeed");
@@ -549,7 +647,7 @@ describe("Requirement Coverage Projection in the spec-check packet", () => {
     tasks: TaskGraph["tasks"],
     graphOverrides: Partial<TaskGraph> = {},
   ): string => {
-    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-coverage-"));
+    const runsRoot = canonicalTempDir("loom-wave-coverage-");
     cleanup.push(runsRoot);
     const created = createRunDirectory(runsRoot, "run.coverage");
     if (!created.ok) throw new Error(created.error.message);
@@ -572,7 +670,7 @@ describe("Requirement Coverage Projection in the spec-check packet", () => {
       input: { wave: 1 },
       taskIds: tasks.map(({ id }) => id),
       authorityDigest: "a".repeat(64),
-    }, parsedGraph.value, 1);
+    }, parsedGraph.value, 1, projectRootForDocuments(parsedGraph.value.spec_file, parsedGraph.value.plan_file));
     const specRequest = batch.requests.find(({ authority }) =>
       (authority as AgentRequestAuthority).role === "spec-check-invoker");
     const digest = (specRequest!.authority as AgentRequestAuthority).contextDigest;
@@ -583,7 +681,7 @@ describe("Requirement Coverage Projection in the spec-check packet", () => {
   };
 
   const specFileIn = (contents: string): string => {
-    const root = mkdtempSync(join(tmpdir(), "loom-coverage-spec-"));
+    const root = canonicalTempDir("loom-coverage-spec-");
     cleanup.push(root);
     mkdirSync(join(root, "specs"), { recursive: true });
     const path = join(root, "specs", "spec.md");
@@ -612,7 +710,7 @@ describe("Requirement Coverage Projection in the spec-check packet", () => {
   });
 
   it("only the spec-check subject receives the projection", () => {
-    const runsRoot = mkdtempSync(join(tmpdir(), "loom-wave-coverage-subject-"));
+    const runsRoot = canonicalTempDir("loom-wave-coverage-subject-");
     cleanup.push(runsRoot);
     const created = createRunDirectory(runsRoot, "run.subject");
     if (!created.ok) throw new Error(created.error.message);
@@ -629,7 +727,7 @@ describe("Requirement Coverage Projection in the spec-check packet", () => {
     const batch = waveRequests(created.value, {
       schemaVersion: 1, kind: "wave-gate", input: { wave: 1 }, taskIds: ["T1"],
       authorityDigest: "a".repeat(64),
-    }, parsedGraph.value, 1);
+    }, parsedGraph.value, 1, projectRootForDocuments(parsedGraph.value.spec_file, parsedGraph.value.plan_file));
     for (const request of batch.requests) {
       const authority = request.authority as AgentRequestAuthority;
       const packet = batch.packets.find((candidate) => candidate.digest === authority.contextDigest);
@@ -725,7 +823,7 @@ describe("Wave spec-check authority guards", () => {
 `;
 
   const specFileIn = (contents: string): string => {
-    const root = mkdtempSync(join(tmpdir(), "loom-guard-spec-"));
+    const root = canonicalTempDir("loom-guard-spec-");
     cleanup.push(root);
     const path = join(root, "spec.md");
     writeFileSync(path, contents, "utf8");
@@ -764,10 +862,10 @@ describe("Wave spec-check authority guards", () => {
     // it was not derived from. Deleting it used to leave every test green.
     const specFile = specFileIn(spec);
     const other = specFileIn(spec.replace("FR-001", "FR-002"));
-    const honest = observeWaveSpecCheckDocuments(specFile, null);
+    const honest = observeDocuments(specFile, null);
     const mismatched = Object.freeze({
       authority: honest.authority,
-      specIndex: observeWaveSpecCheckDocuments(other, null).specIndex,
+      specIndex: observeDocuments(other, null).specIndex,
     });
     const prepared = prepareWaveReviewBatch(
       runId(), registration, graphWith(specFile), 1, workspace, mismatched,
@@ -780,7 +878,7 @@ describe("Wave spec-check authority guards", () => {
     // Same path, different bytes: only the digest comparison catches this, and
     // it is what makes the module's "one read" claim true rather than asserted.
     const specFile = specFileIn(spec);
-    const honest = observeWaveSpecCheckDocuments(specFile, null);
+    const honest = observeDocuments(specFile, null);
     const forged = Object.freeze({
       authority: honest.authority,
       specIndex: projectSpecBytes(specFile, Buffer.from(spec.replace("FR-001", "FR-009"), "utf8")),
@@ -794,7 +892,7 @@ describe("Wave spec-check authority guards", () => {
 
   it("refuses an unparsed result derived from different bytes at the same path", () => {
     const specFile = specFileIn(spec);
-    const honest = observeWaveSpecCheckDocuments(specFile, null);
+    const honest = observeDocuments(specFile, null);
     const mismatched = Object.freeze({
       authority: honest.authority,
       specIndex: projectSpecBytes(specFile, Buffer.from("# not a canonical specification", "utf8")),
@@ -810,7 +908,7 @@ describe("Wave spec-check authority guards", () => {
     const specFile = specFileIn(spec);
     const prepared = prepareWaveReviewBatch(
       runId(), registration, graphWith(specFile), 1, workspace,
-      observeWaveSpecCheckDocuments(specFile, null),
+      observeDocuments(specFile, null),
     );
     if (!prepared.ok) throw new Error(prepared.error.message);
     expect(prepared.ok).toBe(true);

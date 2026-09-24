@@ -4,7 +4,7 @@ This guide covers status, persisted artifacts, recovery, validation, and contrib
 
 ## Prerequisites
 
-- Linux or macOS 13+ for the existing runtime (`/proc/self/fd` descriptor-relative authority on Linux; `O_NOFOLLOW_ANY` on macOS, with older Darwin kernels refused at startup). **Strict critical-remediation report reset requires Linux**; Darwin fails before check launch. This does not change zero-critical remediation or Wave behavior.
+- Linux or macOS 13+ for the existing runtime (`/proc/self/fd` descriptor-relative authority on Linux; `O_NOFOLLOW_ANY` on macOS, with older Darwin kernels refused at startup). **Strict critical-remediation report reset works on both**: Linux unlinks through the retained parent descriptor; macOS re-proves the parent path (`O_NOFOLLOW_ANY` + identity) immediately before the unlink, refusing a planted symlink with ELOOP. Darwin retains the documented proof-to-use gap shared by every anchored leaf mutation. This does not change zero-critical remediation or Wave behavior.
 - Bun (engine runtime and tests)
 - Git
 - Claude Code or Pi
@@ -118,6 +118,8 @@ bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration abandon \
 ```
 
 The marker removes nothing. It is written once and is immutable: an identical repeat succeeds, a different one is refused, a run may not supersede itself, and the replacement must already exist as a direct child of the same runs root. Afterwards `inspect` still reads the run’s evidence, but every operation that would advance it — `resume`, `submit`, `correlate`, `decide`, `restart`, `complete` — refuses, and no recovery can adopt it as a pristine replacement. `--superseded-by` is optional; omit it when a run is retired without a successor.
+
+When the abandoned Run owns the matching protected Wave Gate, the same command also stamps that registration `terminal-abandoned` under the TaskGraph lock and clears its `active_wave_completion_suite`. This protected-state mutation authorizes a later successor start without deleting the tombstone audit. The immutable Run marker is published first; if the subsequent protected-state stamp fails, the command reports the marker-only partial outcome. Repeat the **identical** `abandon` command: marker publication reconciles idempotently and the helper retries the state stamp. Do not choose a new reason or successor, delete the marker, or edit protected state by hand.
 
 ### Pi batch limit
 
@@ -543,6 +545,31 @@ Registered programs derive the exact missing slots and issue retry requests. Res
 
 A malformed semantic output gets one retry. Attempt-2 rejection is terminal for that run. Wave reviewer exhaustion has an explicit `orchestration restart` path; standalone runs should remain blocked audit evidence rather than be edited.
 
+### Implementation escalation (semantic attempt 2 exhausted)
+
+A modern implementation Task gets exactly two semantic attempts. When attempt 2's settlement also fails its proof, the lineage records an `escalation-required` receipt and further implementation dispatch is refused — the engine will not spin a third unreviewed attempt. Attestation byte drift is terminal on attempt 1 because refreshing its baseline would certify child-authored bytes. The direct exit from either terminal state is `remediate`; it is deliberate, reason-echoed, and never rewrites history:
+
+```bash
+# Consume the escalation: append one escalation-remediated receipt and return
+# the Task to a fresh attempt 1 (operator repaired the environment, re-scoped
+# the Task, or otherwise sanctioned a new proving round).
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration remediate \
+  --task <task-id> \
+  --receipt <exact-terminal-escalation-receipt-id> \
+  --reason "<why a fresh attempt is now sanctioned>"
+
+# Separately, arm re-attestation only on an eligible pending, nonterminal Task
+# when the declared artifacts ALREADY carry the completed work
+# (populate-task-graph --force reset, reopened Wave, anchor-only repair).
+bun "$LOOM_DIR/engine/src/cli.ts" helper orchestration attest \
+  --task <task-id> \
+  --reason "<why the work is known to be already present>"
+```
+
+`remediate` requires the EXACT receipt id of the Task's terminal escalation and refuses a repeat (`no longer escalated`), a live attempt, or a wrong receipt — all without touching state. The receipt is appended only; history start and the seed predecessor are untouched, and the walk past the remediation receipt lands on a fresh attempt 1 with a full two-attempt budget. The reason is echoed to stdout only; it is never persisted into the graph.
+
+`attest` refuses a live attempt, an escalated lineage (remediate first), a satisfied proof, a repeat (`already in attestation mode`), and an unknown Task — all without touching state. It rewrites exactly the proof surface under the TaskGraph lock: one scope-wide attestation obligation plus one attested obligation per declared artifact, a regression-required/new-tests-waived stored policy (the legacy `new_tests_required` boolean is CLEARED, not flipped — a `false` there would contradict the required regression at the load boundary), and the `implementation_attestation: true` flag. Lineage, baselines, and history are untouched. The dispatch binding requires the engine-derived `LOOM_IMPLEMENTATION_ATTESTATION_CONTEXT` line on every dispatch and refuses it on non-attestation Tasks. The attested child must change NOTHING inside the attempt scope: any byte move fails the scope obligation and terminalizes that attestation lineage, so it can never become a refreshed attempt-2 baseline. Restore the intended bytes, then use the exact terminal receipt with `remediate` before another proving round. The classified regression still runs. Reconcile measures drift against the attempt baseline (never the population baseline), so pre-existing population-relative changes are the attested work, not writes.
+
 ### Completed Wave has post-review workspace-integrity loss
 
 A completed Wave may be reopened only through Loom's independent immutable Review Packet authority. This is the recovery for a missed remediation invalidation; do not edit the graph or decrement a Review Generation.
@@ -682,7 +709,7 @@ Completed-v2 replay parses both checkpoint audit-path arrays before assessing re
 
 Critical remediation selects check IDs from the operator-owned `.loom/verification-manifest.json`. The selected fixed executable/argv must itself create a **new** report at the **exact** configured path on every run. The file must be a fresh parseable JUnit XML or Vitest/Jest JSON report beneath `.loom/completion-reports/`, remain untracked, and be Git-ignored. A normal process exit is insufficient: the parsed report must show more than zero executed tests, zero failures, and not an all-skipped run.
 
-Before each selected critical check launches, the engine proves that exact literal report path is Git-ignored and untracked, then removes any old regular file through a retained Linux parent descriptor using no-follow, descriptor-relative unlink. Only ENOENT counts as absence; directories, symlinks, permission failures, and unsupported reset fail before launch with `required report reset failed before launch`. Merely touching seeded green bytes cannot pass. A newly written report may have identical bytes to the previous report. **Darwin is deliberately unsupported for this destructive reset**, because the existing pathname adapter cannot prove race-free parent anchoring. Zero-critical remediation launches no check, and Wave report freshness behavior is unchanged.
+Before each selected critical check launches, the engine proves that exact literal report path is Git-ignored and untracked, then removes any old regular file through the anchored parent capability using no-follow: Linux unlinks through the retained parent descriptor; macOS re-proves the parent's whole path immediately before the unlink and refuses a planted-symlink parent with ELOOP (both reports survive a redirect attempt). Only ENOENT counts as absence; directories, symlinks, and permission failures fail before launch with `required report reset failed before launch`. Merely touching seeded green bytes cannot pass. A newly written report may have identical bytes to the previous report. Zero-critical remediation launches no check, and Wave report freshness behavior is unchanged.
 
 Strict reports are capped at **8 MiB (8,388,608 bytes)** and actual XML element depth **128** (root depth 1, including diagnostic elements). Structural XML parsing rejects malformed documents and DTDs; comments/CDATA do not create tests. Capture, persistence, and base64 replay enforce the report byte bound before oversized allocation/decoding. V2 remediation additionally caps each encoded event file at **12 MiB**, the aggregate encoded journal at **64 MiB**, and the journal at **1024 records**. These limits apply to retained-event reads, append reconciliation/new appends, and CLI inspection's event-tail read, before oversized file decoding/JSON parsing; enumeration is bounded too. They are not blanket limits on every Run artifact/checkpoint, or a claim that decoded heap usage equals encoded bytes. Legacy/default journal consumers retain their existing policy.
 
@@ -745,7 +772,7 @@ Without `LOOM_RUN_MODEL_CALIBRATION=1`, the script exits without running models.
 
 ### Locked bootstrap and mandatory full gate
 
-The development/CI baseline is a full-history Git checkout on non-root Linux, Node **22.23.2**, Bun **1.3.13**, npm, Git, jq, Bash **4+**, and GNU `timeout` on PATH. The existing macOS 13+ runtime support excludes strict critical-remediation report reset and is not a claim that this verification change was tested there; macOS would also need the development tools, including GNU coreutils and a suitable Bash. Full history is required because deterministic tests resolve the committed model-calibration corpus against historical revisions available through remote refs. A normal full clone checked out on `main` contains those objects; for an existing single-branch shallow clone, fetch every remote head before verification:
+The development/CI baseline is a full-history Git checkout on a non-root account with Node **22.23.2**, Bun **1.3.13**, npm, Git, and jq. Linux additionally requires Bash **4+** and GNU `timeout` on PATH. The macOS 13+ CI job uses Apple's Bash 3.2 and does not require GNU coreutils; its runtime support includes anchored report reset through a re-proven parent path. Full history is required because deterministic tests resolve the committed model-calibration corpus against historical revisions available through remote refs. A normal full clone checked out on `main` contains those objects; for an existing single-branch shallow clone, fetch every remote head before verification:
 
 ```bash
 git fetch --unshallow origin '+refs/heads/*:refs/remotes/origin/*' --tags
@@ -761,7 +788,7 @@ npm run verify
 
 Both locks are required: root dependencies supply Pi/runtime resources; engine dependencies supply the compiler and Vitest. `preverify` checks required tools, executable local Vitest/Pi, and that Pi resolves to the root-local locked CLI through npm's PATH. No global/latest Pi or network-fetching compiler fallback is accepted. Local preflight checks availability, not exact runtime versions; CI explicitly checks the pinned Node/Bun versions.
 
-The same **root `npm run verify`** runs locally, in `.github/workflows/ci.yml` for PRs/branch pushes/tags, and through this repository's runtime Verification Manifest. CI checks out full history with `fetch-depth: 0`, installs both frozen graphs, preserves failures through `pipefail`, and attempts log artifact upload even after failure. It has a 30-minute job budget; the manifest separately bounds its command to 30 minutes. Neither is proof of a successful hosted CI run.
+The same **root `npm run verify`** runs locally, in `.github/workflows/ci.yml` for PRs/branch pushes/tags, and through this repository's runtime Verification Manifest. CI checks out full history with `fetch-depth: 0`, installs both frozen graphs, preserves failures through `pipefail`, and attempts log artifact upload even after failure. It has a 60-minute job budget; the manifest separately bounds its command to 30 minutes. Neither is proof of a successful hosted CI run.
 
 Root `verify` delegates to engine `verify`: prerequisites → typecheck → existing `test`. That test script runs the entire existing Vitest suite (including property/integration tests) followed by all six unchanged smoke commands, once each on success:
 

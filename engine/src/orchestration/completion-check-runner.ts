@@ -23,6 +23,7 @@ import {
   type StructuredReportParseResult,
 } from "../core/structured-test-report";
 import { sha256Bytes } from "../core/review-packet";
+import { observeGitProbe } from "../utils/git-probe";
 import { inspectRepositoryPath } from "../utils/repository-path";
 import {
   parseCanonicalRepositoryRoot,
@@ -130,10 +131,25 @@ const completionSucceeded = (value: CompletionCheckExecution): CompletionCheckRu
 const failed = (error: CompletionCheckRunnerFailure): Readonly<{ ok: false; error: CompletionCheckRunnerFailure }> =>
   Object.freeze({ ok: false, error: Object.freeze(error) });
 
-function messageOf(cause: unknown): string {
+/** The one validating constructor for bounded failure messages: the trim
+ *  check plus the non-empty fallback literal prove non-emptiness, and the
+ *  4096 slice bound must stay at or under completion-suite's
+ *  MAX_SPAWN_FAILURE_MESSAGE_LENGTH (4096) because the at-rest wire parser
+ *  refuses longer messages. The brand is minted here — where the proof
+ *  lives — never re-asserted by callers (parse-don't-validate,
+ *  type-design-analyzer-1). */
+function messageOf(cause: unknown): NonEmptyString {
   const message = cause instanceof Error ? cause.message : String(cause);
   const bounded = message.slice(0, MAX_MESSAGE_LENGTH);
-  return bounded.trim().length > 0 ? bounded : "completion check infrastructure failure";
+  return (bounded.trim().length > 0 ? bounded : "completion check infrastructure failure") as NonEmptyString;
+}
+
+/** A Git stderr diagnostic as an attributed refusal suffix, or the empty
+ *  string when the probe produced none — a refused guard names the Git cause,
+ *  never a bare status number (silent-failure-hunter-1). */
+function gitDiagnostic(stderr: string | Buffer | undefined): string {
+  const text = (stderr?.toString() ?? "").trim();
+  return text === "" ? "" : `: ${text}`;
 }
 
 function boundedInteger(raw: number | undefined, fallback: number, maximum: number): number | null {
@@ -242,16 +258,51 @@ function preSpawnReportSnapshot(
 
 /** Destructive permission is narrower than report-reading authority: only the
  * exact currently ignored, untracked report may be removed. Git reads do not
- * refresh the index, and the unlink itself retains its no-follow parent fd. */
+ * refresh the index, and the unlink itself retains its no-follow parent fd.
+ *
+ * The tracked-state probe is re-observed through the canonical bounded
+ * empty-retry (`observeGitProbe`): a single status-0/empty-stdout success is
+ * never a tracked/untracked decision, because the transient empty-success
+ * class documented there would otherwise bypass the tracked-file refusal arm
+ * and authorize unlinking tracked content. Only a confirmed-empty observation
+ * reaches the explicit caller decision — empty legitimately means untracked
+ * for `ls-files` — and any observed non-empty stdout refuses loudly. */
 function resetRemediationReport(root: CanonicalRepositoryRoot, check: RunnerCommand): void {
   if (check.reportPolicy.kind !== "required-file") throw new Error("remediation requires a report path");
   const path = check.reportPolicy.path;
-  const tracked = spawnSync("git", ["--literal-pathspecs", "ls-files", "-z", "--", path], { cwd: root, encoding: "utf8" });
-  if (tracked.error || tracked.status !== 0 || tracked.stdout.length !== 0) {
+  const observed = observeGitProbe<string, Error>(() => {
+    const tracked = spawnSync("git", ["--literal-pathspecs", "ls-files", "-z", "--", path], { cwd: root, encoding: "utf8" });
+    if (tracked.error !== undefined) {
+      return Object.freeze({ ok: false as const, error: new Error(`git ls-files could not start: ${tracked.error.message}`) });
+    }
+    if (tracked.status !== 0) {
+      return Object.freeze({
+        ok: false as const,
+        error: new Error(`git ls-files exited ${String(tracked.status)} for ${path}${gitDiagnostic(tracked.stderr)}`),
+      });
+    }
+    return Object.freeze({ ok: true as const, value: tracked.stdout });
+  }, (stdout) => stdout.length === 0);
+  if (observed.kind === "failed") {
+    throw new Error(`report reset could not observe tracked state of ${path}: ${observed.error.message}`);
+  }
+  if (observed.kind === "observed") {
     throw new Error(`report reset cannot prove exact path is untracked: ${path}`);
   }
+  // The policy refusal is the CLEAN not-ignored answer: check-ignore -q exits
+  // 1 with empty stdout and stderr. A spawn error or a Git fatal exit with a
+  // diagnostic is a different state and refuses with its own attribution
+  // instead of reading as a .gitignore policy violation (silent-failure-hunter-1).
   const ignored = spawnSync("git", ["check-ignore", "-q", "--", path], { cwd: root, encoding: "utf8" });
-  if (ignored.error || ignored.status !== 0) throw new Error(`report reset requires a Git-ignored path: ${path}`);
+  if (ignored.error !== undefined) {
+    throw new Error(`report reset could not run check-ignore for ${path}: ${ignored.error.message}`);
+  }
+  if (ignored.status !== 0) {
+    if (ignored.status === 1 && (ignored.stdout ?? "").trim() === "" && (ignored.stderr ?? "").trim() === "") {
+      throw new Error(`report reset requires a Git-ignored path: ${path}`);
+    }
+    throw new Error(`report reset check-ignore exited ${String(ignored.status)} for ${path}${gitDiagnostic(ignored.stderr)}`);
+  }
   removeRunRegularFileNoFollow(absoluteRepositoryPath(root, path));
 }
 
@@ -269,7 +320,7 @@ function unreadableReport(check: RunnerCommand, cause: unknown): CollectedReport
   return Object.freeze({
     kind: "unreadable",
     path: check.reportPolicy.path,
-    message: messageOf(cause) as NonEmptyString,
+    message: messageOf(cause),
   });
 }
 
@@ -324,22 +375,43 @@ function diagnostics(stdout: DiagnosticTail, stderr: DiagnosticTail): Completion
   });
 }
 
-type CommandExecution = Readonly<{
-  process: RawRemediationProcessOutcome;
-  report: CollectedReport | null;
-  diagnostics: CompletionCheckDiagnostics;
-}>;
+/** Spawn-failure and observation are different states, not one state with an
+ *  optional report: a spawn failure can never have collected a report and an
+ *  observed process always has one (possibly `missing`/`unreadable`). The
+ *  report/process pairing is therefore a compile-time property — constructing a
+ *  report on spawn-failure or a null report on observation is a type error, and
+ *  consumers discriminate on `kind` instead of re-deriving the pairing at their
+ *  own sites. The policy parameter keeps the second promise the runner already
+ *  makes by construction: a required-file check never observes a
+ *  `not-required` report, so the remediation overload below can hand its
+ *  consumer an observation whose `not-required` arm does not exist. */
+type ReportPolicy = ProjectCommandCheck["reportPolicy"];
+type RequiredFileReportPolicy = Extract<ReportPolicy, { readonly kind: "required-file" }>;
+type RequiredReportObservation = Exclude<CollectedReport, { readonly kind: "not-required" }>;
 
-type CommandRunnerResult =
-  | Readonly<{ ok: true; value: CommandExecution }>
+type CommandExecution<P extends ReportPolicy = ReportPolicy> =
+  | Readonly<{
+      kind: "spawn-failed";
+      process: Extract<RawRemediationProcessOutcome, { readonly kind: "spawn-failed" }>;
+      diagnostics: CompletionCheckDiagnostics;
+    }>
+  | Readonly<{
+      kind: "observed";
+      process: Extract<RawRemediationProcessOutcome, { readonly kind: "observed" }>;
+      report: P extends RequiredFileReportPolicy ? RequiredReportObservation : CollectedReport;
+      diagnostics: CompletionCheckDiagnostics;
+    }>;
+
+type CommandRunnerResult<P extends ReportPolicy = ReportPolicy> =
+  | Readonly<{ ok: true; value: CommandExecution<P> }>
   | Readonly<{ ok: false; error: CompletionCheckRunnerFailure }>;
 
 function spawnFailure(cause: unknown, output: CompletionCheckDiagnostics): CommandRunnerResult {
   return Object.freeze({
     ok: true,
     value: Object.freeze({
-      process: Object.freeze({ kind: "spawn-failed", message: messageOf(cause) as NonEmptyString }),
-      report: null,
+      kind: "spawn-failed" as const,
+      process: Object.freeze({ kind: "spawn-failed", message: messageOf(cause) }),
       diagnostics: output,
     }),
   });
@@ -348,7 +420,25 @@ function spawnFailure(cause: unknown, output: CompletionCheckDiagnostics): Comma
 type ProcessGroupProbe =
   | Readonly<{ kind: "gone" }>
   | Readonly<{ kind: "present" }>
+  | Readonly<{ kind: "eperm" }>
   | Readonly<{ kind: "error"; message: string }>;
+export type { ProcessGroupProbe };
+
+type LeaderProbe =
+  | Readonly<{ kind: "present" }>
+  | Readonly<{ kind: "gone" }>
+  | Readonly<{ kind: "error"; message: string }>;
+export type { LeaderProbe };
+
+/** Ports at the containment-policy seam (architecture.md): the group/leader
+ *  probes and the wall clock are narrow single-method ports whose production
+ *  adapters are the real `process.kill`-backed probes and `Date.now`. Tests
+ *  substitute plain closure fakes — no `process.kill` spy, no real waiting —
+ *  so the deadline and EPERM-polarity policy below is testable at its own
+ *  seam (atl-3). Defaults keep every production call site unchanged. */
+export type GroupProbe = (processGroupId: number) => ProcessGroupProbe;
+export type LeaderLivenessProbe = (processGroupId: number) => LeaderProbe;
+export type WallClock = () => number;
 
 type ParentObservation =
   | Readonly<{ kind: "spawn-failed"; cause: unknown }>
@@ -373,13 +463,141 @@ function probeProcessGroup(processGroupId: number): ProcessGroupProbe {
     process.kill(-processGroupId, 0);
     return Object.freeze({ kind: "present" });
   } catch (cause) {
+    const code = errnoCode(cause);
+    if (code === "ESRCH") return Object.freeze({ kind: "gone" });
+    // EPERM is its own state, never a generic error: the group contains at
+    // least one process we may not signal. Healthy descendants inherit our
+    // uid, so our own tree does not normally produce this — but a descendant
+    // that changes uid (setuid/sudo execution inside a project command) can:
+    // after the leader is reaped, EPERM is exactly the all-survivors-uid-changed
+    // state, and it is indistinguishable from a foreign id that recycled the
+    // numeric group. EPERM therefore never proves dissolution on its own; it
+    // must still be correlated with the leader probe (see
+    // observeClosedProcessGroup, waitForProcessGroupGone, and the EPERM arm of
+    // terminateProcessGroup).
+    if (code === "EPERM") return Object.freeze({ kind: "eperm" });
+    return Object.freeze({
+      kind: "error",
+      message: `process-group ${processGroupId} existence check failed: ${messageOf(cause)}`,
+    });
+  }
+}
+
+/** Liveness of the group LEADER itself (the spawned check process, positive
+ *  pid). While the leader exists — including as an unreaped zombie — the
+ *  group is legitimately ours. This invariant holds only while the spawned
+ *  leader is un-reaped (the containment arm driven by
+ *  `terminateProcessGroup`); once Node has reaped the leader, a positive-PID
+ *  probe success names a recycled pid and the reaped-context rule of
+ *  `observeClosedProcessGroup` applies instead — no negative-PGID signal is
+ *  authorized. */
+function probeLeaderAlive(processGroupId: number): LeaderProbe {
+  try {
+    process.kill(processGroupId, 0);
+    return Object.freeze({ kind: "present" });
+  } catch (cause) {
     return errnoCode(cause) === "ESRCH"
       ? Object.freeze({ kind: "gone" })
       : Object.freeze({
           kind: "error",
-          message: `process-group ${processGroupId} existence check failed: ${messageOf(cause)}`,
+          message: `process-group ${processGroupId} leader check failed: ${messageOf(cause)}`,
         });
   }
+}
+
+type ClosedProcessGroupObservation =
+  | Readonly<{ kind: "gone"; reason: "absent" | "recycled-leader" }>
+  | Readonly<{ kind: "surviving-descendants" }>
+  | Readonly<{ kind: "unconfirmed"; reason: "foreign-eperm" }>
+  | Readonly<{ kind: "error"; message: string }>;
+export type { ClosedProcessGroupObservation };
+
+/** Only an ESRCH group probe confirms dissolution after the leader died.
+ *
+ *  EPERM cannot: it names at least one member we may not signal, which after
+ *  the leader is reaped is exactly the all-survivors-changed-uid case (setuid
+ *  execution inside a project command), and is indistinguishable from a
+ *  foreign id that recycled the numeric group. Claiming either would misreport
+ *  surviving descendants as contained. The caller waits for a provable ESRCH
+ *  and refuses at its deadline instead; escalation to SIGKILL happens only
+ *  where the escalation is identity-bound-authorized — while the spawned
+ *  leader is un-reaped (see `decideEpermEscalation` and
+ *  `decideSurvivingEscalation`) — never on an id that may no longer name this
+ *  check's group.
+ *
+ *  The probe and clock are defaulted ports (see `GroupProbe`/`WallClock`):
+ *  production callers omit them; tests pass plain fakes. */
+export async function waitForProcessGroupGone(
+  processGroupId: number,
+  maximumWaitMs: number,
+  groupProbe: GroupProbe = probeProcessGroup,
+  now: WallClock = Date.now,
+): Promise<ProcessGroupProbe> {
+  const deadline = now() + maximumWaitMs;
+  let latest = groupProbe(processGroupId);
+  while (latest.kind !== "gone" && now() < deadline) {
+    await delay(Math.min(GROUP_PROBE_INTERVAL_MS, Math.max(1, deadline - now())));
+    latest = groupProbe(processGroupId);
+  }
+  return latest;
+}
+
+/** Classify a group only after Node has reaped the spawned leader.
+ *
+ * At that point a positive PID probe cannot name our leader. If it succeeds,
+ * the PID/PGID has been recycled and no negative-PGID signal is authorized.
+ * A still-present group with no leader can only be observed, never signalled:
+ * once the leader closes there is no atomic identity-bound group signalling
+ * primitive available to Node. And EPERM with a reaped leader is not a
+ * dissolution proof either — it names unsignalable members (uid-changed
+ * survivors) or a recycled foreign id, so it reports unconfirmed rather than
+ * gone; only a provable ESRCH settles the outcome.
+ *
+ * Both probes are defaulted ports (see `GroupProbe`/`LeaderLivenessProbe`):
+ * the group probe is invoked in the body — visible where it happens, and now
+ * supplied by the wait loop that drives this classifier — and the leader
+ * probe is injectable the same way. Production callers omit them; tests pass
+ * plain fakes. */
+export function observeClosedProcessGroup(
+  processGroupId: number,
+  groupProbe: GroupProbe = probeProcessGroup,
+  leaderProbe: LeaderLivenessProbe = probeLeaderAlive,
+): ClosedProcessGroupObservation {
+  const group = groupProbe(processGroupId);
+  if (group.kind === "gone") return Object.freeze({ kind: "gone", reason: "absent" });
+  if (group.kind === "error") return Object.freeze({ kind: "error", message: group.message });
+  const leader = leaderProbe(processGroupId);
+  if (leader.kind === "error") return Object.freeze({ kind: "error", message: leader.message });
+  if (leader.kind === "present") return Object.freeze({ kind: "gone", reason: "recycled-leader" });
+  // Leader reaped. "present" names unsignalled survivors; EPERM names at
+  // least one unsignalable member (or a recycled foreign id). Neither is a
+  // dissolution proof, so neither may be reported as contained: keep
+  // observing (the state may still resolve to a provable ESRCH) and fail
+  // closed at the deadline.
+  return group.kind === "eperm"
+    ? Object.freeze({ kind: "unconfirmed", reason: "foreign-eperm" })
+    : Object.freeze({ kind: "surviving-descendants" });
+}
+
+export async function waitForClosedProcessGroup(
+  processGroupId: number,
+  maximumWaitMs: number,
+  groupProbe: GroupProbe = probeProcessGroup,
+  leaderProbe: LeaderLivenessProbe = probeLeaderAlive,
+  now: WallClock = Date.now,
+): Promise<ClosedProcessGroupObservation> {
+  const deadline = now() + maximumWaitMs;
+  let observation = observeClosedProcessGroup(processGroupId, groupProbe, leaderProbe);
+  // Both undecided states keep the observation loop alive: surviving
+  // descendants may exit, and an EPERM group may still resolve to a provable
+  // ESRCH once its uid-changed members exit. Only a confirmed-gone or an
+  // expiry ends the wait, and expiry is always the caller's refusal.
+  while ((observation.kind === "surviving-descendants" || observation.kind === "unconfirmed") &&
+         now() < deadline) {
+    await delay(Math.min(GROUP_PROBE_INTERVAL_MS, Math.max(1, deadline - now())));
+    observation = observeClosedProcessGroup(processGroupId, groupProbe, leaderProbe);
+  }
+  return observation;
 }
 
 function signalProcessGroup(processGroupId: number, signal: "SIGTERM" | "SIGKILL"): string | null {
@@ -397,37 +615,208 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }
 
-async function waitForProcessGroupGone(
-  processGroupId: number,
-  maximumWaitMs: number,
-): Promise<ProcessGroupProbe> {
-  const deadline = Date.now() + maximumWaitMs;
-  let latest = probeProcessGroup(processGroupId);
-  while (latest.kind === "present" && Date.now() < deadline) {
-    await delay(Math.min(GROUP_PROBE_INTERVAL_MS, Math.max(1, deadline - Date.now())));
-    latest = probeProcessGroup(processGroupId);
+/** Reaping-phase provenance for the containment decision
+ *  (type-design-analyzer-1): the spawned check's `exit` event is the knowable
+ *  bit. Node reaps the child at `exit`, which precedes `close` whenever a
+ *  descendant holds stdio, so `leader-unreaped` is the only phase in which a
+ *  positive-PID probe success can still name this check's own leader
+ *  (including as an unreaped zombie). */
+type LeaderReapingPhase =
+  | Readonly<{ kind: "leader-unreaped" }>
+  | Readonly<{ kind: "leader-reaped" }>;
+export type { LeaderReapingPhase };
+
+/** The EPERM arm's post-SIGTERM decision, phase-explicit and pure so the
+ *  polarity table is directly testable. In the leader-reaped phase the numeric
+ *  id is no longer identity-bound and the decision refuses further signalling
+ *  whatever the leader probe answers. In the leader-unreaped phase the
+ *  code-reviewer-1 escalation holds: an EPERM group whose leader probe answers
+ *  present is still legitimately ours and escalates, while leader-gone
+ *  (and leader-error, recorded) refuse as the ambiguous states they are. */
+type EpermEscalationDecision =
+  | Readonly<{ kind: "escalate" }>
+  | Readonly<{ kind: "refuse-recycled-id" }>
+  | Readonly<{ kind: "refuse-ambiguous-leader" }>;
+export type { EpermEscalationDecision };
+
+function decideEpermEscalation(phase: LeaderReapingPhase, leader: LeaderProbe): EpermEscalationDecision {
+  switch (phase.kind) {
+    case "leader-reaped":
+      return Object.freeze({ kind: "refuse-recycled-id" });
+    case "leader-unreaped":
+      switch (leader.kind) {
+        case "present":
+          return Object.freeze({ kind: "escalate" });
+        case "gone":
+        case "error":
+          return Object.freeze({ kind: "refuse-ambiguous-leader" });
+      }
   }
-  return latest;
+}
+export { decideEpermEscalation };
+
+/** The plainly-surviving arm's post-SIGTERM decision: escalate only while the
+ *  spawned leader is un-reaped (the id is still identity-bound); in the
+ *  leader-reaped phase the same present group may name recycled authority and
+ *  the decision refuses the SIGKILL the pre-phase code sent unconditionally. */
+type SurvivingEscalationDecision =
+  | Readonly<{ kind: "escalate" }>
+  | Readonly<{ kind: "refuse-recycled-id" }>;
+export type { SurvivingEscalationDecision };
+
+function decideSurvivingEscalation(phase: LeaderReapingPhase): SurvivingEscalationDecision {
+  return phase.kind === "leader-reaped"
+    ? Object.freeze({ kind: "refuse-recycled-id" })
+    : Object.freeze({ kind: "escalate" });
+}
+export { decideSurvivingEscalation };
+
+/** One settled-observation refusal builder for the two post-close-style
+ *  flows (parent closed; leader-reaped trigger). The parent-closed prose is
+ *  substring-pinned by three integration fragments (EPERM confirmation,
+ *  identity observation, post-close signalling —
+ *  completion-check-runner.integration.test.ts) and stays identical; only the
+ *  subject and the surviving descendants' trailing clause differ per flow. */
+function settledProcessGroupRefusal(
+  subject: string,
+  survivingClause: string,
+  processGroupId: number,
+  settled: Exclude<ClosedProcessGroupObservation, { readonly kind: "gone" }>,
+): string {
+  switch (settled.kind) {
+    case "error":
+      return `${subject} but process-tree identity could not be observed: ${settled.message}`;
+    case "unconfirmed":
+      return `${subject} but process-group ${processGroupId} dissolution could not be confirmed ` +
+        "(EPERM): a member refuses signalling, so the group is neither provably ours nor provably gone";
+    case "surviving-descendants":
+      return `${subject} while process-group ${processGroupId} descendants remained; ${survivingClause}`;
+  }
+}
+
+/** Shared closed-group classifier for the two no-signalling flows (the parent
+ *  closed on its own; a trigger that arrived after the spawned leader's exit).
+ *  Both observe once, wait for a provable ESRCH, and settle — only the subject
+ *  wording and the surviving clause differ. The return separates an initial
+ *  dissolution (nothing ever survived) from a dissolution reached only during
+ *  the wait (descendants did survive for a while), because only the second is
+ *  a process-tree-survived refusal; the first proceeds to normal observation. */
+type ClosedGroupSettlement =
+  | Readonly<{ kind: "initially-gone" }>
+  | Readonly<{ kind: "settled-after-survivors" }>
+  | Readonly<{ kind: "unconfirmed"; message: string }>;
+
+async function settleClosedProcessGroup(
+  subject: string,
+  survivingClause: string,
+  processGroupId: number,
+  hardKillWaitMs: number,
+): Promise<ClosedGroupSettlement> {
+  const initialGroup = observeClosedProcessGroup(processGroupId);
+  if (initialGroup.kind === "error") {
+    return Object.freeze({
+      kind: "unconfirmed" as const,
+      message: `${subject} but process-tree identity could not be observed: ${initialGroup.message}`,
+    });
+  }
+  const settled = initialGroup.kind === "gone"
+    ? Object.freeze({ kind: "gone", reason: "absent" } as const)
+    : await waitForClosedProcessGroup(processGroupId, hardKillWaitMs);
+  if (settled.kind !== "gone") {
+    return Object.freeze({
+      kind: "unconfirmed" as const,
+      message: settledProcessGroupRefusal(subject, survivingClause, processGroupId, settled),
+    });
+  }
+  return initialGroup.kind === "gone"
+    ? Object.freeze({ kind: "initially-gone" as const })
+    : Object.freeze({ kind: "settled-after-survivors" as const });
 }
 
 async function terminateProcessGroup(
   processGroupId: number,
   graceMs: number,
   hardKillWaitMs: number,
+  reapingPhase: () => LeaderReapingPhase,
+  groupProbe: GroupProbe = probeProcessGroup,
+  leaderProbe: LeaderLivenessProbe = probeLeaderAlive,
+  now: WallClock = Date.now,
 ): Promise<Readonly<{ ok: true }> | Readonly<{ ok: false; message: string }>> {
   const errors: string[] = [];
+  // Phase gate before the first signal (type-design-analyzer-1): once the
+  // spawned leader's exit is observed, the numeric id is no longer
+  // identity-bound and this module sends nothing at all. The trigger arm
+  // routes that state to the closed-path observer; this guard covers a phase
+  // flip between that check and the send.
+  if (reapingPhase().kind === "leader-reaped") {
+    return Object.freeze({
+      ok: false,
+      message: `process-group ${processGroupId} containment refused: the spawned leader already exited, ` +
+        "so the numeric group id is no longer identity-bound and further signalling is unauthorized",
+    });
+  }
   const termError = signalProcessGroup(processGroupId, "SIGTERM");
   if (termError !== null) errors.push(termError);
 
-  const afterTerm = await waitForProcessGroupGone(processGroupId, graceMs);
+  const afterTerm = await waitForProcessGroupGone(processGroupId, graceMs, groupProbe, now);
   if (afterTerm.kind === "error") errors.push(afterTerm.message);
-  if (afterTerm.kind !== "gone") {
+
+  // Post-SIGTERM escalation, decided by the phase-explicit decision functions
+  // above. The escalation itself is unchanged: signal, then wait for a
+  // provable ESRCH through the same injected ports as the pre-kill wait.
+  const escalateToSigkill = async (): Promise<void> => {
     const killError = signalProcessGroup(processGroupId, "SIGKILL");
     if (killError !== null) errors.push(killError);
-    const afterKill = await waitForProcessGroupGone(processGroupId, hardKillWaitMs);
+    const afterKill = await waitForProcessGroupGone(processGroupId, hardKillWaitMs, groupProbe, now);
     if (afterKill.kind === "error") errors.push(afterKill.message);
-    if (afterKill.kind !== "gone") {
+    if (afterKill.kind === "eperm") {
+      errors.push(`process-group ${processGroupId} dissolution could not be confirmed after SIGKILL (EPERM)`);
+    } else if (afterKill.kind !== "gone") {
       errors.push(`process-group ${processGroupId} still exists after SIGKILL containment`);
+    }
+  };
+  // EPERM after SIGTERM cannot prove dissolution ON ITS OWN (uid-changed
+  // survivors vs a recycled foreign id), so the arm correlates the leader
+  // probe AND the reaping phase: in the leader-unreaped phase the module's own
+  // leader invariant — while the leader exists, including as an unreaped
+  // zombie, the group is legitimately ours — binds the numeric id whenever the
+  // leader is still alive, so a leader-alive group escalates to SIGKILL
+  // exactly like a plainly surviving one; the leader-reaped phase — where the
+  // id may already name recycled authority — refuses WITHOUT any further
+  // signal, as does the ambiguous leader-gone/leader-error state.
+  if (afterTerm.kind === "eperm") {
+    const leader = leaderProbe(processGroupId);
+    if (leader.kind === "error") errors.push(leader.message);
+    const decision = decideEpermEscalation(reapingPhase(), leader);
+    switch (decision.kind) {
+      case "escalate":
+        await escalateToSigkill();
+        break;
+      case "refuse-recycled-id":
+        errors.push(
+          `process-group ${processGroupId} dissolution could not be confirmed after SIGTERM (EPERM); ` +
+          "the spawned leader already exited, so the numeric group id may name recycled authority and signalling is refused",
+        );
+        break;
+      case "refuse-ambiguous-leader":
+        errors.push(
+          `process-group ${processGroupId} dissolution could not be confirmed after SIGTERM (EPERM); ` +
+          "signalling an id that may no longer name this check's group is refused",
+        );
+        break;
+    }
+  } else if (afterTerm.kind !== "gone") {
+    const decision = decideSurvivingEscalation(reapingPhase());
+    switch (decision.kind) {
+      case "escalate":
+        await escalateToSigkill();
+        break;
+      case "refuse-recycled-id":
+        errors.push(
+          `process-group ${processGroupId} still exists after SIGTERM; the spawned leader already exited, ` +
+          "so the numeric group id may name recycled authority and SIGKILL escalation is refused",
+        );
+        break;
     }
   }
 
@@ -447,6 +836,39 @@ function parentObservation(child: ChildProcess): Promise<ParentObservation> {
     child.once("error", (cause) => resolveOnce(Object.freeze({ kind: "spawn-failed", cause })));
     child.once("close", (exitCode, signal) => resolveOnce(Object.freeze({ kind: "closed", exitCode, signal })));
   });
+}
+
+async function waitForParentClose(
+  parent: Promise<ParentObservation>,
+  hardKillWaitMs: number,
+  trigger: "timeout" | "cancelled",
+  stdout: DiagnosticTail,
+  stderr: DiagnosticTail,
+): Promise<Readonly<{ ok: true; value: Extract<ParentObservation, { kind: "closed" }> }> |
+  Readonly<{ ok: false; error: CompletionCheckRunnerFailure }>> {
+  const observation = await Promise.race<ParentObservation | null>([
+    parent,
+    delay(hardKillWaitMs).then(() => null),
+  ]);
+  // The deadline arm is the ordinary race: close simply never arrived. A raced
+  // spawn-failed observation is different evidence — the child errored
+  // asynchronously (e.g. the executable vanished after pid assignment), the
+  // group dissolved because nothing ever ran, and the errno names the cause.
+  // Reporting that as an unexplained unavailable close would hide it.
+  if (observation !== null && observation.kind === "spawn-failed") {
+    return failed({
+      kind: "termination-unconfirmed",
+      message: `${trigger} process group is gone but the spawned process had failed to start: ${messageOf(observation.cause)}`,
+      diagnostics: diagnostics(stdout, stderr),
+    });
+  }
+  return observation !== null && observation.kind === "closed"
+    ? Object.freeze({ ok: true, value: observation })
+    : failed({
+        kind: "termination-unconfirmed",
+        message: `${trigger} process group is gone but the parent close observation is unavailable`,
+        diagnostics: diagnostics(stdout, stderr),
+      });
 }
 
 function observedExecution(
@@ -471,6 +893,7 @@ function observedExecution(
   return Object.freeze({
     ok: true,
     value: Object.freeze({
+      kind: "observed" as const,
       process: Object.freeze({
         kind: "observed" as const,
         exitCode: observation.exitCode,
@@ -489,6 +912,20 @@ function observedExecution(
  * owns a detached process group; no result is returned until that whole group
  * is proven gone. Every expected infrastructure failure is returned as data.
  */
+/** The remediation authority type-pins its command's report policy to
+ *  `required-file`, so its observed executions can never collect a
+ *  `not-required` report — the overload states that promise in the type the
+ *  consumer sees instead of a defensive runtime branch. */
+async function runProjectCommand(
+  selected: AuthorizedRemediationCheck,
+  repositoryRoot: CanonicalRepositoryRoot,
+  options: CompletionCheckRunnerOptions,
+): Promise<CommandRunnerResult<RequiredFileReportPolicy>>;
+async function runProjectCommand(
+  selected: ProjectCommandCheck | AuthorizedRemediationCheck,
+  repositoryRoot: CanonicalRepositoryRoot,
+  options: CompletionCheckRunnerOptions,
+): Promise<CommandRunnerResult>;
 async function runProjectCommand(
   selected: ProjectCommandCheck | AuthorizedRemediationCheck,
   repositoryRoot: CanonicalRepositoryRoot,
@@ -563,6 +1000,18 @@ async function runProjectCommand(
     return spawnFailure(cause, diagnostics(stdout, stderr));
   }
   const parent = parentObservation(child);
+  // type-design-analyzer-1: the knowable reaping-phase bit. Node reaps the
+  // spawned child at `exit`, which precedes `close` whenever a descendant
+  // holds stdio; once observed, the numeric group id is no longer
+  // identity-bound and no further negative-PGID signal is authorized.
+  let leaderExitObserved = false;
+  child.once("exit", () => {
+    leaderExitObserved = true;
+  });
+  const reapingPhase = (): LeaderReapingPhase =>
+    leaderExitObserved
+      ? Object.freeze({ kind: "leader-reaped" })
+      : Object.freeze({ kind: "leader-unreaped" });
   const processGroupId = child.pid;
   if (processGroupId === undefined) {
     return spawnFailure("spawn returned no process id", diagnostics(stdout, stderr));
@@ -592,8 +1041,20 @@ async function runProjectCommand(
     if (trigger.observation.kind === "spawn-failed") {
       return spawnFailure(trigger.observation.cause, diagnostics(stdout, stderr));
     }
-    const group = probeProcessGroup(processGroupId);
-    if (group.kind === "gone") {
+    const settledGroup = await settleClosedProcessGroup(
+      "completion parent closed",
+      "post-close signalling was refused because the numeric group id is no longer identity-bound",
+      processGroupId,
+      hardKillWaitMs,
+    );
+    if (settledGroup.kind === "unconfirmed") {
+      return failed({
+        kind: "termination-unconfirmed",
+        message: settledGroup.message,
+        diagnostics: diagnostics(stdout, stderr),
+      });
+    }
+    if (settledGroup.kind === "initially-gone") {
       return observedExecution(
         repositoryRoot,
         check,
@@ -605,27 +1066,73 @@ async function runProjectCommand(
         reportMode,
       );
     }
-    const containment = await terminateProcessGroup(processGroupId, graceMs, hardKillWaitMs);
-    const output = diagnostics(stdout, stderr);
-    if (group.kind === "error" || !containment.ok) {
-      const causes = [group.kind === "error" ? group.message : null, containment.ok ? null : containment.message]
-        .filter((message): message is string => message !== null);
-      return failed({
-        kind: "termination-unconfirmed",
-        message: `completion parent closed but process-tree containment could not be proven: ${causes.join("; ")}`,
-        diagnostics: output,
-      });
-    }
     return failed({
       kind: "process-tree-survived",
-      message: `completion parent closed while process-group ${processGroupId} descendants remained; the group was terminated`,
+      message: `completion parent closed while process-group ${processGroupId} descendants remained; ` +
+        "the runner waited for them to exit without signalling an unbound numeric group id",
       exitCode: trigger.observation.exitCode,
       signal: trigger.observation.signal,
-      diagnostics: output,
+      diagnostics: diagnostics(stdout, stderr),
     });
   }
 
-  const containment = await terminateProcessGroup(processGroupId, graceMs, hardKillWaitMs);
+  // type-design-analyzer-1: a timeout/cancellation trigger after the spawned
+  // leader's `exit` was observed runs in the leader-reaped phase — Node reaped
+  // the child (before `close`, which descendants holding stdio can withhold),
+  // so the numeric group id is no longer identity-bound and this module
+  // signals nothing further. The state is exactly the closed-parent
+  // classification: observe, wait for a provable ESRCH, and report
+  // fail-closed. SIGTERM/SIGKILL escalation stays authorized only in the
+  // leader-unreaped phase handled below.
+  if (reapingPhase().kind === "leader-reaped") {
+    const settledGroup = await settleClosedProcessGroup(
+      `${trigger.kind} completion check ended`,
+      "post-exit signalling was refused because the numeric group id is no longer identity-bound",
+      processGroupId,
+      hardKillWaitMs,
+    );
+    if (settledGroup.kind === "unconfirmed") {
+      return failed({
+        kind: "termination-unconfirmed",
+        message: settledGroup.message,
+        diagnostics: diagnostics(stdout, stderr),
+      });
+    }
+    const parentClose = await waitForParentClose(parent, hardKillWaitMs, trigger.kind, stdout, stderr);
+    if (!parentClose.ok) return parentClose;
+    const closed = parentClose.value;
+    if (trigger.kind === "cancelled") {
+      return failed({
+        kind: "cancelled",
+        message: "completion check cancelled after its process group dissolved without signalling",
+        exitCode: closed.exitCode,
+        signal: closed.signal,
+        diagnostics: diagnostics(stdout, stderr),
+      });
+    }
+    if (settledGroup.kind === "settled-after-survivors") {
+      return failed({
+        kind: "process-tree-survived",
+        message: `${trigger.kind} completion check ended while process-group ${processGroupId} descendants remained; ` +
+          "the runner waited for them to exit without signalling an unbound numeric group id",
+        exitCode: closed.exitCode,
+        signal: closed.signal,
+        diagnostics: diagnostics(stdout, stderr),
+      });
+    }
+    return observedExecution(
+      repositoryRoot,
+      check,
+      beforeReport,
+      stdout,
+      stderr,
+      closed,
+      true,
+      reportMode,
+    );
+  }
+
+  const containment = await terminateProcessGroup(processGroupId, graceMs, hardKillWaitMs, reapingPhase);
   if (!containment.ok) {
     return failed({
       kind: "termination-unconfirmed",
@@ -633,17 +1140,9 @@ async function runProjectCommand(
       diagnostics: diagnostics(stdout, stderr),
     });
   }
-  const closed = await Promise.race<ParentObservation | null>([
-    parent,
-    delay(hardKillWaitMs).then(() => null),
-  ]);
-  if (closed === null || closed.kind !== "closed") {
-    return failed({
-      kind: "termination-unconfirmed",
-      message: `${trigger.kind} process group is gone but the parent close observation is unavailable`,
-      diagnostics: diagnostics(stdout, stderr),
-    });
-  }
+  const parentClose = await waitForParentClose(parent, hardKillWaitMs, trigger.kind, stdout, stderr);
+  if (!parentClose.ok) return parentClose;
+  const closed = parentClose.value;
   if (trigger.kind === "cancelled") {
     return failed({
       kind: "cancelled",
@@ -692,11 +1191,11 @@ export async function runCompletionCheck(
   if (!root.ok) return root;
   const execution = await runProjectCommand(parsedCheck.value, root.value, options);
   if (!execution.ok) return execution;
-  const outcome: CompletionProcessOutcome = execution.value.process.kind === "spawn-failed"
+  const outcome: CompletionProcessOutcome = execution.value.kind === "spawn-failed"
     ? execution.value.process
     : Object.freeze({
         ...execution.value.process,
-        report: completionReportOutcome(execution.value.report!),
+        report: completionReportOutcome(execution.value.report),
       });
   const checkResult: CompletionCheckResult = Object.freeze({
     checkId: parsedCheck.value.checkId,
@@ -740,13 +1239,10 @@ export async function runRemediationCheck(
   if (!root.ok) return root;
   const execution = await runProjectCommand(check, root.value, options);
   if (!execution.ok) return execution;
-  if (execution.value.report !== null && "kind" in execution.value.report &&
-      execution.value.report.kind === "not-required") {
-    return failed({
-      kind: "invalid-runner-authority",
-      message: "required remediation report observation unexpectedly became not-required",
-    });
-  }
+  // A spawn failure never collected a report; an observed required-file check
+  // always has one whose `not-required` arm does not exist (see the
+  // `runProjectCommand` overload promise). One envelope, discriminated by the
+  // CommandExecution ADT at the single field the arms differ in.
   return Object.freeze({
     ok: true,
     value: Object.freeze({
@@ -756,7 +1252,9 @@ export async function runRemediationCheck(
       manifestDigest: check.manifestDigest,
       authorityDigest: check.authorityDigest,
       process: execution.value.process,
-      report: execution.value.report === null ? null : remediationReportObservation(execution.value.report),
+      report: execution.value.kind === "spawn-failed"
+        ? null
+        : remediationReportObservation(execution.value.report),
       diagnostics: execution.value.diagnostics,
     }),
   });

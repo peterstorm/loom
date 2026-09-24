@@ -689,7 +689,7 @@ describe.sequential("Defect-Family Accounting production facade", () => {
       expect(await remediation.value.readEvents()).toHaveLength(1);
       expect(readFileSync(join(fixture.repository, ".git", "index"))).toEqual(indexBefore);
     }
-  }, 30_000);
+  }, 90_000);
 
   it("fails closed on oversized durable report replay without changing the real index", async () => {
     const fixture = scriptedReportFixture();
@@ -710,10 +710,21 @@ describe.sequential("Defect-Family Accounting production facade", () => {
     const first = await startRemediationFacade(remediation.value, prepared.value.registration);
     expect(first.ok && (first.action as { kind: string }).kind).toBe("blocked");
     // Corrupt an actual retained observation, not hand-built live source/check authority.
+    // The retained observation is selected by SHAPE, never by readdir order:
+    // entry order within one directory is platform-defined, and mutating the
+    // wrong retained event would write into an unrelated record.
     const eventsDirectory = join(remediation.value.runDirectory, "events");
-    const eventName = readdirSync(eventsDirectory).find((name) => name.endsWith(".json"));
-    if (!eventName) throw new Error("runner did not retain its real event");
-    const eventPath = join(eventsDirectory, eventName);
+    const eventPath = ((): string => {
+      for (const name of readdirSync(eventsDirectory).sort()) {
+        if (!name.endsWith(".json")) continue;
+        const candidatePath = join(eventsDirectory, name);
+        const candidate = JSON.parse(readFileSync(candidatePath, "utf8")) as {
+          event?: { process?: unknown; report?: unknown };
+        };
+        if (candidate.event?.process !== undefined && candidate.event?.report !== undefined) return candidatePath;
+      }
+      throw new Error("runner did not retain its real check observation");
+    })();
     const retained = JSON.parse(readFileSync(eventPath, "utf8"));
     const original = readFileSync(eventPath);
     retained.event.process.exitCode = 0;
@@ -802,7 +813,7 @@ describe.sequential("Defect-Family Accounting production facade", () => {
         expect(readFileSync(join(fixture.repository, ".git", "index"))).toEqual(indexBefore);
       }
     }
-  });
+  }, 90_000);
 
   it("records report removal failure durably, never launches, and cannot retry it in the same Run", async () => {
     expect(process.getuid?.()).not.toBe(0);

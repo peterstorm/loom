@@ -1,3 +1,4 @@
+import { canonicalStructuralEquals } from "./orchestration-contract";
 import {
   parseVerificationPolicy,
   requiresNewTests,
@@ -46,7 +47,18 @@ export type ProofObligation =
   | Readonly<{ kind: "task-completed" }>
   | Readonly<{ kind: "regression-test-pass" }>
   | Readonly<{ kind: "new-tests" }>
-  | Readonly<{ kind: "declared-artifact-changed"; artifact: string }>;
+  | Readonly<{ kind: "attempt-scope-attested" }>
+  | Readonly<{ kind: "declared-artifact-changed"; artifact: string }>
+  | Readonly<{ kind: "declared-artifact-attested"; artifact: string }>;
+
+/** Which byte comparison each declared artifact owes.
+ *
+ * `changed` is the default: the dispatched child itself moves the bytes.
+ * `attested` inverts the comparison for a Task whose work predates the
+ * attempt: the child must leave the declared bytes EXACTLY as the attempt
+ * baseline captured them, and a write is a failure, not a proof.
+ */
+export type DeclaredArtifactExpectation = "changed" | "attested";
 
 /** Small decomposition-owned input from which obligations are deterministically derived. */
 export type ProofObligationInput =
@@ -54,12 +66,14 @@ export type ProofObligationInput =
       verificationPolicy: VerificationPolicy;
       newTestsRequired?: never;
       declaredArtifacts: readonly string[];
+      declaredArtifactExpectation?: DeclaredArtifactExpectation;
     }>
   | Readonly<{
       verificationPolicy?: never;
       /** Compatibility input for callers not yet holding a Task policy. */
       newTestsRequired: boolean;
       declaredArtifacts: readonly string[];
+      declaredArtifactExpectation?: DeclaredArtifactExpectation;
     }>;
 
 /**
@@ -120,7 +134,37 @@ export type ProofFailure =
   | Readonly<{ kind: "untrusted-regression-tests-failed"; label: string }>
   | Readonly<{ kind: "untrusted-regression-pass"; label: string }>
   | Readonly<{ kind: "new-tests-not-observed" }>
-  | Readonly<{ kind: "declared-artifact-not-changed"; artifact: string }>;
+  | Readonly<{ kind: "attempt-scope-drifted" }>
+  | Readonly<{ kind: "declared-artifact-not-changed"; artifact: string }>
+  | Readonly<{ kind: "declared-artifact-drifted"; artifact: string }>;
+
+/** The base ProofFailure kinds whose minted `proof:` labels mark a retry
+ *  receipt as terminal attestation drift. `satisfies` binds each entry to a
+ *  real ProofFailure kind, so a rename in the union fails here instead of
+ *  silently disconnecting the matchers below. */
+const ATTESTATION_DRIFT_BASE_KINDS = Object.freeze([
+  "attempt-scope-drifted",
+  "declared-artifact-drifted",
+] as const satisfies readonly ProofFailure["kind"][]);
+
+/** The `proof:`-prefixed failure kinds implementation-completion's
+ *  `proofFailureKind` mints and every attestation-drift matcher consumes.
+ *  One membership list: the attestation lineage walk and the escalation
+ *  message selector cannot disagree about what counts as drift. Both kinds
+ *  co-occur by construction — any declared-artifact write makes the
+ *  attempt-scope delta non-empty — but that invariant is now code, not
+ *  folklore. */
+export type AttestationDriftFailureKind = Extract<
+  `proof:${ProofFailure["kind"]}`,
+  `proof:${(typeof ATTESTATION_DRIFT_BASE_KINDS)[number]}`
+>;
+
+const ATTESTATION_DRIFT_FAILURE_KINDS = Object.freeze(
+  ATTESTATION_DRIFT_BASE_KINDS.map((kind) => `proof:${kind}` as AttestationDriftFailureKind),
+) as readonly [AttestationDriftFailureKind, ...AttestationDriftFailureKind[]];
+
+export const isAttestationDriftFailureKind = (kind: string): kind is AttestationDriftFailureKind =>
+  (ATTESTATION_DRIFT_FAILURE_KINDS as readonly string[]).includes(kind);
 
 /** Evidence remains explicit about where a pass came from. */
 export type ProofEvidence =
@@ -137,7 +181,9 @@ export type ProofEvidence =
       label: string;
     }>
   | Readonly<{ kind: "new-tests"; detail: string | null }>
-  | Readonly<{ kind: "declared-artifact-changed"; artifact: string }>;
+  | Readonly<{ kind: "attempt-scope-attested" }>
+  | Readonly<{ kind: "declared-artifact-changed"; artifact: string }>
+  | Readonly<{ kind: "declared-artifact-attested"; artifact: string }>;
 
 export type PendingProofResult = Readonly<{
   state: "pending";
@@ -187,7 +233,7 @@ export type FailedTaskProof = Extract<TaskProof, { state: "failed" }>;
 export type SatisfiedTaskProof = Extract<TaskProof, { state: "satisfied" }>;
 
 const obligationKey = (obligation: ProofObligation): string =>
-  obligation.kind === "declared-artifact-changed"
+  obligation.kind === "declared-artifact-changed" || obligation.kind === "declared-artifact-attested"
     ? `${obligation.kind}:${obligation.artifact}`
     : obligation.kind;
 
@@ -202,6 +248,7 @@ const normalizedPaths = (paths: readonly string[]): readonly string[] =>
 export function deriveProofObligations(input: ProofObligationInput): NonEmpty<ProofObligation> {
   const artifacts = normalizedPaths(input.declaredArtifacts);
   const policy = input.verificationPolicy ?? verificationPolicyFromLegacy(input.newTestsRequired);
+  const expectation = input.declaredArtifactExpectation ?? "changed";
   const tail: ProofObligation[] = [
     ...(requiresRegression(policy)
       ? [Object.freeze({ kind: "regression-test-pass" as const })]
@@ -209,7 +256,12 @@ export function deriveProofObligations(input: ProofObligationInput): NonEmpty<Pr
     ...(requiresNewTests(policy)
       ? [Object.freeze({ kind: "new-tests" as const })]
       : []),
-    ...artifacts.map((artifact) => Object.freeze({ kind: "declared-artifact-changed" as const, artifact })),
+    ...(expectation === "attested"
+      ? [Object.freeze({ kind: "attempt-scope-attested" as const })]
+      : []),
+    ...artifacts.map((artifact) => Object.freeze(expectation === "attested"
+      ? { kind: "declared-artifact-attested" as const, artifact }
+      : { kind: "declared-artifact-changed" as const, artifact })),
   ];
   return nonEmpty(Object.freeze({ kind: "task-completed" }), tail);
 }
@@ -314,6 +366,18 @@ const evaluateOne = (
             obligation,
             failure: Object.freeze({ kind: "new-tests-not-observed" }),
           });
+    case "attempt-scope-attested":
+      return observed.filesModified.length === 0
+        ? Object.freeze({
+            state: "satisfied",
+            obligation,
+            evidence: Object.freeze({ kind: "attempt-scope-attested" }),
+          })
+        : Object.freeze({
+            state: "failed",
+            obligation,
+            failure: Object.freeze({ kind: "attempt-scope-drifted" }),
+          });
     case "declared-artifact-changed":
       return observed.filesModified.includes(obligation.artifact)
         ? Object.freeze({
@@ -325,6 +389,22 @@ const evaluateOne = (
             state: "failed",
             obligation,
             failure: Object.freeze({ kind: "declared-artifact-not-changed", artifact: obligation.artifact }),
+          });
+    case "declared-artifact-attested":
+      // The attested arm reads the same write observation as the changed arm,
+      // inverted: a verify-only child leaves the declared bytes untouched, so
+      // the artifact's absence from the changed set is the satisfaction. A
+      // write during an attestation attempt is drift, never evidence.
+      return observed.filesModified.includes(obligation.artifact)
+        ? Object.freeze({
+            state: "failed",
+            obligation,
+            failure: Object.freeze({ kind: "declared-artifact-drifted", artifact: obligation.artifact }),
+          })
+        : Object.freeze({
+            state: "satisfied",
+            obligation,
+            evidence: Object.freeze({ kind: "declared-artifact-attested", artifact: obligation.artifact }),
           });
   }
 };
@@ -427,20 +507,20 @@ const parseNonEmptyString = (raw: unknown, path: string): ProofParseResult<strin
 
 export function parseProofObligation(raw: unknown, path = "obligation"): ProofParseResult<ProofObligation> {
   if (!isRecord(raw)) return fail([`${path} must be an object`]);
-  if (raw.kind === "task-completed" || raw.kind === "regression-test-pass" || raw.kind === "new-tests") {
+  if (raw.kind === "task-completed" || raw.kind === "regression-test-pass" || raw.kind === "new-tests" ||
+      raw.kind === "attempt-scope-attested") {
     const kind = raw.kind;
     return parseExactRecordArm<ProofObligation>(raw, path, ["kind"], () =>
       ok(Object.freeze({ kind })));
   }
-  if (raw.kind === "declared-artifact-changed") {
-    return parseExactRecordArm(raw, path, ["kind", "artifact"], () => {
+  if (raw.kind === "declared-artifact-changed" || raw.kind === "declared-artifact-attested") {
+    const kind = raw.kind;
+    return parseExactRecordArm<ProofObligation>(raw, path, ["kind", "artifact"], () => {
       const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
-      return artifact.ok
-        ? ok(Object.freeze({ kind: "declared-artifact-changed", artifact: artifact.value }))
-        : artifact;
+      return artifact.ok ? ok(Object.freeze({ kind, artifact: artifact.value })) : artifact;
     });
   }
-  return fail([`${path}.kind must be task-completed, regression-test-pass, new-tests, or declared-artifact-changed`]);
+  return fail([`${path}.kind must be task-completed, regression-test-pass, new-tests, attempt-scope-attested, declared-artifact-changed, or declared-artifact-attested`]);
 }
 
 export function parseProofObligationInput(raw: unknown): ProofParseResult<ProofObligationInput> {
@@ -448,7 +528,7 @@ export function parseProofObligationInput(raw: unknown): ProofParseResult<ProofO
   const exact = parseExactRecordArm(
     raw,
     "proof obligation input",
-    ["verificationPolicy", "newTestsRequired", "declaredArtifacts"],
+    ["verificationPolicy", "newTestsRequired", "declaredArtifacts", "declaredArtifactExpectation"],
     () => ok(true),
   );
   if (!exact.ok) return fail(exact.errors);
@@ -468,6 +548,10 @@ export function parseProofObligationInput(raw: unknown): ProofParseResult<ProofO
     errors.push("verificationPolicy and newTestsRequired are mutually exclusive");
   }
   if (!Array.isArray(raw.declaredArtifacts)) errors.push("declaredArtifacts must be an array");
+  if (raw.declaredArtifactExpectation !== undefined &&
+      raw.declaredArtifactExpectation !== "changed" && raw.declaredArtifactExpectation !== "attested") {
+    errors.push("declaredArtifactExpectation must be changed or attested");
+  }
 
   const artifacts: string[] = [];
   if (Array.isArray(raw.declaredArtifacts)) {
@@ -481,8 +565,20 @@ export function parseProofObligationInput(raw: unknown): ProofParseResult<ProofO
   if (errors.length > 0) return fail(errors);
   const declaredArtifacts = Object.freeze([...artifacts]);
   return explicit?.ok
-    ? ok(Object.freeze({ verificationPolicy: explicit.value, declaredArtifacts }))
-    : ok(Object.freeze({ newTestsRequired: raw.newTestsRequired === true, declaredArtifacts }));
+    ? ok(Object.freeze({
+        verificationPolicy: explicit.value,
+        declaredArtifacts,
+        ...(raw.declaredArtifactExpectation === undefined
+          ? {}
+          : { declaredArtifactExpectation: raw.declaredArtifactExpectation as "changed" | "attested" }),
+      }))
+    : ok(Object.freeze({
+        newTestsRequired: raw.newTestsRequired === true,
+        declaredArtifacts,
+        ...(raw.declaredArtifactExpectation === undefined
+          ? {}
+          : { declaredArtifactExpectation: raw.declaredArtifactExpectation as "changed" | "attested" }),
+      }));
 }
 
 function parseUntrustedTestProvenance(
@@ -586,7 +682,8 @@ export function parseProofFailure(raw: unknown, path = "failure"): ProofParseRes
   switch (raw.kind) {
     case "task-not-completed":
     case "test-result-missing":
-    case "new-tests-not-observed": {
+    case "new-tests-not-observed":
+    case "attempt-scope-drifted": {
       const kind = raw.kind;
       return parseExactRecordArm<ProofFailure>(raw, path, ["kind"], () =>
         ok(Object.freeze({ kind })));
@@ -605,12 +702,13 @@ export function parseProofFailure(raw: unknown, path = "failure"): ProofParseRes
       });
     }
     case "declared-artifact-not-changed":
+    case "declared-artifact-drifted": {
+      const kind = raw.kind;
       return parseExactRecordArm<ProofFailure>(raw, path, ["kind", "artifact"], () => {
         const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
-        return artifact.ok
-          ? ok(Object.freeze({ kind: "declared-artifact-not-changed", artifact: artifact.value }))
-          : artifact;
+        return artifact.ok ? ok(Object.freeze({ kind, artifact: artifact.value })) : artifact;
       });
+    }
     default:
       return fail([`${path}.kind is not a recognized proof failure`]);
   }
@@ -618,8 +716,9 @@ export function parseProofFailure(raw: unknown, path = "failure"): ProofParseRes
 
 export function parseProofEvidence(raw: unknown, path = "evidence"): ProofParseResult<ProofEvidence> {
   if (!isRecord(raw)) return fail([`${path} must be an object`]);
-  if (raw.kind === "task-completed") {
-    return parseExactRecordArm(raw, path, ["kind"], () => ok(Object.freeze({ kind: "task-completed" })));
+  if (raw.kind === "task-completed" || raw.kind === "attempt-scope-attested") {
+    const kind = raw.kind;
+    return parseExactRecordArm<ProofEvidence>(raw, path, ["kind"], () => ok(Object.freeze({ kind })));
   }
   if (raw.kind === "regression-test-pass") {
     const allowed = raw.provenance === "pi-structured"
@@ -653,12 +752,11 @@ export function parseProofEvidence(raw: unknown, path = "evidence"): ProofParseR
       return ok(Object.freeze({ kind: "new-tests", detail: raw.detail === null ? null : raw.detail }));
     });
   }
-  if (raw.kind === "declared-artifact-changed") {
+  if (raw.kind === "declared-artifact-changed" || raw.kind === "declared-artifact-attested") {
+    const kind = raw.kind;
     return parseExactRecordArm<ProofEvidence>(raw, path, ["kind", "artifact"], () => {
       const artifact = parseNonEmptyString(raw.artifact, `${path}.artifact`);
-      return artifact.ok
-        ? ok(Object.freeze({ kind: "declared-artifact-changed", artifact: artifact.value }))
-        : artifact;
+      return artifact.ok ? ok(Object.freeze({ kind, artifact: artifact.value })) : artifact;
     });
   }
   return fail([`${path}.kind is not recognized proof evidence`]);
@@ -678,15 +776,21 @@ const resultMatchesObligation = (result: ProofObligationResult): boolean => {
         ].includes(result.failure.kind);
       case "new-tests":
         return result.failure.kind === "new-tests-not-observed";
+      case "attempt-scope-attested":
+        return result.failure.kind === "attempt-scope-drifted";
       case "declared-artifact-changed":
         return result.failure.kind === "declared-artifact-not-changed"
+          && result.failure.artifact === result.obligation.artifact;
+      case "declared-artifact-attested":
+        return result.failure.kind === "declared-artifact-drifted"
           && result.failure.artifact === result.obligation.artifact;
     }
   }
   if (result.state === "satisfied") {
     if (result.obligation.kind !== result.evidence.kind) return false;
-    return result.obligation.kind !== "declared-artifact-changed"
-      || (result.evidence.kind === "declared-artifact-changed"
+    return (result.obligation.kind !== "declared-artifact-changed" &&
+        result.obligation.kind !== "declared-artifact-attested")
+      || (result.evidence.kind === result.obligation.kind
         && result.obligation.artifact === result.evidence.artifact);
   }
   // `pending` — no evidence and no failure to disagree with the obligation, so
@@ -747,8 +851,6 @@ const parseNonEmptyArray = <T>(
   return head === undefined ? fail([`${path} must be a non-empty array`]) : ok(nonEmpty(head, tail));
 };
 
-const sameValue = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right);
-
 type ParsedProofParts = {
   readonly obligations: NonEmpty<ProofObligation>;
   readonly results: NonEmpty<ProofObligationResult>;
@@ -807,7 +909,11 @@ function parseFailedProof(raw: Record<string, unknown>, parts: ParsedProofParts)
     ? evaluated.value.flatMap((result) => result.state === "failed" ? [result.failure] : [])
     : [];
   if (evaluated.ok && derived.length === 0) errors.push("failed proof must contain at least one failed result");
-  if (evaluated.ok && failures.ok && !sameValue(failures.value, derived)) {
+  // Agreement is structural, not textual: JSON.stringify equality was
+  // key-order-sensitive and undefined-dropping, where the engine's canonical
+  // equality kernel is the exact-fit primitive (silent-failure-hunter-2). Arrays
+  // stay order-sensitive, so positional drift is still refused.
+  if (evaluated.ok && failures.ok && !canonicalStructuralEquals(failures.value, derived)) {
     errors.push("proof.failures must equal the failures derived from proof.results");
   }
   return errors.length > 0 || !failures.ok || !evaluated.ok ? fail(errors) : ok(Object.freeze({
@@ -826,7 +932,7 @@ function parseSatisfiedProof(raw: Record<string, unknown>, parts: ParsedProofPar
   const derived = evaluated.ok
     ? evaluated.value.flatMap((result) => result.state === "satisfied" ? [result.evidence] : [])
     : [];
-  if (evaluated.ok && evidence.ok && !sameValue(evidence.value, derived)) {
+  if (evaluated.ok && evidence.ok && !canonicalStructuralEquals(evidence.value, derived)) {
     errors.push("proof.evidence must equal the evidence derived from proof.results");
   }
   if (errors.length > 0 || !evidence.ok || !evaluated.ok) return fail(errors);

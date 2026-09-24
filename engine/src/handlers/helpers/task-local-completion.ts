@@ -7,7 +7,7 @@
  */
 
 import { lstatSync } from "node:fs";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import type { Task } from "../../types";
 import {
   buildTaskLocalByteObservation,
@@ -35,6 +35,7 @@ export type TaskLocalCompletionArgs = Readonly<{
   parserModifiedPaths: readonly string[];
   parserPathLabel: string;
   siblingOwnedPaths: readonly string[];
+  authoritativeStatePath?: string;
 }>;
 
 type RequiredTaskBaselines = Readonly<{
@@ -82,6 +83,28 @@ function authorityHead(
   }
 }
 
+/** Project the exact authoritative State File into repository-relative path
+ *  authority. A State File outside this repository cannot appear in its Git
+ *  change observation and therefore needs no exclusion. */
+export function authoritativeStateRepositoryPath(
+  repositoryRoot: string,
+  authoritativeStatePath: string,
+): string | null {
+  const root = resolve(repositoryRoot);
+  const absoluteStatePath = resolve(authoritativeStatePath);
+  const fromRoot = relative(root, absoluteStatePath);
+  if (fromRoot === "" || fromRoot === ".." || fromRoot.startsWith("../") ||
+      fromRoot.startsWith("..\\") || isAbsolute(fromRoot)) return null;
+  return canonicalRepositoryPaths(root, [absoluteStatePath], "authoritative State File")[0] ?? null;
+}
+
+/** Engine ownership is exact authority, never trust inferred from a namespace.
+ *  Git-ignored runtime artifacts do not enter repositoryChangedPaths; a
+ *  Git-visible review or panel artifact is therefore ordinary unowned evidence. */
+export function isEngineOwnedRuntimePath(path: string, authoritativeStatePath: string | null): boolean {
+  return authoritativeStatePath !== null && path === authoritativeStatePath;
+}
+
 function observeAvailableTaskScope(
   args: TaskLocalCompletionArgs,
   baselines: RequiredTaskBaselines,
@@ -114,10 +137,16 @@ function observeAvailableTaskScope(
       args.repositoryRoot,
       baselines.proof.map(({ artifact }) => artifact),
     );
+    const authoritativeStatePath = args.authoritativeStatePath === undefined
+      ? null
+      : authoritativeStateRepositoryPath(args.repositoryRoot, args.authoritativeStatePath);
+    // Only the exact State File selected for this settlement is engine-owned.
+    // Ignored runtime artifacts never enter the Git-visible observation; every
+    // other changed path remains byte-scope evidence regardless of namespace.
     const repositoryChangedPaths = changedRepositoryArtifactsSince(
       args.repositoryRoot,
       baselines.repository,
-    );
+    ).filter((path) => !isEngineOwnedRuntimePath(path, authoritativeStatePath));
     observed = buildTaskLocalByteObservation({
       authority: args.authority,
       attemptBaseline: baselines.attempt,
@@ -177,7 +206,14 @@ function waivedNewTestEvidence(requirement: NewTestRequirement): NewTestEvidence
     : parseNewTestEvidence(false, `verification_policy.new_tests waived: ${reason}`);
 }
 
-/** Pure new-test evidence classification from already-collected diff bytes. */
+/** Pure new-test evidence classification from already-collected diff bytes.
+ *
+ *  The zero arms distinguish "no test declarations" from "test evidence could
+ *  not be projected": files with unattributable Git patch paths (malformed or
+ *  undecodable, including C-quoted non-UTF-8 names) contribute nothing to any
+ *  count, so their absence is named instead of being published as a false
+ *  claim about what the modified files contain. The zero-unattributable
+ *  messages are byte-identical to the pre-attribution prose. */
 export function analyzeNewTests(
   diff: string,
   requirement: NewTestRequirement,
@@ -186,6 +222,7 @@ export function analyzeNewTests(
   if (waiver !== null) return waiver;
 
   const tests = git.countNewTests(diff);
+  const unattributable = git.countUnattributableDiffFiles(diff);
   const assertions = tests.total > 0 ? git.countAssertions(diff) : 0;
   if (tests.total > 0 && assertions > 0) {
     const details = [
@@ -199,10 +236,18 @@ export function analyzeNewTests(
       `${tests.total} new test methods, ${assertions} assertions (${details})`,
     );
   }
+  if (tests.total > 0) {
+    return parseNewTestEvidence(
+      false,
+      unattributable > 0
+        ? `${tests.total} test methods but 0 assertions (empty stubs?); additionally, ${unattributable} modified file(s) had unattributable Git patch paths and their added lines are excluded from every count`
+        : `${tests.total} test methods but 0 assertions (empty stubs?)`,
+    );
+  }
   return parseNewTestEvidence(
     false,
-    tests.total > 0
-      ? `${tests.total} test methods but 0 assertions (empty stubs?)`
+    unattributable > 0
+      ? `new-test evidence could not be projected for ${unattributable} modified file(s) with unattributable Git patch paths; test declarations in them are neither confirmed nor denied`
       : "no test declarations found in modified files",
   );
 }

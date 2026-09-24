@@ -41,20 +41,39 @@
  * held to the same invariant by `findingsLockstepError` at the load boundary —
  * the enumeration of all seven writers lives on `Task.findings` in types.ts.
  *
+ * This module owns the Finding/ReviewRun/Refutation SHAPES as well (atl-2):
+ * they used to sit in the types.ts catch-all beside `Task`, splitting one
+ * domain concept's identity across three layers (shape here-adjacent,
+ * invariants here, wire schema in core/reviewer-contract). The shapes moved
+ * into this concept's leaf shape volume (core/findings-shape.ts, re-exported
+ * here) — the concept's one home — and types.ts re-exports them so the
+ * ~105-file import surface is unchanged.
+ *
  * Pure module: no I/O, no clock, no randomness.
  */
 
-import {
-  FINDING_SEVERITIES,
-  PRIOR_FINDING_VERDICTS,
-  type ReviewStatus,
-  type Task,
-} from "../types";
+import type { ReviewStatus, Task } from "../types";
+import { parseReviewPath, type HeadSha, type PacketId } from "./review-packet";
+import { parseRequestId, parseSlotId, parseOrchestrationRunId } from "./orchestration-contract";
+import { isNoFindingSentinel } from "../utils/no-finding-sentinel";
+import { isExactGitSha } from "./git-sha";
+import { isRecord } from "./plain-record";
+import { reviewerDraftV2Schema, reviewerPayloadV2Schema, parseReviewerProtocolDescriptor } from "./reviewer-contract";
+
+// The Finding/ReviewRun/Refutation SHAPES live in ./findings-shape — a leaf
+// volume of this concept (it imports only ./reviewer-contract), so the
+// schema-root Task fields in types.ts can bind the vocabulary without a
+// cycle: types.ts → findings-shape stays one-way, while this behaviour volume
+// keeps its type-only Task/ReviewStatus edge to types.ts. This module owns
+// the concept and re-exports the whole shape surface, so "where findings come
+// from" stays one answer and every existing import site keeps working.
+import { FINDING_SEVERITIES, PRIOR_FINDING_VERDICTS } from "./findings-shape";
 import type {
   CurrentReviewRunEvidence,
   LegacyDraftFinding,
   DraftFinding,
   Finding,
+  FindingIdentity,
   FindingResolutionAssessment,
   FindingSeverity,
   NonEmptyRefutations,
@@ -64,31 +83,39 @@ import type {
   ResolvedFinding,
   ReviewRun,
   ReviewRunEvidence,
-} from "../types";
-import type { FindingIdentity } from "../types";
-import { parseReviewPath, type HeadSha, type PacketId } from "./review-packet";
-import { parseRequestId, parseSlotId, parseOrchestrationRunId } from "./orchestration-contract";
-import { isNoFindingSentinel } from "../utils/no-finding-sentinel";
-import { isExactGitSha } from "./git-sha";
-import { reviewerDraftV2Schema, reviewerPayloadV2Schema, parseReviewerProtocolDescriptor } from "./reviewer-contract";
-
-// The shapes live in types.ts (the schema root, with `Task`); this module owns
-// their BEHAVIOUR. Re-exported so every existing import site keeps working and
-// so "where findings come from" stays one answer.
-export { FINDING_SEVERITIES };
+} from "./findings-shape";
+export { FINDING_SEVERITIES, PRIOR_FINDING_VERDICTS } from "./findings-shape";
 export type {
+  AcceptedReviewAuthority,
+  CurrentAcceptedReviewAuthority,
+  CurrentDraftFinding,
+  CurrentReviewRun,
+  CurrentReviewRunEvidence,
+  CurrentReviewRunSlotAuthority,
   DraftFinding,
   Finding,
+  FindingIdentity,
+  FindingResolution,
   FindingResolutionAssessment,
   FindingSeverity,
+  LegacyAcceptedReviewAuthority,
+  LegacyDraftFinding,
+  LegacyReviewRun,
+  LegacyReviewRunEvidence,
+  LegacyReviewRunSlotAuthority,
+  NonEmptyPriorAssessments,
   NonEmptyRefutations,
   PriorFindingAssessment,
+  PriorFindingVerdict,
   Refutation,
   RefutedFinding,
   ResolvedFinding,
   ReviewRun,
   ReviewRunEvidence,
-};
+  ReviewRunSlotAuthority,
+  SlotBoundReviewRunEvidence,
+  UnboundReviewRunEvidence,
+} from "./findings-shape";
 
 /** Smart constructor: null when `raw` is not a known severity. */
 export function parseFindingSeverity(raw: unknown): FindingSeverity | null {
@@ -368,7 +395,7 @@ export function parseFindingsBlockResult(output: string): FindingsBlockParseResu
 
   const drafts: LegacyDraftFinding[] = [];
   for (const [index, entry] of raw.entries()) {
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    if (!isRecord(entry)) {
       return Object.freeze({ kind: "rejected", reason: `entry ${index} must be an object` });
     }
     const record = entry as Record<string, unknown>;
@@ -408,7 +435,7 @@ function parseStoredFinding(raw: unknown): Finding | null {
 }
 
 function readStoredFinding(raw: unknown): Finding | null {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  if (!isRecord(raw)) return null;
   const record = raw as Record<string, unknown>;
   const severity = parseFindingSeverity(record.severity);
   if (severity === null || typeof record.claim !== "string") return null;
@@ -449,7 +476,7 @@ function readStoredFinding(raw: unknown): Finding | null {
 }
 
 function parseStoredAssessment(raw: unknown): PriorFindingAssessment | null {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  if (!isRecord(raw)) return null;
   const record = raw as Record<string, unknown>;
   const findingId = typeof record.finding_id === "string" ? record.finding_id.trim() : "";
   const reason = typeof record.reason === "string" ? record.reason.trim() : "";
@@ -464,14 +491,14 @@ function parseStoredAssessment(raw: unknown): PriorFindingAssessment | null {
 
 /** The one definition of a well-formed stored refutation record. */
 function parseStoredRefutation(raw: unknown): RefutedFinding | null {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  if (!isRecord(raw)) return null;
   const record = raw as Record<string, unknown>;
   const finding = parseStoredFinding(record.finding);
   if (finding === null) return null;
   if (!Array.isArray(record.refutations) || record.refutations.length === 0) return null;
   const refutations: Refutation[] = [];
   for (const entry of record.refutations) {
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return null;
+    if (!isRecord(entry)) return null;
     const pair = entry as Record<string, unknown>;
     const lens = typeof pair.lens === "string" ? pair.lens.trim() : "";
     const reason = typeof pair.reason === "string" ? pair.reason.trim() : "";
@@ -493,7 +520,7 @@ function parseResolutionAssessments(input: Readonly<{
   const currentAssessments = input.finding.protocolVersion === 2 ? reviewerPayloadV2Schema.safeParse({
     schemaVersion: 2, kind: "wave-review", packetId: input.packetId, generation: input.generation,
     findings: [], prior_findings: input.assessments.map((raw) => {
-      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return raw;
+      if (!isRecord(raw)) return raw;
       const { agent: _agent, ...assessment } = raw as Record<string, unknown>;
       return assessment;
     }),
@@ -501,7 +528,7 @@ function parseResolutionAssessments(input: Readonly<{
   if (currentAssessments !== null && (!currentAssessments.success || currentAssessments.data.kind !== "wave-review")) return null;
   const assessments = input.assessments.map((raw, index) => {
     const assessment = parseStoredAssessment(raw);
-    if (assessment === null || typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+    if (assessment === null || !isRecord(raw)) return null;
     const agent = typeof (raw as Record<string, unknown>).agent === "string"
       ? ((raw as Record<string, unknown>).agent as string).trim()
       : "";
@@ -513,11 +540,10 @@ function parseResolutionAssessments(input: Readonly<{
 }
 
 function parseStoredResolution(raw: unknown): ResolvedFinding | null {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  if (!isRecord(raw)) return null;
   const record = raw as Record<string, unknown>;
   const finding = parseStoredFinding(record.finding);
-  if (finding === null || typeof record.resolution !== "object" || record.resolution === null ||
-      Array.isArray(record.resolution)) return null;
+  if (finding === null || !isRecord(record.resolution)) return null;
   const resolution = record.resolution as Record<string, unknown>;
   if (resolution.kind !== "resolved_by_remediation") return null;
   if (typeof resolution.generation !== "number" || !Number.isSafeInteger(resolution.generation) ||
@@ -597,7 +623,7 @@ export function salvageMalformedFindings(raw: unknown): readonly LegacyDraftFind
   if (!Array.isArray(raw)) return [];
   return raw.flatMap((entry) => {
     if (parseStoredFinding(entry) !== null) return [];
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return [];
+    if (!isRecord(entry)) return [];
     const record = entry as Record<string, unknown>;
     if (hasReservedFindingFields(record)) return [];
     const severity = parseFindingSeverity(record.severity);
@@ -629,7 +655,7 @@ function salvageFindingsFromMalformedRecords(
   if (!Array.isArray(raw)) return [];
   return raw.flatMap((entry) => {
     if (parseEnvelope(entry) !== null) return [];
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return [];
+    if (!isRecord(entry)) return [];
     const finding = parseStoredFinding((entry as Record<string, unknown>).finding);
     return finding === null ? [] : [finding];
   });
@@ -706,7 +732,7 @@ export function findingsViewError(raw: unknown, label: string): string | null {
 /**
  * Load-boundary check that `findings` and its two `string[]` views agree.
  *
- * `types.ts` calls the views DERIVED, six writers keep them so, and both the
+ * `types.ts` calls the views DERIVED, seven writers keep them so, and both the
  * wave gate and the GH comment read the views rather than the array. Nothing
  * proved it. Shape validation alone leaves both drift directions open, and the
  * dangerous one is silent: a critical present in `findings` but missing from
@@ -787,7 +813,7 @@ function hasReservedFindingFields(record: Record<string, unknown>): boolean {
 /** Reserved current authority cannot be repaired by stripping it into legacy data. */
 export function currentFindingAuthorityError(task: Record<string, unknown>): string | null {
   const rawRun = task.review_run;
-  if (typeof rawRun === "object" && rawRun !== null && !Array.isArray(rawRun)) {
+  if (isRecord(rawRun)) {
     const run = rawRun as Record<string, unknown>;
     const evidence = Array.isArray(run.evidence) ? run.evidence : [];
     const reserved = "reviewer_protocol" in run || evidence.some((entry) => typeof entry === "object" && entry !== null &&
@@ -809,7 +835,7 @@ export function currentFindingAuthorityError(task: Record<string, unknown>): str
 }
 
 function parseStoredDraft(raw: unknown): DraftFinding | null {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  if (!isRecord(raw)) return null;
   const record = raw as Record<string, unknown>;
   if (hasReservedFindingFields(record)) {
     if (record.protocolVersion !== 2 || !Object.hasOwn(record, "protocolVersion")) return null;
@@ -858,7 +884,7 @@ export function reviewRunError(
   label: string,
 ): string | null {
   if (raw === undefined) return null;
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return `${label} must be an object`;
+  if (!isRecord(raw)) return `${label} must be an object`;
   const run = raw as Record<string, unknown>;
   const current = Object.hasOwn(run, "reviewer_protocol");
   if (current && (!parseReviewerProtocolDescriptor(run.reviewer_protocol).ok ||
@@ -924,7 +950,7 @@ export function reviewRunError(
     const slotIds = new Set<string>();
     const requestIds = new Set<string>();
     for (const [index, rawSlot] of run.slot_authority.entries()) {
-      if (typeof rawSlot !== "object" || rawSlot === null || Array.isArray(rawSlot)) return `${label}.slot_authority is malformed`;
+      if (!isRecord(rawSlot)) return `${label}.slot_authority is malformed`;
       const slot = rawSlot as Record<string, unknown>;
       const keys = ["agent", "slot_id", "attempted", "request_id", "context_digest"];
       if (Object.keys(slot).length !== keys.length || keys.some((key) => !Object.hasOwn(slot, key)) ||
@@ -940,7 +966,7 @@ export function reviewRunError(
   const evidenceAgents: string[] = [];
   for (const [index, rawEvidence] of run.evidence.entries()) {
     const evidenceLabel = `${label}.evidence[${index}]`;
-    if (typeof rawEvidence !== "object" || rawEvidence === null || Array.isArray(rawEvidence)) {
+    if (!isRecord(rawEvidence)) {
       return `${evidenceLabel} must be an object`;
     }
     const evidence = rawEvidence as Record<string, unknown>;
@@ -963,7 +989,7 @@ export function reviewRunError(
     } else {
       if (!Array.isArray(slots)) return `${label}.slot_authority must be an array when present`;
       const slot = slots.find((candidate) =>
-        typeof candidate === "object" && candidate !== null && !Array.isArray(candidate) &&
+        isRecord(candidate) &&
         (candidate as Record<string, unknown>).agent === evidence.agent);
       if (slot === undefined) return `${evidenceLabel} has no matching engine-issued Review Run slot`;
       const authority = slot as Record<string, unknown>;
@@ -1025,7 +1051,7 @@ export function evidenceFailureError(
     }
     const duplicate = raw.findIndex((agent, at) => raw.indexOf(agent) !== at);
     if (duplicate >= 0) return `${label}: review_evidence_failures repeats '${raw[duplicate]}'`;
-    const run = typeof t.review_run === "object" && t.review_run !== null && !Array.isArray(t.review_run)
+    const run = isRecord(t.review_run)
       ? t.review_run as Record<string, unknown>
       : null;
     const expected = Array.isArray(run?.expected_agents) &&

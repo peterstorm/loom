@@ -51,7 +51,10 @@ import {
   renderProjectVerificationCoverage,
 } from "./verification-manifest";
 import { WAVE_REVIEW_AGENTS } from "./model-profiles";
-import { deriveImplementationRetryDisposition } from "./implementation-retry";
+import {
+  deriveImplementationAttestationContext,
+  deriveImplementationRetryDisposition,
+} from "./implementation-retry";
 import { staleReservationsForRosterObservation } from "./validate-task-execution";
 import {
   awaitUserAction,
@@ -82,6 +85,7 @@ import {
   type RequestId,
   type ProtectedWaveStateCommitted,
 } from "./orchestration-contract";
+import { preserveAcceptedReviewRunFindings } from "./findings";
 import {
   buildFindingBrief,
   reviewSignals,
@@ -352,7 +356,7 @@ export function reduceWaveGate<
  * transition is still checked, at runtime, by the reducer's own
  * `undeclared-transition` refusal.
  */
-export function replayWaveGateTransition(
+function replayWaveGateTransition(
   state: WaveGateState,
   event: WaveGateEvent,
 ): DomainResult<WaveGateState, WaveGateTransitionError> {
@@ -504,7 +508,8 @@ export function gateCheckMessage(check: GateCheck): string {
 
 function proofFailureMessage(failure: ProofFailure): string {
   switch (failure.kind) {
-    case "declared-artifact-not-changed": return `${failure.kind}:${failure.artifact}`;
+    case "declared-artifact-not-changed":
+    case "declared-artifact-drifted": return `${failure.kind}:${failure.artifact}`;
     case "untrusted-regression-tests-failed":
     case "untrusted-regression-pass": return `${failure.kind}:${failure.label}`;
     default: return failure.kind;
@@ -1191,6 +1196,38 @@ export function evaluateWaveGate(state: TaskGraph, waveArg: number | null, deps:
     : failedGateDecision(authority.wave, checks, failed.reason);
 }
 
+/**
+ * Retire one Wave review generation as a single aggregate transition.
+ *
+ * Every authority field invalidated by a replacement gate lives here so
+ * restart and orphan recovery cannot drift through shell-local object spreads.
+ * Accepted Findings survive; only packet-bound review evidence is retired.
+ */
+export function resetWaveGateReviewAuthority(
+  graph: TaskGraph,
+  taskIds: readonly string[],
+): TaskGraph {
+  return canonicalRecord({
+    ...graph,
+    tasks: Object.freeze(graph.tasks.map((task) => {
+      if (!taskIds.includes(task.id) || task.review_run === undefined) return task;
+      const preserved = preserveAcceptedReviewRunFindings(task);
+      return canonicalRecord({
+        ...preserved,
+        review_status: "pending" as const,
+        review_generation: task.review_generation,
+        review_run: undefined,
+        review_error: undefined,
+        review_evidence_failures: undefined,
+      });
+    })),
+    spec_check: undefined,
+    wave_review_epoch: undefined,
+    active_wave_gate: undefined,
+    active_wave_completion_suite: undefined,
+  });
+}
+
 export function applyGateDecision(state: TaskGraph, decision: GateDecision): TaskGraph {
   if (
     decision.verdict.kind !== "pass" || state.current_wave !== decision.wave ||
@@ -1268,6 +1305,9 @@ export type WaveGateNextActionError = Readonly<{
   message: string;
 }>;
 
+const nextActionFailure = (message: string): DomainResult<WaveGateNextAction, WaveGateNextActionError> =>
+  canonicalRecord({ ok: false, error: canonicalRecord({ kind: "wave-gate-next-action-rejected", message }) });
+
 function lifecycleCheckpointIdentityIsExact(
   state: WaveGateState,
   registration: ActiveWaveGateRegistration,
@@ -1322,16 +1362,10 @@ export function proveWaveGateNextAction(
   action: ExternalAction,
 ): DomainResult<WaveGateNextAction, WaveGateNextActionError> {
   if (!lifecycleMatchesSnapshot(state, snapshot)) {
-    return canonicalRecord({ ok: false, error: canonicalRecord({
-      kind: "wave-gate-next-action-rejected",
-      message: "next action lifecycle is disconnected from the exact protected Wave readiness snapshot",
-    }) });
+    return nextActionFailure("next action lifecycle is disconnected from the exact protected Wave readiness snapshot");
   }
   if (action.runId !== state.runId) {
-    return canonicalRecord({ ok: false, error: canonicalRecord({
-      kind: "wave-gate-next-action-rejected",
-      message: "next action belongs to a different Wave Gate run",
-    }) });
+    return nextActionFailure("next action belongs to a different Wave Gate run");
   }
   const binding = actionBinding(state);
   let proven: WaveGateNextAction | null = null;
@@ -1345,10 +1379,7 @@ export function proveWaveGateNextAction(
     proven = canonicalRecord({ kind: "completed", lifecycle: "done", action, binding });
   }
   if (proven === null) {
-    return canonicalRecord({ ok: false, error: canonicalRecord({
-      kind: "wave-gate-next-action-rejected",
-      message: `${action.kind} is not authorized from Wave Gate lifecycle state ${state.kind}`,
-    }) });
+    return nextActionFailure(`${action.kind} is not authorized from Wave Gate lifecycle state ${state.kind}`);
   }
   waveNextActionProofs.add(proven);
   return canonicalRecord({ ok: true, value: proven });
@@ -1709,22 +1740,19 @@ export type WaveCompletionCommitError = Readonly<{
   message: string;
 }>;
 
+const commitFailure = (message: string): DomainResult<WaveCompletionCommit, WaveCompletionCommitError> =>
+  canonicalRecord({ ok: false, error: canonicalRecord({ kind: "wave-completion-commit-rejected", message }) });
+
 /** Pure atomic payload: shell persists this graph and returns this receipt in
  * one StateManager transaction. No task/wave mutation is exposed separately. */
 export function commitWaveGateCompletion(
   snapshot: WaveReadinessSnapshot,
 ): DomainResult<WaveCompletionCommit, WaveCompletionCommitError> {
   if (!waveReadinessProofs.has(snapshot)) {
-    return canonicalRecord({ ok: false, error: canonicalRecord({
-      kind: "wave-completion-commit-rejected",
-      message: "completion requires a parser-derived canonical readiness proof",
-    }) });
+    return commitFailure("completion requires a parser-derived canonical readiness proof");
   }
   if (snapshot.graph.active_wave_gate !== snapshot.registration) {
-    return canonicalRecord({ ok: false, error: canonicalRecord({
-      kind: "wave-completion-commit-rejected",
-      message: "snapshot graph active_wave_gate is not the exact readiness registration",
-    }) });
+    return commitFailure("snapshot graph active_wave_gate is not the exact readiness registration");
   }
   const currentAuthority = completionAuthority(
     snapshot.graph,
@@ -1737,20 +1765,14 @@ export function commitWaveGateCompletion(
     currentAuthority.readinessDigest !== snapshot.readinessDigest ||
     currentAuthority.completionIntent.effectId !== snapshot.completionIntent.effectId
   ) {
-    return canonicalRecord({ ok: false, error: canonicalRecord({
-      kind: "wave-completion-commit-rejected",
-      message: "completion readiness authority drifted after proof derivation",
-    }) });
+    return commitFailure("completion readiness authority drifted after proof derivation");
   }
   if (snapshot.gateDecision.verdict.kind !== "pass") {
     const eligibility = snapshot.facts.waveGateCompletionEligibility;
     const failures = eligibility.kind === "known" && eligibility.value.kind === "ineligible"
       ? eligibility.value.failedPrerequisites
       : [snapshot.gateDecision.verdict.reason];
-    return canonicalRecord({ ok: false, error: canonicalRecord({
-      kind: "wave-completion-commit-rejected",
-      message: `completion readiness is ineligible: ${failures.join("; ")}`,
-    }) });
+    return commitFailure(`completion readiness is ineligible: ${failures.join("; ")}`);
   }
   const receipt: ProtectedWaveStateCommitted = canonicalRecord({
     kind: "protected-wave-state-committed",
@@ -1761,17 +1783,11 @@ export function commitWaveGateCompletion(
   });
   const reconciled = reconcileEffectReceipt(snapshot.completionIntent, receipt);
   if (!reconciled.ok || reconciled.value.kind !== "protected-wave-state-committed") {
-    return canonicalRecord({ ok: false, error: canonicalRecord({
-      kind: "wave-completion-commit-rejected",
-      message: reconciled.ok ? "completion produced the wrong receipt kind" : reconciled.error.message,
-    }) });
+    return commitFailure(reconciled.ok ? "completion produced the wrong receipt kind" : reconciled.error.message);
   }
   const advanced = applyGateDecision(snapshot.graph, snapshot.gateDecision);
   if (advanced === snapshot.graph) {
-    return canonicalRecord({ ok: false, error: canonicalRecord({
-      kind: "wave-completion-commit-rejected",
-      message: "locked active/current Wave authority drifted before completion",
-    }) });
+    return commitFailure("locked active/current Wave authority drifted before completion");
   }
   const activeCompletionSuite = snapshot.graph.active_wave_completion_suite;
   const completedRegistration: CompletedWaveGateRegistration = activeCompletionSuite === undefined
@@ -1796,10 +1812,7 @@ export function commitWaveGateCompletion(
       });
   const priorHistory = advanced.wave_gate_history ?? [];
   if (priorHistory.some((entry) => entry.runId === completedRegistration.runId)) {
-    return canonicalRecord({ ok: false, error: canonicalRecord({
-      kind: "wave-completion-commit-rejected",
-      message: `Wave Gate run ${completedRegistration.runId} is already terminal in history`,
-    }) });
+    return commitFailure(`Wave Gate run ${completedRegistration.runId} is already terminal in history`);
   }
   const {
     active_wave_gate: _retired,
@@ -2384,7 +2397,7 @@ export function deriveLoomStatus(snapshot: WaveReadinessSnapshot): LoomStatus {
 }
 
 /** Fail-closed status retains the complete fact inventory; no zero/ready value is fabricated. */
-export function deriveUnavailableLoomStatus(rawReasons: NonEmpty<StatusReason>): LoomStatus {
+function deriveUnavailableLoomStatus(rawReasons: NonEmpty<StatusReason>): LoomStatus {
   const reasons = Object.freeze([...rawReasons]) as NonEmpty<StatusReason>;
   const unavailable = (): Readonly<{ kind: "unavailable"; reasons: NonEmpty<StatusReason> }> =>
     canonicalRecord({ kind: "unavailable", reasons });
@@ -2408,7 +2421,7 @@ export function deriveUnavailableLoomStatus(rawReasons: NonEmpty<StatusReason>):
   });
 }
 
-export function unavailableStatusReason(message: string): StatusReason {
+function unavailableStatusReason(message: string): StatusReason {
   return reason("authority-unavailable", message);
 }
 
@@ -2668,14 +2681,36 @@ function unstartedWaveStatus(
           failureKinds: disposition.failureKinds as NonEmpty<string>,
         })]
       : []);
+  // Attestation Tasks bind their dispatch to the engine-derived attestation
+  // context (digest over the stored attested obligation set + policy). The
+  // load boundary proved mode/obligations/policy lockstep, so derivation can
+  // only fail on an in-memory graph; either way the wave reports unavailable
+  // instead of emitting a dispatch a child could not legally be admitted on.
+  const attestationAppendix = new Map(dispositions.flatMap(({ task, disposition }) => {
+    if (disposition.kind !== "initial" && disposition.kind !== "retry") return [];
+    if (task.implementation_attestation !== true) return [];
+    return [[task.id, deriveImplementationAttestationContext(task)] as const];
+  }));
+  const attestationFailure = [...attestationAppendix.entries()].find(([, derived]) => !derived.ok);
+  if (attestationFailure !== undefined) {
+    return deriveUnavailableLoomStatus(Object.freeze([
+      reason(
+        "authority-contradiction",
+        `${attestationFailure[0]} attestation mode could not derive its attestation context: ${attestationFailure[1].ok ? "" : attestationFailure[1].error}`,
+        attestationFailure[0],
+      ),
+    ]) as NonEmpty<StatusReason>);
+  }
   const dispatches = dispositions.flatMap(({ task, disposition }): readonly WaveImplementationDispatch[] => {
     if (activeTaskIds.has(task.id)) return [];
+    const attestation = attestationAppendix.get(task.id);
+    const attestationLine = attestation !== undefined && attestation.ok ? attestation.promptAppendix : null;
     if (disposition.kind === "initial") {
       return [canonicalRecord({
         kind: "initial-implementation",
         taskId: task.id,
         semanticAttempt: 1,
-        promptAppendix: null,
+        promptAppendix: attestationLine,
       })];
     }
     if (disposition.kind === "retry") {
@@ -2683,7 +2718,9 @@ function unstartedWaveStatus(
         kind: "retry-implementation",
         taskId: task.id,
         semanticAttempt: 2,
-        promptAppendix: disposition.promptAppendix,
+        promptAppendix: attestationLine === null
+          ? disposition.promptAppendix
+          : `${disposition.promptAppendix}\n${attestationLine}`,
       })];
     }
     return [];
@@ -2699,7 +2736,7 @@ function unstartedWaveStatus(
       wave,
       tasks: Object.freeze(escalated) as NonEmpty<(typeof escalated)[number]>,
     });
-    message = `Wave ${wave} requires implementation escalation; ${escalated.length} task(s) exhausted semantic attempt 2`;
+    message = `Wave ${wave} requires implementation escalation; ${escalated.length} task(s) reached a terminal implementation failure`;
   } else if (dispatches.length > 0) {
     recovery = canonicalRecord({
       kind: "spawn-wave-implementation",
@@ -2730,7 +2767,7 @@ function unstartedWaveStatus(
   for (const task of escalated) {
     reasons.push(reason(
       "implementation-escalation-required",
-      `${task.taskId} exhausted attempt 2: ${task.failureKinds.join(", ")}`,
+      `${task.taskId} reached terminal implementation failure: ${task.failureKinds.join(", ")}`,
       task.taskId,
     ));
   }

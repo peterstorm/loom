@@ -218,7 +218,10 @@ export function prepareAbandonedWaveGateSpecTraceUpgrade(
   if (active === undefined) {
     return reject("Spec trace Wave Gate retirement requires protected active_wave_gate authority");
   }
-  if (active.terminalOutcome !== null) {
+  // A `terminal-abandoned` tombstone is the expected post-`orchestration
+  // abandon` shape (the state stamp mirrors the run-directory marker); only
+  // legacy done/terminal-blocked outcomes still refuse retirement.
+  if (active.terminalOutcome !== null && active.terminalOutcome.kind !== "terminal-abandoned") {
     return reject(`Spec trace Wave Gate retirement requires nonterminal active run ${active.runId}`);
   }
   if (active.runsRoot === undefined) {

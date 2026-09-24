@@ -6,7 +6,8 @@ import upgradeSpecTrace from "../../../src/handlers/helpers/upgrade-spec-trace";
 import { prepareSpecTraceUpgrade } from "../../../src/core/spec-trace-migration";
 import { createRunDirectory } from "../../../src/orchestration/run-directory-handle";
 import { StateManager, parseTaskGraph } from "../../../src/state-manager";
-import type { TaskGraph } from "../../../src/types";
+import type { ActiveWaveGateTerminalOutcome, TaskGraph } from "../../../src/types";
+import { terminalBlockedDiagnostic } from "../../../src/core/orchestration-contract";
 import { pendingTaskProof } from "../../fixtures/task-lifecycle";
 import { capturedSpecCheck } from "../../../src/core/spec-check";
 
@@ -32,6 +33,19 @@ const finding = {
   line: null,
   claim: "preserved review evidence",
 };
+
+/** A valid terminal-blocked tombstone diagnostic, built by the kernel
+ *  constructor so the refusal pin exercises the exact state shape the
+ *  blocked-transition writer stores. */
+const terminalBlockedTombstone = (() => {
+  const parsed = terminalBlockedDiagnostic({
+    category: "invalid-authority",
+    runId: "run.active" as never,
+    message: "wave gate blocked terminally",
+  });
+  if (!parsed.ok) throw new Error(parsed.error.message);
+  return parsed.value;
+})();
 
 function legacyGraph(): TaskGraph {
   return {
@@ -168,6 +182,10 @@ describe("upgrade-spec-trace helper", () => {
   async function activeFixture(options: Readonly<{
     marker?: "valid" | "foreign" | "superseded" | "superseded-missing";
     programDigest?: string;
+    /** Tombstone stamp on the active registration (the terminal-outcome shape
+     *  the abandon stamp / terminal transitions write). Default null = the
+     *  legacy live registration the earlier fixtures exercise. */
+    terminalOutcome?: ActiveWaveGateTerminalOutcome;
   }> = {}): Promise<{ root: string; statePath: string; runsRoot: string; graph: TaskGraph }> {
     const { root, statePath } = fixture();
     const runsRoot = join(root, "wave-gate-runs");
@@ -217,7 +235,7 @@ describe("upgrade-spec-trace helper", () => {
         authorityDigest: authorityDigest as never,
         revision: 4,
         runsRoot,
-        terminalOutcome: null,
+        terminalOutcome: options.terminalOutcome ?? null,
       },
       wave_review_epoch: {
         runId: "run.active" as never,
@@ -320,6 +338,67 @@ describe("upgrade-spec-trace helper", () => {
     expect(conflicting.kind).toBe("error");
     if (conflicting.kind === "error") expect(conflicting.message).toContain("already v2 with different trace ownership");
     expect(readFileSync(statePath, "utf8")).toBe(committedBytes);
+  });
+
+  it("retires the exact abandoned run through the terminal-abandoned tombstone the abandon stamp writes", async () => {
+    const { statePath, runsRoot, graph } = await activeFixture({
+      marker: "valid",
+      terminalOutcome: {
+        kind: "terminal-abandoned" as const,
+        reason: "legacy spec scope cannot reach the correct Requirement ownership",
+        supersededBy: null,
+      } as never,
+    });
+    const result = await upgradeSpecTrace(JSON.stringify(input), ["--retire-abandoned-run"]);
+    expect(result.kind).toBe("passthrough");
+
+    const stored = new StateManager(statePath).load();
+    expect(stored.active_wave_gate).toBeUndefined();
+    expect(stored.wave_review_epoch).toBeUndefined();
+    expect(stored.spec_check).toBeUndefined();
+    expect(stored.spec_trace_version).toBe(2);
+    expect(stored.tasks[0]?.spec_contributions).toEqual(["FR-1"]);
+    expect(stored.tasks.map(({ spec_anchors: _a, spec_contributions: _c, ...rest }) => rest))
+      .toEqual(graph.tasks.map(({ spec_anchors: _a, spec_contributions: _c, ...rest }) => rest));
+    expect(stored.spec_trace_wave_gate_retirements).toEqual([{
+      schemaVersion: 1,
+      kind: "spec-trace-wave-gate-retirement",
+      runId: "run.active",
+      wave: 1,
+      authorityDigest: "c".repeat(64),
+      revision: 4,
+      runsRoot,
+      reason: "legacy spec scope cannot reach the correct Requirement ownership",
+      supersededBy: null,
+    }]);
+    expect(Object.isFrozen(stored.spec_trace_wave_gate_retirements)).toBe(true);
+    expect(Object.isFrozen(stored.spec_trace_wave_gate_retirements?.[0])).toBe(true);
+    expect(parseTaskGraph(JSON.parse(JSON.stringify(stored))).ok).toBe(true);
+
+    const committedBytes = readFileSync(statePath, "utf8");
+    const replay = await upgradeSpecTrace(JSON.stringify(input), ["--retire-abandoned-run"]);
+    expect(replay.kind).toBe("passthrough");
+    expect(readFileSync(statePath, "utf8")).toBe(committedBytes);
+  });
+
+  it.each([
+    ["done", {
+      kind: "done" as const,
+      outcome: {
+        runId: "run.active",
+        slot: { kind: "fixed-artifact-slot", path: "result.json" },
+        digest: "a".repeat(64),
+        byteLength: 11,
+      },
+    }],
+    ["terminal-blocked", { kind: "terminal-blocked" as const, diagnostic: terminalBlockedTombstone }],
+  ] as const)("refuses a %s tombstone with the nonterminal refusal and no protected-state mutation", async (_label, terminalOutcome) => {
+    const { statePath } = await activeFixture({ marker: "valid", terminalOutcome: terminalOutcome as never });
+    const before = readFileSync(statePath, "utf8");
+    const result = await upgradeSpecTrace(JSON.stringify(input), ["--retire-abandoned-run"]);
+    expect(result.kind).toBe("error");
+    if (result.kind === "error") expect(result.message).toContain("requires nonterminal active run run.active");
+    expect(readFileSync(statePath, "utf8")).toBe(before);
   });
 
   it("preserves an exact verified superseding-run pointer in the retirement audit", async () => {

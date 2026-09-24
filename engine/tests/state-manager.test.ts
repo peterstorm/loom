@@ -2,11 +2,14 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, realpathSync, writeFileSync, readFileSync, chmodSync, renameSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { StateManager, parseTaskGraph, resolveTaskGraph } from "../src/state-manager";
+import { StateManager, parseActiveWaveGateRegistration, parseTaskGraph, resolveTaskGraph } from "../src/state-manager";
 import { SUBAGENT_DIR } from "../src/config";
 import { parseNewTestEvidence, type TaskGraph } from "../src/types";
 import { derivePendingTaskProof, evaluateTaskProof } from "../src/core/proof-obligations";
+import { waveGateAuthorityDigest } from "../src/core/wave-review-authority";
+import { parseOrchestrationRunId } from "../src/core/orchestration-contract";
 import type { TaskId } from "../src/core/task-id";
+import { acceptedWaveCompletionSuite as acceptedCompletionSuite } from "./fixtures/accepted-wave-completion-suite";
 
 function makeTmpDir(): string {
   const dir = join(tmpdir(), `loom-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -1191,6 +1194,10 @@ describe("resolveTaskGraph — session ids are parsed before naming SUBAGENT_DIR
   });
 
   it("rejects a pointed graph whose ancestor is a symlink", () => {
+    // Unlike the session pointer's subagent base, the graph parent is held to
+    // the strict no-symlink rule: the pointer names an engine-issued location,
+    // so a symlinked ancestor is hostile re-binding and the authority capture
+    // refuses before any byte is read.
     const s = `sm-symlink-ancestor-${process.pid}-${Date.now()}`;
     const dir = makeTmpDir();
     const realParent = join(dir, "real-parent");
@@ -1351,5 +1358,281 @@ describe("parseTaskGraph proves findings, not just the fields that always did", 
     const parsed = parseTaskGraph(graph({ findings: [{}] }));
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.error).toContain("repair-task-graph");
+  });
+});
+
+describe("protected Wave Gate abandonment stamp (orchestration abandon → tombstone → supersede)", () => {
+  const waveGraph = {
+    current_phase: "execute",
+    current_wave: 1,
+    phase_artifacts: {},
+    skipped_phases: [],
+    spec_file: null,
+    plan_file: null,
+    wave_gates: {},
+    tasks: [{
+      id: "T1", description: "review target", agent: "code-implementer-agent", wave: 1,
+      status: "implemented", depends_on: [],
+    }],
+  };
+  const tombstone = (reason = "gate terminally blocked", supersededBy: string | null = null) => ({
+    kind: "terminal-abandoned" as const,
+    reason,
+    supersededBy,
+  });
+  const activeGate = (runId: string, graph: TaskGraph, terminalOutcome: unknown = null) => ({
+    schemaVersion: 1,
+    kind: "active-wave-gate" as const,
+    runId,
+    wave: 1,
+    authorityDigest: waveGateAuthorityDigest(1, ["T1"], graph),
+    revision: 0,
+    runsRoot: "/runs",
+    terminalOutcome,
+  });
+  it("parses a terminal-abandoned tombstone and exempts it from the nonterminal phase/wave conflict", () => {
+    // A tombstone may exist on a graph that has since left the abandoned
+    // run's phase/wave — the whole point of D1 is that the run is no longer
+    // active authority, so the nonterminal conflict check must not apply.
+    const parsed = parseTaskGraph({
+      current_phase: "init",
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      tasks: [],
+      wave_gates: {},
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: "run.gone", wave: 1,
+        authorityDigest: "a".repeat(64), revision: 2, runsRoot: "/runs",
+        terminalOutcome: tombstone(),
+      },
+    });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.value.active_wave_gate?.terminalOutcome).toEqual(tombstone());
+      expect(Object.isFrozen(parsed.value.active_wave_gate?.terminalOutcome)).toBe(true);
+    }
+
+    // A tombstone naming a successor parses too.
+    const withSuccessor = parseTaskGraph({
+      ...waveGraph,
+      active_wave_gate: activeGate("run.gone", waveGraph as unknown as TaskGraph, tombstone("reason", "run.next")),
+    });
+    expect(withSuccessor.ok).toBe(true);
+    if (withSuccessor.ok) {
+      expect(withSuccessor.value.active_wave_gate?.terminalOutcome).toEqual(tombstone("reason", "run.next"));
+    }
+
+    // The nonterminal registration on the same init-phase graph still refuses.
+    const live = parseTaskGraph({
+      current_phase: "init",
+      phase_artifacts: {},
+      skipped_phases: [],
+      spec_file: null,
+      plan_file: null,
+      tasks: [],
+      wave_gates: {},
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: "run.live", wave: 1,
+        authorityDigest: "a".repeat(64), revision: 0, terminalOutcome: null,
+      },
+    });
+    expect(live.ok).toBe(false);
+    if (!live.ok) expect(live.error).toContain("requires current_phase execute");
+  });
+
+  it.each([
+    ["an unknown terminal kind", { kind: "abandoned" }, "kind must be done, terminal-blocked, or terminal-abandoned"],
+    ["a missing reason", { kind: "terminal-abandoned", supersededBy: null }, "must contain exactly kind, reason, and supersededBy"],
+    ["a missing supersededBy", { kind: "terminal-abandoned", reason: "r" }, "must contain exactly kind, reason, and supersededBy"],
+    ["an extra field", { ...tombstone(), stamp: true }, "must contain exactly kind, reason, and supersededBy"],
+    ["an empty reason", tombstone(""), "reason must be exact non-blank trimmed text"],
+    ["an untrimmed reason", tombstone(" padded "), "reason must be exact non-blank trimmed text"],
+    ["an oversized reason", tombstone("x".repeat(513)), "reason must be exact non-blank trimmed text"],
+    ["a non-string reason", tombstone(42 as unknown as string), "reason must be exact non-blank trimmed text"],
+    ["a self-superseding tombstone", tombstone("reason", "run.gone"), "run cannot supersede itself"],
+    ["a malformed successor id", tombstone("reason", "has space"), "supersededBy"],
+  ])("refuses %s at the load boundary", (_label, terminalOutcome, expects) => {
+    const parsed = parseActiveWaveGateRegistration({
+      schemaVersion: 1, kind: "active-wave-gate", runId: "run.gone", wave: 1,
+      authorityDigest: "a".repeat(64), revision: 0, terminalOutcome,
+    });
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain(expects);
+  });
+
+  const runId = (value: string) => {
+    const parsed = parseOrchestrationRunId(value);
+    if (!parsed.ok) throw new Error(parsed.error.message);
+    return parsed.value;
+  };
+
+  it("stamps the operator's abandonment, replays idempotently, and refuses conflicting stamps", async () => {
+    const dir = makeTmpDir();
+    const statePath = join(dir, "active_task_graph.json");
+    const graph = waveGraph as unknown as TaskGraph;
+    writeFileSync(statePath, JSON.stringify(graph));
+    chmodSync(statePath, 0o444);
+    try {
+      const mgr = new StateManager(statePath);
+      await mgr.registerActiveWaveGate(activeGate("run.first", mgr.load()), ["T1"]);
+      await mgr.update((locked) => ({
+        ...locked,
+        active_wave_completion_suite: acceptedCompletionSuite(locked.active_wave_gate!),
+      }));
+      expect(mgr.load().active_wave_completion_suite).toBeDefined();
+
+      const foreignRoot = await mgr.abandonActiveWaveGateRegistration({
+        runsRoot: "/other-runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
+      });
+      expect(foreignRoot).toEqual({ kind: "not-targeted", reason: "authority-mismatch" });
+      expect(mgr.load().active_wave_gate?.terminalOutcome).toBeNull();
+      expect(mgr.load().active_wave_completion_suite).toBeDefined();
+
+      const stamped = await mgr.abandonActiveWaveGateRegistration({
+        runsRoot: "/runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
+      });
+      expect(stamped).toMatchObject({ kind: "stamped", registration: { terminalOutcome: tombstone() } });
+      if (stamped.kind !== "stamped") throw new Error("abandonment fixture did not stamp");
+      expect(mgr.load().active_wave_gate?.terminalOutcome).toEqual(tombstone());
+      expect(mgr.load().active_wave_completion_suite).toBeUndefined();
+
+      // Exact replay: same decision, no rewrite.
+      const before = readFileSync(statePath, "utf-8");
+      const replay = await mgr.abandonActiveWaveGateRegistration({
+        runsRoot: "/runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
+      });
+      expect(replay).toEqual({ kind: "replayed", registration: stamped.registration });
+      expect(readFileSync(statePath, "utf-8")).toBe(before);
+
+      // A conflicting reason is refused and leaves the stamp intact.
+      const conflicting = await mgr.abandonActiveWaveGateRegistration({
+        runsRoot: "/runs", runId: runId("run.first"), reason: "a different story", supersededBy: null,
+      });
+      expect(conflicting).toEqual({ kind: "not-targeted", reason: "terminal-conflict" });
+      expect(mgr.load().active_wave_gate?.terminalOutcome).toEqual(tombstone());
+
+      // A foreign run id and an absent registration are no-ops.
+      expect(await mgr.abandonActiveWaveGateRegistration({
+        runsRoot: "/runs", runId: runId("run.other"), reason: "gate terminally blocked", supersededBy: null,
+      })).toEqual({ kind: "not-targeted", reason: "authority-mismatch" });
+      expect(mgr.load().active_wave_gate?.terminalOutcome).toEqual(tombstone());
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("abandons nothing when no registration is installed, and leaves the graph byte-identical", async () => {
+    // The registration-absent arm: without active_wave_gate there is no
+    // protected registration to tombstone, so the operator's abandon must be
+    // a typed no-op — not an apparent write and not an authority error.
+    const dir = makeTmpDir();
+    const statePath = join(dir, "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify(waveGraph));
+    chmodSync(statePath, 0o444);
+    try {
+      const mgr = new StateManager(statePath);
+      const before = readFileSync(statePath, "utf-8");
+      expect(await mgr.abandonActiveWaveGateRegistration({
+        runsRoot: "/runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
+      })).toEqual({ kind: "not-targeted", reason: "registration-absent" });
+      expect(readFileSync(statePath, "utf-8")).toBe(before);
+      expect(mgr.load().active_wave_gate).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stamps nothing when the registration is already terminal in another way", async () => {
+    const dir = makeTmpDir();
+    const statePath = join(dir, "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify({
+      ...waveGraph,
+      active_wave_gate: activeGate("run.done", waveGraph as unknown as TaskGraph, {
+        kind: "terminal-abandoned", reason: "earlier decision", supersededBy: null,
+      }),
+    }));
+    chmodSync(statePath, 0o444);
+    try {
+      const mgr = new StateManager(statePath);
+      const before = readFileSync(statePath, "utf-8");
+      expect(await mgr.abandonActiveWaveGateRegistration({
+        runsRoot: "/runs", runId: runId("run.done"), reason: "a different story", supersededBy: null,
+      })).toEqual({ kind: "not-targeted", reason: "terminal-conflict" });
+      expect(readFileSync(statePath, "utf-8")).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("lets a fresh start supersede an abandoned tombstone instead of dead-locking the Wave", async () => {
+    const dir = makeTmpDir();
+    const statePath = join(dir, "active_task_graph.json");
+    const graph = waveGraph as unknown as TaskGraph;
+    writeFileSync(statePath, JSON.stringify(graph));
+    chmodSync(statePath, 0o444);
+    try {
+      const mgr = new StateManager(statePath);
+      await mgr.registerActiveWaveGate(activeGate("run.first", mgr.load()), ["T1"]);
+      await mgr.abandonActiveWaveGateRegistration({
+        runsRoot: "/runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
+      });
+
+      // The digest is re-derived from the CURRENT locked state — the tombstone
+      // is part of it, exactly as production derives it before install.
+      await mgr.registerActiveWaveGate(activeGate("run.second", mgr.load()), ["T1"]);
+      const after = mgr.load();
+      expect(after.active_wave_gate?.runId).toBe("run.second");
+      expect(after.active_wave_gate?.terminalOutcome).toBeNull();
+      // The tombstone is NOT archived into terminal history: that history
+      // poisons later starts for the same Wave, and an abandoned run was
+      // never completed.
+      expect(after.wave_gate_history).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("binds a named abandonment successor to exactly that fresh registration", async () => {
+    const dir = makeTmpDir();
+    const statePath = join(dir, "active_task_graph.json");
+    const graph = waveGraph as unknown as TaskGraph;
+    writeFileSync(statePath, JSON.stringify(graph));
+    chmodSync(statePath, 0o444);
+    try {
+      const mgr = new StateManager(statePath);
+      await mgr.registerActiveWaveGate(activeGate("run.first", mgr.load()), ["T1"]);
+      await mgr.abandonActiveWaveGateRegistration({
+        runsRoot: "/runs", runId: runId("run.first"), reason: "replaced", supersededBy: runId("run.expected"),
+      });
+
+      await expect(mgr.registerActiveWaveGate(activeGate("run.other", mgr.load()), ["T1"]))
+        .rejects.toThrow("authorizes successor run.expected, not run.other");
+      await mgr.registerActiveWaveGate(activeGate("run.expected", mgr.load()), ["T1"]);
+      expect(mgr.load().active_wave_gate?.runId).toBe("run.expected");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still refuses a fresh start while a legacy terminal registration owns the Wave", async () => {
+    const dir = makeTmpDir();
+    const statePath = join(dir, "active_task_graph.json");
+    const graph = waveGraph as unknown as TaskGraph;
+    writeFileSync(statePath, JSON.stringify({
+      ...waveGraph,
+      active_wave_gate: activeGate("run.done", graph, { kind: "done", outcome: {
+        runId: "run.done", slot: "result.json", digest: "b".repeat(64), byteLength: 3,
+      } }),
+    }));
+    chmodSync(statePath, 0o444);
+    try {
+      const mgr = new StateManager(statePath);
+      await expect(mgr.registerActiveWaveGate(activeGate("run.next", mgr.load()), ["T1"]))
+        .rejects.toThrow("must be explicitly migrated to terminal history");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

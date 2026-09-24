@@ -19,6 +19,55 @@ export function boundDiagnosticMessage(message: string): string {
     : `${message.slice(0, MAX_DIAGNOSTIC_MESSAGE_LENGTH - DIAGNOSTIC_TRUNCATION_MARKER.length)}${DIAGNOSTIC_TRUNCATION_MARKER}`;
 }
 
+/** Bounded text budget for a converted thrown cause. Small enough that no
+ *  full hostile input is ever echoed into a refusal, large enough to name the
+ *  defect. Same idea as `boundDiagnosticMessage`, but the marker is the
+ *  single-character ellipsis the packet and successor parsers have always
+ *  used, so their pinned refusal bytes stay identical. */
+export const MAX_THROWN_CAUSE_TEXT_LENGTH = 256;
+
+const boundedCauseText = (value: string): string =>
+  value.length <= MAX_THROWN_CAUSE_TEXT_LENGTH
+    ? value
+    : `${value.slice(0, MAX_THROWN_CAUSE_TEXT_LENGTH - 1)}…`;
+
+/** Local to this module: every consumer reads the plain { name, message } shape
+ *  off `boundedThrownCause`'s return value, so the name never needs to escape
+ *  the kernel (cs-7). */
+type BoundedThrownCause = Readonly<{ name: string; message: string }>;
+
+/**
+ * The ONE bounded thrown-cause capture for every fail-closed boundary that
+ * converts an unexpected throw into a typed refusal: the Context Packet
+ * parsers, the packet projection read-model, and the successor registration
+ * and capture-witness adapters. It used to be two hand-maintained copies (the
+ * packet core could not import a handler module), and a third layer was one
+ * copy away from minting its own variant.
+ *
+ * The 256-char budget, the Error/NonError/Uninspectable arms, and the `…`
+ * truncation are shared; each caller keeps its own refusal prose and its own
+ * subject phrase (e.g. "context packet", "successor source"), so the message
+ * stays attributable without the capture drifting between layers. The
+ * `UninspectableCause` arm keeps a throwing getter on the thrown value from
+ * crashing the boundary itself.
+ */
+export function boundedThrownCause(thrown: unknown, subject: string): BoundedThrownCause {
+  try {
+    if (thrown instanceof Error) {
+      return {
+        name: boundedCauseText(typeof thrown.name === "string" && thrown.name !== "" ? thrown.name : "Error"),
+        message: boundedCauseText(typeof thrown.message === "string" ? thrown.message : `${subject} inspection failed`),
+      };
+    }
+    return {
+      name: "NonErrorThrown",
+      message: boundedCauseText(typeof thrown === "string" ? thrown : `${subject} inspection failed with a non-Error cause`),
+    };
+  } catch {
+    return { name: "UninspectableCause", message: `${subject} inspection failed with an uninspectable cause` };
+  }
+}
+
 /**
  * Constructs a frozen canonical data record without an Object.prototype chain.
  * Own enumerable fields and symbols retain their descriptors, so discriminants,
@@ -128,22 +177,60 @@ export function structurallyEqual(left: unknown, right: unknown, seen: Structura
   if (typeof left !== "object" || typeof right !== "object" || left === null || right === null) {
     return false;
   }
+  // A Context Packet's ImmutableByteSequence and its parsed wire form (the
+  // plain number array JSON makes of it) are two spellings of the same
+  // bytes — the packet contract binds them with one digest. Materialize the
+  // tagged sides and let the ordinary array arm below compare them: a
+  // sequence deliberately has no own enumerable keys (Object.keys of a
+  // sequence is empty), so record equality would vacuously accept ANY two
+  // sequences, and an unmaterialized mixed pair would be refused by the same
+  // arm that refuses array-vs-record. A tagged side that cannot iterate
+  // (hostile prototype) refuses instead of throwing. The memo keys the
+  // ORIGINAL pair: a sequence's iteration can never introduce a cycle.
+  let subjectLeft: readonly unknown[] | object = left;
+  let subjectRight: readonly unknown[] | object = right;
+  const leftSequence = hasImmutableByteSequenceTag(left);
+  const rightSequence = hasImmutableByteSequenceTag(right);
+  if (leftSequence || rightSequence) {
+    const materializedLeft = leftSequence ? byteSequenceEntries(left) : left;
+    const materializedRight = rightSequence ? byteSequenceEntries(right) : right;
+    if (materializedLeft === null || materializedRight === null) return false;
+    subjectLeft = materializedLeft;
+    subjectRight = materializedRight;
+  }
   return withPairInProgress(left, right, seen, () => {
-    if (Array.isArray(left) || Array.isArray(right)) {
-      return Array.isArray(left) && Array.isArray(right) && left.length === right.length &&
-        left.every((entry, index) => structurallyEqual(entry, right[index], seen));
+    if (Array.isArray(subjectLeft) || Array.isArray(subjectRight)) {
+      return Array.isArray(subjectLeft) && Array.isArray(subjectRight) &&
+        subjectLeft.length === subjectRight.length &&
+        subjectLeft.every((entry, index) => structurallyEqual(entry, subjectRight[index], seen));
     }
-    if (left instanceof Map || right instanceof Map) return mapsEqual(left, right, seen);
-    if (left instanceof Set || right instanceof Set) return setsEqual(left, right, seen);
-    if (left instanceof Date || right instanceof Date) {
-      return left instanceof Date && right instanceof Date && Object.is(left.getTime(), right.getTime());
+    if (subjectLeft instanceof Map || subjectRight instanceof Map) {
+      return mapsEqual(subjectLeft, subjectRight, seen);
     }
-    if (left instanceof RegExp || right instanceof RegExp) {
-      return left instanceof RegExp && right instanceof RegExp &&
-        left.source === right.source && left.flags === right.flags;
+    if (subjectLeft instanceof Set || subjectRight instanceof Set) {
+      return setsEqual(subjectLeft, subjectRight, seen);
     }
-    return recordsEqual(left, right, seen);
+    if (subjectLeft instanceof Date || subjectRight instanceof Date) {
+      return subjectLeft instanceof Date && subjectRight instanceof Date &&
+        Object.is(subjectLeft.getTime(), subjectRight.getTime());
+    }
+    if (subjectLeft instanceof RegExp || subjectRight instanceof RegExp) {
+      return subjectLeft instanceof RegExp && subjectRight instanceof RegExp &&
+        subjectLeft.source === subjectRight.source && subjectLeft.flags === subjectRight.flags;
+    }
+    return recordsEqual(subjectLeft, subjectRight, seen);
   });
+}
+
+/** Materialize a tagged byte-sequence side of a comparison: the sequence
+ *  iterates its bytes; anything that cannot iterate (a hostile tagged
+ *  non-iterable) refuses instead of throwing. */
+function byteSequenceEntries(value: unknown): readonly unknown[] | null {
+  try {
+    return Array.from(value as Iterable<unknown>);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -158,6 +245,21 @@ export function structurallyEqual(left: unknown, right: unknown, seen: Structura
 export function canonicalStructuralEquals(left: unknown, right: unknown): boolean {
   return structurallyEqual(left, right, new Map());
 }
+
+/** Well-known registry tag shared with core/context-packets' ImmutableByteSequence
+ *  prototype. The equality kernel must recognize byte sequences WITHOUT importing
+ *  the packet module — the packet module imports this kernel — so the tag travels
+ *  through the global symbol registry instead of an import edge.
+ *
+ *  The tag is set only on the packet module's frozen sequence prototype. A plain
+ *  number array (the parsed wire form) never carries it, which is exactly the
+ *  distinction the byte-sequence comparison arm needs: one tagged side means
+ *  "compare as byte sequences"; neither tagged means every other rule applies. */
+export const IMMUTABLE_BYTE_SEQUENCE_TAG: unique symbol = Symbol.for("@peterstorm/loom/immutable-byte-sequence");
+
+const hasImmutableByteSequenceTag = (value: unknown): boolean =>
+  typeof value === "object" && value !== null &&
+  (value as Record<symbol, unknown>)[IMMUTABLE_BYTE_SEQUENCE_TAG] === true;
 
 export const success = <T, E = never>(value: T): DomainResult<T, E> => canonicalRecord({ ok: true, value });
 export const failure = <T = never, E = never>(error: E): DomainResult<T, E> =>

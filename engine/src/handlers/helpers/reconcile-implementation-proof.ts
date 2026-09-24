@@ -8,7 +8,7 @@ import {
   type TaskGraph,
 } from "../../types";
 import { newWaveGate } from "../../types";
-import { taskGraphPath } from "../../config";
+import { observeTaskGraphProjectBoundary, taskGraphPath } from "../../config";
 import { StateManager } from "../../state-manager";
 import {
   evaluateTaskProof,
@@ -25,16 +25,15 @@ import {
   changedDeclaredArtifactsSince,
   changedDeclaredArtifactsSinceRevision,
 } from "../../utils/artifact-baseline";
-import * as git from "../../utils/git";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
 import {
   isWaveComplete,
-  parseNewTestEvidence,
   type NewTestEvidence,
 } from "../../core/implementation-application";
 import {
   collectNewTestEvidence,
   describeNewTestObservationError,
+  realDiffDepsAt,
 } from "./task-local-completion";
 import { parseWaveArg } from "./wave-args";
 import { isExactGitSha } from "../../core/git-sha";
@@ -224,20 +223,18 @@ function taskCompletionWasObserved(task: Task): boolean {
 export function reconcileTaskFromStoredEvidence(
   task: Task,
   proofArtifactsChanged: readonly string[],
-  collectedNewTests: NewTestEvidence | Readonly<{ written: boolean; evidence: string }>,
+  collectedNewTests: NewTestEvidence,
   allowLegacyPositiveMigration = false,
 ): Task {
   if (task.status === "completed") return task;
-  const normalizedNewTests = parseNewTestEvidence(
-    collectedNewTests.written,
-    collectedNewTests.evidence,
-  );
-  const newTestsWritten = normalizedNewTests.written;
-  const newTestEvidence = normalizedNewTests.evidence;
+  // The ADT arrives parsed; no legacy-pair re-coercion here.
+  const newTestsWritten = collectedNewTests.written;
+  const newTestEvidence = collectedNewTests.evidence;
   const proof = evaluateTaskProof(
     {
       verificationPolicy: taskVerificationPolicy(task),
       declaredArtifacts: task.file_list ?? [],
+      declaredArtifactExpectation: task.implementation_attestation === true ? "attested" : "changed",
     },
     {
       taskCompleted: taskCompletionWasObserved(task) ||
@@ -256,9 +253,13 @@ export function reconcileTaskFromStoredEvidence(
       proof,
       revalidation_required: undefined,
       legacy_missing_proof: undefined,
-      ...storedNewTestEvidence(normalizedNewTests),
+      ...storedNewTestEvidence(collectedNewTests),
     };
   }
+  // The duplicated pending shape is load-bearing, not noise: Task's ADT makes
+  // `revalidation_required: true` a literal on the satisfied arm, so the two
+  // objects must be built per-arm for TS to prove the legal state. Collapsing
+  // them into one ternary-carrying object fails to typecheck (TS2322).
   return proof.state === "satisfied"
     ? {
         ...task,
@@ -266,7 +267,7 @@ export function reconcileTaskFromStoredEvidence(
         proof,
         revalidation_required: true,
         legacy_missing_proof: undefined,
-        ...storedNewTestEvidence(normalizedNewTests),
+        ...storedNewTestEvidence(collectedNewTests),
       }
     : {
         ...task,
@@ -274,14 +275,14 @@ export function reconcileTaskFromStoredEvidence(
         proof,
         revalidation_required: task.revalidation_required,
         legacy_missing_proof: undefined,
-        ...storedNewTestEvidence(normalizedNewTests),
+        ...storedNewTestEvidence(collectedNewTests),
       };
 }
 
 function failureSummary(task: Task): string {
   if (task.proof?.state !== "failed") return task.proof?.state ?? "missing";
   return task.proof.failures.map((failure) =>
-    failure.kind === "declared-artifact-not-changed"
+    failure.kind === "declared-artifact-not-changed" || failure.kind === "declared-artifact-drifted"
       ? `${failure.kind}:${failure.artifact}`
       : failure.kind
   ).join(", ");
@@ -312,10 +313,17 @@ const handler: HookHandler = async (_stdin, args) => {
   const statePath = taskGraphPath();
   const manager = StateManager.fromPath(statePath);
   if (!manager) return { kind: "error", message: `No task graph at ${statePath}` };
-  const root = git.repositoryRoot();
-  if (!root || !git.isGitRepo()) {
-    return { kind: "error", message: "reconcile-implementation-proof requires a git repository" };
+  let root: string;
+  try {
+    const boundary = observeTaskGraphProjectBoundary(manager.getPath());
+    if (boundary.kind !== "git-repository") {
+      return { kind: "error", message: "reconcile-implementation-proof requires a git repository" };
+    }
+    root = boundary.root;
+  } catch (error) {
+    return { kind: "error", message: reconciliationFailureMessage(error) };
   }
+  const diffDeps = realDiffDepsAt(root);
   if (recoveredBaselineSha !== null) {
     try {
       execFileSync("git", ["cat-file", "-e", `${recoveredBaselineSha}^{commit}`], {
@@ -341,9 +349,9 @@ const handler: HookHandler = async (_stdin, args) => {
   }
 
   let wave = requestedWave ?? 1;
-  let reconciled: TaskGraph | null = null;
+  let published: TaskGraph;
   try {
-    await manager.update((state) => {
+    published = await manager.updateAndReturn((state) => {
       wave = requestedWave ?? state.current_wave ?? 1;
       if (!state.tasks.some((task) => task.wave === wave)) {
         throw new Error(`Wave ${wave} has no tasks`);
@@ -386,16 +394,36 @@ const handler: HookHandler = async (_stdin, args) => {
         const sourceTask = recoveredPaths.length > 0
           ? invalidateTaskReview(recoveredTask)
           : recoveredTask;
-        const snapshotChanges = changedDeclaredArtifactsSince(root, sourceTask.artifact_baseline);
-        const revisionChanges = sourceTask.start_sha
-          ? changedDeclaredArtifactsSinceRevision(root, sourceTask.start_sha, sourceTask.file_list ?? [])
-          : [];
-        const byteChanges = [...new Set([...snapshotChanges, ...revisionChanges])];
-        const proofArtifactsChanged = attributedChangedArtifacts(byteChanges, sourceTask.files_modified ?? []);
+        // Attestation measures drift against the ATTEMPT baseline, never the
+        // population baseline: the work predates the attempt, so
+        // population-relative changes ARE the attested bytes, not evidence of
+        // writes. It also refuses transcript attribution — cumulative
+        // files_modified from earlier attempts would otherwise read as drift
+        // this attempt never produced.
+        const attestation = sourceTask.implementation_attestation === true;
+        if (attestation && sourceTask.attempt_artifact_baseline === undefined) {
+          throw new Error(
+            `attestation Task ${sourceTask.id} has no attempt_artifact_baseline to attest against; ` +
+            "dispatch an attestation attempt first — the attest program only prepares the Task",
+          );
+        }
+        const snapshotChanges = attestation
+          ? []
+          : changedDeclaredArtifactsSince(root, sourceTask.artifact_baseline);
+        const revisionChanges = attestation || !sourceTask.start_sha
+          ? []
+          : changedDeclaredArtifactsSinceRevision(root, sourceTask.start_sha, sourceTask.file_list ?? []);
+        const byteChanges = attestation
+          ? changedDeclaredArtifactsSince(root, sourceTask.attempt_artifact_baseline)
+          : [...new Set([...snapshotChanges, ...revisionChanges])];
+        const proofArtifactsChanged = attestation
+          ? byteChanges
+          : attributedChangedArtifacts(byteChanges, sourceTask.files_modified ?? []);
         const collectedNewTests = collectNewTestEvidence(
           sourceTask.files_modified ?? [],
           taskVerificationPolicy(sourceTask).newTests,
           sourceTask.start_sha,
+          diffDeps,
         );
         if (!collectedNewTests.ok) {
           throw new Error(
@@ -415,7 +443,7 @@ const handler: HookHandler = async (_stdin, args) => {
         tasks,
         ...(recoveredWritesApplied && state.spec_check?.wave === wave ? { spec_check: undefined } : {}),
       };
-      reconciled = {
+      const stateWithGate: TaskGraph = {
         ...resolved,
         wave_gates: {
           ...resolved.wave_gates,
@@ -426,16 +454,13 @@ const handler: HookHandler = async (_stdin, args) => {
           },
         },
       };
-      return reconciled;
+      return { state: stateWithGate, value: stateWithGate };
     });
   } catch (error) {
     return { kind: "error", message: reconciliationFailureMessage(error) };
   }
 
-  if (reconciled === null) {
-    return { kind: "error", message: "reconcile-implementation-proof produced no state" };
-  }
-  const tasks = (reconciled as TaskGraph).tasks.filter((task) => task.wave === wave);
+  const tasks = published.tasks.filter((task) => task.wave === wave);
   for (const task of tasks) {
     process.stderr.write(
       `${task.id}: status=${task.status}, proof=${task.proof?.state ?? "missing"}` +
