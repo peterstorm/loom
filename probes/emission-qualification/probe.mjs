@@ -204,7 +204,12 @@ async function runPhase(bus, child, records, argsEntries, spec, instruction, lab
   child.stdin.write(`${JSON.stringify({ id: promptId, type: "prompt", message: instruction })}\n`);
   const response = await bus.waitFor((e) => e.type === "response" && e.id === promptId, STATE_TIMEOUT_MS, `prompt ${label}`);
   if (!response.success) {
-    return { promptRejected: response.error ?? "prompt rejected", phaseRecords: [], phaseArgs: [] };
+    // The prompt gate rejected the instruction — no model request was made.
+    // The phase still owns its window bounds, so the final re-analysis reads
+    // the same (empty) [start, end) windows instead of sliding to record 0,
+    // and the rejection itself is persisted in the report as prompt-level
+    // vocabulary (AD-2: never dressed as a route verdict).
+    return { promptRejected: response.error ?? "prompt rejected", phaseRecords: [], phaseArgs: [], recordStart, argsStart, argsEnd: argsEntries.length };
   }
   const responseIndex = bus.events.indexOf(response);
   const start = Date.now();
@@ -216,7 +221,10 @@ async function runPhase(bus, child, records, argsEntries, spec, instruction, lab
   await sleep(SETTLE_GRACE_MS);
   const phaseRecords = records.slice(recordStart).filter((r) => r.request);
   const phaseArgs = argsEntries.slice(argsStart);
-  return { phaseRecords, phaseArgs, recordStart, argsStart };
+  // argsEnd is the bound the FIRST analysis used (args present at return); the
+  // final re-analysis slices the identical closed [argsStart, argsEnd) window,
+  // so a late execute-arg from a later phase can never be attributed here.
+  return { phaseRecords, phaseArgs, recordStart, argsStart, argsEnd: argsEntries.length };
 }
 
 /** Classification follows only from the observations (AD-2). Infrastructure
@@ -226,6 +234,7 @@ async function runPhase(bus, child, records, argsEntries, spec, instruction, lab
  *  parses as JSON cannot read as a pass. */
 function classifyOutcome(a, v, d) {
   if (a.upstreamError !== undefined) return `INFRASTRUCTURE: upstream unreachable (${a.upstreamError}) — no route verdict recorded`;
+  if (a.promptRejected !== undefined) return `prompt rejected (${a.promptRejected}) — no route verdict recorded`;
   if (!a.modelRequests) return "no-request-observed";
   if (!a.accepted) return `rejected (HTTP ${a.httpStatus}) → extraction-only`;
   if (d?.argsEmitted !== undefined && d.argsConforms === false) return "direct enforcement probe inconclusive (emitted arguments are not schema-shaped)";
@@ -244,11 +253,12 @@ function classifyOutcome(a, v, d) {
   return "violation inconclusive";
 }
 
-function analyzePhase(spec, { phaseRecords, phaseArgs }) {
+function analyzePhase(spec, { phaseRecords, phaseArgs, promptRejected }) {
   const conforms = spec.conformsDetect !== undefined ? new Function(`return (${spec.conformsDetect})`)() : null;
   const analysis = {
     modelRequests: phaseRecords.length,
     upstreamError: undefined,
+    promptRejected: promptRejected ?? undefined,
     accepted: false,
     httpStatus: undefined,
     toolSent: false,
@@ -433,8 +443,8 @@ async function main() {
       toolReport.classification = classifyOutcome(toolReport.acceptance, toolReport.violation, toolReport.directEnforcement);
       report.tools[spec.registeredToolName] = toolReport;
       phaseBounds.set(spec.registeredToolName, {
-        acceptance: { recordStart: acceptancePhase.recordStart, recordEnd: acceptanceEnd, argsStart: acceptancePhase.argsStart },
-        violation: { recordStart: violationPhase.recordStart, recordEnd: violationEnd, argsStart: violationPhase.argsStart },
+        acceptance: { recordStart: acceptancePhase.recordStart, recordEnd: acceptanceEnd, argsStart: acceptancePhase.argsStart, argsEnd: acceptancePhase.argsEnd, promptRejected: acceptancePhase.promptRejected },
+        violation: { recordStart: violationPhase.recordStart, recordEnd: violationEnd, argsStart: violationPhase.argsStart, argsEnd: violationPhase.argsEnd, promptRejected: violationPhase.promptRejected },
       });
     }
   } catch (error) {
@@ -456,9 +466,10 @@ async function main() {
     const toolReport = report.tools[spec.registeredToolName];
     const bounds = phaseBounds.get(spec.registeredToolName);
     if (toolReport === undefined || bounds === undefined) continue;
-    const phaseWindow = ({ recordStart, recordEnd, argsStart }) => ({
+    const phaseWindow = ({ recordStart, recordEnd, argsStart, argsEnd, promptRejected }) => ({
       phaseRecords: records.slice(recordStart, recordEnd).filter((r) => r.request),
-      phaseArgs: argsEntries.slice(argsStart),
+      phaseArgs: argsEntries.slice(argsStart, argsEnd),
+      promptRejected,
     });
     toolReport.acceptance = analyzePhase(spec, phaseWindow(bounds.acceptance));
     toolReport.violation = analyzePhase(spec, phaseWindow(bounds.violation));

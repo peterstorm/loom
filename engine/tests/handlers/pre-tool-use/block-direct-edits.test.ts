@@ -21,7 +21,7 @@ import {
   type ActiveRosterProbe,
 } from "../../../src/core/block-direct-edits";
 import blockDirectEdits, { activeRosterProbe } from "../../../src/handlers/pre-tool-use/block-direct-edits";
-import { SUBAGENT_DIR, TASK_GRAPH_PATH, pathExistsFailClosed, gitRepositoryRoot } from "../../../src/config";
+import { SUBAGENT_DIR, pathExistsFailClosed, gitRepositoryRoot } from "../../../src/config";
 import { parseSessionId } from "../../../src/machine/evidence";
 
 const orchestrating = () => true;
@@ -249,13 +249,14 @@ describe("pathExistsFailClosed — fail-closed existence probe (round-40 C1/C2)"
 });
 
 describe("shouldBlockDirectEdit — the arming port is required (lazy-arming doctrine)", () => {
-  it("every arming decision names its probe — the import-frozen default is gone", () => {
-    // Behavior guard: the explicit probe drives the decision, identically on
-    // both sides (the old round-40 concern — fail-closed arming — now lives in
-    // the probe itself, `pathExistsFailClosed`).
-    const probe = () => pathExistsFailClosed(TASK_GRAPH_PATH);
-    expect(shouldBlockDirectEdit("Edit", sNoActive, probe).kind)
-      .toBe(shouldBlockDirectEdit("Edit", sNoActive, probe).kind);
+  it("the probe decides: a proven-absent graph allows, a proven-present graph blocks", () => {
+    // The probe-to-decision mapping the lazy-arming doctrine pins: the SAME
+    // session must ALLOW when the injected probe proves no task graph and
+    // BLOCK when it proves one — the arming decision is the probe's, made at
+    // call time, never the module's (the old round-40 concern — fail-closed
+    // arming — now lives in the probe itself, `pathExistsFailClosed`).
+    expect(shouldBlockDirectEdit("Edit", sNoActive, () => false).kind).toBe("allow");
+    expect(shouldBlockDirectEdit("Edit", sNoActive, () => true).kind).toBe("block");
     // Type-level pin: omitting the required port is a COMPILE error — no
     // frozen default stands in for the arming decision. Typed, never executed.
     // @ts-expect-error the task-graph port is required — no frozen default stands in
@@ -504,5 +505,66 @@ describe("block-direct-edits handler — panel-artifact targets (end-to-end wiri
       session_id: s,
     }), []);
     expect(result.kind).toBe("block");
+  });
+});
+
+describe("block-direct-edits handler — the write-target projection's catch branch (round-41 A2 twin)", () => {
+  /**
+   * The pi twin's catch branch is pinned in panel-guard-targets.test.ts; this
+   * is the Claude handler's twin, reached the same REAL way — a git binary
+   * that cannot START (no PATH) makes `gitRepositoryRoot` throw (config's
+   * confirmed-anomaly contract). The projection catch must announce (the
+   * activeRosterProbe convention) and fail closed to an empty target list,
+   * which the role admission then blocks on — proven with a PANEL WRITER
+   * roster so the block can only be the fail-closed empty list.
+   */
+  const statePath = join(tmpdir(), `block-direct-catch-${process.pid}.json`);
+  const originalStatePath = process.env.LOOM_STATE_PATH;
+  const originalPath = process.env.PATH;
+  const originalCwd = process.cwd();
+  const scratch = mkdtempSync(join(tmpdir(), "loom-guard-catch-"));
+
+  beforeEach(() => {
+    writeFileSync(statePath, "{}");
+    process.env.LOOM_STATE_PATH = statePath;
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(join(SUBAGENT_DIR, `${s}.active`), "a339f6fd51d78b179\tarch-interviewer-agent\n");
+  });
+
+  afterEach(() => {
+    if (originalStatePath === undefined) delete process.env.LOOM_STATE_PATH;
+    else process.env.LOOM_STATE_PATH = originalStatePath;
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    rmSync(statePath, { force: true });
+  });
+
+  afterAll(() => {
+    process.chdir(originalCwd);
+    rmSync(scratch, { recursive: true, force: true });
+  });
+
+  it("an unspawnable git binary announces the cause and fails closed to the role admission", async () => {
+    const written: string[] = [];
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      written.push(String(chunk));
+      return true;
+    });
+    process.chdir(scratch);
+    process.env.PATH = "";
+    try {
+      const result = await blockDirectEdits(JSON.stringify({
+        tool_name: "Write",
+        tool_input: { file_path: join(scratch, "interview.md") },
+        session_id: s,
+      }), []);
+      expect(result.kind).toBe("block");
+      if (result.kind === "block") expect(result.message).toContain("BLOCKED: Direct edits not allowed");
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(written.join("")).toContain("block-direct-edits: cannot resolve");
+    expect(written.join("")).toContain("could not start");
+    expect(written.join("")).toContain("failing closed to the role admission");
   });
 });

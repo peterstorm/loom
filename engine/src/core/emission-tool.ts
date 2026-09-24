@@ -55,17 +55,22 @@ export type EmissionToolName =
 export type EmissionSchemaVersion = "v2" | "v3" | "v1";
 
 /** The closed vocabulary as data, for boundary parses of untrusted claimed
- *  version strings (the mint refuses a non-member before any registry lookup). */
-export const EMISSION_SCHEMA_VERSIONS: readonly EmissionSchemaVersion[] = Object.freeze(["v2", "v3", "v1"]);
+ *  version strings (the mint refuses a non-member before any registry lookup).
+ *  Module-local: its only consumer is `issueEmissionBinding`'s boundary parse
+ *  in this module; the registry's typed cells carry the vocabulary to every
+ *  other reader. */
+const EMISSION_SCHEMA_VERSIONS: readonly EmissionSchemaVersion[] = Object.freeze(["v2", "v3", "v1"]);
 
 /**
  * The emission edge's closed refusal-code vocabulary — parse, don't validate:
  * a code is a member of THIS union, never a free string, so an unknown code is
  * unrepresentable behind every consumer that switches on it (the tool result
  * mapping, the Phase-2 execute shell). It is the reviewer protocol's own
- * failure codes (the registry's reviewer parsers mint exactly these) plus the
- * two failures the admission gate itself mints around the parse — the
- * unsupported-version and deterministic-serialization refusals.
+ * failure codes (the registry's reviewer parsers mint exactly these) plus two
+ * added vocabulary members minted elsewhere: `unsupported-schema-version`
+ * (the admission gateway below and the issued-binding mint) and `invalid-schema`
+ * (the verdict-args parser). The gateway's deterministic-serialization refusal
+ * reuses the protocol's own `invalid-json` code rather than adding a member.
  */
 export type EmissionParseFailureCode =
   | ReviewerProtocolFailure["code"]

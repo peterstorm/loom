@@ -5,6 +5,7 @@ import {
   PRIMARY_AXES,
   TESTABILITY_BARS,
   aggregateVerdicts,
+  architectureCriterion,
   candidateFilename,
   deriveJudgeCriteria,
   parseInterviewDigest,
@@ -15,6 +16,7 @@ import {
   sensitiveBoundaryStatus,
   serializeJudgeVerdict,
   serializeRankings,
+  type ArchitectureCriterion,
   type CandidateFilename,
 } from "../../src/core/panel-contract";
 import { ARCHITECTURE_LAYOUT } from "../../src/core/panel-kernel";
@@ -41,6 +43,15 @@ const VALID_DIGEST = [
 ].join("\n");
 
 const CANDIDATES = [candidateFilename("simplicity-first"), candidateFilename("type-driven-fp")] as const;
+
+/** Mint a test criterion through the closed vocabulary — the same boundary the
+ *  production callers use — so a typo'd test criterion fails here, loudly,
+ *  instead of compiling into the seam the brand guards. */
+const mintedCriterion = (raw: string): ArchitectureCriterion => {
+  const minted = architectureCriterion(raw);
+  if (minted === null) throw new Error(`test criterion is outside the validated interview vocabulary: ${raw}`);
+  return minted;
+};
 
 function verdict(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -265,7 +276,7 @@ describe("parsePanelManifest", () => {
 
 describe("parseJudgeVerdict", () => {
   it("validates the full contract and sanitizes brace characters from prose", () => {
-    const parsed = parseJudgeVerdict(verdict(), "simplicity", CANDIDATES);
+    const parsed = parseJudgeVerdict(verdict(), mintedCriterion("simplicity"), CANDIDATES);
     expect(parsed.ok).toBe(true);
     if (parsed.ok) {
       expect(parsed.value.entries[0]!.strongestIdea).toBe("one pure boundary");
@@ -294,7 +305,7 @@ describe("parseJudgeVerdict", () => {
     ["brace-only strongest idea", perturb(0, { strongest_idea: "{}" })],
     ["ascending score order", verdict({ rankings: [{ ...BASE[0], score: 2 }, { ...BASE[1], score: 8 }] })],
   ])("rejects %s", (_label, raw) => {
-    expect(parseJudgeVerdict(raw, "simplicity", CANDIDATES).ok).toBe(false);
+    expect(parseJudgeVerdict(raw, mintedCriterion("simplicity"), CANDIDATES).ok).toBe(false);
   });
 });
 
@@ -311,7 +322,7 @@ function verdictFor(criterion: string, scores: readonly (readonly [CandidateFile
         strongest_idea: "an idea",
       })),
     }),
-    criterion,
+    mintedCriterion(criterion),
     ordered.map(([candidate]) => candidate),
   );
   if (!parsed.ok) throw new Error(`fixture invalid: ${parsed.errors.join("; ")}`);
@@ -393,7 +404,7 @@ describe("parseJudgeVerdict rankings never contain NaN", () => {
         JSON.parse(verdict()).rankings[1],
       ],
     });
-    const parsed = parseJudgeVerdict(raw, "simplicity", CANDIDATES);
+    const parsed = parseJudgeVerdict(raw, mintedCriterion("simplicity"), CANDIDATES);
     expect(parsed.ok).toBe(false);
   });
 
@@ -408,7 +419,7 @@ describe("parseJudgeVerdict rankings never contain NaN", () => {
               JSON.parse(verdict()).rankings[1],
             ],
           });
-          const parsed = parseJudgeVerdict(raw, "simplicity", CANDIDATES);
+          const parsed = parseJudgeVerdict(raw, mintedCriterion("simplicity"), CANDIDATES);
           if (!parsed.ok) return true;
           return parsed.value.entries.every((r) => Number.isInteger(r.score));
         },
@@ -418,7 +429,7 @@ describe("parseJudgeVerdict rankings never contain NaN", () => {
 });
 
 describe("aggregateVerdicts", () => {
-  const CRITERIA = ["simplicity", "pure functional core", CODEBASE_FIT_CRITERION] as const;
+  const CRITERIA = ["simplicity", "pure functional core", CODEBASE_FIT_CRITERION].map(mintedCriterion);
   const A = CANDIDATES[0];
   const B = CANDIDATES[1];
 
@@ -536,7 +547,10 @@ describe("aggregateVerdicts", () => {
     ["non-distinct candidates", ["a"], ["x.md", "x.md"]],
     ["empty candidates", ["a"], []],
   ])("rejects %s", (_label, criteria, candidates) => {
-    expect(aggregateVerdicts([], criteria as string[], candidates as unknown as readonly ReturnType<typeof candidateFilename>[]).ok).toBe(false);
+    // The runtime still rejects untrusted criteria lists; the brand only
+    // guards compile-time callers, so the garbage-fixture cast goes THROUGH
+    // the brand deliberately.
+    expect(aggregateVerdicts([], criteria as unknown as readonly ArchitectureCriterion[], candidates as unknown as readonly ReturnType<typeof candidateFilename>[]).ok).toBe(false);
   });
 
   it("property: ranking is a total order — deterministic under input permutation", () => {
@@ -563,7 +577,7 @@ describe("aggregateVerdicts", () => {
 
 describe("serializeRankings", () => {
   it("emits rank, total, and per-criterion scores as an array of pairs", () => {
-    const CRITERIA = ["simplicity", "pure functional core", CODEBASE_FIT_CRITERION];
+    const CRITERIA = ["simplicity", "pure functional core", CODEBASE_FIT_CRITERION].map(mintedCriterion);
     const ranked = aggregateVerdicts(
       [
         verdictFor(CRITERIA[0]!, [[CANDIDATES[0], 9], [CANDIDATES[1], 1]]),
@@ -585,7 +599,7 @@ describe("serializeRankings", () => {
   });
 
   it("survives the finalize-template substitution gate (no residual placeholders)", () => {
-    const CRITERIA = ["simplicity", "pure functional core", CODEBASE_FIT_CRITERION];
+    const CRITERIA = ["simplicity", "pure functional core", CODEBASE_FIT_CRITERION].map(mintedCriterion);
     const ranked = aggregateVerdicts(
       CRITERIA.map((c) => verdictFor(c, [[CANDIDATES[0], 5], [CANDIDATES[1], 5]])),
       CRITERIA,

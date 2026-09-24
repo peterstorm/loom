@@ -33,7 +33,12 @@ export default function (pi) {
 
     for (const { kind, version, spec } of TOOL_DEFS) {
       const schemaVersion = spec.schemaVersions[version];
-      if (!schemaVersion) continue;
+      if (!schemaVersion) {
+        // A silently dropped tool looks identical to a route that never ran;
+        // the driver's stderr capture (report.stderr) carries the reason.
+        process.stderr.write(`loom(emission-qual): skipping ${kind} ${version} — the frozen registry carries no such schema version\n`);
+        continue;
+      }
       // v2 and v3 share the reviewer-payload spec, so their tool names carry
       // the version suffix; the single-version verdict kinds keep the exact
       // production tool name.

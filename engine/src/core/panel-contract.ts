@@ -480,10 +480,15 @@ function requireNonIncreasingScores(rankings: readonly JudgeRanking[]): readonly
   return [];
 }
 
-/** Parse untrusted judge output and return canonical, substitution-safe data. */
+/** Parse untrusted judge output and return canonical, substitution-safe data.
+ *  The expected criterion rides the closed `ArchitectureCriterion` brand — the
+ *  same discipline the refutation sibling applies to `ReviewLens` — so a
+ *  hand-typed criterion string cannot compile at the seam that binds a verdict
+ *  to its criterion. Untrusted checkpoint strings mint through
+ *  `architectureCriterion` (nullable) before the call. */
 export function parseJudgeVerdict(
   rawJson: string,
-  expectedCriterion: string,
+  expectedCriterion: ArchitectureCriterion,
   expectedCandidates: readonly CandidateFilename[],
 ): ParseResult<JudgeVerdict> {
   return parseVerdictEnvelope<JudgeRanking, CandidateFilename>(
@@ -710,11 +715,14 @@ function compareRankings(a: CandidateRanking, b: CandidateRanking): number {
  *     verdicts sharing a criterion would silently produce a wrong tie-break.
  *
  * Verdicts are matched to criteria BY NAME here, so their argument order is
- * irrelevant and a duplicated or missing criterion is a hard error.
+ * irrelevant and a duplicated or missing criterion is a hard error. The
+ * criteria order rides the closed `ArchitectureCriterion` brand — the order
+ * IS the tie-break order, so a hand-typed free-text list cannot compile at
+ * the seam that decides which architecture ships.
  */
 export function aggregateVerdicts(
   verdicts: readonly JudgeVerdict[],
-  criteriaInOrder: readonly string[],
+  criteriaInOrder: readonly ArchitectureCriterion[],
   expectedCandidates: readonly CandidateFilename[],
 ): ParseResult<readonly CandidateRanking[]> {
   const errors: string[] = [];

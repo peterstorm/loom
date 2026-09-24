@@ -11,15 +11,17 @@
  * may write at all — a judge whose prompt names candidate paths is READING
  * them and receives nothing. Path mentions only REFINE a writer's scope.
  *
- * The decision functions perform no I/O, clock, or randomness. Importing this
- * module is not currently side-effect-free: `PHASE_AGENT_MAP` comes from
- * `config.ts`, whose initialization resolves the Task Graph through filesystem
- * and Git probes. Splitting runtime discovery from Agent policy is tracked as
- * a separate configuration-seam deepening.
+ * The decision functions perform no I/O, clock, or randomness, and importing
+ * this module is side-effect-free: `PHASE_AGENT_MAP` comes from the pure
+ * model-profiles leaf (the catalog-derived projections), not from `config.ts`
+ * — whose initialization resolves the Task Graph through filesystem and Git
+ * probes. Runtime discovery still lives in config, exactly where this module
+ * never reaches.
  */
 
-import { PHASE_AGENT_MAP } from "../config";
+import { PHASE_AGENT_MAP } from "./model-profiles";
 import { stripNamespace } from "../utils/strip-namespace";
+import type { LoomAgentName } from "./model-profiles";
 import type { Phase } from "../types";
 
 /**
@@ -61,12 +63,21 @@ const PHASE_FALLBACK_SCOPE: Readonly<Partial<Record<Phase, readonly string[]>>> 
  *  (decompose) is read-only and receives no grant even when its prompt names
  *  artifact paths. */
 const ARTIFACT_WRITING_PHASES: ReadonlySet<string> = new Set(Object.keys(PHASE_FALLBACK_SCOPE));
-/** Exported for the direct-edit guard's panel-artifact admission: the role set
- *  is the one honest door both the grant planner and the guard admit through. */
-export const PANEL_ARTIFACT_WRITERS: ReadonlySet<string> = new Set([
+/** The panel agents whose run contract includes writing an artifact — the
+ *  WAVE_REVIEW_AGENTS pattern: a literal roster typed against the catalog, so
+ *  a renamed or typo'd agent name fails compilation instead of silently
+ *  emptying both the grant planner and the guard's panel-artifact admission. */
+export const PANEL_ARTIFACT_WRITER_NAMES = Object.freeze([
   "arch-interviewer-agent",
   "arch-designer-agent",
-]);
+] as const satisfies readonly LoomAgentName[]);
+
+/** Exported for the direct-edit guard's panel-artifact admission: the role set
+ *  is the one honest door both the grant planner and the guard admit through.
+ *  String-keyed deliberately — its consumers test UNTRUSTED agent names, which
+ *  no brand can guarantee; the compile-time guarantee lives in the typed
+ *  roster above, which is this set's only constructor. */
+export const PANEL_ARTIFACT_WRITERS: ReadonlySet<string> = new Set(PANEL_ARTIFACT_WRITER_NAMES);
 
 /** Path tokens → candidate scope dirs: a token ending in a filename scopes
  *  to its directory; trailing slashes are trimmed; duplicates removed. */

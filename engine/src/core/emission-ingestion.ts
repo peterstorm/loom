@@ -452,7 +452,6 @@ export function selectCanonicalPayload(
     kind: "final-message-extraction" as const,
     fallback: parseFinalPayload(finalMessageCandidates),
     source: "extraction" as const,
-    emissionRefusal: null,
   });
 }
 

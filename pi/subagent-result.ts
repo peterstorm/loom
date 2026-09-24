@@ -750,10 +750,11 @@ export async function applyFailedPiResult(args: FailedPiResultArgs): Promise<PiR
 export const WRITE_TARGET_KEYS: readonly string[] = ["path", "file_path", "filePath"];
 
 /**
- * The first non-nullish value among `WRITE_TARGET_KEYS` as a non-empty string,
- * or `null` when no key proves one. The `??`-chain order is preserved exactly:
- * a present-but-non-string value WINS the probe and fails the string test — it
- * does not defer to a later key.
+ * The first NON-NULLISH value among `WRITE_TARGET_KEYS` as a non-empty string,
+ * or `null` when no key proves one. The `??=`-assignment defers only nullish
+ * values (`undefined`/`null`) to a later key; the first non-nullish value WINS
+ * the probe, and a winner that is not a non-empty string fails the string test
+ * — it does not defer to a later key either.
  */
 export function writeTargetPathOf(args: unknown): string | null {
   if (typeof args !== "object" || args === null) return null;

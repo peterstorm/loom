@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -81,5 +81,55 @@ describe("panelGuardTargets — the Pi write-target projection feeding the panel
     // then blocks on.
     expect(panelGuardTargets({ filePath: join(nonRepoDir, "candidate.md") }, nonRepoDir))
       .toEqual([]);
+  });
+
+  it("an unexpected probe failure announces on stderr and fails closed — the catch branch", () => {
+    // A git binary that cannot START (no PATH) makes gitRepositoryRoot throw
+    // (config's confirmed-anomaly contract) — the UNEXPECTED failure the
+    // proven non-repository answer above deliberately does not cover. The
+    // announcement (the activeRosterProbe convention) is what keeps a
+    // permissions or transport problem distinguishable from "no write target
+    // named"; the list still fails closed to the role admission.
+    process.chdir(repoDir);
+    const originalPath = process.env.PATH;
+    const written: string[] = [];
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      written.push(String(chunk));
+      return true;
+    });
+    try {
+      process.env.PATH = "";
+      expect(panelGuardTargets({ path: join(repoDir, "interview.md") }, repoDir)).toEqual([]);
+    } finally {
+      stderr.mockRestore();
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+    expect(written.join("")).toContain("cannot resolve write targets against the repository root");
+    expect(written.join("")).toContain("could not start");
+    expect(written.join("")).toContain("failing closed to the role admission");
+  });
+
+  it("an edits array with ONE unprovable target rejects the whole batch silently — no partial projection", () => {
+    // piWriteTargetPaths is all-or-nothing BEFORE the repository probe: a
+    // non-string target ({path: 42}) wins its key's probe, fails the string
+    // test, and refuses the BATCH — the proven unparseable answer returns no
+    // targets and NO announcement (that is the catch branch's job, for
+    // UNEXPECTED probe failures only).
+    process.chdir(repoDir);
+    const written: string[] = [];
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      written.push(String(chunk));
+      return true;
+    });
+    try {
+      expect(panelGuardTargets({ edits: [
+        { path: join(repoDir, "a.md") },
+        { path: 42 },
+      ] }, repoDir)).toEqual([]);
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(written.join("")).toBe("");
   });
 });

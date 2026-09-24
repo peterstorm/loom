@@ -134,8 +134,11 @@ import {
   renderSpawnTask,
   replayStandaloneResultFromEvidence,
   replayStandaloneCapturedEvidence,
-  type StandaloneReviewedSource,
 } from "../engine/src/handlers/helpers/programs";
+import {
+  publishLoomReviewAuthorityBridge,
+  type LoomReviewAuthorityReceipt,
+} from "../engine/src/handlers/helpers/programs/review-authority-bridge";
 import {
   assertAnchoredFilesystemPlatformSupported,
   readRunBytesNoFollow,
@@ -200,8 +203,6 @@ const PI_RESOURCE_CACHE = join(PI_AGENT_DIR, "cache", "loom-resources");
 const isPiSpawnTool = (toolName: string): boolean =>
   toolName === "subagent" || toolName === LOOM_INTERACTIVE_SUBAGENT_TOOL;
 
-const LOOM_REVIEW_AUTHORITY_SYMBOL = Symbol.for("@peterstorm/loom/review-authority/v1");
-
 type TrustedReviewCapture = Readonly<{
   requestId: string;
   slotId: string;
@@ -225,18 +226,6 @@ type TrustedReviewRun = Readonly<{
 type TrustedReviewRoot = Readonly<{
   nextTouch: number;
   runs: ReadonlyMap<string, TrustedReviewRun>;
-}>;
-
-type LoomReviewAuthorityReceipt = Readonly<{
-  schemaVersion: 1;
-  kind: "loom-review-authority-receipt";
-  sessionId: string;
-  runId: string;
-  runsRoot: string;
-  runDirectory: string;
-  requestIds: readonly string[];
-  resultDigest: string;
-  reviewedSource: StandaloneReviewedSource;
 }>;
 
 const trustedReviewRuns = new Map<string, Map<string, TrustedReviewRoot>>();
@@ -1220,7 +1209,7 @@ async function verifyTrustedReviewRun(
   }) };
 }
 
-async function verifyTrustedStandaloneReview(input: Readonly<{ cwd: string; sessionId: string }>): Promise<unknown> {
+async function verifyTrustedStandaloneReview(input: Readonly<{ cwd: string; sessionId: string }>): Promise<LoomReviewAuthorityReceipt> {
   const sessionRoots = trustedReviewRuns.get(input.sessionId);
   if (sessionRoots === undefined) throw new Error(`no request-bound Loom captures were witnessed for Pi session ${input.sessionId}`);
   const expectedRoot = resolve(input.cwd, ".claude/reviews/review-and-fix-runs");
@@ -1253,9 +1242,7 @@ export default function (
 ) {
   assertAnchoredFilesystemPlatformSupported();
   registerInteractiveSubagentTool(pi, PACKAGE_ROOT, PI_AGENT_DIR);
-  (globalThis as unknown as Record<PropertyKey, unknown>)[LOOM_REVIEW_AUTHORITY_SYMBOL] = Object.freeze({
-    verify: verifyTrustedStandaloneReview,
-  });
+  publishLoomReviewAuthorityBridge(globalThis, { verify: verifyTrustedStandaloneReview });
 
   // A Pi process may host overlapping sessions. Parent reservations and
   // capabilities are therefore aggregates owned by one parsed session, never

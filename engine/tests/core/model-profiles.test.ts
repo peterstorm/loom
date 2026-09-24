@@ -8,8 +8,10 @@ import {
   LLM_PROFILE_IDS,
   LLM_PROFILES,
   LOOM_OWNED_AGENTS,
+  assertPanelJudgeProfileUnique,
   classifyPiSpawnItems,
   lowerModelProfile,
+  panelJudgeProfileCarriers,
   parseAgentFrontmatter,
   parseLlmProfile,
   parseLlmProfileId,
@@ -21,7 +23,9 @@ import {
   validateAgentPolicyCatalog,
   validateAgentPolicyFrontmatter,
   validateExplicitSpawnModel,
+  type AgentPolicy,
   type LlmProfileId,
+  type LoomAgentName,
 } from "../../src/core/model-profiles";
 import { IMPL_AGENTS } from "../../src/config";
 
@@ -381,5 +385,31 @@ describe("catalog and frontmatter validators", () => {
       "model-profile": "general-review",
       model: "sonnet",
     }).ok).toBe(false);
+  });
+});
+
+describe("panel-judge profile uniqueness — the judge-verdict scoping invariant", () => {
+  const row = (agent: LoomAgentName, profile: LlmProfileId): AgentPolicy<LoomAgentName> =>
+    Object.freeze({ agent, profile, kind: Object.freeze({ kind: "reviewer" }), requiredSkill: null });
+
+  it("the live catalog carries the panel-judge profile exactly once", () => {
+    // The consumer the scoping condition reads as data: `producerKindsOfAgent`
+    // binds judge-verdict emission to the carrier list, so the list must name
+    // exactly the one judge.
+    expect(panelJudgeProfileCarriers()).toEqual(["arch-judge-agent"]);
+  });
+
+  it("refuses a synthetic roster where a second agent binds the panel-judge profile", () => {
+    // The throwing branch driven with a synthetic two-carrier roster — the
+    // failure mode the load-time assertion exists for, exercised directly so a
+    // weakened predicate cannot survive the suite green.
+    const twoCarriers = [row("arch-judge-agent", "panel-judge"), row("code-reviewer", "panel-judge")];
+    expect(() => assertPanelJudgeProfileUnique(twoCarriers)).toThrowError(
+      /panel-judge profile must bind exactly one Agent[\s\S]*arch-judge-agent, code-reviewer[\s\S]*judge-verdict/,
+    );
+  });
+
+  it("accepts the synthetic single-carrier roster — the legal shape", () => {
+    expect(() => assertPanelJudgeProfileUnique([row("arch-judge-agent", "panel-judge")])).not.toThrow();
   });
 });

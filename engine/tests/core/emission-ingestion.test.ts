@@ -475,6 +475,27 @@ describe("selectCanonicalPayload", () => {
     }
   });
 
+  it("the baseline arm's RUNTIME value matches its declared shape — no refusal key, twin-arm symmetry", () => {
+    // The declared arm, its doc comment and the compile pin below all say the
+    // field is unrepresentable on the baseline; this pin proves the runtime
+    // record agrees — a vestigial key is invisible through the declared type,
+    // and the round-8 arm split left exactly such a key on this constructor.
+    const selection = selectCanonicalPayload(REVIEWER_V2, ABSENT, []);
+    expect(selection.kind).toBe("final-message-extraction");
+    if (selection.kind === "final-message-extraction") {
+      expect(Object.hasOwn(selection, "emissionRefusal")).toBe(false);
+      expect(Object.keys(selection).sort()).toEqual(["fallback", "kind", "source"]);
+    }
+    // Twin-arm symmetry: the verdict path's baseline arm carries the same
+    // three-key shape modulo its own payload field names.
+    const verdict = selectVerdictSource(JUDGE_V1, ABSENT, "the captured attempt bytes");
+    expect(verdict).toEqual({
+      kind: "final-message-extraction",
+      rawJson: "the captured attempt bytes",
+      source: "extraction",
+    });
+  });
+
   it("prefers a valid emission call over extraction regardless of final text (FR-003/AS-003)", () => {
     fc.assert(
       fc.property(proseArb, candidatesArb, (claim, candidates) => {

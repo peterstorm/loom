@@ -7,7 +7,7 @@
 
 import { posix } from "node:path";
 import type { HookResult } from "../types";
-import { IMPL_AGENTS } from "../config";
+import { IMPL_AGENTS } from "./model-profiles";
 import { PANEL_ARTIFACT_WRITERS, SPEC_ARTIFACT_ROOT } from "./artifact-write-scope";
 import {
   parseGrantedAgentId,
