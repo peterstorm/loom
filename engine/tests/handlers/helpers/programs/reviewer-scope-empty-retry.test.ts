@@ -71,7 +71,8 @@ describe("reviewer scope derivation survives the transient empty-stdout Git obse
   it("recovers a transient empty HEAD and empty path listing before freezing scope authority", () => {
     scriptedResponses.queue = [
       answered(""), answered(SHA), // rev-parse HEAD: transient discharged on attempt 2
-      failedWith(1), failedWith(1), failedWith(1), failedWith(1), // merge-base candidates: no base
+      answered(SHA), failedWith(1), answered(SHA), failedWith(1), // first two candidates: present, no base
+      answered(SHA), failedWith(1), answered(SHA), failedWith(1), // next two candidates: present, no base
       answered(""), answered("src/a.ts\0"), // ls-files untracked: transient discharged
       answered("src/b.ts\0"), // diff --name-only -z
       answered("src/c.ts\0"), // diff --cached --diff-filter=A
@@ -88,7 +89,7 @@ describe("reviewer scope derivation survives the transient empty-stdout Git obse
     });
     expect(changed.untracked).toEqual(["src/a.ts"]);
     // The retry consumed the transients; it did not ingest them.
-    expect(scriptedResponses.calls.filter((entry) => entry[1] === "rev-parse")).toHaveLength(2);
+    expect(scriptedResponses.calls.filter((entry) => entry[1] === "rev-parse" && entry[2] === "HEAD")).toHaveLength(2);
     expect(scriptedResponses.calls.filter((entry) => entry[1] === "ls-files")).toHaveLength(2);
   });
 
@@ -101,16 +102,84 @@ describe("reviewer scope derivation survives the transient empty-stdout Git obse
   });
 
   it("refuses a confirmed-empty merge-base before omitting committed changes from scope", () => {
-    scriptedResponses.queue = [answered(SHA), answered(""), answered(""), answered("")];
+    scriptedResponses.queue = [answered(SHA), answered(SHA), answered(""), answered(""), answered("")];
     expect(() => deriveChangedPaths()).toThrow(/merge-base origin\/main.*empty output after bounded retries/);
     expect(scriptedResponses.calls.map((entry) => entry[1])).toEqual([
-      "rev-parse", "merge-base", "merge-base", "merge-base",
+      "rev-parse", "rev-parse", "merge-base", "merge-base", "merge-base",
     ]);
+  });
+
+  it("refuses a merge-base spawn error before trying another base or omitting committed paths", () => {
+    scriptedResponses.queue = [
+      answered(SHA), answered(SHA), // HEAD and verified candidate reference
+      { error: new Error("spawn git ENOENT"), status: null, stdout: "", stderr: "" },
+    ];
+    expect(() => deriveChangedPaths()).toThrow(/merge-base.*could not be spawned.*ENOENT/);
+    expect(scriptedResponses.calls.map((entry) => entry[1])).toEqual(["rev-parse", "rev-parse", "merge-base"]);
+  });
+
+  it("refuses a fatal merge-base exit instead of classifying it as no common ancestor", () => {
+    scriptedResponses.queue = [answered(SHA), answered(SHA), { status: 128, stdout: "", stderr: "fatal: broken repository" }];
+    expect(() => deriveChangedPaths()).toThrow(/fatal: broken repository/);
+    expect(scriptedResponses.calls.map((entry) => entry[1])).toEqual(["rev-parse", "rev-parse", "merge-base"]);
+  });
+
+  it("refuses a diagnostic-bearing exit 1 rather than treating an unobserved error as no base", () => {
+    scriptedResponses.queue = [answered(SHA), answered(SHA), { status: 1, stdout: "", stderr: "fatal: cannot read object" }];
+    expect(() => deriveChangedPaths()).toThrow(/fatal: cannot read object/);
+    expect(scriptedResponses.calls.map((entry) => entry[1])).toEqual(["rev-parse", "rev-parse", "merge-base"]);
+  });
+
+  it("skips an independently observed missing ref without running merge-base on it", () => {
+    scriptedResponses.queue = [
+      answered(SHA), failedWith(1), // origin/main does not exist
+      answered(SHA), answered(SHA), // origin/master exists and has a base
+      answered(""), answered(""), answered(""), // untracked
+      answered("src/unstaged.ts\0"),
+      answered(""), answered(""), answered(""), // staged-added
+      answered("src/committed.ts\0"),
+      answered(""), answered(""), answered(""), // staged
+      answered("src/committed.ts\0"),
+    ];
+    const changed = deriveChangedPaths();
+    expect(changed.authority.committed).toEqual(["src/committed.ts"]);
+    expect(scriptedResponses.calls.filter((entry) => entry[1] === "merge-base")).toHaveLength(1);
+    expect(scriptedResponses.calls.filter((entry) => entry[1] === "rev-parse")).toHaveLength(3);
+  });
+
+  it("refuses candidate-reference process errors instead of skipping that candidate", () => {
+    scriptedResponses.queue = [
+      answered(SHA), { error: new Error("spawn git ENOENT"), status: null, stdout: "", stderr: "" },
+    ];
+    expect(() => deriveChangedPaths()).toThrow(/rev-parse.*could not be spawned.*ENOENT/);
+    expect(scriptedResponses.calls).toHaveLength(2);
+  });
+
+  it("refuses a confirmed-empty candidate reference before attempting merge-base", () => {
+    scriptedResponses.queue = [answered(SHA), answered(""), answered(""), answered("")];
+    expect(() => deriveChangedPaths()).toThrow(/candidate origin\/main.*empty output after bounded retries/);
+    expect(scriptedResponses.calls.map((entry) => entry[1])).toEqual(["rev-parse", "rev-parse", "rev-parse", "rev-parse"]);
+  });
+
+  it("continues only for a clean no-common-ancestor result and keeps the next candidate's committed paths", () => {
+    scriptedResponses.queue = [
+      answered(SHA), answered(SHA), failedWith(1), answered(SHA), answered(SHA),
+      answered(""), answered(""), answered(""), // legitimate empty untracked listing
+      answered("src/unstaged.ts\0"),
+      answered(""), answered(""), answered(""), // legitimate empty staged-added listing
+      answered("src/committed.ts\0"),
+      answered(""), answered(""), answered(""), // legitimate empty staged listing
+      answered("src/committed.ts\0"),
+    ];
+    const changed = deriveChangedPaths();
+    expect(changed.authority.base_revision).toBe(SHA);
+    expect(changed.authority.committed).toEqual(["src/committed.ts"]);
+    expect(scriptedResponses.calls.filter((entry) => entry[1] === "merge-base")).toHaveLength(2);
   });
 
   it("recovers a transient empty merge-base and keeps committed branch paths", () => {
     scriptedResponses.queue = [
-      answered(SHA),
+      answered(SHA), answered(SHA), // HEAD and verified candidate reference
       answered(""), answered(SHA), // merge-base: retry before using a real base
       answered(""), answered(""), answered(""), // legitimate empty untracked listing
       answered(""), answered(""), answered(""), // legitimate empty unstaged listing
@@ -128,7 +197,8 @@ describe("reviewer scope derivation survives the transient empty-stdout Git obse
   it("accepts a confirmed-empty path listing as the explicit legitimate-empty decision", () => {
     scriptedResponses.queue = [
       answered(SHA), // rev-parse HEAD observed first try
-      failedWith(1), failedWith(1), failedWith(1), failedWith(1),
+      answered(SHA), failedWith(1), answered(SHA), failedWith(1),
+      answered(SHA), failedWith(1), answered(SHA), failedWith(1),
       answered(""), answered(""), answered(""), // ls-files stays empty: legitimate
       answered("src/b.ts\0"),
       answered("src/c.ts\0"),

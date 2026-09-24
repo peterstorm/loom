@@ -121,12 +121,12 @@ export function parseStandaloneStartInput(raw: unknown): ProgramParse<Registered
  *   value through after the retry budget was spent.
  */
 type GitEmptyDecision = "refuse" | "legitimate";
+type CandidateReference = Readonly<{ kind: "missing" }> | Readonly<{ kind: "present"; revision: string }>;
+type MergeBaseCandidate = Readonly<{ kind: "no-base" }> | Readonly<{ kind: "base"; revision: string }>;
 
-/** Spawn stdout/stderr text as this module's probe sites see it: a utf8 spawn
- *  passes the string through; a buffer spawn decodes UTF-8 exactly as the
- *  original `Buffer.toString("utf8")` did, with the same empty fallback. */
+/** Spawn stdout/stderr text with Buffer's default UTF-8 decoding and an empty fallback. */
 function spawnText(stream: string | Buffer | undefined): string {
-  return typeof stream === "string" ? stream : (stream ?? Buffer.alloc(0)).toString("utf8");
+  return stream?.toString() ?? "";
 }
 
 /** Shared stderr-fallback refusal for a non-zero Git exit: the caller's exact
@@ -160,7 +160,7 @@ function gitSpawnProbe<T>(
   };
 }
 
-function gitPaths(args: readonly string[]): readonly string[] {
+function gitPaths(args: readonly string[], empty: GitEmptyDecision): readonly string[] {
   const observed = observeGitProbe(
     gitSpawnProbe(args, { encoding: "buffer", maxBuffer: 16 * 1024 * 1024 }, (result) =>
       result.status !== 0
@@ -169,9 +169,13 @@ function gitPaths(args: readonly string[]): readonly string[] {
     (paths) => paths.length === 0,
   );
   if (observed.kind === "failed") throw observed.error;
-  // Explicit caller decision: a path listing that is empty after bounded
-  // retries names an empty family — it is never a fabricated observation.
-  return Object.freeze(observed.kind === "confirmed-empty" ? [] : [...observed.value]);
+  if (observed.kind === "confirmed-empty") {
+    if (empty === "refuse") {
+      throw new Error(`git ${args.join(" ")} returned empty output after bounded retries; review scope authority cannot be fabricated from an empty observation`);
+    }
+    return Object.freeze([]);
+  }
+  return Object.freeze([...observed.value]);
 }
 
 /**
@@ -230,40 +234,68 @@ function reviewablePath(path: string): boolean {
   return parsed.ok && !isExcludedRemediationPath(parsed.value);
 }
 
+function candidateReference(candidate: string): CandidateReference {
+  const observed = observeGitProbe(
+    gitSpawnProbe<CandidateReference>(["rev-parse", "--verify", "--quiet", "--end-of-options", `${candidate}^{commit}`],
+      { encoding: "utf8" }, (result) => {
+        if (result.status === 1 && spawnText(result.stdout).trim() === "" && spawnText(result.stderr).trim() === "") {
+          return { ok: true, value: { kind: "missing" } };
+        }
+        if (result.status !== 0) return stderrRefusal(result.stderr, `git cannot observe candidate ${candidate}`);
+        return { ok: true, value: { kind: "present", revision: spawnText(result.stdout).trim() } };
+      }),
+    (value) => value.kind === "present" && value.revision === "",
+  );
+  if (observed.kind === "failed") throw observed.error;
+  if (observed.kind === "confirmed-empty") {
+    throw new Error(`git candidate ${candidate} returned empty output after bounded retries; review scope authority cannot be fabricated from an empty observation`);
+  }
+  return observed.value;
+}
+
+function candidateMergeBase(candidate: string, head: string): MergeBaseCandidate {
+  const observed = observeGitProbe(
+    gitSpawnProbe<MergeBaseCandidate>(["merge-base", candidate, head], { encoding: "utf8" }, (result) => {
+      if (result.status === 1 && spawnText(result.stderr).trim() === "" && spawnText(result.stdout).trim() === "") {
+        return { ok: true, value: { kind: "no-base" } };
+      }
+      if (result.status !== 0) return stderrRefusal(result.stderr, `git merge-base failed for ${candidate}`);
+      return { ok: true, value: { kind: "base", revision: spawnText(result.stdout).trim() } };
+    }),
+    (value) => value.kind === "base" && value.revision === "",
+  );
+  if (observed.kind === "failed") throw observed.error;
+  if (observed.kind === "confirmed-empty") {
+    throw new Error(`git merge-base ${candidate} ${head} returned empty output after bounded retries; review scope authority cannot be fabricated from an empty observation`);
+  }
+  return observed.value;
+}
+
 export function deriveChangedPaths(): DerivedChangedPaths {
   // A HEAD revision can never legitimately be empty: a confirmed-empty answer
   // after the bounded retry refuses instead of freezing `head_revision: ""`.
   const head = gitText(["rev-parse", "HEAD"], "refuse");
   let base: string | null = null;
   for (const candidate of ["origin/main", "origin/master", "main", "master"]) {
-    const observed = observeGitProbe(
-      gitSpawnProbe(["merge-base", candidate, head], { encoding: "utf8" }, (result) =>
-        result.status !== 0
-          ? stderrRefusal(result.stderr, `git merge-base failed for ${candidate}`)
-          : { ok: true as const, value: spawnText(result.stdout).trim() }),
-      (value) => value === "",
-    );
-    // A non-zero exit means this candidate has no merge base. A status-0
-    // merge-base can never legitimately emit an empty revision: refusing it
-    // keeps committed changes from disappearing from review scope.
-    if (observed.kind === "failed") continue;
-    if (observed.kind === "confirmed-empty") {
-      throw new Error(`git merge-base ${candidate} ${head} returned empty output after bounded retries; review scope authority cannot be fabricated from an empty observation`);
-    }
-    base = observed.value;
+    // A missing ref is distinct from an error: real temporary repositories
+    // often have no origin/main, and merge-base reports that absence as 128.
+    if (candidateReference(candidate).kind === "missing") continue;
+    const observed = candidateMergeBase(candidate, head);
+    if (observed.kind === "no-base") continue;
+    base = observed.revision;
     break;
   }
-  const untracked = gitPaths(["ls-files", "--others", "--exclude-standard", "-z", "--"]).filter(reviewablePath);
-  const trackedUnstaged = gitPaths(["diff", "--name-only", "-z", "--"]).filter(reviewablePath);
-  const stagedAdded = gitPaths(["diff", "--cached", "--name-only", "--diff-filter=A", "-z", "--"]).filter(reviewablePath);
+  const untracked = gitPaths(["ls-files", "--others", "--exclude-standard", "-z", "--"], "legitimate").filter(reviewablePath);
+  const trackedUnstaged = gitPaths(["diff", "--name-only", "-z", "--"], "legitimate").filter(reviewablePath);
+  const stagedAdded = gitPaths(["diff", "--cached", "--name-only", "--diff-filter=A", "-z", "--"], "legitimate").filter(reviewablePath);
   const committedAdded = base === null
     ? []
-    : gitPaths(["diff", "--name-only", "--diff-filter=A", "-z", `${base}...${head}`, "--"]).filter(reviewablePath);
+    : gitPaths(["diff", "--name-only", "--diff-filter=A", "-z", `${base}...${head}`, "--"], "legitimate").filter(reviewablePath);
   return Object.freeze({
     authority: Object.freeze({
       unstaged: Object.freeze([...new Set([...trackedUnstaged, ...untracked])].sort()),
-      staged: gitPaths(["diff", "--cached", "--name-only", "-z", "--"]).filter(reviewablePath),
-      committed: base === null ? Object.freeze([]) : gitPaths(["diff", "--name-only", "-z", `${base}...${head}`, "--"]).filter(reviewablePath),
+      staged: gitPaths(["diff", "--cached", "--name-only", "-z", "--"], "legitimate").filter(reviewablePath),
+      committed: base === null ? Object.freeze([]) : gitPaths(["diff", "--name-only", "-z", `${base}...${head}`, "--"], "legitimate").filter(reviewablePath),
       base_revision: base,
       head_revision: head,
     }),

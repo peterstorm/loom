@@ -44,9 +44,10 @@ export function observeGitProbe<T, E>(
 
 /**
  * Pass a confirmed-empty observation straight through as a step result: the
- * raw (third) empty output is returned, and the consuming site's own
- * emptiness guard refuses loudly with attribution. `GitProbeStep` is
- * structurally `DomainResult`, so both call-site families consume it directly.
+ * raw (third) empty output is returned. Each consumer decides whether empty
+ * is legitimate (for example, an empty path list) or must be refused with
+ * attribution (for example, a missing HEAD). `GitProbeStep` is structurally
+ * `DomainResult`, so both call-site families consume it directly.
  */
 export function confirmedEmptyPassthrough<T, E>(
   observed: GitProbeObservation<T, E>,

@@ -101,6 +101,14 @@ function fixtureRoot(): CanonicalRepositoryRoot {
   return parsed.value;
 }
 
+function writeStaleReport(root: CanonicalRepositoryRoot, contents: string): string {
+  const report = join(root, REPORT_PATH);
+  mkdirSync(join(root, ".loom", "completion-reports"), { recursive: true });
+  writeFileSync(report, contents);
+  expect(spawnSync("git", ["add", ".gitignore"], { cwd: root }).status).toBe(0);
+  return report;
+}
+
 function valueOf<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown }): T {
   if (!result.ok) throw new Error(`fixture construction failed: ${JSON.stringify(result.error)}`);
   return result.value;
@@ -194,10 +202,7 @@ beforeEach(() => {
 describe("remediation report reset survives the transient empty tracked-state observation", () => {
   it("refuses a tracked, ignore-matched report after transient empties discharge into the observed truth", async () => {
     const root = fixtureRoot();
-    const report = join(root, REPORT_PATH);
-    mkdirSync(join(root, ".loom", "completion-reports"), { recursive: true });
-    writeFileSync(report, "stale tracked content");
-    expect(spawnSync("git", ["add", ".gitignore"], { cwd: root }).status).toBe(0);
+    const report = writeStaleReport(root, "stale tracked content");
     expect(spawnSync("git", ["add", "-f", REPORT_PATH], { cwd: root }).status).toBe(0);
     const index = readFileSync(join(root, ".git", "index"));
 
@@ -224,10 +229,7 @@ describe("remediation report reset survives the transient empty tracked-state ob
 
   it("proceeds with the reset only after a confirmed-empty observation names the untracked path", async () => {
     const root = fixtureRoot();
-    const report = join(root, REPORT_PATH);
-    mkdirSync(join(root, ".loom", "completion-reports"), { recursive: true });
-    writeFileSync(report, "stale untracked content");
-    expect(spawnSync("git", ["add", ".gitignore"], { cwd: root }).status).toBe(0);
+    writeStaleReport(root, "stale untracked content");
 
     scripted.passthrough = false;
     scripted.queue = [
@@ -248,10 +250,7 @@ describe("remediation report reset survives the transient empty tracked-state ob
 
   it("attributes a failed tracked-state observation instead of a generic untracked refusal", async () => {
     const root = fixtureRoot();
-    const report = join(root, REPORT_PATH);
-    mkdirSync(join(root, ".loom", "completion-reports"), { recursive: true });
-    writeFileSync(report, "stale");
-    expect(spawnSync("git", ["add", ".gitignore"], { cwd: root }).status).toBe(0);
+    const report = writeStaleReport(root, "stale");
 
     scripted.passthrough = false;
     scripted.queue = [
