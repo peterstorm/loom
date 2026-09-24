@@ -21,6 +21,7 @@ import { parseTaskGraph } from "../src/state-manager";
 import { observeTaskGraphProjectBoundary } from "../src/config";
 import { graphFixture, taskFixture } from "./fixtures/task-lifecycle";
 import { publishInitialBatch } from "../src/handlers/helpers/programs/helpers";
+import { readLoomReviewAuthorityBridge } from "../src/handlers/helpers/programs/review-authority-bridge";
 import { waveGateAuthorityDigest, waveRequests } from "../src/handlers/helpers/programs/wave-gate";
 import type { AgentRequestAuthority } from "../src/core/orchestration-contract";
 import { fsSessionRegistry, TASK_GRAPH_POINTER_LEASES_SUFFIX } from "../src/machine";
@@ -1900,9 +1901,11 @@ describe("Pi extension review tool_result integration", () => {
       },
     });
     expect(JSON.parse(resumed)).toMatchObject({ kind: "done" });
-    const bridge = (globalThis as unknown as Record<PropertyKey, unknown>)[
-      Symbol.for("@peterstorm/loom/review-authority/v1")
-    ] as { verify: (input: { cwd: string; sessionId: string }) => Promise<unknown> };
+    // The bridge is looked up through the typed, fail-closed seam rather than
+    // re-declaring the symbol string and structurally guessing the receipt
+    // shape: a missing or malformed host binding throws here instead of
+    // handing the test a `verify` that never existed.
+    const bridge = readLoomReviewAuthorityBridge(globalThis);
     expect(await bridge.verify({ cwd: projectCwd, sessionId: session })).toMatchObject({
       schemaVersion: 1,
       kind: "loom-review-authority-receipt",

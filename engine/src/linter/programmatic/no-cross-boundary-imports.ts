@@ -121,22 +121,21 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/core/reviewer-contract.ts": ["zod/v4"],
       "engine/src/core/standalone-lineage-contract.ts": ["zod/v4"],
       "engine/src/core/reviewer-protocol.ts": ["jsonc-parser"],
+      // Grammar-constrained verdict grammars: the panel contract and the panel
+      // tally define their judge/refutation verdict schemas with zod, and the
+      // emission tool's verdict-args parser types its admission seam with the
+      // same package. Exact-specifier grants — never a prefix — so a new zod
+      // subpath fails the gate until it is re-audited by machine-purity.
+      "engine/src/core/panel-contract.ts": ["zod/v4"],
+      "engine/src/core/review-panel.ts": ["zod/v4"],
+      "engine/src/core/emission-tool.ts": ["zod/v4"],
     },
     perFileAllow: {
-      // Cross-branch pre-provisioning, INERT in this checkout: the feature-
-      // branch `block-direct-edits` normalizes panel/spec-artifact targets
-      // with pure path math (posix.normalize) before the prefix test, but the
-      // module checked in at this HEAD makes no node:path import (the
-      // normalization landed only on feat/defect-stale-flow and
-      // feat/grammar-constrained-decoding). By the map-header doctrine above:
-      // stale permission, not a lint failure.
+      // The direct-edit guard normalizes panel/spec-artifact targets with pure
+      // path math (posix.normalize) before the prefix test — no filesystem I/O.
       "engine/src/core/block-direct-edits.ts": ["node:path"],
-      // Cross-branch pre-provisioning, INERT in this checkout: the feature-
-      // branch `emission-ingestion` folds a digest over captured payload
-      // bytes (digest-only hashing, mirroring review-packet/panel-program),
-      // but that module does not exist on this branch — the only occurrence
-      // of its name in this tree is this grant line. By the map-header
-      // doctrine above: stale permission, not a lint failure.
+      // The emission ingestion folds a digest over captured payload bytes —
+      // digest-only hashing, mirroring review-packet/panel-program.
       "engine/src/core/emission-ingestion.ts": ["node:crypto"],
       "engine/src/core/harness-capture.ts": ["node:crypto"],
       "engine/src/core/harness-resources.ts": ["node:crypto", "node:path"],

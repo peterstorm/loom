@@ -5,8 +5,10 @@
  * injected function, so the decision itself performs no I/O.
  */
 
+import { posix } from "node:path";
 import type { HookResult } from "../types";
-import { IMPL_AGENTS, defaultTaskGraphExists } from "../config";
+import { IMPL_AGENTS } from "./model-profiles";
+import { PANEL_ARTIFACT_WRITERS, SPEC_ARTIFACT_ROOT } from "./artifact-write-scope";
 import {
   parseGrantedAgentId,
   parseSessionId,
@@ -59,11 +61,6 @@ function isWriteAuthorizedAgent(agentId: string): boolean {
   return IMPL_AGENTS.has(agentId) || parseGrantedAgentId(agentId) !== null;
 }
 
-// Default task-graph existence probe: the shared fail-closed probe in config
-// (`defaultTaskGraphExists` — ENOENT is the only absent answer), injected
-// here as `shouldBlockDirectEdit`'s default port. Pi passes its own override
-// built on the same `probePathFailClosed` core.
-
 /**
  * No roster reader supplied — answer `null`, i.e. "cannot prove a subagent is
  * running", which falls through to block. There is deliberately NO filesystem
@@ -74,11 +71,31 @@ function isWriteAuthorizedAgent(agentId: string): boolean {
  */
 const noActiveRoster: ActiveRosterProbe = () => null;
 
+/** Repo-relative spec-artifact target: normalized here so a `..` segment
+ *  cannot reassemble into an escape after the prefix test. Targets arrive
+ *  from the caller's shell already resolved against the session cwd and made
+ *  repo-relative; a path that escapes the repo or does not live under the
+ *  spec artifact root fails this check and stays blocked. */
+function inSpecArtifactRoot(targetPath: string): boolean {
+  const normalized = posix.normalize(targetPath);
+  return normalized === SPEC_ARTIFACT_ROOT || normalized.startsWith(`${SPEC_ARTIFACT_ROOT}/`);
+}
+
+/**
+ * REQUIRED arming port: the task-graph existence probe, named at every call
+ * site — no import-frozen default stands in for it. The lazy-arming doctrine
+ * (commit 6f4a1452): a default frozen at module load made the gate's arming
+ * depend on the checkout and silently disarmed on a fresh one; production
+ * callers inject `pathExistsFailClosed(taskGraphPath())`, tests inject their
+ * own. Fail-closed semantics stay the caller's (`pathExistsFailClosed` — ENOENT
+ * is the only absent answer).
+ */
 export function shouldBlockDirectEdit(
   toolName: string,
   sessionId: string,
-  taskGraphExists: () => boolean = defaultTaskGraphExists,
+  taskGraphExists: () => boolean,
   readActiveRoster: ActiveRosterProbe = noActiveRoster,
+  targetPaths: readonly string[] = [],
 ): HookResult {
   if (!taskGraphExists()) return { kind: "allow" };
   if (!FILE_TOOLS.has(toolName)) return { kind: "allow" };
@@ -110,7 +127,25 @@ export function shouldBlockDirectEdit(
     (agentType !== null && IMPL_AGENTS.has(agentType)) || isWriteAuthorizedAgent(agentId))) {
     return { kind: "allow" };
   }
-  // No roster, or only review/verifier agents active — block.
+
+  // Phase-artifact writes: panel artifact writers (interviewer, designer) are
+  // granted writes scoped to the spec artifact root. Their run contracts
+  // promise this capability — the panel templates instruct writing the run's
+  // interview digest and one candidate per lens under the panel-runs dir —
+  // and a spawn that proceeds without it fails confusingly at its first
+  // write. Targets arrive repo-relative from the caller's shell, so a `..`
+  // segment or an outside-the-repo path cannot be proven in-scope here and
+  // stays blocked. Judges are deliberately absent from
+  // PANEL_ARTIFACT_WRITERS: their prompts name candidate paths to READ, and
+  // this admission must not let a compromised judge rewrite candidate files
+  // the finalizer reads verbatim.
+  if (roster !== null &&
+      roster.some(({ agentType }) => agentType !== null && PANEL_ARTIFACT_WRITERS.has(agentType)) &&
+      targetPaths.length > 0 &&
+      targetPaths.every(inSpecArtifactRoot)) {
+    return { kind: "allow" };
+  }
+  // No roster, or only review/verifier and read-only panel agents active — block.
 
   return {
     kind: "block",

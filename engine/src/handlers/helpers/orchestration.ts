@@ -132,7 +132,7 @@ import {
 import { resolveModelProfile, lowerModelProfile } from "../../core/model-profiles";
 import { buildContextPacket, encodeByteSection, type ContextPacket } from "../../orchestration/context-packets";
 import { countRefutationVotes, defaultRefutationThreshold, parseRefutationVerdict, type RefutationVerdict } from "../../core/review-panel";
-import { aggregateVerdicts, candidateFilename, parseArchitectureCandidate, parseArchitectureFinalization, parseJudgeVerdict, type JudgeVerdict } from "../../core/panel-contract";
+import { aggregateVerdicts, architectureCriterion, candidateFilename, parseArchitectureCandidate, parseArchitectureFinalization, parseJudgeVerdict, type ArchitectureCriterion, type JudgeVerdict } from "../../core/panel-contract";
 import type { VerdictEnvelope } from "../../core/panel-kernel";
 import { createEffectRunner } from "../../orchestration/effect-runner";
 import { captureKey } from "../../core/harness-capture";
@@ -1577,7 +1577,13 @@ function panelSubmissionProblem(
   if (judgeMatch !== null) {
     const criterion = input.judgeCriteria[Number(judgeMatch[1]) - 1];
     if (criterion === undefined) return `request ${logicalRequestId} is not a canonical judge slot`;
-    const verdict = parseJudgeVerdict(raw, criterion, input.candidateLenses.map(candidateFilename));
+    // The criterion is minted through the closed vocabulary, never asserted
+    // into the brand: the journal is checkpoint-loaded (untrusted) input, and
+    // a criterion outside deriveJudgeCriteria's vocabulary cannot come from a
+    // validated digest.
+    const branded = architectureCriterion(criterion);
+    if (branded === null) return `request ${logicalRequestId} carries judge criterion ${JSON.stringify(criterion)}, which is outside the validated interview vocabulary`;
+    const verdict = parseJudgeVerdict(raw, branded, input.candidateLenses.map(candidateFilename));
     return verdict.ok ? null : verdict.errors.join("; ");
   }
 
@@ -1879,15 +1885,24 @@ function executeDeterministicPanelOperation(
     };
   }
   if (operationId === "architecture-aggregate") {
+    // Checkpoint-loaded criteria are minted through the closed vocabulary
+    // (the same parse boundary the panel authority mints at), never asserted
+    // into the brand; a foreign criterion refuses here instead of binding.
+    const criteria: ArchitectureCriterion[] = [];
+    for (const criterion of input.judgeCriteria) {
+      const branded = architectureCriterion(criterion);
+      if (branded === null) return { ok: false, message: `judge criterion ${JSON.stringify(criterion)} is outside the validated interview vocabulary` };
+      criteria.push(branded);
+    }
     const verdicts: JudgeVerdict[] = [];
-    for (let index = 0; index < input.judgeCriteria.length; index += 1) {
+    for (let index = 0; index < criteria.length; index += 1) {
       const captured = capturedPanelRaw(handle, `architecture:judge:${index + 1}`);
       if (!captured.ok) return captured;
-      const parsed = parseJudgeVerdict(captured.raw, input.judgeCriteria[index]!, candidates);
+      const parsed = parseJudgeVerdict(captured.raw, criteria[index]!, candidates);
       if (!parsed.ok) return { ok: false, message: parsed.errors.join("; ") };
       verdicts.push(parsed.value);
     }
-    const ranking = aggregateVerdicts(verdicts, input.judgeCriteria, candidates);
+    const ranking = aggregateVerdicts(verdicts, criteria, candidates);
     if (!ranking.ok) return { ok: false, message: ranking.errors.join("; ") };
     return {
       ok: true,

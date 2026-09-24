@@ -17,96 +17,44 @@ import { PANEL_BASELINE_LENSES, PANEL_LENSES } from "./core/panel-contract";
 // import adds no cycle. Every Loom-owned agent set and phase map below is a
 // DERIVED projection of the catalog; harness compatibility utilities are not.
 import {
-  AGENT_POLICIES,
-  agentsOfKind,
+  ARCH_PANEL_AGENTS,
+  frozenSet,
+  IMPL_AGENTS,
+  isReviewAgent,
+  KNOWN_AGENTS,
+  PHASE_AGENT_MAP,
+  REVIEW_AGENTS,
+  REVIEW_PANEL_AGENTS,
+  REVIEW_SUB_AGENTS,
   WAVE_REVIEW_AGENTS,
 } from "./core/model-profiles";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "./core/verification-manifest";
 import { projectRootForStateFile } from "./core/phase-artifact-paths";
 import { observeGitProbe } from "./utils/git-probe";
 
-export { WAVE_REVIEW_AGENTS };
+// The catalog-derived agent-policy projections live in the PURE model-profiles
+// leaf (see its catalog-derived section), so the core modules that need them
+// can import the leaf without dragging in config's initialization — which
+// resolves the Task Graph through filesystem and Git probes and runs three
+// load-time assertions. config re-exports every moved name for the shell-side
+// consumers whose import sites predate the move.
+export {
+  ARCH_PANEL_AGENTS,
+  IMPL_AGENTS,
+  isReviewAgent,
+  KNOWN_AGENTS,
+  PHASE_AGENT_MAP,
+  REVIEW_AGENTS,
+  REVIEW_PANEL_AGENTS,
+  REVIEW_SUB_AGENTS,
+  WAVE_REVIEW_AGENTS,
+};
 
 /** Markers above this trigger mandatory clarify phase */
 export const CLARIFY_THRESHOLD = 3;
 
 /** Valid phase ordering — re-exported from the single source tuple in types. */
 export const PHASE_ORDER: readonly Phase[] = PHASES;
-
-/** Phase agents → their phase. DERIVED from the Agent Catalog (kind `phase`).
- *  The catalog's AgentKind is a union, not a record with a `role` beside a
- *  `phase` both branches carry: panel agents have no per-agent phase to
- *  declare — they all run in ARCH_PANEL_PHASE by construction — so
- *  `{ kind: "arch-panel", phase: "decompose" }` is unrepresentable rather
- *  than policed by a load-time throw. Normal phase-agent completion is handed
- *  to the phase-transition observer, while panel-agent completion is intentionally
- *  ignored by advance-phase so the architecture phase cannot advance
- *  mid-panel. Exact-name phase/panel disjointness is structural (one catalog
- *  key, one kind); the runtime guard below remains for suffix-variant
- *  collisions, e.g. a phase agent `arch-designer` vs a panel
- *  `arch-designer-agent`, which are distinct keys no record can rule out.
- *  Frozen so post-load mutation that could smuggle a panel agent in here — and
- *  break the "only architecture-agent advances the phase" contract that
- *  advance-phase.ts relies on — is impossible at runtime. Typed
- *  `Readonly<Record<string, Phase | undefined>>` (not the mutable `Record`) so
- *  the freeze's read-only-ness survives into the type: `PHASE_AGENT_MAP[x] = ...`
- *  is a compile-time error too, not just a runtime throw. The string index
- *  signature is kept (unlike `as const`) so detectPhase's computed
- *  `PHASE_AGENT_MAP[agent]` lookups still type-check.
- *
- *  `Phase | undefined`, not `Phase`, because the lookup key is AGENT-CONTROLLED
- *  (`tool_input.subagent_type`) and most agents are not in this map. Declaring a
- *  total lookup made every consumer's existence guard look like defensive
- *  clutter the compiler said was unnecessary.
- *
- *  Null-prototype, because `Object.fromEntries` alone returns an object that
- *  inherits `Object.prototype`: `PHASE_AGENT_MAP["constructor"]` returned the
- *  `Object` constructor typed as a `Phase`, and `"toString" in phaseMap` was
- *  true — which `panelPhaseOverlap` below tests with `in`. Every guard downstream
- *  failed closed or loud on the resulting value, but they were catching a hazard
- *  the data structure should never have offered. */
-export const PHASE_AGENT_MAP: Readonly<Record<string, Phase | undefined>> = Object.freeze(
-  Object.assign(
-    Object.create(null) as Record<string, Phase>,
-    Object.fromEntries(
-      // `flatMap` rather than `filter().map()`: the kind union narrows inside
-      // the callback that reads `phase`, so only the branch that HAS a phase can
-      // contribute one. `filter` leaves the value widened, which is what made
-      // the panel branch's absent `phase` a compile error rather than a proof.
-      AGENT_POLICIES.flatMap(({ agent, kind }): [string, Phase][] =>
-        kind.kind === "phase" ? [[agent, kind.phase]] : [],
-      ),
-    ),
-  ),
-);
-
-/** A read-only Set that blocks ordinary runtime mutator calls. `Object.freeze`
- *  alone does NOT stop `set.add(...)`, so the instance's `add`/`delete`/`clear`
- *  methods are shadowed with throwing functions before the object shell is
- *  frozen. This protects normal consumers; it does not claim to defeat exotic
- *  prototype calls such as `Set.prototype.add.call(set, value)`. */
-function frozenSet<T>(values: Iterable<T>): ReadonlySet<T> {
-  const s = new Set(values);
-  const immutable = (): never => {
-    throw new Error("loom config invariant violated: this Set is immutable");
-  };
-  s.add = immutable as typeof s.add;
-  s.delete = immutable as typeof s.delete;
-  s.clear = immutable as typeof s.clear;
-  return Object.freeze(s);
-}
-
-/** Architecture-panel agents (`/loom --panel`): DERIVED from the Agent Catalog
- *  (kind `arch-panel`). Recognized by phase validation as architecture-phase
- *  work, but INVISIBLE to advance-phase — never in PHASE_AGENT_MAP so only
- *  architecture-agent's SubagentStop advances the phase. If a designer/judge were
- *  a phase agent, its completion would fire a phase transition and the date-prefix
- *  plan fallback could advance the phase mid-panel. The disjointness is structural
- *  for exact names (one key, one kind) AND enforced at module load (the guard
- *  below throws on import) for suffix-variant collisions — belt and suspenders.
- *  Built via frozenSet so runtime mutation is blocked, symmetric with the frozen
- *  PHASE_AGENT_MAP. */
-export const ARCH_PANEL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("arch-panel"));
 
 /**
  * The phase every panel agent is classified as for phase-order validation.
@@ -229,59 +177,10 @@ export const PANEL_JUDGES_DEFAULT = 3;
 // the enforced rule with no runtime consequence and no failing test. The two
 // constants above are the shared policy; `selectLenses` is the enforcement.
 
-/** Impl agents → all map to "execute" phase. DERIVED from the Agent Catalog
- *  (kind `impl`). Note: agent identifiers are intentionally `string` (no
- *  brand). Bun runs in transpile-only mode, so a TS brand would not enforce
- *  anything at runtime; the real boundary check lives in
- *  validate-task-graph.ts via KNOWN_AGENTS.has(agent). */
-export const IMPL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("impl"));
-
-/** Known agents for task graph validation */
-export const KNOWN_AGENTS: ReadonlySet<string> = frozenSet([...IMPL_AGENTS, ...Object.keys(PHASE_AGENT_MAP)]);
-
-/** Utility agents allowed through phase validation */
+/** Utility agents allowed through phase validation — HARNESS-level names
+ *  (Claude Code built-ins), not catalog identities, so they stay here rather
+ *  than in the catalog-derived section of the model-profiles leaf. */
 export const UTILITY_AGENTS: ReadonlySet<string> = frozenSet(["Explore", "Plan", "haiku"]);
-
-/** Review sub-agents that produce findings per task. DERIVED from the Agent
- *  Catalog (kind `reviewer`) — membership only; the ordered wave roster is
- *  WAVE_REVIEW_AGENTS (re-exported above from the catalog module, where its
- *  index-binding order lives beside the identities it selects from). */
-export const REVIEW_SUB_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("reviewer"));
-
-/**
- * Is this agent type one whose output carries review findings?
- *
- * Lives HERE, beside the set it queries, rather than in core/review-output.
- * That module declares itself pure — "no I/O, no clock, no randomness" — and
- * importing this file to answer a one-line membership question made the claim
- * false: `config` resolves TASK_GRAPH_PATH at import, which spawns
- * `git rev-parse --show-toplevel`, and drags in three throwing load-time
- * assertions besides (assertPanelPhaseDisjoint, assertReviewPanelDisjoint,
- * assertPanelExecuteDisjoint). Agent-name classification is a harness concern,
- * and both callers already hold the agent type before they reach the parser.
- */
-export function isReviewAgent(agentType: string): boolean {
-  return REVIEW_SUB_AGENTS.has(agentType);
-}
-
-/** Finding-producing review agents plus the spec-check invoker. */
-export const REVIEW_AGENTS: ReadonlySet<string> = frozenSet([
-  ...REVIEW_SUB_AGENTS,
-  ...agentsOfKind("spec-check"),
-]);
-
-/** Refutation-panel verifiers (wave gate Step 3.5): execute-phase work like
- *  every other reviewer, but deliberately NOT in REVIEW_SUB_AGENTS and NOT in
- *  REVIEW_AGENTS.
- *
- *  A verifier emits pure JSON that the `review-panel` helper validates; it has
- *  no findings of its own to store. In REVIEW_SUB_AGENTS its transcript would
- *  route through store-reviewer-findings, which would find no CRITICAL_COUNT
- *  and mark the task `evidence_capture_failed` — a passing wave blocked by the
- *  agent that was there to unblock it. Kept as its own set for the same reason
- *  ARCH_PANEL_AGENTS is: recognized by phase validation, invisible to the
- *  SubagentStop dispatcher. Frozen, symmetric with ARCH_PANEL_AGENTS. */
-export const REVIEW_PANEL_AGENTS: ReadonlySet<string> = frozenSet(agentsOfKind("review-verifier"));
 
 /** Review-panel agents that would be MISROUTED by colliding with a phase,
  *  architecture-panel, impl, review, or utility agent — validatePhaseOrder
@@ -629,9 +528,20 @@ function proveNoGitMetadataInAncestorsFrom(cwd: string): void {
   }
 }
 
-/** Resolve Git root without conflating an absent repository with an unavailable probe —
- *  the bounded empty-stdout retry here discharges the transient documented at
- *  `observeGitProbe`; a confirmed anomaly throws with the full probe evidence. */
+/** Resolve Git root without conflating an absent repository with an unavailable probe.
+ *  Exported for the direct-edit wrapper's panel-artifact target resolution and
+ *  the panel-guard write targets; the probe itself stays the one implementation
+ *  the task-graph search shares. Runtime-rooted: anchored at process.cwd() —
+ *  the extension's runtime root — composed over the cwd-explicit core below. */
+export function gitRepositoryRoot(): string | null {
+  return gitRepositoryRootFrom(process.cwd());
+}
+
+/** The cwd-explicit core (the spawn-cwd runtime polarity): the probe runs with
+ *  the explicit cwd, so the governing graph lives in the repository the caller
+ *  declares — the bounded empty-stdout retry here discharges the transient
+ *  documented at `observeGitProbe`; a confirmed anomaly throws with the full
+ *  probe evidence. */
 function gitRepositoryRootFrom(cwd: string): string | null {
   type RootProbe =
     | Readonly<{ kind: "root"; root: string; status: number; stdoutLength: number; signal: NodeJS.Signals | null; stderr: string }>

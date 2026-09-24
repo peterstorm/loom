@@ -1,0 +1,2393 @@
+{
+  "model": "glm-5.3-flash-spark-tp2-v14",
+  "provider": "desktop-vllm",
+  "upstream": "http://192.168.0.80:8000/v1",
+  "startedAt": "2026-09-19T11:58:05.237Z",
+  "tools": {
+    "loom_emit_reviewer_payload_v2": {
+      "schemaDigest": "sha256-3ac3395301c1d38f41cd93accb19b942e832d7ebced990976335208259f40c37",
+      "schemaKB": 10,
+      "acceptance": {
+        "modelRequests": 3,
+        "accepted": true,
+        "httpStatus": 200,
+        "toolSent": true,
+        "strictFlag": true,
+        "wireParamsEqualFrozen": true,
+        "rawArgs": {
+          "schemaVersion": "2",
+          "kind": "standalone-review",
+          "findings": "[{\"severity\": \"critical\", \"file\": null, \"line\": null, \"claim\": \"Supported input can be accepted without the required authorization check.\", \"basis\": {\"evidence\": {\"kind\": \"execution-trace\", \"preconditions\": [\"An unauthenticated caller reaches the supported entry point.\"], \"steps\": [\"Trace the entry point to the write without encountering authorization.\"], \"observed\": \"Predicted unauthorized write; not executed.\", \"expected\": \"Reject before writing.\", \"reference\": \"Entry-point control flow\"}, \"violatedContract\": {\"reference\": \"Project authorization obligation\", \"statement\": \"Writes require authorization.\"}, \"consequence\": {\"affected\": \"Stored user data\", \"preconditions\": \"Unauthenticated supported request\", \"impact\": \"Unauthorized modification\", \"evidenceLimits\": \"Static trace only; no execution receipt.\"}, \"truthConfidence\": 80, \"severityRationale\": \"The reachable authorization violation blocks safe delivery.\"}}]"
+        },
+        "rawArgsViolation": false,
+        "executeObserved": false,
+        "duplicateExecute": false,
+        "wireToolDef": {
+          "type": "function",
+          "function": {
+            "name": "loom_emit_reviewer_payload_v2",
+            "description": "Emit the frozen reviewer-payload v2 payload. Parameters ARE the frozen schema.",
+            "parameters": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/__schema0"
+                },
+                {
+                  "$ref": "#/$defs/__schema13"
+                }
+              ],
+              "description": "Exactly one strict JSON object, at most 1048576 UTF-8 bytes, no BOM, duplicate keys or more than 32 nested containers including root. Byte decoder enforces these limits before schema parsing. Evidence is reviewer-reported, never engine proof.",
+              "$defs": {
+                "__schema0": {
+                  "readOnly": true,
+                  "type": "object",
+                  "properties": {
+                    "schemaVersion": {
+                      "type": "number",
+                      "const": 2
+                    },
+                    "kind": {
+                      "type": "string",
+                      "const": "standalone-review"
+                    },
+                    "findings": {
+                      "$ref": "#/$defs/__schema1"
+                    }
+                  },
+                  "required": [
+                    "schemaVersion",
+                    "kind",
+                    "findings"
+                  ],
+                  "additionalProperties": false
+                },
+                "__schema1": {
+                  "readOnly": true,
+                  "maxItems": 128,
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/__schema2"
+                  }
+                },
+                "__schema2": {
+                  "oneOf": [
+                    {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "severity": {
+                          "$ref": "#/$defs/__schema3"
+                        },
+                        "file": {
+                          "$ref": "#/$defs/__schema4"
+                        },
+                        "line": {
+                          "$ref": "#/$defs/__schema6"
+                        },
+                        "claim": {
+                          "$ref": "#/$defs/__schema7"
+                        },
+                        "basis": {
+                          "$ref": "#/$defs/__schema8"
+                        }
+                      },
+                      "required": [
+                        "severity",
+                        "file",
+                        "line",
+                        "claim",
+                        "basis"
+                      ],
+                      "additionalProperties": false,
+                      "description": "A null file requires a null line."
+                    },
+                    {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "severity": {
+                          "$ref": "#/$defs/__schema11"
+                        },
+                        "file": {
+                          "$ref": "#/$defs/__schema4"
+                        },
+                        "line": {
+                          "$ref": "#/$defs/__schema6"
+                        },
+                        "claim": {
+                          "$ref": "#/$defs/__schema7"
+                        },
+                        "reason": {
+                          "$ref": "#/$defs/__schema7"
+                        },
+                        "basis": {
+                          "$ref": "#/$defs/__schema12"
+                        }
+                      },
+                      "required": [
+                        "severity",
+                        "file",
+                        "line",
+                        "claim",
+                        "reason"
+                      ],
+                      "additionalProperties": false,
+                      "description": "A null file requires a null line. Optional basis must be complete, never null."
+                    }
+                  ]
+                },
+                "__schema3": {
+                  "type": "string",
+                  "const": "critical"
+                },
+                "__schema4": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2048,
+                      "description": "1–2048 UTF-8 bytes; canonical parseReviewPath repository-relative POSIX path; must belong to issued frozen scope (checked by ingress).",
+                      "$ref": "#/$defs/__schema5"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "__schema5": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048,
+                  "description": "1–2048 UTF-8 bytes; non-whitespace; no NUL or unpaired Unicode surrogates. Preserve accepted contents exactly."
+                },
+                "__schema6": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "__schema7": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "description": "1–4096 UTF-8 bytes; non-whitespace; no NUL or unpaired Unicode surrogates. Preserve accepted contents exactly."
+                },
+                "__schema8": {
+                  "readOnly": true,
+                  "type": "object",
+                  "properties": {
+                    "evidence": {
+                      "oneOf": [
+                        {
+                          "readOnly": true,
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "reproduction"
+                            },
+                            "execution": {
+                              "type": "string",
+                              "enum": [
+                                "not-executed",
+                                "reviewer-reported"
+                              ]
+                            },
+                            "setup": {
+                              "$ref": "#/$defs/__schema9"
+                            },
+                            "input": {
+                              "$ref": "#/$defs/__schema9"
+                            },
+                            "observed": {
+                              "$ref": "#/$defs/__schema9"
+                            },
+                            "expected": {
+                              "$ref": "#/$defs/__schema9"
+                            },
+                            "reference": {
+                              "$ref": "#/$defs/__schema5"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "execution",
+                            "setup",
+                            "input",
+                            "observed",
+                            "expected",
+                            "reference"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "readOnly": true,
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "execution-trace"
+                            },
+                            "preconditions": {
+                              "$ref": "#/$defs/__schema10"
+                            },
+                            "steps": {
+                              "$ref": "#/$defs/__schema10"
+                            },
+                            "observed": {
+                              "$ref": "#/$defs/__schema9"
+                            },
+                            "expected": {
+                              "$ref": "#/$defs/__schema9"
+                            },
+                            "reference": {
+                              "$ref": "#/$defs/__schema5"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "preconditions",
+                            "steps",
+                            "observed",
+                            "expected",
+                            "reference"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "violatedContract": {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "reference": {
+                          "$ref": "#/$defs/__schema5"
+                        },
+                        "statement": {
+                          "$ref": "#/$defs/__schema9"
+                        }
+                      },
+                      "required": [
+                        "reference",
+                        "statement"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "consequence": {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "affected": {
+                          "$ref": "#/$defs/__schema9"
+                        },
+                        "preconditions": {
+                          "$ref": "#/$defs/__schema9"
+                        },
+                        "impact": {
+                          "$ref": "#/$defs/__schema9"
+                        },
+                        "evidenceLimits": {
+                          "$ref": "#/$defs/__schema9"
+                        }
+                      },
+                      "required": [
+                        "affected",
+                        "preconditions",
+                        "impact",
+                        "evidenceLimits"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "truthConfidence": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 100
+                    },
+                    "severityRationale": {
+                      "$ref": "#/$defs/__schema7"
+                    }
+                  },
+                  "required": [
+                    "evidence",
+                    "violatedContract",
+                    "consequence",
+                    "truthConfidence",
+                    "severityRationale"
+                  ],
+                  "additionalProperties": false
+                },
+                "__schema9": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8192,
+                  "description": "1–8192 UTF-8 bytes; non-whitespace; no NUL or unpaired Unicode surrogates. Preserve accepted contents exactly."
+                },
+                "__schema10": {
+                  "readOnly": true,
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "$ref": "#/$defs/__schema9"
+                    }
+                  ],
+                  "items": {
+                    "$ref": "#/$defs/__schema9"
+                  },
+                  "maxItems": 32
+                },
+                "__schema11": {
+                  "type": "string",
+                  "const": "advisory"
+                },
+                "__schema12": {
+                  "$ref": "#/$defs/__schema8"
+                },
+                "__schema13": {
+                  "readOnly": true,
+                  "type": "object",
+                  "properties": {
+                    "schemaVersion": {
+                      "type": "number",
+                      "const": 2
+                    },
+                    "kind": {
+                      "type": "string",
+                      "const": "wave-review"
+                    },
+                    "packetId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "description": "Must equal the issued Review Packet ID."
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991,
+                      "description": "Must equal the issued Review Generation."
+                    },
+                    "prior_findings": {
+                      "readOnly": true,
+                      "description": "Every issued prior Finding ID exactly once in packet order; empty roster requires empty array. Ingress checks the issued roster.",
+                      "$ref": "#/$defs/__schema14"
+                    },
+                    "findings": {
+                      "$ref": "#/$defs/__schema1"
+                    }
+                  },
+                  "required": [
+                    "schemaVersion",
+                    "kind",
+                    "packetId",
+                    "generation",
+                    "prior_findings",
+                    "findings"
+                  ],
+                  "additionalProperties": false
+                },
+                "__schema14": {
+                  "maxItems": 4096,
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/__schema15"
+                  }
+                },
+                "__schema15": {
+                  "readOnly": true,
+                  "type": "object",
+                  "properties": {
+                    "finding_id": {
+                      "$ref": "#/$defs/__schema5"
+                    },
+                    "verdict": {
+                      "type": "string",
+                      "enum": [
+                        "resolved_by_remediation",
+                        "still_present"
+                      ]
+                    },
+                    "reason": {
+                      "$ref": "#/$defs/__schema9"
+                    }
+                  },
+                  "required": [
+                    "finding_id",
+                    "verdict",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "strict": true
+          }
+        }
+      },
+      "violation": {
+        "modelRequests": 2,
+        "accepted": true,
+        "httpStatus": 200,
+        "toolSent": true,
+        "strictFlag": true,
+        "wireParamsEqualFrozen": true,
+        "rawArgs": {
+          "schemaVersion": "2",
+          "kind": "standalone-review",
+          "findings": "[{\"severity\": \"critical\", \"file\": null, \"line\": null, \"claim\": \"Supported input can be accepted without the required authorization check.\", \"basis\": {\"evidence\": {\"kind\": \"execution-trace\", \"preconditions\": [\"An unauthenticated caller reaches the supported entry point.\"], \"steps\": [\"Trace the entry point to the write without encountering authorization.\"], \"observed\": \"Predicted unauthorized write; not executed.\", \"expected\": \"Reject before writing.\", \"reference\": \"Entry-point control flow\"}, \"violatedContract\": {\"reference\": \"Project authorization obligation\", \"statement\": \"Writes require authorization.\"}, \"consequence\": {\"affected\": \"Stored user data\", \"preconditions\": \"Unauthenticated supported request\", \"impact\": \"Unauthorized modification\", \"evidenceLimits\": \"Static trace only; no execution receipt.\"}, \"truthConfidence\": 80, \"severityRationale\": \"The reachable authorization violation blocks safe delivery.\"}}]"
+        },
+        "rawArgsViolation": false,
+        "executeObserved": false,
+        "duplicateExecute": false,
+        "wireToolDef": {
+          "type": "function",
+          "function": {
+            "name": "loom_emit_reviewer_payload_v2",
+            "description": "Emit the frozen reviewer-payload v2 payload. Parameters ARE the frozen schema.",
+            "parameters": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/__schema0"
+                },
+                {
+                  "$ref": "#/$defs/__schema13"
+                }
+              ],
+              "description": "Exactly one strict JSON object, at most 1048576 UTF-8 bytes, no BOM, duplicate keys or more than 32 nested containers including root. Byte decoder enforces these limits before schema parsing. Evidence is reviewer-reported, never engine proof.",
+              "$defs": {
+                "__schema0": {
+                  "readOnly": true,
+                  "type": "object",
+                  "properties": {
+                    "schemaVersion": {
+                      "type": "number",
+                      "const": 2
+                    },
+                    "kind": {
+                      "type": "string",
+                      "const": "standalone-review"
+                    },
+                    "findings": {
+                      "$ref": "#/$defs/__schema1"
+                    }
+                  },
+                  "required": [
+                    "schemaVersion",
+                    "kind",
+                    "findings"
+                  ],
+                  "additionalProperties": false
+                },
+                "__schema1": {
+                  "readOnly": true,
+                  "maxItems": 128,
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/__schema2"
+                  }
+                },
+                "__schema2": {
+                  "oneOf": [
+                    {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "severity": {
+                          "$ref": "#/$defs/__schema3"
+                        },
+                        "file": {
+                          "$ref": "#/$defs/__schema4"
+                        },
+                        "line": {
+                          "$ref": "#/$defs/__schema6"
+                        },
+                        "claim": {
+                          "$ref": "#/$defs/__schema7"
+                        },
+                        "basis": {
+                          "$ref": "#/$defs/__schema8"
+                        }
+                      },
+                      "required": [
+                        "severity",
+                        "file",
+                        "line",
+                        "claim",
+                        "basis"
+                      ],
+                      "additionalProperties": false,
+                      "description": "A null file requires a null line."
+                    },
+                    {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "severity": {
+                          "$ref": "#/$defs/__schema11"
+                        },
+                        "file": {
+                          "$ref": "#/$defs/__schema4"
+                        },
+                        "line": {
+                          "$ref": "#/$defs/__schema6"
+                        },
+                        "claim": {
+                          "$ref": "#/$defs/__schema7"
+                        },
+                        "reason": {
+                          "$ref": "#/$defs/__schema7"
+                        },
+                        "basis": {
+                          "$ref": "#/$defs/__schema12"
+                        }
+                      },
+                      "required": [
+                        "severity",
+                        "file",
+                        "line",
+                        "claim",
+                        "reason"
+                      ],
+                      "additionalProperties": false,
+                      "description": "A null file requires a null line. Optional basis must be complete, never null."
+                    }
+                  ]
+                },
+                "__schema3": {
+                  "type": "string",
+                  "const": "critical"
+                },
+                "__schema4": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2048,
+                      "description": "1–2048 UTF-8 bytes; canonical parseReviewPath repository-relative POSIX path; must belong to issued frozen scope (checked by ingress).",
+                      "$ref": "#/$defs/__schema5"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "__schema5": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048,
+                  "description": "1–2048 UTF-8 bytes; non-whitespace; no NUL or unpaired Unicode surrogates. Preserve accepted contents exactly."
+                },
+                "__schema6": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "__schema7": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "description": "1–4096 UTF-8 bytes; non-whitespace; no NUL or unpaired Unicode surrogates. Preserve accepted contents exactly."
+                },
+                "__schema8": {
+                  "readOnly": true,
+                  "type": "object",
+                  "properties": {
+                    "evidence": {
+                      "oneOf": [
+                        {
+                          "readOnly": true,
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "reproduction"
+                            },
+                            "execution": {
+                              "type": "string",
+                              "enum": [
+                                "not-executed",
+                                "reviewer-reported"
+                              ]
+                            },
+                            "setup": {
+                              "$ref": "#/$defs/__schema9"
+                            },
+                            "input": {
+                              "$ref": "#/$defs/__schema9"
+                            },
+                            "observed": {
+                              "$ref": "#/$defs/__schema9"
+                            },
+                            "expected": {
+                              "$ref": "#/$defs/__schema9"
+                            },
+                            "reference": {
+                              "$ref": "#/$defs/__schema5"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "execution",
+                            "setup",
+                            "input",
+                            "observed",
+                            "expected",
+                            "reference"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "readOnly": true,
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "execution-trace"
+                            },
+                            "preconditions": {
+                              "$ref": "#/$defs/__schema10"
+                            },
+                            "steps": {
+                              "$ref": "#/$defs/__schema10"
+                            },
+                            "observed": {
+                              "$ref": "#/$defs/__schema9"
+                            },
+                            "expected": {
+                              "$ref": "#/$defs/__schema9"
+                            },
+                            "reference": {
+                              "$ref": "#/$defs/__schema5"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "preconditions",
+                            "steps",
+                            "observed",
+                            "expected",
+                            "reference"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    "violatedContract": {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "reference": {
+                          "$ref": "#/$defs/__schema5"
+                        },
+                        "statement": {
+                          "$ref": "#/$defs/__schema9"
+                        }
+                      },
+                      "required": [
+                        "reference",
+                        "statement"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "consequence": {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "affected": {
+                          "$ref": "#/$defs/__schema9"
+                        },
+                        "preconditions": {
+                          "$ref": "#/$defs/__schema9"
+                        },
+                        "impact": {
+                          "$ref": "#/$defs/__schema9"
+                        },
+                        "evidenceLimits": {
+                          "$ref": "#/$defs/__schema9"
+                        }
+                      },
+                      "required": [
+                        "affected",
+                        "preconditions",
+                        "impact",
+                        "evidenceLimits"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "truthConfidence": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 100
+                    },
+                    "severityRationale": {
+                      "$ref": "#/$defs/__schema7"
+                    }
+                  },
+                  "required": [
+                    "evidence",
+                    "violatedContract",
+                    "consequence",
+                    "truthConfidence",
+                    "severityRationale"
+                  ],
+                  "additionalProperties": false
+                },
+                "__schema9": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8192,
+                  "description": "1–8192 UTF-8 bytes; non-whitespace; no NUL or unpaired Unicode surrogates. Preserve accepted contents exactly."
+                },
+                "__schema10": {
+                  "readOnly": true,
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "$ref": "#/$defs/__schema9"
+                    }
+                  ],
+                  "items": {
+                    "$ref": "#/$defs/__schema9"
+                  },
+                  "maxItems": 32
+                },
+                "__schema11": {
+                  "type": "string",
+                  "const": "advisory"
+                },
+                "__schema12": {
+                  "$ref": "#/$defs/__schema8"
+                },
+                "__schema13": {
+                  "readOnly": true,
+                  "type": "object",
+                  "properties": {
+                    "schemaVersion": {
+                      "type": "number",
+                      "const": 2
+                    },
+                    "kind": {
+                      "type": "string",
+                      "const": "wave-review"
+                    },
+                    "packetId": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "description": "Must equal the issued Review Packet ID."
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991,
+                      "description": "Must equal the issued Review Generation."
+                    },
+                    "prior_findings": {
+                      "readOnly": true,
+                      "description": "Every issued prior Finding ID exactly once in packet order; empty roster requires empty array. Ingress checks the issued roster.",
+                      "$ref": "#/$defs/__schema14"
+                    },
+                    "findings": {
+                      "$ref": "#/$defs/__schema1"
+                    }
+                  },
+                  "required": [
+                    "schemaVersion",
+                    "kind",
+                    "packetId",
+                    "generation",
+                    "prior_findings",
+                    "findings"
+                  ],
+                  "additionalProperties": false
+                },
+                "__schema14": {
+                  "maxItems": 4096,
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/__schema15"
+                  }
+                },
+                "__schema15": {
+                  "readOnly": true,
+                  "type": "object",
+                  "properties": {
+                    "finding_id": {
+                      "$ref": "#/$defs/__schema5"
+                    },
+                    "verdict": {
+                      "type": "string",
+                      "enum": [
+                        "resolved_by_remediation",
+                        "still_present"
+                      ]
+                    },
+                    "reason": {
+                      "$ref": "#/$defs/__schema9"
+                    }
+                  },
+                  "required": [
+                    "finding_id",
+                    "verdict",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "strict": true
+          }
+        }
+      },
+      "classification": "CONSTRAINED: strict requested and the forced adversarial call still conforms — provider grammar enforces the tool schema",
+      "directEnforcement": {
+        "attempted": true,
+        "httpStatus": 200,
+        "argsEmitted": {
+          "schemaVersion": "2",
+          "kind": "standalone-review",
+          "findings": "[]"
+        },
+        "violationEmitted": false
+      }
+    },
+    "loom_emit_reviewer_payload_v3": {
+      "schemaDigest": "sha256-515ed14d0435d47da4f8299ed4f7ba9908f33c9f567051db93de84ec0017b4a2",
+      "schemaKB": 14.6,
+      "acceptance": {
+        "modelRequests": 2,
+        "accepted": true,
+        "httpStatus": 200,
+        "toolSent": true,
+        "strictFlag": true,
+        "wireParamsEqualFrozen": true,
+        "rawArgs": {
+          "schemaVersion": "3",
+          "kind": "standalone-successor-review",
+          "lineageDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "snapshotDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "priorAssessments": "[]",
+          "findings": "[]"
+        },
+        "rawArgsViolation": false,
+        "executeObserved": false,
+        "duplicateExecute": false,
+        "wireToolDef": {
+          "type": "function",
+          "function": {
+            "name": "loom_emit_reviewer_payload_v3",
+            "description": "Emit the frozen reviewer-payload v3 payload. Parameters ARE the frozen schema.",
+            "parameters": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "readOnly": true,
+              "description": "Explicit standalone successor envelope only; Finding evidence remains v2. Every issued origin digest exactly once in inventory order. No IDs/counts authored by reviewers. One strict JSON object; 1048576 UTF-8 bytes; depth 32; no duplicate keys/BOM. Repaired requires a relevant changed scoped path; reopening names an exact prior decision and supplies new evidence. Engine joins scope, roster, source and decisions independently.",
+              "$ref": "#/$defs/__schema0",
+              "$defs": {
+                "__schema0": {
+                  "type": "object",
+                  "properties": {
+                    "schemaVersion": {
+                      "type": "number",
+                      "const": 3
+                    },
+                    "kind": {
+                      "type": "string",
+                      "const": "standalone-successor-review"
+                    },
+                    "lineageDigest": {
+                      "$ref": "#/$defs/__schema1"
+                    },
+                    "snapshotDigest": {
+                      "$ref": "#/$defs/__schema1"
+                    },
+                    "priorAssessments": {
+                      "readOnly": true,
+                      "maxItems": 4096,
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/$defs/__schema2"
+                      }
+                    },
+                    "findings": {
+                      "readOnly": true,
+                      "maxItems": 128,
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/$defs/__schema8"
+                      }
+                    }
+                  },
+                  "required": [
+                    "schemaVersion",
+                    "kind",
+                    "lineageDigest",
+                    "snapshotDigest",
+                    "priorAssessments",
+                    "findings"
+                  ],
+                  "additionalProperties": false
+                },
+                "__schema1": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "__schema2": {
+                  "oneOf": [
+                    {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "origin": {
+                          "$ref": "#/$defs/__schema1"
+                        },
+                        "verdict": {
+                          "type": "string",
+                          "const": "still-present"
+                        },
+                        "reason": {
+                          "$ref": "#/$defs/__schema3"
+                        }
+                      },
+                      "required": [
+                        "origin",
+                        "verdict",
+                        "reason"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "origin": {
+                          "$ref": "#/$defs/__schema1"
+                        },
+                        "verdict": {
+                          "type": "string",
+                          "const": "not-assessable"
+                        },
+                        "reason": {
+                          "$ref": "#/$defs/__schema3"
+                        }
+                      },
+                      "required": [
+                        "origin",
+                        "verdict",
+                        "reason"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "origin": {
+                          "$ref": "#/$defs/__schema1"
+                        },
+                        "verdict": {
+                          "type": "string",
+                          "const": "retained"
+                        },
+                        "decisionDigest": {
+                          "$ref": "#/$defs/__schema1"
+                        },
+                        "reason": {
+                          "$ref": "#/$defs/__schema3"
+                        }
+                      },
+                      "required": [
+                        "origin",
+                        "verdict",
+                        "decisionDigest",
+                        "reason"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "origin": {
+                          "$ref": "#/$defs/__schema1"
+                        },
+                        "verdict": {
+                          "type": "string",
+                          "const": "repaired"
+                        },
+                        "reason": {
+                          "$ref": "#/$defs/__schema3"
+                        },
+                        "change": {
+                          "readOnly": true,
+                          "type": "object",
+                          "properties": {
+                            "path": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 2048,
+                              "description": "1–2048 UTF-8 bytes; non-whitespace; no NUL or unpaired Unicode surrogates. Preserve accepted contents exactly."
+                            },
+                            "description": {
+                              "$ref": "#/$defs/__schema3"
+                            }
+                          },
+                          "required": [
+                            "path",
+                            "description"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "origin",
+                        "verdict",
+                        "reason",
+                        "change"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "origin": {
+                          "$ref": "#/$defs/__schema1"
+                        },
+                        "verdict": {
+                          "type": "string",
+                          "const": "reopen"
+                        },
+                        "reason": {
+                          "$ref": "#/$defs/__schema3"
+                        },
+                        "proposal": {
+                          "readOnly": true,
+                          "type": "object",
+                          "properties": {
+                            "decisionDigest": {
+                              "$ref": "#/$defs/__schema1"
+                            },
+                            "evidence": {
+                              "$ref": "#/$defs/__schema4"
+                            },
+                            "changedConditions": {
+                              "$ref": "#/$defs/__schema3"
+                            },
+                            "currentApplicability": {
+                              "$ref": "#/$defs/__schema3"
+                            },
+                            "evidenceLimits": {
+                              "$ref": "#/$defs/__schema3"
+                            }
+                          },
+                          "required": [
+                            "decisionDigest",
+                            "evidence",
+                            "changedConditions",
+                            "currentApplicability",
+                            "evidenceLimits"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "origin",
+                        "verdict",
+                        "reason",
+                        "proposal"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "__schema3": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8192,
+                  "description": "1–8192 UTF-8 bytes; non-whitespace; no NUL or unpaired Unicode surrogates. Preserve accepted contents exactly."
+                },
+                "__schema4": {
+                  "oneOf": [
+                    {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "reproduction"
+                        },
+                        "execution": {
+                          "type": "string",
+                          "enum": [
+                            "not-executed",
+                            "reviewer-reported"
+                          ]
+                        },
+                        "setup": {
+                          "$ref": "#/$defs/__schema5"
+                        },
+                        "input": {
+                          "$ref": "#/$defs/__schema5"
+                        },
+                        "observed": {
+                          "$ref": "#/$defs/__schema5"
+                        },
+                        "expected": {
+                          "$ref": "#/$defs/__schema5"
+                        },
+                        "reference": {
+                          "$ref": "#/$defs/__schema6"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "execution",
+                        "setup",
+                        "input",
+                        "observed",
+                        "expected",
+                        "reference"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "execution-trace"
+                        },
+                        "preconditions": {
+                          "$ref": "#/$defs/__schema7"
+                        },
+                        "steps": {
+                          "$ref": "#/$defs/__schema7"
+                        },
+                        "observed": {
+                          "$ref": "#/$defs/__schema5"
+                        },
+                        "expected": {
+                          "$ref": "#/$defs/__schema5"
+                        },
+                        "reference": {
+                          "$ref": "#/$defs/__schema6"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "preconditions",
+                        "steps",
+                        "observed",
+                        "expected",
+                        "reference"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "__schema5": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8192,
+                  "description": "1–8192 UTF-8 bytes; non-whitespace; no NUL or unpaired Unicode surrogates. Preserve accepted contents exactly."
+                },
+                "__schema6": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048,
+                  "description": "1–2048 UTF-8 bytes; non-whitespace; no NUL or unpaired Unicode surrogates. Preserve accepted contents exactly."
+                },
+                "__schema7": {
+                  "readOnly": true,
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "$ref": "#/$defs/__schema5"
+                    }
+                  ],
+                  "items": {
+                    "$ref": "#/$defs/__schema5"
+                  },
+                  "maxItems": 32
+                },
+                "__schema8": {
+                  "readOnly": true,
+                  "type": "object",
+                  "properties": {
+                    "draft": {
+                      "oneOf": [
+                        {
+                          "readOnly": true,
+                          "type": "object",
+                          "properties": {
+                            "severity": {
+                              "$ref": "#/$defs/__schema9"
+                            },
+                            "file": {
+                              "$ref": "#/$defs/__schema10"
+                            },
+                            "line": {
+                              "$ref": "#/$defs/__schema11"
+                            },
+                            "claim": {
+                              "$ref": "#/$defs/__schema12"
+                            },
+                            "basis": {
+                              "$ref": "#/$defs/__schema13"
+                            }
+                          },
+                          "required": [
+                            "severity",
+                            "file",
+                            "line",
+                            "claim",
+                            "basis"
+                          ],
+                          "additionalProperties": false,
+                          "description": "A null file requires a null line."
+                        },
+                        {
+                          "readOnly": true,
+                          "type": "object",
+                          "properties": {
+                            "severity": {
+                              "$ref": "#/$defs/__schema14"
+                            },
+                            "file": {
+                              "$ref": "#/$defs/__schema10"
+                            },
+                            "line": {
+                              "$ref": "#/$defs/__schema11"
+                            },
+                            "claim": {
+                              "$ref": "#/$defs/__schema12"
+                            },
+                            "reason": {
+                              "$ref": "#/$defs/__schema12"
+                            },
+                            "basis": {
+                              "$ref": "#/$defs/__schema15"
+                            }
+                          },
+                          "required": [
+                            "severity",
+                            "file",
+                            "line",
+                            "claim",
+                            "reason"
+                          ],
+                          "additionalProperties": false,
+                          "description": "A null file requires a null line. Optional basis must be complete, never null."
+                        }
+                      ]
+                    },
+                    "relation": {
+                      "oneOf": [
+                        {
+                          "readOnly": true,
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "independent"
+                            }
+                          },
+                          "required": [
+                            "kind"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "readOnly": true,
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "distinct-related"
+                            },
+                            "origin": {
+                              "$ref": "#/$defs/__schema1"
+                            },
+                            "distinction": {
+                              "$ref": "#/$defs/__schema3"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "origin",
+                            "distinction"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "draft",
+                    "relation"
+                  ],
+                  "additionalProperties": false
+                },
+                "__schema9": {
+                  "type": "string",
+                  "const": "critical"
+                },
+                "__schema10": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2048,
+                      "description": "1–2048 UTF-8 bytes; canonical parseReviewPath repository-relative POSIX path; must belong to issued frozen scope (checked by ingress).",
+                      "$ref": "#/$defs/__schema6"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "__schema11": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "__schema12": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "description": "1–4096 UTF-8 bytes; non-whitespace; no NUL or unpaired Unicode surrogates. Preserve accepted contents exactly."
+                },
+                "__schema13": {
+                  "readOnly": true,
+                  "type": "object",
+                  "properties": {
+                    "evidence": {
+                      "$ref": "#/$defs/__schema4"
+                    },
+                    "violatedContract": {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "reference": {
+                          "$ref": "#/$defs/__schema6"
+                        },
+                        "statement": {
+                          "$ref": "#/$defs/__schema5"
+                        }
+                      },
+                      "required": [
+                        "reference",
+                        "statement"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "consequence": {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "affected": {
+                          "$ref": "#/$defs/__schema5"
+                        },
+                        "preconditions": {
+                          "$ref": "#/$defs/__schema5"
+                        },
+                        "impact": {
+                          "$ref": "#/$defs/__schema5"
+                        },
+                        "evidenceLimits": {
+                          "$ref": "#/$defs/__schema5"
+                        }
+                      },
+                      "required": [
+                        "affected",
+                        "preconditions",
+                        "impact",
+                        "evidenceLimits"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "truthConfidence": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 100
+                    },
+                    "severityRationale": {
+                      "$ref": "#/$defs/__schema12"
+                    }
+                  },
+                  "required": [
+                    "evidence",
+                    "violatedContract",
+                    "consequence",
+                    "truthConfidence",
+                    "severityRationale"
+                  ],
+                  "additionalProperties": false
+                },
+                "__schema14": {
+                  "type": "string",
+                  "const": "advisory"
+                },
+                "__schema15": {
+                  "$ref": "#/$defs/__schema13"
+                }
+              }
+            },
+            "strict": true
+          }
+        }
+      },
+      "violation": {
+        "modelRequests": 2,
+        "accepted": true,
+        "httpStatus": 200,
+        "toolSent": true,
+        "strictFlag": true,
+        "wireParamsEqualFrozen": true,
+        "rawArgs": {
+          "schemaVersion": "3",
+          "kind": "standalone-successor-review",
+          "lineageDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "snapshotDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "priorAssessments": "[]",
+          "findings": "[]"
+        },
+        "rawArgsViolation": false,
+        "executeObserved": false,
+        "duplicateExecute": false,
+        "wireToolDef": {
+          "type": "function",
+          "function": {
+            "name": "loom_emit_reviewer_payload_v3",
+            "description": "Emit the frozen reviewer-payload v3 payload. Parameters ARE the frozen schema.",
+            "parameters": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "readOnly": true,
+              "description": "Explicit standalone successor envelope only; Finding evidence remains v2. Every issued origin digest exactly once in inventory order. No IDs/counts authored by reviewers. One strict JSON object; 1048576 UTF-8 bytes; depth 32; no duplicate keys/BOM. Repaired requires a relevant changed scoped path; reopening names an exact prior decision and supplies new evidence. Engine joins scope, roster, source and decisions independently.",
+              "$ref": "#/$defs/__schema0",
+              "$defs": {
+                "__schema0": {
+                  "type": "object",
+                  "properties": {
+                    "schemaVersion": {
+                      "type": "number",
+                      "const": 3
+                    },
+                    "kind": {
+                      "type": "string",
+                      "const": "standalone-successor-review"
+                    },
+                    "lineageDigest": {
+                      "$ref": "#/$defs/__schema1"
+                    },
+                    "snapshotDigest": {
+                      "$ref": "#/$defs/__schema1"
+                    },
+                    "priorAssessments": {
+                      "readOnly": true,
+                      "maxItems": 4096,
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/$defs/__schema2"
+                      }
+                    },
+                    "findings": {
+                      "readOnly": true,
+                      "maxItems": 128,
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/$defs/__schema8"
+                      }
+                    }
+                  },
+                  "required": [
+                    "schemaVersion",
+                    "kind",
+                    "lineageDigest",
+                    "snapshotDigest",
+                    "priorAssessments",
+                    "findings"
+                  ],
+                  "additionalProperties": false
+                },
+                "__schema1": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "__schema2": {
+                  "oneOf": [
+                    {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "origin": {
+                          "$ref": "#/$defs/__schema1"
+                        },
+                        "verdict": {
+                          "type": "string",
+                          "const": "still-present"
+                        },
+                        "reason": {
+                          "$ref": "#/$defs/__schema3"
+                        }
+                      },
+                      "required": [
+                        "origin",
+                        "verdict",
+                        "reason"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "origin": {
+                          "$ref": "#/$defs/__schema1"
+                        },
+                        "verdict": {
+                          "type": "string",
+                          "const": "not-assessable"
+                        },
+                        "reason": {
+                          "$ref": "#/$defs/__schema3"
+                        }
+                      },
+                      "required": [
+                        "origin",
+                        "verdict",
+                        "reason"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "origin": {
+                          "$ref": "#/$defs/__schema1"
+                        },
+                        "verdict": {
+                          "type": "string",
+                          "const": "retained"
+                        },
+                        "decisionDigest": {
+                          "$ref": "#/$defs/__schema1"
+                        },
+                        "reason": {
+                          "$ref": "#/$defs/__schema3"
+                        }
+                      },
+                      "required": [
+                        "origin",
+                        "verdict",
+                        "decisionDigest",
+                        "reason"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "origin": {
+                          "$ref": "#/$defs/__schema1"
+                        },
+                        "verdict": {
+                          "type": "string",
+                          "const": "repaired"
+                        },
+                        "reason": {
+                          "$ref": "#/$defs/__schema3"
+                        },
+                        "change": {
+                          "readOnly": true,
+                          "type": "object",
+                          "properties": {
+                            "path": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 2048,
+                              "description": "1–2048 UTF-8 bytes; non-whitespace; no NUL or unpaired Unicode surrogates. Preserve accepted contents exactly."
+                            },
+                            "description": {
+                              "$ref": "#/$defs/__schema3"
+                            }
+                          },
+                          "required": [
+                            "path",
+                            "description"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "origin",
+                        "verdict",
+                        "reason",
+                        "change"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "origin": {
+                          "$ref": "#/$defs/__schema1"
+                        },
+                        "verdict": {
+                          "type": "string",
+                          "const": "reopen"
+                        },
+                        "reason": {
+                          "$ref": "#/$defs/__schema3"
+                        },
+                        "proposal": {
+                          "readOnly": true,
+                          "type": "object",
+                          "properties": {
+                            "decisionDigest": {
+                              "$ref": "#/$defs/__schema1"
+                            },
+                            "evidence": {
+                              "$ref": "#/$defs/__schema4"
+                            },
+                            "changedConditions": {
+                              "$ref": "#/$defs/__schema3"
+                            },
+                            "currentApplicability": {
+                              "$ref": "#/$defs/__schema3"
+                            },
+                            "evidenceLimits": {
+                              "$ref": "#/$defs/__schema3"
+                            }
+                          },
+                          "required": [
+                            "decisionDigest",
+                            "evidence",
+                            "changedConditions",
+                            "currentApplicability",
+                            "evidenceLimits"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "origin",
+                        "verdict",
+                        "reason",
+                        "proposal"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "__schema3": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8192,
+                  "description": "1–8192 UTF-8 bytes; non-whitespace; no NUL or unpaired Unicode surrogates. Preserve accepted contents exactly."
+                },
+                "__schema4": {
+                  "oneOf": [
+                    {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "reproduction"
+                        },
+                        "execution": {
+                          "type": "string",
+                          "enum": [
+                            "not-executed",
+                            "reviewer-reported"
+                          ]
+                        },
+                        "setup": {
+                          "$ref": "#/$defs/__schema5"
+                        },
+                        "input": {
+                          "$ref": "#/$defs/__schema5"
+                        },
+                        "observed": {
+                          "$ref": "#/$defs/__schema5"
+                        },
+                        "expected": {
+                          "$ref": "#/$defs/__schema5"
+                        },
+                        "reference": {
+                          "$ref": "#/$defs/__schema6"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "execution",
+                        "setup",
+                        "input",
+                        "observed",
+                        "expected",
+                        "reference"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "execution-trace"
+                        },
+                        "preconditions": {
+                          "$ref": "#/$defs/__schema7"
+                        },
+                        "steps": {
+                          "$ref": "#/$defs/__schema7"
+                        },
+                        "observed": {
+                          "$ref": "#/$defs/__schema5"
+                        },
+                        "expected": {
+                          "$ref": "#/$defs/__schema5"
+                        },
+                        "reference": {
+                          "$ref": "#/$defs/__schema6"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "preconditions",
+                        "steps",
+                        "observed",
+                        "expected",
+                        "reference"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "__schema5": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8192,
+                  "description": "1–8192 UTF-8 bytes; non-whitespace; no NUL or unpaired Unicode surrogates. Preserve accepted contents exactly."
+                },
+                "__schema6": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048,
+                  "description": "1–2048 UTF-8 bytes; non-whitespace; no NUL or unpaired Unicode surrogates. Preserve accepted contents exactly."
+                },
+                "__schema7": {
+                  "readOnly": true,
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "$ref": "#/$defs/__schema5"
+                    }
+                  ],
+                  "items": {
+                    "$ref": "#/$defs/__schema5"
+                  },
+                  "maxItems": 32
+                },
+                "__schema8": {
+                  "readOnly": true,
+                  "type": "object",
+                  "properties": {
+                    "draft": {
+                      "oneOf": [
+                        {
+                          "readOnly": true,
+                          "type": "object",
+                          "properties": {
+                            "severity": {
+                              "$ref": "#/$defs/__schema9"
+                            },
+                            "file": {
+                              "$ref": "#/$defs/__schema10"
+                            },
+                            "line": {
+                              "$ref": "#/$defs/__schema11"
+                            },
+                            "claim": {
+                              "$ref": "#/$defs/__schema12"
+                            },
+                            "basis": {
+                              "$ref": "#/$defs/__schema13"
+                            }
+                          },
+                          "required": [
+                            "severity",
+                            "file",
+                            "line",
+                            "claim",
+                            "basis"
+                          ],
+                          "additionalProperties": false,
+                          "description": "A null file requires a null line."
+                        },
+                        {
+                          "readOnly": true,
+                          "type": "object",
+                          "properties": {
+                            "severity": {
+                              "$ref": "#/$defs/__schema14"
+                            },
+                            "file": {
+                              "$ref": "#/$defs/__schema10"
+                            },
+                            "line": {
+                              "$ref": "#/$defs/__schema11"
+                            },
+                            "claim": {
+                              "$ref": "#/$defs/__schema12"
+                            },
+                            "reason": {
+                              "$ref": "#/$defs/__schema12"
+                            },
+                            "basis": {
+                              "$ref": "#/$defs/__schema15"
+                            }
+                          },
+                          "required": [
+                            "severity",
+                            "file",
+                            "line",
+                            "claim",
+                            "reason"
+                          ],
+                          "additionalProperties": false,
+                          "description": "A null file requires a null line. Optional basis must be complete, never null."
+                        }
+                      ]
+                    },
+                    "relation": {
+                      "oneOf": [
+                        {
+                          "readOnly": true,
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "independent"
+                            }
+                          },
+                          "required": [
+                            "kind"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "readOnly": true,
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "distinct-related"
+                            },
+                            "origin": {
+                              "$ref": "#/$defs/__schema1"
+                            },
+                            "distinction": {
+                              "$ref": "#/$defs/__schema3"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "origin",
+                            "distinction"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "draft",
+                    "relation"
+                  ],
+                  "additionalProperties": false
+                },
+                "__schema9": {
+                  "type": "string",
+                  "const": "critical"
+                },
+                "__schema10": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2048,
+                      "description": "1–2048 UTF-8 bytes; canonical parseReviewPath repository-relative POSIX path; must belong to issued frozen scope (checked by ingress).",
+                      "$ref": "#/$defs/__schema6"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "__schema11": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "__schema12": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "description": "1–4096 UTF-8 bytes; non-whitespace; no NUL or unpaired Unicode surrogates. Preserve accepted contents exactly."
+                },
+                "__schema13": {
+                  "readOnly": true,
+                  "type": "object",
+                  "properties": {
+                    "evidence": {
+                      "$ref": "#/$defs/__schema4"
+                    },
+                    "violatedContract": {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "reference": {
+                          "$ref": "#/$defs/__schema6"
+                        },
+                        "statement": {
+                          "$ref": "#/$defs/__schema5"
+                        }
+                      },
+                      "required": [
+                        "reference",
+                        "statement"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "consequence": {
+                      "readOnly": true,
+                      "type": "object",
+                      "properties": {
+                        "affected": {
+                          "$ref": "#/$defs/__schema5"
+                        },
+                        "preconditions": {
+                          "$ref": "#/$defs/__schema5"
+                        },
+                        "impact": {
+                          "$ref": "#/$defs/__schema5"
+                        },
+                        "evidenceLimits": {
+                          "$ref": "#/$defs/__schema5"
+                        }
+                      },
+                      "required": [
+                        "affected",
+                        "preconditions",
+                        "impact",
+                        "evidenceLimits"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "truthConfidence": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 100
+                    },
+                    "severityRationale": {
+                      "$ref": "#/$defs/__schema12"
+                    }
+                  },
+                  "required": [
+                    "evidence",
+                    "violatedContract",
+                    "consequence",
+                    "truthConfidence",
+                    "severityRationale"
+                  ],
+                  "additionalProperties": false
+                },
+                "__schema14": {
+                  "type": "string",
+                  "const": "advisory"
+                },
+                "__schema15": {
+                  "$ref": "#/$defs/__schema13"
+                }
+              }
+            },
+            "strict": true
+          }
+        }
+      },
+      "classification": "CONSTRAINED: strict requested and the forced adversarial call still conforms — provider grammar enforces the tool schema",
+      "directEnforcement": {
+        "attempted": true,
+        "httpStatus": 200,
+        "argsEmitted": {
+          "schemaVersion": "3",
+          "kind": "standalone-successor-review",
+          "lineageDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+          "snapshotDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+          "priorAssessments": "[]",
+          "findings": "[]"
+        },
+        "violationEmitted": false
+      }
+    },
+    "loom_emit_judge_verdict": {
+      "schemaDigest": "sha256-3f590e9f4a9e4ef586220f4d0fa07bb061fb4ebaa32c9a24eeed07fbb044c569",
+      "schemaKB": 1.8,
+      "acceptance": {
+        "modelRequests": 1,
+        "accepted": true,
+        "httpStatus": 200,
+        "toolSent": true,
+        "strictFlag": true,
+        "wireParamsEqualFrozen": true,
+        "rawArgs": {
+          "criterion": "extensibility",
+          "rankings": [
+            {
+              "candidate": "candidate-a.ts",
+              "score": 7,
+              "fatal_flaw": null,
+              "strongest_idea": "Frozen bytes as the parameter schema remove drift."
+            }
+          ]
+        },
+        "rawArgsViolation": false,
+        "executeObserved": true,
+        "duplicateExecute": false,
+        "wireToolDef": {
+          "type": "function",
+          "function": {
+            "name": "loom_emit_judge_verdict",
+            "description": "Emit the frozen judge-verdict v1 payload. Parameters ARE the frozen schema.",
+            "parameters": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "readOnly": true,
+              "type": "object",
+              "properties": {
+                "criterion": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "The judge criterion this verdict ranks under; ingress binds it to the run's derived criteria."
+                },
+                "rankings": {
+                  "readOnly": true,
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/__schema0"
+                  }
+                }
+              },
+              "required": [
+                "criterion",
+                "rankings"
+              ],
+              "additionalProperties": false,
+              "$defs": {
+                "__schema0": {
+                  "readOnly": true,
+                  "type": "object",
+                  "properties": {
+                    "candidate": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The run-scoped candidate filename this ranking judges; ingress binds it to the expected candidate set."
+                    },
+                    "score": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 10,
+                      "description": "An integer from 0 to 10; judges score one candidate per criterion."
+                    },
+                    "fatal_flaw": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/__schema1"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "The fatal flaw, or null. Non-empty after brace stripping and trimming when present."
+                    },
+                    "strongest_idea": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The strongest idea; non-empty after brace stripping and trimming."
+                    }
+                  },
+                  "required": [
+                    "candidate",
+                    "score",
+                    "fatal_flaw",
+                    "strongest_idea"
+                  ],
+                  "additionalProperties": false
+                },
+                "__schema1": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "strict": true
+          }
+        }
+      },
+      "violation": {
+        "modelRequests": 2,
+        "accepted": true,
+        "httpStatus": 200,
+        "toolSent": true,
+        "strictFlag": true,
+        "wireParamsEqualFrozen": true,
+        "rawArgs": {
+          "criterion": "extensibility",
+          "rankings": [
+            {
+              "candidate": "candidate-a.ts",
+              "score": 12,
+              "fatal_flaw": null,
+              "strongest_idea": "Frozen bytes as the parameter schema remove drift."
+            }
+          ]
+        },
+        "rawArgsViolation": true,
+        "executeObserved": false,
+        "duplicateExecute": false,
+        "wireToolDef": {
+          "type": "function",
+          "function": {
+            "name": "loom_emit_judge_verdict",
+            "description": "Emit the frozen judge-verdict v1 payload. Parameters ARE the frozen schema.",
+            "parameters": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "readOnly": true,
+              "type": "object",
+              "properties": {
+                "criterion": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "The judge criterion this verdict ranks under; ingress binds it to the run's derived criteria."
+                },
+                "rankings": {
+                  "readOnly": true,
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/__schema0"
+                  }
+                }
+              },
+              "required": [
+                "criterion",
+                "rankings"
+              ],
+              "additionalProperties": false,
+              "$defs": {
+                "__schema0": {
+                  "readOnly": true,
+                  "type": "object",
+                  "properties": {
+                    "candidate": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The run-scoped candidate filename this ranking judges; ingress binds it to the expected candidate set."
+                    },
+                    "score": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 10,
+                      "description": "An integer from 0 to 10; judges score one candidate per criterion."
+                    },
+                    "fatal_flaw": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/__schema1"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "The fatal flaw, or null. Non-empty after brace stripping and trimming when present."
+                    },
+                    "strongest_idea": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The strongest idea; non-empty after brace stripping and trimming."
+                    }
+                  },
+                  "required": [
+                    "candidate",
+                    "score",
+                    "fatal_flaw",
+                    "strongest_idea"
+                  ],
+                  "additionalProperties": false
+                },
+                "__schema1": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "strict": true
+          }
+        }
+      },
+      "classification": "UNCONSTRAINED: forced adversarial call emitted the violation — provider ignores the tool schema (engine-authoritative)",
+      "directEnforcement": {
+        "attempted": true,
+        "httpStatus": 200,
+        "argsEmitted": {
+          "criterion": "coherence",
+          "rankings": [
+            {
+              "candidate": "candidate_a.md",
+              "fatal_flaw": null,
+              "score": 12,
+              "strongest_idea": "placeholder"
+            }
+          ]
+        },
+        "violationEmitted": true
+      }
+    },
+    "loom_emit_refutation_verdict": {
+      "schemaDigest": "sha256-766a0dee252ca3fb135253d51b6ddea5bac1ce941e367eebf2da10f81ce8b2fd",
+      "schemaKB": 1.4,
+      "acceptance": {
+        "modelRequests": 1,
+        "accepted": false,
+        "toolSent": true,
+        "strictFlag": true,
+        "wireParamsEqualFrozen": true,
+        "executeObserved": false,
+        "duplicateExecute": false,
+        "wireToolDef": {
+          "type": "function",
+          "function": {
+            "name": "loom_emit_refutation_verdict",
+            "description": "Emit the frozen refutation-verdict v1 payload. Parameters ARE the frozen schema.",
+            "parameters": {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "readOnly": true,
+              "type": "object",
+              "properties": {
+                "criterion": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "The lens whose slot issued this verdict; ingress binds it to the run's lens roster."
+                },
+                "verdicts": {
+                  "readOnly": true,
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/__schema0"
+                  }
+                }
+              },
+              "required": [
+                "criterion",
+                "verdicts"
+              ],
+              "additionalProperties": false,
+              "$defs": {
+                "__schema0": {
+                  "readOnly": true,
+                  "type": "object",
+                  "properties": {
+                    "finding_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "The wave-scoped finding id this entry judges; ingress binds it to the issued brief."
+                    },
+                    "verdict": {
+                      "type": "string",
+                      "enum": [
+                        "refuted",
+                        "upheld",
+                        "uncertain"
+                      ],
+                      "description": "One of: refuted, upheld, uncertain. Uncertain counts toward neither side."
+                    },
+                    "reasoning": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "1+ UTF-8 bytes; non-empty after brace stripping and trimming."
+                    }
+                  },
+                  "required": [
+                    "finding_id",
+                    "verdict",
+                    "reasoning"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "strict": true
+          }
+        }
+      },
+      "violation": {
+        "modelRequests": 0,
+        "accepted": false,
+        "toolSent": false,
+        "executeObserved": false,
+        "duplicateExecute": false
+      },
+      "classification": "rejected (HTTP undefined) → extraction-only",
+      "directEnforcement": {
+        "attempted": true,
+        "httpStatus": 200,
+        "argsEmitted": {
+          "criterion": "negative_test_lens",
+          "verdicts": [
+            {
+              "finding_id": "wave1-finding-001",
+              "reasoning": "Negative test entry: this verdict intentionally uses an invalid enum value to exercise the rejection path.",
+              "verdict": "partially_upheld"
+            }
+          ]
+        },
+        "violationEmitted": true
+      }
+    }
+  },
+  "errors": []
+}

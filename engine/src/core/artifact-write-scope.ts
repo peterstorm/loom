@@ -11,15 +11,18 @@
  * may write at all — a judge whose prompt names candidate paths is READING
  * them and receives nothing. Path mentions only REFINE a writer's scope.
  *
- * The decision functions perform no I/O, clock, or randomness. Importing this
- * module is not currently side-effect-free: `PHASE_AGENT_MAP` comes from
- * `config.ts`, whose initialization resolves the Task Graph through filesystem
- * and Git probes. Splitting runtime discovery from Agent policy is tracked as
- * a separate configuration-seam deepening.
+ * The decision functions perform no I/O, clock, or randomness, and importing
+ * this module is side-effect-free: `PHASE_AGENT_MAP` comes from the pure
+ * model-profiles leaf (the catalog-derived projections), not from `config.ts`
+ * — whose initialization resolves the Task Graph through filesystem and Git
+ * probes. Runtime discovery still lives in config, exactly where this module
+ * never reaches.
  */
 
-import { PHASE_AGENT_MAP } from "../config";
+import { PHASE_AGENT_MAP } from "./model-profiles";
 import { stripNamespace } from "../utils/strip-namespace";
+import type { LoomAgentName } from "./model-profiles";
+import type { Phase } from "../types";
 
 /**
  * `.claude/specs/…` / `.claude/plans/…` path tokens in a phase prompt
@@ -31,45 +34,50 @@ import { stripNamespace } from "../utils/strip-namespace";
  */
 const ARTIFACT_PATH_TOKEN = /(?:^|[^A-Za-z0-9_./{}-])((?:\.\.\/)*\.claude\/(?:specs|plans)(?:\/[A-Za-z0-9._/{}:-]*)?)/g;
 
-/** Phase agents whose run contract includes writing an artifact. Everything
- *  else PHASE_AGENT_MAP knows (decompose) is read-only and receives no grant
- *  even when its prompt names artifact paths. */
-const ARTIFACT_WRITING_PHASES: ReadonlySet<string> = new Set([
-  "brainstorm",
-  "specify",
-  "clarify",
-  "plan-alignment",
-  "architecture",
-]);
-
-/** Panel agents whose run contract includes writing an artifact. They are
- *  not in PHASE_AGENT_MAP, so the phase branch cannot admit them — this set
- *  is the only door for `role: "panel"` agents. Judges are deliberately
- *  absent: their prompts name candidate paths to READ, and a scoped write
- *  grant would let a compromised judge rewrite candidate files the finalizer
- *  reads verbatim. */
-const PANEL_ARTIFACT_WRITERS: ReadonlySet<string> = new Set([
-  "arch-interviewer-agent",
-  "arch-designer-agent",
-]);
+/** The spec artifact root, repo-relative: where every spec-phase and panel-run
+ *  artifact lives (`.claude/specs/<slug>/`, including the panel-runs subtree the
+ *  interview digest and designer candidates occupy). The direct-edit guard
+ *  consumes this same constant, so its admission and the scope derivation can
+ *  never name two roots. */
+export const SPEC_ARTIFACT_ROOT = ".claude/specs";
 
 /** Phase-aware fallback when a prompt carries no artifact path: the phase's
- *  canonical artifact dir. Writers without explicit paths get the phase-wide
- *  dir; panel writers without explicit paths get nothing (their prompts
- *  always carry a run-scoped path). */
-function phaseFallbackScope(phase: string): readonly string[] | null {
-  switch (phase) {
-    case "brainstorm":
-    case "specify":
-    case "clarify":
-    case "plan-alignment":
-      return [".claude/specs"];
-    case "architecture":
-      return [".claude/plans"];
-    default:
-      return null;
-  }
-}
+ *  canonical artifact dir. ONE representation of the phase-writer policy: the
+ *  KEYS are exactly the artifact-writing phases (the writer set derives from
+ *  them, so the two can never diverge), and a phase absent from the map is a
+ *  non-writer. Panel writers get nothing here (their prompts always carry a
+ *  run-scoped path); judges are deliberately absent from
+ *  PANEL_ARTIFACT_WRITERS: their prompts name candidate paths to READ, and a
+ *  scoped write grant would let a compromised judge rewrite candidate files
+ *  the finalizer reads verbatim. */
+const PHASE_FALLBACK_SCOPE: Readonly<Partial<Record<Phase, readonly string[]>>> = Object.freeze({
+  brainstorm: Object.freeze([SPEC_ARTIFACT_ROOT]),
+  specify: Object.freeze([SPEC_ARTIFACT_ROOT]),
+  clarify: Object.freeze([SPEC_ARTIFACT_ROOT]),
+  "plan-alignment": Object.freeze([SPEC_ARTIFACT_ROOT]),
+  architecture: Object.freeze([".claude/plans"]),
+});
+
+/** Phase agents whose run contract includes writing an artifact — DERIVED
+ *  from the fallback map's keys. Everything else PHASE_AGENT_MAP knows
+ *  (decompose) is read-only and receives no grant even when its prompt names
+ *  artifact paths. */
+const ARTIFACT_WRITING_PHASES: ReadonlySet<string> = new Set(Object.keys(PHASE_FALLBACK_SCOPE));
+/** The panel agents whose run contract includes writing an artifact — the
+ *  WAVE_REVIEW_AGENTS pattern: a literal roster typed against the catalog, so
+ *  a renamed or typo'd agent name fails compilation instead of silently
+ *  emptying both the grant planner and the guard's panel-artifact admission. */
+export const PANEL_ARTIFACT_WRITER_NAMES = Object.freeze([
+  "arch-interviewer-agent",
+  "arch-designer-agent",
+] as const satisfies readonly LoomAgentName[]);
+
+/** Exported for the direct-edit guard's panel-artifact admission: the role set
+ *  is the one honest door both the grant planner and the guard admit through.
+ *  String-keyed deliberately — its consumers test UNTRUSTED agent names, which
+ *  no brand can guarantee; the compile-time guarantee lives in the typed
+ *  roster above, which is this set's only constructor. */
+export const PANEL_ARTIFACT_WRITERS: ReadonlySet<string> = new Set(PANEL_ARTIFACT_WRITER_NAMES);
 
 /** Path tokens → candidate scope dirs: a token ending in a filename scopes
  *  to its directory; trailing slashes are trimmed; duplicates removed. */
@@ -126,5 +134,5 @@ export function deriveArtifactWriteScope(
     const specific = derived.filter((dir) => !derived.some((other) => other !== dir && other.startsWith(`${dir}/`)));
     return specific.length > 0 ? specific : derived;
   }
-  return isPhaseWriter ? phaseFallbackScope(phase) : null;
+  return isPhaseWriter ? PHASE_FALLBACK_SCOPE[phase] ?? null : null;
 }

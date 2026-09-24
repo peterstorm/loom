@@ -138,6 +138,8 @@ const AUDITED_RUNTIME = new Map([...SAX_RUNTIME, ...REVIEWER_RUNTIME]);
 const CONTRACT = "engine/src/core/reviewer-contract.ts";
 const LINEAGE_CONTRACT = "engine/src/core/standalone-lineage-contract.ts";
 const CODEC = "engine/src/core/reviewer-protocol.ts";
+const PANEL_CONTRACT = "engine/src/core/panel-contract.ts";
+const PANEL_TALLY = "engine/src/core/review-panel.ts";
 const REVIEWER_ENTRIES = new Map([
   ["zod/v4", "zod/v4/index.js"], ["jsonc-parser", "jsonc-parser/lib/umd/main.js"],
 ]);
@@ -218,7 +220,7 @@ function auditClosure(roots: readonly string[], overlays: ReadonlyMap<string, st
           ? DEFAULT_PURE_MODULES.includes(candidate) : runtime.dependencies.includes(specifier) && AUDITED_RUNTIME.has(candidate));
         if (target === undefined) errors.push(`${mod}: ${specifier} leaves the declared pure closure`);
         else queue.push(target);
-      } else if (([CONTRACT, LINEAGE_CONTRACT].includes(mod) && specifier === "zod/v4") || (mod === CODEC && specifier === "jsonc-parser")) {
+      } else if (([CONTRACT, LINEAGE_CONTRACT, PANEL_CONTRACT, PANEL_TALLY].includes(mod) && specifier === "zod/v4") || (mod === CODEC && specifier === "jsonc-parser")) {
         const entry = REVIEWER_ENTRIES.get(specifier);
         if (entry !== undefined) queue.push(entry);
       } else if ((mod === PARSER && specifier === "saxes") || runtime?.dependencies.includes(specifier)) {

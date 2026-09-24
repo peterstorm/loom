@@ -450,6 +450,8 @@ Run schema validator on agent output:
 echo "$DECOMPOSE_OUTPUT" | bun ${LOOM_DIR}/engine/src/cli.ts helper validate-task-graph --decompose-payload -
 ```
 
+Run the validator with cwd at the repository root (or the worktree root for a worktree orchestration): the plan's relative `**Rule file:**` paths (`.claude/linter/rules/...`) resolve against the process cwd — invoked from elsewhere, checkable INV-N rules false-fail with ENOENT.
+
 The validator also cross-checks executable-model bindings when the plan declares them (`## Lifecycles` / `## Pipeline` / `## Invariants`): every LC-N machine file must appear in a task's `file_list`, the AuthoredDag sidecar must exist and be structurally sound, every checkable INV-N rule file must exist, and near-miss declarations (typo'd headings/labels) are errors. See `references/executable-models.md`. These same checks run fail-closed inside `populate-task-graph` (4d), so they cannot be skipped.
 
 **Routing validation failures — read the error text:**

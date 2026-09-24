@@ -9,11 +9,14 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
   aggregateVerdicts,
+  architectureCriterion,
   candidateFilename,
   deriveJudgeCriteria,
   parseInterviewDigest,
+  PRIMARY_AXES,
   selectPanelLenses,
   serializeRankings,
+  type ArchitectureCriterion,
   type CandidateFilename,
   type JudgeRanking,
   type JudgeVerdict,
@@ -66,6 +69,15 @@ const verdictOf = (
   entries: scores.map(([candidate, score]) => ranking(candidate, score)),
 });
 
+/** Mint a test criterion through the closed vocabulary — the same boundary the
+ *  production callers mint at — so a foreign test criterion fails loudly here
+ *  instead of compiling into the branded criteria order. */
+const mintedCriterion = (raw: string): ArchitectureCriterion => {
+  const criterion = architectureCriterion(raw);
+  if (criterion === null) throw new Error(`test criterion outside the validated interview vocabulary: ${raw}`);
+  return criterion;
+};
+
 // ---------------------------------------------------------------------------
 // C4 — the tie-break past the first criterion, and the criteria ORDER
 // ---------------------------------------------------------------------------
@@ -73,15 +85,16 @@ const verdictOf = (
 describe("compareRankings breaks a total tie by walking every criterion", () => {
   const A = candidateFilename("simplicity-first");
   const B = candidateFilename("type-driven-fp");
-  const CRITERIA = ["c0", "c1", "c2"] as const;
+  const CRITERIA = PRIMARY_AXES.slice(0, 3).map(mintedCriterion);
 
-  /** Totals tie at 18. c0 ties; c1 favours A; c2 favours B. So the winner is
-   *  decided entirely by which of c1/c2 the criteria order reaches first — the
-   *  behaviour a `Math.min(1, …)` cap on the loop silently removed. */
+  /** Totals tie at 18. The first criterion ties; the second favours A; the
+   *  third favours B. So the winner is decided entirely by which of the
+   *  second/third the criteria order reaches first — the behaviour a
+   *  `Math.min(1, …)` cap on the loop silently removed. */
   const TIED = [
-    verdictOf("c0", [[A, 6], [B, 6]]),
-    verdictOf("c1", [[A, 8], [B, 4]]),
-    verdictOf("c2", [[A, 4], [B, 8]]),
+    verdictOf(CRITERIA[0]!, [[A, 6], [B, 6]]),
+    verdictOf(CRITERIA[1]!, [[A, 8], [B, 4]]),
+    verdictOf(CRITERIA[2]!, [[A, 4], [B, 8]]),
   ];
 
   it("uses the SECOND criterion when the first ties", () => {
@@ -93,18 +106,14 @@ describe("compareRankings breaks a total tie by walking every criterion", () => 
   });
 
   it("a different criteria ORDER produces a different winner — so the order is a contract", () => {
-    const reversed = aggregateVerdicts(TIED, ["c2", "c1", "c0"], [A, B]);
+    const reversed = aggregateVerdicts(TIED, [...CRITERIA].reverse(), [A, B]);
     expect(reversed.ok).toBe(true);
     if (!reversed.ok) return;
     expect(reversed.value[0]!.candidate).toBe(B);
   });
 
   it("falls back to the lexicographically smallest filename only when every criterion ties", () => {
-    const allTied = [
-      verdictOf("c0", [[A, 6], [B, 6]]),
-      verdictOf("c1", [[A, 6], [B, 6]]),
-      verdictOf("c2", [[A, 6], [B, 6]]),
-    ];
+    const allTied = CRITERIA.map((criterion) => verdictOf(criterion, [[A, 6], [B, 6]]));
     const ranked = aggregateVerdicts(allTied, [...CRITERIA], [B, A]);
     expect(ranked.ok).toBe(true);
     if (!ranked.ok) return;
@@ -120,7 +129,10 @@ describe("compareRankings breaks a total tie by walking every criterion", () => 
           // Build two candidates whose totals are equal and whose scores agree
           // on the first `tieDepth` criteria, then diverge.
           const tieDepth = Math.min(tieDepthRaw, k - 1);
-          const criteria = Array.from({ length: k }, (_, i) => `c${i}`);
+          // Distinct, in-vocabulary criteria: this property's subject is the
+          // ORDER mechanics, so any k distinct members of the closed
+          // vocabulary carry it (the axes alone reach k = 5).
+          const criteria = Array.from({ length: k }, (_, i) => mintedCriterion(PRIMARY_AXES[i]!));
           const aScores: number[] = [];
           const bScores: number[] = [];
           for (let i = 0; i < k; i++) {
@@ -180,14 +192,16 @@ describe("aggregateVerdicts validates the score domain when called standalone", 
     // NaN was the worst: the comparator returned NaN, `sort` treats that as 0,
     // and the candidate came out RANK 1 with `"total_score": null` in the
     // artifact that decides which architecture ships.
-    const ranked = aggregateVerdicts([verdictOf("c0", [[A, score], [B, 5]])], ["c0"], [A, B]);
+    const criterion = mintedCriterion("simplicity");
+    const ranked = aggregateVerdicts([verdictOf(criterion, [[A, score], [B, 5]])], [criterion], [A, B]);
     expect(ranked.ok).toBe(false);
     if (!ranked.ok) expect(ranked.errors.join(" ")).toContain("must be an integer from 0 to 10");
   });
 
   it("accepts the whole legal domain", () => {
+    const criterion = mintedCriterion("simplicity");
     for (let score = 0; score <= 10; score++) {
-      expect(aggregateVerdicts([verdictOf("c0", [[A, score], [B, score]])], ["c0"], [A, B]).ok).toBe(true);
+      expect(aggregateVerdicts([verdictOf(criterion, [[A, score], [B, score]])], [criterion], [A, B]).ok).toBe(true);
     }
   });
 });
@@ -199,14 +213,15 @@ describe("aggregateVerdicts validates the score domain when called standalone", 
 describe("serializeRankings numbers every row, not just the first", () => {
   it("emits 1..N with no duplicates", () => {
     const candidates = (["simplicity-first", "type-driven-fp", "risk-security-first"] as const).map(candidateFilename);
+    const criterion = mintedCriterion("simplicity");
     const ranked = aggregateVerdicts(
-      [verdictOf("c0", [[candidates[0]!, 9], [candidates[1]!, 7], [candidates[2]!, 5]])],
-      ["c0"],
+      [verdictOf(criterion, [[candidates[0]!, 9], [candidates[1]!, 7], [candidates[2]!, 5]])],
+      [criterion],
       candidates,
     );
     expect(ranked.ok).toBe(true);
     if (!ranked.ok) return;
-    const parsed = JSON.parse(serializeRankings(ranked.value, ["c0"])) as {
+    const parsed = JSON.parse(serializeRankings(ranked.value, [criterion])) as {
       ranking: { rank: number; candidate: string; total_score: number }[];
     };
     expect(parsed.ranking.map((r) => r.rank)).toEqual([1, 2, 3]);
