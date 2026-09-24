@@ -204,6 +204,29 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
     });
   });
 
+  it("refuses three empty-success Git status witnesses before registering a successor", async () => {
+    const root = project(); await ownedSession(root, async () => {
+      const f = await predecessor(root); const p = await policy(root, "source", "policy-zero", f.publisher);
+      const shim = join(root, "empty-status-git"); mkdirSync(shim);
+      const realGit = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+      const trace = join(root, "status-attempts");
+      writeFileSync(join(shim, "git"), `#!/bin/sh\nif [ "$1" = status ] && [ "$2" = --porcelain=v2 ]; then\n  echo attempt >> "$LOOM_STATUS_TRACE"\n  exit 0\nfi\nexec "$LOOM_REAL_GIT" "$@"\n`);
+      chmodSync(join(shim, "git"), 0o755);
+      const previousPath = process.env.PATH;
+      Object.assign(process.env, { PATH: `${shim}:${previousPath ?? ""}`, LOOM_REAL_GIT: realGit, LOOM_STATUS_TRACE: trace });
+      try {
+        const refused = await invoke(root, ["start", "standalone-review", ...flags(root, "empty-status")], json(input(p)));
+        expect(refused.code).not.toBe(0);
+        expect(refused.stderr).toContain("git status --porcelain=v2 --branch -z --untracked-files=all returned empty output after bounded retries");
+        expect(readFileSync(trace, "utf8").trim().split("\n")).toHaveLength(3);
+        expect(existsSync(join(root, "runs", "empty-status"))).toBe(false);
+      } finally {
+        if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+        delete process.env.LOOM_REAL_GIT; delete process.env.LOOM_STATUS_TRACE;
+      }
+    });
+  });
+
   it("refuses orchestration submit above the raw 16 MiB capture bound before touching the pending attempt", async () => {
     const root = project(); await ownedSession(root, async () => {
       const f = await predecessor(root); const p = await policy(root, "source", "policy-zero", f.publisher);

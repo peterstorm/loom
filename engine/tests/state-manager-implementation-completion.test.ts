@@ -439,6 +439,65 @@ describe("Task attempt authority StateManager lockstep", () => {
     }, { executing_tasks: ["T1"] }))).toContain("receiptId does not match");
   });
 
+  it("pins the three previously unpinned Task-attempt load guards", () => {
+    // pr-test-analyzer-1: the chain's sibling refusals each carry a dedicated
+    // pin; these three rows close the same gap for the identity, escalation,
+    // and semantic-attempt guards so dropping one fails a suite.
+    const activeGraph = (active: ImplementationAttemptAuthority, overrides: Record<string, unknown> = {}) => graph({
+      ...baseTask(),
+      proof: pendingProof(),
+      active_implementation_attempt: active,
+      attempt_artifact_baseline: attemptBaseline,
+      attempt_repository_baseline: repositoryBaseline,
+      reserved_at: active.reservedAt,
+      ...overrides,
+    }, { executing_tasks: ["T1"] });
+    const foreign = valueOf(createImplementationAttemptAuthority({
+      taskId: "T2",
+      wave: 1,
+      semanticAttempt: 1,
+      reservationId: "foreign-identity",
+      headSha: "c".repeat(40),
+      reservedAt: "2026-08-23T00:00:00.000Z",
+      taskScopeBaseline: attemptBaseline,
+      dirtySetBaseline: repositoryBaseline,
+    }));
+    expect(errorOf(activeGraph(foreign))).toContain("active_implementation_attempt must match Task id and Wave");
+
+    const escalatedHistory = [
+      receiptFor(authority("pin-esc-retry"), false),
+      receiptFor(authority("pin-esc-2", 2), false),
+    ];
+    const escalatedDisposition = deriveImplementationRetryDisposition({
+      id: "T1",
+      implementation_attempt_history: escalatedHistory,
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
+    });
+    if (escalatedDisposition.kind !== "escalated") throw new Error("escalation fixture failed");
+    const activeOnEscalated = authority("pin-esc-active");
+    expect(errorOf(activeGraph(activeOnEscalated, {
+      implementation_attempt_history: escalatedHistory,
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
+    }))).toContain("escalated implementation lineage cannot carry an active attempt");
+
+    const retryHistory = [receiptFor(authority("pin-contradiction-retry"), false)];
+    const retryDisposition = deriveImplementationRetryDisposition({
+      id: "T1",
+      implementation_attempt_history: retryHistory,
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
+    });
+    if (retryDisposition.kind !== "retry") throw new Error("retry fixture failed");
+    const staleSemantic = authority("pin-contradiction-active");
+    expect(errorOf(activeGraph(staleSemantic, {
+      implementation_attempt_history: retryHistory,
+      implementation_retry_protocol: 2,
+      implementation_retry_history_start: 0,
+    }))).toContain("active_implementation_attempt semantic attempt contradicts settlement history");
+  });
+
   it("rejects an active authority whose digest or reservation already appears in history", () => {
     const active = authority("reused-reservation");
     const valid = {

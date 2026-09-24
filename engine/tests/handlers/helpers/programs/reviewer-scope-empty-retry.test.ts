@@ -49,6 +49,15 @@ import { deriveChangedPaths, metadata } from "../../../../src/handlers/helpers/p
 
 const SHA = "b".repeat(40);
 
+// The changed-shape fixture both numstat rows consume: token-identical in
+// every field, so the rows state only what they actually vary — the scripted
+// spawnSync queue and the expected additions count (code-simplifier-3).
+const numstatChanged = {
+  authority: { unstaged: ["src/b.ts"], staged: [], committed: [], base_revision: null, head_revision: SHA },
+  untracked: ["src/a.ts"],
+  created: new Set(["src/a.ts", "src/b.ts"]),
+};
+
 beforeEach(() => {
   scriptedResponses.queue = [];
   scriptedResponses.calls = [];
@@ -91,6 +100,31 @@ describe("reviewer scope derivation survives the transient empty-stdout Git obse
     expect(scriptedResponses.calls.every((entry) => entry[1] === "rev-parse")).toBe(true);
   });
 
+  it("refuses a confirmed-empty merge-base before omitting committed changes from scope", () => {
+    scriptedResponses.queue = [answered(SHA), answered(""), answered(""), answered("")];
+    expect(() => deriveChangedPaths()).toThrow(/merge-base origin\/main.*empty output after bounded retries/);
+    expect(scriptedResponses.calls.map((entry) => entry[1])).toEqual([
+      "rev-parse", "merge-base", "merge-base", "merge-base",
+    ]);
+  });
+
+  it("recovers a transient empty merge-base and keeps committed branch paths", () => {
+    scriptedResponses.queue = [
+      answered(SHA),
+      answered(""), answered(SHA), // merge-base: retry before using a real base
+      answered(""), answered(""), answered(""), // legitimate empty untracked listing
+      answered(""), answered(""), answered(""), // legitimate empty unstaged listing
+      answered(""), answered(""), answered(""), // legitimate empty staged-added listing
+      answered("src/new.ts\0"), // committed-added listing
+      answered(""), answered(""), answered(""), // legitimate empty staged listing
+      answered("src/new.ts\0"), // committed path listing
+    ];
+    const changed = deriveChangedPaths();
+    expect(changed.authority.base_revision).toBe(SHA);
+    expect(changed.authority.committed).toEqual(["src/new.ts"]);
+    expect(scriptedResponses.calls.filter((entry) => entry[1] === "merge-base")).toHaveLength(2);
+  });
+
   it("accepts a confirmed-empty path listing as the explicit legitimate-empty decision", () => {
     scriptedResponses.queue = [
       answered(SHA), // rev-parse HEAD observed first try
@@ -113,29 +147,25 @@ describe("reviewer scope derivation survives the transient empty-stdout Git obse
       answered(""), answered("1\t0\tsrc/b.ts\n"), // tracked numstat transient discharged
       answered(""), answered("3\t0\tsrc/a.ts\n"), // untracked numstat transient discharged
     ];
-    const changed = {
-      authority: { unstaged: ["src/b.ts"], staged: [], committed: [], base_revision: null, head_revision: SHA },
-      untracked: ["src/a.ts"],
-      created: new Set(["src/a.ts", "src/b.ts"]),
-    };
-    const reviewMetadata = metadata("all", ["src/a.ts", "src/b.ts"], changed);
+    const reviewMetadata = metadata("all", ["src/a.ts", "src/b.ts"], numstatChanged);
     expect(reviewMetadata.additions).toBe(4);
     expect(scriptedResponses.calls.filter((entry) => entry[2] === "--numstat")).toHaveLength(2);
   });
 
-  it("counts zero additions when numstat stays empty after bounded retries", () => {
-    scriptedResponses.queue = [
-      answered(""), answered(""), answered(""), // tracked numstat confirmed empty
-      answered(""), answered(""), answered(""), // untracked numstat confirmed empty
-    ];
-    const changed = {
-      authority: { unstaged: ["src/b.ts"], staged: [], committed: [], base_revision: null, head_revision: SHA },
-      untracked: ["src/a.ts"],
-      created: new Set(["src/a.ts", "src/b.ts"]),
-    };
-    const reviewMetadata = metadata("all", ["src/a.ts", "src/b.ts"], changed);
+  it("counts zero tracked additions when numstat legitimately stays empty after bounded retries", () => {
+    scriptedResponses.queue = [answered(""), answered(""), answered("")];
+    const reviewMetadata = metadata("all", ["src/b.ts"], numstatChanged);
     expect(reviewMetadata.additions).toBe(0);
-    // The explicit caller decision was reached only after the full retry budget.
-    expect(scriptedResponses.calls).toHaveLength(6);
+    expect(scriptedResponses.calls).toHaveLength(3);
+  });
+
+  it("refuses confirmed-empty untracked numstat before using zero for reviewer selection", () => {
+    scriptedResponses.queue = [
+      answered("2\t0\tsrc/b.ts\n"), // tracked additions observed
+      answered(""), answered(""), answered(""), // untracked numstat: impossible empty result
+    ];
+    expect(() => metadata("code", ["src/a.ts", "src/b.ts"], numstatChanged))
+      .toThrow(/cannot measure untracked additions for src\/a.ts.*empty output after bounded retries/);
+    expect(scriptedResponses.calls).toHaveLength(4);
   });
 });

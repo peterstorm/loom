@@ -23,6 +23,7 @@ import {
   type StructuredReportParseResult,
 } from "../core/structured-test-report";
 import { sha256Bytes } from "../core/review-packet";
+import { observeGitProbe } from "../utils/git-probe";
 import { inspectRepositoryPath } from "../utils/repository-path";
 import {
   parseCanonicalRepositoryRoot,
@@ -242,12 +243,32 @@ function preSpawnReportSnapshot(
 
 /** Destructive permission is narrower than report-reading authority: only the
  * exact currently ignored, untracked report may be removed. Git reads do not
- * refresh the index, and the unlink itself retains its no-follow parent fd. */
+ * refresh the index, and the unlink itself retains its no-follow parent fd.
+ *
+ * The tracked-state probe is re-observed through the canonical bounded
+ * empty-retry (`observeGitProbe`): a single status-0/empty-stdout success is
+ * never a tracked/untracked decision, because the transient empty-success
+ * class documented there would otherwise bypass the tracked-file refusal arm
+ * and authorize unlinking tracked content. Only a confirmed-empty observation
+ * reaches the explicit caller decision — empty legitimately means untracked
+ * for `ls-files` — and any observed non-empty stdout refuses loudly. */
 function resetRemediationReport(root: CanonicalRepositoryRoot, check: RunnerCommand): void {
   if (check.reportPolicy.kind !== "required-file") throw new Error("remediation requires a report path");
   const path = check.reportPolicy.path;
-  const tracked = spawnSync("git", ["--literal-pathspecs", "ls-files", "-z", "--", path], { cwd: root, encoding: "utf8" });
-  if (tracked.error || tracked.status !== 0 || tracked.stdout.length !== 0) {
+  const observed = observeGitProbe<string, Error>(() => {
+    const tracked = spawnSync("git", ["--literal-pathspecs", "ls-files", "-z", "--", path], { cwd: root, encoding: "utf8" });
+    if (tracked.error !== undefined) {
+      return Object.freeze({ ok: false as const, error: new Error(`git ls-files could not start: ${tracked.error.message}`) });
+    }
+    if (tracked.status !== 0) {
+      return Object.freeze({ ok: false as const, error: new Error(`git ls-files exited ${String(tracked.status)} for ${path}`) });
+    }
+    return Object.freeze({ ok: true as const, value: tracked.stdout });
+  }, (stdout) => stdout.length === 0);
+  if (observed.kind === "failed") {
+    throw new Error(`report reset could not observe tracked state of ${path}: ${observed.error.message}`);
+  }
+  if (observed.kind === "observed") {
     throw new Error(`report reset cannot prove exact path is untracked: ${path}`);
   }
   const ignored = spawnSync("git", ["check-ignore", "-q", "--", path], { cwd: root, encoding: "utf8" });

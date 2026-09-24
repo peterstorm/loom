@@ -104,6 +104,7 @@ import {
 import { parseReviewerProtocolDescriptor } from "./core/reviewer-contract";
 import { KNOWN_AGENTS, PHASE_ORDER, REVIEW_SUB_AGENTS } from "./config";
 import { isRecord } from "./core/plain-record";
+import type { LegacyWaveGateCompatibilityAuthority } from "./core/legacy-archive";
 
 /**
  * Prove one wave gate's shape, for the reason every `Task` union field is proven.
@@ -2248,7 +2249,7 @@ export function parseTaskGraph(raw: unknown): ParseResult<ParsedTaskGraph> {
 
 export type ParsedLegacyWaveGateMigrationAuthority = Readonly<{
   registration: ActiveWaveGateRegistration;
-  compatibility: import("./core/legacy-archive").LegacyWaveGateCompatibilityAuthority;
+  compatibility: LegacyWaveGateCompatibilityAuthority;
 }>;
 
 export function parseLegacyWaveGateMigrationAuthority(raw: unknown): ParseResult<ParsedLegacyWaveGateMigrationAuthority> {
@@ -2284,7 +2285,7 @@ export function parseLegacyWaveGateMigrationAuthority(raw: unknown): ParseResult
     revision: 0,
     terminalOutcome: null,
   });
-  const compatibility: import("./core/legacy-archive").LegacyWaveGateCompatibilityAuthority = Object.freeze({
+  const compatibility: LegacyWaveGateCompatibilityAuthority = Object.freeze({
     schemaVersion: 1,
     kind: "legacy-wave-gate-compatibility",
     runId: registration.runId,

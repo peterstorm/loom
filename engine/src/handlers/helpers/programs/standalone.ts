@@ -56,12 +56,14 @@ function initialStandaloneRequests(authority: FrozenStandaloneReviewAuthority) {
 }
 
 const successorGitAuthorityWitness = (): string =>
-  // A clean worktree legitimately produces empty porcelain output, so the
-  // confirmed-empty decision here is "legitimate" — accepted only after the
-  // bounded retry, never from a single unobserved success.
+  // With --branch, git always emits branch header lines on stdout (verified
+  // across clean, dirty, unborn-HEAD, and -z forms), so this probe can never
+  // legitimately answer empty: the confirmed-empty decision here is "refuse" —
+  // a confirmed-empty throws loudly with attribution instead of passing a
+  // fabricated empty witness that could never detect change.
   gitText([
     "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all",
-  ], "legitimate");
+  ], "refuse");
 
 export async function prepareStandaloneSuccessorFacadeStart(runsRoot: string, run: string, input: StandaloneSuccessorStartInput) {
   try {
