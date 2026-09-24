@@ -14,7 +14,7 @@ import { statSync } from "node:fs";
 import { resolve as pathResolve, relative as pathRelative, sep as pathSep } from "node:path";
 import type { HookHandler, PreToolUseInput } from "../../types";
 import { shouldBlockDirectEdit, type ActiveRosterProbe } from "../../core/block-direct-edits";
-import { gitRepositoryRoot, subagentDir } from "../../config";
+import { gitRepositoryRoot, subagentDir, taskGraphPath, pathExistsFailClosed } from "../../config";
 import { readActiveAgentRoles } from "../../machine/ledger";
 
 /**
@@ -44,6 +44,19 @@ export const activeRosterProbe: ActiveRosterProbe = (sessionId) => {
   }
 };
 
+/**
+ * Graph activity, observed LAZILY at decision time through the shared
+ * `taskGraphPath()` resolver rather than the import-frozen `TASK_GRAPH_PATH`
+ * default. For a real hook process the two are identical (the environment is
+ * fixed before this module loads), but the lazy resolver is what the Pi
+ * adapter already probes, and it is what lets a test arm the guard by
+ * re-pointing `LOOM_STATE_PATH` at decision time without reloading the module
+ * graph — the re-pointing doctrine every other config path here follows. The
+ * probe itself stays fail-closed (`pathExistsFailClosed`): only a proven
+ * ENOENT disarms the gate.
+ */
+const graphActiveProbe = (): boolean => pathExistsFailClosed(taskGraphPath());
+
 const handler: HookHandler = async (stdin) => {
   let input: PreToolUseInput;
   try {
@@ -60,7 +73,7 @@ const handler: HookHandler = async (stdin) => {
   return shouldBlockDirectEdit(
     input.tool_name,
     input.session_id,
-    undefined,
+    graphActiveProbe,
     activeRosterProbe,
     panelWriteTargetPaths(input.tool_input),
   );

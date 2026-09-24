@@ -11,7 +11,7 @@
  * decision that never touches the filesystem.
  */
 
-import { describe, it, expect, afterAll, vi } from "vitest";
+import { describe, it, expect, afterAll, afterEach, beforeEach, vi } from "vitest";
 import { mkdirSync, rmSync, writeFileSync, symlinkSync, mkdtempSync, chmodSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -454,9 +454,27 @@ describe("block-direct-edits handler — panel-artifact targets (end-to-end wiri
    * the wrapper resolves the raw file_path against the harness cwd and makes
    * it repo-relative, so a real .claude/specs target under this repo admits a
    * real panel-writer roster while an outside-the-repo target stays blocked.
-   * Both assertions assume the guard is armed (a task graph exists in this
-   * checkout); without one the gate's first act allows every edit.
+   * The guard is armed HERE, not by the checkout: `LOOM_STATE_PATH` is
+   * re-pointed at a per-suite temp State File (the lazy resolver the handler
+   * probes reads it at decision time), so the assertions hold on a fresh CI
+   * checkout exactly as they do in a checkout hosting a live orchestration
+   * run — a test that silently depended on the developer's state file passed
+   * locally and allowed every edit on CI.
    */
+  const statePath = join(tmpdir(), `block-direct-armed-${process.pid}.json`);
+  const originalStatePath = process.env.LOOM_STATE_PATH;
+
+  beforeEach(() => {
+    writeFileSync(statePath, "{}");
+    process.env.LOOM_STATE_PATH = statePath;
+  });
+
+  afterEach(() => {
+    if (originalStatePath === undefined) delete process.env.LOOM_STATE_PATH;
+    else process.env.LOOM_STATE_PATH = originalStatePath;
+    rmSync(statePath, { force: true });
+  });
+
   it("a real .claude/specs target under the repo admits a real panel-writer roster", async () => {
     mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
     writeFileSync(join(SUBAGENT_DIR, `${s}.active`), "a339f6fd51d78b179\tarch-interviewer-agent\n");
