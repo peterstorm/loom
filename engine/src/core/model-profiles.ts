@@ -263,9 +263,11 @@ const producerKind = (name: PayloadProducerKindName): PayloadProducerKind =>
  *
  * The judge-verdict scoping consumes the panel-judge profile's uniqueness as
  * data: profiles are shared across Agents generally ("implementation" alone
- * binds seven), so uniqueness is a catalog-level fact, not a type invariant —
- * the agent-catalog and model-profiles suites pin the mapping, and a second
- * panel-judge Agent would mis-scope the judge-verdict kind at this condition.
+ * binds six), so uniqueness is a catalog-level fact, not a type invariant —
+ * enforced at module load by `assertPanelJudgeProfileUnique` and pinned by the
+ * agent-catalog and model-profiles suites, so a second panel-judge Agent
+ * fails at import instead of mis-scoping the judge-verdict kind at this
+ * condition.
  *
  * Total over the catalog and deterministically ordered: every Agent name
  * answers (non-producers answer an empty list), the dual-payload Agent
@@ -287,6 +289,39 @@ export function producerKindsOfAgent(agent: LoomAgentName): readonly PayloadProd
   }
   return Object.freeze(kinds);
 }
+
+/** The panel-judge profile's catalog uniqueness as a live predicate — the
+ *  judge-verdict scoping in `producerKindsOfAgent` consumes it as data, so a
+ *  second panel-judge-profiled Agent would mis-scope that kind. Exported so a
+ *  test can drive the throwing branch with a synthetic roster. */
+export function panelJudgeProfileCarriers(
+  policies: readonly AgentPolicy<LoomAgentName>[] = AGENT_POLICIES,
+): readonly LoomAgentName[] {
+  return Object.freeze(
+    policies.filter(({ profile }) => profile === "panel-judge").map(({ agent }) => agent),
+  );
+}
+
+/** Throw if more than one Agent carries the panel-judge profile — the
+ *  judge-verdict scoping invariant, enforced at load like config's panel/phase
+ *  disjointness, so an invalid catalog can never execute. */
+export function assertPanelJudgeProfileUnique(
+  policies: readonly AgentPolicy<LoomAgentName>[] = AGENT_POLICIES,
+): void {
+  const carriers = panelJudgeProfileCarriers(policies);
+  if (carriers.length > 1) {
+    throw new Error(
+      `loom model-policy invariant violated: the panel-judge profile must bind exactly one Agent, ` +
+        `but ${carriers.length} bind it: ${carriers.join(", ")}. A second panel-judge Agent would ` +
+        `mis-scope the judge-verdict producer kind in producerKindsOfAgent.`,
+    );
+  }
+}
+
+// Fail at module load — not just in CI — if the catalog ever binds the
+// panel-judge profile to more than one Agent. Module init runs once at the
+// first import of this module, so an invalid catalog can never execute.
+assertPanelJudgeProfileUnique();
 
 /** Ordered Wave review roster policy — a selection FROM the catalog, not a
  *  second identity source. Ordering is load-bearing: wave-gate slot authority

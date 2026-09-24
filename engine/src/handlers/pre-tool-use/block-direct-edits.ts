@@ -97,7 +97,16 @@ function panelWriteTargetPaths(toolInput: Record<string, unknown>): readonly str
     const absolute = pathResolve(process.cwd(), filePath);
     const relative = pathRelative(repoRoot, absolute).split(pathSep).join("/");
     return Object.freeze([relative]);
-  } catch {
+  } catch (e) {
+    // The proven answers above (no string target, no repository) return
+    // silently; an UNEXPECTED probe failure is different, and it is announced
+    // here — the activeRosterProbe convention — so a permissions or transport
+    // problem is never indistinguishable from "this edit names no write
+    // target". The list still fails closed to the role admission.
+    process.stderr.write(
+      `block-direct-edits: cannot resolve ${filePath} against the repository root: ` +
+        `${e instanceof Error ? e.message : String(e)} — failing closed to the role admission\n`,
+    );
     return [];
   }
 }

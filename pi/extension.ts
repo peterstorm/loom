@@ -63,6 +63,8 @@ import {
   piSubagentFailureSignals,
   piSubagentResultFailed,
   retireCompletedOrMissingImplementation,
+  WRITE_TARGET_KEYS,
+  writeTargetPathOf,
   type PiResultOutcome,
   type PiReviewAttemptAuthority,
   type PiSpecCheckAttemptAuthority,
@@ -384,8 +386,8 @@ export type PiWriteTargetPathsResult =
   | Readonly<{ ok: false; error: string }>;
 
 const writeTarget = (input: Record<string, unknown>, path: string): PiWriteTargetPathsResult => {
-  const target = input.path ?? input.file_path ?? input.filePath;
-  return typeof target === "string" && target !== ""
+  const target = writeTargetPathOf(input);
+  return target !== null
     ? Object.freeze({ ok: true, value: Object.freeze([target]) as readonly [string] })
     : Object.freeze({ ok: false, error: `${path} must name one non-empty path, file_path, or filePath target` });
 };
@@ -396,7 +398,7 @@ export function piWriteTargetPaths(raw: unknown): PiWriteTargetPathsResult {
     return Object.freeze({ ok: false, error: "write input must be a plain object" });
   }
   const input = raw as Record<string, unknown>;
-  if ("path" in input || "file_path" in input || "filePath" in input) return writeTarget(input, "write input");
+  if (WRITE_TARGET_KEYS.some((key) => key in input)) return writeTarget(input, "write input");
   if (!Array.isArray(input.edits) || input.edits.length === 0) {
     return Object.freeze({ ok: false, error: "write input must contain a target or a non-empty edits array" });
   }
@@ -422,7 +424,7 @@ export function piWriteTargetPaths(raw: unknown): PiWriteTargetPathsResult {
  * repository root cannot prove the target's scope either: fail closed to
  * the role admission, which blocks panel writers.
  */
-const panelGuardTargets = (rawInput: unknown, cwd: string): readonly string[] => {
+export const panelGuardTargets = (rawInput: unknown, cwd: string): readonly string[] => {
   if (typeof rawInput !== "object" || rawInput === null || Array.isArray(rawInput)) return [];
   const targets = piWriteTargetPaths(rawInput);
   if (!targets.ok) return [];
@@ -431,7 +433,16 @@ const panelGuardTargets = (rawInput: unknown, cwd: string): readonly string[] =>
     if (repoRoot === null) return [];
     return Object.freeze(targets.value.map((target) =>
       pathRelative(repoRoot, resolve(cwd, target)).split(pathSep).join("/")));
-  } catch {
+  } catch (e) {
+    // The proven answers above (unparseable input, no repository) return
+    // silently; an UNEXPECTED probe failure is announced — the handler's
+    // activeRosterProbe convention — so a permissions or transport problem is
+    // never indistinguishable from "this tool call names no write target".
+    // The list still fails closed to the role admission.
+    process.stderr.write(
+      `loom(pi): cannot resolve write targets against the repository root: ` +
+        `${e instanceof Error ? e.message : String(e)} — failing closed to the role admission\n`,
+    );
     return [];
   }
 };

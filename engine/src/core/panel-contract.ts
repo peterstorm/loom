@@ -628,12 +628,13 @@ export type JudgeVerdictArgsV1 = z.infer<typeof judgeVerdictV1Schema>;
  *
  *  JSON Schema cannot represent refinements, and `z.toJSONSchema` silently
  *  drops them: the frozen bytes grammar-constrain SHAPE only (minLength, the
- *  integer score domain, the verdict enum, nullability). The prose-sanitization
- *  refinement rides the emission edge's parse — `verdictArgsParser` re-runs
- *  `safeParse` on every generated argument — so sanitization is enforced at
- *  the emission edge, never by the provider grammar. A reader who believed the
- *  rendered bytes enforced it would be wrong about the one sanitization the
- *  schema expresses. */
+ *  integer score domain, nullability — the judge schema carries no enum; the
+ *  refutation schema's verdict enum lives in its own comment). The
+ *  prose-sanitization refinement rides the emission edge's parse —
+ *  `verdictArgsParser` re-runs `safeParse` on every generated argument — so
+ *  sanitization is enforced at the emission edge, never by the provider
+ *  grammar. A reader who believed the rendered bytes enforced it would be
+ *  wrong about the one sanitization the schema expresses. */
 export const JUDGE_VERDICT_SCHEMA_V1: string = JSON.stringify(z.toJSONSchema(judgeVerdictV1Schema, {
   target: "draft-2020-12", io: "output", unrepresentable: "throw", cycles: "throw", reused: "ref",
 }), null, 2);

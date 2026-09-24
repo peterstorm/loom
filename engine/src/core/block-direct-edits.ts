@@ -7,7 +7,7 @@
 
 import { posix } from "node:path";
 import type { HookResult } from "../types";
-import { IMPL_AGENTS, defaultTaskGraphExists } from "../config";
+import { IMPL_AGENTS } from "../config";
 import { PANEL_ARTIFACT_WRITERS, SPEC_ARTIFACT_ROOT } from "./artifact-write-scope";
 import {
   parseGrantedAgentId,
@@ -61,11 +61,6 @@ function isWriteAuthorizedAgent(agentId: string): boolean {
   return IMPL_AGENTS.has(agentId) || parseGrantedAgentId(agentId) !== null;
 }
 
-// Default task-graph existence probe: the shared fail-closed probe in config
-// (`defaultTaskGraphExists` — ENOENT is the only absent answer), injected
-// here as `shouldBlockDirectEdit`'s default port. Pi passes its own override
-// built on the same `probePathFailClosed` core.
-
 /**
  * No roster reader supplied — answer `null`, i.e. "cannot prove a subagent is
  * running", which falls through to block. There is deliberately NO filesystem
@@ -86,10 +81,19 @@ function inSpecArtifactRoot(targetPath: string): boolean {
   return normalized === SPEC_ARTIFACT_ROOT || normalized.startsWith(`${SPEC_ARTIFACT_ROOT}/`);
 }
 
+/**
+ * REQUIRED arming port: the task-graph existence probe, named at every call
+ * site — no import-frozen default stands in for it. The lazy-arming doctrine
+ * (commit 6f4a1452): a default frozen at module load made the gate's arming
+ * depend on the checkout and silently disarmed on a fresh one; production
+ * callers inject `pathExistsFailClosed(taskGraphPath())`, tests inject their
+ * own. Fail-closed semantics stay the caller's (`pathExistsFailClosed` — ENOENT
+ * is the only absent answer).
+ */
 export function shouldBlockDirectEdit(
   toolName: string,
   sessionId: string,
-  taskGraphExists: () => boolean = defaultTaskGraphExists,
+  taskGraphExists: () => boolean,
   readActiveRoster: ActiveRosterProbe = noActiveRoster,
   targetPaths: readonly string[] = [],
 ): HookResult {

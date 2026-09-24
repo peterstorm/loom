@@ -31,8 +31,11 @@
  * all and stays the shell's existing infrastructure recovery.
  *
  * Pure module: no I/O, no clock, no randomness; it must not import
- * panel-program.ts or any I/O adapter (the boundary the cross-import linter
- * enforces). PR #52's fail-closed extraction is consumed verbatim
+ * panel-program.ts or any I/O adapter (a placement constraint this header
+ * states and review audits: the cross-import linter admits core-to-core
+ * imports and the module is not enrolled in the purity closure, so this
+ * declaration is the invariant's stated home, not an automated gate). PR
+ * #52's fail-closed extraction is consumed verbatim
  * (`parseFinalPayload` — never modified, called exactly as the capture runtime
  * calls it), so wherever the selection is extraction the fallback behavior is
  * exactly today's: any behavioral divergence from the no-op baseline can only
@@ -153,7 +156,9 @@ const canonicalCall = (call: EmissionToolCall): EmissionToolCall =>
  *   complete frame carrying one makes the observation unusable.
  */
 export function observeEmissionCalls(frames: readonly EmissionCallFrame[]): EmissionObservation {
-  const identities: string[] = [];
+  // One structure carries first-observed order: a Map's insertion order IS
+  // first-observed order, so the distinct-call set needs no parallel array to
+  // keep in agreement with it.
   const callsByIdentity = new Map<string, EmissionToolCall>();
   for (const frame of frames) {
     if (frame.kind === "incomplete") {
@@ -174,7 +179,6 @@ export function observeEmissionCalls(frames: readonly EmissionCallFrame[]): Emis
     const seen = callsByIdentity.get(call.toolCallId);
     if (seen === undefined) {
       callsByIdentity.set(call.toolCallId, call);
-      identities.push(call.toolCallId);
     } else if (!canonicalStructuralEquals(seen, call)) {
       return canonicalRecord({
         kind: "unusable" as const,
@@ -183,13 +187,20 @@ export function observeEmissionCalls(frames: readonly EmissionCallFrame[]): Emis
     }
     // else: an exact replay of one already-observed call — idempotent (FR-007).
   }
-  if (identities.length === 0) return canonicalRecord({ kind: "absent" as const });
-  if (identities.length === 1) {
-    return canonicalRecord({ kind: "single-call" as const, call: callsByIdentity.get(identities[0]!)! });
+  const observed = Object.freeze([...callsByIdentity.values()]);
+  if (observed.length === 0) return canonicalRecord({ kind: "absent" as const });
+  const first = observed[0];
+  if (first === undefined) {
+    // Unreachable — `observed.length > 0` above proves the element exists; the
+    // explicit guard carries the invariant instead of a non-null assertion.
+    throw new Error("emission observation invariant failed: a non-empty observation lost its first call");
+  }
+  if (observed.length === 1) {
+    return canonicalRecord({ kind: "single-call" as const, call: first });
   }
   return canonicalRecord({
     kind: "multiple-calls" as const,
-    calls: Object.freeze(identities.map((toolCallId) => callsByIdentity.get(toolCallId)!)),
+    calls: observed,
   });
 }
 
@@ -353,14 +364,24 @@ export type IngestionSelection =
       kind: "final-message-extraction";
       /** PR #52's parseFinalPayload result, verbatim: success carries the
        *  admitted payload, rejection carries the existing zero-candidate and
-       *  ambiguity rejection vocabulary the caller terminalises as today. */
+       *  ambiguity rejection vocabulary the caller terminalises as today.
+       *  This arm IS the no-op baseline: NO emission call was observed, so
+       *  there is no refusal to retain — the field this arm used to carry as a
+       *  nullable is representable only on the refused-call arm below. */
+      fallback: DomainResult<FinalPayload, CaptureRejection>;
+      source: "extraction";
+    }>
+  | Readonly<{
+      kind: "extraction-over-refused-call";
+      /** PR #52's parseFinalPayload result, verbatim (same contract as the
+       *  baseline arm). Extraction was selected OVER a single engine-refused
+       *  call and consumed no retry (FR-006). */
       fallback: DomainResult<FinalPayload, CaptureRejection>;
       source: "extraction";
       /** FR-006: the retained refusal of the single engine-refused emission
-       *  call that led here — null when no call was observed (the no-op
-       *  baseline). A non-null refusal means extraction was selected over a
-       *  refused call and consumed no retry. */
-      emissionRefusal: EmissionParseFailure | null;
+       *  call that led here — REQUIRED, not nullable: the arm exists only
+       *  because a refusal was observed and retained. */
+      emissionRefusal: EmissionParseFailure;
     }>
   | Readonly<{ kind: "duplicate-emission-call" }>
   | Readonly<{
@@ -415,7 +436,7 @@ export function selectCanonicalPayload(
     const fallback = parseFinalPayload(finalMessageCandidates);
     if (fallback.ok) {
       return canonicalRecord({
-        kind: "final-message-extraction" as const,
+        kind: "extraction-over-refused-call" as const,
         fallback,
         source: "extraction" as const,
         emissionRefusal,
@@ -477,13 +498,23 @@ export type VerdictSourceSelection =
       kind: "final-message-extraction";
       /** The caller's existing rawJson — the captured attempt bytes it already
        *  submits — returned byte-verbatim, so the union carries the
-       *  deterministic winner in every state and the caller's fold is uniform. */
+       *  deterministic winner in every state and the caller's fold is uniform.
+       *  The no-op baseline arm: NO emission call was observed, no refusal
+       *  retained. */
+      rawJson: string;
+      source: "extraction";
+    }>
+  | Readonly<{
+      kind: "extraction-over-refused-call";
+      /** The caller's existing rawJson, byte-verbatim (same contract as the
+       *  baseline arm). Extraction was selected OVER a single engine-refused
+       *  call — the submission seam accepts it (no retry consumed) or rejects
+       *  holding both causes (FR-006). */
       rawJson: string;
       source: "extraction";
       /** FR-006: the retained refusal of the single engine-refused emission
-       *  call that led here — null when no call was observed (the no-op
-       *  baseline). */
-      emissionRefusal: EmissionParseFailure | null;
+       *  call that led here — REQUIRED, not nullable. */
+      emissionRefusal: EmissionParseFailure;
     }>
   | Readonly<{ kind: "duplicate-emission-call" }>
   | Readonly<{ kind: "observation-refused"; refusal: EmissionObservationRefusal }>;
@@ -508,7 +539,7 @@ export function selectVerdictSource(
       });
     }
     return canonicalRecord({
-      kind: "final-message-extraction" as const,
+      kind: "extraction-over-refused-call" as const,
       rawJson: existingRawJson,
       source: "extraction" as const,
       emissionRefusal: retainedRefusalOf(admitted),
@@ -518,6 +549,5 @@ export function selectVerdictSource(
     kind: "final-message-extraction" as const,
     rawJson: existingRawJson,
     source: "extraction" as const,
-    emissionRefusal: null,
   });
 }

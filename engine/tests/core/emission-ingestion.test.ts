@@ -254,6 +254,30 @@ describe("issueEmissionBinding", () => {
       if (!refused.ok) expect(refused.error.code).toBe("invalid-request-identity");
     }
   });
+
+  it("refuses an out-of-vocabulary producer kind in vocabulary instead of crashing (the mint's refusal contract)", () => {
+    const refused = issueEmissionBinding({
+      requestId: REQUEST_ID,
+      // The exact shape a plain-string claims parser narrowed by cast would
+      // mint: a misspelled kind that selects no registry cell.
+      kind: "reviewr-payload" as PayloadProducerKindName,
+      version: "v2",
+    });
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) {
+      expect(refused.error.code).toBe("unknown-producer-kind");
+      expect(refused.error.message).toContain("reviewr-payload");
+    }
+  });
+
+  it("refuses a claimed version outside the closed schema-version vocabulary before any registry lookup", () => {
+    const refused = issueEmissionBinding({ requestId: REQUEST_ID, kind: "judge-verdict", version: "v9" });
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) {
+      expect(refused.error.code).toBe("unsupported-schema-version");
+      expect(refused.error.message).toContain("v9");
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -436,7 +460,6 @@ describe("selectCanonicalPayload", () => {
         expect(selection.kind).toBe("final-message-extraction");
         if (selection.kind === "final-message-extraction") {
           expect(selection.source).toBe("extraction");
-          expect(selection.emissionRefusal).toBeNull();
           expect(canonicalStructuralEquals(selection.fallback, parseFinalPayload(candidates))).toBe(true);
         }
       }),
@@ -516,9 +539,8 @@ describe("selectCanonicalPayload", () => {
           observeEmissionCalls([frameOf(callOf(REVIEWER_V2, "call-1", args))]),
           candidates,
         );
-        if (selection.kind === "final-message-extraction") {
-          return selection.emissionRefusal !== null
-            && selection.emissionRefusal.code === refusal.code
+        if (selection.kind === "extraction-over-refused-call") {
+          return selection.emissionRefusal.code === refusal.code
             && selection.emissionRefusal.message === refusal.message
             && canonicalStructuralEquals(selection.fallback, parseFinalPayload(candidates));
         }
@@ -540,8 +562,8 @@ describe("selectCanonicalPayload", () => {
       observeEmissionCalls([frameOf(callOf(REVIEWER_V2, "call-1", INVALID_ARGUMENTS))]),
       USABLE_CANDIDATES,
     );
-    expect(selection.kind).toBe("final-message-extraction");
-    if (selection.kind === "final-message-extraction") {
+    expect(selection.kind).toBe("extraction-over-refused-call");
+    if (selection.kind === "extraction-over-refused-call") {
       expect(selection.fallback.ok).toBe(true);
       expect(selection.emissionRefusal).toEqual(asRefusal(REVIEWER_REFUSED));
       expect(canonicalStructuralEquals(selection.fallback, parseFinalPayload(USABLE_CANDIDATES))).toBe(true);
@@ -700,13 +722,12 @@ describe("selectCanonicalPayload", () => {
 
 
 describe("selectVerdictSource", () => {
-  it("leaves the caller's rawJson standing with zero calls — the no-op baseline with no retained refusal", () => {
+  it("leaves the caller's rawJson standing with zero calls — the no-op baseline arm carries no refusal field", () => {
     const selection = selectVerdictSource(JUDGE_V1, ABSENT, "the captured attempt bytes");
     expect(selection).toEqual({
       kind: "final-message-extraction",
       rawJson: "the captured attempt bytes",
       source: "extraction",
-      emissionRefusal: null,
     });
   });
 
@@ -742,14 +763,14 @@ describe("selectVerdictSource", () => {
     if (selection.kind === "emission-tool-arguments") expect(JSON.parse(selection.rawJson)).toEqual(args);
   });
 
-  it("retains the single refused call's refusal on the extraction arm — the submission seam decides usability", () => {
+  it("retains the single refused call's refusal on its own arm — the submission seam decides usability", () => {
     const selection = selectVerdictSource(
       JUDGE_V1,
       observeEmissionCalls([frameOf(callOf(JUDGE_V1, "call-1", { criterion: "x", rankings: [] }))]),
       "the captured attempt bytes",
     );
     expect(selection).toEqual({
-      kind: "final-message-extraction",
+      kind: "extraction-over-refused-call",
       rawJson: "the captured attempt bytes",
       source: "extraction",
       emissionRefusal: asRefusal(JUDGE_REFUSED),
@@ -846,10 +867,22 @@ const _fallbackIsDomainResult: (
 ) => DomainResult<FinalPayload, CaptureRejection> = (selection) => selection.fallback;
 void _fallbackIsDomainResult;
 
-/** The retained single-call refusal rides the extraction arms of both paths. */
+/** The no-op baseline arm carries NO refusal field — the split makes the
+ *  refused-call state a distinct kind, so reading a refusal off the baseline
+ *  is a compile error, not a null-check convention. */
+const _baselineHasNoRefusalField = (
+  selection: Extract<IngestionSelection, { kind: "final-message-extraction" }>,
+): void => {
+  // @ts-expect-error the no-op baseline arm carries no refusal field
+  void selection.emissionRefusal;
+};
+void _baselineHasNoRefusalField;
+
+/** The retained single-call refusal is REQUIRED on the refused-call arm of
+ *  both paths — the arm exists only because a refusal was observed. */
 const _refusalIsRetained: (
-  selection: Extract<VerdictSourceSelection, { kind: "final-message-extraction" }>,
-) => EmissionParseFailure | null = (selection) => selection.emissionRefusal;
+  selection: Extract<IngestionSelection | VerdictSourceSelection, { kind: "extraction-over-refused-call" }>,
+) => EmissionParseFailure = (selection) => selection.emissionRefusal;
 void _refusalIsRetained;
 
 /** Type-level path scoping (AD-8): a binding minted for one ingestion path

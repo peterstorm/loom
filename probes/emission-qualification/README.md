@@ -22,8 +22,8 @@ are representable.
 
 | Schema | Digest | Accepted (HTTP) | `strict` on wire | Wire parameters = frozen bytes | Raw violation through forced call |
 |---|---|---|---|---|---|
-| reviewer v2 (10.0 KB) | `sha256-3ac33953…` | **yes** (200) | **true** | **yes** | no (model-complied; inconclusive — see below) |
-| reviewer v3 (14.6 KB) | `sha256-515ed14d…` | **yes** (200) | **true** | **yes** | no (model-complied; inconclusive — see below) |
+| reviewer v2 (10.0 KB) | `sha256-3ac33953…` | **yes** (200) | **true** | **yes** | no (direct-stage args shape-nonconforming; inconclusive — see record §2.6) |
+| reviewer v3 (14.6 KB) | `sha256-515ed14d…` | **yes** (200) | **true** | **yes** | no (direct-stage args shape-nonconforming; inconclusive — see record §2.6) |
 | judge v1 (1.8 KB) | `sha256-3f590e9f…` | **yes** (200) | **true** | **yes** | **yes** (`score: 12` at HTTP 200) |
 | refutation v1 (1.4 KB) | `sha256-766a0dee…` | **yes** (200) | **true** | **yes** | **yes** (`verdict: "partially_upheld"` at HTTP 200) |
 
@@ -37,11 +37,10 @@ v2's root `oneOf`). vLLM **ignores the OpenAI tool-level `strict` flag** — its
 structured-outputs enforcement lives in `extra_body` (`guided_json` /
 `structured_outputs`), which pi-ai does not send for tools. The two decisive
 forced-call violations (judge, refutation) on the same server, same flag,
-settle the mechanism; the v2/v3 direct calls conforming is model compliance,
-not enforcement, and is recorded as inconclusive rather than claimed.
+settle the mechanism; the v2/v3 direct-stage arguments were shape-nonconforming as emitted (string-typed `schemaVersion`, JSON-encoded `findings`/`priorAssessments` — see the Phase-2 record §2.6), so neither conformance nor enforcement was demonstrated for these kinds, recorded inconclusive rather than claimed.
 
 Per the plan this is a legitimate, fully-supported mode: **the engine stays
-authoritative** (FR-003/FR-006/FR-010/FR-018 — engine parsing, issuance joins,
+authoritative** (FR-003/FR-006/FR-010/FR-012 — engine parsing, issuance joins,
 and the request-slot budget unchanged). No route is extraction-only: nothing
 was rejected.
 

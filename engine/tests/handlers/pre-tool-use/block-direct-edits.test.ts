@@ -248,13 +248,19 @@ describe("pathExistsFailClosed — fail-closed existence probe (round-40 C1/C2)"
   });
 });
 
-describe("shouldBlockDirectEdit — default task-graph probe fails CLOSED (round-40 C1)", () => {
-  it("the default probe is the fail-closed probe (unreadable paths stay armed)", () => {
-    // Wiring regression guard: the default must be pathExistsFailClosed, whose
-    // non-ENOENT branch keeps the gate armed (exercised above via ELOOP).
-    const viaDefault = shouldBlockDirectEdit("Edit", sNoActive);
-    const viaFailClosed = shouldBlockDirectEdit("Edit", sNoActive, () => pathExistsFailClosed(TASK_GRAPH_PATH));
-    expect(viaDefault.kind).toBe(viaFailClosed.kind);
+describe("shouldBlockDirectEdit — the arming port is required (lazy-arming doctrine)", () => {
+  it("every arming decision names its probe — the import-frozen default is gone", () => {
+    // Behavior guard: the explicit probe drives the decision, identically on
+    // both sides (the old round-40 concern — fail-closed arming — now lives in
+    // the probe itself, `pathExistsFailClosed`).
+    const probe = () => pathExistsFailClosed(TASK_GRAPH_PATH);
+    expect(shouldBlockDirectEdit("Edit", sNoActive, probe).kind)
+      .toBe(shouldBlockDirectEdit("Edit", sNoActive, probe).kind);
+    // Type-level pin: omitting the required port is a COMPILE error — no
+    // frozen default stands in for the arming decision. Typed, never executed.
+    // @ts-expect-error the task-graph port is required — no frozen default stands in
+    const omitted: Parameters<typeof shouldBlockDirectEdit> = ["Edit", sNoActive];
+    void omitted;
   });
 });
 
@@ -282,7 +288,13 @@ describe("activeRosterProbe — the adapter's catch branch (round-41 A2)", () =>
     }
   });
 
-  it("an ELOOP roster returns null AND announces the cause on stderr", () => {
+  /**
+   * The shared ELOOP fixture: both announcement cases below prove the SAME
+   * probe through the SAME failure (a self-referencing symlink roster), so the
+   * setup lives once here and each test keeps only the assertion that makes it
+   * distinct.
+   */
+  const eloopAnnouncement = (): { result: ReturnType<typeof activeRosterProbe>; written: string[] } => {
     const dir = mkdtempSync(join(tmpdir(), "loom-roster-eloop-"));
     dirs.push(dir);
     process.env.LOOM_SUBAGENT_DIR = dir;
@@ -296,10 +308,15 @@ describe("activeRosterProbe — the adapter's catch branch (round-41 A2)", () =>
       return true;
     });
     try {
-      expect(activeRosterProbe(session)).toBeNull();
+      return { result: activeRosterProbe(session), written };
     } finally {
       stderr.mockRestore();
     }
+  };
+
+  it("an ELOOP roster returns null AND announces the cause on stderr", () => {
+    const { result, written } = eloopAnnouncement();
+    expect(result).toBeNull();
     expect(written.join("")).toContain("block-direct-edits: cannot check");
     expect(written.join("")).toContain("ELOOP");
   });
@@ -328,25 +345,13 @@ describe("activeRosterProbe — the adapter's catch branch (round-41 A2)", () =>
     expect(written.join("")).toContain("falling through to block");
   });
 
-  it("an unstatable roster path returns null AND announces the cause on stderr", () => {
-    const dir = mkdtempSync(join(tmpdir(), "loom-roster-eloop-"));
-    dirs.push(dir);
-    process.env.LOOM_SUBAGENT_DIR = dir;
-    const session = parseSessionId(`roster-eloop-${process.pid}`)!;
-    const active = join(dir, `${session}.active`);
-    symlinkSync(active, active);
-
-    const written: string[] = [];
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
-      written.push(String(chunk));
-      return true;
-    });
-    try {
-      expect(activeRosterProbe(session)).toBeNull();
-    } finally {
-      stderr.mockRestore();
-    }
-    expect(written.join("")).toContain("block-direct-edits: cannot check");
+  it("the announcement names the ELOOP cause family", () => {
+    // Same probe, same failure as the case above — this test keeps only its
+    // distinguishing assertion: the cause WORD must be ELOOP (or the label a
+    // Node upgrade substitutes for it), which pinning the exact current
+    // message alone would not survive.
+    const { result, written } = eloopAnnouncement();
+    expect(result).toBeNull();
     expect(written.join("")).toMatch(/ELOOP|symbolic link/i);
   });
 

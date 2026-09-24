@@ -54,6 +54,10 @@ export type EmissionToolName =
  */
 export type EmissionSchemaVersion = "v2" | "v3" | "v1";
 
+/** The closed vocabulary as data, for boundary parses of untrusted claimed
+ *  version strings (the mint refuses a non-member before any registry lookup). */
+export const EMISSION_SCHEMA_VERSIONS: readonly EmissionSchemaVersion[] = Object.freeze(["v2", "v3", "v1"]);
+
 /**
  * The emission edge's closed refusal-code vocabulary — parse, don't validate:
  * a code is a member of THIS union, never a free string, so an unknown code is
@@ -83,10 +87,15 @@ export type EmissionPayloadParser = (
 
 export type EmissionToolSpec = Readonly<{
   toolName: EmissionToolName;
-  schemaVersions: Readonly<Record<string, Readonly<{
+  /** Keyed by the closed `EmissionSchemaVersion` vocabulary — a spec cell
+   *  claiming an out-of-vocabulary version is unrepresentable; an untrusted
+   *  claimed version string is parsed against the vocabulary at the mint
+   *  before any lookup, so the identical `unsupported-schema-version` refusal
+   *  path is kept as a typed lookup miss. */
+  schemaVersions: Readonly<Partial<Record<EmissionSchemaVersion, Readonly<{
     schemaBytes: string;
     parsePayload: EmissionPayloadParser;
-  }>>>;
+  }>>>>;
 }>;
 
 const encoder = new TextEncoder();
@@ -113,12 +122,17 @@ const verdictArgsParser = (schema: z.ZodType): EmissionPayloadParser => (raw: Ui
     }));
   }
   const parsed = schema.safeParse(value);
-  return parsed.success
-    ? success(parsed.data)
-    : failure(canonicalRecord({
-        code: "invalid-schema",
-        message: `emission arguments do not conform to the frozen schema: ${parsed.error.issues[0]?.message ?? "schema non-conformance"}`,
-      }));
+  if (parsed.success) return success(parsed.data);
+  // The refusal is the model's correction surface within the bounded budget:
+  // one message names every fixable violation in the call (bounded, in parse
+  // order) instead of spending a retry per issue.
+  const issues = parsed.error.issues;
+  const named = issues.slice(0, 5).map((issue) => issue.message).join("; ");
+  const overflow = issues.length > 5 ? `; (+${issues.length - 5} more)` : "";
+  return failure(canonicalRecord({
+    code: "invalid-schema",
+    message: `emission arguments do not conform to the frozen schema: ${named || "schema non-conformance"}${overflow}`,
+  }));
 };
 
 /**
@@ -258,6 +272,7 @@ export function admitEmissionArguments(
  */
 export type EmissionBindingRefusalCode =
   | "invalid-request-identity"
+  | "unknown-producer-kind"
   | "unsupported-schema-version"
   | "tool-name-mismatch"
   | "schema-digest-mismatch";
@@ -324,15 +339,32 @@ export function issueEmissionBinding<K extends PayloadProducerKindName>(
       message: `issued emission binding carries no canonical request id: ${requestId.error.message}`,
     }));
   }
-  // The alias annotation widens the satisfies-narrowed literal registry so the
-  // version lookup below is a plain string-keyed Record lookup — the
-  // definedness check, not the type system, proves the pair is carried.
-  const spec: EmissionToolSpec = EMISSION_TOOL_SPECS[issued.kind];
-  const schemaVersion = spec.schemaVersions[issued.version];
+  // The closed vocabulary is parsed at the boundary — an untrusted claimed
+  // version string that names no vocabulary member refuses exactly where the
+  // definedness check refused before, and the typed lookup below can never
+  // select an out-of-vocabulary key.
+  if (!(EMISSION_SCHEMA_VERSIONS as readonly string[]).includes(issued.version)) {
+    return failure(canonicalRecord({
+      code: "unsupported-schema-version" as const,
+      message: `issued emission binding carries schema version ${describeUnknown(issued.version)}, which is not in the closed schema-version vocabulary (${EMISSION_SCHEMA_VERSIONS.join(", ")})`,
+    }));
+  }
+  const claimedVersion = issued.version as EmissionSchemaVersion;
+  const spec: EmissionToolSpec | undefined = EMISSION_TOOL_SPECS[issued.kind];
+  if (spec === undefined) {
+    // A caller that parsed claims as plain strings and narrowed by cast can
+    // name an out-of-vocabulary kind; the mint refuses it in vocabulary
+    // instead of crashing on the undefined spec cell.
+    return failure(canonicalRecord({
+      code: "unknown-producer-kind" as const,
+      message: `issued emission binding names producer kind ${describeUnknown(issued.kind)}, which selects no registry cell (supported: ${Object.keys(EMISSION_TOOL_SPECS).join(", ")})`,
+    }));
+  }
+  const schemaVersion = spec.schemaVersions[claimedVersion];
   if (schemaVersion === undefined) {
     return failure(canonicalRecord({
       code: "unsupported-schema-version" as const,
-      message: `emission tool ${spec.toolName} carries no schema version ${issued.version} for producer kind ${issued.kind} (supported: ${Object.keys(spec.schemaVersions).join(", ")})`,
+      message: `emission tool ${spec.toolName} carries no schema version ${claimedVersion} for producer kind ${issued.kind} (supported: ${Object.keys(spec.schemaVersions).join(", ")})`,
     }));
   }
   if (issued.toolName !== undefined && issued.toolName !== spec.toolName) {
@@ -347,32 +379,36 @@ export function issueEmissionBinding<K extends PayloadProducerKindName>(
     if (!claimed.ok || claimed.value !== schemaDigest) {
       return failure(canonicalRecord({
         code: "schema-digest-mismatch" as const,
-        message: `issued schema digest ${describeUnknown(issued.schemaDigest)} does not certify the frozen ${issued.kind}/${issued.version} schema (registry digest ${schemaDigest})`,
+        message: `issued schema digest ${describeUnknown(issued.schemaDigest)} does not certify the frozen ${issued.kind}/${claimedVersion} schema (registry digest ${schemaDigest})`,
       }));
     }
   }
-  // The definedness check above proves issued.version is a registry-carried
-  // version, and the K constraint (K extends PayloadProducerKindName) proves
-  // the kind member — this is the one justified construction cast at the ONE
-  // minting point, so every minted binding is a valid-pair record by
-  // construction and no consumer ever re-narrows.
+  // The vocabulary parse above proves claimedVersion is a registry-carried
+  // version, the definedness check proves the kind selects a cell, and the K
+  // constraint (K extends PayloadProducerKindName) proves the kind member —
+  // this is the one justified construction cast at the ONE minting point, so
+  // every minted binding is a valid-pair record by construction and no
+  // consumer ever re-narrows.
   return success(canonicalRecord({
     requestId: requestId.value,
     kind: Object.freeze({ kind: issued.kind }),
-    version: issued.version as EmissionSchemaVersion,
+    version: claimedVersion,
     toolName: spec.toolName,
     schemaDigest,
   }) as IssuedEmissionBindingOf<K>);
 }
 
 /**
- * The capability ADT (US4): per harness × producer kind, whether the
- * constrained path can be provided. Pi's declaration returns degradation
- * "refuse" on a failed revision proof — the US4 hard fail, where the /reload
- * remediation exists; Claude Code's declaration returns not-provided with
- * degradation "extraction" (no Loom extension seam — the US2
- * capability-aware-degradation class; the guard therefore admits those spawns,
- * AD-7).
+ * The capability ADT (US4/US2): per harness × producer kind, whether the
+ * constrained path can be provided. Design intent for the later-wave wiring
+ * (spawn/request programs, T6/T7 — no production caller in this revision):
+ * the Pi-side declaration is to return degradation "refuse" when the child's
+ * loaded revision does not carry this emission tool (the revision check is
+ * parent-side loaded-revision containment — NOT the FR-008 child-readiness
+ * proof, which the launcher gate owns); that is the US4 hard fail whose
+ * remediation is /reload. The Claude Code declaration is to return
+ * not-provided with degradation "extraction" (no Loom extension seam) — the
+ * US2 capability-aware-degradation class, which the guard admits (AD-7).
  */
 export type EmissionToolCapability =
   | Readonly<{ kind: "provided"; schemaDigest: ArtifactDigest }>
