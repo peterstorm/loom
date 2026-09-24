@@ -131,10 +131,25 @@ const completionSucceeded = (value: CompletionCheckExecution): CompletionCheckRu
 const failed = (error: CompletionCheckRunnerFailure): Readonly<{ ok: false; error: CompletionCheckRunnerFailure }> =>
   Object.freeze({ ok: false, error: Object.freeze(error) });
 
-function messageOf(cause: unknown): string {
+/** The one validating constructor for bounded failure messages: the trim
+ *  check plus the non-empty fallback literal prove non-emptiness, and the
+ *  4096 slice bound must stay at or under completion-suite's
+ *  MAX_SPAWN_FAILURE_MESSAGE_LENGTH (4096) because the at-rest wire parser
+ *  refuses longer messages. The brand is minted here — where the proof
+ *  lives — never re-asserted by callers (parse-don't-validate,
+ *  type-design-analyzer-1). */
+function messageOf(cause: unknown): NonEmptyString {
   const message = cause instanceof Error ? cause.message : String(cause);
   const bounded = message.slice(0, MAX_MESSAGE_LENGTH);
-  return bounded.trim().length > 0 ? bounded : "completion check infrastructure failure";
+  return (bounded.trim().length > 0 ? bounded : "completion check infrastructure failure") as NonEmptyString;
+}
+
+/** A Git stderr diagnostic as an attributed refusal suffix, or the empty
+ *  string when the probe produced none — a refused guard names the Git cause,
+ *  never a bare status number (silent-failure-hunter-1). */
+function gitDiagnostic(stderr: string | Buffer | undefined): string {
+  const text = (stderr?.toString() ?? "").trim();
+  return text === "" ? "" : `: ${text}`;
 }
 
 function boundedInteger(raw: number | undefined, fallback: number, maximum: number): number | null {
@@ -261,7 +276,10 @@ function resetRemediationReport(root: CanonicalRepositoryRoot, check: RunnerComm
       return Object.freeze({ ok: false as const, error: new Error(`git ls-files could not start: ${tracked.error.message}`) });
     }
     if (tracked.status !== 0) {
-      return Object.freeze({ ok: false as const, error: new Error(`git ls-files exited ${String(tracked.status)} for ${path}`) });
+      return Object.freeze({
+        ok: false as const,
+        error: new Error(`git ls-files exited ${String(tracked.status)} for ${path}${gitDiagnostic(tracked.stderr)}`),
+      });
     }
     return Object.freeze({ ok: true as const, value: tracked.stdout });
   }, (stdout) => stdout.length === 0);
@@ -271,8 +289,20 @@ function resetRemediationReport(root: CanonicalRepositoryRoot, check: RunnerComm
   if (observed.kind === "observed") {
     throw new Error(`report reset cannot prove exact path is untracked: ${path}`);
   }
+  // The policy refusal is the CLEAN not-ignored answer: check-ignore -q exits
+  // 1 with empty stdout and stderr. A spawn error or a Git fatal exit with a
+  // diagnostic is a different state and refuses with its own attribution
+  // instead of reading as a .gitignore policy violation (silent-failure-hunter-1).
   const ignored = spawnSync("git", ["check-ignore", "-q", "--", path], { cwd: root, encoding: "utf8" });
-  if (ignored.error || ignored.status !== 0) throw new Error(`report reset requires a Git-ignored path: ${path}`);
+  if (ignored.error !== undefined) {
+    throw new Error(`report reset could not run check-ignore for ${path}: ${ignored.error.message}`);
+  }
+  if (ignored.status !== 0) {
+    if (ignored.status === 1 && (ignored.stdout ?? "").trim() === "" && (ignored.stderr ?? "").trim() === "") {
+      throw new Error(`report reset requires a Git-ignored path: ${path}`);
+    }
+    throw new Error(`report reset check-ignore exited ${String(ignored.status)} for ${path}${gitDiagnostic(ignored.stderr)}`);
+  }
   removeRunRegularFileNoFollow(absoluteRepositoryPath(root, path));
 }
 
@@ -290,7 +320,7 @@ function unreadableReport(check: RunnerCommand, cause: unknown): CollectedReport
   return Object.freeze({
     kind: "unreadable",
     path: check.reportPolicy.path,
-    message: messageOf(cause) as NonEmptyString,
+    message: messageOf(cause),
   });
 }
 
@@ -381,7 +411,7 @@ function spawnFailure(cause: unknown, output: CompletionCheckDiagnostics): Comma
     ok: true,
     value: Object.freeze({
       kind: "spawn-failed" as const,
-      process: Object.freeze({ kind: "spawn-failed", message: messageOf(cause) as NonEmptyString }),
+      process: Object.freeze({ kind: "spawn-failed", message: messageOf(cause) }),
       diagnostics: output,
     }),
   });

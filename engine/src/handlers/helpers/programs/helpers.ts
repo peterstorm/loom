@@ -16,7 +16,7 @@ import { devNull } from 'node:os';
 import { extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync, type SpawnSyncOptions, type SpawnSyncReturns } from 'node:child_process';
-import { observeGitProbe, type GitProbeStep } from '../../../utils/git-probe';
+import { observeGitProbe, type GitProbeObservation, type GitProbeStep } from '../../../utils/git-probe';
 import { canonicalStructuralEquals, sameAgentRequestAuthority, parseAgentRequestAuthority, boundedThrownCause, type DomainResult, createAtomicInitialPublicationClaimPort, createInitialBatchPublicationReconciler, createInitialPublicationEffectPort, createPublicationAuthorityResolver, parseBatchPublishedReceipt, parseEffectId, parseIssuedSpawnRequest, parseRequestId, prepareInitialBatchPublicationIntent, spawnBatchAction, AGENT_REQUIRED_SKILLS, type AgentRequestAuthority, type BatchPublishedReceipt, type EffectId, type InitialSpawnRequestInput, type PublicationAuthorityResolver, type SpawnRequest } from '../../../core/orchestration-contract';
 import { serializeAdjudicatedStandaloneReview, STANDALONE_REVIEWER_ROLES, serializeStandaloneReviewAuthority, parseStandaloneReviewAuthority, selectStandaloneReviewers, type FrozenStandaloneReviewAuthority, type StandaloneReviewKind, type StandaloneReviewMetadata } from '../../../core/standalone-review';
 import { safeIoCause } from '../../../core/safe-io-cause';
@@ -139,13 +139,60 @@ function stderrRefusal(
   return { ok: false as const, error: new Error(spawnText(stderr).trim() || fallback) };
 }
 
-/** One file-local shape for the module's five spawnSync→probe wraps
- *  (gitPaths, gitText, the merge-base candidate loop, trackedAdditions,
- *  untrackedAdditions): the adapter states the shared spawn-failure refusal
- *  once, and each call site passes only its own spawn options, value decode,
- *  and refusal labels — the real per-site differences (buffer vs utf8 stderr
- *  decoding, the no-index probe's status-1 acceptance, message labels) stay
- *  visible as parameters instead of a diff across five near-identical blocks. */
+/** Fatal UTF-8 decode of one NUL-delimited Git path listing: a chunk whose
+ *  bytes are not valid UTF-8 refuses with attribution instead of entering
+ *  scope authority as a U+FFFD-mangled path that can never match the real
+ *  worktree file (the same contract workspace-digest parseListedPaths
+ *  enforces for its listings). Bytes travel through a latin1 round-trip so
+ *  the NUL separators split on byte boundaries before any decoding. */
+function decodeListedPaths(stdout: string | Buffer | undefined): GitProbeStep<readonly string[], Error> {
+  const chunks = Buffer.from(stdout ?? new Uint8Array(0)).toString("binary").split("\0");
+  const decoded: string[] = [];
+  for (const [index, binary] of chunks.entries()) {
+    if (binary === "") continue;
+    try {
+      decoded.push(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(binary, "binary")));
+    } catch (cause) {
+      return { ok: false as const, error: new Error(`git path ${index} is not UTF-8: ${cause instanceof Error ? cause.message : String(cause)}`) };
+    }
+  }
+  return { ok: true as const, value: Object.freeze(decoded.sort()) };
+}
+
+/** The one scope-authority refusal for a confirmed-empty Git observation,
+ *  stated once so every scope probe's attribution stays byte-identical and
+ *  cannot drift apart under lockstep edits. */
+function scopeEmptyRefusal(subject: string): Error {
+  return new Error(`git ${subject} returned empty output after bounded retries; review scope authority cannot be fabricated from an empty observation`);
+}
+
+type ConfirmedEmptyObservation<T> = Extract<GitProbeObservation<T, Error>, { kind: "confirmed-empty" }>;
+
+/** One shared post-observation resolution for the module's Git probes: a
+ *  failed observation throws with the probe's own attribution, a confirmed
+ *  empty reaches the caller's explicit per-site decision, and an observed
+ *  value passes through. The transient-empty rationale lives at
+ *  `observeGitProbe`; this helper only states the shared resolution tail
+ *  once — each call site keeps its true per-site policy (empty decision,
+ *  value decode) visible as parameters. */
+function resolveObservation<T, R>(
+  observed: GitProbeObservation<T, Error>,
+  confirmedEmpty: (observation: ConfirmedEmptyObservation<T>) => R,
+  observedValue: (value: T) => R,
+): R {
+  if (observed.kind === "failed") throw observed.error;
+  if (observed.kind === "confirmed-empty") return confirmedEmpty(observed);
+  return observedValue(observed.value);
+}
+
+/** One file-local shape for the module's six spawnSync→probe wraps
+ *  (gitPaths, gitText, candidateReference, candidateMergeBase,
+ *  trackedAdditions, untrackedAdditions): the adapter states the shared
+ *  spawn-failure refusal once, and each call site passes only its own spawn
+ *  options, value decode, and refusal labels — the real per-site differences
+ *  (buffer vs utf8 stderr decoding, the no-index probe's status-1 acceptance,
+ *  message labels) stay visible as parameters instead of a diff across six
+ *  near-identical blocks. */
 function gitSpawnProbe<T>(
   args: readonly string[],
   options: SpawnSyncOptions,
@@ -161,21 +208,21 @@ function gitSpawnProbe<T>(
 }
 
 function gitPaths(args: readonly string[], empty: GitEmptyDecision): readonly string[] {
-  const observed = observeGitProbe(
-    gitSpawnProbe(args, { encoding: "buffer", maxBuffer: 16 * 1024 * 1024 }, (result) =>
-      result.status !== 0
-        ? stderrRefusal(result.stderr, `git ${args[0]} failed`)
-        : { ok: true as const, value: spawnText(result.stdout).split("\0").filter(Boolean).sort() }),
-    (paths) => paths.length === 0,
+  const frozenPaths = (paths: readonly string[]): readonly string[] => Object.freeze([...paths]);
+  return resolveObservation(
+    observeGitProbe(
+      gitSpawnProbe(args, { encoding: "buffer", maxBuffer: 16 * 1024 * 1024 }, (result) =>
+        result.status !== 0
+          ? stderrRefusal(result.stderr, `git ${args[0]} failed`)
+          : decodeListedPaths(result.stdout)),
+      (paths) => paths.length === 0,
+    ),
+    (confirmed) => {
+      if (empty === "refuse") throw scopeEmptyRefusal(args.join(" "));
+      return frozenPaths(confirmed.third);
+    },
+    frozenPaths,
   );
-  if (observed.kind === "failed") throw observed.error;
-  if (observed.kind === "confirmed-empty") {
-    if (empty === "refuse") {
-      throw new Error(`git ${args.join(" ")} returned empty output after bounded retries; review scope authority cannot be fabricated from an empty observation`);
-    }
-    return Object.freeze([]);
-  }
-  return Object.freeze([...observed.value]);
 }
 
 /**
@@ -185,21 +232,20 @@ function gitPaths(args: readonly string[], empty: GitEmptyDecision): readonly st
  * for text authority is visible where the value is consumed, never defaulted.
  */
 export function gitText(args: readonly string[], empty: GitEmptyDecision): string {
-  const observed = observeGitProbe(
-    gitSpawnProbe(args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }, (result) =>
-      result.status !== 0
-        ? stderrRefusal(result.stderr, `git ${args[0]} failed`)
-        : { ok: true as const, value: spawnText(result.stdout).trim() }),
-    (value) => value === "",
+  return resolveObservation(
+    observeGitProbe(
+      gitSpawnProbe(args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }, (result) =>
+        result.status !== 0
+          ? stderrRefusal(result.stderr, `git ${args[0]} failed`)
+          : { ok: true as const, value: spawnText(result.stdout).trim() }),
+      (value) => value === "",
+    ),
+    (confirmed) => {
+      if (empty === "refuse") throw scopeEmptyRefusal(args.join(" "));
+      return confirmed.third;
+    },
+    (value) => value,
   );
-  if (observed.kind === "failed") throw observed.error;
-  if (observed.kind === "confirmed-empty") {
-    if (empty === "refuse") {
-      throw new Error(`git ${args.join(" ")} returned empty output after bounded retries; review scope authority cannot be fabricated from an empty observation`);
-    }
-    return "";
-  }
-  return observed.value;
 }
 
 export type CanonicalChangedPaths = Readonly<{
@@ -235,40 +281,38 @@ function reviewablePath(path: string): boolean {
 }
 
 function candidateReference(candidate: string): CandidateReference {
-  const observed = observeGitProbe(
-    gitSpawnProbe<CandidateReference>(["rev-parse", "--verify", "--quiet", "--end-of-options", `${candidate}^{commit}`],
-      { encoding: "utf8" }, (result) => {
-        if (result.status === 1 && spawnText(result.stdout).trim() === "" && spawnText(result.stderr).trim() === "") {
-          return { ok: true, value: { kind: "missing" } };
-        }
-        if (result.status !== 0) return stderrRefusal(result.stderr, `git cannot observe candidate ${candidate}`);
-        return { ok: true, value: { kind: "present", revision: spawnText(result.stdout).trim() } };
-      }),
-    (value) => value.kind === "present" && value.revision === "",
+  return resolveObservation(
+    observeGitProbe(
+      gitSpawnProbe<CandidateReference>(["rev-parse", "--verify", "--quiet", "--end-of-options", `${candidate}^{commit}`],
+        { encoding: "utf8" }, (result) => {
+          if (result.status === 1 && spawnText(result.stdout).trim() === "" && spawnText(result.stderr).trim() === "") {
+            return { ok: true, value: { kind: "missing" } };
+          }
+          if (result.status !== 0) return stderrRefusal(result.stderr, `git cannot observe candidate ${candidate}`);
+          return { ok: true, value: { kind: "present", revision: spawnText(result.stdout).trim() } };
+        }),
+      (value) => value.kind === "present" && value.revision === "",
+    ),
+    () => { throw scopeEmptyRefusal(`candidate ${candidate}`); },
+    (value) => value,
   );
-  if (observed.kind === "failed") throw observed.error;
-  if (observed.kind === "confirmed-empty") {
-    throw new Error(`git candidate ${candidate} returned empty output after bounded retries; review scope authority cannot be fabricated from an empty observation`);
-  }
-  return observed.value;
 }
 
 function candidateMergeBase(candidate: string, head: string): MergeBaseCandidate {
-  const observed = observeGitProbe(
-    gitSpawnProbe<MergeBaseCandidate>(["merge-base", candidate, head], { encoding: "utf8" }, (result) => {
-      if (result.status === 1 && spawnText(result.stderr).trim() === "" && spawnText(result.stdout).trim() === "") {
-        return { ok: true, value: { kind: "no-base" } };
-      }
-      if (result.status !== 0) return stderrRefusal(result.stderr, `git merge-base failed for ${candidate}`);
-      return { ok: true, value: { kind: "base", revision: spawnText(result.stdout).trim() } };
-    }),
-    (value) => value.kind === "base" && value.revision === "",
+  return resolveObservation(
+    observeGitProbe(
+      gitSpawnProbe<MergeBaseCandidate>(["merge-base", candidate, head], { encoding: "utf8" }, (result) => {
+        if (result.status === 1 && spawnText(result.stdout).trim() === "" && spawnText(result.stderr).trim() === "") {
+          return { ok: true, value: { kind: "no-base" } };
+        }
+        if (result.status !== 0) return stderrRefusal(result.stderr, `git merge-base failed for ${candidate}`);
+        return { ok: true, value: { kind: "base", revision: spawnText(result.stdout).trim() } };
+      }),
+      (value) => value.kind === "base" && value.revision === "",
+    ),
+    () => { throw scopeEmptyRefusal(`merge-base ${candidate} ${head}`); },
+    (value) => value,
   );
-  if (observed.kind === "failed") throw observed.error;
-  if (observed.kind === "confirmed-empty") {
-    throw new Error(`git merge-base ${candidate} ${head} returned empty output after bounded retries; review scope authority cannot be fabricated from an empty observation`);
-  }
-  return observed.value;
 }
 
 export function deriveChangedPaths(): DerivedChangedPaths {
@@ -316,40 +360,42 @@ function parseNumstatAdditions(output: string): number {
 
 function trackedAdditions(baseline: string, paths: readonly string[]): number {
   if (paths.length === 0) return 0;
-  const observed = observeGitProbe(
-    gitSpawnProbe(["diff", "--numstat", baseline, "--", ...paths], { encoding: "utf8" }, (result) =>
-      result.status !== 0
-        ? stderrRefusal(result.stderr, "git diff --numstat failed")
-        : { ok: true as const, value: spawnText(result.stdout) }),
-    (output) => output === "",
+  return resolveObservation(
+    observeGitProbe(
+      gitSpawnProbe(["diff", "--numstat", baseline, "--", ...paths], { encoding: "utf8" }, (result) =>
+        result.status !== 0
+          ? stderrRefusal(result.stderr, "git diff --numstat failed")
+          : { ok: true as const, value: spawnText(result.stdout) }),
+      (output) => output === "",
+    ),
+    // Explicit caller decision: numstat legitimately produces no lines when
+    // there is no content delta to count, so confirmed-empty means zero
+    // additions — never a fabricated count reaching reviewer selection.
+    (confirmed) => parseNumstatAdditions(confirmed.third),
+    parseNumstatAdditions,
   );
-  if (observed.kind === "failed") throw observed.error;
-  // Explicit caller decision: numstat legitimately produces no lines when
-  // there is no content delta to count, so confirmed-empty means zero
-  // additions — never a fabricated count reaching reviewer selection.
-  return parseNumstatAdditions(observed.kind === "confirmed-empty" ? observed.third : observed.value);
 }
 
 function untrackedAdditions(paths: readonly string[]): number {
   return paths.reduce((sum, path) => {
-    const observed = observeGitProbe(
-      gitSpawnProbe(["diff", "--no-index", "--numstat", "--", devNull, path], { encoding: "utf8" }, (result) => {
-        const diagnostic = spawnText(result.stderr).trim();
-        if ((result.status !== 0 && result.status !== 1) || diagnostic !== "") {
-          return { ok: false as const, error: new Error(diagnostic || `cannot measure untracked additions for ${path}`) };
-        }
-        return { ok: true as const, value: spawnText(result.stdout) };
-      }),
-      (output) => output === "",
+    return sum + resolveObservation(
+      observeGitProbe(
+        gitSpawnProbe(["diff", "--no-index", "--numstat", "--", devNull, path], { encoding: "utf8" }, (result) => {
+          const diagnostic = spawnText(result.stderr).trim();
+          if ((result.status !== 0 && result.status !== 1) || diagnostic !== "") {
+            return { ok: false as const, error: new Error(diagnostic || `cannot measure untracked additions for ${path}`) };
+          }
+          return { ok: true as const, value: spawnText(result.stdout) };
+        }),
+        (output) => output === "",
+      ),
+      // No-index numstat emits a row even for an empty file. An empty success
+      // after bounded retries cannot authorize zero additions, because that
+      // could suppress an automatically required reviewer. This refusal is a
+      // measurement invariant, not scope authority, so it stays site-local.
+      () => { throw new Error(`cannot measure untracked additions for ${path}: empty output after bounded retries`); },
+      parseNumstatAdditions,
     );
-    if (observed.kind === "failed") throw observed.error;
-    // No-index numstat emits a row even for an empty file. An empty success
-    // after bounded retries cannot authorize zero additions, because that
-    // could suppress an automatically required reviewer.
-    if (observed.kind === "confirmed-empty") {
-      throw new Error(`cannot measure untracked additions for ${path}: empty output after bounded retries`);
-    }
-    return sum + parseNumstatAdditions(observed.value);
   }, 0);
 }
 

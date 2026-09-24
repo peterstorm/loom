@@ -38,12 +38,13 @@ export function resolveRepositoryRoot(context = "repository root"): string | und
       stdio: ["pipe", "pipe", "pipe"],
     });
   } catch (error) {
-    // Never silent: every downstream helper runs against cwd: undefined and
-    // its failures read as "no tests written" — the one indistinguishable
-    // lie this module must not tell without a trace.
+    // Never silent, and never falsely reassuring: an unresolved root leaves
+    // this module's helpers refusing with typed errors (never spawning Git
+    // with cwd: undefined), so the warning names the resolution failure that
+    // the helpers' loud refusals will point back to.
     process.stderr.write(
       `loom: git rev-parse --show-toplevel failed at ${context} (${error instanceof Error ? error.message : String(error)}) — ` +
-        `remaining git helpers run against process.cwd and their failures will read as absent evidence\n`,
+        `git helpers refuse their observations until a repository root resolves\n`,
     );
     return undefined;
   }

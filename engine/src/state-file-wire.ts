@@ -224,7 +224,7 @@ function blockedGateCauseError(
       `wave_gates["${wave}"]: blocked: true has no cause — no task in wave ${wave} carries ` +
       `critical review findings and spec_check does not report a critical finding for it. ` +
       `A causeless block withholds the wave with an empty "BLOCKED due to:" reason list; ` +
-      `clear the flag or restore the findings that justify it (\`--fix\` clears it)`
+      `clear the flag or restore the findings that justify it — no \`--fix\` path repairs this invariant`
     );
   }
   return null;

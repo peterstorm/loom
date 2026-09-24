@@ -161,6 +161,21 @@ describe("reviewer scope derivation survives the transient empty-stdout Git obse
     expect(scriptedResponses.calls.map((entry) => entry[1])).toEqual(["rev-parse", "rev-parse", "rev-parse", "rev-parse"]);
   });
 
+  it("refuses a fatal candidate-reference exit instead of classifying it as a missing ref", () => {
+    // Mirrors the merge-base fatal pin: a regression that classifies any
+    // non-zero status as a clean absent ref would silently skip the candidate
+    // and omit committed branch changes from the frozen scope.
+    scriptedResponses.queue = [answered(SHA), { status: 128, stdout: "", stderr: "fatal: broken repository" }];
+    expect(() => deriveChangedPaths()).toThrow(/fatal: broken repository/);
+    expect(scriptedResponses.calls.map((entry) => entry[1])).toEqual(["rev-parse", "rev-parse"]);
+  });
+
+  it("refuses a diagnostic-bearing candidate-reference exit 1 rather than treating an unobserved error as a missing ref", () => {
+    scriptedResponses.queue = [answered(SHA), { status: 1, stdout: "", stderr: "fatal: cannot lock ref" }];
+    expect(() => deriveChangedPaths()).toThrow(/fatal: cannot lock ref/);
+    expect(scriptedResponses.calls.map((entry) => entry[1])).toEqual(["rev-parse", "rev-parse"]);
+  });
+
   it("continues only for a clean no-common-ancestor result and keeps the next candidate's committed paths", () => {
     scriptedResponses.queue = [
       answered(SHA), answered(SHA), failedWith(1), answered(SHA), answered(SHA),
@@ -192,6 +207,28 @@ describe("reviewer scope derivation survives the transient empty-stdout Git obse
     expect(changed.authority.base_revision).toBe(SHA);
     expect(changed.authority.committed).toEqual(["src/new.ts"]);
     expect(scriptedResponses.calls.filter((entry) => entry[1] === "merge-base")).toHaveLength(2);
+  });
+
+  it("recovers a transient empty candidate reference before observing the merge base", () => {
+    // The reference probe is the last Git probe family without a discharge
+    // pin: its attempt-2 recovery must observe the real revision, not skip
+    // the candidate or run past the scripted queue.
+    scriptedResponses.queue = [
+      answered(SHA), // rev-parse HEAD
+      answered(""), answered(SHA), // candidate reference: transient discharged on attempt 2
+      answered(SHA), // merge-base observes the real base
+      answered(""), answered(""), answered(""), // legitimate empty untracked listing
+      answered(""), answered(""), answered(""), // legitimate empty unstaged listing
+      answered(""), answered(""), answered(""), // legitimate empty staged-added listing
+      answered("src/new.ts\0"), // committed-added listing
+      answered(""), answered(""), answered(""), // legitimate empty staged listing
+      answered("src/new.ts\0"), // committed path listing
+    ];
+    const changed = deriveChangedPaths();
+    expect(changed.authority.base_revision).toBe(SHA);
+    expect(changed.authority.committed).toEqual(["src/new.ts"]);
+    expect(scriptedResponses.calls.filter((entry) => entry[1] === "rev-parse" && entry[2] === "--verify")).toHaveLength(2);
+    expect(scriptedResponses.calls.filter((entry) => entry[1] === "merge-base")).toHaveLength(1);
   });
 
   it("accepts a confirmed-empty path listing as the explicit legitimate-empty decision", () => {
