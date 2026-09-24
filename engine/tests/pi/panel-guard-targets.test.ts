@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { panelGuardTargets } from "../../../pi/extension";
@@ -17,7 +17,12 @@ import { panelGuardTargets } from "../../../pi/extension";
  *
  * `gitRepositoryRoot()` is anchored at process.cwd(), so the suite chdirs (the
  * populate-task-graph precedent) between a real scratch repository and a proven
- * non-repository, restoring the original cwd afterwards. The `cwd` argument is
+ * non-repository, restoring the original cwd afterwards. The scratch dirs are
+ * canonicalized through `realpathSync` at creation: `git rev-parse
+ * --show-toplevel` reports the REAL path (macOS resolves `/var/folders` →
+ * `/private/var/folders`), and a fixture target built from the unresolved
+ * path would legitimately project out-of-scope against the canonical root —
+ * the failure would be in the fixture, not the guard. The `cwd` argument is
  * passed explicitly in every call, so each projection is fully determined by
  * the test and no assertion leans on an ambient directory it did not choose.
  */
@@ -31,9 +36,9 @@ describe("panelGuardTargets — the Pi write-target projection feeding the panel
   };
 
   beforeAll(() => {
-    repoDir = mkdtempSync(join(tmpdir(), "loom-panel-guard-repo-"));
+    repoDir = realpathSync(mkdtempSync(join(tmpdir(), "loom-panel-guard-repo-")));
     git(["init", "-q"], repoDir);
-    nonRepoDir = mkdtempSync(join(tmpdir(), "loom-panel-guard-nonrepo-"));
+    nonRepoDir = realpathSync(mkdtempSync(join(tmpdir(), "loom-panel-guard-nonrepo-")));
   });
 
   afterAll(() => {
