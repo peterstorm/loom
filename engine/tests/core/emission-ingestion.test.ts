@@ -811,6 +811,27 @@ describe("selectVerdictSource", () => {
     expect(selection.kind).toBe("emission-tool-arguments");
   });
 
+  it("refuses an incomplete frame's unusable observation before counting — never absence, never absorbed (AD-8/FR-014)", () => {
+    // The refusal row's "incomplete" half driven through the verdict selection
+    // (its reviewer-path counterpart covers the reviewer path): the shared
+    // decision refuses before counting, so an incomplete observation beside a
+    // valid call is a typed refusal in either scan order — never reclassified
+    // as absence, never absorbed into ambiguity, never rescued by the valid
+    // call.
+    const validJudge = frameOf(callOf(JUDGE_V1, "call-j", validJudgeArguments("extensibility")));
+    for (const frames of [
+      [incompleteFrame("call-x", "stream interrupted")],
+      [validJudge, incompleteFrame("call-x", "stream interrupted")],
+      [incompleteFrame("call-x", "stream interrupted"), validJudge],
+    ]) {
+      const selection = selectVerdictSource(JUDGE_V1, observeEmissionCalls(frames), "raw");
+      expect(selection).toEqual({
+        kind: "observation-refused",
+        refusal: { code: "unusable-observation", message: expect.stringContaining("call-x") },
+      });
+    }
+  });
+
   it("refuses contradictory verdict frames sharing one call identity", () => {
     const call = frameOf(callOf(JUDGE_V1, "call-1", validJudgeArguments("extensibility")));
     const contradictory = frameOf({ ...call.call, arguments: validJudgeArguments("reproduction") });
