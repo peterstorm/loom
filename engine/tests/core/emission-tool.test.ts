@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
+  acknowledgeEmissionExecution,
+  EMISSION_CONSTRAINED_SAMPLING_REQUEST,
+} from "../../src/core/harness-capture";
+import {
   admitEmissionArguments,
   EMISSION_TOOL_SPECS,
   frozenPayloadSchemaParameters,
@@ -8,8 +12,9 @@ import {
   providedEmissionCapability,
   type EmissionArgumentAdmission,
   type EmissionParseFailureCode,
+  type EmissionSchemaVersion,
 } from "../../src/core/emission-tool";
-import { producerKindsOfAgent } from "../../src/core/model-profiles";
+import { producerKindsOfAgent, type PayloadProducerKindName } from "../../src/core/model-profiles";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
 import { parseReviewerPayloadV2, parseStandaloneReviewerPayloadV3 } from "../../src/core/reviewer-protocol";
 import { standaloneReviewerPayloadV3Schema } from "../../src/core/standalone-lineage-contract";
@@ -258,6 +263,144 @@ describe("EmissionToolCapability", () => {
   });
 });
 
+describe("whitespace-only schema-vs-parser disagreement (AD-5, engine half)", () => {
+  /** Whitespace-only prose the frozen bytes' shape rules admit: JSON Schema
+   *  expresses minLength only — the zod refinements (trim, NUL, surrogate,
+   *  byte-budget) are unrepresentable in the emitted bytes and ride the
+   *  emission edge's parse instead (AD-5's stated limit on the frozen
+   *  schema's guarantees). The REAL pi validation half — these arguments
+   *  passing `validateToolArguments` against the exact frozen bytes — is
+   *  pinned by engine/tests/pi/emission-tool.test.ts. */
+  const whitespacePerKind: readonly (readonly [PayloadProducerKindName, string, unknown])[] = [
+    ["reviewer-payload", "v2", {
+      schemaVersion: 2,
+      kind: "standalone-review",
+      findings: [{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim: "   " }],
+    }],
+    ["judge-verdict", "v1", {
+      criterion: "extensibility",
+      rankings: [{ candidate: "candidate-type-driven-fp.md", score: 8, fatal_flaw: null, strongest_idea: "   " }],
+    }],
+    ["refutation-verdict", "v1", {
+      criterion: "reproduction",
+      verdicts: [{ finding_id: "T1:code-reviewer-1", verdict: "refuted", reasoning: "   " }],
+    }],
+  ];
+
+  it("refuses whitespace-only advisory prose the frozen JSON Schema's shape rules admit", () => {
+    for (const [kindName, version, args] of whitespacePerKind) {
+      const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS[kindName], version as EmissionSchemaVersion, args);
+      expect(admitted.kind, `${kindName}/${version}`).toBe("refused");
+    }
+  });
+
+  it("refuses with the parse's own vocabulary — reviewer through the fallback's parser, verdicts through the frozen schema", () => {
+    const reviewer = admitEmissionArguments(
+      EMISSION_TOOL_SPECS["reviewer-payload"], "v2",
+      whitespacePerKind[0]![2],
+    );
+    expect(reviewer.kind).toBe("refused");
+    if (reviewer.kind === "refused") expect(reviewer.code).toBe("invalid-payload");
+
+    const judge = admitEmissionArguments(EMISSION_TOOL_SPECS["judge-verdict"], "v1", whitespacePerKind[1]![2]);
+    expect(judge.kind).toBe("refused");
+    if (judge.kind === "refused") expect(judge.code).toBe("invalid-schema");
+
+    const refutation = admitEmissionArguments(EMISSION_TOOL_SPECS["refutation-verdict"], "v1", whitespacePerKind[2]![2]);
+    expect(refutation.kind).toBe("refused");
+    if (refutation.kind === "refused") expect(refutation.code).toBe("invalid-schema");
+  });
+
+  it("never admits whitespace-only prose over arbitrary other-valid shapes (the gate is the parse, not a shape check)", () => {
+    fc.assert(
+      fc.property(fc.constantFrom(" ", "  \t ", "\n\r"), (whitespace) => {
+        const judge = admitEmissionArguments(EMISSION_TOOL_SPECS["judge-verdict"], "v1", {
+          criterion: "extensibility",
+          rankings: [{ candidate: "candidate-type-driven-fp.md", score: 8, fatal_flaw: null, strongest_idea: whitespace }],
+        });
+        return judge.kind === "refused";
+      }),
+    );
+  });
+});
+
+describe("acknowledgeEmissionExecution — the FR-013 execute-shell decision", () => {
+  const JUDGE_SPEC = EMISSION_TOOL_SPECS["judge-verdict"];
+  const validJudgeArgs = {
+    criterion: "extensibility",
+    rankings: [{ candidate: "candidate-type-driven-fp.md", score: 8, fatal_flaw: null, strongest_idea: "the frozen registry" }],
+  };
+
+  it("acknowledges valid arguments with the minimal terminating result — never echoing the payload", () => {
+    const outcome = acknowledgeEmissionExecution(JUDGE_SPEC, "v1", validJudgeArgs);
+    expect(outcome.kind).toBe("acknowledged");
+    if (outcome.kind === "acknowledged") {
+      expect(outcome.acknowledgment.terminate).toBe(true);
+      expect(outcome.acknowledgment.details).toEqual({});
+      expect(outcome.acknowledgment.content).toEqual([{ type: "text", text: "payload acknowledged" }]);
+      // Bounded and payload-blind: the acknowledgment carries no fragment of
+      // the admitted payload (AD-3: no large payload echo).
+      expect(JSON.stringify(outcome.acknowledgment)).not.toContain("frozen registry");
+      expect(JSON.stringify(outcome.acknowledgment).length).toBeLessThan(200);
+    }
+  });
+
+  it("carries the refusal the shell must THROW — the admission's own code and message, never a shell-invented string", () => {
+    for (const [version, args] of [
+      ["v1", { criterion: "extensibility", rankings: [{ candidate: "candidate-x.md", score: 11, fatal_flaw: null, strongest_idea: "out of domain" }] }],
+      ["v2", validJudgeArgs],
+    ] as const) {
+      const outcome = acknowledgeEmissionExecution(JUDGE_SPEC, version as EmissionSchemaVersion, args);
+      expect(outcome.kind).toBe("refused");
+      if (outcome.kind === "refused") {
+        const direct = admitEmissionArguments(JUDGE_SPEC, version as EmissionSchemaVersion, args);
+        expect(direct.kind).toBe("refused");
+        if (direct.kind === "refused") {
+          expect(outcome.code).toBe(direct.code);
+          expect(outcome.message).toBe(direct.message);
+        }
+      }
+    }
+  });
+
+  it("refuses whitespace-only prose the harness validator admits — the shell is engine-authoritative", () => {
+    const outcome = acknowledgeEmissionExecution(JUDGE_SPEC, "v1", {
+      criterion: "extensibility",
+      rankings: [{ candidate: "candidate-type-driven-fp.md", score: 8, fatal_flaw: null, strongest_idea: "   " }],
+    });
+    expect(outcome).toMatchObject({ kind: "refused", code: "invalid-schema" });
+  });
+
+  it("is frozen at every arm — a caller-side push cannot widen the outcome behind the shell", () => {
+    const acknowledged = acknowledgeEmissionExecution(JUDGE_SPEC, "v1", validJudgeArgs);
+    expect(Object.isFrozen(acknowledged)).toBe(true);
+    if (acknowledged.kind === "acknowledged") {
+      expect(Object.isFrozen(acknowledged.acknowledgment)).toBe(true);
+      expect(Object.isFrozen(acknowledged.acknowledgment.content)).toBe(true);
+      expect(Object.isFrozen(acknowledged.acknowledgment.content[0])).toBe(true);
+    }
+    const refused = acknowledgeEmissionExecution(JUDGE_SPEC, "v1", { criterion: "x", rankings: [] });
+    expect(Object.isFrozen(refused)).toBe(true);
+  });
+});
+
+describe("EMISSION_CONSTRAINED_SAMPLING_REQUEST — the FR-002/INV-1 request vocabulary", () => {
+  it("requests JSON-schema constrained sampling with strict PREFERRED — never required", () => {
+    expect(EMISSION_CONSTRAINED_SAMPLING_REQUEST).toEqual({ type: "json_schema", strict: "prefer" });
+    expect(Object.isFrozen(EMISSION_CONSTRAINED_SAMPLING_REQUEST)).toBe(true);
+  });
+
+  it("is ONE request vocabulary for every emission tool — the registry's specs carry no separate request", () => {
+    for (const spec of Object.values(EMISSION_TOOL_SPECS)) {
+      for (const schemaVersion of Object.values(spec.schemaVersions)) {
+        void schemaVersion;
+        expect(EMISSION_CONSTRAINED_SAMPLING_REQUEST.type).toBe("json_schema");
+        expect(EMISSION_CONSTRAINED_SAMPLING_REQUEST.strict).toBe("prefer");
+      }
+    }
+  });
+});
+
 /** Type-level: the refusal code is a member of the closed vocabulary, never a
  *  free string — an unknown code is unrepresentable behind every consumer that
  *  switches on it (parse, don't validate). */
@@ -265,3 +408,9 @@ const _refusedCodeIsClosed: (
   admission: Extract<EmissionArgumentAdmission, { kind: "refused" }>,
 ) => EmissionParseFailureCode = (admission) => admission.code;
 void _refusedCodeIsClosed;
+
+/** Type-level INV-1: the request vocabulary's strict member is the "prefer"
+ *  literal — a required request is unrepresentable behind the type, and the
+ *  behavioral resolver crossing lives in the real-Pi suite. */
+const _strictIsPreferLiteral: "prefer" = EMISSION_CONSTRAINED_SAMPLING_REQUEST.strict;
+void _strictIsPreferLiteral;

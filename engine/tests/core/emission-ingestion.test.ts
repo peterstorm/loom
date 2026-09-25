@@ -2,11 +2,8 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { createHash } from "node:crypto";
 import {
-  observeEmissionCalls,
   selectCanonicalPayload,
   selectVerdictSource,
-  type EmissionCallFrame,
-  type EmissionToolCall,
   type IngestionSelection,
   type VerdictSourceSelection,
 } from "../../src/core/emission-ingestion";
@@ -16,10 +13,19 @@ import {
   issueEmissionBinding,
   type EmissionArgumentAdmission,
   type EmissionParseFailure,
+  type EmissionSchemaVersion,
   type IssuedEmissionBinding,
   type IssuedEmissionBindingOf,
 } from "../../src/core/emission-tool";
-import { parseFinalPayload, type CaptureRejection, type FinalPayload } from "../../src/core/harness-capture";
+import {
+  canonicalCall,
+  observeEmissionCalls,
+  parseFinalPayload,
+  type CaptureRejection,
+  type EmissionCallFrame,
+  type EmissionToolCall,
+  type FinalPayload,
+} from "../../src/core/harness-capture";
 import {
   canonicalStructuralEquals,
   type DomainResult,
@@ -896,6 +902,95 @@ describe("selectVerdictSource", () => {
       kind: "observation-refused",
       refusal: { code: "unexpected-version", message: expect.stringContaining("v2") },
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase-2 discriminating acceptance: whitespace-only schema-vs-parser disagreement
+// ---------------------------------------------------------------------------
+
+/**
+ * AD-5's discriminating case as selection behavior: whitespace-only advisory
+ * prose passes Pi's frozen JSON Schema validation (the emitted bytes express
+ * shape only — minLength — and never the zod refinements) but fails the
+ * engine's admission. The pi-validation half is pinned by the real-Pi suite
+ * (engine/tests/pi/emission-tool.test.ts) through the REAL
+ * `validateToolArguments`; this suite pins the engine half: the harness-valid
+ * call is a REFUSED call at the selection, never an ingested payload — and the
+ * refusal is retained on whichever extraction arm the final candidates allow.
+ */
+const whitespaceOnlyArguments = (kind: PayloadProducerKindName): unknown => {
+  switch (kind) {
+    case "reviewer-payload": {
+      const finding = reviewerPayloadV2Schema.parse({
+        schemaVersion: 2,
+        kind: "standalone-review",
+        findings: [{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim: "real claim" }],
+      }).findings[0]!;
+      return { schemaVersion: 2, kind: "standalone-review", findings: [{ ...finding, claim: "   " }] };
+    }
+    case "judge-verdict":
+      return {
+        criterion: "extensibility",
+        rankings: [{ candidate: "candidate-type-driven-fp.md", score: 8, fatal_flaw: null, strongest_idea: "   " }],
+      };
+    case "refutation-verdict":
+      return {
+        criterion: "reproduction",
+        verdicts: [{ finding_id: "T1:code-reviewer-1", verdict: "refuted", reasoning: "   " }],
+      };
+  }
+};
+
+describe("whitespace-only schema-vs-parser disagreement (AD-5)", () => {
+  it("refuses the whitespace-only call for every kind even though its shape passes the frozen JSON Schema", () => {
+    for (const [kindName, spec] of Object.entries(EMISSION_TOOL_SPECS)) {
+      for (const version of Object.keys(spec.schemaVersions)) {
+        const admission = admitEmissionArguments(
+          EMISSION_TOOL_SPECS[kindName as PayloadProducerKindName],
+          version as EmissionSchemaVersion,
+          whitespaceOnlyArguments(kindName as PayloadProducerKindName),
+        );
+        expect(admission.kind, `${kindName}/${version}`).toBe("refused");
+      }
+    }
+  });
+
+  it("selects usable extraction over the harness-valid-but-engine-refused call, refusal retained (FR-006)", () => {
+    const binding = mustMint({ requestId: REQUEST_ID, kind: "reviewer-payload", version: "v2" });
+    const call = callOf(binding, "call-w", whitespaceOnlyArguments("reviewer-payload"));
+    const selection = selectCanonicalPayload(
+      binding,
+      observeEmissionCalls([frameOf(call)]),
+      USABLE_CANDIDATES,
+    );
+    expect(selection.kind).toBe("extraction-over-refused-call");
+    if (selection.kind === "extraction-over-refused-call") {
+      expect(selection.emissionRefusal.code).toBe("invalid-payload");
+      expect(canonicalStructuralEquals(selection.fallback, parseFinalPayload(USABLE_CANDIDATES))).toBe(true);
+    }
+  });
+
+  it("rejects once with both causes when the whitespace-only call has no usable fallback (AD-9)", () => {
+    const binding = mustMint({ requestId: REQUEST_ID, kind: "judge-verdict", version: "v1" });
+    const call = callOf(binding, "call-w", whitespaceOnlyArguments("judge-verdict"));
+    const selection = selectVerdictSource(binding, observeEmissionCalls([frameOf(call)]), "");
+    expect(selection.kind).toBe("extraction-over-refused-call");
+    if (selection.kind === "extraction-over-refused-call") {
+      expect(selection.emissionRefusal.code).toBe("invalid-schema");
+    }
+  });
+
+  it("pins the vocabulary's contract-field projection at its home: provenance beyond the five fields is folded away", () => {
+    const base = callOf(REVIEWER_V2, "call-1", INVALID_ARGUMENTS);
+    type ProvenancedCall = EmissionToolCall & Readonly<{ agent: string; observedAt: string }>;
+    const provenanced: ProvenancedCall = { ...base, agent: "code-reviewer", observedAt: "t1" };
+    expect(canonicalCall(provenanced)).toEqual(base);
+    // The fold emits exactly this projection, so a hand-built observation with
+    // provenance selects identically to the folded one (the selection is a
+    // function of the contract fields only).
+    const withProvenance = observeEmissionCalls([{ kind: "complete", call: provenanced }]);
+    expect(canonicalStructuralEquals(withProvenance, observeEmissionCalls([frameOf(base)]))).toBe(true);
   });
 });
 

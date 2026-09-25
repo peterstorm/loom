@@ -20,8 +20,13 @@
  *   → the single-call state admits the arguments through the registry's
  *     `admitEmissionArguments` (schema selection)
  *
- * Wrong kind/version/request and unusable observations therefore reject before
- * schema selection, and they are REFUSALS, not absence: the boundary
+ * The observation side of that pipeline — the transport frames, the closed
+ * emission observation and its ONE fold — lives in `harness-capture` (the
+ * additive emission observation/rejection vocabulary's stated home, shared
+ * with the tool-surface contracts); this module imports it and owns the
+ * BINDING and the SELECTION over it. Wrong kind/version/request and unusable
+ * observations therefore reject before schema selection, and they are
+ * REFUSALS, not absence: the boundary
  * classifies them (evidence/infrastructure), the kernel never invents a
  * successful fallback for them. The two semantic rejection arms —
  * `duplicate-emission-call` and `refused-call-no-fallback` — are the rows that
@@ -52,180 +57,28 @@ import {
   EMISSION_TOOL_SPECS,
   type EmissionArgumentAdmission,
   type EmissionParseFailure,
-  type EmissionSchemaVersion,
   type IssuedEmissionBinding,
   type IssuedEmissionBindingOf,
 } from "./emission-tool";
 import {
+  canonicalCall,
   parseFinalPayload,
   type CaptureRejection,
+  type EmissionObservation,
+  type EmissionObservationRefusal,
+  type EmissionToolCall,
   type FinalPayload,
   type FinalPayloadCandidate,
 } from "./harness-capture";
 import {
   canonicalRecord,
-  canonicalStructuralEquals,
   type ArtifactDigest,
   type DomainResult,
 } from "./orchestration-contract/identity";
-import type { PayloadProducerKind } from "./model-profiles";
-
-// ---------------------------------------------------------------------------
-// Observed transport frames and the closed emission observation (AD-8)
-// ---------------------------------------------------------------------------
-
-/**
- * One complete, request-bound emission-tool call as the harness adapters
- * observe it: the issued request attempt the frame was observed under (the
- * adapter's attribution — verified, never trusted, by the selection's binding
- * check), the transport's tool-call identity, the producer kind and schema
- * version the call's tool carries, and the arguments as observed. Untrusted
- * transport data: the selection compares `requestId` against the issued
- * binding rather than re-parsing it, so a malformed id can only fail the
- * match (wrong-request refusal), never impersonate the issued request.
- */
-export type EmissionToolCall = Readonly<{
-  requestId: string;
-  toolCallId: string;
-  kind: PayloadProducerKind;
-  version: EmissionSchemaVersion;
-  arguments: unknown;
-}>;
-
-/**
- * One observed emission-tool transport frame — complete (a full call with
- * arguments) or incomplete/failed (the harness saw an emission call but could
- * not observe it completely). The incomplete arm exists so an incomplete or
- * failed observation is REPRESENTABLE as itself: the fold refuses it with a
- * reason and never reclassifies it as absence (AD-8). `toolCallId` is null
- * when the adapter could not recover which call failed; the refusal is the
- * same either way.
- */
-export type EmissionCallFrame =
-  | Readonly<{ kind: "complete"; call: EmissionToolCall }>
-  | Readonly<{ kind: "incomplete"; toolCallId: string | null; reason: string }>;
-
-/**
- * The closed emission observation (AD-8): absent, one complete call, multiple
- * distinct calls, or unusable with a reason. The vocabulary is closed — a
- * consumer switching on `kind` over these four arms is exhaustive.
- */
-export type EmissionObservation =
-  | Readonly<{ kind: "absent" }>
-  | Readonly<{ kind: "single-call"; call: EmissionToolCall }>
-  | Readonly<{ kind: "multiple-calls"; calls: readonly EmissionToolCall[] }>
-  | Readonly<{ kind: "unusable"; reason: string }>;
-
-/**
- * The contract-field projection of one observed call. Adapter provenance
- * beyond the contract fields is projected away at the fold, so the
- * observation — and therefore the selection — is a function of the contract
- * fields only and never of how much provenance an adapter attached.
- */
-const canonicalCall = (call: EmissionToolCall): EmissionToolCall =>
-  canonicalRecord({
-    requestId: call.requestId,
-    toolCallId: call.toolCallId,
-    kind: Object.freeze({ kind: call.kind.kind }),
-    version: call.version,
-    arguments: call.arguments,
-  });
-
-/**
- * The ONE fold from observed transport frames to the closed emission
- * observation — the observation decision both selection functions share, not
- * a caller-maintained policy. The fold is binding-blind: it classifies by
- * tool-call identity alone, so the same fold serves every issued binding and
- * every path (misbinding is the selection's check against the issued
- * binding).
- *
- * - Any incomplete/failed frame refuses the attempt with its reason: the
- *   observation is unusable, never reclassified as absence (AD-8), and the
- *   first incomplete frame in observation order names the refusal.
- * - Frames sharing one tool-call identity are the same call replayed:
- *   idempotent when every frame carries the identical record (request id,
- *   kind, version and structurally-equal arguments — FR-007's "same observed
- *   call"), and contradictory — unusable — when any frame differs (FR-007's
- *   "contradictory records sharing call identity MUST refuse rather than
- *   deduplicate silently"). Replayed frames with the same identity and bytes
- *   therefore add no consumption and no publication.
- * - The DISTINCT identities decide the count, in first-observed order: zero →
- *   absent, one → single-call, ≥2 → multiple-calls (which is ambiguity by the
- *   time the selection sees it).
- * - An empty tool-call identity cannot be bound or replay-deduplicated, so a
- *   complete frame carrying one makes the observation unusable.
- */
-export function observeEmissionCalls(frames: readonly EmissionCallFrame[]): EmissionObservation {
-  // One structure carries first-observed order: a Map's insertion order IS
-  // first-observed order, so the distinct-call set needs no parallel array to
-  // keep in agreement with it.
-  const callsByIdentity = new Map<string, EmissionToolCall>();
-  for (const frame of frames) {
-    if (frame.kind === "incomplete") {
-      return canonicalRecord({
-        kind: "unusable" as const,
-        reason: frame.toolCallId === null
-          ? `an emission tool call was observed incomplete: ${frame.reason}`
-          : `emission tool call ${frame.toolCallId} was observed incomplete: ${frame.reason}`,
-      });
-    }
-    const call = canonicalCall(frame.call);
-    if (call.toolCallId.length === 0) {
-      return canonicalRecord({
-        kind: "unusable" as const,
-        reason: "an observed emission tool call carries an empty tool-call identity",
-      });
-    }
-    const seen = callsByIdentity.get(call.toolCallId);
-    if (seen === undefined) {
-      callsByIdentity.set(call.toolCallId, call);
-    } else if (!canonicalStructuralEquals(seen, call)) {
-      return canonicalRecord({
-        kind: "unusable" as const,
-        reason: `contradictory duplicate transport frames for emission tool call ${call.toolCallId}`,
-      });
-    }
-    // else: an exact replay of one already-observed call — idempotent (FR-007).
-  }
-  const observed = Object.freeze([...callsByIdentity.values()]);
-  if (observed.length === 0) return canonicalRecord({ kind: "absent" as const });
-  const first = observed[0];
-  if (first === undefined) {
-    // Unreachable — `observed.length > 0` above proves the element exists; the
-    // explicit guard carries the invariant instead of a non-null assertion.
-    throw new Error("emission observation invariant failed: a non-empty observation lost its first call");
-  }
-  if (observed.length === 1) {
-    return canonicalRecord({ kind: "single-call" as const, call: first });
-  }
-  return canonicalRecord({
-    kind: "multiple-calls" as const,
-    calls: observed,
-  });
-}
 
 // ---------------------------------------------------------------------------
 // Binding check and count decision — shared by both selection functions
 // ---------------------------------------------------------------------------
-
-/**
- * The closed refusal vocabulary for observations that are not a semantic
- * payload decision (AD-9): an unusable observation (incomplete/failed or
- * contradictory frames), or a call bound to the wrong request attempt,
- * producer kind, or schema version. Never absence, never a fallback — the
- * boundary classifies these as evidence/infrastructure, never as a consumed
- * semantic attempt.
- */
-export type EmissionObservationRefusalCode =
-  | "unusable-observation"
-  | "wrong-request"
-  | "unexpected-kind"
-  | "unexpected-version";
-
-export type EmissionObservationRefusal = Readonly<{
-  code: EmissionObservationRefusalCode;
-  message: string;
-}>;
 
 /**
  * The binding-checked, count-decided observation decision both selection
