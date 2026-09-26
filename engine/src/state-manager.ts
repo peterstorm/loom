@@ -26,7 +26,7 @@ import {
 } from "./machine";
 import type { ActiveWaveGateRegistration, CompletedWaveGateRegistration, TaskGraph } from "./types";
 import type { DomainResult } from "./core/orchestration-contract";
-import type { WaveCompletionCommit, WaveCompletionCommitError } from "./core/wave-gate-machine";
+import { resetWaveGateReviewAuthority, type WaveCompletionCommit, type WaveCompletionCommitError } from "./core/wave-gate-machine";
 import { assertPiCliMutationCompatible, captureLoomRuntimeIdentity } from "./runtime-compatibility";
 import { waveGateAuthorityDigest } from "./core/wave-review-authority";
 import {
@@ -449,11 +449,10 @@ export class StateManager {
             `not ${registration.runId}`,
           );
         }
-        // An operator-abandoned tombstone is not authority for the Wave: the
-        // fresh registration supersedes it below. Roster and digest are still
-        // re-proven against the locked state, and the tombstone is NOT
-        // archived into wave_gate_history — that history poisons later starts
-        // for the same Wave, and an abandoned run was never completed.
+        // The abandoned Run is not completion authority. Its review epoch and
+        // packet-bound evidence must retire with the successor install, while
+        // accepted Findings and implementation proof survive. The tombstone is
+        // not archived as a completed Wave.
       }
       const lockedTaskIds = state.tasks
         .filter((task) => task.wave === registration.wave)
@@ -466,7 +465,10 @@ export class StateManager {
           "Protected Wave authority changed after Run Directory publication; active Wave Gate was not installed",
         );
       }
-      return { state: { ...state, active_wave_gate: registration }, value: registration };
+      const successorBase = existing?.terminalOutcome?.kind === "terminal-abandoned"
+        ? resetWaveGateReviewAuthority(state, lockedTaskIds)
+        : state;
+      return { state: { ...successorBase, active_wave_gate: registration }, value: registration };
     });
   }
 
