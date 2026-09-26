@@ -1759,6 +1759,72 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       });
     });
 
+    it("dispatches the exact attempt-2 context after a Wave Gate run was abandoned for changed bytes", () => {
+      const retry = semanticReceipt(1, []);
+      const registered = registeredGraph();
+      const graph = registeredGraph({
+        active_wave_gate: {
+          ...registered.active_wave_gate!,
+          terminalOutcome: { kind: "terminal-abandoned", reason: "reviewed bytes changed", supersededBy: null },
+        },
+        tasks: [taskState({ id: "T2", status: "implemented" }), {
+          ...taskState({ id: "T1", status: "pending" }),
+          implementation_attempt_history: [retry],
+          implementation_retry_protocol: 2,
+          implementation_retry_history_start: 0,
+          failure_reason: `retry-required: ${retry.failureKinds.join(", ")}`,
+          retry_count: 1,
+        }],
+      });
+
+      const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
+
+      expect(status.facts.location).toEqual({ kind: "known", value: { activePhase: "execute", activeWave: 1 } });
+      expect(status.next.action).toMatchObject({
+        diagnostic: { recovery: {
+          kind: "spawn-wave-implementation", wave: 1,
+          dispatches: [{ kind: "retry-implementation", taskId: "T1", semanticAttempt: 2,
+            promptAppendix: expect.stringContaining(retry.receiptId) }],
+        } },
+      });
+      expect(graph.active_wave_gate?.terminalOutcome).toEqual({
+        kind: "terminal-abandoned", reason: "reviewed bytes changed", supersededBy: null,
+      });
+      expect(deriveWaveReadiness(graph, statusDeps)).toMatchObject({
+        ok: false, error: { reasons: [{ kind: "authority-contradiction" }] },
+      });
+    });
+
+    it("offers a fresh Wave Gate once implementation is complete after abandonment", () => {
+      const registered = registeredGraph();
+      const graph = registeredGraph({ active_wave_gate: {
+        ...registered.active_wave_gate!,
+        terminalOutcome: { kind: "terminal-abandoned", reason: "reviewed bytes changed", supersededBy: null },
+      } });
+      expect(deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps).next.action)
+        .toMatchObject({ diagnostic: { recovery: { kind: "start-wave-gate", wave: 1 } } });
+    });
+
+    it("refuses a foreign-wave tombstone or one already naming a successor", () => {
+      const registered = registeredGraph();
+      for (const terminal of [
+        { ...registered.active_wave_gate!, wave: 2, terminalOutcome: {
+          kind: "terminal-abandoned" as const, reason: "foreign", supersededBy: null,
+        } },
+        { ...registered.active_wave_gate!, terminalOutcome: {
+          kind: "terminal-abandoned" as const, reason: "successor selected",
+          supersededBy: authorityValue(parseOrchestrationRunId("next-run")),
+        } },
+      ]) {
+        const graph = registeredGraph({ active_wave_gate: terminal });
+        const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
+        expect(Object.values(status.facts).every((fact) => fact.kind === "unavailable")).toBe(true);
+        expect(status.next.action).toMatchObject({
+          kind: "blocked", diagnostic: { category: "invalid-authority", recovery: { kind: "inspect-run-and-stop" } },
+        });
+      }
+    });
+
     it("reports terminal non-retryable escalation after semantic attempt 2", () => {
       const retry = semanticReceipt(1, []);
       const escalation = semanticReceipt(2, [retry]);

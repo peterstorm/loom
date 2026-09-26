@@ -2583,14 +2583,15 @@ function committedTerminalStatus(
 }
 
 /**
- * The implementation window: an execute Wave whose Wave Gate has not been
- * registered yet.
+ * The implementation window: an execute Wave without a live Wave Gate.
  *
  * Completion retires the outgoing registration in the same commit that
  * advances `current_wave`, and the next registration only appears when the
  * gate is started — so every Wave spends its whole implementation span with
- * `active_wave_gate === undefined`. Routing that through the readiness path
- * reported a healthy graph as terminal invalid authority and blanked all
+ * `active_wave_gate === undefined`. A terminal-abandoned Run without a named
+ * successor also leaves the Wave in this window: its protected tombstone is
+ * retained, but cannot authorize review or block a Task retry. Routing either
+ * case through the readiness path reported invalid authority and blanked all
  * fact categories. Here the facts are derivable and the owed move is known, so
  * both are reported.
  *
@@ -2602,7 +2603,11 @@ function unstartedWaveStatus(
   graph: TaskGraph,
   deps: GateDeps,
 ): LoomStatus | null {
-  if (graph.active_wave_gate !== undefined || graph.current_wave === undefined) return null;
+  if (graph.current_wave === undefined) return null;
+  const registration = graph.active_wave_gate;
+  if (registration !== undefined &&
+      (registration.wave !== graph.current_wave || registration.terminalOutcome?.kind !== "terminal-abandoned" ||
+        registration.terminalOutcome.supersededBy !== null)) return null;
   const wave = graph.current_wave;
   // A terminal receipt for the current Wave means this is not an unstarted
   // Wave. committedTerminalStatus already accepted the exact terminal graph;
@@ -2919,8 +2924,8 @@ export function deriveLoomStatusFromParsedGraph(
     deps.currentWaveCompletionResult,
   );
   if (committed !== null) return committed;
-  // Before the readiness path, which requires a registration: an execute Wave
-  // legitimately has none for its whole implementation span.
+  // Before the readiness path, which requires a live registration: an execute
+  // Wave may have no registration or only an abandoned Run tombstone.
   const unstarted = unstartedWaveStatus(parsed.value, deps);
   if (unstarted !== null) return unstarted;
   if (lifecycleProof === null) {
