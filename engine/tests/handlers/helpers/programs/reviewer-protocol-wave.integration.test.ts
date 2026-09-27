@@ -16,6 +16,7 @@ import { captureHarnessResult } from "../../../../src/orchestration/harness-capt
 import { parseTaskGraph, StateManager } from "../../../../src/state-manager";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } from "../../../fixtures/pi-session";
 import type { Finding, TaskGraph } from "../../../../src/types";
+import { parseWaveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../../../src/core/reviewed-workspace";
 import { graphFixture, taskFixture } from "../../../fixtures/task-lifecycle";
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
@@ -192,6 +193,11 @@ describe("registered Wave reviewer protocol", () => {
       expect(packet.schemaVersion).toBe(2);
       expect(Buffer.from(packet.fixedContext.find(({ label }) => label === "reviewer-payload-schema")!.bytes).toString()).toBe(REVIEWER_PAYLOAD_SCHEMA_V2);
       expect(Buffer.from(packet.fixedContext.find(({ label }) => label === "reviewer-impact-rubric")!.bytes).toString()).toBe(REVIEWER_IMPACT_RUBRIC_V1);
+      const sourceSection = packet.fixedContext.find(({ label }) => label === WAVE_FROZEN_SOURCE_SECTION)!;
+      const source = value(parseWaveFrozenSource(JSON.parse(Buffer.from(sourceSection.bytes).toString("utf8"))));
+      expect(source.taskId).toBe("T1");
+      expect(source.workspaceHeadSha).toBe(run.workspace_head_sha);
+      expect(source.files).toMatchObject([{ path: "src/x.ts", kind: "text", content: "export const x = 1;\n" }]);
       expect(value(reviewerProtocolResolver(handle, registration(handle))(authority)).protocolVersion).toBe(2);
     }
     const reviewers = issued.slice(1);
@@ -237,6 +243,10 @@ describe("registered Wave reviewer protocol", () => {
     const firstPacket = value(handle.readContext(first.contextDigest));
     const secondPacket = value(handle.readContext(retry.authority.contextDigest));
     expect(secondPacket.fixedContext).toEqual(firstPacket.fixedContext);
+    const firstSource = firstPacket.fixedContext.find(({ label }) => label === WAVE_FROZEN_SOURCE_SECTION)!;
+    const retrySource = secondPacket.fixedContext.find(({ label }) => label === WAVE_FROZEN_SOURCE_SECTION)!;
+    expect(retrySource.digest).toBe(firstSource.digest);
+    expect(retrySource).toEqual(firstSource);
     expect(persistedWaveAttemptTwoCompatibilityProblem(first, retry.authority, firstPacket, secondPacket)).toBeNull();
     expect(await resume(p, handle)).toEqual(retried);
     const awaiting = await submit(p, handle, retry.authority, payload(handle, retry.authority, [advisory]));

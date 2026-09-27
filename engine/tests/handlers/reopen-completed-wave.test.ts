@@ -110,7 +110,7 @@ describe("reviewed workspace integrity", () => {
   });
 
   it("accepts an unchanged declared scope", () => {
-    const unchanged = { taskId: "T22", scope: ["src/a.ts"], headSha: head };
+    const unchanged = { taskId: "T22", scope: ["src/a.ts"], headSha: head, artifacts: [{ path: "src/a.ts", bytes: [] }] };
     expect(checkReviewedWorkspace([task("T22", 3)], { loadPlanModels: () => ({ kind: "none" }), filePresence: () => ({ ok: true, exists: true }), reviewedWorkspace: () => [unchanged] }).passed).toBe(true);
   });
 
