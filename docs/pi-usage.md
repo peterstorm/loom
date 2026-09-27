@@ -57,7 +57,7 @@ git pull
 
 Restart Pi or run `/reload`. Run `home-manager switch` only after changing the Home Manager module or dotfiles' default Pi settings.
 
-The dotfiles package supplies a generic `subagent` extension and a small set of generic agents (planner, reviewer, scout, worker). Loom's agent definitions live in the same Pi agent directory as rendered, integrity-stamped files produced by `scripts/sync-pi-agents.sh` (see [Agent sync and model policy](#agent-sync-and-model-policy)); do not hand-edit them or byte-copy raw source agents there.
+The dotfiles package supplies a generic `subagent` extension and a small set of generic agents (planner, reviewer, scout, worker). Loom's agent definitions live in the same Pi agent directory as rendered, integrity-stamped files produced by `scripts/sync-pi-agents.sh` (see [Agent sync and model policy](#agent-sync-and-model-policy)); do not hand-edit them or byte-copy raw source agents there. Emission-enabled Pi requests additionally require the shared `subagent` launcher with the `loom:subagent-launch:v1` port installed under the *same* `PI_CODING_AGENT_DIR` as the parent. Installing Loom alone does not install or upgrade that separately owned launcher.
 
 ## Installation
 
@@ -155,6 +155,14 @@ The child consumes the token before its first model turn. Replay, wrong Agent/Ta
 Registered `spawn-batch` requests contain `LOOM_REQUEST_ID`, Context Packet digest/path, and complete request authority. Before dispatch, the extension binds Pi’s native tool-call/item identity to that request. On result, it publishes the exact final bytes into the reserved immutable transcript slot and resumes program semantics from those bytes.
 
 Pi’s subagent tool accepts at most eight items per call. Large engine-issued batches may be partitioned into ordered chunks of at most eight, but requests must not be changed, dropped, or duplicated; resume only after every chunk completes.
+
+### Emission-enabled child startup
+
+Only an issued, explicitly qualified Pi provider/model route can select the frozen emission-tool schema. Loom's parent admission independently checks that issuance and its exact descriptor, then probes the installed `subagent` launch port. A missing port **blocks an emission-enabled spawn before dispatch**; it never turns a tool-primary request into an ordinary JSON-mode child. Genuinely extraction-only and other non-emission requests retain the normal launcher path.
+
+For each admitted emission item, the parent passes a one-use launch capability to the shared launcher keyed by tool call and item slot. The launcher sets `LOOM_EMISSION_BINDING` only in that child's environment, starts Pi in RPC mode **without a Task prompt**, discovers and invokes `/loom-emission-readiness`, checks the child's request/context/schema/tool/revision and actual active set, binds and checks the issued provider/model *after* readiness, and delivers the Task only on the open decision. Missing or malformed readiness, route mismatch, timeout, and cancellation terminate that child without delivering its Task. Parallel items never share an ambient binding; retry spawns traverse the same barrier. The pure readiness parser/decision lives in `pi/emission-tool.ts`, and the transport adapter lives in the separately installed Pi `subagent` extension.
+
+On this workstation the managed source is `~/.dotfiles/pi/extensions/subagent/`; `~/.pi/agent/extensions/subagent/` is the installed link. Restart Pi or reload its extensions after updating that launcher, and confirm the active `PI_CODING_AGENT_DIR` contains it. Do not provision `LOOM_EMISSION_BINDING` in the parent shell or add a descriptor to task text by hand: neither is issued request authority.
 
 ## Harness behavior
 
