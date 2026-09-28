@@ -11,6 +11,8 @@ import {
   assertPanelJudgeProfileUnique,
   classifyPiSpawnItems,
   lowerModelProfile,
+  issuedReviewerProfile,
+  reviewerIssueRouteForParent,
   panelJudgeProfileCarriers,
   parseAgentFrontmatter,
   parseLlmProfile,
@@ -46,6 +48,10 @@ const EXPECTED_PROFILES = {
     claudeCode: { model: "sonnet" },
     pi: { provider: "openai-codex", model: "gpt-5.5", thinking: "high" },
   },
+  "qualified-local-review": {
+    claudeCode: { model: "sonnet" },
+    pi: { provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" },
+  },
   "panel-design": {
     claudeCode: { model: "opus" },
     pi: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
@@ -75,11 +81,13 @@ describe("semantic model profiles", () => {
       .toEqual(EXPECTED_PROFILES);
   });
 
-  it("uses only currently available, explicitly named openai-codex targets", () => {
-    expect(new Set(LLM_PROFILES.map(({ pi }) => pi.provider))).toEqual(new Set(["openai-codex"]));
-    expect(new Set(LLM_PROFILES.map(({ pi }) => pi.model))).toEqual(
+  it("keeps all default profiles on exact cloud targets and the alternative on one qualified local target", () => {
+    const defaults = LLM_PROFILES.filter(({ id }) => id !== "qualified-local-review");
+    expect(new Set(defaults.map(({ pi }) => pi.provider))).toEqual(new Set(["openai-codex"]));
+    expect(new Set(defaults.map(({ pi }) => pi.model))).toEqual(
       new Set(["gpt-5.6-sol", "gpt-5.5", "gpt-5.4-mini"]),
     );
+    expect(LLM_PROFILES.find(({ id }) => id === "qualified-local-review")?.pi).toEqual(EXPECTED_PROFILES["qualified-local-review"].pi);
     expect(LLM_PROFILES.every(({ pi }) => pi.model.length > 0 && pi.thinking.length > 0)).toBe(true);
   });
 
@@ -122,6 +130,29 @@ describe("semantic model profiles", () => {
     }));
   });
 });
+
+describe("qualified-local reviewer issuance", () => {
+  const qualified = { pi: true, provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" };
+
+  it("elects the local profile only from the exact parent session route", () => {
+    expect(reviewerIssueRouteForParent(qualified)).toBe("qualified-local");
+    for (const changed of [
+      { pi: false }, { provider: "openai-codex" }, { model: "glm-5.3-flash-spark-tp2-v15" },
+      { thinking: "medium" },
+    ]) expect(reviewerIssueRouteForParent({ ...qualified, ...changed })).toBe("catalog");
+  });
+
+  it("preserves the catalog for all non-reviewers and the cloud default", () => {
+    expect(issuedReviewerProfile("code-reviewer", "qualified-local")).toMatchObject({
+      ok: true, value: { id: "qualified-local-review", pi: qualifiedRoute },
+    });
+    expect(issuedReviewerProfile("code-reviewer", "catalog")).toEqual(resolveModelProfile("general-review"));
+    expect(issuedReviewerProfile("spec-check-invoker", "qualified-local")).toEqual(resolveModelProfile("general-review"));
+    expect(issuedReviewerProfile("review-verifier-agent", "qualified-local")).toEqual(resolveModelProfile("refutation"));
+  });
+});
+
+const qualifiedRoute = { provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" };
 
 describe("Pi spawn input parsing", () => {
   it("parses each single, parallel, and chain mode in order", () => {
