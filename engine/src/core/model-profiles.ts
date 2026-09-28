@@ -21,6 +21,7 @@ export const LLM_PROFILE_IDS = [
   "architecture-finalize",
   "general-review",
   "focused-review",
+  "qualified-local-review",
   "panel-design",
   "panel-judge",
   "refutation",
@@ -29,17 +30,15 @@ export const LLM_PROFILE_IDS = [
 
 export type LlmProfileId = (typeof LLM_PROFILE_IDS)[number];
 export type ClaudeCodeModel = "haiku" | "sonnet" | "opus";
-export type PiProvider = "openai-codex";
 export type PiOpenAiModel = "gpt-5.6-sol" | "gpt-5.5" | "gpt-5.4-mini";
 export type PiThinkingLevel = "medium" | "high";
 export type Harness = "claude-code" | "pi";
 
 export type ClaudeCodeTarget = Readonly<{ model: ClaudeCodeModel }>;
-export type PiTarget = Readonly<{
-  provider: PiProvider;
-  model: PiOpenAiModel;
-  thinking: PiThinkingLevel;
-}>;
+export type PiTarget =
+  | Readonly<{ provider: "openai-codex"; model: PiOpenAiModel; thinking: PiThinkingLevel }>
+  | Readonly<{ provider: "desktop-vllm"; model: "glm-5.3-flash-spark-tp2-v14"; thinking: "high" }>;
+export type PiProvider = PiTarget["provider"];
 
 export type LlmProfile = Readonly<{
   id: LlmProfileId;
@@ -52,12 +51,7 @@ export type ClaudeCodeBinding = Readonly<{
   model: ClaudeCodeModel;
 }>;
 
-export type PiBinding = Readonly<{
-  harness: "pi";
-  provider: PiProvider;
-  model: PiOpenAiModel;
-  thinking: PiThinkingLevel;
-}>;
+export type PiBinding = Readonly<{ harness: "pi" } & PiTarget>;
 
 export type HarnessBinding = ClaudeCodeBinding | PiBinding;
 
@@ -104,6 +98,11 @@ export const LLM_PROFILES: readonly LlmProfile[] = Object.freeze([
   profile("architecture-finalize", "opus", "gpt-5.6-sol", "high"),
   profile("general-review", "sonnet", "gpt-5.6-sol", "high"),
   profile("focused-review", "sonnet", "gpt-5.5", "high"),
+  Object.freeze({
+    id: "qualified-local-review",
+    claudeCode: claudeTarget("sonnet"),
+    pi: Object.freeze({ provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" }),
+  }),
   profile("panel-design", "opus", "gpt-5.6-sol", "high"),
   profile("panel-judge", "opus", "gpt-5.6-sol", "high"),
   profile("refutation", "opus", "gpt-5.6-sol", "high"),
@@ -563,6 +562,30 @@ export function resolveAgentProfile(raw: unknown): PolicyResult<LlmProfile> {
   return policy.ok ? resolveModelProfile(policy.value.profile) : policy;
 }
 
+/** Explicit issuance choice. Role and Skill remain catalog-owned. */
+export type ReviewerIssueRoute = "catalog" | "qualified-local";
+
+/** The shell supplies the actual parent session observation, never a prompt or
+ * caller-authored profile. A different provider, model or thinking setting
+ * preserves the catalog/cloud route; no wildcard local inheritance is issued. */
+export function reviewerIssueRouteForParent(parent: Readonly<{
+  pi: boolean;
+  provider: string | undefined;
+  model: string | undefined;
+  thinking: string | undefined;
+}>): ReviewerIssueRoute {
+  const qualified = LLM_PROFILES.find(({ id }) => id === "qualified-local-review")!.pi;
+  return parent.pi && parent.provider === qualified.provider && parent.model === qualified.model &&
+    parent.thinking === qualified.thinking ? "qualified-local" : "catalog";
+}
+
+export function issuedReviewerProfile(agent: unknown, route: ReviewerIssueRoute): PolicyResult<LlmProfile> {
+  const policy = resolveAgentPolicy(agent);
+  if (!policy.ok) return policy;
+  return resolveModelProfile(route === "qualified-local" && policy.value.kind.kind === "reviewer"
+    ? "qualified-local-review" : policy.value.profile);
+}
+
 export function parseHarness(raw: unknown): PolicyResult<Harness> {
   return raw === "claude-code" || raw === "pi"
     ? success(raw)
@@ -577,14 +600,11 @@ export function lowerModelProfile(profileValue: LlmProfile, harness: "claude-cod
 export function lowerModelProfile(profileValue: LlmProfile, harness: "pi"): PiBinding;
 export function lowerModelProfile(profileValue: LlmProfile, harness: Harness): HarnessBinding;
 export function lowerModelProfile(profileValue: LlmProfile, harness: Harness): HarnessBinding {
-  return harness === "claude-code"
-    ? Object.freeze({ harness, model: profileValue.claudeCode.model })
-    : Object.freeze({
-        harness,
-        provider: profileValue.pi.provider,
-        model: profileValue.pi.model,
-        thinking: profileValue.pi.thinking,
-      });
+  if (harness === "claude-code") return Object.freeze({ harness, model: profileValue.claudeCode.model });
+  const target = profileValue.pi;
+  return target.provider === "desktop-vllm"
+    ? Object.freeze({ harness, provider: target.provider, model: target.model, thinking: target.thinking })
+    : Object.freeze({ harness, provider: target.provider, model: target.model, thinking: target.thinking });
 }
 
 export function piModelPattern(target: PiTarget | PiBinding): string {

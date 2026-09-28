@@ -17,7 +17,7 @@ import {
 } from "./proof-obligations";
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ByteSection, type ContextPacket } from "./context-packets";
 import { parseReviewerProtocolDescriptor, type ReviewerProtocolDescriptor } from "./reviewer-contract";
-import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile, WAVE_REVIEW_AGENTS } from "./model-profiles";
+import { issuedReviewerProfile, lowerModelProfile, resolveAgentPolicy, WAVE_REVIEW_AGENTS, type ReviewerIssueRoute } from "./model-profiles";
 import {
   canonicalRecord,
   parseAgentRequestAuthority,
@@ -685,7 +685,9 @@ export function prepareWaveReviewBatch(
   attempt: 1 | 2,
   workspace: readonly ReviewedWorkspaceObservation[],
   specCheckObservation: WaveSpecCheckObservation,
+  issueRoute: ReviewerIssueRoute = "catalog",
 ): DomainResult<WaveRequestBatch, WaveReviewPreparationError> {
+  const reviewerRoute = registration.schemaVersion === 2 ? issueRoute : "catalog";
   if (registration.schemaVersion === 2) {
     const protocol = parseReviewerProtocolDescriptor(registration.reviewerProtocol);
     if (!protocol.ok) return failure(protocol.error.message);
@@ -745,6 +747,7 @@ export function prepareWaveReviewBatch(
   );
   const batchEpoch = parseArtifactDigest(sha256Hex(JSON.stringify({
     runId,
+    ...(reviewerRoute === "qualified-local" ? { reviewerRoute } : {}),
     wave: registration.input.wave,
     authorityDigest: registration.authorityDigest,
     tasks: tasks.map((task) => ({
@@ -827,7 +830,7 @@ export function prepareWaveReviewBatch(
     if (!requestId.ok) return failure(requestId.error.message);
     const policy = resolveAgentPolicy(subject.role);
     if (!policy.ok) return failure(policy.error.message);
-    const profile = resolveModelProfile(policy.value.profile);
+    const profile = issuedReviewerProfile(subject.role, reviewerRoute);
     if (!profile.ok) return failure(profile.error.message);
     const task = subject.taskId === null ? null : tasks.find(({ id }) => id === subject.taskId) ?? null;
     const section = encodeByteSection("wave-review-authority", JSON.stringify({

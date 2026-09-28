@@ -69,12 +69,13 @@ import {
   sameAgentRequestAuthority,
 } from "./orchestration-contract";
 import {
+  issuedReviewerProfile,
   lowerModelProfile,
   parseLlmProfileId,
   resolveAgentPolicy,
-  resolveModelProfile,
   type LlmProfileId,
   type LoomAgentName,
+  type ReviewerIssueRoute,
 } from "./model-profiles";
 import { reviewFindingCounts, attributeFindings, findingsUnionError, parseStoredFindings, type Finding, type RefutedFinding } from "./findings";
 import { fail, isRecord, ok, sanitizeProse, type ParseResult } from "./panel-kernel";
@@ -520,6 +521,8 @@ export interface FreshStandaloneReviewerContexts {
 export interface PrepareFreshStandaloneReviewInput
   extends Omit<PrepareStandaloneReviewInput, "roster"> {
   readonly reviewerContexts: readonly FreshStandaloneReviewerContexts[];
+  /** Frozen in each issued attempt's modelProfile/harnessBinding. */
+  readonly reviewerIssueRoute?: ReviewerIssueRoute;
 }
 
 /**
@@ -554,9 +557,9 @@ export function prepareFreshStandaloneReview(
       authorityErrors.push(`${role}: policy resolution failed: ${policy.error.message}`);
       return null;
     }
-    const profile = resolveModelProfile(policy.value.profile);
+    const profile = issuedReviewerProfile(role, input.reviewerIssueRoute ?? "catalog");
     if (!profile.ok) {
-      authorityErrors.push(`${role}: model profile '${policy.value.profile}' failed: ${profile.error.message}`);
+      authorityErrors.push(`${role}: model profile resolution failed: ${profile.error.message}`);
       return null;
     }
     const contexts = input.reviewerContexts[index];
@@ -576,7 +579,7 @@ export function prepareFreshStandaloneReview(
         program: "standalone-review",
         role,
         attempt,
-        modelProfile: policy.value.profile,
+        modelProfile: profile.value.id,
         harnessBinding: {
           pi: lowerModelProfile(profile.value, "pi"),
           claude: lowerModelProfile(profile.value, "claude-code"),
