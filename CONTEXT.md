@@ -229,7 +229,7 @@ A sum type representing success (`Right`) or failure (`Left`). Used for error ha
 _Avoid_: Result (acceptable in Rust), Optional (different semantics)
 
 **LLM Profile**:
-A semantic policy assigning one Agent role to complete harness-specific requested bindings: a Claude Code model and an exact Pi provider/model/thinking tuple. Missing bindings fail closed. Pi launcher policy may explicitly inherit a local parent model at the spawn boundary; the profile catalog never infers that override.
+A semantic policy assigning one Agent role to complete harness-specific requested bindings: a Claude Code model and an exact Pi provider/model/thinking tuple. Missing bindings fail closed. Wave/standalone reviewer issuance may explicitly select the catalog's `qualified-local-review` alternative only when the observed Pi parent has the exact qualified provider, model, and thinking setting; other roles and cloud sessions retain their assigned default. Both harness bindings and the selected profile are frozen in Agent Request Authority. Pi launcher policy may explicitly inherit a local parent model at the spawn boundary, but cannot change issued authority or infer a new profile from task text.
 _Avoid_: Model alias, Sonnet equivalent, current model, implicit model fallback
 
 **Runtime Revision**:

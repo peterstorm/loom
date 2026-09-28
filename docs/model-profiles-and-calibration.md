@@ -17,6 +17,7 @@ Current profile ids:
 - `architecture-finalize`
 - `general-review`
 - `focused-review`
+- `qualified-local-review` (issue-time alternative for Wave/standalone reviewer payloads only)
 - `panel-design`
 - `panel-judge`
 - `refutation`
@@ -39,7 +40,7 @@ There is no implicit profile fallback. Missing Agent, profile, harness, or front
 
 ### Pi launcher routing
 
-The catalog defines the requested Pi binding. A machine’s Pi launcher routing policy may explicitly choose local-parent inheritance or a named exact target for child Agents. Loom does not infer that choice inside the pure catalog. Both Pi launchers—the normal headless subagent transport and the Interactive Phase Transport—apply parent-model, workload, profile, and Agent specificity and record the same exact provider/model/thinking binding. The Pi spawn guard proves the generated definition, user-global Agent scope, and request authority while allowing the launcher’s explicit routing decision to determine the effective model.
+The catalog defines the requested Pi binding. New Wave/standalone reviewer issuance explicitly selects `qualified-local-review` only when the Pi parent is the exact `desktop-vllm/glm-5.3-flash-spark-tp2-v14:high` route; a cloud, different local, or non-Pi parent uses the Agent's default catalog profile. Spec-check, Refutation Panel, and implementation roles never elect this alternative. A machine’s Pi launcher routing policy may explicitly choose local-parent inheritance or a named exact target for child Agents, but cannot promote an already issued cloud request or reinterpret its frozen profile. Both Pi launchers—the normal headless subagent transport and the Interactive Phase Transport—apply parent-model, workload, profile, and Agent specificity and record the same exact provider/model/thinking binding. The Pi spawn guard proves the generated definition, user-global Agent scope, and request authority while allowing the launcher’s explicit routing decision to determine the effective model.
 
 ## Engine-issued requests
 
