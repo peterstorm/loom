@@ -209,6 +209,228 @@ export function frozenPayloadSchemaParameters(schemaBytes: string): unknown {
   return JSON.parse(schemaBytes);
 }
 
+// ---------------------------------------------------------------------------
+// Wire-form canonicalization (the emission edge's transport parse)
+// ---------------------------------------------------------------------------
+
+const MAX_CANONICALIZE_DEPTH = 32;
+
+type JsonSchemaNode = Readonly<Record<string, unknown>>;
+
+const isPlainJsonRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** Resolve a local `#/$defs/...` JSON-pointer $ref against the root schema.
+ *  Total: a foreign pointer, a missing segment, or a non-object target yields
+ *  null (the node then walks as itself); self/cyclic refs are bounded by the
+ *  walk's depth guard, never by throwing. */
+const resolveLocalRef = (root: JsonSchemaNode, node: JsonSchemaNode): JsonSchemaNode | null => {
+  const ref = node["$ref"];
+  if (typeof ref !== "string" || !ref.startsWith("#/")) return null;
+  let current: unknown = root;
+  for (const rawSegment of ref.slice(2).split("/")) {
+    const key = rawSegment.replace(/~1/g, "/").replace(/~0/g, "~");
+    if (!isPlainJsonRecord(current) || !(key in current)) return null;
+    current = current[key];
+  }
+  return isPlainJsonRecord(current) ? current : null;
+};
+
+/** The schema positions a node effectively describes: itself (local $ref
+ *  resolved) plus every composite member (allOf/anyOf/oneOf), flattened
+ *  depth-guarded. One frozen schema, one walk — the positions are read-only
+ *  projections, never a second contract. */
+const schemaPositions = (
+  node: JsonSchemaNode,
+  root: JsonSchemaNode,
+  depth: number,
+): readonly JsonSchemaNode[] => {
+  if (depth > MAX_CANONICALIZE_DEPTH) return [];
+  const resolved = resolveLocalRef(root, node) ?? node;
+  const positions: JsonSchemaNode[] = [resolved];
+  for (const composite of ["allOf", "anyOf", "oneOf"] as const) {
+    const members = resolved[composite];
+    if (Array.isArray(members)) {
+      for (const member of members) {
+        if (isPlainJsonRecord(member)) positions.push(...schemaPositions(member, root, depth + 1));
+      }
+    }
+  }
+  return positions;
+};
+
+/** Parse one JSON-encoded string as ONE declared JSON Schema type. Accepts
+ *  only the value the declared type names at the runtime-type level; anything
+ *  else fails so the unchanged string reaches validation and is refused with
+ *  its own vocabulary. Pure and total — never throws. */
+const parseStringAsDeclaredType = (
+  type: string,
+  raw: string,
+): { ok: true; value: unknown } | { ok: false } => {
+  const trimmed = raw.trim();
+  switch (type) {
+    case "number": {
+      if (trimmed === "") return { ok: false };
+      const parsed = Number(trimmed);
+      return Number.isFinite(parsed) ? { ok: true, value: parsed } : { ok: false };
+    }
+    case "integer": {
+      if (trimmed === "") return { ok: false };
+      const parsed = Number(trimmed);
+      return Number.isFinite(parsed) && Number.isInteger(parsed) ? { ok: true, value: parsed } : { ok: false };
+    }
+    case "boolean":
+      if (raw === "true") return { ok: true, value: true };
+      if (raw === "false") return { ok: true, value: false };
+      return { ok: false };
+    case "null":
+      return raw === "null" ? { ok: true, value: null } : { ok: false };
+    case "array": {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return { ok: false };
+      }
+      return Array.isArray(parsed) ? { ok: true, value: parsed } : { ok: false };
+    }
+    case "object": {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return { ok: false };
+      }
+      return isPlainJsonRecord(parsed) ? { ok: true, value: parsed } : { ok: false };
+    }
+    default:
+      return { ok: false };
+  }
+};
+
+/** The string branch: parse the value against the declared non-string types
+ *  of the node's effective positions; a string-typed position or an
+ *  unparseable value leaves the string verbatim for validation to refuse. */
+const canonicalizeStringAt = (
+  node: JsonSchemaNode,
+  value: string,
+  root: JsonSchemaNode,
+  depth: number,
+): unknown => {
+  for (const position of schemaPositions(node, root, depth)) {
+    const declared = position["type"];
+    const types = typeof declared === "string" ? [declared] : Array.isArray(declared)
+      ? declared.filter((member): member is string => typeof member === "string")
+      : [];
+    for (const type of types) {
+      if (type === "string") continue;
+      const parsed = parseStringAsDeclaredType(type, value);
+      if (parsed.ok) return parsed.value;
+    }
+  }
+  return value;
+};
+
+/** The array branch: walk the declared items schema; unchanged elements keep
+ *  the original array reference. */
+const canonicalizeArrayAt = (
+  node: JsonSchemaNode,
+  value: readonly unknown[],
+  root: JsonSchemaNode,
+  depth: number,
+): unknown => {
+  const items = schemaPositions(node, root, depth)
+    .map((position) => position["items"])
+    .find(isPlainJsonRecord);
+  if (items === undefined) return value;
+  let changed = false;
+  const next = value.map((element) => {
+    const canonical = canonicalizeAt(items, element, root, depth + 1);
+    if (canonical !== element) changed = true;
+    return canonical;
+  });
+  return changed ? next : value;
+};
+
+/** The object branch: the declared properties of every effective position
+ *  (first declaration wins, matching ajv's resolution); unchanged objects
+ *  keep the original reference. */
+const canonicalizeObjectAt = (
+  node: JsonSchemaNode,
+  value: Record<string, unknown>,
+  root: JsonSchemaNode,
+  depth: number,
+): unknown => {
+  const properties = declaredProperties(node, root, depth);
+  if (properties.size === 0) return value;
+  let changed = false;
+  const next: Record<string, unknown> = { ...value };
+  for (const [key, propertySchema] of properties) {
+    if (!(key in next)) continue;
+    const canonical = canonicalizeAt(propertySchema, next[key], root, depth + 1);
+    if (canonical !== next[key]) {
+      next[key] = canonical;
+      changed = true;
+    }
+  }
+  return changed ? next : value;
+};
+
+/** The declared properties across a node's effective positions. */
+const declaredProperties = (
+  node: JsonSchemaNode,
+  root: JsonSchemaNode,
+  depth: number,
+): ReadonlyMap<string, JsonSchemaNode> => {
+  const properties = new Map<string, JsonSchemaNode>();
+  for (const position of schemaPositions(node, root, depth)) {
+    const declaredProperties = position["properties"];
+    if (!isPlainJsonRecord(declaredProperties)) continue;
+    for (const [key, propertySchema] of Object.entries(declaredProperties)) {
+      if (isPlainJsonRecord(propertySchema) && !properties.has(key)) properties.set(key, propertySchema);
+    }
+  }
+  return properties;
+};
+
+/** One canonicalization step at one schema node, dispatched over the value's
+ *  JSON runtime type. */
+const canonicalizeAt = (node: JsonSchemaNode, value: unknown, root: JsonSchemaNode, depth: number): unknown => {
+  if (depth > MAX_CANONICALIZE_DEPTH) return value;
+  if (typeof value === "string") return canonicalizeStringAt(node, value, root, depth);
+  if (Array.isArray(value)) return canonicalizeArrayAt(node, value, root, depth);
+  if (isPlainJsonRecord(value)) return canonicalizeObjectAt(node, value, root, depth);
+  return value;
+};
+
+/**
+ * The emission edge's wire-form canonicalization (parse, don't validate):
+ * routes without server-side constrained decoding routinely serialize schema
+ * fields as JSON-encoded STRINGS (`schemaVersion: "2"`, `findings: "[...]"`)
+ * even when the model's payload is otherwise conforming. This walk is driven
+ * ENTIRELY by the frozen schema's own declared types — it only parses a value
+ * that a declared non-string type can accept from its JSON encoding, and it
+ * never invents, defaults, or drops a field.
+ *
+ * Contract preservation (FR-021/SC-006): the registered `parameters` remain
+ * the frozen bytes; this step runs in pi's `prepareArguments` hook BEFORE the
+ * harness validates against those same bytes, so every genuinely
+ * non-conforming form is still refused with the frozen schema's own
+ * vocabulary, and the registry's admission gate re-parses the canonical form
+ * unchanged. One schema, one contract — the canonicalization adds a
+ * deterministic transport parse, not a second schema.
+ *
+ * Pure, total, and idempotent: unknown schema shapes and unmatched arguments
+ * pass through verbatim; unchanged subtrees return the original reference;
+ * cyclic $defs are bounded by the walk's depth guard. The input is never
+ * mutated — the canonical form is a fresh structure sharing unchanged
+ * subtrees.
+ */
+export function canonicalizeEmissionWireArguments(schema: unknown, args: unknown): unknown {
+  if (!isPlainJsonRecord(schema)) return args;
+  return canonicalizeAt(schema, args, schema, 0);
+}
+
 /**
  * The admission ADT: admitted or refused — exactly one arm per argument, so
  * the tool result mapping switches on the discriminant. The refused arm is

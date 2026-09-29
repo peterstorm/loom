@@ -6,6 +6,7 @@ import {
 } from "../../src/core/harness-capture";
 import {
   admitEmissionArguments,
+  canonicalizeEmissionWireArguments,
   EMISSION_TOOL_SPECS,
   frozenPayloadSchemaParameters,
   notProvidedEmissionCapability,
@@ -15,7 +16,7 @@ import {
   type EmissionSchemaVersion,
 } from "../../src/core/emission-tool";
 import { producerKindsOfAgent, type PayloadProducerKindName } from "../../src/core/model-profiles";
-import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
+import { REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_SCHEMA_V2 } from "../../src/core/reviewer-contract";
 import { parseReviewerPayloadV2, parseStandaloneReviewerPayloadV3 } from "../../src/core/reviewer-protocol";
 import { standaloneReviewerPayloadV3Schema } from "../../src/core/standalone-lineage-contract";
 import { canonicalStructuralEquals, type ArtifactDigest } from "../../src/core/orchestration-contract/identity";
@@ -408,6 +409,156 @@ const _refusedCodeIsClosed: (
   admission: Extract<EmissionArgumentAdmission, { kind: "refused" }>,
 ) => EmissionParseFailureCode = (admission) => admission.code;
 void _refusedCodeIsClosed;
+
+describe("canonicalizeEmissionWireArguments — the emission edge's wire-form canonicalization", () => {
+  const v2Schema = frozenPayloadSchemaParameters(REVIEWER_PAYLOAD_SCHEMA_V2);
+  const v2Spec = EMISSION_TOOL_SPECS["reviewer-payload"];
+  /** The EXACT wire shape the wave-gate reviewer children produced on the
+   *  unconstrained local route: every declared non-string field serialized as
+   *  a JSON-encoded string, payload content otherwise conforming. */
+  const stringifiedFinding = REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!;
+  const recordedWireForm = {
+    schemaVersion: "2",
+    kind: "standalone-review" as const,
+    findings: JSON.stringify([stringifiedFinding]),
+  };
+  /** The wave-review variant the actual children emitted, same string-typed
+   *  class — exercising the oneOf's second branch and its $ref'd fields. */
+  const recordedWaveWireForm = {
+    schemaVersion: "2",
+    kind: "wave-review" as const,
+    packetId: "3f".repeat(32),
+    generation: "0",
+    prior_findings: "[]",
+    findings: JSON.stringify([stringifiedFinding]),
+  };
+
+  it("canonicalizes the recorded string-typed wire form into a payload the registry's parser admits", () => {
+    const canonical = canonicalizeEmissionWireArguments(v2Schema, recordedWireForm);
+    expect(canonical).toEqual({
+      schemaVersion: 2,
+      kind: "standalone-review",
+      findings: [stringifiedFinding],
+    });
+    const admitted = admitEmissionArguments(v2Spec, "v2", canonical);
+    expect(admitted.kind).toBe("valid");
+  });
+
+  it("canonicalizes the wave-review variant — oneOf branch and $ref'd prior_findings/findings walk", () => {
+    const canonical = canonicalizeEmissionWireArguments(v2Schema, recordedWaveWireForm);
+    expect(canonical).toEqual({
+      schemaVersion: 2,
+      kind: "wave-review",
+      packetId: "3f".repeat(32),
+      generation: 0,
+      prior_findings: [],
+      findings: [stringifiedFinding],
+    });
+    expect(admitEmissionArguments(v2Spec, "v2", canonical).kind).toBe("valid");
+  });
+
+  it("is idempotent and preserves unchanged subtrees — canonical arguments canonicalize to THEMSELVES", () => {
+    // The identity the pi agent loop short-circuits on: an already-canonical
+    // payload returns the SAME reference, so the loop validates it directly.
+    expect(canonicalizeEmissionWireArguments(v2Schema, REVIEWER_PAYLOAD_EXAMPLE_V2)).toBe(REVIEWER_PAYLOAD_EXAMPLE_V2);
+    const once = canonicalizeEmissionWireArguments(v2Schema, recordedWireForm);
+    const twice = canonicalizeEmissionWireArguments(v2Schema, once);
+    expect(canonicalStructuralEquals(once, twice)).toBe(true);
+    const waveOnce = canonicalizeEmissionWireArguments(v2Schema, recordedWaveWireForm) as {
+      findings: readonly unknown[];
+    };
+    const waveTwice = canonicalizeEmissionWireArguments(v2Schema, waveOnce) as {
+      findings: readonly unknown[];
+    };
+    expect(waveTwice.findings).toBe(waveOnce.findings);
+  });
+
+  it("leaves wire forms no declared type can accept UNCHANGED — the canonicalization never invents or defaults", () => {
+    const unparseable = {
+      schemaVersion: "two",
+      kind: "standalone-review" as const,
+      findings: "not json",
+    };
+    const result = canonicalizeEmissionWireArguments(v2Schema, unparseable);
+    expect(result).toBe(unparseable);
+    // The unchanged form still refuses through the registry's parser — the
+    // gate is untouched by the transport parse.
+    const admitted = admitEmissionArguments(v2Spec, "v2", result);
+    expect(admitted.kind).toBe("refused");
+    if (admitted.kind === "refused") expect(admitted.code).toBe("invalid-payload");
+  });
+
+  it("parses declared type unions and never converts toward the string member", () => {
+    const unionSchema = {
+      type: "object",
+      properties: {
+        line: { type: ["integer", "null"] },
+        flag: { type: ["boolean", "null"] },
+        label: { type: "string" },
+      },
+      additionalProperties: false,
+    };
+    expect(canonicalizeEmissionWireArguments(unionSchema, { line: "3", flag: "true", label: "keep" })).toEqual({
+      line: 3,
+      flag: true,
+      label: "keep",
+    });
+    expect(canonicalizeEmissionWireArguments(unionSchema, { line: "null", flag: "null" })).toEqual({
+      line: null,
+      flag: null,
+    });
+    // A string stays a string at a string-typed position; an unparseable
+    // string stays verbatim at every position.
+    expect(canonicalizeEmissionWireArguments(unionSchema, { label: "3" })).toEqual({ label: "3" });
+    expect(canonicalizeEmissionWireArguments(unionSchema, { line: "3.5", flag: "yes" })).toEqual({
+      line: "3.5",
+      flag: "yes",
+    });
+  });
+
+  it("either parses a declared-integer position to a finite integer or leaves the string verbatim — never throws (property)", () => {
+    fc.assert(
+      fc.property(fc.string(), fc.string(), (raw, other) => {
+        const schema = { type: "object", properties: { generation: { type: "integer" } } };
+        const result = canonicalizeEmissionWireArguments(schema, { generation: raw, other }) as {
+          generation: unknown;
+        };
+        const generation = result.generation;
+        if (typeof generation === "string") {
+          expect(generation).toBe(raw);
+        } else {
+          expect(Number.isFinite(generation)).toBe(true);
+          expect(Number.isInteger(generation)).toBe(true);
+        }
+      }),
+    );
+  });
+
+  it("never mutates its inputs — the canonical form is a fresh structure sharing unchanged subtrees", () => {
+    const frozen = Object.freeze({
+      schemaVersion: "2",
+      kind: "standalone-review",
+      findings: Object.freeze([Object.freeze({ ...stringifiedFinding })]),
+    });
+    const canonical = canonicalizeEmissionWireArguments(v2Schema, frozen) as {
+      schemaVersion: unknown;
+      findings: readonly unknown[];
+    };
+    expect(canonical.schemaVersion).toBe(2);
+    expect(Array.isArray(canonical.findings)).toBe(true);
+    expect(admitEmissionArguments(v2Spec, "v2", canonical).kind).toBe("valid");
+  });
+
+  it("passes through verbatim for non-object schemas, primitive arguments, and unknown shapes", () => {
+    const args = { a: 1 };
+    expect(canonicalizeEmissionWireArguments(undefined, args)).toBe(args);
+    expect(canonicalizeEmissionWireArguments("not a schema", args)).toBe(args);
+    expect(canonicalizeEmissionWireArguments(42, args)).toBe(args);
+    expect(canonicalizeEmissionWireArguments(v2Schema, 5)).toBe(5);
+    expect(canonicalizeEmissionWireArguments(v2Schema, "raw")).toBe("raw");
+    expect(canonicalizeEmissionWireArguments(v2Schema, null)).toBe(null);
+  });
+});
 
 /** Type-level INV-1: the request vocabulary's strict member is the "prefer"
  *  literal — a required request is unrepresentable behind the type, and the

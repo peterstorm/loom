@@ -60,6 +60,7 @@ import {
   type EmissionExecutionOutcome,
   type EmissionToolAcknowledgment,
 } from "../engine/src/core/harness-capture";
+import { canonicalizeEmissionWireArguments } from "../engine/src/core/emission-tool";
 import {
   boundDiagnosticMessage,
   canonicalRecord,
@@ -377,6 +378,15 @@ export function describeEmissionRegistrationContradiction(
  * - `parameters` are the frozen bytes parsed ONCE — byte-identity to the
  *   frozen payload schema is by construction (FR-021/SC-006; the one
  *   serialization chain, no mirror).
+ * - `prepareArguments` is the wire-form canonicalization pi's agent loop runs
+ *   BEFORE `validateToolArguments`: driven entirely by the frozen schema's
+ *   declared types, it parses only values a declared non-string type can
+ *   accept from their JSON encoding (routes without server-side constrained
+ *   decoding serialize fields as JSON strings). Validation against the SAME
+ *   frozen bytes still follows and refuses every genuinely non-conforming
+ *   form; the registry's admission gate re-parses the canonical form
+ *   unchanged. One schema, one contract — a transport parse, not a second
+ *   schema.
  * - `constrainedSampling` is the ONE shared preferred-strict request — the
  *   same object every emission tool registers with (FR-002/INV-1; never
  *   strict-required, and no second provider payload serialization — the
@@ -394,6 +404,7 @@ export type EmissionToolDefinition = Readonly<{
   label: string;
   description: string;
   parameters: unknown;
+  prepareArguments: (args: unknown) => unknown;
   constrainedSampling: EmissionConstrainedSamplingRequest;
   execute: (toolCallId: string, params: unknown) => Promise<EmissionToolAcknowledgment>;
 }>;
@@ -409,11 +420,13 @@ export function emissionToolDefinition(binding: IssuedEmissionBinding): Emission
       `emission tool definition invariant failed: binding ${binding.requestId} names ${binding.kind.kind}/${binding.version}, which the frozen registry does not carry`,
     );
   }
+  const parameters = frozenPayloadSchemaParameters(schemaVersion.schemaBytes);
   return canonicalRecord({
     name: spec.toolName,
     label: `Emission ${binding.kind.kind} ${binding.version}`,
     description: `Emit the frozen ${binding.kind.kind} ${binding.version} payload. Parameters ARE the frozen schema.`,
-    parameters: frozenPayloadSchemaParameters(schemaVersion.schemaBytes),
+    parameters,
+    prepareArguments: (args: unknown): unknown => canonicalizeEmissionWireArguments(parameters, args),
     constrainedSampling: EMISSION_CONSTRAINED_SAMPLING_REQUEST,
     execute: async (_toolCallId: string, params: unknown): Promise<EmissionToolAcknowledgment> => {
       const outcome: EmissionExecutionOutcome = acknowledgeEmissionExecution(spec, binding.version, params);

@@ -39,7 +39,16 @@
  * - non-TypeBox parameter schemas (the frozen bytes parsed as plain JSON) take
  *   pi-ai's JSON-Schema coercion path, which does NOT coerce a string-typed
  *   `schemaVersion` to the `const` number — the recorded per-branch refusals
- *   are reproduced verbatim.
+ *   are reproduced verbatim by the DIRECT validator pins below.
+ * - the production definition carries `prepareArguments` — the wire-form
+ *   canonicalization pi-agent-core runs BEFORE `validateToolArguments`
+ *   (`prepareToolCallArguments`), driven entirely by the frozen schema's
+ *   declared types. The recorded string-typed class (`schemaVersion: "2"`,
+ *   JSON-encoded `findings`) parses into a conforming payload and ADMITS
+ *   through the loop without a re-prompt, while a wire form no declared type
+ *   can accept still refuses verbatim before execute. The direct-validator
+ *   pins keep proving the validator's own refusal vocabulary for a tool
+ *   invoked WITHOUT the canonicalization layer.
  */
 
 import { describe, expect, it } from "vitest";
@@ -599,22 +608,66 @@ describe("real pi agent loop — terminating execute and the in-child validation
     expect(events[events.length - 1]!.type).toBe("agent_end");
   });
 
-  it("a pi-validation failure never reaches execute — the error message names the tool and the branch", async () => {
+  it("the recorded string-typed wire form is canonicalized BEFORE pi validates — the violation class now executes without a re-prompt", async () => {
     const registryCell = REGISTRY_CELLS[0]!; // reviewer-payload v2, string-typed violation class
     const observed: unknown[] = [];
+    // The children's ACTUAL wire shape: the whole findings ARRAY serialized as
+    // one JSON string (a lone object would correctly stay a string at an
+    // array-typed position — the canonicalization never coerces across types).
+    const stringyArrayForm = {
+      schemaVersion: "2",
+      kind: "standalone-review",
+      findings: JSON.stringify([REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]]),
+    };
     const script = scriptTurns([
-      assistantToolCallMessage([{ type: "toolCall", id: "call-bad", name: registryCell.spec.toolName, arguments: malformedArguments(registryCell.kind, registryCell.version) }]),
+      assistantToolCallMessage([{ type: "toolCall", id: "call-stringy", name: registryCell.spec.toolName, arguments: stringyArrayForm }]),
+    ]);
+    const { events, messages } = await runScriptedLoop([executeShellTool(registryCell, observed)], script);
+
+    // The wire-form canonicalization parsed the JSON-encoded fields against
+    // the frozen schema's declared types; validation then admitted, execute
+    // observed the CANONICAL payload, and the terminating acknowledgment
+    // settled the turn with NO re-prompt — the recorded in-child failure loop
+    // for this class is gone from the production surface.
+    expect(script.callCount()).toBe(1);
+    expect(observed).toHaveLength(1);
+    expect(observed[0]).toEqual({
+      schemaVersion: 2,
+      kind: "standalone-review",
+      findings: [REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]],
+    });
+    const executionEnd = events.find(
+      (event): event is Extract<AgentEvent, { type: "tool_execution_end" }> => event.type === "tool_execution_end",
+    );
+    expect(executionEnd?.isError).toBe(false);
+    expect(toolResultMessages(messages).every((message) => message.isError !== true)).toBe(true);
+    expect(events[events.length - 1]!.type).toBe("agent_end");
+  });
+
+  it("a wire form no declared type can accept still refuses before execute — the canonicalization never invents a field", async () => {
+    const registryCell = REGISTRY_CELLS[0]!; // reviewer-payload v2
+    const observed: unknown[] = [];
+    const unparseable = {
+      schemaVersion: "two",
+      kind: "standalone-review",
+      findings: "not json",
+    };
+    const script = scriptTurns([
+      assistantToolCallMessage([{ type: "toolCall", id: "call-unparseable", name: registryCell.spec.toolName, arguments: unparseable }]),
       assistantFinalTextMessage("giving up; extraction fallback owns the attempt"),
     ]);
     const { events, messages } = await runScriptedLoop([executeShellTool(registryCell, observed)], script);
 
-    // The validator refused before execute: nothing was observed, and the
-    // error result carries pi's precise per-branch message.
+    // The canonicalization cannot parse these values into any declared type,
+    // so they pass through unchanged and the validator refuses verbatim
+    // before execute: nothing was observed, and the error result carries
+    // pi's precise per-branch message.
     expect(observed).toHaveLength(0);
     const result = toolResultMessages(messages)[0]!;
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toContain(`Validation failed for tool "${registryCell.spec.toolName}"`);
     expect(result.content[0]!.text).toContain("schemaVersion: must be number");
+    expect(result.content[0]!.text).toContain("findings: must be array");
     const errorEnd = events.find(
       (event): event is Extract<AgentEvent, { type: "tool_execution_end" }> => event.type === "tool_execution_end",
     );
@@ -1313,6 +1366,22 @@ describe("the production emission tool definition — the exact registration sur
       // INV-1: the ONE preferred-strict request — the same object every
       // emission tool registers with, minted in the engine core.
       expect(definition.constrainedSampling).toBe(EMISSION_CONSTRAINED_SAMPLING_REQUEST);
+      // The wire-form canonicalization rides the definition, wired to the
+      // SAME parameters object: the recorded string-typed class canonicalizes
+      // into a payload the engine's admission gate admits.
+      expect(typeof definition.prepareArguments).toBe("function");
+      if (registryCell.kind === "reviewer-payload" && registryCell.version === "v2") {
+        const stringy = {
+          schemaVersion: "2",
+          kind: "standalone-review",
+          findings: JSON.stringify([
+            { ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim: "supported input bypasses the authorization check" },
+          ]),
+        };
+        const canonicalized = definition.prepareArguments(stringy);
+        expect(canonicalized).not.toBe(stringy);
+        expect(admitEmissionArguments(registryCell.spec, registryCell.version, canonicalized).kind).toBe("valid");
+      }
       expect(typeof definition.description).toBe("string");
     }
   });
