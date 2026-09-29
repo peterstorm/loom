@@ -35,7 +35,7 @@ export async function startNativeLegacyReview(handle: RunDirHandle) {
     scopeSafety: scope.map(path => ({ path, status: "safe" })), roster }));
   const registration = history.standaloneFixtureRegistration(prepared.authority);
   value(await handle.registerProgram(registration));
-  const batch = await helpers.publishInitialBatch(handle, prepared.initialRequests.map(authority => ({ authority,
+  const batch = await helpers.publishLegacyInitialBatch(handle, prepared.initialRequests.map(authority => ({ authority,
     context: { digest: authority.contextDigest, slot: `contexts/${authority.contextDigest}.json` } })), contexts, "standalone-review");
   if (!batch.ok) throw Error(batch.message);
   const awaiting = value(machine.reduceStandaloneReviewMachine(machine.startStandaloneReviewMachine(prepared.authority), { kind: "review-batch-published", runId: handle.runId }));

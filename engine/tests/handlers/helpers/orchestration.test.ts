@@ -25,7 +25,7 @@ import {
   type StandaloneCaptureWitness,
 } from "../../../src/handlers/helpers/programs/standalone";
 import { StateManager } from "../../../src/state-manager";
-import { parseRegistration, publishInitialBatch } from "../../../src/handlers/helpers/programs/helpers";
+import { parseRegistration, publishLegacyInitialBatch } from "../../../src/handlers/helpers/programs/helpers";
 import { deriveWaveAttemptTwo, waveGateAuthorityDigest, waveRequests, installWaveReviewRuns, persistedWaveAttemptTwoCompatibilityProblem, prepareOrphanedWaveGateRecovery } from "../../../src/handlers/helpers/programs/wave-gate";
 import { captureKey } from "../../../src/core/harness-capture";
 import { buildContextPacket, encodeByteSection } from "../../../src/orchestration/context-packets";
@@ -727,7 +727,7 @@ describe("orchestration CLI", () => {
         1,
         { kind: "state-layout", root },
       );
-      const published = await publishInitialBatch(handle.value, batch.requests, batch.packets, "wave-gate-current");
+      const published = await publishLegacyInitialBatch(handle.value, batch.requests, batch.packets, "wave-gate-current");
       if (!published.ok) throw new Error(published.message);
       await installWaveReviewRuns(manager, registration, batch);
     });
@@ -2417,7 +2417,7 @@ describe("orchestration CLI", () => {
       expect((await previous.value.captureTranscript(authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
       if (authority.role !== "spec-check-invoker") {
         const retry = deriveWaveAttemptTwo(previous.value, authority);
-        const published = await withFixturePiSession(root, () => publishInitialBatch(previous.value, [retry.request], [retry.packet], `wave-gate-retry:${authority.slotId}`));
+        const published = await withFixturePiSession(root, () => publishLegacyInitialBatch(previous.value, [retry.request], [retry.packet], `wave-gate-retry:${authority.slotId}`));
         if (!published.ok) throw new Error(published.message);
       }
     }
@@ -3466,7 +3466,7 @@ describe("orchestration CLI", () => {
     expect(started.status, started.stderr).toBe(0);
     const action = JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
 
-    // Simulate the crash window: publishInitialBatch durably wrote contexts,
+    // Simulate the crash window: publishLegacyInitialBatch durably wrote contexts,
     // requests, and the publication receipt, but the awaiting-results
     // checkpoint write never happened.
     rmSync(join(runDir, "checkpoint.json"));
@@ -3958,7 +3958,9 @@ describe("orchestration CLI", () => {
       const replay = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
       expect(replay.status, replay.stderr).toBe(0);
       expect(JSON.parse(replay.stdout).kind, JSON.stringify(JSON.parse(replay.stdout))).toBe("done");
-    }, 15_000);
+      // Five cold CLI processes plus two concurrent status reads can exceed
+      // the default deadline under the full parallel project suite.
+    }, 30_000);
 
     it("refuses a decision id that is not the exact pending advisory request", async () => {
       const { root, runsRoot, runDir } = (await startedWaveRun("decide-wrong-id"));

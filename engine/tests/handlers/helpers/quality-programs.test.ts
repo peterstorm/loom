@@ -170,6 +170,7 @@ describe("quality-program helper boundaries", () => {
       "parseWaveGateStartInput",
       "prepareRemediationFacadeStart",
       "prepareStandaloneSuccessorFacadeStart",
+      "publishedReviewerRequest",
       "readStandaloneReviewedSource",
       "recoverOrphanedWaveGateFacade",
       "renderSpawnTask",

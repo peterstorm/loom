@@ -16,7 +16,8 @@
  *   `probes/emission-qualification/recordings/` and requalification follows
  *   the feasibility record's triggers; this suite pins the harness-side
  *   semantics those recordings observed.
- * - The registered tool is the PRODUCTION emission tool definition: the
+ * - The registered tool is the PRODUCTION emission tool definition
+ *   (pi/emission-tool.ts, wired by pi/extension.ts's readiness command): the
  *   execute shell is the shared `acknowledgeEmissionExecution` decision
  *   (refusals THROW at the harness boundary — returning never sets the error
  *   flag; AD-3) over the registry's admission gate, the constrained-sampling
@@ -25,9 +26,10 @@
  *   policy seam production registers with — never a test twin.
  *
  * Observed pi behaviors pinned here (discovered by the committed probes):
- * - the in-child validation-retry loop: a tool-argument validation failure
- *   feeds the error back as a tool-role result and the loop re-prompts the
- *   model (~2 extra model requests per the qualification recordings); loom's
+ * - the in-child validation-retry loop: each tool-argument validation failure
+ *   feeds an error back as a tool-role result and causes one re-prompt. This
+ *   suite pins that per-failure cost; the qualification recordings separately
+ *   observed up to ~2 extra requests across their full correction flows. Loom's
  *   request-slot attempt budget sits OUTSIDE this harness-level loop (FR-006's
  *   budget boundary).
  * - a thrown execute error is ALSO a non-terminating tool result and re-prompts
@@ -41,6 +43,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import fc from "fast-check";
 import {
   createAssistantMessageEventStream,
   validateToolArguments,
@@ -52,20 +55,55 @@ import { runAgentLoop, type AgentContext, type AgentEvent, type AgentLoopConfig,
 import {
   acknowledgeEmissionExecution,
   EMISSION_CONSTRAINED_SAMPLING_REQUEST,
+  observeEmissionCalls,
+  type EmissionCallFrame,
   type EmissionToolAcknowledgment,
 } from "../../src/core/harness-capture";
+import { selectCanonicalPayload } from "../../src/core/emission-ingestion";
 import {
   admitEmissionArguments,
   EMISSION_TOOL_SPECS,
   frozenPayloadSchemaParameters,
+  issueEmissionBinding,
   type EmissionSchemaVersion,
   type EmissionToolSpec,
+  type IssuedEmissionBinding,
 } from "../../src/core/emission-tool";
 import {
   REVIEWER_PAYLOAD_EXAMPLE_V2,
   reviewerPayloadV2Schema,
 } from "../../src/core/reviewer-contract";
 import { standaloneReviewerPayloadV3Schema } from "../../src/core/standalone-lineage-contract";
+import { sha256Hex } from "../../src/core/review-packet";
+import {
+  decideEmissionToolRegistration,
+  describeEmissionRegistrationContradiction,
+  emissionReadinessReport,
+  emissionToolDefinition,
+  EMISSION_HOLD_ENTRY_TYPE,
+  EMISSION_READINESS_COMMAND,
+  EMISSION_READINESS_ENTRY_TYPE,
+  emissionToolFamily,
+  LOOM_EMISSION_BINDING_ENV,
+  parseEmissionChildProvisioning,
+  type EmissionToolRegistration,
+} from "../../../pi/emission-tool";
+import { piEmissionCallFrames } from "../../../pi/transcript-adapter";
+import {
+  associatePiSpawnLifecycle,
+  classifyPiIssuedReviewRequest,
+  piIssuedReviewerCaptureObservation,
+  piReviewerCaptureObservation,
+  qualifyPiIssuedReviewRequest,
+  type PiIssuedReviewRequestClass,
+} from "../../../pi/extension";
+import {
+  expectedSpawnEmissionCapability,
+  renderEmissionDescriptor,
+  type AdmittedSpawnItem,
+  type IssuedSpawnEmissionAuthority,
+} from "../../src/core/spawn-admission";
+import { planPiWriteGrants } from "../../src/core/pi-write-grant-plan";
 
 // ---------------------------------------------------------------------------
 // Canonical and discriminating fixtures — minted from the real zod schemas
@@ -224,6 +262,34 @@ const assistantFinalTextMessage = (text: string): AssistantMessage =>
     timestamp: Date.now(),
   }) as AssistantMessage;
 
+/** The transport's aborted-turn result: the final AssistantMessage carries
+ *  stopReason "aborted" (pi-ai's cancellation contract — the final message of
+ *  an aborted assistant turn) and whatever partial content had streamed when
+ *  the cancel arrived — here, nothing. */
+const assistantAbortedTurnMessage = (): AssistantMessage =>
+  ({
+    role: "assistant",
+    content: [],
+    api: "openai-completions",
+    provider: "scripted",
+    model: scriptedModel.id,
+    usage: zeroUsage(),
+    stopReason: "aborted",
+    errorMessage: "aborted by the caller",
+    timestamp: Date.now(),
+  }) as AssistantMessage;
+
+/** The caller's cancellation arrived while the model streamed the emission
+ *  tool call: the aborted turn's partial message still carries a structurally
+ *  complete toolCall block. Because execute never ran, the transcript adapter
+ *  classifies the call as incomplete and unusable rather than authoritative. */
+const assistantAbortedToolCallMessage = (calls: readonly { type: "toolCall"; id: string; name: string; arguments: unknown }[]): AssistantMessage =>
+  ({
+    ...assistantToolCallMessage(calls),
+    stopReason: "aborted",
+    errorMessage: "aborted by the caller",
+  }) as AssistantMessage;
+
 interface ScriptedTurn {
   /** The transport for one assistant turn — the ONLY scripted part. */
   readonly streamFn: StreamFn;
@@ -239,9 +305,15 @@ interface ScriptedTurn {
 const scriptTurns = (responses: readonly AssistantMessage[]): ScriptedTurn => {
   let call = 0;
   const contexts: { role: string; isError?: boolean }[][] = [];
-  const streamFn: StreamFn = (_model, context) => {
+  const streamFn: StreamFn = (_model, context, options) => {
     contexts.push(structuredClone(context.messages) as { role: string; isError?: boolean }[]);
-    const message = responses[call];
+    // The transport honours the caller's cancellation signal the way real
+    // pi-ai streams do: a request whose signal fires before its response
+    // completes finishes as an aborted turn — it never consumes a scripted
+    // response.
+    const message: AssistantMessage = options?.signal?.aborted
+      ? assistantAbortedTurnMessage()
+      : responses[call];
     if (message === undefined) {
       // A script exhausted by an unexpected follow-up turn is a test defect,
       // never a silent empty stream: pi would treat an immediately-ended
@@ -251,35 +323,51 @@ const scriptTurns = (responses: readonly AssistantMessage[]): ScriptedTurn => {
     call += 1;
     const stream = createAssistantMessageEventStream();
     stream.push({ type: "start", partial: message });
-    stream.push({
-      type: "done",
-      reason: message.stopReason === "toolUse" ? "toolUse" : "stop",
-      message,
-    });
+    if (message.stopReason === "aborted") {
+      // pi-ai's stream contract: an aborted turn completes through the
+      // stream's `error` event, whose extracted result is the aborted
+      // AssistantMessage the agent loop reads.
+      stream.push({ type: "error", reason: "aborted", error: message });
+    } else {
+      stream.push({
+        type: "done",
+        reason: message.stopReason === "toolUse" ? "toolUse" : "stop",
+        message,
+      });
+    }
     return stream;
   };
   return { streamFn, contexts, callCount: () => call };
 };
 
-/** What the production execute shell observes beside its decision: the
- *  arguments pi validated, appended as the observable record (the probe's
- *  execute contract — the complete request-bound transcript observation the
- *  capture adapters fold is T5/T7's; this record pins what execute SAW). */
-const executeShellTool = (cell: RegistryCell, observed: unknown[]): Record<string, unknown> => ({
-  name: cell.spec.toolName,
-  label: `Emission ${cell.kind} ${cell.version}`,
-  description: `Emit the frozen ${cell.kind} ${cell.version} payload. Parameters ARE the frozen schema.`,
-  parameters: frozenPayloadSchemaParameters(cell.spec.schemaVersions[cell.version]!.schemaBytes),
-  constrainedSampling: EMISSION_CONSTRAINED_SAMPLING_REQUEST,
-  execute: async (_toolCallId: string, params: unknown) => {
-    observed.push(params);
-    // The production shell's decision, minted once — refusals THROW at the
-    // harness boundary (returning never sets the harness error flag, AD-3).
-    const outcome = acknowledgeEmissionExecution(cell.spec, cell.version, params);
-    if (outcome.kind === "refused") throw new Error(`${outcome.code}: ${outcome.message}`);
-    return outcome.acknowledgment;
-  },
-});
+/** The PRODUCTION registration surface (pi/emission-tool.ts) over a minted
+ *  issued binding: the exact tool definition production registers, with the
+ *  suite's observation record wrapping the PRODUCTION execute — the
+ *  arguments pi validated, seen beside the same admission decision. The suite
+ *  crosses the same seam the extension's readiness command registers with —
+ *  never a test twin. */
+const mintedBindingFor = (cell: RegistryCell, requestId: string): IssuedEmissionBinding => {
+  const minted = issueEmissionBinding({
+    requestId,
+    kind: cell.kind,
+    version: cell.version,
+    toolName: cell.spec.toolName,
+    schemaDigest: sha256Hex(cell.spec.schemaVersions[cell.version]!.schemaBytes),
+  });
+  if (!minted.ok) throw new Error(`fixture binding refused: ${minted.error.code} — ${minted.error.message}`);
+  return minted.value;
+};
+
+const executeShellTool = (cell: RegistryCell, observed: unknown[]): Record<string, unknown> => {
+  const definition = emissionToolDefinition(mintedBindingFor(cell, "req-emission-tool-t5-shell"));
+  return {
+    ...definition,
+    execute: async (toolCallId: string, params: unknown) => {
+      observed.push(params);
+      return definition.execute(toolCallId, params);
+    },
+  } as Record<string, unknown>;
+};
 
 /** The AD-10 always-accept control: a shell that SKIPS the engine's admission
  *  gate would acknowledge exactly the arguments production refuses. */
@@ -303,25 +391,36 @@ const plainTool: Record<string, unknown> = {
   execute: async () => ({ content: [{ type: "text", text: "noted" }], details: {} }),
 };
 
+/** The loop-config hook that cancels the plain sibling's preparation — the
+ *  cancel arrives mid-batch (the emission is already prepared), so pi
+ *  finalizes the sibling as its own "Operation aborted" error result without
+ *  execute ever running. */
+const abortPlainToolPreparation = (controller: AbortController): NonNullable<AgentLoopConfig["beforeToolCall"]> =>
+  async (input) => {
+    if (input.toolCall.name === "scratch_note") controller.abort();
+    return undefined;
+  };
+
 const asAgentContext = (tools: readonly Record<string, unknown>[]): AgentContext =>
   ({ systemPrompt: "loom producer agent", messages: [], tools }) as unknown as AgentContext;
 
-const asLoopConfig = (): AgentLoopConfig =>
-  ({ model: scriptedModel, convertToLlm: (messages: readonly unknown[]) => messages }) as unknown as AgentLoopConfig;
+const asLoopConfig = (extra?: { beforeToolCall?: AgentLoopConfig["beforeToolCall"] }): AgentLoopConfig =>
+  ({ model: scriptedModel, convertToLlm: (messages: readonly unknown[]) => messages, ...extra }) as unknown as AgentLoopConfig;
 
 const runScriptedLoop = async (
   tools: readonly Record<string, unknown>[],
   script: ScriptedTurn,
+  loop?: { readonly signal?: AbortSignal; readonly beforeToolCall?: AgentLoopConfig["beforeToolCall"] },
 ): Promise<{ readonly events: AgentEvent[]; readonly messages: readonly unknown[] }> => {
   const events: AgentEvent[] = [];
   const messages = await runAgentLoop(
     [{ role: "user", content: "Emit the issued payload exactly once.", timestamp: Date.now() }],
     asAgentContext(tools),
-    asLoopConfig(),
+    asLoopConfig(loop?.beforeToolCall ? { beforeToolCall: loop.beforeToolCall } : undefined),
     (event) => {
       events.push(event);
     },
-    undefined,
+    loop?.signal,
     script.streamFn as StreamFn,
   );
   return { events, messages };
@@ -478,8 +577,9 @@ describe("real pi agent loop — terminating execute and the in-child validation
     ]);
     const { events } = await runScriptedLoop([executeShellTool(registryCell, observed)], script);
 
-    // TWO model requests: the original turn and the re-prompt after the
-    // tool-role error feedback (feasibility §2.7's observed ~2 extra requests).
+    // TWO model requests: the original turn and one re-prompt after this
+    // validation failure. Feasibility §2.7 separately records up to ~2 extra
+    // requests across the complete correction flows captured by its probes.
     expect(script.callCount()).toBe(2);
     // The feedback the model received on the re-prompt is the validation
     // error as a tool-role result.
@@ -573,6 +673,108 @@ describe("real pi agent loop — terminating execute and the in-child validation
     );
     expect(successEnds).toHaveLength(2);
   });
+
+  it("a cancelled assistant turn aborts the loop BEFORE the emission executes — no tool execution, no follow-up model request, the toolCall block stays observable (AD-3)", async () => {
+    const registryCell = REGISTRY_CELLS[2]!; // judge-verdict v1
+    const observed: unknown[] = [];
+    // The caller cancelled while the model streamed the emission tool call:
+    // the transport completes the turn as aborted, partial toolCall block
+    // intact — the cancellation path a live launcher or user produces.
+    const script = scriptTurns([
+      assistantAbortedToolCallMessage([
+        { type: "toolCall", id: "call-1", name: registryCell.spec.toolName, arguments: canonicalArguments(registryCell.kind, registryCell.version) },
+      ]),
+    ]);
+    const { events, messages } = await runScriptedLoop([executeShellTool(registryCell, observed)], script);
+
+    // Exactly ONE transport call: the aborted turn ends the loop — no
+    // follow-up request, no re-prompt, no script exhaustion.
+    expect(script.callCount()).toBe(1);
+    // The emission never executed: pi's abort check precedes tool-batch
+    // execution, so a cancelled turn cannot reach the shell.
+    expect(observed).toHaveLength(0);
+    expect(
+      events.find((event) => event.type === "tool_execution_start" || event.type === "tool_execution_end"),
+    ).toBeUndefined();
+    // The aborted assistant message — WITH its structurally complete emission
+    // toolCall block — stays in the settled transcript, but without successful
+    // execution it is unusable rather than authoritative output.
+    const abortedAssistant = messages.find(
+      (message) =>
+        (message as { role?: string }).role === "assistant" &&
+        (message as { stopReason?: string }).stopReason === "aborted",
+    ) as { content: { type: string; name?: string }[] } | undefined;
+    expect(abortedAssistant).toBeDefined();
+    expect(abortedAssistant!.content[0]).toMatchObject({ type: "toolCall", name: registryCell.spec.toolName });
+    const scanned = piEmissionCallFrames(messages, mintedBindingFor(registryCell, "req-emission-tool-t5-cancelled"));
+    expect(scanned.ok).toBe(true);
+    if (scanned.ok) {
+      expect(scanned.value).toHaveLength(1);
+      expect(scanned.value[0]).toMatchObject({
+        kind: "incomplete",
+        toolCallId: "call-1",
+        reason: expect.stringContaining("aborted"),
+      });
+      expect(observeEmissionCalls(scanned.value).kind).toBe("unusable");
+    }
+    // And the loop ended on the aborted turn.
+    expect(events[events.length - 1]!.type).toBe("agent_end");
+  });
+
+  it("cancellation mid-batch: the cancelled sibling's error result keeps the batch non-terminating and the abort suppresses the follow-up turn (AD-3)", async () => {
+    const registryCell = REGISTRY_CELLS[2]!; // judge-verdict v1
+    const observed: unknown[] = [];
+    const controller = new AbortController();
+    // The cancel arrives while the plain sibling is being prepared: pi
+    // finalizes it as its own "Operation aborted" error result (execute never
+    // runs); the emission — already prepared — still executes to its
+    // terminating acknowledgment.
+    const script = scriptTurns([
+      assistantToolCallMessage([
+        { type: "toolCall", id: "call-emit", name: registryCell.spec.toolName, arguments: canonicalArguments(registryCell.kind, registryCell.version) },
+        { type: "toolCall", id: "call-note", name: "scratch_note", arguments: {} },
+      ]),
+    ]);
+    const { events, messages } = await runScriptedLoop(
+      [executeShellTool(registryCell, observed), plainTool],
+      script,
+      { signal: controller.signal, beforeToolCall: abortPlainToolPreparation(controller) },
+    );
+
+    // The emission executed and observed the validated arguments.
+    expect(observed).toHaveLength(1);
+    expect(observed[0]).toEqual(canonicalArguments(registryCell.kind, registryCell.version));
+    // Two finalized results: the cancelled sibling's abort error and the
+    // emission's success (emission end after the sibling's, in parallel mode).
+    const ends = events.filter(
+      (event): event is Extract<AgentEvent, { type: "tool_execution_end" }> => event.type === "tool_execution_end",
+    );
+    expect(ends).toHaveLength(2);
+    expect(ends.map((end) => end.isError).sort()).toEqual([false, true]);
+    // The terminating emission acknowledgment does NOT resurrect the loop
+    // into a settled follow-up: the batch is non-terminating (the cancelled
+    // sibling's error IS a finalized result), so the loop attempted exactly
+    // one follow-up transport call, which the abort turned into an aborted
+    // turn — never a settled re-prompt, never a third model request.
+    expect(script.callCount()).toBe(2);
+    // The follow-up context carried BOTH tool results — observation
+    // completeness: the emission's terminating ack and the abort error are
+    // both on the transcript the capture seam reads.
+    const followUpContext = script.contexts[1]!;
+    const toolResults = followUpContext.filter((message) => message.role === "toolResult");
+    expect(toolResults).toHaveLength(2);
+    expect(toolResults.some((message) => message.isError === true)).toBe(true);
+    // The agent ended on the aborted follow-up turn.
+    expect(events[events.length - 1]!.type).toBe("agent_end");
+    // The emission's tool result itself was a success carrying the
+    // acknowledgment (not an error-labeled refusal).
+    const emissionResult = toolResultMessages(messages).find(
+      (result) => result.toolName === registryCell.spec.toolName,
+    );
+    expect(emissionResult).toBeDefined();
+    expect(emissionResult!.isError).toBe(false);
+    expect(emissionResult!.content[0]!.text).toContain("payload acknowledged");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -663,3 +865,1125 @@ describe("EMISSION_CONSTRAINED_SAMPLING_REQUEST through the real pi-ai resolver 
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// T5: the production registration/readiness shell (pi/emission-tool.ts) and
+// the complete request-bound transcript observations (pi/transcript-adapter.ts)
+// ---------------------------------------------------------------------------
+
+import {
+  canonicalStructuralEquals,
+  parseContextDigest,
+} from "../../src/core/orchestration-contract/identity";
+import type { IssuedEmissionBindingOf } from "../../src/core/emission-tool";
+import type { FinalPayloadCandidate } from "../../src/core/harness-capture";
+
+const REVIEWER_V2_CELL = REGISTRY_CELLS[0]!;
+const REVIEWER_V3_CELL = REGISTRY_CELLS[1]!;
+const JUDGE_V1_CELL = REGISTRY_CELLS[2]!;
+const REFUTATION_V1_CELL = REGISTRY_CELLS[3]!;
+
+const mintedRefusal = (minted: { ok: boolean; error?: { code: string; message: string } }): never => {
+  throw new Error(`fixture binding refused: ${minted.error?.code} — ${minted.error?.message}`);
+};
+
+const mintedJudgeBinding = (): IssuedEmissionBinding => {
+  const minted = issueEmissionBinding({ requestId: "req-emission-tool-t5-obs", kind: "judge-verdict", version: "v1" });
+  return minted.ok ? minted.value : mintedRefusal(minted);
+};
+
+const mintedReviewerBinding = (): IssuedEmissionBindingOf<"reviewer-payload"> => {
+  const minted = issueEmissionBinding({ requestId: "req-emission-tool-t5-obs", kind: "reviewer-payload", version: "v2" });
+  return minted.ok ? minted.value : mintedRefusal(minted);
+};
+
+const issuedLookupContext = (() => {
+  const parsed = parseContextDigest(sha256Hex("t5-issued-refutation-lookup"));
+  if (!parsed.ok) throw new Error(`fixture context digest refused: ${parsed.error.message}`);
+  return parsed.value;
+})();
+
+describe("Pi mixed-batch lifecycle association", () => {
+  it("keeps each item paired with its guard, emission expectation, roster identity, and write-grant decision", () => {
+    const emissionBinding = mintedReviewerBinding();
+    const contextDigest = parseContextDigest(sha256Hex("t5-mixed-batch-context"));
+    if (!contextDigest.ok) throw new Error(`fixture context digest refused: ${contextDigest.error.message}`);
+
+    const admitted: readonly AdmittedSpawnItem[] = Object.freeze([
+      Object.freeze({
+        item: Object.freeze({ agent: "code-reviewer" as const, task: "review the issued payload" }),
+        taskExecutionSpawn: Object.freeze({ kind: "non-implementation" as const }),
+        emissionExpectation: Object.freeze({
+          kind: "emission-enabled" as const,
+          binding: emissionBinding,
+          contextDigest: contextDigest.value,
+          route: Object.freeze({ provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14" }),
+        }),
+      }),
+      Object.freeze({
+        item: Object.freeze({ agent: "code-implementer-agent" as const, task: "Task ID: T5\nimplement the shell" }),
+        taskExecutionSpawn: Object.freeze({
+          kind: "implementation" as const,
+          prompt: "Task ID: T5\nimplement the shell",
+          description: "",
+        }),
+        emissionExpectation: Object.freeze({ kind: "no-emission-tool" as const }),
+      }),
+      Object.freeze({
+        item: Object.freeze({ agent: "review-verifier-agent" as const, task: "verify the prior finding" }),
+        taskExecutionSpawn: Object.freeze({ kind: "standalone" as const }),
+        emissionExpectation: Object.freeze({ kind: "no-emission-tool" as const }),
+      }),
+    ]);
+
+    const associated = associatePiSpawnLifecycle(admitted, "tool-call-mixed-t5");
+    expect(associated.map(({ slot, admission }) => ({
+      slot,
+      agent: admission.item.agent,
+      guard: admission.taskExecutionSpawn.kind,
+      expectation: admission.emissionExpectation.kind,
+    }))).toEqual([
+      { slot: 0, agent: "code-reviewer", guard: "non-implementation", expectation: "emission-enabled" },
+      { slot: 1, agent: "code-implementer-agent", guard: "implementation", expectation: "no-emission-tool" },
+      { slot: 2, agent: "review-verifier-agent", guard: "standalone", expectation: "no-emission-tool" },
+    ]);
+    expect(new Set(associated.map(({ rosterId }) => rosterId)).size).toBe(3);
+    expect(Object.isFrozen(associated)).toBe(true);
+    for (const [slot, association] of associated.entries()) {
+      expect(association.admission).toBe(admitted[slot]);
+      expect(Object.isFrozen(association)).toBe(true);
+    }
+
+    // The existing grant planner remains unchanged. The shell derives its two
+    // positional inputs locally from these paired records, then immediately
+    // rejoins each requirement to the same slot; the implementation child
+    // keeps T5's session grant while reviewer/verifier guards keep no grant.
+    const grantPlan = planPiWriteGrants(
+      associated.map(({ admission }) => admission.item),
+      associated.map(({ admission }) => admission.taskExecutionSpawn),
+      true,
+    );
+    expect(grantPlan).toEqual({
+      ok: true,
+      requirements: [
+        { kind: "none" },
+        { kind: "session", taskId: "T5" },
+        { kind: "none" },
+      ],
+    });
+  });
+});
+
+describe("Pi issued-request classification under a registered review facade", () => {
+  const runId = "run.t5-issued-refutation";
+  const requestId = mintedReviewerBinding().requestId;
+  const refutationRequest = {
+    runId,
+    requestId,
+    contextDigest: issuedLookupContext,
+    program: "refutation-panel",
+    role: "review-verifier-agent",
+  } as const;
+
+  it("admits independently published refutation children of standalone and Wave programs as extraction-only until they carry their own descriptor", () => {
+    const programs = [
+      {
+        kind: "standalone-review" as const,
+        schemaVersion: 3 as const,
+        reviewerProtocol: { schemaDigest: sha256Hex(REVIEWER_V3_CELL.spec.schemaVersions.v3!.schemaBytes) },
+      },
+      {
+        kind: "wave-gate" as const,
+        schemaVersion: 2 as const,
+        reviewerProtocol: { schemaDigest: sha256Hex(REVIEWER_V2_CELL.spec.schemaVersions.v2!.schemaBytes) },
+      },
+    ];
+    for (const program of programs) {
+      const classified = classifyPiIssuedReviewRequest(runId, program, refutationRequest);
+      expect(classified.ok, program.kind).toBe(true);
+      if (!classified.ok) continue;
+      expect(classified.value).toEqual({
+        kind: "refutation-panel-extraction",
+        claim: {
+          requestId,
+          contextDigest: issuedLookupContext,
+          producerKind: "reviewer-payload",
+          version: "v1",
+        },
+      });
+    }
+  });
+
+  it("keeps a direct registered reviewer request on its exact issued emission protocol", () => {
+    const schemaDigest = mintedReviewerBinding().schemaDigest;
+    const classified = classifyPiIssuedReviewRequest(
+      runId,
+      { kind: "wave-gate", schemaVersion: 2, reviewerProtocol: { schemaDigest } },
+      { ...refutationRequest, program: "wave-gate", role: "code-reviewer" },
+    );
+    expect(classified).toEqual({
+      ok: true,
+      value: {
+        kind: "review-program-emission",
+        claim: {
+          requestId,
+          contextDigest: issuedLookupContext,
+          producerKind: "reviewer-payload",
+          version: "v2",
+          schemaDigest,
+        },
+      },
+    });
+  });
+
+  it("fails closed for a forged run, a substituted refutation role, and a foreign child program", () => {
+    for (const request of [
+      { ...refutationRequest, runId: "run.forged" },
+      { ...refutationRequest, role: "code-reviewer" },
+      { ...refutationRequest, program: "architecture-panel" },
+    ]) {
+      const classified = classifyPiIssuedReviewRequest(
+        runId,
+        { kind: "standalone-review", schemaVersion: 1 },
+        request,
+      );
+      expect(classified.ok).toBe(false);
+      if (!classified.ok) expect(classified.error.message.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("the production issued-review capture decision", () => {
+  const runId = "run.t5-capture-decision";
+  const request = {
+    runId,
+    requestId: mintedReviewerBinding().requestId,
+    contextDigest: issuedLookupContext,
+    program: "wave-gate",
+    role: "code-reviewer",
+  } as const;
+  const finalMessages = [{
+    role: "assistant",
+    content: [{ type: "text", text: '{"schemaVersion":2,"kind":"wave-review","packetId":"p","generation":1,"prior_findings":[],"findings":[]}' }],
+  }];
+
+  it.each([
+    {
+      version: "v2",
+      program: {
+        kind: "wave-gate" as const,
+        schemaVersion: 2 as const,
+        reviewerProtocol: { schemaDigest: sha256Hex("not-the-issued-frozen-schema-v2") },
+      },
+    },
+    {
+      version: "v3",
+      program: {
+        kind: "standalone-review" as const,
+        schemaVersion: 3 as const,
+        reviewerProtocol: { schemaDigest: sha256Hex("not-the-issued-frozen-schema-v3") },
+      },
+    },
+  ])("makes a malformed current $version issued binding unavailable instead of falling through to final-message extraction", ({ program }) => {
+    const classified = classifyPiIssuedReviewRequest(
+      runId,
+      program,
+      { ...request, program: program.kind },
+    );
+    if (!classified.ok) throw new Error(classified.error.message);
+
+    const observation = piIssuedReviewerCaptureObservation(classified.value, finalMessages);
+    expect(observation.kind).toBe("unavailable");
+    if (observation.kind === "unavailable") {
+      expect(observation.reason).toBe("emission-binding");
+      expect(observation.message).toContain("schema-digest-mismatch");
+      expect(observation.message).toContain("issued reviewer emission binding is unavailable");
+      expect(Buffer.byteLength(observation.message, "utf8")).toBeLessThan(1_000);
+    }
+  });
+
+  it("keeps the explicit archived reviewer v1 final-message fallback", () => {
+    const classified = classifyPiIssuedReviewRequest(
+      runId,
+      { kind: "wave-gate", schemaVersion: 1 },
+      request,
+    );
+    if (!classified.ok) throw new Error(classified.error.message);
+
+    const observation = piIssuedReviewerCaptureObservation(classified.value, finalMessages);
+    expect(observation.kind).toBe("candidates");
+    if (observation.kind === "candidates") {
+      expect(observation.candidates).toEqual([{
+        origin: "content[0].text",
+        text: finalMessages[0]!.content[0]!.text,
+      }]);
+    }
+  });
+});
+
+describe("qualified published Pi request routes bind descriptor admission independently of task text", () => {
+  const reviewPrograms = [
+    {
+      version: "v2" as const,
+      program: {
+        kind: "wave-gate" as const,
+        schemaVersion: 2 as const,
+        reviewerProtocol: { schemaDigest: sha256Hex(REVIEWER_V2_CELL.spec.schemaVersions.v2!.schemaBytes) },
+      },
+    },
+    {
+      version: "v3" as const,
+      program: {
+        kind: "standalone-review" as const,
+        schemaVersion: 3 as const,
+        reviewerProtocol: { schemaDigest: sha256Hex(REVIEWER_V3_CELL.spec.schemaVersions.v3!.schemaBytes) },
+      },
+    },
+  ] as const;
+
+  const qualifiedAuthority = (
+    classified: PiIssuedReviewRequestClass,
+    role: "code-reviewer" | "review-verifier-agent",
+    provider: string,
+    model: string,
+  ): IssuedSpawnEmissionAuthority => {
+    const qualified = qualifyPiIssuedReviewRequest(classified, {
+      role,
+      harnessBinding: { pi: { provider, model } },
+    });
+    if (!qualified.ok) throw new Error(`fixture route qualification refused: ${qualified.error.message}`);
+    return qualified.value;
+  };
+
+  const admissionFor = (
+    authority: IssuedSpawnEmissionAuthority,
+    agent: "code-reviewer" | "review-verifier-agent",
+    descriptor = "",
+  ) => expectedSpawnEmissionCapability({
+    agent,
+    task: `LOOM_REQUEST_ID: ${authority.claim.requestId}\n` +
+      `LOOM_CONTEXT_DIGEST: ${authority.claim.contextDigest}\n${descriptor}`,
+  }, () => ({ ok: true, value: authority }));
+
+  it("admits v2/v3 cloud-pinned reviewers without a descriptor as no-tool, and a valid-looking descriptor cannot upgrade either route", () => {
+    const previousAmbientModel = process.env["PI_MODEL"];
+    process.env["PI_MODEL"] = "glm-5.3-flash-spark-tp2-v14";
+    try {
+      for (const { version, program } of reviewPrograms) {
+        const request = {
+          runId: `run.t5-cloud-${version}`,
+          requestId: mintedBindingFor(version === "v2" ? REVIEWER_V2_CELL : REVIEWER_V3_CELL, `req-t5-cloud-${version}`).requestId,
+          contextDigest: issuedLookupContext,
+          program: program.kind,
+          role: "code-reviewer",
+        } as const;
+        const classified = classifyPiIssuedReviewRequest(request.runId, program, request);
+        if (!classified.ok) throw new Error(classified.error.message);
+        const authority = qualifiedAuthority(classified.value, request.role, "openai-codex", "gpt-6-sol");
+        expect(authority.route, version).toMatchObject({ kind: "extraction-only" });
+        expect(admissionFor(authority, request.role), version).toEqual({
+          ok: true,
+          expectation: { kind: "no-emission-tool" },
+        });
+
+        const minted = issueEmissionBinding({
+          requestId: authority.claim.requestId,
+          kind: authority.claim.producerKind,
+          version: authority.claim.version,
+          schemaDigest: authority.claim.schemaDigest,
+        });
+        if (!minted.ok) throw new Error(minted.error.message);
+        const forgedUpgrade = admissionFor(
+          authority,
+          request.role,
+          renderEmissionDescriptor(minted.value, authority.claim.contextDigest),
+        );
+        expect(forgedUpgrade.ok, version).toBe(false);
+        if (!forgedUpgrade.ok) expect(forgedUpgrade.reason).toContain("independently issued route is extraction-only");
+      }
+    } finally {
+      if (previousAmbientModel === undefined) delete process.env["PI_MODEL"];
+      else process.env["PI_MODEL"] = previousAmbientModel;
+    }
+  });
+
+  it("requires the exact descriptor for qualified frozen v2/v3 desktop routes and refuses omitted or forged descriptors", () => {
+    for (const { version, program } of reviewPrograms) {
+      const request = {
+        runId: `run.t5-qualified-${version}`,
+        requestId: mintedBindingFor(version === "v2" ? REVIEWER_V2_CELL : REVIEWER_V3_CELL, `req-t5-qualified-${version}`).requestId,
+        contextDigest: issuedLookupContext,
+        program: program.kind,
+        role: "code-reviewer",
+      } as const;
+      const classified = classifyPiIssuedReviewRequest(request.runId, program, request);
+      if (!classified.ok) throw new Error(classified.error.message);
+      const authority = qualifiedAuthority(
+        classified.value,
+        request.role,
+        "desktop-vllm",
+        "glm-5.3-flash-spark-tp2-v14",
+      );
+      if (authority.route?.kind !== "emission-enabled") {
+        throw new Error(`expected an emission-enabled ${version} route`);
+      }
+
+      const omitted = admissionFor(authority, request.role);
+      expect(omitted.ok, version).toBe(false);
+      if (!omitted.ok) expect(omitted.reason).toContain("missing its required LOOM_EMISSION_DESCRIPTOR descriptor");
+
+      const forgedContext = parseContextDigest(sha256Hex(`t5-forged-descriptor-${version}`));
+      if (!forgedContext.ok) throw new Error(forgedContext.error.message);
+      const forged = admissionFor(
+        authority,
+        request.role,
+        renderEmissionDescriptor(authority.route.binding, forgedContext.value),
+      );
+      expect(forged.ok, version).toBe(false);
+      if (!forged.ok) expect(forged.reason).toContain("differs from the descriptor");
+
+      expect(admissionFor(
+        authority,
+        request.role,
+        renderEmissionDescriptor(authority.route.binding, authority.route.contextDigest),
+      ), version).toEqual({
+        ok: true,
+        expectation: {
+          kind: "emission-enabled",
+          binding: authority.route.binding,
+          contextDigest: authority.route.contextDigest,
+          route: {
+            provider: "desktop-vllm",
+            model: "glm-5.3-flash-spark-tp2-v14",
+          },
+        },
+      });
+    }
+  });
+
+  it("keeps an older refutation-panel request extraction-only even on the qualified desktop route", () => {
+    const request = {
+      runId: "run.t5-old-refutation-route",
+      requestId: mintedBindingFor(REVIEWER_V2_CELL, "req-t5-old-refutation-route").requestId,
+      contextDigest: issuedLookupContext,
+      program: "refutation-panel",
+      role: "review-verifier-agent",
+    } as const;
+    const program = reviewPrograms[0]!.program;
+    const classified = classifyPiIssuedReviewRequest(request.runId, program, request);
+    if (!classified.ok) throw new Error(classified.error.message);
+    expect(classified.value.kind).toBe("refutation-panel-extraction");
+    const authority = qualifiedAuthority(
+      classified.value,
+      request.role,
+      "desktop-vllm",
+      "glm-5.3-flash-spark-tp2-v14",
+    );
+    expect(authority.route).toMatchObject({ kind: "extraction-only" });
+    expect(admissionFor(authority, request.role)).toEqual({
+      ok: true,
+      expectation: { kind: "no-emission-tool" },
+    });
+
+    const descriptorBinding = issueEmissionBinding({
+      requestId: request.requestId,
+      kind: "reviewer-payload",
+      version: "v2",
+    });
+    if (!descriptorBinding.ok) throw new Error(descriptorBinding.error.message);
+    const forgedUpgrade = admissionFor(
+      authority,
+      request.role,
+      renderEmissionDescriptor(descriptorBinding.value, request.contextDigest),
+    );
+    expect(forgedUpgrade.ok).toBe(false);
+    if (!forgedUpgrade.ok) expect(forgedUpgrade.reason).toContain("independently issued route is extraction-only");
+  });
+});
+
+describe("the production emission tool definition — the exact registration surface (FR-001/FR-002/FR-013/FR-021/SC-006)", () => {
+  it("carries the registry's exact name, the frozen bytes as parameters, and the ONE preferred sampling request, for every registry cell", () => {
+    for (const registryCell of REGISTRY_CELLS) {
+      const definition = emissionToolDefinition(mintedBindingFor(registryCell, "req-emission-tool-t5-def"));
+      expect(definition.name, `${registryCell.kind}/${registryCell.version}`).toBe(registryCell.spec.toolName);
+      expect(definition.label).toBe(`Emission ${registryCell.kind} ${registryCell.version}`);
+      // SC-006 at the definition surface: the parameters ARE the frozen
+      // payload schema bytes, parsed once — one schema, no second contract.
+      expect(definition.parameters).toEqual(JSON.parse(registryCell.spec.schemaVersions[registryCell.version]!.schemaBytes));
+      // INV-1: the ONE preferred-strict request — the same object every
+      // emission tool registers with, minted in the engine core.
+      expect(definition.constrainedSampling).toBe(EMISSION_CONSTRAINED_SAMPLING_REQUEST);
+      expect(typeof definition.description).toBe("string");
+    }
+  });
+
+  it("execute admits valid arguments into the minimal terminating acknowledgment with NO payload echo", async () => {
+    const registryCell = JUDGE_V1_CELL;
+    const definition = emissionToolDefinition(mintedBindingFor(registryCell, "req-emission-tool-t5-exec"));
+    const args = canonicalArguments(registryCell.kind, registryCell.version);
+    const acknowledgment = await definition.execute("call-exec-1", args);
+    // FR-013: terminating, minimal, empty details — and never the payload.
+    expect(acknowledgment.terminate).toBe(true);
+    expect(acknowledgment.details).toEqual({});
+    expect(acknowledgment.content).toHaveLength(1);
+    expect(acknowledgment.content[0]!.type).toBe("text");
+    expect(acknowledgment.content[0]!.text).toBe("payload acknowledged");
+    expect(JSON.stringify(acknowledgment.content)).not.toContain("extensibility");
+  });
+
+  it("execute THROWS the engine's refusal verbatim for engine-refined arguments — never a returned error-labeled object (AD-3)", async () => {
+    const registryCell = JUDGE_V1_CELL;
+    const definition = emissionToolDefinition(mintedBindingFor(registryCell, "req-emission-tool-t5-throw"));
+    const whitespaceArgs = whitespaceOnlyArguments(registryCell.kind);
+    let thrown: unknown = null;
+    try {
+      await definition.execute("call-ws", whitespaceArgs);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    const message = (thrown as Error).message;
+    // The refusal is the admission's own code and message — the model's
+    // correction surface is the parse's vocabulary, never a shell-invented
+    // string (FR-006 retained diagnostics).
+    expect(message).toContain("invalid-schema");
+    expect(message).toContain("frozen schema");
+  });
+
+  it("the definition constructor refuses a binding whose registry cell is absent — the invariant guard over minted bindings", () => {
+    // The mint refuses unsupported (kind, version) pairs, so the guard is
+    // unreachable through the mint; this pins it against future construction
+    // paths with a test-confined forged binding.
+    const minted = mintedBindingFor(JUDGE_V1_CELL, "req-emission-tool-t5-guard");
+    const forged = { ...minted, version: "v9" } as unknown as IssuedEmissionBinding;
+    expect(() => emissionToolDefinition(forged)).toThrow(/invariant failed/);
+  });
+});
+
+describe("the child's emission-tool registration state machine — idempotent only for the exact same request/kind/version/digest (AD-4)", () => {
+  const registeredA = mintedBindingFor(REVIEWER_V2_CELL, "req-emission-tool-t5-reg-a");
+  const registeredAReplay = mintedBindingFor(REVIEWER_V2_CELL, "req-emission-tool-t5-reg-a");
+  const differentRequest = mintedBindingFor(REVIEWER_V2_CELL, "req-emission-tool-t5-reg-b");
+  const differentVersion = mintedBindingFor(REVIEWER_V3_CELL, "req-emission-tool-t5-reg-a");
+  const differentKind = mintedBindingFor(JUDGE_V1_CELL, "req-emission-tool-t5-reg-a");
+  const differentDigestSource = REFUTATION_V1_CELL;
+
+  it("registers on an unregistered child and is idempotent for the exact same binding", () => {
+    const unregistered: EmissionToolRegistration = { kind: "unregistered" };
+    expect(decideEmissionToolRegistration(unregistered, registeredA)).toEqual({ kind: "register" });
+    const registered: EmissionToolRegistration = { kind: "registered", binding: registeredA };
+    expect(decideEmissionToolRegistration(registered, registeredAReplay)).toEqual({ kind: "idempotent" });
+  });
+
+  it("refuses every contradictory re-registration, naming both bindings in the diagnostic", () => {
+    const registered: EmissionToolRegistration = { kind: "registered", binding: registeredA };
+    for (const [label, attempted] of [
+      ["different request", differentRequest],
+      ["different version", differentVersion],
+      ["different kind", differentKind],
+      ["different digest source", mintedBindingFor(differentDigestSource, "req-emission-tool-t5-reg-a")],
+    ] as const) {
+      const decision = decideEmissionToolRegistration(registered, attempted);
+      if (decision.kind !== "contradictory") {
+        throw new Error(`expected a contradictory decision for ${label}, received ${decision.kind}`);
+      }
+      expect(decision.registered.requestId).toBe(registeredA.requestId);
+      expect(decision.attempted).toBe(attempted);
+      const message = describeEmissionRegistrationContradiction(decision);
+      expect(message, label).toContain(registeredA.requestId);
+      expect(message, label).toContain(attempted.requestId);
+      expect(message, label).toContain(registeredA.version);
+      expect(message, label).toContain(registeredA.schemaDigest);
+    }
+  });
+});
+
+describe("the child's provisioning ADT — the issued binding certified against the frozen registry, never trusted (FR-008)", () => {
+  const provisionedClaims = (overrides: Record<string, unknown> = {}): Record<string, unknown> => {
+    const binding = mintedBindingFor(JUDGE_V1_CELL, "req-emission-tool-t5-prov");
+    return {
+      requestId: binding.requestId,
+      contextDigest: sha256Hex(`emission-startup-context:${binding.requestId}`),
+      kind: binding.kind.kind,
+      version: binding.version,
+      toolName: binding.toolName,
+      schemaDigest: binding.schemaDigest,
+      ...overrides,
+    };
+  };
+
+  const parseRaw = (raw: string | undefined) => parseEmissionChildProvisioning(raw);
+
+  it("only an absent env is not-provisioned; present blank provisioning refuses instead of silently becoming extraction-only", () => {
+    expect(parseRaw(undefined)).toEqual({ kind: "not-provisioned" });
+    for (const raw of ["", "   "]) {
+      const refused = parseRaw(raw);
+      expect(refused.kind).toBe("provisioning-refused");
+      if (refused.kind === "provisioning-refused") {
+        expect(refused.code).toBe("invalid-json");
+        expect(refused.reason).toContain("not valid JSON");
+      }
+    }
+  });
+
+  it("refuses non-JSON and non-object payloads with a bounded reason", () => {
+    const notJson = parseRaw("{not json");
+    expect(notJson.kind).toBe("provisioning-refused");
+    if (notJson.kind === "provisioning-refused") {
+      expect(notJson.code).toBe("invalid-json");
+      expect(notJson.reason).toContain("not valid JSON");
+    }
+    const notObject = parseRaw("[]");
+    expect(notObject.kind).toBe("provisioning-refused");
+    if (notObject.kind === "provisioning-refused") {
+      expect(notObject.code).toBe("non-object");
+      expect(notObject.reason).toContain("not an object");
+    }
+  });
+
+  it("refuses an out-of-contract context digest and a non-string kind before the mint is consulted", () => {
+    const badDigest = parseRaw(JSON.stringify(provisionedClaims({ contextDigest: "sha256-not-hex" })));
+    expect(badDigest.kind).toBe("provisioning-refused");
+    if (badDigest.kind === "provisioning-refused") {
+      expect(badDigest.code).toBe("invalid-context-digest");
+      expect(badDigest.reason).toContain("context-digest");
+    }
+    const badKind = parseRaw(JSON.stringify(provisionedClaims({ kind: 42 })));
+    expect(badKind.kind).toBe("provisioning-refused");
+    if (badKind.kind === "provisioning-refused") {
+      expect(badKind.code).toBe("invalid-claim-type");
+      expect(badKind.reason).toContain("not a producer kind");
+    }
+  });
+
+  it("refuses malformed present optional claims instead of silently deriving registry values", () => {
+    for (const overrides of [{ toolName: 42 }, { schemaDigest: false }]) {
+      const refused = parseRaw(JSON.stringify(provisionedClaims(overrides)));
+      expect(refused.kind).toBe("provisioning-refused");
+      if (refused.kind === "provisioning-refused") {
+        expect(refused.code).toBe("invalid-claim-type");
+        expect(refused.reason).toContain("present optional claims must be strings");
+      }
+    }
+  });
+
+  it("refuses every claim that does not select a frozen registry cell, carrying the mint's own code and message", () => {
+    for (const [label, overrides, expectedCode] of [
+      ["unknown kind", { kind: "no-such-kind" }, "unknown-producer-kind"],
+      ["unsupported version", { version: "v9" }, "unsupported-schema-version"],
+      ["wrong claimed digest", { schemaDigest: sha256Hex("stale-bytes") }, "schema-digest-mismatch"],
+      ["wrong claimed tool name", { toolName: "loom_emit_refutation_verdict" }, "tool-name-mismatch"],
+      ["empty request id", { requestId: "" }, "invalid-request-identity"],
+    ] as const) {
+      const refused = parseRaw(JSON.stringify(provisionedClaims(overrides)));
+      expect(refused.kind, label).toBe("provisioning-refused");
+      if (refused.kind === "provisioning-refused") {
+        expect(refused.code, label).toBe(expectedCode);
+        expect(refused.reason.length, label).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("certifies valid claims into the minted binding and a canonical context digest", () => {
+    const provisioned = parseRaw(JSON.stringify(provisionedClaims()));
+    if (provisioned.kind !== "provisioned") throw new Error(`expected a provisioned child, received ${provisioned.kind}`);
+    const expected = mintedBindingFor(JUDGE_V1_CELL, "req-emission-tool-t5-prov");
+    expect(provisioned.binding).toEqual(expected);
+    expect(provisioned.contextDigest).toBe(sha256Hex(`emission-startup-context:${expected.requestId}`));
+  });
+
+  it("derives absent claims from the ONE frozen source — never a second default (AD-7)", () => {
+    const claims = provisionedClaims();
+    const minimal = JSON.stringify({ requestId: claims.requestId, contextDigest: claims.contextDigest, kind: claims.kind, version: claims.version });
+    const provisioned = parseRaw(minimal);
+    if (provisioned.kind !== "provisioned") throw new Error(`expected a provisioned child, received ${provisioned.kind}`);
+    const expected = mintedBindingFor(JUDGE_V1_CELL, "req-emission-tool-t5-prov");
+    expect(provisioned.binding.toolName).toBe(expected.toolName);
+    expect(provisioned.binding.schemaDigest).toBe(expected.schemaDigest);
+  });
+});
+
+describe("the readiness protocol contract — command, entry type, hold marker, and the bound report the barrier parses (AD-4)", () => {
+  it("carries the settled protocol names the wave-2 barrier suite and the probe pin", () => {
+    expect(EMISSION_READINESS_COMMAND).toBe("loom-emission-readiness");
+    expect(EMISSION_READINESS_ENTRY_TYPE).toBe("loom-emission-readiness");
+    expect(EMISSION_HOLD_ENTRY_TYPE).toBe("loom-emission-hold");
+    expect(LOOM_EMISSION_BINDING_ENV).toBe("LOOM_EMISSION_BINDING");
+  });
+
+  it("the readiness report carries exactly the ten contract fields, minted binding plus the child's honest observations", () => {
+    const binding = mintedBindingFor(JUDGE_V1_CELL, "req-emission-tool-t5-report");
+    const provisioned = parseEmissionChildProvisioning(JSON.stringify({
+      requestId: binding.requestId,
+      contextDigest: sha256Hex(`emission-startup-context:${binding.requestId}`),
+      kind: binding.kind.kind,
+      version: binding.version,
+      toolName: binding.toolName,
+      schemaDigest: binding.schemaDigest,
+    }));
+    if (provisioned.kind !== "provisioned") throw new Error(`expected a provisioned child, received ${provisioned.kind}`);
+    const report = emissionReadinessReport(provisioned, {
+      revision: "sha256:loom-emission-rev-t5",
+      active: true,
+      childPid: 4242,
+      registeredTools: [binding.toolName, "read"],
+    });
+    expect(Object.keys(report).sort()).toEqual([
+      "active", "childPid", "contextDigest", "kind", "registeredTools",
+      "requestId", "revision", "schemaDigest", "toolName", "version",
+    ]);
+    expect(report.requestId).toBe(binding.requestId);
+    expect(report.contextDigest).toBe(sha256Hex(`emission-startup-context:${binding.requestId}`));
+    expect(report.kind).toBe("judge-verdict");
+    expect(report.version).toBe("v1");
+    expect(report.toolName).toBe("loom_emit_judge_verdict");
+    expect(report.schemaDigest).toBe(sha256Hex(JUDGE_V1_CELL.spec.schemaVersions.v1!.schemaBytes));
+    expect(report.revision).toBe("sha256:loom-emission-rev-t5");
+    expect(report.active).toBe(true);
+    expect(report.childPid).toBe(4242);
+    expect(report.registeredTools).toEqual([binding.toolName, "read"]);
+  });
+});
+
+describe("emissionToolFamily — the registry-projected family of a tool name (FR-014)", () => {
+  it("maps every frozen registry tool name to its producer kind", () => {
+    expect(emissionToolFamily("loom_emit_reviewer_payload")).toEqual({ kind: "registered", producerKind: "reviewer-payload" });
+    expect(emissionToolFamily("loom_emit_judge_verdict")).toEqual({ kind: "registered", producerKind: "judge-verdict" });
+    expect(emissionToolFamily("loom_emit_refutation_verdict")).toEqual({ kind: "registered", producerKind: "refutation-verdict" });
+  });
+
+  it("prefix-reserved names outside the registry are observed-but-unbindable, never unrelated", () => {
+    expect(emissionToolFamily("loom_emit_gibberish")).toEqual({ kind: "unregistered-emission-name" });
+  });
+
+  it("everything else is unrelated — including non-string names", () => {
+    expect(emissionToolFamily("bash")).toEqual({ kind: "unrelated" });
+    expect(emissionToolFamily("loom")).toEqual({ kind: "unrelated" });
+    expect(emissionToolFamily(undefined)).toEqual({ kind: "unrelated" });
+    expect(emissionToolFamily(42)).toEqual({ kind: "unrelated" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T5: complete, request-bound transcript observations (pi/transcript-adapter.ts)
+// ---------------------------------------------------------------------------
+
+const assistantWithCalls = (calls: readonly { id: string; name: string; arguments?: unknown }[], text = ""): unknown => ({
+  role: "assistant",
+  content: [
+    ...(text.length > 0 ? [{ type: "text", text }] : []),
+    ...calls.map((call) => ({ type: "toolCall", id: call.id, name: call.name, arguments: call.arguments ?? {} })),
+  ],
+});
+
+const framesOf = (messages: unknown, issued: IssuedEmissionBinding): readonly EmissionCallFrame[] => {
+  const scanned = piEmissionCallFrames(messages, issued);
+  if (!scanned.ok) throw new Error(`fixture transcript refused: ${scanned.errors.join("; ")}`);
+  return scanned.value;
+};
+
+const asCompleteCalls = (frames: readonly EmissionCallFrame[]): readonly Extract<EmissionCallFrame, { kind: "complete" }>["call"][] =>
+  frames.filter((frame): frame is Extract<EmissionCallFrame, { kind: "complete" }> => frame.kind === "complete")
+    .map((frame) => frame.call);
+
+describe("piEmissionCallFrames — complete, request-bound emission observations (FR-014/AD-8)", () => {
+  const issued = mintedReviewerBinding();
+  const reviewerTool = REVIEWER_V2_CELL.spec.toolName;
+  const judgeTool = JUDGE_V1_CELL.spec.toolName;
+
+  it("a transcript with no emission calls observes absence", () => {
+    const messages = [
+      userLike(),
+      assistantWithCalls([{ id: "call-bash", name: "bash", arguments: { command: "bun test" } }], "working"),
+      toolResultLike("call-bash", "bash"),
+      assistantWithCalls([], "done in prose"),
+    ];
+    expect(framesOf(messages, issued)).toEqual([]);
+    expect(observeEmissionCalls(framesOf(messages, issued))).toEqual({ kind: "absent" });
+  });
+
+  it("one emission call observes one complete frame, bound to the issued request, kind from the registry, arguments as observed", () => {
+    const args = canonicalArguments("reviewer-payload", "v2");
+    const messages = [
+      userLike(),
+      assistantWithCalls([{ id: "call-emit-1", name: reviewerTool, arguments: args }]),
+      toolResultLike("call-emit-1", reviewerTool),
+    ];
+    const frames = framesOf(messages, issued);
+    expect(frames).toHaveLength(1);
+    const [frame] = asCompleteCalls(frames);
+    expect(frame!.toolCallId).toBe("call-emit-1");
+    expect(frame!.requestId).toBe(issued.requestId);
+    expect(frame!.kind).toEqual({ kind: "reviewer-payload" });
+    expect(frame!.version).toBe(issued.version);
+    expect(frame!.arguments).toEqual(args);
+    // The fold classifies the frames the production adapter produced: one
+    // complete call, and the engine re-admits the observed arguments.
+    const observation = observeEmissionCalls(frames);
+    expect(observation.kind).toBe("single-call");
+    if (observation.kind === "single-call") {
+      expect(admitEmissionArguments(REVIEWER_V2_CELL.spec, REVIEWER_V2_CELL.version, observation.call.arguments).kind).toBe("valid");
+    }
+  });
+
+  it("a successfully executed tool-only reviewer result reaches the production capture observation without assistant prose", () => {
+    const args = canonicalArguments("reviewer-payload", "v2");
+    const messages = [
+      assistantWithCalls([{ id: "call-tool-only", name: reviewerTool, arguments: args }]),
+      toolResultLike("call-tool-only", reviewerTool),
+    ];
+    const observation = piReviewerCaptureObservation(messages, issued);
+    expect(observation.kind).toBe("candidates");
+    if (observation.kind === "candidates") {
+      expect(observation.candidates).toHaveLength(1);
+      expect(observation.candidates[0]!.origin).toBe("emission-tool-arguments");
+      expect(JSON.parse(observation.candidates[0]!.text)).toEqual(args);
+    }
+  });
+
+  it("a missing or failed finalized tool result makes valid-looking arguments unusable", () => {
+    const args = canonicalArguments("reviewer-payload", "v2");
+    for (const [label, messages] of [
+      ["missing", [assistantWithCalls([{ id: "call-unexecuted", name: reviewerTool, arguments: args }])]],
+      ["failed", [
+        assistantWithCalls([{ id: "call-refused", name: reviewerTool, arguments: args }]),
+        toolResultLike("call-refused", reviewerTool, true),
+      ]],
+    ] as const) {
+      const frames = framesOf(messages, issued);
+      expect(frames, label).toHaveLength(1);
+      expect(frames[0], label).toMatchObject({ kind: "incomplete" });
+      expect(observeEmissionCalls(frames).kind, label).toBe("unusable");
+      const capture = piReviewerCaptureObservation(messages, issued);
+      expect(capture.kind, label).toBe("terminal-refusal");
+      if (capture.kind === "terminal-refusal") expect(capture.reason, label).toBe("unusable-observation");
+    }
+  });
+
+  it("refuses duplicate finalized toolResult entries with one toolCallId instead of treating either as authoritative", () => {
+    const args = canonicalArguments("reviewer-payload", "v2");
+    const messages = [
+      assistantWithCalls([{ id: "call-duplicate-result", name: reviewerTool, arguments: args }]),
+      toolResultLike("call-duplicate-result", reviewerTool),
+      toolResultLike("call-duplicate-result", reviewerTool),
+    ];
+    const frames = framesOf(messages, issued);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({
+      kind: "incomplete",
+      toolCallId: "call-duplicate-result",
+      reason: expect.stringContaining("2 finalized tool results; exactly one is required"),
+    });
+    expect(observeEmissionCalls(frames).kind).toBe("unusable");
+    expect(piReviewerCaptureObservation(messages, issued)).toMatchObject({
+      kind: "terminal-refusal",
+      reason: "unusable-observation",
+    });
+  });
+
+  it("observes mismatched toolResult names and non-false isError for the emission call id as incomplete", () => {
+    const args = canonicalArguments("reviewer-payload", "v2");
+    for (const [label, toolName, isError, reason] of [
+      ["wrong tool name", "bash", false, "mismatched tool result"],
+      ["missing success flag", reviewerTool, undefined, "non-success isError"],
+      ["non-boolean success flag", reviewerTool, "false", "non-success isError"],
+    ] as const) {
+      const messages = [
+        assistantWithCalls([{ id: "call-mismatched-result", name: reviewerTool, arguments: args }]),
+        { role: "toolResult", toolCallId: "call-mismatched-result", toolName, isError,
+          content: [{ type: "text", text: "payload acknowledged" }] },
+      ];
+      const frames = framesOf(messages, issued);
+      expect(frames, label).toHaveLength(1);
+      expect(frames[0], label).toMatchObject({
+        kind: "incomplete",
+        toolCallId: "call-mismatched-result",
+        reason: expect.stringContaining(reason),
+      });
+      expect(observeEmissionCalls(frames).kind, label).toBe("unusable");
+      expect(piReviewerCaptureObservation(messages, issued).kind, label).toBe("terminal-refusal");
+    }
+  });
+
+  it("a failed singleton typed-block emission refuses the exact final-message fallback reproduction", () => {
+    const messages = [
+      {
+        role: "assistant",
+        content: {
+          type: "toolCall",
+          id: "call-1",
+          name: reviewerTool,
+          arguments: { schemaVersion: 2, kind: "standalone-review", findings: "bad" },
+        },
+      },
+      {
+        role: "toolResult",
+        toolCallId: "call-1",
+        toolName: reviewerTool,
+        isError: true,
+        content: [{ type: "text", text: "schema rejected" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: '{"schemaVersion":2,"kind":"standalone-review","findings":[]}' }],
+      },
+    ];
+
+    const frames = framesOf(messages, issued);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({
+      kind: "incomplete",
+      toolCallId: "call-1",
+      reason: expect.stringContaining("failed"),
+    });
+    const capture = piReviewerCaptureObservation(messages, issued);
+    expect(capture.kind).toBe("terminal-refusal");
+    if (capture.kind === "terminal-refusal") expect(capture.reason).toBe("unusable-observation");
+  });
+
+  it("normalizes array and singleton typed-block emissions to the same unusable observation (property)", () => {
+    fc.assert(
+      fc.property(
+        fc.stringMatching(/^[a-z0-9]{1,12}$/),
+        fc.integer({ min: 0, max: 1_000 }),
+        (suffix, sentinel) => {
+          const id = `call-${suffix}`;
+          const block = {
+            type: "toolCall",
+            id,
+            name: reviewerTool,
+            arguments: { schemaVersion: 2, kind: "standalone-review", findings: sentinel },
+          };
+          for (const content of [block, [block]]) {
+            const frames = framesOf([
+              { role: "assistant", content },
+              toolResultLike(id, reviewerTool, true),
+            ], issued);
+            expect(frames).toHaveLength(1);
+            expect(frames[0]).toMatchObject({ kind: "incomplete", toolCallId: id });
+            expect(observeEmissionCalls(frames).kind).toBe("unusable");
+          }
+        },
+      ),
+      { numRuns: 100 },
+    );
+  });
+
+  it("refuses accessor-backed native content without invoking it", () => {
+    let accessorReads = 0;
+    const assistant = Object.defineProperty({ role: "assistant" }, "content", {
+      enumerable: true,
+      get: () => {
+        accessorReads += 1;
+        return { type: "toolCall", id: "call-accessor", name: reviewerTool, arguments: {} };
+      },
+    });
+
+    const scanned = piEmissionCallFrames([assistant], issued);
+    expect(scanned.ok).toBe(false);
+    expect(accessorReads).toBe(0);
+    const capture = piReviewerCaptureObservation([assistant], issued);
+    expect(capture.kind).toBe("terminal-refusal");
+    expect(accessorReads).toBe(0);
+  });
+
+  it("does not collapse an arbitrary singleton object into a valid tool call or fallback", () => {
+    const messages = [
+      { role: "assistant", content: { id: "call-not-typed", name: reviewerTool, arguments: {} } },
+      { role: "assistant", content: [{ type: "text", text: '{"schemaVersion":2,"kind":"standalone-review","findings":[]}' }] },
+    ];
+    expect(framesOf(messages, issued)).toEqual([]);
+    const capture = piReviewerCaptureObservation(messages, issued);
+    expect(capture.kind).toBe("terminal-refusal");
+    if (capture.kind === "terminal-refusal") {
+      // The selection arm's own typed refusal is RETAINED, then composed with
+      // the independent transcript scan's refusal — neither erases the other.
+      expect(capture.reason).toBe("no-final-payload");
+      expect(capture.message).toContain("result carried no final text payload;");
+      expect(capture.message).toContain("the independent transcript scan also refused:");
+      expect(capture.message.length).toBeGreaterThan("result carried no final text payload; the independent transcript scan also refused:".length);
+    }
+  });
+
+  it("retains unknown argument keys in complete frames as unprojected enumerable snapshots", () => {
+    const args = {
+      ...(canonicalArguments("reviewer-payload", "v2") as Record<string, unknown>),
+      adapterSentinel: { retained: true },
+    };
+    const [call] = asCompleteCalls(framesOf([
+      assistantWithCalls([{ id: "call-raw", name: reviewerTool, arguments: args }]),
+      toolResultLike("call-raw", reviewerTool),
+    ], issued));
+    expect(call!.arguments).toEqual(args);
+    expect(call!.arguments).toHaveProperty("adapterSentinel", { retained: true });
+  });
+
+  it("a malformed unrelated entry does not hide a valid emission call from the independent scan", () => {
+    const args = canonicalArguments("reviewer-payload", "v2");
+    const frames = framesOf([
+      { role: "assistant", content: 42 },
+      assistantWithCalls([{ id: "call-after-corruption", name: reviewerTool, arguments: args }]),
+      toolResultLike("call-after-corruption", reviewerTool),
+    ], issued);
+    expect(asCompleteCalls(frames)).toHaveLength(1);
+    expect(asCompleteCalls(frames)[0]!.toolCallId).toBe("call-after-corruption");
+  });
+
+  it("the production reviewer capture selects a successful emission after a malformed unrelated entry with no prose", () => {
+    const args = canonicalArguments("reviewer-payload", "v2");
+    const observation = piReviewerCaptureObservation([
+      { role: "assistant", content: 42 },
+      assistantWithCalls([{ id: "call-after-unrelated-malformation", name: reviewerTool, arguments: args }]),
+      toolResultLike("call-after-unrelated-malformation", reviewerTool),
+    ], issued);
+
+    expect(observation.kind).toBe("candidates");
+    if (observation.kind === "candidates") {
+      expect(observation.candidates).toHaveLength(1);
+      expect(observation.candidates[0]!.origin).toBe("emission-tool-arguments");
+      expect(JSON.parse(observation.candidates[0]!.text)).toEqual(args);
+    }
+  });
+
+  it("a call to a DIFFERENT producer kind's tool is a complete frame carrying the OBSERVED kind — and the selection refuses it as unexpected-kind, never a self-selected decoder (FR-014)", () => {
+    const messages = [
+      assistantWithCalls([{ id: "call-wrong", name: judgeTool, arguments: { criterion: "extensibility", rankings: [] } }]),
+      toolResultLike("call-wrong", judgeTool),
+    ];
+    const frames = framesOf(messages, issued);
+    const [frame] = asCompleteCalls(frames);
+    expect(frame!.kind).toEqual({ kind: "judge-verdict" });
+    expect(frame!.version).toBe(issued.version);
+    const observation = observeEmissionCalls(frames);
+    expect(observation.kind).toBe("single-call");
+    const selection = selectCanonicalPayload(issued, observation, [] satisfies readonly FinalPayloadCandidate[]);
+    expect(selection.kind).toBe("observation-refused");
+    if (selection.kind === "observation-refused") {
+      expect(selection.refusal.code).toBe("unexpected-kind");
+      expect(selection.refusal.message).toContain("judge-verdict");
+    }
+  });
+
+  it("a prefix-reserved name outside the frozen registry refuses as an incomplete frame — never absorbed as absence (FR-014)", () => {
+    const messages = [assistantWithCalls([{ id: "call-stale", name: "loom_emit_gibberish", arguments: { arbitrary: true } }])];
+    const frames = framesOf(messages, issued);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toEqual({
+      kind: "incomplete",
+      toolCallId: "call-stale",
+      reason: expect.stringContaining("loom_emit_gibberish"),
+    });
+    expect(observeEmissionCalls(frames).kind).toBe("unusable");
+  });
+
+  it("an emission call without a recoverable identity, and one with non-object arguments, are incomplete frames with reasons", () => {
+    const noIdentity = framesOf([assistantWithCalls([{ id: "", name: reviewerTool, arguments: { schemaVersion: 2 } }])], issued);
+    expect(noIdentity).toHaveLength(1);
+    expect(noIdentity[0]).toMatchObject({ kind: "incomplete", toolCallId: null });
+    const badArguments = framesOf([
+      { role: "assistant", content: [{ type: "toolCall", id: "call-bad", name: reviewerTool, arguments: "not-an-object" }] },
+      toolResultLike("call-bad", reviewerTool, true),
+    ], issued);
+    expect(badArguments).toHaveLength(1);
+    expect(badArguments[0]).toMatchObject({ kind: "incomplete", toolCallId: "call-bad" });
+    for (const frames of [noIdentity, badArguments]) {
+      const observation = observeEmissionCalls(frames);
+      expect(observation.kind).toBe("unusable");
+      if (observation.kind === "unusable") expect(observation.reason.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("an exact replay of one call identity folds idempotently; a contradictory replay refuses (FR-007)", () => {
+    const args = canonicalArguments("reviewer-payload", "v2");
+    const replayed = framesOf([
+      assistantWithCalls([{ id: "call-replay", name: reviewerTool, arguments: args }]),
+      assistantWithCalls([{ id: "call-replay", name: reviewerTool, arguments: args }]),
+      toolResultLike("call-replay", reviewerTool),
+    ], issued);
+    expect(asCompleteCalls(replayed)).toHaveLength(2);
+    expect(observeEmissionCalls(replayed)).toEqual(observeEmissionCalls(framesOf([
+      assistantWithCalls([{ id: "call-replay", name: reviewerTool, arguments: args }]),
+      toolResultLike("call-replay", reviewerTool),
+    ], issued)));
+    const contradictory = framesOf([
+      assistantWithCalls([{ id: "call-contradicted", name: reviewerTool, arguments: args }]),
+      assistantWithCalls([{ id: "call-contradicted", name: reviewerTool, arguments: { schemaVersion: 2, kind: "standalone-review", findings: [] } }]),
+      toolResultLike("call-contradicted", reviewerTool),
+    ], issued);
+    const observation = observeEmissionCalls(contradictory);
+    expect(observation.kind).toBe("unusable");
+    if (observation.kind === "unusable") expect(observation.reason).toContain("contradictory");
+  });
+
+  it("two distinct calls and an incomplete-beside-complete pair refuse exactly as the fold classifies them", () => {
+    const args = canonicalArguments("reviewer-payload", "v2");
+    const doubled = observeEmissionCalls(framesOf([
+      assistantWithCalls([{ id: "call-a", name: reviewerTool, arguments: args }]),
+      assistantWithCalls([{ id: "call-b", name: reviewerTool, arguments: args }]),
+      toolResultLike("call-a", reviewerTool),
+      toolResultLike("call-b", reviewerTool),
+    ], issued));
+    expect(doubled.kind).toBe("multiple-calls");
+    const mixed = observeEmissionCalls(framesOf([
+      assistantWithCalls([{ id: "call-good", name: reviewerTool, arguments: args }]),
+      { role: "assistant", content: [{ type: "toolCall", id: "call-broken", name: reviewerTool, arguments: "nope" }] },
+      toolResultLike("call-good", reviewerTool),
+      toolResultLike("call-broken", reviewerTool, true),
+    ], issued));
+    expect(mixed.kind).toBe("unusable");
+  });
+
+  it("observes only ASSISTANT tool calls — user-carried and result-carried tool-call shapes are not emission observations (AD-8)", () => {
+    const args = canonicalArguments("reviewer-payload", "v2");
+    const messages = [
+      { role: "user", content: [{ type: "toolCall", id: "call-user", name: reviewerTool, arguments: args }] },
+      { role: "toolResult", toolCallId: "call-user", toolName: reviewerTool, content: [{ type: "text", text: JSON.stringify(args) }] },
+    ];
+    expect(framesOf(messages, issued)).toEqual([]);
+  });
+
+  it("refuses a non-array transcript — the scan fails closed, it never invents absence", () => {
+    const scanned = piEmissionCallFrames({ role: "assistant" }, issued);
+    expect(scanned.ok).toBe(false);
+  });
+
+  it("is deterministic over arbitrary transcripts and attributes every complete frame to the issued request (property)", () => {
+    const nameArb = fc.constantFrom(JUDGE_V1_CELL.spec.toolName, "loom_emit_future_tool", "bash", "read");
+    const idArb = fc.oneof(fc.stringMatching(/^call-[a-z0-9]{1,8}$/), fc.constant(""));
+    const blockArb = fc.oneof(
+      fc.record({ type: fc.constant("toolCall"), id: idArb, name: nameArb, arguments: fc.record({ n: fc.integer({ min: 0, max: 9 }) }) }),
+      fc.record({ type: fc.constant("text"), text: fc.string({ maxLength: 8 }) }),
+    );
+    const messageArb = fc.record({
+      role: fc.constantFrom("assistant", "user", "toolResult"),
+      content: fc.array(blockArb, { maxLength: 4 }),
+    });
+    const judgeIssued = mintedJudgeBinding();
+    fc.assert(
+      fc.property(fc.array(messageArb, { maxLength: 5 }), (messages) => {
+        const first = piEmissionCallFrames(messages, judgeIssued);
+        const second = piEmissionCallFrames(messages, judgeIssued);
+        expect(canonicalStructuralEquals(first, second)).toBe(true);
+        if (first.ok) {
+          for (const frame of first.value) {
+            if (frame.kind === "complete") {
+              expect(frame.call.requestId).toBe(judgeIssued.requestId);
+              expect(frame.call.toolCallId.length).toBeGreaterThan(0);
+              expect(frame.call.kind.kind).toBe("judge-verdict");
+              expect(frame.call.version).toBe(judgeIssued.version);
+            }
+          }
+        }
+      }),
+      { numRuns: 200 },
+    );
+  });
+});
+
+function userLike(): unknown {
+  return { role: "user", content: [{ type: "text", text: "Emit the issued payload exactly once." }] };
+}
+
+function toolResultLike(id: string, name: string, isError = false): unknown {
+  return { role: "toolResult", toolCallId: id, toolName: name, isError, content: [{ type: "text", text: "payload acknowledged" }] };
+}

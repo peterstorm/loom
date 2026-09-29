@@ -41,7 +41,7 @@ import {
   type WaveSpecCheckTaskAuthority,
   type WaveTaskRunAuthority,
 } from '../../../core/wave-review-authority';
-import { durableCaptureRejection, durableRefutationRequests, exactObject, executableRefutationRequests, failed, parseRegisteredFacadeProgram, reviewerProtocolResolver, publicationResolver, publishInitialBatch, recoverOrPublishRefutationRetry, refutationRejectionDiagnostic, renderSpawnTask, type FacadeDriveResult, type RegisteredWaveGateProgram } from './helpers';
+import { REVIEWER_EXTRACTION_RETRY_INSTRUCTION, decideRefutationTranscriptRead, durableCaptureRejection, durableRefutationRequests, exactObject, executableRefutationRequests, failed, observedReviewerIssueRoute, parseRegisteredFacadeProgram, reviewerProtocolResolver, publicationResolver, publishReviewInitialBatch, recoverOrPublishRefutationRetry, refutationRejectionDiagnostic, renderReviewProgramSpawnTask, reviewerRetryInstruction, type FacadeDriveResult, type RegisteredWaveGateProgram } from './helpers';
 
 const waveGateDeps = Object.freeze({
   loadPlanModels: loadPlanModelsSource,
@@ -391,6 +391,7 @@ export function waveRequests(
       planFile: graph.plan_file,
       projectBoundary,
     }),
+    observedReviewerIssueRoute(),
   );
   if (!prepared.ok) throw new Error(prepared.error.message);
   return prepared.value;
@@ -502,7 +503,7 @@ export const WAVE_RETRY_FIXED_TAIL = [
   "once in packet order. Use an empty array when there are no prior findings.",
 ].join("\n");
 
-const CURRENT_WAVE_RETRY_TAIL = "Emit exactly one JSON object conforming to the unchanged reviewer-payload-schema and reviewer-impact-rubric sections.";
+const CURRENT_WAVE_RETRY_TAIL = REVIEWER_EXTRACTION_RETRY_INSTRUCTION;
 
 function boundedRetryReason(reason: string): string {
   const escaped = JSON.stringify(reason);
@@ -523,6 +524,18 @@ function waveRetryDiagnosticText(reason: string): string {
 
 function currentWaveRetryDiagnosticText(reason: string): string {
   return `${WAVE_RETRY_PREAMBLE}${boundedRetryReason(reason)}\n\n${CURRENT_WAVE_RETRY_TAIL}`;
+}
+
+/** Compose attempt-2 task text from the actual rendered route. Persisted
+ *  extraction diagnostics retain their canonical bytes; an emission render
+ *  replaces only the route-blind final action with the fresh-spawn tool rule. */
+export function renderCurrentWaveRetryTask(task: string, retryDiagnostic: string): string {
+  const instruction = reviewerRetryInstruction(task);
+  if (instruction === CURRENT_WAVE_RETRY_TAIL) return [task, retryDiagnostic].join("\n");
+  const diagnostic = retryDiagnostic.endsWith(CURRENT_WAVE_RETRY_TAIL)
+    ? `${retryDiagnostic.slice(0, -CURRENT_WAVE_RETRY_TAIL.length)}${instruction}`
+    : `${retryDiagnostic}\n\n${instruction}`;
+  return [task, diagnostic].join("\n");
 }
 
 /**
@@ -818,6 +831,7 @@ export async function installWaveReviewRuns(
       1,
       observedWorkspaces,
       currentObservation,
+      observedReviewerIssueRoute(),
     );
     if (!lockedPreparation.ok || !canonicalStructuralEquals(lockedPreparation.value, batch)) {
       throw new Error("Wave review packet context changed before the batch could be installed");
@@ -1792,7 +1806,7 @@ export async function resumeWaveGateFacade(
       // Re-running the complete effect reconciles a crash after any strict
       // prefix of requests was reserved instead of treating partial issuance
       // as a corrupt batch and stranding the active replacement authority.
-      const published = await publishInitialBatch(handle, batch.requests, batch.packets, "wave-gate-current");
+      const published = await publishReviewInitialBatch(handle, batch.requests, batch.packets, "wave-gate-current", registration);
       if (!published.ok) return failed(published.message);
       const action = published.action as { requests: readonly Record<string, unknown>[] };
       await installWaveReviewRuns(manager, registration, batch);
@@ -1822,7 +1836,7 @@ export async function resumeWaveGateFacade(
         observeTaskGraphProjectBoundary(manager.getPath()),
       );
       await installWaveReviewRuns(manager, registration, batch);
-      const published = await publishInitialBatch(handle, batch.requests, batch.packets, "wave-gate-current");
+      const published = await publishReviewInitialBatch(handle, batch.requests, batch.packets, "wave-gate-current", registration);
       return published.ok ? { ok: true, action: published.action } : failed(published.message);
     }
 
@@ -1862,11 +1876,12 @@ export async function resumeWaveGateFacade(
         if (expectedBatch.batchEpoch !== epoch.batchEpoch) {
           return waveBlocked(handle, "persisted current Wave review batch differs from deterministic protected authority");
         }
-        const republished = await publishInitialBatch(
+        const republished = await publishReviewInitialBatch(
           handle,
           expectedBatch.requests,
           expectedBatch.packets,
           "wave-gate-current",
+          registration,
         );
         if (!republished.ok) return failed(republished.message);
         return { ok: true, action: republished.action };
@@ -1885,8 +1900,8 @@ export async function resumeWaveGateFacade(
       if (recovered.kind === "found") {
         currentIssued = Object.freeze(recovered.requests.map(({ authority }) => authority));
       } else {
-        const published = await publishInitialBatch(
-          handle, inputs, candidates.map(({ packet }) => packet), "wave-gate-current",
+        const published = await publishReviewInitialBatch(
+          handle, inputs, candidates.map(({ packet }) => packet), "wave-gate-current", registration,
         );
         if (!published.ok) return failed(published.message);
         currentIssued = Object.freeze(published.requests.map(({ authority }) => authority));
@@ -2015,7 +2030,7 @@ export async function resumeWaveGateFacade(
         requests: uncapturedInitialReviews.map((authority) => ({
           authority,
           context: { digest: authority.contextDigest, slot: { kind: "fixed-artifact-slot", path: `contexts/${authority.contextDigest}.json` } },
-          task: renderSpawnTask(handle, authority, "Read the immutable context packet at LOOM_CONTEXT_PATH and complete the exact Wave review request."),
+          task: renderReviewProgramSpawnTask(handle, authority, "Read the immutable context packet at LOOM_CONTEXT_PATH and complete the exact Wave review request.", registration),
         })),
       } };
     }
@@ -2035,7 +2050,7 @@ export async function resumeWaveGateFacade(
           durableRequests.push(...recovered.requests);
           continue;
         }
-        const published = await publishInitialBatch(handle, [retry.request], [retry.packet], label);
+        const published = await publishReviewInitialBatch(handle, [retry.request], [retry.packet], label, registration);
         if (!published.ok) return failed(published.message);
         durableRequests.push(...published.requests);
       }
@@ -2046,10 +2061,10 @@ export async function resumeWaveGateFacade(
           const retry = retries.find(({ slotId }) => slotId === request.authority.slotId);
           return {
             ...request,
-            task: [
-              renderSpawnTask(handle, request.authority, "Read the immutable context packet at LOOM_CONTEXT_PATH, then retry the exact current Wave Review Packet slot."),
+            task: renderCurrentWaveRetryTask(
+              renderReviewProgramSpawnTask(handle, request.authority, "Read the immutable context packet at LOOM_CONTEXT_PATH, then retry the exact current Wave Review Packet slot.", registration),
               retry?.retryDiagnostic ?? "Attempt 1 was rejected; correct the packet evidence contract.",
-            ].join("\n"),
+            ),
           };
         }),
       } });
@@ -2141,7 +2156,7 @@ export async function resumeWaveGateFacade(
       let durable: SpawnRequest;
       if (recovered.kind === "found") durable = recovered.requests[0]!;
       else {
-        const published = await publishInitialBatch(handle, [retry.request], [retry.packet], "wave-gate-spec-retry");
+        const published = await publishReviewInitialBatch(handle, [retry.request], [retry.packet], "wave-gate-spec-retry", registration);
         if (!published.ok) return failed(published.message);
         durable = published.requests[0]!;
       }
@@ -2165,7 +2180,7 @@ export async function resumeWaveGateFacade(
         kind: "spawn-batch", runId: handle.runId,
         requests: [{
           ...durable,
-          task: renderSpawnTask(handle, durable.authority, "Read the immutable context packet at LOOM_CONTEXT_PATH, then retry the exact current Wave spec-check slot."),
+          task: renderReviewProgramSpawnTask(handle, durable.authority, "Read the immutable context packet at LOOM_CONTEXT_PATH, then retry the exact current Wave spec-check slot.", registration),
         }],
       } };
     }
@@ -2185,24 +2200,48 @@ export async function resumeWaveGateFacade(
       const recovered = durableRefutationRequests(handle, preparation.inputs, resolver, "wave-refutation");
       if (recovered.kind === "corrupt") return waveBlocked(handle, recovered.message);
       if (recovered.kind === "absent") {
-        const published = await publishInitialBatch(handle, preparation.inputs, preparation.packets, "wave-refutation");
+        const published = await publishReviewInitialBatch(handle, preparation.inputs, preparation.packets, "wave-refutation", registration);
         return published.ok ? { ok: true, action: published.action } : failed(published.message);
       }
       const requests = recovered.requests;
       const panelCaptured = handle.readCapturedAttempts();
       if (!panelCaptured.ok) return waveBlocked(handle, panelCaptured.error.message);
+      // A durable harness capture rejection is a completed FAILED attempt, not
+      // an invitation to respawn attempt 1 forever — the same class-2
+      // trichotomy the reviewer slots above and the standalone program's
+      // decideAttemptOneSlots phase apply. A slot whose attempt-1 capture the
+      // harness terminally rejected (no bytes can ever land) is tombstoned
+      // here and routed into the panel's own rejection path in the replay
+      // loop below, which re-issues its attempt-2 retry; only genuinely
+      // un-delivered slots are re-issued at attempt 1.
       const missing = requests.filter((request) => !panelCaptured.value.has(captureKey(request.authority.slotId, request.authority.attempt)));
-      if (missing.length > 0) {
+      const rejectionReceipts = new Map<string, string>();
+      for (const request of missing) {
+        const rejection = await durableCaptureRejection(handle, request.authority);
+        if (rejection !== null) rejectionReceipts.set(request.authority.slotId, rejection);
+      }
+      const reissues = missing.filter((request) => !rejectionReceipts.has(request.authority.slotId));
+      if (reissues.length > 0) {
         return {
           ok: true,
-          action: { kind: "spawn-batch", runId: handle.runId, requests: executableRefutationRequests(handle, missing, false) },
+          action: { kind: "spawn-batch", runId: handle.runId, requests: executableRefutationRequests(handle, reissues, false) },
         };
       }
       let panelState = startPersistentRefutationPanel(preparation.panel).state;
       for (const request of requests) {
-        const bytes = handle.readTranscriptBytes(request.authority);
-        if (!bytes.ok) return waveBlocked(handle, bytes.error.message);
-        let submitted = submitRefutationVerdict(panelState, resolver, panelRequestIdentity(request), Buffer.from(bytes.value).toString("utf8"));
+        const transcript = decideRefutationTranscriptRead(
+          handle.readTranscriptBytes(request.authority),
+          rejectionReceipts.get(request.authority.slotId),
+        );
+        if (transcript.kind === "infrastructure-failure") return failed(transcript.message);
+        // A tombstoned attempt-1 slot has no evidence: the capture runtime
+        // terminally rejected the attempt, so there is no verdict to parse.
+        // Only that explicit tombstone advances the slot through the panel's
+        // semantic rejection path; an unreadable captured transcript returned
+        // above as infrastructure failure and cannot consume a retry.
+        let submitted = transcript.kind === "verdict"
+          ? submitRefutationVerdict(panelState, resolver, panelRequestIdentity(request), transcript.transcript)
+          : rejectRefutationVerdict(panelState, resolver, panelRequestIdentity(request), transcript.diagnostic);
         if (!submitted.ok) return waveBlocked(handle, submitted.error.message);
         panelState = submitted.value.state;
         if (submitted.value.action?.kind === "spawn-refutation-verifiers") {

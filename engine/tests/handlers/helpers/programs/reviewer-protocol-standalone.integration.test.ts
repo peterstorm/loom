@@ -12,7 +12,7 @@ import { parseRequestId, type AgentRequestAuthority } from "../../../../src/core
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_IMPACT_RUBRIC_V1, REVIEWER_PAYLOAD_SCHEMA_V2 } from "../../../../src/core/reviewer-contract";
 import { prepareStandaloneReview, serializeStandaloneReviewAuthority, STANDALONE_REVIEWER_ROLES } from "../../../../src/core/standalone-review";
 import { reduceStandaloneReviewMachine, serializeStandaloneReviewMachineState, startStandaloneReviewMachine } from "../../../../src/core/standalone-review-machine";
-import { parseRegistration, parseRegisteredFacadeProgram, parsedAuthority, publicationFile, standalonePublicationEffectId, publishInitialBatch, reviewerProtocolResolver, standaloneRequestId } from "../../../../src/handlers/helpers/programs/helpers";
+import { parseRegistration, parseRegisteredFacadeProgram, parsedAuthority, publicationFile, standalonePublicationEffectId, publishLegacyInitialBatch, reviewerProtocolResolver, standaloneRequestId } from "../../../../src/handlers/helpers/programs/helpers";
 import { inspectStandaloneFacade, readStandaloneReviewedSource, replayStandaloneResultFromEvidence, type StandaloneCaptureWitness } from "../../../../src/handlers/helpers/programs/standalone";
 import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { captureHarnessResult } from "../../../../src/orchestration/harness-capture-runtime";
@@ -128,7 +128,7 @@ async function legacyPrefix(p: ReturnType<typeof project>): Promise<{ handle: Ru
     authority: JSON.parse(serializeStandaloneReviewAuthority(prepared.authority)) }));
   value(await handle.registerProgram(registration));
   const firstPackets = packets.filter((_, index) => index % 2 === 0);
-  const published = await withFixturePiSession(p.root, () => publishInitialBatch(handle, prepared.initialRequests.map((authority) => ({ authority,
+  const published = await withFixturePiSession(p.root, () => publishLegacyInitialBatch(handle, prepared.initialRequests.map((authority) => ({ authority,
     context: { digest: authority.contextDigest, slot: `contexts/${authority.contextDigest}.json` } })), firstPackets, "standalone-review"));
   if (!published.ok) throw new Error(published.message);
   const awaiting = value(reduceStandaloneReviewMachine(startStandaloneReviewMachine(prepared.authority), { kind: "review-batch-published", runId: handle.runId }));

@@ -20,7 +20,7 @@ import { parseAgentRequestAuthority } from "../src/core/orchestration-contract";
 import { parseTaskGraph } from "../src/state-manager";
 import { observeTaskGraphProjectBoundary } from "../src/config";
 import { graphFixture, taskFixture } from "./fixtures/task-lifecycle";
-import { publishInitialBatch } from "../src/handlers/helpers/programs/helpers";
+import { publishLegacyInitialBatch } from "../src/handlers/helpers/programs/helpers";
 import { readLoomReviewAuthorityBridge } from "../src/handlers/helpers/programs/review-authority-bridge";
 import { waveGateAuthorityDigest, waveRequests } from "../src/handlers/helpers/programs/wave-gate";
 import type { AgentRequestAuthority } from "../src/core/orchestration-contract";
@@ -352,7 +352,7 @@ async function publishPiFixtureRequest(handle: RunDirHandle, raw: AgentRequestAu
   if (!request.ok) throw new Error(JSON.stringify(request.error));
   const packet = handle.readContext(request.value.contextDigest);
   if (!packet.ok) throw new Error(packet.error.message);
-  const published = await publishInitialBatch(handle, [{ authority: request.value,
+  const published = await publishLegacyInitialBatch(handle, [{ authority: request.value,
     context: { digest: packet.value.digest, slot: `contexts/${packet.value.digest}.json` } }], [packet.value], "pi-transport-fixture");
   if (!published.ok) throw new Error(published.message);
 }

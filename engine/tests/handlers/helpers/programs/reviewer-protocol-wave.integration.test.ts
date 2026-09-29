@@ -9,7 +9,7 @@ import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
 import { WAVE_REVIEW_AGENTS } from "../../../../src/core/model-profiles";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, type ReviewerDraftV2 } from "../../../../src/core/reviewer-contract";
-import { parseRegisteredFacadeProgram, publishInitialBatch, reviewerProtocolResolver } from "../../../../src/handlers/helpers/programs/helpers";
+import { parseRegisteredFacadeProgram, publishLegacyInitialBatch, reviewerProtocolResolver } from "../../../../src/handlers/helpers/programs/helpers";
 import { handleWaveReviewContext, installWaveReviewRuns, waveGateAuthorityDigest, waveRequests, deriveWaveAttemptTwo, persistedWaveAttemptTwoCompatibilityProblem, currentWaveTaskReviewRetries, markWaveTaskReviewRetriesIssued } from "../../../../src/handlers/helpers/programs/wave-gate";
 import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { captureHarnessResult } from "../../../../src/orchestration/harness-capture-runtime";
@@ -160,7 +160,7 @@ async function legacyPrefix(p: ReturnType<typeof project>) {
       1,
       { kind: "state-layout", root: p.root },
     );
-    const published = await publishInitialBatch(handle, batch.requests, batch.packets, "wave-gate-current");
+    const published = await publishLegacyInitialBatch(handle, batch.requests, batch.packets, "wave-gate-current");
     if (!published.ok) throw new Error(published.message);
     await installWaveReviewRuns(manager, registered, batch);
     return { handle, action: published.action as Action };
@@ -272,7 +272,7 @@ describe("registered Wave reviewer protocol", () => {
     if (kind === "unchanged-context") {
       for (const { authority } of action.requests!.slice(1)) {
         const retry = deriveWaveAttemptTwo(handle, authority);
-        const published = await publishInitialBatch(handle, [retry.request], [retry.packet], `wave-gate-retry:${authority.slotId}`);
+        const published = await publishLegacyInitialBatch(handle, [retry.request], [retry.packet], `wave-gate-retry:${authority.slotId}`);
         if (!published.ok) throw new Error(published.message);
         legacyDelivery(published.action as Action);
       }

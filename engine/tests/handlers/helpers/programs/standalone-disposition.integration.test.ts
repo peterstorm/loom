@@ -302,7 +302,7 @@ describe.sequential("admitted standalone advisory publication, correction and re
       const { startStandaloneReviewMachine, reduceStandaloneReviewMachine, serializeStandaloneReviewMachineState } = await import("../../../../src/core/standalone-review-machine");
       const { resolveAgentPolicy, resolveModelProfile, lowerModelProfile } = await import("../../../../src/core/model-profiles");
       const { legacyStandaloneContext, standaloneFixtureRegistration } = await import("../../../fixtures/standalone-reviewer-protocol");
-      const { publishInitialBatch } = await import("../../../../src/handlers/helpers/programs/helpers");
+      const { publishLegacyInitialBatch } = await import("../../../../src/handlers/helpers/programs/helpers");
       const { resumeStandaloneFacade } = await import("../../../../src/handlers/helpers/programs/standalone");
       const publisher = await import("../../../../src/handlers/helpers/programs/standalone-disposition");
       const handle = valueOf(createRunDirectory(join(root, "runs"), "legacy"));
@@ -323,7 +323,7 @@ describe.sequential("admitted standalone advisory publication, correction and re
         scopeSafety: [{ path: "README.md", status: "safe" }], roster: [{ slotId: "slot:legacy", attempts: attempts.map(row => row.authority) }] }));
       const registration = standaloneFixtureRegistration(prepared.authority);
       valueOf(await handle.registerProgram(registration));
-      const published = await publishInitialBatch(handle, prepared.initialRequests.map(authority => ({ authority,
+      const published = await publishLegacyInitialBatch(handle, prepared.initialRequests.map(authority => ({ authority,
         context: { digest: authority.contextDigest, slot: `contexts/${authority.contextDigest}.json` } })), attempts.map(row => row.packet), "standalone-review");
       expect(published.ok).toBe(true);
       const awaiting = valueOf(reduceStandaloneReviewMachine(startStandaloneReviewMachine(prepared.authority), { kind: "review-batch-published", runId: handle.runId }));

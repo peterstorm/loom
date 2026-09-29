@@ -7,6 +7,8 @@
 
 export {
   parseRegisteredFacadeProgram,
+  // Parent-side spawn admission must prove publication, not trust prompt markers.
+  publishedReviewerRequest,
   parseRemediationStartInput,
   parseStandaloneStartInput,
   parseWaveGateStartInput,

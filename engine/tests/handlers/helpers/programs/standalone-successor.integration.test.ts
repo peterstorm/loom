@@ -312,7 +312,7 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
           comments_changed: false, additions: 1, file_count: 1, new_structure: false, languages: ["TypeScript"] },
         scopeSafety: [{ path: "a.ts", status: "safe" }], roster: [{ slotId: "slot:legacy", attempts: attempts.map(row => row.authority) }] }));
       const registration = standaloneFixtureRegistration(prepared.authority); value(await handle.registerProgram(registration));
-      const batch = await helpers.publishInitialBatch(handle, prepared.initialRequests.map(authority => ({ authority,
+      const batch = await helpers.publishLegacyInitialBatch(handle, prepared.initialRequests.map(authority => ({ authority,
         context: { digest: authority.contextDigest, slot: `contexts/${authority.contextDigest}.json` } })), attempts.map(row => row.packet), "standalone-review");
       expect(batch.ok).toBe(true);
       const awaiting = value(machine.reduceStandaloneReviewMachine(machine.startStandaloneReviewMachine(prepared.authority), { kind: "review-batch-published", runId: handle.runId }));
