@@ -34,6 +34,15 @@ import {
   PI_EXTENSION_RUNTIME_ROOT_ENV,
 } from "../src/runtime-compatibility";
 
+// Route election is ambient-env sensitive: the engine elects the reviewer
+// issue route from this process's PI_PROVIDER/PI_MODEL/PI_REASONING_LEVEL.
+// These fixtures pin the catalog route, so an ambient Pi handshake (a wrapper
+// session running the suite under the qualified-local model) must not flip
+// spawn admission or capture routing mid-file.
+for (const routeEnv of ["PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL"] as const) {
+  delete process.env[routeEnv];
+}
+
 type Handler = (event: Record<string, unknown>, context: Record<string, unknown>) => unknown;
 
 class FakePi {

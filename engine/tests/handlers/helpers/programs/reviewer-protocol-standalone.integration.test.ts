@@ -19,6 +19,16 @@ import { captureHarnessResult } from "../../../../src/orchestration/harness-capt
 import { disposeFixturePiSessions, fixturePiEnvironment, fixtureSession, withFixturePiSession } from "../../../fixtures/pi-session";
 import { readSessionRunBindings } from "../../../../src/orchestration/session-run-bindings";
 
+// Route election is ambient-env sensitive: observedReviewerIssueRoute() reads
+// this process's PI_PROVIDER/PI_MODEL/PI_REASONING_LEVEL, and
+// fixturePiEnvironment spreads process.env into every CLI child. These
+// fixtures pin the catalog issue route, so an ambient Pi handshake (a wrapper
+// session running the suite under the qualified-local model) must not flip
+// the election and re-shape issued/retry prompts.
+for (const routeEnv of ["PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL"] as const) {
+  delete process.env[routeEnv];
+}
+
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 const cli = fileURLToPath(new URL("../../../../src/cli.ts", import.meta.url));
 const roots: string[] = [];

@@ -509,14 +509,21 @@ function transitionedTask(
   }
   if (transition.kind === "retry-required" || transition.kind === "escalation-required") {
     if (facts.normalizedEvidence === undefined) throw new Error(`${transition.kind} transition requires normalized evidence`);
-    const repositoryBaseline = task.repository_baseline ?? task.attempt_repository_baseline;
+    // Each attempt owns the repository boundary frozen at its own spawn. A
+    // retry retires the prior attempt's boundary and its unresolved-foreign
+    // diagnostics: the next registration freezes a FRESH boundary instead of
+    // inheriting a stale attempt-1 snapshot that turns every unrelated
+    // repository movement between attempts into out-of-scope evidence for
+    // THIS task (the wave-3 cross-task retry jam). Foreign or sibling paths
+    // observed DURING an attempt still invalidate its review — only the
+    // inter-attempt carry is gone. The cleared pair also keeps the State File
+    // wire invariant (unresolved_repository_paths requires repository_baseline)
+    // satisfiable — they retire together or not at all.
     const pending = {
       ...common,
       status: "pending" as const,
-      ...(repositoryBaseline === undefined ? {} : { repository_baseline: repositoryBaseline }),
-      unresolved_repository_paths: facts.bytes.unresolvedRepositoryPaths.length === 0
-        ? undefined
-        : facts.bytes.unresolvedRepositoryPaths,
+      repository_baseline: undefined,
+      unresolved_repository_paths: undefined,
       legacy_missing_proof: undefined,
       failure_reason: `${transition.kind}: ${transitionFailureKinds(transition).join(", ")}`,
       retry_count: transition.kind === "retry-required" ? 1 : 2,
@@ -527,18 +534,17 @@ function transitionedTask(
       : { ...pending, proof: transition.proof, revalidation_required: undefined };
   }
   if (task.proof === undefined) throw new Error("infrastructure settlement requires historical Proof audit data");
-  const byteOutcome = facts.bytes.suite.checks[0]?.outcome;
-  const unresolvedRepositoryPaths = byteOutcome?.kind === "observation-unavailable"
-    ? task.unresolved_repository_paths
-    : facts.bytes.unresolvedRepositoryPaths;
+  // Same per-attempt boundary policy as the semantic retry arms above: an
+  // infrastructure-blocked settlement retires the attempt boundary and its
+  // unresolved-foreign diagnostics too — whether newly observed during this
+  // attempt or carried from the suspended one — so the re-armed attempt
+  // freezes a fresh boundary instead of resurrecting a stale snapshot.
   return {
     ...common,
     status: "pending",
     proof: task.proof,
-    repository_baseline: task.repository_baseline ?? task.attempt_repository_baseline,
-    unresolved_repository_paths: unresolvedRepositoryPaths === undefined || unresolvedRepositoryPaths.length === 0
-      ? undefined
-      : unresolvedRepositoryPaths,
+    repository_baseline: undefined,
+    unresolved_repository_paths: undefined,
     revalidation_required: true,
     legacy_missing_proof: undefined,
     failure_reason: `infrastructure-blocked: ${transitionFailureKinds(transition).join(", ")}`,
