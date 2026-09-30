@@ -7,6 +7,7 @@ import {
   type ArtifactSnapshot,
   type DeclaredArtifactBaseline,
 } from "../core/artifact-baseline";
+import { compareStrings } from "../core/ordering";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "./repository-path";
 
 function digest(bytes: Uint8Array): string {
@@ -227,6 +228,9 @@ export interface AttemptBaselineTask {
   readonly attempt_artifact_baseline?: readonly DeclaredArtifactBaseline[];
   readonly attempt_repository_baseline?: readonly DeclaredArtifactBaseline[];
   readonly file_list?: readonly string[];
+  /** The trusted Git commit retained at attempt start; the byte source for
+   *  runtime-baseline restoration of declared artifacts that were clean then. */
+  readonly start_sha?: string;
 }
 
 export interface AttemptBaselineComparison {
@@ -237,6 +241,48 @@ export interface AttemptBaselineComparison {
   readonly bytesChangedSinceAttempt: boolean;
   /** The comparison's failure cause, or null on a clean comparison. */
   readonly failure: string | null;
+}
+
+/**
+ * The runtime-baseline restoration map for implementation settlement.
+ *
+ * For each task's declared file_list path that is Git-dirty NOW, decide whether
+ * the settlement's runtime-revision comparison may hash that path at its
+ * attempt-start bytes instead of its live (implemented) bytes:
+ *
+ * - clean now → unmapped (live bytes ARE the baseline bytes);
+ * - provably clean at attempt start (`start_sha` present and the attempt's
+ *   repository baseline does not list the path as dirty then) and the path
+ *   exists at `start_sha` → mapped to `start_sha` (hash the baseline bytes);
+ * - created by the attempt (absent at `start_sha`) → mapped to `null`
+ *   (excluded from the revision entirely);
+ * - dirty at attempt start, or no trusted `start_sha` → unmapped: the write
+ *   boundary stays strict for that path. Fail closed — restoration is an
+ *   exemption, and an exemption that cannot prove its precondition must not
+ *   exist.
+ */
+export function runtimeBaselineRestoreForTasks(
+  root: string,
+  tasks: readonly AttemptBaselineTask[],
+): ReadonlyMap<string, string | null> {
+  const dirty = new Set(repositoryChangedPaths(root));
+  const restore = new Map<string, string | null>();
+  for (const task of tasks) {
+    let dirtyAtSpawn: Set<string> | null = null;
+    if (task.attempt_repository_baseline !== undefined) {
+      const parsed = parseDeclaredArtifactBaseline(task.attempt_repository_baseline, "attempt repository baseline");
+      if (!parsed.ok) continue; // unparseable baseline: no restoration for this task
+      dirtyAtSpawn = new Set(parsed.value.map((entry) => entry.artifact));
+    }
+    for (const path of task.file_list ?? []) {
+      if (!dirty.has(path)) continue; // clean now: nothing to restore
+      if (dirtyAtSpawn?.has(path)) continue; // dirty at spawn: baseline bytes untrusted
+      const revision = task.start_sha;
+      if (revision === undefined || !/^[0-9a-f]{40}$/.test(revision)) continue;
+      restore.set(path, artifactExistsAtRevision(root, revision, path) ? revision : null);
+    }
+  }
+  return Object.freeze(new Map([...restore].sort(([left], [right]) => compareStrings(left, right))));
 }
 
 /**

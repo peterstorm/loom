@@ -27,7 +27,7 @@ import {
 import type { ActiveWaveGateRegistration, CompletedWaveGateRegistration, TaskGraph } from "./types";
 import type { DomainResult } from "./core/orchestration-contract";
 import { resetWaveGateReviewAuthority, type WaveCompletionCommit, type WaveCompletionCommitError } from "./core/wave-gate-machine";
-import { assertPiCliMutationCompatible, captureLoomRuntimeIdentity } from "./runtime-compatibility";
+import { assertPiCliMutationCompatible, captureLoomRuntimeIdentityRestoring, type RuntimeBaselineRestore } from "./runtime-compatibility";
 import { waveGateAuthorityDigest } from "./core/wave-review-authority";
 import {
   anchoredDirectoryHasIdentity,
@@ -308,13 +308,20 @@ export function findRegisteredWaveGateCompletionReplay(
 export class StateManager {
   private readonly path: string;
   private readonly authority: TaskGraphFileAuthority;
+  /** Declared artifacts of the in-flight implementation attempts, hashed at
+   *  their attempt-start bytes by the write boundary's revision comparison.
+   *  Empty = the strict full-domain comparison (every non-implementation
+   *  caller). See captureLoomRuntimeIdentityRestoring. */
+  private readonly runtimeBaselineRestore: RuntimeBaselineRestore;
 
   constructor(
     path: string,
     authority: TaskGraphFileAuthority = captureTaskGraphFileAuthority(path, false),
+    runtimeBaselineRestore: RuntimeBaselineRestore = new Map(),
   ) {
     this.path = authority.path;
     this.authority = authority;
+    this.runtimeBaselineRestore = runtimeBaselineRestore;
   }
 
   static fromSession(sessionId?: string): StateManager | null {
@@ -323,9 +330,12 @@ export class StateManager {
   }
 
   /** Pi parent adapter seam; see resolveLocalSessionTaskGraphAuthority. */
-  static fromLocalSession(sessionId: string): StateManager | null {
+  static fromLocalSession(
+    sessionId: string,
+    runtimeBaselineRestore: RuntimeBaselineRestore = new Map(),
+  ): StateManager | null {
     const authority = resolveLocalSessionTaskGraphAuthority(sessionId);
-    return authority === null ? null : new StateManager(authority.path, authority);
+    return authority === null ? null : new StateManager(authority.path, authority, runtimeBaselineRestore);
   }
 
   /**
@@ -625,7 +635,15 @@ export class StateManager {
     // This is the final shared write boundary, including replacement/repair
     // paths. Check before lock creation so a skewed fresh CLI leaves the
     // protected graph byte-for-byte and metadata-for-metadata untouched.
-    assertPiCliMutationCompatible(process.env, captureLoomRuntimeIdentity(PACKAGE_ROOT));
+    // Implementation settlement restores the in-flight attempts' declared
+    // artifacts to their attempt-start bytes for this comparison: the attempt
+    // writing those files is the product, not runtime drift. Every path outside
+    // the restore map still hashes live, so any other drift refuses exactly as
+    // before. An empty restore map is the strict full-domain capture.
+    assertPiCliMutationCompatible(
+      process.env,
+      captureLoomRuntimeIdentityRestoring(PACKAGE_ROOT, this.runtimeBaselineRestore),
+    );
     const directory = this.openAuthorityDirectory();
     return withStateDirectoryAsync(directory, `TaskGraph atomic write of ${this.path}`, () =>
       withAnchoredDirectoryHandleLock(directory, ".task_graph", () => {

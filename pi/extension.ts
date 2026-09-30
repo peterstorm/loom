@@ -203,6 +203,7 @@ import {
 } from "../engine/src/core/implementation-completion";
 import { materializePiResources } from "./resources";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
+import { runtimeBaselineRestoreForTasks } from "../engine/src/utils/artifact-baseline";
 import { buildPiRoutingContext } from "../engine/src/utils/model-routing-context";
 import { planPiWriteGrants } from "../engine/src/core/pi-write-grant-plan";
 import {
@@ -2194,6 +2195,38 @@ async function verifyTrustedReviewRun(
   }) };
 }
 
+/**
+ * The runtime-baseline restoration map for the implementation settlements this
+ * batch finalizes: the named tasks' declared artifacts, provably clean at their
+ * attempt start, hashed at those attempt-start bytes by the write boundary's
+ * revision comparison. An implementation attempt's declared artifacts may live
+ * inside the runtime revision domain, and the attempt writing them is the
+ * product — without this restoration the settlement reads its own authorized
+ * writes as runtime drift and refuses the state update that records its
+ * outcome. Any proven-unrestorable input yields an empty map, which keeps the
+ * strict full-domain comparison in force (fail closed).
+ */
+function implementationBaselineRestoreFor(
+  manager: StateManager,
+  taskIds: readonly string[],
+): ReadonlyMap<string, string | null> {
+  if (taskIds.length === 0) return new Map();
+  try {
+    const state = manager.load();
+    const tasks = state.tasks.filter((task) => taskIds.includes(task.id));
+    if (tasks.length === 0) return new Map();
+    const boundary = observeTaskGraphProjectBoundary(manager.getPath());
+    if (boundary.kind !== "git-repository") return new Map();
+    return runtimeBaselineRestoreForTasks(boundary.root, tasks);
+  } catch (error) {
+    process.stderr.write(
+      `loom(pi): implementation runtime-baseline restore unavailable, strict revision comparison stays: ` +
+      `${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    return new Map();
+  }
+}
+
 async function verifyTrustedStandaloneReview(input: Readonly<{ cwd: string; sessionId: string }>): Promise<LoomReviewAuthorityReceipt> {
   const sessionRoots = trustedReviewRuns.get(input.sessionId);
   if (sessionRoots === undefined) throw new Error(`no request-bound Loom captures were witnessed for Pi session ${input.sessionId}`);
@@ -3556,6 +3589,25 @@ export default function (
       }
       const finalizedAt = parseIsoInstant(new Date().toISOString(), "Pi finalization instant");
       if (!finalizedAt.ok) return [finalizedAt.error.errors.join("; ")];
+      // Restore the reserved attempts' declared artifacts to their attempt-start
+      // bytes for the write boundary's revision comparison, so the settlement of
+      // an attempt that (correctly) wrote engine/src or pi files is not refused
+      // as runtime drift. Unprovable inputs yield an empty map: strict stays.
+      const finalizeRestore = implementationBaselineRestoreFor(
+        manager,
+        reservation.items.flatMap((item) =>
+          item.kind === "implementation" && item.taskId !== null ? [item.taskId] : []),
+      );
+      if (finalizeRestore.size > 0) {
+        try {
+          manager = StateManager.fromLocalSession(reservation.sessionId, finalizeRestore) ?? manager;
+        } catch (error) {
+          process.stderr.write(
+            `loom(pi): baseline-restored manager construction failed; strict comparison stays: ` +
+            `${error instanceof Error ? error.message : String(error)}\n`,
+          );
+        }
+      }
       try {
         const committed = await manager.updateAndReturn((initial) => {
           let state: TaskGraph = initial;
@@ -4026,7 +4078,31 @@ export default function (
         // the state store and the repository as ports. They decide and persist;
         // this dispatcher owns stderr and owns which of their diagnostics count as
         // orchestration processing errors.
-        const store = mgr;
+        // Implementation settlement in this batch may have written declared
+        // engine/src/pi artifacts: restore those attempts' declared, clean-at-spawn
+        // artifacts to their attempt-start bytes for the write boundary's revision
+        // comparison (see implementationBaselineRestoreFor). Unprovable inputs yield
+        // an empty map and the strict full-domain comparison stays.
+        let settlementMgr = mgr;
+        try {
+          const state = mgr.load();
+          const settleTaskIds = [
+            ...new Set([
+              ...(state.executing_tasks ?? []),
+              ...(reservation?.items ?? []).flatMap((item) => item.taskId === null ? [] : [item.taskId]),
+            ]),
+          ];
+          const settleRestore = implementationBaselineRestoreFor(mgr, settleTaskIds);
+          if (settleRestore.size > 0) {
+            settlementMgr = StateManager.fromLocalSession(sessionId, settleRestore) ?? mgr;
+          }
+        } catch (error) {
+          process.stderr.write(
+            `loom(pi): implementation runtime-baseline restore unavailable, strict revision comparison stays: ` +
+            `${error instanceof Error ? error.message : String(error)}\n`,
+          );
+        }
+        const store = settlementMgr;
         // One observation owns both Pi adapters. A Git failure throws and the
         // per-result shell records infrastructure failure; it never substitutes
         // the runtime checkout or cwd for the TaskGraph's project boundary.
