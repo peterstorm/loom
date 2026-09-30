@@ -27,20 +27,31 @@
  * This adapter also preserves the historical Claude observation-fault policy
  * from the bound packet/registration; current infrastructure unavailability
  * must not consume a reviewer semantic attempt.
+ *
+ * The default transcript projection (T7) observes BOTH closed vocabularies
+ * from one bounded line walk: the final-payload candidates exactly as before,
+ * plus the assistant emission-tool-call frames — so the shared runtime's ONE
+ * canonical selection serves Claude too, and a call to an emission tool this
+ * request never advertised is REFUSED (extraction-only authority cannot be
+ * upgraded), never absorbed as absence. A caller-supplied payload reader owns
+ * its whole observation, candidates only.
  */
 
 import { readFileSync } from "node:fs";
 import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
 import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
 import type { AgentRequestAuthority } from "../../core/orchestration-contract";
+import { EMISSION_TOOL_SPECS, type EmissionSchemaVersion } from "../../core/emission-tool";
 import { isReviewAgent } from "../../config";
 import { parseRegisteredFacadeProgram } from "../helpers/programs";
 import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
-import type { FinalPayloadCandidate } from "../../core/harness-capture";
+import type { EmissionCallFrame, FinalPayloadCandidate } from "../../core/harness-capture";
+import type { PayloadProducerKindName } from "../../core/model-profiles";
 import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
 import {
   captureAuditLine,
   captureCandidates,
+  captureEmissionObservation,
   captureUnavailable,
   captureHarnessResult,
   describeCaptureFailure,
@@ -74,23 +85,28 @@ class ClaudeTranscriptJsonError extends Error {}
 
 export type ClaudePayloadReader = (transcriptPath: string) => readonly FinalPayloadCandidate[];
 
-export function claudeFinalPayloadCandidates(transcriptPath: string, maximumBytes?: number): readonly FinalPayloadCandidate[] {
-  // One read, no pre-check: `existsSync` returns false for ELOOP/ENOTDIR too,
-  // which would turn an unreadable transcript into a silent "no candidates"
-  // before readFileSync could surface the cause. Once the locator selected this
-  // path, EVERY read failure — including ENOENT when the file disappeared — is
-  // filesystem evidence the operator must see, never a missing-payload claim.
-  const lines = ((): readonly string[] => {
-    try {
-      return (maximumBytes === undefined ? readFileSync(transcriptPath, "utf-8")
-        : new TextDecoder("utf-8", { fatal: true }).decode(readRunBytesNoFollow(transcriptPath, maximumBytes))).split("\n");
-    } catch (error) {
-      throw new ClaudeTranscriptReadError(
-        `cannot read Claude transcript ${transcriptPath}: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-  })();
+/** The bounded transcript read behind BOTH transcript projections. One read,
+ *  no pre-check: `existsSync` returns false for ELOOP/ENOTDIR too, which would
+ *  turn an unreadable transcript into a silent "no candidates" before
+ *  readFileSync could surface the cause. Once the locator selected this path,
+ *  EVERY read failure — including ENOENT when the file disappeared — is
+ *  filesystem evidence the operator must see, never a missing-payload claim. */
+function claudeTranscriptLines(transcriptPath: string, maximumBytes?: number): readonly string[] {
+  try {
+    return (maximumBytes === undefined ? readFileSync(transcriptPath, "utf-8")
+      : new TextDecoder("utf-8", { fatal: true }).decode(readRunBytesNoFollow(transcriptPath, maximumBytes))).split("\n");
+  } catch (error) {
+    throw new ClaudeTranscriptReadError(
+      `cannot read Claude transcript ${transcriptPath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
 
+export function claudeFinalPayloadCandidates(transcriptPath: string, maximumBytes?: number): readonly FinalPayloadCandidate[] {
+  return claudeCandidatesFromLines(claudeTranscriptLines(transcriptPath, maximumBytes));
+}
+
+function claudeCandidatesFromLines(lines: readonly string[]): readonly FinalPayloadCandidate[] {
   const finalIndex = lines.findLastIndex((line) => line.trim().length > 0);
   if (finalIndex < 0) return Object.freeze([]);
   const blocks = assistantTextBlocksOf(lines[finalIndex], finalIndex);
@@ -126,6 +142,215 @@ function assistantTextBlocksOf(line: string | undefined, zeroBasedLine: number):
     .map((block) => block["text"])
     .filter((text): text is string => typeof text === "string");
   return Object.freeze(texts);
+}
+
+// ---------------------------------------------------------------------------
+// Emission-family transcript observation (T7; AD-8, FR-014)
+// ---------------------------------------------------------------------------
+
+/**
+ * The engine-side projection of the closed emission-tool family — the same
+ * frozen-registry classification `pi/emission-tool` projects on the Pi side,
+ * derived here from the SAME registry source with the SAME duplicate-name
+ * invariant guard, because the engine adapter cannot import the pi module
+ * (pi → engine, never outward). A registered name carries its registry
+ * producer kind; a PREFIX-reserved name the registry does not freeze is an
+ * observed-but-unbindable emission call; everything else is unrelated.
+ */
+export type ClaudeEmissionToolFamily =
+  | Readonly<{ kind: "unrelated" }>
+  | Readonly<{ kind: "registered"; producerKind: PayloadProducerKindName }>
+  | Readonly<{ kind: "unregistered-emission-name" }>;
+
+const EMISSION_TOOL_NAME_PREFIX = "loom_emit_";
+
+const producerKindsByToolName = (): ReadonlyMap<string, PayloadProducerKindName> => {
+  const projection = new Map<string, PayloadProducerKindName>();
+  for (const [kindName, spec] of Object.entries(EMISSION_TOOL_SPECS)) {
+    if (projection.has(spec.toolName)) {
+      throw new Error(`emission tool registry invariant failed: duplicate tool name ${spec.toolName}`);
+    }
+    projection.set(spec.toolName, kindName as PayloadProducerKindName);
+  }
+  return projection;
+};
+
+const claudeKindByToolName = producerKindsByToolName();
+
+export function claudeEmissionToolFamily(toolName: unknown): ClaudeEmissionToolFamily {
+  if (typeof toolName !== "string") return Object.freeze({ kind: "unrelated" as const });
+  const registeredKind = claudeKindByToolName.get(toolName);
+  if (registeredKind !== undefined) {
+    return Object.freeze({ kind: "registered" as const, producerKind: registeredKind });
+  }
+  return toolName.startsWith(EMISSION_TOOL_NAME_PREFIX)
+    ? Object.freeze({ kind: "unregistered-emission-name" as const })
+    : Object.freeze({ kind: "unrelated" as const });
+}
+
+/** What the frame scan attributes to each observed call: the correlated
+ *  request's id (verified, never trusted, by the selection's binding check)
+ *  and the registration's issued schema version — version and digest come
+ *  from the ISSUED registration, never from the model's arguments (AD-7). */
+export type ClaudeEmissionAttribution = Readonly<{
+  requestId: string;
+  version: EmissionSchemaVersion | null;
+}>;
+
+interface ClaudeToolUseBlock {
+  readonly origin: string;
+  readonly id: string | null;
+  readonly name: unknown;
+  readonly input: unknown;
+}
+
+/** Collect the assistant `tool_use` blocks and the tool results (keyed by
+ *  `tool_use_id`) from one bounded line walk. TOLERANT, like the Pi adapter's
+ *  independent scan: an unrelated malformed line cannot carry an emission
+ *  call and is skipped for the FRAMES only — the final-line candidates keep
+ *  their strict malformed-JSON refusal through `assistantTextBlocksOf`. */
+function collectClaudeToolBlocks(lines: readonly string[]): {
+  readonly toolUses: readonly ClaudeToolUseBlock[];
+  readonly resultsByCallId: ReadonlyMap<string, { readonly isError: unknown; readonly count: number }>;
+} {
+  const toolUses: ClaudeToolUseBlock[] = [];
+  const resultCounts = new Map<string, { isError: unknown; count: number }>();
+  for (const [lineIndex, line] of lines.entries()) {
+    if (line.trim().length === 0) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line) as unknown;
+    } catch {
+      continue; // An unparseable unrelated line carries no emission call.
+    }
+    if (typeof parsed !== "object" || parsed === null) continue;
+    const message = (parsed as Record<string, unknown>)["message"];
+    if (typeof message !== "object" || message === null) continue;
+    const record = message as Record<string, unknown>;
+    if (!Array.isArray(record["content"])) continue;
+    const origin = `transcript.line[${lineIndex}]`;
+    if (record["role"] === "assistant") {
+      for (const block of record["content"] as readonly unknown[]) {
+        if (typeof block !== "object" || block === null) continue;
+        const toolUse = block as Record<string, unknown>;
+        if (toolUse["type"] !== "tool_use") continue;
+        const id = typeof toolUse["id"] === "string" && toolUse["id"].trim() !== "" ? toolUse["id"] : null;
+        toolUses.push({ origin, id, name: toolUse["name"], input: toolUse["input"] });
+      }
+      continue;
+    }
+    if (record["role"] === "user") {
+      for (const block of record["content"] as readonly unknown[]) {
+        if (typeof block !== "object" || block === null) continue;
+        const toolResult = block as Record<string, unknown>;
+        if (toolResult["type"] !== "tool_result") continue;
+        const toolUseId = toolResult["tool_use_id"];
+        if (typeof toolUseId !== "string" || toolUseId === "") continue;
+        const seen = resultCounts.get(toolUseId);
+        resultCounts.set(toolUseId, { isError: toolResult["is_error"], count: (seen?.count ?? 0) + 1 });
+      }
+    }
+  }
+  return { toolUses: Object.freeze(toolUses), resultsByCallId: resultCounts };
+}
+
+/**
+ * The emission-tool-call frames observed in a Claude transcript — the same
+ * closed vocabulary the Pi adapter projects, so the capture runtime's ONE
+ * fold and selection serve both harnesses (FR-033's shared refusals).
+ *
+ * ASSISTANT TOOL CALLS ONLY (AD-8): JSON pasted into text is a
+ * `FinalPayloadCandidate`, never an emission frame. FAMILY BY REGISTRY, NOT
+ * BY SHAPE. Successful execution only (AS-021): a call becomes complete only
+ * when its transcript also carries exactly one finalized, successful
+ * `tool_result` — aborted, failed, missing, duplicate, or mismatched results
+ * become incomplete frames, so a streamed-but-unexecuted call can never
+ * become authoritative output. An incomplete observation is REPRESENTABLE as
+ * itself and the runtime's fold refuses it — never reclassified as absence.
+ */
+export function claudeEmissionFramesFromLines(
+  lines: readonly string[],
+  attributed: ClaudeEmissionAttribution,
+): readonly EmissionCallFrame[] {
+  const { toolUses, resultsByCallId } = collectClaudeToolBlocks(lines);
+  const frames: EmissionCallFrame[] = [];
+  for (const toolUse of toolUses) {
+    const family = claudeEmissionToolFamily(toolUse.name);
+    if (family.kind === "unrelated") continue;
+    if (family.kind === "unregistered-emission-name") {
+      frames.push(Object.freeze({
+        kind: "incomplete" as const,
+        toolCallId: toolUse.id,
+        reason: `${toolUse.origin} names tool ${JSON.stringify(toolUse.name)}, which selects no frozen registry producer kind`,
+      }));
+      continue;
+    }
+    if (toolUse.id === null) {
+      frames.push(Object.freeze({
+        kind: "incomplete" as const,
+        toolCallId: null,
+        reason: `an emission tool call to ${JSON.stringify(toolUse.name)} was observed without a recoverable tool-call identity (${toolUse.origin})`,
+      }));
+      continue;
+    }
+    if (attributed.version === null) {
+      frames.push(Object.freeze({
+        kind: "incomplete" as const,
+        toolCallId: toolUse.id,
+        reason: `emission tool call ${toolUse.id} carries no issued schema version to bind against (${toolUse.origin})`,
+      }));
+      continue;
+    }
+    if (typeof toolUse.input !== "object" || toolUse.input === null || Array.isArray(toolUse.input)) {
+      frames.push(Object.freeze({
+        kind: "incomplete" as const,
+        toolCallId: toolUse.id,
+        reason: `emission tool call ${toolUse.id} was observed with ${JSON.stringify(toolUse.input)} arguments, not an object (${toolUse.origin})`,
+      }));
+      continue;
+    }
+    const result = resultsByCallId.get(toolUse.id);
+    if (result === undefined || result.count !== 1) {
+      frames.push(Object.freeze({
+        kind: "incomplete" as const,
+        toolCallId: toolUse.id,
+        reason: result === undefined
+          ? `emission tool call ${toolUse.id} has no finalized tool result (${toolUse.origin})`
+          : `emission tool call ${toolUse.id} has ${result.count} finalized tool results; exactly one is required (${toolUse.origin})`,
+      }));
+      continue;
+    }
+    if (result.isError === true) {
+      frames.push(Object.freeze({
+        kind: "incomplete" as const,
+        toolCallId: toolUse.id,
+        reason: `emission tool call ${toolUse.id} failed (${toolUse.origin})`,
+      }));
+      continue;
+    }
+    frames.push(Object.freeze({
+      kind: "complete" as const,
+      call: Object.freeze({
+        requestId: attributed.requestId,
+        toolCallId: toolUse.id,
+        kind: Object.freeze({ kind: family.producerKind }),
+        version: attributed.version,
+        arguments: Object.freeze({ ...(toolUse.input as Record<string, unknown>) }),
+      }),
+    }));
+  }
+  return Object.freeze(frames);
+}
+
+/** The registration's issued emission schema version, as the transcript scan
+ *  attributes it — from the DURABLE registration, never from the transcript
+ *  or the model (AD-7). Archived v1 and non-review programs bind no version. */
+function issuedEmissionVersionOf(
+  parsed: ReturnType<typeof parseRegisteredFacadeProgram> | null,
+): EmissionSchemaVersion | null {
+  if (parsed === null || parsed.kind !== "registered") return null;
+  if (parsed.program.kind !== "standalone-review" && parsed.program.kind !== "wave-gate") return null;
+  return parsed.program.schemaVersion === 2 ? "v2" : parsed.program.schemaVersion === 3 ? "v3" : null;
 }
 
 /**
@@ -243,8 +468,23 @@ export async function captureClaudeResult(
       // Every current capture is bounded before decoding. The old unbounded
       // readFileSync branch admitted the impossible foreign escape, because the
       // correlated request carries no schema version to compare against.
-      return captureCandidates(readPayload === claudeFinalPayloadCandidates
-        ? claudeFinalPayloadCandidates(transcriptPath, 16_777_216) : readPayload(transcriptPath));
+      //
+      // The default transcript projection observes BOTH closed vocabularies
+      // from one bounded line walk (T7): the unchanged final-payload candidates
+      // AND the emission-family tool-call frames — so the capture runtime's ONE
+      // canonical selection serves Claude too, and a call to an emission tool
+      // this request never advertised is refused, never absorbed as absence.
+      // A caller-supplied reader owns its WHOLE observation (candidates only);
+      // the frame scan is part of the default projection.
+      if (readPayload !== claudeFinalPayloadCandidates) return captureCandidates(readPayload(transcriptPath));
+      const attributed: ClaudeEmissionAttribution | null = correlated.ok
+        ? { requestId: correlated.value.request.requestId, version: issuedEmissionVersionOf(parsedRegistration) }
+        : null;
+      const lines = claudeTranscriptLines(transcriptPath, 16_777_216);
+      const candidates = claudeCandidatesFromLines(lines);
+      return attributed === null
+        ? captureCandidates(candidates)
+        : captureEmissionObservation(claudeEmissionFramesFromLines(lines, attributed), candidates);
     } catch (error) {
       if (error instanceof ClaudeTranscriptReadError) {
         return claudeObservationUnavailable(input, runsRoot, runDirectory, "transcript-read", error.message);
