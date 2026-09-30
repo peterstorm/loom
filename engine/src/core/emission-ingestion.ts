@@ -18,7 +18,8 @@
  *   → the count of DISTINCT tool-call identities decides
  *     (zero → extraction verbatim; one → schema admission; ≥2 → ambiguity)
  *   → the single-call state admits the arguments through the registry's
- *     `admitEmissionArguments` (schema selection)
+ *     `admitEmissionArguments` (schema selection), after the schema-driven
+ *     wire-form canonicalization of the observed transport form
  *
  * The observation side of that pipeline — the transport frames, the closed
  * emission observation and its ONE fold — lives in `harness-capture` (the
@@ -54,9 +55,12 @@
 import { createHash } from "node:crypto";
 import {
   admitEmissionArguments,
+  canonicalizeEmissionWireArguments,
   EMISSION_TOOL_SPECS,
+  frozenPayloadSchemaParameters,
   type EmissionArgumentAdmission,
   type EmissionParseFailure,
+  type EmissionToolSpec,
   type IssuedEmissionBinding,
   type IssuedEmissionBindingOf,
 } from "./emission-tool";
@@ -132,12 +136,38 @@ function observationCalls(observation: EmissionObservation): readonly EmissionTo
 
 /** The binding-scoped admission: the arguments are admitted through the
  *  ISSUED binding's registry cell — the schema selection happens here and
- *  only here, after the binding check, never from the call's own claims. */
+ *  only here, after the binding check, never from the call's own claims.
+ *
+ *  The observed wire form is canonicalized FIRST — the same schema-driven
+ *  transport parse the child's `prepareArguments` runs over the frozen bytes.
+ *  The transcript records what the model emitted (the raw transport form),
+ *  not what the child executed (the canonical payload pi validated), so on
+ *  routes without server-side constrained decoding the observed arguments
+ *  carry JSON-encoded strings for declared non-string fields even when the
+ *  payload itself conforms. The canonicalization parses only values a
+ *  declared non-string type can accept from their JSON encoding; every
+ *  genuinely non-conforming form still refuses through the SAME frozen-bytes
+ *  parse with its own vocabulary — one schema, one contract, a transport
+ *  parse rather than a second schema. */
 const admitBoundCall = (
   expected: IssuedEmissionBinding,
   call: EmissionToolCall,
-): EmissionArgumentAdmission =>
-  admitEmissionArguments(EMISSION_TOOL_SPECS[expected.kind.kind], expected.version, call.arguments);
+): EmissionArgumentAdmission => {
+  // The annotation collapses the registry's frozen literal union to the spec
+  // interface: the (kind, version) pair is registry-carried by the mint, so
+  // the indexed cell is defined for every minted binding (the undefined arm
+  // below is the typed lookup miss admitEmissionArguments itself refuses).
+  const spec: EmissionToolSpec = EMISSION_TOOL_SPECS[expected.kind.kind];
+  const schemaVersion = spec.schemaVersions[expected.version];
+  if (schemaVersion === undefined) {
+    return admitEmissionArguments(spec, expected.version, call.arguments);
+  }
+  const canonical = canonicalizeEmissionWireArguments(
+    frozenPayloadSchemaParameters(schemaVersion.schemaBytes),
+    call.arguments,
+  );
+  return admitEmissionArguments(spec, expected.version, canonical);
+};
 
 /** The retained single-call refusal (FR-006): the admission's code and
  *  message verbatim, canonical-recorded so the diagnostic is bounded. */

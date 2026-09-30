@@ -995,6 +995,94 @@ describe("whitespace-only schema-vs-parser disagreement (AD-5)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// The binding-scoped admission's wire-form canonicalization (the transport
+// parse at the ingestion boundary)
+// ---------------------------------------------------------------------------
+
+/** The recorded transport class the unconstrained local route produces: the
+ *  transcript observes what the model emitted — JSON-encoded strings for
+ *  declared non-string fields — while the child executed the canonical
+ *  payload pi validated through `prepareArguments`. */
+const wireFormOf = (payload: unknown): unknown => {
+  const record = payload as Record<string, unknown>;
+  const wire: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record)) {
+    wire[key] = typeof value === "number"
+      ? JSON.stringify(value)
+      : Array.isArray(value) || (typeof value === "object" && value !== null)
+        ? JSON.stringify(value)
+        : value;
+  }
+  return wire;
+};
+
+describe("the binding-scoped admission canonicalizes the observed wire form", () => {
+  it("selects the recorded string-typed wire form as emission-tool-arguments with the canonical payload", () => {
+    const wire = wireFormOf(REVIEWER_PAYLOAD_EXAMPLE_V2) as Record<string, unknown>;
+    expect(wire["schemaVersion"]).toBe("2");
+    expect(typeof wire["findings"]).toBe("string");
+    const selection = selectCanonicalPayload(
+      REVIEWER_V2,
+      observeEmissionCalls([frameOf(callOf(REVIEWER_V2, "call-wire", wire))]),
+      [],
+    );
+    expect(selection.kind).toBe("emission-tool-arguments");
+    if (selection.kind === "emission-tool-arguments") {
+      expect(canonicalStructuralEquals(JSON.parse(selection.payload.text), REVIEWER_PAYLOAD_EXAMPLE_V2)).toBe(true);
+      // The provenance call keeps the OBSERVED transport form — the audit
+      // trail records what the model emitted, not the canonicalization.
+      expect(selection.call.arguments).toEqual(wire);
+    }
+  });
+
+  it("canonicalizes the verdict path's observed wire form through its own binding", () => {
+    const wire = wireFormOf(validJudgeArguments("extensibility"));
+    const selection = selectVerdictSource(
+      JUDGE_V1,
+      observeEmissionCalls([frameOf(callOf(JUDGE_V1, "call-wire", wire))]),
+      "the captured attempt bytes",
+    );
+    expect(selection.kind).toBe("emission-tool-arguments");
+    if (selection.kind === "emission-tool-arguments") {
+      expect(JSON.parse(selection.rawJson)).toEqual(validJudgeArguments("extensibility"));
+    }
+  });
+
+  it("still refuses a wire form no declared type can accept — both causes retained, no invented fields", () => {
+    const unparseable = { schemaVersion: "two", kind: "standalone-review", findings: "not json" };
+    const selection = selectCanonicalPayload(
+      REVIEWER_V2,
+      observeEmissionCalls([frameOf(callOf(REVIEWER_V2, "call-unparseable", unparseable))]),
+      [],
+    );
+    expect(selection.kind).toBe("refused-call-no-fallback");
+    if (selection.kind === "refused-call-no-fallback") {
+      expect(selection.emissionRefusal.code).toBe("invalid-payload");
+      expect(selection.extraction.reason).toBe("no-final-payload");
+    }
+  });
+
+  it("is idempotent over already-canonical observed arguments — the child-executed form selects identically", () => {
+    const fromCanonical = selectCanonicalPayload(
+      REVIEWER_V2,
+      observeEmissionCalls([frameOf(callOf(REVIEWER_V2, "call-1", REVIEWER_PAYLOAD_EXAMPLE_V2))]),
+      [],
+    );
+    const fromWire = selectCanonicalPayload(
+      REVIEWER_V2,
+      observeEmissionCalls([frameOf(callOf(REVIEWER_V2, "call-2", wireFormOf(REVIEWER_PAYLOAD_EXAMPLE_V2)))]),
+      [],
+    );
+    expect(fromCanonical.kind).toBe("emission-tool-arguments");
+    expect(fromWire.kind).toBe("emission-tool-arguments");
+    if (fromCanonical.kind === "emission-tool-arguments" && fromWire.kind === "emission-tool-arguments") {
+      expect(fromWire.payload.text).toBe(fromCanonical.payload.text);
+      expect(fromWire.payload.digest).toBe(fromCanonical.payload.digest);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Type-level pins
 // ---------------------------------------------------------------------------
 
