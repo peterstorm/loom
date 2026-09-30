@@ -1726,5 +1726,113 @@ describe("the engine capture seam selects the canonical emission source", () => 
       expect(read.ok).toBe(true);
       if (read.ok) expect(read.value).toBeNull();
     });
+
+    it("represents an unclassifiable line as an incomplete frame instead of provable absence (AD-8)", () => {
+      // The upheld capture-review critical's exact scenario: the emission
+      // tool_use line is truncated (partial flush), the final line still
+      // parses as usable text. The tolerant walk cannot claim "no emission
+      // calls" — the corrupted line may hide the call — so the scan must
+      // surface the incompleteness in the closed vocabulary.
+      const lines = [
+        JSON.stringify({ message: { role: "assistant", content: [
+          { type: "text", text: "thinking" },
+        ] } }),
+        `{"message":{"role":"assistant","content":[{"type":"tool_use","id":"tu-lost","name":"${REVIEWER_TOOL}"`,
+        JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "VERDICT: PASSED\n" }] } }),
+      ];
+      const frames = claudeEmissionFramesFromLines(lines, { requestId: "request:reviewer:1", version: "v2" });
+      expect(frames).toHaveLength(1);
+      if (frames[0]!.kind !== "incomplete") throw new Error("narrowing");
+      expect(frames[0]!.reason).toContain("unclassifiable line");
+      expect(frames[0]!.reason).toContain("transcript.line[1]");
+      expect(frames[0]!.reason).toContain("cannot claim absence");
+    });
+
+    it("represents orphan tool results as incomplete frames naming the lost call ids", () => {
+      // The emission call's tool_use line was lost; its tool_result survived.
+      // The orphan id is the walk's only witness to the lost call.
+      const lines = [
+        JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "thinking" }] } }),
+        JSON.stringify({ message: { role: "user", content: [
+          { type: "tool_result", tool_use_id: "tu-orphan", is_error: false },
+        ] } }),
+        JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "VERDICT: PASSED\n" }] } }),
+      ];
+      const frames = claudeEmissionFramesFromLines(lines, { requestId: "request:reviewer:1", version: "v2" });
+      expect(frames).toHaveLength(1);
+      if (frames[0]!.kind !== "incomplete") throw new Error("narrowing");
+      expect(frames[0]!.reason).toContain("orphan tool result");
+      expect(frames[0]!.reason).toContain("tu-orphan");
+    });
+
+    it("keeps a clean zero-call walk on the ordinary no-tool observation", () => {
+      // The incompleteness guard must not fire on well-formed transcripts:
+      // a blank-padded, message-shaped walk with no unparseable lines and no
+      // orphan results observes absence legitimately.
+      const lines = [
+        "",
+        JSON.stringify({ message: { role: "assistant", content: [
+          { type: "tool_use", id: "tu-scratch", name: "Bash", input: { command: "ls" } },
+        ] } }),
+        JSON.stringify({ message: { role: "user", content: [
+          { type: "tool_result", tool_use_id: "tu-scratch", is_error: false },
+        ] } }),
+        JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "done" }] } }),
+        "",
+      ];
+      expect(claudeEmissionFramesFromLines(lines, { requestId: "request:reviewer:1", version: "v2" })).toEqual([]);
+    });
+
+    it("refuses a capture whose transcript lost an emission call to a corrupted line instead of silently extracting", async () => {
+      const staged = await stagedWaveRun({ harness: "claude", nativeId: "agent-abc" });
+      const transcriptPath = join(staged.directory, "corrupted-emission-transcript.jsonl");
+      // Line 1 carried the emission tool_use and was truncated mid-write; the
+      // final line's text would pass extraction. Pre-fix this captured as a
+      // plain extraction fallback with no trace of the lost call.
+      writeFileSync(transcriptPath, [
+        `{"message":{"role":"assistant","content":[{"type":"tool_use","id":"tu-lost","name":"${REVIEWER_TOOL}"`,
+        JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "VERDICT: PASSED\n" }] } }),
+      ].join("\n") + "\n");
+
+      const outcome = await captureClaudeResult(
+        { session_id: "s1", agent_id: "agent-abc", agent_type: "code-reviewer", agent_transcript_path: transcriptPath },
+        staged.runsRoot,
+        staged.directory,
+      );
+      // The incomplete walk yields a frame; extraction-only authority cannot
+      // be upgraded by an observed emission call, so the capture terminalises
+      // with the refusal naming the unreadable line — never silence.
+      expect(outcome.kind).toBe("terminal-rejection");
+      if (outcome.kind !== "terminal-rejection") return;
+      expect(outcome.reason).toBe("unexpected-emission-call");
+      const rejected = staged.handle.readCaptureRejection(staged.request);
+      expect(rejected.ok).toBe(true);
+      if (rejected.ok) expect(rejected.value).toContain("unexpected-emission-call");
+    });
+
+    it("surfaces a corrupted-line walk through the qualified route as an unusable observation naming the unreadable lines", async () => {
+      const staged = await stagedWaveRun();
+      const lines = [
+        `{"message":{"role":"assistant","content":[{"type":"tool_use","id":"tu-lost","name":"${REVIEWER_TOOL}"`,
+        JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "VERDICT: PASSED\n" }] } }),
+      ];
+      const frames = claudeEmissionFramesFromLines(lines, { requestId: staged.request.requestId, version: "v2" });
+      expect(frames.some((frame) => frame.kind === "incomplete")).toBe(true);
+      const outcome = await captureEmission(staged, frames, [textCandidate("content[0].text", "VERDICT: PASSED\n")]);
+
+      // The incomplete walk is represented as itself in the closed vocabulary:
+      // an unusable observation that terminalises the attempt with the reason
+      // naming the unreadable lines — usable final text never papers over a
+      // transcript known to have lost lines (the same class the sole
+      // incomplete-frame arm terminalises with).
+      expect(outcome.kind).toBe("terminal-rejection");
+      if (outcome.kind !== "terminal-rejection") return;
+      expect(outcome.reason).toBe("unusable-observation");
+      expect(outcome.message).toContain("unclassifiable line");
+      expect(outcome.message).toContain("cannot claim absence");
+      const rejected = staged.handle.readCaptureRejection(staged.request);
+      expect(rejected.ok).toBe(true);
+      if (rejected.ok) expect(rejected.value).toContain("unclassifiable line");
+    });
   });
 });

@@ -204,54 +204,96 @@ interface ClaudeToolUseBlock {
   readonly input: unknown;
 }
 
+/** The assistant `tool_use` blocks of one assistant message's content array. */
+function collectClaudeToolUses(
+  content: readonly unknown[],
+  origin: string,
+  sink: ClaudeToolUseBlock[],
+): void {
+  for (const block of content) {
+    if (typeof block !== "object" || block === null) continue;
+    const toolUse = block as Record<string, unknown>;
+    if (toolUse["type"] !== "tool_use") continue;
+    const id = typeof toolUse["id"] === "string" && toolUse["id"].trim() !== "" ? toolUse["id"] : null;
+    sink.push({ origin, id, name: toolUse["name"], input: toolUse["input"] });
+  }
+}
+
+/** The tool results (keyed by `tool_use_id`) of one user message's content array. */
+function collectClaudeToolResults(
+  content: readonly unknown[],
+  sink: Map<string, { isError: unknown; count: number }>,
+): void {
+  for (const block of content) {
+    if (typeof block !== "object" || block === null) continue;
+    const toolResult = block as Record<string, unknown>;
+    if (toolResult["type"] !== "tool_result") continue;
+    const toolUseId = toolResult["tool_use_id"];
+    if (typeof toolUseId !== "string" || toolUseId === "") continue;
+    const seen = sink.get(toolUseId);
+    sink.set(toolUseId, { isError: toolResult["is_error"], count: (seen?.count ?? 0) + 1 });
+  }
+}
+
 /** Collect the assistant `tool_use` blocks and the tool results (keyed by
- *  `tool_use_id`) from one bounded line walk. TOLERANT, like the Pi adapter's
- *  independent scan: an unrelated malformed line cannot carry an emission
- *  call and is skipped for the FRAMES only — the final-line candidates keep
- *  their strict malformed-JSON refusal through `assistantTextBlocksOf`. */
+ *  `tool_use_id`) from one bounded line walk, PLUS the walk's own
+ *  incompleteness evidence. TOLERANT, like the Pi adapter's independent scan:
+ *  an unrelated malformed line cannot carry an emission call and is skipped
+ *  for the FRAMES — but it is COUNTED (AD-8, silent-failure-hunter-1): an
+ *  unclassifiable line could hide an emission call, so the frame set cannot
+ *  claim absence over it, and the count plus the orphan tool results surface
+ *  in the observation instead of being absorbed as silence. The final-line
+ *  candidates keep their strict malformed-JSON refusal through
+ *  `assistantTextBlocksOf`. Orphan results are sound on this read because
+ *  `readRunBytesNoFollow` rejects oversize files outright — the walk always
+ *  sees the whole transcript, never a head-truncated window. */
 function collectClaudeToolBlocks(lines: readonly string[]): {
   readonly toolUses: readonly ClaudeToolUseBlock[];
   readonly resultsByCallId: ReadonlyMap<string, { readonly isError: unknown; readonly count: number }>;
+  readonly unclassifiableLineCount: number;
+  readonly firstUnclassifiableLineOrigin: string | null;
+  readonly orphanResultIds: readonly string[];
 } {
   const toolUses: ClaudeToolUseBlock[] = [];
   const resultCounts = new Map<string, { isError: unknown; count: number }>();
+  let unclassifiableLineCount = 0;
+  let firstUnclassifiableLineOrigin: string | null = null;
+  const noteUnclassifiable = (lineIndex: number): void => {
+    unclassifiableLineCount += 1;
+    if (firstUnclassifiableLineOrigin === null) {
+      firstUnclassifiableLineOrigin = `transcript.line[${lineIndex}]`;
+    }
+  };
   for (const [lineIndex, line] of lines.entries()) {
     if (line.trim().length === 0) continue;
     let parsed: unknown;
     try {
       parsed = JSON.parse(line) as unknown;
     } catch {
-      continue; // An unparseable unrelated line carries no emission call.
+      noteUnclassifiable(lineIndex); // May hide an emission call: counted, never silence.
+      continue;
     }
-    if (typeof parsed !== "object" || parsed === null) continue;
+    if (typeof parsed !== "object" || parsed === null) {
+      noteUnclassifiable(lineIndex);
+      continue;
+    }
     const message = (parsed as Record<string, unknown>)["message"];
     if (typeof message !== "object" || message === null) continue;
     const record = message as Record<string, unknown>;
     if (!Array.isArray(record["content"])) continue;
     const origin = `transcript.line[${lineIndex}]`;
-    if (record["role"] === "assistant") {
-      for (const block of record["content"] as readonly unknown[]) {
-        if (typeof block !== "object" || block === null) continue;
-        const toolUse = block as Record<string, unknown>;
-        if (toolUse["type"] !== "tool_use") continue;
-        const id = typeof toolUse["id"] === "string" && toolUse["id"].trim() !== "" ? toolUse["id"] : null;
-        toolUses.push({ origin, id, name: toolUse["name"], input: toolUse["input"] });
-      }
-      continue;
-    }
-    if (record["role"] === "user") {
-      for (const block of record["content"] as readonly unknown[]) {
-        if (typeof block !== "object" || block === null) continue;
-        const toolResult = block as Record<string, unknown>;
-        if (toolResult["type"] !== "tool_result") continue;
-        const toolUseId = toolResult["tool_use_id"];
-        if (typeof toolUseId !== "string" || toolUseId === "") continue;
-        const seen = resultCounts.get(toolUseId);
-        resultCounts.set(toolUseId, { isError: toolResult["is_error"], count: (seen?.count ?? 0) + 1 });
-      }
-    }
+    if (record["role"] === "assistant") collectClaudeToolUses(record["content"], origin, toolUses);
+    else if (record["role"] === "user") collectClaudeToolResults(record["content"], resultCounts);
   }
-  return { toolUses: Object.freeze(toolUses), resultsByCallId: resultCounts };
+  const observedCallIds = new Set(toolUses.flatMap(({ id }) => id === null ? [] : [id]));
+  const orphanResultIds = [...resultCounts.keys()].filter((id) => !observedCallIds.has(id));
+  return {
+    toolUses: Object.freeze(toolUses),
+    resultsByCallId: resultCounts,
+    unclassifiableLineCount,
+    firstUnclassifiableLineOrigin,
+    orphanResultIds: Object.freeze(orphanResultIds),
+  };
 }
 
 /**
@@ -272,7 +314,8 @@ export function claudeEmissionFramesFromLines(
   lines: readonly string[],
   attributed: ClaudeEmissionAttribution,
 ): readonly EmissionCallFrame[] {
-  const { toolUses, resultsByCallId } = collectClaudeToolBlocks(lines);
+  const walk = collectClaudeToolBlocks(lines);
+  const { toolUses, resultsByCallId } = walk;
   const frames: EmissionCallFrame[] = [];
   for (const toolUse of toolUses) {
     const family = claudeEmissionToolFamily(toolUse.name);
@@ -337,6 +380,24 @@ export function claudeEmissionFramesFromLines(
         version: attributed.version,
         arguments: Object.freeze({ ...(toolUse.input as Record<string, unknown>) }),
       }),
+    }));
+  }
+  // An incomplete walk is represented as itself, never reclassified as
+  // absence (AD-8; the upheld capture-review critical): an unclassifiable
+  // line could carry the emission call and an orphan tool result proves a
+  // tool_use was lost, so "zero emission frames" would be a claim the walk
+  // cannot prove. The frame routes through the runtime's existing refused-call
+  // vocabulary — the fallback records the refusal in the durable capture
+  // source instead of absorbing the loss as silence.
+  if (walk.unclassifiableLineCount > 0 || walk.orphanResultIds.length > 0) {
+    const orphanPart = walk.orphanResultIds.length === 0 ? "" :
+      `; ${walk.orphanResultIds.length} orphan tool result(s) with call ids ${walk.orphanResultIds.slice(0, 5).join(", ")}${walk.orphanResultIds.length > 5 ? ", …" : ""} whose tool_use block was never observed`;
+    frames.push(Object.freeze({
+      kind: "incomplete" as const,
+      toolCallId: null,
+      reason: `the transcript line walk is incomplete (${walk.unclassifiableLineCount} unclassifiable line(s)` +
+        (walk.firstUnclassifiableLineOrigin === null ? "" : `, first at ${walk.firstUnclassifiableLineOrigin}`) +
+        `${orphanPart}); an emission call could be hidden there, so the emission observation cannot claim absence (AD-8)`,
     }));
   }
   return Object.freeze(frames);
