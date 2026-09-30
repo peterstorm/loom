@@ -485,44 +485,52 @@ const firstDifferingField = (seen: EmissionToolCall, call: EmissionToolCall): st
  * - An empty tool-call identity cannot be bound or replay-deduplicated, so a
  *   complete frame carrying one makes the observation unusable.
  */
-export function observeEmissionCalls(frames: readonly EmissionCallFrame[]): EmissionObservation {
+/**
+ * The frame fold's first phase: replay-deduplicate complete frames by
+ * tool-call identity (exact replays idempotent, contradictions refused with
+ * the FR-014 differing field), refuse incomplete frames and empty identities
+ * outright. The returned union keeps the refusal as data so the observation
+ * selection below stays a pure projection.
+ */
+const foldFramesToCalls = (
+  frames: readonly EmissionCallFrame[],
+): { kind: "observed"; calls: readonly EmissionToolCall[] } | { kind: "refused"; reason: string } => {
   // One structure carries first-observed order: a Map's insertion order IS
   // first-observed order, so the distinct-call set needs no parallel array to
   // keep in agreement with it.
   const callsByIdentity = new Map<string, EmissionToolCall>();
   for (const frame of frames) {
     if (frame.kind === "incomplete") {
-      return canonicalRecord({
-        kind: "unusable" as const,
-        reason: frame.toolCallId === null
-          ? `an emission tool call was observed incomplete: ${frame.reason}`
-          : `emission tool call ${frame.toolCallId} was observed incomplete: ${frame.reason}`,
-      });
+      return { kind: "refused", reason: frame.toolCallId === null
+        ? `an emission tool call was observed incomplete: ${frame.reason}`
+        : `emission tool call ${frame.toolCallId} was observed incomplete: ${frame.reason}` };
     }
     const call = canonicalCall(frame.call);
     if (call.toolCallId.length === 0) {
       // The reason names the observed producer kind: the operator journal reads
       // this diagnostic to find WHICH family's calls cannot be bound, without
       // re-opening the transcript.
-      return canonicalRecord({
-        kind: "unusable" as const,
-        reason: `an observed ${call.kind.kind} emission tool call carries an empty tool-call identity`,
-      });
+      return { kind: "refused", reason: `an observed ${call.kind.kind} emission tool call carries an empty tool-call identity` };
     }
     const seen = callsByIdentity.get(call.toolCallId);
     if (seen === undefined) {
       callsByIdentity.set(call.toolCallId, call);
     } else if (!canonicalStructuralEquals(seen, call)) {
-      return canonicalRecord({
-        kind: "unusable" as const,
-        reason:
-          `contradictory duplicate transport frames for emission tool call ${call.toolCallId} ` +
-          `(differing: ${firstDifferingField(seen, call)})`,
-      });
+      return { kind: "refused", reason:
+        `contradictory duplicate transport frames for emission tool call ${call.toolCallId} ` +
+        `(differing: ${firstDifferingField(seen, call)})` };
     }
     // else: an exact replay of one already-observed call — idempotent (FR-007).
   }
-  const observed = Object.freeze([...callsByIdentity.values()]);
+  return { kind: "observed", calls: Object.freeze([...callsByIdentity.values()]) };
+};
+
+export function observeEmissionCalls(frames: readonly EmissionCallFrame[]): EmissionObservation {
+  const folded = foldFramesToCalls(frames);
+  if (folded.kind === "refused") {
+    return canonicalRecord({ kind: "unusable" as const, reason: folded.reason });
+  }
+  const observed = folded.calls;
   if (observed.length === 0) return canonicalRecord({ kind: "absent" as const });
   const first = observed[0];
   if (first === undefined) {
