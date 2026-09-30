@@ -1202,6 +1202,156 @@ describe("the issued spawn-route projection join (T6)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Successor v3 route parity across every degraded arm (T9): the successor's
+// issued v3 claim takes the SAME closed route decision as the v2 claim on
+// every degraded route — Claude Code (no Pi parent), a schema-incompatible
+// (non-qualified) provider route, and an unprovidable child surface remain
+// explicit extraction-only with unchanged extraction semantics, and no route
+// arm can fail a producer request merely because strict sampling is
+// unsupported (INV-1/AS-005: the capability vocabulary carries no strict arm
+// at all, so "strict" is not an input the decision could demand).
+// ---------------------------------------------------------------------------
+
+describe("successor v3 route parity across every degraded arm (T9)", () => {
+  const extraction = notProvidedEmissionCapability("extraction-only surface", "extraction");
+  const hardRefuse = notProvidedEmissionCapability("child revision does not carry the tool", "refuse");
+  const issuedPiRoute = (provider: string, model: string) => Object.freeze({
+    harnessBinding: Object.freeze({ pi: Object.freeze({ provider, model }) }),
+  });
+  const qualifiedRoute = issuedPiRoute("desktop-vllm", "glm-5.3-flash-spark-tp2-v14");
+
+  it("routes the successor v3 claim to extraction-only on every degraded route, with unchanged extraction semantics (FR-010/AD-7)", () => {
+    const v3Claim = claimOf(REVIEWER_V3);
+    const degraded = [
+      ["Claude Code: no Pi parent", qualifyIssuedSpawnEmissionRoute(v3Claim, qualifiedRoute, false)],
+      ["schema-incompatible route", qualifyIssuedSpawnEmissionRoute(v3Claim, issuedPiRoute("openai-codex", "gpt-5.6-sol"), true)],
+      ["unprovidable child surface", decideRequestEmissionRoute(v3Claim, extraction)],
+    ] as const;
+    for (const [label, route] of degraded) {
+      expect(route.kind, label).toBe("extraction-only");
+      if (route.kind !== "extraction-only") throw new Error(`${label} fixture must remain extraction-only`);
+      // Extraction-only is a route, never a request failure: the reason
+      // names the remediation and the projection stamps NO tool wording.
+      expect(route.reason, label).not.toMatch(/strict/);
+      const projected = projectEmissionTaskText(route, "successor final-message instruction");
+      expect(projected.descriptor, label).toBe("");
+      expect(projected.instruction, label).toBe("successor final-message instruction");
+      expect(parseEmissionDescriptor(projected.instruction).kind, label).toBe("absent");
+    }
+    // The US4 arms stay the hard refusals they are for every kind — a stale
+    // loaded revision and an unprovidable refuse-class surface (v3 pin).
+    expect(decideRequestEmissionRoute(v3Claim, providedEmissionCapability(REVIEWER_V2.schemaDigest)))
+      .toMatchObject({ kind: "refused", reason: expect.stringContaining("stale loaded revision") });
+    expect(decideRequestEmissionRoute(v3Claim, hardRefuse))
+      .toMatchObject({ kind: "refused", reason: expect.stringContaining("cannot provide the issued emission tool") });
+  });
+
+  it("keeps an explicitly extraction-only successor v3 spawn on the no-tool baseline and refuses a descriptor upgrade (AS-010)", () => {
+    const route = qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V3), issuedPiRoute("openai-codex", "gpt-5.6-sol"), true);
+    if (route.kind !== "extraction-only") throw new Error("fixture route must be extraction-only");
+    const issued: SpawnAdmissionPorts["readIssuedRequest"] = (requestId, digest, role) =>
+      requestId === REVIEWER_V3.requestId && digest === CONTEXT_DIGEST && role === "code-reviewer"
+        ? { ok: true, value: { role, claim: claimOf(REVIEWER_V3), route: Object.freeze({ kind: "extraction-only" as const, reason: route.reason }) } }
+        : { ok: false, error: { message: "the fixture's issued authority belongs to another request" } };
+    // Descriptor-free: the ordinary extraction-only admission, no tool.
+    expect(expectedSpawnEmissionCapability(item("code-reviewer", issuedTask("code-reviewer", REVIEWER_V3)), issued))
+      .toEqual({ ok: true, expectation: { kind: "no-emission-tool" } });
+    // A descriptor cannot upgrade extraction-only authority (AD-7).
+    const upgraded = expectedSpawnEmissionCapability(emissionItem("code-reviewer", REVIEWER_V3), issued);
+    expect(upgraded.ok).toBe(false);
+    if (upgraded.ok) throw new Error("descriptor must not upgrade an extraction-only v3 route");
+    expect(upgraded.reason).toContain("the independently issued route is extraction-only");
+    expect(upgraded.reason).toContain("cannot be upgraded by task text");
+  });
+
+  it("admits the successor v3 route exactly like v2: qualified route, exact binding, and the qualified child route carried (T9 v3 parity)", () => {
+    const qualified = qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V3), qualifiedRoute, true);
+    expect(qualified).toMatchObject({ kind: "emission-enabled", binding: REVIEWER_V3, contextDigest: CONTEXT_DIGEST });
+    if (qualified.kind !== "emission-enabled") throw new Error("qualified fixture must enable emission");
+    const admission = expectedSpawnEmissionCapability(
+      emissionItem("code-reviewer", REVIEWER_V3),
+      issuedFor("code-reviewer", REVIEWER_V3, CONTEXT_DIGEST, qualified),
+    );
+    expect(admission).toMatchObject({
+      ok: true,
+      expectation: {
+        kind: "emission-enabled",
+        binding: REVIEWER_V3,
+        contextDigest: CONTEXT_DIGEST,
+        route: { provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14" },
+      },
+    });
+  });
+
+  it("cannot upgrade an extraction-only successor v3 issued profile when the ambient parent model is qualified", () => {
+    const extractionProfileRoute = qualifyIssuedSpawnEmissionRoute(
+      claimOf(REVIEWER_V3),
+      issuedPiRoute("openai-codex", "gpt-5.6-sol"),
+      true,
+    );
+    expect(extractionProfileRoute.kind).toBe("extraction-only");
+    if (extractionProfileRoute.kind !== "extraction-only") throw new Error("fixture must be extraction-only");
+    const ambientQualifiedParent = expectedSpawnEmissionCapability(
+      item("code-reviewer", issuedTask("code-reviewer", REVIEWER_V3)),
+      (requestId, digest, role) => requestId === REVIEWER_V3.requestId && digest === CONTEXT_DIGEST && role === "code-reviewer"
+        ? { ok: true, value: { role, claim: claimOf(REVIEWER_V3), route: extractionProfileRoute } }
+        : { ok: false, error: { message: "foreign" } },
+    );
+    expect(ambientQualifiedParent).toEqual({ ok: true, expectation: { kind: "no-emission-tool" } });
+  });
+
+  it("pins the qualified route to the catalog profile for the successor v3 claim too (requalification drift guard)", () => {
+    const profile = fixtureValue(resolveModelProfile("qualified-local-review"));
+    const pi = lowerModelProfile(profile, "pi");
+    expect(qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V3), issuedPiRoute(pi.provider, pi.model), true))
+      .toMatchObject({ kind: "emission-enabled" });
+    expect(qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V3), issuedPiRoute("desktop-vllm", "some-other-local-model"), true))
+      .toMatchObject({ kind: "extraction-only" });
+  });
+
+  it("carries no strict-sampling arm in the capability vocabulary, so no route decision can demand strict support (INV-1/AS-005, property)", () => {
+    // Type pin: the capability ADT's arms carry exactly a digest or a
+    // reason+degradation — there is no strict field to require, so
+    // "unsupported strict sampling" is not a decision input at all.
+    expectTypeOf<Extract<EmissionToolCapability, { kind: "provided" }>>()
+      .toEqualTypeOf<Readonly<{ kind: "provided"; schemaDigest: ArtifactDigest }>>();
+    expectTypeOf<Extract<EmissionToolCapability, { kind: "not-provided" }>>()
+      .toEqualTypeOf<Readonly<{ kind: "not-provided"; reason: string; degradation: "refuse" | "extraction" }>>();
+
+    const capabilities = [
+      providedEmissionCapability(REVIEWER_V2.schemaDigest),
+      providedEmissionCapability(REVIEWER_V3.schemaDigest),
+      providedEmissionCapability("e".repeat(64) as ArtifactDigest),
+      extraction,
+      hardRefuse,
+    ];
+    const claims = [claimOf(REVIEWER_V2), claimOf(REVIEWER_V3)];
+    for (const claim of claims) {
+      for (const capability of capabilities) {
+        const decision = decideRequestEmissionRoute(claim, capability);
+        expect(["emission", "extraction-only", "refused"], `${claim.version}/${capability.kind}`).toContain(decision.kind);
+        if (decision.kind === "refused") {
+          expect(decision.reason).toMatch(/stale loaded revision|cannot provide the issued emission tool/);
+        }
+        expect("reason" in decision && decision.reason !== null ? decision.reason : "")
+          .not.toMatch(/strict/i);
+        if (decision.kind === "emission") {
+          expect(decision.binding.version).toBe(claim.version);
+          expect(decision.binding.schemaDigest).toBe(claim.schemaDigest);
+        }
+      }
+    }
+    // The qualified (unconstrained-emission) route's decision is a pure
+    // function of route identity and registry cell: the same claim and
+    // capability mint the byte-identical decision, so a route that ignores
+    // the preferred strict flag (AS-005) rides the identical matrix.
+    const first = decideRequestEmissionRoute(claimOf(REVIEWER_V3), providedEmissionCapability(REVIEWER_V3.schemaDigest));
+    const second = decideRequestEmissionRoute(claimOf(REVIEWER_V3), providedEmissionCapability(REVIEWER_V3.schemaDigest));
+    expect(second).toEqual(first);
+  });
+});
+
 describe("renderSpawnTask emission projection wiring", () => {
   /** The confined fake: for requests outside the reviewer emission gate the
    *  render reads only `runDirectory` — the reviewer compatibility bootstrap

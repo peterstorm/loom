@@ -34,6 +34,7 @@ import {
 import { sha256Hex } from "../../src/core/review-packet";
 import type { PayloadProducerKind, PayloadProducerKindName } from "../../src/core/model-profiles";
 import { standaloneReviewerPayloadV3Schema } from "../../src/core/standalone-lineage-contract";
+import { parseStandaloneReviewerPayloadV3 } from "../../src/core/reviewer-protocol";
 import {
   REVIEWER_PAYLOAD_EXAMPLE_V2,
   reviewerPayloadV2Schema,
@@ -62,6 +63,7 @@ const mustMint = <K extends PayloadProducerKindName>(
 };
 
 const REVIEWER_V2 = mustMint({ requestId: REQUEST_ID, kind: "reviewer-payload", version: "v2" });
+const REVIEWER_V3 = mustMint({ requestId: REQUEST_ID, kind: "reviewer-payload", version: "v3" });
 const JUDGE_V1 = mustMint({ requestId: REQUEST_ID, kind: "judge-verdict", version: "v1" });
 const REFUTATION_V1 = mustMint({ requestId: REQUEST_ID, kind: "refutation-verdict", version: "v1" });
 
@@ -1355,6 +1357,229 @@ describe("the verdict extraction arms preserve the existing raw input byte-verba
         );
       }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The successor v3 reviewer path rides the shared selection kernel (T9)
+// ---------------------------------------------------------------------------
+
+/** A schema-valid successor v3 payload as emission arguments. The lineage
+ *  digests are fixture-local; the successor's OWN joins re-check them
+ *  against the prepared successor (the successor suites), so the kernel
+ *  selection only ever sees the parser's verdict. */
+const v3Arguments = (overrides: Record<string, unknown> = {}): unknown =>
+  standaloneReviewerPayloadV3Schema.parse({
+    schemaVersion: 3,
+    kind: "standalone-successor-review",
+    lineageDigest: "a".repeat(64),
+    snapshotDigest: "b".repeat(64),
+    priorAssessments: [],
+    findings: [],
+    ...overrides,
+  });
+
+/** The engine-refined v3 refusal fixtures, built as RAW argument objects —
+ *  they are invalid BY the engine-only refinements, so the schema parse must
+ *  never mint them. Whitespace-only prose and an authored finding id both
+ *  pass the frozen JSON Schema's shape checks and must still refuse (AS-018). */
+const v3WhitespaceRefusal = (): Record<string, unknown> => ({
+  schemaVersion: 3,
+  kind: "standalone-successor-review",
+  lineageDigest: "a".repeat(64),
+  snapshotDigest: "b".repeat(64),
+  priorAssessments: [],
+  findings: [{ draft: { severity: "advisory", file: null, line: null, claim: "Distinct v3 assertion", reason: "   " }, relation: { kind: "independent" } }],
+});
+const v3AuthoredIdRefusal = (): Record<string, unknown> => ({
+  ...v3WhitespaceRefusal(),
+  findings: [{ draft: { severity: "advisory", file: null, line: null, claim: "Authored id", reason: "Useful, nonblocking improvement." }, relation: { kind: "independent" }, id: "chosen-1" }],
+});
+
+/** The wire form routes without server-side constrained decoding emit:
+ *  declared non-string fields serialized as JSON-encoded strings. */
+const wireFormOfV3 = (value: unknown): unknown => {
+  const record = value as Record<string, unknown>;
+  return {
+    schemaVersion: "3",
+    kind: record["kind"],
+    lineageDigest: record["lineageDigest"],
+    snapshotDigest: record["snapshotDigest"],
+    priorAssessments: JSON.stringify(record["priorAssessments"]),
+    findings: JSON.stringify(record["findings"]),
+  };
+};
+
+const v3RefusalOf = (arguments_: unknown): { code: string; message: string } => {
+  const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS["reviewer-payload"], "v3", arguments_);
+  if (admitted.kind !== "refused") throw new Error("fixture v3 admission must be refused");
+  return { code: admitted.code, message: admitted.message };
+};
+
+describe("the successor v3 reviewer path rides the shared selection kernel (T9)", () => {
+  it("selects a valid v3 emission call over final text through the v3 registry cell, with the call's provenance (FR-003/AS-003)", () => {
+    const selection = selectCanonicalPayload(
+      REVIEWER_V3,
+      observeEmissionCalls([frameOf(callOf(REVIEWER_V3, "call-v3-ok", v3Arguments()))]),
+      USABLE_CANDIDATES,
+    );
+    expect(selection.kind).toBe("emission-tool-arguments");
+    if (selection.kind !== "emission-tool-arguments") throw new Error("v3 fixture must select emission");
+    expect(selection.source).toBe("emission-tool");
+    expect(selection.call).toMatchObject({ toolCallId: "call-v3-ok", version: "v3" });
+    // The canonical payload bytes re-parse through the SAME frozen v3 parser
+    // the successor's issuance joins run — one schema, one contract (FR-021).
+    const reparsed = parseStandaloneReviewerPayloadV3(Uint8Array.from(selection.payload.bytes));
+    expect(reparsed.ok).toBe(true);
+    expect(selection.payload.origin).toBe("emission-tool-arguments");
+  });
+
+  it("canonicalizes the v3 wire form through the frozen v3 schema and selects identically to the child-executed form", () => {
+    const value = v3Arguments({
+      findings: [{ draft: { severity: "advisory", file: null, line: null, claim: "Distinct v3 assertion", reason: "Useful, nonblocking improvement." }, relation: { kind: "independent" } }],
+    });
+    const fromCanonical = selectCanonicalPayload(
+      REVIEWER_V3,
+      observeEmissionCalls([frameOf(callOf(REVIEWER_V3, "call-v3-canonical", value))]),
+      [],
+    );
+    const fromWire = selectCanonicalPayload(
+      REVIEWER_V3,
+      observeEmissionCalls([frameOf(callOf(REVIEWER_V3, "call-v3-wire", wireFormOfV3(value)))]),
+      [],
+    );
+    expect(fromCanonical.kind).toBe("emission-tool-arguments");
+    expect(fromWire.kind).toBe("emission-tool-arguments");
+    if (fromCanonical.kind === "emission-tool-arguments" && fromWire.kind === "emission-tool-arguments") {
+      expect(fromWire.payload.text).toBe(fromCanonical.payload.text);
+      expect(fromWire.payload.digest).toBe(fromCanonical.payload.digest);
+    }
+  });
+
+  it("never ingests engine-refined v3 arguments — the whitespace-only prose and authored-ID refinements refuse with the v3 vocabulary (AS-018)", () => {
+    for (const [label, refused] of [
+      ["whitespace-only prose", v3WhitespaceRefusal()],
+      ["authored finding id", v3AuthoredIdRefusal()],
+    ] as const) {
+      const admission = admitEmissionArguments(EMISSION_TOOL_SPECS["reviewer-payload"], "v3", refused);
+      expect(admission.kind, label).toBe("refused");
+      if (admission.kind !== "refused") throw new Error(`${label} fixture must refuse`);
+      expect(admission.code, label).toBe("invalid-payload");
+    }
+  });
+
+  it("selects usable extraction over one engine-refused v3 call with the refusal retained and no retry consumed (FR-006/AS-007)", () => {
+    const refused = v3RefusalOf(v3WhitespaceRefusal());
+    expect(refused.code).toBe("invalid-payload");
+    const selection = selectCanonicalPayload(
+      REVIEWER_V3,
+      observeEmissionCalls([frameOf(callOf(REVIEWER_V3, "call-v3-refused", v3WhitespaceRefusal()))]),
+      USABLE_CANDIDATES,
+    );
+    expect(selection.kind).toBe("extraction-over-refused-call");
+    if (selection.kind !== "extraction-over-refused-call") throw new Error("fixture must fall back with retention");
+    expect(selection.source).toBe("extraction");
+    expect(selection.emissionRefusal).toEqual(refused);
+    expect(selection.fallback.ok).toBe(true);
+  });
+
+  it("rejects once with BOTH causes when the refused v3 call has no usable fallback (AD-9)", () => {
+    const selection = selectCanonicalPayload(
+      REVIEWER_V3,
+      observeEmissionCalls([frameOf(callOf(REVIEWER_V3, "call-v3-refused-no-fallback", v3WhitespaceRefusal()))]),
+      [],
+    );
+    expect(selection.kind).toBe("refused-call-no-fallback");
+    if (selection.kind !== "refused-call-no-fallback") throw new Error("fixture must reject with both causes");
+    expect(selection.emissionRefusal.code).toBe("invalid-payload");
+    expect(selection.extraction.reason).toBe("no-final-payload");
+  });
+
+  it("rejects duplicate v3 calls as ambiguity — refused-then-corrected in either order, and identical arguments under different call ids (FR-007/AS-019)", () => {
+    for (const [label, frames] of [
+      ["refused then corrected", [frameOf(callOf(REVIEWER_V3, "call-v3-bad", v3WhitespaceRefusal())), frameOf(callOf(REVIEWER_V3, "call-v3-good", v3Arguments()))]],
+      ["corrected then refused", [frameOf(callOf(REVIEWER_V3, "call-v3-good", v3Arguments())), frameOf(callOf(REVIEWER_V3, "call-v3-bad", v3WhitespaceRefusal()))]],
+      ["identical arguments, distinct identities", [frameOf(callOf(REVIEWER_V3, "call-v3-one", v3Arguments())), frameOf(callOf(REVIEWER_V3, "call-v3-two", v3Arguments()))]],
+    ] as const) {
+      const selection = selectCanonicalPayload(REVIEWER_V3, observeEmissionCalls(frames), USABLE_CANDIDATES);
+      expect(selection.kind, label).toBe("duplicate-emission-call");
+      if (selection.kind !== "duplicate-emission-call") throw new Error(`${label} fixture must reject as ambiguity`);
+      expect(selection.calls.map(({ toolCallId }) => toolCallId)).toEqual(frames.map((frame) => frame.call.toolCallId));
+    }
+  });
+
+  it("refuses each v3 misbinding before counting — a v2 call in a v3 attempt never self-decodes, a verdict call never consults, a foreign request never binds (FR-014)", () => {
+    const misbindings = [
+      ["unexpected version", { ...callOf(REVIEWER_V3, "call-v2-in-v3", validReviewerArguments("misbound version")), version: "v2" as const }],
+      ["unexpected kind", { ...callOf(REVIEWER_V3, "call-judge-in-v3", validJudgeArguments("extensibility")), kind: JUDGE_V1.kind }],
+      ["wrong request", { ...callOf(REVIEWER_V3, "call-foreign-request", v3Arguments()), requestId: OTHER_REQUEST_ID }],
+    ] as const;
+    for (const [label, misbound] of misbindings) {
+      const selection = selectCanonicalPayload(
+        REVIEWER_V3,
+        observeEmissionCalls([frameOf(misbound), frameOf(callOf(REVIEWER_V3, "call-v3-good", v3Arguments()))]),
+        USABLE_CANDIDATES,
+      );
+      expect(selection.kind, label).toBe("observation-refused");
+      if (selection.kind !== "observation-refused") throw new Error(`${label} fixture must refuse`);
+      expect(selection.refusal.message).toContain("call-");
+    }
+    const versionRefusal = selectCanonicalPayload(REVIEWER_V3, observeEmissionCalls([frameOf(misbindings[0]![1])]), USABLE_CANDIDATES);
+    expect(versionRefusal).toMatchObject({ kind: "observation-refused", refusal: { code: "unexpected-version" } });
+    const kindRefusal = selectCanonicalPayload(REVIEWER_V3, observeEmissionCalls([frameOf(misbindings[1]![1])]), USABLE_CANDIDATES);
+    expect(kindRefusal).toMatchObject({ kind: "observation-refused", refusal: { code: "unexpected-kind" } });
+    const requestRefusal = selectCanonicalPayload(REVIEWER_V3, observeEmissionCalls([frameOf(misbindings[2]![1])]), USABLE_CANDIDATES);
+    expect(requestRefusal).toMatchObject({ kind: "observation-refused", refusal: { code: "wrong-request" } });
+  });
+
+  it("folds an exact v3 replay back to a single call — idempotent (FR-007)", () => {
+    const frame = frameOf(callOf(REVIEWER_V3, "call-v3-replay", v3Arguments()));
+    const selection = selectCanonicalPayload(REVIEWER_V3, observeEmissionCalls([frame, frame]), USABLE_CANDIDATES);
+    expect(selection).toEqual(selectCanonicalPayload(REVIEWER_V3, observeEmissionCalls([frame]), USABLE_CANDIDATES));
+  });
+
+  it("keeps the v3 extraction arms equal to the no-op baseline on the same final candidates, and asserts duplicate/misbound rejection outcomes (AD-9 containment law, property)", () => {
+    const refusedV3 = v3WhitespaceRefusal();
+    const misboundV2 = { ...callOf(REVIEWER_V3, "call-v2-in-v3", validReviewerArguments("misbound")), version: "v2" as const };
+    fc.assert(
+      fc.property(candidatesArb, (candidates) => {
+        const baseline = parseFinalPayload(candidates);
+        const zeroCall = selectCanonicalPayload(REVIEWER_V3, ABSENT, candidates);
+        const overRefused = selectCanonicalPayload(
+          REVIEWER_V3,
+          observeEmissionCalls([frameOf(callOf(REVIEWER_V3, "call-v3-refused", refusedV3))]),
+          candidates,
+        );
+        // The containment law claims ONLY the two extraction-selected states.
+        if (baseline.ok) {
+          expect(zeroCall).toMatchObject({ kind: "final-message-extraction", fallback: baseline, source: "extraction" });
+          expect(overRefused).toMatchObject({ kind: "extraction-over-refused-call", fallback: baseline, source: "extraction" });
+        } else {
+          expect(zeroCall.kind).toBe("final-message-extraction");
+          expect(overRefused.kind).toBe("refused-call-no-fallback");
+          if (overRefused.kind === "refused-call-no-fallback") expect(overRefused.extraction).toEqual(baseline.error);
+        }
+        // The duplicate and misbound rows assert REJECTION outcomes — never
+        // skipped under a universal containment name (AD-9).
+        const duplicate = selectCanonicalPayload(
+          REVIEWER_V3,
+          observeEmissionCalls([frameOf(callOf(REVIEWER_V3, "call-v3-one", v3Arguments())), frameOf(callOf(REVIEWER_V3, "call-v3-two", v3Arguments()))]),
+          candidates,
+        );
+        expect(duplicate.kind).toBe("duplicate-emission-call");
+        const misbound = selectCanonicalPayload(REVIEWER_V3, observeEmissionCalls([frameOf(misboundV2)]), candidates);
+        expect(misbound).toMatchObject({ kind: "observation-refused", refusal: { code: "unexpected-version" } });
+        return true;
+      }),
+      { numRuns: 60 },
+    );
+  });
+
+  it("keeps the v3 no-op baseline byte-identical to PR #52's extraction with zero calls — the unconstrained-route parity baseline (FR-010/AS-005)", () => {
+    const zeroCall = selectCanonicalPayload(REVIEWER_V3, ABSENT, USABLE_CANDIDATES);
+    expect(zeroCall).toEqual(selectCanonicalPayload(REVIEWER_V2, ABSENT, USABLE_CANDIDATES));
+    if (zeroCall.kind !== "final-message-extraction") throw new Error("zero-call fixture must be the extraction baseline");
+    expect("emissionRefusal" in zeroCall).toBe(false);
   });
 });
 

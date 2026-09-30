@@ -114,21 +114,40 @@ import {
   AGENT_REQUIRED_SKILLS,
   parseAgentRequestAuthority,
   parseStoredAgentRequestAuthority,
+  parseArtifactByteLength,
+  parseArtifactDigest,
   parseEffectId,
   parseFixedArtifactSlot,
   parseRequestId,
   parseSlotId,
   type AgentRequestAuthority,
+  type ArtifactDigest,
+  type DomainResult,
   type EffectIntent,
 } from "../../core/orchestration-contract";
 import {
+  describePanelRefusalPair,
+  describePanelVerdictEmissionParseFailure,
+  panelVerdictSelectionRejection,
+  panelVerdictSourceProvenance,
+  panelVerdictSourceRecord,
+  parsePanelVerdictSourceRecord,
+  replayPanelVerdictSourceSelection,
   reduceArchitectureProgram,
   reduceRefutationProgram,
   startArchitectureDispatchProgram,
   startRefutationDispatchProgram,
   type PanelProgramAction,
+  type PanelVerdictEmissionPort,
+  type PanelVerdictEmissionSelection,
+  type PanelVerdictSource,
+  type PanelVerdictSourceRecord,
+  type PanelVerdictSourceSelection,
   type SpawnRequest as PanelSpawnRequest,
 } from "../../core/panel-program";
+import { selectVerdictSource } from "../../core/emission-ingestion";
+import { issueEmissionBinding } from "../../core/emission-tool";
+import { observeEmissionCalls } from "../../core/harness-capture";
 import { resolveModelProfile, lowerModelProfile } from "../../core/model-profiles";
 import { buildContextPacket, encodeByteSection, type ContextPacket } from "../../orchestration/context-packets";
 import { countRefutationVotes, defaultRefutationThreshold, parseRefutationVerdict, type RefutationVerdict } from "../../core/review-panel";
@@ -865,7 +884,7 @@ async function abandonOperation(args: readonly string[]): Promise<HookResult> {
     : { kind: "allow" };
 }
 
-type RegisteredPanelProgram = Readonly<{
+export type RegisteredPanelProgram = Readonly<{
   schemaVersion: 1;
   kind: "architecture" | "refutation";
   input: LegacyArchitecturePanelJournal["input"] | LegacyRefutationPanelJournal["input"];
@@ -873,7 +892,7 @@ type RegisteredPanelProgram = Readonly<{
   context: unknown;
 }>;
 
-function parseRegisteredPanelProgram(raw: unknown): RegisteredPanelProgram | null {
+export function parseRegisteredPanelProgram(raw: unknown): RegisteredPanelProgram | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
   const record = raw as Record<string, unknown>;
   if (record["schemaVersion"] !== 1 ||
@@ -1462,12 +1481,19 @@ async function reconcileCapturedPanelResults(
     if (settled.has(`${logicalRequestId}:${request.attempt}`)) continue;
     const bytes = handle.readTranscriptBytes(request);
     if (!bytes.ok) return { ok: false, message: bytes.error.message };
-    const problem = panelSubmissionProblem(
+    // The verdict-source seam resolves this attempt's emission evidence — the
+    // durable record's replay when one was published, otherwise the extraction
+    // baseline — and the submission decision runs over exactly that resolution
+    // (the same policy every later scan of the same attempt reproduces).
+    const settledAttempt = await settlePanelAttemptSubmission({
+      handle,
       registration,
+      request,
       logicalRequestId,
-      Buffer.from(bytes.value).toString("utf-8"),
-    );
-    await appendSpawnOutcome(handle, request.requestId, request.attempt, logicalRequestId, problem);
+      raw: Buffer.from(bytes.value).toString("utf-8"),
+    });
+    if (!settledAttempt.ok) return { ok: false, message: settledAttempt.error };
+    await appendSpawnOutcome(handle, request.requestId, request.attempt, logicalRequestId, settledAttempt.value.problem);
   }
   return { ok: true };
 }
@@ -1548,10 +1574,275 @@ function logicalPanelRequestId(requestId: string, attempt: 1 | 2): string {
     : requestId;
 }
 
-function panelSubmissionProblem(
+// ---------------------------------------------------------------------------
+// The legacy panel path's verdict-source seam (AD-8, FR-006/009/011/012) — the
+// same selection policy the persistent panel submissions use, shared through
+// core/panel-program's vocabulary. One attempt's emission evidence is resolved
+// ONCE per scan (`resolvePanelAttemptVerdictSource`) from the durable
+// panel-verdict-source record (the accepted call's exact-replay authority) or
+// the caller's live observation; every later scan of the same attempt
+// reproduces the same decision, the same selected bytes, and the same accepted
+// call identity — never a re-parse of pre-selection transcript bytes, and
+// never a silent extraction baseline over evidence that says otherwise.
+// ---------------------------------------------------------------------------
+
+export type PanelAttemptVerdictSource =
+  | Readonly<{ kind: "baseline" }>
+  | Readonly<{ kind: "selected"; selection: PanelVerdictSourceSelection; record: PanelVerdictSourceRecord | null }>;
+
+const BASELINE_VERDICT_SOURCE: PanelAttemptVerdictSource = Object.freeze({ kind: "baseline" as const });
+
+/**
+ * The PRODUCTION adapter of the panel seam's kernel port — the ONE place the
+ * handler shell couples the declared-pure panel core to the emission kernel
+ * (the core never imports the transport modules). The fold is the kernel's
+ * ONE verdict-source selection; the AD-9 replay capability re-certifies a
+ * record's emission claims through the frozen registry mint and re-folds the
+ * single accepted call over a complete observation, returning the minted
+ * schema digest for the core's certification cross-check.
+ */
+export const panelVerdictEmissionPort: PanelVerdictEmissionPort = {
+  fold: ({ binding, observation, rawJson }) => selectVerdictSource(binding, observation, rawJson),
+  replayAcceptedCall: (claims, call, rawJson) => {
+    const minted = issueEmissionBinding(claims);
+    if (!minted.ok) return { ok: false, error: minted.error.message };
+    const selection = selectVerdictSource(minted.value, observeEmissionCalls([Object.freeze({ kind: "complete" as const, call })]), rawJson);
+    return { ok: true, value: Object.freeze({ schemaDigest: minted.value.schemaDigest, selection }) };
+  },
+};
+
+const PANEL_VERDICT_SOURCES_BOUND_BYTES = 65_536;
+
+const panelVerdictSourceArtifactPath = (requestId: string): string => `panel-verdict-sources/${requestId}.json`;
+
+const bytesEqual = (left: Uint8Array, right: readonly number[]): boolean =>
+  left.length === right.length && left.every((byte, index) => byte === right[index]);
+
+/** The digest identity of the bytes one attempt's seam authoritatively parsed. */
+function panelAttemptPayloadIdentity(rawJson: string): { digest: ArtifactDigest; byteLength: number } | null {
+  const bytes = Buffer.from(rawJson, "utf-8");
+  const digest = parseArtifactDigest(createHash("sha256").update(bytes).digest("hex"));
+  const byteLength = parseArtifactByteLength(bytes.length);
+  return digest.ok && byteLength.ok ? { digest: digest.value, byteLength: byteLength.value } : null;
+}
+
+/**
+ * Read one attempt's durable panel verdict source record. Absent is the
+ * ordinary no-emission-evidence state; present-but-unreadable or malformed is
+ * unavailable evidence and fails closed — never a silent extraction baseline
+ * over a record that says otherwise.
+ */
+function readPanelVerdictSourceRecord(handle: RunDirHandle, request: AgentRequestAuthority): DomainResult<PanelVerdictSourceRecord | null, string> {
+  const bytes = handle.readArtifactBytes(panelVerdictSourceArtifactPath(request.requestId), PANEL_VERDICT_SOURCES_BOUND_BYTES);
+  if (!bytes.ok) return { ok: false, error: `the durable panel verdict source for request ${request.requestId} is unreadable: ${bytes.error.message}` };
+  if (bytes.value === null) return { ok: true, value: null };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(Buffer.from(bytes.value).toString("utf-8"));
+  } catch (error) {
+    return { ok: false, error: `the durable panel verdict source for request ${request.requestId} is not valid JSON: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  const parsed = parsePanelVerdictSourceRecord(raw);
+  return parsed.ok
+    ? { ok: true, value: parsed.value }
+    : { ok: false, error: `the durable panel verdict source for request ${request.requestId} is malformed: ${parsed.error}` };
+}
+
+/**
+ * Resolve what emission evidence ONE panel attempt's scan carries.
+ *
+ * The durable record is authoritative when present: its accepted call is
+ * replayed through the ONE selection seam and its payload identity is
+ * re-verified against the bytes this scan holds, so a replayed emission
+ * selection reproduces the same selected bytes and call identity — and a
+ * tampered or stale record refuses instead of degrading. Otherwise a live
+ * emission input selects; the binding must certify THIS attempt's request
+ * and the panel verdict kind the attempt's panel program receives (the same
+ * issuance joins the persistent submissions check — the legacy seam takes
+ * both verdict kinds in one union, so its kind join is the runtime check the
+ * persistent seam's refinement types do at compile time). With neither,
+ * the attempt is the extraction baseline it always was.
+ */
+/** The exact arguments the legacy panel verdict-source resolver takes. */
+type PanelAttemptVerdictSourceArgs = Readonly<{
+  handle: RunDirHandle;
+  request: AgentRequestAuthority;
+  raw: string;
+  emission?: PanelVerdictEmissionSelection;
+}>;
+
+/**
+ * The caller-side issuance joins of one panel attempt's emission input,
+ * checked BEFORE any evidence is read: a binding that does not certify this
+ * attempt's request, or that certifies the WRONG VERDICT KIND for the panel
+ * program the attempt belongs to, is a caller defect — never an attempt
+ * observation. A judge-verdict binding on a refutation verifier attempt would
+ * otherwise fold into a selection the authoritative parse can only refuse
+ * later — consuming the attempt on a defect that is not the model's. Panel
+ * programs receive exactly their own verdict kind (judge criteria for the
+ * architecture panel, refutation for the refutation panel); a non-panel
+ * program carries no panel verdict kind, so only the request identity applies
+ * there. Returns the refusal message, or null when every join holds.
+ */
+function panelAttemptIssuanceJoinError(args: PanelAttemptVerdictSourceArgs): string | null {
+  if (args.emission === undefined) return null;
+  if (args.emission.binding.requestId !== args.request.requestId) {
+    return `issued emission binding certifies request ${args.emission.binding.requestId}, not the submitted request ${args.request.requestId}`;
+  }
+  let panelVerdictKind: "judge-verdict" | "refutation-verdict" | null = null;
+  if (args.request.program === "refutation-panel") panelVerdictKind = "refutation-verdict";
+  else if (args.request.program === "architecture-panel") panelVerdictKind = "judge-verdict";
+  if (panelVerdictKind === null || args.emission.binding.kind.kind === panelVerdictKind) return null;
+  return `issued emission binding certifies producer kind ${args.emission.binding.kind.kind}, not the ${panelVerdictKind} kind the ${args.request.program} attempt ${args.request.requestId} belongs to`;
+}
+
+/** The durable-record arm of the legacy panel verdict-source resolution: the
+ * recorded selection is authoritative and is replayed through the same seam
+ * (AD-9), and the replayed bytes must still certify the record's payload
+ * identity — a mismatching record refuses instead of being rewritten. */
+function replayPanelAttemptDurableRecord(args: PanelAttemptVerdictSourceArgs, record: PanelVerdictSourceRecord): DomainResult<PanelAttemptVerdictSource, string> {
+  if (record.requestId !== args.request.requestId) {
+    return { ok: false, error: `the durable panel verdict source for request ${record.requestId} does not describe request ${args.request.requestId}` };
+  }
+  const replayed = replayPanelVerdictSourceSelection(record, args.raw, panelVerdictEmissionPort);
+  if (!replayed.ok) {
+    return { ok: false, error: `durable panel verdict source for request ${args.request.requestId} could not be replayed: ${replayed.error}` };
+  }
+  const payload = replayed.value.kind === "emission-tool-arguments" ? replayed.value.rawJson : args.raw;
+  const identity = panelAttemptPayloadIdentity(payload);
+  if (identity === null || identity.digest !== record.payloadDigest || identity.byteLength !== record.payloadByteLength) {
+    return { ok: false, error: `the durable panel verdict source for request ${args.request.requestId} does not describe the accepted attempt bytes` };
+  }
+  return { ok: true, value: Object.freeze({ kind: "selected" as const, selection: replayed.value, record }) };
+}
+
+export function resolvePanelAttemptVerdictSource(args: PanelAttemptVerdictSourceArgs): DomainResult<PanelAttemptVerdictSource, string> {
+  // The caller's issuance joins are checked BEFORE any evidence is read: a
+  // binding that does not certify this attempt's request is a caller defect,
+  // never an attempt observation.
+  const joinError = panelAttemptIssuanceJoinError(args);
+  if (joinError !== null) return { ok: false, error: joinError };
+  const record = readPanelVerdictSourceRecord(args.handle, args.request);
+  if (!record.ok) return record;
+  if (record.value !== null) return replayPanelAttemptDurableRecord(args, record.value);
+  if (args.emission !== undefined) {
+    const selection = panelVerdictEmissionPort.fold({ binding: args.emission.binding, observation: args.emission.observation, rawJson: args.raw });
+    return { ok: true, value: Object.freeze({ kind: "selected" as const, selection, record: null }) };
+  }
+  return { ok: true, value: BASELINE_VERDICT_SOURCE };
+}
+
+/** Publish one attempt's accepted source record BEFORE its outcome is declared
+ *  (write-ahead, the capture seam's exact posture): an identical prior record
+ *  proceeds, a DIFFERENT one refuses — the recorded selection is authoritative
+ *  and is never rewritten. */
+async function publishPanelVerdictSourceRecord(handle: RunDirHandle, request: AgentRequestAuthority, record: PanelVerdictSourceRecord): Promise<DomainResult<true, string>> {
+  const serialized = `${JSON.stringify(record, null, 2)}\n`;
+  const bytes = Object.freeze([...Buffer.from(serialized, "utf-8")]);
+  if (bytes.length > PANEL_VERDICT_SOURCES_BOUND_BYTES) {
+    return { ok: false, error: `the panel verdict source record for request ${request.requestId} exceeds the ${PANEL_VERDICT_SOURCES_BOUND_BYTES}-byte publication bound` };
+  }
+  const path = panelVerdictSourceArtifactPath(request.requestId);
+  const prior = handle.readArtifactBytes(path, PANEL_VERDICT_SOURCES_BOUND_BYTES);
+  if (!prior.ok) return { ok: false, error: prior.error.message };
+  if (prior.value !== null) {
+    return bytesEqual(prior.value, bytes)
+      ? { ok: true, value: true }
+      : { ok: false, error: `panel verdict source provenance for request ${request.requestId} is already published with a different accepted source; the recorded selection is authoritative and is never rewritten` };
+  }
+  const published = await handle.publishArtifactSet([{ relativePath: path, bytes }]);
+  return published.ok ? { ok: true, value: true } : { ok: false, error: published.error.message };
+}
+
+/**
+ * Settle ONE panel attempt's submission through the resolved verdict source:
+ * the decision, then — when a LIVE emission selection was accepted — the
+ * write-ahead source record that binds the accepted source (and its exact call
+ * identity) to the acceptance before the outcome is declared. Replayed
+ * selections never republish (the durable record already carries them), and
+ * rejected selections publish nothing: the rejection's diagnostics travel with
+ * the outcome event.
+ */
+export async function settlePanelAttemptSubmission(args: {
+  handle: RunDirHandle;
+  registration: RegisteredPanelProgram;
+  request: AgentRequestAuthority;
+  logicalRequestId: string;
+  raw: string;
+  emission?: PanelVerdictEmissionSelection;
+}): Promise<DomainResult<Readonly<{ problem: string | null; source: PanelVerdictSource | null }>, string>> {
+  const resolved = resolvePanelAttemptVerdictSource({ handle: args.handle, request: args.request, raw: args.raw, emission: args.emission });
+  if (!resolved.ok) return resolved;
+  const problem = panelSubmissionProblem(args.registration, args.logicalRequestId, args.raw, resolved.value);
+  if (problem !== null) return { ok: true, value: Object.freeze({ problem, source: null }) };
+  if (resolved.value.kind === "baseline") return { ok: true, value: Object.freeze({ problem: null, source: null }) };
+  if (resolved.value.record !== null) return { ok: true, value: Object.freeze({ problem: null, source: resolved.value.record.source }) };
+  const selection = resolved.value.selection;
+  if (selection.kind === "duplicate-emission-call" || selection.kind === "observation-refused") {
+    // Unreachable — a rejected selection always produced a problem above. The
+    // guard carries the invariant instead of handing rejected arms to the
+    // provenance mapping.
+    return { ok: false, error: "panel verdict invariant: a rejected selection settled without a problem" };
+  }
+  const binding = args.emission?.binding;
+  if (binding === undefined) {
+    return { ok: false, error: "panel verdict invariant: a live selection exists without an issued emission binding" };
+  }
+  const source = panelVerdictSourceProvenance(binding, selection);
+  const acceptedRawJson = selection.kind === "emission-tool-arguments" ? selection.rawJson : args.raw;
+  const identity = panelAttemptPayloadIdentity(acceptedRawJson);
+  if (identity === null) {
+    return { ok: false, error: `the accepted panel verdict bytes for request ${args.request.requestId} have no bounded digest identity` };
+  }
+  const record = panelVerdictSourceRecord({
+    requestId: args.request.requestId,
+    slotId: args.request.slotId,
+    attempt: args.request.attempt,
+    source,
+    acceptedCall: selection.kind === "emission-tool-arguments" ? selection.call : undefined,
+    payloadDigest: identity.digest,
+    payloadByteLength: identity.byteLength,
+  });
+  if (!record.ok) {
+    return { ok: false, error: `the panel verdict source record for request ${args.request.requestId} could not be constructed: ${record.error}` };
+  }
+  const published = await publishPanelVerdictSourceRecord(args.handle, args.request, record.value);
+  if (!published.ok) return published;
+  return { ok: true, value: Object.freeze({ problem: null, source }) };
+}
+
+function panelVerdictSelectionProblem(source: PanelAttemptVerdictSource): string | null {
+  if (source.kind !== "selected") return null;
+  if (source.selection.kind !== "duplicate-emission-call" && source.selection.kind !== "observation-refused") return null;
+  return panelVerdictSelectionRejection(source.selection).message;
+}
+
+function panelVerdictParseProblem(
+  selection: PanelVerdictSourceSelection | null,
+  errors: readonly string[],
+  label: "judge verdict" | "refutation verdict",
+): string {
+  if (selection === null) return errors.join("; ");
+  if (selection.kind === "emission-tool-arguments") {
+    return describePanelVerdictEmissionParseFailure(selection.call.toolCallId, label, errors.join("; "));
+  }
+  if (selection.kind === "extraction-over-refused-call") {
+    return describePanelRefusalPair(selection.emissionRefusal, errors.join("; "));
+  }
+  return errors.join("; ");
+}
+
+function panelVerdictSelectionUpgradeRefusal(source: PanelAttemptVerdictSource, logicalRequestId: string): string | null {
+  return source.kind === "selected"
+    ? `request ${logicalRequestId} is an extraction-only panel slot that advertises no emission tool; an observed emission call cannot upgrade it`
+    : null;
+}
+
+export function panelSubmissionProblem(
   registration: RegisteredPanelProgram,
   logicalRequestId: string,
   raw: string,
+  source: PanelAttemptVerdictSource = BASELINE_VERDICT_SOURCE,
 ): string | null {
   if (registration.kind === "refutation") {
     const match = /^refutation:verifier:(\d+)$/.exec(logicalRequestId);
@@ -1559,8 +1850,12 @@ function panelSubmissionProblem(
     const index = match === null ? -1 : Number(match[1]) - 1;
     const lens = input.lenses[index];
     if (lens === undefined) return `request ${logicalRequestId} is not a canonical verifier slot`;
-    const parsed = parseRefutationVerdict(raw, lens, input.criticalFindingIds);
-    return parsed.ok ? null : parsed.errors.join("; ");
+    const selectionProblem = panelVerdictSelectionProblem(source);
+    if (selectionProblem !== null) return selectionProblem;
+    const selection = source.kind === "selected" ? source.selection : null;
+    const target = selection !== null && selection.kind === "emission-tool-arguments" ? selection.rawJson : raw;
+    const parsed = parseRefutationVerdict(target, lens, input.criticalFindingIds);
+    return parsed.ok ? null : panelVerdictParseProblem(selection, parsed.errors, "refutation verdict");
   }
 
   const input = registration.input as LegacyArchitecturePanelJournal["input"];
@@ -1569,6 +1864,8 @@ function panelSubmissionProblem(
     const index = Number(candidateMatch[1]) - 1;
     const lens = input.candidateLenses[index];
     if (lens === undefined) return `request ${logicalRequestId} is not a canonical candidate slot`;
+    const upgradeRefusal = panelVerdictSelectionUpgradeRefusal(source, logicalRequestId);
+    if (upgradeRefusal !== null) return upgradeRefusal;
     const parsed = parseArchitectureCandidate(raw, lens);
     return parsed.ok ? null : parsed.errors.join("; ");
   }
@@ -1583,11 +1880,17 @@ function panelSubmissionProblem(
     // validated digest.
     const branded = architectureCriterion(criterion);
     if (branded === null) return `request ${logicalRequestId} carries judge criterion ${JSON.stringify(criterion)}, which is outside the validated interview vocabulary`;
-    const verdict = parseJudgeVerdict(raw, branded, input.candidateLenses.map(candidateFilename));
-    return verdict.ok ? null : verdict.errors.join("; ");
+    const selectionProblem = panelVerdictSelectionProblem(source);
+    if (selectionProblem !== null) return selectionProblem;
+    const selection = source.kind === "selected" ? source.selection : null;
+    const target = selection !== null && selection.kind === "emission-tool-arguments" ? selection.rawJson : raw;
+    const verdict = parseJudgeVerdict(target, branded, input.candidateLenses.map(candidateFilename));
+    return verdict.ok ? null : panelVerdictParseProblem(selection, verdict.errors, "judge verdict");
   }
 
   if (logicalRequestId === "architecture:finalize") {
+    const upgradeRefusal = panelVerdictSelectionUpgradeRefusal(source, logicalRequestId);
+    if (upgradeRefusal !== null) return upgradeRefusal;
     const parsed = parseArchitectureFinalization(raw, input.candidateLenses.map(candidateFilename));
     return parsed.ok ? null : parsed.errors.join("; ");
   }
@@ -1711,8 +2014,15 @@ async function dispatchSubmission(binding: SubmissionBinding, capture: CapturedS
   }
   if (panelRegistration !== null) {
     const logicalRequestId = logicalPanelRequestId(requestId, attempt);
-    const problem = panelSubmissionProblem(panelRegistration, logicalRequestId, capture.semanticRaw);
-    await appendSpawnOutcome(handle, requestId, attempt, logicalRequestId, problem);
+    const settledAttempt = await settlePanelAttemptSubmission({
+      handle,
+      registration: panelRegistration,
+      request: reserved,
+      logicalRequestId,
+      raw: capture.semanticRaw,
+    });
+    if (!settledAttempt.ok) return { kind: "error", message: settledAttempt.error };
+    await appendSpawnOutcome(handle, requestId, attempt, logicalRequestId, settledAttempt.value.problem);
     const driven = await driveRegisteredPanel(handle, panelRegistration);
     return driven.ok ? emitRunAction(handle, driven.action) : { kind: "error", message: driven.message };
   }
@@ -1774,10 +2084,10 @@ function operationArtifact(relativePath: string, value: unknown): DeterministicO
   });
 }
 
-function capturedPanelRaw(
+function capturedPanelAttempt(
   handle: RunDirHandle,
   logicalRequestId: string,
-): Readonly<{ ok: true; raw: string }> | Readonly<{ ok: false; message: string }> {
+): Readonly<{ ok: true; request: AgentRequestAuthority; raw: string }> | Readonly<{ ok: false; message: string }> {
   const issued = handle.readIssuedRequests();
   if (!issued.ok) return { ok: false, message: issued.error.message };
   const captured = handle.readCapturedAttempts();
@@ -1790,8 +2100,29 @@ function capturedPanelRaw(
   if (request === undefined) return { ok: false, message: `operation is missing captured result for ${logicalRequestId}` };
   const bytes = handle.readTranscriptBytes(request);
   return bytes.ok
-    ? { ok: true, raw: Buffer.from(bytes.value).toString("utf-8") }
+    ? { ok: true, request, raw: Buffer.from(bytes.value).toString("utf-8") }
     : { ok: false, message: bytes.error.message };
+}
+
+/**
+ * The parse target ONE deterministic-operation scan adjudicates: the attempt's
+ * own raw bytes, EXCEPT when its durable verdict source record replays an
+ * emission selection — then the selection's bytes, reproduced by the same seam
+ * that accepted them (the record is the exact-replay authority; a replay that
+ * refuses fails the operation closed instead of re-parsing raw bytes the
+ * acceptance never used).
+ */
+function panelOperationParseTarget(
+  handle: RunDirHandle,
+  request: AgentRequestAuthority,
+  raw: string,
+): Readonly<{ ok: true; target: string }> | Readonly<{ ok: false; message: string }> {
+  const resolved = resolvePanelAttemptVerdictSource({ handle, request, raw });
+  if (!resolved.ok) return { ok: false, message: resolved.error };
+  if (resolved.value.kind === "selected" && resolved.value.selection.kind === "emission-tool-arguments") {
+    return { ok: true, target: resolved.value.selection.rawJson };
+  }
+  return { ok: true, target: raw };
 }
 
 function executeDeterministicPanelOperation(
@@ -1816,9 +2147,11 @@ function executeDeterministicPanelOperation(
     const verdicts: VerdictEnvelope<RefutationVerdict>[] = [];
     for (let index = 0; index < input.lenses.length; index += 1) {
       const logicalRequestId = `refutation:verifier:${index + 1}`;
-      const captured = capturedPanelRaw(handle, logicalRequestId);
+      const captured = capturedPanelAttempt(handle, logicalRequestId);
       if (!captured.ok) return captured;
-      const parsed = parseRefutationVerdict(captured.raw, input.lenses[index]!, input.criticalFindingIds);
+      const target = panelOperationParseTarget(handle, captured.request, captured.raw);
+      if (!target.ok) return target;
+      const parsed = parseRefutationVerdict(target.target, input.lenses[index]!, input.criticalFindingIds);
       if (!parsed.ok) return { ok: false, message: parsed.errors.join("; ") };
       verdicts.push(parsed.value);
     }
@@ -1871,7 +2204,7 @@ function executeDeterministicPanelOperation(
   if (operationId === "architecture-prepare-judges") {
     const accepted = [];
     for (let index = 0; index < input.candidateLenses.length; index += 1) {
-      const captured = capturedPanelRaw(handle, `architecture:candidate:${index + 1}`);
+      const captured = capturedPanelAttempt(handle, `architecture:candidate:${index + 1}`);
       if (!captured.ok) return captured;
       const problem = panelSubmissionProblem(registration, `architecture:candidate:${index + 1}`, captured.raw);
       if (problem !== null) return { ok: false, message: problem };
@@ -1896,9 +2229,11 @@ function executeDeterministicPanelOperation(
     }
     const verdicts: JudgeVerdict[] = [];
     for (let index = 0; index < criteria.length; index += 1) {
-      const captured = capturedPanelRaw(handle, `architecture:judge:${index + 1}`);
+      const captured = capturedPanelAttempt(handle, `architecture:judge:${index + 1}`);
       if (!captured.ok) return captured;
-      const parsed = parseJudgeVerdict(captured.raw, criteria[index]!, candidates);
+      const target = panelOperationParseTarget(handle, captured.request, captured.raw);
+      if (!target.ok) return target;
+      const parsed = parseJudgeVerdict(target.target, criteria[index]!, candidates);
       if (!parsed.ok) return { ok: false, message: parsed.errors.join("; ") };
       verdicts.push(parsed.value);
     }
