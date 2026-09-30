@@ -49,9 +49,20 @@ function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: fals
   return result.value;
 }
 function git(root: string, args: readonly string[]) {
-  const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
-  if (result.status !== 0) throw new Error(result.stderr);
-  return result.stdout.trim();
+	// Fixture commit SHAs must be deterministic: frozen-source sections embed
+	// workspaceHead/headRevision, and the byte-identity assertions compare
+	// packets minted by separate fixture projects. Wall-clock commit dates
+	// give different SHAs whenever two commits straddle a second boundary — a
+	// time-flake that only appears under full-suite load. Pin both dates so
+	// identical trees always yield identical SHAs. (The FR-012 test's
+	// withIssueRoute date pins stay: identical values, no conflict.)
+	const result = spawnSync("git", args, {
+		cwd: root,
+		encoding: "utf8",
+		env: { ...process.env, GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z", GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z" },
+	});
+	if (result.status !== 0) throw new Error(result.stderr);
+	return result.stdout.trim();
 }
 function project() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "loom-p4-standalone-")));

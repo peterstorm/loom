@@ -44,8 +44,18 @@ function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: fals
   return result.value;
 }
 function git(root: string, args: readonly string[]) {
-  const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
-  if (result.status !== 0) throw new Error(result.stderr);
+	// Fixture commit SHAs must be deterministic: frozen-source sections embed
+	// workspaceHead, and packet byte-identity assertions compare sections
+	// minted by separate fixture projects. Wall-clock commit dates give
+	// different SHAs whenever two commits straddle a second boundary — a
+	// time-flake that only appears under full-suite load. Pin both dates so
+	// identical trees always yield identical SHAs.
+	const result = spawnSync("git", args, {
+		cwd: root,
+		encoding: "utf8",
+		env: { ...process.env, GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z", GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z" },
+	});
+	if (result.status !== 0) throw new Error(result.stderr);
 }
 const critical = REVIEWER_PAYLOAD_EXAMPLE_V2.findings.find((finding) => finding.severity === "critical")!;
 const criticalDraft: ReviewerDraftV2 = { ...critical, file: "src/x.ts", line: 1, claim: "  exact current claim\nwith detail  " };
