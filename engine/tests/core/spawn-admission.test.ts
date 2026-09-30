@@ -186,6 +186,7 @@ import {
   emissionToolPrimaryInstruction,
   expectedSpawnEmissionCapability as decideSpawnEmissionCapability,
   issuedReviewerPayloadClaim,
+  issuedSpawnEmissionRouteDecision,
   parseEmissionDescriptor,
   projectEmissionTaskText,
   qualifyIssuedSpawnEmissionRoute,
@@ -194,6 +195,7 @@ import {
   type IssuedProducerClaim,
   type IssuedSpawnEmissionAuthority,
   type IssuedSpawnEmissionRoute,
+  type IssuedSpawnEmissionRouteDecision,
 } from "../../src/core/spawn-admission";
 import {
   issueEmissionBinding,
@@ -897,6 +899,20 @@ describe("request emission routes", () => {
     });
   });
 
+  it("pins the qualified emission route to the catalog's qualified-local-review profile (requalification drift guard)", () => {
+    const profile = resolveModelProfile("qualified-local-review");
+    if (!profile.ok) throw new Error(`fixture profile refused: ${profile.error.message}`);
+    const pi = lowerModelProfile(profile.value, "pi");
+    // The emission capability trusts exactly the catalog profile the issue
+    // route election derives from the qualified-local parent handshake: a
+    // catalog model change must fail this guard and force requalification,
+    // never silently re-qualify a new model against the frozen schemas.
+    expect(qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V2), issuedPiRoute(pi.provider, pi.model), true))
+      .toMatchObject({ kind: "emission-enabled" });
+    expect(qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V2), issuedPiRoute("desktop-vllm", "some-other-local-model"), true))
+      .toMatchObject({ kind: "extraction-only" });
+  });
+
   it("carries only the exact qualified child route in enabled expectations", () => {
     const qualified = qualifyIssuedSpawnEmissionRoute(
       claimOf(REVIEWER_V2),
@@ -1158,6 +1174,30 @@ describe("request emission routes", () => {
       // The extraction-only admission prose stays out of the tool-primary arm:
       // the pinned standalone/wave suites assert current v2 tasks never carry it.
       expect(instruction).not.toContain("Machine Summary");
+    }
+  });
+});
+
+describe("the issued spawn-route projection join (T6)", () => {
+  it("projects the enabled arm onto the request programs' emission decision without re-deriving the binding", () => {
+    const route = issuedSpawnEmissionRouteDecision(emissionRouteFor(REVIEWER_V2));
+    expect(route).toEqual({ kind: "emission", binding: REVIEWER_V2, contextDigest: CONTEXT_DIGEST });
+  });
+
+  it("passes the extraction-only and refused arms through as the same closed values", () => {
+    const extractionOnly: IssuedSpawnEmissionRoute = Object.freeze({ kind: "extraction-only" as const, reason: "no frozen registry cell" });
+    const refused: IssuedSpawnEmissionRouteDecision = Object.freeze({ kind: "refused" as const, reason: "stale loaded revision" });
+    expect(issuedSpawnEmissionRouteDecision(extractionOnly)).toEqual(extractionOnly);
+    expect(issuedSpawnEmissionRouteDecision(refused)).toEqual(refused);
+  });
+
+  it("round-trips the issued route decisions of the current reviewer cells back onto the request-programs' vocabulary", () => {
+    for (const binding of [REVIEWER_V2, REVIEWER_V3]) {
+      const enabled = decideIssuedSpawnEmissionRoute(claimOf(binding), providedEmissionCapability(binding.schemaDigest));
+      if (enabled.kind !== "emission-enabled") throw new Error("fixture route must enable emission");
+      expect(issuedSpawnEmissionRouteDecision(enabled)).toEqual({
+        kind: "emission", binding, contextDigest: CONTEXT_DIGEST,
+      });
     }
   });
 });

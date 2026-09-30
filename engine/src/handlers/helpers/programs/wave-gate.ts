@@ -41,7 +41,7 @@ import {
   type WaveSpecCheckTaskAuthority,
   type WaveTaskRunAuthority,
 } from '../../../core/wave-review-authority';
-import { REVIEWER_EXTRACTION_RETRY_INSTRUCTION, decideRefutationTranscriptRead, durableCaptureRejection, durableRefutationRequests, exactObject, executableRefutationRequests, failed, observedReviewerIssueRoute, parseRegisteredFacadeProgram, reviewerProtocolResolver, publicationResolver, publishReviewInitialBatch, recoverOrPublishRefutationRetry, refutationRejectionDiagnostic, renderReviewProgramSpawnTask, reviewerRetryInstruction, type FacadeDriveResult, type RegisteredWaveGateProgram } from './helpers';
+import { REVIEWER_EXTRACTION_RETRY_INSTRUCTION, decideRefutationTranscriptRead, durableCaptureRejection, durableRefutationRequests, exactObject, executableRefutationRequests, failed, observedReviewerIssueRoute, parseRegisteredFacadeProgram, reviewerProtocolResolver, publicationResolver, publishLegacyInitialBatch, publishReviewInitialBatch, recoverOrPublishRefutationRetry, refutationRejectionDiagnostic, renderReviewProgramSpawnTask, renderSpawnTask, reviewerRetryInstruction, type FacadeDriveResult, type RegisteredWaveGateProgram } from './helpers';
 
 const waveGateDeps = Object.freeze({
   loadPlanModels: loadPlanModelsSource,
@@ -2156,7 +2156,10 @@ export async function resumeWaveGateFacade(
       let durable: SpawnRequest;
       if (recovered.kind === "found") durable = recovered.requests[0]!;
       else {
-        const published = await publishReviewInitialBatch(handle, [retry.request], [retry.packet], "wave-gate-spec-retry", registration);
+        // The spec-check slot is an explicit extraction-only request (FR-001):
+        // it publishes with no emission authority, so its retry task advertises
+        // no emission tool regardless of the parent route.
+        const published = await publishLegacyInitialBatch(handle, [retry.request], [retry.packet], "wave-gate-spec-retry");
         if (!published.ok) return failed(published.message);
         durable = published.requests[0]!;
       }
@@ -2180,7 +2183,9 @@ export async function resumeWaveGateFacade(
         kind: "spawn-batch", runId: handle.runId,
         requests: [{
           ...durable,
-          task: renderReviewProgramSpawnTask(handle, durable.authority, "Read the immutable context packet at LOOM_CONTEXT_PATH, then retry the exact current Wave spec-check slot.", registration),
+          // Extraction-only render: the spec-check slot carries no emission
+          // descriptor and keeps the caller's instruction verbatim (FR-020).
+          task: renderSpawnTask(handle, durable.authority, "Read the immutable context packet at LOOM_CONTEXT_PATH, then retry the exact current Wave spec-check slot."),
         }],
       } };
     }
@@ -2200,7 +2205,10 @@ export async function resumeWaveGateFacade(
       const recovered = durableRefutationRequests(handle, preparation.inputs, resolver, "wave-refutation");
       if (recovered.kind === "corrupt") return waveBlocked(handle, recovered.message);
       if (recovered.kind === "absent") {
-        const published = await publishReviewInitialBatch(handle, preparation.inputs, preparation.packets, "wave-refutation", registration);
+        // Panel verdicts are the explicit extraction-only publication route:
+        // the refutation batch carries no reviewer emission authority, so the
+        // shared core renders every task with the caller's instruction verbatim.
+        const published = await publishLegacyInitialBatch(handle, preparation.inputs, preparation.packets, "wave-refutation");
         return published.ok ? { ok: true, action: published.action } : failed(published.message);
       }
       const requests = recovered.requests;

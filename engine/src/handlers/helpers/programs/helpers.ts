@@ -28,6 +28,7 @@ import { parseReviewerProtocolDescriptor, type ReviewerProtocolDescriptor, type 
 import {
   emissionToolPrimaryInstruction,
   issuedReviewerPayloadClaim,
+  issuedSpawnEmissionRouteDecision,
   parseEmissionDescriptor,
   projectEmissionTaskText,
   qualifyIssuedSpawnEmissionRoute,
@@ -993,13 +994,9 @@ function reviewerEmissionProjection(
     authority,
     process.env.PI_CODING_AGENT === "true",
   );
-  const route = qualified.kind === "emission-enabled"
-    ? canonicalRecord({
-        kind: "emission" as const,
-        binding: qualified.binding,
-        contextDigest: qualified.contextDigest,
-      })
-    : qualified;
+  // The admission module owns the route-discriminant projection; the render
+  // never re-derives it.
+  const route = issuedSpawnEmissionRouteDecision(qualified);
   // The shell owns the refusal→throw conversion (US4): a route the child
   // surface cannot provide fails the render, so the drive reports the bounded
   // refusal — no silent degradation, no fallback to an unprovidable tool.

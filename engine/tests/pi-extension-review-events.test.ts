@@ -291,7 +291,7 @@ const reviewResult = (
   },
 });
 
-async function piCaptureRun(runSuffix: string, contextText = "Pi capture context"): Promise<Readonly<{
+async function piCaptureRun(runSuffix: string, contextText = "Pi capture context", issueRoute: "catalog" | "qualified-local" = "catalog"): Promise<Readonly<{
   runsRoot: string;
   runDir: string;
   request: AgentRequestAuthority;
@@ -322,38 +322,57 @@ async function piCaptureRun(runSuffix: string, contextText = "Pi capture context
     authorityDigest: waveGateAuthorityDigest(1, ["T1"], graph) };
   const registered = await opened.value.registerProgram(registration);
   if (!registered.ok) throw new Error(registered.error.message);
-  const previous = process.cwd();
-  process.chdir(repository);
-  let batch: ReturnType<typeof waveRequests>;
+  // The issue-route election is ambient-env sensitive: each arm pins its own
+  // route explicitly (the qualified arm pins the qualified local route, the
+  // catalog arm deletes the election variables), so waveRequests elects the
+  // same profiles the request authority below binds.
+  const routeEnv: Readonly<Record<string, string | undefined>> = issueRoute === "qualified-local"
+    ? { PI_PROVIDER: "desktop-vllm", PI_MODEL: "glm-5.3-flash-spark-tp2-v14", PI_REASONING_LEVEL: "high" }
+    : { PI_PROVIDER: undefined, PI_MODEL: undefined, PI_REASONING_LEVEL: undefined };
+  const previousRoute = Object.keys(routeEnv).map((key) => [key, process.env[key]] as const);
+  const previousCwd = process.cwd();
   try {
-    batch = waveRequests(opened.value, registration, graph, 1, { kind: "git-repository", root: repository });
+    for (const [key, value] of Object.entries(routeEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    process.chdir(repository);
+    const batch = waveRequests(opened.value, registration, graph, 1, { kind: "git-repository", root: repository });
+    const source = batch.packets.find(({ role }) => role === "code-reviewer");
+    if (source === undefined) throw new Error("historical Wave fixture lacks reviewer packet");
+    const packet = buildContextPacket({ ...source, requestId, fixedContext: [...source.fixedContext, section.value] });
+    if (!packet.ok) throw new Error(packet.error.message);
+    const published = await opened.value.publishContext(packet.value);
+    if (!published.ok) throw new Error(published.error.message);
+    const profile = issueRoute === "qualified-local" ? "qualified-local-review" : "general-review";
+    const resolved = (await import("../src/core/model-profiles")).resolveModelProfile(profile);
+    if (!resolved.ok) throw new Error(resolved.error.message);
+    const lowered = (await import("../src/core/model-profiles")).lowerModelProfile(resolved.value, "pi");
+    const request = {
+      runId: `run.${runSuffix}`,
+      requestId,
+      slotId: "slot-1",
+      program: "wave-gate",
+      role: "code-reviewer",
+      attempt: 1,
+      modelProfile: profile,
+      harnessBinding: {
+        pi: lowered,
+        claude: { harness: "claude-code", model: "sonnet" },
+      },
+      requiredSkill: null,
+      contextDigest: packet.value.digest,
+      outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-1/attempt-1.raw" },
+    } as AgentRequestAuthority;
+    await publishPiFixtureRequest(opened.value, request);
+    return { runsRoot, runDir, request, handle: opened.value };
   } finally {
-    process.chdir(previous);
+    process.chdir(previousCwd);
+    for (const [key, value] of previousRoute) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
-  const source = batch.packets.find(({ role }) => role === "code-reviewer");
-  if (source === undefined) throw new Error("historical Wave fixture lacks reviewer packet");
-  const packet = buildContextPacket({ ...source, requestId, fixedContext: [...source.fixedContext, section.value] });
-  if (!packet.ok) throw new Error(packet.error.message);
-  const published = await opened.value.publishContext(packet.value);
-  if (!published.ok) throw new Error(published.error.message);
-  const request = {
-    runId: `run.${runSuffix}`,
-    requestId,
-    slotId: "slot-1",
-    program: "wave-gate",
-    role: "code-reviewer",
-    attempt: 1,
-    modelProfile: "general-review",
-    harnessBinding: {
-      pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-      claude: { harness: "claude-code", model: "sonnet" },
-    },
-    requiredSkill: null,
-    contextDigest: packet.value.digest,
-    outputSlot: { kind: "fixed-artifact-slot", path: "transcripts/slot-1/attempt-1.raw" },
-  } as AgentRequestAuthority;
-  await publishPiFixtureRequest(opened.value, request);
-  return { runsRoot, runDir, request, handle: opened.value };
 }
 
 async function publishPiFixtureRequest(handle: RunDirHandle, raw: AgentRequestAuthority): Promise<void> {
@@ -613,6 +632,38 @@ describe("Pi extension review tool_result integration", () => {
       sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad499" },
     });
 
+    expect(readFileSync(join(staged.runDir, "transcripts", "slot-1", "attempt-1.raw"), "utf-8")).toBe(expected);
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].critical_findings).toBeUndefined();
+  });
+
+  it("captures Pi tool_result bytes identically for an issued authority on the qualified emission route (FR-012)", async () => {
+    const pi = await extension();
+    const staged = await piCaptureRun("pi-qualified-route", "Pi capture context", "qualified-local");
+    // The issued authority genuinely binds the qualified local emission route.
+    expect(staged.request.modelProfile).toBe("qualified-local-review");
+    expect(staged.request.harnessBinding.pi).toMatchObject({ provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14" });
+    const toolCallId = "call-qualified-route-capture";
+    const nativeId = await rosterId(toolCallId, 0, "code-reviewer");
+    const correlated = await staged.handle.recordHarnessCorrelator({
+      schemaVersion: 1,
+      harness: "pi",
+      nativeId,
+      requestId: staged.request.requestId,
+      role: staged.request.role,
+      attempt: staged.request.attempt,
+    });
+    expect(correlated.ok).toBe(true);
+    process.env.LOOM_ORCHESTRATION_RUNS_ROOT = staged.runsRoot;
+    process.env.LOOM_ORCHESTRATION_RUN_DIR = staged.runDir;
+    const result = reviewResult("Task: T1", "qualified-route finding");
+    const expected = (result.details.results[0].messages[0].content[0] as { text: string }).text;
+
+    await pi.emit("tool_result", { ...result, toolCallId }, {
+      sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad499" },
+    });
+
+    // The request-bound capture flow is route-independent: the same final
+    // payload lands byte-identically regardless of the issued emission route.
     expect(readFileSync(join(staged.runDir, "transcripts", "slot-1", "attempt-1.raw"), "utf-8")).toBe(expected);
     expect(JSON.parse(readFileSync(statePath, "utf-8")).tasks[0].critical_findings).toBeUndefined();
   });

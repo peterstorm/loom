@@ -666,20 +666,24 @@ export function piEmissionCallFrames(
         }));
         continue;
       }
-      if (!isRecord(block["arguments"])) {
-        frames.push(Object.freeze({
-          kind: "incomplete" as const,
-          toolCallId,
-          reason: `emission tool call ${toolCallId} was observed with ${describeUnknown(block["arguments"])} arguments, not an object (${origin})`,
-        }));
-        continue;
-      }
+      // Causal diagnostic precedence (FR-014): turn finalization is checked
+      // BEFORE argument shape — an aborted/error turn invalidates every call
+      // in it regardless of how its arguments look, so the finalization is
+      // the reason an observation is incomplete, not the argument form.
       const stopReason = message["stopReason"];
       if (stopReason === "aborted" || stopReason === "error") {
         frames.push(Object.freeze({
           kind: "incomplete" as const,
           toolCallId,
           reason: `emission tool call ${toolCallId} belongs to an assistant turn finalized as ${stopReason} (${origin})`,
+        }));
+        continue;
+      }
+      if (!isRecord(block["arguments"])) {
+        frames.push(Object.freeze({
+          kind: "incomplete" as const,
+          toolCallId,
+          reason: `emission tool call ${toolCallId} was observed with ${describeUnknown(block["arguments"])} arguments, not an object (${origin})`,
         }));
         continue;
       }
@@ -694,18 +698,21 @@ export function piEmissionCallFrames(
         }));
         continue;
       }
-      const unusableResult = results.find((result) =>
-        result["toolName"] !== block["name"] || result["isError"] !== false
-      );
-      if (unusableResult !== undefined) {
-        const resultName = describeUnknown(unusableResult["toolName"]);
-        const resultState = unusableResult["isError"] === true
+      // The exactly-one result was enforced above; index the proven singleton
+      // directly instead of re-searching it.
+      const [singleton] = results;
+      if (singleton === undefined) {
+        throw new Error("emission scan invariant failed: an exactly-one result set produced no element");
+      }
+      if (singleton["toolName"] !== block["name"] || singleton["isError"] !== false) {
+        const resultName = describeUnknown(singleton["toolName"]);
+        const resultState = singleton["isError"] === true
           ? "failed"
-          : `has non-success isError ${describeUnknown(unusableResult["isError"])}`;
+          : `has non-success isError ${describeUnknown(singleton["isError"])}`;
         frames.push(Object.freeze({
           kind: "incomplete" as const,
           toolCallId,
-          reason: unusableResult["toolName"] !== block["name"]
+          reason: singleton["toolName"] !== block["name"]
             ? `emission tool call ${toolCallId} finalized under mismatched tool result ${resultName} (${origin})`
             : `emission tool call ${toolCallId} ${resultState} (${origin})`,
         }));

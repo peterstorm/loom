@@ -129,6 +129,7 @@ import {
   LOOM_EMISSION_BINDING_ENV,
   parseEmissionChildProvisioning,
   parseReadinessStageObservation,
+  type EmissionHoldPhase,
   type EmissionReadinessExpectation,
   type EmissionToolRegistration,
 } from "./emission-tool";
@@ -3090,7 +3091,7 @@ export default function (
       ? Object.freeze({ kind: "unprovisioned" as const })
       : armEmissionHold(),
   };
-  const appendEmissionHoldDiagnostic = (phase: "entered" | "resolved"): void => {
+  const appendEmissionHoldDiagnostic = (phase: EmissionHoldPhase): void => {
     try {
       pi.appendEntry(EMISSION_HOLD_ENTRY_TYPE, { phase });
     } catch (thrown) {
@@ -3165,6 +3166,22 @@ export default function (
     await hold.wait;
     appendEmissionHoldDiagnostic("resolved");
     return undefined;
+  });
+
+  // Fail-safe hold resolution (AD-4's cleanup arm): a provisioned child whose
+  // hold is still ARMED at session shutdown must not leave its awaited
+  // before_agent_start handler pending forever — the wedged coroutine cannot
+  // outlive the session it gates. Releasing at shutdown admits no model
+  // request (the session is ending), so the barrier stays fail-closed for
+  // every prompt; the shutdown-released entry is the honest forensic marker
+  // that readiness never opened on this child. An already-released (or
+  // never-armed) hold is inert here.
+  pi.on("session_shutdown", async () => {
+    const hold = emissionHoldState.current;
+    if (hold.kind !== "armed") return;
+    emissionHoldState.current = Object.freeze({ kind: "released" as const });
+    hold.release();
+    appendEmissionHoldDiagnostic("shutdown-released");
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {

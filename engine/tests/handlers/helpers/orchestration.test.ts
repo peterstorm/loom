@@ -26,6 +26,7 @@ import {
 } from "../../../src/handlers/helpers/programs/standalone";
 import { StateManager } from "../../../src/state-manager";
 import { parseRegistration, publishLegacyInitialBatch } from "../../../src/handlers/helpers/programs/helpers";
+import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../src/core/spawn-admission";
 import { deriveWaveAttemptTwo, waveGateAuthorityDigest, waveRequests, installWaveReviewRuns, persistedWaveAttemptTwoCompatibilityProblem, prepareOrphanedWaveGateRecovery } from "../../../src/handlers/helpers/programs/wave-gate";
 import { captureKey } from "../../../src/core/harness-capture";
 import { buildContextPacket, encodeByteSection } from "../../../src/orchestration/context-packets";
@@ -1261,6 +1262,62 @@ describe("orchestration CLI", () => {
     expect(panel.requests).toHaveLength(3);
     expect(panel.requests.every(({ authority }) => authority.role === "review-verifier-agent")).toBe(true);
   }, 15_000);
+
+  it("keeps the refutation panel spawn tool-free under a qualified emission-capable parent (FR-001/AD-6)", async () => {
+    // runCli's envOverrides override (and undefined-delete) the fixture env,
+    // so each arm pins its own issue-route election explicitly.
+    const CATALOG_ROUTE_ENV = { PI_PROVIDER: undefined, PI_MODEL: undefined, PI_REASONING_LEVEL: undefined } as const;
+    const QUALIFIED_ROUTE_ENV = { PI_PROVIDER: "desktop-vllm", PI_MODEL: "glm-5.3-flash-spark-tp2-v14", PI_REASONING_LEVEL: "high" } as const;
+    const runThroughPanel = async (routeEnv: Readonly<Record<string, string | undefined>>) => {
+      const root = repository();
+      writeFileSync(join(root, "README.md"), "fixture\npanel defect\n");
+      const runsRoot = join(root, ".claude", "reviews", "review-and-fix-runs");
+      const runDir = join(runsRoot, "run.panel-route");
+      mkdirSync(runDir, { recursive: true });
+      const startedResponse = await runCli(["start", "standalone-review", "--runs-root", runsRoot, "--run", runDir],
+        JSON.stringify({ kind: "all", files: null, dryRun: false }), root, routeEnv);
+      expect(startedResponse.status, startedResponse.stderr).toBe(0);
+      const started = JSON.parse(startedResponse.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority; task: string }[] };
+      const opened = openRunDirectory(runsRoot, runDir);
+      if (!opened.ok) throw new Error(opened.error.message);
+      const criticalTranscript = currentStandaloneCritical("README.md", "Panel route defect");
+      const cleanTranscript = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
+      for (const [index, { authority }] of started.requests.entries()) {
+        expect((await opened.value.captureTranscript(authority, [...Buffer.from(index === 0 ? criticalTranscript : cleanTranscript)])).ok).toBe(true);
+      }
+      const resumedResponse = await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, routeEnv);
+      expect(resumedResponse.status, resumedResponse.stderr).toBe(0);
+      const panel = JSON.parse(resumedResponse.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority; task: string }[] };
+      return { root, started, panel };
+    };
+    const catalog = await runThroughPanel(CATALOG_ROUTE_ENV);
+    const qualified = await runThroughPanel(QUALIFIED_ROUTE_ENV);
+
+    // The parent route is genuinely emission-capable: the reviewer slots of
+    // the qualified run issue descriptors, the catalog run's do not.
+    for (const { task } of qualified.started.requests) {
+      expect(parseEmissionDescriptor(task)).toMatchObject({ kind: "issued", binding: { version: "v2" } });
+      expect(task).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
+    }
+    for (const { task } of catalog.started.requests) {
+      expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
+    }
+
+    // AD-6: the panel verdict slots are not this feature's emission route —
+    // every panel task advertises no tool and is byte-identical across the
+    // two parent routes (modulo the project-local run-directory path).
+    const normalize = (task: string, root: string) => task.split(root).join("<RUN_ROOT>");
+    expect(qualified.panel.requests.map(({ authority }) => authority.role))
+      .toEqual(catalog.panel.requests.map(({ authority }) => authority.role));
+    for (const [catalogRequest, qualifiedRequest] of catalog.panel.requests.map((request, index) => [request, qualified.panel.requests[index]!] as const)) {
+      for (const task of [catalogRequest.task, qualifiedRequest.task]) {
+        expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
+        expect(task).not.toContain("calling the exact tool loom_emit_reviewer_payload");
+        expect(parseEmissionDescriptor(task).kind).toBe("absent");
+      }
+      expect(normalize(qualifiedRequest.task, qualified.root)).toBe(normalize(catalogRequest.task, catalog.root));
+    }
+  }, 60_000);
 
   it("counts committed, staged, unstaged, and untracked additions once for reviewer selection", async () => {
     const root = repository();

@@ -750,6 +750,25 @@ export function decideIssuedSpawnEmissionRoute(
     : route;
 }
 
+/**
+ * The ONE projection of an issued spawn route back onto the request
+ * programs' route decision — the inverse of `decideIssuedSpawnEmissionRoute`'s
+ * enabled arm, owned here so no consumer re-derives the discriminant mapping.
+ * The extraction-only and refused arms are the same closed values in both
+ * vocabularies and pass through unchanged.
+ */
+export function issuedSpawnEmissionRouteDecision(
+  route: IssuedSpawnEmissionRouteDecision,
+): EmissionRouteDecision {
+  return route.kind === "emission-enabled"
+    ? canonicalRecord({
+        kind: "emission" as const,
+        binding: route.binding,
+        contextDigest: route.contextDigest,
+      })
+    : route;
+}
+
 export type IssuedRequestPiRoute = Readonly<{
   harnessBinding: Readonly<{
     pi: Readonly<{ provider: string; model: string }>;

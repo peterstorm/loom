@@ -8,6 +8,12 @@ import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { captureStandaloneCliEvidence } from "../../../fixtures/standalone-cli-capture";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } from "../../../fixtures/pi-session";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
+import {
+  EMISSION_DESCRIPTOR_MARKER,
+  emissionToolPrimaryInstruction,
+  parseEmissionDescriptor,
+  renderEmissionDescriptor,
+} from "../../../../src/core/spawn-admission";
 import { standaloneOriginReference, standaloneDecisionReference, type PreparedStandaloneSuccessor } from "../../../../src/core/standalone-lineage";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../../../src/core/reviewer-contract";
 import type { StandaloneReviewerPayloadV3 } from "../../../../src/core/standalone-lineage-contract";
@@ -526,6 +532,104 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
         if (!replay.ok) throw Error(replay.message);
         expect(Buffer.from(replay.json)).toEqual(bytes); expect(replay.digest).toBe(hash(bytes));
         expect(existsSync(join(s.handle.runDirectory, "checkpoint.json"))).toBe(false);
+      }
+    });
+  });
+
+  it("projects the issued v3 route on the successor path and changes only reviewer task text across routes (FR-012)", async () => {
+    const root = project();
+    await ownedSession(root, async () => {
+      const f = await predecessor(root);
+      const p = await policy(root, "source", "policy-route", f.publisher);
+      writeFileSync(join(root, "a.ts"), "export const value = 2;\n");
+      const QUALIFIED_ROUTE_ENV: Readonly<Record<string, string>> = Object.freeze({
+        PI_PROVIDER: "desktop-vllm", PI_MODEL: "glm-5.3-flash-spark-tp2-v14", PI_REASONING_LEVEL: "high",
+      });
+      // The catalog arm explicitly DELETES the election variables: the outer
+      // Loom session may run this suite under the qualified-local model, and
+      // the catalog issue route must not inherit it.
+      const CATALOG_ROUTE_ENV: Readonly<Record<string, string | undefined>> = Object.freeze({
+        PI_PROVIDER: undefined, PI_MODEL: undefined, PI_REASONING_LEVEL: undefined,
+      });
+      const startSuccessor = async (run: string, environment: Readonly<Record<string, string | undefined>>) => {
+        const previous = Object.keys(environment).map((key) => [key, process.env[key]] as const);
+        try {
+          for (const [key, value] of Object.entries(environment)) {
+            if (value === undefined) delete process.env[key];
+            else process.env[key] = value;
+          }
+          return await successor(root, run, p, f);
+        } finally {
+          for (const [key, value] of previous) {
+            if (value === undefined) delete process.env[key];
+            else process.env[key] = value;
+          }
+        }
+      };
+      const extraction = await startSuccessor("route-extraction", CATALOG_ROUTE_ENV);
+      const emission = await startSuccessor("route-emission", QUALIFIED_ROUTE_ENV);
+
+      // The route election is genuinely exercised and both runs freeze the
+      // same successor v3 program shape (schemaVersion 3, same lineage).
+      for (const run of [extraction, emission]) {
+        expect(run.registration.schemaVersion).toBe(3);
+        expect(run.started.requests.map(({ authority }) => authority.role)).toEqual(["code-reviewer", "type-design-analyzer"]);
+      }
+      expect(emission.started.requests.map(({ authority }) => authority.modelProfile))
+        .toEqual(emission.started.requests.map(() => "qualified-local-review"));
+      expect(emission.started.requests.map(({ authority }) => authority.modelProfile))
+        .not.toEqual(extraction.started.requests.map(({ authority }) => authority.modelProfile));
+
+      // The successor's frozen packet content is route-independent: the v3
+      // packet digests embed each run's request identity, but the lineage and
+      // predecessor-archive section bytes are identical.
+      for (const [extractionRequest, emissionRequest] of extraction.started.requests.map((request, index) => [request, emission.started.requests[index]!] as const)) {
+        const extractionPacket = value(extraction.handle.readStandaloneSuccessorContext(extractionRequest.authority.contextDigest));
+        const emissionPacket = value(emission.handle.readStandaloneSuccessorContext(emissionRequest.authority.contextDigest));
+        expect(emissionPacket.schemaVersion).toBe(3);
+        expect(emissionPacket.variableContext.map((section) => section.label))
+          .toEqual(extractionPacket.variableContext.map((section) => section.label));
+        expect(emissionPacket.variableContext.map((section) => section.digest))
+          .toEqual(extractionPacket.variableContext.map((section) => section.digest));
+        // The fixed sections embed each run's identity (run id, run locator,
+        // lineage digest), so the route-independence comparison normalizes
+        // those identity values; any route-dependent byte would survive that
+        // normalization.
+        expect(emissionPacket.fixedContext.map((section) => section.label))
+          .toEqual(extractionPacket.fixedContext.map((section) => section.label));
+        const normalizeIdentity = (text: string) =>
+          text.split("route-emission").join("route-extraction")
+            .split(emission.prepared.lineageDigest).join(extraction.prepared.lineageDigest);
+        for (const [emissionSection, extractionSection] of emissionPacket.fixedContext.map((section, index) => [section, extractionPacket.fixedContext[index]!] as const)) {
+          expect(normalizeIdentity(Buffer.from(emissionSection.bytes).toString("utf8")))
+            .toBe(Buffer.from(extractionSection.bytes).toString("utf8"));
+        }
+      }
+
+      // The route delta on the wire is EXACTLY the descriptor line plus the
+      // appended tool-primary instruction; request digests and run identity
+      // are normalized to placeholders because each run mints its own.
+      const normalize = (task: string, run: typeof extraction, name: string) => {
+        let out = task.split(name).join("<RUN>");
+        for (const [index, { authority }] of run.started.requests.entries()) {
+          out = out.split(authority.requestId).join(`<REQUEST:${index}>`);
+          out = out.split(authority.contextDigest).join(`<CONTEXT:${index}>`);
+        }
+        return out;
+      };
+      for (const [extractionRequest, emissionRequest] of extraction.started.requests.map((request, index) => [request, emission.started.requests[index]!] as const)) {
+        const extractionTask = normalize(extractionRequest.task, extraction, "route-extraction");
+        const emissionTask = normalize(emissionRequest.task, emission, "route-emission");
+        expect(extractionTask).not.toContain(EMISSION_DESCRIPTOR_MARKER);
+        const descriptor = parseEmissionDescriptor(emissionRequest.task);
+        expect(descriptor).toMatchObject({ kind: "issued", contextDigest: emissionRequest.authority.contextDigest,
+          binding: { requestId: emissionRequest.authority.requestId, version: "v3" } });
+        if (descriptor.kind !== "issued") throw new Error("qualified-route fixture must mint an issued descriptor");
+        const stripped = emissionTask
+          .replace(normalize(renderEmissionDescriptor(descriptor.binding, descriptor.contextDigest), emission, "route-emission"), "")
+          .replace(`\n${emissionToolPrimaryInstruction(descriptor.binding)}`, "");
+        expect(stripped).toBe(extractionTask);
+        expect(emissionTask).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
       }
     });
   });

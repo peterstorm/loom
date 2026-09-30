@@ -3880,6 +3880,62 @@ describe(`the PRODUCTION loom child extension through the real barrier protocol 
     }
   });
 
+  it("session shutdown releases an armed emission hold: the wedged prompt settles, the shutdown-released marker is attempted, and re-invocation is inert (AD-4 cleanup arm)", async () => {
+    const requestId = nextRequestId("t5-hold-shutdown-release");
+    const expectation = makeExpectation(JUDGE_V1_CELL, requestId, "http://127.0.0.1:9/v1");
+    const rawBinding = childProvisioningEnv(
+      expectation,
+      requestId,
+      canonicalRecord({ kind: "minted" as const, cell: JUDGE_V1_CELL }),
+    );
+    if (rawBinding === undefined) throw new Error("the shutdown-release fixture failed to mint provisioning");
+
+    const previousBinding = process.env[LOOM_EMISSION_BINDING_ENV];
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((() => true) as typeof process.stderr.write);
+    process.env[LOOM_EMISSION_BINDING_ENV] = rawBinding;
+    try {
+      const productionExtension = await import("../../../pi/extension");
+      const pi = new EmissionHoldFakePi();
+      productionExtension.default(pi as never, () => Object.freeze([]));
+      const holdHandler = pi.handlers.get("before_agent_start")?.[1];
+      // The emission fail-safe is the SECOND session_shutdown handler: the
+      // interactive-subagent bridge registers one first, the emission
+      // fail-safe second, and the general cleanup third (whose fake-ctx
+      // behavior this unit fixture does not drive).
+      const shutdownFailSafe = pi.handlers.get("session_shutdown")?.[1];
+      if (holdHandler === undefined || shutdownFailSafe === undefined) {
+        throw new Error("the production extension did not register its emission hold and shutdown fail-safe");
+      }
+
+      let holdSettled = false;
+      const heldPrompt = Promise.resolve(holdHandler({}, {})).then(() => {
+        holdSettled = true;
+      });
+      await sleep(20);
+      expect(holdSettled).toBe(false);
+
+      // Shutdown with the hold armed: the wedged coroutine resolves. The
+      // fake journal refuses hold entries, so the shutdown-released marker
+      // surfaces as the bounded stderr diagnostic — the entry emission is
+      // attempted even when the journal is unavailable.
+      await shutdownFailSafe({}, {});
+      await heldPrompt;
+      expect(holdSettled).toBe(true);
+
+      // A second shutdown is inert: the hold is already released, so exactly
+      // one shutdown-released diagnostic is emitted and nothing re-releases.
+      await shutdownFailSafe({}, {});
+      const diagnostic = stderr.mock.calls.map(([chunk]) => String(chunk)).join("");
+      expect(diagnostic).toContain("emission hold shutdown-released diagnostic append failed (Error: hold journal unavailable");
+      expect(diagnostic.match(/shutdown-released diagnostic append failed/g)).toHaveLength(1);
+      expect(diagnostic).toContain("the hold remains fail-closed");
+    } finally {
+      stderr.mockRestore();
+      if (previousBinding === undefined) delete process.env[LOOM_EMISSION_BINDING_ENV];
+      else process.env[LOOM_EMISSION_BINDING_ENV] = previousBinding;
+    }
+  });
+
   it("matching readiness on the judge-verdict v1 cell opens the gate, exposes the exact registered tool to the constrained route, and the first model request lands after the readiness observation", async () => {
     const run = await runProductionGate(productionScenario("production-matching-judge-v1", { issuedCell: JUDGE_V1_CELL, waitForRequest: true }));
     const open = expectOpenProductionRun(run);

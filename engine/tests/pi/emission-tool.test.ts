@@ -1915,6 +1915,35 @@ describe("piEmissionCallFrames — complete, request-bound emission observations
     }
   });
 
+  it("an aborted turn finalizes every emission call in it as incomplete BEFORE argument shape — finalization is the causal reason (AD-8)", () => {
+    // The cancellation path a live launcher produces: the transport finalizes
+    // the turn as aborted while a partial toolCall block carries arguments the
+    // wire never completed. The frame's reason is the FINALIZATION, not the
+    // argument form — the call died with its turn regardless of how its
+    // arguments look, and the diagnostic must say which.
+    const registryCell = REGISTRY_CELLS[2]!; // judge-verdict v1
+    const messages = [
+      {
+        role: "assistant",
+        stopReason: "aborted",
+        content: [{
+          type: "toolCall",
+          id: "call-aborted-malformed",
+          name: registryCell.spec.toolName,
+          arguments: "not-an-object",
+        }],
+      },
+    ];
+    const frames = framesOf(messages, mintedBindingFor(registryCell, "req-emission-frames-aborted-malformed"));
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({
+      kind: "incomplete",
+      toolCallId: "call-aborted-malformed",
+      reason: expect.stringContaining("belongs to an assistant turn finalized as aborted"),
+    });
+    expect(observeEmissionCalls(frames).kind).toBe("unusable");
+  });
+
   it("a failed singleton typed-block emission refuses the exact final-message fallback reproduction", () => {
     const messages = [
       {

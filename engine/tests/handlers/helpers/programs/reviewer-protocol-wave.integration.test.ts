@@ -8,8 +8,14 @@ import { attributeFindings } from "../../../../src/core/findings";
 import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
 import { WAVE_REVIEW_AGENTS } from "../../../../src/core/model-profiles";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
+import {
+  EMISSION_DESCRIPTOR_MARKER,
+  emissionToolPrimaryInstruction,
+  parseEmissionDescriptor,
+  renderEmissionDescriptor,
+} from "../../../../src/core/spawn-admission";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, type ReviewerDraftV2 } from "../../../../src/core/reviewer-contract";
-import { parseRegisteredFacadeProgram, publishLegacyInitialBatch, reviewerProtocolResolver } from "../../../../src/handlers/helpers/programs/helpers";
+import { parseRegisteredFacadeProgram, publishLegacyInitialBatch, renderSpawnTask, reviewerProtocolResolver } from "../../../../src/handlers/helpers/programs/helpers";
 import { handleWaveReviewContext, installWaveReviewRuns, waveGateAuthorityDigest, waveRequests, deriveWaveAttemptTwo, persistedWaveAttemptTwoCompatibilityProblem, currentWaveTaskReviewRetries, markWaveTaskReviewRetriesIssued } from "../../../../src/handlers/helpers/programs/wave-gate";
 import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { captureHarnessResult } from "../../../../src/orchestration/harness-capture-runtime";
@@ -436,4 +442,115 @@ describe("registered Wave reviewer protocol", () => {
     expect(refused.stderr).toContain(": request does not belong to the exact current Wave Review Packet slot");
     expect(readFileSync(p.statePath)).toEqual(beforeStale);
   }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// Issued emission route controls on the real Wave program path (T6): FR-012
+// issuance joins retained regardless of emission-tool availability, and the
+// non-producer spec-check slot stays byte-identical on both routes.
+// ---------------------------------------------------------------------------
+
+const QUALIFIED_ROUTE_ENV: Readonly<Record<string, string>> = Object.freeze({
+  PI_PROVIDER: "desktop-vllm",
+  PI_MODEL: "glm-5.3-flash-spark-tp2-v14",
+  PI_REASONING_LEVEL: "high",
+});
+
+async function withIssueRoute<T>(environment: Readonly<Record<string, string>>, operation: () => Promise<T>): Promise<T> {
+  const previous = Object.keys(environment).map((key) => [key, process.env[key]] as const);
+  try {
+    Object.assign(process.env, environment);
+    return await operation();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+/** Scope the Pi-parent observation for in-process renders without touching
+ *  the CLI children this suite spawns (their fixture environment is fixed). */
+async function withPiParent<T>(enabled: boolean, operation: () => T | Promise<T>): Promise<T> {
+  const previous = process.env.PI_CODING_AGENT;
+  try {
+    if (enabled) process.env.PI_CODING_AGENT = "true";
+    else delete process.env.PI_CODING_AGENT;
+    return await operation();
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT;
+    else process.env.PI_CODING_AGENT = previous;
+  }
+}
+
+function executePacketCommand(task: string) {
+  const command = /^LOOM_CONTEXT_READ_COMMAND: (.+)$/m.exec(task)?.[1];
+  expect(command, "delivery must supply an executable cross-harness packet reader").toBeDefined();
+  const result = spawnSync("bash", ["-c", command ?? "exit 127"], { encoding: "utf8" });
+  expect(result.status, result.stderr).toBe(0);
+  return JSON.parse(result.stdout) as { schemaVersion: number; requestId: string; sections: unknown[] };
+}
+
+describe("the issued emission route on the Wave program path (T6)", () => {
+  it("retains every issuance join across the extraction and emission routes and changes only reviewer task text (FR-012)", async () => {
+    const startRun = async (environment: Readonly<Record<string, string>>) => withIssueRoute(environment, async () => {
+      const p = project();
+      const { action, handle } = await start(p, "run.route");
+      return { p, handle, requests: action.requests! };
+    });
+    const extraction = await startRun({});
+    const emission = await startRun(QUALIFIED_ROUTE_ENV);
+
+    // The route election is genuinely exercised: reviewers bind the
+    // qualified-local profile on the emission route and the catalog profile
+    // on the extraction route; the spec-check slot never does (AD-6).
+    const reviewer = (request: { authority: AgentRequestAuthority }) => request.authority.role !== "spec-check-invoker";
+    expect(emission.requests.filter(reviewer).map(({ authority }) => authority.modelProfile))
+      .toEqual(emission.requests.filter(reviewer).map(() => "qualified-local-review"));
+    expect(emission.requests.filter(reviewer).map(({ authority }) => authority.modelProfile))
+      .not.toEqual(extraction.requests.filter(reviewer).map(({ authority }) => authority.modelProfile));
+    expect(emission.requests.find(({ authority }) => authority.role === "spec-check-invoker")!.authority.modelProfile)
+      .toBe(extraction.requests.find(({ authority }) => authority.role === "spec-check-invoker")!.authority.modelProfile);
+
+    // FR-012 on the emission route: the issuance joins survive — the packet
+    // read command still resolves the exact issued v2 packet for every slot,
+    // and the durable-only fallback render reproduces each issued task
+    // byte-for-byte (the Wave start appends one task-scoped instruction line,
+    // so the comparison drops that final decoration), while the same render
+    // without a Pi parent yields the extraction-shaped task. The route delta
+    // on the wire is EXACTLY the descriptor line plus the appended
+    // tool-primary instruction.
+    const base = "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.";
+    const undecorated = (task: string) => task.slice(0, task.lastIndexOf("\n"));
+    for (const { authority, task } of emission.requests) {
+      const emissionRender = await withPiParent(true, () => renderSpawnTask(emission.handle, authority, base));
+      expect(undecorated(task)).toBe(emissionRender);
+      const extractionRender = await withPiParent(false, () => renderSpawnTask(emission.handle, authority, base));
+      if (authority.role === "spec-check-invoker") {
+        expect(extractionRender).toBe(emissionRender);
+        expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
+        continue;
+      }
+      // The delivery join survives on the emission route: the packet read
+      // command still resolves the exact issued v2 packet for this slot.
+      expect(executePacketCommand(task)).toMatchObject({ schemaVersion: 2, requestId: authority.requestId });
+      expect(task).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
+      const descriptor = parseEmissionDescriptor(task);
+      expect(descriptor).toMatchObject({ kind: "issued", contextDigest: authority.contextDigest,
+        binding: { requestId: authority.requestId, version: "v2" } });
+      if (descriptor.kind !== "issued") throw new Error("qualified-route fixture must mint an issued descriptor");
+      const stripped = emissionRender
+        .replace(renderEmissionDescriptor(descriptor.binding, descriptor.contextDigest), "")
+        .replace(`\n${emissionToolPrimaryInstruction(descriptor.binding)}`, "");
+      expect(stripped).toBe(extractionRender);
+    }
+
+    // The extraction route keeps its exact baseline: no descriptor, verbatim
+    // instruction, and a parent-state-independent durable render.
+    for (const { authority, task } of extraction.requests) {
+      expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
+      expect(task).not.toContain("calling the exact tool loom_emit_reviewer_payload");
+      expect(undecorated(task)).toBe(await withPiParent(true, () => renderSpawnTask(extraction.handle, authority, base)));
+    }
+  }, 120_000);
 });

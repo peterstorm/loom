@@ -96,9 +96,22 @@ export const EMISSION_READINESS_ENTRY_TYPE = "loom-emission-readiness";
 
 /** The custom-entry type bracketing the in-child `before_agent_start` hold —
  *  the defense-in-depth layer's observable gating (AD-4). Entries make the
- *  hold's entered/resolved ordering observable on the RPC stream; they are
- *  never LLM context. */
+ *  hold's phase ordering observable on the RPC stream; they are never LLM
+ *  context. */
 export const EMISSION_HOLD_ENTRY_TYPE = "loom-emission-hold";
+
+/** The closed phase vocabulary the hold's `EMISSION_HOLD_ENTRY_TYPE` entries
+ *  carry onto the RPC stream — part of this module's readiness protocol
+ *  contract, beside the command and entry-type names it already owns:
+ *
+ *  - `entered`: a prompt arrived before readiness and is wedged.
+ *  - `resolved`: the readiness exchange released the hold.
+ *  - `shutdown-released`: the session shut down while the hold was still
+ *    armed — the cleanup arm's honest forensic marker that readiness never
+ *    opened on that child. The release exists so the wedged
+ *    `before_agent_start` handler cannot outlive its session; it can admit
+ *    no model request, because the session is ending. */
+export type EmissionHoldPhase = "entered" | "resolved" | "shutdown-released";
 
 /** The environment variable the launcher provisions an emission-enabled child
  *  with: the issued emission binding as JSON (request id, context digest,
