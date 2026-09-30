@@ -501,9 +501,12 @@ export function observeEmissionCalls(frames: readonly EmissionCallFrame[]): Emis
     }
     const call = canonicalCall(frame.call);
     if (call.toolCallId.length === 0) {
+      // The reason names the observed producer kind: the operator journal reads
+      // this diagnostic to find WHICH family's calls cannot be bound, without
+      // re-opening the transcript.
       return canonicalRecord({
         kind: "unusable" as const,
-        reason: "an observed emission tool call carries an empty tool-call identity",
+        reason: `an observed ${call.kind.kind} emission tool call carries an empty tool-call identity`,
       });
     }
     const seen = callsByIdentity.get(call.toolCallId);

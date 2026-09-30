@@ -600,6 +600,48 @@ describe("canonicalizeEmissionWireArguments — the emission edge's wire-form ca
   });
 });
 
+// ---------------------------------------------------------------------------
+// The shell/canonicalization boundary — the wire-form parse happens BEFORE pi
+// validates (the tool definition's prepareArguments), never inside the shell's
+// admission
+// ---------------------------------------------------------------------------
+
+describe("the shell never canonicalizes — the wire-form parse happens before pi validates", () => {
+  it("refuses the recorded string-typed wire form at the shell, and the canonicalized form acknowledges — the canonicalization belongs to prepareArguments, never to the shell's admission", () => {
+    const v2Spec = EMISSION_TOOL_SPECS["reviewer-payload"];
+    // The recorded transport class the unconstrained route produces: a
+    // string-typed schemaVersion and the findings array serialized as one
+    // JSON string — exactly what the transcript observes. The production
+    // definition canonicalizes this in prepareArguments BEFORE pi validates
+    // (pinned through the real loop in engine/tests/pi/emission-tool.test.ts);
+    // this pin holds the boundary itself: the shell's admission is
+    // engine-authoritative over what it receives, so a caller that skips the
+    // prepareArguments layer cannot smuggle a wire form past the same
+    // admission the engine's selection later re-runs.
+    const wire = {
+      schemaVersion: "2",
+      kind: "standalone-review",
+      findings: JSON.stringify([{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim: "real claim" }]),
+    };
+    expect(acknowledgeEmissionExecution(v2Spec, "v2", wire).kind).toBe("refused");
+
+    // The canonical form the prepareArguments layer produces admits, and the
+    // shell acknowledges it with the minimal terminating result.
+    const canonical = canonicalizeEmissionWireArguments(
+      frozenPayloadSchemaParameters(v2Spec.schemaVersions["v2"]!.schemaBytes),
+      wire,
+    );
+    expect(acknowledgeEmissionExecution(v2Spec, "v2", canonical)).toEqual({
+      kind: "acknowledged",
+      acknowledgment: {
+        content: [{ type: "text", text: "payload acknowledged" }],
+        details: {},
+        terminate: true,
+      },
+    });
+  });
+});
+
 /** Type-level INV-1: the request vocabulary's strict member is the "prefer"
  *  literal — a required request is unrepresentable behind the type, and the
  *  behavioral resolver crossing lives in the real-Pi suite. */

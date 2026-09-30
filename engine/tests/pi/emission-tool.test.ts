@@ -704,6 +704,128 @@ describe("real pi agent loop — terminating execute and the in-child validation
     expect(bypassAcknowledgment.terminate).toBe(true);
   });
 
+  /** The PRODUCTION tool definition over an explicit issued binding, with the
+   *  suite's observation record around the PRODUCTION execute — the same
+   *  posture as executeShellTool, parametrized by the binding so the settled
+   *  transcript can be captured under the SAME issued request the tool was
+   *  registered with. */
+  const observedProductionTool = (issued: IssuedEmissionBinding, observed: unknown[]): Record<string, unknown> => {
+    const definition = emissionToolDefinition(issued);
+    return {
+      ...definition,
+      execute: async (toolCallId: string, params: unknown) => {
+        observed.push(params);
+        return definition.execute(toolCallId, params);
+      },
+    } as Record<string, unknown>;
+  };
+
+  /** The path-REFINED reviewer binding mint: the capture observation takes the
+   *  reviewer-payload refinement, so the fixture mints the refined view
+   *  directly (the path scoping is a type fact, never a runtime check). */
+  const mintedReviewerBindingFor = (requestId: string): IssuedEmissionBindingOf<"reviewer-payload"> => {
+    const minted = issueEmissionBinding({ requestId, kind: "reviewer-payload", version: "v2" });
+    if (!minted.ok) throw new Error(`fixture binding refused: ${minted.error.code} — ${minted.error.message}`);
+    return minted.value;
+  };
+
+  it("an engine-refined refusal that threw is terminal even with usable final text — one re-prompt, the retained diagnostic, and the final text never resurrects the attempt (AD-8/FR-006)", async () => {
+    const cell = REGISTRY_CELLS[0]!; // reviewer-payload v2 — the prose-bearing cell the disagreement is defined for
+    const issued = mintedReviewerBindingFor("req-emission-invalid-plus-final");
+    const observed: unknown[] = [];
+    const tool = observedProductionTool(issued, observed);
+    const settledPayload = reviewerPayloadV2Schema.parse({
+      schemaVersion: 2,
+      kind: "standalone-review",
+      findings: [{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim: "real claim" }],
+    });
+    const whitespaceArgs = whitespaceOnlyArguments(cell.kind);
+    const script = scriptTurns([
+      assistantToolCallMessage([{ type: "toolCall", id: "call-ws", name: cell.spec.toolName, arguments: whitespaceArgs }]),
+      assistantFinalTextMessage(JSON.stringify(settledPayload, null, 2)),
+    ]);
+    const { messages } = await runScriptedLoop([tool], script);
+
+    // pi's validator ADMITTED the whitespace shape (the AD-5 disagreement),
+    // so execute RAN and observed the arguments — then the engine's admission
+    // refused and the shell THREW. The loop re-prompted once and the model
+    // settled in prose: one extra request, the observed in-child retry-loop
+    // cost for ENGINE-refined refusals (parallel to the validation-failure
+    // loop, which re-prompts BEFORE execute).
+    expect(script.callCount()).toBe(2);
+    expect(observed).toHaveLength(1);
+    expect(observed[0]).toEqual(whitespaceArgs);
+    const result = toolResultMessages(messages)[0]!;
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("invalid-payload");
+    // The text the model received is the admission's OWN diagnostic — the
+    // same refusal vocabulary the engine's selection retains (FR-006), never
+    // a shell-invented string.
+    const admission = admitEmissionArguments(cell.spec, cell.version, whitespaceArgs);
+    if (admission.kind !== "refused") throw new Error("fixture must be engine-refused");
+    expect(result.content[0]!.text).toContain(admission.message);
+
+    // The production capture over the settled transcript: the thrown refusal
+    // is an INCOMPLETE observation (its finalized result is the error the
+    // shell threw) — never reclassified as absence and never reclassified as
+    // extraction, EVEN with usable final text. The attempt terminal-refuses
+    // with the retained diagnostic; the attempt budget, not the fallback,
+    // owns the recovery (FR-006's boundary).
+    const capture = piReviewerCaptureObservation(messages, issued);
+    expect(capture).toMatchObject({ kind: "terminal-refusal", reason: "unusable-observation" });
+    if (capture.kind === "terminal-refusal") {
+      expect(capture.message).toContain("call-ws");
+      expect(capture.message).toContain("failed");
+    }
+  });
+
+  it("an engine-refused emission followed by a corrected re-emission refuses the attempt — the failed call is never reclassified as absence and the corrected sibling cannot rescue it (AD-9)", async () => {
+    const cell = REGISTRY_CELLS[0]!; // reviewer-payload v2
+    const issued = mintedReviewerBindingFor("req-emission-refused-then-corrected");
+    const observed: unknown[] = [];
+    const tool = observedProductionTool(issued, observed);
+    const corrected = reviewerPayloadV2Schema.parse({
+      schemaVersion: 2,
+      kind: "standalone-review",
+      findings: [{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim: "real claim" }],
+    });
+    const script = scriptTurns([
+      assistantToolCallMessage([{ type: "toolCall", id: "call-refused", name: cell.spec.toolName, arguments: whitespaceOnlyArguments(cell.kind) }]),
+      assistantToolCallMessage([{ type: "toolCall", id: "call-corrected", name: cell.spec.toolName, arguments: corrected }]),
+    ]);
+    const { events, messages } = await runScriptedLoop([tool], script);
+
+    // The engine-refusal loop cost: the original turn and ONE re-prompt, on
+    // which the model re-emitted with corrected arguments — exactly the
+    // same-spawn correction AD-9 declares rejection-by-construction.
+    expect(script.callCount()).toBe(2);
+    expect(observed).toHaveLength(2);
+    expect(observed[1]).toEqual(corrected);
+    const ends = events.filter(
+      (event): event is Extract<AgentEvent, { type: "tool_execution_end" }> => event.type === "tool_execution_end",
+    );
+    expect(ends).toHaveLength(2);
+    expect(ends[0]!.isError).toBe(true);
+    expect(ends[1]!.isError).toBe(false);
+
+    // The transcript scan: the thrown first call is an INCOMPLETE frame (its
+    // finalized result is the error the shell threw), never reclassified as
+    // absence; the corrected sibling is a complete frame beside it.
+    const scanned = piEmissionCallFrames(messages, issued);
+    if (!scanned.ok) throw new Error(`transcript scan refused: ${scanned.errors.join("; ")}`);
+    expect(scanned.value).toHaveLength(2);
+    expect(scanned.value[0]).toMatchObject({ kind: "incomplete", toolCallId: "call-refused" });
+    expect(scanned.value[1]).toMatchObject({ kind: "complete" });
+    const observation = observeEmissionCalls(scanned.value);
+    expect(observation.kind).toBe("unusable");
+    if (observation.kind === "unusable") expect(observation.reason).toContain("call-refused");
+
+    // The production capture terminalises the attempt: the corrected sibling
+    // cannot rescue it, and the corrected payload is never selected.
+    const capture = piReviewerCaptureObservation(messages, issued);
+    expect(capture).toMatchObject({ kind: "terminal-refusal", reason: "unusable-observation" });
+  });
+
   it("a mixed batch does NOT terminate — one non-terminating result forces the follow-up turn (AD-3)", async () => {
     const registryCell = REGISTRY_CELLS[2]!; // judge-verdict v1
     const observed: unknown[] = [];
@@ -1692,6 +1814,25 @@ describe("piEmissionCallFrames — complete, request-bound emission observations
     expect(observation.kind).toBe("single-call");
     if (observation.kind === "single-call") {
       expect(admitEmissionArguments(REVIEWER_V2_CELL.spec, REVIEWER_V2_CELL.version, observation.call.arguments).kind).toBe("valid");
+    }
+  });
+
+  it("a well-formed payload pasted as final assistant text with zero emission calls extracts through the existing parser — the adapter observes assistant tool calls, never pasted text (AD-8)", () => {
+    const messages = [
+      userLike(),
+      assistantWithCalls([], JSON.stringify(REVIEWER_PAYLOAD_EXAMPLE_V2, null, 2)),
+    ];
+    // Pasted JSON in text is a FinalPayloadCandidate, never an emission frame:
+    // the observation is absence even though the text IS a schema-valid payload.
+    expect(framesOf(messages, issued)).toEqual([]);
+    const capture = piReviewerCaptureObservation(messages, issued);
+    expect(capture.kind).toBe("candidates");
+    if (capture.kind === "candidates") {
+      expect(capture.candidates).toHaveLength(1);
+      // The extraction candidate keeps its text origin — the existing parser's
+      // provenance, not an emission-tool one.
+      expect(capture.candidates[0]!.origin).toBe("content[0].text");
+      expect(JSON.parse(capture.candidates[0]!.text)).toEqual(REVIEWER_PAYLOAD_EXAMPLE_V2);
     }
   });
 

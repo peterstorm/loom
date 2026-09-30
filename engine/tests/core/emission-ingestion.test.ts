@@ -28,10 +28,12 @@ import {
 } from "../../src/core/harness-capture";
 import {
   canonicalStructuralEquals,
+  type ArtifactDigest,
   type DomainResult,
 } from "../../src/core/orchestration-contract/identity";
 import { sha256Hex } from "../../src/core/review-packet";
 import type { PayloadProducerKind, PayloadProducerKindName } from "../../src/core/model-profiles";
+import { standaloneReviewerPayloadV3Schema } from "../../src/core/standalone-lineage-contract";
 import {
   REVIEWER_PAYLOAD_EXAMPLE_V2,
   reviewerPayloadV2Schema,
@@ -380,7 +382,15 @@ describe("observeEmissionCalls", () => {
 
   it("refuses a complete frame carrying an empty tool-call identity — it cannot be bound or replay-deduplicated", () => {
     const call = callOf(REVIEWER_V2, "", INVALID_ARGUMENTS);
-    expect(observeEmissionCalls([frameOf(call)]).kind).toBe("unusable");
+    const observation = observeEmissionCalls([frameOf(call)]);
+    expect(observation.kind).toBe("unusable");
+    if (observation.kind === "unusable") {
+      // The refusal names the OBSERVED producer kind: the operator journal
+      // identifies which family's calls cannot be bound without re-opening
+      // the transcript — the reason is the diagnostic, not a bare tag.
+      expect(observation.reason).toContain("reviewer-payload");
+      expect(observation.reason).toContain("empty tool-call identity");
+    }
   });
 
   it("is deterministic over arbitrary frame lists", () => {
@@ -1200,6 +1210,151 @@ describe("the binding-scoped admission canonicalizes the observed wire form", ()
       expect(fromWire.payload.text).toBe(fromCanonical.payload.text);
       expect(fromWire.payload.digest).toBe(fromCanonical.payload.digest);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The selection's binding-certification invariant (AD-8: the expected
+// kind/version/schema is CHECKED, never trusted)
+// ---------------------------------------------------------------------------
+
+/** The mint stamps the exact tool name and the frozen bytes' digest; nothing
+ *  in the type system stops a caller from hand-building the record shape. The
+ *  selection re-verifies the certification against its own registry cell, so
+ *  an uncertified digest can never flow into the accepted call's journal
+ *  provenance as if it were the issued schema identity. */
+describe("the selection's binding-certification invariant", () => {
+  it("throws at the selection when the binding's schema digest does not certify its registry cell — never admits, never journals fabricated provenance", () => {
+    const forgedDigest = { ...REVIEWER_V2, schemaDigest: "0".repeat(64) as ArtifactDigest };
+    const call = frameOf(callOf(REVIEWER_V2, "call-cert", validReviewerArguments("the registry")));
+    expect(() =>
+      selectCanonicalPayload(forgedDigest, observeEmissionCalls([call]), USABLE_CANDIDATES),
+    ).toThrow(/does not certify its registry cell/);
+
+    const forgedVerdict = { ...JUDGE_V1, schemaDigest: "f".repeat(64) as ArtifactDigest };
+    expect(() =>
+      selectVerdictSource(
+        forgedVerdict,
+        observeEmissionCalls([frameOf(callOf(JUDGE_V1, "call-cert", validJudgeArguments("extensibility")))]),
+        "raw",
+      ),
+    ).toThrow(/does not certify its registry cell/);
+  });
+
+  it("throws when the binding claims another cell's tool name — the exact tool name is part of the issued contract", () => {
+    const forgedTool = { ...JUDGE_V1, toolName: EMISSION_TOOL_SPECS["reviewer-payload"].toolName };
+    expect(() =>
+      selectVerdictSource(
+        forgedTool,
+        observeEmissionCalls([frameOf(callOf(JUDGE_V1, "call-tool", validJudgeArguments("extensibility")))]),
+        "raw",
+      ),
+    ).toThrow(/does not certify its registry cell/);
+  });
+
+  it("never trips the guard for any minted registry cell — the positive control over the certification invariant", () => {
+    const v3Arguments = standaloneReviewerPayloadV3Schema.parse({
+      schemaVersion: 3,
+      kind: "standalone-successor-review",
+      lineageDigest: "a".repeat(64),
+      snapshotDigest: "b".repeat(64),
+      priorAssessments: [],
+      findings: [],
+    });
+    // Per-path thunks: the path scoping is a type fact, so each control mints
+    // its own binding literal and crosses its own selection entry.
+    const positiveControls: readonly (readonly [string, () => IngestionSelection | VerdictSourceSelection])[] = [
+      ["reviewer-payload/v2", () => {
+        const minted = mustMint({ requestId: REQUEST_ID, kind: "reviewer-payload", version: "v2" });
+        return selectCanonicalPayload(
+          minted,
+          observeEmissionCalls([frameOf(callOf(minted, "call-ok", validReviewerArguments("the registry")))]),
+          [],
+        );
+      }],
+      ["reviewer-payload/v3", () => {
+        const minted = mustMint({ requestId: REQUEST_ID, kind: "reviewer-payload", version: "v3" });
+        return selectCanonicalPayload(
+          minted,
+          observeEmissionCalls([frameOf(callOf(minted, "call-ok", v3Arguments))]),
+          [],
+        );
+      }],
+      ["judge-verdict/v1", () => {
+        const minted = mustMint({ requestId: REQUEST_ID, kind: "judge-verdict", version: "v1" });
+        return selectVerdictSource(
+          minted,
+          observeEmissionCalls([frameOf(callOf(minted, "call-ok", validJudgeArguments("extensibility")))]),
+          "raw",
+        );
+      }],
+      ["refutation-verdict/v1", () => {
+        const minted = mustMint({ requestId: REQUEST_ID, kind: "refutation-verdict", version: "v1" });
+        return selectVerdictSource(
+          minted,
+          observeEmissionCalls([frameOf(callOf(minted, "call-ok", validRefutationArguments("reproduction")))]),
+          "raw",
+        );
+      }],
+    ];
+    for (const [label, select] of positiveControls) {
+      expect(select().kind, label).toBe("emission-tool-arguments");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The verdict extraction arms preserve the existing raw input byte-verbatim
+// (AD-8: the verdict extraction arm preserves the existing raw input)
+// ---------------------------------------------------------------------------
+
+describe("the verdict extraction arms preserve the existing raw input byte-verbatim", () => {
+  const whitespaceSignificantRawJson = `  \n\t{"criterion":"extensibility","rankings":[]}\u00a0`;
+
+  it("returns the caller's rawJson byte-verbatim on both extraction arms — unicode and surrounding whitespace included", () => {
+    const baseline = selectVerdictSource(JUDGE_V1, ABSENT, whitespaceSignificantRawJson);
+    expect(baseline).toEqual({
+      kind: "final-message-extraction",
+      rawJson: whitespaceSignificantRawJson,
+      source: "extraction",
+    });
+
+    const overRefused = selectVerdictSource(
+      JUDGE_V1,
+      observeEmissionCalls([frameOf(callOf(JUDGE_V1, "call-1", { criterion: "x", rankings: [] }))]),
+      whitespaceSignificantRawJson,
+    );
+    expect(overRefused.kind).toBe("extraction-over-refused-call");
+    if (overRefused.kind === "extraction-over-refused-call") {
+      expect(overRefused.rawJson).toBe(whitespaceSignificantRawJson);
+      // Byte-verbatim, not merely string-equal-by-coincidence: the UTF-8
+      // encoding of what the arm returns is the encoding of what went in.
+      expect(new TextEncoder().encode(overRefused.rawJson)).toEqual(new TextEncoder().encode(whitespaceSignificantRawJson));
+    }
+  });
+
+  it("freezes the verdict duplicate arm's retained calls — parity with the reviewer path's ambiguity content", () => {
+    const first = frameOf(callOf(JUDGE_V1, "call-a", validJudgeArguments("extensibility")));
+    const second = frameOf(callOf(JUDGE_V1, "call-b", validJudgeArguments("reproduction")));
+    const selection = selectVerdictSource(JUDGE_V1, observeEmissionCalls([first, second]), "raw");
+    expect(selection.kind).toBe("duplicate-emission-call");
+    if (selection.kind === "duplicate-emission-call") {
+      expect(selection.calls.map(({ toolCallId }) => toolCallId)).toEqual(["call-a", "call-b"]);
+      expect(Object.isFrozen(selection.calls)).toBe(true);
+    }
+  });
+
+  it("carries any caller rawJson verbatim through the zero-call arm — the verdict containment law's baseline (property)", () => {
+    fc.assert(
+      fc.property(fc.string({ maxLength: 200 }), (rawJson) => {
+        const selection = selectVerdictSource(JUDGE_V1, ABSENT, rawJson);
+        return (
+          selection.kind === "final-message-extraction" &&
+          selection.rawJson === rawJson &&
+          selection.source === "extraction"
+        );
+      }),
+    );
   });
 });
 

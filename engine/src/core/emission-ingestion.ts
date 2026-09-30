@@ -75,6 +75,7 @@ import {
   type FinalPayload,
   type FinalPayloadCandidate,
 } from "./harness-capture";
+import { sha256Hex } from "./review-packet";
 import {
   canonicalRecord,
   type ArtifactDigest,
@@ -166,6 +167,25 @@ const admitBoundCall = (
   const schemaVersion = spec.schemaVersions[expected.version];
   if (schemaVersion === undefined) {
     return admitEmissionArguments(spec, expected.version, call.arguments);
+  }
+  // The binding-certification invariant (AD-8: the expected kind/version/schema
+  // is CHECKED, never trusted). The mint stamps the exact tool name and the
+  // frozen bytes' digest; nothing in the type system stops a caller from
+  // hand-building the record shape, and an uncertified digest would flow into
+  // the accepted call's journal provenance as if it were the issued schema
+  // identity. The same derivation the mint applies (`sha256Hex` over the exact
+  // frozen bytes) is re-verified here. A fabricated or stale binding is a
+  // caller defect, not a transport observation, so it throws instead of
+  // refusing: invariant guards may throw, and misbound CALLS — the model/transport
+  // failure class — never reach this arm, because the binding check above
+  // refuses them first.
+  const schemaDigest = sha256Hex(schemaVersion.schemaBytes);
+  if (expected.toolName !== spec.toolName || expected.schemaDigest !== schemaDigest) {
+    throw new Error(
+      `issued emission binding does not certify its registry cell: kind ${expected.kind.kind} at version ${expected.version} ` +
+        `carries tool ${spec.toolName} with schema digest ${schemaDigest}, but the binding claims ` +
+        `tool ${expected.toolName} with digest ${expected.schemaDigest} — mint bindings through issueEmissionBinding, never by hand`,
+    );
   }
   const canonical = canonicalizeEmissionWireArguments(
     frozenPayloadSchemaParameters(schemaVersion.schemaBytes),

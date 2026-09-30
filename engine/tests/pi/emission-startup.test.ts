@@ -37,11 +37,23 @@
  * `node_modules/.bin/pi`, then PATH — and the runtime identity is carried in
  * the suite title below.
  *
- * The wave-2 protocol suite contains 15 scenarios: matching opens on the
+ * The wave-2 protocol suite contains 22 scenarios: matching opens on the
  * judge-v1 and reviewer-v2 cells; held ordering; the zero-request negative
- * controls; cancellation; and concurrent isolation. The T5 production suite
- * at the end repeats the protocol against the real Loom extension, including
- * provisioning refusals and the hold's wedge-to-readiness release arc.
+ * controls (including an active, digest-matching tool under a DRIFTED name
+ * and a readiness bound to a foreign context digest — both discriminating
+ * only through the real protocol); the bounded-observation law (a readiness
+ * entry arriving AFTER the bounded window cannot reopen the decided
+ * barrier); the misbinding precedence END-TO-END (a child provisioned for a
+ * stale peer's request AND a different producer kind refuses wrong-request,
+ * never its capability mismatch); the fail-closed route bind observed live
+ * (a bound route drifting from the expected constrained endpoint, and a
+ * child with NO registered provider — both refused before any prompt after
+ * matching readiness); the infrastructure-failure boundary (a child that
+ * dies mid-readiness throws as infrastructure, never a minted refusal, with
+ * ZERO counted model requests); cancellation; and concurrent isolation. The
+ * T5 production suite at the end repeats the protocol against the real Loom
+ * extension, including provisioning refusals and the hold's
+ * wedge-to-readiness release arc.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -426,6 +438,11 @@ export default function (pi) {
 
 async function reportReadiness(pi) {
   const registeredBytes = VARIANT === "wrong-digest" ? STALE_SCHEMA_TEXT : FROZEN_SCHEMA_TEXT;
+  if (VARIANT === "no-provider") {
+    // The route-bind-absent control: an honestly matching readiness payload
+    // about a child that never registered the constrained provider — the
+    // gate's fail-closed bind must refuse before any prompt.
+  } else {
   pi.registerProvider("loom-counting", {
     name: "Loom Counting Provider",
     baseUrl: COUNT_BASE_URL,
@@ -443,6 +460,7 @@ async function reportReadiness(pi) {
       },
     ],
   });
+  }
   pi.registerTool({
     name: TOOL_NAME,
     label: "Loom Emission Tool",
@@ -475,7 +493,7 @@ async function reportReadiness(pi) {
 `;
 
 /** Strict JSONL RPC framing over the child's stdout (the probe's bus). */
-type RpcEvent = Readonly<{ type: string } & Record<string, unknown>>;
+type RpcEvent = Readonly<{ type: string; receivedAt: number } & Record<string, unknown>>;
 
 type RpcBus = Readonly<{
   waitFor: (predicate: (event: RpcEvent) => boolean, timeoutMs: number, label: string) => Promise<RpcEvent>;
@@ -507,15 +525,15 @@ const makeRpcBus = (stdout: NodeJS.ReadableStream): RpcBus => {
       try {
         parsed = JSON.parse(line);
       } catch {
-        events.push({ type: "__non_json__", line: line.slice(0, 160) });
+        events.push({ type: "__non_json__", line: line.slice(0, 160), receivedAt: Date.now() });
         continue;
       }
       const record = recordOf(parsed);
       if (record === null) {
-        events.push({ type: "__non_json__", line: line.slice(0, 160) });
+        events.push({ type: "__non_json__", line: line.slice(0, 160), receivedAt: Date.now() });
         continue;
       }
-      const event: RpcEvent = { ...record, type: typeof record["type"] === "string" ? record["type"] : "__untyped__" };
+      const event: RpcEvent = { ...record, type: typeof record["type"] === "string" ? record["type"] : "__untyped__", receivedAt: Date.now() };
       events.push(event);
       for (let position = waiters.length - 1; position >= 0; position--) {
         const waiter = waiters[position];
@@ -604,7 +622,7 @@ const bindRouteWithSettle = async (
       });
 };
 
-type ChildVariant = "matching" | "held" | "wrong-digest" | "malformed" | "silent" | "stale-extension" | "slow";
+type ChildVariant = "matching" | "held" | "wrong-digest" | "malformed" | "silent" | "stale-extension" | "slow" | "no-provider";
 
 type ChildBinding = Readonly<{
   requestId: string;
@@ -625,11 +643,26 @@ type ScenarioSpec = Readonly<{
   childKind?: PayloadProducerKindName;
   childVersion?: string;
   childRevision?: string;
+  /** The tool name the child registers the FROZEN schema under — the drift
+   *  surface for tool-name-mismatch through the real protocol. */
+  childToolName?: string;
+  /** The base URL the CHILD registers the constrained provider under — the
+   *  drift surface for the live fail-closed route bind (defaults to the
+   *  launcher's own counting server). */
+  childCountBaseUrl?: string;
   /** The real spawn-time --tools allowlist (the honest-inactive control). */
   allowlist?: readonly string[];
   spawnChildExtension?: boolean;
   /** Cancel the barrier mid-readiness-wait (the cancellation control). */
   cancelAfterMs?: number;
+  /** How long the SLOW variant delays its readiness report — the
+   *  bounded-observation control delays it PAST the READY_TIMEOUT_MS window
+   *  so the late entry lands while the launcher's release is held. */
+  readinessDelayMs?: number;
+  /** SIGKILL the child this many ms AFTER the readiness command was invoked
+   *  (and before the bounded readiness window closes) — the
+   *  infrastructure-failure boundary control. */
+  killChildAfterReadinessInvocationMs?: number;
   waitForRequest?: boolean;
   waitForHold?: boolean;
   /** Hold this run's own release open until the promise settles — the AS-020
@@ -647,14 +680,14 @@ const childEnvFor = (
   delete env["PI_CODING_AGENT"];
   env["EMISSION_STARTUP_VARIANT"] = spec.variant;
   env["EMISSION_STARTUP_READINESS_COMMAND"] = READINESS_COMMAND_NAME;
-  env["EMISSION_STARTUP_TOOL_NAME"] = childCell.toolName;
+  env["EMISSION_STARTUP_TOOL_NAME"] = spec.childToolName ?? childCell.toolName;
   env["EMISSION_STARTUP_SCHEMA"] = childCell.schemaBytes;
   env["EMISSION_STARTUP_STALE_SCHEMA"] = spec.variant === "wrong-digest" ? staleSchemaBytes(childCell.schemaBytes) : "";
   env["EMISSION_STARTUP_CHILD_BINDING"] = JSON.stringify(childBinding);
-  env["EMISSION_STARTUP_COUNT_BASE_URL"] = server.baseUrl;
+  env["EMISSION_STARTUP_COUNT_BASE_URL"] = spec.childCountBaseUrl ?? server.baseUrl;
   env["EMISSION_STARTUP_COUNT_KEY"] = "loom-counting-key";
   env["EMISSION_STARTUP_HOLD_MS"] = String(HOLD_MS);
-  env["EMISSION_STARTUP_SLOW_READINESS_MS"] = spec.variant === "slow" ? String(SLOW_READINESS_MS) : "0";
+  env["EMISSION_STARTUP_SLOW_READINESS_MS"] = spec.variant === "slow" ? String(spec.readinessDelayMs ?? SLOW_READINESS_MS) : "0";
   return env;
 };
 
@@ -677,6 +710,10 @@ type StartupRun = Readonly<{
   invocationCount: number;
   readinessPayload: unknown;
   readinessObservedAt: number | null;
+  /** Readiness entries that arrived AFTER the gate decision — the bounded-
+   *  observation control proves a late observation cannot reopen a decided
+   *  barrier (zero of them may ever induce a prompt or a model request). */
+  readinessEntriesAfterDecision: number;
   prompted: boolean;
   holdResolvedAt: number | null;
   firstRequestAt: number | null;
@@ -745,6 +782,10 @@ const startStartupGate = (spec: ScenarioSpec): StartedGate => {
   const childRef: { current: ChildProcess | null } = { current: null };
   const releasedRef: { current: boolean } = { current: false };
   const releasedAtRef: { current: number | null } = { current: null };
+  /** Live view of the run's own counting substitute — read by the rejection
+   *  path below so an infrastructure failure still carries its COUNTED
+   *  zero-request evidence. */
+  const countingHitsRef: { current: readonly CountedRequest[] } = { current: [] };
   const childReady = deferred<ChildProcess | null>();
   const decisionMade = deferred<void>();
   const releaseChild = (): void => {
@@ -757,6 +798,7 @@ const startStartupGate = (spec: ScenarioSpec): StartedGate => {
   const result = (async (): Promise<StartupRun> => {
     let exitSettled: Promise<void> | null = null;
     const server = await startCountingServer();
+    countingHitsRef.current = server.hits;
     const tmp = canonicalTempDir(`loom-emission-startup-${spec.label}-`);
     try {
       const issuedRequestId = nextRequestId(spec.label);
@@ -875,6 +917,13 @@ const startStartupGate = (spec: ScenarioSpec): StartedGate => {
         if (invocation["success"] !== true) {
           throw new Error(`the readiness command invocation was refused by the child: ${boundedEvent(invocation)}`);
         }
+        if (spec.killChildAfterReadinessInvocationMs !== undefined) {
+          // The infrastructure-failure boundary control: the child dies AFTER
+          // a verified invocation, while the launcher's bounded readiness
+          // wait is open — the launcher must surface an infrastructure
+          // failure, never a minted refusal decision.
+          setTimeout(() => releaseChild(), spec.killChildAfterReadinessInvocationMs);
+        }
         const readinessWait = settleWait(bus.waitFor(readinessPredicate, READY_TIMEOUT_MS, "readiness"));
         if (spec.cancelAfterMs !== undefined) {
           const outcome = await Promise.race([readinessWait, sleep(spec.cancelAfterMs).then((): "cancelled" => "cancelled")]);
@@ -917,6 +966,7 @@ const startStartupGate = (spec: ScenarioSpec): StartedGate => {
       const observation = startupGateObservation(stageObservation, routeObservation);
       const finalDecision = decideEmissionStartup(expectation, observation);
       decisionMade.resolve();
+      const decisionAt = Date.now();
 
       // 5. Act on the closed decision — prompt delivery ONLY on the open arm.
       const action = startupGateAction(finalDecision);
@@ -963,6 +1013,9 @@ const startStartupGate = (spec: ScenarioSpec): StartedGate => {
         invocationCount,
         readinessPayload: readiness.kind === "observed" ? readiness.payload : null,
         readinessObservedAt,
+        readinessEntriesAfterDecision: bus.snapshot()
+          .filter(readinessPredicate)
+          .filter((event) => event.receivedAt > decisionAt).length,
         prompted,
         holdResolvedAt,
         firstRequestAt: hits.length > 0 ? hits[0]!.at : null,
@@ -982,6 +1035,17 @@ const startStartupGate = (spec: ScenarioSpec): StartedGate => {
     }
   })().catch((error: unknown) => {
     childReady.resolve(null);
+    // Infrastructure failures keep their existing semantics — they propagate
+    // as errors, never as minted gate decisions — and they carry the run's
+    // own counted model-request snapshot so the zero-request property stays
+    // provable on the rejection path too.
+    const countedRequests = countingHitsRef.current.length;
+    if (error instanceof Error) {
+      throw new Error(
+        `${error.message} — the counting substitute recorded ${countedRequests} model request(s) before this failure`,
+        { cause: error },
+      );
+    }
     throw error;
   });
   return {
@@ -1530,11 +1594,47 @@ describe(`emission-startup barrier against a real headless pi child on ${piIdent
     expect(refusedDecision.message).toContain(run.issuedRequestId);
   });
 
+  it("a child binding the ISSUED request id to a foreign context digest is refused as wrong-request with ZERO model requests (AS-020)", async () => {
+    const run = await runStartupGate(scenario("foreign-context-digest", {
+      // Same request id, different context digest: the wrong-request bind is
+      // BOTH identity fields, and the digest arm is discriminated only when
+      // the request-id arm matches — the misbinding precedence through the
+      // real protocol, not only at the pure gate.
+      childContextDigest: contextDigestOf("emission-startup-context:foreign-digest-seed"),
+    }));
+    const refusedDecision = expectZeroRequestRefusal(run, "wrong-request");
+    expect(run.readinessPayload).not.toBeNull();
+    const raw = recordOf(run.readinessPayload);
+    expect(raw?.["requestId"]).toBe(run.issuedRequestId);
+    expect(raw?.["contextDigest"]).toBe(contextDigestOf("emission-startup-context:foreign-digest-seed"));
+    expect(refusedDecision.message).toContain("context digest");
+    expect(refusedDecision.message).toContain("≠ issued");
+  });
+
   it("a child loaded at a stale revision is refused with ZERO model requests (AS-020)", async () => {
     const run = await runStartupGate(scenario("stale-revision", { childRevision: STALE_REVISION }));
     const refusedDecision = expectZeroRequestRefusal(run, "revision-mismatch");
     expect(run.readinessPayload).not.toBeNull();
     expect(refusedDecision.message).toContain(STALE_REVISION);
+  });
+
+  it("a child registering the FROZEN schema under a drifted tool name — active and digest-matching — is refused with ZERO model requests (AS-020)", async () => {
+    const driftedToolName = "loom_emit_reviewer_payload_drifted";
+    const run = await runStartupGate(scenario("drifted-tool-name", {
+      childToolName: driftedToolName,
+      // The drifted tool is genuinely registered AND active: the child is
+      // fully functional under the wrong name, so the refusal is purely the
+      // exact-tool-name bind, never an inactive-tool accident.
+      allowlist: [driftedToolName],
+    }));
+    const refusedDecision = expectZeroRequestRefusal(run, "tool-name-mismatch");
+    expect(run.readinessPayload).not.toBeNull();
+    const raw = recordOf(run.readinessPayload);
+    expect(raw?.["toolName"]).toBe(driftedToolName);
+    expect(raw?.["active"]).toBe(true);
+    expect(raw?.["schemaDigest"]).toBe(sha256Hex(REVIEWER_V2_CELL.schemaBytes));
+    expect(refusedDecision.message).toContain(driftedToolName);
+    expect(refusedDecision.message).toContain(REVIEWER_V2_CELL.toolName);
   });
 
   it("a registered-but-inactive tool under a real --tools allowlist exclusion is honestly refused with ZERO model requests (AS-020)", async () => {
@@ -1588,6 +1688,123 @@ describe(`emission-startup barrier against a real headless pi child on ${piIdent
     expect(run.invocationCount).toBe(1);
     expect(run.releasedAt).not.toBeNull();
     expect(refusedDecision.message).toContain("cancelled");
+  });
+
+  it("a readiness observation arriving AFTER the bounded window cannot reopen the decided barrier — the launcher releases without prompting on late readiness (FR-008)", async () => {
+    // The bounded-observation law through the REAL protocol: the child's
+    // readiness entry lands PAST the bounded readiness window, while the
+    // launcher's release is still held, so the late observation provably
+    // ARRIVES — and provably does nothing. The decided readiness-timeout
+    // refusal stands: no prompt, ZERO counted model requests, the child's
+    // own reservation released. The counting substitute is the discriminator:
+    // an unbounded or reopenable launcher would have prompted on the late
+    // entry and produced a counted request.
+    const holdRelease = deferred<void>();
+    const LATE_DELAY_MS = 4_000;
+    const gate = startStartupGate(scenario("late-readiness", {
+      variant: "slow",
+      readinessDelayMs: LATE_DELAY_MS,
+      holdRelease: holdRelease.promise,
+    }));
+    try {
+      await gate.gateDecided;
+      // Hold the release past the child's late emission: the bounded window
+      // plus the delay plus settling margin — safely inside the runner's
+      // HOLD_RELEASE_CAP_MS cap so a lost late entry still settles the run.
+      await sleep(LATE_DELAY_MS - READY_TIMEOUT_MS + 1_500);
+      holdRelease.resolve();
+      const run = await gate.result;
+      const refusedDecision = expectZeroRequestRefusal(run, "readiness-timeout");
+      // The late entry PROVABLY arrived after the decision — and induced
+      // nothing: the in-window payload stayed absent, the refused message
+      // names the bounded window, and the counting substitute recorded zero.
+      expect(run.readinessEntriesAfterDecision, run.label).toBeGreaterThanOrEqual(1);
+      expect(run.readinessPayload, run.label).toBeNull();
+      expect(run.invocationCount, run.label).toBe(1);
+      expect(refusedDecision.message, run.label).toContain("bounded window");
+    } finally {
+      holdRelease.resolve();
+      await gate.result.catch(() => undefined);
+    }
+  });
+
+  it("a child provisioned for a stale peer's request AND a different producer kind is refused wrong-request with ZERO model requests — no later capability mismatch reclassifies a misbound child (FR-014)", async () => {
+    // The misbinding precedence through the REAL protocol (the pure gate pins
+    // the whole chain): a child bound to another request and activated for
+    // another kind/version/tool must refuse as wrong-request — its capability
+    // mismatch must never mask the misbinding that is the actual failure.
+    const staleRequestId = nextRequestId("misbound-peer");
+    const run = await runStartupGate(scenario("misbound-everywhere", {
+      childCell: JUDGE_V1_CELL,
+      childRequestId: staleRequestId,
+    }));
+    const refusedDecision = expectZeroRequestRefusal(run, "wrong-request");
+    expect(run.readinessPayload).not.toBeNull();
+    const raw = recordOf(run.readinessPayload);
+    expect(raw?.["requestId"]).toBe(staleRequestId);
+    expect(raw?.["kind"]).toBe("judge-verdict");
+    expect(raw?.["toolName"]).toBe("loom_emit_judge_verdict");
+    expect(refusedDecision.message).toContain(staleRequestId);
+    expect(refusedDecision.message).toContain(run.issuedRequestId);
+    expect(refusedDecision.message).not.toContain("judge-verdict, not the issued");
+  });
+
+  it("a child whose bound route drifts from the expected constrained endpoint is refused by the fail-closed bind with ZERO model requests — matching readiness alone never opens the gate (AS-020/AD-4)", async () => {
+    // Discriminating only through the REAL protocol: the child registers a
+    // live provider and an active, digest-matching tool — every readiness
+    // field matches — but under a DRIFTED base URL, so set_model binds a
+    // route that is not the issued constrained endpoint. Prompting here
+    // would deliver the emission payload to an endpoint the issued binding
+    // never certified; the gate must refuse before ANY model request.
+    const run = await runStartupGate(scenario("route-bind-drift", { childCountBaseUrl: "http://127.0.0.1:9/v1" }));
+    const refusedDecision = expectZeroRequestRefusal(run, "route-bind-refused");
+    expect(run.channelAlive, run.label).toBe(true);
+    expect(run.commandListed, run.label).toBe(true);
+    expect(run.invocationCount, run.label).toBe(1);
+    expect(run.readinessPayload, run.label).not.toBeNull();
+    expect(refusedDecision.message, run.label).toContain("not the expected constrained route");
+    expect(refusedDecision.message, run.label).toContain("http://127.0.0.1:9/v1");
+  });
+
+  it("a child with matching readiness but NO registered provider is refused by the bounded route-bind settle with ZERO model requests (AS-020/AD-4)", async () => {
+    // The bind itself fails closed: the child emits an honest, fully
+    // matching readiness payload, but set_model never finds the constrained
+    // model (the child registered no provider), so the settle-bounded bind
+    // refuses and the launcher releases without prompting.
+    const run = await runStartupGate(scenario("route-bind-absent-provider", { variant: "no-provider" }));
+    const refusedDecision = expectZeroRequestRefusal(run, "route-bind-refused");
+    expect(run.channelAlive, run.label).toBe(true);
+    expect(run.commandListed, run.label).toBe(true);
+    expect(run.invocationCount, run.label).toBe(1);
+    expect(run.readinessPayload, run.label).not.toBeNull();
+    expect(refusedDecision.message, run.label).toContain("set_model refused");
+  });
+
+  it("a child that dies mid-readiness is an INFRASTRUCTURE failure — never a minted gate refusal, no remediation vocabulary, ZERO counted model requests (AD-4)", async () => {
+    // The refusal ADT is the launcher's decision vocabulary for OBSERVED
+    // startup facts. A child that dies while the bounded readiness wait is
+    // open is infrastructure: the existing semantics propagate the error —
+    // no refusal code, no remediation, no minted decision, no consumed
+    // attempt — while the run's own counting substitute still proves that
+    // ZERO model requests were sent before the failure.
+    const runPromise = runStartupGate(
+      scenario("mid-readiness-death", { variant: "slow", killChildAfterReadinessInvocationMs: 300 }),
+    );
+    await expect(runPromise).rejects.toThrow(/child died during a bounded wait/);
+    const failure: unknown = await runPromise.catch((caught: unknown) => caught);
+    expect(failure).toBeInstanceOf(Error);
+    if (!(failure instanceof Error)) throw new Error("unreachable: the rejection is an Error");
+    // NOT a refusal decision: the infrastructure error carries no refusal
+    // code, no remediation text and no decision arm — the closed ADT was
+    // never minted, and semantic retry authority was never touched.
+    expect("code" in failure, failure.message).toBe(false);
+    expect("remediation" in failure, failure.message).toBe(false);
+    expect("decision" in failure, failure.message).toBe(false);
+    // The death is the test's own SIGKILL of a child that had already been
+    // invoked, and the counted evidence on the rejection path is ZERO model
+    // requests.
+    expect(failure.message, failure.message).toContain("signal SIGKILL");
+    expect(failure.message, failure.message).toContain("the counting substitute recorded 0 model request(s)");
   });
 
   it("AS-020: a refused child is released without disturbing a concurrently starting matching child", async () => {
@@ -3585,7 +3802,7 @@ describe(`the PRODUCTION loom child extension through the real barrier protocol 
   it("retains bounded refused and transport-failed prompt responses as typed hold diagnostics", () => {
     expect(holdPromptResponseOf({
       kind: "observed",
-      event: { type: "response", success: false, error: "provider rejected the resumed prompt" },
+      event: { type: "response", success: false, error: "provider rejected the resumed prompt", receivedAt: 0 },
     })).toEqual({
       kind: "refused",
       diagnostic: expect.stringContaining("provider rejected the resumed prompt"),
