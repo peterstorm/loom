@@ -228,9 +228,6 @@ export interface AttemptBaselineTask {
   readonly attempt_artifact_baseline?: readonly DeclaredArtifactBaseline[];
   readonly attempt_repository_baseline?: readonly DeclaredArtifactBaseline[];
   readonly file_list?: readonly string[];
-  /** The trusted Git commit retained at attempt start; the byte source for
-   *  runtime-baseline restoration of declared artifacts that were clean then. */
-  readonly start_sha?: string;
 }
 
 export interface AttemptBaselineComparison {
@@ -251,21 +248,29 @@ export interface AttemptBaselineComparison {
  * attempt-start bytes instead of its live (implemented) bytes:
  *
  * - clean now → unmapped (live bytes ARE the baseline bytes);
- * - provably clean at attempt start (`start_sha` present and the attempt's
- *   repository baseline does not list the path as dirty then) and the path
- *   exists at `start_sha` → mapped to `start_sha` (hash the baseline bytes);
- * - created by the attempt (absent at `start_sha`) → mapped to `null`
- *   (excluded from the revision entirely);
- * - dirty at attempt start, or no trusted `start_sha` → unmapped: the write
- *   boundary stays strict for that path. Fail closed — restoration is an
- *   exemption, and an exemption that cannot prove its precondition must not
- *   exist.
+ * - provably clean at attempt start (the attempt's repository baseline does
+ *   not list the path as dirty then) → mapped to the CURRENT HEAD: a path that
+ *   was clean at spawn carried HEAD's bytes, and no one commits between spawn
+ *   and settlement, so HEAD's bytes ARE the attempt-start bytes. A HEAD that
+ *   did move can only fail closed — the restored bytes then mismatch the
+ *   loaded identity and the write refuses exactly as before;
+ * - created by the attempt (absent at HEAD) → mapped to `null` (excluded from
+ *   the revision entirely);
+ * - dirty at attempt start → unmapped: the write boundary stays strict for
+ *   that path. Fail closed — restoration is an exemption, and an exemption
+ *   that cannot prove its precondition must not exist.
  */
 export function runtimeBaselineRestoreForTasks(
   root: string,
   tasks: readonly AttemptBaselineTask[],
 ): ReadonlyMap<string, string | null> {
   const dirty = new Set(repositoryChangedPaths(root));
+  if (dirty.size === 0) return new Map();
+  const revision = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
   const restore = new Map<string, string | null>();
   for (const task of tasks) {
     let dirtyAtSpawn: Set<string> | null = null;
@@ -277,8 +282,6 @@ export function runtimeBaselineRestoreForTasks(
     for (const path of task.file_list ?? []) {
       if (!dirty.has(path)) continue; // clean now: nothing to restore
       if (dirtyAtSpawn?.has(path)) continue; // dirty at spawn: baseline bytes untrusted
-      const revision = task.start_sha;
-      if (revision === undefined || !/^[0-9a-f]{40}$/.test(revision)) continue;
       restore.set(path, artifactExistsAtRevision(root, revision, path) ? revision : null);
     }
   }

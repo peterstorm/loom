@@ -41,7 +41,6 @@ function gitFixture(): { root: string; revision: string } {
 const taskWith = (overrides: Partial<RuntimeBaselineTask> = {}): RuntimeBaselineTask => ({
   attempt_repository_baseline: [],
   file_list: ["engine/src/core/task.ts"],
-  start_sha: "unset",
   ...overrides,
 });
 
@@ -49,15 +48,14 @@ describe("runtimeBaselineRestoreForTasks", () => {
   it("restores a declared artifact that was clean at spawn and is dirty now", () => {
     const { root, revision } = gitFixture();
     writeFileSync(join(root, "engine", "src", "core", "task.ts"), "export const task = 2;\n");
-    const restore = runtimeBaselineRestoreForTasks(root, [taskWith({ start_sha: revision })]);
+    const restore = runtimeBaselineRestoreForTasks(root, [taskWith()]);
     expect(restore.get("engine/src/core/task.ts")).toBe(revision);
   });
 
   it("keeps the strict boundary for a path that was already dirty at attempt start", () => {
-    const { root, revision } = gitFixture();
+    const { root } = gitFixture();
     writeFileSync(join(root, "engine", "src", "core", "task.ts"), "export const task = 2;\n");
     const restore = runtimeBaselineRestoreForTasks(root, [taskWith({
-      start_sha: revision,
       attempt_repository_baseline: [{
         artifact: "engine/src/core/task.ts",
         snapshot: { kind: "sha256", digest: "a".repeat(64) },
@@ -66,23 +64,24 @@ describe("runtimeBaselineRestoreForTasks", () => {
     expect(restore.has("engine/src/core/task.ts")).toBe(false);
   });
 
-  it("maps an attempt-created file to null (excluded) and skips tasks without a trusted start_sha", () => {
+  it("maps an attempt-created file to null (excluded) and stays strict for undeclared dirt", () => {
     const { root, revision } = gitFixture();
     writeFileSync(join(root, "engine", "src", "core", "created.ts"), "new\n");
     const restore = runtimeBaselineRestoreForTasks(root, [
-      taskWith({ file_list: ["engine/src/core/created.ts"], start_sha: revision }),
-      taskWith({ file_list: ["engine/src/core/task.ts"], start_sha: undefined }),
-      taskWith({ file_list: ["engine/src/core/task.ts"], start_sha: "abc123" }),
+      taskWith({ file_list: ["engine/src/core/created.ts"] }),
     ]);
     expect(restore.get("engine/src/core/created.ts")).toBeNull();
-    expect(restore.has("engine/src/core/task.ts")).toBe(false);
+    expect(restore.get("engine/src/core/task.ts")).toBeUndefined();
+    expect(restore.size).toBe(1);
+    // HEAD is content-addressed: the mapped revision IS the attempt-start state.
+    expect(revision).toMatch(/^[0-9a-f]{40}$/);
   });
 
   it("never restores an undeclared dirty path", () => {
     const { root, revision } = gitFixture();
     writeFileSync(join(root, "engine", "src", "core", "task.ts"), "export const task = 2;\n");
     writeFileSync(join(root, "pi", "extension.ts"), "export default () => 1;\n");
-    const restore = runtimeBaselineRestoreForTasks(root, [taskWith({ start_sha: revision })]);
+    const restore = runtimeBaselineRestoreForTasks(root, [taskWith()]);
     expect(restore.get("engine/src/core/task.ts")).toBe(revision);
     expect(restore.has("pi/extension.ts")).toBe(false);
   });
