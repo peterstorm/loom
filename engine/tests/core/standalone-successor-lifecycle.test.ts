@@ -368,7 +368,7 @@ const successorEmissionBinding = (requestId: string) => {
  *  ONE correctly bound v3 emission call, the kernel's canonical selection
  *  admits it, and the selected canonical bytes become the captured bytes —
  *  the exact composition the production capture runtime runs. */
-function emissionCapturedBytes(prepared: PreparedStandaloneSuccessor, request: Readonly<{ requestId: string }>, raw: Uint8Array): Uint8Array {
+function emissionCapturedBytes(_prepared: PreparedStandaloneSuccessor, request: Readonly<{ requestId: string }>, raw: Uint8Array): Uint8Array {
   const binding = successorEmissionBinding(request.requestId);
   const arguments_ = JSON.parse(new TextDecoder().decode(raw)) as unknown;
   const selection = selectCanonicalPayload(
