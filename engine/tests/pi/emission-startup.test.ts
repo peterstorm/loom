@@ -241,9 +241,11 @@ const BIND_SETTLE_BACKOFF_MS = 300;
 const HOLD_RESOLVE_TIMEOUT_MS = 6_000;
 const FIRST_REQUEST_TIMEOUT_MS = 6_000;
 // The real production extension can finish the resumed RPC prompt before its
-// provider request is scheduled when the full suite saturates the worker pool.
-// Keep the larger budget local to that one hold-release observation.
-const PRODUCTION_HOLD_FIRST_REQUEST_TIMEOUT_MS = 30_000;
+// provider request is scheduled, and under full-suite load the scheduled
+// request itself can wait on the saturated worker pool — one real gate start
+// observed this wait exceed 30s. Keep the larger budget local to that one
+// hold-release observation; the test's own timeout override covers the wait.
+const PRODUCTION_HOLD_FIRST_REQUEST_TIMEOUT_MS = 60_000;
 const REFUSE_GRACE_MS = 800;
 const CANCEL_AFTER_MS = 600;
 const HOLD_MS = 700;
@@ -4095,7 +4097,7 @@ describe(`the PRODUCTION loom child extension through the real barrier protocol 
     expect(run.requestCount).toBe(0);
   });
 
-  it("readiness releases the already-wedged prompt, appends the resolved marker, and permits its first model request", { timeout: 90_000 }, async () => {
+  it("readiness releases the already-wedged prompt, appends the resolved marker, and permits its first model request", { timeout: 150_000 }, async () => {
     const run = await runProductionHoldGate({
       label: "production-hold-readiness-release",
       issuedCell: JUDGE_V1_CELL,
