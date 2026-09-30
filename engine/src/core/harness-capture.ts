@@ -445,6 +445,21 @@ export function canonicalCall(call: EmissionToolCall): EmissionToolCall {
 }
 
 /**
+ * The first contract field on which two contradictory frames sharing one
+ * tool-call identity differ, in the FR-014 contract-field order (request id,
+ * producer kind, schema version, arguments). The retained refusal names WHAT
+ * differed — the model's correction surface and the operator's journal read
+ * the reason, never just that a contradiction exists. The tool-call identity
+ * itself cannot be the differing field: the fold groups frames by it.
+ */
+const firstDifferingField = (seen: EmissionToolCall, call: EmissionToolCall): string => {
+  if (seen.requestId !== call.requestId) return "requestId";
+  if (!canonicalStructuralEquals(seen.kind, call.kind)) return "kind";
+  if (seen.version !== call.version) return "version";
+  return "arguments";
+};
+
+/**
  * The ONE fold from observed transport frames to the closed emission
  * observation — the observation decision both selection functions in
  * `emission-ingestion` share, not a caller-maintained policy. The fold is
@@ -460,7 +475,9 @@ export function canonicalCall(call: EmissionToolCall): EmissionToolCall {
  *   kind, version and structurally-equal arguments — FR-007's "same observed
  *   call"), and contradictory — unusable — when any frame differs (FR-007's
  *   "contradictory records sharing call identity MUST refuse rather than
- *   deduplicate silently"). Replayed frames with the same identity and bytes
+ *   deduplicate silently"), with the refusal naming the first differing
+ *   contract field in FR-014 order (request id, producer kind, schema
+ *   version, arguments). Replayed frames with the same identity and bytes
  *   therefore add no consumption and no publication.
  * - The DISTINCT identities decide the count, in first-observed order: zero →
  *   absent, one → single-call, ≥2 → multiple-calls (which is ambiguity by the
@@ -495,7 +512,9 @@ export function observeEmissionCalls(frames: readonly EmissionCallFrame[]): Emis
     } else if (!canonicalStructuralEquals(seen, call)) {
       return canonicalRecord({
         kind: "unusable" as const,
-        reason: `contradictory duplicate transport frames for emission tool call ${call.toolCallId}`,
+        reason:
+          `contradictory duplicate transport frames for emission tool call ${call.toolCallId} ` +
+          `(differing: ${firstDifferingField(seen, call)})`,
       });
     }
     // else: an exact replay of one already-observed call — idempotent (FR-007).

@@ -16,7 +16,8 @@
  *     version refuses — FR-014; a misbound call is never filtered away, never
  *     self-decoded, and can never be absorbed into a mere ambiguity count)
  *   → the count of DISTINCT tool-call identities decides
- *     (zero → extraction verbatim; one → schema admission; ≥2 → ambiguity)
+ *     (zero → extraction verbatim; one → schema admission; ≥2 → ambiguity,
+ *     with the ambiguity arm carrying its observed calls)
  *   → the single-call state admits the arguments through the registry's
  *     `admitEmissionArguments` (schema selection), after the schema-driven
  *     wire-form canonicalization of the observed transport form
@@ -87,11 +88,15 @@ import {
 /**
  * The binding-checked, count-decided observation decision both selection
  * functions share: refusal before counting, counting before schema selection.
+ * The duplicate arm carries the ambiguity's content — the observed DISTINCT
+ * calls in first-observed order — so the selection's rejection names what was
+ * observed instead of a bare count (FR-007), never reconstructed by callers
+ * from the input frames.
  */
 type ObservationDecision =
   | Readonly<{ kind: "absent" }>
   | Readonly<{ kind: "single-call"; call: EmissionToolCall }>
-  | Readonly<{ kind: "duplicate-emission-call" }>
+  | Readonly<{ kind: "duplicate-emission-call"; calls: readonly EmissionToolCall[] }>
   | Readonly<{ kind: "observation-refused"; refusal: EmissionObservationRefusal }>;
 
 /** The first misbinding of one observed call against the issued binding, or
@@ -191,13 +196,21 @@ function decideBoundObservation(
       return canonicalRecord({ kind: "observation-refused" as const, refusal: misbinding });
     }
   }
-  if (observation.kind === "single-call") {
-    return canonicalRecord({ kind: "single-call" as const, call: observation.call });
+  // Exhaustive over the guard-narrowed observation: every arm — the zero-call
+  // arm included — is an explicit case, never an implicit fall-through return,
+  // so a new observation arm fails to compile here instead of silently
+  // selecting the extraction baseline.
+  switch (observation.kind) {
+    case "single-call":
+      return canonicalRecord({ kind: "single-call" as const, call: observation.call });
+    case "multiple-calls":
+      return canonicalRecord({
+        kind: "duplicate-emission-call" as const,
+        calls: Object.freeze([...observation.calls]),
+      });
+    case "absent":
+      return canonicalRecord({ kind: "absent" as const });
   }
-  if (observation.kind === "multiple-calls") {
-    return canonicalRecord({ kind: "duplicate-emission-call" as const });
-  }
-  return canonicalRecord({ kind: "absent" as const });
 }
 
 // ---------------------------------------------------------------------------
@@ -223,7 +236,8 @@ function decideBoundObservation(
  *   final message is present (FR-007/AS-019) — the record-count semantics are
  *   validity-blind and identity-based: identical arguments under different
  *   call identities are still two calls, and an exact replay of one call is
- *   still one call (the fold).
+ *   still one call (the fold). The rejection carries the ambiguity's content:
+ *   the observed distinct calls in first-observed order.
  * - Misbound (wrong request/kind/version) or unusable observations: the
  *   `observation-refused` typed refusal — never absence, never a fallback
  *   (FR-014/AD-9); the boundary classifies it.
@@ -266,7 +280,14 @@ export type IngestionSelection =
        *  because a refusal was observed and retained. */
       emissionRefusal: EmissionParseFailure;
     }>
-  | Readonly<{ kind: "duplicate-emission-call" }>
+  | Readonly<{
+      kind: "duplicate-emission-call";
+      /** FR-007: the ambiguity's content — the observed DISTINCT calls in
+       *  first-observed order, returned by the decision so the caller's
+       *  terminal diagnostics name what was observed instead of a bare
+       *  count, and never reconstructed from the input frames. */
+      calls: readonly EmissionToolCall[];
+    }>
   | Readonly<{
       kind: "refused-call-no-fallback";
       /** The single refused call's retained refusal (FR-006). */
@@ -302,40 +323,43 @@ export function selectCanonicalPayload(
   finalMessageCandidates: readonly FinalPayloadCandidate[],
 ): IngestionSelection {
   const decision = decideBoundObservation(expected, observation);
-  if (decision.kind === "observation-refused" || decision.kind === "duplicate-emission-call") {
-    return decision;
-  }
-  if (decision.kind === "single-call") {
-    const admitted = admitBoundCall(expected, decision.call);
-    if (admitted.kind === "valid") {
+  switch (decision.kind) {
+    case "observation-refused":
+    case "duplicate-emission-call":
+      return decision;
+    case "single-call": {
+      const admitted = admitBoundCall(expected, decision.call);
+      if (admitted.kind === "valid") {
+        return canonicalRecord({
+          kind: "emission-tool-arguments" as const,
+          payload: finalPayloadOfArguments(admitted.payload),
+          source: "emission-tool" as const,
+          call: canonicalCall(decision.call),
+        });
+      }
+      const emissionRefusal = retainedRefusalOf(admitted);
+      const fallback = parseFinalPayload(finalMessageCandidates);
+      if (fallback.ok) {
+        return canonicalRecord({
+          kind: "extraction-over-refused-call" as const,
+          fallback,
+          source: "extraction" as const,
+          emissionRefusal,
+        });
+      }
       return canonicalRecord({
-        kind: "emission-tool-arguments" as const,
-        payload: finalPayloadOfArguments(admitted.payload),
-        source: "emission-tool" as const,
-        call: canonicalCall(decision.call),
-      });
-    }
-    const emissionRefusal = retainedRefusalOf(admitted);
-    const fallback = parseFinalPayload(finalMessageCandidates);
-    if (fallback.ok) {
-      return canonicalRecord({
-        kind: "extraction-over-refused-call" as const,
-        fallback,
-        source: "extraction" as const,
+        kind: "refused-call-no-fallback" as const,
         emissionRefusal,
+        extraction: fallback.error,
       });
     }
-    return canonicalRecord({
-      kind: "refused-call-no-fallback" as const,
-      emissionRefusal,
-      extraction: fallback.error,
-    });
+    case "absent":
+      return canonicalRecord({
+        kind: "final-message-extraction" as const,
+        fallback: parseFinalPayload(finalMessageCandidates),
+        source: "extraction" as const,
+      });
   }
-  return canonicalRecord({
-    kind: "final-message-extraction" as const,
-    fallback: parseFinalPayload(finalMessageCandidates),
-    source: "extraction" as const,
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -398,7 +422,13 @@ export type VerdictSourceSelection =
        *  call that led here — REQUIRED, not nullable. */
       emissionRefusal: EmissionParseFailure;
     }>
-  | Readonly<{ kind: "duplicate-emission-call" }>
+  | Readonly<{
+      kind: "duplicate-emission-call";
+      /** FR-007: the ambiguity's content — the observed DISTINCT calls in
+       *  first-observed order (same contract as the reviewer path's arm),
+       *  returned by the decision, never reconstructed from the frames. */
+      calls: readonly EmissionToolCall[];
+    }>
   | Readonly<{ kind: "observation-refused"; refusal: EmissionObservationRefusal }>;
 
 export function selectVerdictSource(
@@ -407,29 +437,32 @@ export function selectVerdictSource(
   existingRawJson: string,
 ): VerdictSourceSelection {
   const decision = decideBoundObservation(expected, observation);
-  if (decision.kind === "observation-refused" || decision.kind === "duplicate-emission-call") {
-    return decision;
-  }
-  if (decision.kind === "single-call") {
-    const admitted = admitBoundCall(expected, decision.call);
-    if (admitted.kind === "valid") {
+  switch (decision.kind) {
+    case "observation-refused":
+    case "duplicate-emission-call":
+      return decision;
+    case "single-call": {
+      const admitted = admitBoundCall(expected, decision.call);
+      if (admitted.kind === "valid") {
+        return canonicalRecord({
+          kind: "emission-tool-arguments" as const,
+          rawJson: JSON.stringify(admitted.payload, null, 2),
+          source: "emission-tool" as const,
+          call: canonicalCall(decision.call),
+        });
+      }
       return canonicalRecord({
-        kind: "emission-tool-arguments" as const,
-        rawJson: JSON.stringify(admitted.payload, null, 2),
-        source: "emission-tool" as const,
-        call: canonicalCall(decision.call),
+        kind: "extraction-over-refused-call" as const,
+        rawJson: existingRawJson,
+        source: "extraction" as const,
+        emissionRefusal: retainedRefusalOf(admitted),
       });
     }
-    return canonicalRecord({
-      kind: "extraction-over-refused-call" as const,
-      rawJson: existingRawJson,
-      source: "extraction" as const,
-      emissionRefusal: retainedRefusalOf(admitted),
-    });
+    case "absent":
+      return canonicalRecord({
+        kind: "final-message-extraction" as const,
+        rawJson: existingRawJson,
+        source: "extraction" as const,
+      });
   }
-  return canonicalRecord({
-    kind: "final-message-extraction" as const,
-    rawJson: existingRawJson,
-    source: "extraction" as const,
-  });
 }

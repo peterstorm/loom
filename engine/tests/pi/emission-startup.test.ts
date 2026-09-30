@@ -1184,6 +1184,107 @@ describe("the emission-startup gate decision — a closed ADT with no semantic a
     }
   });
 
+  it("the binding check precedes every capability check — a misbound readiness refuses wrong-request first, and each later field speaks only after its predecessors match (FR-014)", () => {
+    // The gate's field-comparison order IS the misbinding precedence: a
+    // readiness report bound to another request must refuse wrong-request
+    // even when EVERY later capability field also mismatches — a child
+    // holding another request's readiness is never reclassified by its
+    // kind/version/digest/tool/active/revision claims. The remaining rows
+    // pin the whole chain: each refusal code appears exactly when its field
+    // mismatches and every EARLIER field matched, so no later mismatch can
+    // mask a misbinding and no earlier one can mask a capability lie.
+    const misboundEverywhere = asRefused(decideEmissionStartup(
+      expectation,
+      startupGateObservation(
+        stageOf({
+          channelAlive: true,
+          channelDiagnostic: null,
+          commandListed: true,
+          readiness: observedReport({
+            requestId: "req-emission-startup-t4-misbound-peer-1",
+            contextDigest: contextDigestOf("emission-startup-context:req-emission-startup-t4-misbound-peer-1"),
+            kind: "judge-verdict",
+            version: "v9",
+            schemaDigest: sha256Hex("misbound-bytes"),
+            toolName: "loom_emit_judge_verdict",
+            active: false,
+            revision: STALE_REVISION,
+          }),
+        }),
+        verifiedRouteOf(expectation.route),
+      ),
+    ));
+    expect(misboundEverywhere.code).toBe("wrong-request");
+    expect(misboundEverywhere.message).toContain("req-emission-startup-t4-misbound-peer-1");
+    expect(misboundEverywhere.message).toContain("≠ issued");
+
+    const misboundDigestOnly = asRefused(decideEmissionStartup(
+      expectation,
+      startupGateObservation(
+        stageOf({
+          channelAlive: true,
+          channelDiagnostic: null,
+          commandListed: true,
+          readiness: observedReport({
+            contextDigest: contextDigestOf("emission-startup-context:some-other-request"),
+            kind: "judge-verdict",
+          }),
+        }),
+        verifiedRouteOf(expectation.route),
+      ),
+    ));
+    expect(misboundDigestOnly.code).toBe("wrong-request");
+
+    // The successor chain: each row matches every field BEFORE its index and
+    // mismatches its own field plus every LATER one — the earliest mismatch
+    // must win, every time.
+    const chainRows: readonly {
+      readonly code: EmissionReadinessRefusalCode;
+      readonly overrides: Readonly<Record<string, unknown>>;
+    }[] = [
+      { code: "unexpected-kind", overrides: { kind: "judge-verdict", version: "v9", schemaDigest: sha256Hex("misbound-bytes"), toolName: "loom_emit_judge_verdict", active: false, revision: STALE_REVISION } },
+      { code: "unexpected-version", overrides: { version: "v9", schemaDigest: sha256Hex("misbound-bytes"), toolName: "loom_emit_judge_verdict", active: false, revision: STALE_REVISION } },
+      { code: "schema-digest-mismatch", overrides: { schemaDigest: sha256Hex("misbound-bytes"), toolName: "loom_emit_judge_verdict", active: false, revision: STALE_REVISION } },
+      { code: "tool-name-mismatch", overrides: { toolName: "loom_emit_refutation_verdict", active: false, revision: STALE_REVISION } },
+      { code: "tool-inactive", overrides: { active: false, revision: STALE_REVISION } },
+      { code: "revision-mismatch", overrides: { revision: STALE_REVISION } },
+    ];
+    for (const row of chainRows) {
+      const decision = asRefused(decideEmissionStartup(
+        expectation,
+        startupGateObservation(
+          stageOf({
+            channelAlive: true,
+            channelDiagnostic: null,
+            commandListed: true,
+            readiness: observedReport(row.overrides),
+          }),
+          verifiedRouteOf(expectation.route),
+        ),
+      ));
+      expect(decision.code, JSON.stringify(row.overrides)).toBe(row.code);
+    }
+  });
+
+  it("the gate decision is idempotent — repeated evaluation of the same observation yields the identical decision, and every arm acts consistently", () => {
+    for (const row of stageRows) {
+      const observation = startupGateObservation(row.stage, verifiedRouteOf(expectation.route));
+      const first = decideEmissionStartup(expectation, observation);
+      const second = decideEmissionStartup(expectation, observation);
+      expect(second, row.code).toEqual(first);
+      expect(startupGateAction(first), row.code).toEqual(
+        first.kind === "refused" ? { kind: "release-without-prompt" } : { kind: "deliver-prompt" },
+      );
+    }
+    for (const row of routeRows) {
+      const observation = startupGateObservation(readyStage(), row.route);
+      const first = decideEmissionStartup(expectation, observation);
+      const second = decideEmissionStartup(expectation, observation);
+      expect(second, JSON.stringify(row.route)).toEqual(first);
+      expect(startupGateAction(first)).toEqual({ kind: "release-without-prompt" });
+    }
+  });
+
   it("the refusal vocabulary is closed at exactly fourteen codes and both decision arms have exact non-semantic shapes", () => {
     const codes = Object.keys(EMISSION_STARTUP_REMEDIATIONS);
     expect(codes).toHaveLength(14);

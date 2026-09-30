@@ -1993,6 +1993,7 @@ describe("piEmissionCallFrames — complete, request-bound emission observations
       toolResultLike("call-b", reviewerTool),
     ], issued));
     expect(doubled.kind).toBe("multiple-calls");
+
     const mixed = observeEmissionCalls(framesOf([
       assistantWithCalls([{ id: "call-good", name: reviewerTool, arguments: args }]),
       { role: "assistant", content: [{ type: "toolCall", id: "call-broken", name: reviewerTool, arguments: "nope" }] },
@@ -2000,6 +2001,68 @@ describe("piEmissionCallFrames — complete, request-bound emission observations
       toolResultLike("call-broken", reviewerTool, true),
     ], issued));
     expect(mixed.kind).toBe("unusable");
+  });
+
+  it("two distinct calls through the real adapter reach the duplicate arm carrying BOTH observed calls (FR-007)", () => {
+    // The real transcript scan folds two distinct successfully executed calls
+    // into multiple-calls, and the production selection's duplicate arm
+    // carries the ambiguity's content — the observed calls in first-observed
+    // order — so the terminal diagnostic names what was observed instead of a
+    // bare count.
+    const args = canonicalArguments("reviewer-payload", "v2");
+    const messages = [
+      assistantWithCalls([{ id: "call-a", name: reviewerTool, arguments: args }]),
+      assistantWithCalls([{ id: "call-b", name: reviewerTool, arguments: args }]),
+      toolResultLike("call-a", reviewerTool),
+      toolResultLike("call-b", reviewerTool),
+    ];
+    const observation = observeEmissionCalls(framesOf(messages, issued));
+    expect(observation.kind).toBe("multiple-calls");
+    const selection = selectCanonicalPayload(issued, observation, [] satisfies readonly FinalPayloadCandidate[]);
+    expect(selection.kind).toBe("duplicate-emission-call");
+    if (selection.kind === "duplicate-emission-call") {
+      expect(selection.calls.map(({ toolCallId }) => toolCallId)).toEqual(["call-a", "call-b"]);
+      expect(selection.calls.every((call) => call.requestId === issued.requestId)).toBe(true);
+    }
+    // The production capture terminalises the same ambiguity: the shared
+    // decision's arm, translated at the adapter, is a terminal refusal — never
+    // a silent pick of one of the two calls.
+    expect(piReviewerCaptureObservation(messages, issued)).toMatchObject({
+      kind: "terminal-refusal",
+      reason: "ambiguous-emission-call",
+    });
+  });
+
+  it("the production reviewer capture refuses contradictory duplicate frames with the fold's retained diagnostic (FR-007/AD-9)", () => {
+    // Two finalized frames share one tool-call identity but disagree on the
+    // arguments: the fold refuses the observation as unusable (naming the
+    // differing contract field), and the production capture translation
+    // carries that retained diagnostic — never a count, never absence, never
+    // a silent pick of either frame.
+    const args = canonicalArguments("reviewer-payload", "v2");
+    const messages = [
+      assistantWithCalls([{ id: "call-contradicted", name: reviewerTool, arguments: args }]),
+      assistantWithCalls([{
+        id: "call-contradicted",
+        name: reviewerTool,
+        arguments: { schemaVersion: 2, kind: "standalone-review", findings: [] },
+      }]),
+      toolResultLike("call-contradicted", reviewerTool),
+    ];
+    const frames = framesOf(messages, issued);
+    expect(frames).toHaveLength(2);
+    const observation = observeEmissionCalls(frames);
+    expect(observation.kind).toBe("unusable");
+    if (observation.kind === "unusable") {
+      expect(observation.reason).toContain("contradictory duplicate transport frames for emission tool call call-contradicted");
+      expect(observation.reason).toContain("(differing: arguments)");
+    }
+    const capture = piReviewerCaptureObservation(messages, issued);
+    expect(capture.kind).toBe("terminal-refusal");
+    if (capture.kind === "terminal-refusal") {
+      expect(capture.reason).toBe("unusable-observation");
+      expect(capture.message).toContain("differing: arguments");
+    }
   });
 
   it("observes only ASSISTANT tool calls — user-carried and result-carried tool-call shapes are not emission observations (AD-8)", () => {

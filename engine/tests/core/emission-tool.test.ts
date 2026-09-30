@@ -17,6 +17,7 @@ import {
 } from "../../src/core/emission-tool";
 import { producerKindsOfAgent, type PayloadProducerKindName } from "../../src/core/model-profiles";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_SCHEMA_V2 } from "../../src/core/reviewer-contract";
+import { judgeVerdictV1Schema } from "../../src/core/panel-contract";
 import { parseReviewerPayloadV2, parseStandaloneReviewerPayloadV3 } from "../../src/core/reviewer-protocol";
 import { standaloneReviewerPayloadV3Schema } from "../../src/core/standalone-lineage-contract";
 import { canonicalStructuralEquals, type ArtifactDigest } from "../../src/core/orchestration-contract/identity";
@@ -176,6 +177,45 @@ describe("admitEmissionArguments", () => {
       expect(admitted.code).toBe("invalid-schema");
       expect(admitted.message).toContain("frozen schema");
     }
+  });
+
+  it("names every fixable violation in ONE bounded refusal message — five named, overflow marked, deterministic", () => {
+    // The verdict parser's one-message-names-all contract: a call with more
+    // than five violations carries five named issues plus an explicit overflow
+    // marker, so one re-emit within the bounded budget corrects them together
+    // instead of spending a retry per issue. Built against the frozen schema's
+    // own issue list, so the pin survives schema-message edits.
+    const args = {
+      criterion: "extensibility",
+      rankings: Array.from({ length: 6 }, (_, index) => ({
+        candidate: `candidate-${index}.md`,
+        score: 11,
+        fatal_flaw: null,
+        strongest_idea: "out of the score domain",
+      })),
+    };
+    const parsed = judgeVerdictV1Schema.safeParse(args);
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    const issues = parsed.error.issues;
+    expect(issues.length).toBeGreaterThan(5);
+
+    const first = admitEmissionArguments(EMISSION_TOOL_SPECS["judge-verdict"], "v1", args);
+    const second = admitEmissionArguments(EMISSION_TOOL_SPECS["judge-verdict"], "v1", args);
+    expect(first.kind).toBe("refused");
+    if (first.kind !== "refused") return;
+    // Deterministic: structurally equal arguments refuse with the identical
+    // message twice — the diagnostic the model re-emits against is stable.
+    expect(second.kind).toBe("refused");
+    if (second.kind !== "refused") return;
+    expect(first.message).toBe(second.message);
+
+    const overflow = `; (+${issues.length - 5} more)`;
+    expect(first.message).toContain(overflow);
+    const body = first.message.slice("emission arguments do not conform to the frozen schema: ".length);
+    const named = body.slice(0, body.indexOf(overflow));
+    expect(named).toBe(issues.slice(0, 5).map((issue) => issue.message).join("; "));
+    for (const issue of issues.slice(0, 5)) expect(first.message).toContain(issue.message);
   });
 
   it("refuses prose-brace payloads the sanitization strips to nothing", () => {

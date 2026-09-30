@@ -339,20 +339,21 @@ describe("observeEmissionCalls", () => {
     expect(canonicalStructuralEquals(observation, observeEmissionCalls([frameOf(call)]))).toBe(true);
   });
 
-  it("refuses contradictory frames sharing one call identity for every differing field (FR-007)", () => {
+  it("refuses contradictory frames sharing one call identity, naming the first differing contract field (FR-007)", () => {
     const call = callOf(REVIEWER_V2, "call-1", validReviewerArguments("the registry"));
-    const contradictory: readonly EmissionToolCall[] = [
-      { ...call, arguments: { different: "arguments" } },
-      { ...call, requestId: OTHER_REQUEST_ID },
-      { ...call, kind: Object.freeze({ kind: "judge-verdict" }) as PayloadProducerKind },
-      { ...call, version: "v3" as const },
-    ];
-    for (const variant of contradictory) {
+    for (const [field, variant] of [
+      ["arguments", { ...call, arguments: { different: "arguments" } }],
+      ["requestId", { ...call, requestId: OTHER_REQUEST_ID }],
+      ["kind", { ...call, kind: Object.freeze({ kind: "judge-verdict" }) as PayloadProducerKind }],
+      ["version", { ...call, version: "v3" as const }],
+    ] as const) {
       const observation = observeEmissionCalls([frameOf(call), frameOf(variant)]);
-      expect(observation).toEqual({
-        kind: "unusable",
-        reason: "contradictory duplicate transport frames for emission tool call call-1",
-      });
+      expect(observation.kind).toBe("unusable");
+      if (observation.kind === "unusable") {
+        expect(observation.reason).toBe(
+          `contradictory duplicate transport frames for emission tool call call-1 (differing: ${field})`,
+        );
+      }
     }
   });
 
@@ -619,7 +620,10 @@ describe("selectCanonicalPayload", () => {
         const first = frameOf(callOf(REVIEWER_V2, "call-a", argsA));
         const second = frameOf(callOf(REVIEWER_V2, "call-b", argsB));
         const selection = selectCanonicalPayload(REVIEWER_V2, observeEmissionCalls([first, second]), candidates);
-        expect(selection).toEqual({ kind: "duplicate-emission-call" });
+        expect(selection.kind).toBe("duplicate-emission-call");
+        if (selection.kind === "duplicate-emission-call") {
+          expect(selection.calls).toEqual([canonicalCall(first.call), canonicalCall(second.call)]);
+        }
       }),
     );
   });
@@ -628,15 +632,132 @@ describe("selectCanonicalPayload", () => {
     const invalid = frameOf(callOf(REVIEWER_V2, "call-a", INVALID_ARGUMENTS));
     const valid = frameOf(callOf(REVIEWER_V2, "call-b", validReviewerArguments("the registry")));
     expect(selectCanonicalPayload(REVIEWER_V2, observeEmissionCalls([invalid, valid]), USABLE_CANDIDATES))
-      .toEqual({ kind: "duplicate-emission-call" });
+      .toMatchObject({ kind: "duplicate-emission-call" });
     expect(selectCanonicalPayload(REVIEWER_V2, observeEmissionCalls([valid, invalid]), USABLE_CANDIDATES))
-      .toEqual({ kind: "duplicate-emission-call" });
+      .toMatchObject({ kind: "duplicate-emission-call" });
 
     const sameArgs = validReviewerArguments("the registry");
     const identicalA = frameOf(callOf(REVIEWER_V2, "call-a", sameArgs));
     const identicalB = frameOf(callOf(REVIEWER_V2, "call-b", structuredClone(sameArgs)));
     expect(selectCanonicalPayload(REVIEWER_V2, observeEmissionCalls([identicalA, identicalB]), USABLE_CANDIDATES))
-      .toEqual({ kind: "duplicate-emission-call" });
+      .toMatchObject({ kind: "duplicate-emission-call" });
+  });
+
+  it("carries the ambiguity's observed calls on the duplicate arm in first-observed order — the rejection names what was observed (FR-007)", () => {
+    const first = frameOf(callOf(REVIEWER_V2, "call-a", INVALID_ARGUMENTS));
+    const second = frameOf(callOf(REVIEWER_V2, "call-b", validReviewerArguments("the registry")));
+    const selection = selectCanonicalPayload(REVIEWER_V2, observeEmissionCalls([first, second]), USABLE_CANDIDATES);
+    expect(selection.kind).toBe("duplicate-emission-call");
+    if (selection.kind === "duplicate-emission-call") {
+      expect(selection.calls).toEqual([canonicalCall(first.call), canonicalCall(second.call)]);
+      expect(Object.isFrozen(selection.calls)).toBe(true);
+    }
+
+    // The verdict path crosses the same shared decision — its duplicate arm
+    // carries the same first-observed-order calls contract.
+    const verdict = selectVerdictSource(
+      JUDGE_V1,
+      observeEmissionCalls([
+        frameOf(callOf(JUDGE_V1, "call-a", validJudgeArguments("extensibility"))),
+        frameOf(callOf(JUDGE_V1, "call-b", validJudgeArguments("reproduction"))),
+      ]),
+      "raw",
+    );
+    expect(verdict.kind).toBe("duplicate-emission-call");
+    if (verdict.kind === "duplicate-emission-call") {
+      expect(verdict.calls.map(({ toolCallId }) => toolCallId)).toEqual(["call-a", "call-b"]);
+    }
+  });
+
+  it("pins the FR-014 misbinding check order — request attempt, then producer kind, then schema version", () => {
+    // All three misbindings at once: the FIRST check in FR-014 order names the
+    // refusal. This pin is what stops the order silently reordering — a call
+    // misbound in request AND kind AND version must never surface as an
+    // unexpected-version (or kind) refusal.
+    const reviewerCall = callOf(REVIEWER_V2, "call-1", INVALID_ARGUMENTS);
+    const allThree = selectCanonicalPayload(
+      REVIEWER_V2,
+      observeEmissionCalls([frameOf({
+        ...reviewerCall,
+        requestId: OTHER_REQUEST_ID,
+        kind: Object.freeze({ kind: "judge-verdict" }) as PayloadProducerKind,
+        version: "v1" as const,
+      })]),
+      USABLE_CANDIDATES,
+    );
+    expect(allThree).toMatchObject({
+      kind: "observation-refused",
+      refusal: { code: "wrong-request", message: expect.stringContaining(OTHER_REQUEST_ID) },
+    });
+
+    // Kind and version together: kind is checked before version.
+    const kindAndVersion = selectCanonicalPayload(
+      REVIEWER_V2,
+      observeEmissionCalls([frameOf({
+        ...reviewerCall,
+        kind: Object.freeze({ kind: "judge-verdict" }) as PayloadProducerKind,
+        version: "v1" as const,
+      })]),
+      USABLE_CANDIDATES,
+    );
+    expect(kindAndVersion).toMatchObject({
+      kind: "observation-refused",
+      refusal: { code: "unexpected-kind", message: expect.stringContaining("judge-verdict") },
+    });
+
+    // The verdict path crosses the same shared decision — the same order
+    // there, with the version misbinding alone still naming the version.
+    const judgeCall = callOf(JUDGE_V1, "call-j", INVALID_ARGUMENTS);
+    const verdictAllThree = selectVerdictSource(
+      JUDGE_V1,
+      observeEmissionCalls([frameOf({
+        ...judgeCall,
+        requestId: OTHER_REQUEST_ID,
+        kind: Object.freeze({ kind: "reviewer-payload" }) as PayloadProducerKind,
+        version: "v2" as const,
+      })]),
+      "raw",
+    );
+    expect(verdictAllThree).toMatchObject({
+      kind: "observation-refused",
+      refusal: { code: "wrong-request", message: expect.stringContaining(OTHER_REQUEST_ID) },
+    });
+    const verdictKindAndVersion = selectVerdictSource(
+      JUDGE_V1,
+      observeEmissionCalls([frameOf({
+        ...judgeCall,
+        kind: Object.freeze({ kind: "reviewer-payload" }) as PayloadProducerKind,
+        version: "v2" as const,
+      })]),
+      "raw",
+    );
+    expect(verdictKindAndVersion).toMatchObject({
+      kind: "observation-refused",
+      refusal: { code: "unexpected-kind", message: expect.stringContaining("reviewer-payload") },
+    });
+  });
+
+  it("refuses contradictory duplicate frames on the reviewer path as an unusable observation — never a count, never absence (FR-007/AD-9)", () => {
+    // The verdict path's contradictory-frame counterpart is pinned above; this
+    // is the reviewer-path half: the same fold refuses before the count, so
+    // contradictory duplicate frames reach the selection as an
+    // observation-refused — never reclassified as one call, never absorbed
+    // into ambiguity, never rescued by usable final candidates.
+    const base = callOf(REVIEWER_V2, "call-1", INVALID_ARGUMENTS);
+    const contradictory = frameOf({ ...base, arguments: { different: "arguments" } });
+    for (const frames of [
+      [frameOf(base), contradictory],
+      [contradictory, frameOf(base)],
+    ]) {
+      const selection = selectCanonicalPayload(REVIEWER_V2, observeEmissionCalls(frames), USABLE_CANDIDATES);
+      expect(selection).toMatchObject({
+        kind: "observation-refused",
+        refusal: {
+          code: "unusable-observation",
+          message: expect.stringContaining("call-1"),
+        },
+      });
+    }
   });
 
   it("selects a replayed single call identically to the un-replayed observation (AD-9 replay row)", () => {
@@ -808,7 +929,7 @@ describe("selectVerdictSource", () => {
     const first = frameOf(callOf(JUDGE_V1, "call-a", validJudgeArguments("extensibility")));
     const second = frameOf(callOf(JUDGE_V1, "call-b", validJudgeArguments("reproduction")));
     expect(selectVerdictSource(JUDGE_V1, observeEmissionCalls([first, second]), "final message"))
-      .toEqual({ kind: "duplicate-emission-call" });
+      .toMatchObject({ kind: "duplicate-emission-call" });
   });
 
   it("folds an exact verdict-call replay back to a single call", () => {
