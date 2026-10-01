@@ -719,6 +719,36 @@ The `helper write-verification-manifest` operation is **create-only**. It requir
 
 **Current repository enrollment (2026-09-09):** with explicit user approval, the parent replaced only `project:verify`'s report policy at a verified idle boundary with no TaskGraph: `{ "kind": "required-file", "path": ".loom/completion-reports/verify.junit.xml" }`. The fixed executable `npm`, argv `["run", "verify"]`, root cwd, Wave scope, and 30-minute timeout are unchanged. This was operator configuration replacement, not use or modification of the create-only helper and not a live graph mutation. The existing `test:unit` script emits JUnit using installed Vitest; no runner or report writer was added. Only `.loom/completion-reports/` is newly Git-ignored. Existing populated TaskGraphs retain their already-frozen commands. Enrollment makes the check selectable for critical P3; it does not establish a passing check or completed live schema-v2 remediation. Do not bypass protected paths or edit a live graph. See [Verification manifest](workflows.md#verification-manifest) and the [dated enrollment follow-up](../.claude/plans/2026-09-09-junit-verification-enrollment.md).
 
+## Rules gate (Claude Code and Pi)
+
+One decision, two thin adapters. `engine/src/core/rules-gate.ts` (pure) holds the policy, full-read coverage, adherence check and block text; `engine/src/core/bash-code-mutation.ts` classifies Bash mutations. Each harness only maps its own evidence into the core's `TranscriptEvent`s:
+
+| Harness | Adapter | Entry |
+|---|---|---|
+| Claude Code | `engine/src/handlers/pre-tool-use/claude-transcript-events.ts` (transcript JSONL → events) | `rules-gate` PreToolUse hook, `hooks/scripts/rules-gate.sh`, matcher `Edit\|Write\|MultiEdit\|Bash` |
+| Pi | `pi/rules-gate.ts` (`buildContextEntries()` → events) | standalone Pi extension; `~/.dotfiles/pi/extensions/loom-rules-gate.ts` is a shim that loads it through the runtime loader |
+
+`engine/tests/pi/rules-gate-parity.test.ts` runs one scenario matrix through both adapters and requires the same decision — change policy in the core only, and a drifting adapter fails there.
+
+The gate blocks a code mutation until the Loom rules and skills are in the main agent's **current context**:
+
+1. `rules/architecture.md` and the language rule for the target extension (`typescript-patterns.md`, `java-patterns.md`, `rust-patterns.md`) were fully `Read` — a `limit` skim does not count, and a read in the same assistant message as the edit does not count.
+2. The `deepen` and `distill` skills were loaded with the `Skill` tool (or the user ran their slash command).
+3. An existing target file was fully read, or written earlier in the session.
+4. An assistant text line `LOOM: applying <rule|skill> — <how>` names a required rule or skill.
+
+Evidence is read from the session transcript (`transcript_path`) and resets at the last compaction boundary, so after `/compact` the rules must be read and stated again. Non-code targets (`.md`, `.json`, …) are not gated. Bash is gated only through a path heuristic (redirects, `tee`, `cp`, `mv`, `sed -i`, `patch`, `rsync`, `install` onto a code file); an interpreter opening a file for write is not recognized.
+
+Subagents are exempt — the orchestrator owns their compliance (Claude Code: `agent_id` present in the hook input; Pi: the `--mode json --no-session` process signature, or `LOOM_GATE_MODES` to choose modes explicitly). The Claude Code hook fails **closed**: an unreadable transcript or a missing runtime blocks the call.
+
+| Env | Effect |
+|---|---|
+| `LOOM_GATE=off` | Disable the gate |
+| `LOOM_GATE_MODES=tui,rpc` | Pi only: gate just these modes (overrides the subagent exemption) |
+| `LOOM_RULES_DIR=/path` | Rules directory (default: `rules/` of the owning Loom package) |
+
+The gate proves context and articulation, never genuine adherence; the substance of the `LOOM:` line is judged in review.
+
 ## Linter operations
 
 ### Scan a path
