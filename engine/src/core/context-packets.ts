@@ -224,8 +224,14 @@ function immutableBytes(owned: Uint8Array): ImmutableByteSequence {
   return Object.freeze(sequence);
 }
 
+/** One byte view of a section's bytes: a sealed sequence by reference, any
+ *  other byte iterable (a packet that crossed JSON) copied. */
+function byteView(bytes: ImmutableByteSequence | readonly number[] | Uint8Array): Uint8Array {
+  return immutableByteStorage.get(bytes) ?? Uint8Array.from(bytes);
+}
+
 function digestBytes(bytes: ImmutableByteSequence | readonly number[] | Uint8Array): string {
-  return sha256Bytes(immutableByteStorage.get(bytes) ?? Uint8Array.from(bytes));
+  return sha256Bytes(byteView(bytes));
 }
 
 /**
@@ -563,10 +569,7 @@ const SECTION_BLOB_NAME = /^[0-9a-f]{64}$/;
 export function storedContextPacket(packet: ContextPacket | StandaloneReviewerContextPacketV3): StoredContextPacket {
   const identity = ({ label, byteLength, digest }: ByteSection) => ({ label, byteLength, digest });
   const sections = [...packet.fixedContext, ...packet.variableContext];
-  // Same byte view as section digesting: sealed sequences by reference, any
-  // other byte iterable (a packet that crossed JSON) copied.
-  const bytesOf = (bytes: ByteSection["bytes"]): Uint8Array => immutableByteStorage.get(bytes) ?? Uint8Array.from(bytes);
-  const blobs = new Map(sections.map((section) => [section.digest, bytesOf(section.bytes)] as const));
+  const blobs = new Map(sections.map((section) => [section.digest, byteView(section.bytes)] as const));
   return Object.freeze({
     text: JSON.stringify({
       ...packet,
