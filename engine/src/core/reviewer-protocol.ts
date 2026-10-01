@@ -3,6 +3,7 @@ import { visit } from "jsonc-parser";
 import {
   REVIEWER_PAYLOAD_LIMITS, REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1,
   REVIEWER_OUTPUT_CONTRACT, REVIEWER_PAYLOAD_EXAMPLE_V2, reviewerPayloadV2Schema,
+  reviewerEmissionToolContract,
   type ReviewerPayloadV2, type ReviewerProtocolFailure,
 } from "./reviewer-contract";
 import { standaloneReviewerPayloadV3Schema, type StandaloneReviewerPayloadV3 } from "./standalone-lineage-contract";
@@ -191,4 +192,39 @@ export function parseReviewerPayloadV2(rawBytes: Uint8Array): DomainResult<Revie
 /** The stamper consumes this same executable schema, parsed example and exact rubric. */
 export function renderReviewerWireContract(): string {
   return `${REVIEWER_OUTPUT_CONTRACT}\n\n## reviewer-payload-schema\n\n\`\`\`json\n${REVIEWER_PAYLOAD_SCHEMA_V2}\n\`\`\`\n\n## Current example (standalone)\n\n\`\`\`json\n${JSON.stringify(REVIEWER_PAYLOAD_EXAMPLE_V2, null, 2)}\n\`\`\`\n\n## reviewer-impact-rubric\n\n${REVIEWER_IMPACT_RUBRIC_V1}`;
+}
+
+// Route-aware wire-instruction rendering (AD-7; FR-020/AS-012).
+
+/**
+ * The closed wire-instruction route of ONE reviewer request — the route
+ * decision's own discriminant as data (the admission module owns the
+ * route-discriminant projection; the render never re-derives it). The
+ * emission arm carries the route's registry-minted tool name, typed at the
+ * binding/route boundaries that feed this render; the extraction-only arm
+ * its admission reason. A refused route is not representable — the shell
+ * throws it fail-closed before any render.
+ */
+export type ReviewerWireInstructionRoute =
+  | Readonly<{ kind: "emission"; toolName: string }>
+  | Readonly<{ kind: "extraction-only"; reason: string }>;
+
+/**
+ * Route-aware rendered reviewer wire instructions (AD-7, FR-020/AS-012): an
+ * emission route renders the frozen tool-primary wording over the exact
+ * issued tool; an extraction-only request — an explicit extraction-only
+ * surface, an unqualified route, or an archived (schema-1) issued claim —
+ * renders the retained final-message contract VERBATIM
+ * (`finalMessageContract`, defaulting to the frozen
+ * `REVIEWER_OUTPUT_CONTRACT`). Archived issued contracts are never
+ * rewritten: a pure route projection that touches no issued packet,
+ * schema/rubric or stamped-fragment bytes.
+ */
+export function renderReviewerWireInstructions(
+  route: ReviewerWireInstructionRoute,
+  finalMessageContract: string = REVIEWER_OUTPUT_CONTRACT,
+): string {
+  return route.kind === "emission"
+    ? reviewerEmissionToolContract(route.toolName)
+    : finalMessageContract;
 }

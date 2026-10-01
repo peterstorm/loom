@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { EMISSION_TOOL_SPECS, frozenPayloadSchemaParameters } from "../../src/core/emission-tool";
+import {
+  EMISSION_TOOL_SPECS, frozenPayloadSchemaParameters, issueEmissionBinding,
+  type EmissionSchemaVersion, type EmissionToolSpec,
+} from "../../src/core/emission-tool";
+import { EMISSION_CONSTRAINED_SAMPLING_REQUEST } from "../../src/core/harness-capture";
+import type { PayloadProducerKindName } from "../../src/core/model-profiles";
+import { emissionToolDefinition } from "../../../pi/emission-tool";
 import { JUDGE_VERDICT_SCHEMA_V1, JUDGE_VERDICT_SCHEMA_V1_DIGEST } from "../../src/core/panel-contract";
 import { REFUTATION_VERDICT_SCHEMA_V1, REFUTATION_VERDICT_SCHEMA_V1_DIGEST } from "../../src/core/review-panel";
 import { sha256Hex } from "../../src/core/review-packet";
@@ -82,4 +88,52 @@ describe("emission tool parameter schemas byte-match the frozen payload schema b
     expect(typeof _judgeDigestIsArtifactDigest).toBe("string");
     expect(typeof _refutationDigestIsArtifactDigest).toBe("string");
   });
+});
+
+/**
+ * The REGISTERED tool surface (FR-021/SC-006, AS-013): the byte identity is
+ * proven where the tool is actually REGISTERED, not only at the parameters
+ * constructor above. `emissionToolDefinition` is the production definition
+ * pi/extension.ts registers — the same definition the readiness barrier and
+ * the Pi validation suite (`engine/tests/pi/emission-tool.test.ts`) drive —
+ * so one minted binding per supported (kind, version) registry cell proves
+ * 100% of the per-kind emission-tool parameter schemas byte-match the frozen
+ * payload schema bytes AT the registered surface: the exact tool name, the
+ * frozen parameters bytes, and the ONE shared constrained-sampling request
+ * (never a second sampling vocabulary).
+ */
+describe("the registered Pi tool surface carries the frozen bytes for every supported kind/version", () => {
+  // Every supported registry cell, as one minted-binding round-trip case.
+  // The registry is the kind/version source of truth; Object.entries erases
+  // the key types, so the boundary parse (`issueEmissionBinding`) re-proves
+  // each claimed cell against the closed vocabulary instead of a test cast.
+  const cells = (Object.keys(EMISSION_TOOL_SPECS) as PayloadProducerKindName[]).flatMap((kind) => {
+    const spec: EmissionToolSpec = EMISSION_TOOL_SPECS[kind];
+    return (Object.keys(spec.schemaVersions) as EmissionSchemaVersion[]).map((version) => ({
+      kind, version, spec, schemaVersion: spec.schemaVersions[version]!,
+    }));
+  });
+
+  it("enumerates every supported registry cell (a vacuous pass would prove nothing)", () => {
+    expect(cells.map(({ kind, version }) => `${kind}/${version}`)).toEqual([
+      "reviewer-payload/v2", "reviewer-payload/v3", "judge-verdict/v1", "refutation-verdict/v1",
+    ]);
+  });
+
+  for (const cell of cells) {
+    it(`${cell.kind}/${cell.version}: the registered tool definition byte-matches the frozen bytes at the registered surface`, () => {
+      const minted = issueEmissionBinding({
+        requestId: "request:registered-surface",
+        kind: cell.kind,
+        version: cell.version,
+      });
+      expect(minted.ok, minted.ok ? "" : `${minted.error.code} — ${minted.error.message}`).toBe(true);
+      if (!minted.ok) return;
+      const definition = emissionToolDefinition(minted.value);
+      expect(definition.name).toBe(cell.spec.toolName);
+      expect(JSON.stringify(definition.parameters, null, 2)).toBe(cell.schemaVersion.schemaBytes);
+      expect(definition.constrainedSampling).toEqual(EMISSION_CONSTRAINED_SAMPLING_REQUEST);
+      expect(typeof definition.prepareArguments).toBe("function");
+    });
+  }
 });
