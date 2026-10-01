@@ -102,6 +102,11 @@ export interface PreToolUseInput {
   /** Harness id of this tool call — stamped as the call-start key so the
    *  PostToolUse recorder can scope report artifacts to THIS call. */
   tool_use_id?: string;
+  /** Session transcript JSONL — the rules gate reads context evidence from it. */
+  transcript_path?: string;
+  cwd?: string;
+  /** Set by Claude Code only when the call originates inside a subagent. */
+  agent_id?: string;
 }
 
 export interface SubagentStopInput {
