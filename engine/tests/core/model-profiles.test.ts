@@ -34,7 +34,7 @@ import { IMPL_AGENTS } from "../../src/config";
 const EXPECTED_PROFILES = {
   implementation: {
     claudeCode: { model: "opus" },
-    pi: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
+    pi: { provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" },
   },
   "architecture-finalize": {
     claudeCode: { model: "opus" },
@@ -87,10 +87,14 @@ describe("semantic model profiles", () => {
 
   it("keeps all default profiles on exact cloud targets and the alternative on one qualified local target", () => {
     const defaults = LLM_PROFILES.filter(({ id }) => id !== "qualified-local-review");
-    expect(new Set(defaults.map(({ pi }) => pi.provider))).toEqual(new Set(["github-copilot", "openai-codex"]));
-    expect(new Set(defaults.map(({ pi }) => pi.model))).toEqual(
+    // implementation rides the same local qualified route as the reviewer
+    // election; every other default stays on an exact cloud target.
+    const cloudDefaults = defaults.filter(({ id }) => id !== "implementation");
+    expect(new Set(cloudDefaults.map(({ pi }) => pi.provider))).toEqual(new Set(["github-copilot", "openai-codex"]));
+    expect(new Set(cloudDefaults.map(({ pi }) => pi.model))).toEqual(
       new Set(["gpt-5.6-sol", "gpt-5.5", "gpt-5.4-mini", "gpt-5.6-terra"]),
     );
+    expect(defaults.find(({ id }) => id === "implementation")?.pi).toEqual(EXPECTED_PROFILES.implementation.pi);
     expect(LLM_PROFILES.find(({ id }) => id === "qualified-local-review")?.pi).toEqual(EXPECTED_PROFILES["qualified-local-review"].pi);
     expect(LLM_PROFILES.every(({ pi }) => pi.model.length > 0 && pi.thinking.length > 0)).toBe(true);
   });

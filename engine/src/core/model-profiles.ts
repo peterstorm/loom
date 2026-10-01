@@ -100,7 +100,11 @@ const profile = (
 
 /** Exact, calibrated-by-policy targets. None is an alias for a parent model. */
 export const LLM_PROFILES: readonly LlmProfile[] = Object.freeze([
-  profile("implementation", "opus", piTarget("gpt-5.6-sol", "high")),
+  profile("implementation", "opus", Object.freeze({
+    provider: "desktop-vllm",
+    model: "glm-5.3-flash-spark-tp2-v14",
+    thinking: "high",
+  } as const)),
   profile("architecture-finalize", "opus", piTarget("gpt-5.6-sol", "high")),
   profile("general-review", "sonnet", piTarget("gpt-5.6-sol", "high")),
   profile("focused-review", "sonnet", piTarget("gpt-5.5", "high")),
