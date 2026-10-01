@@ -719,7 +719,16 @@ function parseRawPiSpawnItems(raw: unknown): PolicyResult<readonly ExternalPiSpa
     return failure({ kind: "unknown-agent", message: "Pi subagent input must be an object" });
   }
   const modes: PiSpawnInputMode[] = [];
-  if (typeof raw.agent === "string" || typeof raw.task === "string") {
+  // A populated single form is a mode; a vacuous one is not. Models echo the
+  // tool schema's optional top-level fields with empty strings alongside a
+  // populated parallel/chain payload, and counting that echo as a second mode
+  // would refuse an unambiguous batch. Empty strings are filtered here, not
+  // downstream: the item loop below still rejects any entry whose agent/task
+  // is missing or blank.
+  if (
+    typeof raw.agent === "string" && raw.agent.trim() !== "" &&
+    typeof raw.task === "string" && raw.task.trim() !== ""
+  ) {
     modes.push(Object.freeze({ kind: "single", entries: Object.freeze([raw]) }));
   }
   if (Array.isArray(raw.tasks) && raw.tasks.length > 0) {

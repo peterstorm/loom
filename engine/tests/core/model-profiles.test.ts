@@ -200,6 +200,26 @@ describe("Pi spawn input parsing", () => {
     }
   });
 
+  it("does not count vacuous single fields as a second mode beside a populated batch", () => {
+    // Regression: a model echoes the tool schema's optional top-level
+    // agent/task fields with an empty string alongside the parallel payload it
+    // actually intended; counting that echo as a populated single mode refused
+    // the unambiguous batch (observed live with gpt-5.6-terra dispatching a
+    // one-entry tasks array). Only a POPULATED single form is a mode, so the
+    // echo is ignored and the parallel batch parses.
+    expect(parsePiSpawnItems({
+      agent: "comment-analyzer",
+      task: "",
+      tasks: [{ agent: "comment-analyzer", task: "review the wave slot" }],
+    })).toEqual({
+      ok: true,
+      value: [{ agent: "comment-analyzer", task: "review the wave slot" }],
+    });
+    // A vacuous single form ALONE is still no batch at all.
+    expect(parsePiSpawnItems({ agent: "comment-analyzer", task: "" }).ok).toBe(false);
+    expect(parsePiSpawnItems({ agent: "", task: "review" }).ok).toBe(false);
+  });
+
   it("classifies external batches without weakening all-or-nothing Loom ownership", () => {
     expect(classifyPiSpawnItems({ agent: "external-agent", task: "outside workflow" })).toEqual({
       ok: true,
