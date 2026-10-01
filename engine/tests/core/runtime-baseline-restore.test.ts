@@ -77,13 +77,53 @@ describe("runtimeBaselineRestoreForTasks", () => {
     expect(revision).toMatch(/^[0-9a-f]{40}$/);
   });
 
-  it("never restores an undeclared dirty path", () => {
+  it("restores the WHOLE revision domain, not only declared artifacts", () => {
+    // An implementation attempt's necessary writes are not bounded by its
+    // declared list: the render/wording changes ripple into the dispatch call
+    // sites that consume them, and the compiler drives the child there. The
+    // settlement exemption must cover the attempt's actual product — any
+    // domain file that was clean at spawn and is dirty now.
     const { root, revision } = gitFixture();
     writeFileSync(join(root, "engine", "src", "core", "task.ts"), "export const task = 2;\n");
     writeFileSync(join(root, "pi", "extension.ts"), "export default () => 1;\n");
+    writeFileSync(join(root, "engine", "src", "core", "created.ts"), "new\n");
     const restore = runtimeBaselineRestoreForTasks(root, [taskWith()]);
     expect(restore.get("engine/src/core/task.ts")).toBe(revision);
+    expect(restore.get("pi/extension.ts")).toBe(revision);
+    expect(restore.get("engine/src/core/created.ts")).toBeNull();
+  });
+
+  it("excludes attempt-created scratch anywhere in the domain and keeps multi-attempt dirt strict", () => {
+    const { root } = gitFixture();
+    // Scratch the attempt created (untracked, absent at HEAD) maps to null.
+    writeFileSync(join(root, "engine", "src", "core", "scratch.ts"), "notes\n");
+    // A path dirty at spawn in ANY in-flight attempt stays strict for all.
+    writeFileSync(join(root, "pi", "extension.ts"), "export default () => 1;\n");
+    const restore = runtimeBaselineRestoreForTasks(root, [
+      taskWith(),
+      taskWith({
+        file_list: ["docs/other.md"],
+        attempt_repository_baseline: [{
+          artifact: "pi/extension.ts",
+          snapshot: { kind: "sha256", digest: "b".repeat(64) },
+        }],
+      }),
+    ]);
+    expect(restore.get("engine/src/core/scratch.ts")).toBeNull();
     expect(restore.has("pi/extension.ts")).toBe(false);
+  });
+
+  it("fails closed for the whole map when any baseline is unparseable", () => {
+    const { root } = gitFixture();
+    writeFileSync(join(root, "engine", "src", "core", "task.ts"), "export const task = 2;\n");
+    const restore = runtimeBaselineRestoreForTasks(root, [
+      taskWith(),
+      taskWith({
+        // @ts-expect-error hostile baseline shape drives the fail-closed branch.
+        attempt_repository_baseline: [{ artifact: 42 }],
+      }),
+    ]);
+    expect(restore.size).toBe(0);
   });
 });
 

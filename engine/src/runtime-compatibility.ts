@@ -65,6 +65,19 @@ function revisionFiles(packageRoot: string): readonly string[] {
   return files;
 }
 
+/** The runtime revision domain's paths relative to the package root, in the
+ *  same canonical order `captureLoomRuntimeIdentity` enumerates. Consumed by
+ *  the implementation settlement's baseline restore: an attempt's authorized
+ *  writes are not bounded by its declared artifact list (dispatch call sites
+ *  ripple, and scratch a child creates inside `engine/src`/`pi` still counts
+ *  as product under this domain), so the restore must cover the whole domain,
+ *  not only declared artifacts. */
+export function runtimeDomainPaths(rawPackageRoot: string): readonly string[] {
+  const packageRoot = realpathSync(resolve(rawPackageRoot));
+  return revisionFiles(packageRoot).map((absolute) =>
+    relative(packageRoot, absolute).split(sep).join("/"));
+}
+
 /** Capture the mutable checkout bytes that one process is about to load/use. */
 export function captureLoomRuntimeIdentity(rawPackageRoot: string): LoomRuntimeIdentity {
   const packageRoot = realpathSync(resolve(rawPackageRoot));

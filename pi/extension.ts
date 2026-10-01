@@ -2198,14 +2198,15 @@ async function verifyTrustedReviewRun(
 
 /**
  * The runtime-baseline restoration map for the implementation settlements this
- * batch finalizes: the named tasks' declared artifacts, provably clean at their
- * attempt start, hashed at those attempt-start bytes by the write boundary's
- * revision comparison. An implementation attempt's declared artifacts may live
- * inside the runtime revision domain, and the attempt writing them is the
- * product — without this restoration the settlement reads its own authorized
- * writes as runtime drift and refuses the state update that records its
- * outcome. Any proven-unrestorable input yields an empty map, which keeps the
- * strict full-domain comparison in force (fail closed).
+ * batch finalizes: the whole runtime revision domain, provably clean at the
+ * in-flight attempts' start, hashed at those attempt-start bytes by the write
+ * boundary's revision comparison. An implementation attempt's writes live
+ * inside the runtime revision domain (`engine/src`, `pi`) and are NOT bounded
+ * by its declared artifact list — the attempt writing those files is the
+ * product — so without this restoration the settlement reads its own
+ * authorized writes as runtime drift and refuses the state update that records
+ * its outcome. Any proven-unrestorable input yields an empty map, which keeps
+ * the strict full-domain comparison in force (fail closed).
  */
 function implementationBaselineRestoreFor(
   manager: StateManager,
@@ -3545,8 +3546,20 @@ export default function (
       const finalizedAt = parseIsoInstant(new Date().toISOString(), "Pi crash-settlement instant");
       if (!finalizedAt.ok) return [finalizedAt.error.errors.join("; ")];
       try {
-        const manager = StateManager.fromLocalSession(reservation?.sessionId ?? "");
-        if (manager === null) return [`cannot settle crashed reserved implementation ${item.taskId ?? "unknown"}: task graph unavailable`];
+        const plainManager = StateManager.fromLocalSession(reservation?.sessionId ?? "");
+        if (plainManager === null) return [`cannot settle crashed reserved implementation ${item.taskId ?? "unknown"}: task graph unavailable`];
+        // The crashed attempt may have written engine/src/pi artifacts (declared
+        // or not) before failing: restore the whole in-flight batch's baseline
+        // domain for the write boundary's revision comparison, exactly like the
+        // finalize path below. Unprovable inputs yield an empty map: strict stays.
+        const crashRestore = implementationBaselineRestoreFor(
+          plainManager,
+          (reservation?.items ?? []).flatMap((reserved) =>
+            reserved.kind === "implementation" && reserved.taskId !== null ? [reserved.taskId] : []),
+        );
+        const manager = crashRestore.size > 0
+          ? StateManager.fromLocalSession(reservation?.sessionId ?? "", crashRestore) ?? plainManager
+          : plainManager;
         const applied = await manager.updateAndReturn((state) => {
           const settlement = settleUnavailableImplementation(
             state,
