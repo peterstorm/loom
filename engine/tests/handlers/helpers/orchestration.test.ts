@@ -2369,6 +2369,17 @@ describe("orchestration CLI", () => {
     const initial = JSON.parse(started.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
     expect(initial.kind, started.stdout).toBe("spawn-batch");
     expect(initial.requests.some(({ authority }) => authority.role === "spec-check-invoker" && authority.attempt === 1)).toBe(true);
+    // Spec-check reads its sections only through the delivered engine reader;
+    // running that exact command decodes its digest-verified authority.
+    const tasks = initial.requests as readonly { authority: AgentRequestAuthority; task: string }[];
+    const specTask = tasks.find(({ authority }) => authority.role === "spec-check-invoker")!.task;
+    const sectionCommand = /^LOOM_CONTEXT_SECTION_COMMAND: (.+)$/m.exec(specTask)?.[1];
+    expect(sectionCommand, specTask).toBeDefined();
+    const authoritySection = spawnSync("bash", ["-c", `${sectionCommand} --section wave-review-authority`], { encoding: "utf8" });
+    expect(authoritySection.status, authoritySection.stderr).toBe(0);
+    expect(JSON.parse(authoritySection.stdout)).toMatchObject({ subject: { role: "spec-check-invoker" } });
+    expect(tasks.filter(({ authority }) => authority.role !== "spec-check-invoker")
+      .every(({ task }) => !task.includes("LOOM_CONTEXT_SECTION_COMMAND"))).toBe(true);
     const opened = openRunDirectory(runsRoot, runDir);
     if (!opened.ok) throw new Error(opened.error.message);
 

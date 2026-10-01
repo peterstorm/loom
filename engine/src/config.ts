@@ -679,10 +679,7 @@ export const defaultTaskGraphExists = (): boolean => pathExistsFailClosed(TASK_G
 
 /** Default rules directory (shipped with loom) — resolved from this file's location */
 const CONFIG_DIR = dirname(fileURLToPath(import.meta.url));
-/** The root of the Loom package this engine runs from (its agents, commands,
- *  binding rules and lint rules). */
-export const LOOM_PACKAGE_ROOT = join(CONFIG_DIR, "..", "..");
-export const DEFAULT_RULES_DIR = join(LOOM_PACKAGE_ROOT, "lint-rules");
+export const DEFAULT_RULES_DIR = join(CONFIG_DIR, "..", "..", "lint-rules");
 
 /** Project-local rules directory — resolved relative to repo root */
 export const PROJECT_RULES_DIR = HARNESS === "pi"

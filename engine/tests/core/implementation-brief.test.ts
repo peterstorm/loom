@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { LOOM_PACKAGE_ROOT } from "../../src/config";
+import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
 import {
   NO_CODE_RULES,
   NO_RETRY_CONTEXT,

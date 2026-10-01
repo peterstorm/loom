@@ -149,6 +149,13 @@ export function boundedByteIterable(
   raw: unknown,
   maximum: number,
 ): DomainResult<Uint8Array, ByteGrammarViolation> {
+  // Typed bytes (a resolved section blob) are bytes by construction; only the
+  // bound applies, and the copy keeps the caller's buffer out of the section.
+  if (raw instanceof Uint8Array) {
+    return raw.length > maximum
+      ? grammarFailure({ rule: "bound", count: raw.length, maximum })
+      : grammarSuccess(Uint8Array.from(raw));
+  }
   if (!Array.isArray(raw) &&
       !(typeof raw === "object" && raw !== null &&
         typeof (raw as { [Symbol.iterator]?: unknown })[Symbol.iterator] === "function")) {
@@ -531,6 +538,79 @@ export function serializeStandaloneReviewerContextPacketV3(raw: unknown): Domain
     if (key === "variableContext") return prefix + "[" + packet.variableContext.map(sectionJson).join(",") + "]";
     return prefix + JSON.stringify(value);
   }).join(",") + "}");
+}
+
+/**
+ * Stored Context Packets.
+ *
+ * Packet and section digests cover section IDENTITY ({label, digest,
+ * byteLength}), never the inline byte representation — so a Run Directory
+ * stores each section's bytes once, in a content-addressed blob named by its
+ * section digest, and the packet file carries identity only. One frozen Wave
+ * source shared by a Task's reviewers is then one blob, not one JSON number
+ * array (≈3.6× the raw size) per reviewer packet.
+ */
+export type StoredContextPacket = Readonly<{
+  /** The packet file: the packet's JSON with every section's bytes removed. */
+  text: string;
+  /** Every distinct section's bytes, keyed by its section digest. */
+  blobs: readonly Readonly<{ digest: ArtifactDigest; bytes: Uint8Array }>[];
+}>;
+
+/** A section blob's name is its section digest: 64 lowercase hex characters. */
+const SECTION_BLOB_NAME = /^[0-9a-f]{64}$/;
+
+export function storedContextPacket(packet: ContextPacket | StandaloneReviewerContextPacketV3): StoredContextPacket {
+  const identity = ({ label, byteLength, digest }: ByteSection) => ({ label, byteLength, digest });
+  const sections = [...packet.fixedContext, ...packet.variableContext];
+  // Same byte view as section digesting: sealed sequences by reference, any
+  // other byte iterable (a packet that crossed JSON) copied.
+  const bytesOf = (bytes: ByteSection["bytes"]): Uint8Array => immutableByteStorage.get(bytes) ?? Uint8Array.from(bytes);
+  const blobs = new Map(sections.map((section) => [section.digest, bytesOf(section.bytes)] as const));
+  return Object.freeze({
+    text: JSON.stringify({
+      ...packet,
+      fixedContext: packet.fixedContext.map(identity),
+      variableContext: packet.variableContext.map(identity),
+    }),
+    blobs: Object.freeze([...blobs].map(([digest, bytes]) => Object.freeze({ digest, bytes }))),
+  });
+}
+
+/**
+ * Restore the bytes of every section a stored packet file names by identity
+ * only, from its Run Directory's blob store, so the ordinary packet parser can
+ * re-hash each section against its digest. A section still carrying inline
+ * bytes is a packet written before external section storage; immutable run
+ * evidence keeps that form, so it passes through for the parser unchanged.
+ */
+export function withStoredSectionBytes(
+  raw: unknown,
+  readBlob: (digest: string) => Uint8Array | null,
+): DomainResult<unknown, ContextPacketError> {
+  if (!isRecord(raw)) return success(raw);
+  const record = raw as Record<string, unknown>;
+  const resolved: Record<string, unknown> = { ...record };
+  for (const key of ["fixedContext", "variableContext"] as const) {
+    const sections = record[key];
+    if (!Array.isArray(sections)) continue;
+    const restored: unknown[] = [];
+    for (const [index, section] of sections.entries()) {
+      if (!isRecord(section) || "bytes" in section) {
+        restored.push(section);
+        continue;
+      }
+      const digest = (section as Record<string, unknown>)["digest"];
+      if (typeof digest !== "string" || !SECTION_BLOB_NAME.test(digest)) {
+        return failure(`${key}[${index}].digest`, "a stored context section must name its blob by a sha256 hex digest");
+      }
+      const bytes = readBlob(digest);
+      if (bytes === null) return failure(`${key}[${index}]`, `context section blob ${digest} is missing from the run's blob store`);
+      restored.push({ ...section, bytes });
+    }
+    resolved[key] = restored;
+  }
+  return success(resolved);
 }
 
 function parseContextPacketHeader(raw: unknown): DomainResult<Record<string, unknown>, ContextPacketError> {
