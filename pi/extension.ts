@@ -227,6 +227,8 @@ import {
   registerInteractiveSubagentTool,
 } from "./interactive-subagent";
 import { observeSpawnBatchGraph, spawnEntryAt } from "./spawn-graph";
+import { expandImplementationBriefMarkers } from "./implementation-brief-expansion";
+import { renderTaskImplementationBrief } from "../engine/src/orchestration/implementation-brief";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 // Capture once, while this extension module is loaded. Fresh CLI processes
@@ -2465,6 +2467,12 @@ export default function (
         const spawnGraphPath = batchGraph.kind === "spawn" ? batchGraph.graphPath : null;
         const orchestrationGraphActive = spawnGraphPath !== null || graphIsActive;
         const orchestrationGraphPath = spawnGraphPath ?? taskGraphPath();
+        // Expand implementation brief markers BEFORE admission, so every gate
+        // below judges the exact engine-rendered brief the child receives.
+        currentGuard = "implementation-brief-expansion";
+        const briefs = expandImplementationBriefMarkers(event.input, (taskId) =>
+          renderTaskImplementationBrief(orchestrationGraphPath, PACKAGE_ROOT, taskId));
+        if (!briefs.ok) return { block: true, reason: briefs.reason };
         const routing = buildPiRoutingContext();
         const admission = admitPiSpawnBatch(event.input, {
           graphActive: orchestrationGraphActive,

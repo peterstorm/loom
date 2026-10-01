@@ -78,6 +78,10 @@ export type WaveReviewRegistrationAuthority = Readonly<{
 }> & (Readonly<{ schemaVersion: 1; reviewerProtocol?: never }> |
   Readonly<{ schemaVersion: 2; reviewerProtocol: ReviewerProtocolDescriptor }>);
 
+/** The Wave review packet section labels; spec-check reads both by name. */
+export const WAVE_REVIEW_AUTHORITY_SECTION = "wave-review-authority";
+export const REQUIREMENT_COVERAGE_SECTION = "requirement-coverage";
+
 /** Exact protected snapshot identity used by publication and locked install. */
 export function waveGateAuthorityDigest(
   wave: number,
@@ -560,7 +564,7 @@ export function readWaveReviewContext(
   digest: string,
 ): WaveReviewContextRead {
   const packet = packets.find((candidate) => candidate.digest === digest);
-  const section = packet?.fixedContext.find(({ label }) => label === "wave-review-authority");
+  const section = packet?.fixedContext.find(({ label }) => label === WAVE_REVIEW_AUTHORITY_SECTION);
   if (section === undefined) return { kind: "absent" };
   try {
     const raw: unknown = JSON.parse(
@@ -833,7 +837,7 @@ export function prepareWaveReviewBatch(
     const profile = issuedReviewerProfile(subject.role, reviewerRoute);
     if (!profile.ok) return failure(profile.error.message);
     const task = subject.taskId === null ? null : tasks.find(({ id }) => id === subject.taskId) ?? null;
-    const section = encodeByteSection("wave-review-authority", JSON.stringify({
+    const section = encodeByteSection(WAVE_REVIEW_AUTHORITY_SECTION, JSON.stringify({
       runId,
       wave: registration.input.wave,
       authorityDigest: registration.authorityDigest,
@@ -867,7 +871,7 @@ export function prepareWaveReviewBatch(
     // it — so widening the authority schema would buy a parser nobody calls.
     // Only the spec-check subject receives it; no reviewer has a use for it.
     const coverageSection = subject.taskId === null
-      ? encodeByteSection("requirement-coverage", renderRequirementCoverage(requirementCoverage))
+      ? encodeByteSection(REQUIREMENT_COVERAGE_SECTION, renderRequirementCoverage(requirementCoverage))
       : null;
     if (coverageSection !== null && !coverageSection.ok) return failure(coverageSection.error.message);
     const sourceSection = subject.taskId === null ? null : frozenSourceByTask.get(subject.taskId) ?? null;

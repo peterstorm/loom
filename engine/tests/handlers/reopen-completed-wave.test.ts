@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -330,7 +330,7 @@ describe("reopen completed Wave", () => {
     expect(() => reopenCompletedWave(reopened, request, legacyProof)).toThrow("current_wave exactly");
   });
 
-  it("blocks immediate Wave Gate preparation and forbids legacy task-stop positive bypass", () => {
+  it("refuses immediate Wave Gate start before claiming a run and forbids legacy task-stop positive bypass", () => {
     const root = mkdtempSync(join(tmpdir(), "loom-reopened-wave-"));
     const runsRoot = mkdtempSync(join(tmpdir(), "loom-reopened-wave-runs-"));
     try {
@@ -354,13 +354,14 @@ describe("reopen completed Wave", () => {
       writeFileSync(statePath, JSON.stringify(awaitingRevalidation));
       const { PI_CODING_AGENT: _pi, ...env } = process.env;
       const blockedRun = join(runsRoot, "run.revalidation-required");
-      mkdirSync(blockedRun);
       const blocked = spawnSync("bun", [CLI, "helper", "orchestration", "start", "wave-gate", "--runs-root", runsRoot, "--run", blockedRun], {
         cwd: root, encoding: "utf8", input: JSON.stringify({ wave: 3 }),
         env: { ...env, LOOM_STATE_PATH: statePath },
       });
-      expect(blocked.status, blocked.stderr).toBe(0);
-      expect((JSON.parse(blocked.stdout) as { kind: string }).kind, blocked.stdout).toBe("blocked");
+      expect(blocked.status, blocked.stdout).not.toBe(0);
+      expect(blocked.stderr).toContain("wave 3 cannot start its Wave Gate");
+      expect(blocked.stderr).toContain("revalidation=fresh-test-evidence-required");
+      expect(existsSync(blockedRun)).toBe(false);
 
       const freshStop = {
         taskCompleted: true,
@@ -382,13 +383,13 @@ describe("reopen completed Wave", () => {
       chmodSync(statePath, 0o644);
       writeFileSync(statePath, JSON.stringify(revalidated));
       const runDir = join(runsRoot, "run.revalidated-wave");
-      mkdirSync(runDir);
       const started = spawnSync("bun", [CLI, "helper", "orchestration", "start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], {
         cwd: root, encoding: "utf8", input: JSON.stringify({ wave: 3 }),
         env: { ...env, LOOM_STATE_PATH: statePath },
       });
-      expect(started.status, started.stderr).toBe(0);
-      expect((JSON.parse(started.stdout) as { kind: string }).kind, started.stdout).toBe("blocked");
+      expect(started.status, started.stdout).not.toBe(0);
+      expect(started.stderr).toContain("Not all tasks have satisfied implementation proof");
+      expect(existsSync(runDir)).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(runsRoot, { recursive: true, force: true });

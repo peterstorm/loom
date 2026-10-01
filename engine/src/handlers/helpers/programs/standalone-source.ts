@@ -2,7 +2,8 @@
 import { dirname, join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { createHash } from "node:crypto";
-import { encodeByteSection, type ByteSection } from "../../../core/context-packets";
+import { encodeByteSection, parseStandaloneReviewerContextPacketV3, type ByteSection } from "../../../core/context-packets";
+import { parseContextPacket } from "../../../orchestration/context-packets";
 import { parseBoundedReviewerJson } from "../../../core/reviewer-protocol";
 import { selectStandaloneReviewers } from "../../../core/standalone-review";
 import { prepareStandaloneSuccessor, type PreparedStandaloneSuccessor, type StandaloneDispositionSelection } from "../../../core/standalone-lineage";
@@ -19,6 +20,7 @@ import { prepareStandaloneLineageSource, type StandaloneLineageSource } from "..
 import { readStandaloneReviewedSource, replayStandaloneCliCaptures } from "./standalone-evidence";
 import { readRunBytesNoFollow } from "../../../orchestration/no-follow-fs";
 import { openRegisteredRunDirectory, type RunDirHandle } from "../../../orchestration/run-directory-handle";
+import { readStoredContextPacketFile } from "../../../orchestration/stored-context-packets";
 import { parsedAuthority, parseRegistration, publishedReviewerRequest, publicationResolver, readPublishedStandaloneResult, type ProgramParse } from "./helpers";
 
 type SuccessorSourcePreparation = Readonly<{ prepared: PreparedStandaloneSuccessor;
@@ -94,19 +96,22 @@ export async function prepareStandaloneSuccessorSource(input: StandaloneSuccesso
     for (const request of candidates) {
       const issued = publishedReviewerRequest(previous.value, request, STANDALONE_LINEAGE_LIMITS.retainedBytes);
       if (!issued.ok) return issued;
-      const bytes = readRunBytesNoFollow(join(reference.locator, "contexts", `${request.contextDigest}.json`), Math.min(remaining, traversal.remaining));
-      remaining -= bytes.length; traversal.remaining -= bytes.length;
+      // One read is both the published-byte identity and the parsed packet,
+      // so the archived reference and the observed packet cannot diverge.
+      const budget = Math.min(remaining, traversal.remaining);
+      const stored = readStoredContextPacketFile(join(reference.locator, "contexts", `${request.contextDigest}.json`), { file: budget, section: budget });
+      if (!stored.ok) return { ok: false as const, message: stored.error };
+      const bytes = stored.value.fileBytes;
+      // The traversal budget covers every byte observed: the packet file and
+      // each section blob it resolved.
+      const observed = bytes.length + stored.value.sectionBytes;
+      if (observed > budget) return { ok: false as const, message: "predecessor Context Packet exceeds the traversal byte budget" };
+      remaining -= observed; traversal.remaining -= observed;
       const packet = registration.value.schemaVersion === 3
-        ? previous.value.readStandaloneSuccessorContext(request.contextDigest, STANDALONE_LINEAGE_LIMITS.retainedBytes)
-        : previous.value.readContext(request.contextDigest, STANDALONE_LINEAGE_LIMITS.retainedBytes);
-      const decoded = parseBoundedReviewerJson(bytes, STANDALONE_LINEAGE_LIMITS.retainedBytes);
-      // The packet's ImmutableByteSequence sections equal their parsed wire
-      // arrays under canonicalStructuralEquals, so the live packet compares
-      // against the authenticated bytes directly — no untyped JSON projection
-      // sits between the observation and the proof, and JSON.stringify's
-      // silent-drop semantics never touch a published-identity comparison.
-      if (!packet.ok || !decoded.ok || !canonicalStructuralEquals(packet.value, decoded.value)) {
-        return { ok: false as const, message: "predecessor exact Context Packet bytes changed during observation" };
+        ? parseStandaloneReviewerContextPacketV3(stored.value.record)
+        : parseContextPacket(stored.value.record);
+      if (!packet.ok || packet.value.digest !== request.contextDigest) {
+        return { ok: false as const, message: "predecessor Context Packet does not prove its issued digest" };
       }
       // Exact published-byte references avoid recursively embedding predecessor packets.
       // Original files stay mandatory: neither source replay nor the reader can fall back.

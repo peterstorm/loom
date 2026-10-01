@@ -38,7 +38,8 @@ import {
   deriveWaveReadiness,
 } from "../../../../src/core/wave-gate-machine";
 import { observedAdvisoryApproval } from "../../../../src/handlers/helpers/orchestration";
-import { derivePendingTaskProof } from "../../../../src/core/proof-obligations";
+import { derivePendingTaskProof, evaluateTaskProof } from "../../../../src/core/proof-obligations";
+import { taskVerificationPolicy } from "../../../../src/core/verification-policy";
 import { buildFindingBrief } from "../../../../src/core/review-panel";
 import {
   parseRequestId,
@@ -126,7 +127,16 @@ describe("Wave Gate start effect ordering", () => {
     const statePath = join(stateDirectory, "active_task_graph.json");
     mkdirSync(runDirectory, { recursive: true });
     mkdirSync(stateDirectory, { recursive: true });
-    const initial = graph({ active_wave_gate: undefined });
+    // Start-ready Tasks, so the start passes its preflight and reaches the
+    // Run Directory program publication this case refuses.
+    const verification_policy = { regression: { kind: "required" }, new_tests: { kind: "waived", reason: "documentation-only" } } as const;
+    const proof = evaluateTaskProof({ verificationPolicy: taskVerificationPolicy({ verification_policy }), declaredArtifacts: [] },
+      { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: [], newTestsWritten: false });
+    if (proof.state !== "satisfied") throw new Error("fixture proof must satisfy");
+    const initial = graph({
+      active_wave_gate: undefined,
+      tasks: TASKS.map((entry) => ({ ...entry, proof, test_result: { verdict: "trusted-pass" }, verification_policy })) as unknown as TaskGraph["tasks"],
+    });
     writeFileSync(statePath, JSON.stringify(initial));
     try {
       const opened = openRunDirectory(runsRoot, runDirectory);

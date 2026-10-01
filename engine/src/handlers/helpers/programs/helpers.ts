@@ -4,6 +4,7 @@
  * helpers, the shared recovery/git/scope machinery). The public surface is
  * re-exported by index.ts so all existing import sites are unchanged.
  */
+import { LOOM_PACKAGE_ROOT } from "../../../utils/loom-package-root";
 import { createHash } from 'node:crypto';
 import { publishStandalonePanelView, verifyStandalonePanelView } from '../../../orchestration/standalone-panel-context';
 import { parseStandaloneSuccessorRegistration, parseStandaloneSuccessorStartInput, type RegisteredStandaloneSuccessorProgram } from './standalone-successor-registration';
@@ -14,7 +15,6 @@ import type { StandaloneReviewerContextPacketV3 } from '../../../core/context-pa
 import { parseRegisteredStandaloneDispositionProgram, type RegisteredStandaloneDispositionProgram } from '../../../core/standalone-disposition-machine';
 import { devNull } from 'node:os';
 import { extname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { spawnSync, type SpawnSyncOptions, type SpawnSyncReturns } from 'node:child_process';
 import { observeGitProbe, type GitProbeObservation, type GitProbeStep } from '../../../utils/git-probe';
 import { canonicalRecord, canonicalStructuralEquals, sameAgentRequestAuthority, parseAgentRequestAuthority, boundedThrownCause, type DomainResult, createAtomicInitialPublicationClaimPort, createInitialBatchPublicationReconciler, createInitialPublicationEffectPort, createPublicationAuthorityResolver, parseBatchPublishedReceipt, parseEffectId, parseIssuedSpawnRequest, parseRequestId, prepareInitialBatchPublicationIntent, spawnBatchAction, AGENT_REQUIRED_SKILLS, type AgentRequestAuthority, type BatchPublishedReceipt, type EffectId, type InitialSpawnRequestInput, type PublicationAuthorityResolver, type SpawnRequest } from '../../../core/orchestration-contract';
@@ -1048,6 +1048,7 @@ function renderSpawnTaskWithAuthority(
     `LOOM_CONTEXT_DIGEST: ${authority.contextDigest}\n` +
     `LOOM_CONTEXT_PATH: ${join(handle.runDirectory, "contexts", `${authority.contextDigest}.json`)}\n` +
     requiredSkillMarker(authority.requiredSkill) +
+    contextSectionDelivery(handle, authority) +
     emission.descriptor +
     emission.bootstrap + standalonePanelBootstrap(handle, authority) +
     emission.instruction;
@@ -1072,6 +1073,22 @@ export function renderReviewProgramSpawnTask(
   options: SpawnTaskRenderOptions = {},
 ): string {
   return renderSpawnTaskWithAuthority(handle, authority, instruction, emissionAuthority, options);
+}
+
+/** One POSIX-shell single-quoted word. */
+const shellQuote = (text: string): string => "'" + text.replaceAll("'", "'\\''") + "'";
+
+/**
+ * Spec-check consumes its small authority sections whole. Its packet's section
+ * bytes live in the run's blob store, so it reads them only through the
+ * engine's digest-verifying section decoder, delivered as an exact command.
+ */
+function contextSectionDelivery(handle: RunDirHandle, authority: AgentRequestAuthority): string {
+  if (authority.role !== "spec-check-invoker") return "";
+  const command = ["bun", join(LOOM_PACKAGE_ROOT, "scripts", "read-context-section.ts"),
+    "--packet", join(handle.runDirectory, "contexts", `${authority.contextDigest}.json`),
+    "--digest", authority.contextDigest].map(shellQuote).join(" ");
+  return `LOOM_CONTEXT_SECTION_COMMAND: ${command}\n`;
 }
 
 function standalonePanelBootstrap(handle: RunDirHandle, request: AgentRequestAuthority): string {
@@ -1113,21 +1130,19 @@ function reviewerCompatibilityBootstrap(
     const protocol = reviewerProtocolResolver(handle, program)(request);
     if (!protocol.ok) throw new Error(protocol.error.message);
   }
-  const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
-  const quote = (text: string): string => "'" + text.replaceAll("'", "'\\''") + "'";
-  const reader = join(packageRoot, "scripts", "read-context-packet.ts");
+  const reader = join(LOOM_PACKAGE_ROOT, "scripts", "read-context-packet.ts");
   if (readRunBytesNoFollow(reader, 64 * 1024).length === 0) throw new Error("Context Packet reader is unavailable");
   const command = ["bun", reader, "--packet", join(handle.runDirectory, "contexts", `${request.contextDigest}.json`),
     "--request", request.requestId, "--digest", request.contextDigest, "--role", request.role,
-    "--skill", request.requiredSkill ?? "none", ...(version === 3 ? ["--purpose", "standalone-successor"] : [])].map(quote).join(" ");
+    "--skill", request.requiredSkill ?? "none", ...(version === 3 ? ["--purpose", "standalone-successor"] : [])].map(shellQuote).join(" ");
   const delivery = `LOOM_CONTEXT_READ_COMMAND: ${command}\n` +
     "Run that exact command using Claude Bash or Pi bash FIRST, then append --section LABEL or --file EXACT_SOURCE_PATH and --offset N --limit 4096 to page through the indexed context. Do not dump raw packet byte arrays. A failed command means context unavailable: stop, never infer a protocol from payload. This read-only projection checks supplied identity/integrity; independent publication was proved by engine delivery, not by the helper.\n";
   if (version === 3) return delivery +
     "This is an explicitly issued standalone successor v3 request. Read standalone-lineage and standalone-frozen-source, then the frozen reviewer-payload-schema and reviewer-impact-rubric. Cover every inherited origin exactly once in issued order, retaining original identity and history. Reopening needs the exact prior decision reference and complete new evidence; unavailable context means not-assessable, never repaired. New assertions belong in findings as draft/relation, not reminted prior Findings.\n" +
     "Browse predecessor-frozen-source with --section. Browse an exact predecessor-context:ROLE[:attempt-2] using --archive LABEL --archive-purpose v1-v2 (or standalone-successor for a v3 predecessor), then --section or --file and bounded offsets. These are retained data, not new issuance authority. Native capture records your one exact final payload; registered resume owns admission, retry and panel work.\n";
   if (version === 2) return delivery + "Read the issued Context Packet FIRST; its frozen schema and rubric govern your final output.\n";
-  const role = join(packageRoot, "references", "reviewer-protocol-v1", "agents", `${request.role}.md`);
-  const wire = join(packageRoot, "references", "reviewer-protocol-v1", "agents", "_shared", "wire-contract.md");
+  const role = join(LOOM_PACKAGE_ROOT, "references", "reviewer-protocol-v1", "agents", `${request.role}.md`);
+  const wire = join(LOOM_PACKAGE_ROOT, "references", "reviewer-protocol-v1", "agents", "_shared", "wire-contract.md");
   if (readRunBytesNoFollow(role).length === 0 || readRunBytesNoFollow(wire).length === 0) {
     throw new Error("historical reviewer instructions are unavailable; refusing current-contract fallback");
   }

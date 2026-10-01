@@ -1565,14 +1565,61 @@ describe("orchestration CLI", () => {
     expect(stored.value?.requestId).toBe(request.requestId);
   });
 
-  it("exposes the wave-gate façade and returns a typed blocked action when authority is unavailable", async () => {
+  it("refuses unavailable wave-gate authority before claiming a Run Directory", async () => {
     const root = project();
     const runsRoot = join(root, "runs");
     const runDir = join(runsRoot, "run.wave-gate");
-    mkdirSync(runDir, { recursive: true });
+    mkdirSync(runsRoot, { recursive: true });
     const result = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: null }), root));
-    expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout).kind, JSON.stringify(JSON.parse(result.stdout))).toBe("blocked");
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("active_task_graph.json");
+    expect(existsSync(runDir)).toBe(false);
+  });
+
+  it("renders the owed implementation dispatches as briefs with per-harness invocations", async () => {
+    const root = project();
+    writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), JSON.stringify(executeGraph()));
+
+    const listed = await runCli(["brief"], "", root);
+    expect(listed.status, listed.stderr).toBe(0);
+    const output = JSON.parse(listed.stdout) as { wave: number; briefs: readonly Record<string, unknown>[] };
+    expect(output).toEqual({
+      wave: 1,
+      briefs: [{
+        taskId: "T2",
+        agent: "code-implementer-agent",
+        dispatch: { kind: "initial-implementation", taskId: "T2", semanticAttempt: 1, promptAppendix: null },
+        pi: { agent: "code-implementer-agent", task: "LOOM_IMPLEMENTATION_BRIEF: T2" },
+        claude: { subagent_type: "code-implementer-agent", model: "opus", description: "Implement T2" },
+      }],
+    });
+
+    const withPrompt = await runCli(["brief", "--task", "T2", "--prompt"], "", root);
+    expect(withPrompt.status, withPrompt.stderr).toBe(0);
+    const prompt = (JSON.parse(withPrompt.stdout) as { briefs: readonly { prompt: string }[] }).briefs[0]!.prompt;
+    expect(prompt).toContain("**Task ID:** T2\n**Wave:** 1\n**Agent:** code-implementer-agent");
+    expect(prompt).toContain("Available at: plan.md");
+
+    const notOwed = await runCli(["brief", "--task", "T1"], "", root);
+    expect(notOwed.status).not.toBe(0);
+    expect(notOwed.stderr).toContain("Task T1 is not in the owed dispatches (T2)");
+  });
+
+  it("refuses a wave-gate start that another live run already owns before claiming a Run Directory", async () => {
+    const root = project();
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run.second");
+    mkdirSync(runsRoot, { recursive: true });
+    writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), JSON.stringify(executeGraph({
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: "run.first", wave: 1,
+        authorityDigest: "a".repeat(64), revision: 0, runsRoot, terminalOutcome: null,
+      },
+    })));
+    const result = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("Active Wave Gate run run.first already owns wave 1");
+    expect(existsSync(runDir)).toBe(false);
   });
 
   it("refuses unavailable remediation source authority before claiming a Run Directory", async () => {
@@ -2322,6 +2369,17 @@ describe("orchestration CLI", () => {
     const initial = JSON.parse(started.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
     expect(initial.kind, started.stdout).toBe("spawn-batch");
     expect(initial.requests.some(({ authority }) => authority.role === "spec-check-invoker" && authority.attempt === 1)).toBe(true);
+    // Spec-check reads its sections only through the delivered engine reader;
+    // running that exact command decodes its digest-verified authority.
+    const tasks = initial.requests as readonly { authority: AgentRequestAuthority; task: string }[];
+    const specTask = tasks.find(({ authority }) => authority.role === "spec-check-invoker")!.task;
+    const sectionCommand = /^LOOM_CONTEXT_SECTION_COMMAND: (.+)$/m.exec(specTask)?.[1];
+    expect(sectionCommand, specTask).toBeDefined();
+    const authoritySection = spawnSync("bash", ["-c", `${sectionCommand} --section wave-review-authority`], { encoding: "utf8" });
+    expect(authoritySection.status, authoritySection.stderr).toBe(0);
+    expect(JSON.parse(authoritySection.stdout)).toMatchObject({ subject: { role: "spec-check-invoker" } });
+    expect(tasks.filter(({ authority }) => authority.role !== "spec-check-invoker")
+      .every(({ task }) => !task.includes("LOOM_CONTEXT_SECTION_COMMAND"))).toBe(true);
     const opened = openRunDirectory(runsRoot, runDir);
     if (!opened.ok) throw new Error(opened.error.message);
 

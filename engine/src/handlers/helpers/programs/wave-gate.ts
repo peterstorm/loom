@@ -1,6 +1,7 @@
 /** Persistent Wave Gate program driver: publishes exact review authority,
  * recovers bounded attempts, commits adjudication, and completes one protected
  * Wave through the shared orchestration primitives. */
+import { realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { awaitUserAction, parseAgentRequestAuthority, parseStoredAgentRequestAuthority, canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId, parseRequestId, type AgentRequestAuthority, type AwaitUserAction, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
 import { defaultRefutationThreshold } from '../../../core/review-panel';
@@ -9,10 +10,11 @@ import type { FindingOutcome } from '../../../core/review-panel';
 import { buildContextPacket, encodeByteSection, parseContextPacket, contextPacketDigest, type ContextPacket } from '../../../orchestration/context-packets';
 import { CURRENT_REVIEWER_PROTOCOL } from '../../../core/reviewer-contract';
 import { captureKey } from '../../../core/harness-capture';
-import { inspectRunDirectoryEntry, type RunDirHandle } from '../../../orchestration/run-directory-handle';
+import { inspectRunDirectoryEntry, parseRunDirectoryReference, type RunDirHandle } from '../../../orchestration/run-directory-handle';
+import { admitWaveGateRegistration } from '../../../core/wave-gate-registration';
 import { observeTaskGraphProjectBoundary, TASK_GRAPH_PATH, type TaskGraphProjectBoundary } from '../../../config';
 import { StateManager } from '../../../state-manager';
-import { commitWaveGateCompletion, deriveWaveAdvisoryDecisionRequest, deriveWaveGateDriveStep, deriveWaveReadiness, deriveWaveRefutationPlan, resetWaveGateReviewAuthority, waveAdvisoryDecisionActionRequest, WAVE_REVIEW_AGENTS, type WaveAdvisoryDecisionRequest } from '../../../core/wave-gate-machine';
+import { commitWaveGateCompletion, deriveWaveAdvisoryDecisionRequest, deriveWaveGateDriveStep, deriveWaveReadiness, deriveWaveStartReadiness, deriveWaveRefutationPlan, resetWaveGateReviewAuthority, waveAdvisoryDecisionActionRequest, WAVE_REVIEW_AGENTS, type WaveAdvisoryDecisionRequest } from '../../../core/wave-gate-machine';
 import { inspectFilePresence, loadPlanModelsSource } from '../complete-wave-gate';
 import { runFullTierWaveLint } from '../lint-wave-gate';
 import { ensureWaveCompletionSuite, observeCurrentWaveWorkspace } from '../wave-completion-suite';
@@ -1445,24 +1447,96 @@ export async function recoverOrphanedWaveGateFacade(
   }
 }
 
+/** A Wave Gate start that passed its preflight against one TaskGraph snapshot.
+ *  Only `prepareWaveGateFacadeStart` mints it (see `preparedWaveGateStarts`). */
+export type PreparedWaveGateStart = Readonly<{
+  runId: string;
+  registration: RegisteredWaveGateProgram;
+}>;
+
+const preparedWaveGateStarts = new WeakSet<PreparedWaveGateStart>();
+
+/**
+ * Preflight one `start wave-gate` WITHOUT touching the runs root: the start
+ * claims a Run Directory only after every refusal it can know in advance has
+ * been ruled out — protected execute/current-Wave authority, a registration
+ * the locked install would refuse (an active gate already owning the Wave, a
+ * completed Wave, a mismatched abandoned successor), unmet start prerequisites
+ * (executing Tasks, implementation proof, test evidence, new tests) and, where
+ * a Verification Manifest gates the Wave, full-tier lint. Every one of these
+ * used to surface only after registration, leaving a run to abandon.
+ *
+ * The locked registration re-decides admission through the same predicate,
+ * because the graph can move between this snapshot and the install.
+ */
+export function prepareWaveGateFacadeStart(
+  input: RegisteredWaveGateProgram["input"],
+  runsRoot: string,
+  run: string,
+): Readonly<{ ok: true; value: PreparedWaveGateStart }> | Readonly<{ ok: false; message: string }> {
+  try {
+    const destination = parseRunDirectoryReference(runsRoot, run);
+    if (!destination.ok) return { ok: false, message: destination.error.message };
+    const graph = new StateManager(TASK_GRAPH_PATH).load();
+    const wave = input.wave ?? graph.current_wave;
+    if (graph.current_phase !== "execute" || wave === undefined || wave !== graph.current_wave) {
+      return { ok: false, message: "wave-gate start requires exact protected execute/current_wave authority" };
+    }
+    const waveTasks = graph.tasks.filter((task) => task.wave === wave);
+    if (waveTasks.length === 0) return { ok: false, message: `wave ${wave} has no tasks` };
+    const taskIds = Object.freeze(waveTasks.map(({ id }) => id));
+    const authorityDigest = waveGateAuthorityDigest(wave, taskIds, graph);
+    const admission = admitWaveGateRegistration(graph, {
+      runId: destination.value.runId,
+      wave,
+      authorityDigest,
+      runsRoot: realRunsRoot(destination.value.runsRoot),
+    }, taskIds);
+    if (admission.kind === "refused") return { ok: false, message: admission.message };
+    const readiness = deriveWaveStartReadiness(graph, waveTasks);
+    if (readiness.kind === "not-ready") {
+      return { ok: false, message: `wave ${wave} cannot start its Wave Gate: ${readiness.failures.join("; ")}` };
+    }
+    if (graph.verification_manifest !== undefined) {
+      const lint = runFullTierWaveLint(waveTasks);
+      if (lint.kind !== "allow") {
+        return { ok: false, message: `wave ${wave} fails full-tier lint before its Wave Gate can start: ${"message" in lint ? lint.message : lint.kind}` };
+      }
+    }
+    const prepared: PreparedWaveGateStart = Object.freeze({
+      runId: destination.value.runId,
+      registration: Object.freeze({
+        schemaVersion: 2, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL, kind: "wave-gate", input: Object.freeze({ wave }),
+        taskIds, authorityDigest,
+      }),
+    });
+    preparedWaveGateStarts.add(prepared);
+    return { ok: true, value: prepared };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** The runs root's real path, as the claimed Run Directory's identity will
+ *  record it; a root that does not exist yet keeps its lexical form. */
+function realRunsRoot(runsRoot: string): string {
+  try {
+    return realpathSync.native(runsRoot);
+  } catch {
+    return runsRoot;
+  }
+}
+
 export async function startWaveGateFacade(
   handle: RunDirHandle,
-  input: RegisteredWaveGateProgram["input"],
+  prepared: PreparedWaveGateStart,
 ): Promise<FacadeDriveResult> {
+  if (!preparedWaveGateStarts.has(prepared) || handle.runId !== prepared.runId) {
+    return failed("wave-gate start requires this Run's actual preflight");
+  }
+  const { registration } = prepared;
   try {
     const manager = new StateManager(TASK_GRAPH_PATH);
-    const initial = manager.load();
-    const wave = input.wave ?? initial.current_wave;
-    if (initial.current_phase !== "execute" || wave === undefined || wave !== initial.current_wave) {
-      return waveBlocked(handle, "wave-gate start requires exact protected execute/current_wave authority");
-    }
-    const taskIds = initial.tasks.filter((task) => task.wave === wave).map(({ id }) => id);
-    if (taskIds.length === 0) return waveBlocked(handle, `wave ${wave} has no tasks`);
-    const authorityDigest = waveGateAuthorityDigest(wave, taskIds, initial);
-    const registration: RegisteredWaveGateProgram = Object.freeze({
-      schemaVersion: 2, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL, kind: "wave-gate", input: Object.freeze({ wave }),
-      taskIds: Object.freeze(taskIds), authorityDigest,
-    });
     // Publish the recoverable Run Directory program first. If publication is
     // refused, protected state remains byte-identical and no unsupported
     // active_wave_gate can be stranded.
@@ -1472,8 +1546,8 @@ export async function startWaveGateFacade(
       schemaVersion: 1,
       kind: "active-wave-gate",
       runId: handle.runId,
-      wave,
-      authorityDigest,
+      wave: registration.input.wave,
+      authorityDigest: registration.authorityDigest,
       revision: 0,
       runsRoot: handle.identity.runsRoot,
       terminalOutcome: null,
@@ -1766,10 +1840,11 @@ export async function resumeWaveGateFacade(
         return waveBlocked(handle, "current spec/plan bytes differ from the active Wave spec-check authority; refresh spec-check evidence");
       }
     }
-    const readiness = deriveWaveReadiness(graph, currentWaveGateDeps(graph, handle.runDirectory));
-    if (!readiness.ok) return waveBlocked(handle, readiness.error.reasons.map(({ message }) => message).join("; "));
-    const preliminary = readiness.value.gateDecision.checks.slice(0, 4).find((check) => !check.passed);
-    if (preliminary !== undefined && !preliminary.passed) return waveBlocked(handle, preliminary.reason);
+    if (graph.current_wave !== registration.input.wave) {
+      return waveBlocked(handle, `active Wave Gate wave ${registration.input.wave} does not match current wave ${graph.current_wave ?? "missing"}`);
+    }
+    const startReadiness = deriveWaveStartReadiness(graph, graph.tasks.filter((task) => task.wave === registration.input.wave));
+    if (startReadiness.kind === "not-ready") return waveBlocked(handle, startReadiness.failures.join("; "));
 
     if (graph.verification_manifest !== undefined) {
       const ensured = await ensureWaveCompletionSuite({ handle, manager, graph, registration });
