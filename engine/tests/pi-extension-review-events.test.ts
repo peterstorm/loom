@@ -2817,6 +2817,70 @@ describe("Pi extension review tool_result integration", () => {
     }
   });
 
+  it("expands an implementation brief marker into the engine-rendered brief before admission and registration", async () => {
+    const planPath = join(temp, "brief-marker-plan.md");
+    writeFileSync(planPath, "# Plan\n");
+    writeState({
+      ...initialGraph(),
+      phase_artifacts: { architecture: planPath },
+      skipped_phases: ["plan-alignment"],
+      plan_file: planPath,
+      tasks: [{ id: "T1", description: "render the brief", agent: "code-implementer-agent", wave: 1, status: "pending", depends_on: [], file_list: ["pi/extension.ts"] }],
+    });
+    const pi = await extension();
+    const input = { agent: "code-implementer-agent", task: "LOOM_IMPLEMENTATION_BRIEF: T1", agentScope: "user" };
+    const context = { cwd: ROOT, sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad430" } };
+
+    const call = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-brief-marker",
+      input,
+    }, context);
+
+    expect(call).toEqual([undefined]);
+    // The child receives the engine-rendered brief (plus its write grant), and
+    // the spawn gates judged exactly those bytes before registering T1.
+    expect(input.task).toContain("**Task ID:** T1\n**Wave:** 1\n**Agent:** code-implementer-agent\n**Required Loom skill:** code-implementer");
+    expect(input.task).toContain(readFileSync(join(ROOT, "rules", "typescript-patterns.md"), "utf8").trimEnd());
+    expect(input.task).toContain(`Available at: ${planPath}`);
+    expect(input.task).toMatch(/LOOM_PI_WRITE_GRANT:[0-9a-f]{64}/);
+    expect(JSON.parse(readFileSync(statePath, "utf8")).executing_tasks).toEqual(["T1"]);
+
+    // Settle the spawn so its write grant and reservation do not outlive the case.
+    await pi.emit("tool_result", {
+      toolName: "subagent",
+      toolCallId: "call-brief-marker",
+      content: [],
+      details: { results: [{ agent: "code-implementer-agent", task: input.task, exitCode: 1, messages: [] }] },
+    }, context);
+  });
+
+  it("refuses a brief marker for a Task owed no dispatch without registering anything", async () => {
+    writeState({
+      ...initialGraph(),
+      tasks: [{
+        ...initialGraph().tasks[0], status: "implemented", proof: completedWithoutTestsProof, file_list: [],
+        verification_policy: { regression: { kind: "waived", reason: "documentation-only" }, new_tests: { kind: "waived", reason: "documentation-only" } },
+      }],
+    });
+    const before = readFileSync(statePath, "utf8");
+    const pi = await extension();
+    const input = { agent: "code-implementer-agent", task: "LOOM_IMPLEMENTATION_BRIEF: T1", agentScope: "user" };
+
+    const call = await pi.emit("tool_call", {
+      toolName: "subagent",
+      toolCallId: "call-brief-marker-implemented",
+      input,
+    }, { cwd: ROOT, sessionManager: { getSessionId: () => "019fca39-f989-7510-8e62-50dadbcad431" } });
+
+    expect(call).toEqual([{
+      block: true,
+      reason: "BLOCKED: spawn item 1 cannot expand its implementation brief: Task T1 is implemented; it is owed no implementation dispatch",
+    }]);
+    expect(input.task).toBe("LOOM_IMPLEMENTATION_BRIEF: T1");
+    expect(readFileSync(statePath, "utf8")).toBe(before);
+  });
+
   it("issues a SCOPED write grant to a phase agent and enforces its artifact scope", async () => {
     writeState({
       ...initialGraph(),

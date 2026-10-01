@@ -106,7 +106,7 @@ export const PI_RUNTIME_HANDSHAKE_ROUTES: ReadonlySet<string> = new Set([
  * included, since its marker is durable and terminal — stays behind the
  * handshake.
  */
-const SKEW_SAFE_ORCHESTRATION_READS: ReadonlySet<string> = new Set(["status", "inspect"]);
+const SKEW_SAFE_ORCHESTRATION_READS: ReadonlySet<string> = new Set(["status", "inspect", "brief"]);
 
 export function piRuntimeHandshakeRequired(
   hookType: string | undefined,

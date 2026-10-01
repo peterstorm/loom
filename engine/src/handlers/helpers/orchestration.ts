@@ -73,13 +73,16 @@ import { match } from "ts-pattern";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { isReviewAgent, SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
+import { isReviewAgent, LOOM_PACKAGE_ROOT, SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
+import { IMPLEMENTATION_BRIEF_MARKER } from "../../core/implementation-brief";
+import { renderTaskImplementationBrief } from "../../orchestration/implementation-brief";
 import { parseTaskGraph, StateManager, type ActiveWaveGateAbandonmentResult } from "../../state-manager";
 import { observeAnyActiveSubagent } from "../../machine";
 import type {
   ActiveWaveGateRegistration,
   HookHandler,
   HookResult,
+  LoomStatus,
   WaveCompletionResultObservation,
 } from "../../types";
 import {
@@ -148,7 +151,7 @@ import {
 import { selectVerdictSource } from "../../core/emission-ingestion";
 import { issueEmissionBinding } from "../../core/emission-tool";
 import { observeEmissionCalls } from "../../core/harness-capture";
-import { resolveModelProfile, lowerModelProfile } from "../../core/model-profiles";
+import { expectedSpawnModel, resolveModelProfile, lowerModelProfile } from "../../core/model-profiles";
 import { buildContextPacket, encodeByteSection, type ContextPacket } from "../../orchestration/context-packets";
 import { countRefutationVotes, defaultRefutationThreshold, parseRefutationVerdict, type RefutationVerdict } from "../../core/review-panel";
 import { aggregateVerdicts, architectureCriterion, candidateFilename, parseArchitectureCandidate, parseArchitectureFinalization, parseJudgeVerdict, type ArchitectureCriterion, type JudgeVerdict } from "../../core/panel-contract";
@@ -205,7 +208,7 @@ import { prepareStandaloneDispositionFacadeStart, startStandaloneDispositionFaca
   resumeStandaloneDispositionFacade, inspectStandaloneDispositionFacade, readSelectedStandaloneDisposition,
   STANDALONE_DISPOSITION_EVENT_RESOURCE_POLICY } from "./programs/standalone-disposition";
 
-const OPERATIONS = ["status", "inspect", "start", "restart", "recover-orphan", "resume", "submit", "correlate", "complete", "decide", "abandon", "remediate", "attest"] as const;
+const OPERATIONS = ["status", "inspect", "brief", "start", "restart", "recover-orphan", "resume", "submit", "correlate", "complete", "decide", "abandon", "remediate", "attest"] as const;
 type Operation = (typeof OPERATIONS)[number];
 
 const isOperation = (value: string | undefined): value is Operation =>
@@ -222,6 +225,9 @@ function usage(): HookResult {
       "",
       "  status  [--json] [--wave N] [--runs-root <wave-gate-runs-root>]",
       "          --runs-root <root> --run <run-directory> selects read-only Run inspection",
+      "  brief   [--task <task-id>] [--prompt]",
+      "          (pure read: engine-rendered implementation brief + spawn invocation for each owed dispatch;",
+      "          Pi spawns pass the LOOM_IMPLEMENTATION_BRIEF marker, --prompt adds the full brief for Claude Code)",
       "  inspect --runs-root <root> --run <run-directory> [--json]",
       "          (pure read: program, state, per-slot capture and rejection diagnostics, event tail)",
       "          --lineage returns authenticated source identity, complete Finding Origins, counts and advisory inventory",
@@ -540,6 +546,16 @@ export async function currentOrchestrationStatus(
   args: readonly string[] = [],
   statePath: string = TASK_GRAPH_PATH,
 ): Promise<string> {
+  const status = await deriveCurrentOrchestrationStatus(args, statePath);
+  return hasFlag(args, "--json") ? renderLoomStatusJson(status) : renderLoomStatusHuman(status);
+}
+
+/** The canonical status of the protected graph, with every shell observation
+ *  status depends on. Renderers and the dispatch helpers project this value. */
+async function deriveCurrentOrchestrationStatus(
+  args: readonly string[],
+  statePath: string,
+): Promise<LoomStatus> {
   const rawGraph = readGraph(statePath);
   const parsedGraph = parseStatusGraph(rawGraph);
   const binding = statusRunDirectoryBinding(parsedGraph, args, statePath);
@@ -558,11 +574,63 @@ export async function currentOrchestrationStatus(
         advisoryApproval: await observedAdvisoryApprovalFromParsed(parsedGraph, base, workspace, binding.handle),
       })
     : base;
-  return renderParsedStatus(parsedGraph, statusDeps, hasFlag(args, "--json"), observation);
+  return deriveLoomStatusFromParsedGraph(parsedGraph, statusDeps, null, observation);
 }
 
 async function statusOperation(args: readonly string[]): Promise<HookResult> {
   process.stdout.write(`${await currentOrchestrationStatus(args)}\n`);
+  return { kind: "allow" };
+}
+
+/**
+ * `brief [--task Tn] [--prompt]` — the engine-rendered implementation brief
+ * for every dispatch canonical status owes (or the one named Task), with the
+ * exact spawn invocation per harness. A pure read: the spawn gate still
+ * registers and authorizes the attempt.
+ *
+ * Pi spawns pass the brief MARKER as the task; the Loom extension expands it
+ * to the rendered brief before any gate reads the prompt. Claude Code has no
+ * expansion seam, so `--prompt` includes the rendered brief to pass verbatim.
+ */
+async function briefOperation(args: readonly string[]): Promise<HookResult> {
+  const status = await deriveCurrentOrchestrationStatus([], TASK_GRAPH_PATH);
+  const action = status.next.action;
+  const recovery = action.kind === "blocked" && action.diagnostic.kind === "wave-gate-not-started"
+    ? action.diagnostic.recovery
+    : null;
+  if (recovery?.kind !== "spawn-wave-implementation") {
+    const owed = recovery?.kind ?? (action.kind === "blocked" ? action.diagnostic.kind : action.kind);
+    return { kind: "error", message: `canonical status owes no implementation dispatch (next: ${owed}); run status` };
+  }
+  const requested = argumentValue(args, "--task");
+  const dispatches = recovery.dispatches.filter(({ taskId }) => requested === null || taskId === requested);
+  if (dispatches.length === 0) {
+    return {
+      kind: "error",
+      message: `Task ${requested} is not in the owed dispatches (${recovery.dispatches.map(({ taskId }) => taskId).join(", ")})`,
+    };
+  }
+  const withPrompt = hasFlag(args, "--prompt");
+  const briefs = [];
+  for (const dispatch of dispatches) {
+    const rendered = renderTaskImplementationBrief(TASK_GRAPH_PATH, LOOM_PACKAGE_ROOT, dispatch.taskId);
+    if (!rendered.ok) return { kind: "error", message: rendered.error };
+    const claudeModel = expectedSpawnModel(rendered.value.agent, "claude-code");
+    if (!claudeModel.ok) return { kind: "error", message: claudeModel.error.message };
+    briefs.push({
+      taskId: rendered.value.taskId,
+      agent: rendered.value.agent,
+      dispatch: rendered.value.dispatch,
+      pi: { agent: rendered.value.agent, task: `${IMPLEMENTATION_BRIEF_MARKER}: ${rendered.value.taskId}` },
+      claude: {
+        subagent_type: rendered.value.agent,
+        model: claudeModel.value,
+        description: `Implement ${rendered.value.taskId}`,
+      },
+      ...(withPrompt ? { prompt: rendered.value.prompt } : {}),
+    });
+  }
+  process.stdout.write(`${JSON.stringify({ wave: recovery.wave, briefs }, null, 2)}\n`);
   return { kind: "allow" };
 }
 
@@ -2399,6 +2467,8 @@ const handler: HookHandler = async (stdin, args) => {
       return argumentValue(rest, "--run") === null ? statusOperation(rest) : inspectOperation(rest);
     case "inspect":
       return inspectOperation(rest);
+    case "brief":
+      return briefOperation(rest);
     case "abandon":
       return abandonOperation(rest);
     case "start":

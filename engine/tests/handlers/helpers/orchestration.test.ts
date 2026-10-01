@@ -1576,6 +1576,35 @@ describe("orchestration CLI", () => {
     expect(existsSync(runDir)).toBe(false);
   });
 
+  it("renders the owed implementation dispatches as briefs with per-harness invocations", async () => {
+    const root = project();
+    writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), JSON.stringify(executeGraph()));
+
+    const listed = await runCli(["brief"], "", root);
+    expect(listed.status, listed.stderr).toBe(0);
+    const output = JSON.parse(listed.stdout) as { wave: number; briefs: readonly Record<string, unknown>[] };
+    expect(output).toEqual({
+      wave: 1,
+      briefs: [{
+        taskId: "T2",
+        agent: "code-implementer-agent",
+        dispatch: { kind: "initial-implementation", taskId: "T2", semanticAttempt: 1, promptAppendix: null },
+        pi: { agent: "code-implementer-agent", task: "LOOM_IMPLEMENTATION_BRIEF: T2" },
+        claude: { subagent_type: "code-implementer-agent", model: "opus", description: "Implement T2" },
+      }],
+    });
+
+    const withPrompt = await runCli(["brief", "--task", "T2", "--prompt"], "", root);
+    expect(withPrompt.status, withPrompt.stderr).toBe(0);
+    const prompt = (JSON.parse(withPrompt.stdout) as { briefs: readonly { prompt: string }[] }).briefs[0]!.prompt;
+    expect(prompt).toContain("**Task ID:** T2\n**Wave:** 1\n**Agent:** code-implementer-agent");
+    expect(prompt).toContain("Available at: plan.md");
+
+    const notOwed = await runCli(["brief", "--task", "T1"], "", root);
+    expect(notOwed.status).not.toBe(0);
+    expect(notOwed.stderr).toContain("Task T1 is not in the owed dispatches (T2)");
+  });
+
   it("refuses a wave-gate start that another live run already owns before claiming a Run Directory", async () => {
     const root = project();
     const runsRoot = join(root, "runs");
