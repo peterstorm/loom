@@ -28,7 +28,7 @@ import type { ActiveWaveGateRegistration, CompletedWaveGateRegistration, TaskGra
 import type { DomainResult } from "./core/orchestration-contract";
 import { resetWaveGateReviewAuthority, type WaveCompletionCommit, type WaveCompletionCommitError } from "./core/wave-gate-machine";
 import { assertPiCliMutationCompatible, captureLoomRuntimeIdentityRestoring, type RuntimeBaselineRestore } from "./runtime-compatibility";
-import { waveGateAuthorityDigest } from "./core/wave-review-authority";
+import { admitWaveGateRegistration } from "./core/wave-gate-registration";
 import {
   anchoredDirectoryHasIdentity,
   anchoredDirectoryIdentity,
@@ -420,63 +420,19 @@ export class StateManager {
     const parsed = parseActiveWaveGateRegistration(rawRegistration);
     if (!parsed.ok) throw new Error(`Invalid active Wave Gate registration: ${parsed.error}`);
     const registration = parsed.value;
+    if (registration.revision !== 0 || registration.terminalOutcome !== null) {
+      throw new Error("A fresh active Wave Gate registration must start at revision 0 without a terminal outcome");
+    }
     return this.updateAndReturn((state) => {
-      if (state.current_phase !== "execute") {
-        throw new Error(`Cannot register Wave Gate run outside execute Phase (current: ${state.current_phase})`);
-      }
-      if (state.current_wave !== registration.wave) {
-        throw new Error(`Cannot register Wave Gate wave ${registration.wave}; protected current_wave is ${state.current_wave ?? "missing"}`);
-      }
-      if (registration.revision !== 0 || registration.terminalOutcome !== null) {
-        throw new Error("A fresh active Wave Gate registration must start at revision 0 without a terminal outcome");
-      }
-      const completed = state.wave_gate_history ?? [];
-      if (completed.some((entry) => entry.runId === registration.runId)) {
-        throw new Error(`Wave Gate run ${registration.runId} is already terminal`);
-      }
-      if (completed.some((entry) => entry.wave >= registration.wave)) {
-        throw new Error(`Wave ${registration.wave} is already completed or older than terminal Wave history`);
-      }
-      const existing = state.active_wave_gate;
-      if (existing !== undefined) {
-        const exactReplay = existing.runId === registration.runId &&
-          existing.wave === registration.wave &&
-          existing.authorityDigest === registration.authorityDigest && existing.runsRoot === registration.runsRoot &&
-          existing.revision === registration.revision && existing.terminalOutcome === null;
-        if (exactReplay) return { state, value: existing };
-        if (existing.terminalOutcome === null) {
-          throw new Error(`Active Wave Gate run ${existing.runId} already owns wave ${existing.wave}`);
-        }
-        if (existing.terminalOutcome.kind !== "terminal-abandoned") {
-          throw new Error(
-            `Legacy terminal Wave Gate run ${existing.runId} must be explicitly migrated to terminal history before registering another run`,
-          );
-        }
-        if (existing.terminalOutcome.supersededBy !== null &&
-            existing.terminalOutcome.supersededBy !== registration.runId) {
-          throw new Error(
-            `Abandoned Wave Gate run ${existing.runId} authorizes successor ${existing.terminalOutcome.supersededBy}, ` +
-            `not ${registration.runId}`,
-          );
-        }
-        // The abandoned Run is not completion authority. Its review epoch and
-        // packet-bound evidence must retire with the successor install, while
-        // accepted Findings and implementation proof survive. The tombstone is
-        // not archived as a completed Wave.
-      }
-      const lockedTaskIds = state.tasks
-        .filter((task) => task.wave === registration.wave)
-        .map(({ id }) => id);
-      const rosterMatches = lockedTaskIds.length === publishedTaskIds.length &&
-        lockedTaskIds.every((taskId, index) => taskId === publishedTaskIds[index]);
-      const lockedDigest = waveGateAuthorityDigest(registration.wave, lockedTaskIds, state);
-      if (!rosterMatches || lockedDigest !== registration.authorityDigest) {
-        throw new Error(
-          "Protected Wave authority changed after Run Directory publication; active Wave Gate was not installed",
-        );
-      }
-      const successorBase = existing?.terminalOutcome?.kind === "terminal-abandoned"
-        ? resetWaveGateReviewAuthority(state, lockedTaskIds)
+      const admission = admitWaveGateRegistration(state, registration, publishedTaskIds);
+      if (admission.kind === "refused") throw new Error(admission.message);
+      if (admission.kind === "replay") return { state, value: admission.existing };
+      // An abandoned Run is not completion authority. Its review epoch and
+      // packet-bound evidence retire with the successor install, while
+      // accepted Findings and implementation proof survive. The tombstone is
+      // not archived as a completed Wave.
+      const successorBase = admission.supersedesAbandoned
+        ? resetWaveGateReviewAuthority(state, publishedTaskIds)
         : state;
       return { state: { ...successorBase, active_wave_gate: registration }, value: registration };
     });

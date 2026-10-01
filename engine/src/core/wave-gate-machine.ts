@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import { reviewedWorkspaceDrift, type ReviewedWorkspaceObservation } from "./reviewed-workspace";
 import type {
   ActiveWaveGateRegistration,
@@ -1144,12 +1144,39 @@ function failedGateDecision(wave: number, checks: readonly GateCheck[], reason: 
   return canonicalRecord({ wave, checks, verdict: canonicalRecord({ kind: "fail", reason }) });
 }
 
-function waveGateChecks(state: TaskGraph, wave: number, waveTasks: readonly Task[], deps: GateDeps): readonly GateCheck[] {
+/**
+ * The Wave Gate's start prerequisites, defined ONCE. The gate evaluates them
+ * first, status projects them before it advises a start, and `start
+ * wave-gate` refuses on them before claiming a Run Directory — so status can
+ * never advise a start that the start would then register and block on.
+ */
+function waveStartPrerequisiteChecks(state: TaskGraph, waveTasks: readonly Task[]): readonly GateCheck[] {
   return Object.freeze([
     checkNoExecutingTasks(waveTasks, state.executing_tasks ?? []),
     checkImplementationProof(waveTasks),
     checkTestEvidence(waveTasks),
     checkNewTests(waveTasks),
+  ]);
+}
+
+export type WaveStartReadiness =
+  | Readonly<{ kind: "ready" }>
+  | Readonly<{ kind: "not-ready"; failures: NonEmpty<string> }>;
+
+/** Whether one Wave's Tasks satisfy every start prerequisite, with every
+ *  failed prerequisite's reason in gate order. */
+export function deriveWaveStartReadiness(state: TaskGraph, waveTasks: readonly Task[]): WaveStartReadiness {
+  const failures = waveStartPrerequisiteChecks(state, waveTasks)
+    .flatMap((check) => check.passed ? [] : [check.reason]);
+  const [first, ...rest] = failures;
+  return first === undefined
+    ? canonicalRecord({ kind: "ready" as const })
+    : canonicalRecord({ kind: "not-ready" as const, failures: Object.freeze([first, ...rest]) as NonEmpty<string> });
+}
+
+function waveGateChecks(state: TaskGraph, wave: number, waveTasks: readonly Task[], deps: GateDeps): readonly GateCheck[] {
+  return Object.freeze([
+    ...waveStartPrerequisiteChecks(state, waveTasks),
     checkWaveCompletionSuite(
       state,
       wave,
@@ -2277,29 +2304,41 @@ function waveImplementationAction(
   recovery: WaveImplementationRecovery,
 ): WaveImplementationAction {
   const common = canonicalRecord({ runId: statusRunId, message });
-  const diagnostic: WaveImplementationAction["diagnostic"] = recovery.kind === "escalate-wave-implementation"
-    ? canonicalRecord({
-        kind: "implementation-escalation-required",
-        category: "semantic-attempts-exhausted",
+  const terminalRetry = canonicalRecord({
+    kind: "advance-wave-lifecycle" as const,
+    eligible: false as const,
+    consumesSemanticAttempt: false as const,
+  });
+  const diagnostic: WaveImplementationAction["diagnostic"] = match(recovery)
+    .with({ kind: "escalate-wave-implementation" }, (escalation) => canonicalRecord({
+      kind: "implementation-escalation-required" as const,
+      category: "semantic-attempts-exhausted" as const,
+      ...common,
+      retry: terminalRetry,
+      recovery: escalation,
+    }))
+    .with({ kind: "repair-wave-start-readiness" }, (repair) => canonicalRecord({
+      kind: "wave-start-not-ready" as const,
+      category: "wave-start-prerequisites-unmet" as const,
+      ...common,
+      retry: terminalRetry,
+      recovery: repair,
+    }))
+    .with(
+      { kind: P.union("spawn-wave-implementation", "await-wave-implementation", "start-wave-gate") },
+      (healthy) => canonicalRecord({
+        kind: "wave-gate-not-started" as const,
+        category: "healthy-wave-unstarted" as const,
         ...common,
         retry: canonicalRecord({
-          kind: "advance-wave-lifecycle",
-          eligible: false,
-          consumesSemanticAttempt: false,
+          kind: "advance-wave-lifecycle" as const,
+          eligible: true as const,
+          consumesSemanticAttempt: false as const,
         }),
-        recovery,
-      })
-    : canonicalRecord({
-        kind: "wave-gate-not-started",
-        category: "healthy-wave-unstarted",
-        ...common,
-        retry: canonicalRecord({
-          kind: "advance-wave-lifecycle",
-          eligible: true,
-          consumesSemanticAttempt: false,
-        }),
-        recovery,
-      });
+        recovery: healthy,
+      }),
+    )
+    .exhaustive();
   return canonicalRecord({ kind: "blocked", runId: statusRunId, diagnostic });
 }
 
@@ -2732,7 +2771,11 @@ function unstartedWaveStatus(
   });
   let recovery: WaveImplementationRecovery;
   let message: string;
-  if (outstanding.length === 0) {
+  const startReadiness = outstanding.length === 0 ? deriveWaveStartReadiness(graph, waveTasks) : null;
+  if (startReadiness?.kind === "not-ready") {
+    recovery = canonicalRecord({ kind: "repair-wave-start-readiness", wave, failures: startReadiness.failures });
+    message = `Wave ${wave} implementation stopped but the Wave Gate cannot start: ${startReadiness.failures.join("; ")}`;
+  } else if (startReadiness?.kind === "ready") {
     recovery = canonicalRecord({ kind: "start-wave-gate", wave });
     message = `Wave ${wave} implementation is complete and no Wave Gate run is registered; start the Wave Gate`;
   } else if (escalated.length > 0) {
@@ -2776,7 +2819,7 @@ function unstartedWaveStatus(
       task.taskId,
     ));
   }
-  reasons.push(reason("wave-gate-not-started", message));
+  reasons.push(reason(recovery.kind === "repair-wave-start-readiness" ? "wave-start-not-ready" : "wave-gate-not-started", message));
 
   return canonicalRecord({
     schemaVersion: 1,

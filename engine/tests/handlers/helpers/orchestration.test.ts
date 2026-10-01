@@ -1565,14 +1565,32 @@ describe("orchestration CLI", () => {
     expect(stored.value?.requestId).toBe(request.requestId);
   });
 
-  it("exposes the wave-gate façade and returns a typed blocked action when authority is unavailable", async () => {
+  it("refuses unavailable wave-gate authority before claiming a Run Directory", async () => {
     const root = project();
     const runsRoot = join(root, "runs");
     const runDir = join(runsRoot, "run.wave-gate");
-    mkdirSync(runDir, { recursive: true });
+    mkdirSync(runsRoot, { recursive: true });
     const result = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: null }), root));
-    expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout).kind, JSON.stringify(JSON.parse(result.stdout))).toBe("blocked");
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("active_task_graph.json");
+    expect(existsSync(runDir)).toBe(false);
+  });
+
+  it("refuses a wave-gate start that another live run already owns before claiming a Run Directory", async () => {
+    const root = project();
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run.second");
+    mkdirSync(runsRoot, { recursive: true });
+    writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), JSON.stringify(executeGraph({
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: "run.first", wave: 1,
+        authorityDigest: "a".repeat(64), revision: 0, runsRoot, terminalOutcome: null,
+      },
+    })));
+    const result = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("Active Wave Gate run run.first already owns wave 1");
+    expect(existsSync(runDir)).toBe(false);
   });
 
   it("refuses unavailable remediation source authority before claiming a Run Directory", async () => {

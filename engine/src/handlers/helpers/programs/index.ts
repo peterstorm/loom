@@ -45,6 +45,7 @@ export {
   recoverOrphanedWaveGateFacade,
   restartWaveGateFacade,
   resumeWaveGateFacade,
+  prepareWaveGateFacadeStart,
   startWaveGateFacade,
   waveAdvisoryDecisionRequestId,
   waveGateDecisionMismatch,

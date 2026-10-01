@@ -71,6 +71,7 @@ import {
   deriveWaveGateDriveStep,
   deriveWaveReadiness,
   deriveWaveRefutationPlan,
+  deriveWaveStartReadiness,
   evaluateWaveGate as evaluateCoreWaveGate,
   prepareWaveRefutationPanel,
   projectWaveGateLifecycle,
@@ -1879,6 +1880,44 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       });
       expect(status.next.reasons.some((entry) => entry.kind === "wave-implementation-pending")).toBe(false);
       expect(status.next.reasons.at(-1)).toMatchObject({ kind: "wave-gate-not-started" });
+    });
+
+    it("reports unmet start prerequisites instead of advising a start the Wave Gate would refuse", () => {
+      const graph = unstarted({
+        tasks: [
+          taskState({ id: "T1", wave: 1, status: "implemented", new_test_observation: undefined }),
+          { ...taskState({ id: "T2", wave: 1, status: "completed" }), test_result: undefined },
+        ],
+      });
+      const readiness = deriveWaveStartReadiness(graph, graph.tasks.filter((entry) => entry.wave === 1));
+
+      const status = deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps);
+
+      expect(readiness.kind).toBe("not-ready");
+      if (readiness.kind !== "not-ready") return;
+      expect(readiness.failures).toEqual([
+        expect.stringContaining("Not all tasks have test evidence.\n  Missing: T2"),
+        expect.stringContaining("Not all tasks satisfied new-test requirement.\n  Missing: T1"),
+      ]);
+      // Status projects exactly the prerequisites the start refuses on.
+      expect(status.next.action).toMatchObject({
+        kind: "blocked",
+        diagnostic: {
+          kind: "wave-start-not-ready",
+          category: "wave-start-prerequisites-unmet",
+          message: `Wave 1 implementation stopped but the Wave Gate cannot start: ${readiness.failures.join("; ")}`,
+          retry: { kind: "advance-wave-lifecycle", eligible: false, consumesSemanticAttempt: false },
+          recovery: { kind: "repair-wave-start-readiness", wave: 1, failures: readiness.failures },
+        },
+      });
+      expect(status.next.reasons.at(-1)).toMatchObject({ kind: "wave-start-not-ready" });
+    });
+
+    it("advises a start exactly when the shared start readiness is ready", () => {
+      const ready = unstarted({ tasks: [taskState({ id: "T1", wave: 1, status: "implemented" })] });
+      expect(deriveWaveStartReadiness(ready, ready.tasks)).toEqual({ kind: "ready" });
+      expect(deriveLoomStatusFromParsedGraph({ ok: true, value: ready }, statusDeps).next.action)
+        .toMatchObject({ diagnostic: { kind: "wave-gate-not-started", recovery: { kind: "start-wave-gate", wave: 1 } } });
     });
 
     it("scopes the owed implementation to the current Wave, ignoring later Waves", () => {

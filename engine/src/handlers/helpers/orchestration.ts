@@ -180,6 +180,7 @@ import {
   prepareStandaloneSuccessorFacadeStart,
   startPreparedStandaloneSuccessor,
   replayStandaloneCapturedEvidence,
+  prepareWaveGateFacadeStart,
   startWaveGateFacade,
   waveAdvisoryDecisionRequestId,
   waveGateDecisionMismatch,
@@ -1324,12 +1325,11 @@ function parseStartRequest(program: Exclude<StartProgram, "standalone-dispositio
   return { ok: true, value: Object.freeze({ kind: "panel", registration }) };
 }
 
-type NonRemediationStartRequest = Exclude<StartRequest, { kind: "remediation" }>;
+type DirectStartRequest = Exclude<StartRequest, { kind: "remediation" | "wave-gate" }>;
 
-const driveStart = (handle: RunDirHandle, request: NonRemediationStartRequest): Promise<FacadeDriveResult> =>
+const driveStart = (handle: RunDirHandle, request: DirectStartRequest): Promise<FacadeDriveResult> =>
   match(request)
     .with({ kind: "standalone-review" }, ({ input }) => startStandaloneFacade(handle, input))
-    .with({ kind: "wave-gate" }, ({ input }) => startWaveGateFacade(handle, input))
     .with({ kind: "panel" }, async ({ registration }) => {
       const registered = await handle.registerProgram(registration);
       return registered.ok
@@ -1373,6 +1373,20 @@ async function startOperation(stdin: string, args: readonly string[]): Promise<H
     const bound = bindLiveRun(args.slice(1), createRunDirectory);
     if (!isBound(bound)) return bound;
     const driven = await startRemediationFacade(bound.value.handle, prepared.value.registration);
+    if (!driven.ok) return { kind: "error", message: driven.message };
+    return emitRunAction(bound.value.handle, driven.action);
+  }
+  if (request.value.kind === "wave-gate") {
+    const runRoot = argumentValue(args.slice(1), "--runs-root");
+    const run = argumentValue(args.slice(1), "--run");
+    if (runRoot === null || run === null) {
+      return { kind: "error", message: "wave-gate start requires --runs-root and --run" };
+    }
+    const prepared = prepareWaveGateFacadeStart(request.value.input, runRoot, run);
+    if (!prepared.ok) return { kind: "error", message: prepared.message };
+    const bound = bindLiveRun(args.slice(1), createRunDirectory);
+    if (!isBound(bound)) return bound;
+    const driven = await startWaveGateFacade(bound.value.handle, prepared.value);
     if (!driven.ok) return { kind: "error", message: driven.message };
     return emitRunAction(bound.value.handle, driven.action);
   }

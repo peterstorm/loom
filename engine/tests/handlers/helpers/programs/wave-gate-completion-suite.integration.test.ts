@@ -277,11 +277,10 @@ describe("Wave Gate façade completion-suite integration", () => {
     expect(observed.cause).toMatchObject({ code: "EISDIR" });
   });
 
-  it("does not execute a modern suite while a current-Wave Task is active", async () => {
+  it("refuses to start, and so never executes a modern suite, while a current-Wave Task is active", async () => {
     const root = repository({ modern: true, executing: true });
-    const action = (await start(root, "run.active-task"));
-    expect(action.kind).toBe("blocked");
-    expect(JSON.stringify(action)).toContain("still executing");
+    await expect(start(root, "run.active-task")).rejects.toThrow("still executing");
+    expect(existsSync(join(root, ".claude/reviews/wave-gate-runs/run.active-task"))).toBe(false);
     expect(sentinelCount(root)).toBe(0);
     expect(graph(root).active_wave_completion_suite).toBeUndefined();
   });
