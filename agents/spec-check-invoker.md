@@ -1,6 +1,6 @@
 ---
 name: spec-check-invoker
-model-profile: general-review
+model-profile: spec-check-review
 model: sonnet
 description: Invokes /spec-check skill for wave-gate spec alignment verification
 tools:

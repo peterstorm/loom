@@ -68,6 +68,10 @@ const EXPECTED_PROFILES = {
     claudeCode: { model: "haiku" },
     pi: { provider: "openai-codex", model: "gpt-5.4-mini", thinking: "medium" },
   },
+  "spec-check-review": {
+    claudeCode: { model: "sonnet" },
+    pi: { provider: "github-copilot", model: "gpt-5.6-terra", thinking: "high" },
+  },
 } as const satisfies Record<LlmProfileId, unknown>;
 
 function errorsOf(result: { readonly ok: true } | { readonly ok: false; readonly errors: readonly string[] }): readonly string[] {
@@ -83,9 +87,9 @@ describe("semantic model profiles", () => {
 
   it("keeps all default profiles on exact cloud targets and the alternative on one qualified local target", () => {
     const defaults = LLM_PROFILES.filter(({ id }) => id !== "qualified-local-review");
-    expect(new Set(defaults.map(({ pi }) => pi.provider))).toEqual(new Set(["openai-codex"]));
+    expect(new Set(defaults.map(({ pi }) => pi.provider))).toEqual(new Set(["github-copilot", "openai-codex"]));
     expect(new Set(defaults.map(({ pi }) => pi.model))).toEqual(
-      new Set(["gpt-5.6-sol", "gpt-5.5", "gpt-5.4-mini"]),
+      new Set(["gpt-5.6-sol", "gpt-5.5", "gpt-5.4-mini", "gpt-5.6-terra"]),
     );
     expect(LLM_PROFILES.find(({ id }) => id === "qualified-local-review")?.pi).toEqual(EXPECTED_PROFILES["qualified-local-review"].pi);
     expect(LLM_PROFILES.every(({ pi }) => pi.model.length > 0 && pi.thinking.length > 0)).toBe(true);
@@ -147,7 +151,7 @@ describe("qualified-local reviewer issuance", () => {
       ok: true, value: { id: "qualified-local-review", pi: qualifiedRoute },
     });
     expect(issuedReviewerProfile("code-reviewer", "catalog")).toEqual(resolveModelProfile("general-review"));
-    expect(issuedReviewerProfile("spec-check-invoker", "qualified-local")).toEqual(resolveModelProfile("general-review"));
+    expect(issuedReviewerProfile("spec-check-invoker", "qualified-local")).toEqual(resolveModelProfile("spec-check-review"));
     expect(issuedReviewerProfile("review-verifier-agent", "qualified-local")).toEqual(resolveModelProfile("refutation"));
   });
 });

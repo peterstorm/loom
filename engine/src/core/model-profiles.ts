@@ -26,18 +26,21 @@ export const LLM_PROFILE_IDS = [
   "panel-judge",
   "refutation",
   "mechanical",
+  "spec-check-review",
 ] as const;
 
 export type LlmProfileId = (typeof LLM_PROFILE_IDS)[number];
 export type ClaudeCodeModel = "haiku" | "sonnet" | "opus";
 export type PiOpenAiModel = "gpt-5.6-sol" | "gpt-5.5" | "gpt-5.4-mini";
+export type PiCopilotModel = "gpt-5.6-terra";
 export type PiThinkingLevel = "medium" | "high";
 export type Harness = "claude-code" | "pi";
 
 export type ClaudeCodeTarget = Readonly<{ model: ClaudeCodeModel }>;
 export type PiTarget =
   | Readonly<{ provider: "openai-codex"; model: PiOpenAiModel; thinking: PiThinkingLevel }>
-  | Readonly<{ provider: "desktop-vllm"; model: "glm-5.3-flash-spark-tp2-v14"; thinking: "high" }>;
+  | Readonly<{ provider: "desktop-vllm"; model: "glm-5.3-flash-spark-tp2-v14"; thinking: "high" }>
+  | Readonly<{ provider: "github-copilot"; model: PiCopilotModel; thinking: PiThinkingLevel }>;
 export type PiProvider = PiTarget["provider"];
 
 export type LlmProfile = Readonly<{
@@ -81,32 +84,36 @@ const piTarget = (
   model: PiOpenAiModel,
   thinking: PiThinkingLevel,
 ): PiTarget => Object.freeze({ provider: "openai-codex", model, thinking });
+const copilotTarget = (
+  model: PiCopilotModel,
+  thinking: PiThinkingLevel,
+): PiTarget => Object.freeze({ provider: "github-copilot", model, thinking });
 const profile = (
   id: LlmProfileId,
   claudeCode: ClaudeCodeModel,
-  piModel: PiOpenAiModel,
-  thinking: PiThinkingLevel,
+  piModel: PiTarget,
 ): LlmProfile => Object.freeze({
   id,
   claudeCode: claudeTarget(claudeCode),
-  pi: piTarget(piModel, thinking),
+  pi: piModel,
 });
 
 /** Exact, calibrated-by-policy targets. None is an alias for a parent model. */
 export const LLM_PROFILES: readonly LlmProfile[] = Object.freeze([
-  profile("implementation", "opus", "gpt-5.6-sol", "high"),
-  profile("architecture-finalize", "opus", "gpt-5.6-sol", "high"),
-  profile("general-review", "sonnet", "gpt-5.6-sol", "high"),
-  profile("focused-review", "sonnet", "gpt-5.5", "high"),
+  profile("implementation", "opus", piTarget("gpt-5.6-sol", "high")),
+  profile("architecture-finalize", "opus", piTarget("gpt-5.6-sol", "high")),
+  profile("general-review", "sonnet", piTarget("gpt-5.6-sol", "high")),
+  profile("focused-review", "sonnet", piTarget("gpt-5.5", "high")),
   Object.freeze({
     id: "qualified-local-review",
     claudeCode: claudeTarget("sonnet"),
     pi: Object.freeze({ provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" }),
   }),
-  profile("panel-design", "opus", "gpt-5.6-sol", "high"),
-  profile("panel-judge", "opus", "gpt-5.6-sol", "high"),
-  profile("refutation", "opus", "gpt-5.6-sol", "high"),
-  profile("mechanical", "haiku", "gpt-5.4-mini", "medium"),
+  profile("panel-design", "opus", piTarget("gpt-5.6-sol", "high")),
+  profile("panel-judge", "opus", piTarget("gpt-5.6-sol", "high")),
+  profile("refutation", "opus", piTarget("gpt-5.6-sol", "high")),
+  profile("mechanical", "haiku", piTarget("gpt-5.4-mini", "medium")),
+  profile("spec-check-review", "sonnet", copilotTarget("gpt-5.6-terra", "high")),
 ]);
 
 /**
@@ -184,7 +191,7 @@ export const AGENT_CATALOG = Object.freeze({
   "security-agent": traits("focused-review", plainKind("impl"), "security-expert"),
   "silent-failure-hunter": traits("focused-review", plainKind("reviewer")),
   "skill-content-reviewer": traits("focused-review", plainKind("utility")),
-  "spec-check-invoker": traits("general-review", plainKind("spec-check"), "spec-check"),
+  "spec-check-invoker": traits("spec-check-review", plainKind("spec-check"), "spec-check"),
   "specify-agent": traits("panel-design", phaseKind("specify"), "specify", "interactive-rpc"),
   "test-engineer": traits("implementation", plainKind("impl")),
   "ts-test-agent": traits("implementation", plainKind("impl"), "ts-test-engineer"),
@@ -602,7 +609,12 @@ export function lowerModelProfile(profileValue: LlmProfile, harness: Harness): H
 export function lowerModelProfile(profileValue: LlmProfile, harness: Harness): HarnessBinding {
   if (harness === "claude-code") return Object.freeze({ harness, model: profileValue.claudeCode.model });
   const target = profileValue.pi;
-  return target.provider === "desktop-vllm"
+  // The arm split is load-bearing for the TYPE: each arm freezes through the
+  // provider literal that names exactly one closed-union member, so the frozen
+  // object assigns to that member of the PiBinding union.
+  return target.provider === "openai-codex"
+    ? Object.freeze({ harness, provider: target.provider, model: target.model, thinking: target.thinking })
+    : target.provider === "desktop-vllm"
     ? Object.freeze({ harness, provider: target.provider, model: target.model, thinking: target.thinking })
     : Object.freeze({ harness, provider: target.provider, model: target.model, thinking: target.thinking });
 }

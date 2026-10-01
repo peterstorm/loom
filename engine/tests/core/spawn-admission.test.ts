@@ -1833,7 +1833,7 @@ describe("positive program-path issuance through the qualified local Pi parent (
     const requests = action.requests ?? [];
     expect(requests).toHaveLength(6);
     const specCheck = requests.find(({ authority }) => authority.role === "spec-check-invoker");
-    expect(specCheck?.authority.modelProfile).toBe("general-review");
+    expect(specCheck?.authority.modelProfile).toBe("spec-check-review");
     expect(specCheck?.task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
     const { readPiIssuedSpawnRequest } = await import("../../../pi/extension");
     const previous = { root: process.env[RUNS_ROOT_ENV], run: process.env[RUN_DIR_ENV] };

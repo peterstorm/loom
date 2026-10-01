@@ -237,7 +237,7 @@ describe("registered Wave spec-check scope", () => {
       ...WAVE_REVIEW_AGENTS,
     ]);
     expect(authorities.map(({ modelProfile }) => modelProfile)).toEqual([
-      "general-review",
+      "spec-check-review",
       "general-review",
       "focused-review",
       "focused-review",
