@@ -52,14 +52,14 @@ describe("Pi session run bindings", () => {
     const first = binding(base, "first", ["request:first:1"]);
     const second = binding(base, "second", ["request:second:1"]);
 
-    expect((await registerSessionRunBinding(directory, sessionId, first)).ok).toBe(true);
-    expect((await registerSessionRunBinding(directory, sessionId, second)).ok).toBe(true);
+    expect((await registerSessionRunBinding(directory, sessionId, first, "pi")).ok).toBe(true);
+    expect((await registerSessionRunBinding(directory, sessionId, second, "pi")).ok).toBe(true);
     expect((await registerSessionRunBinding(directory, sessionId, {
       ...first,
       requestIds: [requestId("request:first:2")],
-    })).ok).toBe(true);
+    }, "pi")).ok).toBe(true);
 
-    const read = readSessionRunBindings(directory, sessionId);
+    const read = readSessionRunBindings(directory, sessionId, "pi");
     expect(read.ok).toBe(true);
     if (!read.ok) return;
     expect(read.value).toHaveLength(2);
@@ -77,16 +77,16 @@ describe("Pi session run bindings", () => {
     const second = binding(base, "concurrent-second", ["request:concurrent:second:1"]);
 
     const published = await Promise.all([
-      registerSessionRunBinding(directory, sessionId, first),
+      registerSessionRunBinding(directory, sessionId, first, "pi"),
       registerSessionRunBinding(directory, sessionId, {
         ...first,
         requestIds: [requestId("request:concurrent:first:2")],
-      }),
-      registerSessionRunBinding(directory, sessionId, second),
+      }, "pi"),
+      registerSessionRunBinding(directory, sessionId, second, "pi"),
     ]);
 
     expect(published.every(({ ok }) => ok)).toBe(true);
-    const read = readSessionRunBindings(directory, sessionId);
+    const read = readSessionRunBindings(directory, sessionId, "pi");
     expect(read.ok).toBe(true);
     if (!read.ok) return;
     expect(read.value).toHaveLength(2);
@@ -100,17 +100,17 @@ describe("Pi session run bindings", () => {
     const base = root();
     const directory = join(base, "bindings");
     const issued = binding(base, "completed", ["request:completed:1"]);
-    expect((await registerSessionRunBinding(directory, sessionId, issued)).ok).toBe(true);
+    expect((await registerSessionRunBinding(directory, sessionId, issued, "pi")).ok).toBe(true);
     const digest = "a".repeat(64);
-    expect((await registerSessionRunBinding(directory, sessionId, { ...issued, resultDigest: digest })).ok).toBe(true);
-    expect(readSessionRunBindings(directory, sessionId)).toMatchObject({
+    expect((await registerSessionRunBinding(directory, sessionId, { ...issued, resultDigest: digest }, "pi")).ok).toBe(true);
+    expect(readSessionRunBindings(directory, sessionId, "pi")).toMatchObject({
       ok: true,
       value: [{ requestIds: ["request:completed:1"], resultDigest: digest }],
     });
     expect((await registerSessionRunBinding(directory, sessionId, {
       ...issued,
       resultDigest: "b".repeat(64),
-    }))).toMatchObject({ ok: false, message: expect.stringContaining("conflicts") });
+    }, "pi"))).toMatchObject({ ok: false, message: expect.stringContaining("conflicts") });
   });
 
   it("reports failure to remove a staged registry after publication fails", async () => {
@@ -129,7 +129,7 @@ describe("Pi session run bindings", () => {
     const result = await registerSessionRunBinding(
       directory,
       sessionId,
-      binding(base, "cleanup-failure", ["request:cleanup:1"]),
+      binding(base, "cleanup-failure", ["request:cleanup:1"]), "pi",
     );
 
     expect(result.ok).toBe(false);
@@ -148,8 +148,8 @@ describe("Pi session run bindings", () => {
       bindings: [],
     };
 
-    expect(parseSessionRunBindingRegistry(valid, "other-session").ok).toBe(false);
-    expect(parseSessionRunBindingRegistry({ ...valid, extra: true }, sessionId).ok).toBe(false);
+    expect(parseSessionRunBindingRegistry(valid, "other-session", "pi").ok).toBe(false);
+    expect(parseSessionRunBindingRegistry({ ...valid, extra: true }, sessionId, "pi").ok).toBe(false);
   });
 
   it("carries parsed direct-child run identity and rejects nested path authority", () => {
@@ -162,7 +162,7 @@ describe("Pi session run bindings", () => {
       bindings: [{
         runId: "run.nested", runsRoot, runDirectory: nested, requestIds: ["request:nested:1"], resultDigest: null,
       }],
-    }, sessionId);
+    }, sessionId, "pi");
 
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.message).toContain("direct child");
@@ -172,10 +172,10 @@ describe("Pi session run bindings", () => {
     const base = root();
     const directory = join(base, "bindings");
     const historical = binding(base, "historical", ["request:historical:1"]);
-    expect((await registerSessionRunBinding(directory, sessionId, historical)).ok).toBe(true);
+    expect((await registerSessionRunBinding(directory, sessionId, historical, "pi")).ok).toBe(true);
     rmSync(historical.runDirectory, { recursive: true, force: true });
 
-    const read = readSessionRunBindings(directory, sessionId);
+    const read = readSessionRunBindings(directory, sessionId, "pi");
 
     expect(read.ok).toBe(true);
     if (read.ok) expect(read.value[0]).toMatchObject({
@@ -193,7 +193,7 @@ describe("Pi session run bindings", () => {
     writeFileSync(target, "{}\n");
     symlinkSync(target, join(directory, `${sessionId}${ORCHESTRATION_RUNS_SUFFIX}`));
 
-    const read = readSessionRunBindings(directory, sessionId);
+    const read = readSessionRunBindings(directory, sessionId, "pi");
     expect(read.ok).toBe(false);
     if (!read.ok) expect(read.message).toContain("cannot read Pi session run bindings");
   });
@@ -217,11 +217,22 @@ describe("harness-stamped session run binding registries", () => {
     expect(reparsed).toMatchObject({ ok: true, value: { harness, bindings: [published] } });
   });
 
-  it("keeps Pi the default harness and its registry shape unchanged", async () => {
+  it("keeps the Pi registry shape unchanged and has no default harness", async () => {
     const base = root();
     const directory = join(base, "bindings");
 
-    expect((await registerSessionRunBinding(directory, sessionId, binding(base, "pi-default", ["request:pi:1"]))).ok).toBe(true);
+    // Compile-time expectations, never invoked: a caller that forgets the harness
+    // must fail to compile rather than silently mean Pi.
+    void (() => {
+      // @ts-expect-error the harness argument is required
+      void readSessionRunBindings(directory, sessionId);
+      // @ts-expect-error the harness argument is required
+      void registerSessionRunBinding(directory, sessionId, {});
+      // @ts-expect-error the harness argument is required
+      void parseSessionRunBindingRegistry({}, sessionId);
+    });
+
+    expect((await registerSessionRunBinding(directory, sessionId, binding(base, "pi-shape", ["request:pi:1"]), "pi")).ok).toBe(true);
 
     const stored = JSON.parse(readFileSync(registryPath(directory), "utf8"));
     expect(Object.keys(stored)).toEqual(["schemaVersion", "kind", "harness", "sessionId", "bindings"]);

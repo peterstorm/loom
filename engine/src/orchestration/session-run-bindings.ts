@@ -54,8 +54,9 @@ export type BindingResult<T> =
   | Readonly<{ ok: true; value: T }>
   | Readonly<{ ok: false; message: string }>;
 
-const ok = <T>(value: T): BindingResult<T> => ({ ok: true, value });
-const failed = <T = never>(message: string): BindingResult<T> => ({ ok: false, message });
+/** The BindingResult constructors every binding reader shares. */
+export const ok = <T>(value: T): BindingResult<T> => ({ ok: true, value });
+export const failed = <T = never>(message: string): BindingResult<T> => ({ ok: false, message });
 const bindingIdentity = ({ runsRoot, runDirectory }: Pick<SessionRunBinding, "runsRoot" | "runDirectory">): string =>
   `${runsRoot}\0${runDirectory}`;
 
@@ -105,14 +106,13 @@ function parseBinding(raw: unknown, index: number): BindingResult<SessionRunBind
 }
 
 /**
- * Parse one registry as `expectedHarness` expects it. The harness defaults to
- * Pi, the registry's first writer, whose file format is unchanged; a registry
- * published by the other harness is refused by name rather than read.
+ * Parse one registry as `expectedHarness` expects it. The harness is required:
+ * a registry published by the other harness is refused by name rather than read.
  */
 export function parseSessionRunBindingRegistry(
   raw: unknown,
   expectedSessionId: string,
-  expectedHarness: SessionBindingHarness = "pi",
+  expectedHarness: SessionBindingHarness,
 ): BindingResult<SessionRunBindingRegistry> {
   const sessionId = parseSessionId(expectedSessionId);
   if (sessionId === null) {
@@ -179,11 +179,11 @@ function readRegistryFromDirectory(
   }
 }
 
-/** Read one session's bindings as `harness` expects them (Pi by default; see the registry parser). */
+/** Read one session's bindings as `harness` expects them; a registry another harness published is refused. */
 export function readSessionRunBindings(
   directory: string,
   rawSessionId: string,
-  harness: SessionBindingHarness = "pi",
+  harness: SessionBindingHarness,
 ): BindingResult<readonly SessionRunBinding[]> {
   const label = HARNESS_LABEL[harness];
   const sessionId = parseSessionId(rawSessionId);
@@ -215,7 +215,7 @@ export async function registerSessionRunBinding(
   directory: string,
   rawSessionId: string,
   binding: unknown,
-  harness: SessionBindingHarness = "pi",
+  harness: SessionBindingHarness,
 ): Promise<BindingResult<SessionRunBindingRegistry>> {
   const label = HARNESS_LABEL[harness];
   const sessionId = parseSessionId(rawSessionId);

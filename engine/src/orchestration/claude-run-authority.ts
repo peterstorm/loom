@@ -31,7 +31,7 @@ import { subagentDir } from "../config";
 import { parseSessionId } from "../machine/evidence";
 import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "./harness-capture-runtime";
 import { inspectRunDirectoryEntry, openRegisteredRunDirectory } from "./run-directory-handle";
-import { readSessionRunBindings, type BindingResult, type SessionRunBinding } from "./session-run-bindings";
+import { failed, ok, readSessionRunBindings, type BindingResult, type SessionRunBinding } from "./session-run-bindings";
 
 /** The run a hook was resolved to — the pair every run-directory primitive takes. */
 export type ClaudeRun = Readonly<{ runsRoot: string; runDirectory: string }>;
@@ -90,8 +90,6 @@ export function claudeRunContext(
   });
 }
 
-const ok = <T>(value: T): BindingResult<T> => ({ ok: true, value });
-const failed = <T = never>(message: string): BindingResult<T> => ({ ok: false, message });
 const UNBOUND: ClaudeRunAuthority = Object.freeze({ kind: "unbound" });
 const bound = (run: ClaudeRun): ClaudeRunAuthority => Object.freeze({ kind: "bound", run: Object.freeze({ ...run }) });
 

@@ -1092,7 +1092,7 @@ describe("orchestration CLI", () => {
       requests: readonly { authority: AgentRequestAuthority }[];
     };
     expect(action.kind).toBe("spawn-batch");
-    const bindings = readSessionRunBindings(bindingDir, sessionId);
+    const bindings = readSessionRunBindings(bindingDir, sessionId, "pi");
     expect(bindings.ok).toBe(true);
     if (!bindings.ok) return;
     expect(bindings.value).toEqual([expect.objectContaining({
@@ -1184,7 +1184,7 @@ describe("orchestration CLI", () => {
       resultDigest: null,
     })] });
     // The registry is stamped Claude Code: Pi can never read it as its own.
-    expect(readSessionRunBindings(bindingDir, sessionId)).toMatchObject({
+    expect(readSessionRunBindings(bindingDir, sessionId, "pi")).toMatchObject({
       ok: false,
       message: expect.stringContaining("belongs to Claude Code, not Pi"),
     });
@@ -1224,7 +1224,7 @@ describe("orchestration CLI", () => {
     }));
 
     expect(started.status, started.stderr).toBe(0);
-    expect(readSessionRunBindings(bindingDir, piSession)).toMatchObject({ ok: true, value: [expect.objectContaining({ runId: "run.pi-inside-claude" })] });
+    expect(readSessionRunBindings(bindingDir, piSession, "pi")).toMatchObject({ ok: true, value: [expect.objectContaining({ runId: "run.pi-inside-claude" })] });
     expect(existsSync(join(bindingDir, `${claudeSession}.orchestration-runs.json`))).toBe(false);
   });
 
@@ -3420,7 +3420,7 @@ describe("orchestration CLI", () => {
     expect(resumed.status, resumed.stderr).toBe(0);
     const done = JSON.parse(resumed.stdout) as { kind: string; outcome: { digest: string } };
     expect(done.kind).toBe("done");
-    expect(readSessionRunBindings(bindingDir, sessionId)).toMatchObject({
+    expect(readSessionRunBindings(bindingDir, sessionId, "pi")).toMatchObject({
       ok: true,
       value: [{ runId: "run.standalone-facade", resultDigest: done.outcome.digest }],
     });

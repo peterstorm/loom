@@ -507,7 +507,7 @@ function sessionRunBinding(
   rawSessionId: string,
   markers: readonly PiOrchestrationMarkers[],
 ): SessionRunBinding {
-  const bindings = readSessionRunBindings(subagentDir(), rawSessionId);
+  const bindings = readSessionRunBindings(subagentDir(), rawSessionId, "pi");
   if (!bindings.ok) throw new Error(bindings.message);
   const requestIds = new Set(markers.map(({ requestId }) => requestId));
   const candidates = bindings.value.filter((binding) =>
@@ -975,7 +975,7 @@ function recoverPiSpawnReservation(
 ): PiSpawnReservation | null {
   const sessionId = parseSessionId(rawSessionId);
   if (sessionId === null) throw new Error(`invalid Pi result session id ${JSON.stringify(rawSessionId)}`);
-  const bindings = readSessionRunBindings(subagentDir(), sessionId);
+  const bindings = readSessionRunBindings(subagentDir(), sessionId, "pi");
   if (!bindings.ok) throw new Error(bindings.message);
   const recovered: PiSpawnReservation[] = [];
   const inaccessibleBindings: string[] = [];
