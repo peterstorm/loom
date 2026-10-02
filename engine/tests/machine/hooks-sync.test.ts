@@ -129,11 +129,6 @@ describe("guard-state-file ↔ hooks.json (PreToolUse Bash wiring)", () => {
 });
 
 describe("implementation binding ↔ hooks.json (PreToolUse wiring)", () => {
-  it("bind-implementation-attempt.sh fires on EVERY tool, so a read-only first call binds too", () => {
-    const entries = entriesWiring("PreToolUse", "bind-implementation-attempt.sh");
-    expect(entries.flatMap((e) => matcherTools(e.matcher ?? "*"))).toEqual(["*"]);
-  });
-
   it("block-direct-edits.sh — which binds before deciding — covers every file-modifying tool", () => {
     const covered = new Set(entriesWiring("PreToolUse", "block-direct-edits.sh").flatMap((e) => matcherTools(e.matcher ?? "*")));
     for (const tool of FILE_MODIFYING_TOOLS) {

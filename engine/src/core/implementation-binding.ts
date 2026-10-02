@@ -35,13 +35,23 @@ export type FirstPromptObservation =
 
 /**
  * An Agent's exact-authority state. `pending` resolves by retrying once the
- * transcript is written; `refused` is re-derived on every attempt but cannot
- * change unless the TaskGraph does.
+ * transcript is written. `refused` is not permanent: it is re-derived on every
+ * attempt from the transcript, TaskGraph and sidecar as observed at that
+ * moment, so a later attempt may answer differently.
  */
 export type ImplementationBinding =
   | Readonly<{ kind: "pending"; reason: string }>
   | Readonly<{ kind: "bound"; authority: ImplementationAttemptAuthority }>
   | Readonly<{ kind: "refused"; reason: string }>;
+
+/**
+ * Appended wherever a `pending` binding is reported. `pending` is retriable,
+ * but an unresolvable child transcript location also observes as `pending`,
+ * and that never resolves by retrying.
+ */
+export const PENDING_BINDING_ESCALATION =
+  "If this persists across retries, the child transcript location cannot be resolved " +
+  "(the Claude config/projects directory, or the session/agent ids), so report it to the orchestrator instead of retrying.";
 
 /** Which attempt the first prompt proves — before any sidecar is published. */
 type AttemptIdentification =

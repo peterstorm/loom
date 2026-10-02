@@ -83,15 +83,6 @@
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/rules-gate.sh"
           }
         ]
-      },
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/bind-implementation-attempt.sh"
-          }
-        ]
       }
     ],
     "SubagentStart": [

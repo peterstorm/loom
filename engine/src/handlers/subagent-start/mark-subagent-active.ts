@@ -9,8 +9,9 @@
  * 3. Publish exact Implementation Attempt sidecar authority for modern
  *    implementation Agents when the child's first prompt is already on disk.
  *    Claude Code usually writes it only after this hook returns, so the
- *    binding is then left PENDING (rostered, no sidecar) and established on
- *    the Agent's first tool call — see `handlers/implementation-binding`.
+ *    binding is then left PENDING (rostered, no sidecar) and established by
+ *    block-direct-edits before the Agent's first write decision (or at
+ *    SubagentStop) — see `handlers/implementation-binding`.
  * 4. Persist the task_graph absolute path for cross-repo SubagentStop access.
  */
 
@@ -38,7 +39,7 @@ import { parseSubagentStartStdin } from "../../parsers/parse-subagent-start-inpu
 import { StateManager } from "../../state-manager";
 import { removeImplementationAttemptSidecar } from "../../implementation-attempt-sidecar";
 import { rollbackTaskExecutionRegistration } from "../task-execution";
-import { ensureImplementationBinding } from "../implementation-binding";
+import { ensureImplementationBinding, suppliedTranscript } from "../implementation-binding";
 import type { ImplementationAttemptAuthority } from "../../core/implementation-completion";
 import { parseAgentName } from "../../core/model-profiles";
 
@@ -183,14 +184,16 @@ const handler: HookHandler = async (stdin) => {
     // Opportunistic: Claude Code usually writes the child transcript only
     // AFTER this hook returns, so a still-unwritten prompt leaves the binding
     // PENDING — the roster row below records the role, writes stay blocked,
-    // and the Agent's first tool call binds it (block-direct-edits and
-    // bind-implementation-attempt). Only a proven refusal stops the start.
+    // and block-direct-edits binds it before the Agent's first write decision
+    // (SubagentStop retries if it never writes). Only a `refused` outcome — a
+    // prompt-based refusal or a binding/publication failure — stops the start;
+    // `pending` never does.
     const binding = ensureImplementationBinding({
       sessionId,
       agentId,
       graph: activeGraphManager,
       existingSidecar: "reprove",
-      ...(input.agent_transcript_path === undefined ? {} : { suppliedTranscriptPath: input.agent_transcript_path }),
+      ...suppliedTranscript(input.agent_transcript_path),
     });
     if (binding.kind === "refused") {
       const rollbackFailure = await rollbackRegistration(binding.identified);
@@ -202,7 +205,7 @@ const handler: HookHandler = async (stdin) => {
     if (binding.kind === "pending") {
       process.stderr.write(
         `mark-subagent-active: implementation authority binding deferred for ${agentId}/${sessionId} — ${binding.reason}; ` +
-          "writes stay blocked until the Agent's first tool call binds it\n",
+          "writes stay blocked until block-direct-edits binds it before the Agent's first write\n",
       );
     }
     if (binding.kind === "bound" && binding.publication === "published") createdAuthority = binding.authority;
