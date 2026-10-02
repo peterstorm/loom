@@ -509,7 +509,7 @@ function load(id) {
   else if (id === "node:path") module = new vm.SyntheticModule(["posix"], function() { this.setExport("posix", posix); }, { context, identifier: id });
   else if (id === "jsonc-parser/lib/umd/main.js") {
     const exports = commonjs(id);
-    module = new vm.SyntheticModule(["visit"], function() { this.setExport("visit", exports.visit); }, { context, identifier: id });
+    module = new vm.SyntheticModule(["visit", "printParseErrorCode"], function() { this.setExport("visit", exports.visit); this.setExport("printParseErrorCode", exports.printParseErrorCode); }, { context, identifier: id });
   } else {
     if (!Object.hasOwn(sources, id)) throw Error("ungranted module: " + id);
     module = new vm.SourceTextModule(sources[id], { context, identifier: id });

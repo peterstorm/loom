@@ -194,7 +194,6 @@ describe("later-Wave progress refusal", () => {
         "2026-08-24T00:01:00.000Z",
       ))],
     }), "Implementation Attempt history"],
-    [(entry) => ({ ...entry, start_sha: "a".repeat(40) }), "start SHA"],
     [(entry) => ({ ...entry, files_modified: [] }), "files"],
     [(entry) => taskFixture({ ...entry, status: "pending", proof, revalidation_required: true }), "proof"],
     [(entry) => ({ ...entry, test_result: { verdict: "trusted-pass" } }), "test result"],
@@ -211,7 +210,6 @@ describe("later-Wave progress refusal", () => {
     [(entry) => ({ ...entry, advisory_findings: ["reviewed"] }), "advisory findings"],
     [(entry) => ({ ...entry, refuted_findings: [{}] as never }), "refuted findings"],
     [(entry) => ({ ...entry, resolved_findings: [{}] as never }), "resolved findings"],
-    [(entry) => ({ ...entry, artifact_baseline: [] }), "artifact baseline"],
     [(entry) => ({ ...entry, attempt_artifact_baseline: [] }), "attempt baseline"],
     [(entry) => ({ ...entry, attempt_repository_baseline: [] }), "repository baseline"],
     [(entry) => ({ ...entry, issued_review_packets: [] }), "issued packet"],
@@ -235,6 +233,23 @@ describe("later-Wave progress refusal", () => {
   it("keeps a wholly untouched pending later Task eligible", () => {
     expect(hasLaterWaveTaskProgress(pendingTask("T23", 4), [])).toBe(false);
     expect(hasLaterWaveProgress(graph(), 3)).toBe(false);
+  });
+
+  it("ignores population-time proof-boundary stamps as progress evidence", () => {
+    // Production-shaped later-Wave Task: populated (stamped) but never started.
+    const stamped = {
+      ...pendingTask("T23", 4),
+      start_sha: "a".repeat(40),
+      artifact_baseline: [{ artifact: "src/b.ts", snapshot: { kind: "sha256" as const, digest } }],
+    };
+    expect(hasLaterWaveTaskProgress(stamped, [])).toBe(false);
+    const stampedGraph = graph([task("T19", 3), task("T22", 3), stamped]);
+    expect(hasLaterWaveProgress(stampedGraph, 3)).toBe(false);
+    const reopened = reopenCompletedWave(stampedGraph, request, legacyProof);
+    expect(reopened.wave_reopening_history?.[0]).toMatchObject({
+      proofMode: "legacy-workspace-authority-unverifiable",
+      reopenedTaskIds: ["T19", "T22"],
+    });
   });
 });
 
