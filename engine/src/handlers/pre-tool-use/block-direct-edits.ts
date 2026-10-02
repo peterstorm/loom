@@ -5,7 +5,8 @@
  * Being on the active roster is NOT itself a write grant: `shouldBlockDirectEdit`
  * admits only implementation-role agents, holders of a minted write grant, and
  * — for the calling subagent only — phase agents and panel writers writing
- * inside their role's artifact roots (`.claude/specs` / `.claude/plans`). Review
+ * inside their role's artifact roots (`artifactWriteRoots`: spec and plan dirs,
+ * plus the lint-rule dirs for architecture). Review
  * agents, judges, verifiers and decompose stay read-only even while active.
  *
  * Claude Code wrapper — delegates the DECISION to core/ and owns the I/O the
@@ -83,14 +84,22 @@ const FILE_PATH_TOOLS: ReadonlySet<string> = new Set(["Edit", "Write", "MultiEdi
 /**
  * The artifact-writer request for core, or `undefined` when the project root
  * itself cannot be canonicalized (the request then never admits anything).
+ * That failure is announced: a writer blocked for an unresolvable root would
+ * otherwise see only the generic direct-edit message.
  */
 export function artifactWriteRequest(
   input: PreToolUseInput,
   projectDir: string | undefined = process.env["CLAUDE_PROJECT_DIR"],
 ): ArtifactWriteRequest | undefined {
   const cwd = input.cwd ?? process.cwd();
-  const projectRoot = canonicalWritePath(resolve(projectDir ?? cwd));
-  if (projectRoot === null) return undefined;
+  const rawRoot = resolve(projectDir ?? cwd);
+  const projectRoot = canonicalWritePath(rawRoot);
+  if (projectRoot === null) {
+    process.stderr.write(
+      `block-direct-edits: cannot canonicalize project root ${rawRoot} — no artifact-writer admission for this call\n`,
+    );
+    return undefined;
+  }
   const filePath = input.tool_input["file_path"];
   const targetPath = FILE_PATH_TOOLS.has(input.tool_name) && typeof filePath === "string" && filePath !== ""
     ? canonicalWritePath(resolve(cwd, filePath))
@@ -98,20 +107,24 @@ export function artifactWriteRequest(
   return { callerAgentId: input.agent_id ?? null, targetPath, projectRoot };
 }
 
+const isPreToolUseInput = (value: unknown): value is PreToolUseInput =>
+  typeof value === "object" && value !== null && "tool_name" in value && typeof value.tool_name === "string" &&
+  "tool_input" in value && typeof value.tool_input === "object" && value.tool_input !== null;
+
+/** Malformed hook input on a guard route fails CLOSED: a crash would exit 1 —
+ *  NON-blocking for PreToolUse — silently waving the edit past the guard. */
+const malformed = (detail: string) =>
+  ({ kind: "block", message: `block-direct-edits: malformed hook input — failing closed: ${detail}` }) as const;
+
 const handler: HookHandler = async (stdin) => {
-  let input: PreToolUseInput;
+  let parsed: unknown;
   try {
-    input = JSON.parse(stdin);
+    parsed = JSON.parse(stdin);
   } catch (e) {
-    // Malformed hook input on a guard route: fail CLOSED. A parse crash
-    // would exit 1 — NON-blocking for PreToolUse — silently waving the
-    // edit past the direct-edit guard.
-    return {
-      kind: "block",
-      message: `block-direct-edits: malformed hook input — failing closed: ${e instanceof Error ? e.message : String(e)}`,
-    };
+    return malformed(e instanceof Error ? e.message : String(e));
   }
-  return shouldBlockDirectEdit(input.tool_name, input.session_id, undefined, activeRosterProbe, artifactWriteRequest(input));
+  if (!isPreToolUseInput(parsed)) return malformed("expected an object with tool_name and tool_input");
+  return shouldBlockDirectEdit(parsed.tool_name, parsed.session_id, undefined, activeRosterProbe, artifactWriteRequest(parsed));
 };
 
 export default handler;

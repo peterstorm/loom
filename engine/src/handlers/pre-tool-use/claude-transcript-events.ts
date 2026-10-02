@@ -16,13 +16,14 @@ const asString = (value: unknown): string => (typeof value === "string" ? value 
 const positiveInt = (value: unknown, fallback: number): number =>
   typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 
-
 const COMMAND_NAME_RE = /<command-name>\/?([^<\s]+)<\/command-name>/;
 
 const toolUseEvent = (block: Record<string, unknown>, messageId: string): TranscriptEvent => {
   const callId = asString(block["id"]);
   const input = isRecord(block["input"]) ? block["input"] : {};
   const path = asString(input["file_path"]);
+  const skill = asString(input["skill"]);
+  const command = asString(input["command"]);
   switch (block["name"]) {
     case "Read":
       return path === ""
@@ -35,13 +36,9 @@ const toolUseEvent = (block: Record<string, unknown>, messageId: string): Transc
     case "Write":
       return path === "" ? { kind: "other-call", callId, messageId } : { kind: "write", callId, messageId, path };
     case "Skill":
-      return asString(input["skill"]) === ""
-        ? { kind: "other-call", callId, messageId }
-        : { kind: "skill", callId, messageId, name: stripNamespace(asString(input["skill"])) };
+      return skill === "" ? { kind: "other-call", callId, messageId } : { kind: "skill", callId, messageId, name: stripNamespace(skill) };
     case "Bash":
-      return asString(input["command"]) === ""
-        ? { kind: "other-call", callId, messageId }
-        : { kind: "command", callId, messageId, command: asString(input["command"]) };
+      return command === "" ? { kind: "other-call", callId, messageId } : { kind: "command", callId, messageId, command };
     default:
       return { kind: "other-call", callId, messageId };
   }
@@ -95,9 +92,7 @@ const parseLine = (line: string): Record<string, unknown> | undefined => {
  * boundary. Lines that are not JSON objects are skipped — parse, don't validate.
  */
 export function parseTranscriptEvents(jsonl: string): readonly TranscriptEvent[] {
-  return jsonl
-    .split("\n")
-    .map(parseLine)
-    .reduce<readonly TranscriptEvent[]>((events, entry) =>
-      entry === undefined ? events : isCompactBoundary(entry) ? [] : [...events, ...entryEvents(entry)], []);
+  const entries = jsonl.split("\n").map(parseLine).filter((entry) => entry !== undefined);
+  const lastBoundary = entries.findLastIndex(isCompactBoundary);
+  return entries.slice(lastBoundary + 1).flatMap(entryEvents);
 }
