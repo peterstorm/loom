@@ -11,7 +11,8 @@ import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_SUB_AGENTS } from "../../config";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { resolveAgentType } from "../../utils/agent-transcript-path";
-import { parseSessionId, readEvidence } from "../../machine";
+import { parseReportedAgentId, parseSessionId, readActiveAgentRoles, readEvidence } from "../../machine";
+import { ensureRosteredImplementationBinding } from "../implementation-binding";
 import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 import { claudeRunContext, type ClaudeRun, type ClaudeRunAuthority } from "../../orchestration/claude-run-authority";
 import { openRunDirectory } from "../../orchestration/run-directory-handle";
@@ -41,6 +42,40 @@ export function categorize(agentType: string): AgentCategory {
   if (agentType === "spec-check-invoker") return "spec-check";
   if (REVIEW_SUB_AGENTS.has(agentType)) return "review";
   return "unknown";
+}
+
+/**
+ * A rostered implementation Agent can reach SubagentStop still PENDING: its
+ * binding is normally established on its first tool call, and an Agent may
+ * make none (or run with the PreToolUse hooks unavailable). Its transcript
+ * exists now, so the binding is attempted once more from its OWN first prompt.
+ * A binding that still cannot be proven stays an explicit missing-sidecar
+ * observation carrying the reason: settlement then preserves execution
+ * authority, and no other Task is ever settled in its place.
+ */
+function bindPendingImplementationAtStop(
+  input: Readonly<{ session_id?: string; agent_id?: string; agent_transcript_path?: string }>,
+  observation: ImplementationAuthorityObservation,
+): ImplementationAuthorityObservation {
+  if (observation.kind !== "authority-unavailable" || observation.failure.kind !== "missing-sidecar") return observation;
+  const sessionId = parseSessionId(input.session_id ?? "");
+  const agentId = parseReportedAgentId(input.agent_id ?? "");
+  if (sessionId === null || agentId === null) return observation;
+  const outcome = ensureRosteredImplementationBinding({
+    sessionId,
+    agentId,
+    roster: readActiveAgentRoles(sessionId),
+    ...(input.agent_transcript_path === undefined ? {} : { suppliedTranscriptPath: input.agent_transcript_path }),
+  });
+  if (outcome === null) return observation;
+  if (outcome.kind === "bound") return snapshotImplementationAttemptSidecar(sessionId, agentId);
+  return Object.freeze({
+    kind: "authority-unavailable",
+    failure: Object.freeze({
+      kind: "missing-sidecar",
+      message: `implementation binding was still pending at SubagentStop and is ${outcome.kind}: ${outcome.reason}`,
+    }),
+  });
 }
 
 export const runDispatch = async (
@@ -190,10 +225,10 @@ export const runDispatch = async (
   let sidecarObservation: ImplementationAuthorityObservation;
   try {
     resolvedAgentType = resolveAgentType(input);
-    sidecarObservation = snapshotImplementationAttemptSidecar(
+    sidecarObservation = bindPendingImplementationAtStop(input, snapshotImplementationAttemptSidecar(
       input.session_id ?? "",
       input.agent_id ?? "",
-    );
+    ));
   } catch (error) {
     const routingFailure = `dispatch: routing observation failed: ${error instanceof Error ? error.message : String(error)}`;
     return errorAfterCleanup(routingFailure);

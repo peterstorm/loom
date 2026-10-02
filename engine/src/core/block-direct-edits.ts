@@ -10,12 +10,20 @@
  * `ArtifactWriteRequest` (Claude Code), the CALLING phase/panel subagent writing
  * inside its role's artifact roots (`artifactWriteRoots`). Everything else is
  * blocked.
+ *
+ * On Claude Code an implementation role is not by itself a write grant: the
+ * Agent's exact Implementation Attempt is bound lazily (`core/implementation-
+ * binding`), and only a `bound` Agent admits. The harness supplies that state
+ * through `ImplementationBindingProbe`; Pi binds authority at spawn (write
+ * grants) and supplies none, so its role admission is unchanged.
  */
 
 import { isAbsolute, join, relative, sep } from "node:path";
+import { match } from "ts-pattern";
 import type { HookResult } from "../types";
 import { IMPL_AGENTS, defaultTaskGraphExists } from "../config";
 import { artifactWriteRoots } from "./artifact-write-scope";
+import type { ImplementationBinding } from "./implementation-binding";
 import {
   parseGrantedAgentId,
   parseSessionId,
@@ -84,6 +92,34 @@ function isWriteAuthorizedAgent(agentId: string): boolean {
 const noActiveRoster: ActiveRosterProbe = () => null;
 
 /**
+ * Port: the exact-authority binding of one rostered implementation Agent.
+ * Supplied only by a harness that binds implementation authority after spawn
+ * (Claude Code). The shell has already ATTEMPTED the caller's binding before
+ * the decision, so the answer for the caller is that attempt's outcome; any
+ * other row answers its observed state.
+ */
+export type ImplementationBindingProbe = (agentId: AgentId) => ImplementationBinding;
+
+const isImplementationRole = (entry: ActiveRosterEntry): boolean =>
+  entry.agentType !== null && IMPL_AGENTS.has(entry.agentType);
+
+/** Write admission for an implementation Agent by its own binding state. */
+export const implementationWriteVerdict = (binding: ImplementationBinding): HookResult =>
+  match(binding)
+    .with({ kind: "bound" }, (): HookResult => ({ kind: "allow" }))
+    .with({ kind: "pending" }, ({ reason }): HookResult => ({
+      kind: "block",
+      message: `BLOCKED: implementation authority binding not yet available for this agent — ${reason}. ` +
+        "This is retriable: retry the same call.",
+    }))
+    .with({ kind: "refused" }, ({ reason }): HookResult => ({
+      kind: "block",
+      message: `BLOCKED: implementation authority binding refused for this agent — ${reason}. ` +
+        "Writes stay blocked; report this to the orchestrator.",
+    }))
+    .exhaustive();
+
+/**
  * Who is writing what, for the artifact-writer admission. Supplied only by a
  * harness that can name the CALLING agent (Claude Code sets `agent_id` in
  * PreToolUse input only for calls made inside a subagent).
@@ -135,6 +171,7 @@ export function shouldBlockDirectEdit(
   taskGraphExists: () => boolean = defaultTaskGraphExists,
   readActiveRoster: ActiveRosterProbe = noActiveRoster,
   artifactWrite?: ArtifactWriteRequest,
+  implementationBinding?: ImplementationBindingProbe,
 ): HookResult {
   if (!taskGraphExists()) return { kind: "allow" };
   if (!FILE_TOOLS.has(toolName)) return { kind: "allow" };
@@ -160,10 +197,23 @@ export function shouldBlockDirectEdit(
   // was blocked by the guard that exists to let it through. The roster's type
   // column is the role it is serving.
   const roster = readActiveRoster(parsed);
-  if (roster !== null && roster.some(({ agentId, agentType }) =>
+
+  // A CALLING implementation Agent is admitted by its OWN exact binding and
+  // nothing else: a sibling's bound row must not lend write authority to an
+  // Agent whose attempt is still pending or was refused.
+  const caller = artifactWrite?.callerAgentId ?? null;
+  const callerEntry = roster?.find(({ agentId }) => agentId === caller);
+  if (implementationBinding !== undefined && callerEntry !== undefined && isImplementationRole(callerEntry)) {
+    return implementationWriteVerdict(implementationBinding(callerEntry.agentId));
+  }
+
+  if (roster !== null && roster.some((entry) =>
     // agentType covers Claude Code; the id fallback covers Pi's `pi-grant-`
     // capability tokens and any roster written before the type column existed.
-    (agentType !== null && IMPL_AGENTS.has(agentType)) || isWriteAuthorizedAgent(agentId))) {
+    // Where the harness binds authority lazily, only a BOUND row admits.
+    (isImplementationRole(entry) &&
+      (implementationBinding === undefined || implementationBinding(entry.agentId).kind === "bound")) ||
+    isWriteAuthorizedAgent(entry.agentId))) {
     return { kind: "allow" };
   }
 

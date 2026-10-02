@@ -7,7 +7,7 @@
  */
 export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
   "pre-tool-use": new Set([
-    "block-direct-edits", "guard-state-file", "validate-phase-order",
+    "block-direct-edits", "bind-implementation-attempt", "guard-state-file", "validate-phase-order",
     "validate-task-execution", "validate-template-substitution",
     "validate-agent-model", "validate-agent-skill", "enforce-phase-tools", "rules-gate",
   ]),
@@ -78,6 +78,7 @@ export const PI_RUNTIME_HANDSHAKE_ROUTES: ReadonlySet<string> = new Set([
   "post-tool-use/record-evidence",
   "post-tool-use/record-orchestration-spawn",
   "subagent-start/mark-subagent-active",
+  "pre-tool-use/bind-implementation-attempt",
   "session-start/cleanup-stale-subagents",
   "helper/complete-wave-gate",
   "helper/populate-task-graph",
