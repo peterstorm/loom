@@ -721,7 +721,8 @@ Hooks auto-activate when `active_task_graph.json` exists:
 
 | Hook | Event | Purpose |
 |------|-------|---------|
-| `block-direct-edits.sh` | PreToolUse: Edit/Write/MultiEdit | Forces the subagent-spawn tool |
+| `block-direct-edits.sh` | PreToolUse: Edit/Write/MultiEdit | Forces the subagent-spawn tool. A Claude implementation Agent writes only once its exact Implementation Attempt is bound (sidecar published from its own first prompt): pending is a retriable block, refused a hard block |
+| `bind-implementation-attempt.sh` | PreToolUse: every tool | Binds a Claude implementation Agent's exact attempt on its first tool call (SubagentStart runs before the child transcript exists). Never blocks; fails open loudly |
 | `enforce-phase-tools.sh` | PreToolUse: Edit/Write/MultiEdit | Guarded-skill-machine gate: denies enforced tools the bound agent's phase doesn't allow (fails closed) |
 | `guard-state-file.sh` | PreToolUse: Bash | Deny-by-default on guarded state paths: only read-only commands (`jq`, `cat`, `grep`, …) and whitelisted helpers pass — covers task graph + subagent evidence/binding files + machine definitions |
 | `validate-task-execution.sh` | PreToolUse: Agent/Task/subagent | Validates wave/dependency order and path ownership, reclaims only policy-eligible exact reservations, captures baselines, and atomically registers attempt/retry authority |
@@ -729,7 +730,7 @@ Hooks auto-activate when `active_task_graph.json` exists:
 | `validate-template-substitution.sh` | PreToolUse: Agent/Task/subagent | Blocks unsubstituted `{variable}` patterns |
 | `validate-agent-model.sh` | PreToolUse: Agent/Task/subagent | Validates agent model assignment |
 | `validate-agent-skill.sh` | PreToolUse: Agent/Task/subagent | Validates agent skill preload |
-| `mark-subagent-active.sh` | SubagentStart | Tracks active subagents + binds the guarded skill machine (epoch) |
+| `mark-subagent-active.sh` | SubagentStart | Tracks active subagents + binds the guarded skill machine (epoch); binds an implementation Agent's exact attempt when its prompt is already on disk, else leaves it pending |
 | `record-evidence.sh` | PostToolUse: Read/Edit/Write/MultiEdit/Bash | Appends epoch-stamped facts (FileRead/FileWrite/TestRun) to the evidence ledger |
 | `lint-file.sh` | PostToolUse: Edit/Write/MultiEdit | Runs the immediate-tier linter (regex rules only; programmatic rules run at the wave gate) |
 | `cleanup-stale-subagents.sh` | SessionStart | Sweeps stale subagent tracking/binding files |

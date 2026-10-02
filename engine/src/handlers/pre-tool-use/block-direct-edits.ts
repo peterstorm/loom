@@ -10,8 +10,10 @@
  * agents, judges, verifiers and decompose stay read-only even while active.
  *
  * Claude Code wrapper — delegates the DECISION to core/ and owns the I/O the
- * decision needs: the roster read, and canonicalizing the target path and
- * project root (realpath) so the core compares symlink-free absolute paths.
+ * decision needs: the roster read, the calling implementation Agent's exact
+ * attempt binding (an implementation role writes only once BOUND), and
+ * canonicalizing the target path and project root (realpath) so the core
+ * compares symlink-free absolute paths.
  */
 
 import { lstatSync, realpathSync, statSync } from "node:fs";
@@ -21,10 +23,16 @@ import {
   shouldBlockDirectEdit,
   type ActiveRosterProbe,
   type ArtifactWriteRequest,
+  type ImplementationBindingProbe,
 } from "../../core/block-direct-edits";
 import { subagentDir, taskGraphPath, pathExistsFailClosed } from "../../config";
-import { readActiveAgentRoles } from "../../machine/ledger";
+import { readActiveAgentRoles, type ActiveAgent } from "../../machine/ledger";
+import { parseReportedAgentId, parseSessionId, type SessionId } from "../../machine/evidence";
 import { parsePreToolUseInput } from "./pre-tool-use-input";
+import {
+  ensureRosteredImplementationBinding,
+  observeImplementationBinding,
+} from "../implementation-binding";
 
 /**
  * Adapter for core's `ActiveRosterProbe`: the session's `.active` roster, or
@@ -126,15 +134,41 @@ export function artifactWriteRequest(
 const malformed = (detail: string) =>
   ({ kind: "block", message: `block-direct-edits: malformed hook input — failing closed: ${detail}` }) as const;
 
+/**
+ * Adapter for core's `ImplementationBindingProbe`. The CALLER's binding is
+ * attempted HERE, before the decision, inside the same handler that decides —
+ * Claude runs separate PreToolUse hooks in parallel, so no other hook's work
+ * can be relied on to have landed first. Every other rostered implementation
+ * Agent answers its observed (never published) state.
+ */
+function callerBindingProbe(
+  input: PreToolUseInput,
+  sessionId: SessionId,
+  roster: readonly ActiveAgent[] | null,
+): ImplementationBindingProbe {
+  const callerId = parseReportedAgentId(input.agent_id ?? "");
+  const callerBinding = callerId === null
+    ? null
+    : ensureRosteredImplementationBinding({ sessionId, agentId: callerId, roster });
+  return (agentId) => agentId === callerId && callerBinding !== null
+    ? callerBinding
+    : observeImplementationBinding(sessionId, agentId);
+}
+
 const handler: HookHandler = async (stdin) => {
   const parsed = parsePreToolUseInput(stdin);
   if (parsed instanceof Error) return malformed(parsed.message);
+  // One roster read feeds both the binding attempt and the decision. An
+  // unparseable session id reaches core unchanged, which blocks on it.
+  const sessionId = parseSessionId(parsed.session_id);
+  const roster = sessionId === null ? null : activeRosterProbe(sessionId);
   return shouldBlockDirectEdit(
     parsed.tool_name,
     parsed.session_id,
     graphActiveProbe,
-    activeRosterProbe,
+    () => roster,
     artifactWriteRequest(parsed),
+    sessionId === null ? undefined : callerBindingProbe(parsed, sessionId, roster),
   );
 };
 
