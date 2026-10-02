@@ -158,6 +158,19 @@ skills:
 
 Claude validates that the Skill exists before spawn. Pi generation inlines declared Skill content and stamps the rendered definition. Agent bodies should treat declared Skills as preloaded rather than trying to invoke a runtime Skill tool from a child.
 
+## Tool restrictions
+
+An Agent that restricts its tools declares **Claude Code tool names** — the only vocabulary Claude Code accepts (it refuses to spawn an Agent whose `tools` it cannot recognise):
+
+```yaml
+tools:
+  - Read
+  - Glob
+  - Grep
+```
+
+Supported names: `Read`, `Write`, `Edit`, `MultiEdit`, `Bash`, `Grep`, `Glob`. Pi generation lowers them to one comma-string line of Pi built-ins (`engine/src/core/agent-tools.ts`); the example renders as `tools: read, find, ls, grep`. Pi names (`read`, `ls`, …) or any other name in a source Agent refuse rendering, and a repository conformance test fails on them. Omit `tools` to inherit each harness's default set.
+
 ## Naming and namespaces
 
 Source policy uses bare Agent names. Claude plugin calls may expose `loom:<name>`; Pi uses generated user-global definitions. Shared parsers strip only the Loom namespace and reject arbitrary namespace substitution.

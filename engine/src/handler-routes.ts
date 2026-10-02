@@ -9,7 +9,7 @@ export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
   "pre-tool-use": new Set([
     "block-direct-edits", "guard-state-file", "validate-phase-order",
     "validate-task-execution", "validate-template-substitution",
-    "validate-agent-model", "validate-agent-skill", "enforce-phase-tools",
+    "validate-agent-model", "validate-agent-skill", "enforce-phase-tools", "rules-gate",
   ]),
   "subagent-stop": new Set([
     "dispatch", "advance-phase", "update-task-status",
@@ -40,6 +40,9 @@ export const FAIL_CLOSED_ROUTES: ReadonlySet<string> = new Set([
   "pre-tool-use/enforce-phase-tools",
   "pre-tool-use/guard-state-file",
   "pre-tool-use/block-direct-edits",
+  // Rules gate: exit 1 is non-blocking, so a crash outside the handler would
+  // wave an ungated code edit through.
+  "pre-tool-use/rules-gate",
   // Task-spawn gates: a crash outside the handler (corrupt task graph on
   // mgr.load(), stdin error) would exit 1 — NON-blocking — and let a Task
   // spawn skip wave-order, dependency, review-gate, phase-order, and

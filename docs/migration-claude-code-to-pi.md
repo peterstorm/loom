@@ -95,9 +95,23 @@ Generation:
 
 - resolves the semantic profile;
 - emits exact Pi provider/model/thinking frontmatter;
+- lowers declared tools to Pi built-ins (see below);
 - lowers package paths;
 - inlines declared Skill content, including command-backed phase Skills;
 - stamps Agent and full-definition integrity metadata.
+
+Source `tools` fields always use Claude Code tool names: Claude Code refuses to spawn an Agent with any name it does not recognise, so Pi names in a source break the Claude harness. The Pi renderer (`engine/src/core/agent-tools.ts`) accepts block, flow, or comma-string forms and rewrites the field as one comma-string line, the only form every Pi consumer reads:
+
+| Claude source | Pi rendering |
+|---|---|
+| `Read` | `read` |
+| `Write` | `write` |
+| `Edit`, `MultiEdit` | `edit` |
+| `Bash` | `bash` |
+| `Grep` | `grep` |
+| `Glob` | `find`, `ls` |
+
+Output is deduplicated in declaration order. Any other name, including a Pi name written in the source, an empty field, a duplicate `tools` key, or an unterminated flow list, refuses rendering with a reason that names the offending entries.
 
 Before every Pi spawn, Loom freshly renders the active source and byte-compares it with the generated user Agent. It rejects stale bytes, project-local shadow definitions, unresolved tokens, and missing required-Skill context.
 

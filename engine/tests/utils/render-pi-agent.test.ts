@@ -23,6 +23,20 @@ describe("exact Pi agent rendering", () => {
     expect(specify).toContain("# Specify - Requirements Before Design");
   });
 
+  it("lowers declared Claude tool names to one Pi tools line", () => {
+    const frontmatterTools = (rendered: string) => rendered.split("\n").filter((line) => line.startsWith("tools:"));
+    expect(frontmatterTools(expectedPiAgentDefinition("specify-agent", ROOT)))
+      .toEqual(["tools: read, bash, edit, write, grep, find, ls"]);
+    expect(frontmatterTools(expectedPiAgentDefinition("arch-judge-agent", ROOT)))
+      .toEqual(["tools: read, find, ls, grep"]);
+  });
+
+  it("refuses to render an agent whose tools Claude Code could not spawn", () => {
+    const source = ["---", "name: code-reviewer", "model: opus", "tools: read, grep", "---", "Review."].join("\n");
+    expect(() => renderPiAgentDefinition(source, "code-reviewer", ROOT))
+      .toThrow(/unsupported tool\(s\): read, grep/);
+  });
+
   it("does not fall through when a higher-priority skill candidate is inaccessible", () => {
     const packageRoot = mkdtempSync(join(tmpdir(), "loom-agent-skill-authority-"));
     const skillPath = join(packageRoot, "skills", "shadowed", "SKILL.md");

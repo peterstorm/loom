@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
+import { lowerAgentToolsForPi } from "./agent-tools";
 import { canonicalRecord, type DomainResult } from "./orchestration-contract";
 
 /**
@@ -7,7 +8,7 @@ import { canonicalRecord, type DomainResult } from "./orchestration-contract";
  *
  * These are BOUNDARY refusals over untrusted input — an install path the
  * package-root token cannot safely represent, an agent file with no model
- * line. They are returned, not thrown: this is functional core, and a core
+ * line or with a tools field outside the Claude vocabulary. They are returned, not thrown: this is functional core, and a core
  * that signals by exception forces every caller into a try/catch the type
  * never asked for. The two shells that render resources still throw, because
  * an unrenderable resource is fatal THERE — but that is the shell's call.
@@ -68,11 +69,13 @@ export function renderPiAgentResource(
   packageRoot: string,
   skills: readonly PreloadedSkill[],
 ): DomainResult<string, HarnessResourceError> {
+  const tooled = lowerAgentToolsForPi(sourceAgent);
+  if (!tooled.ok) return rejected(tooled.error.message);
   const modelLine = /^model:\s*.*$/m;
-  if (!modelLine.test(sourceAgent)) return rejected("agent has no explicit Claude model line");
+  if (!modelLine.test(tooled.value)) return rejected("agent has no explicit Claude model line");
   const binding = packageRootBinding(packageRoot);
   if (!binding.ok) return binding;
-  const withBinding = sourceAgent.replace(
+  const withBinding = tooled.value.replace(
     modelLine,
     `model: ${exactModel}\nloom-package-root: ${binding.value}`,
   );

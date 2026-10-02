@@ -137,6 +137,9 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       // The emission ingestion folds a digest over captured payload bytes —
       // digest-only hashing, mirroring review-packet/panel-program.
       "engine/src/core/emission-ingestion.ts": ["node:crypto"],
+      // The shared rules gate classifies target files by extension: pure
+      // path math (extname/join) over strings, no filesystem.
+      "engine/src/core/bash-code-mutation.ts": ["node:path"],
       "engine/src/core/harness-capture.ts": ["node:crypto"],
       "engine/src/core/harness-resources.ts": ["node:crypto", "node:path"],
       "engine/src/core/legacy-archive.ts": ["node:crypto"],
@@ -158,6 +161,7 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/core/repository-path.ts": ["node:path"],
       "engine/src/core/review-packet.ts": ["node:crypto"],
       "engine/src/core/review-panel.ts": ["node:path"],
+      "engine/src/core/rules-gate.ts": ["node:path"],
       "engine/src/core/standalone-review.ts": ["node:crypto", "node:util"],
       // Exact runtime entry and transitive implementation bytes are gated by machine-purity.
       "engine/src/core/structured-test-report.ts": ["saxes"],

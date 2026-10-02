@@ -2,13 +2,25 @@
  * Core: Block Edit/Write/MultiEdit from the MAIN agent during loom orchestration.
  * Harness-agnostic — no stdin parsing. Pure GIVEN ITS PORTS: every read it needs
  * (the task graph's existence, the session's active roster) arrives as an
- * injected function, so the decision itself performs no I/O.
+ * injected function, and every path arrives already canonical, so the decision
+ * itself performs no I/O.
+ *
+ * Three admissions, in order: an active implementation-role agent, an active
+ * Pi write-grant holder, or — when the caller supplies an `ArtifactWriteRequest`
+ * (Claude Code) — the CALLING phase/panel subagent writing inside its role's
+ * artifact roots (`artifactWriteRoots`). Everything else is blocked.
+ *
+ * This is the ONE artifact-writer admission. Pi supplies no request: it cannot
+ * name the calling agent here, and its phase/panel writers instead hold scoped
+ * write grants (admitted as grant holders above; the extension then confines
+ * each write to the grant's `deriveArtifactWriteScope` dirs). Both paths
+ * classify writers through the same `artifact-write-scope` role policy.
  */
 
-import { posix } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import type { HookResult } from "../types";
 import { IMPL_AGENTS } from "./model-profiles";
-import { PANEL_ARTIFACT_WRITERS, SPEC_ARTIFACT_ROOT } from "./artifact-write-scope";
+import { artifactWriteRoots } from "./artifact-write-scope";
 import {
   parseGrantedAgentId,
   parseSessionId,
@@ -71,14 +83,50 @@ function isWriteAuthorizedAgent(agentId: string): boolean {
  */
 const noActiveRoster: ActiveRosterProbe = () => null;
 
-/** Repo-relative spec-artifact target: normalized here so a `..` segment
- *  cannot reassemble into an escape after the prefix test. Targets arrive
- *  from the caller's shell already resolved against the session cwd and made
- *  repo-relative; a path that escapes the repo or does not live under the
- *  spec artifact root fails this check and stays blocked. */
-function inSpecArtifactRoot(targetPath: string): boolean {
-  const normalized = posix.normalize(targetPath);
-  return normalized === SPEC_ARTIFACT_ROOT || normalized.startsWith(`${SPEC_ARTIFACT_ROOT}/`);
+/**
+ * Who is writing what, for the artifact-writer admission. Supplied only by a
+ * harness that can name the CALLING agent (Claude Code sets `agent_id` in
+ * PreToolUse input only for calls made inside a subagent).
+ *
+ * `targetPath` and `projectRoot` must be absolute and symlink-canonical — the
+ * shell resolves them; a `null` target (unresolvable, no `file_path`) is never
+ * admitted.
+ */
+export type ArtifactWriteRequest = Readonly<{
+  callerAgentId: string | null;
+  targetPath: string | null;
+  projectRoot: string;
+}>;
+
+/** Outcome of the artifact-writer admission. */
+type ArtifactWriteVerdict =
+  | Readonly<{ kind: "inside-roots" }>
+  /** The caller is an artifact writer, but the target is outside its roots. */
+  | Readonly<{ kind: "outside-roots"; agentType: string; allowedRoots: readonly string[]; targetPath: string | null }>
+  /** The caller is unknown, the main agent, or a role that writes no artifacts. */
+  | Readonly<{ kind: "not-a-writer" }>;
+
+/** True when `target` lies strictly below `root`; both must be absolute. */
+function strictlyInside(root: string, target: string): boolean {
+  if (!isAbsolute(root) || !isAbsolute(target)) return false;
+  const rel = relative(root, target);
+  return rel !== "" && !isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`);
+}
+
+function artifactWriteVerdict(
+  roster: readonly ActiveRosterEntry[],
+  request: ArtifactWriteRequest,
+): ArtifactWriteVerdict {
+  const { callerAgentId, targetPath, projectRoot } = request;
+  if (callerAgentId === null) return { kind: "not-a-writer" };
+  const agentType = roster.find(({ agentId }) => agentId === callerAgentId)?.agentType ?? null;
+  if (agentType === null) return { kind: "not-a-writer" };
+  const roots = artifactWriteRoots(agentType);
+  if (roots === null) return { kind: "not-a-writer" };
+  const allowedRoots = roots.map((root) => join(projectRoot, root));
+  return targetPath !== null && allowedRoots.some((root) => strictlyInside(root, targetPath))
+    ? { kind: "inside-roots" }
+    : { kind: "outside-roots", agentType, allowedRoots, targetPath };
 }
 
 /**
@@ -95,7 +143,7 @@ export function shouldBlockDirectEdit(
   sessionId: string,
   taskGraphExists: () => boolean,
   readActiveRoster: ActiveRosterProbe = noActiveRoster,
-  targetPaths: readonly string[] = [],
+  artifactWrite?: ArtifactWriteRequest,
 ): HookResult {
   if (!taskGraphExists()) return { kind: "allow" };
   if (!FILE_TOOLS.has(toolName)) return { kind: "allow" };
@@ -128,24 +176,25 @@ export function shouldBlockDirectEdit(
     return { kind: "allow" };
   }
 
-  // Phase-artifact writes: panel artifact writers (interviewer, designer) are
-  // granted writes scoped to the spec artifact root. Their run contracts
-  // promise this capability — the panel templates instruct writing the run's
-  // interview digest and one candidate per lens under the panel-runs dir —
-  // and a spawn that proceeds without it fails confusingly at its first
-  // write. Targets arrive repo-relative from the caller's shell, so a `..`
-  // segment or an outside-the-repo path cannot be proven in-scope here and
-  // stays blocked. Judges are deliberately absent from
-  // PANEL_ARTIFACT_WRITERS: their prompts name candidate paths to READ, and
-  // this admission must not let a compromised judge rewrite candidate files
-  // the finalizer reads verbatim.
-  if (roster !== null &&
-      roster.some(({ agentType }) => agentType !== null && PANEL_ARTIFACT_WRITERS.has(agentType)) &&
-      targetPaths.length > 0 &&
-      targetPaths.every(inSpecArtifactRoot)) {
-    return { kind: "allow" };
+  // Phase agents and panel writers may write their own artifacts — but only the
+  // CALLER's role counts. The main agent (no caller id) and read-only roles stay
+  // blocked even while a phase agent is active on the roster.
+  if (roster !== null && artifactWrite !== undefined) {
+    const verdict = artifactWriteVerdict(roster, artifactWrite);
+    if (verdict.kind === "inside-roots") return { kind: "allow" };
+    if (verdict.kind === "outside-roots") {
+      return {
+        kind: "block",
+        message: [
+          `BLOCKED: ${verdict.agentType} may write only its artifacts during loom orchestration.`,
+          `Target ${verdict.targetPath === null ? "(unresolvable path)" : verdict.targetPath} is outside the allowed roots:`,
+          ...verdict.allowedRoots.map((root) => `  - ${root}/`),
+        ].join("\n"),
+      };
+    }
   }
-  // No roster, or only review/verifier and read-only panel agents active — block.
+  // No admission matched: no roster, only read-only roles active, or the caller
+  // is not a writer of this target — block.
 
   return {
     kind: "block",

@@ -528,15 +528,6 @@ function proveNoGitMetadataInAncestorsFrom(cwd: string): void {
   }
 }
 
-/** Resolve Git root without conflating an absent repository with an unavailable probe.
- *  Exported for the direct-edit wrapper's panel-artifact target resolution and
- *  the panel-guard write targets; the probe itself stays the one implementation
- *  the task-graph search shares. Runtime-rooted: anchored at process.cwd() —
- *  the extension's runtime root — composed over the cwd-explicit core below. */
-export function gitRepositoryRoot(): string | null {
-  return gitRepositoryRootFrom(process.cwd());
-}
-
 /** The cwd-explicit core (the spawn-cwd runtime polarity): the probe runs with
  *  the explicit cwd, so the governing graph lives in the repository the caller
  *  declares — the bounded empty-stdout retry here discharges the transient
