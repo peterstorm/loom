@@ -94,6 +94,15 @@ describe("rules-gate handler", () => {
     expect((await handler(payload(), [])).kind).toBe("passthrough");
   });
 
+  it("passes when the marker was stated through a completed Bash command instead of prose", async () => {
+    const withoutProse = fullTranscript().split("\n").filter((l) => !l.includes('"m6"'));
+    writeFileSync(transcript, [
+      ...withoutProse,
+      use("m6", "b1", "Bash", { command: ": 'LOOM: applying architecture.md — pure core'" }), ok("b1"),
+    ].join("\n"));
+    expect((await handler(payload(), [])).kind).toBe("passthrough");
+  });
+
   it("names the Skill tool and the SKILL.md read alternative in a Claude Code block", async () => {
     writeFileSync(transcript, "");
     const r = await handler(payload(), []);

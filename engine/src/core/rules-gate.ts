@@ -17,9 +17,12 @@
  *     Coverage across all completed reads must reach end of file.
  *  3. TARGET FILE KNOWN — an existing target must have been fully read, or
  *     written by this session earlier (search before writing).
- *  4. ADHERENCE STATED — an assistant text `LOOM: applying <rule|skill> — <how>`
- *     naming a required rule or skill. The gate proves the marker exists; the
- *     substance is part of the work and is judged in review.
+ *  4. ADHERENCE STATED — `LOOM: applying <rule|skill> — <how>` naming a required
+ *     rule or skill, in assistant text OR in a completed shell command (e.g.
+ *     `: 'LOOM: applying …'`). The command form exists because a harness may
+ *     persist a rewritten copy of assistant prose that drops the line, while a
+ *     command is stored verbatim — rewriting it would change what ran. The gate
+ *     proves the marker exists; the substance is judged in review.
  *
  * Evidence is whatever survives the LAST compaction boundary — after compaction
  * the rules are out of the model's context, so they must be read and stated again.
@@ -71,6 +74,8 @@ export type TranscriptEvent =
   | Readonly<{ kind: "read"; callId: string; messageId: string; path: string; offset: number; limit: number }>
   | Readonly<{ kind: "write"; callId: string; messageId: string; path: string }>
   | Readonly<{ kind: "skill"; callId: string; messageId: string; name: string }>
+  /** A shell command, verbatim — the second place an adherence marker counts. */
+  | Readonly<{ kind: "command"; callId: string; messageId: string; command: string }>
   | Readonly<{ kind: "other-call"; callId: string; messageId: string }>
   | Readonly<{ kind: "result"; callId: string; ok: boolean }>
   | Readonly<{ kind: "text"; messageId: string; text: string }>
@@ -151,7 +156,9 @@ export function collectEvidence(
         e.kind === "skill-command" ? [e.name] : e.kind === "skill" && counts(e) ? [e.name] : [],
       ),
     ),
-    adherenceStated: events.some((e) => e.kind === "text" && statesAdherence(e.text)),
+    adherenceStated: events.some((e) =>
+      e.kind === "text" ? statesAdherence(e.text) : e.kind === "command" && completed.has(e.callId) && statesAdherence(e.command),
+    ),
   };
 }
 
@@ -267,6 +274,8 @@ export type GateHarness = "claude-code" | "pi";
 type HarnessVocabulary = Readonly<{
   /** How rules (and SKILL.md files) are loaded. */
   readTool: string;
+  /** The shell tool — its commands carry the marker verbatim. */
+  shellTool: string;
   /** The ways this harness loads a skill, given its SKILL.md path when on disk. */
   loadSkill: (name: string, skillFile: string | null) => string;
 }>;
@@ -274,12 +283,14 @@ type HarnessVocabulary = Readonly<{
 const VOCABULARY: Readonly<Record<GateHarness, HarnessVocabulary>> = {
   "claude-code": {
     readTool: "the Read tool",
+    shellTool: "the Bash tool",
     loadSkill: (name, skillFile) =>
       `invoke the Skill tool with "${name}"${skillFile === null ? "" : `, or Read ${skillFile} in full`}`,
   },
   pi: {
     // Pi has no Skill tool: the agent reads SKILL.md itself; only the user can run `/skill:<name>`.
     readTool: "the read tool",
+    shellTool: "the bash tool",
     loadSkill: (name, skillFile) =>
       skillFile === null
         ? `ask the user to run /skill:${name}`
@@ -311,5 +322,8 @@ export function renderGateBlock(
         `State in a short text line which rule/skill applies to this change and the specific principle it honors, e.g.:\n` +
         `  LOOM: applying architecture.md — FC/IS: extraction stays pure, Either at the boundary\n` +
         `(must name at least one of: architecture, typescript-patterns, java-patterns, rust-patterns, ` +
-        `property-testing, deepen, distill — then retry). Once per context window is enough.`;
+        `property-testing, deepen, distill — then retry). Once per context window is enough.\n` +
+        `If a stated line does not register (a harness may store a rewritten copy of your prose), ` +
+        `state it through ${vocabulary.shellTool} instead — commands are kept verbatim:\n` +
+        `  : 'LOOM: applying architecture.md — FC/IS: extraction stays pure, Either at the boundary'`;
 }
