@@ -210,9 +210,27 @@ describe("shouldBlockDirectEdit — artifact writers (Claude Code caller admissi
       expect(result.message).toContain("/proj/src/index.ts");
       expect(result.message).toContain("/proj/.claude/specs/");
     }
-    // The other phase's root is outside too.
+    // Only architecture writes the plan tree.
     expect(decide([entry(CALLER, "specify-agent")], CALLER, PLAN).kind).toBe("block");
-    expect(decide([entry(CALLER, "architecture-agent")], CALLER, SPEC).kind).toBe("block");
+    expect(decide([entry(CALLER, "plan-alignment-agent")], CALLER, PLAN).kind).toBe("block");
+  });
+
+  it("architecture writes its plan, spec-tree files, and lint rules — and nothing else", () => {
+    const architecture = [entry(CALLER, "architecture-agent")];
+    expect(decide(architecture, CALLER, PLAN).kind).toBe("allow");
+    expect(decide(architecture, CALLER, SPEC).kind).toBe("allow");
+    expect(decide(architecture, CALLER, "/proj/.claude/linter/rules/inv-1-pure-core.json").kind).toBe("allow");
+    expect(decide(architecture, CALLER, "/proj/.pi/linter/rules/inv-1-pure-core.json").kind).toBe("allow");
+    const outside = decide(architecture, CALLER, "/proj/src/index.ts");
+    expect(outside.kind).toBe("block");
+    if (outside.kind === "block") {
+      for (const root of [".claude/plans/", ".claude/specs/", ".claude/linter/rules/", ".pi/linter/rules/"]) {
+        expect(outside.message).toContain(`/proj/${root}`);
+      }
+    }
+    // Neighbours of the lint-rule dir stay outside.
+    expect(decide(architecture, CALLER, "/proj/.claude/linter/config.json").kind).toBe("block");
+    expect(decide(architecture, CALLER, "/proj/.claude/state/active_task_graph.json").kind).toBe("block");
   });
 
   it("the root itself, a sibling prefix, and `..` escapes are outside", () => {

@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { artifactWriteRoots, deriveArtifactWriteScope } from "../../src/core/artifact-write-scope";
 
+/** What phase-architecture.md / phase-arch-finalize.md promise the architecture agent writes. */
+const ARCHITECTURE_ROOTS = [".claude/plans", ".claude/specs", ".claude/linter/rules", ".pi/linter/rules"];
+
 describe("artifact write-scope derivation — role policy", () => {
   it("read-only spawns get nothing even when their prompts name artifact paths", () => {
     // A REALISTIC judge prompt: the manifest and interview paths it must READ
@@ -53,11 +56,31 @@ describe("artifact write-scope derivation — role policy", () => {
       "Output location: `.claude/specs/2026-08-12-foo/spec.md`",
     )).toEqual([".claude/specs/2026-08-12-foo"]);
     expect(deriveArtifactWriteScope("specify-agent", "Specify the feature.")).toEqual([".claude/specs"]);
-    expect(deriveArtifactWriteScope("architecture-agent", "Write the plan.")).toEqual([".claude/plans"]);
+    expect(deriveArtifactWriteScope("architecture-agent", "Write the plan.")).toEqual(ARCHITECTURE_ROOTS);
+  });
+
+  // Prompt mentions only NARROW inside the role's roots: plan-alignment READS
+  // the plan, and that mention must not widen its grant into `.claude/plans`.
+  it("drops prompt tokens outside the role's roots", () => {
     expect(deriveArtifactWriteScope(
       "plan-alignment-agent",
       "Align the plan at .claude/plans/2026-08-12-foo.md",
-    )).toEqual([".claude/plans"]);
+    )).toEqual([".claude/specs"]);
+    expect(deriveArtifactWriteScope(
+      "plan-alignment-agent",
+      "Plan: .claude/plans/2026-08-12-foo.md\nReport: .claude/specs/2026-08-12-foo/plan-alignment.md",
+    )).toEqual([".claude/specs/2026-08-12-foo"]);
+    expect(deriveArtifactWriteScope(
+      "arch-designer-agent",
+      "Do NOT write .claude/plans/x.md. Candidate: .claude/specs/x/panel-runs/r/candidates/c.md",
+    )).toEqual([".claude/specs/x/panel-runs/r/candidates"]);
+  });
+
+  it("architecture keeps its lint-rule dirs whole when the prompt refines plans/specs", () => {
+    expect(deriveArtifactWriteScope(
+      "architecture-agent",
+      "Spec: .claude/specs/2026-08-12-foo/spec.md\nOutput location: .claude/plans/2026-08-12-foo.md",
+    )).toEqual([".claude/specs/2026-08-12-foo", ".claude/plans", ".claude/linter/rules", ".pi/linter/rules"]);
   });
 
   it("namespace prefixes do not defeat the role policy", () => {
@@ -124,11 +147,11 @@ describe("artifact write-scope derivation — granularity filter", () => {
 });
 
 describe("artifactWriteRoots — role-only roots (Claude Code policy)", () => {
-  it("phase writers get their phase's canonical artifact dir", () => {
+  it("phase writers get every dir their template promises", () => {
     for (const agent of ["brainstorm-agent", "specify-agent", "clarify-agent", "plan-alignment-agent"]) {
       expect(artifactWriteRoots(agent), agent).toEqual([".claude/specs"]);
     }
-    expect(artifactWriteRoots("architecture-agent")).toEqual([".claude/plans"]);
+    expect(artifactWriteRoots("architecture-agent")).toEqual(ARCHITECTURE_ROOTS);
   });
 
   it("panel writers get the spec tree", () => {

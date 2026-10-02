@@ -76,23 +76,27 @@ function artifactWriterRole(agent: string): ArtifactWriterRole | null {
   return PANEL_ARTIFACT_WRITERS.has(name) ? { kind: "panel" } : null;
 }
 
-/** Phase-aware fallback when a prompt carries no artifact path: the phase's
- *  canonical artifact dir. Writers without explicit paths get the phase-wide
- *  dir; panel writers without explicit paths get nothing (their prompts
- *  always carry a run-scoped path). */
-function phaseFallbackScope(phase: string): readonly string[] | null {
-  switch (phase) {
-    case "brainstorm":
-    case "specify":
-    case "clarify":
-    case "plan-alignment":
-      return [".claude/specs"];
-    case "architecture":
-      return [".claude/plans"];
-    default:
-      return null;
-  }
+/** A writing phase's role roots: every dir its template promises it writes
+ *  (commands/templates/phase-*.md). Architecture writes the plan
+ *  (`.claude/plans/`), may write under the spec tree (`.claude/specs/{slug}/`,
+ *  and panel-run dirs in finalize), and writes checkable-invariant lint rules
+ *  into the harness's rules dir (`.claude/linter/rules/`, or
+ *  `.pi/linter/rules/` under Pi). Every other writing phase writes only into
+ *  the spec tree — plan-alignment's report goes to `{spec_dir}`. */
+function phaseArtifactRoots(phase: string): readonly string[] {
+  return phase === "architecture"
+    ? [".claude/plans", ".claude/specs", ".claude/linter/rules", ".pi/linter/rules"]
+    : [".claude/specs"];
 }
+
+const roleRoots = (role: ArtifactWriterRole): readonly string[] =>
+  role.kind === "phase" ? phaseArtifactRoots(role.phase) : PANEL_ARTIFACT_ROOTS;
+
+const isWithin = (root: string, dir: string): boolean => dir === root || dir.startsWith(`${root}/`);
+
+/** Roots the prompt-token grammar (`.claude/specs|plans` only) can never name:
+ *  prompt mentions cannot refine them, so a refined scope keeps them whole. */
+const promptNameable = (root: string): boolean => /^\.claude\/(?:specs|plans)$/.test(root);
 
 /** Path tokens → candidate scope dirs: a token ending in a filename scopes
  *  to its directory; trailing slashes are trimmed; duplicates removed. */
@@ -126,10 +130,14 @@ function scopeFromPathTokens(task: string): readonly string[] {
  * (ARTIFACT_WRITING_PHASES phase agents, PANEL_ARTIFACT_WRITERS panel
  * agents) may receive a grant — a read-only agent (judge, verifier,
  * reviewer, decompose, spec-check) gets null even when its prompt names
- * artifact paths. For writers, prompt path tokens refine the scope; a bare
+ * artifact paths. For writers, prompt path tokens refine the scope WITHIN the
+ * role's roots — a token outside them (plan-alignment READING the plan) is
+ * dropped, so a mention can only narrow, never widen. A bare
  * `.claude/specs`/`.claude/plans` mention is only a granularity fallback
- * and is dropped when the prompt also names a specific dir (a wide mention
- * must not widen the grant beyond what the template promises).
+ * and is dropped when the prompt also names a specific dir. Roots the token
+ * grammar cannot name (lint-rule dirs) are kept whole. With no usable token,
+ * phase writers get their full roots and panel writers get nothing (their
+ * prompts always carry a run-scoped path).
  */
 export function deriveArtifactWriteScope(
   agent: string,
@@ -137,28 +145,28 @@ export function deriveArtifactWriteScope(
 ): readonly string[] | null {
   const role = artifactWriterRole(agent);
   if (role === null) return null;
+  const roots = roleRoots(role);
 
-  const derived = scopeFromPathTokens(task);
+  const derived = scopeFromPathTokens(task).filter((dir) => roots.some((root) => isWithin(root, dir)));
   if (derived.length > 0) {
     // Drop any derived dir that is a strict prefix of another derived dir:
     // `.claude/specs/` in "the panel-run dir under `.claude/specs/`" must
     // not admit every other spec tree.
     const specific = derived.filter((dir) => !derived.some((other) => other !== dir && other.startsWith(`${dir}/`)));
-    return specific.length > 0 ? specific : derived;
+    return [...(specific.length > 0 ? specific : derived), ...roots.filter((root) => !promptNameable(root))];
   }
-  return role.kind === "phase" ? phaseFallbackScope(role.phase) : null;
+  return role.kind === "phase" ? roots : null;
 }
 
 /**
  * Role-only artifact roots (project-relative dirs) an agent type may write
  * into, or null when the role is not an artifact writer. No prompt refinement:
  * this is the Claude Code policy, where the caller is known only by its
- * recorded agent type. Phase writers get their phase's canonical dir
- * (`.claude/specs` for brainstorm/specify/clarify/plan-alignment,
- * `.claude/plans` for architecture); panel writers get `.claude/specs`.
+ * recorded agent type. Phase writers get their phase's roots
+ * (`phaseArtifactRoots` — also Pi's no-token fallback); panel writers get
+ * `.claude/specs`.
  */
 export function artifactWriteRoots(agent: string): readonly string[] | null {
   const role = artifactWriterRole(agent);
-  if (role === null) return null;
-  return role.kind === "phase" ? phaseFallbackScope(role.phase) : PANEL_ARTIFACT_ROOTS;
+  return role === null ? null : roleRoots(role);
 }
