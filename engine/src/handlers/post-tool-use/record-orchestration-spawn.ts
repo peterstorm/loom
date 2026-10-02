@@ -4,17 +4,30 @@
  * The façade places one LOOM_REQUEST_ID marker in every engine-issued Agent
  * prompt. Claude's PostToolUse payload is the first boundary that contains
  * both that exact prompt and the harness-native child id, so this handler
- * persists the binding before SubagentStop can present result bytes.
+ * persists the binding — for a background spawn, before SubagentStop can
+ * present result bytes. A foreground spawn finishes before its Agent call
+ * returns, so its SubagentStop records the same correlator first from the
+ * agent's own spawn prompt; the write is idempotent and this handler then
+ * merely agrees with it.
+ *
+ * Which run the marker belongs to is resolved by `resolveClaudeSpawnRun`: the
+ * explicit LOOM_ORCHESTRATION_* authority when set, otherwise the session run
+ * binding the façade published for this Claude Code session.
  */
 
 import type { HookHandler, HookResult } from "../../types";
-import { openRunDirectory } from "../../orchestration/run-directory-handle";
-import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../orchestration/harness-capture-runtime";
+import {
+  claudeRunContext,
+  explicitClaudeRun,
+  recordClaudeSpawnCorrelator,
+  requestMarkers,
+  resolveClaudeSpawnRun,
+} from "../../orchestration/claude-run-authority";
+import { subagentDir } from "../../config";
 import { stripNamespace } from "../../utils/strip-namespace";
 
-const REQUEST_MARKER = /^LOOM_REQUEST_ID:[ \t]*(\S+)[ \t]*$/gm;
-
 type ClaudePostToolUseInput = Readonly<{
+  session_id?: unknown;
   tool_name?: unknown;
   tool_input?: unknown;
   tool_response?: unknown;
@@ -39,24 +52,27 @@ function nativeAgentIds(raw: unknown, depth = 0): readonly string[] {
   return Object.freeze([...new Set([...direct, ...nested])]);
 }
 
-export async function recordClaudeSpawnCorrelation(raw: unknown): Promise<HookResult> {
-  const runsRoot = process.env[RUNS_ROOT_ENV];
-  const runDirectory = process.env[RUN_DIR_ENV];
-  if (runsRoot === undefined && runDirectory === undefined) return { kind: "passthrough" };
-  if (runsRoot === undefined || runDirectory === undefined) {
-    return { kind: "error", message: "Claude orchestration spawn requires both run-root and run-directory authority" };
-  }
-
+export async function recordClaudeSpawnCorrelation(
+  raw: unknown,
+  bindingDirectory: string = subagentDir(),
+): Promise<HookResult> {
   const input = exactRecord(raw) as ClaudePostToolUseInput | null;
   const toolInput = exactRecord(input?.tool_input);
   const prompt = typeof toolInput?.["prompt"] === "string"
     ? toolInput["prompt"]
     : typeof toolInput?.["task"] === "string" ? toolInput["task"] : "";
-  const markers = [...prompt.matchAll(REQUEST_MARKER)].map((match) => match[1]!);
+  const markers = requestMarkers(prompt);
+  const context = claudeRunContext(input?.session_id, process.env, bindingDirectory);
   // PostToolUse is global. A call without an engine marker is unrelated legacy
-  // work and must not be claimed by this run.
-  if (markers.length === 0) return { kind: "passthrough" };
+  // work and must not be claimed by any run — but half an explicit authority
+  // is still a fault, whatever the prompt carries.
+  if (markers.length === 0) {
+    const explicit = explicitClaudeRun(context);
+    return explicit.ok ? { kind: "passthrough" } : { kind: "error", message: explicit.message };
+  }
   if (markers.length !== 1) return { kind: "error", message: "Claude orchestration prompt must carry exactly one LOOM_REQUEST_ID marker" };
+  const run = resolveClaudeSpawnRun(context, markers[0]!);
+  if (!run.ok) return { kind: "error", message: run.message };
 
   const rawRole = toolInput?.["subagent_type"] ?? toolInput?.["agent"];
   const role = typeof rawRole === "string" ? stripNamespace(rawRole) : "";
@@ -66,24 +82,12 @@ export async function recordClaudeSpawnCorrelation(raw: unknown): Promise<HookRe
     return { kind: "error", message: `Claude orchestration spawn must return exactly one native agent id; observed ${nativeIds.length}` };
   }
 
-  const opened = openRunDirectory(runsRoot, runDirectory);
-  if (!opened.ok) return { kind: "error", message: opened.error.message };
-  const issued = opened.value.readIssuedRequests();
-  if (!issued.ok) return { kind: "error", message: issued.error.message };
-  const request = issued.value.find(({ requestId }) => requestId === markers[0]);
-  if (request === undefined) return { kind: "error", message: `Claude spawn claims unissued request ${markers[0]}` };
-  if (request.role !== role) {
-    return { kind: "error", message: `Claude spawn request ${request.requestId} belongs to ${request.role}, not ${role}` };
-  }
-  const recorded = await opened.value.recordHarnessCorrelator({
-    schemaVersion: 1,
-    harness: "claude",
+  const recorded = await recordClaudeSpawnCorrelator(run.value, {
+    requestId: markers[0]!,
+    role,
     nativeId: nativeIds[0]!,
-    requestId: request.requestId,
-    role: request.role,
-    attempt: request.attempt,
   });
-  return recorded.ok ? { kind: "allow" } : { kind: "error", message: recorded.error.message };
+  return recorded.ok ? { kind: "allow" } : { kind: "error", message: recorded.message };
 }
 
 const handler: HookHandler = async (stdin) => {
