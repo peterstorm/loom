@@ -24,7 +24,7 @@ import {
 } from "../../core/block-direct-edits";
 import { subagentDir, taskGraphPath, pathExistsFailClosed } from "../../config";
 import { readActiveAgentRoles } from "../../machine/ledger";
-import { isPreToolUseInput } from "./pre-tool-use-input";
+import { parsePreToolUseInput } from "./pre-tool-use-input";
 
 /**
  * Adapter for core's `ActiveRosterProbe`: the session's `.active` roster, or
@@ -127,13 +127,8 @@ const malformed = (detail: string) =>
   ({ kind: "block", message: `block-direct-edits: malformed hook input — failing closed: ${detail}` }) as const;
 
 const handler: HookHandler = async (stdin) => {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdin);
-  } catch (e) {
-    return malformed(e instanceof Error ? e.message : String(e));
-  }
-  if (!isPreToolUseInput(parsed)) return malformed("expected an object with tool_name and tool_input");
+  const parsed = parsePreToolUseInput(stdin);
+  if (parsed instanceof Error) return malformed(parsed.message);
   return shouldBlockDirectEdit(
     parsed.tool_name,
     parsed.session_id,

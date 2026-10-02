@@ -28,7 +28,7 @@ import { firstBashCodeMutationTarget } from "../../core/bash-code-mutation";
 import { decideRulesGate, renderGateBlock, type GateDirs, type GatePorts } from "../../core/rules-gate";
 import { parseTranscriptEvents } from "./claude-transcript-events";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
-import { isPreToolUseInput } from "./pre-tool-use-input";
+import { parsePreToolUseInput } from "./pre-tool-use-input";
 
 const gateDisabled = (): boolean => process.env["LOOM_GATE"] === "off" || process.env["LOOM_GATE"] === "0";
 
@@ -92,15 +92,6 @@ export const filesystemPorts = (cwd: string): GatePorts => {
   };
 };
 
-const parseInput = (stdin: string): PreToolUseInput | undefined => {
-  try {
-    const parsed: unknown = JSON.parse(stdin);
-    return isPreToolUseInput(parsed) ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
-};
-
 const decide = (input: PreToolUseInput, call: GatedCall): HookResult => {
   if (input.transcript_path === undefined || input.transcript_path === "") {
     return blockResult("loom-rules-gate: hook input carries no transcript_path — failing closed (set LOOM_GATE=off to bypass)");
@@ -129,8 +120,8 @@ const decide = (input: PreToolUseInput, call: GatedCall): HookResult => {
 
 const handler: HookHandler = async (stdin) => {
   if (gateDisabled()) return passthroughResult();
-  const input = parseInput(stdin);
-  if (input === undefined) return blockResult("loom-rules-gate: malformed hook input — failing closed");
+  const input = parsePreToolUseInput(stdin);
+  if (input instanceof Error) return blockResult("loom-rules-gate: malformed hook input — failing closed");
   if (input.agent_id !== undefined) return passthroughResult();
   const call = gatedCall(input);
   return call === undefined ? passthroughResult() : decide(input, call);

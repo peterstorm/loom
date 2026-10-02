@@ -3,7 +3,8 @@
  * two harnesses.
  *
  * Pure policy: which non-implementation loom-owned spawns may WRITE, and which
- * `.claude/specs` / `.claude/plans` directories they may target.
+ * artifact directories they may target — the spec and plan trees, plus the
+ * lint-rule dirs for architecture.
  *   - Pi: `deriveArtifactWriteScope` refines the scope from the spawn prompt;
  *     the capability is ISSUED by `pi/write-grant.ts` and ENFORCED per write by
  *     the pi extension.
@@ -141,10 +142,9 @@ function scopeFromPathTokens(task: string): readonly string[] {
  * dropped, so a mention can only narrow, never widen. A bare
  * `.claude/specs`/`.claude/plans` mention is only a granularity fallback
  * and is dropped when the prompt also names a dir beneath that same root.
- * Roots the token
- * grammar cannot name (lint-rule dirs) are kept whole. With no usable token,
- * phase writers get their full roots and panel writers get nothing (their
- * prompts always carry a run-scoped path).
+ * Roots the token grammar cannot name (lint-rule dirs) are kept whole. With no
+ * usable token, phase writers get their full roots and panel writers get
+ * nothing (their prompts always carry a run-scoped path).
  */
 export function deriveArtifactWriteScope(
   agent: string,

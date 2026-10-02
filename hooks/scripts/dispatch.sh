@@ -40,8 +40,15 @@ fi
 
 if [ -z "${CLAUDE_PLUGIN_ROOT:-}" ] || ! command -v bun &>/dev/null; then
   cat > /dev/null 2>/dev/null || true
-  echo "dispatch: runtime unavailable (bun/CLAUDE_PLUGIN_ROOT) — SubagentStop cleanup skipped, bindings may leak" >&2
   debug_log "  SKIPPED (runtime unavailable)"
+  # A run binding means a reserved reviewer slot may be waiting on this stop:
+  # exit 1 (non-blocking, but surfaced to the operator) so the stranded capture
+  # is visible. Still never 2 — that would refuse the subagent's own stop.
+  if ls "${SUBAGENT_DIR}"/*.orchestration-runs.json &>/dev/null; then
+    echo "dispatch: runtime unavailable (bun/CLAUDE_PLUGIN_ROOT) — a session run binding exists, so a request-bound capture may be stranded; restore the runtime and re-run the stop" >&2
+    exit 1
+  fi
+  echo "dispatch: runtime unavailable (bun/CLAUDE_PLUGIN_ROOT) — SubagentStop cleanup skipped, bindings may leak" >&2
   exit 0
 fi
 

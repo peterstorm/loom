@@ -80,34 +80,45 @@ import {
 export type { CaptureOutcome };
 
 /**
- * Inspect the final non-empty Claude transcript line and hand over the final
+ * Inspect the FINAL TURN of a Claude transcript and hand over the final
  * payload it carries.
  *
- * Claude's transcript is JSONL with one message per line. Unlike Pi, where a
- * result carries a list of blocks, no earlier line is searched as a fallback —
- * with ONE exact structural exception, the SubagentHandback ending. Current
- * Claude Code subagents deliver their report by calling the `SubagentHandback`
- * tool, so the transcript ends with the harness's tool_result acknowledging
- * that call, and the payload lives in the call itself on the line immediately
- * before it. That pair is a single harness-written delivery, not an earlier
- * message being salvaged: the final line must be a user message whose content
- * is exactly one non-error tool_result, and the preceding non-empty line must be
- * an assistant message holding the `SubagentHandback` tool_use with that id and
- * a string `input.message`. Anything else about that pair yields no candidate.
+ * Claude's transcript is JSONL with one entry per line. Only the final turn is
+ * examined — no earlier turn is ever searched as a fallback. Lines that are not
+ * conversation entries (`attachment`, `system`, …) carry no payload and are
+ * skipped wherever they fall, so a harness bookkeeping line written after the
+ * subagent stopped cannot hide its result.
+ *
+ * The final turn takes one of two shapes:
+ *  - legacy: it ends with an assistant line; that line's text blocks are the
+ *    candidates.
+ *  - SubagentHandback: current Claude Code subagents deliver their report by
+ *    calling the `SubagentHandback` tool. The turn then ends with the user
+ *    tool_result lines answering the calls of ONE assistant message — which
+ *    Claude writes as several assistant lines sharing a message id when the
+ *    model made parallel calls. Each `SubagentHandback` call in that message
+ *    whose tool_result is present and not an error contributes its string
+ *    `input.message`. A failed or unanswered handback delivers nothing; the
+ *    message's other blocks (prose, other tool calls) are never a result.
  *
  * A syntactically malformed line is reported as transcript corruption with its
- * line number. Any other well-formed final message yields no candidate, so the
- * payload rules still reject instead of accepting salvage.
+ * line number. Any other final turn yields no candidate, so the payload rules
+ * still reject instead of accepting salvage.
  *
- * Multi-block assistant messages are reported as the ambiguity they are rather
- * than being collapsed here: choosing or joining blocks is the shared payload
- * rule's decision, and pre-selecting one would turn `ambiguous-final-payload`
- * into an unreachable refusal on this path.
+ * Several candidates are reported as the ambiguity they are rather than being
+ * collapsed here: choosing or joining them is the shared payload rule's
+ * decision, and pre-selecting one would turn `ambiguous-final-payload` into an
+ * unreachable refusal on this path.
  */
 class ClaudeTranscriptReadError extends Error {}
 class ClaudeTranscriptJsonError extends Error {}
 
 export type ClaudePayloadReader = (transcriptPath: string) => readonly FinalPayloadCandidate[];
+
+type Block = Readonly<Record<string, unknown>>;
+
+/** One conversation line of the transcript, by role. */
+type ConversationLine = Readonly<{ index: number; role: "assistant" | "user"; messageId: string | null; content: readonly Block[] }>;
 
 /** The bounded transcript read behind EVERY transcript projection — the final
  *  payload candidates, the emission call frames, and the spawn prompt. One read,
@@ -131,14 +142,6 @@ export function claudeFinalPayloadCandidates(transcriptPath: string, maximumByte
   return claudeCandidatesFromLines(claudeTranscriptLines(transcriptPath, maximumBytes));
 }
 
-/** The shapes a final transcript line can take, as far as payload capture cares. */
-type ClaudeFinalLine =
-  | Readonly<{ kind: "assistant-text"; texts: readonly string[] }>
-  | Readonly<{ kind: "handback-result"; toolUseId: string; isError: boolean }>
-  | Readonly<{ kind: "other" }>;
-
-const OTHER_LINE: ClaudeFinalLine = Object.freeze({ kind: "other" });
-
 const isRecord = (raw: unknown): raw is Readonly<Record<string, unknown>> =>
   typeof raw === "object" && raw !== null && !Array.isArray(raw);
 
@@ -157,62 +160,84 @@ function transcriptMessageOf(line: string, zeroBasedLine: number, position: stri
   return isRecord(message) ? message : null;
 }
 
-function finalLineOf(message: Readonly<Record<string, unknown>> | null): ClaudeFinalLine {
-  if (message === null || !Array.isArray(message["content"])) return OTHER_LINE;
-  const content = message["content"] as readonly unknown[];
-  if (message["role"] === "assistant") {
-    // Every text block is handed over as its own candidate. Concatenating them
-    // here would be the normalisation the payload rules forbid, and keeping only
-    // one would hide the ambiguity the engine is supposed to refuse.
-    const texts = content
-      .filter((block): block is Readonly<Record<string, unknown>> => isRecord(block) && block["type"] === "text")
-      .map((block) => block["text"])
-      .filter((text): text is string => typeof text === "string");
-    return Object.freeze({ kind: "assistant-text", texts: Object.freeze(texts) });
-  }
-  const only = content.length === 1 ? content[0] : undefined;
-  if (message["role"] === "user" && isRecord(only) && only["type"] === "tool_result" &&
-      typeof only["tool_use_id"] === "string") {
-    return Object.freeze({ kind: "handback-result", toolUseId: only["tool_use_id"], isError: only["is_error"] === true });
-  }
-  return OTHER_LINE;
+/** A line as a conversation entry, or `null` for anything else (attachments, system lines, …). */
+function conversationLineOf(line: string, index: number): ConversationLine | null {
+  const message = transcriptMessageOf(line, index, "final");
+  if (message === null || !Array.isArray(message["content"])) return null;
+  const role = message["role"];
+  if (role !== "assistant" && role !== "user") return null;
+  return Object.freeze({
+    index,
+    role,
+    messageId: typeof message["id"] === "string" ? message["id"] : null,
+    content: (message["content"] as readonly unknown[]).filter(isRecord),
+  });
 }
 
-/** The `input.message` of the SubagentHandback call `toolUseId`, when that line made exactly that call. */
-function handbackMessageOf(message: Readonly<Record<string, unknown>> | null, toolUseId: string): string | null {
-  if (message === null || message["role"] !== "assistant" || !Array.isArray(message["content"])) return null;
-  const call = (message["content"] as readonly unknown[]).find((block): block is Readonly<Record<string, unknown>> =>
-    isRecord(block) && block["type"] === "tool_use" && block["id"] === toolUseId);
-  if (call === undefined || call["name"] !== "SubagentHandback" || !isRecord(call["input"])) return null;
-  const payload = call["input"]["message"];
-  return typeof payload === "string" ? payload : null;
+const isToolResultLine = (line: ConversationLine): boolean =>
+  line.role === "user" && line.content.length > 0 && line.content.every((block) => block["type"] === "tool_result");
+
+const textsOf = (line: ConversationLine): readonly string[] =>
+  line.content
+    .filter((block) => block["type"] === "text")
+    .map((block) => block["text"])
+    .filter((text): text is string => typeof text === "string");
+
+/** Delivered handback payloads of one assistant message, given the results that answered it. */
+function deliveredHandbacks(
+  message: readonly ConversationLine[],
+  results: ReadonlyMap<string, boolean>,
+): readonly FinalPayloadCandidate[] {
+  return message.flatMap((line) => line.content.flatMap((block): FinalPayloadCandidate[] => {
+    if (block["type"] !== "tool_use" || block["name"] !== "SubagentHandback" || typeof block["id"] !== "string") return [];
+    // Unanswered, or answered with an error: the handback delivered nothing.
+    if (results.get(block["id"]) !== false) return [];
+    const payload = isRecord(block["input"]) ? block["input"]["message"] : undefined;
+    return typeof payload === "string" ? [Object.freeze({ origin: `transcript.line[${line.index}].handback`, text: payload })] : [];
+  }));
 }
 
+/** The final-turn candidates of already-read transcript lines (see the rule above). */
 function claudeCandidatesFromLines(lines: readonly string[]): readonly FinalPayloadCandidate[] {
-  const nonEmpty = (index: number): boolean => lines[index]!.trim().length > 0;
-  const finalIndex = lines.findLastIndex((_, index) => nonEmpty(index));
-  if (finalIndex < 0) return Object.freeze([]);
-  const finalLine = finalLineOf(transcriptMessageOf(lines[finalIndex]!, finalIndex, "final"));
-  switch (finalLine.kind) {
-    case "assistant-text":
-      return Object.freeze(finalLine.texts.map((text, blockIndex) => Object.freeze({
-        origin: `transcript.line[${finalIndex}].block[${blockIndex}]`,
-        text,
-      })));
-    case "handback-result": {
-      // A failed handback delivered nothing; its call's text is not a result.
-      if (finalLine.isError) return Object.freeze([]);
-      const callIndex = lines.slice(0, finalIndex).findLastIndex((_, index) => nonEmpty(index));
-      if (callIndex < 0) return Object.freeze([]);
-      const payload = handbackMessageOf(
-        transcriptMessageOf(lines[callIndex]!, callIndex, "handback call"), finalLine.toolUseId);
-      return payload === null
-        ? Object.freeze([])
-        : Object.freeze([Object.freeze({ origin: `transcript.line[${callIndex}].handback`, text: payload })]);
+  // Walk backwards, parsing only as far as the final turn reaches: a torn or
+  // malformed line in an EARLIER turn is not this capture's evidence.
+  let cursor = lines.length;
+  const previousConversationLine = (): ConversationLine | null => {
+    while (--cursor >= 0) {
+      if (lines[cursor]!.trim().length === 0) continue;
+      const line = conversationLineOf(lines[cursor]!, cursor);
+      if (line !== null) return line;
     }
-    case "other":
-      return Object.freeze([]);
+    return null;
+  };
+
+  const results = new Map<string, boolean>();
+  let caller = previousConversationLine();
+  while (caller !== null && isToolResultLine(caller)) {
+    for (const block of caller.content) {
+      if (typeof block["tool_use_id"] === "string") results.set(block["tool_use_id"], block["is_error"] === true);
+    }
+    caller = previousConversationLine();
   }
+  if (caller === null || caller.role !== "assistant") return Object.freeze([]);
+  if (results.size === 0) {
+    const last = caller;
+    return Object.freeze(textsOf(last).map((text, blockIndex) => Object.freeze({
+      origin: `transcript.line[${last.index}].block[${blockIndex}]`,
+      text,
+    })));
+  }
+
+  // The assistant message the results answer: Claude writes one line per block
+  // of a multi-call message, all sharing its message id.
+  const message: ConversationLine[] = [caller];
+  if (caller.messageId !== null) {
+    for (let line = previousConversationLine(); line?.role === "assistant" && line.messageId === caller.messageId;
+      line = previousConversationLine()) {
+      message.unshift(line);
+    }
+  }
+  return Object.freeze(deliveredHandbacks(message, results));
 }
 
 /**
@@ -374,9 +399,9 @@ function collectClaudeToolResults(
  *  for the FRAMES — but it is COUNTED (AD-8, silent-failure-hunter-1): an
  *  unclassifiable line could hide an emission call, so the frame set cannot
  *  claim absence over it, and the count plus the orphan tool results surface
- *  in the observation instead of being absorbed as silence. The final-line
- *  candidates keep their strict malformed-JSON refusal through
- *  `claudeCandidatesFromLines`. Orphan results are sound on this read because
+ *  in the observation instead of being absorbed as silence. The final-turn
+ *  candidates keep their strict malformed-JSON refusal (for every line the
+ *  final turn reaches) through `claudeCandidatesFromLines`. Orphan results are sound on this read because
  *  `readRunBytesNoFollow` rejects oversize files outright — the walk always
  *  sees the whole transcript, never a head-truncated window. */
 function collectClaudeToolBlocks(lines: readonly string[]): {
