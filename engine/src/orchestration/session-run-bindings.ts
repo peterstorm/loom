@@ -22,15 +22,35 @@ export type SessionRunBinding = Readonly<RunDirectoryReference & {
   resultDigest: string | null;
 }>;
 
+/**
+ * The harness whose session published a registry.
+ *
+ * There is one registry file per session id whichever harness owns the
+ * session. The harness is recorded IN the registry and every reader names the
+ * harness it expects, so a registry Pi published can never authorize a Claude
+ * Code hook, nor the reverse, even if the two ever shared a session id.
+ */
+const SESSION_BINDING_HARNESSES = ["pi", "claude-code"] as const;
+export type SessionBindingHarness = (typeof SESSION_BINDING_HARNESSES)[number];
+
+/** The operator-facing name of each harness, used in every binding diagnostic. */
+export const HARNESS_LABEL: Readonly<Record<SessionBindingHarness, string>> = Object.freeze({
+  "pi": "Pi",
+  "claude-code": "Claude Code",
+});
+
+const isSessionBindingHarness = (raw: unknown): raw is SessionBindingHarness =>
+  (SESSION_BINDING_HARNESSES as readonly unknown[]).includes(raw);
+
 export type SessionRunBindingRegistry = Readonly<{
   schemaVersion: 1;
   kind: "session-run-bindings";
-  harness: "pi";
+  harness: SessionBindingHarness;
   sessionId: SessionId;
   bindings: readonly SessionRunBinding[];
 }>;
 
-type BindingResult<T> =
+export type BindingResult<T> =
   | Readonly<{ ok: true; value: T }>
   | Readonly<{ ok: false; message: string }>;
 
@@ -84,16 +104,29 @@ function parseBinding(raw: unknown, index: number): BindingResult<SessionRunBind
   }));
 }
 
+/**
+ * Parse one registry as `expectedHarness` expects it. The harness defaults to
+ * Pi, the registry's first writer, whose file format is unchanged; a registry
+ * published by the other harness is refused by name rather than read.
+ */
 export function parseSessionRunBindingRegistry(
   raw: unknown,
   expectedSessionId: string,
+  expectedHarness: SessionBindingHarness = "pi",
 ): BindingResult<SessionRunBindingRegistry> {
   const sessionId = parseSessionId(expectedSessionId);
-  if (sessionId === null) return failed(`invalid Pi session id ${JSON.stringify(expectedSessionId)}`);
+  if (sessionId === null) {
+    return failed(`invalid ${HARNESS_LABEL[expectedHarness]} session id ${JSON.stringify(expectedSessionId)}`);
+  }
   if (!exactRecord(raw, ["schemaVersion", "kind", "harness", "sessionId", "bindings"]) ||
-      raw.schemaVersion !== 1 || raw.kind !== "session-run-bindings" || raw.harness !== "pi" ||
+      raw.schemaVersion !== 1 || raw.kind !== "session-run-bindings" || !isSessionBindingHarness(raw.harness) ||
       raw.sessionId !== sessionId || !Array.isArray(raw.bindings)) {
     return failed("session run binding registry is malformed or belongs to another session");
+  }
+  if (raw.harness !== expectedHarness) {
+    return failed(
+      `session run binding registry belongs to ${HARNESS_LABEL[raw.harness]}, not ${HARNESS_LABEL[expectedHarness]}`,
+    );
   }
   const bindings: SessionRunBinding[] = [];
   for (const [index, binding] of raw.bindings.entries()) {
@@ -105,7 +138,7 @@ export function parseSessionRunBindingRegistry(
   if (new Set(identities).size !== identities.length) {
     return failed("session run binding registry contains duplicate run identities");
   }
-  return ok(sessionRunBindingRegistry(sessionId, bindings));
+  return ok(sessionRunBindingRegistry(expectedHarness, sessionId, bindings));
 }
 
 function registryFile(sessionId: SessionId): string {
@@ -113,52 +146,58 @@ function registryFile(sessionId: SessionId): string {
 }
 
 const sessionRunBindingRegistry = (
+  harness: SessionBindingHarness,
   sessionId: SessionId,
   bindings: readonly SessionRunBinding[],
 ): SessionRunBindingRegistry => Object.freeze({
   schemaVersion: 1,
   kind: "session-run-bindings",
-  harness: "pi",
+  harness,
   sessionId,
   bindings: Object.freeze([...bindings]),
 });
 
 function readRegistryFromDirectory(
   directory: AnchoredDirectory,
+  harness: SessionBindingHarness,
   sessionId: SessionId,
 ): BindingResult<SessionRunBindingRegistry> {
+  const label = HARNESS_LABEL[harness];
   let bytes: Buffer;
   try {
     bytes = readDirectoryFileNoFollow(directory, registryFile(sessionId));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return ok(sessionRunBindingRegistry(sessionId, []));
+      return ok(sessionRunBindingRegistry(harness, sessionId, []));
     }
-    return failed(`cannot read Pi session run bindings: ${error instanceof Error ? error.message : String(error)}`);
+    return failed(`cannot read ${label} session run bindings: ${error instanceof Error ? error.message : String(error)}`);
   }
   try {
-    return parseSessionRunBindingRegistry(JSON.parse(bytes.toString("utf-8")) as unknown, sessionId);
+    return parseSessionRunBindingRegistry(JSON.parse(bytes.toString("utf-8")) as unknown, sessionId, harness);
   } catch (error) {
-    return failed(`Pi session run bindings are invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+    return failed(`${label} session run bindings are invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
+/** Read one session's bindings as `harness` expects them (Pi by default; see the registry parser). */
 export function readSessionRunBindings(
   directory: string,
   rawSessionId: string,
+  harness: SessionBindingHarness = "pi",
 ): BindingResult<readonly SessionRunBinding[]> {
+  const label = HARNESS_LABEL[harness];
   const sessionId = parseSessionId(rawSessionId);
-  if (sessionId === null) return failed(`invalid Pi session id ${JSON.stringify(rawSessionId)}`);
+  if (sessionId === null) return failed(`invalid ${label} session id ${JSON.stringify(rawSessionId)}`);
   try {
     const anchored = openBindingDirectory(directory);
     try {
-      const registry = readRegistryFromDirectory(anchored, sessionId);
+      const registry = readRegistryFromDirectory(anchored, harness, sessionId);
       return registry.ok ? ok(registry.value.bindings) : registry;
     } finally {
       closeAnchoredDirectory(anchored);
     }
   } catch (error) {
-    return failed(`cannot open Pi session run binding directory: ${error instanceof Error ? error.message : String(error)}`);
+    return failed(`cannot open ${label} session run binding directory: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -176,22 +215,24 @@ export async function registerSessionRunBinding(
   directory: string,
   rawSessionId: string,
   binding: unknown,
+  harness: SessionBindingHarness = "pi",
 ): Promise<BindingResult<SessionRunBindingRegistry>> {
+  const label = HARNESS_LABEL[harness];
   const sessionId = parseSessionId(rawSessionId);
-  if (sessionId === null) return failed(`invalid Pi session id ${JSON.stringify(rawSessionId)}`);
+  if (sessionId === null) return failed(`invalid ${label} session id ${JSON.stringify(rawSessionId)}`);
   const parsedBinding = parseBinding(binding, 0);
   if (!parsedBinding.ok) return parsedBinding;
 
   try {
     const base = ensureResolvedBaseDirectory(directory);
     return await withAnchoredDirectoryLock(base, `${sessionId}.orchestration-runs.lock`, (anchored) => {
-      const current = readRegistryFromDirectory(anchored, sessionId);
+      const current = readRegistryFromDirectory(anchored, harness, sessionId);
       if (!current.ok) return current;
       const identity = bindingIdentity(parsedBinding.value);
       const previous = current.value.bindings.find((binding) => bindingIdentity(binding) === identity);
       if (previous !== undefined && previous.resultDigest !== null && parsedBinding.value.resultDigest !== null &&
           previous.resultDigest !== parsedBinding.value.resultDigest) {
-        return failed("Pi session run binding result digest conflicts with its previous completion receipt");
+        return failed(`${label} session run binding result digest conflicts with its previous completion receipt`);
       }
       const mergedBinding = previous === undefined
         ? parsedBinding.value
@@ -204,7 +245,7 @@ export async function registerSessionRunBinding(
         ...current.value.bindings.filter((binding) => bindingIdentity(binding) !== identity),
         mergedBinding,
       ].sort((left, right) => compareStrings(bindingIdentity(left), bindingIdentity(right)));
-      const next = sessionRunBindingRegistry(sessionId, bindings);
+      const next = sessionRunBindingRegistry(harness, sessionId, bindings);
       const finalName = registryFile(sessionId);
       const stagedName = `${finalName}.staged-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
       try {
@@ -228,6 +269,6 @@ export async function registerSessionRunBinding(
       return ok(next);
     });
   } catch (error) {
-    return failed(`cannot publish Pi session run binding: ${error instanceof Error ? error.message : String(error)}`);
+    return failed(`cannot publish ${label} session run binding: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
