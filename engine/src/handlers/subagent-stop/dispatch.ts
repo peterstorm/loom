@@ -12,7 +12,8 @@ import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { resolveAgentType } from "../../utils/agent-transcript-path";
 import { parseReportedAgentId, parseSessionId, readActiveAgentRoles, readEvidence } from "../../machine";
-import { ensureRosteredImplementationBinding } from "../implementation-binding";
+import { ensureRosteredImplementationBinding, suppliedTranscript } from "../implementation-binding";
+import { PENDING_BINDING_ESCALATION } from "../../core/implementation-binding";
 import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 import { claudeRunContext, type ClaudeRun, type ClaudeRunAuthority } from "../../orchestration/claude-run-authority";
 import { openRunDirectory } from "../../orchestration/run-directory-handle";
@@ -46,8 +47,9 @@ export function categorize(agentType: string): AgentCategory {
 
 /**
  * A rostered implementation Agent can reach SubagentStop still PENDING: its
- * binding is normally established on its first tool call, and an Agent may
- * make none (or run with the PreToolUse hooks unavailable). Its transcript
+ * binding is normally established by block-direct-edits before its first
+ * write decision, and an Agent may never write (or run with the PreToolUse
+ * hooks unavailable). Its transcript
  * exists now, so the binding is attempted once more from its OWN first prompt.
  * A binding that still cannot be proven stays an explicit missing-sidecar
  * observation carrying the reason: settlement then preserves execution
@@ -65,7 +67,7 @@ function bindPendingImplementationAtStop(
     sessionId,
     agentId,
     roster: readActiveAgentRoles(sessionId),
-    ...(input.agent_transcript_path === undefined ? {} : { suppliedTranscriptPath: input.agent_transcript_path }),
+    ...suppliedTranscript(input.agent_transcript_path),
   });
   if (outcome === null) return observation;
   if (outcome.kind === "bound") return snapshotImplementationAttemptSidecar(sessionId, agentId);
@@ -73,7 +75,8 @@ function bindPendingImplementationAtStop(
     kind: "authority-unavailable",
     failure: Object.freeze({
       kind: "missing-sidecar",
-      message: `implementation binding was still pending at SubagentStop and is ${outcome.kind}: ${outcome.reason}`,
+      message: `implementation binding was still pending at SubagentStop and is ${outcome.kind}: ${outcome.reason}` +
+        (outcome.kind === "pending" ? `. ${PENDING_BINDING_ESCALATION}` : ""),
     }),
   });
 }

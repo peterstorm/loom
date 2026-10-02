@@ -29,7 +29,7 @@ import { match } from "ts-pattern";
 import type { HookResult } from "../types";
 import { IMPL_AGENTS } from "./model-profiles";
 import { artifactWriteRoots } from "./artifact-write-scope";
-import type { ImplementationBinding } from "./implementation-binding";
+import { PENDING_BINDING_ESCALATION, type ImplementationBinding } from "./implementation-binding";
 import {
   parseGrantedAgentId,
   parseSessionId,
@@ -111,7 +111,7 @@ export const implementationWriteVerdict = (binding: ImplementationBinding): Hook
     .with({ kind: "pending" }, ({ reason }): HookResult => ({
       kind: "block",
       message: `BLOCKED: implementation authority binding not yet available for this agent — ${reason}. ` +
-        "This is retriable: retry the same call.",
+        `This is retriable: retry the same call. ${PENDING_BINDING_ESCALATION}`,
     }))
     .with({ kind: "refused" }, ({ reason }): HookResult => ({
       kind: "block",

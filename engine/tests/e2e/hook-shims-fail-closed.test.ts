@@ -13,10 +13,6 @@
  * mark-subagent-active.sh (fail-CLOSED authority binder):
  *   - runtime unavailable → exit 2 because only the engine may prove graph absence
  *   - ENOENT graph → engine passthrough; EACCES/ELOOP/ENOTDIR → engine block
- *
- * bind-implementation-attempt.sh (fail-OPEN lazy binder — decides no write):
- *   - main-agent call or no roster anywhere → exit 0 fast path, quiet
- *   - subagent call + roster + runtime unavailable → exit 0 WITH a note
  */
 
 import { describe, it, expect, afterAll } from "vitest";
@@ -33,7 +29,6 @@ const GUARD = join(SCRIPTS, "guard-state-file.sh");
 const DISPATCH = join(SCRIPTS, "dispatch.sh");
 const MARK = join(SCRIPTS, "mark-subagent-active.sh");
 const CLEANUP = join(SCRIPTS, "cleanup-stale-subagents.sh");
-const BIND = join(SCRIPTS, "bind-implementation-attempt.sh");
 const PLUGIN_ROOT = join(SCRIPTS, "..", "..");
 
 // chmod 000 does not bar root — these tests are meaningless under uid 0.
@@ -408,44 +403,6 @@ describe("dispatch.sh — runs on binding-without-graph, fails OPEN loudly on ru
       PATH: bunlessPath(),
     });
     expect(stderr).toContain("bindings may leak");
-    expect(status).toBe(0);
-  });
-});
-
-describe("bind-implementation-attempt.sh — fails OPEN loudly (block-direct-edits owns the write decision)", () => {
-  const subagentCall = JSON.stringify({ session_id: "shim-test", agent_id: "a-1", tool_name: "Read", tool_input: {} });
-
-  it("a main-agent call (no agent_id) → exit 0 fast path, quiet, even with a roster present", () => {
-    const dir = tempDir();
-    writeFileSync(join(dir, "shim-test.active"), "a-1\tcode-implementer-agent\n");
-    const { status, stderr } = runShim(BIND, { LOOM_SUBAGENT_DIR: dir });
-    expect(stderr).toBe("");
-    expect(status).toBe(0);
-  });
-
-  it("a subagent call with no roster anywhere → exit 0 fast path, quiet", () => {
-    const { status, stderr } = runShim(BIND, { LOOM_SUBAGENT_DIR: tempDir() }, subagentCall);
-    expect(stderr).toBe("");
-    expect(status).toBe(0);
-  });
-
-  it("subagent call + roster + CLAUDE_PLUGIN_ROOT unset → exit 0 WITH a 'binding deferred' note", () => {
-    const dir = tempDir();
-    writeFileSync(join(dir, "shim-test.active"), "a-1\tcode-implementer-agent\n");
-    const { status, stderr } = runShim(BIND, { LOOM_SUBAGENT_DIR: dir }, subagentCall);
-    expect(stderr).toContain("binding deferred");
-    expect(status).toBe(0);
-  });
-
-  it("subagent call + roster + bun not found on PATH → exit 0 WITH a 'binding deferred' note", () => {
-    const dir = tempDir();
-    writeFileSync(join(dir, "shim-test.active"), "a-1\tcode-implementer-agent\n");
-    const { status, stderr } = runShim(BIND, {
-      LOOM_SUBAGENT_DIR: dir,
-      CLAUDE_PLUGIN_ROOT: "/tmp/fake-plugin-root",
-      PATH: bunlessPath(),
-    }, subagentCall);
-    expect(stderr).toContain("binding deferred");
     expect(status).toBe(0);
   });
 });

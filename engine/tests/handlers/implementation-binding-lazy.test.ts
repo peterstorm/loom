@@ -4,10 +4,10 @@
  *
  * Claude Code fires SubagentStart before the child transcript exists and does
  * not honor a SubagentStart block. So SubagentStart records the roster row
- * and leaves the binding PENDING; the Agent's first tool call (any tool, via
- * bind-implementation-attempt, or the write itself, via block-direct-edits)
- * binds it from its own first prompt; and SubagentStop makes a last attempt.
- * Writes are admitted only once bound.
+ * and leaves the binding PENDING; block-direct-edits binds it from its own
+ * first prompt before deciding the Agent's first write; and SubagentStop
+ * makes a last attempt for an Agent that never wrote. Writes are admitted
+ * only once bound.
  *
  * block-direct-edits gates on the IMPORT-time TaskGraph path, so the graph
  * location is pinned in `vi.hoisted` before any engine module loads.
@@ -31,12 +31,12 @@ const fixture = await vi.hoisted(async () => {
 
 import markActive from "../../src/handlers/subagent-start/mark-subagent-active";
 import blockDirectEdits from "../../src/handlers/pre-tool-use/block-direct-edits";
-import bindImplementationAttempt from "../../src/handlers/pre-tool-use/bind-implementation-attempt";
 import dispatch from "../../src/handlers/subagent-stop/dispatch";
 import {
   ensureImplementationBinding,
   ensureRosteredImplementationBinding,
 } from "../../src/handlers/implementation-binding";
+import { PENDING_BINDING_ESCALATION } from "../../src/core/implementation-binding";
 import { snapshotImplementationAttemptSidecar } from "../../src/implementation-attempt-sidecar";
 import { projectSlug } from "../../src/utils/agent-transcript-path";
 import {
@@ -235,7 +235,11 @@ describe("SubagentStart before the child transcript exists", () => {
     const result = await quietly(() => blockDirectEdits(toolInput("Edit", "a-1"), []));
 
     expect(result).toMatchObject({ kind: "block", message: expect.stringContaining("not yet available") });
-    if (result.kind === "block") expect(result.message).toContain("retriable");
+    if (result.kind === "block") {
+      expect(result.message).toContain("retriable");
+      // A pending that never clears means the transcript location is unresolvable: escalate, don't loop.
+      expect(result.message).toContain(PENDING_BINDING_ESCALATION);
+    }
     expect(sidecarOf("a-1")).toMatchObject({ kind: "authority-unavailable", failure: { kind: "missing-sidecar" } });
   });
 
@@ -249,46 +253,28 @@ describe("SubagentStart before the child transcript exists", () => {
   });
 });
 
-describe("the first tool call binds", () => {
-  it("a read-only first call binds from the now-written prompt, and the next Edit is admitted", async () => {
+describe("the first write decision binds", () => {
+  it("an Edit binds the caller from its now-written prompt before deciding, then admits it", async () => {
     const attempts = writeGraph(["T1"]);
     await start("a-1");
     writeTranscript("a-1", "**Task ID:** T1\n\nImplement it.");
 
-    expect(await bindImplementationAttempt(toolInput("Read", "a-1"), [])).toEqual({ kind: "passthrough" });
-
+    expect(await blockDirectEdits(toolInput("Edit", "a-1"), [])).toEqual({ kind: "allow" });
     expect(sidecarOf("a-1")).toMatchObject({
       kind: "authority-observed",
       sidecar: { agentId: "a-1", canonicalTaskGraphPath: STATE_PATH, authority: attempts.T1 },
     });
-    expect(await blockDirectEdits(toolInput("Edit", "a-1"), [])).toEqual({ kind: "allow" });
+    // Subsequent writes observe the published sidecar.
+    expect(await blockDirectEdits(toolInput("Write", "a-1"), [])).toEqual({ kind: "allow" });
   });
 
-  it("an Edit as the very first call binds itself before deciding — no reliance on the binder hook", async () => {
-    const attempts = writeGraph(["T1"]);
-    await start("a-1");
-    writeTranscript("a-1", "Task ID: T1");
-
-    expect(await blockDirectEdits(toolInput("Edit", "a-1"), [])).toEqual({ kind: "allow" });
-    expect(sidecarOf("a-1")).toMatchObject({ kind: "authority-observed", sidecar: { authority: attempts.T1 } });
-  });
-
-  it("a read-only call while the transcript is still missing proceeds and reports the deferral", async () => {
-    writeGraph(["T1"]);
-    await start("a-1");
-
-    const result = await quietly(() => bindImplementationAttempt(toolInput("Read", "a-1"), []));
-
-    expect(result).toMatchObject({ kind: "passthrough", systemMessage: expect.stringContaining("pending") });
-  });
-
-  it("the binder ignores main-agent calls and non-implementation subagents", async () => {
+  it("a non-implementation subagent's write never publishes a binding", async () => {
     writeGraph(["T1"]);
     await quietly(() => markActive(JSON.stringify({ session_id: session, agent_id: "r-1", agent_type: "loom:code-reviewer" }), []));
     writeTranscript("r-1", "Task ID: T1");
 
-    expect(await bindImplementationAttempt(toolInput("Read", null), [])).toEqual({ kind: "passthrough" });
-    expect(await bindImplementationAttempt(toolInput("Read", "r-1"), [])).toEqual({ kind: "passthrough" });
+    await quietly(() => blockDirectEdits(toolInput("Edit", "r-1"), []));
+
     expect(sidecarOf("r-1")).toMatchObject({ kind: "authority-unavailable", failure: { kind: "missing-sidecar" } });
   });
 });
@@ -302,7 +288,7 @@ describe("parallel implementers of one type", () => {
     writeTranscript("a-1", "Task ID: T1");
 
     expect(await blockDirectEdits(toolInput("Edit", "a-2"), [])).toEqual({ kind: "allow" });
-    expect(await bindImplementationAttempt(toolInput("Grep", "a-1"), [])).toEqual({ kind: "passthrough" });
+    expect(await blockDirectEdits(toolInput("Write", "a-1"), [])).toEqual({ kind: "allow" });
 
     expect(sidecarOf("a-1")).toMatchObject({ kind: "authority-observed", sidecar: { authority: attempts.T1 } });
     expect(sidecarOf("a-2")).toMatchObject({ kind: "authority-observed", sidecar: { authority: attempts.T2 } });
@@ -336,9 +322,6 @@ describe("unprovable bindings refuse writes with the reason", () => {
     expect(result).toMatchObject({ kind: "block", message: expect.stringContaining("refused") });
     if (result.kind === "block") expect(result.message).toContain(reason);
     expect(sidecarOf("a-1")).toMatchObject({ kind: "authority-unavailable", failure: { kind: "missing-sidecar" } });
-    // The binder surfaces the same refusal on a read-only call, without blocking it.
-    expect(await quietly(() => bindImplementationAttempt(toolInput("Read", "a-1"), [])))
-      .toMatchObject({ kind: "passthrough", systemMessage: expect.stringContaining(reason) });
   });
 });
 
@@ -365,13 +348,13 @@ describe("idempotent and race-safe binding", () => {
     writeTranscript("a-1", "Task ID: T1");
 
     const run = () => new Promise<number | null>((resolve, reject) => {
-      const child = spawn("bun", [join(ENGINE_ROOT, "src", "cli.ts"), "pre-tool-use", "bind-implementation-attempt"], {
+      const child = spawn("bun", [join(ENGINE_ROOT, "src", "cli.ts"), "pre-tool-use", "block-direct-edits"], {
         env: { ...process.env },
         stdio: ["pipe", "ignore", "ignore"],
       });
       child.on("error", reject);
       child.on("close", resolve);
-      child.stdin.end(toolInput("Read", "a-1"));
+      child.stdin.end(toolInput("Edit", "a-1"));
     });
     const statuses = await Promise.all([run(), run(), run(), run()]);
 
@@ -412,6 +395,7 @@ describe("SubagentStop of an Agent still pending", () => {
     const result = await quietly(() => dispatch(stopInput("a-1"), []));
 
     expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("still pending at SubagentStop") });
+    if (result.kind === "error") expect(result.message).toContain(PENDING_BINDING_ESCALATION);
     const stored = readGraph();
     expect(stored.executing_tasks).toEqual(["T1", "T2"]);
     expect(stored.tasks.map((task) => task.active_implementation_attempt)).toEqual([attempts.T1, attempts.T2]);

@@ -1,7 +1,7 @@
 /**
  * Shell: establish a Claude implementation Agent's exact Implementation
  * Attempt binding — the one operation SubagentStart (opportunistically),
- * PreToolUse (before every write decision, and on every tool call), and
+ * PreToolUse (block-direct-edits, before every write decision), and
  * SubagentStop (a last attempt before settlement) all share.
  *
  * The persisted state is the implementation-attempt SIDECAR itself: a rostered
@@ -9,7 +9,7 @@
  * There is no separate pending marker to drift out of step with the sidecar.
  *
  * Idempotent and race-safe: an observed sidecar is returned as-is, and two
- * concurrent first tool calls from one child derive identical bytes from the
+ * concurrent first write decisions from one child derive identical bytes from the
  * same prompt and TaskGraph, so publication's no-replace link answers the
  * loser `already-owned` instead of publishing twice or conflicting.
  */
@@ -32,22 +32,23 @@ import {
   snapshotImplementationAttemptSidecar,
 } from "../implementation-attempt-sidecar";
 
+type CoreBinding<K extends ImplementationBinding["kind"]> = Extract<ImplementationBinding, { kind: K }>;
+
 /**
- * One binding attempt's outcome. Assignable to the core `ImplementationBinding`;
- * the extra fields carry what SubagentStart's rollback needs: whether THIS
- * attempt created the sidecar, and which registration it identified before a
- * refusal.
+ * One binding attempt's outcome: each core `ImplementationBinding` variant,
+ * plus what SubagentStart's rollback needs — whether THIS attempt created the
+ * sidecar, and which registration it identified before a refusal.
  */
 type ImplementationBindingOutcome =
-  | Readonly<{ kind: "pending"; reason: string }>
-  | Readonly<{
-      kind: "bound";
-      authority: ImplementationAttemptAuthority;
-      publication: "observed" | "published" | "already-owned";
-    }>
-  | Readonly<{ kind: "refused"; reason: string; identified: ImplementationAttemptAuthority | null }>;
+  | CoreBinding<"pending">
+  | (CoreBinding<"bound"> & Readonly<{ publication: "observed" | "published" | "already-owned" }>)
+  | (CoreBinding<"refused"> & Readonly<{ identified: ImplementationAttemptAuthority | null }>);
 
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
+
+/** The optional `suppliedTranscriptPath` field, present only when the hook supplied one. */
+export const suppliedTranscript = (path: string | undefined): Readonly<{ suppliedTranscriptPath?: string }> =>
+  path === undefined ? {} : { suppliedTranscriptPath: path };
 
 const refused = (reason: string, identified: ImplementationAttemptAuthority | null = null): ImplementationBindingOutcome =>
   Object.freeze({ kind: "refused", reason, identified });
@@ -190,7 +191,7 @@ export function ensureRosteredImplementationBinding(request: Readonly<{
         agentId: request.agentId,
         graph: resolved.graph,
         existingSidecar: "trust",
-        ...(request.suppliedTranscriptPath === undefined ? {} : { suppliedTranscriptPath: request.suppliedTranscriptPath }),
+        ...suppliedTranscript(request.suppliedTranscriptPath),
       })
     : refused(resolved.reason);
 }
