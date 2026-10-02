@@ -1438,3 +1438,106 @@ describe("guard-state-file handler — call-start stamping never changes the gua
     }
   });
 });
+
+describe("glob leading-dot rule — bash default (no dotglob)", () => {
+  // A one-segment guarded `.loom` dir made every lone `*` (and every token whose
+  // first segment is a wildcard) match it, because the glob regex let `*`
+  // consume the leading `.`. Bash never does that without dotglob, and a
+  // quoted `*` is never expanded at all.
+  it("harmless commands with a lone or leading `*` are no longer blocked", () => {
+    expect(guardDecision(`find src -not -path "*/__tests__/*"`)).toBe("allow");
+    expect(guardDecision(`sed -i 's/a/b * c/' x.ts`)).toBe("allow");
+    expect(guardDecision(`python3 - <<'EOF'\nx = 2 * 3\nprint(x * 2)\nEOF`)).toBe("allow");
+    expect(guardDecision(`echo '*' > out.txt`)).toBe("allow");
+    expect(guardDecision(`touch "*"`)).toBe("allow");
+    expect(guardDecision("rm -rf dist/*")).toBe("allow");
+    expect(guardDecision("rm -f *.log")).toBe("allow");
+    expect(guardDecision("rm -rf ?loom *oom [!x]loom")).toBe("allow");
+  });
+
+  it("unquoted globs that really expand into a dotted guarded dir still block", () => {
+    for (const cmd of [
+      "rm -rf .l*",
+      "rm -rf .loo?",
+      "rm -rf .[l]oom",
+      "rm -rf .[a-z]oom",
+      "rm -rf .*",
+      "rm -rf .*/verification-manifest.json",
+      "cp /tmp/forged.json .l*/verification-manifest.json",
+      "rm -rf .c*/state",
+      "rm .claude/stat*/active_task_graph.json",
+      "rm -rf .cl*/st*",
+      // A leading `./` names exactly what the bare glob names.
+      "rm -rf ./.l*",
+      "rm -rf ./.claude/stat*",
+      // POSIX leaves `[.]` unspecified — fail closed.
+      "rm -rf [.]loom",
+      // Non-dotted guarded dirs: the leading-dot rule is irrelevant there.
+      "rm /tmp/*",
+      "rm -rf /tmp/claude-sub*/",
+    ]) {
+      expect(guardDecision(cmd), cmd).toBe("block");
+    }
+  });
+
+  it("a substitution's unknown output may start with `.` — the opaque wildcard keeps matching it", () => {
+    expect(guardDecision("rm -rf $(printf .lo)om")).toBe("block");
+    expect(guardDecision("rm -rf `printf .l`oom")).toBe("block");
+    expect(guardDecision("rm -rf $(printf .loom)")).toBe("block");
+  });
+
+  it("a line that can enable dotglob is judged with wildcards matching dots (fail closed)", () => {
+    for (const cmd of [
+      "shopt -s dotglob; rm -rf *",
+      "shopt -s dotglob\nrm -rf *oom",
+      "GLOBIGNORE=x rm -rf *oom",
+      "GLOBIGNORE=.:..; rm -rf ?loom",
+      "BASHOPTS=dotglob bash -c 'rm -rf *'",
+      "setopt globdots; rm -rf *",
+      "setopt GLOB_DOTS && rm -rf *oom",
+    ]) {
+      expect(guardDecision(cmd), cmd).toBe("block");
+    }
+  });
+
+  // Independent oracle: fnmatch of a [a-z*?.] glob against `.loom`, with the
+  // leading-dot rule switchable.
+  const matchesLoom = (glob: string, dotsMatch: boolean): boolean => {
+    if (!dotsMatch && !glob.startsWith(".")) return false;
+    const re = glob.replace(/\./g, "\\.").replace(/\*/g, ".*").replace(/\?/g, ".");
+    return new RegExp(`^${re}$`).test(".loom");
+  };
+  const globArb = fc.stringMatching(/^[*?.lomx]{1,6}$/);
+
+  it("property: a one-segment unquoted glob blocks exactly when bash would expand it to `.loom`", () => {
+    fc.assert(
+      fc.property(globArb, (glob) => {
+        expect(guardDecision(`rm -rf ${glob}`)).toBe(matchesLoom(glob, false) ? "block" : "allow");
+      }),
+      { numRuns: 500 },
+    );
+  });
+
+  it("property: with dotglob enabled on the line, a glob blocks whenever it could match `.loom` at all", () => {
+    fc.assert(
+      fc.property(globArb, (glob) => {
+        fc.pre(matchesLoom(glob, true));
+        expect(guardDecision(`shopt -s dotglob; rm -rf ${glob}`)).toBe("block");
+      }),
+      { numRuns: 300 },
+    );
+  });
+
+  // One segment only: a multi-segment relative glob (`?*/*`) may still reach an
+  // ABSOLUTE guarded dir (`tmp/claude-subagents` from cwd `/`) — that
+  // cwd-agnostic fail-closed is unrelated to the leading-dot rule.
+  it("property: a wildcard-led word never makes a harmless write block", () => {
+    fc.assert(
+      fc.property(fc.stringMatching(/^[*?][*?a-z]{0,8}$/), (glob) => {
+        expect(guardDecision(`printf '%s' '${glob}' > out.txt`)).toBe("allow");
+        expect(guardDecision(`grep -rn "${glob}" src`)).toBe("allow");
+      }),
+      { numRuns: 300 },
+    );
+  });
+});
