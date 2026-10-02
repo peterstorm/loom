@@ -12,7 +12,9 @@
  * Escape hatches (env): LOOM_GATE=off disables; LOOM_RULES_DIR / LOOM_SKILLS_DIR
  * override the rules and skills directories (default: rules/ and skills/ of the
  * owning Loom package). A skill is satisfied by the Skill tool, a user slash
- * command, or a full Read of `<skills>/<name>/SKILL.md`.
+ * command, or a full Read of `<skills>/<name>/SKILL.md`. The marker counts in
+ * assistant text or in a completed Bash command (`: 'LOOM: applying …'`), which
+ * the transcript keeps verbatim.
  * Subagents are exempt — they carry the rules in their task prompt and the
  * orchestrator owns compliance (`agent_id` is set only inside a subagent).
  */

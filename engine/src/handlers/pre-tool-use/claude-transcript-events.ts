@@ -38,6 +38,10 @@ const toolUseEvent = (block: Record<string, unknown>, messageId: string): Transc
       return asString(input["skill"]) === ""
         ? { kind: "other-call", callId, messageId }
         : { kind: "skill", callId, messageId, name: stripNamespace(asString(input["skill"])) };
+    case "Bash":
+      return asString(input["command"]) === ""
+        ? { kind: "other-call", callId, messageId }
+        : { kind: "command", callId, messageId, command: asString(input["command"]) };
     default:
       return { kind: "other-call", callId, messageId };
   }

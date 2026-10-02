@@ -65,6 +65,8 @@ const toolCallEvent = (part: Record<string, unknown>, messageId: string): Transc
       limit: Math.min(READ_TOOL_MAX_LINES, positiveInt(args["limit"], READ_TOOL_MAX_LINES)),
     };
   }
+  const command = asString(args["command"]);
+  if (part["name"] === "bash" && command !== "") return { kind: "command", callId, messageId, command };
   return part["name"] === "write" && path !== ""
     ? { kind: "write", callId, messageId, path }
     : { kind: "other-call", callId, messageId };

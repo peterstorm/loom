@@ -30,6 +30,7 @@ type Step =
   | { kind: "write"; path: string }
   | { kind: "text"; text: string }
   | { kind: "slash"; name: string }
+  | { kind: "shell"; command: string; failed?: true }
   | { kind: "compact" };
 
 const MARKER: Step = { kind: "text", text: "LOOM: applying architecture.md — FC/IS: pure core" };
@@ -38,7 +39,8 @@ const FULL: Step[] = [
   { kind: "skill", name: "loom:deepen" }, { kind: "skill", name: "loom:distill" },
   { kind: "read", path: TARGET }, MARKER,
 ];
-const without = (steps: Step[], pred: (s: Step) => boolean): Step[] => steps.filter((s) => !pred(s));
+const SHELL_MARKER = ": 'LOOM: applying architecture.md — FC/IS: pure core'";
+const without =(steps: Step[], pred: (s: Step) => boolean): Step[] => steps.filter((s) => !pred(s));
 
 // --- Claude Code rendering -------------------------------------------------
 const claudeJsonl = (steps: Step[]): string =>
@@ -56,6 +58,7 @@ const claudeJsonl = (steps: Step[]): string =>
       case "write": return [msg([{ type: "tool_use", id, name: "Write", input: { file_path: s.path } }]), res()];
       case "text": return [msg([{ type: "text", text: s.text }])];
       case "slash": return [JSON.stringify({ type: "user", message: { content: `<command-name>/${s.name}</command-name>` } })];
+      case "shell": return [msg([{ type: "tool_use", id, name: "Bash", input: { command: s.command } }]), res(s.failed)];
       case "compact": return [JSON.stringify({ type: "system", subtype: "compact_boundary" })];
     }
   }).join("\n");
@@ -77,6 +80,7 @@ const piEntries = (steps: Step[]): SessionEntry[] => {
       case "write": return [asst([{ type: "toolCall", id, name: "write", arguments: { path: s.path } }]), res()];
       case "text": return [asst([{ type: "text", text: s.text }])];
       case "slash": return [{ type: "message", id: `u${i}`, message: { role: "user", content: `<skill name="${s.name.split(":").pop()}" location="/x/SKILL.md">…</skill>` } }];
+      case "shell": return [asst([{ type: "toolCall", id, name: "bash", arguments: { command: s.command } }]), res(s.failed)];
       case "compact": return [];
     }
   }) as SessionEntry[];
@@ -102,6 +106,8 @@ const scenarios: ReadonlyArray<readonly [string, Step[], GateDecision["kind"]]> 
   ["skill via slash command", [{ kind: "slash", name: "loom:deepen" }, ...without(FULL, (s) => s.kind === "skill" && s.name === "loom:deepen")], "allow"],
   ["missing marker", without(FULL, (s) => s === MARKER), "missing-marker"],
   ["marker names no rule", [...without(FULL, (s) => s === MARKER), { kind: "text", text: "LOOM: applying good vibes" }], "missing-marker"],
+  ["marker via completed shell command", [...without(FULL, (s) => s === MARKER), { kind: "shell", command: SHELL_MARKER }], "allow"],
+  ["marker via failed shell command", [...without(FULL, (s) => s === MARKER), { kind: "shell", command: SHELL_MARKER, failed: true }], "missing-marker"],
   ["evidence before compaction is discarded", [...FULL, { kind: "compact" }], "missing-context"],
   ["evidence re-established after compaction", [...FULL, { kind: "compact" }, ...FULL], "allow"],
 ];

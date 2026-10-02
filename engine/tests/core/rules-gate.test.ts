@@ -154,6 +154,27 @@ describe("decideRulesGate", () => {
     expect(decide([...lines, text("pending", "LOOM: applying distill — one move at a time"), toolUse("pending", "edit-1", "Edit", { file_path: TARGET })])).toEqual({ kind: "allow" });
   });
 
+  // A harness may persist a rewritten copy of assistant prose that drops the
+  // marker line; a shell command is stored verbatim.
+  const BASH_MARKER = ": 'LOOM: applying architecture.md — FC/IS: pure core'";
+
+  it("accepts the marker stated through a completed Bash command", () => {
+    const lines = fullContext().filter((l) => l !== MARKER);
+    expect(decide([...lines, toolUse("b", "b1", "Bash", { command: BASH_MARKER }), result("b1")])).toEqual({ kind: "allow" });
+  });
+
+  it("does not count a Bash marker whose call failed or has no result", () => {
+    const lines = fullContext().filter((l) => l !== MARKER);
+    expect(decide([...lines, toolUse("b", "b1", "Bash", { command: BASH_MARKER }), result("b1", true)])).toEqual({ kind: "missing-marker" });
+    expect(decide([...lines, toolUse("b", "b1", "Bash", { command: BASH_MARKER })])).toEqual({ kind: "missing-marker" });
+  });
+
+  it("rejects a Bash marker that names no rule", () => {
+    const lines = fullContext().filter((l) => l !== MARKER);
+    const vague = toolUse("b", "b1", "Bash", { command: ": 'LOOM: applying good vibes'" });
+    expect(decide([...lines, vague, result("b1")])).toEqual({ kind: "missing-marker" });
+  });
+
   it("discards all evidence before the last compaction boundary", () => {
     const d = decide([...fullContext(), boundary()]);
     expect(d.kind).toBe("missing-context");
@@ -222,5 +243,14 @@ describe("renderGateBlock", () => {
     for (const harness of ["claude-code", "pi"] as const) {
       expect(renderGateBlock({ kind: "missing-marker" }, "edit x", harness)).toContain("LOOM: applying");
     }
+  });
+
+  it("names the harness's shell tool as the verbatim fallback for a missing marker", () => {
+    const claude = renderGateBlock({ kind: "missing-marker" }, "edit x", "claude-code");
+    expect(claude).toContain("the Bash tool");
+    expect(claude).toContain(": 'LOOM: applying");
+    const pi = renderGateBlock({ kind: "missing-marker" }, "edit x", "pi");
+    expect(pi).toContain("the bash tool");
+    expect(pi).not.toContain("the Bash tool");
   });
 });
