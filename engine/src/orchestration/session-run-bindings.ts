@@ -141,6 +141,9 @@ export function parseSessionRunBindingRegistry(
   return ok(sessionRunBindingRegistry(expectedHarness, sessionId, bindings));
 }
 
+/** The registry lock sits beside its registry, named from the same suffix so the two cannot drift. */
+const REGISTRY_LOCK_SUFFIX = ORCHESTRATION_RUNS_SUFFIX.replace(/\.json$/, ".lock");
+
 function registryFile(sessionId: SessionId): string {
   return `${sessionId}${ORCHESTRATION_RUNS_SUFFIX}`;
 }
@@ -225,7 +228,7 @@ export async function registerSessionRunBinding(
 
   try {
     const base = ensureResolvedBaseDirectory(directory);
-    return await withAnchoredDirectoryLock(base, `${sessionId}.orchestration-runs.lock`, (anchored) => {
+    return await withAnchoredDirectoryLock(base, `${sessionId}${REGISTRY_LOCK_SUFFIX}`, (anchored) => {
       const current = readRegistryFromDirectory(anchored, harness, sessionId);
       if (!current.ok) return current;
       const identity = bindingIdentity(parsedBinding.value);
