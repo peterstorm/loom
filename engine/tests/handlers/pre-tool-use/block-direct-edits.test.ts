@@ -332,6 +332,30 @@ describe("artifactWriteRequest — the handler's canonicalization shell", () => 
     expect(artifactWriteRequest(input({ cwd: d, agent_id: "a1", tool_input: { file_path: link } }), d)?.targetPath).toBeNull();
   });
 
+  it("a MultiEdit from a writer carries its file_path and agent_id into an admitted request", () => {
+    const d = project();
+    const request = artifactWriteRequest(input({ cwd: d, agent_id: "a1", tool_name: "MultiEdit", tool_input: { file_path: ".claude/specs/foo/spec.md", edits: [] } }), d);
+    expect(request).toEqual({ callerAgentId: "a1", targetPath: join(d, ".claude/specs/foo/spec.md"), projectRoot: d });
+    expect(shouldBlockDirectEdit("MultiEdit", s, orchestrating, roster(entry("a1", "specify-agent")), request).kind).toBe("allow");
+  });
+
+  it("an unresolvable project root yields no request AND announces the cause on stderr", () => {
+    const d = project();
+    const dangling = join(d, "dangling-root");
+    symlinkSync(join(d, "nowhere"), dangling);
+    const written: string[] = [];
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      written.push(String(chunk));
+      return true;
+    });
+    try {
+      expect(artifactWriteRequest(input({ cwd: d, agent_id: "a1", tool_input: { file_path: "x.md" } }), dangling)).toBeUndefined();
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(written.join("")).toContain(`cannot canonicalize project root ${dangling}`);
+  });
+
   it("a symlinked project dir canonicalizes to its real path", () => {
     const d = project();
     const alias = join(d, "..", `${d.split("/").pop()}-alias`);
@@ -387,6 +411,14 @@ describe("block-direct-edits handler — malformed stdin fails CLOSED (round-11)
     expect(result.kind).toBe("block");
     if (result.kind === "block") {
       expect(result.message).toContain("malformed hook input");
+    }
+  });
+
+  it("JSON that is not a hook payload (null, wrong shape) → block, never a crash", async () => {
+    for (const stdin of ["null", "42", "[]", '{"tool_name":"Edit"}', '{"tool_input":{}}']) {
+      const result = await blockDirectEdits(stdin, []);
+      expect(result.kind, stdin).toBe("block");
+      if (result.kind === "block") expect(result.message, stdin).toContain("malformed hook input");
     }
   });
 });

@@ -356,6 +356,18 @@ describe("dispatch.sh — runs on binding-without-graph, fails OPEN loudly on ru
     expect(status).toBe(0);
   });
 
+  it("no graph + only a session RUN binding → still dispatches (standalone review capture must not be skipped)", () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, "shim-test.orchestration-runs.json"), "{}");
+    const { status, stderr } = runShim(DISPATCH, {
+      CLAUDE_PROJECT_DIR: graphlessProjectDir(),
+      LOOM_SUBAGENT_DIR: dir,
+    });
+    // Reaching the runtime check (CLAUDE_PLUGIN_ROOT unset) proves the skip did not fire.
+    expect(stderr).toContain("bindings may leak");
+    expect(status).toBe(0);
+  });
+
   it("no graph + binding present + bun not found on PATH → exit 0 WITH a 'bindings may leak' note", () => {
     const dir = tempDir();
     writeFileSync(join(dir, "shim-test.machine"), "a-1\tcode-implementer-agent\t1\n");

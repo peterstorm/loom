@@ -246,11 +246,12 @@ export type GateQuery = Readonly<{
   dirs: GateDirs;
 }>;
 
-/** The assistant message that carries tool call `callId`, if it is in the transcript yet. */
+/** The events that are tool calls — each carries a `callId` and its assistant `messageId`. */
 type ToolCallEvent = Exclude<TranscriptEvent, { kind: "result" | "text" | "skill-command" }>;
 const isToolCall = (e: TranscriptEvent): e is ToolCallEvent =>
   e.kind !== "result" && e.kind !== "text" && e.kind !== "skill-command";
 
+/** The assistant message that carries tool call `callId`, if it is in the transcript yet. */
 const messageIdOfCall = (events: readonly TranscriptEvent[], callId: string | undefined): string | undefined =>
   events.filter(isToolCall).find((e) => e.callId === callId)?.messageId;
 

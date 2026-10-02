@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -196,5 +196,64 @@ describe("Pi session run bindings", () => {
     const read = readSessionRunBindings(directory, sessionId);
     expect(read.ok).toBe(false);
     if (!read.ok) expect(read.message).toContain("cannot read Pi session run bindings");
+  });
+});
+
+describe("harness-stamped session run binding registries", () => {
+  const registryPath = (directory: string) => join(directory, `${sessionId}${ORCHESTRATION_RUNS_SUFFIX}`);
+
+  it.each(["pi", "claude-code"] as const)("round-trips a %s registry stamped with its own harness", async (harness) => {
+    const base = root();
+    const directory = join(base, "bindings");
+    const published = binding(base, harness, ["request:round-trip:1"]);
+
+    const registered = await registerSessionRunBinding(directory, sessionId, published, harness);
+
+    expect(registered.ok).toBe(true);
+    if (registered.ok) expect(registered.value.harness).toBe(harness);
+    expect(JSON.parse(readFileSync(registryPath(directory), "utf8"))).toMatchObject({ harness, sessionId });
+    expect(readSessionRunBindings(directory, sessionId, harness)).toEqual({ ok: true, value: [published] });
+    const reparsed = parseSessionRunBindingRegistry(JSON.parse(readFileSync(registryPath(directory), "utf8")), sessionId, harness);
+    expect(reparsed).toMatchObject({ ok: true, value: { harness, bindings: [published] } });
+  });
+
+  it("keeps Pi the default harness and its registry shape unchanged", async () => {
+    const base = root();
+    const directory = join(base, "bindings");
+
+    expect((await registerSessionRunBinding(directory, sessionId, binding(base, "pi-default", ["request:pi:1"]))).ok).toBe(true);
+
+    const stored = JSON.parse(readFileSync(registryPath(directory), "utf8"));
+    expect(Object.keys(stored)).toEqual(["schemaVersion", "kind", "harness", "sessionId", "bindings"]);
+    expect(stored.harness).toBe("pi");
+  });
+
+  it.each([
+    ["pi", "claude-code", "belongs to Pi, not Claude Code"],
+    ["claude-code", "pi", "belongs to Claude Code, not Pi"],
+  ] as const)("refuses a %s registry read or extended as %s", async (owner, reader, message) => {
+    const base = root();
+    const directory = join(base, "bindings");
+    expect((await registerSessionRunBinding(directory, sessionId, binding(base, owner, ["request:owned:1"]), owner)).ok).toBe(true);
+
+    expect(readSessionRunBindings(directory, sessionId, reader)).toEqual({
+      ok: false,
+      message: `session run binding registry ${message}`,
+    });
+    const crossWrite = await registerSessionRunBinding(directory, sessionId, binding(base, "cross", ["request:cross:1"]), reader);
+    expect(crossWrite).toMatchObject({ ok: false, message: expect.stringContaining(message) });
+    expect(readSessionRunBindings(directory, sessionId, owner)).toMatchObject({
+      ok: true,
+      value: [expect.objectContaining({ runId: `run.${owner}` })],
+    });
+  });
+
+  it("rejects a registry naming a harness outside the closed vocabulary", () => {
+    expect(parseSessionRunBindingRegistry({
+      schemaVersion: 1, kind: "session-run-bindings", harness: "codex", sessionId, bindings: [],
+    }, sessionId, "claude-code")).toEqual({
+      ok: false,
+      message: "session run binding registry is malformed or belongs to another session",
+    });
   });
 });

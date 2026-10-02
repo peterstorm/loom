@@ -113,7 +113,11 @@ import {
   type RemediationInspectionLabel,
   type RunInspectionObservation,
 } from "../../core/run-inspection";
-import { readSessionRunBindings, registerSessionRunBinding } from "../../orchestration/session-run-bindings";
+import {
+  HARNESS_LABEL,
+  readSessionRunBindings,
+  registerSessionRunBinding,
+} from "../../orchestration/session-run-bindings";
 import {
   AGENT_REQUIRED_SKILLS,
   parseAgentRequestAuthority,
@@ -1251,30 +1255,56 @@ async function driveRegisteredPanel(
   return { ok: false, message: "panel emitted more deterministic operations than its closed operation vocabulary allows" };
 }
 
-async function publishPiSpawnBinding(
+/**
+ * The harness session a façade invocation publishes capture authority into.
+ *
+ * Each harness's subagent hooks learn which run a spawned agent belongs to
+ * from a durable SESSION RUN BINDING the façade publishes, never from the
+ * environment of the agent itself. Pi announces its session as
+ * `PI_SESSION_ID`; Claude Code exposes `CLAUDE_CODE_SESSION_ID` (with
+ * `CLAUDECODE=1`) to the Bash commands its main agent runs, and its hooks
+ * receive that same id as the payload `session_id`. Pi takes precedence: a Pi
+ * process launched from inside Claude Code is still a Pi session.
+ */
+type BindingSession =
+  | Readonly<{ harness: "pi"; sessionVariable: "PI_SESSION_ID"; sessionId: string | undefined }>
+  | Readonly<{ harness: "claude-code"; sessionVariable: "CLAUDE_CODE_SESSION_ID"; sessionId: string | undefined }>;
+
+function bindingSessionOf(env: NodeJS.ProcessEnv): BindingSession | null {
+  if (env.PI_CODING_AGENT === "true") {
+    return { harness: "pi", sessionVariable: "PI_SESSION_ID", sessionId: env.PI_SESSION_ID };
+  }
+  if (env.CLAUDECODE === "1") {
+    return { harness: "claude-code", sessionVariable: "CLAUDE_CODE_SESSION_ID", sessionId: env.CLAUDE_CODE_SESSION_ID };
+  }
+  return null;
+}
+
+async function publishSpawnBinding(
+  session: BindingSession,
   handle: RunDirHandle,
-  action: Record<string, unknown> | null,
+  action: Record<string, unknown>,
 ): Promise<HookResult | null> {
-  if (action?.["kind"] !== "spawn-batch" || process.env.PI_CODING_AGENT !== "true") return null;
-  const sessionId = process.env.PI_SESSION_ID;
+  const { sessionId } = session;
+  const label = HARNESS_LABEL[session.harness];
   if (sessionId === undefined) {
-    return { kind: "error", message: "Pi orchestration spawn publication requires PI_SESSION_ID" };
+    return { kind: "error", message: `${label} orchestration spawn publication requires ${session.sessionVariable}` };
   }
   const requests = action["requests"];
   if (!Array.isArray(requests) || requests.length === 0) {
-    return { kind: "error", message: "Pi orchestration spawn action has no request authority" };
+    return { kind: "error", message: `${label} orchestration spawn action has no request authority` };
   }
   const requestIds = [];
   for (const [index, request] of requests.entries()) {
     if (typeof request !== "object" || request === null) {
-      return { kind: "error", message: `Pi orchestration spawn request ${index} is malformed` };
+      return { kind: "error", message: `${label} orchestration spawn request ${index} is malformed` };
     }
     const parsed = parseStoredAgentRequestAuthority((request as Record<string, unknown>)["authority"]);
     if (!parsed.ok) {
-      return { kind: "error", message: `Pi orchestration spawn request ${index}: ${parsed.error.violations.map(({ message }) => message).join("; ")}` };
+      return { kind: "error", message: `${label} orchestration spawn request ${index}: ${parsed.error.violations.map(({ message }) => message).join("; ")}` };
     }
     if (parsed.value.runId !== handle.runId) {
-      return { kind: "error", message: `Pi orchestration spawn request ${index} belongs to another run` };
+      return { kind: "error", message: `${label} orchestration spawn request ${index} belongs to another run` };
     }
     requestIds.push(parsed.value.requestId);
   }
@@ -1284,17 +1314,19 @@ async function publishPiSpawnBinding(
     runDirectory: handle.runDirectory,
     requestIds: Object.freeze(requestIds),
     resultDigest: null,
-  }));
+  }), session.harness);
   return registered.ok
     ? null
-    : { kind: "error", message: `cannot publish Pi orchestration capture authority: ${registered.message}` };
+    : { kind: "error", message: `cannot publish ${label} orchestration capture authority: ${registered.message}` };
 }
 
-async function publishPiCompletionBinding(
+async function publishCompletionBinding(
+  session: BindingSession,
   handle: RunDirHandle,
-  action: Record<string, unknown> | null,
+  action: Record<string, unknown>,
 ): Promise<HookResult | null> {
-  if (action?.["kind"] !== "done" || process.env.PI_CODING_AGENT !== "true") return null;
+  const { sessionId } = session;
+  const label = HARNESS_LABEL[session.harness];
   const outcome = action["outcome"];
   const record = typeof outcome === "object" && outcome !== null ? outcome as Record<string, unknown> : null;
   const slot = record?.["slot"];
@@ -1302,33 +1334,36 @@ async function publishPiCompletionBinding(
   const resultDigest = record?.["digest"];
   if (slotRecord?.["kind"] !== "fixed-artifact-slot" || slotRecord["path"] !== "result.json" ||
       typeof resultDigest !== "string" || !/^[0-9a-f]{64}$/.test(resultDigest)) return null;
-  const sessionId = process.env.PI_SESSION_ID;
   if (sessionId === undefined) {
-    return { kind: "error", message: "Pi orchestration completion publication requires PI_SESSION_ID" };
+    return { kind: "error", message: `${label} orchestration completion publication requires ${session.sessionVariable}` };
   }
-  const bindings = readSessionRunBindings(SUBAGENT_DIR, sessionId);
+  const bindings = readSessionRunBindings(SUBAGENT_DIR, sessionId, session.harness);
   if (!bindings.ok) {
-    return { kind: "error", message: `cannot read Pi orchestration completion authority: ${bindings.message}` };
+    return { kind: "error", message: `cannot read ${label} orchestration completion authority: ${bindings.message}` };
   }
   const binding = bindings.value.find(({ runId, runDirectory }) =>
     runId === handle.runId && runDirectory === handle.runDirectory);
   if (binding === undefined) {
-    return { kind: "error", message: `cannot bind completed result for unregistered Pi run ${handle.runId}` };
+    return { kind: "error", message: `cannot bind completed result for unregistered ${label} run ${handle.runId}` };
   }
-  const registered = await registerSessionRunBinding(SUBAGENT_DIR, sessionId, Object.freeze({ ...binding, resultDigest }));
+  const registered = await registerSessionRunBinding(
+    SUBAGENT_DIR, sessionId, Object.freeze({ ...binding, resultDigest }), session.harness);
   return registered.ok
     ? null
-    : { kind: "error", message: `cannot publish Pi orchestration completion authority: ${registered.message}` };
+    : { kind: "error", message: `cannot publish ${label} orchestration completion authority: ${registered.message}` };
 }
 
 async function emitRunAction(handle: RunDirHandle, action: unknown): Promise<HookResult> {
   const actionRecord = typeof action === "object" && action !== null
     ? action as Record<string, unknown>
     : null;
-  const spawnFailure = await publishPiSpawnBinding(handle, actionRecord);
-  if (spawnFailure !== null) return spawnFailure;
-  const completionFailure = await publishPiCompletionBinding(handle, actionRecord);
-  if (completionFailure !== null) return completionFailure;
+  const session = bindingSessionOf(process.env);
+  if (session !== null && actionRecord !== null) {
+    const failure = actionRecord["kind"] === "spawn-batch" ? await publishSpawnBinding(session, handle, actionRecord)
+      : actionRecord["kind"] === "done" ? await publishCompletionBinding(session, handle, actionRecord)
+      : null;
+    if (failure !== null) return failure;
+  }
   process.stdout.write(`${JSON.stringify(action, null, 2)}\n`);
   return { kind: "allow" };
 }

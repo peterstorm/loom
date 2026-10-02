@@ -13,11 +13,15 @@ import { stripNamespace } from "../../utils/strip-namespace";
 import { resolveAgentType } from "../../utils/agent-transcript-path";
 import { parseSessionId, readEvidence } from "../../machine";
 import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
-import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../orchestration/harness-capture-runtime";
+import { claudeRunContext, type ClaudeRun, type ClaudeRunAuthority } from "../../orchestration/claude-run-authority";
 import { openRunDirectory } from "../../orchestration/run-directory-handle";
 import { parseRegisteredFacadeProgram, reviewerProtocolResolver } from "../helpers/programs";
 
-import captureOrchestrationResult, { resolveClaudeRequestAuthority } from "./capture-orchestration-result";
+import {
+  captureClaudeStop,
+  establishClaudeStopRun,
+  resolveClaudeRequestAuthority,
+} from "./capture-orchestration-result";
 import cleanupSubagentFlag from "./cleanup-subagent-flag";
 import advancePhase from "./advance-phase";
 import { runUpdateTaskStatus, type EvidenceSnapshot } from "./update-task-status";
@@ -133,25 +137,37 @@ export const runDispatch = async (
   // below returns early when there is none, which would skip capture for every
   // standalone run; and repository metadata is not request authority, so a
   // metadata fault must not prevent a reserved result from being captured.
+  //
+  // The run this stop speaks for is established ONCE (explicit environment
+  // authority, else the Claude Code session run binding) and that one value is
+  // threaded through capture, request resolution, and the reviewer-protocol
+  // read below, so no step can re-derive a different run.
   let captureFailure: string | null = null;
+  let runAuthority: ClaudeRunAuthority = { kind: "unbound" };
   try {
-    const capture = await captureOrchestrationResult(stdin, args);
-    if (capture.kind === "error") captureFailure = capture.message;
+    const established = await establishClaudeStopRun(input, claudeRunContext(input.session_id));
+    if (!established.ok) {
+      captureFailure = `request-bound capture rejected: ${established.message}`;
+    } else {
+      runAuthority = established.value;
+      const capture = await captureClaudeStop(input, runAuthority);
+      if (capture.kind === "error") captureFailure = capture.message;
+    }
   } catch (error) {
     captureFailure = `captureOrchestrationResult crashed: ${error instanceof Error ? error.message : String(error)}`;
     process.stderr.write(`ERROR in captureOrchestrationResult: ${captureFailure}\n`);
   }
 
   // Which PROGRAM a stop belongs to decides whether legacy category settlement
-  // applies at all, and it is decided from the same correlation the capture
-  // above used. The environment names come from the runtime that READS them, so
-  // a rename cannot leave the dispatcher asking a question nobody answers.
-  let requestAuthority: AgentRequestAuthority | null = null;
+  // applies at all, and it is decided from the same correlation, in the same
+  // run, the capture above used.
+  let requestBinding: Readonly<{ request: AgentRequestAuthority; run: ClaudeRun }> | null = null;
   if (captureFailure === null) {
-    const resolved = resolveClaudeRequestAuthority(input, process.env[RUNS_ROOT_ENV], process.env[RUN_DIR_ENV]);
-    if (resolved.ok) requestAuthority = resolved.request;
+    const resolved = resolveClaudeRequestAuthority(input, runAuthority);
+    if (resolved.ok) requestBinding = resolved.bound;
     else captureFailure = `request authority resolution failed: ${resolved.message}`;
   }
+  const requestAuthority = requestBinding?.request ?? null;
 
   if (captureFailure !== null) return errorAfterCleanup(captureFailure);
 
@@ -189,22 +205,23 @@ export const runDispatch = async (
   // refusal rather than an opportunity to settle one request through another
   // role's TaskGraph transition.
   let category: AgentCategory;
-  if (requestAuthority !== null) {
-    const authorityRole = stripNamespace(requestAuthority.role);
+  if (requestBinding !== null) {
+    const { request: issued, run: requestRun } = requestBinding;
+    const authorityRole = stripNamespace(issued.role);
     const authorityCategory = categorize(authorityRole);
     if (authorityCategory !== "review" && authorityCategory !== "spec-check") {
-      const message = `Wave Gate request ${requestAuthority.requestId} has unroutable issued role ${JSON.stringify(requestAuthority.role)}`;
+      const message = `Wave Gate request ${issued.requestId} has unroutable issued role ${JSON.stringify(issued.role)}`;
       return errorAfterCleanup(message);
     }
     const reportedRole = stripNamespace(resolvedAgentType);
     if (reportedRole !== "" && reportedRole !== authorityRole) {
-      const message = `Wave Gate request ${requestAuthority.requestId} is issued to ${JSON.stringify(requestAuthority.role)}, ` +
+      const message = `Wave Gate request ${issued.requestId} is issued to ${JSON.stringify(issued.role)}, ` +
         `but SubagentStop reported ${JSON.stringify(resolvedAgentType)}`;
       return errorAfterCleanup(message);
     }
     category = authorityCategory;
     if (category === "review") {
-      const opened = openRunDirectory(process.env[RUNS_ROOT_ENV] ?? "", process.env[RUN_DIR_ENV] ?? "");
+      const opened = openRunDirectory(requestRun.runsRoot, requestRun.runDirectory);
       if (!opened.ok) return errorAfterCleanup(opened.error.message);
       const raw = opened.value.readProgramRegistration();
       if (!raw.ok) return errorAfterCleanup(raw.error.message);
@@ -212,7 +229,7 @@ export const runDispatch = async (
       if (registered.kind !== "registered" || registered.program.kind !== "wave-gate") {
         return errorAfterCleanup("registered Wave reviewer authority unavailable; legacy settlement refused");
       }
-      const protocol = reviewerProtocolResolver(opened.value, registered.program)(requestAuthority);
+      const protocol = reviewerProtocolResolver(opened.value, registered.program)(issued);
       if (!protocol.ok) return errorAfterCleanup(protocol.error.message);
       if (protocol.value.protocolVersion === 2) {
         // Capture is complete. Registered resume owns admission, bounded retry,

@@ -1709,6 +1709,90 @@ describe("orchestration CLI", () => {
     expect(started.stderr).toContain("cannot publish Pi orchestration capture authority");
   });
 
+  // Claude Code: CLAUDECODE=1 plus CLAUDE_CODE_SESSION_ID, as Claude Code
+  // exposes them to the main agent's Bash commands, and no Pi announcement.
+  const claudeCodeEnvironment = (sessionId: string | undefined, bindingDir: string) => ({
+    PI_CODING_AGENT: undefined,
+    PI_SESSION_ID: undefined,
+    PI_SESSION_FILE: undefined,
+    CLAUDECODE: "1",
+    CLAUDE_CODE_SESSION_ID: sessionId,
+    LOOM_ORCHESTRATION_RUNS_ROOT: undefined,
+    LOOM_ORCHESTRATION_RUN_DIR: undefined,
+    LOOM_SUBAGENT_DIR: bindingDir,
+  });
+
+  it("publishes Claude Code session capture authority before returning a spawn batch", async () => {
+    const root = sourceProject();
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run.claude-handoff");
+    const bindingDir = join(root, "claude-session-bindings");
+    const sessionId = "8a510c9a-c1fb-4b89-b61f-08ef6a007c78";
+    mkdirSync(runDir, { recursive: true });
+
+    const started = (await runCli([
+      "start", "standalone-review", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false }), root,
+    claudeCodeEnvironment(sessionId, bindingDir)));
+
+    expect(started.status, started.stderr).toBe(0);
+    const action = JSON.parse(started.stdout) as {
+      kind: string;
+      requests: readonly { authority: AgentRequestAuthority }[];
+    };
+    expect(action.kind).toBe("spawn-batch");
+    expect(readSessionRunBindings(bindingDir, sessionId, "claude-code")).toEqual({ ok: true, value: [expect.objectContaining({
+      runId: "run.claude-handoff",
+      runsRoot,
+      runDirectory: runDir,
+      requestIds: action.requests.map(({ authority }) => authority.requestId).sort(),
+      resultDigest: null,
+    })] });
+    // The registry is stamped Claude Code: Pi can never read it as its own.
+    expect(readSessionRunBindings(bindingDir, sessionId)).toMatchObject({
+      ok: false,
+      message: expect.stringContaining("belongs to Claude Code, not Pi"),
+    });
+  });
+
+  it("withholds a Claude Code spawn batch when CLAUDE_CODE_SESSION_ID is absent", async () => {
+    const root = sourceProject();
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run.claude-missing-session");
+    mkdirSync(runDir, { recursive: true });
+
+    const started = (await runCli([
+      "start", "standalone-review", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false }), root,
+    claudeCodeEnvironment(undefined, join(root, "bindings"))));
+
+    expect(started.status).not.toBe(0);
+    expect(started.stdout).not.toContain('"kind": "spawn-batch"');
+    expect(started.stderr).toContain("Claude Code orchestration spawn publication requires CLAUDE_CODE_SESSION_ID");
+  });
+
+  it("publishes into the Pi session when a Pi process also inherits Claude Code's variables", async () => {
+    const root = sourceProject();
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run.pi-inside-claude");
+    const bindingDir = join(root, "nested-bindings");
+    const piSession = "019ff290-ffee-7e86-8ed0-c834c04b7f70";
+    const claudeSession = "8a510c9a-c1fb-4b89-b61f-08ef6a007c79";
+    mkdirSync(runDir, { recursive: true });
+
+    const started = (await runCli([
+      "start", "standalone-review", "--runs-root", runsRoot, "--run", runDir,
+    ], JSON.stringify({ kind: "comments", files: ["src/types.ts"], dryRun: false }), root, {
+      ...claudeCodeEnvironment(claudeSession, bindingDir),
+      PI_CODING_AGENT: "true",
+      PI_SESSION_ID: piSession,
+    }));
+
+    expect(started.status, started.stderr).toBe(0);
+    expect(readSessionRunBindings(bindingDir, piSession)).toMatchObject({ ok: true, value: [expect.objectContaining({ runId: "run.pi-inside-claude" })] });
+    expect(existsSync(join(bindingDir, `${claudeSession}.orchestration-runs.json`))).toBe(false);
+  });
+
   it("rejects a non-canonical explicit scope before publishing reviewer context", async () => {
     const root = repository();
     mkdirSync(join(root, "src"));
