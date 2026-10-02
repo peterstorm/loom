@@ -52,22 +52,37 @@ passing"` and `git grep "npm test"` produce no TestRun at all.
 
 ## Attribution model (read this before adding a machine)
 
-The harness gives tool calls no agent identity, so evidence attribution
-rests on the **sole-active rule**: evidence is recorded and the live gate
-enforces ONLY while exactly one subagent is active and exactly one machine
-is bound. Any contention — a second subagent of any type, a second binding
-— stands both down, each with a stderr note (the recorder still never
-blocks, so a bound-but-empty ledger surfaces downstream as the
-`degraded` label). SubagentStop resolution is safe either way,
-because it reads only the stopping agent's epoch.
+Evidence attribution is the pure `attributeEvidence` (evidence.ts). Claude
+Code stamps `agent_id` on every hook fired inside a subagent (PreToolUse
+and PostToolUse alike) and omits it for the main agent, while parallel
+subagents share the parent's `session_id`. So:
+
+- **Caller identity first.** A call carrying `agent_id` is recorded ONLY
+  under that agent's own binding line — parallel bound subagents in one
+  session each record into their own epoch. An `agent_id` that is
+  reserved/path-unsafe, owns no binding line, or owns more than one
+  records nothing (with a stderr audit line); it is never credited to a
+  sibling.
+- **Sole-active fallback.** A call with no `agent_id` (the main agent, or
+  a harness that predates the field) falls back to the **sole-active
+  rule**: evidence is recorded ONLY while exactly one subagent is active
+  and exactly one machine is bound. Any contention stands it down with a
+  stderr note. Pi has no PostToolUse recorder, so none of this applies
+  there.
+
+The live PreToolUse gate (`enforce-phase-tools`) still uses only the
+sole-active rule, so it stands down whenever more than one subagent is
+active. The recorder never blocks, so a bound-but-empty ledger surfaces
+downstream as the `degraded` label. SubagentStop resolution is safe either
+way, because it reads only the stopping agent's epoch.
 
 **Binding liveness.** A binding is normally released by the agent's
 SubagentStop hook — but a gated subagent that dies without the hook firing
 must not gate the session until the next SessionStart sweep. Each binding
 line carries its bind timestamp, and the binding file's mtime is the
 activity anchor: the gate and the recorder refresh it on EVERY tool call
-they see for the session. Because tool calls carry no agent identity, this
-is **session-activity** liveness, not per-agent liveness — any activity in
+they see for the session. Because the anchor is one mtime per session
+binding file, this is **session-activity** liveness, not per-agent liveness — any activity in
 the session (the parent's included) keeps every binding fresh, so a dead
 subagent's binding survives while the session is being used. A binding
 idle past `STALE_SUBAGENT_TTL_MS` (shared with the 60-minute SessionStart
@@ -95,11 +110,11 @@ additionally walks the import closure so the reducer can never re-acquire
   invariants over interleavings).
 
 Known residual limits, on purpose and documented:
-- The sole-active rule means parallel waves run without the live gate:
-  tool calls carry no agent identity, so with more than one subagent
-  active the gate and recorder stand down rather than cross-credit. The
-  per-epoch SubagentStop audit still applies to whatever the sole-active
-  windows recorded.
+- Parallel waves run without the live gate: `enforce-phase-tools` uses
+  only the sole-active rule, so with more than one subagent active it
+  stands down rather than gate one agent on another's evidence. The
+  recorder keeps recording per caller `agent_id`, so the per-epoch
+  SubagentStop audit still sees each parallel agent's own evidence.
 - Report freshness is *call-scoped*: the PreToolUse Bash hook stamps the
   start of every Bash call (`<session>.callstart.json`, keyed by the
   harness `tool_use_id`), and a disk artifact (explicit `--outputFile`
