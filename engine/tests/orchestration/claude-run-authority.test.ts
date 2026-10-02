@@ -14,7 +14,8 @@ import {
   type ClaudeRunContext,
 } from "../../src/orchestration/claude-run-authority";
 import { recordClaudeSpawnCorrelation } from "../../src/handlers/post-tool-use/record-orchestration-spawn";
-import captureOrchestrationResult from "../../src/handlers/subagent-stop/capture-orchestration-result";
+import captureOrchestrationResult, { establishClaudeStopRun } from "../../src/handlers/subagent-stop/capture-orchestration-result";
+import { projectSlug } from "../../src/utils/agent-transcript-path";
 
 /**
  * Claude Code run authority WITHOUT the LOOM_ORCHESTRATION_* environment: the
@@ -23,7 +24,7 @@ import captureOrchestrationResult from "../../src/handlers/subagent-stop/capture
  */
 
 const SESSION = "8a510c9a-c1fb-4b89-b61f-08ef6a007c78";
-const ENV_KEYS = [RUNS_ROOT_ENV, RUN_DIR_ENV, "LOOM_SUBAGENT_DIR"] as const;
+const ENV_KEYS = [RUNS_ROOT_ENV, RUN_DIR_ENV, "LOOM_SUBAGENT_DIR", "CLAUDE_CONFIG_DIR", "CLAUDE_PROJECT_DIR"] as const;
 const cleanup: string[] = [];
 let base: string;
 let bindingDirectory: string;
@@ -199,7 +200,7 @@ describe("Claude PostToolUse spawn correlation through the session run binding",
     const registered = await registerSessionRunBinding(bindingDirectory, SESSION, {
       runId: "run.pi-owned", runsRoot: run.runsRoot, runDirectory: run.runDirectory,
       requestIds: ["request:alpha:1"], resultDigest: null,
-    });
+    }, "pi");
     expect(registered.ok).toBe(true);
 
     const result = await recordClaudeSpawnCorrelation(
@@ -373,5 +374,71 @@ describe("resolveClaudeSpawnRun", () => {
   it("returns the explicit run without consulting bindings", () => {
     expect(resolveClaudeSpawnRun(context({ runsRoot: "/r", runDirectory: "/r/run.x", sessionId: undefined }), "request:alpha:1"))
       .toEqual({ ok: true, value: { runsRoot: "/r", runDirectory: "/r/run.x" } });
+  });
+});
+
+describe("establishClaudeStopRun foreground refusals", () => {
+  const prompt = "LOOM_REQUEST_ID: request:alpha:1\nReview.";
+
+  /**
+   * Point Claude's transcript/meta derivation at an empty hermetic config tree,
+   * so nothing the real harness wrote for this session can answer for the agent.
+   * Returns where the derived `agent-<id>.*` files for this session would live.
+   */
+  function hermeticClaudeConfig(): string {
+    const configDir = join(base, "claude-config");
+    const projectDir = join(base, "project");
+    mkdirSync(projectDir, { recursive: true });
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    process.env.CLAUDE_PROJECT_DIR = projectDir;
+    const subagents = join(configDir, "projects", projectSlug(projectDir), SESSION, "subagents");
+    mkdirSync(subagents, { recursive: true });
+    return subagents;
+  }
+
+  it("refuses a marked foreground stop whose transcript cannot be located, recording no correlator", async () => {
+    const run = await stagedRun("no-transcript", ["request:alpha:1"]);
+    await bind(run);
+    hermeticClaudeConfig();
+
+    const result = await establishClaudeStopRun({
+      session_id: SESSION,
+      agent_id: "agent-lost",
+      agent_type: "loom:code-reviewer",
+      agent_transcript_path: join(base, "missing.jsonl"),
+    }, context());
+
+    expect(result).toMatchObject({ ok: false, message: expect.stringContaining("no transcript can be located") });
+    expect(correlator(run, "agent-lost")).toBeNull();
+  });
+
+  it("refuses a marked foreground stop whose role resolves empty, recording no correlator", async () => {
+    const run = await stagedRun("no-role", ["request:alpha:1"]);
+    await bind(run);
+    hermeticClaudeConfig();
+
+    const result = await establishClaudeStopRun({
+      session_id: SESSION,
+      agent_id: "agent-roleless",
+      agent_transcript_path: handbackTranscript("roleless", prompt, "{}"),
+    }, context());
+
+    expect(result).toMatchObject({ ok: false, message: expect.stringContaining("has no agent role to correlate") });
+    expect(correlator(run, "agent-roleless")).toBeNull();
+  });
+
+  it("refuses a marked foreground stop whose role metadata is unreadable, recording no correlator", async () => {
+    const run = await stagedRun("bad-role", ["request:alpha:1"]);
+    await bind(run);
+    writeFileSync(join(hermeticClaudeConfig(), "agent-agent-badmeta.meta.json"), "{not json");
+
+    const result = await establishClaudeStopRun({
+      session_id: SESSION,
+      agent_id: "agent-badmeta",
+      agent_transcript_path: handbackTranscript("badmeta", prompt, "{}"),
+    }, context());
+
+    expect(result).toMatchObject({ ok: false, message: expect.stringContaining("cannot resolve the role of Claude agent agent-badmeta") });
+    expect(correlator(run, "agent-badmeta")).toBeNull();
   });
 });

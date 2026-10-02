@@ -190,7 +190,7 @@ describe("standalone registered protocol delivery and publication", () => {
     const initial = (await runCli(p.root, ["start", "standalone-review", "--runs-root", p.runsRoot, "--run", "run.current"], JSON.stringify({ kind: "all", files: p.scope, dryRun: false })));
     const handle = value(openRunDirectory(p.runsRoot, "run.current"));
     const session = fixtureSession(p.root);
-    const bindings = value(readSessionRunBindings(session.transport, session.sessionId));
+    const bindings = value(readSessionRunBindings(session.transport, session.sessionId, "pi"));
     expect(bindings).toHaveLength(1);
     expect(bindings[0]).toMatchObject({ runId: handle.runId, runsRoot: p.runsRoot, runDirectory: handle.runDirectory, resultDigest: null });
     expect(bindings[0]!.requestIds).toEqual(initial.requests!.map(({ authority }) => authority.requestId).sort());
@@ -225,7 +225,7 @@ describe("standalone registered protocol delivery and publication", () => {
     expect((await resume(p.root, handle)).kind).toBe("done");
     expect(value(await inspectStandaloneFacade(handle, registration)).kind).toBe("done");
     const resultBytes = readFileSync(join(handle.runDirectory, "result.json"));
-    const completedBinding = value(readSessionRunBindings(session.transport, session.sessionId))[0]!;
+    const completedBinding = value(readSessionRunBindings(session.transport, session.sessionId, "pi"))[0]!;
     expect(completedBinding.resultDigest).toBe(hash(resultBytes));
     expect(completedBinding.requestIds).toContain(retry.authority.requestId);
     const result = JSON.parse(resultBytes.toString());

@@ -208,7 +208,7 @@ describe("session run binding registry validation", () => {
     const { runsRoot, directory } = runDirectory("run.binding1");
     const parsed = parseSessionRunBindingRegistry(registry([{
       runId: "run.binding1", runsRoot, runDirectory: directory, requestIds: ["request:a"], resultDigest: null,
-    }]), SESSION);
+    }]), SESSION, "pi");
 
     expect(parsed.ok, parsed.ok ? "" : parsed.message).toBe(true);
   });
@@ -217,7 +217,7 @@ describe("session run binding registry validation", () => {
     const { runsRoot, directory } = runDirectory("run.binding2");
     const parsed = parseSessionRunBindingRegistry(registry([{
       runId: "run.binding2", runsRoot, runDirectory: directory, requestIds: ["request:a", "request:a"], resultDigest: null,
-    }]), SESSION);
+    }]), SESSION, "pi");
 
     expect(parsed.ok).toBe(false);
     if (parsed.ok) return;
@@ -229,7 +229,7 @@ describe("session run binding registry validation", () => {
     const binding = { runId: "run.binding3", runsRoot, runDirectory: directory, requestIds: ["request:a"], resultDigest: null };
     const parsed = parseSessionRunBindingRegistry(
       registry([binding, { ...binding, requestIds: ["request:b"] }]),
-      SESSION,
+      SESSION, "pi",
     );
 
     expect(parsed.ok).toBe(false);
@@ -241,7 +241,7 @@ describe("session run binding registry validation", () => {
     const { runsRoot, directory } = runDirectory("run.binding4");
     const parsed = parseSessionRunBindingRegistry(registry([{
       runId: "run.somethingelse", runsRoot, runDirectory: directory, requestIds: ["request:a"], resultDigest: null,
-    }]), SESSION);
+    }]), SESSION, "pi");
 
     expect(parsed.ok).toBe(false);
     if (parsed.ok) return;
@@ -252,7 +252,7 @@ describe("session run binding registry validation", () => {
     const { runsRoot, directory } = runDirectory("run.binding5");
     const parsed = parseSessionRunBindingRegistry(registry([{
       runId: "run.binding5", runsRoot, runDirectory: directory, requestIds: ["request:a"], resultDigest: null,
-    }]), "019fca39-f989-7510-8e62-50dadbcad4ff");
+    }]), "019fca39-f989-7510-8e62-50dadbcad4ff", "pi");
 
     expect(parsed.ok).toBe(false);
     if (parsed.ok) return;
@@ -263,7 +263,7 @@ describe("session run binding registry validation", () => {
     const { runsRoot, directory } = runDirectory("run.binding6");
     const parsed = parseSessionRunBindingRegistry(registry([{
       runId: "run.binding6", runsRoot, runDirectory: directory, requestIds: [], resultDigest: null,
-    }]), SESSION);
+    }]), SESSION, "pi");
 
     expect(parsed.ok).toBe(false);
     if (parsed.ok) return;
@@ -281,7 +281,7 @@ describe("session run binding registry validation", () => {
       runDirectory: directory,
       requestIds: ["request:a" as never],
       resultDigest: null,
-    });
+    }, "pi");
 
     expect(registered.ok, registered.ok ? "" : registered.message).toBe(true);
   });

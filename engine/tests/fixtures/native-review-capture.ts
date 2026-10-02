@@ -27,9 +27,9 @@ export async function captureNativeReview(
       const registration = await registerSessionRunBinding(session.transport, session.sessionId, {
         runId: handle.runId, runsRoot: handle.identity.runsRoot, runDirectory: handle.runDirectory,
         requestIds: [request.requestId], resultDigest: null,
-      });
+      }, "pi");
       if (!registration.ok) throw new Error(registration.message);
-      const bindings = readSessionRunBindings(session.transport, session.sessionId);
+      const bindings = readSessionRunBindings(session.transport, session.sessionId, "pi");
       if (!bindings.ok) throw new Error(bindings.message);
       const binding = bindings.value.find(({ runId, requestIds }) => runId === handle.runId && requestIds.includes(request.requestId));
       if (binding === undefined) throw new Error("production fixture session binding not published");
