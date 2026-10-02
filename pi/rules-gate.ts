@@ -13,8 +13,13 @@
  * exempt; everything else (tui, rpc, print, json with a session) is gated.
  *
  * Escape hatches (env): LOOM_GATE=off disables; LOOM_GATE_MODES=tui,rpc gates
- * only the listed modes (overrides the subagent exemption); LOOM_RULES_DIR
- * overrides the rules directory (default: `rules/` of this Loom package).
+ * only the listed modes (overrides the subagent exemption); LOOM_RULES_DIR /
+ * LOOM_SKILLS_DIR override the rules and skills directories (default: `rules/`
+ * and `skills/` of this Loom package — resolved by the shared `gateDirs`).
+ *
+ * Skills: Pi has no Skill tool, so a required skill is satisfied by a FULL read
+ * of its `SKILL.md` or by the user's `/skill:<name>` command (a `<skill>` block
+ * in a user message). The block text says so (`renderGateBlock(…, "pi")`).
  */
 
 import type { ExtensionAPI, ExtensionContext, SessionEntry, ToolCallEvent } from "@earendil-works/pi-coding-agent";
@@ -29,11 +34,8 @@ import {
   renderGateBlock,
   type TranscriptEvent,
 } from "../engine/src/core/rules-gate";
-import { filesystemPorts } from "../engine/src/handlers/pre-tool-use/rules-gate";
-import { LOOM_PACKAGE_ROOT } from "../engine/src/utils/loom-package-root";
+import { filesystemPorts, gateDirs } from "../engine/src/handlers/pre-tool-use/rules-gate";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
-
-const rulesDir = (): string => process.env["LOOM_RULES_DIR"] ?? join(LOOM_PACKAGE_ROOT, "rules");
 
 const gateOff = (): boolean => process.env["LOOM_GATE"] === "off" || process.env["LOOM_GATE"] === "0";
 
@@ -148,9 +150,10 @@ export function registerRulesGate(pi: ExtensionAPI): void {
       ctx.ui.notify("loom-rules-gate: DISABLED (LOOM_GATE=off)", "warning");
       return;
     }
-    const rulesOk = ALWAYS_REQUIRED_RULES.every((rule) => existsSync(join(rulesDir(), rule)));
+    const { rulesDir } = gateDirs();
+    const rulesOk = ALWAYS_REQUIRED_RULES.every((rule) => existsSync(join(rulesDir, rule)));
     if (rulesOk) ctx.ui.notify("loom-rules-gate active: rules/skills must be fully read and stated before code writes", "info");
-    else ctx.ui.notify(`loom-rules-gate WARNING: missing rules in ${rulesDir()}`, "warning");
+    else ctx.ui.notify(`loom-rules-gate WARNING: missing rules in ${rulesDir}`, "warning");
   });
 
   pi.on("tool_call", async (event, ctx) => {
@@ -162,12 +165,12 @@ export function registerRulesGate(pi: ExtensionAPI): void {
         target: call.target,
         events: piContextEvents(ctx.sessionManager.buildContextEntries()),
         pendingCallId: event.toolCallId,
-        rulesDir: rulesDir(),
+        dirs: gateDirs(),
       },
       filesystemPorts(ctx.cwd),
     );
     if (decision.kind === "allow") return;
-    return { block: true, reason: renderGateBlock(decision, call.action) };
+    return { block: true, reason: renderGateBlock(decision, call.action, "pi") };
   });
 }
 

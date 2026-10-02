@@ -733,7 +733,7 @@ One decision, two thin adapters. `engine/src/core/rules-gate.ts` (pure) holds th
 The gate blocks a code mutation until the Loom rules and skills are in the main agent's **current context**:
 
 1. `rules/architecture.md` and the language rule for the target extension (`typescript-patterns.md`, `java-patterns.md`, `rust-patterns.md`) were fully `Read` — a `limit` skim does not count, and a read in the same assistant message as the edit does not count.
-2. The `deepen` and `distill` skills were loaded with the `Skill` tool (or the user ran their slash command).
+2. The `deepen` and `distill` skills were loaded: with the `Skill` tool (Claude Code), by the user's skill command (`/loom:deepen` on Claude Code, `/skill:deepen` on Pi), or by a full read of the skill's own `skills/<name>/SKILL.md`. The SKILL.md read is the path a Pi agent takes — Pi has no Skill tool. The block text names the mechanisms of the harness that raised it.
 3. An existing target file was fully read, or written earlier in the session.
 4. An assistant text line `LOOM: applying <rule|skill> — <how>` names a required rule or skill.
 
@@ -746,6 +746,7 @@ Subagents are exempt — the orchestrator owns their compliance (Claude Code: `a
 | `LOOM_GATE=off` | Disable the gate |
 | `LOOM_GATE_MODES=tui,rpc` | Pi only: gate just these modes (overrides the subagent exemption) |
 | `LOOM_RULES_DIR=/path` | Rules directory (default: `rules/` of the owning Loom package) |
+| `LOOM_SKILLS_DIR=/path` | Skills directory whose `<name>/SKILL.md` satisfies a skill requirement (default: `skills/` of the owning Loom package) |
 
 The gate proves context and articulation, never genuine adherence; the substance of the `LOOM:` line is judged in review.
 

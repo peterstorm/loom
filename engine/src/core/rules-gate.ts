@@ -7,8 +7,10 @@
  * behind `GatePorts`; each harness adapter owns it.
  *
  * Four checks, in order:
- *  1. RULES/SKILLS IN CONTEXT — a completed `Read` of each required rule, and a
- *     completed `Skill` call (or a user slash command) for each required skill.
+ *  1. RULES/SKILLS IN CONTEXT — a completed `Read` of each required rule, and
+ *     for each required skill either a completed `Skill` call / user skill
+ *     command, OR a full read of the skill's own `SKILL.md`. The read path is
+ *     what makes the requirement satisfiable on Pi, which has no Skill tool.
  *     A read issued in the SAME assistant message as the gated call does not
  *     count: the model generated the code without having seen the file.
  *  2. FULL READS ONLY — a read with `limit` covers only [offset, offset+limit).
@@ -22,7 +24,8 @@
  * Evidence is whatever survives the LAST compaction boundary — after compaction
  * the rules are out of the model's context, so they must be read and stated again.
  *
- * The gate proves context and articulation, never genuine adherence.
+ * The gate proves context and articulation, never genuine adherence. The block
+ * text names the loading mechanism of the harness that asked (`GateHarness`).
  */
 
 import { extname, join } from "node:path";
@@ -156,51 +159,66 @@ export function collectEvidence(
 // Requirements
 // ---------------------------------------------------------------------------
 
-export type Requirement = Readonly<{
-  /** Canonical paths; ANY one fully-read path satisfies the requirement. */
-  paths: readonly string[];
-  /** A loaded skill of this name also satisfies the requirement. */
-  skillName?: string;
-  /** A prior successful write to the path also satisfies the requirement. */
-  writable?: boolean;
-  why: string;
-}>;
+/** Where the gate's required material lives: `<rulesDir>/<rule>` and `<skillsDir>/<skill>/SKILL.md`. */
+export type GateDirs = Readonly<{ rulesDir: string; skillsDir: string }>;
 
-export function requirementsFor(targetPath: string, rulesDir: string, ports: GatePorts): readonly Requirement[] {
+/**
+ * One thing that must be in context. Each kind names exactly the evidence that
+ * satisfies it — paths are canonical (`GatePorts.canonicalPath`).
+ */
+export type Requirement =
+  /** A rule file, read in full. */
+  | Readonly<{ kind: "rule"; path: string; why: string }>
+  /** A skill, loaded by the harness (Skill tool / skill command) or by a full
+   *  read of `skillFile` — `null` when the SKILL.md is not on disk. */
+  | Readonly<{ kind: "skill"; name: string; skillFile: string | null; why: string }>
+  /** The existing file being changed, read in full or written earlier this session. */
+  | Readonly<{ kind: "target"; path: string; why: string }>;
+
+export function requirementsFor(targetPath: string, dirs: GateDirs, ports: GatePorts): readonly Requirement[] {
   const ext = extname(targetPath).toLowerCase();
   if (!CODE_EXTENSIONS.has(ext)) return [];
 
+  const existing = (raw: string): string | null => {
+    const path = ports.canonicalPath(raw);
+    return ports.exists(path) ? path : null;
+  };
   const ruleRequirement = (rule: string, why: string): readonly Requirement[] => {
-    const path = ports.canonicalPath(join(rulesDir, rule));
-    return ports.exists(path) ? [{ paths: [path], why }] : [];
+    const path = existing(join(dirs.rulesDir, rule));
+    return path === null ? [] : [{ kind: "rule", path, why }];
   };
   const languageRule = EXTENSION_TO_RULE[ext];
-  const target = ports.canonicalPath(targetPath);
+  const target = existing(targetPath);
 
   return [
     ...ALWAYS_REQUIRED_RULES.flatMap((rule) => ruleRequirement(rule, `rule ${rule} — required for all code (CLAUDE.md)`)),
     ...(languageRule === undefined ? [] : ruleRequirement(languageRule, `rule ${languageRule} — language patterns for ${ext} files`)),
-    ...REQUIRED_SKILLS.map((skill): Requirement => ({
-      // Skills are plugin-provided: the Skill tool is the only way to load one,
-      // so the requirement names no file path.
-      paths: [],
-      skillName: skill,
-      why: `skill "${skill}" — CLAUDE.md: load Loom skills when implementing code (invoke it with the Skill tool)`,
+    ...REQUIRED_SKILLS.map((name): Requirement => ({
+      kind: "skill",
+      name,
+      skillFile: existing(join(dirs.skillsDir, name, "SKILL.md")),
+      why: `skill "${name}" — CLAUDE.md: load Loom skills when implementing code`,
     })),
-    ...(ports.exists(target)
-      ? [{
-          paths: [target],
-          writable: true,
+    ...(target === null
+      ? []
+      : [{
+          kind: "target",
+          path: target,
           why: "target file in context — the file being edited must have been read in full (or written earlier this session) before it is changed",
-        } satisfies Requirement]
-      : []),
+        } satisfies Requirement]),
   ];
 }
 
-const isSatisfied = (r: Requirement, evidence: Evidence): boolean =>
-  (r.writable === true && r.paths.some((p) => evidence.writtenPaths.has(p))) ||
-  r.paths.some((p) => evidence.fullyReadPaths.has(p)) ||
-  (r.skillName !== undefined && evidence.loadedSkills.has(r.skillName));
+const isSatisfied = (r: Requirement, evidence: Evidence): boolean => {
+  switch (r.kind) {
+    case "rule":
+      return evidence.fullyReadPaths.has(r.path);
+    case "skill":
+      return evidence.loadedSkills.has(r.name) || (r.skillFile !== null && evidence.fullyReadPaths.has(r.skillFile));
+    case "target":
+      return evidence.writtenPaths.has(r.path) || evidence.fullyReadPaths.has(r.path);
+  }
+};
 
 // ---------------------------------------------------------------------------
 // Decision
@@ -218,7 +236,7 @@ export type GateQuery = Readonly<{
   events: readonly TranscriptEvent[];
   /** `tool_use_id` of the gated call, to exclude evidence from its own message. */
   pendingCallId: string | undefined;
-  rulesDir: string;
+  dirs: GateDirs;
 }>;
 
 /** The assistant message that carries tool call `callId`, if it is in the transcript yet. */
@@ -230,7 +248,7 @@ const messageIdOfCall = (events: readonly TranscriptEvent[], callId: string | un
   events.filter(isToolCall).find((e) => e.callId === callId)?.messageId;
 
 export function decideRulesGate(query: GateQuery, ports: GatePorts): GateDecision {
-  const requirements = requirementsFor(query.target, query.rulesDir, ports);
+  const requirements = requirementsFor(query.target, query.dirs, ports);
   if (requirements.length === 0) return { kind: "allow" };
 
   const evidence = collectEvidence(query.events, ports, messageIdOfCall(query.events, query.pendingCallId));
@@ -243,14 +261,47 @@ export function decideRulesGate(query: GateQuery, ports: GatePorts): GateDecisio
 // Rendering
 // ---------------------------------------------------------------------------
 
-const requirementLine = (r: Requirement, index: number): string =>
-  `  ${index + 1}. ${r.paths[0] ?? `skill:${r.skillName ?? "?"}`}   (${r.why})`;
+/** The harness asking: decides which loading mechanism the block text names. */
+export type GateHarness = "claude-code" | "pi";
 
-export function renderGateBlock(decision: Exclude<GateDecision, { kind: "allow" }>, action: string): string {
+type HarnessVocabulary = Readonly<{
+  /** How rules (and SKILL.md files) are loaded. */
+  readTool: string;
+  /** The ways this harness loads a skill, given its SKILL.md path when on disk. */
+  loadSkill: (name: string, skillFile: string | null) => string;
+}>;
+
+const VOCABULARY: Readonly<Record<GateHarness, HarnessVocabulary>> = {
+  "claude-code": {
+    readTool: "the Read tool",
+    loadSkill: (name, skillFile) =>
+      `invoke the Skill tool with "${name}"${skillFile === null ? "" : `, or Read ${skillFile} in full`}`,
+  },
+  pi: {
+    // Pi has no Skill tool: the agent reads SKILL.md itself; only the user can run `/skill:<name>`.
+    readTool: "the read tool",
+    loadSkill: (name, skillFile) =>
+      skillFile === null
+        ? `ask the user to run /skill:${name}`
+        : `read ${skillFile} in full (or ask the user to run /skill:${name})`,
+  },
+};
+
+const requirementLine = (vocabulary: HarnessVocabulary) => (r: Requirement, index: number): string => {
+  const subject = r.kind === "skill" ? `skill:${r.name} — ${vocabulary.loadSkill(r.name, r.skillFile)}` : r.path;
+  return `  ${index + 1}. ${subject}   (${r.why})`;
+};
+
+export function renderGateBlock(
+  decision: Exclude<GateDecision, { kind: "allow" }>,
+  action: string,
+  harness: GateHarness,
+): string {
+  const vocabulary = VOCABULARY[harness];
   return decision.kind === "missing-context"
     ? `BLOCKED by loom-rules-gate: you are about to ${action}, but the required Loom rules/skills are not in your current context.\n` +
-        `Load each of these (rules with the Read tool, skills with the Skill tool), THEN retry the same operation:\n` +
-        decision.missing.map(requirementLine).join("\n") +
+        `Load each of these (rules with ${vocabulary.readTool}; skills as listed), THEN retry the same operation:\n` +
+        decision.missing.map(requirementLine(vocabulary)).join("\n") +
         `\nNotes: loads must have completed before this operation (one in the same message does not count). ` +
         `Partial reads (with a \`limit\`) do NOT count — the file must be covered in full; ` +
         `use \`offset\` reads for files longer than ${READ_TOOL_MAX_LINES} lines. ` +
