@@ -20,7 +20,9 @@ describe("real reporter bytes at the parser seam", () => {
     try {
       const file = join(directory, "reporter.test.mjs");
       writeFileSync(file, `import { test, describe } from 'node:test';\n${body}\n`);
-      const child = spawnSync(process.execPath, ["--test", "--test-reporter=junit", file], { cwd: directory, timeout: 10000 });
+      // The per-test timeout makes the never-settling case cancel deterministically:
+      // Node 24.14 waits on the pending promise instead of cancelling at loop drain.
+      const child = spawnSync(process.execPath, ["--test", "--test-timeout=2000", "--test-reporter=junit", file], { cwd: directory, timeout: 10000 });
       expect(child.error).toBeUndefined();
       expect(child.signal).toBeNull();
       expect(child.status).toBe(exit);
