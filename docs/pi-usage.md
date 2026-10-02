@@ -13,7 +13,8 @@ Supported through the shared engine:
 - registered standalone review, Refutation Panel, Wave Gate, and remediation programs;
 - exact model/Skill request policy;
 - immutable Run Directories and exact-byte Agent-result capture;
-- scoped phase/panel artifact writes and Task-bound implementation writes.
+- scoped phase/panel artifact writes and Task-bound implementation writes;
+- emission-enabled producer payloads on the qualified route: exact frozen-schema tool registration, the launcher's request-bound readiness barrier, and deterministic emission/extraction source selection (see [Emission-enabled child startup](#emission-enabled-child-startup)).
 
 Interactive phase parity:
 
@@ -160,9 +161,36 @@ Pi’s subagent tool accepts at most eight items per call. Large engine-issued b
 
 Only an issued, explicitly qualified Pi provider/model route can select the frozen emission-tool schema. Loom's parent admission independently checks that issuance and its exact descriptor, then probes the installed `subagent` launch port. A missing port **blocks an emission-enabled spawn before dispatch**; it never turns a tool-primary request into an ordinary JSON-mode child. Genuinely extraction-only and other non-emission requests retain the normal launcher path.
 
-For each admitted emission item, the parent passes a one-use launch capability to the shared launcher keyed by session, tool call and item slot. The v2 synchronous event port returns a closed, one-shot reply through a callback; neither the capability probe nor the launch request is a mutable reply envelope. An older v1 listener cannot silently claim v2 readiness; ordinary JSON subagents keep their existing launch path. The launcher sets `LOOM_EMISSION_BINDING` only in that child's environment, starts Pi in RPC mode **without a Task prompt**, discovers and invokes `/loom-emission-readiness`, checks the child's request/context/schema/tool/revision and actual active set, binds and checks the issued provider/model *after* readiness, and delivers the Task only on the open decision. Missing or malformed readiness, route mismatch, timeout, and cancellation terminate that child without delivering its Task. When the launcher attests an exact pre-Task-prompt startup refusal, the parent verifies its session, tool-call, slot, issued request, and empty child transcript before preserving the **same** issued request for another launch; absent, malformed, or post-prompt results do not earn that retry exemption. Parallel items never share an ambient binding; retry spawns traverse the same barrier. The pure readiness parser/decision lives in `pi/emission-tool.ts`, and the transport adapter lives in the separately installed Pi `subagent` extension.
+For each admitted emission item, the parent passes a one-use launch capability to the shared launcher keyed by session, tool call and item slot. The v2 synchronous event port returns a closed, one-shot reply through a callback; neither the capability probe nor the launch request is a mutable reply envelope. An older v1 listener cannot silently claim v2 readiness; ordinary JSON subagents keep their existing launch path. The launcher sets `LOOM_EMISSION_BINDING` only in that child's environment, starts Pi in RPC mode **without a Task prompt**, discovers and invokes `/loom-emission-readiness`, checks the child's request/context/schema/tool/revision and actual active set, binds and checks the issued provider/model *after* readiness, and delivers the Task only on the open decision. Missing or malformed readiness, route mismatch, timeout, and cancellation terminate that child without delivering its Task — and without any model request ever being sent to that child. When the launcher attests an exact pre-Task-prompt startup refusal, the parent verifies its session, tool-call, slot, issued request, and empty child transcript before preserving the **same** issued request for another launch; absent, malformed, or post-prompt results do not earn that retry exemption. Parallel items never share an ambient binding; retry spawns traverse the same barrier. The pure readiness parser/decision lives in `pi/emission-tool.ts`, and the transport adapter lives in the separately installed Pi `subagent` extension.
 
 On this workstation the managed source is `~/.dotfiles/pi/extensions/subagent/`; `~/.pi/agent/extensions/subagent/` is the installed link. Restart Pi or reload its extensions after updating that launcher, and confirm the active `PI_CODING_AGENT_DIR` contains it. Do not provision `LOOM_EMISSION_BINDING` in the parent shell or add a descriptor to task text by hand: neither is issued request authority.
+
+### Emission activation, readiness errors and retry budget
+
+Emission activates only when all of the following hold: the issued request names a producer kind the Agent Catalog authorizes for that Agent, the request's Pi binding is the exact qualified route (`desktop-vllm/glm-5.3-flash-spark-tp2-v14`), the shared `subagent` launcher exposes the `loom:subagent-launch:v2` port under the same `PI_CODING_AGENT_DIR` as the parent, and the child passes its readiness barrier. Provider capability flags are operator configuration on the provider side; Loom contributes documentation only and never configures a provider.
+
+A readiness refusal names its actual cause, and the remediation follows the cause:
+
+| Refusal | Actual cause | Remediation |
+|---|---|---|
+| `readiness-command-absent` | the child did not register the readiness command | `/reload` the loom extension |
+| `malformed-readiness` | the readiness payload does not match the bound readiness contract | `/reload` the extension |
+| `unexpected-version` | the child carries a schema version other than the issued one | `/reload` so the child carries the issued frozen schema version |
+| `schema-digest-mismatch` | the child registered schema bytes other than the issued frozen bytes | `/reload` so the child registers the issued frozen schema bytes |
+| `revision-mismatch` | the child loads a different Loom revision | `/reload` so the child loads the issued revision |
+| `unexpected-kind` | the child is provisioned for another producer kind | verify the issued producer kind against the child's spawn configuration |
+| `tool-name-mismatch` | the child registered a tool name other than the issued emission tool | verify the child extension registers the exact issued tool name |
+| `tool-inactive` | the emission tool is missing from the child spawn's `--tools` allowlist | include the tool in the spawn allowlist |
+| `wrong-request` | the observed child holds another request's readiness | spawn a fresh child provisioned for this request |
+| `child-unreachable` | the pi runtime or extension wiring cannot reach the child | verify the pi runtime and extension wiring, then respawn |
+| `startup-unavailable` | child provisioning or extension startup refused | correct the provisioning or startup refusal, then respawn |
+| `readiness-timeout` | the child did not report readiness within the bounded window | inspect the child extension startup, then respawn within the bounded readiness window |
+| `route-bind-refused` | the provider/model the gate must bind before prompting is misconfigured | verify the provider/model configuration |
+| `cancelled` | startup was cancelled | none — the child was released without prompting |
+
+`/reload` is the remediation for **stale Loom resources** — an outdated extension, revision or schema registration. It is not a universal cure: a provider that rejects or ignores the frozen tool schema, a missing or un-upgraded launcher port, or an unqualified route are configuration problems that only requalification or launcher installation fix. No amount of reloading turns an extraction-only route into an emission route.
+
+Emission and extraction rejection share the engine's one existing request-slot attempt budget: a semantic rejection at attempt 1 permits one fresh attempt-2 spawn, and attempt-2 failure is terminal. There is no same-spawn correction protocol — agents are instructed to call the emission tool once and, after one argument refusal, to finish with the documented final-message fallback instead of re-emitting. Pi's own in-child validation-retry loop (it re-prompts the model after a tool-argument validation failure, ~2 extra requests) sits outside that accounting; calibration counts it in the emission arm's latency budget. One observability limit is recorded honestly: the harness exposes parsed tool arguments, not the original generated JSON bytes, so duplicate-key behavior is never reported as measured.
 
 ## Harness behavior
 
@@ -232,6 +260,14 @@ Read the diagnostic:
 - state/evidence paths remain guarded regardless of grant.
 
 Never broaden the grant manually.
+
+### An emission-enabled spawn is refused before dispatch
+
+The shared `subagent` launcher under the active `PI_CODING_AGENT_DIR` is missing its `loom:subagent-launch:v2` port, or the installed copy predates it. Install or update the separately owned launcher (`~/.dotfiles/pi/extensions/subagent/` on this workstation), restart Pi or reload its extensions, and confirm `~/.pi/agent/extensions/subagent/` carries it. Loom never silently degrades an emission-enabled request to an ordinary JSON-mode child, and provisioning `LOOM_EMISSION_BINDING` by hand or adding a descriptor to task text is not a fix — neither is issued request authority.
+
+### A child fails the emission readiness barrier
+
+Read the refusal code in the spawn diagnostic and follow the remediation table in [Emission activation, readiness errors and retry budget](#emission-activation-readiness-errors-and-retry-budget). Stale-Loom causes (`readiness-command-absent`, `malformed-readiness`, `unexpected-version`, `schema-digest-mismatch`, `revision-mismatch`) resolve with `/reload`; everything else is a spawn-configuration, launcher or provider problem that reloading will not fix. A provider schema rejection is a route-qualification problem, never a stale-resource problem.
 
 ### Interactive phase Agent is refused by `subagent`
 

@@ -48,6 +48,22 @@ _Avoid_: Spawn gate (that is the Hook applying the decision), spawn validation
 The Pi-only parent-relayed RPC child transport for one interactive phase Agent. It preserves the same child process and Agent turn while translating child `extension_ui_request` frames into parent-TUI dialogs and returning exactly correlated `extension_ui_response` frames. It resolves the same exact effective provider/model/thinking binding as the normal subagent transport and records that binding in its result. Headless Agents remain on the normal subagent transport.
 _Avoid_: Question-file fallback, parent interview, interactive subagent (that is the tool surface, not the transport contract)
 
+**Emission Tool**:
+The exact frozen-schema producer tool one emission-enabled child request advertises — one registered name per producer kind (`loom_emit_reviewer_payload`, `loom_emit_judge_verdict`, `loom_emit_refutation_verdict`; the issued binding selects the reviewer schema version, v2 or v3), with parameters byte-identical to the frozen payload schema for that kind/version. The child registers and executes it; the engine parser stays validity-authoritative and the model does not select the tool, kind or version.
+_Avoid_: output schema, structured output (generic), second schema (there is exactly one frozen schema)
+
+**Emission Source**:
+The engine-side provenance recorded for every ingested payload: `emission-tool` arguments or final-message `extraction`. Selection is one deterministic decision bound to the issued request attempt over a closed emission-observation vocabulary — absent, exactly one complete call, multiple distinct calls, or an unusable observation with a reason — where wrong-request, wrong-kind/version, incomplete and otherwise unusable observations refuse as typed rejections rather than becoming absence, and an exact transport replay of one call is idempotent. Acceptance binds the source durably to the accepted evidence. Genuinely pre-feature accepted events were extraction; a malformed present-day source field is not historical absence.
+_Avoid_: payload origin, delivery path
+
+**Qualified Emission Route**:
+The exact provider/served-model/schema-digest triple whose recorded qualification accepts the frozen emission schemas — the sole authority for enabling emission on an issued request. Provider capability flags remain operator configuration; a flag, a provider name, or a successful local schema round-trip is not qualification. Requalification is triggered by a served-model switch, a schema digest change, or a pi upgrade changing tool serialization or resolver behavior.
+_Avoid_: capable provider, strict-sampling support (unproven), auto-detected capability
+
+**Readiness Barrier**:
+The bounded, request-bound pre-model gate at the Pi launcher: the child must prove its actual registered, active tool matches the issued request, producer kind, version and schema digest before any model request is delivered. Missing, stale, contradictory or wrong-request readiness fails closed, and the remediation names the actual cause. Parent admission and the runtime revision handshake alone are not readiness proof.
+_Avoid_: startup notification, readiness flag, parent hash check
+
 **Wire Contract**:
 The exact machine-readable output shape a review Agent must emit. Fresh independent standalone/Wave issuance uses Reviewer Protocol v2: one JSON payload with engine-derived counts and IDs. Only explicit standalone successor schema-3 input selects the separate v3 envelope; its new Finding drafts retain v2 evidence. The executable schema/rubric generate the shared fragment and seven stamped shims; never hand-edit those copies. Completed and unfinished issued v1 contracts retain their original markers/block/lifecycle parsing. [ADR-0009](docs/adr/ADR-0009-versioned-reviewer-protocol.md) records the boundary. P4 merged as `96153ed` on 2026-09-10; publication and loaded-runtime cutover were verified. P5 successor contracts are implemented and the registered review and remediation are complete ([ADR-0010](docs/adr/ADR-0010-standalone-finding-lineage.md)); they do not rewrite issued v1/v2 evidence. Publication and the /reload cutover happen after merge.
 _Avoid_: Output format, response template, Machine Summary (that is one historical v1 section, not the current contract)
