@@ -234,13 +234,25 @@ describe("Claude orchestration spawn correlation", () => {
     expect(result.message).toContain("both run-root and run-directory authority");
   });
 
-  it("passes through entirely when NO run authority is present", async () => {
+  it("passes through an unmarked call when NO run authority is present", async () => {
+    delete process.env[RUNS_ROOT_ENV];
+    delete process.env[RUN_DIR_ENV];
+
+    const result = await recordOrchestrationSpawn(spawn("Just do the thing."), []);
+
+    expect(result.kind).toBe("passthrough");
+  });
+
+  it("refuses a marked call when neither explicit authority nor a session binding can vouch for it", async () => {
+    // Without the environment, a LOOM_REQUEST_ID marker is resolved through the
+    // Claude Code session run binding; a payload naming no session can have
+    // none, and a marker is a claim of engine authority that must not be dropped.
     delete process.env[RUNS_ROOT_ENV];
     delete process.env[RUN_DIR_ENV];
 
     const result = await recordOrchestrationSpawn(spawn("LOOM_REQUEST_ID: request:a\nGo."), []);
 
-    expect(result.kind).toBe("passthrough");
+    expect(result).toMatchObject({ kind: "error", message: expect.stringContaining("no session_id") });
   });
 });
 

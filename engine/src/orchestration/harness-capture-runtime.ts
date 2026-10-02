@@ -41,15 +41,19 @@ import { verifyStandalonePanelView } from "./standalone-panel-context";
 import { openRegisteredRunDirectory, type RunDirHandle } from "./run-directory-handle";
 
 /**
- * Where a run directory is announced.
+ * Where a run directory is announced explicitly.
  *
- * Operator/harness-supplied only: NO production code writes either variable.
- * Pi's spawn side publishes a durable session run binding instead
- * (`registerSessionRunBinding`, read back by `pi/extension`), and that binding —
- * not the environment — is what carries capture authority across a process
- * boundary today. These two names are the fallback for a supervisor or a test
- * driving a harness with no binding registry; absent means "this agent is not
- * part of an orchestration run", which is the common case and NOT an error.
+ * Operator/supervisor-supplied only: NO production code writes either variable.
+ * On both harnesses the façade publishes a durable SESSION RUN BINDING instead
+ * (`registerSessionRunBinding`, keyed by `PI_SESSION_ID` on Pi and by
+ * `CLAUDE_CODE_SESSION_ID` on Claude Code), and that binding — not the
+ * environment — is what carries capture authority across a process boundary:
+ * `pi/extension` reads it back for Pi, `claude-run-authority` for Claude's
+ * PostToolUse and SubagentStop hooks. When either variable is set it takes
+ * precedence over the binding and half of it is a fault; a supervisor or a test
+ * may use them to pin a harness to one run. Absent, with no binding claiming the
+ * agent, means "this agent is not part of an orchestration run", which is the
+ * common case and NOT an error.
  */
 export const RUNS_ROOT_ENV = "LOOM_ORCHESTRATION_RUNS_ROOT";
 export const RUN_DIR_ENV = "LOOM_ORCHESTRATION_RUN_DIR";
