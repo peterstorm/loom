@@ -307,14 +307,59 @@ function collapseSingleCharClass(text: string): string {
   return text.replace(/\[([^!^/\]])\]/g, "$1");
 }
 
+/**
+ * The matching view's model of a substitution's statically-unknowable OUTPUT
+ * (placeholderFor, wildcardSubstitutions). It is deliberately NOT the glob `*`:
+ * an unquoted `*` written by the agent obeys bash's leading-dot rule, but
+ * `$(printf .lo)om` really can produce `.loom`, so this wildcard must keep
+ * matching a leading `.`. A character outside every shell syntax class, so —
+ * like the literal placeholder parts — it can never form a redirect,
+ * separator, quote, or expansion. Rendered as `∗` (U+2217) in block messages.
+ */
+const OPAQUE_OUTPUT = "\u2217";
+
+/** A character that makes a token a glob for the guarded-dir intersection. */
+const GLOB_CHAR = new RegExp(`[*?[${OPAQUE_OUTPUT}]`);
+
+/**
+ * May a wildcard (`*`, `?`, `[…]`) match a path segment's LEADING `.`? Bash's
+ * default (no `dotglob`) — and zsh's (no `GLOB_DOTS`) — is no: the dot must be
+ * written explicitly (`.l*`, `.loo?`, `.[l]oom`, `.*`). A command line that so
+ * much as names a switch able to flip that (`shopt -s dotglob`, `GLOBIGNORE=`,
+ * `BASHOPTS=…`, zsh `setopt globdots`) is judged with wildcards matching dots
+ * — fail closed: the guard cannot tell which segment the switch precedes.
+ */
+type LeadingDotPolicy = "explicit-only" | "wildcards-match";
+
+const DOT_GLOB_ENABLERS = /dotglob|glob_?dots|GLOBIGNORE|BASHOPTS/i;
+
+const leadingDotPolicyOf = (command: string): LeadingDotPolicy =>
+  DOT_GLOB_ENABLERS.test(command) ? "wildcards-match" : "explicit-only";
+
+/** Under the default policy, can this glob segment's first character match a
+ *  literal leading `.`? Only an explicit `.`, a substitution's opaque output,
+ *  or a non-negated bracket expression listing `.` (POSIX leaves that case
+ *  unspecified — fail closed). `*`, `?`, ranges, and negated classes cannot. */
+function leadingDotReachable(glob: string): boolean {
+  const first = glob[0];
+  if (first === "." || first === OPAQUE_OUTPUT) return true;
+  if (first !== "[") return false;
+  const close = glob.indexOf("]", 1);
+  if (close === -1) return false; // a lone `[` is the literal `[`, never `.`
+  const body = glob.slice(1, close);
+  return !body.startsWith("!") && !body.startsWith("^") && body.includes(".");
+}
+
 /** fnmatch one path segment: does the glob segment (bash `*`/`?`/`[…]`, none
- *  crossing `/`) match the literal segment exactly? A malformed class fails
- *  closed (matches). */
-function segmentGlobMatches(glob: string, literal: string): boolean {
+ *  crossing `/`, plus the substitution wildcard OPAQUE_OUTPUT) match the
+ *  literal segment exactly? Bash's leading-dot rule applies unless `policy`
+ *  says a dotglob switch may be on. A malformed class fails closed (matches). */
+function segmentGlobMatches(glob: string, literal: string, policy: LeadingDotPolicy): boolean {
+  if (policy === "explicit-only" && literal.startsWith(".") && !leadingDotReachable(glob)) return false;
   let re = "^";
   for (let i = 0; i < glob.length; i++) {
     const c = glob[i];
-    if (c === "*") re += "[^/]*";
+    if (c === "*" || c === OPAQUE_OUTPUT) re += "[^/]*";
     else if (c === "?") re += "[^/]";
     else if (c === "[") {
       const close = glob.indexOf("]", i + 1);
@@ -334,12 +379,18 @@ function segmentGlobMatches(glob: string, literal: string): boolean {
  *  path that reaches AT or INTO one of the given guarded dirs? True when the
  *  dir's segments are a leading fnmatch of the token's, so a globbed state-dir
  *  prefix or a `rm /tmp/<star>` both enter scope even though no literal
- *  survives collapse. */
-function tokenGlobHitsGuardedDir(token: string, dirs: readonly (readonly string[])[]): boolean {
-  if (!/[*?[]/.test(token)) return false;
-  const tok = token.split("/").filter((s) => s !== "");
+ *  survives collapse. `.` segments are dropped first — `./.l*` names exactly
+ *  what `.l*` names, so a leading `./` cannot shift the alignment past the
+ *  guarded dir. */
+function tokenGlobHitsGuardedDir(
+  token: string,
+  dirs: readonly (readonly string[])[],
+  policy: LeadingDotPolicy,
+): boolean {
+  if (!GLOB_CHAR.test(token)) return false;
+  const tok = token.split("/").filter((s) => s !== "" && s !== ".");
   return dirs.some(
-    (dir) => tok.length >= dir.length && dir.every((seg, k) => segmentGlobMatches(tok[k], seg)),
+    (dir) => tok.length >= dir.length && dir.every((seg, k) => segmentGlobMatches(tok[k], seg, policy)),
   );
 }
 
@@ -439,7 +490,8 @@ export function blankSubstitutions(text: string): string {
 
 /**
  * A matching view where command/process substitutions and backticks are
- * replaced by a glob WILDCARD (`*`) — modeling the THIRD output channel the
+ * replaced by the substitution WILDCARD (OPAQUE_OUTPUT, matched like `*` but
+ * exempt from the leading-dot rule) — modeling the THIRD output channel the
  * empty and literal views miss: a substitution whose runtime output is a
  * NONEMPTY fragment that COMPLETES a guarded literal when concatenated with the
  * literal text around it. `rm -rf .claude/stat$(printf e)` reassembles to
@@ -461,7 +513,7 @@ export function blankSubstitutions(text: string): string {
  * the default/alternate word for collapseVariants to reveal (`${x:-*}` → `*`).
  */
 function wildcardSubstitutions(text: string): string {
-  return scanSubstitutions(text, () => "*").rebuilt;
+  return scanSubstitutions(text, () => OPAQUE_OUTPUT).rebuilt;
 }
 
 /**
@@ -482,6 +534,7 @@ function referencesPattern(
   text: string,
   pattern: () => RegExp,
   dirs: () => readonly (readonly string[])[],
+  policy: LeadingDotPolicy,
 ): boolean {
   const exemplars = dirs();
   const blanked = blankSubstitutions(text);
@@ -506,17 +559,28 @@ function referencesPattern(
       const view = collapseSingleCharClass(raw).replace(/\/{2,}/g, "/");
       if (pattern().test(view)) return true;
       for (const token of view.split(/\s+/)) {
-        if (tokenGlobHitsGuardedDir(token, exemplars)) return true;
+        if (tokenGlobHitsGuardedDir(token, exemplars, policy)) return true;
       }
     }
   }
   return false;
 }
 
-const referencesGuardedState = (text: string): boolean =>
-  referencesPattern(text, stateFilePatterns, guardedDirSegments);
-const referencesProtectedDir = (text: string): boolean =>
-  referencesPattern(text, protectedDirPatterns, protectedDirSegments);
+/** The two scope predicates of ONE decision, fixed to the whole command
+ *  line's leading-dot policy — a segment judged alone must not lose a
+ *  `shopt -s dotglob` that an earlier segment of the same line ran. */
+interface GuardScope {
+  readonly guardedState: (text: string) => boolean;
+  readonly protectedDir: (text: string) => boolean;
+}
+
+const scopeFor = (policy: LeadingDotPolicy): GuardScope => ({
+  guardedState: (text) => referencesPattern(text, stateFilePatterns, guardedDirSegments, policy),
+  protectedDir: (text) => referencesPattern(text, protectedDirPatterns, protectedDirSegments, policy),
+});
+
+/** Fail-closed scope for callers that judge a fragment without its line. */
+const FAIL_CLOSED_SCOPE = scopeFor("wildcards-match");
 
 /**
  * Is the segment's head token a command that cannot write a file? Exact-token
@@ -606,28 +670,30 @@ interface FlattenedCommand {
  *  state (`sed -i … $(printf 'active_task_graph').json` must not launder the
  *  token away). The body is classified on its quote-collapsed view so quote
  *  splitting inside a substitution cannot launder the class either. A body
- *  with NO guarded token flattens to the glob WILDCARD `*` — the fail-closed
- *  model of a substitution's statically-unknowable output. This subsumes BOTH
- *  output channels the flattened text must reflect: an EMPTY output (`$(:)` →
- *  "") where a guarded literal fragmented across the substitution rejoins bash-
- *  side (`.claude/stat$(:)e` → `.claude/state`, matched here as the glob
- *  `.claude/stat*e` fnmatches the `.claude/state` dir), AND a NONEMPTY output
- *  that COMPLETES a guarded literal (`.claude/stat$(printf e)` → `.claude/state`,
- *  the round-26 fail-open — an empty placeholder yielded `.claude/stat`, which
- *  the chain-scope check then skipped as out-of-scope). `*` is special to the
- *  matching layer (segmentGlobMatches / tokenGlobHitsGuardedDir expand it), so
- *  unlike a LITERAL filler — the round-20 concealment, which re-split the
- *  literal and hid the rejoin — it can never itself break a guarded match; it
- *  can only surface more references. The load-bearing property of the
- *  non-empty placeholder texts is that they cannot form a redirect or
- *  separator: `*` and the literal parts contain only [A-Za-z_/*], and the
- *  `${SUBAGENT_DIR}` prefix is redirect/separator-free as shipped
+ *  with NO guarded token flattens to the substitution WILDCARD OPAQUE_OUTPUT —
+ *  the fail-closed model of a substitution's statically-unknowable output
+ *  (matched like `*`, except that it may produce a leading `.`). This subsumes
+ *  BOTH output channels the flattened text must reflect: an EMPTY output
+ *  (`$(:)` → "") where a guarded literal fragmented across the substitution
+ *  rejoins bash-side (`.claude/stat$(:)e` → `.claude/state`, matched here as
+ *  the wildcard form of `.claude/stat*e` fnmatching the `.claude/state` dir),
+ *  AND a NONEMPTY output that COMPLETES a guarded literal
+ *  (`.claude/stat$(printf e)` → `.claude/state`, the round-26 fail-open — an
+ *  empty placeholder yielded `.claude/stat`, which the chain-scope check then
+ *  skipped as out-of-scope). The wildcard is special to the matching layer
+ *  (segmentGlobMatches / tokenGlobHitsGuardedDir expand it), so unlike a
+ *  LITERAL filler — the round-20 concealment, which re-split the literal and
+ *  hid the rejoin — it can never itself break a guarded match; it can only
+ *  surface more references. The load-bearing property of the non-empty
+ *  placeholder texts is that they cannot form a redirect or separator:
+ *  OPAQUE_OUTPUT and the literal parts contain only [A-Za-z_/] plus U+2217,
+ *  and the `${SUBAGENT_DIR}` prefix is redirect/separator-free as shipped
  *  (`/tmp/claude-subagents`) — this is contingent on an operator-set
  *  LOOM_SUBAGENT_DIR staying free of shell-special characters. */
-function placeholderFor(body: string): string {
-  if (referencesProtectedDir(body)) return `${SUBAGENT_DIR}/__subst__`;
-  if (referencesGuardedState(body)) return "active_task_graph__subst__";
-  return "*";
+function placeholderFor(body: string, scope: GuardScope): string {
+  if (scope.protectedDir(body)) return `${SUBAGENT_DIR}/__subst__`;
+  if (scope.guardedState(body)) return "active_task_graph__subst__";
+  return OPAQUE_OUTPUT;
 }
 
 /**
@@ -638,10 +704,14 @@ function placeholderFor(body: string): string {
  * literal, and `$(…)`/backticks stay live in double quotes while `<(…)`/`>(…)`
  * do not. Returns null when an opener has no closer — unbalanced substitution
  * syntax on a guarded line is judged unparseable, and unparseable fails closed
- * at the caller.
+ * at the caller. `scope` classifies each body for its placeholder; it
+ * defaults to the fail-closed scope for callers judging text out of context.
  */
-export function flattenSubstitutions(command: string): FlattenedCommand | null {
-  const scan = scanSubstitutions(command, placeholderFor);
+export function flattenSubstitutions(
+  command: string,
+  scope: GuardScope = FAIL_CLOSED_SCOPE,
+): FlattenedCommand | null {
+  const scan = scanSubstitutions(command, (body) => placeholderFor(body, scope));
   if (scan.unclosed) return null;
   return { bodies: scan.bodies, flattened: scan.rebuilt };
 }
@@ -1756,10 +1826,10 @@ function scanHeredocBodySubstitutions(body: string): {
  * task-graph-exists check.
  */
 export function guardStateFileDecision(command: string): HookResult {
-  return decide(command, 0);
+  return decide(command, 0, scopeFor(leadingDotPolicyOf(command)));
 }
 
-function decide(command: string, depth: number): HookResult {
+function decide(command: string, depth: number, scope: GuardScope): HookResult {
   if (!command) return { kind: "allow" };
 
   // Heredoc bodies are data, not command text: strip them BEFORE the front
@@ -1768,7 +1838,7 @@ function decide(command: string, depth: number): HookResult {
   // command whose only writes are unguarded. Live parts of unquoted bodies
   // come back through `bodies` below.
   const hd = splitHeredocs(command);
-  if (hd.unparseable && referencesGuardedState(hd.stripped)) return BLOCK;
+  if (hd.unparseable && scope.guardedState(hd.stripped)) return BLOCK;
 
   // Unquoted-heredoc bodies: substitutions execute, the rest is data. These
   // are judged BEFORE the stripped-text front gate so a body substitution
@@ -1777,7 +1847,7 @@ function decide(command: string, depth: number): HookResult {
   // contribute nothing (opaque data).
   if (depth > MAX_SUBSTITUTION_DEPTH) return BLOCK;
   for (const body of hd.bodies) {
-    if (decide(body, depth + 1).kind === "block") return BLOCK;
+    if (decide(body, depth + 1, scope).kind === "block") return BLOCK;
   }
 
   // Lines that never reference a guarded path are not this guard's business.
@@ -1787,26 +1857,26 @@ function decide(command: string, depth: number): HookResult {
   // collapse, so neither escapes this gate. Patterns resolve machinesDir()
   // at decision time — a re-pointed LOOM_MACHINES_DIR is guarded without a
   // module reload.)
-  if (!referencesGuardedState(hd.stripped)) return { kind: "allow" };
+  if (!scope.guardedState(hd.stripped)) return { kind: "allow" };
 
-  const flat = flattenSubstitutions(hd.stripped);
+  const flat = flattenSubstitutions(hd.stripped, scope);
   if (flat === null) return BLOCK;
   for (const body of flat.bodies) {
-    if (decide(body, depth + 1).kind === "block") return BLOCK;
+    if (decide(body, depth + 1, scope).kind === "block") return BLOCK;
   }
 
   for (const chain of pipeChains(flat.flattened)) {
     // A chain none of whose segments touch a guarded path is out of scope —
     // `npm install && jq . <state>` must not block on the npm segment.
     // (Tested quote-collapsed, like every pattern site.)
-    if (!chain.some(referencesGuardedState)) continue;
+    if (!chain.some(scope.guardedState)) continue;
 
     for (const segment of chain) {
       if (segmentInvokesHelper(segment)) {
         // The helper vouches for its own segment (including a redirect of its
         // output into a state file) — but NEVER for a protected-dir write:
         // ledger and machine-definition forgery stay blocked even here.
-        if (referencesProtectedDir(segment) && hasOutputRedirect(segment)) {
+        if (scope.protectedDir(segment) && hasOutputRedirect(segment)) {
           return blockFor(chain, segment);
         }
         continue;
