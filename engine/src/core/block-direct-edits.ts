@@ -5,10 +5,11 @@
  * injected function, and every path arrives already canonical, so the decision
  * itself performs no I/O.
  *
- * Three admissions, in order: an active implementation-role agent, an active
- * Pi write-grant holder, or — when the caller supplies an `ArtifactWriteRequest`
- * (Claude Code) — the CALLING phase/panel subagent writing inside its role's
- * artifact roots (`artifactWriteRoots`). Everything else is blocked.
+ * Two admission stages: first one roster check — an active implementation-role
+ * agent or Pi write-grant holder; then, when the caller supplies an
+ * `ArtifactWriteRequest` (Claude Code), the CALLING phase/panel subagent writing
+ * inside its role's artifact roots (`artifactWriteRoots`). Everything else is
+ * blocked.
  */
 
 import { isAbsolute, join, relative, sep } from "node:path";
