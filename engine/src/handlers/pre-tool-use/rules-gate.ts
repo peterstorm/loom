@@ -28,6 +28,7 @@ import { firstBashCodeMutationTarget } from "../../core/bash-code-mutation";
 import { decideRulesGate, renderGateBlock, type GateDirs, type GatePorts } from "../../core/rules-gate";
 import { parseTranscriptEvents } from "./claude-transcript-events";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
+import { isPreToolUseInput } from "./pre-tool-use-input";
 
 const gateDisabled = (): boolean => process.env["LOOM_GATE"] === "off" || process.env["LOOM_GATE"] === "0";
 
@@ -90,10 +91,6 @@ export const filesystemPorts = (cwd: string): GatePorts => {
     exists: existsSync,
   };
 };
-
-const isPreToolUseInput = (value: unknown): value is PreToolUseInput =>
-  typeof value === "object" && value !== null && "tool_name" in value && typeof value.tool_name === "string" &&
-  "tool_input" in value && typeof value.tool_input === "object" && value.tool_input !== null;
 
 const parseInput = (stdin: string): PreToolUseInput | undefined => {
   try {

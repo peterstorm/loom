@@ -36,7 +36,8 @@ import type { Phase } from "../types";
  * artifact paths). A token ending in a filename scopes to its directory; a
  * trailing slash already denotes a directory; a bare `.claude/specs` or
  * `.claude/plans` mention scopes the whole artifact dir (fallback
- * granularity). Read-only mentions widen the scope harmlessly.
+ * granularity). `deriveArtifactWriteScope` confines mentions to the role's
+ * roots, so a read-only mention can add an in-root dir but never escape them.
  */
 const ARTIFACT_PATH_TOKEN = /(?:^|[^A-Za-z0-9_./{}-])((?:\.\.\/)*\.claude\/(?:specs|plans)(?:\/[A-Za-z0-9._/{}:-]*)?)/g;
 
@@ -139,7 +140,8 @@ function scopeFromPathTokens(task: string): readonly string[] {
  * role's roots — a token outside them (plan-alignment READING the plan) is
  * dropped, so a mention can only narrow, never widen. A bare
  * `.claude/specs`/`.claude/plans` mention is only a granularity fallback
- * and is dropped when the prompt also names a specific dir. Roots the token
+ * and is dropped when the prompt also names a dir beneath that same root.
+ * Roots the token
  * grammar cannot name (lint-rule dirs) are kept whole. With no usable token,
  * phase writers get their full roots and panel writers get nothing (their
  * prompts always carry a run-scoped path).

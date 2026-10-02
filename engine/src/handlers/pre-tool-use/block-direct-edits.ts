@@ -24,6 +24,7 @@ import {
 } from "../../core/block-direct-edits";
 import { subagentDir, taskGraphPath, pathExistsFailClosed } from "../../config";
 import { readActiveAgentRoles } from "../../machine/ledger";
+import { isPreToolUseInput } from "./pre-tool-use-input";
 
 /**
  * Adapter for core's `ActiveRosterProbe`: the session's `.active` roster, or
@@ -119,10 +120,6 @@ export function artifactWriteRequest(
     : null;
   return { callerAgentId: input.agent_id ?? null, targetPath, projectRoot };
 }
-
-const isPreToolUseInput = (value: unknown): value is PreToolUseInput =>
-  typeof value === "object" && value !== null && "tool_name" in value && typeof value.tool_name === "string" &&
-  "tool_input" in value && typeof value.tool_input === "object" && value.tool_input !== null;
 
 /** Malformed hook input on a guard route fails CLOSED: a crash would exit 1 —
  *  NON-blocking for PreToolUse — silently waving the edit past the guard. */
