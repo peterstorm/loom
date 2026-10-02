@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { deriveArtifactWriteScope } from "../../src/core/artifact-write-scope";
+import { artifactWriteRoots, deriveArtifactWriteScope } from "../../src/core/artifact-write-scope";
 
 describe("artifact write-scope derivation — role policy", () => {
   it("read-only spawns get nothing even when their prompts name artifact paths", () => {
@@ -120,5 +120,47 @@ describe("artifact write-scope derivation — granularity filter", () => {
       ),
       { numRuns: 200 },
     );
+  });
+});
+
+describe("artifactWriteRoots — role-only roots (Claude Code policy)", () => {
+  it("phase writers get their phase's canonical artifact dir", () => {
+    for (const agent of ["brainstorm-agent", "specify-agent", "clarify-agent", "plan-alignment-agent"]) {
+      expect(artifactWriteRoots(agent), agent).toEqual([".claude/specs"]);
+    }
+    expect(artifactWriteRoots("architecture-agent")).toEqual([".claude/plans"]);
+  });
+
+  it("panel writers get the spec tree", () => {
+    expect(artifactWriteRoots("arch-interviewer-agent")).toEqual([".claude/specs"]);
+    expect(artifactWriteRoots("arch-designer-agent")).toEqual([".claude/specs"]);
+  });
+
+  it("read-only and implementation roles get nothing", () => {
+    for (const agent of [
+      "arch-judge-agent", "decompose-agent", "review-verifier-agent", "code-reviewer",
+      "spec-check-invoker", "code-simplifier", "code-implementer-agent", "not-an-agent", "",
+    ]) {
+      expect(artifactWriteRoots(agent), agent).toBeNull();
+    }
+  });
+
+  it("strips the plugin namespace like the Pi policy does", () => {
+    expect(artifactWriteRoots("loom:specify-agent")).toEqual([".claude/specs"]);
+    expect(artifactWriteRoots("loom:arch-judge-agent")).toBeNull();
+  });
+
+  it("agrees with the Pi policy on WHO writes: same roles, and the same roots as Pi's no-path fallback", () => {
+    const agents = [
+      "brainstorm-agent", "specify-agent", "clarify-agent", "plan-alignment-agent", "architecture-agent",
+      "arch-interviewer-agent", "arch-designer-agent", "arch-judge-agent", "decompose-agent", "code-reviewer",
+    ];
+    for (const agent of agents) {
+      const pi = deriveArtifactWriteScope(agent, "write .claude/specs/x/out.md");
+      expect(artifactWriteRoots(agent) === null, agent).toBe(pi === null);
+    }
+    for (const agent of ["brainstorm-agent", "specify-agent", "clarify-agent", "plan-alignment-agent", "architecture-agent"]) {
+      expect(artifactWriteRoots(agent), agent).toEqual(deriveArtifactWriteScope(agent, "no artifact path here"));
+    }
   });
 });

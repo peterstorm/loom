@@ -1,11 +1,17 @@
 /**
- * Artifact write-scope derivation for Pi child write grants.
+ * Artifact write policy for non-implementation loom-owned agents — one policy,
+ * two harnesses.
  *
  * Pure policy: which non-implementation loom-owned spawns may WRITE, and which
- * `.claude/specs` / `.claude/plans` directories a prompt-derived scope names.
- * The capability is ISSUED by `pi/write-grant.ts` and ENFORCED per write by
- * the pi extension; this module only decides the scope set an agent is
- * allowed to target.
+ * `.claude/specs` / `.claude/plans` directories they may target.
+ *   - Pi: `deriveArtifactWriteScope` refines the scope from the spawn prompt;
+ *     the capability is ISSUED by `pi/write-grant.ts` and ENFORCED per write by
+ *     the pi extension.
+ *   - Claude Code: `artifactWriteRoots` gives the role-only roots, which
+ *     `shouldBlockDirectEdit` enforces against the CALLING subagent's recorded
+ *     role (Claude has no prompt-bound grant to refine them).
+ * Both answer "may this role write at all?" through one classifier
+ * (`artifactWriterRole`), so the harnesses cannot disagree about who writes.
  *
  * Role-driven, not path-driven: an agent's run contract decides whether it
  * may write at all — a judge whose prompt names candidate paths is READING
@@ -52,6 +58,23 @@ const PANEL_ARTIFACT_WRITERS: ReadonlySet<string> = new Set([
   "arch-interviewer-agent",
   "arch-designer-agent",
 ]);
+
+/** Panel writers' role-wide root: every panel run lives under the spec tree. */
+const PANEL_ARTIFACT_ROOTS: readonly string[] = [".claude/specs"];
+
+/** Why an agent may write artifacts at all. Not a writer → `null`. */
+type ArtifactWriterRole =
+  | Readonly<{ kind: "phase"; phase: string }>
+  | Readonly<{ kind: "panel" }>;
+
+/** The one role classifier both harnesses' policies go through. A phase
+ *  writer wins over a panel writer (no agent is both today). */
+function artifactWriterRole(agent: string): ArtifactWriterRole | null {
+  const name = stripNamespace(agent);
+  const phase = PHASE_AGENT_MAP[name];
+  if (phase !== undefined && ARTIFACT_WRITING_PHASES.has(phase)) return { kind: "phase", phase };
+  return PANEL_ARTIFACT_WRITERS.has(name) ? { kind: "panel" } : null;
+}
 
 /** Phase-aware fallback when a prompt carries no artifact path: the phase's
  *  canonical artifact dir. Writers without explicit paths get the phase-wide
@@ -112,11 +135,8 @@ export function deriveArtifactWriteScope(
   agent: string,
   task: string,
 ): readonly string[] | null {
-  const name = stripNamespace(agent);
-  const phase = PHASE_AGENT_MAP[name];
-  const isPhaseWriter = phase !== undefined && ARTIFACT_WRITING_PHASES.has(phase);
-  const isPanelWriter = PANEL_ARTIFACT_WRITERS.has(name);
-  if (!isPhaseWriter && !isPanelWriter) return null;
+  const role = artifactWriterRole(agent);
+  if (role === null) return null;
 
   const derived = scopeFromPathTokens(task);
   if (derived.length > 0) {
@@ -126,5 +146,19 @@ export function deriveArtifactWriteScope(
     const specific = derived.filter((dir) => !derived.some((other) => other !== dir && other.startsWith(`${dir}/`)));
     return specific.length > 0 ? specific : derived;
   }
-  return isPhaseWriter ? phaseFallbackScope(phase) : null;
+  return role.kind === "phase" ? phaseFallbackScope(role.phase) : null;
+}
+
+/**
+ * Role-only artifact roots (project-relative dirs) an agent type may write
+ * into, or null when the role is not an artifact writer. No prompt refinement:
+ * this is the Claude Code policy, where the caller is known only by its
+ * recorded agent type. Phase writers get their phase's canonical dir
+ * (`.claude/specs` for brainstorm/specify/clarify/plan-alignment,
+ * `.claude/plans` for architecture); panel writers get `.claude/specs`.
+ */
+export function artifactWriteRoots(agent: string): readonly string[] | null {
+  const role = artifactWriterRole(agent);
+  if (role === null) return null;
+  return role.kind === "phase" ? phaseFallbackScope(role.phase) : PANEL_ARTIFACT_ROOTS;
 }

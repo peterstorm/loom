@@ -146,6 +146,8 @@ Two grant shapes exist:
 
 Read-only roles—reviewers, verifier, judge, decompose, and spec-check—receive no grant even if their prompts mention writable-looking paths.
 
+Claude Code applies the same writer-role policy without a grant. `block-direct-edits` admits an Edit/Write/MultiEdit from a writer role only when the **calling** subagent (PreToolUse `agent_id`) is on the session's active roster with that role and the symlink-resolved target lies strictly inside the role's root under the project directory (`CLAUDE_PROJECT_DIR`): brainstorm, specify, clarify, and plan-alignment → `.claude/specs/`; architecture → `.claude/plans/`; arch-interviewer and arch-designer → `.claude/specs/`. Claude roots are role-only (no prompt refinement). The main agent and read-only roles stay blocked even while a writer is active. `artifactWriterRole` in `engine/src/core/artifact-write-scope.ts` classifies writer roles once for both harnesses.
+
 Outside orchestration—no active TaskGraph for the session—no role receives a grant, including implementation agents. Direct edits are ungated when no TaskGraph exists, so a capability there would authorize nothing already forbidden, while its Task id binding would refuse a spawn that has no Task id to give. This is what makes a Loom agent usable ad hoc on Pi, matching Claude Code, whose hook shims already exit before any gate when no TaskGraph is present. `engine/src/core/pi-write-grant-plan.ts` owns the decision.
 
 The child consumes the token before its first model turn. Replay, wrong Agent/Task/cwd, expiration, rejected spawn, or shutdown fails closed. Parent tool completion and rollback revoke outstanding grants. A fixed 24-hour ceiling only bounds a capability abandoned by a parent crash; it is not the normal lifetime.
