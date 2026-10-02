@@ -8,6 +8,7 @@
  * transitively touching node:fs.
  */
 
+import { match } from "ts-pattern";
 import type { Epoch, Evidence, EvidenceRecord, TestReportSummary } from "./types";
 import { parseReportSummary } from "./test-report";
 export { judgeTestRun, type TrustedTestVerdict } from "./test-report";
@@ -309,8 +310,8 @@ export function formatBindingLine(binding: MachineBinding, boundAtMs: number): s
 /**
  * Binding liveness: a binding is fresh while its last observed activity —
  * the bind stamp or the binding file's activity anchor (mtime, touched by
- * the gate and the recorder on every SESSION tool call — tool calls carry
- * no agent identity), whichever is later — is within the TTL. This is
+ * the gate and the recorder on every SESSION tool call — one anchor per
+ * session file, not per agent), whichever is later — is within the TTL. This is
  * session-activity liveness, not per-agent liveness: a subagent that dies
  * without its SubagentStop hook keeps a fresh binding while the parent
  * session stays active, and expires only after the whole session idles
@@ -443,6 +444,88 @@ export function resolveSoleActiveBinding(
   return activeRoster[0] === bindings[0].agentId ? bindings[0] : null;
 }
 
+// --- Evidence attribution (whose epoch a tool call's evidence belongs to) ---
+
+/**
+ * The identity a tool-call hook payload reports for its CALLER, parsed once
+ * at the hook boundary. Claude Code sets `agent_id` on every hook that fires
+ * inside a subagent — PreToolUse and PostToolUse alike — and omits it for the
+ * main agent; harnesses that predate the field omit it everywhere. Parallel
+ * subagents share the parent's `session_id`, so `agent_id` is the ONLY fact
+ * that tells their calls apart.
+ *
+ *   unreported  — no `agent_id` field: main agent, or an older harness
+ *   reported    — an id the harness-reported constructor accepts
+ *   unparseable — present but refused (path-unsafe, reserved write-grant
+ *                 namespace, empty, non-string): it names SOMEONE, so it must
+ *                 never fall back to the session-wide sole-active rule
+ */
+export type CallerIdentity =
+  | Readonly<{ kind: "unreported" }>
+  | Readonly<{ kind: "reported"; agentId: AgentId }>
+  | Readonly<{ kind: "unparseable"; raw: string }>;
+
+export function parseCallerIdentity(raw: unknown): CallerIdentity {
+  if (raw === undefined) return Object.freeze({ kind: "unreported" });
+  if (typeof raw !== "string") return Object.freeze({ kind: "unparseable", raw: JSON.stringify(raw) ?? String(raw) });
+  const agentId = parseReportedAgentId(raw);
+  return agentId === null
+    ? Object.freeze({ kind: "unparseable", raw })
+    : Object.freeze({ kind: "reported", agentId });
+}
+
+/**
+ * Where one tool call's evidence may be recorded — or why it may not.
+ *
+ *   caller            — the reporting agent's OWN binding line (exact identity)
+ *   sole              — no caller identity; the session-wide sole-active rule
+ *                       (resolveSoleActiveBinding) attributed it
+ *   ungated           — no live binding at all: nothing to attribute to
+ *   corrupt           — persisted binding authority has malformed rows
+ *   caller-unparseable / caller-unbound / caller-ambiguous — a caller WAS
+ *                       reported but owns no single binding; never another's
+ *   contended         — no caller identity and the sole-active rule refused
+ */
+export type EvidenceAttribution =
+  | Readonly<{ kind: "caller"; binding: MachineBinding }>
+  | Readonly<{ kind: "sole"; binding: MachineBinding }>
+  | Readonly<{ kind: "ungated" }>
+  | Readonly<{ kind: "corrupt" }>
+  | Readonly<{ kind: "caller-unparseable"; raw: string }>
+  | Readonly<{ kind: "caller-unbound"; agentId: AgentId }>
+  | Readonly<{ kind: "caller-ambiguous"; agentId: AgentId; bindings: number }>
+  | Readonly<{ kind: "contended" }>;
+
+/**
+ * Attribute one tool call's evidence. A REPORTED caller is credited only to
+ * the binding line carrying its own agent id — so parallel bound agents in one
+ * session each record into their own epoch, and an id with no (or more than
+ * one) binding records nothing rather than borrowing a sibling's. Only an
+ * UNREPORTED caller falls back to the sole-active rule, unchanged.
+ */
+export function attributeEvidence(
+  caller: CallerIdentity,
+  authority: MachineBindingAuthority,
+  activeRoster: readonly AgentId[],
+): EvidenceAttribution {
+  if (authority.kind === "corrupt") return Object.freeze({ kind: "corrupt" });
+  if (authority.bindings.length === 0) return Object.freeze({ kind: "ungated" });
+  return match(caller)
+    .returnType<EvidenceAttribution>()
+    .with({ kind: "unparseable" }, ({ raw }) => Object.freeze({ kind: "caller-unparseable", raw }))
+    .with({ kind: "reported" }, ({ agentId }) => {
+      const own = authority.bindings.filter((binding) => binding.agentId === agentId);
+      if (own.length === 0) return Object.freeze({ kind: "caller-unbound", agentId });
+      if (own.length > 1) return Object.freeze({ kind: "caller-ambiguous", agentId, bindings: own.length });
+      return Object.freeze({ kind: "caller", binding: own[0] });
+    })
+    .with({ kind: "unreported" }, () => {
+      const sole = resolveSoleActiveBinding(authority.bindings, activeRoster);
+      return sole === null ? Object.freeze({ kind: "contended" }) : Object.freeze({ kind: "sole", binding: sole });
+    })
+    .exhaustive();
+}
+
 // --- SessionRegistry port ---
 
 /** Exact outcome of an attempted machine-binding capability release. */
@@ -476,6 +559,9 @@ export interface SessionRegistry {
   readonly markActive: (sessionId: SessionId, agentId: AgentId) => Promise<void>;
   readonly removeActive: (sessionId: SessionId, agentId: AgentId) => Promise<void>;
   readonly countActiveAgents: (sessionId: SessionId) => number;
+  /** The `.active` roster's identity column — the input of the sole-active
+   *  fallback (attributeEvidence → resolveSoleActiveBinding). */
+  readonly readActiveRoster: (sessionId: SessionId) => readonly AgentId[];
   readonly soleActiveBinding: (sessionId: SessionId) => MachineBinding | null;
   readonly refreshBindingActivity: (sessionId: SessionId) => Promise<void>;
   /** Diagnostic/liveness projection that omits malformed rows. */

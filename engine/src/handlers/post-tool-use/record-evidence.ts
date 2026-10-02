@@ -5,34 +5,65 @@
  * session's ledger — the deterministic core observes what happened at
  * execution time, never the agent's narrative about it.
  *
- * Records ONLY when attribution is sound: exactly one machine binding and
- * the active roster is exactly the bound agent (soleActiveBinding).
- * Contended sessions record nothing, with a stderr note — commingled
- * evidence is worse than no evidence, because the SubagentStop resolver
- * treats ledger data as high-trust.
+ * Records ONLY when attribution is sound (attributeEvidence, evidence.ts):
+ * a call carrying `agent_id` — Claude Code stamps it on every hook fired
+ * inside a subagent — is credited to THAT agent's own binding line, so
+ * parallel bound subagents in one session each record into their own epoch.
+ * A call without `agent_id` (main agent, older harness) falls back to the
+ * sole-active rule: exactly one machine binding and the roster is exactly the
+ * bound agent. Everything else records nothing, with a stderr note —
+ * commingled evidence is worse than no evidence, because the SubagentStop
+ * resolver treats ledger data as high-trust.
  *
  * Never blocks: the PreToolUse gate fails closed on missing evidence, and
  * the SubagentStop resolver labels a bound-but-empty ledger as degraded —
  * so a broken recorder surfaces downstream instead of silently passing.
  */
 
-import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { match } from "ts-pattern";
 import type { HookHandler } from "../../types";
 import { passthroughResult } from "../../types";
 import {
+  attributeEvidence,
   eventsForEpoch,
+  type EvidenceAttribution,
   extractEvidence,
   findReport,
   fsSessionRegistry,
-  machineBindingPath,
+  parseCallerIdentity,
   parseSessionId,
+  type SessionId,
   type SessionRegistry,
 } from "../../machine";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
 
+/** Why a call recorded nothing, as the audit line the operator sees; null
+ *  for an ungated session (nothing was ever bound, nothing was lost). */
+function standDownNotice(
+  sessionId: SessionId,
+  attribution: Exclude<EvidenceAttribution, { kind: "caller" | "sole" }>,
+): string | null {
+  const reason = match(attribution)
+    .with({ kind: "ungated" }, () => null)
+    .with({ kind: "corrupt" }, () => "machine binding authority has malformed rows")
+    .with({ kind: "caller-unparseable" }, ({ raw }) =>
+      `caller agent_id ${JSON.stringify(raw)} is reserved or path-unsafe — it cannot own a binding`)
+    .with({ kind: "caller-unbound" }, ({ agentId }) =>
+      `caller ${agentId} has no machine binding line — evidence is never credited to another agent`)
+    .with({ kind: "caller-ambiguous" }, ({ agentId, bindings }) =>
+      `caller ${agentId} owns ${bindings} binding lines — its epoch is ambiguous`)
+    .with({ kind: "contended" }, () =>
+      "call carries no agent_id and attribution is unsound (contended or leaked binding)")
+    .exhaustive();
+  return reason === null ? null : `record-evidence: standing down for ${sessionId} — ${reason}; nothing recorded\n`;
+}
+
 interface RecordEvidenceInput {
   session_id?: string;
+  /** Caller identity — set by Claude Code only inside a subagent. Untrusted:
+   *  parsed by parseCallerIdentity, never used raw. */
+  agent_id?: unknown;
   tool_name?: string;
   tool_input?: Record<string, unknown>;
   tool_response?: unknown;
@@ -64,19 +95,20 @@ export const runRecordEvidence = async (
     // — no-op for ungated sessions (no binding file, no lock taken).
     await registry.refreshBindingActivity(sessionId);
 
-    const binding = registry.soleActiveBinding(sessionId);
-    if (binding === null) {
-      // Bound-but-unattributable (contended session, leaked binding): say
-      // so once, like the gate does — a silently-standing-down recorder is
-      // indistinguishable from a broken one. Sessions with no binding file
-      // at all are simply ungated; stay quiet for those.
-      if (existsSync(machineBindingPath(sessionId))) {
-        process.stderr.write(
-          `record-evidence: standing down for ${sessionId} — binding exists but attribution is unsound (contended or leaked); nothing recorded\n`,
-        );
-      }
+    const attribution = attributeEvidence(
+      parseCallerIdentity(input.agent_id),
+      registry.readBindingAuthority(sessionId),
+      registry.readActiveRoster(sessionId),
+    );
+    if (attribution.kind !== "caller" && attribution.kind !== "sole") {
+      // Bound-but-unattributable: say so, like the gate does — a silently
+      // standing-down recorder is indistinguishable from a broken one.
+      // Ungated sessions (no live binding) stay quiet.
+      const notice = standDownNotice(sessionId, attribution);
+      if (notice !== null) process.stderr.write(notice);
       return passthroughResult();
     }
+    const { binding } = attribution;
 
     const toolInput = input.tool_input ?? {};
     const cwd = input.cwd ?? process.cwd();

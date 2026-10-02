@@ -75,6 +75,8 @@ export function inMemorySessionRegistry(): SessionRegistry {
 
     countActiveAgents: (sessionId: string): number => (active.get(sessionId) ?? []).length,
 
+    readActiveRoster: (sessionId: string): readonly AgentId[] => Object.freeze([...(active.get(sessionId) ?? [])]),
+
     soleActiveBinding: (sessionId: string): MachineBinding | null =>
       resolveSoleActiveBinding(bindings.get(sessionId) ?? [], active.get(sessionId) ?? []),
 

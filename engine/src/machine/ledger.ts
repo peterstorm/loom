@@ -17,18 +17,24 @@
  * Epochs make attribution structural: every evidence line is stamped with
  * the binding's epoch (`<agent_id>:<agent_type>`), and readers fold only
  * their own epoch — a stale line from a crashed run or a parallel agent is
- * inert instead of cross-credited. Because the harness gives PostToolUse no
- * agent identity, evidence is recorded ONLY while exactly one subagent is
- * active and exactly one machine is bound (soleActiveBinding); in contended
- * sessions both the recorder and the gate stand down.
+ * inert instead of cross-credited. Which epoch a tool call's evidence lands
+ * in is the pure attributeEvidence (evidence.ts): Claude Code stamps
+ * `agent_id` on every hook fired inside a subagent (PostToolUse included), so
+ * a reporting caller is credited to ITS OWN binding line — parallel bound
+ * subagents sharing the parent's session_id each record into their own
+ * epoch. Only calls with no `agent_id` (the main agent, or a harness that
+ * predates the field) fall back to the session-wide rule: exactly one
+ * subagent active and exactly one machine bound (soleActiveBinding). The
+ * PreToolUse gate (enforce-phase-tools) still uses only that sole-active rule,
+ * so it stands down in contended sessions.
  *
  * Binding liveness (SESSION-activity TTL, not per-agent liveness): a
  * binding is normally released by SubagentStop, but a gated subagent that
  * dies without the hook firing must not gate the session forever. Each
  * binding line carries its bind stamp; the binding file's mtime is the
  * activity anchor, refreshed (refreshBindingActivity) on EVERY tool call
- * the gate or recorder sees for the session — tool calls carry no agent
- * identity, so any session activity (including the parent's) keeps every
+ * the gate or recorder sees for the session — the anchor is one per session
+ * file, not per agent, so any session activity (including the parent's) keeps every
  * binding fresh. A dead subagent's binding therefore expires only once the
  * whole session has been idle past STALE_SUBAGENT_TTL_MS — the same TTL
  * the SessionStart sweep uses — after which readBindings treats it as
@@ -265,13 +271,14 @@ export function readActiveAgentRoles(sessionId: SessionId): readonly ActiveAgent
   return Object.freeze(readActiveAgentEntries(sessionId));
 }
 
-function readActiveAgents(sessionId: SessionId): AgentId[] {
-  return readActiveAgentEntries(sessionId).map(({ agentId }) => agentId);
+/** The roster's identity column — what attribution counts and compares. */
+export function readActiveRoster(sessionId: SessionId): readonly AgentId[] {
+  return Object.freeze(readActiveAgentEntries(sessionId).map(({ agentId }) => agentId));
 }
 
 /** Number of agents currently on the session's `.active` roster. */
 export function countActiveAgents(sessionId: SessionId): number {
-  return readActiveAgents(sessionId).length;
+  return readActiveRoster(sessionId).length;
 }
 
 /**
@@ -372,7 +379,7 @@ export function soleActiveBinding(sessionId: SessionId, nowMs: number = Date.now
   if (authority.kind === "corrupt") {
     throw new Error(`machine binding authority for ${sessionId} contains malformed rows`);
   }
-  return resolveSoleActiveBinding(authority.bindings, readActiveAgents(sessionId));
+  return resolveSoleActiveBinding(authority.bindings, readActiveRoster(sessionId));
 }
 
 /**
@@ -380,7 +387,7 @@ export function soleActiveBinding(sessionId: SessionId, nowMs: number = Date.now
  * — deleting the file when nothing else remains — and, when fresh bindings
  * survive, touch the file's mtime so their activity anchor advances. The
  * gate and the recorder call this on every tool call they see for the
- * session; tool calls carry no agent identity, so this is SESSION-activity
+ * session; the anchor is one mtime per session file, so this is SESSION-activity
  * liveness: any activity (the parent's included) keeps every binding
  * fresh, and a dead subagent's binding expires only after the whole
  * session idles past STALE_SUBAGENT_TTL_MS. Malformed lines are preserved:

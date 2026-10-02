@@ -7,10 +7,12 @@
  * transition doesn't exist.
  *
  * Failure policy: once ANY binding exists for the session, unexpected
- * errors fail CLOSED — a gate that crashes open is no gate. When attribution is impossible (multiple bindings, or any second
- * subagent active in the session — the harness gives tool calls no agent
- * identity), the gate stands down with a stderr note; SubagentStop's
- * per-epoch resolution still applies.
+ * errors fail CLOSED — a gate that crashes open is no gate. The gate uses
+ * only the session-wide sole-active rule: with multiple bindings, or any
+ * second subagent active in the session, it stands down with a stderr note.
+ * The recorder (record-evidence) attributes per caller `agent_id` instead, so
+ * SubagentStop's per-epoch resolution still sees each parallel agent's own
+ * evidence.
  */
 
 import { existsSync, readdirSync } from "node:fs";
