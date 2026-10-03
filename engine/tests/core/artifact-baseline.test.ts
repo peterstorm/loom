@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, it } from "vitest";
+import fc from "fast-check";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  artifactCovers,
   attributedChangedArtifacts,
   changedDeclaredArtifacts,
   parseDeclaredArtifactBaseline,
+  treeSnapshotDigest,
+  type TreeEntry,
 } from "../../src/core/artifact-baseline";
 import {
   captureDeclaredArtifactBaseline,
@@ -52,6 +56,13 @@ describe("declared artifact baseline", () => {
     expect(attributedChangedArtifacts(byteChanges, ["src/other.ts"])).toEqual([]);
   });
 
+  it("attributes a directory artifact from a write below it, never a name-prefix sibling", () => {
+    expect(attributedChangedArtifacts(
+      ["calibration/run", "calibration/runner.ts"],
+      ["calibration/run/result.json"],
+    )).toEqual(["calibration/run"]);
+  });
+
   it("rejects malformed snapshots and exact-set drift", () => {
     const malformed = parseDeclaredArtifactBaseline([{
       artifact: "src/a.ts",
@@ -77,5 +88,77 @@ describe("declared artifact baseline", () => {
       snapshot: { kind: "missing" },
     }]);
     expect(parsed.ok).toBe(false);
+  });
+});
+
+const segment = fc.stringMatching(/^[a-z0-9._-]{1,8}$/).filter((value) => value !== "." && value !== "..");
+const relativePath = fc.array(segment, { minLength: 1, maxLength: 4 }).map((parts) => parts.join("/"));
+const sha256 = fc.stringMatching(/^[a-f0-9]{64}$/);
+const treeEntry: fc.Arbitrary<TreeEntry> = fc.record({
+  path: relativePath,
+  kind: fc.constantFrom("file" as const, "symlink" as const),
+  contentSha256: sha256,
+});
+const tree = fc.uniqueArray(treeEntry, { selector: (entry) => entry.path, maxLength: 8 });
+
+describe("treeSnapshotDigest", () => {
+  it("is a sha256 hex digest independent of enumeration order", () => {
+    fc.assert(fc.property(
+      tree.chain((entries) => fc.tuple(
+        fc.constant(entries),
+        fc.shuffledSubarray(entries, { minLength: entries.length, maxLength: entries.length }),
+      )),
+      ([entries, shuffled]) => {
+        expect(treeSnapshotDigest(shuffled)).toBe(treeSnapshotDigest(entries));
+        expect(treeSnapshotDigest(entries)).toMatch(/^[a-f0-9]{64}$/);
+      },
+    ));
+  });
+
+  it("does not mutate its input", () => {
+    fc.assert(fc.property(tree, (entries) => {
+      const before = JSON.stringify(entries);
+      treeSnapshotDigest(entries);
+      expect(JSON.stringify(entries)).toBe(before);
+    }));
+  });
+
+  it("changes when any one entry's path, kind or content changes", () => {
+    fc.assert(fc.property(
+      tree.filter((entries) => entries.length > 0),
+      fc.nat(),
+      fc.constantFrom("path", "kind", "content"),
+      (entries, pick, field) => {
+        const index = pick % entries.length;
+        const target = entries[index]!;
+        const changed: TreeEntry = field === "path"
+          ? { ...target, path: `${target.path}-renamed` }
+          : field === "kind"
+            ? { ...target, kind: target.kind === "file" ? "symlink" : "file" }
+            : { ...target, contentSha256: target.contentSha256 === "0".repeat(64) ? "1".repeat(64) : "0".repeat(64) };
+        fc.pre(!entries.some((entry, other) => other !== index && entry.path === changed.path));
+        const edited = entries.map((entry, other) => other === index ? changed : entry);
+        expect(treeSnapshotDigest(edited)).not.toBe(treeSnapshotDigest(entries));
+      },
+    ));
+  });
+
+  it("is stable for the empty tree, and adding an entry changes it", () => {
+    expect(treeSnapshotDigest([])).toBe(treeSnapshotDigest([]));
+    fc.assert(fc.property(treeEntry, (entry) => {
+      expect(treeSnapshotDigest([entry])).not.toBe(treeSnapshotDigest([]));
+    }));
+  });
+});
+
+describe("artifactCovers", () => {
+  it("covers the artifact and every path below it, never a name-prefix sibling or an ancestor", () => {
+    fc.assert(fc.property(relativePath, relativePath, (artifact, below) => {
+      expect(artifactCovers(artifact, artifact)).toBe(true);
+      expect(artifactCovers(artifact, `${artifact}/${below}`)).toBe(true);
+      expect(artifactCovers(artifact, `${artifact}x`)).toBe(false);
+      expect(artifactCovers(artifact, `${artifact}x/${below}`)).toBe(false);
+      expect(artifactCovers(`${artifact}/${below}`, artifact)).toBe(false);
+    }));
   });
 });

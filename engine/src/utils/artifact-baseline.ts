@@ -1,25 +1,42 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, readlinkSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
+import { join } from "node:path";
 import {
   changedDeclaredArtifacts,
   parseDeclaredArtifactBaseline,
+  treeSnapshotDigest,
   type ArtifactSnapshot,
   type DeclaredArtifactBaseline,
+  type TreeEntry,
 } from "../core/artifact-baseline";
 import { compareStrings } from "../core/ordering";
+import { sha256Bytes } from "../core/review-packet";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "./repository-path";
 import { runtimeDomainPaths } from "../runtime-compatibility";
 
-function digest(bytes: Uint8Array): string {
-  return createHash("sha256").update(bytes).digest("hex");
+/** Leaves under a worktree directory, by lstat semantics: symlinks are hashed
+ *  by target text and never followed. Empty subdirectories contribute nothing,
+ *  matching Git, which cannot represent them. */
+function worktreeEntries(artifact: string, absolute: string, prefix = ""): readonly TreeEntry[] {
+  return readdirSync(absolute, { withFileTypes: true }).flatMap((entry): readonly TreeEntry[] => {
+    const path = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+    const child = join(absolute, entry.name);
+    if (entry.isDirectory()) return worktreeEntries(artifact, child, path);
+    if (entry.isFile()) return [{ path, kind: "file", contentSha256: sha256Bytes(readFileSync(child)) }];
+    if (entry.isSymbolicLink()) {
+      return [{ path, kind: "symlink", contentSha256: sha256Bytes(readlinkSync(child, { encoding: "buffer" })) }];
+    }
+    throw new Error(`declared artifact ${artifact} contains a node that is not a file, directory or symlink: ${artifact}/${path}`);
+  });
 }
 
 function snapshotArtifact(root: string, artifact: string): ArtifactSnapshot {
   const inspected = inspectRepositoryPath(root, artifact, "declared artifact");
   if (!inspected.exists) return Object.freeze({ kind: "missing" });
-  const bytes = readFileSync(inspected.absolute);
-  return Object.freeze({ kind: "sha256", digest: digest(bytes) });
+  const digested = lstatSync(inspected.absolute).isDirectory()
+    ? treeSnapshotDigest(worktreeEntries(artifact, inspected.absolute))
+    : sha256Bytes(readFileSync(inspected.absolute));
+  return Object.freeze({ kind: "sha256", digest: digested });
 }
 
 /** Imperative shell: capture every declared artifact's exact start state. */
@@ -33,40 +50,85 @@ export function captureDeclaredArtifactBaseline(
   })));
 }
 
-function artifactExistsAtRevision(
-  root: string,
-  revision: string,
-  artifact: string,
-): boolean {
-  const entries = execFileSync(
-    "git",
-    ["ls-tree", "-z", "--name-only", revision, "--", artifact],
-    { cwd: root, encoding: "buffer", stdio: ["ignore", "pipe", "pipe"] },
-  );
-  return entries.length > 0;
+type GitTreeLeaf = Readonly<{ mode: string; sha: string; path: string }>;
+
+/** `git ls-tree -r -z` records are `<mode> SP <type> SP <sha> TAB <path>`. A
+ *  lone file lists as itself; a directory lists every leaf below it. */
+function gitTreeLeaves(root: string, revision: string, artifact: string): readonly GitTreeLeaf[] {
+  const output = execFileSync("git", ["ls-tree", "-r", "-z", revision, "--", artifact], {
+    cwd: root,
+    encoding: "buffer",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 100 * 1024 * 1024,
+  });
+  return output.toString("utf-8").split("\0").filter((record) => record !== "").map((record) => {
+    const match = /^(\d{6}) [a-z]+ ([0-9a-f]+)\t(.+)$/s.exec(record);
+    if (match === null) {
+      throw new Error(`Unparseable git ls-tree record for ${artifact} at ${revision}: ${JSON.stringify(record)}`);
+    }
+    return Object.freeze({ mode: match[1]!, sha: match[2]!, path: match[3]! });
+  });
 }
 
-function snapshotArtifactAtRevision(
+/** Git has no empty trees, so a path exists at a revision exactly when it has a leaf. */
+function artifactExistsAtRevision(root: string, revision: string, artifact: string): boolean {
+  return gitTreeLeaves(root, revision, artifact).length > 0;
+}
+
+function readArtifactObject(
   root: string,
   revision: string,
   artifact: string,
-): ArtifactSnapshot {
-  if (!artifactExistsAtRevision(root, revision, artifact)) {
-    return Object.freeze({ kind: "missing" });
-  }
+  args: readonly string[],
+): Buffer {
   try {
-    const bytes = execFileSync("git", ["show", `${revision}:${artifact}`], {
+    return execFileSync("git", args, {
       cwd: root,
       encoding: "buffer",
       stdio: ["ignore", "pipe", "pipe"],
       maxBuffer: 100 * 1024 * 1024,
     });
-    return Object.freeze({ kind: "sha256", digest: digest(bytes) });
   } catch (error) {
     throw new Error(
       `Cannot read declared artifact ${artifact} at ${revision}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+}
+
+const TREE_ENTRY_KIND_BY_MODE: Readonly<Record<string, TreeEntry["kind"]>> = Object.freeze({
+  "100644": "file",
+  "100755": "file",
+  "120000": "symlink",
+});
+
+// An empty directory has no Git representation, so it snapshots as `missing`
+// here while the worktree snapshots it as the empty-tree digest. Reporting that
+// pair as changed is deliberate and conservative: it can only over-report.
+function snapshotArtifactAtRevision(
+  root: string,
+  revision: string,
+  artifact: string,
+): ArtifactSnapshot {
+  const leaves = gitTreeLeaves(root, revision, artifact);
+  if (leaves.length === 0) return Object.freeze({ kind: "missing" });
+  if (leaves.length === 1 && leaves[0]!.path === artifact) {
+    const bytes = readArtifactObject(root, revision, artifact, ["show", `${revision}:${artifact}`]);
+    return Object.freeze({ kind: "sha256", digest: sha256Bytes(bytes) });
+  }
+  const entries = leaves.map(({ mode, sha, path }): TreeEntry => {
+    const kind = TREE_ENTRY_KIND_BY_MODE[mode];
+    if (kind === undefined) {
+      throw new Error(
+        `Cannot read declared artifact ${artifact} at ${revision}: unsupported tree entry mode ${mode} at ${path}`,
+      );
+    }
+    return {
+      path: path.slice(artifact.length + 1),
+      kind,
+      contentSha256: sha256Bytes(readArtifactObject(root, revision, artifact, ["cat-file", "blob", sha])),
+    };
+  });
+  return Object.freeze({ kind: "sha256", digest: treeSnapshotDigest(entries) });
 }
 
 /** Capture exact artifact bytes from a validated historical Git commit. The
@@ -124,7 +186,7 @@ function snapshotRepositoryArtifact(root: string, artifact: string): ArtifactSna
     ]);
   }
   if (bytes === null) throw new Error(`repository change must be a file or leaf symlink: ${artifact}`);
-  return Object.freeze({ kind: "sha256", digest: digest(bytes) });
+  return Object.freeze({ kind: "sha256", digest: sha256Bytes(bytes) });
 }
 
 function captureRepositoryArtifacts(

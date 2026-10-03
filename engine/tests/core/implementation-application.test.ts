@@ -241,6 +241,38 @@ describe("Task-local byte-scope application core", () => {
     expect(bytes.invalidationBytesChanged).toBe(false);
   });
 
+  it("scopes, attributes and proves a directory artifact through writes below it", () => {
+    const scoped = [...baseline("src/a.ts", digest("a")), ...baseline("calibration/run", null)];
+    const current = [...baseline("src/a.ts", digest("a")), ...baseline("calibration/run", digest("d"))];
+    const bytes = observedBytes(authority(), {
+      attemptBaseline: scoped,
+      currentAttemptScope: current,
+      proofBaseline: scoped,
+      currentProofScope: current,
+      parserModifiedPaths: ["calibration/run/result.json"],
+      repositoryChangedPaths: ["calibration/run/result.json", "calibration/runner.ts"],
+    });
+    expect(bytes.suite.checks[0]?.outcome).toEqual({
+      kind: "out-of-scope-writes",
+      paths: ["calibration/runner.ts"],
+    });
+    expect(bytes.attributedAttemptChangedPaths).toEqual(["calibration/run"]);
+    expect(bytes.cumulativeProofArtifactChanges).toEqual(["calibration/run"]);
+    expect(bytes.unresolvedRepositoryPaths).toEqual(["calibration/runner.ts"]);
+  });
+
+  it("treats repository movement below a sibling-owned directory as inert", () => {
+    const bytes = observedBytes(authority(), {
+      currentAttemptScope: baseline("src/a.ts", digest("a")),
+      currentProofScope: baseline("src/a.ts", digest("a")),
+      parserModifiedPaths: [],
+      repositoryChangedPaths: ["calibration/run/result.json"],
+      siblingOwnedPaths: ["calibration/run"],
+    });
+    expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+    expect(bytes.unresolvedRepositoryPaths).toEqual([]);
+  });
+
   it("fails raw parser paths outside Task scope even when a sibling owns them", () => {
     const bytes = observedBytes(authority(), {
       parserModifiedPaths: ["src/sibling.ts"],
