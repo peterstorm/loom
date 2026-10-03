@@ -6,7 +6,7 @@ import { isImplementationAgent, isStandaloneReviewAgent } from "./model-profiles
 import { stripNamespace } from "../utils/strip-namespace";
 import { hasStandaloneReviewContext, invalidateTaskReview } from "./review-output";
 import { newWaveGate, reconcileWaveBlock, waveBlockCauses } from "./wave-gate-model";
-import type { DeclaredArtifactBaseline } from "./artifact-baseline";
+import { artifactCovers, type DeclaredArtifactBaseline } from "./artifact-baseline";
 import {
   canonicalArtifactBaselineDigest,
   createImplementationAttemptAuthority,
@@ -243,8 +243,10 @@ export function staleReservationsForRosterObservation(
   }));
 }
 
+/** A directory artifact overlaps every artifact it covers, in either direction. */
 function declaredPathOverlap(left: Task, right: Task): string | undefined {
-  return (left.file_list ?? []).find((path) => right.file_list?.includes(path));
+  return (left.file_list ?? []).find((path) => (right.file_list ?? []).some((other) =>
+    artifactCovers(path, other) || artifactCovers(other, path)));
 }
 
 /**

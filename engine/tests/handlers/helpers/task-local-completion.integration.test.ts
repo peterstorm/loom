@@ -246,6 +246,79 @@ describe("Task-local completion observation shell", () => {
     });
   });
 
+  it("observes a declared directory artifact created during the attempt", () => {
+    // Production regression: a Task declaring a directory that did not exist at
+    // dispatch settled infrastructure-blocked (EISDIR), and once readable every
+    // write below the directory was classified out-of-scope.
+    const root = canonicalTempDir("loom-task-local-directory-");
+    roots.push(root);
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "loom@example.test"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
+    mkdirSync(join(root, "scripts"));
+    writeFileSync(join(root, "scripts/x.ts"), "export const x = 1;\n");
+    execFileSync("git", ["add", "."], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "seed"], { cwd: root });
+    const declared = ["scripts/x.ts", "calibration/dir"];
+    const attemptBaseline = captureDeclaredArtifactBaseline(root, declared);
+    expect(attemptBaseline[1]?.snapshot).toEqual({ kind: "missing" });
+    const repositoryBaseline = captureRepositoryChangeBaseline(root);
+    const created = createImplementationAttemptAuthority({
+      taskId: "T13",
+      wave: 1,
+      semanticAttempt: 1,
+      reservationId: "task-local-directory",
+      headSha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim(),
+      reservedAt: "2026-08-24T00:00:00.000Z",
+      taskScopeBaseline: attemptBaseline,
+      dirtySetBaseline: repositoryBaseline,
+    });
+    if (!created.ok) throw new Error(created.error.errors.join("; "));
+    const task = taskFixture({
+      id: "T13",
+      description: "calibration pilot",
+      agent: "code-implementer-agent",
+      wave: 1,
+      status: "pending",
+      depends_on: [],
+      file_list: declared,
+      new_tests_required: false,
+      proof: derivePendingTaskProof({ newTestsRequired: false, declaredArtifacts: declared }),
+      artifact_baseline: attemptBaseline,
+      attempt_artifact_baseline: attemptBaseline,
+      attempt_repository_baseline: repositoryBaseline,
+      repository_baseline: repositoryBaseline,
+      active_implementation_attempt: created.value,
+      reserved_at: created.value.reservedAt,
+    });
+
+    mkdirSync(join(root, "calibration/dir/runs"), { recursive: true });
+    writeFileSync(join(root, "calibration/dir/manifest.json"), "{}\n");
+    writeFileSync(join(root, "calibration/dir/runs/pilot.jsonl"), "{\"ok\":true}\n");
+    writeFileSync(join(root, "scripts/x.ts"), "export const x = 2;\n");
+
+    const observed = observeTaskLocalCompletion({
+      repositoryRoot: root,
+      task,
+      authority: created.value,
+      parserModifiedPaths: [
+        join(root, "calibration/dir/manifest.json"),
+        join(root, "calibration/dir/runs/pilot.jsonl"),
+        join(root, "scripts/x.ts"),
+      ],
+      parserPathLabel: "test transcript paths",
+      siblingOwnedPaths: [],
+    });
+
+    expect(observed.suite.checks[0]?.outcome).toEqual({
+      kind: "accepted",
+      changedPaths: ["calibration/dir", "scripts/x.ts"],
+    });
+    expect(observed.cumulativeProofArtifactChanges).toEqual(["calibration/dir", "scripts/x.ts"]);
+    expect(observed.cumulativeModifiedPaths).toEqual(["calibration/dir", "scripts/x.ts"]);
+    expect(observed.unresolvedRepositoryPaths).toEqual([]);
+  });
+
   it.each([
     ["missing baseline", { attempt_artifact_baseline: undefined }],
     ["unsafe parser path", null],

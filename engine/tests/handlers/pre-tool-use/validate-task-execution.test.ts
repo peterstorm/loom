@@ -210,6 +210,21 @@ describe("validate-task-execution — exclusive ownership", () => {
       .toContain("both declare src/a.ts");
   });
 
+  it("rejects a directory artifact overlapping a path below it, in either direction", () => {
+    const tasks = [scoped("T1", "calibration/run"), scoped("T2", "calibration/run/result.json")];
+    expect(taskExecutionOwnershipError(mkState(tasks), ["T1", "T2"], "parallel"))
+      .toContain("both declare calibration/run");
+    expect(taskExecutionOwnershipError(mkState(tasks), ["T2", "T1"], "parallel"))
+      .toContain("both declare calibration/run/result.json");
+    expect(taskExecutionOwnershipError(mkState(tasks, { executing_tasks: ["T1"] }), ["T2"], "parallel"))
+      .toContain("T1 owns declared path calibration/run/result.json");
+  });
+
+  it("does not treat a name-prefix sibling as overlapping a directory artifact", () => {
+    const state = mkState([scoped("T1", "calibration/run"), scoped("T2", "calibration/runner.ts")]);
+    expect(taskExecutionOwnershipError(state, ["T1", "T2"], "parallel")).toBeNull();
+  });
+
   it("rejects overlap with an active same-wave owner", () => {
     const state = mkState(
       [scoped("T1", "src/a.ts"), scoped("T2", "src/a.ts")],
