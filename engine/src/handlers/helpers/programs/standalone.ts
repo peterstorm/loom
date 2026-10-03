@@ -24,7 +24,7 @@ import { completePersistentRefutationPanel, panelRequestIdentity, refutationPane
 import { readRunBytesNoFollow, writeRunBytesExclusiveNoFollow } from '../../../orchestration/no-follow-fs';
 import { captureKey } from '../../../core/harness-capture';
 import { type RunDirHandle } from '../../../orchestration/run-directory-handle';
-import { standaloneReviewerProtocolResolver, readPublishedStandaloneResult, deriveChangedPaths, gitText, decideRefutationTranscriptRead, durableCaptureRejection, durablePublishedReceipt, durablePublicationDigest, durableRefutationRequests, durableRequests, executableRefutationRequests, failed, metadata, observedReviewerIssueRoute, readRegisteredStandaloneAuthority, publicationResolver, publishLegacyInitialBatch, publishReviewInitialBatch, recoverOrPublishRefutationRetry, recoverOrPublishStandaloneRetry, refutationRejectionDiagnostic, renderReviewProgramSpawnTask, safeScope, standalonePackets, standalonePublicationEffectId, standaloneRetryTask, type FacadeDriveResult, type ProgramParse, type RegisteredStandaloneProgram } from './helpers';
+import { standaloneReviewerProtocolResolver, readPublishedStandaloneResult, deriveChangedPaths, gitText, durableCaptureRejection, durablePublishedReceipt, durablePublicationDigest, durableRefutationRequests, durableRequests, executableRefutationRequests, failed, metadata, readRegisteredStandaloneAuthority, publicationResolver, publishInitialBatch, recoverOrPublishRefutationRetry, recoverOrPublishStandaloneRetry, refutationRejectionDiagnostic, renderSpawnTask, safeScope, standalonePackets, standalonePublicationEffectId, standaloneRetryTask, type FacadeDriveResult, type ProgramParse, type RegisteredStandaloneProgram } from './helpers';
 
 const preparedSuccessorStarts = new WeakSet<object>();
 
@@ -89,7 +89,7 @@ export async function prepareStandaloneSuccessorFacadeStart(runsRoot: string, ru
     const prepared = prepareFreshStandaloneReview({ runId: destination.value.runId, explicitScope: input.files,
       changedPaths: changed.authority, successor: lineage.value.prepared, reviewerContexts: lineage.value.contexts,
       scopeSafety: lineage.value.prepared.snapshot.map(row => ({ path: row.path, status: row.kind === "absent" ? "absent" : "safe" })),
-      reviewMetadata: preparationMetadata(reviewMetadata), reviewerIssueRoute: observedReviewerIssueRoute() });
+      reviewMetadata: preparationMetadata(reviewMetadata) });
     if (!prepared.ok) return { ok: false as const, message: prepared.error.errors.join("; ") };
     const registration: RegisteredStandaloneSuccessorProgram = Object.freeze({ schemaVersion: 3, kind: "standalone-review",
       reviewerProtocol: STANDALONE_REVIEWER_PROTOCOL_V3, input, currentSource: source.value.source,
@@ -123,7 +123,7 @@ export async function startPreparedStandaloneSuccessor(handle: RunDirHandle,
     if (!published.ok) return failed(published.error.message);
   }
   const requests = initialStandaloneRequests(prepared.authority);
-  const batch = await publishReviewInitialBatch(handle, requests, prepared.packets.filter((_, index) => index % 2 === 0), "standalone-review", prepared.registration);
+  const batch = await publishInitialBatch(handle, requests, prepared.packets.filter((_, index) => index % 2 === 0), "standalone-review");
   if (!batch.ok) return failed(batch.message);
   const awaiting = reduceStandaloneReviewMachine(startStandaloneReviewMachine(prepared.authority), { kind: "review-batch-published", runId: handle.runId });
   if (!awaiting.ok) return failed(awaiting.error.message);
@@ -155,7 +155,6 @@ export async function startStandaloneFacade(
       reviewMetadata: preparationMetadata(reviewMetadata),
       scopeSafety: safeScope(scope),
       reviewerContexts: packetSet.contexts,
-      reviewerIssueRoute: observedReviewerIssueRoute(),
     });
     if (!prepared.ok) return failed(prepared.error.errors.join("; "));
     const registration: RegisteredStandaloneProgram = Object.freeze({
@@ -178,7 +177,7 @@ export async function startStandaloneFacade(
       const published = await handle.publishContext(packet);
       if (!published.ok) return failed(published.error.message);
     }
-    const batch = await publishReviewInitialBatch(handle, initialRequests, packetSet.packets.filter((_, index) => index % 2 === 0), "standalone-review", registration);
+    const batch = await publishInitialBatch(handle, initialRequests, packetSet.packets.filter((_, index) => index % 2 === 0), "standalone-review");
     if (!batch.ok) return failed(batch.message);
     const awaiting = reduceStandaloneReviewMachine(startStandaloneReviewMachine(prepared.value.authority), {
       kind: "review-batch-published", runId: handle.runId,
@@ -359,12 +358,11 @@ export async function resumeStandaloneFacade(
         if (registration.schemaVersion !== 3 || authenticated === undefined) {
           return failed("standalone review checkpoint is missing and no durable batch publication exists");
         }
-        const published = await publishReviewInitialBatch(
+        const published = await publishInitialBatch(
           handle,
           initialStandaloneRequests(authorityResult.value),
           authenticated.packets.filter((_, index) => index % 2 === 0),
           "standalone-review",
-          registration,
         );
         if (!published.ok) return failed(published.message);
       }
@@ -405,7 +403,7 @@ export async function resumeStandaloneFacade(
       case "awaiting-refutation":
         return resumeAwaitingRefutation(handle, state.value, resolver);
       case "awaiting-results":
-        return resumeAwaitingResults(handle, state.value, resolver, reviewerProtocols, registration);
+        return resumeAwaitingResults(handle, state.value, resolver, reviewerProtocols);
       case "preparing":
       case "aggregating":
         return failed(`unsupported standalone resume state ${state.value.kind}`);
@@ -431,10 +429,7 @@ async function resumeAwaitingRefutation(
   const recovered = durableRefutationRequests(handle, preparation.inputs, resolver);
   if (recovered.kind === "corrupt") return failed(recovered.message);
   if (recovered.kind === "absent") {
-    // Panel verdicts are the explicit extraction-only publication route: the
-    // refutation batch carries no reviewer emission authority, so the shared
-    // core renders every task with the caller's instruction verbatim.
-    const published = await publishLegacyInitialBatch(handle, preparation.inputs, preparation.packets, "standalone-refutation");
+    const published = await publishInitialBatch(handle, preparation.inputs, preparation.packets, "standalone-refutation");
     return published.ok ? { ok: true, action: published.action } : failed(published.message);
   }
   const panelRequests = recovered.requests;
@@ -477,19 +472,18 @@ async function resumeAwaitingRefutation(
   // exact terminal state.
   const panelEvents: PersistentRefutationPanelEvent[] = [];
   for (const request of panelRequests) {
-    const transcript = decideRefutationTranscriptRead(
-      handle.readTranscriptBytes(request.authority),
-      tombstones.get(request.authority.slotId),
-    );
-    if (transcript.kind === "infrastructure-failure") return failed(transcript.message);
+    const bytes = handle.readTranscriptBytes(request.authority);
     // A tombstoned attempt-1 slot has no evidence: the capture runtime
     // terminally rejected the attempt, so there is no verdict to parse.
-    // Only that explicit tombstone advances the slot through the panel's
-    // semantic rejection path; an unreadable captured transcript returned
-    // above as infrastructure failure and cannot consume a retry.
-    let submitted = transcript.kind === "verdict"
-      ? submitRefutationVerdict(panelState, resolver, panelRequestIdentity(request), transcript.transcript)
-      : rejectRefutationVerdict(panelState, resolver, panelRequestIdentity(request), transcript.diagnostic);
+    // The slot advances to its attempt-2 retry through the panel's
+    // rejection path — with the capture diagnostic as the rejection
+    // message, which the attempt-2 task repeats to the verifier. Kept
+    // as a fail-closed guard: a runtime whose missing-filter and this
+    // loop disagree must fail loudly, not pass an undefined tombstone
+    // downstream as if the slot had a verdict.
+    let submitted = bytes.ok
+      ? submitRefutationVerdict(panelState, resolver, panelRequestIdentity(request), Buffer.from(bytes.value).toString("utf8"))
+      : rejectRefutationVerdict(panelState, resolver, panelRequestIdentity(request), tombstones.get(request.authority.slotId) ?? bytes.error.message);
     if (!submitted.ok) return failed(submitted.error.message);
     panelState = submitted.value.state;
     if (submitted.value.recordedEvent !== undefined) panelEvents.push(submitted.value.recordedEvent);
@@ -583,7 +577,6 @@ async function resumeAwaitingResults(
   state: Extract<StandaloneReviewMachineState, { kind: "awaiting-results" }>,
   resolver: PublicationAuthorityResolver,
   reviewerProtocols: StandaloneReviewerProtocolResolver,
-  registration: RegisteredStandaloneProgram,
 ): Promise<FacadeDriveResult> {
   const activeAuthority = state.authority;
   const recovered = durableRequests(handle, activeAuthority, resolver);
@@ -678,7 +671,7 @@ async function resumeAwaitingResults(
       issued.push(attemptOne);
       continue;
     }
-    const retry = await recoverOrPublishStandaloneRetry(handle, activeAuthority, slot, resolver, registration);
+    const retry = await recoverOrPublishStandaloneRetry(handle, activeAuthority, slot, resolver);
     if (!retry.ok) return failed(retry.message);
     issued.push(retry.request);
   }
@@ -742,11 +735,10 @@ async function resumeAwaitingResults(
       idempotencyKey: { runId: handle.runId, effectId: effectId.value },
       receipt: publication.receipt,
       requests: missing.map((request) => {
-        const task = renderReviewProgramSpawnTask(
+        const task = renderSpawnTask(
           handle,
           request.authority,
           "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.",
-          registration,
           { standalone: true },
         );
         return {
@@ -775,10 +767,7 @@ async function resumeAwaitingResults(
     });
     if (!reduced.ok || reduced.value.kind !== "awaiting-refutation") return failed(reduced.ok ? "critical route did not reach refutation" : reduced.error.message);
     await handle.writeCheckpoint(serializeStandaloneReviewMachineState(reduced.value));
-    // Panel verdicts are the explicit extraction-only publication route: the
-    // refutation batch carries no reviewer emission authority, so the shared
-    // core renders every task with the caller's instruction verbatim.
-    const published = await publishLegacyInitialBatch(handle, preparation.inputs, preparation.packets, "standalone-refutation");
+    const published = await publishInitialBatch(handle, preparation.inputs, preparation.packets, "standalone-refutation");
     return published.ok ? { ok: true, action: published.action } : failed(published.message);
   }
   reduced = reduceStandaloneReviewMachine(reduced.value, { kind: "aggregate-clean", aggregate: aggregate.value.aggregate });

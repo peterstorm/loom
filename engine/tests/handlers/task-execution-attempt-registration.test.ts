@@ -197,7 +197,7 @@ describe("modern implementation attempt registration", () => {
     expect(stored.tasks[0]?.unresolved_repository_paths).toEqual(["foreign.ts"]);
   });
 
-  it("re-arms a retry on a fresh repository boundary so foreign and sibling movement between attempts cannot block or attribute it", async () => {
+  it("keeps an unreported unowned delta non-positive while a parallel sibling-owned dirty path stays inert", async () => {
     const repo = repository();
     const task = taskFixture({
       id: "T1",
@@ -240,23 +240,19 @@ describe("modern implementation attempt registration", () => {
 
     const first = await registerTaskExecutionBatch([spawn("T1")]);
     if (first.kind !== "registered") throw new Error(first.message);
+    const retainedBaseline = manager.load().tasks[0]?.repository_baseline;
     mkdirSync(join(repo.root, "src"), { recursive: true });
     writeFileSync(join(repo.root, "src/a.ts"), "export const a = 1;\n");
     writeFileSync(join(repo.root, "foreign.ts"), "foreign\n");
     writeFileSync(join(repo.root, "sibling.ts"), "parallel T2 bytes\n");
     await settle(first.authorities[0]!, ["src/a.ts"], "2026-08-25T00:01:00.000Z", false);
-    // The foreign delta observed DURING attempt 1 invalidates its review and
-    // retires the attempt boundary with the retry-required transition: the
-    // re-armed attempt freezes a FRESH boundary at its own registration, so
-    // the surviving foreign bytes (never repaired) cannot refuse or sully it.
     expect(manager.load().tasks[0]).toMatchObject({
       status: "pending",
-      review_status: "pending",
+      repository_baseline: retainedBaseline,
+      unresolved_repository_paths: ["foreign.ts"],
     });
-    expect(manager.load().tasks[0]?.repository_baseline).toBeUndefined();
-    expect(manager.load().tasks[0]?.unresolved_repository_paths).toBeUndefined();
 
-    // No foreign repair before the retry: the fresh boundary absorbs it.
+    rmSync(join(repo.root, "foreign.ts"));
     const second = await registerTaskExecutionBatch([
       nextSpawn(manager.load(), "T1"),
       spawn("T2"),
@@ -302,11 +298,8 @@ describe("modern implementation attempt registration", () => {
     expect(manager.load().tasks[0]).toMatchObject({ status: "implemented" });
     expect(manager.load().tasks[0]?.retry_count).toBeUndefined();
     expect(manager.load().tasks[0]?.files_modified).not.toContain("sibling.ts");
-    expect(manager.load().tasks[0]?.files_modified).not.toContain("foreign.ts");
     expect(manager.load().tasks[0]?.repository_baseline).toBeUndefined();
     expect(readFileSync(join(repo.root, "sibling.ts"), "utf8")).toBe("parallel T2 bytes\n");
-    // The foreign write survived every attempt unattributed and unblocked.
-    expect(readFileSync(join(repo.root, "foreign.ts"), "utf8")).toBe("foreign\n");
   });
 
   it("rejects a preflight authority plan when locked settlement history advances the semantic attempt", () => {

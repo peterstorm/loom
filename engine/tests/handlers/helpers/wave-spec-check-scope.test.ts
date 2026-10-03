@@ -34,11 +34,6 @@ import {
 } from "../../../src/core/orchestration-contract";
 import { buildContextPacket, encodeByteSection } from "../../../src/core/context-packets";
 import { capturedSpecCheck } from "../../../src/core/spec-check";
-import {
-  parseWaveFrozenSource,
-  reviewedWorkspaceObservation,
-  WAVE_FROZEN_SOURCE_SECTION,
-} from "../../../src/core/reviewed-workspace";
 
 const DIGEST = (fill: string): ArtifactDigest => {
   const parsed = parseArtifactDigest(fill.repeat(64));
@@ -237,7 +232,7 @@ describe("registered Wave spec-check scope", () => {
       ...WAVE_REVIEW_AGENTS,
     ]);
     expect(authorities.map(({ modelProfile }) => modelProfile)).toEqual([
-      "spec-check-review",
+      "general-review",
       "general-review",
       "focused-review",
       "focused-review",
@@ -599,9 +594,7 @@ describe("Wave reviewer slot identity projection", () => {
       const graph = { ...preparedGraph, tasks: preparedGraph.tasks.map((task) => ({ ...task, review_generation: generation })) };
       const legacy = { ...plain, schemaVersion: 1 as const, input: { wave: 1 } };
       const current = { ...legacy, schemaVersion: 2 as const, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL };
-      const workspace = [reviewedWorkspaceObservation("T1", ["engine/src/core/wave-review-authority.ts"], [
-        { path: "engine/src/core/wave-review-authority.ts", bytes: Buffer.from("reviewed source") },
-      ])];
+      const workspace = [{ taskId: "T1", scope: ["engine/src/core/wave-review-authority.ts"], headSha: "b".repeat(64) }];
       const observation = observeDocuments(null, null);
       const first = prepareWaveReviewBatch(runId.value, legacy, graph, 1, workspace, observation);
       const second = prepareWaveReviewBatch(runId.value, current, graph, 1, workspace, observation);
@@ -611,16 +604,6 @@ describe("Wave reviewer slot identity projection", () => {
       expect(second.value.packets[0]).toEqual(first.value.packets[0]);
       expect(second.value.settledFloor).toEqual(first.value.settledFloor);
       expect(second.value.packets.slice(1).every(({ schemaVersion }) => schemaVersion === 2)).toBe(true);
-      expect(first.value.packets.every((packet) => packet.fixedContext.every(({ label }) => label !== WAVE_FROZEN_SOURCE_SECTION))).toBe(true);
-      expect(second.value.packets[0]!.fixedContext.every(({ label }) => label !== WAVE_FROZEN_SOURCE_SECTION)).toBe(true);
-      const sources = second.value.packets.slice(1).map((packet) =>
-        packet.fixedContext.find(({ label }) => label === WAVE_FROZEN_SOURCE_SECTION)!);
-      expect(new Set(sources.map(({ digest }) => digest)).size).toBe(1);
-      const parsedSource = parseWaveFrozenSource(JSON.parse(Buffer.from(sources[0]!.bytes).toString("utf8")));
-      expect(parsedSource).toMatchObject({ ok: true, value: {
-        taskId: "T1", workspaceHeadSha: workspace[0]!.headSha,
-        files: [{ path: "engine/src/core/wave-review-authority.ts", kind: "text", content: "reviewed source" }],
-      } });
       expect(second.value.requests.slice(1)).not.toEqual(first.value.requests.slice(1));
     }), { numRuns: 20, seed: 4301 });
   });
@@ -630,74 +613,6 @@ describe("Wave reviewer slot identity projection", () => {
 
     expect(identitiesFor({ ...plain, authorityDigest: "b".repeat(64) }, 1)).not.toEqual(baseline);
     expect(identitiesFor(plain, 2)).not.toEqual(baseline);
-  });
-});
-
-describe("Wave frozen source authority", () => {
-  const parsedRunId = parseOrchestrationRunId("run.frozen-source");
-  if (!parsedRunId.ok) throw new Error(parsedRunId.error.message);
-  const parsedGraph = parseTaskGraph({
-    spec_trace_version: 2, current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
-    spec_file: null, plan_file: null, wave_gates: {},
-    tasks: [
-      taskFixture({ id: "T1", description: "first", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", depends_on: [], spec_anchors: [], spec_contributions: [],
-        file_list: ["src/a.ts"], files_modified: ["src/a.ts"] }),
-      taskFixture({ id: "T2", description: "second", agent: "code-implementer-agent", wave: 1,
-        status: "implemented", depends_on: [], spec_anchors: [], spec_contributions: [],
-        file_list: ["src/b.ts"], files_modified: ["src/b.ts"] }),
-    ],
-  });
-  if (!parsedGraph.ok) throw new Error(String(parsedGraph.error));
-  const registration: RegisteredWaveGateProgram = {
-    schemaVersion: 2, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL, kind: "wave-gate", input: { wave: 1 },
-    taskIds: ["T1", "T2"], authorityDigest: "a".repeat(64),
-  };
-  const first = reviewedWorkspaceObservation("T1", ["src/a.ts"], [{ path: "src/a.ts", bytes: Buffer.from("first task") }]);
-  const second = reviewedWorkspaceObservation("T2", ["src/b.ts"], [{ path: "src/b.ts", bytes: Buffer.from("second task") }]);
-  const prepare = (workspace: readonly typeof first[]) => prepareWaveReviewBatch(
-    parsedRunId.value, { ...registration, input: { wave: 1 } }, parsedGraph.value, 1, workspace, observeDocuments(null, null),
-  );
-
-  it("publishes one task-local snapshot to every reviewer and none to spec-check", () => {
-    const batch = prepare([first, second]);
-    if (!batch.ok) throw new Error(batch.error.message);
-    for (const [index, packet] of batch.value.packets.entries()) {
-      const source = packet.fixedContext.find(({ label }) => label === WAVE_FROZEN_SOURCE_SECTION);
-      if (index === 0) {
-        expect(source).toBeUndefined();
-        continue;
-      }
-      expect(source).toBeDefined();
-      const context = handleWaveReviewContext([packet], packet.digest);
-      if (context.kind !== "loaded" || context.value.taskRun === null) throw new Error("reviewer context must load");
-      const decoded = parseWaveFrozenSource(JSON.parse(Buffer.from(source!.bytes).toString("utf8")));
-      if (!decoded.ok) throw new Error(decoded.error);
-      expect(decoded.value.taskId).toBe(context.value.taskRun.taskId);
-      expect(decoded.value.workspaceHeadSha).toBe(context.value.taskRun.workspaceHeadSha);
-      expect(decoded.value.files.map(({ path }) => path)).toEqual(
-        context.value.taskRun.taskId === "T1" ? ["src/a.ts"] : ["src/b.ts"],
-      );
-    }
-  });
-
-  it.each([
-    ["missing artifact", { ...first, artifacts: [] }, "omitted declared artifact"],
-    ["mismatched digest", { ...first, headSha: "f".repeat(64) }, "disagree with observed workspaceHeadSha"],
-    ["duplicate artifact", { ...first, artifacts: [...first.artifacts, ...first.artifacts] }, "duplicate artifact"],
-    ["out-of-scope artifact", { ...first, artifacts: [{ path: "src/foreign.ts", bytes: [] }] }, "out-of-scope artifact"],
-  ] as const)("refuses a %s observation", (_name, malformed, message) => {
-    const batch = prepare([malformed, second]);
-    expect(batch.ok).toBe(false);
-    if (!batch.ok) expect(batch.error.message).toContain(message);
-  });
-
-  it("refuses missing, duplicate, and foreign Task observations", () => {
-    for (const workspace of [[first], [first, first], [first, { ...second, taskId: "foreign" }]]) {
-      const batch = prepare(workspace);
-      expect(batch.ok).toBe(false);
-      if (!batch.ok) expect(batch.error.message).toMatch(/workspace observations|duplicate workspace observations/);
-    }
   });
 });
 
@@ -940,9 +855,7 @@ describe("Wave spec-check authority guards", () => {
     return parsed.value;
   };
 
-  const workspace = [reviewedWorkspaceObservation("T1", ["src/a.ts"], [
-    { path: "src/a.ts", bytes: Buffer.from("reviewed source") },
-  ])];
+  const workspace = [{ taskId: "T1", headSha: "b".repeat(64), scope: ["src/a.ts"] }];
 
   it("refuses an observation whose Spec Index names another document", () => {
     // The guard exists so a projection can never be published under a document

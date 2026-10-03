@@ -1,9 +1,8 @@
 /** Bounded current wire codec. Version/issuance/scope joins belong to review-output. */
-import { printParseErrorCode, visit } from "jsonc-parser";
+import { visit } from "jsonc-parser";
 import {
   REVIEWER_PAYLOAD_LIMITS, REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1,
   REVIEWER_OUTPUT_CONTRACT, REVIEWER_PAYLOAD_EXAMPLE_V2, reviewerPayloadV2Schema,
-  reviewerEmissionToolContract,
   type ReviewerPayloadV2, type ReviewerProtocolFailure,
 } from "./reviewer-contract";
 import { standaloneReviewerPayloadV3Schema, type StandaloneReviewerPayloadV3 } from "./standalone-lineage-contract";
@@ -117,25 +116,6 @@ function uniqueMembers(text: string): DomainResult<true, ReviewerProtocolFailure
     : rejected("invalid-json", "JSON visitor did not complete.");
 }
 
-/**
- * First strict-grammar error reported by the same scanner the companion
- * duplicate check uses, or `null` for text the scanner accepts (JSONC-legal
- * single quotes are the only gap; they fall back to the legacy message).
- * Runtime-independent: it never depends on the host engine's JSON.parse
- * error wording (the CLI runs under bun/JSC, whose messages carry no
- * position at all), so the retry diagnostic is identical on every host.
- * Local state never escapes: the scan reads its argument and returns data.
- */
-function firstStrictJsonGrammarError(text: string): Readonly<{ code: number; offset: number }> | null {
-  let first: Readonly<{ code: number; offset: number }> | null = null;
-  visit(text, {
-    onError: (code, offset) => {
-      first ??= Object.freeze({ code, offset });
-    },
-  }, { disallowComments: true, allowTrailingComma: false, allowEmptyContent: false });
-  return first;
-}
-
 /** Shared strict byte grammar; callers select a schema explicitly after this parse. */
 export function parseBoundedReviewerJson(rawBytes: Uint8Array, maximumBytes: number): DomainResult<unknown, ReviewerProtocolFailure> {
   if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1 || rawBytes.byteLength > maximumBytes) {
@@ -162,25 +142,10 @@ export function parseBoundedReviewerJson(rawBytes: Uint8Array, maximumBytes: num
     // A prose-wrapped payload still carries the reviewer's own final message;
     // deterministic extraction admits it without hand-editing the original
     // transcript bytes, which stay immutable audit evidence. Zero candidates
-    // and ambiguity fail closed to the bounded retry. The retry preamble names
-    // the underlying grammar failure so the next attempt can self-correct: the
-    // strict scanner reports the exact offending position, which is exactly
-    // what an agent needs to find the unescaped quote or unbalanced bracket.
+    // and ambiguity fail closed to the bounded retry.
     const extracted = extractStrictObject(text);
     if (extracted === null) {
-      const grammar = firstStrictJsonGrammarError(text);
-      if (grammar === null) {
-        return rejected("invalid-json", "Reviewer payload must be exactly one strict JSON object.");
-      }
-      const prefix = text.slice(0, grammar.offset);
-      const line = (prefix.match(/\n/g)?.length ?? 0) + 1;
-      const column = grammar.offset - prefix.lastIndexOf("\n");
-      return rejected(
-        "invalid-json",
-        `Reviewer payload must be exactly one strict JSON object. Parse error: ${printParseErrorCode(grammar.code)} at position ${grammar.offset} (line ${line}, column ${column})`,
-        "",
-        encoder.encode(prefix).byteLength,
-      );
+      return rejected("invalid-json", "Reviewer payload must be exactly one strict JSON object.");
     }
     parsedValue = extracted.value;
     payloadText = extracted.text;
@@ -192,29 +157,6 @@ export function parseBoundedReviewerJson(rawBytes: Uint8Array, maximumBytes: num
   } catch {
     return rejected("invalid-payload", "Reviewer payload could not be inspected safely.");
   }
-}
-
-/**
- * The retry-facing diagnostic for a rejected reviewer payload. The strict
- * parse already knows WHY (code/message/path/byteOffset) and the caller knows
- * HOW BIG the captured bytes were; the attempt-2 preamble must name both so
- * the next emission can self-correct instead of re-emitting the same shape.
- * Above the model-reliability ceiling the guidance tells the agent to compress
- * (long re-verification reasons are the usual size driver); below it, to
- * validate before finalizing. Pure; the caller hands it the failure and the
- * captured byte length.
- */
-export function renderReviewerPayloadDiagnostic(
-  failure: ReviewerProtocolFailure,
-  payloadByteLength: number,
-): string {
-  const located = failure.byteOffset === undefined
-    ? failure.message
-    : `${failure.message}${failure.path === "" ? "" : ` at ${failure.path}`} (byte ${failure.byteOffset})`;
-  const guidance = payloadByteLength > REVIEWER_PAYLOAD_LIMITS.retryGuidanceBytes
-    ? `keep the final JSON under ${REVIEWER_PAYLOAD_LIMITS.retryGuidanceBytes} bytes — compress re-verification reasons to one sentence per prior finding and escape every quote inside prose`
-    : `validate the emitted JSON with JSON.parse before finalizing`;
-  return `${located} (payload ${payloadByteLength} bytes; ${guidance})`;
 }
 
 export function parseStandaloneReviewerPayloadV3(rawBytes: Uint8Array): DomainResult<StandaloneReviewerPayloadV3, ReviewerProtocolFailure> {
@@ -249,39 +191,4 @@ export function parseReviewerPayloadV2(rawBytes: Uint8Array): DomainResult<Revie
 /** The stamper consumes this same executable schema, parsed example and exact rubric. */
 export function renderReviewerWireContract(): string {
   return `${REVIEWER_OUTPUT_CONTRACT}\n\n## reviewer-payload-schema\n\n\`\`\`json\n${REVIEWER_PAYLOAD_SCHEMA_V2}\n\`\`\`\n\n## Current example (standalone)\n\n\`\`\`json\n${JSON.stringify(REVIEWER_PAYLOAD_EXAMPLE_V2, null, 2)}\n\`\`\`\n\n## reviewer-impact-rubric\n\n${REVIEWER_IMPACT_RUBRIC_V1}`;
-}
-
-// Route-aware wire-instruction rendering (AD-7; FR-020/AS-012).
-
-/**
- * The closed wire-instruction route of ONE reviewer request — the route
- * decision's own discriminant as data (the admission module owns the
- * route-discriminant projection; the render never re-derives it). The
- * emission arm carries the route's registry-minted tool name, typed at the
- * binding/route boundaries that feed this render; the extraction-only arm
- * its admission reason. A refused route is not representable — the shell
- * throws it fail-closed before any render.
- */
-export type ReviewerWireInstructionRoute =
-  | Readonly<{ kind: "emission"; toolName: string }>
-  | Readonly<{ kind: "extraction-only"; reason: string }>;
-
-/**
- * Route-aware rendered reviewer wire instructions (AD-7, FR-020/AS-012): an
- * emission route renders the frozen tool-primary wording over the exact
- * issued tool; an extraction-only request — an explicit extraction-only
- * surface, an unqualified route, or an archived (schema-1) issued claim —
- * renders the retained final-message contract VERBATIM
- * (`finalMessageContract`, defaulting to the frozen
- * `REVIEWER_OUTPUT_CONTRACT`). Archived issued contracts are never
- * rewritten: a pure route projection that touches no issued packet,
- * schema/rubric or stamped-fragment bytes.
- */
-export function renderReviewerWireInstructions(
-  route: ReviewerWireInstructionRoute,
-  finalMessageContract: string = REVIEWER_OUTPUT_CONTRACT,
-): string {
-  return route.kind === "emission"
-    ? reviewerEmissionToolContract(route.toolName)
-    : finalMessageContract;
 }

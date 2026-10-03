@@ -4,11 +4,9 @@ import { valueOf, standaloneFixture, publishBatch, upholdStandaloneCriticals } f
 import { dispositionPublicationFixture } from "../fixtures/standalone-disposition-publication";
 import { prepareStandaloneLineageSource, prepareStandaloneSuccessor, prepareStandaloneDisposition,
   standaloneOriginReference, standaloneDecisionReference, type PreparedStandaloneSuccessor } from "../../src/core/standalone-lineage";
-import { type StandaloneReviewerPayloadV3, STANDALONE_REVIEWER_PROTOCOL_V3, standaloneReviewerPayloadV3Schema } from "../../src/core/standalone-lineage-contract";
+import { type StandaloneReviewerPayloadV3 } from "../../src/core/standalone-lineage-contract";
 import { buildStandaloneSuccessorReviewerContext, parseIssuedStandaloneSuccessorReviewer,
-  standaloneSuccessorReviewerRegistration, standaloneSuccessorEmissionBinding } from "../../src/core/standalone-successor-reviewer";
-import { selectCanonicalPayload } from "../../src/core/emission-ingestion";
-import { observeEmissionCalls } from "../../src/core/harness-capture";
+  standaloneSuccessorReviewerRegistration } from "../../src/core/standalone-successor-reviewer";
 import { prepareFreshStandaloneReview, parseStandaloneReviewAuthority, serializeStandaloneReviewAuthority,
   capturedReviewerResultFromBytes, proveStandaloneRosterCompletion, aggregateStandaloneReview,
   serializeAdjudicatedStandaloneReview, serializeStandaloneAggregate, parseStandaloneAggregate,
@@ -46,14 +44,9 @@ const payload = (prepared: PreparedStandaloneSuccessor): StandaloneReviewerPaylo
 });
 type Reports = (prepared: PreparedStandaloneSuccessor, index: number) => StandaloneReviewerPayloadV3;
 
-/** Same initial publication, capture, completion, LC-2 and T2 adapters as production; no filesystem or harness state.
- *  `captureVia` derives the captured bytes from the report's raw bytes — the
- *  default is the identity (today's extraction-shaped capture); the
- *  emission-sourced lifecycle routes the SAME reports through the kernel's
- *  canonical selection, proving the lifecycle is source-blind (T9). */
+/** Same initial publication, capture, completion, LC-2 and T2 adapters as production; no filesystem or harness state. */
 function collect(sourceResult: AuthoritativeStandaloneReviewResult, runId: string, reports: Reports = payload,
-  snapshotRevision = runId,
-  captureVia: (prepared: PreparedStandaloneSuccessor, request: Readonly<{ requestId: string }>, raw: Uint8Array) => Uint8Array = (_prepared, _request, raw) => raw) {
+  snapshotRevision = runId) {
   const source = valueOf(prepareStandaloneLineageSource(sourceResult, `/owned/${sourceResult.runId}`));
   const disposition = dispositionPublicationFixture(valueOf(prepareStandaloneDisposition(source, bytes({
     schemaVersion: 1, source: source.publication, provenance: "DECLARED", revision: { kind: "initial" },
@@ -94,7 +87,7 @@ function collect(sourceResult: AuthoritativeStandaloneReviewResult, runId: strin
       registration: standaloneSuccessorReviewerRegistration(prepared) });
   };
   const accepted = published.action.requests.map((request, index) => {
-    const raw = captureVia(prepared, request.authority, bytes(reports(prepared, index)));
+    const raw = bytes(reports(prepared, index));
     const artifact = valueOf(parseArtifactRef({ runId, slot: request.authority.outputSlot, digest: sha256Bytes(raw), byteLength: raw.length }));
     return valueOf(acceptedAgentResult(request, valueOf(capturedReviewerResultFromBytes(artifact, raw))));
   });
@@ -346,100 +339,5 @@ describe("actual LC-2 standalone v3 publication and lineage", () => {
       raw[key] = {};
       expect(parseStandaloneReviewMachineState(raw, review.resolver, review.protocols, review.authority).ok).toBe(false);
     }), { seed: 5301, numRuns: 20 });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// The v3 lifecycle is source-blind to the emission seam (T9, FR-012/AD-9):
-// the same reports captured through the kernel's canonical selection produce
-// the byte-identical lifecycle the extraction path produces, and an
-// engine-refined emission refusal is retained by the selection and never
-// reaches the lifecycle joins as arguments.
-// ---------------------------------------------------------------------------
-
-/** The successor's issued emission binding for a fixture request. */
-const successorEmissionBinding = (requestId: string) => {
-  const minted = standaloneSuccessorEmissionBinding({ requestId, protocolDescriptor: STANDALONE_REVIEWER_PROTOCOL_V3 });
-  if (!minted.ok) throw new Error(`fixture successor emission binding refused: ${minted.error.message}`);
-  return minted.value;
-};
-
-/** The emission-sourced capture derivation: the report's payload travels as
- *  ONE correctly bound v3 emission call, the kernel's canonical selection
- *  admits it, and the selected canonical bytes become the captured bytes —
- *  the exact composition the production capture runtime runs. */
-function emissionCapturedBytes(_prepared: PreparedStandaloneSuccessor, request: Readonly<{ requestId: string }>, raw: Uint8Array): Uint8Array {
-  const binding = successorEmissionBinding(request.requestId);
-  const arguments_ = JSON.parse(new TextDecoder().decode(raw)) as unknown;
-  const selection = selectCanonicalPayload(
-    binding,
-    observeEmissionCalls([{
-      kind: "complete" as const,
-      call: { requestId: binding.requestId, toolCallId: `call:${request.requestId}`, kind: binding.kind, version: binding.version, arguments: arguments_ },
-    }]),
-    [],
-  );
-  if (selection.kind !== "emission-tool-arguments") {
-    throw new Error(`emission-sourced fixture must select the emission arm, got ${selection.kind}`);
-  }
-  return Uint8Array.from(selection.payload.bytes);
-}
-
-describe("the v3 lifecycle is source-blind to the emission seam (T9)", () => {
-  it("produces the byte-identical lifecycle from emission-sourced capture as from extraction over the same canonical bytes, joins unchanged", () => {
-    const reports: Reports = (prepared, index) => index === 0
-      ? { ...repaired(prepared, index), findings: [{ draft: advisory, relation: { kind: "independent" } }] }
-      : payload(prepared);
-    // The comparator isolates the SOURCE variable: both runs capture the
-    // SAME canonical bytes — the emission arm's deterministic encoding, the
-    // zod-parsed payload re-encoded `JSON.stringify(parsed, null, 2)` (the
-    // parse fixes key order to the frozen schema's declaration order) — once
-    // via the extraction path and once through the kernel's canonical
-    // selection. Byte-identity of the two finalized publications then pins
-    // that the accepted source never enters the lifecycle joins.
-    const canonicalBytes = (_prepared: PreparedStandaloneSuccessor, _request: Readonly<{ requestId: string }>, raw: Uint8Array): Uint8Array =>
-      new TextEncoder().encode(JSON.stringify(standaloneReviewerPayloadV3Schema.parse(JSON.parse(new TextDecoder().decode(raw))), null, 2));
-    const extraction = finalize(collect(predecessor(), "run.source-blind", reports, "run.source-blind", canonicalBytes));
-    const emission = finalize(collect(predecessor(), "run.source-blind", reports, "run.source-blind", emissionCapturedBytes));
-    // The whole canonical v3 publication is byte-identical: the accepted
-    // source is capture-side provenance, never a lifecycle input.
-    expect(emission.serialization).toBe(extraction.serialization);
-    expect(emission.result.lineage.counts).toEqual(extraction.result.lineage.counts);
-    expect(emission.result.lineage.inventory).toEqual(extraction.result.lineage.inventory);
-    // The resolution assessments attribute the SAME transcripts: identical
-    // requestId/transcriptDigest/contextDigest joins for every reviewer.
-    const resolution = emission.result.lineage.inventory[0]!.history.at(-1)!;
-    const extractionResolution = extraction.result.lineage.inventory[0]!.history.at(-1)!;
-    expect(resolution).toEqual(extractionResolution);
-    expect(emission.aggregate).toEqual(extraction.aggregate);
-  });
-
-  it("retains an engine-refined emission refusal on the selection and lets only the unchanged extraction result reach the joins (FR-006)", () => {
-    const valid = {
-      schemaVersion: 3,
-      kind: "standalone-successor-review",
-      lineageDigest: "a".repeat(64),
-      snapshotDigest: "b".repeat(64),
-      priorAssessments: [],
-      findings: [],
-    };
-    const refined = { ...valid, findings: [{ draft: { severity: "advisory", file: null, line: null, claim: "Exact text ", reason: "   " }, relation: { kind: "independent" } }] };
-    const binding = successorEmissionBinding("request:refined-refusal");
-    const selection = selectCanonicalPayload(
-      binding,
-      observeEmissionCalls([{
-        kind: "complete" as const,
-        call: { requestId: binding.requestId, toolCallId: "call:refined", kind: binding.kind, version: binding.version, arguments: refined as unknown },
-      }]),
-      [{ origin: "content[0].text", text: JSON.stringify(valid) }],
-    );
-    expect(selection.kind).toBe("extraction-over-refused-call");
-    if (selection.kind !== "extraction-over-refused-call") throw new Error("fixture must retain the refusal");
-    expect(selection.emissionRefusal.code).toBe("invalid-payload");
-    expect(selection.source).toBe("extraction");
-    if (!selection.fallback.ok) throw new Error("fixture fallback must admit");
-    // The fallback's bytes are the SAME bytes the zero-call extraction path
-    // would capture (AD-9 containment at the lifecycle's input boundary).
-    expect(new TextDecoder().decode(Uint8Array.from(selection.fallback.value.bytes))).toBe(JSON.stringify(valid));
   });
 });

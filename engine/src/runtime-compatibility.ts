@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { compareStrings } from "./core/ordering";
@@ -65,19 +64,6 @@ function revisionFiles(packageRoot: string): readonly string[] {
   return files;
 }
 
-/** The runtime revision domain's paths relative to the package root, in the
- *  same canonical order `captureLoomRuntimeIdentity` enumerates. Consumed by
- *  the implementation settlement's baseline restore: an attempt's authorized
- *  writes are not bounded by its declared artifact list (dispatch call sites
- *  ripple, and scratch a child creates inside `engine/src`/`pi` still counts
- *  as product under this domain), so the restore must cover the whole domain,
- *  not only declared artifacts. */
-export function runtimeDomainPaths(rawPackageRoot: string): readonly string[] {
-  const packageRoot = realpathSync(resolve(rawPackageRoot));
-  return revisionFiles(packageRoot).map((absolute) =>
-    relative(packageRoot, absolute).split(sep).join("/"));
-}
-
 /** Capture the mutable checkout bytes that one process is about to load/use. */
 export function captureLoomRuntimeIdentity(rawPackageRoot: string): LoomRuntimeIdentity {
   const packageRoot = realpathSync(resolve(rawPackageRoot));
@@ -85,62 +71,6 @@ export function captureLoomRuntimeIdentity(rawPackageRoot: string): LoomRuntimeI
     path: relative(packageRoot, absolute).split(sep).join("/"),
     bytes: readFileSync(absolute),
   }));
-  return Object.freeze({ packageRoot, revision: runtimeRevisionFromEntries(entries) });
-}
-
-/**
- * Baseline restoration for the implementation-settlement write boundary. Each
- * mapped path hashes the exact bytes it had at its attempt baseline (a Git
- * revision), a `null` mapping excludes the path (it did not exist at the
- * baseline — a file the attempt created), and unmapped paths hash their live
- * worktree bytes.
- *
- * WHY THIS EXISTS: an implementation attempt's declared artifacts may live
- * inside the runtime revision domain (`engine/src`, `pi`). The attempt is
- * SUPPOSED to change those bytes — that is the product. A settlement running
- * after the children wrote must not read their authorized writes as runtime
- * drift and refuse the very state update that records the attempt's outcome.
- * Restoring only the attempt's declared, provably-clean-at-spawn paths to
- * their attempt-start bytes keeps the guard's actual purpose intact: any drift
- * OUTSIDE the attempt's declared artifacts still refuses the write.
- */
-export type RuntimeBaselineRestore = ReadonlyMap<string, string | null>;
-
-/** A start_sha is a full Git object name; anything else is refused so a
- *  revision can never smuggle shell-relevant characters into `git show`. */
-const isRestorableRevision = (revision: string): boolean => /^[0-9a-f]{40}$/.test(revision);
-
-function baselineBytesAtRevision(packageRoot: string, revision: string, path: string): Uint8Array {
-  if (!isRestorableRevision(revision)) {
-    throw new Error(`runtime baseline restore: refusing non-SHA revision ${JSON.stringify(revision)}`);
-  }
-  return execFileSync("git", ["show", `${revision}:${path}`], {
-    cwd: packageRoot,
-    encoding: "buffer",
-    stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: 100 * 1024 * 1024,
-  });
-}
-
-/** Capture the runtime identity with the attempt's declared artifacts hashed at
- *  their attempt-start bytes instead of their live (implemented) bytes. */
-export function captureLoomRuntimeIdentityRestoring(
-  rawPackageRoot: string,
-  restore: RuntimeBaselineRestore,
-): LoomRuntimeIdentity {
-  const packageRoot = realpathSync(resolve(rawPackageRoot));
-  const entries = revisionFiles(packageRoot)
-    .map((absolute): { path: string; absolute: string } => ({
-      path: relative(packageRoot, absolute).split(sep).join("/"),
-      absolute,
-    }))
-    .filter(({ path }) => restore.get(path) !== null)
-    .map(({ path, absolute }): RuntimeRevisionEntry => Object.freeze({
-      path,
-      bytes: restore.get(path) !== undefined
-        ? baselineBytesAtRevision(packageRoot, restore.get(path) as string, path)
-        : readFileSync(absolute),
-    }));
   return Object.freeze({ packageRoot, revision: runtimeRevisionFromEntries(entries) });
 }
 

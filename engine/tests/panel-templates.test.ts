@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findResidualPlaceholders } from "../src/core/validate-template-substitution";
-import { architectureCriterion, candidateFilename, parseJudgeVerdict, serializeJudgeVerdict } from "../src/core/panel-contract";
+import { candidateFilename, parseJudgeVerdict, serializeJudgeVerdict } from "../src/core/panel-contract";
 
 /**
  * Template placeholder audit for the four panel-mode templates.
@@ -152,9 +152,7 @@ describe("panel-mode judge-verdict round-trip through the substitution gate", ()
         },
       ],
     });
-    const expectedCriterion = architectureCriterion("simplicity");
-    if (expectedCriterion === null) throw new Error("fixture criterion is outside the validated interview vocabulary");
-    const parsed = parseJudgeVerdict(raw, expectedCriterion, [candidateFilename("simplicity-first")]);
+    const parsed = parseJudgeVerdict(raw, "simplicity", [candidateFilename("simplicity-first")]);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     const canonical = serializeJudgeVerdict(parsed.value);

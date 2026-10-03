@@ -16,9 +16,7 @@
  *   events/<sequence>-<dedup>.json     immutable domain events
  *   requests/<request-id>.json         immutable request authority
  *   requests/correlators/<digest>.json immutable native-id/request binding
- *   contexts/<digest>.json             immutable context packets (section identity only;
- *                                      packets written before blob storage carry inline bytes)
- *   blobs/<section-digest>             immutable section bytes, stored once per digest
+ *   contexts/<digest>.json             complete immutable context packets
  *   transcripts/<slot>/attempt-<n>.raw exact harness bytes
  *   transcripts/<slot>/attempt-<n>.rejected immutable terminal capture refusal
  *   receipts/<effect-id>.json          typed effect/publication receipts
@@ -59,8 +57,7 @@ import { captureKey, type CaptureKey } from "../core/harness-capture";
 import { parseSemanticAttempt } from "../core/implementation-completion";
 import { canonicalJson, parseJsonValue } from "../core/review-packet";
 import type { ContextPacket } from "./context-packets";
-import { parseStandaloneReviewerContextPacketV3, storedContextPacket, type StandaloneReviewerContextPacketV3, type StoredContextPacket } from "../core/context-packets";
-import { CONTEXT_SECTION_BLOBS, readStoredContextRecord } from "./stored-context-packets";
+import { parseStandaloneReviewerContextPacketV3, serializeStandaloneReviewerContextPacketV3, type StandaloneReviewerContextPacketV3 } from "../core/context-packets";
 import { parseContextPacket } from "./context-packets";
 import {
   ensureRelativeDirectoryNoFollow,
@@ -107,7 +104,6 @@ const FIXED_SUBDIRECTORIES: readonly string[] = [
   REQUESTS,
   join(REQUESTS, CORRELATORS),
   CONTEXTS,
-  CONTEXT_SECTION_BLOBS,
   TRANSCRIPTS,
   RECEIPTS,
   ARTIFACTS,
@@ -1102,38 +1098,9 @@ function contextPublished(
   return success(canonicalRecord({ kind: "context-published" as const, runId, digest, slotPath: path }));
 }
 
-/** Write each section blob once; an existing blob must hold the exact bytes. */
-function publishSectionBlobs(directory: string, stored: StoredContextPacket): DomainResult<void, RunDirectoryError> {
-  for (const { digest, bytes } of stored.blobs) {
-    // A blob is named by its section digest; bytes that do not hash to it
-    // would leave a packet no reader can verify.
-    if (createHash("sha256").update(bytes).digest("hex") !== digest) {
-      return failure("context", `context section bytes do not match their digest ${digest}`);
-    }
-    const path = join(directory, CONTEXT_SECTION_BLOBS, digest);
-    try {
-      writeRunBytesExclusiveNoFollow(path, bytes);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-        return failure("context", `cannot publish context section blob ${digest}: ${(error as Error).message}`);
-      }
-      try {
-        if (!readRunBytesNoFollow(path).equals(bytes)) {
-          return failure("context", `a different section blob already occupies digest ${digest}`);
-        }
-      } catch (readError) {
-        return failure("context", `cannot verify context section blob ${digest}: ${(readError as Error).message}`);
-      }
-    }
-  }
-  return success(undefined);
-}
-
 function readContextPacket(directory: string, digest: ContextPacket["digest"], maximumBytes?: number): DomainResult<ContextPacket, RunDirectoryError> {
   try {
-    const record = readStoredContextRecord(directory, readRunBytesNoFollow(join(directory, CONTEXTS, `${digest}.json`), maximumBytes), maximumBytes);
-    if (!record.ok) return failure("context", record.error);
-    const parsed = parseContextPacket(record.value.record);
+    const parsed = parseContextPacket(readJsonNoFollow(join(directory, CONTEXTS, `${digest}.json`), maximumBytes));
     if (!parsed.ok) return failure("context", parsed.error.message);
     return parsed.value.digest === digest
       ? success(parsed.value)
@@ -1169,11 +1136,9 @@ function contextOperations(runId: OrchestrationRunId, directory: string) {
   return {
     async publishContext(packet: ContextPacket | StandaloneReviewerContextPacketV3): Promise<DomainResult<ContextPublishedReceipt, RunDirectoryError>> {
       const path = join(directory, CONTEXTS, `${packet.digest}.json`);
-      const stored = storedContextPacket(packet);
-      // Blobs first: a packet file is never visible before the bytes it names.
-      const blobs = publishSectionBlobs(directory, stored);
-      if (!blobs.ok) return blobs;
-      const claimed = claimIdempotentWrite(path, stored.text, "context",
+      const encoded = packet.schemaVersion === 3 ? serializeStandaloneReviewerContextPacketV3(packet) : success(JSON.stringify(packet));
+      if (!encoded.ok) return failure("context", encoded.error.message);
+      const claimed = claimIdempotentWrite(path, encoded.value, "context",
         (cause) => `cannot publish context packet: ${cause}`,
         "a different context packet already occupies this digest");
       return claimed.ok ? contextPublished(runId, packet.digest, path) : claimed;
@@ -1184,9 +1149,7 @@ function contextOperations(runId: OrchestrationRunId, directory: string) {
         const bytes = readRunBytesNoFollow(join(directory, CONTEXTS, `${digest}.json`), maximumBytes);
         const prior = successorPackets.get(digest);
         if (prior !== undefined && prior.bytes.equals(bytes)) return success(prior.packet);
-        const record = readStoredContextRecord(directory, bytes, maximumBytes);
-        if (!record.ok) return failure("context", record.error);
-        const parsed = parseStandaloneReviewerContextPacketV3(record.value.record);
+        const parsed = parseStandaloneReviewerContextPacketV3(JSON.parse(bytes.toString("utf8")));
         if (!parsed.ok) return failure("context", parsed.error.message);
         if (parsed.value.digest !== digest) return failure("context", "successor packet differs from its immutable slot");
         successorPackets.set(digest, Object.freeze({ bytes, packet: parsed.value }));

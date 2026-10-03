@@ -8,12 +8,8 @@ import {
   LLM_PROFILE_IDS,
   LLM_PROFILES,
   LOOM_OWNED_AGENTS,
-  assertPanelJudgeProfileUnique,
   classifyPiSpawnItems,
   lowerModelProfile,
-  issuedReviewerProfile,
-  reviewerIssueRouteForParent,
-  panelJudgeProfileCarriers,
   parseAgentFrontmatter,
   parseLlmProfile,
   parseLlmProfileId,
@@ -25,16 +21,14 @@ import {
   validateAgentPolicyCatalog,
   validateAgentPolicyFrontmatter,
   validateExplicitSpawnModel,
-  type AgentPolicy,
   type LlmProfileId,
-  type LoomAgentName,
 } from "../../src/core/model-profiles";
 import { IMPL_AGENTS } from "../../src/config";
 
 const EXPECTED_PROFILES = {
   implementation: {
     claudeCode: { model: "opus" },
-    pi: { provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" },
+    pi: { provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
   },
   "architecture-finalize": {
     claudeCode: { model: "opus" },
@@ -47,10 +41,6 @@ const EXPECTED_PROFILES = {
   "focused-review": {
     claudeCode: { model: "sonnet" },
     pi: { provider: "openai-codex", model: "gpt-5.5", thinking: "high" },
-  },
-  "qualified-local-review": {
-    claudeCode: { model: "sonnet" },
-    pi: { provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" },
   },
   "panel-design": {
     claudeCode: { model: "opus" },
@@ -68,10 +58,6 @@ const EXPECTED_PROFILES = {
     claudeCode: { model: "haiku" },
     pi: { provider: "openai-codex", model: "gpt-5.4-mini", thinking: "medium" },
   },
-  "spec-check-review": {
-    claudeCode: { model: "sonnet" },
-    pi: { provider: "github-copilot", model: "gpt-5.6-terra", thinking: "high" },
-  },
 } as const satisfies Record<LlmProfileId, unknown>;
 
 function errorsOf(result: { readonly ok: true } | { readonly ok: false; readonly errors: readonly string[] }): readonly string[] {
@@ -85,17 +71,11 @@ describe("semantic model profiles", () => {
       .toEqual(EXPECTED_PROFILES);
   });
 
-  it("keeps all default profiles on exact cloud targets and the alternative on one qualified local target", () => {
-    const defaults = LLM_PROFILES.filter(({ id }) => id !== "qualified-local-review");
-    // implementation rides the same local qualified route as the reviewer
-    // election; every other default stays on an exact cloud target.
-    const cloudDefaults = defaults.filter(({ id }) => id !== "implementation");
-    expect(new Set(cloudDefaults.map(({ pi }) => pi.provider))).toEqual(new Set(["github-copilot", "openai-codex"]));
-    expect(new Set(cloudDefaults.map(({ pi }) => pi.model))).toEqual(
-      new Set(["gpt-5.6-sol", "gpt-5.5", "gpt-5.4-mini", "gpt-5.6-terra"]),
+  it("uses only currently available, explicitly named openai-codex targets", () => {
+    expect(new Set(LLM_PROFILES.map(({ pi }) => pi.provider))).toEqual(new Set(["openai-codex"]));
+    expect(new Set(LLM_PROFILES.map(({ pi }) => pi.model))).toEqual(
+      new Set(["gpt-5.6-sol", "gpt-5.5", "gpt-5.4-mini"]),
     );
-    expect(defaults.find(({ id }) => id === "implementation")?.pi).toEqual(EXPECTED_PROFILES.implementation.pi);
-    expect(LLM_PROFILES.find(({ id }) => id === "qualified-local-review")?.pi).toEqual(EXPECTED_PROFILES["qualified-local-review"].pi);
     expect(LLM_PROFILES.every(({ pi }) => pi.model.length > 0 && pi.thinking.length > 0)).toBe(true);
   });
 
@@ -139,29 +119,6 @@ describe("semantic model profiles", () => {
   });
 });
 
-describe("qualified-local reviewer issuance", () => {
-  const qualified = { pi: true, provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" };
-
-  it("elects the local profile only from the exact parent session route", () => {
-    expect(reviewerIssueRouteForParent(qualified)).toBe("qualified-local");
-    for (const changed of [
-      { pi: false }, { provider: "openai-codex" }, { model: "glm-5.3-flash-spark-tp2-v15" },
-      { thinking: "medium" },
-    ]) expect(reviewerIssueRouteForParent({ ...qualified, ...changed })).toBe("catalog");
-  });
-
-  it("preserves the catalog for all non-reviewers and the cloud default", () => {
-    expect(issuedReviewerProfile("code-reviewer", "qualified-local")).toMatchObject({
-      ok: true, value: { id: "qualified-local-review", pi: qualifiedRoute },
-    });
-    expect(issuedReviewerProfile("code-reviewer", "catalog")).toEqual(resolveModelProfile("general-review"));
-    expect(issuedReviewerProfile("spec-check-invoker", "qualified-local")).toEqual(resolveModelProfile("spec-check-review"));
-    expect(issuedReviewerProfile("review-verifier-agent", "qualified-local")).toEqual(resolveModelProfile("refutation"));
-  });
-});
-
-const qualifiedRoute = { provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" };
-
 describe("Pi spawn input parsing", () => {
   it("parses each single, parallel, and chain mode in order", () => {
     expect(parsePiSpawnItems({ agent: "code-reviewer", task: "review" })).toEqual({
@@ -202,26 +159,6 @@ describe("Pi spawn input parsing", () => {
     ]) {
       expect(parsePiSpawnItems(raw).ok).toBe(false);
     }
-  });
-
-  it("does not count vacuous single fields as a second mode beside a populated batch", () => {
-    // Regression: a model echoes the tool schema's optional top-level
-    // agent/task fields with an empty string alongside the parallel payload it
-    // actually intended; counting that echo as a populated single mode refused
-    // the unambiguous batch (observed live with gpt-5.6-terra dispatching a
-    // one-entry tasks array). Only a POPULATED single form is a mode, so the
-    // echo is ignored and the parallel batch parses.
-    expect(parsePiSpawnItems({
-      agent: "comment-analyzer",
-      task: "",
-      tasks: [{ agent: "comment-analyzer", task: "review the wave slot" }],
-    })).toEqual({
-      ok: true,
-      value: [{ agent: "comment-analyzer", task: "review the wave slot" }],
-    });
-    // A vacuous single form ALONE is still no batch at all.
-    expect(parsePiSpawnItems({ agent: "comment-analyzer", task: "" }).ok).toBe(false);
-    expect(parsePiSpawnItems({ agent: "", task: "review" }).ok).toBe(false);
   });
 
   it("classifies external batches without weakening all-or-nothing Loom ownership", () => {
@@ -444,31 +381,5 @@ describe("catalog and frontmatter validators", () => {
       "model-profile": "general-review",
       model: "sonnet",
     }).ok).toBe(false);
-  });
-});
-
-describe("panel-judge profile uniqueness — the judge-verdict scoping invariant", () => {
-  const row = (agent: LoomAgentName, profile: LlmProfileId): AgentPolicy<LoomAgentName> =>
-    Object.freeze({ agent, profile, kind: Object.freeze({ kind: "reviewer" }), requiredSkill: null });
-
-  it("the live catalog carries the panel-judge profile exactly once", () => {
-    // The consumer the scoping condition reads as data: `producerKindsOfAgent`
-    // binds judge-verdict emission to the carrier list, so the list must name
-    // exactly the one judge.
-    expect(panelJudgeProfileCarriers()).toEqual(["arch-judge-agent"]);
-  });
-
-  it("refuses a synthetic roster where a second agent binds the panel-judge profile", () => {
-    // The throwing branch driven with a synthetic two-carrier roster — the
-    // failure mode the load-time assertion exists for, exercised directly so a
-    // weakened predicate cannot survive the suite green.
-    const twoCarriers = [row("arch-judge-agent", "panel-judge"), row("code-reviewer", "panel-judge")];
-    expect(() => assertPanelJudgeProfileUnique(twoCarriers)).toThrowError(
-      /panel-judge profile must bind exactly one Agent[\s\S]*arch-judge-agent, code-reviewer[\s\S]*judge-verdict/,
-    );
-  });
-
-  it("accepts the synthetic single-carrier roster — the legal shape", () => {
-    expect(() => assertPanelJudgeProfileUnique([row("arch-judge-agent", "panel-judge")])).not.toThrow();
   });
 });

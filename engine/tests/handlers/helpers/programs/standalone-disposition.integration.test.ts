@@ -8,7 +8,6 @@ import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession as runInFixturePiSession } from "../../../fixtures/pi-session";
 import { standaloneOriginReference, prepareStandaloneSuccessor, type StandaloneDispositionPublicationReference } from "../../../../src/core/standalone-lineage";
 import { parseStandaloneDispositionStartBytes, standaloneDispositionReceipt } from "../../../../src/core/standalone-disposition-machine";
-import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/spawn-admission";
 function valueOf<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T {
   if (!result.ok) throw Error(JSON.stringify(result));
   return result.value;
@@ -71,28 +70,9 @@ async function command(root: string, args: readonly string[], raw = "") {
   return JSON.parse(result.stdout) as Action;
 }
 const flags = (root: string, run: string) => ["--runs-root", join(root, "runs"), "--run", run];
-async function sourceFixture(root: string, environment: Readonly<Record<string, string | undefined>> = {}) {
-  // Route-election pinning for the source run's issuing CLI child: the arms
-  // of the route-agnostic disposition control pin explicit routes, and the
-  // ambient session's qualified-local handshake must not leak into either.
-  const previous = Object.keys(environment).map((key) => [key, process.env[key]] as const);
-  try {
-    for (const [key, value] of Object.entries(environment)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-    return await sourceFixturePinned(root);
-  } finally {
-    for (const [key, value] of previous) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
-}
-
-async function sourceFixturePinned(root: string) {
+async function sourceFixture(root: string) {
   const initial = await command(root, ["start", "standalone-review", ...flags(root, "source")], JSON.stringify({ kind: "simplify", files: ["README.md"], dryRun: false }));
-  const requests: readonly { authority: AgentRequestAuthority; task?: string }[] = initial.requests;
+  const requests: readonly { authority: AgentRequestAuthority }[] = initial.requests;
   for (const [index, { authority }] of requests.entries()) {
     await command(root, ["submit", ...flags(root, "source"), "--request", authority.requestId, "--slot", authority.slotId, "--attempt", "1"],
       JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: index === 0 ? [
@@ -107,7 +87,7 @@ async function sourceFixturePinned(root: string) {
   const input = valueOf(parseStandaloneDispositionStartBytes(bytes({ source, previous: null, record: { schemaVersion: 1,
     source, provenance: "DECLARED", revision: { kind: "initial" }, entries: lineage.inventory.map((row, index) => ({
       origin: standaloneOriginReference(row.origin), decision: index === 0 ? "accepted" : "deferred", reason: "  Exact declared policy\n  " })) } })));
-  return { source, lineage, input, publisher, initial };
+  return { source, lineage, input, publisher };
 }
 
 describe.sequential("admitted standalone advisory publication, correction and recovery", { timeout: 60_000 }, () => {
@@ -322,7 +302,7 @@ describe.sequential("admitted standalone advisory publication, correction and re
       const { startStandaloneReviewMachine, reduceStandaloneReviewMachine, serializeStandaloneReviewMachineState } = await import("../../../../src/core/standalone-review-machine");
       const { resolveAgentPolicy, resolveModelProfile, lowerModelProfile } = await import("../../../../src/core/model-profiles");
       const { legacyStandaloneContext, standaloneFixtureRegistration } = await import("../../../fixtures/standalone-reviewer-protocol");
-      const { publishLegacyInitialBatch } = await import("../../../../src/handlers/helpers/programs/helpers");
+      const { publishInitialBatch } = await import("../../../../src/handlers/helpers/programs/helpers");
       const { resumeStandaloneFacade } = await import("../../../../src/handlers/helpers/programs/standalone");
       const publisher = await import("../../../../src/handlers/helpers/programs/standalone-disposition");
       const handle = valueOf(createRunDirectory(join(root, "runs"), "legacy"));
@@ -343,7 +323,7 @@ describe.sequential("admitted standalone advisory publication, correction and re
         scopeSafety: [{ path: "README.md", status: "safe" }], roster: [{ slotId: "slot:legacy", attempts: attempts.map(row => row.authority) }] }));
       const registration = standaloneFixtureRegistration(prepared.authority);
       valueOf(await handle.registerProgram(registration));
-      const published = await publishLegacyInitialBatch(handle, prepared.initialRequests.map(authority => ({ authority,
+      const published = await publishInitialBatch(handle, prepared.initialRequests.map(authority => ({ authority,
         context: { digest: authority.contextDigest, slot: `contexts/${authority.contextDigest}.json` } })), attempts.map(row => row.packet), "standalone-review");
       expect(published.ok).toBe(true);
       const awaiting = valueOf(reduceStandaloneReviewMachine(startStandaloneReviewMachine(prepared.authority), { kind: "review-batch-published", runId: handle.runId }));
@@ -446,57 +426,5 @@ describe.sequential("admitted standalone advisory publication, correction and re
       expect(done.outcome.record.revision).toEqual(input.record.revision);
       expect(done.outcome.provenance).toBe("DECLARED");
     });
-  });
-
-  it("keeps the disposition publication route-agnostic: finding inventory and policy entries are identical regardless of the source run's emission route (FR-012)", async () => {
-    // The outer Loom session may run under the qualified-local model, so both
-    // arms pin their route explicitly: the catalog arm DELETES the election
-    // variables, the emission arm pins the qualified local route.
-    const CATALOG_ROUTE_ENV: Readonly<Record<string, string | undefined>> = Object.freeze({
-      PI_PROVIDER: undefined, PI_MODEL: undefined, PI_REASONING_LEVEL: undefined,
-    });
-    const QUALIFIED_ROUTE_ENV: Readonly<Record<string, string>> = Object.freeze({
-      PI_PROVIDER: "desktop-vllm", PI_MODEL: "glm-5.3-flash-spark-tp2-v14", PI_REASONING_LEVEL: "high",
-    });
-    const catalogRoot = project();
-    const qualifiedRoot = project();
-    const catalog = await sourceFixture(catalogRoot, CATALOG_ROUTE_ENV);
-    const qualified = await sourceFixture(qualifiedRoot, QUALIFIED_ROUTE_ENV);
-
-    // The control is genuinely exercised: the qualified source run issues
-    // descriptors and tool-primary instructions, the catalog run does not.
-    const tasksOf = (fixture: Awaited<ReturnType<typeof sourceFixture>>) =>
-      (fixture.initial.requests as readonly { authority: AgentRequestAuthority; task: string }[]).map(({ task }) => task);
-    for (const task of tasksOf(qualified)) {
-      expect(parseEmissionDescriptor(task)).toMatchObject({ kind: "issued", binding: { version: "v2" } });
-      expect(task).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
-    }
-    for (const task of tasksOf(catalog)) {
-      expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
-      expect(parseEmissionDescriptor(task).kind).toBe("absent");
-    }
-
-    // FR-012 downstream of issuance: the disposition's finding inventory and
-    // the published policy decisions are identical across routes once each
-    // project's own source identity is normalized. Finding rows normalize by
-    // locator/result digest; policy entries carry origin REFERENCE DIGESTS
-    // (hashes of project-local source identity), so their decisions and
-    // reasons are compared and their origins are covered by the inventory
-    // equality above.
-    const normalizeSource = (value: unknown, fixture: Awaited<ReturnType<typeof sourceFixture>>) =>
-      JSON.stringify(value).split(fixture.source.locator).join("<SOURCE>").split(fixture.source.resultDigest).join("<RESULT>");
-    const policyDecisions = (record: { entries: readonly { origin: unknown; decision: unknown; reason: unknown }[] }) =>
-      JSON.stringify(record.entries.map(({ origin: _origin, ...decision }) => decision));
-    expect(normalizeSource(qualified.lineage.inventory, qualified)).toBe(normalizeSource(catalog.lineage.inventory, catalog));
-    expect(policyDecisions(qualified.input.record)).toBe(policyDecisions(catalog.input.record));
-    expect(qualified.input.record.revision).toEqual(catalog.input.record.revision);
-    expect(qualified.input.record.provenance).toBe(catalog.input.record.provenance);
-    const catalogDone = await command(catalogRoot, ["start", "standalone-disposition", ...flags(catalogRoot, "policy")], JSON.stringify(catalog.input));
-    const qualifiedDone = await command(qualifiedRoot, ["start", "standalone-disposition", ...flags(qualifiedRoot, "policy")], JSON.stringify(qualified.input));
-    for (const done of [catalogDone, qualifiedDone]) {
-      expect(done).toMatchObject({ kind: "done", outcome: { kind: "standalone-disposition-published", provenance: "DECLARED" } });
-    }
-    expect(policyDecisions(qualifiedDone.outcome.record)).toBe(policyDecisions(catalogDone.outcome.record));
-    expect(qualifiedDone.outcome.record.revision).toEqual(catalogDone.outcome.record.revision);
   });
 });

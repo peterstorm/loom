@@ -2,11 +2,6 @@
 name: type-design-analyzer
 model-profile: focused-review
 model: sonnet
-tools:
-  - Bash
-  - Read
-  - Grep
-  - Glob
 description: Use this agent when you need expert analysis of type design in your codebase. Specifically use it when introducing new types, during PR creation to review types being added, or when refactoring existing types. Provides quantitative ratings on encapsulation, invariant expression, usefulness, and enforcement.
 color: pink
 ---

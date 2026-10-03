@@ -3,10 +3,7 @@
 import { attributeExit, classifyTestCommandDetailed, type ClassifiedTestCommand } from "../engine/src/machine";
 import { splitCommandSegmentsWithOps, stripComment, stripEnvPrefix } from "../engine/src/core/shell-command";
 import { extractTestEvidence } from "../engine/src/core/test-evidence";
-import { boundedThrownCause, describeUnknown } from "../engine/src/core/orchestration-contract/identity";
-import type { IssuedEmissionBinding } from "../engine/src/core/emission-tool";
-import type { EmissionCallFrame } from "../engine/src/core/harness-capture";
-import { emissionToolFamily } from "./emission-tool";
+import { boundedThrownCause } from "../engine/src/core/orchestration-contract";
 
 const TOOL_NAME_MAP: Readonly<Record<string, string>> = Object.freeze({
   bash: "Bash",
@@ -88,36 +85,29 @@ function parseMessageRole(message: Readonly<Record<string, unknown>>, messageLab
   return role;
 }
 
-type PiMessageContentClassification =
-  | Readonly<{ kind: "text"; text: string }>
-  | Readonly<{ kind: "typed-blocks"; blocks: readonly (readonly [unknown, string])[] }>
-  | Readonly<{ kind: "invalid" }>;
-
-/** One content-shape vocabulary for every native transcript projection.
- * A typed object is exactly one block; it is not presumed to be a tool call —
- * the block parser/scanner must still prove its type and fields. */
-function classifyMessageContent(
-  contentValue: unknown,
-  messageLabel: string,
-  rolePresent: boolean,
-): PiMessageContentClassification {
+function classifyMessageContent(contentValue: unknown, messageLabel: string, rolePresent: boolean): {
+  blocks: readonly (readonly [unknown, string])[];
+  stringContent: string | null;
+  valid: boolean;
+} {
   if (typeof contentValue === "string") {
     return rolePresent
-      ? { kind: "text", text: contentValue }
-      : { kind: "invalid" };
+      ? { blocks: [], stringContent: contentValue, valid: true }
+      : { blocks: [], stringContent: null, valid: false };
   }
   if (Array.isArray(contentValue)) {
     return {
-      kind: "typed-blocks",
       blocks: contentValue.map(
         (block, blockIndex) => [block, `${messageLabel}.content[${blockIndex}]`] as const,
       ),
+      stringContent: null,
+      valid: true,
     };
   }
   if (isRecord(contentValue)) {
-    return { kind: "typed-blocks", blocks: [[contentValue, `${messageLabel}.content`] as const] };
+    return { blocks: [[contentValue, `${messageLabel}.content`] as const], stringContent: null, valid: true };
   }
-  return { kind: "invalid" };
+  return { blocks: [], stringContent: null, valid: false };
 }
 
 function parseToolFields(message: Readonly<Record<string, unknown>>, messageLabel: string, errors: string[]): Pick<PiMessage, "toolCallId" | "toolName" | "isError"> {
@@ -157,20 +147,18 @@ export function parsePiMessages(messages: unknown): PiTranscriptResult<readonly 
     }
     const role = parseMessageRole(message, messageLabel, errors);
     const classified = classifyMessageContent(message.content, messageLabel, role !== null);
-    if (classified.kind === "invalid") {
+    if (!classified.valid) {
       errors.push(`${messageLabel}.content must be an array, string, or typed content block`);
       return;
     }
 
     const blockErrorsBefore = errors.length;
-    const content: PiContentBlock[] = classified.kind === "text"
-      ? [Object.freeze({ type: "text", text: classified.text })]
-      : [];
-    if (classified.kind === "typed-blocks") {
-      for (const [block, label] of classified.blocks) {
-        const parsedBlock = parsePiContentBlock(block, label, errors);
-        if (parsedBlock !== null) content.push(parsedBlock);
-      }
+    const content: PiContentBlock[] = classified.stringContent === null
+      ? []
+      : [Object.freeze({ type: "text", text: classified.stringContent })];
+    for (const [block, label] of classified.blocks) {
+      const parsedBlock = parsePiContentBlock(block, label, errors);
+      if (parsedBlock !== null) content.push(parsedBlock);
     }
 
     const toolFields = parseToolFields(message, messageLabel, errors);
@@ -211,10 +199,7 @@ const ZERO_FAILURE_MARKER = /\b0 fail(?:ed|ing)?\b|\bFailures: 0\b|\bErrors: 0\b
  *  - every segment AFTER the test is a proven stdin-only PIPE stage. The narrow
  *    grammar admits `tail` without file operands (optionally `-n N`, its
  *    attached form `-nN`, or the GNU tail obsolete form `-N`) and `tee` with
- *    path operands that may write copies of the stream to side-effect files
- *    while forwarding stdin to stdout unchanged — the piped stage's own stdout
- *    stays byte-equal to its stdin, so the paired output is untouched; an
- *    arbitrary pipe command can ignore stdin
+ *    inert path operands; an arbitrary pipe command can ignore stdin
  *    and fabricate a green summary just as easily as a sequenced trailer. A
  *    `;`/`&&`/`||`/`&` command after the test is also refused because its stdout
  *    is concatenated into the paired output and would be read as the verdict.
@@ -416,7 +401,7 @@ export function piStructuredTestResult(
  * parsers can pair a real command with its exact result.
  */
 /** Text blocks normalised to a defined `text`; every other block passes through
- *  untouched so user and tool-result projections share one mapping policy. */
+ *  untouched. The toolResult and user branches below mapped identical closures. */
 function normalizedTextBlocks(content: readonly PiContentBlock[]): readonly unknown[] {
   return content.map((block) => block.type === "text" ? { type: "text", text: block.text ?? "" } : block);
 }
@@ -561,174 +546,4 @@ export function piResultFinalPayloadCandidates(
     return piFinalPayloadCandidates(message.content);
   }
   return { ok: true, value: Object.freeze([]) };
-}
-
-// ---------------------------------------------------------------------------
-// Emission call observations (T5; FR-014/AD-8)
-// ---------------------------------------------------------------------------
-
-/**
- * The complete, request-bound emission-tool call frames observed in a Pi
- * child transcript — the observation half the capture adapters fold through
- * the engine's `observeEmissionCalls` and the issued binding's selection.
- *
- * Posture, so the two projections of one transcript cannot drift:
- *
- * - TOLERANT, INDEPENDENT SCAN. This scan does NOT go through
- *   `parsePiMessages`: an emission call must remain observable even when an
- *   unrelated block elsewhere in the transcript is malformed, and the
- *   incomplete/failed observation arm (AD-8) needs per-call classification
- *   the wholesale-failing message parser cannot express. The fallback
- *   candidates keep going through `parsePiMessages`/`piResultFinalPayloadCandidates`
- *   unchanged — a transcript the parser refuses still refuses capture there,
- *   so this tolerance cannot weaken what the capture seam accepts.
- * - ASSISTANT TOOL CALLS ONLY (AD-8). Tool-call blocks in any other role, and
- *   every non-toolCall block, are not emission observations. JSON pasted into
- *   text is a `FinalPayloadCandidate`, never an emission frame — the two
- *   vocabularies share no constructor.
- * - FAMILY BY REGISTRY, NOT BY SHAPE. A block is emission-suspect when its
- *   tool name is a frozen-registry emission name (its producer kind is the
- *   registry's fact for that name) or a prefix-reserved name the registry
- *   does not freeze — the latter is an observed-but-unbindable call, refused
- *   as an incomplete frame rather than absorbed as absence (FR-014).
- * - REQUEST BOUND BY ATTRIBUTION (FR-014). The frame's `requestId` is the
- *   issued binding's — the adapter's attribution from the correlated request
- *   authority, verified (never trusted) by the selection's binding check. A
- *   frame's `kind` is the OBSERVED registry kind of the called tool, so a
- *   call to a different producer kind's tool arrives as a complete frame
- *   carrying the wrong kind — the selection refuses it (`unexpected-kind`)
- *   before any version consultation, and it can never select its own
- *   decoder. A frame's `version` is the issued binding's: the FR-008
- *   readiness barrier proved the child's actual registered tool matches the
- *   issued kind/version/digest BEFORE any model request, which is the
- *   precondition that makes the attribution sound; the selection re-verifies
- *   request and kind against the same issued authority.
- * - SUCCESSFUL EXECUTION ONLY (AS-021). An assistant tool-call block becomes
- *   complete only when the transcript also carries its finalized, successful
- *   Pi `toolResult`. Aborted/error turns, missing, duplicate, malformed, or
- *   `isError: true` results become incomplete frames, so streamed but
- *   unexecuted arguments can never become authoritative output. Schema
- *   rejection before execute remains observable through its error result.
- * - ARGUMENTS AS OBSERVED. Complete frames carry a frozen shallow snapshot of
- *   the parsed arguments object's enumerable properties. The snapshot does
- *   not preserve object identity or original JSON bytes; Pi exposes neither
- *   the generated bytes nor duplicate keys at this seam.
- */
-export function piEmissionCallFrames(
-  messages: unknown,
-  issued: IssuedEmissionBinding,
-): PiTranscriptResult<readonly EmissionCallFrame[]> {
-  if (!Array.isArray(messages)) return { ok: false, errors: ["messages must be an array"] };
-  try {
-    const problem = successorTranscriptBudgetProblem(messages);
-    if (problem !== null) return { ok: false, errors: [problem] };
-  } catch (thrown) {
-    const cause = boundedThrownCause(thrown, "transcript");
-    return { ok: false, errors: [`emission transcript cannot be inspected safely: ${cause.name}: ${cause.message}`] };
-  }
-  const collectedResults = new Map<string, Record<string, unknown>[]>();
-  for (const message of messages) {
-    if (!isRecord(message) || message["role"] !== "toolResult") continue;
-    const toolCallId = message["toolCallId"];
-    if (typeof toolCallId !== "string" || toolCallId.trim() === "") continue;
-    const results = collectedResults.get(toolCallId);
-    if (results === undefined) collectedResults.set(toolCallId, [message]);
-    else results.push(message);
-  }
-  const resultsByCallId = new Map(
-    [...collectedResults].map(([toolCallId, results]) => [toolCallId, Object.freeze(results)] as const),
-  );
-  const frames: EmissionCallFrame[] = [];
-  for (const [messageIndex, message] of messages.entries()) {
-    // A corrupt unrelated entry cannot carry an emission call; the fallback
-    // projection's own parse still refuses the transcript wholesale.
-    if (!isRecord(message) || message["role"] !== "assistant") continue;
-    const classified = classifyMessageContent(message["content"], `messages[${messageIndex}]`, true);
-    if (classified.kind !== "typed-blocks") continue;
-    for (const [block, origin] of classified.blocks) {
-      if (!isRecord(block) || block["type"] !== "toolCall") continue;
-      const family = emissionToolFamily(block["name"]);
-      if (family.kind === "unrelated") continue;
-      const toolCallId = typeof block["id"] === "string" && block["id"].trim() !== "" ? block["id"] : null;
-      if (family.kind === "unregistered-emission-name") {
-        frames.push(Object.freeze({
-          kind: "incomplete" as const,
-          toolCallId,
-          reason: `${origin} names tool ${describeUnknown(block["name"])}, which selects no frozen registry producer kind`,
-        }));
-        continue;
-      }
-      if (toolCallId === null) {
-        frames.push(Object.freeze({
-          kind: "incomplete" as const,
-          toolCallId: null,
-          reason: `an emission tool call to ${describeUnknown(block["name"])} was observed without a recoverable tool-call identity (${origin})`,
-        }));
-        continue;
-      }
-      // Causal diagnostic precedence (FR-014): turn finalization is checked
-      // BEFORE argument shape — an aborted/error turn invalidates every call
-      // in it regardless of how its arguments look, so the finalization is
-      // the reason an observation is incomplete, not the argument form.
-      const stopReason = message["stopReason"];
-      if (stopReason === "aborted" || stopReason === "error") {
-        frames.push(Object.freeze({
-          kind: "incomplete" as const,
-          toolCallId,
-          reason: `emission tool call ${toolCallId} belongs to an assistant turn finalized as ${stopReason} (${origin})`,
-        }));
-        continue;
-      }
-      if (!isRecord(block["arguments"])) {
-        frames.push(Object.freeze({
-          kind: "incomplete" as const,
-          toolCallId,
-          reason: `emission tool call ${toolCallId} was observed with ${describeUnknown(block["arguments"])} arguments, not an object (${origin})`,
-        }));
-        continue;
-      }
-      const results = resultsByCallId.get(toolCallId) ?? [];
-      if (results.length !== 1) {
-        frames.push(Object.freeze({
-          kind: "incomplete" as const,
-          toolCallId,
-          reason: results.length === 0
-            ? `emission tool call ${toolCallId} has no finalized tool result (${origin})`
-            : `emission tool call ${toolCallId} has ${results.length} finalized tool results; exactly one is required (${origin})`,
-        }));
-        continue;
-      }
-      // The exactly-one result was enforced above; index the proven singleton
-      // directly instead of re-searching it.
-      const [singleton] = results;
-      if (singleton === undefined) {
-        throw new Error("emission scan invariant failed: an exactly-one result set produced no element");
-      }
-      if (singleton["toolName"] !== block["name"] || singleton["isError"] !== false) {
-        const resultName = describeUnknown(singleton["toolName"]);
-        const resultState = singleton["isError"] === true
-          ? "failed"
-          : `has non-success isError ${describeUnknown(singleton["isError"])}`;
-        frames.push(Object.freeze({
-          kind: "incomplete" as const,
-          toolCallId,
-          reason: singleton["toolName"] !== block["name"]
-            ? `emission tool call ${toolCallId} finalized under mismatched tool result ${resultName} (${origin})`
-            : `emission tool call ${toolCallId} ${resultState} (${origin})`,
-        }));
-        continue;
-      }
-      frames.push(Object.freeze({
-        kind: "complete" as const,
-        call: Object.freeze({
-          requestId: issued.requestId,
-          toolCallId,
-          kind: Object.freeze({ kind: family.producerKind }),
-          version: issued.version,
-          arguments: Object.freeze({ ...block["arguments"] }),
-        }),
-      }));
-    }
-  }
-  return { ok: true, value: Object.freeze(frames) };
 }

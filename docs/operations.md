@@ -190,18 +190,12 @@ All seven reviewer tasks carry a concrete `LOOM_CONTEXT_READ_COMMAND`: a shell-q
 the actual immutable `LOOM_CONTEXT_PATH` and expected request/digest/role/Skill.
 Run it with Claude `Bash` or Pi `bash`; no `readContextPacket` harness tool exists.
 The command first returns a bounded section index. Append `--section LABEL` to
-browse decoded sections or `--file EXACT_SOURCE_PATH` for frozen source text,
-then `--offset N --limit 4096` to continue. Fresh Wave v2 Task-reviewer packets
-carry one `wave-frozen-source` section built from the same dirty/untracked/absent
-artifact snapshot as `workspaceHeadSha`; spec-check packets do not receive source,
-and already-issued historical Wave packets remain byte-immutable. Each Task packet
-contains only that Task's declared/modified review scope. Text offsets count UTF-16
-units; index offsets count section entries (at most 32 per page). Section browsing
-omits source contents and binary/base64 fields while retaining binary/absent path,
-digest, and length metadata. Wave and standalone v1/v2 binary-file selection and
-any invalid UTF-8 fail; standalone v3 frozen source uses a binary representation
-for byte fidelity, but explicit `--file` selection returns it when fatal UTF-8
-decoding succeeds.
+browse decoded sections or `--file EXACT_SOURCE_PATH` for frozen standalone source
+text, then `--offset N --limit 4096` to continue. Text offsets count UTF-16 units;
+index offsets count section entries (at most 32 per page). Section browsing omits
+source contents and binary/base64 fields. V1/v2 binary-file selection and any
+invalid UTF-8 fail; v3 frozen source uses a binary representation for byte fidelity,
+but explicit `--file` selection returns it when fatal UTF-8 decoding succeeds.
 The helper uses existing no-follow regular-file reads, fatal UTF-8, the packet
 parser and expected identity checks. Its 128 MiB input limit is a legacy
 v1/v2-selection ceiling (successor Context Packets are already bounded smaller

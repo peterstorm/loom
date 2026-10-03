@@ -10,7 +10,6 @@ import { sha256Bytes } from "../../src/core/review-packet";
 import { buildContextPacket, buildReviewerContextPacket, buildStandaloneReviewerContextPacketV3, contextPacketDigest, encodeByteSection } from "../../src/core/context-packets";
 import { parseContextProjectionArguments, projectContextPacket } from "../../src/core/context-packet-projection";
 import { parseArtifactDigest, parseRequestId } from "../../src/core/orchestration-contract";
-import { reviewedWorkspaceObservation, waveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../src/core/reviewed-workspace";
 
 const script = fileURLToPath(new URL("../../../scripts/read-context-packet.ts", import.meta.url));
 const roots: string[] = [];
@@ -68,68 +67,6 @@ describe("read-only packet command", () => {
     expect(JSON.parse(page.stdout)).toEqual({ offset: 4096, nextOffset: 6144, totalUnits: f.text.length, text: f.text.slice(4096, 6144) });
     expect(readFileSync(f.path, "utf8")).toBe(f.bytes);
     expect(Buffer.byteLength(page.stdout)).toBeLessThan(48 * 1024);
-  });
-
-  it("reads exact Wave text while section browsing exposes only binary/absent metadata", () => {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), "loom-wave-reader-")));
-    roots.push(root);
-    const text = "export const dirty = 'exact workspace bytes';\n";
-    const snapshot = reviewedWorkspaceObservation("T1", ["absent.ts", "binary.bin", "src/a.ts"], [
-      { path: "src/a.ts", bytes: Buffer.from(text) },
-      { path: "binary.bin", bytes: Uint8Array.from([0xff, 0x00, 0x61]) },
-      { path: "absent.ts", bytes: null },
-    ]);
-    const source = value(encodeByteSection(WAVE_FROZEN_SOURCE_SECTION, JSON.stringify(waveFrozenSource(snapshot))));
-    const packet = value(buildReviewerContextPacket({
-      requestId: value(parseRequestId("request:wave-reader")), role: "code-reviewer", requiredSkill: "none",
-      fixedContext: [source], variableContext: [],
-    }));
-    const path = join(root, "packet.json");
-    writeFileSync(path, JSON.stringify(packet));
-    const args = ["--packet", path, "--request", packet.requestId, "--digest", packet.digest,
-      "--role", packet.role, "--skill", packet.requiredSkill];
-
-    const section = run([...args, "--section", WAVE_FROZEN_SOURCE_SECTION]);
-    expect(section.status, section.stderr).toBe(0);
-    const metadata = JSON.parse(section.stdout).text as string;
-    expect(metadata).toContain("binary.bin");
-    expect(metadata).toContain("absent.ts");
-    expect(metadata).toContain("[omitted; select text with --file]");
-    expect(metadata).not.toContain("exact workspace bytes");
-    expect(metadata).not.toContain(Buffer.from([0xff, 0x00, 0x61]).toString("base64"));
-
-    const selected = run([...args, "--file", "src/a.ts"]);
-    expect(selected.status, selected.stderr).toBe(0);
-    expect(JSON.parse(selected.stdout).text).toBe(text);
-    for (const path of ["binary.bin", "absent.ts", "foreign.ts"]) {
-      const refused = run([...args, "--file", path]);
-      expect(refused.status).toBe(1);
-      expect(refused.stdout).toBe("");
-    }
-  });
-
-  it("refuses ambiguous Wave paths and a Wave source whose bytes disagree with workspaceHeadSha", () => {
-    const requestId = value(parseRequestId("request:wave-reader-ambiguity"));
-    const source = reviewedWorkspaceObservation("T1", ["src/a.ts"], [
-      { path: "src/a.ts", bytes: Buffer.from("exact") },
-    ]);
-    const wire = waveFrozenSource(source);
-    const mutations = [
-      { ...wire, files: [...wire.files, wire.files[0]!] },
-      { ...wire, files: [{ ...wire.files[0]!, content: "drifted" }] },
-    ];
-    for (const [index, mutation] of mutations.entries()) {
-      const section = value(encodeByteSection(WAVE_FROZEN_SOURCE_SECTION, JSON.stringify(mutation)));
-      const packet = value(buildReviewerContextPacket({ requestId, role: "code-reviewer", requiredSkill: "none",
-        fixedContext: [section], variableContext: [] }));
-      const input = value(parseContextProjectionArguments([
-        "--packet", "/fixture/packet.json", "--request", packet.requestId, "--digest", packet.digest,
-        "--role", packet.role, "--skill", packet.requiredSkill, "--file", "src/a.ts",
-      ]));
-      const projected = projectContextPacket(packet, input);
-      expect(projected.ok, `mutation ${index} must refuse`).toBe(false);
-      if (!projected.ok) expect(projected.error).toMatch(/duplicate path|differs from its digest or length/);
-    }
   });
 
   it("renders current frozen schema and rubric as decoded text", () => {

@@ -227,7 +227,7 @@ const artifactDigest = (n: number): ArtifactDigest => valueOf(parseArtifactDiges
 const effectId = (suffix: string): EffectId => valueOf(parseEffectId(`effect:${suffix}`));
 
 const implementationBindings = {
-  pi: { harness: "pi", provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" },
+  pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
   claude: { harness: "claude-code", model: "opus" },
 } as const;
 
@@ -551,7 +551,7 @@ describe("orchestration authority parsers", () => {
       role: "code-reviewer",
       modelProfile: "general-review",
       harnessBinding: {
-        pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
+        pi: implementationBindings.pi,
         claude: { harness: "claude-code", model: "sonnet" },
       },
       requiredSkill: null,

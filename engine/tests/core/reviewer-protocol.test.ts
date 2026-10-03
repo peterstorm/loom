@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { z } from "zod/v4";
-import { parseReviewerPayloadV2, renderReviewerPayloadDiagnostic, renderReviewerWireContract } from "../../src/core/reviewer-protocol";
+import { parseReviewerPayloadV2, renderReviewerWireContract } from "../../src/core/reviewer-protocol";
 import {
   CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_LIMITS,
   REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, reviewerPayloadV2Schema,
-  type FindingBasis, type ReviewerDraftV2, type ReviewerPayloadV2, type ReviewerProtocolFailure,
+  type FindingBasis, type ReviewerDraftV2, type ReviewerPayloadV2,
 } from "../../src/core/reviewer-contract";
 import { sha256Hex } from "../../src/core/review-packet";
 
@@ -323,50 +323,6 @@ describe("authoritative generated wire contract", () => {
     }
     inspect(schema);
     for (const phrase of ["UTF-8 bytes", "null file requires a null line", "issued frozen scope", "packet order", '"maxItems": 32', '"maxItems": 128', '"maxItems": 4096']) expect(REVIEWER_PAYLOAD_SCHEMA_V2).toContain(phrase);
-  });
-});
-
-describe("reviewer payload rejection diagnostics", () => {
-  const failure = (
-    partial: Pick<ReviewerProtocolFailure, "message"> & Partial<ReviewerProtocolFailure>,
-  ): ReviewerProtocolFailure => ({
-    kind: "reviewer-protocol-failed",
-    code: "invalid-json",
-    path: "",
-    ...partial,
-  });
-
-  it("names the strict grammar error and carries its position as a UTF-8 byte offset", () => {
-    const refused = parseReviewerPayloadV2(bytes('{"x":1,}'));
-    expect(refused.ok).toBe(false);
-    if (refused.ok) throw new Error("expected whole-response refusal");
-    expect(refused.error.code).toBe("invalid-json");
-    expect(refused.error.message).toBe(
-      "Reviewer payload must be exactly one strict JSON object. Parse error: PropertyNameExpected at position 7 (line 1, column 8)",
-    );
-    expect(refused.error.byteOffset).toBe(7);
-  });
-
-  it("converts the reported position to a byte offset, not a code-unit index", () => {
-    // The scanner reports code-unit position 11; the UTF-8 payload byte offset
-    // is 14 (each é is 2 bytes).
-    const refused = parseReviewerPayloadV2(bytes('{"a":"ééé",}'));
-    expect(refused.ok).toBe(false);
-    if (refused.ok) throw new Error("expected whole-response refusal");
-    expect(refused.error.message).toContain("at position 11");
-    expect(refused.error.byteOffset).toBe(14);
-  });
-
-  it("renders message, path, byte offset and size-scoped guidance for retries", () => {
-    expect(renderReviewerPayloadDiagnostic(failure({ message: "bad", path: "#/findings/0", byteOffset: 42 }), 512)).toBe(
-      "bad at #/findings/0 (byte 42) (payload 512 bytes; validate the emitted JSON with JSON.parse before finalizing)",
-    );
-    expect(renderReviewerPayloadDiagnostic(failure({ message: "bad", byteOffset: 9_846 }), 9_846)).toBe(
-      "bad (byte 9846) (payload 9846 bytes; keep the final JSON under 8500 bytes — compress re-verification reasons to one sentence per prior finding and escape every quote inside prose)",
-    );
-    expect(renderReviewerPayloadDiagnostic(failure({ message: "plain" }), 32)).toBe(
-      "plain (payload 32 bytes; validate the emitted JSON with JSON.parse before finalizing)",
-    );
   });
 });
 

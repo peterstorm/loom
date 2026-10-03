@@ -170,8 +170,6 @@ describe("quality-program helper boundaries", () => {
       "parseWaveGateStartInput",
       "prepareRemediationFacadeStart",
       "prepareStandaloneSuccessorFacadeStart",
-      "prepareWaveGateFacadeStart",
-      "publishedReviewerRequest",
       "readStandaloneReviewedSource",
       "recoverOrphanedWaveGateFacade",
       "renderSpawnTask",
@@ -189,15 +187,6 @@ describe("quality-program helper boundaries", () => {
       "waveAdvisoryDecisionRequestId",
       "waveGateDecisionMismatch",
     ]);
-    // The program-path emission seam (T6) is deliberately volume-internal: the
-    // issued descriptor/route projection and its required registration
-    // authority are not parent-caller operations, so they must never leak onto
-    // this curated surface (FR-001/FR-020; the parent callers get the
-    // durable-compatibility `renderSpawnTask` and the publication-proving
-    // `publishedReviewerRequest` only).
-    expect(Object.keys(surface)).not.toContain("renderReviewProgramSpawnTask");
-    expect(Object.keys(surface)).not.toContain("publishReviewInitialBatch");
-    expect(Object.keys(surface)).not.toContain("projectEmissionTaskText");
   });
 
   it("keeps production callers on the curated program-driver Public Surface", () => {

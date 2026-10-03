@@ -225,7 +225,7 @@ describe("resume-after-clear handler", () => {
     writeState(makeGraph());
     const { stdout } = runHandler();
     expect(stdout).toContain("Phase 5: Execute");
-    expect(stdout).toContain("helper orchestration brief");
+    expect(stdout).toContain("impl-agent-context");
     expect(stdout).toContain("helper orchestration status --json");
     expect(stdout).toContain("initial/retry dispatches or terminal escalation");
   });
@@ -322,7 +322,7 @@ describe("buildContextOutput (pure)", () => {
   it("interpolates loomDir into instructions", () => {
     const out = buildContextOutput(graph(), "/abs/loom");
     expect(out).toContain("/abs/loom/commands/loom.md");
-    expect(out).toContain("helper orchestration brief");
+    expect(out).toContain("/abs/loom/commands/templates/impl-agent-context.md");
   });
 
   it("computes maxWave from highest task wave", () => {
@@ -370,7 +370,7 @@ describe("buildContextOutput (pure)", () => {
       },
     }), "/loom");
     expect(out).toContain("helper orchestration status --json");
-    expect(out).toContain("never assemble a brief by hand");
+    expect(out).toContain("exact status-issued retry appendix");
     expect(out).not.toContain("BLOCKED");
   });
 });

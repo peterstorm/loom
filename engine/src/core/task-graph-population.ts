@@ -1,5 +1,4 @@
 import type { Task, TaskGraph } from "../types";
-import type { DeclaredArtifactBaseline } from "./artifact-baseline";
 import { newWaveGate } from "./wave-gate-model";
 import { derivePendingTaskProof } from "./proof-obligations";
 import {
@@ -78,15 +77,6 @@ export type TaskGraphPopulationCommand = Readonly<{
   force: boolean;
   issue?: number;
   repo?: string;
-  /** Per-Task declared-artifact proof boundaries captured from GIT at the
-   *  population revision, keyed by Task id. Captured BEFORE any work exists,
-   *  so the boundary always predates the Task's production and the stale-flow
-   *  wedge is unrepresentable. Optional, backward compatible; absent when the
-   *  Git boundary could not be captured and the first dispatch then stamps
-   *  its own. */
-  proofBaselines?: ReadonlyMap<string, readonly DeclaredArtifactBaseline[]>;
-  /** GIT revision the proof baselines were captured at. */
-  populationRevision?: string;
 }>;
 
 export type TaskGraphPopulationError = Readonly<{
@@ -116,14 +106,8 @@ function reject(
   return Object.freeze({ ok: false, error: Object.freeze({ kind, message }) });
 }
 
-function sanitizeTask(
-  task: AuthoredTask,
-  specIndex: SpecIndexAvailability,
-  proofBaselines: ReadonlyMap<string, readonly DeclaredArtifactBaseline[]> | undefined,
-  populationRevision: string | undefined,
-): Task {
+function sanitizeTask(task: AuthoredTask, specIndex: SpecIndexAvailability): Task {
   const verificationPolicy = taskVerificationPolicy(task);
-  const proofBaseline = proofBaselines?.get(task.id);
   const completionAnchors = Object.freeze([...(task.spec_anchors ?? [])]);
   const anchorHashes = specIndex.kind === "indexed"
     ? recordedAnchorHashes(specIndex.index, completionAnchors)
@@ -141,8 +125,6 @@ function sanitizeTask(
     verification_policy: serializeVerificationPolicy(verificationPolicy),
     ...(task.plan_context === undefined ? {} : { plan_context: task.plan_context }),
     file_list: Object.freeze([...task.file_list]),
-    ...(proofBaseline === undefined ? {} : { artifact_baseline: proofBaseline }),
-    ...(populationRevision === undefined ? {} : { start_sha: populationRevision }),
     proof: derivePendingTaskProof({
       verificationPolicy,
       declaredArtifacts: task.file_list,
@@ -221,12 +203,7 @@ export function populateTaskGraph(
     plan_file: command.validatedPlanFile,
     spec_file: lockedSpecFile,
     spec_index_observation: specIndexObservationOf(command.specIndex),
-    tasks: Object.freeze(command.tasks.map((task) => sanitizeTask(
-      task,
-      command.specIndex,
-      command.proofBaselines,
-      command.populationRevision,
-    ))),
+    tasks: Object.freeze(command.tasks.map((task) => sanitizeTask(task, command.specIndex))),
     current_wave: 1,
     executing_tasks: Object.freeze([]),
     wave_gates: waveGates,

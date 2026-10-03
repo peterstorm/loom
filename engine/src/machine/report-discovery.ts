@@ -45,97 +45,76 @@ type LiteralShellWord = Readonly<{
  * branches are contract: a command that names its report through a variable
  * or substitution must never mint an artifact path for trust.
  */
-type LiteralWordState = {
-  words: LiteralShellWord[];
-  word: string;
-  wordStarted: boolean;
-  optionEligible: boolean;
-  quote: "'" | '"' | null;
-};
-
-const startWord = (state: LiteralWordState, literalUnquoted: boolean): void => {
-  if (!state.wordStarted) state.optionEligible = literalUnquoted;
-  state.wordStarted = true;
-};
-
-const pushWord = (state: LiteralWordState): void => {
-  state.words.push({ value: state.word, optionEligible: state.optionEligible && state.word.startsWith("--") });
-  state.word = "";
-  state.wordStarted = false;
-  state.optionEligible = false;
-};
-
-/** Consume one character inside a double-quoted section. Returns the next
- *  index, or -1 to refuse (a `$`/backtick inside double quotes, or a trailing
- *  backslash). */
-function consumeDoubleQuotedChar(state: LiteralWordState, command: string, index: number): number {
-  const char = command[index]!;
-  if (char === '"') {
-    state.quote = null;
-  } else if (char === "\\") {
-    const next = command[index + 1];
-    if (next === undefined) return -1;
-    if ('$`"\\\n'.includes(next)) {
-      if (next !== "\n") state.word += next;
-      return index + 2;
-    }
-    state.word += char;
-    return index + 1;
-  } else if (char === "$" || char === "`") {
-    return -1;
-  } else {
-    state.word += char;
-  }
-  startWord(state, false);
-  return index + 1;
-}
-
-/** Consume one character outside any quote. Returns the next index, or -1 to
- *  refuse (a dynamic expansion, or a trailing backslash). */
-function consumeUnquotedChar(state: LiteralWordState, command: string, index: number): number {
-  const char = command[index]!;
-  if (char === "'" || char === '"') {
-    startWord(state, false);
-    state.quote = char;
-    return index + 1;
-  }
-  if (char === "$" || char === "`") return -1;
-  if (char === "\\") {
-    const next = command[index + 1];
-    if (next === undefined) return -1;
-    startWord(state, false);
-    if (next !== "\n") state.word += next;
-    return index + 2;
-  }
-  if (/\s/.test(char)) {
-    if (state.wordStarted) pushWord(state);
-    return index + 1;
-  }
-  startWord(state, true);
-  state.word += char;
-  return index + 1;
-}
-
 export function literalShellWords(command: string): readonly LiteralShellWord[] | null {
-  const state: LiteralWordState = { words: [], word: "", wordStarted: false, optionEligible: false, quote: null };
-  for (let i = 0; i < command.length;) {
-    if (state.quote === "'") {
-      const char = command[i]!;
-      if (char === "'") state.quote = null;
-      else state.word += char;
-      startWord(state, false);
-      i += 1;
+  const words: LiteralShellWord[] = [];
+  let word = "";
+  let wordStarted = false;
+  let optionEligible = false;
+  let quote: "'" | '"' | null = null;
+  const startWord = (literalUnquoted: boolean): void => {
+    if (!wordStarted) optionEligible = literalUnquoted;
+    wordStarted = true;
+  };
+  const pushWord = (): void => {
+    words.push({ value: word, optionEligible: optionEligible && word.startsWith("--") });
+    word = "";
+    wordStarted = false;
+    optionEligible = false;
+  };
+
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i];
+    if (quote === "'") {
+      if (char === "'") quote = null;
+      else word += char;
+      startWord(false);
       continue;
     }
-    const next = state.quote === '"'
-      ? consumeDoubleQuotedChar(state, command, i)
-      : consumeUnquotedChar(state, command, i);
-    if (next === -1) return null;
-    i = next;
+    if (quote === '"') {
+      if (char === '"') {
+        quote = null;
+      } else if (char === "\\") {
+        const next = command[i + 1];
+        if (next === undefined) return null;
+        if ('$`"\\\n'.includes(next)) {
+          if (next !== "\n") word += next;
+          i++;
+        } else {
+          word += char;
+        }
+      } else if (char === "$" || char === "`") {
+        return null;
+      } else {
+        word += char;
+      }
+      startWord(false);
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      startWord(false);
+      quote = char;
+      continue;
+    }
+    if (char === "$" || char === "`") return null;
+    if (char === "\\") {
+      const next = command[i + 1];
+      if (next === undefined) return null;
+      startWord(false);
+      if (next !== "\n") word += next;
+      i++;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (wordStarted) pushWord();
+      continue;
+    }
+    startWord(true);
+    word += char;
   }
-  if (state.quote !== null) return null;
-  if (state.wordStarted) pushWord(state);
-  return state.words;
+
+  if (quote !== null) return null;
+  if (wordStarted) pushWord();
+  return words;
 }
 
 function optionValues(words: readonly LiteralShellWord[], option: string): readonly string[] {
@@ -178,12 +157,6 @@ const JUNIT_REPORT_DIRS = [
   "target/failsafe-reports",
   "build/test-results/test",
 ];
-
-/** Loom's pinned completion-suite artifact location: the engine's `test:unit`
- *  writes its Vitest JUnit report here (relative to the checkout root). This
- *  directory is scanned for JS-runner segments ONLY — family scoping keeps a
- *  JVM build's surefire artifact unable to vouch for an npm/vitest command. */
-const LOOM_COMPLETION_REPORT_DIR = [".loom", "completion-reports"] as const;
 
 /**
  * Upper freshness bound: reports older than this are ignored regardless of
@@ -387,26 +360,11 @@ export function findReport(
   }
 
   const lower = segment.toLowerCase();
-  const isJvmRunner = JVM_RUNNER_PREFIXES.some((p) => lower.startsWith(p));
-  // JS test runners (npm/npx/pnpm/yarn script invocations, vitest, jest, bun
-  // test) write their report through the runner's own configuration — Loom's
-  // pinned completion-suite location among them — so they reach the SAME
-  // freshness-gated dir scan, but scoped to the Loom directory only: a fresh
-  // surefire artifact must not vouch for an npm command (family scoping), and
-  // a runner that wrote no report still finds nothing because every candidate
-  // must postdate the call start.
-  const isJsTestRunner = /(^|[\s;&])(npm|npx|pnpm|yarn)([\s]|$)/.test(lower) ||
-    /\b(vitest|jest)\b/.test(lower) || /\bbun\s+test\b/.test(lower);
-  if (!isJvmRunner && !isJsTestRunner) return null;
+  if (!JVM_RUNNER_PREFIXES.some((p) => lower.startsWith(p))) return null;
 
   if (callStartMs === null) {
     noStamp("JUnit report dirs");
     return null;
-  }
-  if (!isJvmRunner) {
-    return mergeSummaries(
-      readJunitDir(resolve(cwd, ...LOOM_COMPLETION_REPORT_DIR), nowMs, callStartMs),
-    );
   }
   const junit = [
     ...JUNIT_REPORT_DIRS.flatMap((d) => readJunitDir(resolve(cwd, d), nowMs, callStartMs)),

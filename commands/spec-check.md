@@ -37,11 +37,16 @@ Two execution paths exist, and every step below depends on which one you are on.
 
 ### Step 1: Load artifacts and freeze scope authority
 
-**Registered Wave Gate (your task carries `LOOM_CONTEXT_SECTION_COMMAND`): Run this decoder.** It reads the immutable packet only, through the engine's digest-verifying section reader; do NOT read `active_task_graph.json` or the packet file itself on this path. Substitute the exact `LOOM_CONTEXT_SECTION_COMMAND` value from your task for `<LOOM_CONTEXT_SECTION_COMMAND>`.
+**Registered Wave Gate (`LOOM_CONTEXT_PATH` is set): Run this decoder.** It reads the immutable packet only; do NOT read `active_task_graph.json` on this path.
 
 ```bash
-<LOOM_CONTEXT_SECTION_COMMAND> --section wave-review-authority | bun -e '
-const authority = JSON.parse(await Bun.stdin.text());
+bun -e '
+const path = process.env.LOOM_CONTEXT_PATH;
+if (!path) throw new Error("LOOM_CONTEXT_PATH is required for registered spec-check");
+const packet = JSON.parse(await Bun.file(path).text());
+const section = packet.fixedContext?.find((entry) => entry.label === "wave-review-authority");
+if (!section) throw new Error("immutable packet lacks wave-review-authority");
+const authority = JSON.parse(new TextDecoder("utf-8", {fatal:true}).decode(Uint8Array.from(section.bytes)));
 if (authority.subject?.role !== "spec-check-invoker" || !Array.isArray(authority.specCheckScope)) {
   throw new Error("immutable packet lacks registered spec-check scope authority");
 }
@@ -54,10 +59,14 @@ Save the exact `specFile`, `wave`, and `tasks` values. Each Task contains `compl
 **Then read the Requirement Coverage Projection from the same packet.** The engine has already joined the Spec Index against this exact roster; Steps 2, 4, 5, 6 and 7 consume that projection instead of re-deriving it.
 
 ```bash
-<LOOM_CONTEXT_SECTION_COMMAND> --section requirement-coverage
+bun -e '
+const path = process.env.LOOM_CONTEXT_PATH;
+const packet = JSON.parse(await Bun.file(path).text());
+const section = packet.fixedContext?.find((entry) => entry.label === "requirement-coverage");
+if (!section) throw new Error("immutable packet lacks the Requirement Coverage Projection");
+console.log(new TextDecoder("utf-8", {fatal:true}).decode(Uint8Array.from(section.bytes)));
+'
 ```
-
-A non-zero exit (missing section, unreadable packet, digest mismatch) means the projection is unavailable: take the Unprojected path above.
 
 The projection is engine-derived authority, not advice, and it states its own rules in its header — those rules win over anything restated here. Two facts travel per row and must not be confused:
 

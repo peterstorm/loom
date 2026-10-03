@@ -8,32 +8,15 @@ import { attributeFindings } from "../../../../src/core/findings";
 import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
 import { WAVE_REVIEW_AGENTS } from "../../../../src/core/model-profiles";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
-import {
-  EMISSION_DESCRIPTOR_MARKER,
-  emissionToolPrimaryInstruction,
-  parseEmissionDescriptor,
-  renderEmissionDescriptor,
-} from "../../../../src/core/spawn-admission";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, type ReviewerDraftV2 } from "../../../../src/core/reviewer-contract";
-import { parseRegisteredFacadeProgram, publishLegacyInitialBatch, renderSpawnTask, reviewerProtocolResolver } from "../../../../src/handlers/helpers/programs/helpers";
+import { parseRegisteredFacadeProgram, publishInitialBatch, reviewerProtocolResolver } from "../../../../src/handlers/helpers/programs/helpers";
 import { handleWaveReviewContext, installWaveReviewRuns, waveGateAuthorityDigest, waveRequests, deriveWaveAttemptTwo, persistedWaveAttemptTwoCompatibilityProblem, currentWaveTaskReviewRetries, markWaveTaskReviewRetriesIssued } from "../../../../src/handlers/helpers/programs/wave-gate";
 import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { captureHarnessResult } from "../../../../src/orchestration/harness-capture-runtime";
 import { parseTaskGraph, StateManager } from "../../../../src/state-manager";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } from "../../../fixtures/pi-session";
 import type { Finding, TaskGraph } from "../../../../src/types";
-import { parseWaveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../../../src/core/reviewed-workspace";
 import { graphFixture, taskFixture } from "../../../fixtures/task-lifecycle";
-
-// Route election is ambient-env sensitive: observedReviewerIssueRoute() reads
-// this process's PI_PROVIDER/PI_MODEL/PI_REASONING_LEVEL, and
-// fixturePiEnvironment spreads process.env into every CLI child. These
-// fixtures pin the catalog issue route, so an ambient Pi handshake (a wrapper
-// session running the suite under the qualified-local model) must not flip
-// the election and re-shape issued/retry prompts.
-for (const routeEnv of ["PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL"] as const) {
-  delete process.env[routeEnv];
-}
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 const cli = fileURLToPath(new URL("../../../../src/cli.ts", import.meta.url));
@@ -44,18 +27,8 @@ function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: fals
   return result.value;
 }
 function git(root: string, args: readonly string[]) {
-	// Fixture commit SHAs must be deterministic: frozen-source sections embed
-	// workspaceHead, and packet byte-identity assertions compare sections
-	// minted by separate fixture projects. Wall-clock commit dates give
-	// different SHAs whenever two commits straddle a second boundary — a
-	// time-flake that only appears under full-suite load. Pin both dates so
-	// identical trees always yield identical SHAs.
-	const result = spawnSync("git", args, {
-		cwd: root,
-		encoding: "utf8",
-		env: { ...process.env, GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z", GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z" },
-	});
-	if (result.status !== 0) throw new Error(result.stderr);
+  const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
+  if (result.status !== 0) throw new Error(result.stderr);
 }
 const critical = REVIEWER_PAYLOAD_EXAMPLE_V2.findings.find((finding) => finding.severity === "critical")!;
 const criticalDraft: ReviewerDraftV2 = { ...critical, file: "src/x.ts", line: 1, claim: "  exact current claim\nwith detail  " };
@@ -186,7 +159,7 @@ async function legacyPrefix(p: ReturnType<typeof project>) {
       1,
       { kind: "state-layout", root: p.root },
     );
-    const published = await publishLegacyInitialBatch(handle, batch.requests, batch.packets, "wave-gate-current");
+    const published = await publishInitialBatch(handle, batch.requests, batch.packets, "wave-gate-current");
     if (!published.ok) throw new Error(published.message);
     await installWaveReviewRuns(manager, registered, batch);
     return { handle, action: published.action as Action };
@@ -219,11 +192,6 @@ describe("registered Wave reviewer protocol", () => {
       expect(packet.schemaVersion).toBe(2);
       expect(Buffer.from(packet.fixedContext.find(({ label }) => label === "reviewer-payload-schema")!.bytes).toString()).toBe(REVIEWER_PAYLOAD_SCHEMA_V2);
       expect(Buffer.from(packet.fixedContext.find(({ label }) => label === "reviewer-impact-rubric")!.bytes).toString()).toBe(REVIEWER_IMPACT_RUBRIC_V1);
-      const sourceSection = packet.fixedContext.find(({ label }) => label === WAVE_FROZEN_SOURCE_SECTION)!;
-      const source = value(parseWaveFrozenSource(JSON.parse(Buffer.from(sourceSection.bytes).toString("utf8"))));
-      expect(source.taskId).toBe("T1");
-      expect(source.workspaceHeadSha).toBe(run.workspace_head_sha);
-      expect(source.files).toMatchObject([{ path: "src/x.ts", kind: "text", content: "export const x = 1;\n" }]);
       expect(value(reviewerProtocolResolver(handle, registration(handle))(authority)).protocolVersion).toBe(2);
     }
     const reviewers = issued.slice(1);
@@ -269,10 +237,6 @@ describe("registered Wave reviewer protocol", () => {
     const firstPacket = value(handle.readContext(first.contextDigest));
     const secondPacket = value(handle.readContext(retry.authority.contextDigest));
     expect(secondPacket.fixedContext).toEqual(firstPacket.fixedContext);
-    const firstSource = firstPacket.fixedContext.find(({ label }) => label === WAVE_FROZEN_SOURCE_SECTION)!;
-    const retrySource = secondPacket.fixedContext.find(({ label }) => label === WAVE_FROZEN_SOURCE_SECTION)!;
-    expect(retrySource.digest).toBe(firstSource.digest);
-    expect(retrySource).toEqual(firstSource);
     expect(persistedWaveAttemptTwoCompatibilityProblem(first, retry.authority, firstPacket, secondPacket)).toBeNull();
     expect(await resume(p, handle)).toEqual(retried);
     const awaiting = await submit(p, handle, retry.authority, payload(handle, retry.authority, [advisory]));
@@ -298,7 +262,7 @@ describe("registered Wave reviewer protocol", () => {
     if (kind === "unchanged-context") {
       for (const { authority } of action.requests!.slice(1)) {
         const retry = deriveWaveAttemptTwo(handle, authority);
-        const published = await publishLegacyInitialBatch(handle, [retry.request], [retry.packet], `wave-gate-retry:${authority.slotId}`);
+        const published = await publishInitialBatch(handle, [retry.request], [retry.packet], `wave-gate-retry:${authority.slotId}`);
         if (!published.ok) throw new Error(published.message);
         legacyDelivery(published.action as Action);
       }
@@ -452,115 +416,4 @@ describe("registered Wave reviewer protocol", () => {
     expect(refused.stderr).toContain(": request does not belong to the exact current Wave Review Packet slot");
     expect(readFileSync(p.statePath)).toEqual(beforeStale);
   }, 60_000);
-});
-
-// ---------------------------------------------------------------------------
-// Issued emission route controls on the real Wave program path (T6): FR-012
-// issuance joins retained regardless of emission-tool availability, and the
-// non-producer spec-check slot stays byte-identical on both routes.
-// ---------------------------------------------------------------------------
-
-const QUALIFIED_ROUTE_ENV: Readonly<Record<string, string>> = Object.freeze({
-  PI_PROVIDER: "desktop-vllm",
-  PI_MODEL: "glm-5.3-flash-spark-tp2-v14",
-  PI_REASONING_LEVEL: "high",
-});
-
-async function withIssueRoute<T>(environment: Readonly<Record<string, string>>, operation: () => Promise<T>): Promise<T> {
-  const previous = Object.keys(environment).map((key) => [key, process.env[key]] as const);
-  try {
-    Object.assign(process.env, environment);
-    return await operation();
-  } finally {
-    for (const [key, value] of previous) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
-}
-
-/** Scope the Pi-parent observation for in-process renders without touching
- *  the CLI children this suite spawns (their fixture environment is fixed). */
-async function withPiParent<T>(enabled: boolean, operation: () => T | Promise<T>): Promise<T> {
-  const previous = process.env.PI_CODING_AGENT;
-  try {
-    if (enabled) process.env.PI_CODING_AGENT = "true";
-    else delete process.env.PI_CODING_AGENT;
-    return await operation();
-  } finally {
-    if (previous === undefined) delete process.env.PI_CODING_AGENT;
-    else process.env.PI_CODING_AGENT = previous;
-  }
-}
-
-function executePacketCommand(task: string) {
-  const command = /^LOOM_CONTEXT_READ_COMMAND: (.+)$/m.exec(task)?.[1];
-  expect(command, "delivery must supply an executable cross-harness packet reader").toBeDefined();
-  const result = spawnSync("bash", ["-c", command ?? "exit 127"], { encoding: "utf8" });
-  expect(result.status, result.stderr).toBe(0);
-  return JSON.parse(result.stdout) as { schemaVersion: number; requestId: string; sections: unknown[] };
-}
-
-describe("the issued emission route on the Wave program path (T6)", () => {
-  it("retains every issuance join across the extraction and emission routes and changes only reviewer task text (FR-012)", async () => {
-    const startRun = async (environment: Readonly<Record<string, string>>) => withIssueRoute(environment, async () => {
-      const p = project();
-      const { action, handle } = await start(p, "run.route");
-      return { p, handle, requests: action.requests! };
-    });
-    const extraction = await startRun({});
-    const emission = await startRun(QUALIFIED_ROUTE_ENV);
-
-    // The route election is genuinely exercised: reviewers bind the
-    // qualified-local profile on the emission route and the catalog profile
-    // on the extraction route; the spec-check slot never does (AD-6).
-    const reviewer = (request: { authority: AgentRequestAuthority }) => request.authority.role !== "spec-check-invoker";
-    expect(emission.requests.filter(reviewer).map(({ authority }) => authority.modelProfile))
-      .toEqual(emission.requests.filter(reviewer).map(() => "qualified-local-review"));
-    expect(emission.requests.filter(reviewer).map(({ authority }) => authority.modelProfile))
-      .not.toEqual(extraction.requests.filter(reviewer).map(({ authority }) => authority.modelProfile));
-    expect(emission.requests.find(({ authority }) => authority.role === "spec-check-invoker")!.authority.modelProfile)
-      .toBe(extraction.requests.find(({ authority }) => authority.role === "spec-check-invoker")!.authority.modelProfile);
-
-    // FR-012 on the emission route: the issuance joins survive — the packet
-    // read command still resolves the exact issued v2 packet for every slot,
-    // and the durable-only fallback render reproduces each issued task
-    // byte-for-byte (the Wave start appends one task-scoped instruction line,
-    // so the comparison drops that final decoration), while the same render
-    // without a Pi parent yields the extraction-shaped task. The route delta
-    // on the wire is EXACTLY the descriptor line plus the appended
-    // tool-primary instruction.
-    const base = "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.";
-    const undecorated = (task: string) => task.slice(0, task.lastIndexOf("\n"));
-    for (const { authority, task } of emission.requests) {
-      const emissionRender = await withPiParent(true, () => renderSpawnTask(emission.handle, authority, base));
-      expect(undecorated(task)).toBe(emissionRender);
-      const extractionRender = await withPiParent(false, () => renderSpawnTask(emission.handle, authority, base));
-      if (authority.role === "spec-check-invoker") {
-        expect(extractionRender).toBe(emissionRender);
-        expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
-        continue;
-      }
-      // The delivery join survives on the emission route: the packet read
-      // command still resolves the exact issued v2 packet for this slot.
-      expect(executePacketCommand(task)).toMatchObject({ schemaVersion: 2, requestId: authority.requestId });
-      expect(task).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
-      const descriptor = parseEmissionDescriptor(task);
-      expect(descriptor).toMatchObject({ kind: "issued", contextDigest: authority.contextDigest,
-        binding: { requestId: authority.requestId, version: "v2" } });
-      if (descriptor.kind !== "issued") throw new Error("qualified-route fixture must mint an issued descriptor");
-      const stripped = emissionRender
-        .replace(renderEmissionDescriptor(descriptor.binding, descriptor.contextDigest), "")
-        .replace(`\n${emissionToolPrimaryInstruction(descriptor.binding)}`, "");
-      expect(stripped).toBe(extractionRender);
-    }
-
-    // The extraction route keeps its exact baseline: no descriptor, verbatim
-    // instruction, and a parent-state-independent durable render.
-    for (const { authority, task } of extraction.requests) {
-      expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
-      expect(task).not.toContain("calling the exact tool loom_emit_reviewer_payload");
-      expect(undecorated(task)).toBe(await withPiParent(true, () => renderSpawnTask(extraction.handle, authority, base)));
-    }
-  }, 120_000);
 });

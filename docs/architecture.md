@@ -207,16 +207,13 @@ run.<id>/
 ├── events/
 ├── requests/
 │   └── correlators/
-├── contexts/       # packet files: section identity only
-├── blobs/          # section bytes, one file per section digest
+├── contexts/
 ├── transcripts/
 ├── receipts/
 └── artifacts/
 ```
 
-Authority, abandonment, request, context, section-blob, transcript, event, and receipt slots are immutable/exclusive.
-
-Context Packet digests cover section identity (label, length, digest), not an inline byte encoding, so a packet file lists its sections and their bytes live once in `blobs/<section-digest>`. A frozen Wave source shared by a Task's five reviewers and their retries is one blob rather than a JSON byte array copied into every packet (a 34 MB Wave Gate run stores 1.9 MB). Every read restores section bytes through one resolver and re-hashes each section; packet files written before blob storage carry inline bytes and remain readable. The handle verifies the direct-child relation, rejects unsafe identity/path shapes, and reopens path components with no-follow filesystem operations. Checkpoints are projections; append-only events and immutable evidence remain the audit history.
+Authority, abandonment, request, context, transcript, event, and receipt slots are immutable/exclusive. The handle verifies the direct-child relation, rejects unsafe identity/path shapes, and reopens path components with no-follow filesystem operations. Checkpoints are projections; append-only events and immutable evidence remain the audit history.
 
 A Run Directory is never deleted, so `abandoned.json` is how a retired run says so: it records the operator's terminal decision and, optionally, the run that replaced it. It is written once and never removes anything. Afterwards `helper orchestration inspect` still reads the run's evidence, but every operation that would advance the run refuses it, and no recovery can adopt it as a pristine replacement. It is deliberately not a program event — the event log is folded by each program's machine on every replay, and this is metadata about the run rather than a transition within it.
 

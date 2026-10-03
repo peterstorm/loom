@@ -16,11 +16,7 @@ export function observeReviewedWorkspace(
   root: string = repositoryRoot() ?? process.cwd(),
 ): readonly ReviewedWorkspaceObservation[] {
   return tasks.map((task) => {
-    const scope = canonicalRepositoryPaths(
-      root,
-      [...new Set([...(task.file_list ?? []), ...(task.files_modified ?? [])])],
-      `Task ${task.id} review scope`,
-    );
+    const scope = canonicalRepositoryPaths(root, task.file_list ?? [], `Task ${task.id} file_list`);
     const artifacts: ReviewedArtifact[] = scope.map((path) => {
       const inspected = inspectRepositoryPath(root, path, `Task ${task.id} reviewed artifact`, { mustBeFile: true });
       return { path, bytes: inspected.exists ? readFileSync(inspected.absolute) : null };

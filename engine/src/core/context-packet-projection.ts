@@ -2,7 +2,6 @@
 import { match } from "ts-pattern";
 import { parseContextPacket, parseStandaloneReviewerContextPacketV3, type ContextPacket, type StandaloneReviewerContextPacketV3 } from "./context-packets";
 import { boundDiagnosticMessage, boundedThrownCause, type DomainResult } from "./orchestration-contract";
-import { parseWaveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "./reviewed-workspace";
 
 type ProjectedPacket = ContextPacket | StandaloneReviewerContextPacketV3;
 
@@ -58,11 +57,8 @@ const decode = (bytes: Iterable<number>): string => new TextDecoder("utf-8", { f
 const record = (raw: unknown): raw is Record<string, unknown> => typeof raw === "object" && raw !== null && !Array.isArray(raw);
 
 function fileText(packet: ProjectedPacket, path: string): DomainResult<string, string> {
-  const sections = [...packet.fixedContext, ...packet.variableContext].filter(({ label }) =>
-    label === "standalone-frozen-source" || label === WAVE_FROZEN_SOURCE_SECTION);
-  if (sections.length === 0) return failed("packet has no frozen source; use the section index for its supplied context");
-  if (sections.length !== 1) return failed("packet has ambiguous frozen source sections");
-  const section = sections[0]!;
+  const section = [...packet.fixedContext, ...packet.variableContext].find(({ label }) => label === "standalone-frozen-source");
+  if (section === undefined) return failed("packet has no standalone frozen source; use the section index for its supplied context");
   let text: string;
   try {
     text = decode(section.bytes);
@@ -76,15 +72,6 @@ function fileText(packet: ProjectedPacket, path: string): DomainResult<string, s
   } catch (cause) {
     const attribution = boundedThrownCause(cause, "frozen source index JSON");
     throw new Error(`frozen source index could not be parsed from the section bytes (${attribution.name}: ${attribution.message})`);
-  }
-  if (section.label === WAVE_FROZEN_SOURCE_SECTION) {
-    const parsed = parseWaveFrozenSource(source);
-    if (!parsed.ok) return failed(parsed.error);
-    const files = parsed.value.files.filter((file) => file.path === path);
-    if (files.length !== 1) return failed("source file is absent or ambiguous in this packet");
-    return files[0]!.kind === "text"
-      ? { ok: true, value: files[0]!.content }
-      : failed("source file is binary or absent; no text projection available");
   }
   if (!record(source) || !Array.isArray(source.files)) return failed("frozen source file index is invalid");
   const files: unknown[] = source.files.filter((file: unknown) => record(file) && file.path === path);

@@ -1,6 +1,6 @@
 # Implementation Agent Context
 
-Rendered by the Loom engine (`helper orchestration brief`) for each owed implementation dispatch; it is never substituted by hand.
+Template for spawning implementation agents during Execute phase. All template variables must be substituted before use.
 
 ---
 

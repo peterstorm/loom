@@ -69,7 +69,7 @@ export function buildContextOutput(state: TaskGraph, loomDir: string): string {
   } else {
     lines.push(`Read the loom skill at \`${loomDir}/commands/loom.md\`, specifically Phase 5: Execute.`);
     lines.push("Run `helper orchestration status --json` and execute only its implementation recovery: initial/retry dispatches or terminal escalation.");
-    lines.push("Dispatch each owed Task through `helper orchestration brief` (engine-rendered impl-agent-context briefs); never assemble a brief by hand.");
+    lines.push(`Load impl-agent-context template from \`${loomDir}/commands/templates/impl-agent-context.md\`; substitute the exact status-issued retry appendix when present.`);
   }
   lines.push("<!-- END LOOM RESUME CONTEXT -->");
 

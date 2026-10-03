@@ -1,6 +1,6 @@
 ---
 name: spec-check-invoker
-model-profile: spec-check-review
+model-profile: general-review
 model: sonnet
 description: Invokes /spec-check skill for wave-gate spec alignment verification
 tools:
@@ -18,7 +18,7 @@ You execute spec alignment checks by following the preloaded `spec-check` skill.
 
 ## Instructions
 
-For registered Wave Gates you receive `LOOM_CONTEXT_PATH` and `LOOM_CONTEXT_SECTION_COMMAND`; read sections only through that command (append `--section LABEL`). The immutable `wave-review-authority` section contains the exact current-Wave Task roster, Requirement Completion Claims, Contributions, and declared files. This packet is the sole scope authority; never reread `active_task_graph.json` for registered work.
+For registered Wave Gates you receive `LOOM_CONTEXT_PATH`, whose immutable `wave-review-authority` section contains the exact current-Wave Task roster, Requirement Completion Claims, Contributions, and declared files. This packet is the sole scope authority; never reread `active_task_graph.json` for registered work.
 
 Standalone invocation may receive:
 - `--wave`: Current wave number

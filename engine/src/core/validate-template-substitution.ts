@@ -6,12 +6,7 @@
 
 import type { HookResult } from "../types";
 
-/** Placeholders that legitimately appear verbatim inside prompt content and
- *  are not template variables: {type}/{id}/{name} predate this gate, and
- *  {system} appears verbatim in the binding rules' directory diagrams
- *  (`infra/{system}/`), which the /loom prompts inline wholesale — a rules
- *  literal, never a task-prompt variable. */
-const FALSE_POSITIVES = new Set(["{type}", "{id}", "{name}", "{system}"]);
+const FALSE_POSITIVES = new Set(["{type}", "{id}", "{name}"]);
 
 /**
  * The single source of truth for "unsubstituted template variable" detection:

@@ -40,12 +40,6 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration start wave-gate \
 JSON
 ```
 
-`start` preflights before creating the directory. A non-zero exit means it
-claimed nothing: unmet start prerequisites (executing Task, implementation
-proof, test evidence, new tests), a Wave another live run owns, a completed
-Wave, or — under a Verification Manifest — full-tier lint. Fix the named cause
-and rerun `start` with the same fresh run id; there is nothing to `abandon`.
-
 Execute only the one typed action returned by `start`, `resume`, or `decide`:
 
 - `spawn-batch`: spawn every exact request, preserving its model, required

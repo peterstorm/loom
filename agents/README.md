@@ -86,59 +86,6 @@ security-agent and skill-content-reviewer are not reviewer-wire targets.
 See [protocol operations](../docs/operations.md#reviewer-protocol-v2). P4 source
 review, merge, publication and loaded-runtime cutover remain pending.
 
-### Producer emission-tool flow
-
-On a qualified Pi route, a fresh schema-2 or schema-3 reviewer request and each
-issued judge/refutation verdict kind are **emission-enabled**: the request
-carries the engine-issued `LOOM_EMISSION_DESCRIPTOR`, the child registers one
-exact emission tool — `loom_emit_reviewer_payload` (the issued binding selects
-schema version v2 or v3), `loom_emit_judge_verdict` (v1) or
-`loom_emit_refutation_verdict` (v1) — with parameters byte-identical to the
-frozen payload schema for that kind/version. The rendered instructions name the
-tool as the primary final action with final-message extraction as the
-deterministic fallback. One call per spawn: re-emitting within the same spawn is ambiguity by
-the retained duplicate policy and agents are instructed against it. Successful
-execution returns a minimal terminating acknowledgment — no extra assistant
-final message or follow-up model turn is required.
-
-Emission-enabled operation additionally depends on readiness, not just
-issuance: the shared `subagent` launcher must expose the `loom:subagent-launch:v2`
-port under the same `PI_CODING_AGENT_DIR` as the parent — an emission-enabled
-spawn without it is blocked **before dispatch**, never degraded to an ordinary
-JSON-mode child — and the child must pass its request-bound readiness barrier
-before any model request is delivered. Readiness refusals, their remediation
-and the shared retry budget are documented in [Pi usage](../docs/pi-usage.md#emission-activation-readiness-errors-and-retry-budget).
-
-The engine parser stays authoritative regardless of route class. On an
-**unconstrained-emission** route the provider accepts the schema but does not
-enforce preferred strict sampling, so tool arguments are admitted by the same
-engine admission a final message would face; issuance joins, engine-derived
-counts/ids and the shared request-slot attempt budget are unchanged. Selection
-is deterministic: zero emission calls keep unchanged extraction; one complete,
-correctly bound call with engine-valid arguments is emission regardless of
-final text; exactly one engine-refused call with a usable final message selects
-extraction while retaining the refusal and consumes no retry; a refused call
-with unusable extraction rejects once through the existing attempt budget; two
-distinct calls reject as ambiguity even when a final message is valid; a
-wrong-request, wrong-kind/version, incomplete or otherwise unusable observation
-refuses as a typed rejection — it is never reclassified as absence — and an
-exact transport replay of one call observation is idempotent, not a second
-call.
-
-**Extraction-only** behavior is explicit, not a failure: Claude Code, archived
-schema-1 reviewer requests, unsupported historical protocols, non-Pi parents
-and any route other than the qualified one advertise no emission tool and keep
-their final-message contract. Task text cannot upgrade extraction-only
-authority; archived issued contracts are not rewritten.
-
-Provider capability flags (strict/constrained sampling, tool-call parser
-settings, served model) remain **user-side configuration**: Loom's contribution
-to that configuration is documentation only. It ships the frozen schemas as its
-own contract, never rewrites a schema for a provider and never configures the
-provider itself (FR-022/AS-014). Route
-qualification and its requalification triggers are documented in [Model
-profiles and calibration](../docs/model-profiles-and-calibration.md).
-
 ## Utility/domain Agents
 
 | Agent | Role | Preloaded Skill |

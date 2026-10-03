@@ -40,7 +40,7 @@ describe("validate-template-substitution — property tests", () => {
     fc.assert(
       fc.property(
         fc.stringMatching(/^[a-z][a-z0-9_]{3,15}$/).filter(
-          (s) => !["type", "id", "name", "system"].includes(s),
+          (s) => !["type", "id", "name"].includes(s),
         ),
         (varName) => {
           const prompt = `Do something with {${varName}}`;
@@ -86,13 +86,6 @@ describe("validate-template-substitution — edge cases", () => {
 
   it("whitelisted false positives → allow", () => {
     expect(validateTemplate("Use {type} and {id} and {name}")).toBe("allow");
-  });
-
-  it("{system} → allow — the binding rules' directory-diagram literal, not a template variable", () => {
-    // The /loom implementation prompts inline the loom rules wholesale, and
-    // the rules' package-structure diagrams contain literal `infra/{system}/`
-    // and `└── {system}/`. Those are content, not unsubstituted variables.
-    expect(validateTemplate("Adapter lives in infra/{system}/ under └── {system}/")).toBe("allow");
   });
 
   it("JSON objects in prompt → allow (a quote sits between { and the key, so no {word} match)", () => {

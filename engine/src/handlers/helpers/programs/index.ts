@@ -7,18 +7,9 @@
 
 export {
   parseRegisteredFacadeProgram,
-  // Parent-side spawn admission must prove publication, not trust prompt markers.
-  publishedReviewerRequest,
   parseRemediationStartInput,
   parseStandaloneStartInput,
   parseWaveGateStartInput,
-  // `renderSpawnTask` is the durable-compatibility/extraction-only render: it
-  // never carries an issued emission descriptor. The program-path emission
-  // seam (`renderReviewProgramSpawnTask`/`publishReviewInitialBatch` and their
-  // required `RegisteredReviewProgram` authority) is deliberately NOT on this
-  // surface — descriptor/route projection is internal to the programs volume,
-  // and publication without an explicit route decision is unrepresentable for
-  // callers (FR-001/FR-020; the curated surface stays parent-caller operations).
   renderSpawnTask,
   reviewerProtocolResolver,
   type FacadeDriveResult,
@@ -45,7 +36,6 @@ export {
   recoverOrphanedWaveGateFacade,
   restartWaveGateFacade,
   resumeWaveGateFacade,
-  prepareWaveGateFacadeStart,
   startWaveGateFacade,
   waveAdvisoryDecisionRequestId,
   waveGateDecisionMismatch,

@@ -318,32 +318,8 @@ describe("findReport", () => {
     const dir = join(cwd, "target/surefire-reports");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "TEST-a.xml"), '<testsuite tests="4" failures="0" errors="0"/>');
-    // A sibling JVM run's artifact must not vouch for `npm test` — even though
-    // npm is a JS test runner, its scan is scoped to Loom's own report dir.
+    // A sibling JVM run's artifact must not vouch for `npm test`.
     expect(findReport("npm test", cwd, "", { nowMs: Date.now(), callStartMs: callStart })).toBeNull();
-  });
-
-  it("discovers a fresh Loom completion-suite JUnit artifact for a JS-runner script invocation", () => {
-    const dir = join(cwd, ".loom/completion-reports");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "verify.junit.xml"), '<testsuite tests="9563" failures="0" errors="0"/>');
-    const report = findReport("npm run test:unit", cwd, "", { nowMs: Date.now(), callStartMs: callStart });
-    expect(report).toEqual({ total: 9563, failed: 0, source: "junit-xml" });
-    // A vitest segment reaches the same scan (the runner the script invokes).
-    const report2 = findReport("npx vitest run tests/x.test.ts", cwd, "", { nowMs: Date.now(), callStartMs: callStart });
-    expect(report2).toEqual({ total: 9563, failed: 0, source: "junit-xml" });
-  });
-
-  it("JS-runner scoping: a stale completion-suite artifact cannot vouch for a later command", () => {
-    const dir = join(cwd, ".loom/completion-reports");
-    mkdirSync(dir, { recursive: true });
-    const file = join(dir, "verify.junit.xml");
-    writeFileSync(file, '<testsuite tests="9563" failures="0" errors="0"/>');
-    const old = (Date.now() - 60 * 60 * 1000) / 1000;
-    utimesSync(file, old, old);
-    expect(findReport("npm run test:unit", cwd, "", { nowMs: Date.now(), callStartMs: Date.now() - 1000 })).toBeNull();
-    // A non-test command gets no scan at all.
-    expect(findReport("bun /tmp/script.ts", cwd, "", { nowMs: Date.now(), callStartMs: callStart })).toBeNull();
   });
 
   it("ignores a stale explicit --outputFile report — freshness bounds cross-run attribution", () => {

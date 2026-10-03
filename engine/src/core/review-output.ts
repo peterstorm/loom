@@ -65,7 +65,7 @@ import {
 } from "./findings";
 import { parseReviewPath } from "./review-packet";
 import { parseContextPacket, type ContextPacket, type LegacyContextPacket, type ReviewerContextPacketV2 } from "./context-packets";
-import { parseReviewerPayloadV2, renderReviewerPayloadDiagnostic } from "./reviewer-protocol";
+import { parseReviewerPayloadV2 } from "./reviewer-protocol";
 import { parseReviewerProtocolDescriptor, REVIEWER_PAYLOAD_LIMITS, type ReviewerProtocolDescriptor, type ReviewerProtocolFailure } from "./reviewer-contract";
 import { acceptedAgentResult, canonicalStructuralEquals, type AgentRequestAuthority, type DomainResult, type OrchestrationRunId, type SpawnRequest } from "./orchestration-contract";
 import { readWaveReviewContext } from "./wave-review-authority";
@@ -271,9 +271,7 @@ export function resolveIssuedTaskReviewFindings(authority: IssuedWaveReviewerPro
   const admitted = parseReviewerEvidence(authority, rawBytes);
   if (!issuedReviewerProtocols.has(authority)) return { kind: "evidence-failed", agent: "unissued-reviewer", message: "reviewer evidence requires minted authority" };
   const agent = authority.request.role;
-  if (!admitted.ok) {
-    return { kind: "evidence-failed", agent, message: renderReviewerPayloadDiagnostic(admitted.error, rawBytes.byteLength) };
-  }
+  if (!admitted.ok) return { kind: "evidence-failed", agent, message: admitted.error.message };
   if (admitted.value.kind !== "wave-review") return { kind: "evidence-failed", agent, message: "Task evidence requires issued Wave authority" };
   return admitted.value.protocolVersion === 2
     ? { kind: "bound-findings", agent, findings: admitted.value.findings, bound: admitted.value.bound, issuedSlot: {
