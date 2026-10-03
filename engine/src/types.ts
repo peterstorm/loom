@@ -714,6 +714,7 @@ export type StatusReasonKind =
   | "wave-implementation-pending"
   | "implementation-escalation-required"
   | "wave-gate-not-started"
+  | "wave-start-not-ready"
   | "run-complete"
   | "completion-prerequisite-failed"
   | "completion-eligible"
@@ -946,7 +947,14 @@ export type WaveImplementationRecovery =
         failureKinds: OrchestrationNonEmpty<string>;
       }>>;
     }>
-  | Readonly<{ kind: "start-wave-gate"; wave: number }>;
+  | Readonly<{ kind: "start-wave-gate"; wave: number }>
+  | Readonly<{
+      kind: "repair-wave-start-readiness";
+      wave: number;
+      /** Every failed start prerequisite, in gate order — exactly the reasons
+       * `start wave-gate` refuses with before claiming a Run Directory. */
+      failures: OrchestrationNonEmpty<string>;
+    }>;
 
 /** An execute Wave holds no Wave Gate registration between entering the Wave
  * and starting its gate. Healthy implementation work is retryable; exhausted
@@ -962,7 +970,19 @@ export type WaveImplementationDiagnostic =
         eligible: true;
         consumesSemanticAttempt: false;
       }>;
-      recovery: Exclude<WaveImplementationRecovery, { kind: "escalate-wave-implementation" }>;
+      recovery: Exclude<WaveImplementationRecovery, { kind: "escalate-wave-implementation" | "repair-wave-start-readiness" }>;
+    }>
+  | Readonly<{
+      kind: "wave-start-not-ready";
+      category: "wave-start-prerequisites-unmet";
+      runId: OrchestrationRunId;
+      message: string;
+      retry: Readonly<{
+        kind: "advance-wave-lifecycle";
+        eligible: false;
+        consumesSemanticAttempt: false;
+      }>;
+      recovery: Extract<WaveImplementationRecovery, { kind: "repair-wave-start-readiness" }>;
     }>
   | Readonly<{
       kind: "implementation-escalation-required";

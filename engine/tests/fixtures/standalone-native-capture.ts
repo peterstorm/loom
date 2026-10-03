@@ -3,13 +3,13 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import type { RunDirHandle } from "../../src/orchestration/run-directory-handle";
+import { LOOM_REVIEW_AUTHORITY_BRIDGE, readLoomReviewAuthorityBridge } from "../../src/handlers/helpers/programs/review-authority-bridge";
 import { fixtureSession } from "./pi-session";
 import { value } from "./standalone-successor-remediation";
 
 type Handler = (event: Record<string, unknown>, context: Record<string, unknown>) => unknown;
 type Emit = (event: string, payload: Record<string, unknown>) => Promise<unknown[]>;
 const packageRoot = fileURLToPath(new URL("../../../", import.meta.url));
-const bridgeKey = Symbol.for("@peterstorm/loom/review-authority/v1");
 
 async function nativeBatchCapturer(root: string, harness: "claude" | "pi", session: ReturnType<typeof fixtureSession>, emit: Emit) {
   const bindings = await import("../../src/orchestration/session-run-bindings");
@@ -65,10 +65,10 @@ export async function nativeSuccessorCapture(root: string, harness: "claude" | "
     "LOOM_ORCHESTRATION_RUNS_ROOT", "LOOM_ORCHESTRATION_RUN_DIR"];
   const previous = keys.map(key => [key, process.env[key]] as const);
   const globals = globalThis as unknown as Record<PropertyKey, unknown>;
-  const oldBridge = globals[bridgeKey];
+  const oldBridge = globals[LOOM_REVIEW_AUTHORITY_BRIDGE];
   const restore = () => {
     for (const [key, prior] of previous) { if (prior === undefined) delete process.env[key]; else process.env[key] = prior; }
-    if (oldBridge === undefined) delete globals[bridgeKey]; else globals[bridgeKey] = oldBridge;
+    if (oldBridge === undefined) delete globals[LOOM_REVIEW_AUTHORITY_BRIDGE]; else globals[LOOM_REVIEW_AUTHORITY_BRIDGE] = oldBridge;
   };
   try {
     // Shadow only this test worker's inherited transport locators; durable parent bindings and PI admission stay untouched.
@@ -97,8 +97,7 @@ export async function nativeSuccessorCapture(root: string, harness: "claude" | "
     const capturer = await nativeBatchCapturer(root, harness, session, emit);
     return { ...capturer, emit, session, verify: () => {
       if (harness !== "pi") throw Error("Claude has durable capture provenance, not a Pi process witness");
-      return (globals[bridgeKey] as { verify: (input: { cwd: string; sessionId: string }) => Promise<unknown> })
-        .verify({ cwd: root, sessionId: session.sessionId });
+      return readLoomReviewAuthorityBridge(globalThis).verify({ cwd: root, sessionId: session.sessionId });
       },
       close: async () => {
         try { await emit("session_shutdown", { reason: "quit" }); }

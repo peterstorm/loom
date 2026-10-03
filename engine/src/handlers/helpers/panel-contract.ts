@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { HookHandler } from "../../types";
 import {
   aggregateVerdicts,
+  architectureCriterion,
   deriveJudgeCriteria,
   parseInterviewDigest,
   parseInterviewDigestJson,
@@ -132,12 +133,16 @@ const handler: HookHandler = async (stdin, args) => {
       // Reject a criterion that is not one this run's digest derives, so a
       // typo'd or stale --criterion cannot produce a verdict that aggregation
       // will later reject as "unexpected" with no way to tell which step lied.
-      if (!(criteria as readonly string[]).includes(criterion)) {
+      // The CLI string is minted through the closed vocabulary — never asserted
+      // into the brand — so the seam that binds a verdict to its criterion
+      // cannot compile with a free-text value.
+      const expectedCriterion = architectureCriterion(criterion);
+      if (expectedCriterion === null || !criteria.includes(expectedCriterion)) {
         return contractError("judge verdict", [
           `criterion must be one of the derived criteria: ${criteria.join(", ")}; received: ${criterion}`,
         ]);
       }
-      const verdict = parseJudgeVerdict(stdin, criterion, candidateFilenames);
+      const verdict = parseJudgeVerdict(stdin, expectedCriterion, candidateFilenames);
       if (!verdict.ok) return contractError("judge verdict", verdict.errors);
       return writeCanonicalOutput(serializeJudgeVerdict(verdict.value) + "\n");
     }

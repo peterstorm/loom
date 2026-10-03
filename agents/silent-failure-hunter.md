@@ -2,6 +2,11 @@
 name: silent-failure-hunter
 model-profile: focused-review
 model: sonnet
+tools:
+  - Bash
+  - Read
+  - Grep
+  - Glob
 description: Use this agent when reviewing code changes in a pull request to identify silent failures, inadequate error handling, and inappropriate fallback behavior. This agent should be invoked proactively after completing a logical chunk of work that involves error handling, catch blocks, fallback logic, or any code that could potentially suppress errors.
 color: yellow
 ---

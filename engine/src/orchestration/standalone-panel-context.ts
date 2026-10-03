@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import { parseContextPacket, parseStandaloneReviewerContextPacketV3, type ContextPacket, type ByteSection } from "../core/context-packets";
 import { readRunBytesNoFollow } from "./no-follow-fs";
+import { readStoredContextPacketFile } from "./stored-context-packets";
 import type { RunDirHandle } from "./run-directory-handle";
 import type { DomainResult } from "../core/orchestration-contract";
 
@@ -15,10 +16,13 @@ function previousPacket(section: ByteSection) {
   if (!object(raw) || !Number.isSafeInteger(raw.byteLength) || typeof raw.byteLength !== "number" || raw.byteLength < 1 || raw.byteLength > LIMIT) throw Error("invalid bounded predecessor packet reference");
   if (raw.encoding !== "published-packet-reference" || typeof raw.path !== "string" || !raw.path.startsWith("/") ||
       (raw.purpose !== "v1-v2" && raw.purpose !== "standalone-successor")) throw Error("current panel requires an exact predecessor reference and explicit decode purpose");
-  const bytes = readRunBytesNoFollow(raw.path, raw.byteLength);
+  const stored = readStoredContextPacketFile(raw.path, { file: raw.byteLength, section: LIMIT });
+  if (!stored.ok) throw Error(stored.error);
+  const bytes = stored.value.fileBytes;
   if (bytes.length !== raw.byteLength || createHash("sha256").update(bytes).digest("hex") !== raw.digest) throw Error("predecessor visibility bytes changed");
-  const decoded: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-  const packet = raw.purpose === "standalone-successor" ? parseStandaloneReviewerContextPacketV3(decoded) : parseContextPacket(decoded);
+  const packet = raw.purpose === "standalone-successor"
+    ? parseStandaloneReviewerContextPacketV3(stored.value.record)
+    : parseContextPacket(stored.value.record);
   if (!packet.ok) throw Error(packet.error.message);
   return packet.value;
 }

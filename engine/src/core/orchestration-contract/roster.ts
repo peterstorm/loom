@@ -141,12 +141,7 @@ export function sameAgentRequestAuthority(
 
 export function canonicalHarnessBinding(pi: PiBinding, claude: ClaudeCodeBinding): ExactHarnessBinding {
   return canonicalRecord({
-    pi: canonicalRecord({
-      harness: "pi",
-      provider: pi.provider,
-      model: pi.model,
-      thinking: pi.thinking,
-    }),
+    pi: canonicalRecord(pi),
     claude: canonicalRecord({ harness: "claude-code", model: claude.model }),
   });
 }
@@ -168,10 +163,10 @@ export const AGENT_REQUEST_KEYS = [
 /**
  * How a request authority reached this parser.
  *
- * "issue"  — the authority is being CONSTRUCTED now, from the live catalog. It
- *            must satisfy today's AGENT_POLICIES exactly; this is the gate that
- *            keeps a newly issued request bound to the model policy actually
- *            says to use (and what keeps the Pi lowering honest).
+ * "issue"  — the authority is being CONSTRUCTED now from the live catalog.
+ *            Only reviewer roles in Wave/standalone review may elect the
+ *            catalog's explicit qualified-local alternative; all other roles
+ *            must use their assigned default profile.
  * "stored" — the authority is being READ BACK from an immutable run artifact,
  *            event, receipt, or publication record. It is HISTORY: "issued
  *            under profile X, ran on model Y." Re-checking history against
@@ -243,11 +238,14 @@ function parseAgentRequestAuthorityInMode(
       ));
     } else {
       policyResolved = true;
-      if (profileId.ok && policy.value.profile !== profileId.value) {
+      if (profileId.ok && policy.value.profile !== profileId.value && !(
+        profileId.value === "qualified-local-review" && policy.value.kind.kind === "reviewer" &&
+        (fields.program === "wave-gate" || fields.program === "standalone-review")
+      )) {
         violations.push(violation(
           "model-policy-mismatch",
           "modelProfile",
-          `role '${role.value}' requires profile '${policy.value.profile}', received '${profileId.value}'`,
+          `role '${role.value}' requires profile '${policy.value.profile}' (or its qualified-local reviewer alternative), received '${profileId.value}'`,
         ));
       }
       if (skill.ok) {

@@ -1,0 +1,11 @@
+{
+  "kind": "regex",
+  "name": "inv-1-no-strict-require-constraint",
+  "description": "No tool constraint may demand JSON-schema strict sampling via strict: \"require\" — pi-ai's resolveJsonSchemaStrictSampling throws on constraint-ignoring providers when config.strict === \"require\", failing the child session's request so the extraction fallback never engages (FR-010/NFR-011 zero-new-failure-modes violation). The constraint is a provider request, never an enforcement.",
+  "extensions": [".ts", ".tsx"],
+  "pattern": "strict:\\s*['\"]require['\"]",
+  "flags": "",
+  "excludePatterns": [],
+  "fixHint": "Use strict: \"prefer\" — the constraint rides the harness's constrained-sampling capability as a request; \"require\" makes pi-ai throw on constraint-ignoring providers (verified against pi 0.83.0). Override this rule by name only if pi-ai's strict semantics change.",
+  "enabled": true
+}

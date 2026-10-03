@@ -7,7 +7,9 @@ import {
   type ArtifactSnapshot,
   type DeclaredArtifactBaseline,
 } from "../core/artifact-baseline";
+import { compareStrings } from "../core/ordering";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "./repository-path";
+import { runtimeDomainPaths } from "../runtime-compatibility";
 
 function digest(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -237,6 +239,73 @@ export interface AttemptBaselineComparison {
   readonly bytesChangedSinceAttempt: boolean;
   /** The comparison's failure cause, or null on a clean comparison. */
   readonly failure: string | null;
+}
+
+/**
+ * The runtime-baseline restoration map for implementation settlement.
+ *
+ * Covers the WHOLE runtime revision domain, not only an attempt's declared
+ * artifacts. Two campaign-proven reasons:
+ *
+ * 1. An implementation attempt's necessary writes are not bounded by its
+ *    declared artifact list — the render/wording changes ripple into the
+ *    dispatch call sites that consume them, and the compiler drives the child
+ *    to those files. Scoping the exemption to the declared list made every
+ *    such attempt unsettlable: the settlement read the attempt's own
+ *    authorized writes as runtime drift.
+ * 2. A child's scratch file inside `engine/src`/`pi` (untracked, absent at
+ *    HEAD) also moved the revision and broke the handshake mid-attempt. It is
+ *    product under this boundary, mapped to `null` (excluded) exactly like an
+ *    attempt-created declared artifact.
+ *
+ * For each domain path that is Git-dirty NOW, the settlement may hash it at
+ * its attempt-start bytes instead of its live bytes when:
+ *
+ * - clean now → unmapped (live bytes ARE the baseline bytes);
+ * - provably clean at spawn in EVERY in-flight attempt's repository baseline
+ *   → mapped to the CURRENT HEAD: a path clean at spawn carried HEAD's bytes,
+ *   and no one commits between spawn and settlement, so HEAD's bytes ARE the
+ *   attempt-start bytes. A HEAD that moved can only fail closed — the
+ *   restored bytes then mismatch the loaded identity and the write refuses;
+ * - created by the attempt (absent at HEAD) → mapped to `null` (excluded from
+ *   the revision entirely);
+ * - dirty at spawn in ANY in-flight attempt's baseline → unmapped: the write
+ *   boundary stays strict for that path. Fail closed — restoration is an
+ *   exemption, and an exemption that cannot prove its precondition must not
+ *   exist.
+ *
+ * An unparseable baseline fails closed for the WHOLE map (empty map, strict
+ * comparison everywhere), not just for its own task.
+ */
+export function runtimeBaselineRestoreForTasks(
+  root: string,
+  tasks: readonly AttemptBaselineTask[],
+): ReadonlyMap<string, string | null> {
+  const dirty = new Set(repositoryChangedPaths(root));
+  if (dirty.size === 0) return new Map();
+  const revision = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: root,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+  const restore = new Map<string, string | null>();
+  // Dirty-at-spawn knowledge is unioned across every in-flight attempt: a path
+  // ANY attempt observed dirty at its spawn stays strict for all of them.
+  const dirtyAtSpawn = new Set<string>();
+  let baselineSeen = false;
+  for (const task of tasks) {
+    if (task.attempt_repository_baseline === undefined) continue;
+    const parsed = parseDeclaredArtifactBaseline(task.attempt_repository_baseline, "attempt repository baseline");
+    if (!parsed.ok) return new Map(); // unparseable baseline: the whole exemption fails closed
+    baselineSeen = true;
+    for (const entry of parsed.value) dirtyAtSpawn.add(entry.artifact);
+  }
+  for (const path of runtimeDomainPaths(root)) {
+    if (!dirty.has(path)) continue; // clean now: nothing to restore
+    if (baselineSeen && dirtyAtSpawn.has(path)) continue; // dirty at spawn: baseline bytes untrusted
+    restore.set(path, artifactExistsAtRevision(root, revision, path) ? revision : null);
+  }
+  return Object.freeze(new Map([...restore].sort(([left], [right]) => compareStrings(left, right))));
 }
 
 /**

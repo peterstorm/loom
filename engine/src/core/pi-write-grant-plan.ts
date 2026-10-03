@@ -21,18 +21,19 @@
  * rejected-grant session) and both this planner and the edit gate must judge
  * the same instant.
  *
- * The decision functions perform no I/O, clock, or randomness. Importing this
- * module is not currently side-effect-free: its Agent policy dependencies reach
- * `config.ts`, whose initialization resolves the Task Graph through filesystem
- * and Git probes. Splitting runtime discovery from Agent policy is tracked as
- * a separate configuration-seam deepening.
+ * The decision functions perform no I/O, clock, or randomness, and importing
+ * this module is side-effect-free: its Agent policy dependencies reach the
+ * pure model-profiles leaf (the catalog-derived projections), not `config.ts`
+ * — whose initialization resolves the Task Graph through filesystem and Git
+ * probes. Runtime discovery still lives in config, exactly where this module
+ * never reaches.
  */
 
 import { match } from "ts-pattern";
 import type { TaskExecutionSpawn } from "./validate-task-execution";
 import { deriveArtifactWriteScope } from "./artifact-write-scope";
 import { extractTaskId } from "../utils/extract-task-id";
-import { PHASE_AGENT_MAP } from "../config";
+import { PHASE_AGENT_MAP } from "./model-profiles";
 import { stripNamespace } from "../utils/strip-namespace";
 
 /** One batch item's spawn shape, as the Pi transport presents it. */

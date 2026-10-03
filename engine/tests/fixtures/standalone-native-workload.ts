@@ -51,7 +51,6 @@ const paths = Object.freeze([
   "engine/src/orchestration/run-directory-handle.ts",
   "engine/src/orchestration/session-run-bindings.ts",
   "engine/src/orchestration/standalone-panel-context.ts",
-  "pi/extension.ts",
   "pi/transcript-adapter.ts",
   "scripts/read-context-packet.ts",
 ]);

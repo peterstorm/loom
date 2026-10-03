@@ -7,7 +7,8 @@ import { SUBAGENT_DIR } from "../src/config";
 import { parseNewTestEvidence, type TaskGraph } from "../src/types";
 import { derivePendingTaskProof, evaluateTaskProof } from "../src/core/proof-obligations";
 import { waveGateAuthorityDigest } from "../src/core/wave-review-authority";
-import { parseOrchestrationRunId } from "../src/core/orchestration-contract";
+import { parseArtifactDigest, parseOrchestrationRunId } from "../src/core/orchestration-contract";
+import { capturedSpecCheck } from "../src/core/spec-check";
 import type { TaskId } from "../src/core/task-id";
 import { acceptedWaveCompletionSuite as acceptedCompletionSuite } from "./fixtures/accepted-wave-completion-suite";
 
@@ -1589,6 +1590,65 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
       // poisons later starts for the same Wave, and an abandoned run was
       // never completed.
       expect(after.wave_gate_history).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("atomically retires an abandoned run's epoch and spec evidence when installing its successor", async () => {
+    const dir = makeTmpDir();
+    const statePath = join(dir, "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify(waveGraph));
+    chmodSync(statePath, 0o444);
+    try {
+      const mgr = new StateManager(statePath);
+      await mgr.registerActiveWaveGate(activeGate("run.first", mgr.load()), ["T1"]);
+      const batchEpoch = parseArtifactDigest("a".repeat(64));
+      if (!batchEpoch.ok) throw new Error(batchEpoch.error.message);
+      await mgr.update((locked) => ({
+        ...locked,
+        wave_review_epoch: { runId: runId("run.first"), wave: 1, batchEpoch: batchEpoch.value },
+        spec_check: capturedSpecCheck({ wave: 1, runAt: "now", criticalFindings: [] }),
+        tasks: locked.tasks.map((task) => ({
+          ...task,
+          review_status: "pending" as const,
+          review_generation: 1,
+          review_run: {
+            generation: 1, packet_id: "b".repeat(64), head_sha: batchEpoch.value,
+            prior_finding_ids: ["code-reviewer-1"], expected_agents: ["code-reviewer"], evidence: [],
+          },
+          findings: [{
+            id: "code-reviewer-1", agent: "code-reviewer", severity: "advisory" as const,
+            file: null, line: null, claim: "retain original finding",
+          }],
+          advisory_findings: ["retain original finding"],
+        })),
+      }));
+      await mgr.abandonActiveWaveGateRegistration({
+        runsRoot: "/runs", runId: runId("run.first"), reason: "reviewed bytes changed", supersededBy: null,
+      });
+      const abandoned = mgr.load();
+      const before = readFileSync(statePath, "utf-8");
+      const successor = activeGate("run.second", abandoned);
+      expect(abandoned.wave_review_epoch?.runId).toBe("run.first");
+      expect(abandoned.spec_check?.wave).toBe(1);
+
+      await mgr.registerActiveWaveGate(successor, ["T1"]);
+      const installed = mgr.load();
+      expect(installed.active_wave_gate?.runId).toBe("run.second");
+      expect(installed.wave_review_epoch).toBeUndefined();
+      expect(installed.spec_check).toBeUndefined();
+      expect(installed.tasks[0]).toMatchObject({
+        review_status: "pending", review_generation: 1,
+        findings: [{ claim: "retain original finding" }],
+        advisory_findings: ["retain original finding"],
+      });
+      expect(installed.tasks[0]?.review_run).toBeUndefined();
+      expect(installed.wave_gate_history).toEqual(abandoned.wave_gate_history);
+      expect(installed.active_wave_gate?.authorityDigest).toBe(successor.authorityDigest);
+      expect(await mgr.registerActiveWaveGate(successor, ["T1"])).toEqual(installed.active_wave_gate);
+      expect(mgr.load()).toEqual(installed);
+      expect(before).not.toBe(readFileSync(statePath, "utf-8"));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

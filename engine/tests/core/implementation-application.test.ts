@@ -133,7 +133,7 @@ describe("Task-local byte-scope application core", () => {
     expect(bytes.taskBytesChangedOrUnobservable).toBe(true);
   });
 
-  it("does not let a parser-reported no-op path credit proof bytes from an older attempt", () => {
+  it("keeps a no-op parser path unattributed while the proof boundary still sees all task production", () => {
     const bytes = observedBytes(authority(), {
       currentAttemptScope: baseline("src/a.ts", digest("a")),
       currentProofScope: baseline("src/a.ts", digest("b")),
@@ -142,8 +142,42 @@ describe("Task-local byte-scope application core", () => {
     });
     expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
     expect(bytes.attributedAttemptChangedPaths).toEqual([]);
-    expect(bytes.cumulativeModifiedPaths).toEqual([]);
-    expect(bytes.cumulativeProofArtifactChanges).toEqual([]);
+    // INV-DF1: the proof boundary predates the Task's production, so the
+    // proof-scope change is task production the settlement must see — the
+    // no-op parser path gains no ATTRIBUTION, but the cumulative paths and the
+    // Oracle's filesModified still credit it.
+    expect(bytes.cumulativeModifiedPaths).toEqual(["src/a.ts"]);
+    expect(bytes.cumulativeProofArtifactChanges).toEqual(["src/a.ts"]);
+  });
+
+  it("credits committed production even when the child makes no edits (stale flow)", () => {
+    const attempt = authority(1, "stale-flow-committed");
+    // The population-time proof baseline predates the committed production; the
+    // re-registered child makes no edits and its attempt scope never moves.
+    const bytes = observedBytes(attempt, {
+      attemptBaseline: baseline("src/a.ts", digest("b")),
+      currentAttemptScope: baseline("src/a.ts", digest("b")),
+    });
+    expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
+    expect(bytes.attributedAttemptChangedPaths).toEqual([]);
+    expect(bytes.cumulativeModifiedPaths).toEqual(["src/a.ts"]);
+    expect(bytes.cumulativeProofArtifactChanges).toEqual(["src/a.ts"]);
+
+    const result = expectApplied(settleObservedImplementation(
+      graph(pendingTask(attempt)),
+      attempt,
+      "2026-08-24T00:08:00.000Z" as never,
+      completedEvidence,
+      TRUSTED_LEDGER_ONLY_POLICY,
+      bytes,
+    ));
+    expect(result.transition.kind).toBe("implemented");
+    expect(result.state.tasks[0]).toMatchObject({
+      status: "implemented",
+      files_modified: ["src/a.ts"],
+      proof: { state: "satisfied" },
+    });
+    expect(result.state.executing_tasks).toEqual([]);
   });
 
   it("retains a prior allowed attribution while refusing an additional no-op parser credit", () => {
@@ -375,11 +409,15 @@ describe("exact transition application", () => {
       expect(result.state.tasks[0]?.implementation_attempt_history?.[0]?.consumesSemanticAttempt).toBe(true);
       expect(result.state.executing_tasks).toEqual([]);
       expect(result.state.tasks[0]?.active_implementation_attempt).toBeUndefined();
+      // Both semantic-failure arms retire the attempt's repository boundary:
+      // the re-armed attempt freezes a fresh one at its own registration.
+      expect(result.state.tasks[0]?.repository_baseline).toBeUndefined();
+      expect(result.state.tasks[0]?.unresolved_repository_paths).toBeUndefined();
       expect(result.state.tasks[0]).not.toHaveProperty("retry_request");
     }
   });
 
-  it("keeps satisfied historical Proof pending+revalidation and retains exact foreign-delta carry", () => {
+  it("keeps satisfied historical Proof pending+revalidation and retires the attempt boundary on retry", () => {
     const attempt = authority();
     const result = expectApplied(settleObservedImplementation(
       graph(pendingTask(attempt)),
@@ -398,13 +436,17 @@ describe("exact transition application", () => {
       status: "pending",
       proof: { state: "satisfied" },
       revalidation_required: true,
-      repository_baseline: [],
-      unresolved_repository_paths: ["foreign.ts"],
     });
+    // The unowned foreign delta observed DURING the attempt still invalidates
+    // its review; only the boundary and its diagnostics retire with the
+    // attempt, so the re-armed attempt freezes a fresh repository boundary.
+    expect(result.state.tasks[0]).toMatchObject({ review_status: "pending", review_generation: 1 });
+    expect(result.state.tasks[0]?.repository_baseline).toBeUndefined();
+    expect(result.state.tasks[0]?.unresolved_repository_paths).toBeUndefined();
     expect(result.state.tasks[0]?.attempt_repository_baseline).toBeUndefined();
   });
 
-  it("infrastructure settlement after exact byte observation persists newly discovered unowned paths", () => {
+  it("infrastructure settlement after exact byte observation retires the attempt boundary", () => {
     const attempt = authority(1, "infrastructure-unowned-path");
     const bytes = observedBytes(attempt, {
       parserModifiedPaths: [],
@@ -420,9 +462,13 @@ describe("exact transition application", () => {
     );
     expect(result.kind).toBe("applied");
     if (result.kind !== "applied") return;
+    // Newly discovered unowned paths invalidate this attempt (the settlement
+    // diagnostics carry them) but retire WITH the attempt: they are evidence
+    // against this attempt's boundary, not a durable carry into the next one.
     expect(result.state.tasks[0]).toMatchObject({
-      repository_baseline: [],
-      unresolved_repository_paths: ["foreign.ts"],
+      repository_baseline: undefined,
+      unresolved_repository_paths: undefined,
+      failure_reason: expect.stringContaining("infrastructure-blocked"),
     });
   });
 
@@ -449,13 +495,14 @@ describe("exact transition application", () => {
       test_result: { verdict: "trusted-pass" },
       test_evidence: "historical pass",
       files_modified: ["src/a.ts"],
-      unresolved_repository_paths: ["foreign.ts"],
     });
     expect(result.state.tasks[0]?.implementation_attempt_history?.[0]).toMatchObject({
       transition: "infrastructure-blocked",
       consumesSemanticAttempt: false,
     });
-    expect(result.state.tasks[0]?.repository_baseline).toEqual([]);
+    // Stale carried diagnostics against the retired boundary drop with it.
+    expect(result.state.tasks[0]?.unresolved_repository_paths).toBeUndefined();
+    expect(result.state.tasks[0]?.repository_baseline).toBeUndefined();
     expect(result.state.executing_tasks).toEqual([]);
   });
 

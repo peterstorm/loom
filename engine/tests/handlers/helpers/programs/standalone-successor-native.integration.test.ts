@@ -11,6 +11,16 @@ import { addRepairTest, git, hash, publishedSuccessorForRemediation, repairDecla
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import type { RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 
+// Route election is ambient-env sensitive: observedReviewerIssueRoute() reads
+// this process's PI_PROVIDER/PI_MODEL/PI_REASONING_LEVEL, and
+// fixturePiEnvironment spreads process.env into every CLI child. These
+// fixtures pin the catalog issue route, so an ambient Pi handshake (a wrapper
+// session running the suite under the qualified-local model) must not flip
+// the election into emission-refusing spawn admission.
+for (const routeEnv of ["PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL"] as const) {
+  delete process.env[routeEnv];
+}
+
 type Requests = readonly { authority: AgentRequestAuthority; task: string }[];
 const roots: string[] = [];
 const operations = new Set<Promise<void>>();

@@ -12,6 +12,17 @@ import {
   sanitizeProse,
   type VerdictEnvelope,
 } from "../../src/core/panel-kernel";
+import {
+  architectureCriterion,
+  candidateFilename,
+  parseJudgeVerdict,
+  serializeJudgeVerdict,
+} from "../../src/core/panel-contract";
+import {
+  parseRefutationVerdict,
+  serializeRefutationVerdict,
+  type WaveFindingId,
+} from "../../src/core/review-panel";
 
 /**
  * The kernel is the code BOTH panels depend on, and it was reachable only
@@ -233,5 +244,83 @@ describe("parseCriteriaSet — the cross-verdict coverage rule", () => {
     const result = parseCriteriaSet([], ["intent"]);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errors.join("; ")).toContain("expected exactly 1 verdict(s); received 0");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The cross-parser witness: both panel parsers share the kernel envelope but
+// bind different payload schemas. Each has its own suite; nothing else proved
+// the schemas never drifted toward each other.
+// ---------------------------------------------------------------------------
+
+describe("the panel parsers refuse each other's payloads (cross-parser witness)", () => {
+  const waveId = (raw: string): WaveFindingId => raw as WaveFindingId;
+  const JUDGE_IDS = [candidateFilename("simplicity-first"), candidateFilename("type-driven-fp")];
+  const FINDING_IDS = [waveId("T1:code-reviewer-1"), waveId("T1:silent-failure-hunter-1")];
+  const criterion = architectureCriterion("simplicity");
+  if (criterion === null) throw new Error("fixture criterion outside the validated interview vocabulary");
+
+  const judgeRankings = [
+    { candidate: JUDGE_IDS[0], score: 9, fatal_flaw: null, strongest_idea: "one pure boundary" },
+    { candidate: JUDGE_IDS[1], score: 7, fatal_flaw: "too much ceremony", strongest_idea: "typed errors" },
+  ];
+  const refutationVotes = [
+    { finding_id: FINDING_IDS[0], verdict: "refuted", reasoning: "the guard three lines up excludes the null" },
+    { finding_id: FINDING_IDS[1], verdict: "upheld", reasoning: "the catch really does swallow it" },
+  ];
+
+  /** A judge payload addressed to criterion `to` — the sibling address lets the
+   *  cross-feed test pin the rejection to the PAYLOAD seam, not to criterion
+   *  binding. */
+  const judgeShaped = (to: string) => JSON.stringify({ criterion: to, rankings: judgeRankings });
+  /** A refutation payload addressed to lens `to`, for the same sharpness. */
+  const refutationShaped = (to: string) => JSON.stringify({ criterion: to, verdicts: refutationVotes });
+
+  it("baseline: each parser admits its own payload", () => {
+    // Without this arm the refusals below could pass for the wrong reason —
+    // e.g. a broken envelope that rejects everything.
+    expect(parseJudgeVerdict(judgeShaped("simplicity"), criterion, JUDGE_IDS).ok).toBe(true);
+    expect(parseRefutationVerdict(refutationShaped("reproduction"), "reproduction", FINDING_IDS).ok).toBe(true);
+  });
+
+  it("a judge-shaped payload is refused by the refutation parser — shape, not binding", () => {
+    // Criterion binding is satisfied ("reproduction" === "reproduction"); the
+    // payload shape is the only thing left to reject it. If the refutation
+    // parser's entriesKey ever drifted to "rankings", a judge verdict could
+    // ride a refutation slot in.
+    expect(parseRefutationVerdict(judgeShaped("reproduction"), "reproduction", FINDING_IDS).ok).toBe(false);
+  });
+
+  it("a refutation-shaped payload is refused by the judge parser — shape, not binding", () => {
+    expect(parseJudgeVerdict(refutationShaped("simplicity"), criterion, JUDGE_IDS).ok).toBe(false);
+  });
+
+  it("both siblings enforce the kernel's prose rule on their own payloads", () => {
+    const judge = parseJudgeVerdict(
+      JSON.stringify({
+        criterion: "simplicity",
+        rankings: judgeRankings.map((r, i) => (i === 0 ? { ...r, strongest_idea: "one {pure} boundary" } : r)),
+      }),
+      criterion,
+      JUDGE_IDS,
+    );
+    expect(judge.ok).toBe(true);
+    if (judge.ok) {
+      expect(judge.value.entries[0]!.strongestIdea).toBe("one pure boundary");
+      expect(serializeJudgeVerdict(judge.value)).not.toContain("{pure}");
+    }
+    const refutation = parseRefutationVerdict(
+      JSON.stringify({
+        criterion: "reproduction",
+        verdicts: refutationVotes.map((v, i) => (i === 0 ? { ...v, reasoning: "the {guard} is unclear" } : v)),
+      }),
+      "reproduction",
+      FINDING_IDS,
+    );
+    expect(refutation.ok).toBe(true);
+    if (refutation.ok) {
+      expect(refutation.value.entries[0]!.reasoning).toBe("the guard is unclear");
+      expect(serializeRefutationVerdict(refutation.value)).not.toContain("{guard}");
+    }
   });
 });
