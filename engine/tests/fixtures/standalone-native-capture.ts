@@ -22,7 +22,7 @@ async function nativeBatchCapturer(root: string, harness: "claude" | "pi", sessi
       value(await bindings.registerSessionRunBinding(session.transport, session.sessionId, {
         runId: handle.runId, runsRoot: handle.identity.runsRoot, runDirectory: handle.runDirectory,
         requestIds: requests.map(row => row.authority.requestId), resultDigest: null,
-      }));
+      }, "pi"));
       const input = { tasks: requests.map(row => ({ agent: row.authority.role, task: row.task, cwd: root })), agentScope: "user" };
       const calls = await emit("tool_call", { toolName: "subagent", toolCallId, input });
       if (calls.some(result => result !== undefined)) throw Error(`native spawn refused: ${JSON.stringify(calls)}`);

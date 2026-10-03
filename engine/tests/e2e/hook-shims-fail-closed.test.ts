@@ -17,9 +17,10 @@
 
 import { describe, it, expect, afterAll } from "vitest";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ORCHESTRATION_RUNS_SUFFIX } from "../../src/machine/evidence";
 
 const SCRIPTS = join(__dirname, "../../../hooks/scripts");
 const ENFORCE = join(SCRIPTS, "enforce-phase-tools.sh");
@@ -354,6 +355,38 @@ describe("dispatch.sh — runs on binding-without-graph, fails OPEN loudly on ru
     });
     expect(stderr).toContain("bindings may leak");
     expect(status).toBe(0);
+  });
+
+  it("no graph + only a session RUN binding → still dispatches, and a missing runtime is a surfaced exit 1", () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, `shim-test${ORCHESTRATION_RUNS_SUFFIX}`), "{}");
+    const { status, stderr } = runShim(DISPATCH, {
+      CLAUDE_PROJECT_DIR: graphlessProjectDir(),
+      LOOM_SUBAGENT_DIR: dir,
+    });
+    // Reaching the runtime check (CLAUDE_PLUGIN_ROOT unset) proves the skip did not fire;
+    // a reserved slot may be waiting, so the failure is surfaced (1), never blocking (2).
+    expect(stderr).toContain("request-bound capture may be stranded");
+    expect(status).toBe(1);
+  });
+
+  it("run binding + bun not found on PATH → surfaced exit 1 as well", () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, `shim-test${ORCHESTRATION_RUNS_SUFFIX}`), "{}");
+    const { status, stderr } = runShim(DISPATCH, {
+      CLAUDE_PROJECT_DIR: graphlessProjectDir(),
+      LOOM_SUBAGENT_DIR: dir,
+      CLAUDE_PLUGIN_ROOT: "/tmp/fake-plugin-root",
+      PATH: bunlessPath(),
+    });
+    expect(stderr).toContain("request-bound capture may be stranded");
+    expect(status).toBe(1);
+  });
+
+  it("matches run bindings with exactly the engine's registry suffix (the shim and the writer cannot drift)", () => {
+    const body = readFileSync(DISPATCH, "utf-8");
+    const globs = [...body.matchAll(/"\$\{SUBAGENT_DIR\}"\/\*(\.[^ \]&]+)/g)].map((m) => m[1]);
+    expect(globs.filter((suffix) => suffix !== ".machine")).toEqual([ORCHESTRATION_RUNS_SUFFIX, ORCHESTRATION_RUNS_SUFFIX]);
   });
 
   it("no graph + binding present + bun not found on PATH → exit 0 WITH a 'bindings may leak' note", () => {

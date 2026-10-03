@@ -405,7 +405,7 @@ describe("Pi extension review tool_result integration", () => {
     runDirectory: staged.runDir,
     requestIds,
     resultDigest: null,
-  });
+  }, "pi");
 
   const reviewRunFixture = (generation: number, marker: string) => ({
     generation,
