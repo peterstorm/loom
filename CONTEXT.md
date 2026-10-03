@@ -240,6 +240,10 @@ _Avoid_: Package version, schema version, commit hash, current checkout
 One engine-reserved execution of one Task under one semantic attempt ordinal and one immutable byte baseline. Only engine-issued attempt authority can settle it; a Task id inferred from concurrent execution state is cleanup evidence, not completion authority.
 _Avoid_: Agent run, retry (that is a transition between attempts), subagent result
 
+**Implementation Binding**:
+On Claude Code, the exact link between one running implementation Agent and the Implementation Attempt its own trusted first prompt names, persisted as the implementation-attempt sidecar. It is `pending` (rostered, no sidecar: Claude writes the child transcript only after SubagentStart), `bound`, or `refused` (the prompt names no, an unknown, or a non-executing Task, or a conflicting authority owns the Agent). It is attempted opportunistically at SubagentStart when the prompt is already on disk, by block-direct-edits before every write decision, and once more at SubagentStop for an Agent that never wrote; `refused` is re-derived on each attempt, not permanent. A `pending` write is a retriable block, but one that persists across retries means the child transcript location cannot be resolved and is reported, not retried. Only `bound` admits writes, and it is never inferred from which reservations are pending. Pi binds at spawn through write grants and has no Implementation Binding.
+_Avoid_: Write grant (Pi's mechanism), reservation guess, roster role
+
 **Implementation Retry Context**:
 The canonical immutable prompt appendix derived from one exact attempt-1 `retry-required` settlement receipt. It binds Task, semantic attempt 2, predecessor receipt, and sorted failure kinds; the shared spawn gate must match the status-issued appendix byte-for-byte before issuing attempt-2 authority. Infrastructure failures reuse the current semantic attempt and never mint this context; attempt-2 semantic failure produces terminal escalation rather than another context.
 _Avoid_: Failure reason, retry prompt, retry count, attempt token

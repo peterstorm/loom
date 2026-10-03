@@ -55,7 +55,11 @@ interface ShimResult {
   stderr: string;
 }
 
-function runShim(script: string, env: Record<string, string | undefined>): ShimResult {
+function runShim(
+  script: string,
+  env: Record<string, string | undefined>,
+  input: string = JSON.stringify({ session_id: "shim-test", tool_name: "Write", tool_input: {} }),
+): ShimResult {
   // Build the env explicitly so CLAUDE_PLUGIN_ROOT can be genuinely ABSENT,
   // not empty — the shim tests `-z`, but absence is the real-world drift.
   // CLAUDE_PROJECT_DIR is stripped too: graph presence must be under the
@@ -76,7 +80,7 @@ function runShim(script: string, env: Record<string, string | undefined>): ShimR
   }
   const result = spawnSync("bash", [script], {
     env: base,
-    input: JSON.stringify({ session_id: "shim-test", tool_name: "Write", tool_input: {} }),
+    input,
     encoding: "utf-8",
     timeout: 30_000,
   });

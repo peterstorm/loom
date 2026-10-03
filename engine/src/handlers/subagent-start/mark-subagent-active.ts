@@ -7,7 +7,11 @@
  * 2. Bind the guarded skill machine for machine-gated agent types, minting
  *    the attribution epoch the recorder and gate key evidence by.
  * 3. Publish exact Implementation Attempt sidecar authority for modern
- *    implementation Agents.
+ *    implementation Agents when the child's first prompt is already on disk.
+ *    Claude Code usually writes it only after this hook returns, so the
+ *    binding is then left PENDING (rostered, no sidecar) and established by
+ *    block-direct-edits before the Agent's first write decision (or at
+ *    SubagentStop) — see `handlers/implementation-binding`.
  * 4. Persist the task_graph absolute path for cross-repo SubagentStop access.
  */
 
@@ -31,17 +35,11 @@ import {
   WRITE_GRANT_AGENT_NAMESPACE,
 } from "../../machine";
 import { passthroughDiagnostic } from "../../utils/hook-diagnostic";
-import { resolveAgentTranscriptPath } from "../../utils/agent-transcript-path";
-import { parseFirstUserPrompt } from "../../parsers/parse-transcript";
 import { parseSubagentStartStdin } from "../../parsers/parse-subagent-start-input";
-import { extractTaskId } from "../../utils/extract-task-id";
-import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
 import { StateManager } from "../../state-manager";
-import {
-  publishImplementationAttemptSidecar,
-  removeImplementationAttemptSidecar,
-} from "../../implementation-attempt-sidecar";
+import { removeImplementationAttemptSidecar } from "../../implementation-attempt-sidecar";
 import { rollbackTaskExecutionRegistration } from "../task-execution";
+import { ensureImplementationBinding, suppliedTranscript } from "../implementation-binding";
 import type { ImplementationAttemptAuthority } from "../../core/implementation-completion";
 import { parseAgentName } from "../../core/model-profiles";
 
@@ -168,12 +166,13 @@ const handler: HookHandler = async (stdin) => {
   }
   const modernImplementationAgent = isImplementationAgent(rosterAgentTypeRaw);
   const loomOwnedAgent = parseAgentName(rosterAgentTypeRaw).ok || modernImplementationAgent;
-  let sidecarPublished = false;
-  let sidecarAlreadyOwned = false;
-  let identifiedAuthority: ImplementationAttemptAuthority | null = null;
-  const rollbackIdentifiedRegistration = async (): Promise<string | null> => {
-    if (identifiedAuthority === null || sidecarAlreadyOwned) return null;
-    const rolledBack = await rollbackTaskExecutionRegistration([identifiedAuthority]);
+  // Exact authority this start identified AND newly published. A sidecar that
+  // was already live (observed, or a duplicate delivery's identical bytes)
+  // belongs to an earlier start, so this start never rolls it back.
+  let createdAuthority: ImplementationAttemptAuthority | null = null;
+  const rollbackRegistration = async (authority: ImplementationAttemptAuthority | null): Promise<string | null> => {
+    if (authority === null) return null;
+    const rolledBack = await rollbackTaskExecutionRegistration([authority]);
     return rolledBack.kind === "block" ? rolledBack.message : null;
   };
   if (modernImplementationAgent) {
@@ -182,44 +181,37 @@ const handler: HookHandler = async (stdin) => {
         `mark-subagent-active: implementation agent identity is invalid; exact attempt authority cannot be bound`,
       );
     }
-    try {
-      const transcriptPath = resolveAgentTranscriptPath(input);
-      if (transcriptPath === null) throw new Error("child transcript could not be resolved");
-      const firstPrompt = parseFirstUserPrompt(readRunBytesNoFollow(transcriptPath).toString("utf8"));
-      if (!firstPrompt.ok) throw new Error(firstPrompt.error);
-      const taskId = extractTaskId(firstPrompt.prompt);
-      if (taskId === null) throw new Error("trusted first user prompt contains no Task id");
-      const manager = activeGraphManager;
-      const graph = manager.load();
-      const task = graph.tasks.find((candidate) => candidate.id === taskId);
-      if (task === undefined) throw new Error(`trusted first user prompt names unknown Task ${taskId}`);
-      if (!(graph.executing_tasks ?? []).includes(taskId) || task.active_implementation_attempt === undefined) {
-        throw new Error(`Task ${taskId} has no current modern implementation attempt`);
-      }
-      identifiedAuthority = task.active_implementation_attempt;
-      const sidecar = publishImplementationAttemptSidecar({
-        sessionId,
-        agentId,
-        taskGraphPath: manager.getPath(),
-        authority: identifiedAuthority,
-      });
-      sidecarPublished = sidecar.disposition === "published";
-      sidecarAlreadyOwned = sidecar.disposition === "already-owned";
-      if (sidecar.cleanupFailure !== null) {
-        const cleanup = sidecar.cleanupFailure;
-        process.stderr.write(
-          `mark-subagent-active: implementation sidecar is live but staged cleanup failed for ${agentId}/${sessionId}: ${cleanup.message}` +
-            (cleanup.code === undefined ? "" : ` (errno ${cleanup.code})`) + "\n",
-        );
-      }
-    } catch (error) {
-      const rollbackFailure = await rollbackIdentifiedRegistration();
+    // Opportunistic: Claude Code usually writes the child transcript only
+    // AFTER this hook returns, so a still-unwritten prompt leaves the binding
+    // PENDING — the roster row below records the role, writes stay blocked,
+    // and block-direct-edits binds it before the Agent's first write decision
+    // (SubagentStop retries if it never writes). Only a `refused` outcome — a
+    // prompt-based refusal or a binding/publication failure — stops the start;
+    // `pending` never does.
+    const binding = ensureImplementationBinding({
+      sessionId,
+      agentId,
+      graph: activeGraphManager,
+      existingSidecar: "reprove",
+      ...suppliedTranscript(input.agent_transcript_path),
+    });
+    if (binding.kind === "refused") {
+      const rollbackFailure = await rollbackRegistration(binding.identified);
       return blockResult(
-        `mark-subagent-active: implementation authority binding failed: ${error instanceof Error ? error.message : String(error)}` +
+        `mark-subagent-active: implementation authority binding failed: ${binding.reason}` +
         (rollbackFailure === null ? "" : `; exact registration rollback failed: ${rollbackFailure}`),
       );
     }
+    if (binding.kind === "pending") {
+      process.stderr.write(
+        `mark-subagent-active: implementation authority binding deferred for ${agentId}/${sessionId} — ${binding.reason}; ` +
+          "writes stay blocked until block-direct-edits binds it before the Agent's first write\n",
+      );
+    }
+    if (binding.kind === "bound" && binding.publication === "published") createdAuthority = binding.authority;
   }
+  const sidecarPublished = createdAuthority !== null;
+  const rollbackIdentifiedRegistration = (): Promise<string | null> => rollbackRegistration(createdAuthority);
 
   // Track active agent for cleanup AND contention counting — appended under
   // the same per-session lock cleanup uses to rewrite the roster
