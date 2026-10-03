@@ -1,5 +1,5 @@
-import { execFileSync } from "node:child_process";
-import { lstatSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { lstatSync, readdirSync, readFileSync, readlinkSync, type Dirent } from "node:fs";
 import { join } from "node:path";
 import {
   changedDeclaredArtifacts,
@@ -12,17 +12,56 @@ import {
 import { sha256Bytes } from "../core/review-packet";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "./repository-path";
 
-/** Leaves under a worktree directory, by lstat semantics: symlinks are hashed
- *  by target text and never followed. Empty subdirectories contribute nothing,
- *  matching Git, which cannot represent them. */
-function worktreeEntries(artifact: string, absolute: string, prefix = ""): readonly TreeEntry[] {
-  return readdirSync(absolute, { withFileTypes: true }).flatMap((entry): readonly TreeEntry[] => {
-    const path = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
-    const child = join(absolute, entry.name);
-    if (entry.isDirectory()) return worktreeEntries(artifact, child, path);
-    if (entry.isFile()) return [{ path, kind: "file", contentSha256: sha256Bytes(readFileSync(child)) }];
-    if (entry.isSymbolicLink()) {
-      return [{ path, kind: "symlink", contentSha256: sha256Bytes(readlinkSync(child, { encoding: "buffer" })) }];
+const GIT_OUTPUT_LIMIT = 100 * 1024 * 1024;
+
+function gitOutput(root: string, args: readonly string[]): Buffer {
+  return execFileSync("git", args, {
+    cwd: root,
+    encoding: "buffer",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: GIT_OUTPUT_LIMIT,
+  });
+}
+
+/** Repository-relative paths Git ignores. Tracked paths are never reported,
+ *  exactly as Git itself never ignores them. */
+function gitIgnoredPaths(root: string, paths: readonly string[]): ReadonlySet<string> {
+  if (paths.length === 0) return new Set();
+  const checked = spawnSync("git", ["check-ignore", "--stdin", "-z"], {
+    cwd: root,
+    input: paths.map((path) => `${path}\0`).join(""),
+    maxBuffer: GIT_OUTPUT_LIMIT,
+  });
+  if (checked.error !== undefined) throw checked.error;
+  // Exit 1 means no path is ignored; any other non-zero status is a failure.
+  if (checked.status !== 0 && checked.status !== 1) {
+    throw new Error(`git check-ignore failed (status ${checked.status}): ${checked.stderr.toString("utf-8").trim()}`);
+  }
+  return new Set(checked.stdout.toString("utf-8").split("\0").filter((path) => path !== ""));
+}
+
+type WorktreeLeaf = Readonly<{ path: string; absolute: string; node: Dirent }>;
+
+/** Every non-directory node below a worktree directory, by lstat semantics. */
+function worktreeLeaves(absolute: string, prefix = ""): readonly WorktreeLeaf[] {
+  return readdirSync(absolute, { withFileTypes: true }).flatMap((node): readonly WorktreeLeaf[] => {
+    const path = prefix === "" ? node.name : `${prefix}/${node.name}`;
+    const child = join(absolute, node.name);
+    return node.isDirectory() ? worktreeLeaves(child, path) : [{ path, absolute: child, node }];
+  });
+}
+
+/** The Git-visible leaves of a worktree directory, matching what `git ls-tree`
+ *  can list at a revision: ignored leaves are dropped, symlinks are hashed by
+ *  target text and never followed, and empty subdirectories contribute nothing.
+ *  A Git-visible node that is not a file or symlink throws. */
+function worktreeEntries(root: string, artifact: string, absolute: string): readonly TreeEntry[] {
+  const leaves = worktreeLeaves(absolute);
+  const ignored = gitIgnoredPaths(root, leaves.map(({ path }) => `${artifact}/${path}`));
+  return leaves.filter(({ path }) => !ignored.has(`${artifact}/${path}`)).map(({ path, absolute: leaf, node }): TreeEntry => {
+    if (node.isFile()) return { path, kind: "file", contentSha256: sha256Bytes(readFileSync(leaf)) };
+    if (node.isSymbolicLink()) {
+      return { path, kind: "symlink", contentSha256: sha256Bytes(readlinkSync(leaf, { encoding: "buffer" })) };
     }
     throw new Error(`declared artifact ${artifact} contains a node that is not a file, directory or symlink: ${artifact}/${path}`);
   });
@@ -32,7 +71,7 @@ function snapshotArtifact(root: string, artifact: string): ArtifactSnapshot {
   const inspected = inspectRepositoryPath(root, artifact, "declared artifact");
   if (!inspected.exists) return Object.freeze({ kind: "missing" });
   const digested = lstatSync(inspected.absolute).isDirectory()
-    ? treeSnapshotDigest(worktreeEntries(artifact, inspected.absolute))
+    ? treeSnapshotDigest(worktreeEntries(root, artifact, inspected.absolute))
     : sha256Bytes(readFileSync(inspected.absolute));
   return Object.freeze({ kind: "sha256", digest: digested });
 }
@@ -53,13 +92,7 @@ type GitTreeLeaf = Readonly<{ mode: string; sha: string; path: string }>;
 /** `git ls-tree -r -z` records are `<mode> SP <type> SP <sha> TAB <path>`. A
  *  lone file lists as itself; a directory lists every leaf below it. */
 function gitTreeLeaves(root: string, revision: string, artifact: string): readonly GitTreeLeaf[] {
-  const output = execFileSync("git", ["ls-tree", "-r", "-z", revision, "--", artifact], {
-    cwd: root,
-    encoding: "buffer",
-    stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: 100 * 1024 * 1024,
-  });
-  return output.toString("utf-8").split("\0").filter((record) => record !== "").map((record) => {
+  return gitOutput(root, ["ls-tree", "-r", "-z", revision, "--", artifact]).toString("utf-8").split("\0").filter((record) => record !== "").map((record) => {
     const match = /^(\d{6}) [a-z]+ ([0-9a-f]+)\t(.+)$/s.exec(record);
     if (match === null) {
       throw new Error(`Unparseable git ls-tree record for ${artifact} at ${revision}: ${JSON.stringify(record)}`);
@@ -75,12 +108,7 @@ function readArtifactObject(
   args: readonly string[],
 ): Buffer {
   try {
-    return execFileSync("git", args, {
-      cwd: root,
-      encoding: "buffer",
-      stdio: ["ignore", "pipe", "pipe"],
-      maxBuffer: 100 * 1024 * 1024,
-    });
+    return gitOutput(root, args);
   } catch (error) {
     throw new Error(
       `Cannot read declared artifact ${artifact} at ${revision}: ${error instanceof Error ? error.message : String(error)}`,
@@ -144,13 +172,7 @@ export function captureDeclaredArtifactBaselineAtRevision(
 }
 
 function nulSeparatedGitPaths(root: string, args: readonly string[]): readonly string[] {
-  const output = execFileSync("git", args, {
-    cwd: root,
-    encoding: "buffer",
-    stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: 100 * 1024 * 1024,
-  });
-  return output.toString("utf-8").split("\0").filter((path) => path !== "");
+  return gitOutput(root, args).toString("utf-8").split("\0").filter((path) => path !== "");
 }
 
 /** Git-visible tracked and untracked paths whose worktree/index state differs

@@ -230,6 +230,36 @@ describe("directory artifacts", () => {
       .toThrow(/calibration\/run\/pipe/);
   });
 
+  it("ignores Git-ignored leaves so worktree and revision cover the same Git-visible set", () => {
+    const { root, revision } = directoryRepository();
+    writeFileSync(join(root, ".gitignore"), "*.cache\n");
+    writeFileSync(join(root, "calibration", "run", "warm.cache"), "ignored\n");
+    expect(changedDeclaredArtifactsSinceRevision(root, revision, ["calibration/run"])).toEqual([]);
+
+    const baseline = captureDeclaredArtifactBaseline(root, ["calibration/run"]);
+    writeFileSync(join(root, "calibration", "run", "warm.cache"), "rewritten\n");
+    expect(changedDeclaredArtifactsSince(root, baseline)).toEqual([]);
+
+    // An untracked file Git does not ignore is genuinely new against the revision.
+    writeFileSync(join(root, "calibration", "run", "new.json"), "{}\n");
+    expect(changedDeclaredArtifactsSinceRevision(root, revision, ["calibration/run"])).toEqual(["calibration/run"]);
+  });
+
+  it("keeps a tracked file that matches an ignore pattern, as Git does", () => {
+    const { root, revision } = directoryRepository();
+    writeFileSync(join(root, ".gitignore"), "*.json\n");
+    expect(changedDeclaredArtifactsSinceRevision(root, revision, ["calibration/run"])).toEqual([]);
+    writeFileSync(join(root, "calibration", "run", "a.json"), "{\"a\":2}\n");
+    expect(changedDeclaredArtifactsSinceRevision(root, revision, ["calibration/run"])).toEqual(["calibration/run"]);
+  });
+
+  it.skipIf(!hasMkfifo)("does not inspect a fifo that Git ignores", () => {
+    const { root } = directoryRepository();
+    writeFileSync(join(root, ".gitignore"), "pipe\n");
+    execFileSync("mkfifo", [join(root, "calibration", "run", "pipe")]);
+    expect(() => captureDeclaredArtifactBaseline(root, ["calibration/run"])).not.toThrow();
+  });
+
   it("rejects a submodule inside a historical directory", () => {
     const { root } = directoryRepository();
     execFileSync("git", [
