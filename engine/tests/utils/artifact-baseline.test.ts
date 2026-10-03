@@ -1,10 +1,22 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  captureDeclaredArtifactBaseline,
+  captureDeclaredArtifactBaselineAtRevision,
   captureRepositoryChangeBaseline,
+  changedDeclaredArtifactsSince,
   changedDeclaredArtifactsSinceRevision,
   changedRepositoryArtifactsSince,
 } from "../../src/utils/artifact-baseline";
@@ -120,5 +132,148 @@ describe("changedDeclaredArtifactsSinceRevision", () => {
     const { root } = repository();
     expect(() => changedDeclaredArtifactsSinceRevision(root, "0".repeat(40), ["unchanged.txt"]))
       .toThrow();
+  });
+});
+
+const hasMkfifo = (() => {
+  try {
+    execFileSync("which", ["mkfifo"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+/** A committed directory artifact with a nested file, used by every directory case. */
+function directoryRepository(): { root: string; revision: string } {
+  const { root } = repository();
+  mkdirSync(join(root, "calibration", "run", "nested"), { recursive: true });
+  writeFileSync(join(root, "calibration", "run", "a.json"), "{\"a\":1}\n");
+  writeFileSync(join(root, "calibration", "run", "nested", "b.json"), "{\"b\":1}\n");
+  execFileSync("git", ["add", "."], { cwd: root });
+  execFileSync("git", ["commit", "--quiet", "-m", "directory artifact"], { cwd: root });
+  const revision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf-8" }).trim();
+  return { root, revision };
+}
+
+describe("directory artifacts", () => {
+  it("baselines an existing directory deterministically instead of throwing EISDIR", () => {
+    const { root } = directoryRepository();
+    const first = captureDeclaredArtifactBaseline(root, ["calibration/run"]);
+    expect(first[0]?.snapshot).toEqual({ kind: "sha256", digest: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(captureDeclaredArtifactBaseline(root, ["calibration/run"])).toEqual(first);
+  });
+
+  it("reports a directory created after a revision where it was missing", () => {
+    const { root, revision } = repository();
+    mkdirSync(join(root, "calibration", "run"), { recursive: true });
+    writeFileSync(join(root, "calibration", "run", "a.json"), "{}\n");
+    expect(changedDeclaredArtifactsSinceRevision(root, revision, ["calibration/run"]))
+      .toEqual(["calibration/run"]);
+  });
+
+  it("agrees across worktree and revision for an unchanged directory", () => {
+    const { root, revision } = directoryRepository();
+    expect(captureDeclaredArtifactBaselineAtRevision(root, revision, ["calibration/run"]))
+      .toEqual(captureDeclaredArtifactBaseline(root, ["calibration/run"]));
+    expect(changedDeclaredArtifactsSinceRevision(root, revision, ["calibration/run"])).toEqual([]);
+  });
+
+  it.each([
+    ["edits a file", (root: string) => writeFileSync(join(root, "calibration", "run", "a.json"), "{\"a\":2}\n")],
+    ["adds a file", (root: string) => writeFileSync(join(root, "calibration", "run", "c.json"), "{}\n")],
+    ["deletes a file", (root: string) => rmSync(join(root, "calibration", "run", "nested", "b.json"))],
+    ["renames a file", (root: string) => renameSync(
+      join(root, "calibration", "run", "a.json"),
+      join(root, "calibration", "run", "renamed.json"),
+    )],
+  ])("reports the directory changed when the implementer %s inside it", (_name, mutate) => {
+    const { root, revision } = directoryRepository();
+    const baseline = captureDeclaredArtifactBaseline(root, ["calibration/run"]);
+    mutate(root);
+    expect(changedDeclaredArtifactsSince(root, baseline)).toEqual(["calibration/run"]);
+    expect(changedDeclaredArtifactsSinceRevision(root, revision, ["calibration/run"])).toEqual(["calibration/run"]);
+  });
+
+  it("hashes a symlink inside the directory by target text without following it", () => {
+    const { root, revision } = directoryRepository();
+    symlinkSync("a.json", join(root, "calibration", "run", "latest"));
+    execFileSync("git", ["add", "."], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "symlink"], { cwd: root });
+    const linkedRevision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf-8" }).trim();
+    expect(changedDeclaredArtifactsSinceRevision(root, linkedRevision, ["calibration/run"])).toEqual([]);
+    const baseline = captureDeclaredArtifactBaseline(root, ["calibration/run"]);
+
+    // The link entry is its target text, so retargeting must register.
+    rmSync(join(root, "calibration", "run", "latest"));
+    symlinkSync("nested/b.json", join(root, "calibration", "run", "latest"));
+    expect(changedDeclaredArtifactsSince(root, baseline)).toEqual(["calibration/run"]);
+    expect(changedDeclaredArtifactsSinceRevision(root, revision, ["calibration/run"])).toEqual(["calibration/run"]);
+
+    // A dangling link is fine: it is never dereferenced.
+    rmSync(join(root, "calibration", "run", "latest"));
+    symlinkSync("does-not-exist", join(root, "calibration", "run", "latest"));
+    expect(() => captureDeclaredArtifactBaseline(root, ["calibration/run"])).not.toThrow();
+  });
+
+  it("does not credit a mode-only change, matching the declared-artifact file contract", () => {
+    const { root } = directoryRepository();
+    const baseline = captureDeclaredArtifactBaseline(root, ["calibration/run"]);
+    chmodSync(join(root, "calibration", "run", "a.json"), 0o755);
+    expect(changedDeclaredArtifactsSince(root, baseline)).toEqual([]);
+  });
+
+  it.skipIf(!hasMkfifo)("rejects a fifo inside the directory with its path", () => {
+    const { root } = directoryRepository();
+    execFileSync("mkfifo", [join(root, "calibration", "run", "pipe")]);
+    expect(() => captureDeclaredArtifactBaseline(root, ["calibration/run"]))
+      .toThrow(/calibration\/run\/pipe/);
+  });
+
+  it("ignores Git-ignored leaves so worktree and revision cover the same Git-visible set", () => {
+    const { root, revision } = directoryRepository();
+    writeFileSync(join(root, ".gitignore"), "*.cache\n");
+    writeFileSync(join(root, "calibration", "run", "warm.cache"), "ignored\n");
+    expect(changedDeclaredArtifactsSinceRevision(root, revision, ["calibration/run"])).toEqual([]);
+
+    const baseline = captureDeclaredArtifactBaseline(root, ["calibration/run"]);
+    writeFileSync(join(root, "calibration", "run", "warm.cache"), "rewritten\n");
+    expect(changedDeclaredArtifactsSince(root, baseline)).toEqual([]);
+
+    // An untracked file Git does not ignore is genuinely new against the revision.
+    writeFileSync(join(root, "calibration", "run", "new.json"), "{}\n");
+    expect(changedDeclaredArtifactsSinceRevision(root, revision, ["calibration/run"])).toEqual(["calibration/run"]);
+  });
+
+  it("keeps a tracked file that matches an ignore pattern, as Git does", () => {
+    const { root, revision } = directoryRepository();
+    writeFileSync(join(root, ".gitignore"), "*.json\n");
+    expect(changedDeclaredArtifactsSinceRevision(root, revision, ["calibration/run"])).toEqual([]);
+    writeFileSync(join(root, "calibration", "run", "a.json"), "{\"a\":2}\n");
+    expect(changedDeclaredArtifactsSinceRevision(root, revision, ["calibration/run"])).toEqual(["calibration/run"]);
+  });
+
+  it.skipIf(!hasMkfifo)("does not inspect a fifo that Git ignores", () => {
+    const { root } = directoryRepository();
+    writeFileSync(join(root, ".gitignore"), "pipe\n");
+    execFileSync("mkfifo", [join(root, "calibration", "run", "pipe")]);
+    expect(() => captureDeclaredArtifactBaseline(root, ["calibration/run"])).not.toThrow();
+  });
+
+  it("rejects a submodule inside a historical directory", () => {
+    const { root } = directoryRepository();
+    execFileSync("git", [
+      "update-index", "--add", "--cacheinfo", `160000,${"1".repeat(40)},calibration/run/module`,
+    ], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "gitlink"], { cwd: root });
+    const revision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf-8" }).trim();
+    expect(() => captureDeclaredArtifactBaselineAtRevision(root, revision, ["calibration/run"]))
+      .toThrow(/Cannot read declared artifact calibration\/run at .*unsupported tree entry mode 160000/);
+  });
+
+  it("keeps a lone file artifact on the exact historical-bytes path", () => {
+    const { root, revision } = directoryRepository();
+    expect(captureDeclaredArtifactBaselineAtRevision(root, revision, ["calibration/run/a.json"]))
+      .toEqual(captureDeclaredArtifactBaseline(root, ["calibration/run/a.json"]));
   });
 });

@@ -1,9 +1,29 @@
+import { compareStrings } from "./ordering";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
-import { parseReviewPath } from "./review-packet";
+import { parseReviewPath, sha256Hex } from "./review-packet";
 
+/** A directory artifact snapshots as `sha256` over its tree digest, so the
+ *  persisted shape is the same for file and directory artifacts. */
 export type ArtifactSnapshot =
   | Readonly<{ kind: "missing" }>
   | Readonly<{ kind: "sha256"; digest: string }>;
+
+/** One leaf of a directory artifact. `path` is relative to the declared
+ *  directory; `contentSha256` hashes a file's bytes or a symlink's target text —
+ *  exactly the bytes Git stores in the blob, so worktree and revision agree. */
+export type TreeEntry = Readonly<{
+  path: string;
+  kind: "file" | "symlink";
+  contentSha256: string;
+}>;
+
+/** Deterministic digest of a directory artifact, independent of enumeration order. */
+export function treeSnapshotDigest(entries: readonly TreeEntry[]): string {
+  const lines = [...entries]
+    .sort((left, right) => compareStrings(left.path, right.path))
+    .map(({ kind, path, contentSha256 }) => `${kind}\0${path}\0${contentSha256}\n`);
+  return sha256Hex(`tree\0${lines.join("")}`);
+}
 
 export type DeclaredArtifactBaseline = Readonly<{
   artifact: string;
@@ -53,17 +73,24 @@ export function parseDeclaredArtifactBaseline(
 const snapshotEquals = (left: ArtifactSnapshot, right: ArtifactSnapshot): boolean =>
   left.kind === right.kind && (left.kind === "missing" || (right.kind === "sha256" && left.digest === right.digest));
 
+/** A declared artifact covers its own canonical path and, when it is a
+ *  directory, every path below it. A file artifact has nothing below it, so
+ *  for files this is exact equality. */
+export function artifactCovers(artifact: string, path: string): boolean {
+  return path === artifact || path.startsWith(`${artifact}/`);
+}
+
 /**
  * A declared artifact is attributable to one task only when both independent
  * observations agree: repository bytes changed after its baseline, and that
- * task's structured transcript records a write to the same canonical path.
+ * task's structured transcript records a write the artifact covers.
  */
-export function attributedChangedArtifacts(
-  byteChanges: readonly string[],
+export function attributedChangedArtifacts<Artifact extends string>(
+  byteChanges: readonly Artifact[],
   taskWrites: readonly string[],
-): readonly string[] {
-  const written = new Set(taskWrites);
-  return Object.freeze([...new Set(byteChanges)].filter((artifact) => written.has(artifact)));
+): readonly Artifact[] {
+  return Object.freeze([...new Set(byteChanges)].filter((artifact) =>
+    taskWrites.some((path) => artifactCovers(artifact, path))));
 }
 
 /**

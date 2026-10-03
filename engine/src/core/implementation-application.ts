@@ -8,6 +8,7 @@ import {
 } from "../types";
 export { parseNewTestEvidence, type NewTestEvidence } from "../types";
 import {
+  artifactCovers,
   attributedChangedArtifacts,
   changedDeclaredArtifacts,
   type DeclaredArtifactBaseline,
@@ -161,24 +162,25 @@ export function buildTaskLocalByteObservation(
     );
   }
 
-  const allowed = new Set(attempt.baseline.map(({ artifact }) => artifact));
-  const siblings = new Set(siblingPaths.value);
+  const allowed = attempt.baseline.map(({ artifact }) => artifact);
+  const covered = (artifacts: readonly string[], path: string) =>
+    artifacts.some((artifact) => artifactCovers(artifact, path));
   // Parser authority is strict independently of repository ownership: a raw
-  // transcript path outside this Task's registered scope always fails.
-  const rawOutside = parserPaths.value.filter((path) => !allowed.has(path));
+  // transcript path outside this Task's registered scope always fails. A
+  // directory artifact covers every path below it.
+  const rawOutside = parserPaths.value.filter((path) => !covered(allowed, path));
   const unresolvedRepositoryPaths = frozenArray(repositoryPaths.value.filter((path) =>
-    !allowed.has(path) && !siblings.has(path)
+    !covered(allowed, path) && !covered(siblingPaths.value, path)
   ));
   const outside = frozenArray(
     [...new Set([...rawOutside, ...unresolvedRepositoryPaths])].sort(compareStrings),
   );
-  const insideParserPaths = parserPaths.value.filter((path) => allowed.has(path));
-  const changedAttempt = new Set(attempt.changed);
-  const attributedAttempt = insideParserPaths.filter((path) => changedAttempt.has(path));
-  const priorAllowedPaths = priorPaths.value.filter((path) => allowed.has(path));
+  // Attribution is per declared artifact: a write below a directory artifact
+  // attributes the directory, never the raw leaf path.
+  const attributedAttempt = attributedChangedArtifacts(attempt.changed, parserPaths.value);
+  const priorAllowedPaths = priorPaths.value.filter((path) => covered(allowed, path));
   const cumulative = frozenArray([...new Set([...priorAllowedPaths, ...attributedAttempt])].sort(compareStrings));
-  const cumulativeSet = new Set(cumulative);
-  const proofChanges = proof.changed.filter((path) => cumulativeSet.has(path));
+  const proofChanges = attributedChangedArtifacts(proof.changed, cumulative);
   const suite = createTaskCompletionSuiteResult(
     input.authority,
     outside.length > 0
