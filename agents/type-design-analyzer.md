@@ -118,6 +118,14 @@ Admission is strict and deterministic; a shape-violating payload fails closed an
 <!-- wire-contract:start — stamped from agents/_shared/wire-contract.md; edit the fragment, then run scripts/stamp-wire-contract.ts -->
 Emit exactly one JSON object conforming to reviewer-payload-schema; apply reviewer-impact-rubric. No other final output.
 
+The final-message contract above is the deterministic fallback: it governs extraction-only requests outright, and it is the fallback when an emission-enabled request's registered tool is unavailable or refuses the arguments. On an emission-enabled request the engine renders the tool-primary wording below with the exact issued tool name substituted for the placeholder. Call that tool exactly once as the primary final action and never re-emit within the same spawn — a second call is refused as duplicate-call ambiguity — and the fallback final message carries exactly the one issued payload object, nothing else.
+
+## emission-tool-contract (tool-primary)
+
+```
+Emit the required payload by calling the exact tool <issued emission tool name> exactly once, with its arguments carrying the complete issued payload, and make that tool call your primary final action. Never call <issued emission tool name> a second time in this spawn. Only if the tool is unavailable or refuses your arguments, fall back to the final message: exactly one JSON object conforming to the issued payload schema, and nothing else.
+```
+
 ## reviewer-payload-schema
 
 ```json

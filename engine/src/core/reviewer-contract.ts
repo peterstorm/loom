@@ -134,6 +134,24 @@ export const REVIEWER_FIXED_SECTIONS = Object.freeze([
 export const reviewerEmissionToolContract = (toolName: string): string =>
   `Emit the required payload by calling the exact tool ${toolName} exactly once, with its arguments carrying the complete issued payload, and make that tool call your primary final action. Never call ${toolName} a second time in this spawn. Only if the tool is unavailable or refuses your arguments, fall back to the final message: exactly one JSON object conforming to the issued payload schema, and nothing else.`;
 
+/**
+ * The stamped fragment's tool-primary template (FR-020/AS-012; AD-7): the
+ * SAME frozen wording as `reviewerEmissionToolContract()` over the ONE
+ * placeholder that stands for the route's registry-minted tool name. The
+ * shared fragment is stamped once and cannot name a route-specific tool (the
+ * binding is minted per request), so the stamped copy carries the template;
+ * substituting the placeholder with the exact issued tool name reproduces the
+ * per-spawn render byte-for-byte — one wording, two renderings. Kind- and
+ * version-generic: never substitute a different tool or rewrite the template
+ * in a shim. Extraction-only and archived issued contracts keep
+ * `REVIEWER_OUTPUT_CONTRACT` verbatim; the tool-primary wording joins the
+ * stamped fragment only through the stamp pass, never by editing generated
+ * shims or the archived references/reviewer-protocol-v1 and v2 fragments
+ * (AS-012).
+ */
+export const REVIEWER_EMISSION_TOOL_CONTRACT_PLACEHOLDER = "<issued emission tool name>";
+export const REVIEWER_EMISSION_TOOL_CONTRACT_TEMPLATE: string = reviewerEmissionToolContract(REVIEWER_EMISSION_TOOL_CONTRACT_PLACEHOLDER);
+
 export type ReviewerProtocolDescriptor = Readonly<{
   protocol: "loom-reviewer"; version: 2; rubricVersion: 1;
   schemaDigest: ArtifactDigest; rubricDigest: ArtifactDigest;
