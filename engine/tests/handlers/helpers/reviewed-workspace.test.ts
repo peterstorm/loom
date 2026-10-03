@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import fc from "fast-check";
@@ -12,6 +11,7 @@ import {
   waveFrozenSource,
 } from "../../../src/core/reviewed-workspace";
 import { taskFixture } from "../../fixtures/task-lifecycle";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -23,7 +23,7 @@ function git(root: string, args: readonly string[]): void {
 
 describe("reviewed workspace shell observation", () => {
   it("captures exact dirty, untracked, binary, and deleted declared bytes without consulting Git HEAD", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-reviewed-workspace-"));
+    const root = canonicalTempDir("loom-reviewed-workspace-");
     roots.push(root);
     mkdirSync(join(root, "src"));
     writeFileSync(join(root, "src", "tracked.ts"), "export const value = 'committed';\n");
@@ -76,7 +76,7 @@ describe("reviewed workspace shell observation", () => {
   });
 
   it("owns copied bytes so later buffer mutation cannot rewrite an issued snapshot", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-reviewed-workspace-copy-"));
+    const root = canonicalTempDir("loom-reviewed-workspace-copy-");
     roots.push(root);
     mkdirSync(join(root, "src"));
     writeFileSync(join(root, "src", "a.ts"), "first");

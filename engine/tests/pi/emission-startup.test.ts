@@ -3113,23 +3113,42 @@ type InstalledLauncherModules = Readonly<{
   }>;
 }>;
 
+/**
+ * The installed launcher lives outside this repository (synced from dotfiles
+ * into the ambient Pi agent dir), so it is resolved once from the ambient
+ * environment, before any test swaps PI_CODING_AGENT_DIR for a fixture.
+ */
+const installedLauncher = (() => {
+  const agentDir = process.env["PI_CODING_AGENT_DIR"] ?? join(homedir(), ".pi", "agent");
+  const subagentRoot = join(agentDir, "extensions", "subagent");
+  const paths = Object.freeze({
+    launcher: join(subagentRoot, "index.ts"),
+    port: join(subagentRoot, "loom-launch-port.ts"),
+    routingPolicy: join(agentDir, "extensions", "model-routing", "policy.ts"),
+  });
+  const missing = Object.freeze(Object.values(paths).filter((path) => !existsSync(path)));
+  return Object.freeze({ agentDir, paths, missing });
+})();
+
+/**
+ * A CI runner can never hold the out-of-repo launcher, so there these
+ * acceptance tests report as skipped. Everywhere else an absent launcher still
+ * fails loudly: the prerequisite is tracked, never a claimed pass (FR-032/FR-008).
+ */
+const skipWithoutInstalledLauncher = process.env["CI"] === "true" && installedLauncher.missing.length > 0;
+
 const loadInstalledLauncherModules = async (): Promise<InstalledLauncherModules> => {
-  const installedAgentDir = process.env["PI_CODING_AGENT_DIR"] ?? join(homedir(), ".pi", "agent");
-  const installedSubagentRoot = join(installedAgentDir, "extensions", "subagent");
-  const installedLauncherPath = join(installedSubagentRoot, "index.ts");
-  const installedPortPath = join(installedSubagentRoot, "loom-launch-port.ts");
-  const installedRoutingPolicyPath = join(installedAgentDir, "extensions", "model-routing", "policy.ts");
-  for (const required of [installedLauncherPath, installedPortPath, installedRoutingPolicyPath]) {
-    if (!existsSync(required)) {
-      throw new Error(
-        `Installed Pi launcher prerequisite is absent at ${required}. Install/sync the shared subagent and model-routing extensions under ${installedAgentDir}, then rerun this acceptance test.`,
-      );
-    }
+  const [absent] = installedLauncher.missing;
+  if (absent !== undefined) {
+    throw new Error(
+      `Installed Pi launcher prerequisite is absent at ${absent}. Install/sync the shared subagent and model-routing extensions under ${installedLauncher.agentDir}, then rerun this acceptance test.`,
+    );
   }
+  const { paths } = installedLauncher;
   return Object.freeze({
-    launcher: await import(/* @vite-ignore */ installedLauncherPath),
-    port: await import(/* @vite-ignore */ installedPortPath),
-    routingPolicy: await import(/* @vite-ignore */ installedRoutingPolicyPath),
+    launcher: await import(/* @vite-ignore */ paths.launcher),
+    port: await import(/* @vite-ignore */ paths.port),
+    routingPolicy: await import(/* @vite-ignore */ paths.routingPolicy),
   }) as InstalledLauncherModules;
 };
 
@@ -3476,7 +3495,7 @@ describe("production parent tool_call to installed launcher readiness barrier", 
     }
   });
 
-  it("keeps the same issued request retriable after an attested pre-prompt refusal and accepts a new native correlator", async () => {
+  it.skipIf(skipWithoutInstalledLauncher)("keeps the same issued request retriable after an attested pre-prompt refusal and accepts a new native correlator", async () => {
     const installed = await loadInstalledLauncherModules();
     const fixture = await publishedParentSpawnFixture("t5-parent-same-request-retry");
     try {
@@ -3528,7 +3547,7 @@ describe("production parent tool_call to installed launcher readiness barrier", 
     }
   });
 
-  it("terminally rejects an absent attempt-1 result and does not infer startup refusal from untrusted markers", async () => {
+  it.skipIf(skipWithoutInstalledLauncher)("terminally rejects an absent attempt-1 result and does not infer startup refusal from untrusted markers", async () => {
     const installed = await loadInstalledLauncherModules();
 
     const absentFixture = await publishedParentSpawnFixture("t5-parent-absent-result");
@@ -3613,7 +3632,7 @@ describe("production parent tool_call to installed launcher readiness barrier", 
 });
 
 describe("native installed subagent launcher integration", { timeout: 20_000 }, () => {
-  it("blocks a mismatched child before Task prompt and permits a fresh exact retry; ordinary JSON launch remains unchanged", async () => {
+  it.skipIf(skipWithoutInstalledLauncher)("blocks a mismatched child before Task prompt and permits a fresh exact retry; ordinary JSON launch remains unchanged", async () => {
     const tmp = canonicalTempDir("loom-installed-launcher-t5-");
     const fakePi = join(tmp, "pi");
     const log = join(tmp, "launch.log");

@@ -1,6 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -27,6 +26,7 @@ import {
 } from "../../src/core/implementation-completion";
 import type { WaveReviewContextAuthority } from "../../src/handlers/helpers/programs/wave-gate";
 import { taskFixture } from "../fixtures/task-lifecycle";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 
 const proof = (() => {
   const evaluated = evaluateTaskProof({ newTestsRequired: false, declaredArtifacts: [] }, {
@@ -346,8 +346,8 @@ describe("reopen completed Wave", () => {
   });
 
   it("refuses immediate Wave Gate start before claiming a run and forbids legacy task-stop positive bypass", () => {
-    const root = mkdtempSync(join(tmpdir(), "loom-reopened-wave-"));
-    const runsRoot = mkdtempSync(join(tmpdir(), "loom-reopened-wave-runs-"));
+    const root = canonicalTempDir("loom-reopened-wave-");
+    const runsRoot = canonicalTempDir("loom-reopened-wave-runs-");
     try {
       mkdirSync(join(root, "src"), { recursive: true });
       writeFileSync(join(root, "src", "a.ts"), "export const a = 1;\n");
