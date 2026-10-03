@@ -26,6 +26,7 @@ import {
 import {
   CALL_START_SUFFIX,
   epochOf,
+  eventsForEpoch,
   parseAgentId,
   parseAgentType,
   parseSessionId,
@@ -36,7 +37,7 @@ import { SUBAGENT_DIR } from "../../../src/config";
 const run = `record-evidence-${process.pid}-${Date.now()}`;
 // Ledger API takes the branded SessionId; parse once at construction.
 const sid = (name: string) => parseSessionId(`${run}-${name}`)!;
-const sessions = ["contended", "leaked", "ungated", "forged-report", "honest-report", "one-call-forge", "dup-delivery", "stale-artifact"].map(sid);
+const sessions = ["contended", "leaked", "ungated", "parallel", "unbound-caller", "forged-report", "honest-report", "one-call-forge", "dup-delivery", "stale-artifact"].map(sid);
 
 afterAll(() => {
   for (const s of sessions) {
@@ -132,6 +133,29 @@ describe("recorder stands down LOUDLY on unattributable gated sessions", () => {
     }
   });
 
+  it("a caller agent_id with no binding line records nothing and says so — never credited to the bound sibling", async () => {
+    const s = sid("unbound-caller");
+    await bind(s, "code-implementer-agent", "a-1");
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(`${SUBAGENT_DIR}/${s}.active`, "a-1\n");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      // Sole-active shape (one binding, roster = a-1): the old rule would
+      // have credited this foreign caller's call to a-1's epoch.
+      const result = await recordEvidence(
+        JSON.stringify({ session_id: s, agent_id: "a-9", tool_name: "Read", tool_input: { file_path: "/a" }, cwd: "/tmp" }),
+        [],
+      );
+      const text = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(result.kind).toBe("passthrough");
+      expect(text).toContain(`standing down for ${s} — caller a-9 has no machine binding line`);
+      expect(readEvidence(s)).toEqual([]);
+    } finally {
+      stderrSpy.mockRestore();
+      await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId("a-1")!);
+    }
+  });
+
   it("ungated session (no binding file): silent passthrough — no stderr noise", async () => {
     const s = sid("ungated");
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
@@ -142,6 +166,45 @@ describe("recorder stands down LOUDLY on unattributable gated sessions", () => {
       expect(text).not.toContain("standing down");
     } finally {
       stderrSpy.mockRestore();
+    }
+  });
+});
+
+describe("parallel bound subagents (one session, Claude Code wave)", () => {
+  it("each agent's calls land in its OWN epoch, keyed exactly as SubagentStop settlement reads them", async () => {
+    const s = sid("parallel");
+    const ids = ["a339f6fd51d78b179", "a-2", "a-3", "a-4"];
+    for (const id of ids) await bind(s, "code-implementer-agent", id);
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(`${SUBAGENT_DIR}/${s}.active`, ids.map((id) => `${id}\tcode-implementer-agent`).join("\n") + "\n");
+    try {
+      for (const [i, id] of ids.entries()) {
+        await recordEvidence(
+          JSON.stringify({
+            session_id: s,
+            agent_id: id,
+            tool_name: "Bash",
+            tool_input: { command: `npm test -- part-${i}` },
+            tool_response: { exit_code: 0, stdout: "" },
+            cwd: "/tmp",
+          }),
+          [],
+        );
+      }
+      // A main-agent call (no agent_id) in the contended session still stands down.
+      await recordEvidence(post(s, "Read", { file_path: "/main" }), []);
+
+      const records = readEvidence(s);
+      expect(records).toHaveLength(ids.length);
+      for (const [i, id] of ids.entries()) {
+        // update-task-status reads eventsForEpoch(records, epochOf(agent_id, agent_type)).
+        const own = eventsForEpoch(records, epochOf(parseAgentId(id)!, parseAgentType("code-implementer-agent")!));
+        expect(own).toEqual([{ kind: "TestRun", command: `npm test -- part-${i}`, exit: 0, report: null }]);
+      }
+    } finally {
+      for (const id of ids) {
+        await unbindMachineAgent(s, parseAgentType("code-implementer-agent")!, parseAgentId(id)!);
+      }
     }
   });
 });
