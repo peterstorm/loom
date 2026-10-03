@@ -9,8 +9,12 @@
  * exit 1 is non-blocking for PreToolUse, so an unreadable transcript must block
  * rather than silently waving the edit through.
  *
- * Escape hatches (env): LOOM_GATE=off disables; LOOM_RULES_DIR overrides the
- * rules directory (default: the rules/ of the owning Loom package).
+ * Escape hatches (env): LOOM_GATE=off disables; LOOM_RULES_DIR / LOOM_SKILLS_DIR
+ * override the rules and skills directories (default: rules/ and skills/ of the
+ * owning Loom package). A skill is satisfied by the Skill tool, a user slash
+ * command, or a full Read of `<skills>/<name>/SKILL.md`. The marker counts in
+ * assistant text or in a completed Bash command (`: 'LOOM: applying …'`), which
+ * the transcript keeps verbatim.
  * Subagents are exempt — they carry the rules in their task prompt and the
  * orchestrator owns compliance (`agent_id` is set only inside a subagent).
  */
@@ -21,9 +25,10 @@ import { isAbsolute, join, resolve } from "node:path";
 import type { HookHandler, HookResult, PreToolUseInput } from "../../types";
 import { blockResult, passthroughResult } from "../../types";
 import { firstBashCodeMutationTarget } from "../../core/bash-code-mutation";
-import { decideRulesGate, renderGateBlock, type GatePorts } from "../../core/rules-gate";
+import { decideRulesGate, renderGateBlock, type GateDirs, type GatePorts } from "../../core/rules-gate";
 import { parseTranscriptEvents } from "./claude-transcript-events";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
+import { isPreToolUseInput } from "./pre-tool-use-input";
 
 const gateDisabled = (): boolean => process.env["LOOM_GATE"] === "off" || process.env["LOOM_GATE"] === "0";
 
@@ -45,6 +50,15 @@ const gatedCall = (input: PreToolUseInput): GatedCall | undefined => {
   const shown = command.length > MAX_ACTION_CHARS ? `${command.slice(0, MAX_ACTION_CHARS)}…` : command;
   return target === null ? undefined : { target, action: `mutate code files via bash: ${shown}` };
 };
+
+/**
+ * Where the gate's rules and skills live — one resolution shared by both harness
+ * adapters (the Pi gate imports it), so an override means the same thing on each.
+ */
+export const gateDirs = (): GateDirs => ({
+  rulesDir: process.env["LOOM_RULES_DIR"] ?? join(LOOM_PACKAGE_ROOT, "rules"),
+  skillsDir: process.env["LOOM_SKILLS_DIR"] ?? join(LOOM_PACKAGE_ROOT, "skills"),
+});
 
 const countLines = (content: string): number =>
   content === "" ? 0 : content.split("\n").length - (content.endsWith("\n") ? 1 : 0);
@@ -78,10 +92,6 @@ export const filesystemPorts = (cwd: string): GatePorts => {
   };
 };
 
-const isPreToolUseInput = (value: unknown): value is PreToolUseInput =>
-  typeof value === "object" && value !== null && "tool_name" in value && typeof value.tool_name === "string" &&
-  "tool_input" in value && typeof value.tool_input === "object" && value.tool_input !== null;
-
 const parseInput = (stdin: string): PreToolUseInput | undefined => {
   try {
     const parsed: unknown = JSON.parse(stdin);
@@ -110,11 +120,11 @@ const decide = (input: PreToolUseInput, call: GatedCall): HookResult => {
       target: call.target,
       events: parseTranscriptEvents(transcript),
       pendingCallId: input.tool_use_id,
-      rulesDir: process.env["LOOM_RULES_DIR"] ?? join(LOOM_PACKAGE_ROOT, "rules"),
+      dirs: gateDirs(),
     },
     filesystemPorts(input.cwd ?? process.cwd()),
   );
-  return decision.kind === "allow" ? passthroughResult() : blockResult(renderGateBlock(decision, call.action));
+  return decision.kind === "allow" ? passthroughResult() : blockResult(renderGateBlock(decision, call.action, "claude-code"));
 };
 
 const handler: HookHandler = async (stdin) => {

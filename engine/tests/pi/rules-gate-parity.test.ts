@@ -11,11 +11,13 @@ import { decideRulesGate, type GatePorts, type GateDecision } from "../../src/co
 import { parseTranscriptEvents } from "../../src/handlers/pre-tool-use/claude-transcript-events";
 import { piContextEvents } from "../../../pi/rules-gate";
 
-const RULES = "/rules";
+const DIRS = { rulesDir: "/rules", skillsDir: "/skills" };
 const ARCH = "/rules/architecture.md";
 const TS_RULES = "/rules/typescript-patterns.md";
+const DEEPEN_SKILL = "/skills/deepen/SKILL.md";
+const DISTILL_SKILL = "/skills/distill/SKILL.md";
 const TARGET = "/repo/src/a.ts";
-const files: Record<string, number> = { [ARCH]: 477, [TS_RULES]: 247, [TARGET]: 40 };
+const files: Record<string, number> = { [ARCH]: 477, [TS_RULES]: 247, [DEEPEN_SKILL]: 215, [DISTILL_SKILL]: 120, [TARGET]: 40 };
 const ports: GatePorts = {
   canonicalPath: (raw) => raw,
   lineCount: (p) => files[p] ?? Number.POSITIVE_INFINITY,
@@ -28,6 +30,7 @@ type Step =
   | { kind: "write"; path: string }
   | { kind: "text"; text: string }
   | { kind: "slash"; name: string }
+  | { kind: "shell"; command: string; failed?: true }
   | { kind: "compact" };
 
 const MARKER: Step = { kind: "text", text: "LOOM: applying architecture.md — FC/IS: pure core" };
@@ -36,7 +39,8 @@ const FULL: Step[] = [
   { kind: "skill", name: "loom:deepen" }, { kind: "skill", name: "loom:distill" },
   { kind: "read", path: TARGET }, MARKER,
 ];
-const without = (steps: Step[], pred: (s: Step) => boolean): Step[] => steps.filter((s) => !pred(s));
+const SHELL_MARKER = ": 'LOOM: applying architecture.md — FC/IS: pure core'";
+const without =(steps: Step[], pred: (s: Step) => boolean): Step[] => steps.filter((s) => !pred(s));
 
 // --- Claude Code rendering -------------------------------------------------
 const claudeJsonl = (steps: Step[]): string =>
@@ -54,6 +58,7 @@ const claudeJsonl = (steps: Step[]): string =>
       case "write": return [msg([{ type: "tool_use", id, name: "Write", input: { file_path: s.path } }]), res()];
       case "text": return [msg([{ type: "text", text: s.text }])];
       case "slash": return [JSON.stringify({ type: "user", message: { content: `<command-name>/${s.name}</command-name>` } })];
+      case "shell": return [msg([{ type: "tool_use", id, name: "Bash", input: { command: s.command } }]), res(s.failed)];
       case "compact": return [JSON.stringify({ type: "system", subtype: "compact_boundary" })];
     }
   }).join("\n");
@@ -75,15 +80,16 @@ const piEntries = (steps: Step[]): SessionEntry[] => {
       case "write": return [asst([{ type: "toolCall", id, name: "write", arguments: { path: s.path } }]), res()];
       case "text": return [asst([{ type: "text", text: s.text }])];
       case "slash": return [{ type: "message", id: `u${i}`, message: { role: "user", content: `<skill name="${s.name.split(":").pop()}" location="/x/SKILL.md">…</skill>` } }];
+      case "shell": return [asst([{ type: "toolCall", id, name: "bash", arguments: { command: s.command } }]), res(s.failed)];
       case "compact": return [];
     }
   }) as SessionEntry[];
 };
 
 const claudeDecision = (steps: Step[]): GateDecision =>
-  decideRulesGate({ target: TARGET, events: parseTranscriptEvents(claudeJsonl(steps)), pendingCallId: "edit-1", rulesDir: RULES }, ports);
+  decideRulesGate({ target: TARGET, events: parseTranscriptEvents(claudeJsonl(steps)), pendingCallId: "edit-1", dirs: DIRS }, ports);
 const piDecision = (steps: Step[]): GateDecision =>
-  decideRulesGate({ target: TARGET, events: piContextEvents(piEntries(steps)), pendingCallId: "edit-1", rulesDir: RULES }, ports);
+  decideRulesGate({ target: TARGET, events: piContextEvents(piEntries(steps)), pendingCallId: "edit-1", dirs: DIRS }, ports);
 
 const scenarios: ReadonlyArray<readonly [string, Step[], GateDecision["kind"]]> = [
   ["full context", FULL, "allow"],
@@ -93,9 +99,15 @@ const scenarios: ReadonlyArray<readonly [string, Step[], GateDecision["kind"]]> 
   ["failed rule read", [{ kind: "read", path: ARCH, failed: true }, ...without(FULL, (s) => s.kind === "read" && s.path === ARCH)], "missing-context"],
   ["rule read with no result yet", [{ kind: "read", path: ARCH, pending: true }, ...without(FULL, (s) => s.kind === "read" && s.path === ARCH)], "missing-context"],
   ["target created by earlier write", [{ kind: "write", path: TARGET }, ...without(FULL, (s) => s.kind === "read" && s.path === TARGET)], "allow"],
+  // Pi has no Skill tool: reading the SKILL.md in full is how a Pi agent loads a skill.
+  ["skills via full SKILL.md reads", [{ kind: "read", path: DEEPEN_SKILL }, { kind: "read", path: DISTILL_SKILL }, ...without(FULL, (s) => s.kind === "skill")], "allow"],
+  ["skill via SKILL.md read in complete slices", [{ kind: "read", path: DEEPEN_SKILL, offset: 1, limit: 100 }, { kind: "read", path: DEEPEN_SKILL, offset: 101, limit: 200 }, ...without(FULL, (s) => s.kind === "skill" && s.name === "loom:deepen")], "allow"],
+  ["partial SKILL.md read", [{ kind: "read", path: DEEPEN_SKILL, limit: 40 }, ...without(FULL, (s) => s.kind === "skill" && s.name === "loom:deepen")], "missing-context"],
   ["skill via slash command", [{ kind: "slash", name: "loom:deepen" }, ...without(FULL, (s) => s.kind === "skill" && s.name === "loom:deepen")], "allow"],
   ["missing marker", without(FULL, (s) => s === MARKER), "missing-marker"],
   ["marker names no rule", [...without(FULL, (s) => s === MARKER), { kind: "text", text: "LOOM: applying good vibes" }], "missing-marker"],
+  ["marker via completed shell command", [...without(FULL, (s) => s === MARKER), { kind: "shell", command: SHELL_MARKER }], "allow"],
+  ["marker via failed shell command", [...without(FULL, (s) => s === MARKER), { kind: "shell", command: SHELL_MARKER, failed: true }], "missing-marker"],
   ["evidence before compaction is discarded", [...FULL, { kind: "compact" }], "missing-context"],
   ["evidence re-established after compaction", [...FULL, { kind: "compact" }, ...FULL], "allow"],
 ];

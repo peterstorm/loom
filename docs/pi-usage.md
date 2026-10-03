@@ -142,9 +142,11 @@ Before spawn, the parent mints a one-time cryptographic grant and injects its to
 Two grant shapes exist:
 
 - **Task-bound implementation grant** — bound to Agent, Task id, repository cwd, TaskGraph, and session; valid for the implementation session.
-- **Scoped artifact grant** — for writer roles only; target directories are derived from prompt authority (spec, plan, or panel-run directories).
+- **Scoped artifact grant** — for writer roles only. Each writer role has fixed role roots (below); prompt authority may only narrow `.claude/specs`/`.claude/plans` roots to the spec, plan, or panel-run directories it names. A prompt path outside the role's roots (plan-alignment reading the plan) is dropped, never granted. Roots a prompt path cannot name (the lint-rule dirs) are granted whole.
 
 Read-only roles—reviewers, verifier, judge, decompose, and spec-check—receive no grant even if their prompts mention writable-looking paths.
+
+Claude Code applies the same writer-role policy without a grant. `block-direct-edits` admits an Edit/Write/MultiEdit from a writer role only when the **calling** subagent (PreToolUse `agent_id`) is on the session's active roster with that role and the symlink-resolved target lies strictly inside the role's root under the project directory (`CLAUDE_PROJECT_DIR`): brainstorm, specify, clarify, and plan-alignment → `.claude/specs/`; architecture → `.claude/plans/`, `.claude/specs/`, `.claude/linter/rules/`, `.pi/linter/rules/` (plan, spec tree and panel-run dirs, checkable-invariant lint rules); arch-interviewer and arch-designer → `.claude/specs/`. These are the role roots both harnesses share; Claude applies them whole (no prompt refinement). The main agent and read-only roles stay blocked even while a writer is active. `artifactWriterRole` in `engine/src/core/artifact-write-scope.ts` classifies writer roles once for both harnesses.
 
 Outside orchestration—no active TaskGraph for the session—no role receives a grant, including implementation agents. Direct edits are ungated when no TaskGraph exists, so a capability there would authorize nothing already forbidden, while its Task id binding would refuse a spawn that has no Task id to give. This is what makes a Loom agent usable ad hoc on Pi, matching Claude Code, whose hook shims already exit before any gate when no TaskGraph is present. `engine/src/core/pi-write-grant-plan.ts` owns the decision.
 

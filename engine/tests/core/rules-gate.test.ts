@@ -6,12 +6,14 @@ import { describe, expect, it } from "vitest";
 import { coveredInFull, decideRulesGate, renderGateBlock, type GatePorts } from "../../src/core/rules-gate";
 import { parseTranscriptEvents } from "../../src/handlers/pre-tool-use/claude-transcript-events";
 
-const RULES = "/rules";
+const DIRS = { rulesDir: "/rules", skillsDir: "/skills" };
 const ARCH = "/rules/architecture.md";
 const TS_RULES = "/rules/typescript-patterns.md";
+const DEEPEN_SKILL = "/skills/deepen/SKILL.md";
+const DISTILL_SKILL = "/skills/distill/SKILL.md";
 const TARGET = "/repo/src/a.ts";
 
-const files: Record<string, number> = { [ARCH]: 477, [TS_RULES]: 247, [TARGET]: 40 };
+const files: Record<string, number> = { [ARCH]: 477, [TS_RULES]: 247, [DEEPEN_SKILL]: 215, [DISTILL_SKILL]: 120, [TARGET]: 40 };
 const ports: GatePorts = {
   canonicalPath: (raw) => raw,
   lineCount: (p) => files[p] ?? Number.POSITIVE_INFINITY,
@@ -44,7 +46,7 @@ const fullContext = (): string[] => [
 ];
 
 const decide = (lines: readonly string[], pendingCallId = "edit-1") =>
-  decideRulesGate({ target: TARGET, events: parseTranscriptEvents(lines.join("\n")), pendingCallId, rulesDir: RULES }, ports);
+  decideRulesGate({ target: TARGET, events: parseTranscriptEvents(lines.join("\n")), pendingCallId, dirs: DIRS }, ports);
 
 describe("decideRulesGate", () => {
   it("allows when rules, skills, target and marker are all in context", () => {
@@ -52,7 +54,7 @@ describe("decideRulesGate", () => {
   });
 
   it("does not gate non-code targets", () => {
-    const d = decideRulesGate({ target: "/repo/README.md", events: [], pendingCallId: undefined, rulesDir: RULES }, ports);
+    const d = decideRulesGate({ target: "/repo/README.md", events: [], pendingCallId: undefined, dirs: DIRS }, ports);
     expect(d).toEqual({ kind: "allow" });
   });
 
@@ -60,7 +62,41 @@ describe("decideRulesGate", () => {
     const d = decide([]);
     expect(d.kind).toBe("missing-context");
     if (d.kind !== "missing-context") return;
-    expect(d.missing.map((r) => r.skillName ?? r.paths[0])).toEqual([ARCH, TS_RULES, "deepen", "distill", TARGET]);
+    expect(d.missing.map((r) => (r.kind === "skill" ? r.name : r.path))).toEqual([ARCH, TS_RULES, "deepen", "distill", TARGET]);
+  });
+
+  it("points each skill requirement at its SKILL.md, and at nothing when the file is absent", () => {
+    const d = decide([]);
+    if (d.kind !== "missing-context") throw new Error("expected missing-context");
+    expect(d.missing.filter((r) => r.kind === "skill")).toMatchObject([
+      { name: "deepen", skillFile: DEEPEN_SKILL },
+      { name: "distill", skillFile: DISTILL_SKILL },
+    ]);
+    const noSkillFiles = decideRulesGate(
+      { target: TARGET, events: [], pendingCallId: undefined, dirs: { ...DIRS, skillsDir: "/elsewhere" } },
+      ports,
+    );
+    if (noSkillFiles.kind !== "missing-context") throw new Error("expected missing-context");
+    expect(noSkillFiles.missing.filter((r) => r.kind === "skill").map((r) => r.kind === "skill" && r.skillFile)).toEqual([null, null]);
+  });
+
+  // Pi has no Skill tool: a full read of the skill's own SKILL.md must satisfy
+  // the requirement on BOTH harnesses.
+  it("accepts a skill loaded by a full read of its SKILL.md", () => {
+    const lines = fullContext().filter((l) => !l.includes('"s1"') && !l.includes('"s2"'));
+    expect(decide([...read("k1", "rk1", DEEPEN_SKILL), ...read("k2", "rk2", DISTILL_SKILL), ...lines])).toEqual({ kind: "allow" });
+  });
+
+  it("rejects a partial read of a SKILL.md", () => {
+    const lines = fullContext().filter((l) => !l.includes('"s1"'));
+    const d = decide([...read("k1", "rk1", DEEPEN_SKILL, { limit: 40 }), ...lines]);
+    expect(d.kind).toBe("missing-context");
+    if (d.kind === "missing-context") expect(d.missing).toMatchObject([{ kind: "skill", name: "deepen" }]);
+  });
+
+  it("does not let a SKILL.md read stand in for a different skill", () => {
+    const lines = fullContext().filter((l) => !l.includes('"s2"'));
+    expect(decide([...read("k1", "rk1", DEEPEN_SKILL), ...lines]).kind).toBe("missing-context");
   });
 
   it("rejects a partial read of a rule (limit skim)", () => {
@@ -118,6 +154,27 @@ describe("decideRulesGate", () => {
     expect(decide([...lines, text("pending", "LOOM: applying distill — one move at a time"), toolUse("pending", "edit-1", "Edit", { file_path: TARGET })])).toEqual({ kind: "allow" });
   });
 
+  // A harness may persist a rewritten copy of assistant prose that drops the
+  // marker line; a shell command is stored verbatim.
+  const BASH_MARKER = ": 'LOOM: applying architecture.md — FC/IS: pure core'";
+
+  it("accepts the marker stated through a completed Bash command", () => {
+    const lines = fullContext().filter((l) => l !== MARKER);
+    expect(decide([...lines, toolUse("b", "b1", "Bash", { command: BASH_MARKER }), result("b1")])).toEqual({ kind: "allow" });
+  });
+
+  it("does not count a Bash marker whose call failed or has no result", () => {
+    const lines = fullContext().filter((l) => l !== MARKER);
+    expect(decide([...lines, toolUse("b", "b1", "Bash", { command: BASH_MARKER }), result("b1", true)])).toEqual({ kind: "missing-marker" });
+    expect(decide([...lines, toolUse("b", "b1", "Bash", { command: BASH_MARKER })])).toEqual({ kind: "missing-marker" });
+  });
+
+  it("rejects a Bash marker that names no rule", () => {
+    const lines = fullContext().filter((l) => l !== MARKER);
+    const vague = toolUse("b", "b1", "Bash", { command: ": 'LOOM: applying good vibes'" });
+    expect(decide([...lines, vague, result("b1")])).toEqual({ kind: "missing-marker" });
+  });
+
   it("discards all evidence before the last compaction boundary", () => {
     const d = decide([...fullContext(), boundary()]);
     expect(d.kind).toBe("missing-context");
@@ -153,15 +210,47 @@ describe("coveredInFull", () => {
 });
 
 describe("renderGateBlock", () => {
-  it("names each missing requirement and the Skill tool for skills", () => {
+  const blocked = () => {
     const d = decide([]);
     if (d.kind === "allow") throw new Error("expected a block");
-    const out = renderGateBlock(d, "edit /repo/src/a.ts");
+    return d;
+  };
+
+  it("Claude Code: names each requirement, the Skill tool, and the SKILL.md read alternative", () => {
+    const out = renderGateBlock(blocked(), "edit /repo/src/a.ts", "claude-code");
     expect(out).toContain(ARCH);
-    expect(out).toContain("skill:deepen");
-    expect(out).toContain("Skill tool");
+    expect(out).toContain(`skill:deepen — invoke the Skill tool with "deepen", or Read ${DEEPEN_SKILL} in full`);
+    expect(out).toContain("rules with the Read tool");
+    expect(out).not.toContain("/skill:");
   });
+
+  it("Pi: never mentions the Skill tool; names the SKILL.md read and the user's /skill: command", () => {
+    const out = renderGateBlock(blocked(), "edit /repo/src/a.ts", "pi");
+    expect(out).toContain(ARCH);
+    expect(out).toContain(`skill:deepen — read ${DEEPEN_SKILL} in full (or ask the user to run /skill:deepen)`);
+    expect(out).toContain("rules with the read tool");
+    expect(out).not.toContain("Skill tool");
+  });
+
+  it("omits the SKILL.md alternative when the file is absent", () => {
+    const d = decideRulesGate({ target: TARGET, events: [], pendingCallId: undefined, dirs: { ...DIRS, skillsDir: "/elsewhere" } }, ports);
+    if (d.kind === "allow") throw new Error("expected a block");
+    expect(renderGateBlock(d, "edit x", "pi")).toContain("skill:deepen — ask the user to run /skill:deepen   (");
+    expect(renderGateBlock(d, "edit x", "claude-code")).toContain(`skill:deepen — invoke the Skill tool with "deepen"   (`);
+  });
+
   it("shows the marker example for a missing marker", () => {
-    expect(renderGateBlock({ kind: "missing-marker" }, "edit x")).toContain("LOOM: applying");
+    for (const harness of ["claude-code", "pi"] as const) {
+      expect(renderGateBlock({ kind: "missing-marker" }, "edit x", harness)).toContain("LOOM: applying");
+    }
+  });
+
+  it("names the harness's shell tool as the verbatim fallback for a missing marker", () => {
+    const claude = renderGateBlock({ kind: "missing-marker" }, "edit x", "claude-code");
+    expect(claude).toContain("the Bash tool");
+    expect(claude).toContain(": 'LOOM: applying");
+    const pi = renderGateBlock({ kind: "missing-marker" }, "edit x", "pi");
+    expect(pi).toContain("the bash tool");
+    expect(pi).not.toContain("the Bash tool");
   });
 });

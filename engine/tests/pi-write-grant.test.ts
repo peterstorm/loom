@@ -11,6 +11,7 @@ import {
   sweepExpiredPiWriteGrants,
   writeTargetViolatesScope,
 } from "../../pi/write-grant";
+import { artifactWriteRoots } from "../src/core/artifact-write-scope";
 let root: string;
 let priorSubagentDir: string | undefined;
 
@@ -64,6 +65,16 @@ describe("Pi child write grants (incl. scoped phase-agent grants)", () => {
     expect(consumed.taskId).toBe("phase:specify");
     expect(consumed.scopeDirs).toHaveLength(1);
     expect(consumed.scopeDirs![0]).toBe(join(cwd, ".claude", "specs", "2026-08-12-foo") + "/");
+  });
+
+  it("issues the architecture role's full roots — lint-rule dirs included, outside guarded state", () => {
+    const { cwd, graph } = fixture();
+    const scopeDirs = artifactWriteRoots("architecture-agent")!;
+    const issued = issuePiWriteGrant({ agent: "architecture-agent", taskId: "phase:architecture", cwd, taskGraphPath: graph, scopeDirs });
+    const consumed = consumePiWriteGrant(injectPiWriteGrant("Write the plan.\n", issued), cwd, "architecture-agent")!;
+    expect(consumed.scopeDirs).toEqual(scopeDirs.map((dir) => join(cwd, dir) + "/"));
+    expect(writeTargetViolatesScope(join(cwd, ".claude", "linter", "rules", "inv-1-pure.json"), consumed.scopeDirs!)).toBeNull();
+    expect(writeTargetViolatesScope(join(cwd, "src", "index.ts"), consumed.scopeDirs!)).not.toBeNull();
   });
 
   it("enforces scope on write targets with trailing-slash prefix semantics", () => {

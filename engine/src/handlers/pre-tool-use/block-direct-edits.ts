@@ -3,18 +3,28 @@
  * IMPLEMENTATION subagent Edit/Write is allowed — detected via the configured
  * subagent directory (`LOOM_SUBAGENT_DIR`, default `/tmp/claude-subagents`).
  * Being on the active roster is NOT itself a write grant: `shouldBlockDirectEdit`
- * admits only implementation-role agents and holders of a minted write grant, so
- * review agents and refutation verifiers stay read-only even while active.
+ * admits only implementation-role agents, holders of a minted write grant, and
+ * — for the calling subagent only — phase agents and panel writers writing
+ * inside their role's artifact roots (`artifactWriteRoots`: spec and plan dirs,
+ * plus the lint-rule dirs for architecture). Review
+ * agents, judges, verifiers and decompose stay read-only even while active.
  *
  * Claude Code wrapper — delegates the DECISION to core/ and owns the I/O the
- * decision needs, which is why the roster read lives here rather than there.
+ * decision needs: the roster read, and canonicalizing the target path and
+ * project root (realpath) so the core compares symlink-free absolute paths.
  */
 
-import { statSync } from "node:fs";
+import { lstatSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import type { HookHandler, PreToolUseInput } from "../../types";
-import { shouldBlockDirectEdit, type ActiveRosterProbe } from "../../core/block-direct-edits";
+import {
+  shouldBlockDirectEdit,
+  type ActiveRosterProbe,
+  type ArtifactWriteRequest,
+} from "../../core/block-direct-edits";
 import { subagentDir } from "../../config";
 import { readActiveAgentRoles } from "../../machine/ledger";
+import { isPreToolUseInput } from "./pre-tool-use-input";
 
 /**
  * Adapter for core's `ActiveRosterProbe`: the session's `.active` roster, or
@@ -43,20 +53,75 @@ export const activeRosterProbe: ActiveRosterProbe = (sessionId) => {
   }
 };
 
-const handler: HookHandler = async (stdin) => {
-  let input: PreToolUseInput;
+/**
+ * Symlink-safe canonical form of an absolute path that may not exist yet: the
+ * realpath of its nearest existing ancestor with the missing remainder
+ * re-appended. `null` when it cannot be proven — a dangling symlink (a write
+ * would follow it wherever it points), or any error other than ENOENT.
+ */
+export function canonicalWritePath(absolute: string): string | null {
   try {
-    input = JSON.parse(stdin);
+    return realpathSync(absolute);
   } catch (e) {
-    // Malformed hook input on a guard route: fail CLOSED. A parse crash
-    // would exit 1 — NON-blocking for PreToolUse — silently waving the
-    // edit past the direct-edit guard.
-    return {
-      kind: "block",
-      message: `block-direct-edits: malformed hook input — failing closed: ${e instanceof Error ? e.message : String(e)}`,
-    };
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") return null;
+    if (isDanglingSymlink(absolute)) return null;
+    const parent = dirname(absolute);
+    if (parent === absolute) return null;
+    const canonicalParent = canonicalWritePath(parent);
+    return canonicalParent === null ? null : join(canonicalParent, basename(absolute));
   }
-  return shouldBlockDirectEdit(input.tool_name, input.session_id, undefined, activeRosterProbe);
+}
+
+const isDanglingSymlink = (path: string): boolean => {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+};
+
+const FILE_PATH_TOOLS: ReadonlySet<string> = new Set(["Edit", "Write", "MultiEdit"]);
+
+/**
+ * The artifact-writer request for core, or `undefined` when the project root
+ * itself cannot be canonicalized (the request then never admits anything).
+ * That failure is announced: a writer blocked for an unresolvable root would
+ * otherwise see only the generic direct-edit message.
+ */
+export function artifactWriteRequest(
+  input: PreToolUseInput,
+  projectDir: string | undefined = process.env["CLAUDE_PROJECT_DIR"],
+): ArtifactWriteRequest | undefined {
+  const cwd = input.cwd ?? process.cwd();
+  const rawRoot = resolve(projectDir ?? cwd);
+  const projectRoot = canonicalWritePath(rawRoot);
+  if (projectRoot === null) {
+    process.stderr.write(
+      `block-direct-edits: cannot canonicalize project root ${rawRoot} — no artifact-writer admission for this call\n`,
+    );
+    return undefined;
+  }
+  const filePath = input.tool_input["file_path"];
+  const targetPath = FILE_PATH_TOOLS.has(input.tool_name) && typeof filePath === "string" && filePath !== ""
+    ? canonicalWritePath(resolve(cwd, filePath))
+    : null;
+  return { callerAgentId: input.agent_id ?? null, targetPath, projectRoot };
+}
+
+/** Malformed hook input on a guard route fails CLOSED: a crash would exit 1 —
+ *  NON-blocking for PreToolUse — silently waving the edit past the guard. */
+const malformed = (detail: string) =>
+  ({ kind: "block", message: `block-direct-edits: malformed hook input — failing closed: ${detail}` }) as const;
+
+const handler: HookHandler = async (stdin) => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdin);
+  } catch (e) {
+    return malformed(e instanceof Error ? e.message : String(e));
+  }
+  if (!isPreToolUseInput(parsed)) return malformed("expected an object with tool_name and tool_input");
+  return shouldBlockDirectEdit(parsed.tool_name, parsed.session_id, undefined, activeRosterProbe, artifactWriteRequest(parsed));
 };
 
 export default handler;

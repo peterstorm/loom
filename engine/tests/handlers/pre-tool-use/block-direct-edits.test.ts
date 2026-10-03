@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect, afterAll, vi } from "vitest";
-import { mkdirSync, rmSync, writeFileSync, symlinkSync, mkdtempSync, chmodSync, readFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, symlinkSync, mkdtempSync, chmodSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -20,7 +20,11 @@ import {
   type ActiveRosterEntry,
   type ActiveRosterProbe,
 } from "../../../src/core/block-direct-edits";
-import blockDirectEdits, { activeRosterProbe } from "../../../src/handlers/pre-tool-use/block-direct-edits";
+import blockDirectEdits, {
+  activeRosterProbe,
+  artifactWriteRequest,
+  canonicalWritePath,
+} from "../../../src/handlers/pre-tool-use/block-direct-edits";
 import { SUBAGENT_DIR, TASK_GRAPH_PATH, pathExistsFailClosed } from "../../../src/config";
 import { parseSessionId } from "../../../src/machine/evidence";
 
@@ -176,6 +180,192 @@ describe("shouldBlockDirectEdit — session-id parse boundary", () => {
   });
 });
 
+// Phase agents (specify, architecture, …) and panel writers must be able to
+// write the artifacts their templates promise — but only the CALLING agent's
+// role counts, and only inside that role's roots.
+describe("shouldBlockDirectEdit — artifact writers (Claude Code caller admission)", () => {
+  const PROJECT = "/proj";
+  const SPEC = "/proj/.claude/specs/2026-10-02-foo/spec.md";
+  const PLAN = "/proj/.claude/plans/2026-10-02-foo.md";
+  const CALLER = "a339f6fd51d78b179";
+
+  const decide = (
+    entries: readonly ActiveRosterEntry[],
+    callerAgentId: string | null,
+    targetPath: string | null,
+    projectRoot = PROJECT,
+  ) => shouldBlockDirectEdit("Write", s, orchestrating, roster(...entries), { callerAgentId, targetPath, projectRoot });
+
+  it("phase writer inside its root → allow", () => {
+    expect(decide([entry(CALLER, "specify-agent")], CALLER, SPEC).kind).toBe("allow");
+    expect(decide([entry(CALLER, "architecture-agent")], CALLER, PLAN).kind).toBe("allow");
+    expect(decide([entry(CALLER, "loom:plan-alignment-agent")], CALLER, SPEC).kind).toBe("allow");
+  });
+
+  it("phase writer outside its root → block naming the allowed roots", () => {
+    const result = decide([entry(CALLER, "specify-agent")], CALLER, "/proj/src/index.ts");
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") {
+      expect(result.message).toContain("specify-agent may write only its artifacts");
+      expect(result.message).toContain("/proj/src/index.ts");
+      expect(result.message).toContain("/proj/.claude/specs/");
+    }
+    // Only architecture writes the plan tree.
+    expect(decide([entry(CALLER, "specify-agent")], CALLER, PLAN).kind).toBe("block");
+    expect(decide([entry(CALLER, "plan-alignment-agent")], CALLER, PLAN).kind).toBe("block");
+  });
+
+  it("architecture writes its plan, spec-tree files, and lint rules — and nothing else", () => {
+    const architecture = [entry(CALLER, "architecture-agent")];
+    expect(decide(architecture, CALLER, PLAN).kind).toBe("allow");
+    expect(decide(architecture, CALLER, SPEC).kind).toBe("allow");
+    expect(decide(architecture, CALLER, "/proj/.claude/linter/rules/inv-1-pure-core.json").kind).toBe("allow");
+    expect(decide(architecture, CALLER, "/proj/.pi/linter/rules/inv-1-pure-core.json").kind).toBe("allow");
+    const outside = decide(architecture, CALLER, "/proj/src/index.ts");
+    expect(outside.kind).toBe("block");
+    if (outside.kind === "block") {
+      for (const root of [".claude/plans/", ".claude/specs/", ".claude/linter/rules/", ".pi/linter/rules/"]) {
+        expect(outside.message).toContain(`/proj/${root}`);
+      }
+    }
+    // Neighbours of the lint-rule dir stay outside.
+    expect(decide(architecture, CALLER, "/proj/.claude/linter/config.json").kind).toBe("block");
+    expect(decide(architecture, CALLER, "/proj/.claude/state/active_task_graph.json").kind).toBe("block");
+  });
+
+  it("the root itself, a sibling prefix, and `..` escapes are outside", () => {
+    const specify = [entry(CALLER, "specify-agent")];
+    expect(decide(specify, CALLER, "/proj/.claude/specs").kind).toBe("block");
+    expect(decide(specify, CALLER, "/proj/.claude/specs-evil/x.md").kind).toBe("block");
+    expect(decide(specify, CALLER, "/proj/.claude/specs/../hooks/x.sh").kind).toBe("block");
+    expect(decide(specify, CALLER, "/proj/.claude/specs/a/../../../etc/passwd").kind).toBe("block");
+    // A file whose NAME starts with `..` is still inside.
+    expect(decide(specify, CALLER, "/proj/.claude/specs/..notes.md").kind).toBe("allow");
+  });
+
+  it("non-absolute or unresolvable inputs are never admitted", () => {
+    const specify = [entry(CALLER, "specify-agent")];
+    expect(decide(specify, CALLER, ".claude/specs/x/spec.md").kind).toBe("block");
+    expect(decide(specify, CALLER, null).kind).toBe("block");
+    expect(decide(specify, CALLER, "/proj/.claude/specs/x/spec.md", "proj").kind).toBe("block");
+  });
+
+  it("main agent (null caller) is blocked even while a phase agent is active", () => {
+    const result = decide([entry(CALLER, "specify-agent")], null, SPEC);
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") expect(result.message).toContain("Direct edits not allowed");
+  });
+
+  it("a caller id that is not on the roster is blocked", () => {
+    expect(decide([entry(CALLER, "specify-agent")], "f00000000000000000", SPEC).kind).toBe("block");
+  });
+
+  it("a caller with no recorded role is blocked", () => {
+    expect(decide([entry(CALLER)], CALLER, SPEC).kind).toBe("block");
+  });
+
+  it("read-only roles are blocked inside the roots, even beside an active phase writer", () => {
+    for (const role of ["code-reviewer", "arch-judge-agent", "review-verifier-agent", "decompose-agent"]) {
+      const result = decide([entry("writer0000000000", "specify-agent"), entry(CALLER, role)], CALLER, SPEC);
+      expect(result.kind, role).toBe("block");
+      if (result.kind === "block") expect(result.message, role).toContain("Direct edits not allowed");
+    }
+  });
+
+  it("panel writer inside specs → allow; inside plans → block", () => {
+    for (const role of ["arch-interviewer-agent", "arch-designer-agent"]) {
+      expect(decide([entry(CALLER, role)], CALLER, "/proj/.claude/specs/x/panel-runs/run.y/interview.md").kind, role).toBe("allow");
+      expect(decide([entry(CALLER, role)], CALLER, PLAN).kind, role).toBe("block");
+    }
+  });
+
+  it("does not loosen the implementation admission or the no-task-graph pass", () => {
+    expect(decide([entry(CALLER, "code-implementer-agent")], null, "/anywhere/x.ts").kind).toBe("allow");
+    expect(shouldBlockDirectEdit("Write", s, () => false, noRoster, { callerAgentId: null, targetPath: null, projectRoot: PROJECT }).kind).toBe("allow");
+  });
+});
+
+describe("artifactWriteRequest — the handler's canonicalization shell", () => {
+  const dirs: string[] = [];
+  afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
+  const project = () => {
+    const d = realpathSync(mkdtempSync(join(tmpdir(), "loom-artifact-write-")));
+    dirs.push(d);
+    mkdirSync(join(d, ".claude", "specs", "foo"), { recursive: true });
+    return d;
+  };
+  const input = (over: Record<string, unknown>) => ({
+    tool_name: "Write", tool_input: {}, session_id: s, ...over,
+  }) as Parameters<typeof artifactWriteRequest>[0];
+
+  it("resolves a relative file_path against cwd and canonicalizes not-yet-existing files", () => {
+    const d = project();
+    const request = artifactWriteRequest(input({ cwd: d, agent_id: "a1", tool_input: { file_path: ".claude/specs/foo/new/spec.md" } }), d);
+    expect(request).toEqual({ callerAgentId: "a1", targetPath: join(d, ".claude/specs/foo/new/spec.md"), projectRoot: d });
+  });
+
+  it("main-agent calls carry a null caller; non-file tools a null target", () => {
+    const d = project();
+    expect(artifactWriteRequest(input({ cwd: d, tool_input: { file_path: "x.md" } }), d)?.callerAgentId).toBeNull();
+    expect(artifactWriteRequest(input({ cwd: d, tool_name: "Bash", tool_input: { command: "ls" } }), d)?.targetPath).toBeNull();
+  });
+
+  it("a symlinked dir inside the specs root resolves to where it really points — and is blocked", () => {
+    const d = project();
+    const outside = join(d, "src");
+    mkdirSync(outside);
+    symlinkSync(outside, join(d, ".claude", "specs", "foo", "escape"));
+    const request = artifactWriteRequest(input({ cwd: d, agent_id: "a1", tool_input: { file_path: join(d, ".claude/specs/foo/escape/evil.ts") } }), d);
+    expect(request?.targetPath).toBe(join(outside, "evil.ts"));
+    const result = shouldBlockDirectEdit("Write", s, orchestrating, roster(entry("a1", "specify-agent")), request);
+    expect(result.kind).toBe("block");
+    // The honest path through the same project is admitted.
+    const honest = artifactWriteRequest(input({ cwd: d, agent_id: "a1", tool_input: { file_path: join(d, ".claude/specs/foo/spec.md") } }), d);
+    expect(shouldBlockDirectEdit("Write", s, orchestrating, roster(entry("a1", "specify-agent")), honest).kind).toBe("allow");
+  });
+
+  it("a dangling symlink target is unresolvable (a write would follow it out)", () => {
+    const d = project();
+    const link = join(d, ".claude", "specs", "foo", "dangling.md");
+    symlinkSync(join(d, "nowhere", "x.md"), link);
+    expect(canonicalWritePath(link)).toBeNull();
+    expect(artifactWriteRequest(input({ cwd: d, agent_id: "a1", tool_input: { file_path: link } }), d)?.targetPath).toBeNull();
+  });
+
+  it("a MultiEdit from a writer carries its file_path and agent_id into an admitted request", () => {
+    const d = project();
+    const request = artifactWriteRequest(input({ cwd: d, agent_id: "a1", tool_name: "MultiEdit", tool_input: { file_path: ".claude/specs/foo/spec.md", edits: [] } }), d);
+    expect(request).toEqual({ callerAgentId: "a1", targetPath: join(d, ".claude/specs/foo/spec.md"), projectRoot: d });
+    expect(shouldBlockDirectEdit("MultiEdit", s, orchestrating, roster(entry("a1", "specify-agent")), request).kind).toBe("allow");
+  });
+
+  it("an unresolvable project root yields no request AND announces the cause on stderr", () => {
+    const d = project();
+    const dangling = join(d, "dangling-root");
+    symlinkSync(join(d, "nowhere"), dangling);
+    const written: string[] = [];
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      written.push(String(chunk));
+      return true;
+    });
+    try {
+      expect(artifactWriteRequest(input({ cwd: d, agent_id: "a1", tool_input: { file_path: "x.md" } }), dangling)).toBeUndefined();
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(written.join("")).toContain(`cannot canonicalize project root ${dangling}`);
+  });
+
+  it("a symlinked project dir canonicalizes to its real path", () => {
+    const d = project();
+    const alias = join(d, "..", `${d.split("/").pop()}-alias`);
+    symlinkSync(d, alias);
+    dirs.push(alias);
+    const request = artifactWriteRequest(input({ cwd: alias, agent_id: "a1", tool_input: { file_path: ".claude/specs/foo/spec.md" } }), alias);
+    expect(request).toMatchObject({ projectRoot: d, targetPath: join(d, ".claude/specs/foo/spec.md") });
+  });
+});
+
 describe("activeRosterProbe — the adapter that reads the .active file", () => {
   const write = (contents: string) => {
     mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
@@ -221,6 +411,14 @@ describe("block-direct-edits handler — malformed stdin fails CLOSED (round-11)
     expect(result.kind).toBe("block");
     if (result.kind === "block") {
       expect(result.message).toContain("malformed hook input");
+    }
+  });
+
+  it("JSON that is not a hook payload (null, wrong shape) → block, never a crash", async () => {
+    for (const stdin of ["null", "42", "[]", '{"tool_name":"Edit"}', '{"tool_input":{}}']) {
+      const result = await blockDirectEdits(stdin, []);
+      expect(result.kind, stdin).toBe("block");
+      if (result.kind === "block") expect(result.message, stdin).toContain("malformed hook input");
     }
   });
 });
