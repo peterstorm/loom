@@ -324,6 +324,76 @@ describe("historical baseline recovery CLI", () => {
   });
 });
 
+describe("directory artifact packet recovery", () => {
+  it("recovers a declared directory from the packet leaves below it", () => {
+    const root = canonicalTempDir("loom-proof-directory-recovery-");
+    cleanup.push(root);
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "--allow-empty", "-m", "before wave 2"], { cwd: root });
+    const historical = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf-8" }).trim();
+    mkdirSync(join(root, "src", "feature"), { recursive: true });
+    const implemented = "export const implemented = true;\n";
+    writeFileSync(join(root, "src", "feature", "a.ts"), implemented);
+    execFileSync("git", ["add", "."], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "wave 2 implementation"], { cwd: root });
+    const poisonedStart = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf-8" }).trim();
+    const packet = createReviewPacket({
+      task: { id: "T5", description: "implementation" },
+      baseSha: base(historical),
+      headSha: head(poisonedStart),
+      declaredPaths: ["src/feature"],
+      modifiedPaths: ["src/feature"],
+      artifacts: [{ path: "src/feature/a.ts", diff: "+implemented\n", postimage: Buffer.from(implemented) }],
+      planContext: "",
+      proofObligations: [],
+    });
+    if (!packet.ok) throw new Error(packet.errors.join("; "));
+    const packetRelative = ".claude/reviews/T5.json";
+    mkdirSync(join(root, ".claude", "reviews"), { recursive: true });
+    writeFileSync(join(root, packetRelative), serializeReviewPacket(packet.value));
+    const statePath = join(root, ".claude", "state", "active_task_graph.json");
+    mkdirSync(join(root, ".claude", "state"), { recursive: true });
+    writeFileSync(statePath, JSON.stringify({
+      current_phase: "execute", phase_artifacts: {}, skipped_phases: [],
+      spec_file: null, plan_file: null, current_wave: 2, executing_tasks: [],
+      wave_gates: {},
+      tasks: [{
+        id: "T5", description: "implementation", agent: "code-implementer-agent",
+        wave: 2, status: "implemented", legacy_missing_proof: true, depends_on: [], new_tests_required: false,
+        file_list: ["src/feature"], files_modified: ["latest-only.ts"],
+        start_sha: poisonedStart,
+        artifact_baseline: [{ artifact: "src/feature", snapshot: { kind: "missing" } }],
+        issued_review_packets: [{
+          task_id: "T5",
+          packet_id: packet.value.packetId,
+          packet_path: packetRelative,
+          base_sha: historical,
+          head_sha: poisonedStart,
+          scope: ["src/feature"],
+        }],
+      }],
+    }, null, 2));
+
+    const recovered = spawnSync("bun", [
+      CLI, "helper", "reconcile-implementation-proof", "--wave", "2",
+      "--baseline-sha", historical,
+      "--packet", `T5=${packetRelative}`,
+    ], {
+      cwd: root, encoding: "utf-8", env: { ...process.env, LOOM_STATE_PATH: statePath },
+    });
+    expect(recovered.status, recovered.stderr).toBe(0);
+    const state = JSON.parse(readFileSync(statePath, "utf-8"));
+    expect(state.tasks[0]).toMatchObject({
+      status: "implemented",
+      proof: { state: "satisfied" },
+      files_modified: ["latest-only.ts", "src/feature"],
+      recovered_artifact_writes: [{ packet_id: packet.value.packetId, modified_paths: ["src/feature"] }],
+    });
+  });
+});
+
 describe("reconcileTaskFromStoredEvidence", () => {
   it("revokes stale new-test credit when the current cumulative diff contains no tests", () => {
     const reconciled = reconcileTaskFromStoredEvidence(

@@ -529,6 +529,54 @@ describe("quality-program helper boundaries", () => {
     expect(written.artifacts[0].diff.content).toContain("deleted file mode");
   });
 
+  it("reviews a scoped directory as its Git-visible leaves, including deletions and symlinks", () => {
+    const root = canonicalTempDir("loom-review-packet-directory-");
+    cleanup.push(root);
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
+    mkdirSync(join(root, "feature", "nested"), { recursive: true });
+    writeFileSync(join(root, ".gitignore"), "*.log\nstate.json\n.claude/\n");
+    writeFileSync(join(root, "feature", "kept.ts"), "before\n");
+    writeFileSync(join(root, "feature", "nested", "removed.ts"), "gone\n");
+    execFileSync("git", ["add", "."], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "baseline"], { cwd: root });
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf-8" }).trim();
+    writeFileSync(join(root, "feature", "kept.ts"), "after\n");
+    rmSync(join(root, "feature", "nested", "removed.ts"));
+    writeFileSync(join(root, "feature", "added.ts"), "new\n");
+    writeFileSync(join(root, "feature", "debug.log"), "ignored\n");
+    symlinkSync("kept.ts", join(root, "feature", "link.ts"));
+    const state = join(root, "state.json");
+    const packet = join(root, ".claude", "reviews", "packet.json");
+    writeReviewPacketTaskGraph(state, {
+      start_sha: head,
+      file_list: ["feature"],
+      files_modified: ["feature/kept.ts"],
+    });
+
+    const id = execFileSync("bun", [
+      CLI, "helper", "review-packet", "create", "--task", "T1", "--output", ".claude/reviews/packet.json",
+    ], { cwd: root, encoding: "utf-8", env: { ...admittedEnv(), LOOM_STATE_PATH: state } }).trim();
+
+    const written = JSON.parse(readFileSync(packet, "utf-8"));
+    expect(written.declaredPaths).toEqual(["feature"]);
+    expect(written.artifacts.map((artifact: { path: string }) => artifact.path)).toEqual([
+      "feature/added.ts",
+      "feature/kept.ts",
+      "feature/link.ts",
+      "feature/nested/removed.ts",
+    ]);
+    const byPath = new Map(written.artifacts.map((artifact: { path: string }) => [artifact.path, artifact]));
+    expect(byPath.get("feature/added.ts")).toMatchObject({ postimage: { content: "new\n" } });
+    expect(byPath.get("feature/kept.ts")).toMatchObject({ postimage: { content: "after\n" } });
+    expect(byPath.get("feature/link.ts")).toMatchObject({ postimage: { content: "kept.ts" } });
+    expect(byPath.get("feature/nested/removed.ts")).toMatchObject({ postimage: null });
+    expect(written.artifacts[1].diff.content).toContain("+after");
+    expect(written.artifacts[3].diff.content).toContain("deleted file mode");
+    expect(cli(["helper", "review-packet", "verify", "--packet", packet], "", {}, root).trim()).toBe(id);
+  });
+
   it("preserves and byte-hashes a binary postimage through the real CLI", () => {
     const root = reviewPacketRepository();
     const dir = mkdtempSync(join(root, ".tmp-review-packet-binary-test-"));

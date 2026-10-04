@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import { compareStrings } from "./ordering";
 import { isExactGitSha } from "./git-sha";
+import { artifactCovers } from "./path-coverage";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | readonly JsonValue[];
@@ -439,19 +440,26 @@ function parseArtifactInputs(raw: unknown): ParsedArtifacts {
   return { artifacts, paths, errors };
 }
 
+/** Artifacts are files. A scoped file is its own artifact; a scoped directory
+ * is reviewed through the leaf files below it, so it must cover at least one
+ * artifact, and every artifact must sit at or below some scoped path. */
 function scopeErrors(
   declared: readonly ReviewPath[],
   modified: readonly ReviewPath[],
   artifactPaths: ReadonlySet<ReviewPath>,
 ): string[] {
   const errors: string[] = [];
-  const scope = new Set([...declared, ...modified]);
-  if (scope.size === 0) errors.push("review packet scope must be non-empty");
+  const scope = [...new Set([...declared, ...modified])];
+  if (scope.length === 0) errors.push("review packet scope must be non-empty");
   for (const path of artifactPaths) {
-    if (!scope.has(path)) errors.push(`artifact '${path}' is outside the declared/modified scope`);
+    if (!scope.some((scoped) => artifactCovers(scoped, path))) {
+      errors.push(`artifact '${path}' is outside the declared/modified scope`);
+    }
   }
-  for (const path of scope) {
-    if (!artifactPaths.has(path)) errors.push(`scoped path '${path}' has no artifact`);
+  for (const scoped of scope) {
+    if (![...artifactPaths].some((path) => artifactCovers(scoped, path))) {
+      errors.push(`scoped path '${scoped}' has no artifact`);
+    }
   }
   return errors;
 }
