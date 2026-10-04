@@ -58,7 +58,7 @@ import { parseRequestId, parseSlotId, parseOrchestrationRunId } from "./orchestr
 import { isNoFindingSentinel } from "../utils/no-finding-sentinel";
 import { isExactGitSha } from "./git-sha";
 import { isRecord } from "./plain-record";
-import { scopeCovers } from "./artifact-baseline";
+import { scopeCovers } from "./path-coverage";
 import { reviewerDraftV2Schema, reviewerPayloadV2Schema, parseReviewerProtocolDescriptor } from "./reviewer-contract";
 
 // The Finding/ReviewRun/Refutation SHAPES live in ./findings-shape — a leaf

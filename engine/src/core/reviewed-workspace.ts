@@ -1,7 +1,7 @@
 import type { Task } from "../types";
 import { sha256Bytes, sha256Hex } from "./review-packet";
 import type { DomainResult } from "./orchestration-contract";
-import { artifactCovers } from "./artifact-baseline";
+import { artifactCovers } from "./path-coverage";
 import { compareStrings } from "./ordering";
 
 export const WAVE_FROZEN_SOURCE_SECTION = "wave-frozen-source";

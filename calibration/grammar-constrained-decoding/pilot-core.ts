@@ -731,13 +731,19 @@ const GUARDRAIL_REQUIREMENT: Readonly<Record<GuardrailId, string>> = Object.free
 export type PassingVerdict = "pass" | "not-applicable";
 export type GuardrailVerdict = PassingVerdict | "violated" | "inconclusive" | "not-measured";
 
-export type GuardrailOutcome<V extends GuardrailVerdict = GuardrailVerdict> = Readonly<{
-  guardrail: GuardrailId;
+export type GuardrailOutcome<V extends GuardrailVerdict = GuardrailVerdict, G extends GuardrailId = GuardrailId> = Readonly<{
+  guardrail: G;
   verdict: V;
   detail: string;
 }>;
 
-const outcome = <V extends GuardrailVerdict>(guardrail: GuardrailId, verdict: V, detail: string): GuardrailOutcome<V> =>
+/** One outcome per guardrail, each typed by the id it is keyed under, so a
+ *  record whose key and outcome id disagree cannot be written. */
+export type GuardrailRecord<V extends GuardrailVerdict = GuardrailVerdict> = Readonly<{
+  [G in GuardrailId]: GuardrailOutcome<V, G>;
+}>;
+
+const outcome = <G extends GuardrailId, V extends GuardrailVerdict>(guardrail: G, verdict: V, detail: string): GuardrailOutcome<V, G> =>
   Object.freeze({ guardrail, verdict, detail });
 
 export type ArmSummary = Readonly<{
@@ -819,7 +825,7 @@ export type CellOutcome =
       cell: CellKey;
       qualification: EmissionRouteQualification;
       measurement: CellMeasurement;
-      guardrails: Readonly<Record<GuardrailId, GuardrailOutcome>>;
+      guardrails: GuardrailRecord;
     }>
   | Readonly<{
       kind: "qualification-only";
@@ -843,7 +849,7 @@ export type CellOutcome =
 
 export type PassedCellEvidence = Readonly<{
   cell: CellKey;
-  guardrails: Readonly<Record<GuardrailId, GuardrailOutcome<PassingVerdict>>>;
+  guardrails: GuardrailRecord<PassingVerdict>;
 }>;
 
 export type GuardrailViolation = Readonly<{ cell: CellKey; guardrail: GuardrailId; requirement: string; detail: string }>;
@@ -981,7 +987,7 @@ type Pair = Readonly<{ scheduled: ScheduledPair; emission: SampleObservation; ex
 
 function latencyGuardrail(pairs: readonly Pair[], prereg: Preregistration): Readonly<{
   measurement: CellMeasurement["latency"];
-  guardrail: GuardrailOutcome;
+  guardrail: GuardrailOutcome<GuardrailVerdict, "latency-p95">;
 }> {
   const { p95RatioBound: bound, bootstrapResamples, bootstrapSeed, confidenceLevel } = prereg.guardrails;
   const ratioOf = (sample: readonly Pair[]): number =>
@@ -1007,7 +1013,7 @@ function latencyGuardrail(pairs: readonly Pair[], prereg: Preregistration): Read
   });
 }
 
-function latencyVerdict(ratio: number, interval: Interval, bound: number, describe: string): GuardrailOutcome {
+function latencyVerdict(ratio: number, interval: Interval, bound: number, describe: string): GuardrailOutcome<GuardrailVerdict, "latency-p95"> {
   if (Number.isNaN(ratio)) {
     return outcome("latency-p95", "inconclusive", `both arms' p95 is dominated by terminal failures or undefined; ${describe}`);
   }
@@ -1018,7 +1024,7 @@ function latencyVerdict(ratio: number, interval: Interval, bound: number, descri
 
 function terminalGuardrail(pairs: readonly Pair[], prereg: Preregistration): Readonly<{
   measurement: CellMeasurement["terminal"];
-  guardrail: GuardrailOutcome;
+  guardrail: GuardrailOutcome<GuardrailVerdict, "terminal-failure-non-increase">;
 }> {
   const failed = (sample: SampleObservation): number => (sampleTerminal(sample).kind === "terminal-failure" ? 1 : 0);
   const emissionFailures = pairs.reduce((sum, pair) => sum + failed(pair.emission), 0);
@@ -1045,7 +1051,7 @@ function terminalGuardrail(pairs: readonly Pair[], prereg: Preregistration): Rea
   });
 }
 
-function structuralGuardrail(series: StructuralSeries): GuardrailOutcome {
+function structuralGuardrail(series: StructuralSeries): GuardrailOutcome<GuardrailVerdict, "provider-structural-retries"> {
   if (series.providerEnforcedStructuralRetries === "not-applicable") {
     return outcome("provider-structural-retries", "not-applicable",
       `route qualified ${series.qualification}: it was verified to enforce no JSON Schema constraint; ` +
@@ -1063,7 +1069,7 @@ function compareQuality(
   pairs: readonly Pair[],
   prereg: Preregistration,
   quality: QualityInputs,
-): Result<Readonly<{ comparison: QualityComparison | null; guardrail: GuardrailOutcome }>, readonly string[]> {
+): Result<Readonly<{ comparison: QualityComparison | null; guardrail: GuardrailOutcome<GuardrailVerdict, "escaped-defect-severity"> }>, readonly string[]> {
   const casesById = new Map(cell.workload.cases.map((entry) => [entry.caseId, entry] as const));
   const heldOut = pairs.filter((pair) => casesById.get(pair.scheduled.caseId)?.heldOutKnownDefectCase === true);
   if (heldOut.length === 0) {
@@ -1170,7 +1176,7 @@ function compareQuality(
   });
 }
 
-function qualityVerdict(meanDifference: number, interval: Interval, margin: number, describe: string): GuardrailOutcome {
+function qualityVerdict(meanDifference: number, interval: Interval, margin: number, describe: string): GuardrailOutcome<GuardrailVerdict, "escaped-defect-severity"> {
   if (interval.lower > 0 || meanDifference > margin) {
     return outcome("escaped-defect-severity", "violated", `${describe}: worse than the PR #52-only extraction baseline`);
   }
@@ -1288,6 +1294,9 @@ function consistencyProblems(evidence: PilotEvidence, schedule: readonly Schedul
 const isPassing = (guardrail: GuardrailOutcome): guardrail is GuardrailOutcome<PassingVerdict> =>
   guardrail.verdict === "pass" || guardrail.verdict === "not-applicable";
 
+const allPassing = (guardrails: GuardrailRecord): guardrails is GuardrailRecord<PassingVerdict> =>
+  GUARDRAIL_IDS.every((id) => isPassing(guardrails[id]));
+
 /** What one cell contributes to the release decision, in cell order. */
 type CellFindings = Readonly<{
   violations: readonly GuardrailViolation[];
@@ -1334,14 +1343,8 @@ function measuredCellFindings(measured: Extract<CellOutcome, { kind: "measured" 
     })])
     .with("pass", "not-applicable", "violated", () => [])
     .exhaustive());
-  const passing = guardrails.filter(isPassing);
-  // Every GUARDRAIL_IDS entry is present (mapped above) and every one passed
-  // the type guard, so the record is total over the passing type.
-  const passed: readonly PassedCellEvidence[] = passing.length === guardrails.length
-    ? [Object.freeze({
-      cell: measured.cell,
-      guardrails: Object.freeze(Object.fromEntries(passing.map((guardrail) => [guardrail.guardrail, guardrail]))) as PassedCellEvidence["guardrails"],
-    })]
+  const passed: readonly PassedCellEvidence[] = allPassing(measured.guardrails)
+    ? [Object.freeze({ cell: measured.cell, guardrails: measured.guardrails })]
     : [];
   return { violations, missing, passed, qualificationOnly: [] };
 }

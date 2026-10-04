@@ -3,8 +3,6 @@ import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import { parseReviewPath, sha256Hex } from "./review-packet";
 import { artifactCovers } from "./path-coverage";
 
-export { artifactCovers, scopeCovers } from "./path-coverage";
-
 /** A directory artifact snapshots as `sha256` over its tree digest, so the
  *  persisted shape is the same for file and directory artifacts. */
 export type ArtifactSnapshot =

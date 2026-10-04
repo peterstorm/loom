@@ -14,7 +14,8 @@ import {
   evaluateTaskProof,
   PI_STRUCTURED_EVIDENCE_POLICY,
 } from "../../core/proof-obligations";
-import { artifactCovers, attributedChangedArtifacts } from "../../core/artifact-baseline";
+import { attributedChangedArtifacts } from "../../core/artifact-baseline";
+import { artifactCovers } from "../../core/path-coverage";
 import { invalidateTaskReview } from "../../core/review-output";
 import {
   parseReviewPacketRecovery,

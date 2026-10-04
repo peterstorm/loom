@@ -71,7 +71,7 @@ import { acceptedAgentResult, canonicalStructuralEquals, type AgentRequestAuthor
 import { readWaveReviewContext } from "./wave-review-authority";
 import { readExactDataRecord } from "./orchestration-contract/bytes";
 import { isStandaloneReviewAgent } from "./model-profiles";
-import { scopeCovers } from "./artifact-baseline";
+import { scopeCovers } from "./path-coverage";
 
 export type ReviewerSubjectBinding =
   | Readonly<{ kind: "standalone-review"; runId: OrchestrationRunId; scope: readonly string[] }>

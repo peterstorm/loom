@@ -8,11 +8,11 @@ import {
 } from "../types";
 export { parseNewTestEvidence, type NewTestEvidence } from "../types";
 import {
-  artifactCovers,
   attributedChangedArtifacts,
   changedDeclaredArtifacts,
   type DeclaredArtifactBaseline,
 } from "./artifact-baseline";
+import { artifactCovers } from "./path-coverage";
 import {
   createTaskCompletionSuiteResult,
   parseCanonicalArtifactBaseline,

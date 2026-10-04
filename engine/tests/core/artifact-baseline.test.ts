@@ -3,8 +3,8 @@ import fc from "fast-check";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { artifactCovers } from "../../src/core/path-coverage";
 import {
-  artifactCovers,
   attributedChangedArtifacts,
   changedDeclaredArtifacts,
   parseDeclaredArtifactBaseline,

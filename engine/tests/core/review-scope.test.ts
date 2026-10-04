@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { scopeCovers } from "../../src/core/artifact-baseline";
+import { scopeCovers } from "../../src/core/path-coverage";
 import { constrainReviewResolutionToScope, makeParsedFindings } from "../../src/core/review-output";
 
 describe("scopeCovers", () => {
