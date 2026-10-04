@@ -1,0 +1,67 @@
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { deliveredSpecCheckText } from "../../../src/handlers/subagent-stop/store-spec-check-findings";
+import { parseSpecCheckOutput } from "../../../src/core/spec-check";
+import { parseTranscript } from "../../../src/parsers/parse-transcript";
+
+const REPORT = [
+  "SPEC_CHECK_WAVE: 8",
+  "HIGH: the pilot recorded 0 observations",
+  "SPEC_CHECK_CRITICAL_COUNT: 0",
+  "SPEC_CHECK_HIGH_COUNT: 1",
+  "SPEC_CHECK_VERDICT: PASSED",
+].join("\n");
+
+const dirs: string[] = [];
+afterEach(() => {
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+function transcript(lines: readonly object[]): string {
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-spec-check-handback-")));
+  dirs.push(dir);
+  const path = join(dir, "agent.jsonl");
+  writeFileSync(path, lines.map((line) => JSON.stringify(line)).join("\n") + "\n");
+  return path;
+}
+
+const handbackTurn = (message: string, isError = false) => [
+  { type: "assistant", message: { id: "m1", role: "assistant", content: [
+    { type: "tool_use", id: "h1", name: "SubagentHandback", input: { message } },
+  ] } },
+  { type: "user", message: { role: "user", content: [
+    { type: "tool_result", tool_use_id: "h1", content: "delivered", is_error: isError },
+  ] } },
+  { type: "attachment" },
+];
+
+describe("deliveredSpecCheckText", () => {
+  it("reads a SubagentHandback report so its finding lines reconcile with the counts", () => {
+    // Current Claude subagents deliver through SubagentHandback; the legacy
+    // text read parses an echoed skill template instead of the delivered report.
+    const path = transcript(handbackTurn(REPORT));
+    const text = deliveredSpecCheckText(path, "legacy text");
+    expect(text).toBe(REPORT);
+    const parsed = parseSpecCheckOutput(text);
+    expect(parsed.high).toEqual(["the pilot recorded 0 observations"]);
+    expect(parsed.highCount).toBe(1);
+  });
+
+  it("keeps the legacy text when the final turn delivered no handback", () => {
+    const path = transcript([{ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: REPORT }] } }]);
+    expect(deliveredSpecCheckText(path, "legacy text")).toBe("legacy text");
+  });
+
+  it("keeps the legacy text when the handback failed, so nothing undelivered is parsed", () => {
+    const path = transcript(handbackTurn(REPORT, true));
+    expect(deliveredSpecCheckText(path, "legacy text")).toBe("legacy text");
+  });
+
+  it("documents why the legacy read cannot reconcile a handback report", () => {
+    const path = transcript(handbackTurn(REPORT));
+    const legacy = parseSpecCheckOutput(parseTranscript(require("node:fs").readFileSync(path, "utf8")));
+    expect(legacy.high).toEqual([]);
+  });
+});
