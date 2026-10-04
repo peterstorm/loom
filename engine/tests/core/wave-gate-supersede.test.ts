@@ -39,4 +39,30 @@ describe("supersedeAbandonedWaveGateReview", () => {
     expect(t14).toMatchObject({ review_status: "passed", accepted_review_authority: { run_id: "run.other" } });
     expect(t1).toMatchObject({ review_status: "passed", accepted_review_authority: { run_id: "run.abandoned" } });
   });
+
+  const blockedBySpecCheck = (criticalFindings: readonly string[]) => ({
+    ...graph,
+    wave_gates: { "8": { impl_complete: true, tests_passed: null, reviews_complete: false, blocked: true } },
+    tasks: graph.tasks.map((task) => task.id === "T14" ? { ...task, critical_findings: criticalFindings } : task),
+    spec_check: {
+      wave: 8, run_at: "now", verdict: "BLOCKED", critical_count: 1, high_count: 0,
+      critical_findings: ["Current Wave has no Requirement Completion Claims or valid Requirement Contributions"],
+      high_findings: [], medium_findings: [],
+    },
+  }) as unknown as TaskGraph;
+
+  it("clears a block whose only cause was the retired spec-check", () => {
+    // Production regression: abandoning a Wave 9 gate whose spec-check settled
+    // a CRITICAL left wave_gates["9"].blocked behind with no cause, and the
+    // successor's registration was refused as a causeless block.
+    const next = supersedeAbandonedWaveGateReview(blockedBySpecCheck([]), "run.abandoned", ["T13", "T14"]);
+    expect(next.spec_check).toBeUndefined();
+    expect(next.wave_gates["8"]).toMatchObject({ blocked: false, impl_complete: true });
+    expect(next.wave_gates["1"]).toBeUndefined();
+  });
+
+  it("keeps a block that a surviving critical review Finding still causes", () => {
+    const next = supersedeAbandonedWaveGateReview(blockedBySpecCheck(["still broken"]), "run.abandoned", ["T13", "T14"]);
+    expect(next.wave_gates["8"]).toMatchObject({ blocked: true });
+  });
 });
