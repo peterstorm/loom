@@ -64,6 +64,7 @@ const indexed: SpecIndexAvailability =
 const task = (overrides: Partial<CoverageTask> = {}): CoverageTask => Object.freeze({
   id: "T1",
   inCurrentWave: true,
+  decisionRecord: false,
   completionAnchors: ["FR-001"],
   contributions: [],
   declaredFiles: ["src/a.ts"],

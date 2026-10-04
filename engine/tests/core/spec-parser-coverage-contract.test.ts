@@ -29,6 +29,7 @@ const canonicalSpec = [
 const tasks: readonly CoverageTask[] = [{
   id: "T1",
   inCurrentWave: true,
+  decisionRecord: false,
   completionAnchors: ["FR-001", "AS-001"],
   contributions: [],
   declaredFiles: ["src/parser.ts"],
