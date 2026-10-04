@@ -58,6 +58,7 @@ import { parseRequestId, parseSlotId, parseOrchestrationRunId } from "./orchestr
 import { isNoFindingSentinel } from "../utils/no-finding-sentinel";
 import { isExactGitSha } from "./git-sha";
 import { isRecord } from "./plain-record";
+import { scopeCovers } from "./artifact-baseline";
 import { reviewerDraftV2Schema, reviewerPayloadV2Schema, parseReviewerProtocolDescriptor } from "./reviewer-contract";
 
 // The Finding/ReviewRun/Refutation SHAPES live in ./findings-shape — a leaf
@@ -1008,7 +1009,7 @@ export function reviewRunError(
     if (!Array.isArray(evidence.new_findings) || evidence.new_findings.some((rawDraft) => {
       const draft = parseStoredDraft(rawDraft);
       return draft === null || (draft.protocolVersion === 2) !== current ||
-        (current && draft.file !== null && !(run.workspace_scope as readonly string[]).includes(draft.file));
+        (current && draft.file !== null && !scopeCovers(run.workspace_scope as readonly string[], draft.file));
     })) {
       return `${evidenceLabel}.new_findings must be well-formed draft findings`;
     }

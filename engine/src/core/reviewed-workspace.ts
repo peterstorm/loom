@@ -1,9 +1,12 @@
 import type { Task } from "../types";
 import { sha256Hex } from "./review-packet";
 
-/** A byte-exact, declared-artifact snapshot. `null` means the declared path
- * was absent when the Review Packet was issued. */
-export type ReviewedArtifact = Readonly<{ path: string; bytes: Uint8Array | null }>;
+/** A byte-exact, declared-artifact snapshot. `null` bytes mean the declared
+ * path was absent when the Review Packet was issued; a declared directory is
+ * identified by its Git-visible tree digest. */
+export type ReviewedArtifact =
+  | Readonly<{ path: string; bytes: Uint8Array | null }>
+  | Readonly<{ path: string; tree: string }>;
 
 export type ReviewedWorkspaceAuthority = Readonly<{
   taskId: string;
@@ -28,11 +31,14 @@ export function reviewedWorkspaceHeadSha(
   scope: readonly string[],
   artifacts: readonly ReviewedArtifact[],
 ): string {
-  const byPath = new Map(artifacts.map((artifact) => [artifact.path, artifact.bytes]));
+  const byPath = new Map(artifacts.map((artifact) => [artifact.path, artifact]));
+  // File and absent encodings are unchanged so persisted review authority keeps
+  // matching; a directory gets a distinct tagged form no file can produce.
   const canonical = [...scope].sort().map((path) => {
-    const bytes = byPath.get(path);
-    if (bytes === undefined) throw new Error(`reviewed workspace snapshot omitted declared artifact ${path}`);
-    return [path, bytes === null ? null : Buffer.from(bytes).toString("base64")];
+    const artifact = byPath.get(path);
+    if (artifact === undefined) throw new Error(`reviewed workspace snapshot omitted declared artifact ${path}`);
+    if ("tree" in artifact) return [path, { tree: artifact.tree }];
+    return [path, artifact.bytes === null ? null : Buffer.from(artifact.bytes).toString("base64")];
   });
   return sha256Hex(JSON.stringify(canonical));
 }

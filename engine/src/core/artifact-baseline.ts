@@ -80,6 +80,12 @@ export function artifactCovers(artifact: string, path: string): boolean {
   return path === artifact || path.startsWith(`${artifact}/`);
 }
 
+/** A path is inside a declared scope when any scoped artifact covers it, so a
+ *  location below a directory artifact is in scope. */
+export function scopeCovers(scope: readonly string[], path: string): boolean {
+  return scope.some((artifact) => artifactCovers(artifact, path));
+}
+
 /**
  * A declared artifact is attributable to one task only when both independent
  * observations agree: repository bytes changed after its baseline, and that

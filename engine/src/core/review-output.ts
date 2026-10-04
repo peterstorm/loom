@@ -71,6 +71,7 @@ import { acceptedAgentResult, canonicalStructuralEquals, type AgentRequestAuthor
 import { readWaveReviewContext } from "./wave-review-authority";
 import { readExactDataRecord } from "./orchestration-contract/bytes";
 import { isStandaloneReviewAgent } from "./model-profiles";
+import { scopeCovers } from "./artifact-baseline";
 
 export type ReviewerSubjectBinding =
   | Readonly<{ kind: "standalone-review"; runId: OrchestrationRunId; scope: readonly string[] }>
@@ -212,7 +213,7 @@ function parseCurrentReviewerEvidence(
   const payload = parsed.value;
   const subject = authority.subject;
   if (payload.kind !== subject.kind) return protocolFailure("binding-mismatch", "/kind", "payload kind must match issued subject");
-  if (payload.findings.some(({ file }) => file !== null && !subject.scope.includes(file))) {
+  if (payload.findings.some(({ file }) => file !== null && !scopeCovers(subject.scope, file))) {
     return protocolFailure("out-of-scope", "/findings", "finding location is outside the frozen scope");
   }
   const drafts = Object.freeze(payload.findings.map((draft): CurrentDraftFinding => Object.freeze({ protocolVersion: 2, ...draft })));
@@ -947,23 +948,24 @@ export function resolveTaskReviewFindings(
 /**
  * Bind located wave findings to the task's Review Packet scope. A null location
  * is honest for cross-cutting claims and remains valid; a supplied path must be
- * one of the task's declared or observed files.
+ * one of the task's declared or observed files, or lie below a declared
+ * directory artifact.
  */
 export function constrainReviewResolutionToScope(
   resolution: ReviewResolution,
   scope: readonly string[],
 ): ReviewResolution {
   if (resolution.kind !== "findings" && resolution.kind !== "bound-findings") return resolution;
-  const allowed = new Set(scope.flatMap((path) => {
+  const allowed = scope.flatMap((path) => {
     const parsed = parseReviewPath(path, "review scope path");
     return parsed.ok ? [parsed.value] : [];
-  }));
+  });
   const outside = resolution.findings.drafts
     .map((finding) => finding.file)
     .filter((file): file is string => {
       if (file === null) return false;
       const parsed = parseReviewPath(file, "review finding path");
-      return !parsed.ok || !allowed.has(parsed.value);
+      return !parsed.ok || !scopeCovers(allowed, parsed.value);
     });
   if (outside.length === 0) return resolution;
   return {
