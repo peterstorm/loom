@@ -29,6 +29,7 @@ import type { DomainResult } from "./core/orchestration-contract";
 import type { WaveCompletionCommit, WaveCompletionCommitError } from "./core/wave-gate-machine";
 import { assertPiCliMutationCompatible, captureLoomRuntimeIdentity } from "./runtime-compatibility";
 import { waveGateAuthorityDigest } from "./core/wave-review-authority";
+import { supersedeAbandonedWaveGateReview } from "./core/wave-gate-supersede";
 import {
   anchoredDirectoryHasIdentity,
   anchoredDirectoryIdentity,
@@ -453,7 +454,8 @@ export class StateManager {
         // fresh registration supersedes it below. Roster and digest are still
         // re-proven against the locked state, and the tombstone is NOT
         // archived into wave_gate_history — that history poisons later starts
-        // for the same Wave, and an abandoned run was never completed.
+        // for the same Wave, and an abandoned run was never completed. Its
+        // review epoch and evidence are retired after the digest is proven.
       }
       const lockedTaskIds = state.tasks
         .filter((task) => task.wave === registration.wave)
@@ -466,7 +468,10 @@ export class StateManager {
           "Protected Wave authority changed after Run Directory publication; active Wave Gate was not installed",
         );
       }
-      return { state: { ...state, active_wave_gate: registration }, value: registration };
+      const superseded = existing?.terminalOutcome?.kind === "terminal-abandoned"
+        ? supersedeAbandonedWaveGateReview(state, existing.runId, lockedTaskIds)
+        : state;
+      return { state: { ...superseded, active_wave_gate: registration }, value: registration };
     });
   }
 

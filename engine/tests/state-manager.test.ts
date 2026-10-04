@@ -1579,11 +1579,19 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
         runsRoot: "/runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
       });
 
+      // The abandoned run's review evidence must not survive into the successor.
+      await mgr.update((locked) => ({
+        ...locked,
+        spec_check: { wave: 1, run_at: "2026-10-04T00:00:00.000Z", verdict: "EVIDENCE_CAPTURE_FAILED", error: "stale", cause: "transcript" },
+      }));
+
       // The digest is re-derived from the CURRENT locked state — the tombstone
       // is part of it, exactly as production derives it before install.
       await mgr.registerActiveWaveGate(activeGate("run.second", mgr.load()), ["T1"]);
       const after = mgr.load();
       expect(after.active_wave_gate?.runId).toBe("run.second");
+      expect(after.spec_check).toBeUndefined();
+      expect(after.wave_review_epoch).toBeUndefined();
       expect(after.active_wave_gate?.terminalOutcome).toBeNull();
       // The tombstone is NOT archived into terminal history: that history
       // poisons later starts for the same Wave, and an abandoned run was
