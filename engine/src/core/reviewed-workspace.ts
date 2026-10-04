@@ -1,11 +1,15 @@
 import type { Task } from "../types";
 import { sha256Bytes, sha256Hex } from "./review-packet";
 import type { DomainResult } from "./orchestration-contract";
+import { artifactCovers } from "./artifact-baseline";
+import { compareStrings } from "./ordering";
 
 export const WAVE_FROZEN_SOURCE_SECTION = "wave-frozen-source";
 export const WAVE_FROZEN_SOURCE_SCHEMA_VERSION = 1;
 
-/** Bytes observed for one path. `null` means the declared path was absent. */
+/** Bytes observed for one file. `null` means the path was absent. A scoped
+ * file is its own artifact; a scoped directory contributes one artifact per
+ * Git-visible leaf below it, or a single absent artifact when it has none. */
 export type ReviewedArtifact = Readonly<{ path: string; bytes: Iterable<number> | null }>;
 
 export type ReviewedWorkspaceAuthority = Readonly<{
@@ -44,6 +48,9 @@ const failed = <T>(error: string): DomainResult<T, string> => ({ ok: false, erro
 const isByte = (byte: unknown): byte is number =>
   typeof byte === "number" && Number.isInteger(byte) && byte >= 0 && byte <= 255;
 
+/** Artifacts sorted by path, each at or below a scoped path, every scoped
+ * path covering at least one. A file-only scope is exactly one artifact per
+ * scoped path, so its encoding is unchanged. */
 function canonicalArtifacts(
   scope: readonly string[],
   artifacts: readonly ReviewedArtifact[],
@@ -51,13 +58,12 @@ function canonicalArtifacts(
   if (scope.some((path) => typeof path !== "string" || path.trim() === "") || new Set(scope).size !== scope.length) {
     return failed("reviewed workspace scope must contain unique nonblank paths");
   }
-  const scopeSet = new Set(scope);
   const byPath = new Map<string, ReviewedArtifact>();
   for (const artifact of artifacts) {
     if (typeof artifact !== "object" || artifact === null || typeof artifact.path !== "string") {
       return failed("reviewed workspace contains a malformed artifact observation");
     }
-    if (!scopeSet.has(artifact.path)) {
+    if (!scope.some((scoped) => artifactCovers(scoped, artifact.path))) {
       return failed(`reviewed workspace contains out-of-scope artifact ${artifact.path}`);
     }
     if (byPath.has(artifact.path)) {
@@ -81,16 +87,15 @@ function canonicalArtifacts(
       bytes: Object.freeze(materialized),
     }));
   }
-  const missing = scope.find((path) => !byPath.has(path));
+  const paths = [...byPath.keys()];
+  const missing = scope.find((scoped) => !paths.some((path) => artifactCovers(scoped, path)));
   if (missing !== undefined) return failed(`reviewed workspace snapshot omitted declared artifact ${missing}`);
-  return { ok: true, value: Object.freeze(scope.map((path) => byPath.get(path)!)) };
+  return { ok: true, value: Object.freeze(paths.sort(compareStrings).map((path) => byPath.get(path)!)) };
 }
 
-function headSha(scope: readonly string[], artifacts: readonly ReviewedArtifact[]): string {
-  return sha256Hex(JSON.stringify(scope.map((path, index) => {
-    const bytes = artifacts[index]!.bytes;
-    return [path, bytes === null ? null : Buffer.from(Uint8Array.from(bytes)).toString("base64")];
-  })));
+function headSha(artifacts: readonly ReviewedArtifact[]): string {
+  return sha256Hex(JSON.stringify(artifacts.map(({ path, bytes }) =>
+    [path, bytes === null ? null : Buffer.from(Uint8Array.from(bytes)).toString("base64")])));
 }
 
 /** Canonical content identity for exact observed bytes, independent of Git state. */
@@ -101,7 +106,7 @@ export function reviewedWorkspaceHeadSha(
   const canonicalScope = [...scope].sort();
   const parsed = canonicalArtifacts(canonicalScope, artifacts);
   if (!parsed.ok) throw new Error(parsed.error);
-  return headSha(canonicalScope, parsed.value);
+  return headSha(parsed.value);
 }
 
 /** Smart constructor: copy mutable shell buffers before deriving the digest. */
@@ -117,7 +122,7 @@ export function reviewedWorkspaceObservation(
     taskId,
     scope: canonicalScope,
     artifacts: parsed.value,
-    headSha: headSha(canonicalScope, parsed.value),
+    headSha: headSha(parsed.value),
   });
 }
 
@@ -138,7 +143,7 @@ export function parseReviewedWorkspaceSnapshot(
   }
   const artifacts = canonicalArtifacts(canonicalScope, observation.artifacts);
   if (!artifacts.ok) return failed(`Task ${taskId}: ${artifacts.error}`);
-  const computed = headSha(canonicalScope, artifacts.value);
+  const computed = headSha(artifacts.value);
   if (observation.headSha !== computed) {
     return failed(`Task ${taskId} workspace bytes disagree with observed workspaceHeadSha`);
   }
@@ -232,7 +237,7 @@ export function parseWaveFrozenSource(raw: unknown): DomainResult<WaveFrozenSour
   const canonical = [...scope].sort();
   if (scope.some((path, index) => path !== canonical[index])) return failed("wave frozen source files must be sorted by path");
   const parsedArtifacts = canonicalArtifacts(scope, artifacts);
-  if (!parsedArtifacts.ok || headSha(scope, parsedArtifacts.value) !== raw.workspaceHeadSha) {
+  if (!parsedArtifacts.ok || headSha(parsedArtifacts.value) !== raw.workspaceHeadSha) {
     return failed("wave frozen source bytes disagree with workspaceHeadSha");
   }
   return { ok: true, value: Object.freeze({
