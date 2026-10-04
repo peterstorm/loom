@@ -1,5 +1,5 @@
 import { lstatSync, realpathSync, type Stats } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   parseRepositoryPath,
   parseRepositoryPathSet,
@@ -80,6 +80,59 @@ export function inspectRepositoryPath(
   }
 
   return Object.freeze({ ...parsed.value, exists: pathExists });
+}
+
+/** Transcript write evidence split at the repository boundary. */
+export type PartitionedWriteEvidence = Readonly<{
+  repository: readonly string[];
+  external: readonly string[];
+}>;
+
+const isOutside = (root: string, path: string): boolean => {
+  const fromRoot = relative(root, path);
+  return fromRoot === ".." || fromRoot.startsWith("../") || isAbsolute(fromRoot);
+};
+
+/** Real location of a possibly-absent path: the deepest existing ancestor
+ *  resolved through every symlink, joined with the not-yet-existing suffix. */
+function realLocation(path: string): string {
+  let existing = path;
+  const suffix: string[] = [];
+  for (;;) {
+    try {
+      return join(realpathSync(existing), ...suffix.reverse());
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+      const parent = dirname(existing);
+      if (parent === existing) return path;
+      suffix.push(existing.slice(parent.length).replace(/^\//, ""));
+      existing = parent;
+    }
+  }
+}
+
+/**
+ * An Agent may write outside the repository (its scratchpad, /tmp). Such a
+ * write cannot change repository bytes, so it is neither byte-scope evidence
+ * nor an observation failure. "Outside" is proven twice — lexically and by
+ * real location — so an alias that resolves into the repository (a symlinked
+ * prefix) stays repository evidence. Relative paths always stay repository
+ * evidence for the strict parser, so a `../` escape still fails closed.
+ */
+export function partitionWriteEvidence(root: string, raw: readonly string[]): PartitionedWriteEvidence {
+  const canonicalRoot = resolve(root);
+  // Resolved only when a lexically external candidate needs the second proof,
+  // so repository-only evidence never touches the filesystem here.
+  let realRoot: string | undefined;
+  const repository: string[] = [];
+  const external: string[] = [];
+  for (const path of raw) {
+    const outside = isAbsolute(path) && isOutside(canonicalRoot, resolve(path)) &&
+      isOutside(realRoot ??= realpathSync(canonicalRoot), realLocation(resolve(path)));
+    (outside ? external : repository).push(path);
+  }
+  return Object.freeze({ repository: Object.freeze(repository), external: Object.freeze(external) });
 }
 
 /** Lexical canonicalization for transcript evidence before it enters state. */
