@@ -19,6 +19,21 @@ import { stripNamespace } from "../../utils/strip-namespace";
 import { observeWaveSpecCheckDocuments } from "../../orchestration/wave-spec-check-documents";
 import { epochSettledFloor } from "../../core/wave-review-authority";
 import { observeTaskGraphProjectBoundary } from "../../config";
+import { claudeFinalPayloadCandidates } from "./capture-orchestration-result";
+
+/**
+ * The spec-check report text to parse. Current Claude subagents deliver their
+ * report through one `SubagentHandback` call, whose JSON-escaped tool input
+ * hides every line-start `CRITICAL:`/`HIGH:` finding from the legacy text
+ * read while its count markers still match — so the counts can never
+ * reconcile. Exactly one delivered handback is the report; anything else keeps
+ * the legacy read, whose reconciliation still fails closed.
+ */
+export function deliveredSpecCheckText(transcriptPath: string, legacyText: string): string {
+  const handbacks = claudeFinalPayloadCandidates(transcriptPath)
+    .filter(({ origin }) => origin.endsWith(".handback"));
+  return handbacks.length === 1 ? handbacks[0]!.text : legacyText;
+}
 
 export const runStoreSpecCheckFindings = async (
   stdin: string,
@@ -66,7 +81,10 @@ export const runStoreSpecCheckFindings = async (
     : null;
   if (resolvedTranscriptPath !== null) {
     try {
-      transcript = await readTranscriptWithRetry(resolvedTranscriptPath, /SPEC_CHECK_CRITICAL_COUNT:\s*\d+/);
+      transcript = deliveredSpecCheckText(
+        resolvedTranscriptPath,
+        await readTranscriptWithRetry(resolvedTranscriptPath, /SPEC_CHECK_CRITICAL_COUNT:\s*\d+/),
+      );
     } catch (error) {
       transcriptFailure = `spec-check transcript is unreadable: ${error instanceof Error ? error.message : String(error)}`;
     }
