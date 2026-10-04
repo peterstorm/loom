@@ -1654,6 +1654,40 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
     }
   });
 
+  it("reopens a review the abandoned run accepted when its successor installs", async () => {
+    const dir = makeTmpDir();
+    const statePath = join(dir, "active_task_graph.json");
+    writeFileSync(statePath, JSON.stringify(waveGraph));
+    chmodSync(statePath, 0o444);
+    try {
+      const mgr = new StateManager(statePath);
+      await mgr.registerActiveWaveGate(activeGate("run.first", mgr.load()), ["T1"]);
+      const first = mgr.load().active_wave_gate!;
+      await mgr.update((locked) => ({
+        ...locked,
+        tasks: locked.tasks.map((task) => ({
+          ...task,
+          review_status: "passed" as const,
+          review_generation: 1,
+          accepted_review_authority: {
+            generation: 1, packet_id: "b".repeat(64), head_sha: "c".repeat(64), scope: ["src/a.ts"],
+            run_id: first.runId, authority_digest: first.authorityDigest,
+          },
+        })),
+      }));
+      await mgr.abandonActiveWaveGateRegistration({
+        runsRoot: "/runs", runId: runId("run.first"), reason: "gate terminally blocked", supersededBy: null,
+      });
+
+      await mgr.registerActiveWaveGate(activeGate("run.second", mgr.load()), ["T1"]);
+      const installed = mgr.load();
+      expect(installed.tasks[0]).toMatchObject({ review_status: "pending", review_generation: 1 });
+      expect(installed.tasks[0]?.accepted_review_authority).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("binds a named abandonment successor to exactly that fresh registration", async () => {
     const dir = makeTmpDir();
     const statePath = join(dir, "active_task_graph.json");

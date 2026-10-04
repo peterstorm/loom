@@ -26,9 +26,10 @@ import {
 } from "./machine";
 import type { ActiveWaveGateRegistration, CompletedWaveGateRegistration, TaskGraph } from "./types";
 import type { DomainResult } from "./core/orchestration-contract";
-import { resetWaveGateReviewAuthority, type WaveCompletionCommit, type WaveCompletionCommitError } from "./core/wave-gate-machine";
+import type { WaveCompletionCommit, WaveCompletionCommitError } from "./core/wave-gate-machine";
 import { assertPiCliMutationCompatible, captureLoomRuntimeIdentityRestoring, type RuntimeBaselineRestore } from "./runtime-compatibility";
 import { admitWaveGateRegistration } from "./core/wave-gate-registration";
+import { supersedeAbandonedWaveGateReview } from "./core/wave-gate-supersede";
 import {
   anchoredDirectoryHasIdentity,
   anchoredDirectoryIdentity,
@@ -428,11 +429,12 @@ export class StateManager {
       if (admission.kind === "refused") throw new Error(admission.message);
       if (admission.kind === "replay") return { state, value: admission.existing };
       // An abandoned Run is not completion authority. Its review epoch and
-      // packet-bound evidence retire with the successor install, while
+      // packet-bound evidence retire with the successor install, and any review
+      // it accepted reopens because that acceptance's run authority is gone;
       // accepted Findings and implementation proof survive. The tombstone is
       // not archived as a completed Wave.
-      const successorBase = admission.supersedesAbandoned
-        ? resetWaveGateReviewAuthority(state, publishedTaskIds)
+      const successorBase = admission.supersedesAbandoned && state.active_wave_gate !== undefined
+        ? supersedeAbandonedWaveGateReview(state, state.active_wave_gate.runId, publishedTaskIds)
         : state;
       return { state: { ...successorBase, active_wave_gate: registration }, value: registration };
     });
