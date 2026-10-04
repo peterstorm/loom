@@ -93,6 +93,7 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/requirement-coverage.ts",
   "engine/src/core/parse-spec.ts",
   "engine/src/core/artifact-baseline.ts",
+  "engine/src/core/path-coverage.ts",
   "engine/src/core/implementation-retry.ts",
   "engine/src/core/implementation-completion.ts",
   "engine/src/core/task-id.ts",

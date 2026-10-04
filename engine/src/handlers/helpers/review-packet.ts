@@ -1,8 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { argumentValue } from "./cli-args";
 import {
+  lstatSync,
   mkdirSync,
   readFileSync,
+  readlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -22,11 +24,13 @@ import {
   type ReviewPacketArtifactInput,
 } from "../../core/review-packet";
 import { reviewRunPriorFindings, startReviewRun } from "../../core/findings";
+import { compareStrings } from "../../core/ordering";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
 import {
   diffBinaryFileFromRevision,
   diffBinaryUntrackedFile,
   isTrackedAt,
+  visibleLeavesAt,
   type GitDiffResult,
 } from "../../utils/git";
 
@@ -122,8 +126,54 @@ export function readReviewPacketPostimage(
   return inspected.exists ? read(inspected.absolute) : null;
 }
 
-function artifact(root: string, baseSha: BaseSha, path: string): ReviewPacketArtifactInput {
-  const inspected = inspectRepositoryPath(root, path, "review packet path", { mustBeFile: true });
+/** One file the packet reviews. A scoped path names a regular file; a leaf
+ * below a scoped directory may also be a symlink, which a directory artifact
+ * snapshot already hashes by its target. */
+type PacketLeaf = Readonly<
+  | { origin: "scoped-file"; path: string }
+  | { origin: "directory-leaf"; path: string }
+>;
+
+function nulSeparated(output: string): readonly string[] {
+  return output.split("\0").filter((entry) => entry !== "");
+}
+
+/** The Git-visible leaves of a scoped directory — present now or at the
+ * packet base, so a deleted leaf still shows — or null when the path names no
+ * directory in either. Ignored files stay out, as they do for directory
+ * artifact snapshots. */
+function directoryLeaves(root: string, baseSha: BaseSha, path: string): readonly string[] | null {
+  const inspected = inspectRepositoryPath(root, path, "review packet path");
+  const directoryNow = inspected.exists && lstatSync(inspected.absolute).isDirectory();
+  const directoryAtBase = nulSeparated(git(["ls-tree", "-z", "--full-tree", baseSha, "--", path], root))
+    .some((entry) => entry.split("\t")[0]!.split(" ")[1] === "tree");
+  if (!directoryNow && !directoryAtBase) return null;
+  const visible = visibleLeavesAt(root, path);
+  if (!visible.ok) throw new Error(visible.error);
+  const atBase = nulSeparated(git(["ls-tree", "-r", "-z", "--name-only", "--full-tree", baseSha, "--", path], root));
+  return [...new Set([...visible.paths, ...atBase])].sort(compareStrings);
+}
+
+/** Expand the scope into the files the packet reviews. A file scoped both
+ * directly and below a scoped directory keeps its stricter direct origin. */
+function packetLeaves(root: string, baseSha: BaseSha, scope: readonly string[]): readonly PacketLeaf[] {
+  const leaves = new Map<string, PacketLeaf>();
+  for (const path of scope) {
+    const below = directoryLeaves(root, baseSha, path);
+    if (below === null) leaves.set(path, { origin: "scoped-file", path });
+    else for (const leaf of below) {
+      if (!leaves.has(leaf)) leaves.set(leaf, { origin: "directory-leaf", path: leaf });
+    }
+  }
+  return [...leaves.values()].sort((left, right) => compareStrings(left.path, right.path));
+}
+
+function artifact(root: string, baseSha: BaseSha, leaf: PacketLeaf): ReviewPacketArtifactInput {
+  const { path } = leaf;
+  const inspected = leaf.origin === "scoped-file"
+    ? inspectRepositoryPath(root, path, "review packet path", { mustBeFile: true })
+    : inspectRepositoryPath(root, path, "review packet path", { allowLeafSymlink: true });
+  const symlink = inspected.exists && lstatSync(inspected.absolute).isSymbolicLink();
   const present = inspected.exists;
   const trackedResult = isTrackedAt(root, path);
   if (!trackedResult.ok) throw new Error(trackedResult.error);
@@ -141,7 +191,9 @@ function artifact(root: string, baseSha: BaseSha, path: string): ReviewPacketArt
   return {
     path,
     diff,
-    postimage: readReviewPacketPostimage(inspected),
+    postimage: symlink
+      ? readlinkSync(inspected.absolute, { encoding: "buffer" })
+      : readReviewPacketPostimage(inspected),
   };
 }
 
@@ -177,7 +229,7 @@ function prepareTaskReviewPacket(root: string, task: Task, baseSha: BaseSha, hea
     headSha,
     declaredPaths,
     modifiedPaths,
-    artifacts: scope.map((path) => artifact(root, baseSha, path)),
+    artifacts: packetLeaves(root, baseSha, scope).map((leaf) => artifact(root, baseSha, leaf)),
     planContext: task.plan_context ?? "",
     proofObligations: task.proof?.obligations ?? [],
   });

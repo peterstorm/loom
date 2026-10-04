@@ -194,6 +194,30 @@ describe("Review Packet", () => {
     })), /outside the.*scope/);
   });
 
+  it("reviews a scoped directory through the leaf artifacts below it", () => {
+    const directory = createReviewPacket(input({
+      declaredPaths: ["src/feature"],
+      modifiedPaths: ["src/feature"],
+      artifacts: [
+        { path: "src/feature/a.ts", diff: "+a\n", postimage: bytes("a\n") },
+        { path: "src/feature/nested/b.ts", diff: "-b\n", postimage: null },
+      ],
+    }));
+    expect(directory.ok).toBe(true);
+    if (directory.ok) expect(parseReviewPacket(serializeReviewPacket(directory.value))).toEqual(directory);
+    expectError(createReviewPacket(input({
+      declaredPaths: ["src/feature"],
+      modifiedPaths: [],
+      artifacts: [],
+    })), /scoped path 'src\/feature' has no artifact/);
+    // A sibling sharing the directory's name prefix is not below it.
+    expectError(createReviewPacket(input({
+      declaredPaths: ["src/feature"],
+      modifiedPaths: [],
+      artifacts: [{ path: "src/feature-other/a.ts", diff: "x", postimage: bytes("x") }],
+    })), /artifact 'src\/feature-other\/a\.ts' is outside/);
+  });
+
   it("parses and verifies unknown JSON and has fixed-point serialization", () => {
     const created = createReviewPacket(input());
     expect(created.ok).toBe(true);
