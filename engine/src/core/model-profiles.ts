@@ -204,6 +204,11 @@ export const AGENT_CATALOG = Object.freeze({
 
 export type LoomAgentName = keyof typeof AGENT_CATALOG;
 
+/** The Agent that writes Architecture Decision Records for work that already
+ *  shipped. Its Tasks trace to the plan's decisions rather than to a
+ *  Requirement, and they form the plan's final Wave. */
+export const DECISION_RECORD_AGENT = "adr-writer-agent" satisfies LoomAgentName;
+
 /** Row view of the catalog, in catalog order. */
 const CATALOG_ENTRIES = Object.entries(AGENT_CATALOG) as readonly [LoomAgentName, AgentTraits][];
 
