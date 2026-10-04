@@ -1200,27 +1200,42 @@ export function evaluateWaveGate(state: TaskGraph, waveArg: number | null, deps:
  * Retire one Wave review generation as a single aggregate transition.
  *
  * Every authority field invalidated by a replacement gate lives here so
- * restart and orphan recovery cannot drift through shell-local object spreads.
- * Accepted Findings survive; only packet-bound review evidence is retired.
+ * restart, orphan recovery and abandoned-run supersession cannot drift through
+ * shell-local object spreads. Accepted Findings survive; only packet-bound
+ * review evidence is retired.
+ *
+ * Retiring the spec-check can remove a Wave's only block cause, and `blocked`
+ * is derived, never asserted: it is re-derived here through the writers' own
+ * `reconcileWaveBlock`, or the State File boundary refuses the causeless
+ * block and no successor gate can install.
  */
 export function resetWaveGateReviewAuthority(
   graph: TaskGraph,
   taskIds: readonly string[],
 ): TaskGraph {
+  const tasks = Object.freeze(graph.tasks.map((task) => {
+    if (!taskIds.includes(task.id) || task.review_run === undefined) return task;
+    const preserved = preserveAcceptedReviewRunFindings(task);
+    return canonicalRecord({
+      ...preserved,
+      review_status: "pending" as const,
+      review_generation: task.review_generation,
+      review_run: undefined,
+      review_error: undefined,
+      review_evidence_failures: undefined,
+    });
+  }));
+  const affectedWaves = new Set([
+    ...graph.tasks.filter(({ id }) => taskIds.includes(id)).map(({ wave }) => wave),
+    ...(graph.spec_check === undefined ? [] : [graph.spec_check.wave]),
+  ]);
+  const waveGates = [...affectedWaves]
+    .filter((wave) => graph.wave_gates[String(wave)] !== undefined)
+    .reduce((gates, wave) => reconcileWaveBlock(gates, tasks, undefined, wave), graph.wave_gates);
   return canonicalRecord({
     ...graph,
-    tasks: Object.freeze(graph.tasks.map((task) => {
-      if (!taskIds.includes(task.id) || task.review_run === undefined) return task;
-      const preserved = preserveAcceptedReviewRunFindings(task);
-      return canonicalRecord({
-        ...preserved,
-        review_status: "pending" as const,
-        review_generation: task.review_generation,
-        review_run: undefined,
-        review_error: undefined,
-        review_evidence_failures: undefined,
-      });
-    })),
+    tasks,
+    wave_gates: waveGates,
     spec_check: undefined,
     wave_review_epoch: undefined,
     active_wave_gate: undefined,
