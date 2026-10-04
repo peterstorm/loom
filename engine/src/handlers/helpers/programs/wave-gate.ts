@@ -520,6 +520,24 @@ function boundedRetryReason(reason: string): string {
   return bounded;
 }
 
+/** The fixed footer contract a rejected spec-check must follow on retry: the
+ *  parser reads finding lines only inside the WAVE…VERDICT block, so findings
+ *  written above `SPEC_CHECK_WAVE` never count and the totals cannot match. */
+export const SPEC_CHECK_RETRY_TAIL = [
+  "Emit the spec-check footer in exactly this order:",
+  "SPEC_CHECK_WAVE: <wave>",
+  "then every CRITICAL:, HIGH: and MEDIUM: finding line,",
+  "then SPEC_CHECK_CRITICAL_COUNT, SPEC_CHECK_HIGH_COUNT and SPEC_CHECK_VERDICT last.",
+  "Finding lines above SPEC_CHECK_WAVE are not read, and each count must equal its finding lines.",
+].join("\n");
+
+/** The attempt-2 instruction a rejected spec-check sees. Like the reviewer
+ *  retry, it names the exact complaint: without it the final attempt is a
+ *  blind repeat that reproduces the same defect. */
+export function specCheckRetryDiagnostic(reason: string): string {
+  return `${WAVE_RETRY_PREAMBLE}${boundedRetryReason(reason)}\n\n${SPEC_CHECK_RETRY_TAIL}`;
+}
+
 function waveRetryDiagnosticText(reason: string): string {
   return `${WAVE_RETRY_PREAMBLE}${reason}\n\n${WAVE_RETRY_FIXED_TAIL}`;
 }
@@ -2254,13 +2272,20 @@ export async function resumeWaveGateFacade(
         }
         return resumeWaveGateFacade(handle, registration, depth + 1);
       }
+      const attemptOneFailure = refreshed.spec_check?.wave === registration.input.wave &&
+        refreshed.spec_check.verdict === "EVIDENCE_CAPTURE_FAILED"
+        ? refreshed.spec_check.error
+        : "attempt 1 produced no accepted current-wave spec-check evidence";
       return { ok: true, action: {
         kind: "spawn-batch", runId: handle.runId,
         requests: [{
           ...durable,
           // Extraction-only render: the spec-check slot carries no emission
           // descriptor and keeps the caller's instruction verbatim (FR-020).
-          task: renderSpawnTask(handle, durable.authority, "Read the immutable context packet at LOOM_CONTEXT_PATH, then retry the exact current Wave spec-check slot."),
+          task: [
+            renderSpawnTask(handle, durable.authority, "Read the immutable context packet at LOOM_CONTEXT_PATH, then retry the exact current Wave spec-check slot."),
+            specCheckRetryDiagnostic(attemptOneFailure),
+          ].join("\n"),
         }],
       } };
     }

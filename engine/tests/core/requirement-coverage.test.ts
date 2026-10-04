@@ -87,6 +87,7 @@ const hashesOf = (claims: readonly string[]): ReadonlyMap<string, RecordedHash> 
 const task = (overrides: Partial<CoverageTask> = {}): CoverageTask => Object.freeze({
   id: "T1",
   inCurrentWave: true,
+  decisionRecord: false,
   completionAnchors: ["FR-001"],
   contributions: [],
   declaredFiles: ["src/a.ts"],
@@ -365,6 +366,49 @@ describe("renderRequirementCoverage", () => {
   });
 });
 
+describe("decision-record Waves", () => {
+  const earlier = task({ id: "W1", inCurrentWave: false, completionAnchors: ["FR-001", "FR-002", "AS-001", "AS-002"] });
+
+  it("does not floor a closing Wave made only of Architecture Decision Records", () => {
+    // Production regression: the final ADR Wave of every plan settled a
+    // CRITICAL "no Requirement Completion Claims" no ADR could remedy.
+    const coverage = projectRequirementCoverage(indexed, [
+      earlier,
+      task({ id: "T14", completionAnchors: [], decisionRecord: true, declaredFiles: ["docs/adr/0011.md"] }),
+      task({ id: "T15", completionAnchors: [], decisionRecord: true, declaredFiles: ["docs/adr/0012.md"] }),
+    ]);
+    expect(coverage.kind === "projected" && coverage.unclaimedTrace).toBe("decision-records");
+    expect(settledCriticalCount(coverage)).toBe(0);
+    const rendered = renderRequirementCoverage(coverage);
+    expect(rendered).toContain("record Architecture Decisions for work that already shipped");
+    expect(rendered).not.toContain("| engine | CRITICAL |");
+    expect(reconcileSpecCheck(report(0), 1, RUN_AT, settledFloorOf(coverage)).kind).toBe("captured");
+  });
+
+  it("still floors a Wave where any untraced Task is not a decision record", () => {
+    const coverage = projectRequirementCoverage(indexed, [
+      earlier,
+      task({ id: "T14", completionAnchors: [], decisionRecord: true }),
+      task({ id: "T15", completionAnchors: [], decisionRecord: false }),
+    ]);
+    expect(coverage.kind === "projected" && coverage.unclaimedTrace).toBe("nowhere");
+    expect(settledCriticalCount(coverage)).toBe(1);
+    expect(renderRequirementCoverage(coverage)).toContain("no work in this Wave traces to a Requirement");
+  });
+
+  it("still floors a current Wave with no Tasks at all", () => {
+    const coverage = projectRequirementCoverage(indexed, [earlier]);
+    expect(coverage.kind === "projected" && coverage.unclaimedTrace).toBe("nowhere");
+    expect(settledCriticalCount(coverage)).toBe(1);
+  });
+
+  it("keeps a decision record's own Completion Claims as ordinary rows", () => {
+    const coverage = rowsOf([task({ decisionRecord: true, completionAnchors: ["FR-404"] })]);
+    expect(coverage.rows[0]?.verdict).toEqual({ kind: "unknown-requirement" });
+    expect(claimSeverity(coverage.rows[0]!.verdict)).toBe("CRITICAL");
+  });
+});
+
 describe("recordedAnchorHashes", () => {
   it("records the entry's own hash, never a re-derived one", () => {
     const recorded = recordedAnchorHashes(index, ["FR-001", "AS-001"]);
@@ -503,7 +547,7 @@ describe("round-2 regressions", () => {
       task({ id: "W1", inCurrentWave: false, completionAnchors: ["FR-001", "FR-002", "AS-001", "AS-002"] }),
       task({ id: "W2", inCurrentWave: true, completionAnchors: [], contributions: ["FR-001"] }),
     ]);
-    expect(coverage.kind === "projected" && coverage.tracesByContribution).toBe(true);
+    expect(coverage.kind === "projected" && coverage.unclaimedTrace).toBe("contributions");
     expect(settledCriticalCount(coverage)).toBe(0);
     const rendered = renderRequirementCoverage(coverage);
     expect(rendered).toContain("legitimate foundation Wave");
@@ -519,7 +563,7 @@ describe("round-2 regressions", () => {
         task({ id: "W1", inCurrentWave: false, completionAnchors: ["FR-001", "FR-002", "AS-001", "AS-002"] }),
         task({ id: "W2", inCurrentWave: true, completionAnchors: [], contributions: [contribution] }),
       ]);
-      expect(coverage.kind === "projected" && coverage.tracesByContribution).toBe(false);
+      expect(coverage.kind === "projected" && coverage.unclaimedTrace).toBe("nowhere");
       expect(settledCriticalCount(coverage)).toBe(1);
       expect(renderRequirementCoverage(coverage)).toContain("no work in this Wave traces to a Requirement");
     },

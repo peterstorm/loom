@@ -17,7 +17,14 @@ import {
 } from "./proof-obligations";
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ByteSection, type ContextPacket } from "./context-packets";
 import { parseReviewerProtocolDescriptor, type ReviewerProtocolDescriptor } from "./reviewer-contract";
-import { issuedReviewerProfile, lowerModelProfile, resolveAgentPolicy, WAVE_REVIEW_AGENTS, type ReviewerIssueRoute } from "./model-profiles";
+import {
+  DECISION_RECORD_AGENT,
+  issuedReviewerProfile,
+  lowerModelProfile,
+  resolveAgentPolicy,
+  WAVE_REVIEW_AGENTS,
+  type ReviewerIssueRoute,
+} from "./model-profiles";
 import {
   canonicalRecord,
   parseAgentRequestAuthority,
@@ -655,6 +662,7 @@ export function coverageTasks(graph: TaskGraph, currentWave: number): readonly C
   return Object.freeze(graph.tasks.map((task) => Object.freeze({
     id: task.id,
     inCurrentWave: task.wave === currentWave,
+    decisionRecord: task.agent === DECISION_RECORD_AGENT,
     ...taskRowFields(task),
     anchorHashes: parsedAnchorHashes(task.spec_anchor_hashes),
   })));

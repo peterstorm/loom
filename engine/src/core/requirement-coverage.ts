@@ -149,6 +149,11 @@ export type SpecIndexAvailability =
 export type CoverageTask = Readonly<{
   id: string;
   inCurrentWave: boolean;
+  /** The Task records an Architecture Decision for work that already shipped.
+   * A decision record traces to the plan's decisions, not to a Requirement, so
+   * a Wave made only of them is the plan's closing record — not work that
+   * traces nowhere. */
+  decisionRecord: boolean;
   completionAnchors: readonly string[];
   /** Partial Requirement Contributions. Carried because a Wave that claims no
    * completion but contributes to a later one is a legitimate shape in this
@@ -159,6 +164,17 @@ export type CoverageTask = Readonly<{
   modifiedFiles: readonly string[];
   anchorHashes: ReadonlyMap<string, RecordedHash>;
 }>;
+
+/**
+ * How a Wave that claims no Requirement completion still traces to the
+ * specification — three facts, and only the last is a defect:
+ * - `contributions`: some Task carries a valid Requirement Contribution, a
+ *   legitimate foundation Wave;
+ * - `decision-records`: every Task records an Architecture Decision for work
+ *   that already shipped, the plan's closing Wave;
+ * - `nowhere`: the Wave's work traces to no Requirement, a decompose defect.
+ */
+export type UnclaimedWaveTrace = "contributions" | "decision-records" | "nowhere";
 
 export type RequirementCoverage =
   | Readonly<{ kind: "unavailable"; reason: SpecIndexUnavailable }>
@@ -176,10 +192,9 @@ export type RequirementCoverage =
        * roster of scenarios to check coverage for, and the step that exists to
        * find uncovered scenarios silently iterates nothing. */
       unclaimedScenarios: readonly SpecEntryId<"AS">[];
-      /** Whether this Wave traces to any Requirement at all through partial
-       * Contributions, when it claims no completions. Distinguishes a
-       * legitimate foundation Wave from work that traces nowhere. */
-      tracesByContribution: boolean;
+      /** How this Wave traces to the specification when it claims no
+       * completions. Only `nowhere` is a settled CRITICAL. */
+      unclaimedTrace: UnclaimedWaveTrace;
       /** The typed exclusion list, replacing a grep of the Out of Scope section. */
       exclusions: NonEmpty<SpecEntry<"OOS">>;
       /** The typed glossary, replacing a grep of the Appendix table. */
@@ -261,6 +276,18 @@ function classify(
   });
 }
 
+function unclaimedTraceOf(
+  tasks: readonly CoverageTask[],
+  byId: ReadonlyMap<string, IndexedEntry>,
+): UnclaimedWaveTrace {
+  const current = tasks.filter(({ inCurrentWave }) => inCurrentWave);
+  if (current.some(({ contributions }) => contributions.some((claim) =>
+    byId.get(claim)?.family === "completable"))) return "contributions";
+  return current.length > 0 && current.every(({ decisionRecord }) => decisionRecord)
+    ? "decision-records"
+    : "nowhere";
+}
+
 /**
  * The sole Requirement Coverage Projection derivation.
  *
@@ -295,8 +322,7 @@ export function projectRequirementCoverage(
   return Object.freeze({
     kind: "projected",
     rows: Object.freeze(rows),
-    tracesByContribution: tasks.some((task) => task.inCurrentWave && task.contributions.some((claim) =>
-      byId.get(claim)?.family === "completable")),
+    unclaimedTrace: unclaimedTraceOf(tasks, byId),
     unclaimed: unclaimedOf(specIndex.index.frs),
     unclaimedScenarios: unclaimedOf(specIndex.index.scenarios),
     exclusions: specIndex.index.oos,
@@ -382,7 +408,7 @@ export function settledCriticalFindings(
     .map((row) => settledFinding(
       `Task ${footerIdentity(row.taskId)} claim ${footerIdentity(row.claim)} — ${claimVerdictMessage(row.verdict)}`,
     ));
-  const syntheticFinding = coverage.rows.length === 0 && !coverage.tracesByContribution
+  const syntheticFinding = coverage.rows.length === 0 && coverage.unclaimedTrace === "nowhere"
     ? [settledFinding("Current Wave has no Requirement Completion Claims or valid Requirement Contributions")]
     : [];
   const unclaimedRequirements = coverage.unclaimed.map((id) =>
@@ -801,19 +827,19 @@ function renderUnavailable(reason: SpecIndexUnavailable): readonly string[] {
   ];
 }
 
-function renderRows(rows: readonly CoverageRow[], tracesByContribution: boolean): readonly string[] {
+function renderRows(rows: readonly CoverageRow[], unclaimedTrace: UnclaimedWaveTrace): readonly string[] {
   if (rows.length === 0) {
-    // Two different facts, and only one of them is a defect. A Wave that traces
-    // NOWHERE is a decompose defect and settles CRITICAL. A Wave that traces
-    // only through Requirement Contributions is a legitimate foundation Wave —
-    // CONTEXT.md defines Contributions as exactly that — and asserting the
-    // first about the second forced the Agent to substantiate a finding that
-    // was false, with no remedy available to it.
-    return tracesByContribution
-      ? ["| — | — | engine | NONE | — |" +
-          " this Wave's Tasks claim no Requirement completion; they trace through Requirement Contributions, which is a legitimate foundation Wave |"]
-      : ["| — | — | engine | CRITICAL | — |" +
-          " this Wave's Tasks make no Requirement Completion Claims and no Contributions, so no work in this Wave traces to a Requirement |"];
+    // Three different facts, and only one of them is a defect. Asserting the
+    // defect about a legitimate shape forces the Agent to substantiate a
+    // finding that is false, with no remedy available to it.
+    return [match<UnclaimedWaveTrace, string>(unclaimedTrace)
+      .with("contributions", () => "| — | — | engine | NONE | — |" +
+        " this Wave's Tasks claim no Requirement completion; they trace through Requirement Contributions, which is a legitimate foundation Wave |")
+      .with("decision-records", () => "| — | — | engine | NONE | — |" +
+        " this Wave's Tasks record Architecture Decisions for work that already shipped; they trace to the plan's decisions, not to a Requirement |")
+      .with("nowhere", () => "| — | — | engine | CRITICAL | — |" +
+        " this Wave's Tasks make no Requirement Completion Claims and no Contributions, so no work in this Wave traces to a Requirement |")
+      .exhaustive()];
   }
   return rows.map((row) => [
     "|", cell(row.taskId),
@@ -858,7 +884,7 @@ export function renderRequirementCoverage(coverage: RequirementCoverage): string
     "",
     "| Task | Claim | Decided by | Severity | Requirement | Detail |",
     "|---|---|---|---|---|---|",
-    ...renderRows(coverage.rows, coverage.tracesByContribution),
+    ...renderRows(coverage.rows, coverage.unclaimedTrace),
     "",
     ...renderUnclaimed("Functional Requirements", "Functional Requirement", coverage.unclaimed),
     ...renderUnclaimed("Acceptance Scenarios", "Acceptance Scenario", coverage.unclaimedScenarios),

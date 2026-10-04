@@ -102,6 +102,7 @@ const taskArb: fc.Arbitrary<CoverageTask> = fc
   .record({
     id: fc.string({ minLength: 1, maxLength: 6 }),
     inCurrentWave: fc.boolean(),
+    decisionRecord: fc.boolean(),
     completionAnchors: fc.uniqueArray(claimArb, { maxLength: 6 }),
     contributions: fc.array(fc.constantFrom(...KNOWN), { maxLength: 2 }),
     declaredFiles: fc.array(fc.string({ minLength: 1, maxLength: 8 }), { maxLength: 3 }),
@@ -210,6 +211,7 @@ describe("Requirement Coverage Projection properties", () => {
         const coverage = projectRequirementCoverage(indexed, [{
           id: "T1",
           inCurrentWave: true,
+          decisionRecord: false,
           completionAnchors: claims,
           contributions: [],
           declaredFiles: ["src/a.ts"],
@@ -233,8 +235,21 @@ describe("Requirement Coverage Projection properties", () => {
       const structuralCriticals = coverage.rows.filter(({ verdict }) =>
         claimSeverity(verdict) === "CRITICAL").length;
       const unclaimed = coverage.unclaimed.length + coverage.unclaimedScenarios.length;
-      const synthetic = coverage.rows.length === 0 && !coverage.tracesByContribution ? 1 : 0;
+      const synthetic = coverage.rows.length === 0 && coverage.unclaimedTrace === "nowhere" ? 1 : 0;
       expect(settledCriticalCount(coverage)).toBe(structuralCriticals + unclaimed + synthetic);
+    }));
+  });
+
+  it("a Wave traces through decision records exactly when every current Task is one and none contributes", () => {
+    fc.assert(fc.property(tasksArb, (tasks) => {
+      const coverage = projectRequirementCoverage(indexed, tasks);
+      if (coverage.kind !== "projected") return;
+      const current = tasks.filter(({ inCurrentWave }) => inCurrentWave);
+      const contributes = current.some(({ contributions }) => contributions.some((claim) => claim !== "OOS-001"));
+      const expected = contributes
+        ? "contributions"
+        : current.length > 0 && current.every(({ decisionRecord }) => decisionRecord) ? "decision-records" : "nowhere";
+      expect(coverage.unclaimedTrace).toBe(expected);
     }));
   });
 

@@ -3,7 +3,7 @@ import { printParseErrorCode, visit } from "jsonc-parser";
 import {
   REVIEWER_PAYLOAD_LIMITS, REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1,
   REVIEWER_OUTPUT_CONTRACT, REVIEWER_PAYLOAD_EXAMPLE_V2, reviewerPayloadV2Schema,
-  reviewerEmissionToolContract,
+  reviewerEmissionToolContract, REVIEWER_EMISSION_TOOL_CONTRACT_TEMPLATE,
   type ReviewerPayloadV2, type ReviewerProtocolFailure,
 } from "./reviewer-contract";
 import { standaloneReviewerPayloadV3Schema, type StandaloneReviewerPayloadV3 } from "./standalone-lineage-contract";
@@ -246,9 +246,17 @@ export function parseReviewerPayloadV2(rawBytes: Uint8Array): DomainResult<Revie
   }
 }
 
-/** The stamper consumes this same executable schema, parsed example and exact rubric. */
+/**
+ * The stamper consumes this same executable schema, parsed example and exact
+ * rubric. The lead contract line stays the retained final-message wording
+ * (`REVIEWER_OUTPUT_CONTRACT` — extraction-only requests and the tool
+ * fallback); the tool-primary section beneath it carries the frozen
+ * emission-wording template over its placeholder (FR-020/AS-012; AD-7). The
+ * schema/rubric bytes are untouched, so the protocol descriptor digests are
+ * unaffected.
+ */
 export function renderReviewerWireContract(): string {
-  return `${REVIEWER_OUTPUT_CONTRACT}\n\n## reviewer-payload-schema\n\n\`\`\`json\n${REVIEWER_PAYLOAD_SCHEMA_V2}\n\`\`\`\n\n## Current example (standalone)\n\n\`\`\`json\n${JSON.stringify(REVIEWER_PAYLOAD_EXAMPLE_V2, null, 2)}\n\`\`\`\n\n## reviewer-impact-rubric\n\n${REVIEWER_IMPACT_RUBRIC_V1}`;
+  return `${REVIEWER_OUTPUT_CONTRACT}\n\nThe final-message contract above is the deterministic fallback: it governs extraction-only requests outright, and it is the fallback when an emission-enabled request's registered tool is unavailable or refuses the arguments. On an emission-enabled request the engine renders the tool-primary wording below with the exact issued tool name substituted for the placeholder. Call that tool exactly once as the primary final action and never re-emit within the same spawn — a second call is refused as duplicate-call ambiguity — and the fallback final message carries exactly the one issued payload object, nothing else.\n\n## emission-tool-contract (tool-primary)\n\n\`\`\`\n${REVIEWER_EMISSION_TOOL_CONTRACT_TEMPLATE}\n\`\`\`\n\n## reviewer-payload-schema\n\n\`\`\`json\n${REVIEWER_PAYLOAD_SCHEMA_V2}\n\`\`\`\n\n## Current example (standalone)\n\n\`\`\`json\n${JSON.stringify(REVIEWER_PAYLOAD_EXAMPLE_V2, null, 2)}\n\`\`\`\n\n## reviewer-impact-rubric\n\n${REVIEWER_IMPACT_RUBRIC_V1}`;
 }
 
 // Route-aware wire-instruction rendering (AD-7; FR-020/AS-012).

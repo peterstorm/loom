@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -165,6 +166,42 @@ describe("resolveLintTargets", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("lints a directory artifact as its Git-visible regular files", () => {
+    // Production regression: a Wave whose Task declared a directory artifact
+    // blocked the completion suite with "lint target must be a regular file".
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-lint-directory-")));
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: root });
+      mkdirSync(join(root, "calibration", "pilot", "cache"), { recursive: true });
+      writeFileSync(join(root, ".gitignore"), "calibration/pilot/cache/\n");
+      writeFileSync(join(root, "calibration", "pilot", "tracked.ts"), "export {};\n");
+      execFileSync("git", ["add", "."], { cwd: root });
+      execFileSync("git", ["-c", "user.name=Loom Test", "-c", "user.email=loom@example.test", "commit", "--quiet", "-m", "seed"], { cwd: root });
+      writeFileSync(join(root, "calibration", "pilot", "untracked.ts"), "export {};\n");
+      writeFileSync(join(root, "calibration", "pilot", "cache", "ignored.ts"), "export {};\n");
+      symlinkSync("tracked.ts", join(root, "calibration", "pilot", "alias.ts"));
+
+      expect(resolveLintTargets(root, ["calibration/pilot", "calibration/pilot/tracked.ts"])).toEqual([
+        join(root, "calibration", "pilot", "tracked.ts"),
+        join(root, "calibration", "pilot", "untracked.ts"),
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when a directory artifact's files cannot be listed", () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-lint-listing-")));
+    try {
+      mkdirSync(join(root, "calibration"));
+      expect(() => resolveLintTargets(root, ["calibration"], () => {
+        throw new Error("git index unreadable");
+      })).toThrow("git index unreadable");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

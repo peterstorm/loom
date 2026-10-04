@@ -58,6 +58,7 @@ import { parseRequestId, parseSlotId, parseOrchestrationRunId } from "./orchestr
 import { isNoFindingSentinel } from "../utils/no-finding-sentinel";
 import { isExactGitSha } from "./git-sha";
 import { isRecord } from "./plain-record";
+import { scopeCovers } from "./path-coverage";
 import { reviewerDraftV2Schema, reviewerPayloadV2Schema, parseReviewerProtocolDescriptor } from "./reviewer-contract";
 
 // The Finding/ReviewRun/Refutation SHAPES live in ./findings-shape — a leaf
@@ -78,6 +79,7 @@ import type {
   FindingSeverity,
   NonEmptyRefutations,
   PriorFindingAssessment,
+  PriorFindingVerdict,
   Refutation,
   RefutedFinding,
   ResolvedFinding,
@@ -560,8 +562,8 @@ function parseStoredResolution(raw: unknown): ResolvedFinding | null {
   if (!Array.isArray(resolution.assessments) || resolution.assessments.length === 0) return null;
   const parsed = parseResolutionAssessments({ finding, generation: resolution.generation, packetId: resolution.packet_id, assessments: resolution.assessments });
   if (parsed === null) return null;
-  if (parsed.some((assessment) => assessment.finding_id !== finding.id ||
-      assessment.verdict !== "resolved_by_remediation")) return null;
+  if (parsed.some((assessment) => assessment.finding_id !== finding.id) ||
+      !priorFindingRetires(finding.agent, parsed)) return null;
   if (new Set(parsed.map((assessment) => assessment.agent)).size !== parsed.length) return null;
   if (parsed.length !== expectedAgents.length ||
       parsed.some((assessment, index) => assessment.agent !== expectedAgents[index])) return null;
@@ -1008,7 +1010,7 @@ export function reviewRunError(
     if (!Array.isArray(evidence.new_findings) || evidence.new_findings.some((rawDraft) => {
       const draft = parseStoredDraft(rawDraft);
       return draft === null || (draft.protocolVersion === 2) !== current ||
-        (current && draft.file !== null && !(run.workspace_scope as readonly string[]).includes(draft.file));
+        (current && draft.file !== null && !scopeCovers(run.workspace_scope as readonly string[], draft.file));
     })) {
       return `${evidenceLabel}.new_findings must be well-formed draft findings`;
     }
@@ -1481,18 +1483,50 @@ export function preserveAcceptedReviewRunFindings(task: Task): Task {
   };
 }
 
+/** Concrete counter-evidence: a `file.ext:line` reference in a dissenting reason. */
+const COUNTER_EVIDENCE = /[\w./-]+\.[A-Za-z0-9]+:\d+/u;
+
+type RetirementVote = Readonly<{ agent: string; verdict: PriorFindingVerdict; reason: string }>;
+
+/**
+ * Whether one prior finding retires on a complete roster's assessments.
+ *
+ * The reviewer role that raised the finding owns the verdict: it retires when
+ * the owner marks it `resolved_by_remediation` and no other reviewer's
+ * `still_present` cites concrete counter-evidence (a `file.ext:line`
+ * reference). A bare "not re-verified" or a file name without a line does not
+ * keep a remediated finding alive — that is how out-of-scope reviewers
+ * carried fixed findings across generations under unanimity. A finding whose
+ * owner is not on the roster (recovered view claims, operator overrides) still
+ * needs every reviewer to resolve it. Shared by settlement and the stored
+ * resolution validator, so a record can only exist if this rule admitted it.
+ */
+export function priorFindingRetires(owner: string, votes: readonly RetirementVote[]): boolean {
+  if (votes.length === 0) return false;
+  const ownerVote = votes.find(({ agent }) => agent === owner);
+  if (ownerVote === undefined) return votes.every(({ verdict }) => verdict === "resolved_by_remediation");
+  return ownerVote.verdict === "resolved_by_remediation" && !votes.some(({ agent, verdict, reason }) =>
+    agent !== owner && verdict === "still_present" && COUNTER_EVIDENCE.test(reason));
+}
+
+function retirementVotes(run: ReviewRun, findingId: string): readonly RetirementVote[] | null {
+  const votes = run.evidence.flatMap((evidence) => {
+    const assessment = evidence.prior_assessments.find(({ finding_id }) => finding_id === findingId);
+    return assessment === undefined ? [] : [{ agent: evidence.agent, verdict: assessment.verdict, reason: assessment.reason }];
+  });
+  return votes.length === run.evidence.length ? votes : null;
+}
+
 function resolvedPriorFindingIds(
   run: ReviewRun,
   prior: ReadonlyMap<string, Finding>,
 ): ReadonlySet<string> {
   return new Set(run.prior_finding_ids.filter((id) => {
     const finding = prior.get(id);
-    return finding !== undefined &&
-      (finding.review_generation === undefined || run.generation > finding.review_generation) &&
-      run.evidence.every((evidence) =>
-        evidence.prior_assessments.find((assessment) => assessment.finding_id === id)?.verdict ===
-          "resolved_by_remediation"
-      );
+    if (finding === undefined ||
+        (finding.review_generation !== undefined && run.generation <= finding.review_generation)) return false;
+    const votes = retirementVotes(run, id);
+    return votes !== null && priorFindingRetires(finding.agent, votes);
   }));
 }
 

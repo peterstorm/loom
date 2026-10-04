@@ -5,7 +5,12 @@ import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import { createImplementationAttemptAuthority } from "../../../src/core/implementation-completion";
 import { derivePendingTaskProof } from "../../../src/core/proof-obligations";
-import { observeTaskLocalCompletion } from "../../../src/handlers/helpers/task-local-completion";
+import {
+  collectDiff,
+  collectNewTestEvidence,
+  observeTaskLocalCompletion,
+  realDiffDepsAt,
+} from "../../../src/handlers/helpers/task-local-completion";
 import {
   captureDeclaredArtifactBaseline,
   captureRepositoryChangeBaseline,
@@ -79,6 +84,26 @@ describe("Task-local completion observation shell", () => {
       changedPaths: ["src/a.ts"],
     });
     expect(observed.cumulativeProofArtifactChanges).toEqual(["src/a.ts"]);
+  });
+
+  it("ignores an Agent write outside the repository instead of making bytes unobservable", () => {
+    // Production regression: a lint-remediation Agent wrote a throwaway
+    // tsconfig in its scratchpad, and the out-of-repository transcript path
+    // settled the finished attempt infrastructure-blocked.
+    const fixture = repository();
+    const scratch = canonicalTempDir("loom-task-local-scratch-");
+    roots.push(scratch);
+    writeFileSync(join(fixture.root, "src/a.ts"), "export const a = 2;\n");
+    writeFileSync(join(scratch, "tsconfig.json"), "{}\n");
+    const observed = observeTaskLocalCompletion({
+      repositoryRoot: fixture.root,
+      task: fixture.task,
+      authority: fixture.authority,
+      parserModifiedPaths: [join(fixture.root, "src/a.ts"), join(scratch, "tsconfig.json")],
+      parserPathLabel: "test transcript paths",
+      siblingOwnedPaths: [],
+    });
+    expect(observed.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: ["src/a.ts"] });
   });
 
   it("keeps a foreign transcript path semantic even when it names an existing file", () => {
@@ -335,5 +360,68 @@ describe("Task-local completion observation shell", () => {
     });
     expect(observed.suite.checks[0]?.outcome).toMatchObject({ kind: "observation-unavailable" });
     expect(observed.taskBytesChangedOrUnobservable).toBe(true);
+  });
+});
+
+describe("New-test evidence below a declared directory artifact", () => {
+  const PILOT_TEST = [
+    'import { expect, it } from "vitest";',
+    'it("records the pilot decision", () => {',
+    "  expect(1 + 1).toBe(2);",
+    "});",
+    "",
+  ].join("\n");
+
+  function seededRepository(): Readonly<{ root: string; head: string }> {
+    const root = canonicalTempDir("loom-new-test-directory-");
+    roots.push(root);
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "loom@example.test"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
+    mkdirSync(join(root, "engine/tests"), { recursive: true });
+    writeFileSync(join(root, "engine/tests/existing.test.ts"), "export {};\n");
+    writeFileSync(join(root, ".gitignore"), "calibration/pilot/cache/\n");
+    execFileSync("git", ["add", "."], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "seed"], { cwd: root });
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    return { root, head };
+  }
+
+  it("proves a new test written inside an untracked directory artifact", () => {
+    // Production regression: T13 declared calibration/grammar-constrained-decoding.
+    // Cumulative attribution names the directory, and `git diff --no-index` on it
+    // failed, so a finished attempt settled infrastructure-blocked.
+    const { root, head } = seededRepository();
+    mkdirSync(join(root, "calibration/pilot/cache"), { recursive: true });
+    writeFileSync(join(root, "calibration/pilot/pilot.test.ts"), PILOT_TEST);
+    writeFileSync(join(root, "calibration/pilot/cache/stale.test.ts"), PILOT_TEST);
+
+    const evidence = collectNewTestEvidence(
+      ["calibration/pilot"],
+      { kind: "required" },
+      head,
+      realDiffDepsAt(root),
+    );
+
+    expect(evidence).toEqual({
+      ok: true,
+      value: { kind: "written", written: true, evidence: "1 new test methods, 1 assertions (ts: 1 it/test)" },
+    });
+    const observed = collectDiff(["calibration/pilot"], realDiffDepsAt(root), head);
+    expect(observed.ok && observed.value.includes("calibration/pilot/cache/")).toBe(false);
+  });
+
+  it("proves a new untracked test inside an already-tracked directory artifact", () => {
+    const { root, head } = seededRepository();
+    writeFileSync(join(root, "engine/tests/added.test.ts"), PILOT_TEST);
+
+    const evidence = collectNewTestEvidence(
+      ["engine/tests"],
+      { kind: "required" },
+      head,
+      realDiffDepsAt(root),
+    );
+
+    expect(evidence).toMatchObject({ ok: true, value: { kind: "written", written: true } });
   });
 });

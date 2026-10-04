@@ -238,7 +238,7 @@ Context Packets split fixed and variable byte sections, hash the complete conten
 
 ## Review authority model
 
-A review Finding is identified by Agent plus emission ordinal, never by model-supplied id. A Task implementation write increments its Review Generation. A Review Packet binds that generation to exact base/head revisions, exact path scope, diffs, postimage bytes, plan context, and proof obligations.
+A review Finding is identified by Agent plus emission ordinal, never by model-supplied id. A Task implementation write increments its Review Generation. A Review Packet binds that generation to exact base/head revisions, exact path scope, diffs, postimage bytes, plan context, and proof obligations. Artifacts are files: a scoped directory is reviewed through its Git-visible leaves at either revision (deleted leaves included, ignored files excluded, symlinks by target), and every scoped path must cover at least one artifact.
 
 A Review Run freezes:
 

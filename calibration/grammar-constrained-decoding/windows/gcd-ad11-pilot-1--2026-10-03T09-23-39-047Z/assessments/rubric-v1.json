@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "assessorId": "rubric-v1",
+  "method": "deterministic rubric: corpus match rules (reviewer), planted-flaw ranking (judge), real-defect refutation (refutation); sees blind id, source and canonical payload only",
+  "blinded": true,
+  "entries": []
+}

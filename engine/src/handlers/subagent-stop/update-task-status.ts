@@ -18,7 +18,8 @@ import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { extractTaskId } from "../../utils/extract-task-id";
 import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
-import { canonicalRepositoryPaths } from "../../utils/repository-path";
+import { canonicalRepositoryPaths, partitionWriteEvidence } from "../../utils/repository-path";
+import { readSettledJsonl } from "../../utils/read-settled-jsonl";
 import {
   compareAttemptBaseline,
 } from "../../utils/artifact-baseline";
@@ -267,7 +268,7 @@ export const runUpdateTaskStatus = async (
   let transcriptContent = "";
   if (transcriptPath) {
     try {
-      transcriptContent = readFileSync(transcriptPath, "utf-8");
+      transcriptContent = await readSettledJsonl(() => readFileSync(transcriptPath, "utf-8"));
     } catch (error) {
       const cause = error instanceof Error ? error.message : String(error);
       if (authority !== null) {
@@ -378,7 +379,7 @@ export const runUpdateTaskStatus = async (
   try {
     filesModified = [...canonicalRepositoryPaths(
       repositoryRoot,
-      rawFilesModified,
+      partitionWriteEvidence(repositoryRoot, rawFilesModified).repository,
       "transcript files_modified",
     )];
   } catch (error) {

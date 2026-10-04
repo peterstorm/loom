@@ -253,6 +253,20 @@ const HOLD_ORDERING_SLACK_MS = 250;
 const HOLD_RELEASE_CAP_MS = 10_000;
 const SLOW_READINESS_MS = 5_000;
 
+/** Each real pi child gets its own HOME and agent dir. pi persists every
+ *  set_model as the default in <agentDir>/settings.json and resolves models
+ *  against that dir's auth and the Loom extension's routing config, so a
+ *  shared dir lets one child's (or the developer's own) model state choose the
+ *  model a later child's released prompt runs on — and every run rewrote the
+ *  developer's real pi default to the counting provider. */
+const isolatedPiEnv = async (tmp: string): Promise<NodeJS.ProcessEnv> => {
+  const home = join(tmp, "home");
+  const agentDir = join(tmp, "pi-agent");
+  await mkdir(home, { recursive: true });
+  await mkdir(agentDir, { recursive: true });
+  return { HOME: home, PI_CODING_AGENT_DIR: agentDir, PI_PROVIDER: "", PI_MODEL: "" };
+};
+
 const nextRequestId = (label: string): string => `req-emission-startup-t4-${label}-${++requestCounter}`;
 let requestCounter = 0;
 
@@ -823,7 +837,7 @@ const startStartupGate = (spec: ScenarioSpec): StartedGate => {
       if (allowlist.length > 0) args.push("--tools", allowlist.join(","));
       const child = spawn(piBinary.bin, args, {
         cwd: tmp,
-        env: childEnvFor(server, spec, childCell, childBinding),
+        env: { ...childEnvFor(server, spec, childCell, childBinding), ...await isolatedPiEnv(tmp) },
         stdio: ["pipe", "pipe", "pipe"],
       });
       childRef.current = child;
@@ -2012,7 +2026,7 @@ const runProductionGate = async (spec: ProductionScenarioSpec): Promise<Producti
     await writeFile(providerExtPath, productionProviderExtensionSource(server.baseUrl), "utf8");
     const args: string[] = ["--mode", "rpc", "--no-session", "-ne", "-e", PRODUCTION_EXTENSION_PATH, "-e", providerExtPath];
     if (allowlist.length > 0) args.push("--tools", allowlist.join(","));
-    const childEnv: NodeJS.ProcessEnv = { ...process.env };
+    const childEnv: NodeJS.ProcessEnv = { ...process.env, ...await isolatedPiEnv(tmp) };
     delete childEnv["PI_CODING_AGENT"];
     delete childEnv[LOOM_EMISSION_BINDING_ENV];
     if (envBinding !== undefined) childEnv[LOOM_EMISSION_BINDING_ENV] = envBinding;
@@ -2257,7 +2271,7 @@ const runProductionHoldGate = async (spec: ProductionHoldGateSpec): Promise<Read
     const envBinding = childProvisioningEnv(expectation, issuedRequestId, provisioning);
     const providerExtPath = join(tmp, "loom-counting-provider.mjs");
     await writeFile(providerExtPath, productionProviderExtensionSource(server.baseUrl), "utf8");
-    const childEnv: NodeJS.ProcessEnv = { ...process.env };
+    const childEnv: NodeJS.ProcessEnv = { ...process.env, ...await isolatedPiEnv(tmp) };
     delete childEnv["PI_CODING_AGENT"];
     delete childEnv[LOOM_EMISSION_BINDING_ENV];
     if (envBinding === undefined) throw new Error("the hold control's provisioning env is absent");

@@ -1,6 +1,7 @@
 import { compareStrings } from "./ordering";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import { parseReviewPath, sha256Hex } from "./review-packet";
+import { artifactCovers } from "./path-coverage";
 
 /** A directory artifact snapshots as `sha256` over its tree digest, so the
  *  persisted shape is the same for file and directory artifacts. */
@@ -72,13 +73,6 @@ export function parseDeclaredArtifactBaseline(
 
 const snapshotEquals = (left: ArtifactSnapshot, right: ArtifactSnapshot): boolean =>
   left.kind === right.kind && (left.kind === "missing" || (right.kind === "sha256" && left.digest === right.digest));
-
-/** A declared artifact covers its own canonical path and, when it is a
- *  directory, every path below it. A file artifact has nothing below it, so
- *  for files this is exact equality. */
-export function artifactCovers(artifact: string, path: string): boolean {
-  return path === artifact || path.startsWith(`${artifact}/`);
-}
 
 /**
  * A declared artifact is attributable to one task only when both independent
