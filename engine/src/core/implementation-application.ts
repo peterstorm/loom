@@ -47,9 +47,11 @@ export type TaskLocalByteObservation = Readonly<{
    *  verify-only child must leave these empty, and an unreported write is
    *  drift, never an attested pass. */
   attemptScopeChangedPaths: readonly ReviewPath[];
-  /** Parser-proven cumulative paths retained for audit/lint scope. */
+  /** Cumulative Task paths retained for audit/lint scope: prior attributions,
+   *  this attempt's parser-proven changes, and every declared artifact whose
+   *  bytes differ from the first Task baseline. */
   cumulativeModifiedPaths: readonly ReviewPath[];
-  /** Declared paths changed from the first Task baseline and parser-attributed. */
+  /** Declared paths whose bytes differ from the first Task baseline. */
   cumulativeProofArtifactChanges: readonly ReviewPath[];
   /** Task-scope bytes changed, or exact observation was unavailable. */
   taskBytesChangedOrUnobservable: boolean;
@@ -179,8 +181,14 @@ export function buildTaskLocalByteObservation(
   // attributes the directory, never the raw leaf path.
   const attributedAttempt = attributedChangedArtifacts(attempt.changed, parserPaths.value);
   const priorAllowedPaths = priorPaths.value.filter((path) => covered(allowed, path));
-  const cumulative = frozenArray([...new Set([...priorAllowedPaths, ...attributedAttempt])].sort(compareStrings));
-  const proofChanges = attributedChangedArtifacts(proof.changed, cumulative);
+  // A declared artifact that differs from the first Task baseline is this
+  // Task's own production: declared artifacts are Wave-exclusive and that
+  // baseline predates every attempt. Crediting it keeps an earlier attempt's
+  // bytes when their attribution was lost to an infrastructure-blocked
+  // settlement, so a verify-only retry is not failed for work already done.
+  const cumulative = frozenArray(
+    [...new Set([...priorAllowedPaths, ...attributedAttempt, ...proof.changed])].sort(compareStrings),
+  );
   const suite = createTaskCompletionSuiteResult(
     input.authority,
     outside.length > 0
@@ -193,7 +201,7 @@ export function buildTaskLocalByteObservation(
     attributedAttemptChangedPaths: frozenArray(attributedAttempt),
     attemptScopeChangedPaths: attempt.changed,
     cumulativeModifiedPaths: cumulative,
-    cumulativeProofArtifactChanges: frozenArray(proofChanges),
+    cumulativeProofArtifactChanges: proof.changed,
     taskBytesChangedOrUnobservable: attempt.changed.length > 0,
     unresolvedRepositoryPaths,
     invalidationBytesChanged: attempt.changed.length > 0 || unresolvedRepositoryPaths.length > 0,

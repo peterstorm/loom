@@ -133,17 +133,40 @@ describe("Task-local byte-scope application core", () => {
     expect(bytes.taskBytesChangedOrUnobservable).toBe(true);
   });
 
-  it("does not let a parser-reported no-op path credit proof bytes from an older attempt", () => {
+  it("credits declared bytes an earlier attempt produced without attributing them to this attempt", () => {
+    // Production regression (T13): attempt 1's writes were never recorded
+    // because its settlement was infrastructure-blocked; a verify-only re-run
+    // then failed declared-artifact-not-changed for bytes that had changed.
     const bytes = observedBytes(authority(), {
       currentAttemptScope: baseline("src/a.ts", digest("a")),
       currentProofScope: baseline("src/a.ts", digest("b")),
-      parserModifiedPaths: ["src/a.ts"],
+      parserModifiedPaths: [],
       priorAttributedPaths: [],
     });
     expect(bytes.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: [] });
     expect(bytes.attributedAttemptChangedPaths).toEqual([]);
-    expect(bytes.cumulativeModifiedPaths).toEqual([]);
-    expect(bytes.cumulativeProofArtifactChanges).toEqual([]);
+    expect(bytes.taskBytesChangedOrUnobservable).toBe(false);
+    expect(bytes.cumulativeModifiedPaths).toEqual(["src/a.ts"]);
+    expect(bytes.cumulativeProofArtifactChanges).toEqual(["src/a.ts"]);
+  });
+
+  it("property: proof credit is exactly the declared bytes changed from the first Task baseline", () => {
+    fc.assert(fc.property(
+      fc.boolean(),
+      fc.boolean(),
+      fc.subarray(["src/a.ts"]),
+      fc.subarray(["src/a.ts"]),
+      (attemptChanged, proofChanged, parserPaths, priorPaths) => {
+        const bytes = observedBytes(authority(), {
+          currentAttemptScope: baseline("src/a.ts", digest(attemptChanged ? "b" : "a")),
+          currentProofScope: baseline("src/a.ts", digest(proofChanged ? "b" : "a")),
+          parserModifiedPaths: parserPaths,
+          priorAttributedPaths: priorPaths,
+        });
+        expect(bytes.cumulativeProofArtifactChanges).toEqual(proofChanged ? ["src/a.ts"] : []);
+        if (proofChanged) expect(bytes.cumulativeModifiedPaths).toContain("src/a.ts");
+      },
+    ));
   });
 
   it("retains a prior allowed attribution while refusing an additional no-op parser credit", () => {
@@ -409,6 +432,24 @@ describe("exact transition application", () => {
       expect(result.state.tasks[0]?.active_implementation_attempt).toBeUndefined();
       expect(result.state.tasks[0]).not.toHaveProperty("retry_request");
     }
+  });
+
+  it("implements a verify-only retry whose declared bytes an infrastructure-blocked attempt produced", () => {
+    const attempt = authority(1, "verify-only-after-infrastructure-block");
+    const result = expectApplied(settleObservedImplementation(
+      graph(pendingTask(attempt, { attempt_artifact_baseline: baseline("src/a.ts", digest("b")) })),
+      attempt,
+      "2026-08-24T00:02:30.000Z" as never,
+      completedEvidence,
+      TRUSTED_LEDGER_ONLY_POLICY,
+      observedBytes(attempt, {
+        attemptBaseline: baseline("src/a.ts", digest("b")),
+        currentAttemptScope: baseline("src/a.ts", digest("b")),
+        parserModifiedPaths: [],
+      }),
+    ));
+    expect(result.transition.kind).toBe("implemented");
+    expect(result.state.tasks[0]).toMatchObject({ status: "implemented", files_modified: ["src/a.ts"] });
   });
 
   it("keeps satisfied historical Proof pending+revalidation and retains exact foreign-delta carry", () => {
