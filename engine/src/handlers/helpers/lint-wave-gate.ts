@@ -11,14 +11,14 @@
  * Usage: bun cli.ts helper lint-wave-gate [--wave N]
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import type { HookHandler, HookResult, Task } from "../../types";
 import { TASK_GRAPH_PATH, DEFAULT_RULES_DIR, PROJECT_RULES_DIR } from "../../config";
 import { StateManager } from "../../state-manager";
 import { lintFiles as lintFilesBatch, formatOutput, formatBlockMessage } from "../../linter/index";
 import type { LintResult, LintOutput } from "../../linter/index";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
-import { repositoryRoot } from "../../utils/git";
+import { repositoryRoot, visibleLeavesAt } from "../../utils/git";
 
 // --- Testable helper logic (pure transformations and filesystem adapters) ---
 
@@ -52,13 +52,41 @@ export function filterExistingFiles(
   return files.filter(existsFn);
 }
 
-/** Canonical, repository-confined filesystem targets for the lint shell. */
-export function resolveLintTargets(root: string, files: readonly string[]): readonly string[] {
-  const canonical = canonicalRepositoryPaths(root, files, "task.files_modified");
-  return canonical
-    .map((path) => inspectRepositoryPath(root, path, "lint target", { mustBeFile: true }))
-    .filter(({ exists }) => exists)
-    .map(({ absolute }) => absolute);
+/** Repository-relative files at or below one directory, Git-visible only. */
+export type ListDirectoryLeaves = (root: string, directory: string) => readonly string[];
+
+const gitVisibleLeaves: ListDirectoryLeaves = (root, directory) => {
+  const listed = visibleLeavesAt(root, directory);
+  if (!listed.ok) throw new Error(listed.error);
+  return listed.paths;
+};
+
+/** Canonical, repository-confined filesystem targets for the lint shell.
+ *  `files_modified` may name a declared directory artifact; it lints as its
+ *  Git-visible regular files (ignored files and symlink leaves carry no source
+ *  of this Task to lint). A named path must otherwise be a regular file. */
+export function resolveLintTargets(
+  root: string,
+  files: readonly string[],
+  listLeaves: ListDirectoryLeaves = gitVisibleLeaves,
+): readonly string[] {
+  const targets = new Set<string>();
+  for (const path of canonicalRepositoryPaths(root, files, "task.files_modified")) {
+    const target = inspectRepositoryPath(root, path, "lint target");
+    if (!target.exists) continue;
+    const stat = lstatSync(target.absolute);
+    if (stat.isFile()) {
+      targets.add(target.absolute);
+    } else if (stat.isDirectory()) {
+      for (const leaf of listLeaves(root, path)) {
+        const inspected = inspectRepositoryPath(root, leaf, "lint target", { allowLeafSymlink: true });
+        if (inspected.exists && lstatSync(inspected.absolute).isFile()) targets.add(inspected.absolute);
+      }
+    } else {
+      throw new Error(`lint target must be a regular file or directory: ${path}`);
+    }
+  }
+  return [...targets].sort();
 }
 
 /**

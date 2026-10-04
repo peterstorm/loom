@@ -521,15 +521,33 @@ export function untrackedLeaves(path: string): GitPathListResult {
 
 /** Untracked leaves from an EXPLICIT root — see `diffFilesAt`. */
 export function untrackedLeavesAt(root: string, path: string): GitPathListResult {
+  return listLeavesAt(root, path, ["--others"], "untracked files");
+}
+
+/** Every Git-visible leaf at or below one pathspec — tracked (including a
+ *  deleted index entry) or untracked, never ignored — sorted. */
+export function visibleLeavesAt(root: string, path: string): GitPathListResult {
+  return listLeavesAt(root, path, ["--cached", "--others"], "Git-visible files");
+}
+
+function listLeavesAt(
+  root: string,
+  path: string,
+  selection: readonly string[],
+  description: string,
+): GitPathListResult {
   try {
     const listed = withShadowGit(root, (environment) =>
-      execFileSync("git", ["ls-files", "--others", "--exclude-standard", "-z", "--", path], {
+      execFileSync("git", ["ls-files", ...selection, "--exclude-standard", "-z", "--", path], {
         ...diffExecOptions(root, environment),
         stdio: ["ignore", "pipe", "pipe"],
       }));
-    return { ok: true, paths: Object.freeze(listed.split("\0").filter((leaf) => leaf !== "").sort()) };
+    return {
+      ok: true,
+      paths: Object.freeze([...new Set(listed.split("\0").filter((leaf) => leaf !== ""))].sort()),
+    };
   } catch (error) {
-    return { ok: false, error: `cannot list untracked files below ${JSON.stringify(path)}: ${commandFailure(error)}` };
+    return { ok: false, error: `cannot list ${description} below ${JSON.stringify(path)}: ${commandFailure(error)}` };
   }
 }
 
