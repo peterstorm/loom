@@ -1,4 +1,4 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 /**
  * The suite's worker budget lives here, not in a CLI flag, because it is a
@@ -10,9 +10,13 @@ import { defineConfig } from "vitest/config";
  * unresponsive past the worker's 60s RPC deadline, and fully green suites
  * (9060/9060 passing) failed the run. Two workers keep darwin unsaturated;
  * Linux keeps the four the command always pinned.
+ *
+ * Calibration pilots live outside `engine/` (they are not Runtime Revision
+ * inputs) but are still project code: `npm run verify` must run their tests.
  */
 export default defineConfig({
   test: {
+    include: [...configDefaults.include, "../calibration/**/*.test.ts"],
     maxWorkers: process.platform === "darwin" ? 2 : 4,
   },
 });
