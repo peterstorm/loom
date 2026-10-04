@@ -242,7 +242,9 @@ async function waveFixture() {
     // fixture rather than calling a driver bound to the test runner's cwd.
     vi.resetModules();
     const driver = await import("../../../../src/handlers/helpers/programs/wave-gate");
-    return driver.startWaveGateFacade(handle, { wave: 1 });
+    const prepared = driver.prepareWaveGateFacadeStart({ wave: 1 }, join(root, "runs"), "run.native-wave");
+    if (!prepared.ok) throw new Error(prepared.message);
+    return driver.startWaveGateFacade(handle, prepared.value);
   });
   if (!started.ok) throw new Error(started.message);
   return { root, statePath, handle, initial: started.action as Action };

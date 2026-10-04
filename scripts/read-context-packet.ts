@@ -5,7 +5,7 @@ import { gunzipSync } from "node:zlib";
 import { parseContextProjectionArguments, projectContextPacket } from "../engine/src/core/context-packet-projection";
 import { parseStandaloneReviewerContextPacketV3 } from "../engine/src/core/context-packets";
 import { safeIoCause } from "../engine/src/core/safe-io-cause";
-import { readRunBytesNoFollow } from "../engine/src/orchestration/no-follow-fs";
+import { readStoredContextPacketFile } from "../engine/src/orchestration/stored-context-packets";
 
 function argumentsAndArchive(args: readonly string[]) {
   const regular: string[] = [];
@@ -24,13 +24,22 @@ function argumentsAndArchive(args: readonly string[]) {
   return { regular, archive };
 }
 
+/** One identity field of an archived predecessor packet, as the string the projection binds. */
+function archivedIdentity(packet: unknown, key: "requestId" | "digest" | "role" | "requiredSkill"): string {
+  const value = typeof packet === "object" && packet !== null ? (packet as Record<string, unknown>)[key] : undefined;
+  if (typeof value !== "string") throw Error(`archived predecessor packet lacks a string ${key}`);
+  return value;
+}
+
 try {
   const { regular, archive } = argumentsAndArchive(process.argv.slice(2));
   const input = parseContextProjectionArguments(regular);
   if (!input.ok) throw Error(input.error);
   // Existing reader ceiling is not a reviewer response or whole-Run budget.
-  const bytes = readRunBytesNoFollow(input.value.path, input.value.purpose === "standalone-successor" ? 16_777_216 : 128 * 1024 * 1024);
-  const raw: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  const ceiling = input.value.purpose === "standalone-successor" ? 16_777_216 : 128 * 1024 * 1024;
+  const stored = readStoredContextPacketFile(input.value.path, { file: ceiling, section: ceiling });
+  if (!stored.ok) throw Error(stored.error);
+  const raw = stored.value.record;
   let projected;
   if (archive.size === 0) projected = projectContextPacket(raw, input.value);
   else {
@@ -43,21 +52,28 @@ try {
     const retained = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(section.bytes)));
     if (!Number.isSafeInteger(retained.byteLength) || retained.byteLength < 1 || retained.byteLength > 16_777_216) throw Error("archive exceeds bounded expansion");
     let expanded: Buffer;
+    let prior: unknown;
     if (retained.encoding === "published-packet-reference") {
       if (typeof retained.path !== "string" || !retained.path.startsWith("/") || retained.purpose !== archive.get("--archive-purpose")) throw Error("invalid explicit predecessor reference");
-      expanded = readRunBytesNoFollow(retained.path, retained.byteLength);
+      // The reference pins the predecessor's packet FILE bytes; its sections
+      // resolve from the predecessor run's own blob store.
+      const predecessor = readStoredContextPacketFile(retained.path, { file: retained.byteLength, section: 16_777_216 });
+      if (!predecessor.ok) throw Error(predecessor.error);
+      expanded = predecessor.value.fileBytes;
+      prior = predecessor.value.record;
     } else if (retained.encoding === "gzip-base64") {
       if (typeof retained.contentBase64 !== "string" || retained.contentBase64.length > 16_777_216) throw Error("archive exceeds compressed bound");
       const compressed = Buffer.from(retained.contentBase64, "base64");
       if (compressed.toString("base64") !== retained.contentBase64) throw Error("invalid archive encoding");
       expanded = gunzipSync(compressed, { maxOutputLength: retained.byteLength });
+      prior = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(expanded));
     } else throw Error("unsupported predecessor encoding");
     if (expanded.length !== retained.byteLength || createHash("sha256").update(expanded).digest("hex") !== retained.digest) throw Error("archive bytes differ");
-    const prior = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(expanded));
     // Inner identity is retained DATA within the independently selected outer section,
     // not authority for issuance or capture. Decode purpose is explicit, never guessed.
-    projected = projectContextPacket(prior, { ...input.value, requestId: prior.requestId, digest: prior.digest,
-      role: prior.role, requiredSkill: prior.requiredSkill,
+    projected = projectContextPacket(prior, { ...input.value, requestId: archivedIdentity(prior, "requestId"),
+      digest: archivedIdentity(prior, "digest"), role: archivedIdentity(prior, "role"),
+      requiredSkill: archivedIdentity(prior, "requiredSkill"),
       purpose: archive.get("--archive-purpose") === "standalone-successor" ? "standalone-successor" : undefined });
   }
   if (!projected.ok) throw Error(projected.error);

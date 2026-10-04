@@ -18,6 +18,16 @@
  * resolving the issued request against its registration, parsing the claimed
  * registration, and resource-bounding final-payload selection before any
  * transcript work.
+ *
+ * The emission seam (T7, AD-8/AD-9) lives here for the same reason: an adapter
+ * that observed its transcript through the emission vocabulary hands over the
+ * closed emission frames BESIDE the unchanged final-payload candidates, and
+ * the canonical selection runs ONCE in this runtime against the ISSUED
+ * authority the run directory itself certifies — the same pure eligibility
+ * join the render path projects with (`resolveReviewerCaptureEmissionAuthority`).
+ * The accepted source is published here too (bounded write-ahead artifact,
+ * replay-idempotent), from the provenance the selection decision RETURNED —
+ * never reconstructed by a later logger from the transcript.
  */
 
 import { match } from "ts-pattern";
@@ -25,17 +35,29 @@ import {
   bindCapture,
   captureKey,
   nativeCaptureObservation,
+  observeEmissionCalls,
   recoverNativeCaptureArtifact,
   captureRejectionAuditRecord,
   captureRejectionDedupKey,
   parseFinalPayload,
   type CaptureReceipt,
+  type EmissionCallFrame,
   type FinalPayload,
   type FinalPayloadCandidate,
   type HarnessResultIdentity,
 } from "../core/harness-capture";
-import { parseEffectId, type AgentRequestAuthority, type ArtifactRef, type DomainResult } from "../core/orchestration-contract";
+import { selectCanonicalPayload } from "../core/emission-ingestion";
+import type { IssuedEmissionBindingOf } from "../core/emission-tool";
+import {
+  issuedReviewerPayloadClaim,
+  issuedSpawnEmissionRouteDecision,
+  qualifyIssuedSpawnEmissionRoute,
+} from "../core/spawn-admission";
+import { STANDALONE_REVIEWER_ROLES } from "../core/standalone-review";
+import { CURRENT_REVIEWER_PROTOCOL } from "../core/reviewer-contract";
+import { canonicalRecord, canonicalStructuralEquals, parseEffectId, type AgentRequestAuthority, type ArtifactRef, type ContextDigest, type DomainResult } from "../core/orchestration-contract";
 import { createHash } from "node:crypto";
+import { canonicalJson, type JsonValue } from "../core/review-packet";
 import { parseStandaloneReviewerProtocolV3 } from "../core/standalone-lineage-contract";
 import { verifyStandalonePanelView } from "./standalone-panel-context";
 import { openRegisteredRunDirectory, type RunDirHandle } from "./run-directory-handle";
@@ -66,8 +88,24 @@ export type TerminalCaptureRefusal = Readonly<{
 
 export type CaptureObservation =
   | Readonly<{ kind: "candidates"; candidates: readonly FinalPayloadCandidate[] }>
+  | Readonly<{
+      kind: "emission-observed";
+      /** The harness adapter's complete assistant emission-tool-call frames —
+       *  the closed observation vocabulary's input, folded ONCE here by
+       *  `observeEmissionCalls` before the selection (AD-8). Zero frames is
+       *  the ordinary no-tool observation, not a special case. */
+      frames: readonly EmissionCallFrame[];
+      /** The unchanged final-payload candidates the extraction arms fold. */
+      candidates: readonly FinalPayloadCandidate[];
+    }>
   | Readonly<{ kind: "unavailable"; reason: string; message: string }>
   | TerminalCaptureRefusal;
+
+export const captureEmissionObservation = (
+  frames: readonly EmissionCallFrame[],
+  candidates: readonly FinalPayloadCandidate[],
+): CaptureObservation =>
+  Object.freeze({ kind: "emission-observed" as const, frames: Object.freeze([...frames]), candidates: Object.freeze([...candidates]) });
 
 export type CaptureOutcome =
   | Readonly<{ kind: "not-an-orchestration-run" }>
@@ -87,6 +125,241 @@ export const captureCandidates = (candidates: readonly FinalPayloadCandidate[]):
 
 const retriableFailure = (reason: string, message: string): CaptureOutcome =>
   Object.freeze({ kind: "retriable-failure", reason, message });
+
+// ---------------------------------------------------------------------------
+// Issued reviewer emission authority at the capture seam (AD-7/AD-8, T7)
+// ---------------------------------------------------------------------------
+
+/**
+ * What the capture seam's issued-authority resolution concluded for ONE
+ * correlated reviewer request — the capture-side mirror of the render path's
+ * emission-eligibility join (`reviewerEmissionProjection`), composed from the
+ * SAME pure pieces so the two sides cannot disagree about which requests are
+ * emission-enabled:
+ *
+ * - `ineligible` — the request names no issued reviewer-payload contract
+ *   (non-producer roles/programs): the no-tool baseline. Observed emission
+ *   calls are still refused, never absorbed as absence.
+ * - `extraction-only` — the issued contract is explicit extraction-only
+ *   (archived v1, unsupported registry cell, or a route the qualified-route
+ *   gate does not trust): extraction-only authority cannot be upgraded by an
+ *   observed emission call (AD-7).
+ * - `emission` — the issued contract selects a frozen registry cell on the
+ *   qualified route: the binding the selection admits against.
+ * - `unavailable` — the issued authority itself could not be read or parsed:
+ *   unavailable evidence, never an invented extraction result.
+ *
+ * The claim is minted from the DURABLE program registration and the issued
+ * request authority — never from prompt markers, harness claims, or model
+ * arguments (FR-001) — and the route decision is the render path's own
+ * `qualifyIssuedSpawnEmissionRoute`, so a Claude harness (no Pi parent) is
+ * extraction-only by construction and a non-qualified provider route cannot
+ * be upgraded by any capture-side input.
+ */
+export type ReviewerCaptureEmissionAuthority =
+  | Readonly<{ kind: "ineligible" }>
+  | Readonly<{ kind: "extraction-only"; reason: string }>
+  | Readonly<{ kind: "emission"; binding: IssuedEmissionBindingOf<"reviewer-payload">; contextDigest: ContextDigest }>
+  | Readonly<{ kind: "unavailable"; message: string }>;
+
+/**
+ * Resolve the issued reviewer emission authority for one correlated request
+ * from the run directory's own durable registration. The eligibility predicate
+ * is the render path's (`reviewerEmissionEligible` semantics: reviewer role on
+ * a standalone-review or wave-gate request); the protocol projection is the
+ * registration's own schema version and issued descriptor, projected from the
+ * raw registration bytes the runtime itself reads and accepted ONLY for the
+ * frozen descriptors; the claim mint and route decision are the render path's
+ * exact pure pieces.
+ */
+export function resolveReviewerCaptureEmissionAuthority(
+  handle: RunDirHandle,
+  request: AgentRequestAuthority,
+  harness: HarnessResultIdentity["harness"],
+): ReviewerCaptureEmissionAuthority {
+  const eligible = (STANDALONE_REVIEWER_ROLES as readonly string[]).includes(request.role) &&
+    (request.program === "standalone-review" || request.program === "wave-gate");
+  if (!eligible) return Object.freeze({ kind: "ineligible" as const });
+  const stored = handle.readProgramRegistration(16_777_216);
+  if (!stored.ok) {
+    return Object.freeze({ kind: "unavailable" as const, message: stored.error.message });
+  }
+  const projected = projectRegisteredReviewerRegistration(stored.value);
+  if (!projected.ok) {
+    return Object.freeze({ kind: "unavailable" as const, message: projected.error });
+  }
+  if (projected.value === null) return Object.freeze({ kind: "ineligible" as const });
+  const claim = issuedReviewerPayloadClaim(
+    projected.value.schemaVersion === 1
+      ? Object.freeze({ schemaVersion: 1 as const })
+      : Object.freeze({
+          schemaVersion: projected.value.schemaVersion,
+          reviewerProtocol: Object.freeze({ schemaDigest: projected.value.schemaDigest }),
+        }),
+    request,
+  );
+  const route = issuedSpawnEmissionRouteDecision(qualifyIssuedSpawnEmissionRoute(claim, request, harness === "pi"));
+  if (route.kind === "emission") {
+    // The claim's producer kind is `reviewer-payload` by construction (the
+    // mint takes only the reviewer protocol projection), so the minted
+    // binding's path refinement is a type fact of this composition, not a
+    // runtime claim the caller could get wrong.
+    return Object.freeze({
+      kind: "emission" as const,
+      binding: route.binding as IssuedEmissionBindingOf<"reviewer-payload">,
+      contextDigest: route.contextDigest,
+    });
+  }
+  if (route.kind === "extraction-only") {
+    return Object.freeze({ kind: "extraction-only" as const, reason: route.reason });
+  }
+  return Object.freeze({ kind: "unavailable" as const, message: route.reason });
+}
+
+/**
+ * The capture seam's projection of the DURABLE program registration onto the
+ * reviewer-protocol inputs the issued claim mint consumes — the same
+ * eligibility inputs the render path derives through the facade registration
+ * parser, projected here from the raw registration bytes the runtime itself
+ * reads (its purpose classification already inspects these same descriptor
+ * fields, so this is the existing minimal inspection layer, extended).
+ *
+ * The projection ACCEPTS ONLY the frozen descriptors: a schema-2 registration
+ * must carry the exact current reviewer protocol and a schema-3 successor the
+ * exact frozen v3 protocol — a drifted descriptor is unavailable evidence,
+ * never an extraction downgrade of a corrupt issuance. `null` is the ordinary
+ * ineligible arm (no reviewer program, or the archived schema-1 contract,
+ * which binds no emission schema).
+ */
+type RegisteredReviewerRegistration =
+  | Readonly<{ schemaVersion: 1; schemaDigest?: never }>
+  | Readonly<{ schemaVersion: 2 | 3; schemaDigest: string }>;
+
+function projectRegisteredReviewerRegistration(
+  raw: unknown,
+): DomainResult<RegisteredReviewerRegistration | null, string> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { ok: true, value: null };
+  const record = raw as Readonly<Record<string, unknown>>;
+  const kind = Object.getOwnPropertyDescriptor(record, "kind")?.value;
+  if (kind !== "standalone-review" && kind !== "wave-gate") return { ok: true, value: null };
+  const schemaVersion = Object.getOwnPropertyDescriptor(record, "schemaVersion")?.value;
+  if (schemaVersion === 1) return { ok: true, value: Object.freeze({ schemaVersion: 1 as const }) };
+  if (schemaVersion === 2) {
+    const descriptor = Object.getOwnPropertyDescriptor(record, "reviewerProtocol")?.value;
+    return canonicalStructuralEquals(descriptor, CURRENT_REVIEWER_PROTOCOL)
+      ? { ok: true, value: Object.freeze({ schemaVersion: 2 as const, schemaDigest: CURRENT_REVIEWER_PROTOCOL.schemaDigest }) }
+      : { ok: false, error: "program registration does not carry the exact frozen reviewer protocol descriptor" };
+  }
+  if (schemaVersion === 3 && kind === "standalone-review") {
+    const parsed = parseStandaloneReviewerProtocolV3(Object.getOwnPropertyDescriptor(record, "reviewerProtocol")?.value);
+    return parsed.ok
+      ? { ok: true, value: Object.freeze({ schemaVersion: 3 as const, schemaDigest: parsed.value.schemaDigest }) }
+      : { ok: false, error: parsed.error.message };
+  }
+  return {
+    ok: false,
+    error: `program registration carries no supported reviewer protocol projection (schema version ${String(schemaVersion)})`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Accepted-source provenance (FR-009): bounded, write-ahead, replay-idempotent
+// ---------------------------------------------------------------------------
+
+/**
+ * The accepted source of one capture, returned BY the selection decision and
+ * persisted beside the accepted bytes — never reconstructed by a later logger
+ * from the transcript (the plan's provenance posture). The emission arm
+ * carries the accepted call's identity and the issued schema digest; the
+ * extraction-over-refused-call arm carries the single-call refusal that led
+ * to the fallback (FR-006). The zero-call baseline arm carries no refusal —
+ * there was none.
+ */
+export type CaptureSourceProvenance = Readonly<{
+  source: "emission-tool" | "extraction";
+  toolCallId?: string;
+  producerKind?: string;
+  /** The issued emission schema version — named `emissionSchemaVersion` in the
+   *  record because the record itself carries its own `schemaVersion`. */
+  emissionSchemaVersion?: string;
+  schemaDigest?: string;
+  emissionRefusal?: Readonly<{ code: string; message: string }>;
+}>;
+
+/** The bounded publication budget of one source record (the native-capture
+ *  observation's bound — these records are small by construction). */
+const CAPTURE_SOURCE_BOUND_BYTES = 16_384;
+
+const captureSourceArtifactPath = (requestId: string): string => `capture-sources/${requestId}.json`;
+
+/** The canonical source record for one accepted capture. Deterministic in its
+ *  inputs, so an exact replay derives byte-identical record bytes. */
+function captureSourceRecord(
+  request: AgentRequestAuthority,
+  harness: HarnessResultIdentity["harness"],
+  provenance: CaptureSourceProvenance,
+  payload: FinalPayload,
+): Readonly<Record<string, JsonValue>> {
+  return canonicalRecord({
+    schemaVersion: 1,
+    kind: "capture-source" as const,
+    requestId: request.requestId,
+    slotId: request.slotId,
+    attempt: request.attempt,
+    harness,
+    source: provenance.source,
+    ...(provenance.toolCallId === undefined ? {} : { toolCallId: provenance.toolCallId }),
+    ...(provenance.producerKind === undefined ? {} : { producerKind: provenance.producerKind }),
+    ...(provenance.emissionSchemaVersion === undefined ? {} : { emissionSchemaVersion: provenance.emissionSchemaVersion }),
+    ...(provenance.schemaDigest === undefined ? {} : { schemaDigest: provenance.schemaDigest }),
+    ...(provenance.emissionRefusal === undefined ? {} : { emissionRefusal: provenance.emissionRefusal }),
+    payloadDigest: payload.digest,
+    payloadByteLength: payload.byteLength,
+  });
+}
+
+const bytesEqual = (left: Uint8Array, right: Uint8Array): boolean =>
+  left.length === right.length && left.every((byte, index) => byte === right[index]);
+
+/**
+ * Publish the bounded accepted-source record BEFORE the transcript write —
+ * write-ahead evidence bound to the request, through the run directory's
+ * existing no-follow artifact publication (the same mechanism and recovery
+ * posture as the native capture observation).
+ *
+ * Exact-replay idempotent: a record already published with IDENTICAL bytes
+ * (a crash between publication and the transcript write, replayed) proceeds;
+ * a published record describing a DIFFERENT accepted source is a refusal —
+ * the recorded selection is authoritative and is never rewritten or silently
+ * reconciled (missing/corrupt provenance is unavailable evidence, never an
+ * invented historical source).
+ */
+async function publishCaptureSourceRecord(
+  handle: RunDirHandle,
+  request: AgentRequestAuthority,
+  harness: HarnessResultIdentity["harness"],
+  provenance: CaptureSourceProvenance,
+  payload: FinalPayload,
+): Promise<DomainResult<true, string>> {
+  const serialized = canonicalJson(captureSourceRecord(request, harness, provenance, payload));
+  const bytes = new TextEncoder().encode(serialized);
+  if (bytes.length > CAPTURE_SOURCE_BOUND_BYTES) {
+    return { ok: false, error: "capture-source record exceeds the 16384-byte publication bound" };
+  }
+  const path = captureSourceArtifactPath(request.requestId);
+  const prior = handle.readArtifactBytes(path, CAPTURE_SOURCE_BOUND_BYTES);
+  if (!prior.ok) return { ok: false, error: prior.error.message };
+  if (prior.value !== null) {
+    return bytesEqual(prior.value, bytes)
+      ? { ok: true, value: true }
+      : {
+          ok: false,
+          error: `capture-source provenance for request ${request.requestId} is already published with a different accepted source; the recorded selection is authoritative and is never rewritten`,
+        };
+  }
+  const published = await handle.publishArtifactSet([{ relativePath: path, bytes: [...bytes] }]);
+  return published.ok ? { ok: true, value: true } : { ok: false, error: published.error.message };
+}
 
 /**
  * Why a capture did not happen, in operator-facing words.
@@ -351,30 +624,144 @@ export async function captureHarnessResult(args: CaptureHarnessInput): Promise<C
   if (purpose.value === "standalone-successor" && observation.candidates.some(candidate => Buffer.byteLength(candidate.text, "utf8") > 1_048_576)) {
     return reject("payload-byte-limit", "native successor final exceeds the unchanged 1048576-byte reviewer budget");
   }
+  // The canonical selection seam (T7, AD-8/AD-9): an adapter that observed the
+  // transcript through the emission vocabulary hands over BOTH projections —
+  // assistant emission-tool-call frames and the unchanged final-payload
+  // candidates — and the selection is made ONCE here, against the issued
+  // authority the run directory itself carries. The candidates-only arm
+  // below is the pre-selection adapters' existing contract and stays
+  // byte-identical.
+  if (observation.kind === "emission-observed") {
+    return captureSelectedEmission(handle, request, identity, issued, args.harness, observation, purpose.value, reject);
+  }
   const payload = parseFinalPayload(observation.candidates);
   if (!payload.ok) return reject(payload.error.reason, payload.error.message);
+  return bindAndPersistCapture(handle, request, identity, issued, payload.value, purpose.value, null);
+}
 
+/**
+ * The duplicate-bind rule the selection paths share with the extraction
+ * baseline: `duplicate-capture` must NOT tombstone (the slot already holds
+ * accepted bytes and `rejectCapture` refuses a captured attempt); every other
+ * bind refusal leaves the reservation unfilled and is terminalised.
+ */
+async function bindAndPersistCapture(
+  handle: RunDirHandle,
+  request: AgentRequestAuthority,
+  identity: HarnessResultIdentity,
+  issued: readonly AgentRequestAuthority[],
+  payload: FinalPayload,
+  purpose: NativeCapturePurpose,
+  provenance: CaptureSourceProvenance | null,
+): Promise<CaptureOutcome> {
   const captured = handle.readCapturedAttempts();
   if (!captured.ok) return retriableFailure("transcripts", captured.error.message);
   const bound = bindCapture({
     issued,
     identity,
-    payload: payload.value,
+    payload,
     // Only current native capture can reconcile an unreceipted write. Its durable
     // observation and exact bytes are proved below; legacy duplicate rules stay intact.
-    alreadyCaptured: purpose.value === "standalone-successor" ? new Set() : captured.value,
+    alreadyCaptured: purpose === "standalone-successor" ? new Set() : captured.value,
   });
   if (!bound.ok) {
-    // `duplicate-capture` is the one bind refusal that must NOT tombstone: the
-    // slot already holds accepted bytes, and `rejectCapture` refuses a captured
-    // attempt. Every other bind refusal leaves the reservation unfilled.
     return bound.error.reason === "duplicate-capture"
       ? { kind: "terminal-rejection", reason: bound.error.reason, message: bound.error.message }
-      : reject(bound.error.reason, bound.error.message);
+      : terminalizeCaptureRejection(handle, request, terminalCaptureRefusal(bound.error.reason, bound.error.message));
   }
-
-  return persistBoundCapture(handle, request, bound.value, payload.value, purpose.value,
+  return persistBoundCapture(handle, request, bound.value, payload, purpose, provenance,
     captured.value.has(captureKey(request.slotId, request.attempt)) ? "recapture" : "fresh");
+}
+
+/**
+ * The BOTH-causes diagnostic the two engine-refused selection arms share
+ *  (FR-006/AD-9: one rejection carrying both causes, never two).
+ */
+const describeRefusalPair = (
+  emissionRefusal: Readonly<{ code: string; message: string }>,
+  extraction: Readonly<{ reason: string; message: string }>,
+): string =>
+  `emission arguments were refused [${emissionRefusal.code}]: ${emissionRefusal.message}; ` +
+    `final-message extraction was refused [${extraction.reason}]: ${extraction.message}`;
+
+/**
+ * The capture seam's ONE canonical selection (AD-8/AD-9, T7): the emission
+ * observation is folded once, the selection runs against the ISSUED binding
+ * the run directory itself certifies (`resolveReviewerCaptureEmissionAuthority`
+ * — never an adapter claim), and every closed selection arm maps onto the
+ * existing capture outcome vocabulary. The refusal arms terminalise with the
+ * selection's own diagnostics (FR-006/FR-007/FR-014); the accepted arms bind
+ * and persist with the provenance the decision RETURNED, so the accepted
+ * source is published by the decision site and never reconstructed from the
+ * transcript later.
+ *
+ * Extraction-only and non-producer authority (the `ineligible` and
+ * `extraction-only` arms — archived v1 contracts, unsupported registry cells,
+ * routes the qualified-route gate does not trust, non-Pi harnesses) keep the
+ * unchanged extraction semantics when NO emission call was observed, and
+ * refuse an observed emission call outright: extraction-only authority cannot
+ * be upgraded by a call to a tool the issued request never advertised (AD-7).
+ */
+async function captureSelectedEmission(
+  handle: RunDirHandle,
+  request: AgentRequestAuthority,
+  identity: HarnessResultIdentity,
+  issued: readonly AgentRequestAuthority[],
+  harness: HarnessResultIdentity["harness"],
+  observation: Extract<CaptureObservation, { kind: "emission-observed" }>,
+  purpose: NativeCapturePurpose,
+  reject: (reason: string, message: string) => Promise<CaptureOutcome>,
+): Promise<CaptureOutcome> {
+  const authority = resolveReviewerCaptureEmissionAuthority(handle, request, harness);
+  if (authority.kind === "unavailable") return retriableFailure("emission-authority", authority.message);
+  if (authority.kind !== "emission") {
+    if (observation.frames.length > 0) {
+      const authorityClass = authority.kind === "extraction-only" ? "extraction-only" : "non-producer";
+      const detail = authority.kind === "extraction-only"
+        ? authority.reason
+        : `request ${request.requestId} carries no issued producer contract`;
+      return reject("unexpected-emission-call",
+        `capture observed ${observation.frames.length} emission tool call(s) under ${authorityClass} authority (${detail}); ` +
+          "extraction-only authority cannot be upgraded by an observed emission call");
+    }
+    const payload = parseFinalPayload(observation.candidates);
+    if (!payload.ok) return reject(payload.error.reason, payload.error.message);
+    return bindAndPersistCapture(handle, request, identity, issued, payload.value, purpose, null);
+  }
+  const selection = selectCanonicalPayload(
+    authority.binding,
+    observeEmissionCalls(observation.frames),
+    observation.candidates,
+  );
+  switch (selection.kind) {
+    case "emission-tool-arguments":
+      return bindAndPersistCapture(handle, request, identity, issued, selection.payload, purpose, {
+        source: "emission-tool" as const,
+        toolCallId: selection.call.toolCallId,
+        producerKind: selection.call.kind.kind,
+        emissionSchemaVersion: authority.binding.version,
+        schemaDigest: authority.binding.schemaDigest,
+      });
+    case "final-message-extraction":
+      if (!selection.fallback.ok) return reject(selection.fallback.error.reason, selection.fallback.error.message);
+      return bindAndPersistCapture(handle, request, identity, issued, selection.fallback.value, purpose, { source: "extraction" as const });
+    case "extraction-over-refused-call":
+      if (!selection.fallback.ok) {
+        return reject("emission-and-extraction-refused", describeRefusalPair(selection.emissionRefusal, selection.fallback.error));
+      }
+      return bindAndPersistCapture(handle, request, identity, issued, selection.fallback.value, purpose, {
+        source: "extraction" as const,
+        emissionRefusal: { code: selection.emissionRefusal.code, message: selection.emissionRefusal.message },
+      });
+    case "duplicate-emission-call":
+      return reject("ambiguous-emission-call",
+        `result carried ${selection.calls.length} distinct emission tool calls ` +
+          `(${selection.calls.map(({ toolCallId }) => toolCallId).join(", ")}); exactly one successfully executed call is allowed`);
+    case "refused-call-no-fallback":
+      return reject("emission-and-extraction-refused", describeRefusalPair(selection.emissionRefusal, selection.extraction));
+    case "observation-refused":
+      return reject(selection.refusal.code, selection.refusal.message);
+  }
 }
 
 async function persistBoundCapture(
@@ -383,6 +770,7 @@ async function persistBoundCapture(
   receipt: CaptureReceipt,
   payload: FinalPayload,
   purpose: NativeCapturePurpose,
+  provenance: CaptureSourceProvenance | null,
   observation: "fresh" | "recapture",
 ): Promise<CaptureOutcome> {
   const context = purpose === "standalone-successor" && request.program === "standalone-review"
@@ -401,6 +789,16 @@ async function persistBoundCapture(
     if (!view.ok) return retriableFailure("context", view.error);
   }
   if (purpose === "standalone-successor") return persistNativeCapture(handle, request, receipt, payload, observation);
+  // The accepted source is published BEFORE the transcript write (write-ahead,
+  // same posture as the native capture observation) and only when a selection
+  // decision produced the payload — extraction-only captures keep today's
+  // byte-identical legacy layout. Publication failure is retriable
+  // infrastructure, never a consumed attempt and never a silently-unrecorded
+  // source.
+  if (provenance !== null) {
+    const published = await publishCaptureSourceRecord(handle, request, receipt.harness, provenance, payload);
+    if (!published.ok) return retriableFailure("capture-source", published.error);
+  }
   const written = await handle.captureTranscript(request, payload.bytes);
   if (!written.ok) {
     const rejection = handle.readCaptureRejection(request);

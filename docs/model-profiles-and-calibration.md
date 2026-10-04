@@ -17,6 +17,7 @@ Current profile ids:
 - `architecture-finalize`
 - `general-review`
 - `focused-review`
+- `qualified-local-review` (issue-time alternative for Wave/standalone reviewer payloads only)
 - `panel-design`
 - `panel-judge`
 - `refutation`
@@ -39,7 +40,25 @@ There is no implicit profile fallback. Missing Agent, profile, harness, or front
 
 ### Pi launcher routing
 
-The catalog defines the requested Pi binding. A machine’s Pi launcher routing policy may explicitly choose local-parent inheritance or a named exact target for child Agents. Loom does not infer that choice inside the pure catalog. Both Pi launchers—the normal headless subagent transport and the Interactive Phase Transport—apply parent-model, workload, profile, and Agent specificity and record the same exact provider/model/thinking binding. The Pi spawn guard proves the generated definition, user-global Agent scope, and request authority while allowing the launcher’s explicit routing decision to determine the effective model.
+The catalog defines the requested Pi binding. New Wave/standalone reviewer issuance explicitly selects `qualified-local-review` only when the Pi parent is the exact `desktop-vllm/glm-5.3-flash-spark-tp2-v14:high` route; a cloud, different local, or non-Pi parent uses the Agent's default catalog profile. Spec-check, Refutation Panel, and implementation roles never elect this alternative. A machine’s Pi launcher routing policy may explicitly choose local-parent inheritance or a named exact target for child Agents, but cannot promote an already issued cloud request or reinterpret its frozen profile. Both Pi launchers—the normal headless subagent transport and the Interactive Phase Transport—apply parent-model, workload, profile, and Agent specificity and record the same exact provider/model/thinking binding. The Pi spawn guard proves the generated definition, user-global Agent scope, and request authority while allowing the launcher’s explicit routing decision to determine the effective model.
+
+### Emission routes and qualification
+
+The frozen emission tools are issued only on an explicitly qualified route. The engine freezes the qualified route as module-local policy data (`QUALIFIED_EMISSION_ROUTE` in `engine/src/core/spawn-admission.ts`): provider `desktop-vllm`, served model `glm-5.3-flash-spark-tp2-v14`. A request issued on that exact Pi route, for a producer kind/version the frozen registry carries, is emission-enabled; every other route — cloud, a different local model, or a non-Pi parent — is issued extraction-only, with the reason recorded on the issued capability. Neither callers nor ambient parent state can choose an enabled route. Once a request is issued emission-enabled, a launcher or child that cannot honor it is refused before any model request, never silently degraded to an ordinary child (see [Pi usage](pi-usage.md#emission-activation-readiness-errors-and-retry-budget)).
+
+Activation is conjunctive and each condition is checked in its own layer: the issued request must name a producer kind the Agent Catalog authorizes for that Agent, its Pi binding must be the exact qualified route, the installed launcher must expose the `loom:subagent-launch:v2` port, and the child must pass its readiness barrier. Qualification alone enables nothing — it only makes issuance on that route possible.
+
+Route classes (exact vocabulary):
+
+- **Constrained emission** — the route accepts the tool schema and enforces the advertised JSON-schema constraints at sampling time.
+- **Unconstrained emission** — the route accepts the exact frozen schema bytes but does not enforce preferred strict sampling; the engine parser stays authoritative. This is the recorded class of the currently qualified route (`probes/emission-qualification/`, consolidated in `.claude/specs/2026-09-16-grammar-constrained-decoding/feasibility.md` §2): all four schemas were accepted at HTTP 200 with the production `strict: "prefer"` registration, and the wire parameters were byte-identical to the frozen bytes, but schema-invalid arguments were demonstrably representable.
+- **Extraction-only** — the harness or route cannot support the exact tool schema; no unsupported tool is advertised and no schema is rewritten or provider-specific payload construction introduced.
+
+Qualification is bound to the route identity — provider, served model, and frozen schema digest. **Requalification triggers:** a served-model switch, a frozen-schema digest change, or a pi upgrade that changes tool serialization or resolver strict-sampling behavior.
+
+Operator configuration: provider capability flags (strict/constrained sampling, tool-call parser, served model) remain **user-side configuration**. Loom's contribution to that configuration is documentation only — it ships the frozen schemas as its own contract but never configures a provider or rewrites a schema for one, and it never treats a capability flag, a provider name, or a successful local schema round-trip as live qualification. Missing access blocks the corresponding evidence; it is never a pass.
+
+Two budget/observability facts matter for calibration: emission and extraction rejection share one existing request-slot attempt budget (a semantic rejection at attempt 1 may advance to one fresh attempt-2 spawn; attempt-2 failure is terminal; there is no same-spawn correction protocol), and pi's own in-child validation-retry loop (~2 extra model requests on refused tool arguments) sits outside that accounting and must be counted in the emission arm's latency budget. Raw tool-argument bytes are not exposed at the harness seam, so duplicate-key behavior is never reported as measured.
 
 ## Engine-issued requests
 

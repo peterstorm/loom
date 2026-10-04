@@ -12,16 +12,23 @@ import {
   type FinalPayloadCandidate,
   type HarnessResultIdentity,
 } from "../../src/core/harness-capture";
+import { admitEmissionArguments, EMISSION_TOOL_SPECS } from "../../src/core/emission-tool";
+import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, reviewerPayloadV2Schema } from "../../src/core/reviewer-contract";
+import { sha256Hex } from "../../src/core/review-packet";
+import type { EmissionCallFrame } from "../../src/core/harness-capture";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import captureOrchestrationResult, {
   captureClaudeResult,
+  claudeEmissionFramesFromLines,
+  claudeEmissionToolFamily,
   claudeFinalPayloadCandidates,
 } from "../../src/handlers/subagent-stop/capture-orchestration-result";
 import { recordClaudeSpawnCorrelation } from "../../src/handlers/post-tool-use/record-orchestration-spawn";
 import { piFinalPayloadCandidates, piResultFinalPayloadCandidates } from "../../../pi/transcript-adapter";
-import { openRunDirectory, type RunDirHandle } from "../../src/orchestration/run-directory-handle";
+import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../src/orchestration/run-directory-handle";
 import {
   captureAuditLine,
+  captureEmissionObservation,
   captureHarnessResult,
   resolveCorrelatedRequest,
   terminalCaptureRefusal,
@@ -1273,3 +1280,559 @@ describe("deterministic parent-call benchmark", () => {
   });
 });
 
+
+// ---------------------------------------------------------------------------
+// The engine capture seam's canonical selection (T7; AD-8/AD-9/AD-10, FR-009)
+// ---------------------------------------------------------------------------
+
+describe("the engine capture seam selects the canonical emission source", () => {
+  const V2_SPEC = EMISSION_TOOL_SPECS["reviewer-payload"];
+  const V2_DIGEST = sha256Hex(V2_SPEC.schemaVersions["v2"]!.schemaBytes);
+
+  const reviewerV2Arguments = (): unknown => reviewerPayloadV2Schema.parse({
+    schemaVersion: 2,
+    kind: "standalone-review",
+    findings: [{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim: "the qualified route carried the frozen schema" }],
+  });
+
+  /** The engine-refined refusal class: whitespace-only prose passes the frozen
+   *  bytes' shape but refuses through the registry's admission (AD-5). */
+  const whitespaceV2Arguments = (): unknown => {
+    const finding = reviewerPayloadV2Schema.parse({
+      schemaVersion: 2,
+      kind: "standalone-review",
+      findings: [{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim: "real claim" }],
+    }).findings[0]!;
+    return { schemaVersion: 2, kind: "standalone-review", findings: [{ ...finding, claim: "   " }] };
+  };
+
+  const completeFrame = (
+    request: AgentRequestAuthority,
+    toolCallId: string,
+    args: unknown,
+    overrides: Partial<{ requestId: string; kind: string; version: string }> = {},
+  ) => Object.freeze({
+    kind: "complete" as const,
+    call: Object.freeze({
+      requestId: overrides.requestId ?? request.requestId,
+      toolCallId,
+      kind: Object.freeze({ kind: overrides.kind ?? "reviewer-payload" }),
+      version: overrides.version ?? "v2",
+      arguments: args,
+    }),
+  });
+
+  const textCandidate = (origin: string, text: string): FinalPayloadCandidate =>
+    Object.freeze({ origin, text });
+
+  interface StagedWaveRun {
+    readonly runsRoot: string;
+    readonly directory: string;
+    readonly request: AgentRequestAuthority;
+    readonly handle: RunDirHandle;
+  }
+
+  /** A real registered wave-gate v2 run with one reserved, correlated reviewer
+   *  request — the same durable authority the render path projects its
+   *  descriptor from, so the capture seam resolves the SAME issuance join. */
+  async function stagedWaveRun(options: Readonly<{
+    harness?: "pi" | "claude";
+    qualifiedRoute?: boolean;
+    nativeId?: string;
+  }> = {}): Promise<StagedWaveRun> {
+    const harness = options.harness ?? "pi";
+    const qualifiedRoute = options.qualifiedRoute ?? true;
+    const runsRoot = canonicalTempDir("loom-emission-seam-");
+    cleanup.push(runsRoot);
+    const directory = join(runsRoot, "run.emission-seam");
+    const created = createRunDirectory(runsRoot, "run.emission-seam");
+    if (!created.ok) throw new Error(created.error.message);
+    // The issuance join at the digest level: the registered protocol's issued
+    // descriptor certifies the SAME frozen bytes the registry cell carries,
+    // so a binding minted from the registration and a binding minted from the
+    // registry are the same identity.
+    expect(CURRENT_REVIEWER_PROTOCOL.schemaDigest).toBe(V2_DIGEST);
+    const registered = {
+      schemaVersion: 2 as const,
+      kind: "wave-gate" as const,
+      input: { wave: 1 },
+      taskIds: ["T1"],
+      authorityDigest: "b".repeat(64),
+      reviewerProtocol: CURRENT_REVIEWER_PROTOCOL,
+    };
+    const program = await created.value.registerProgram(registered);
+    if (!program.ok) throw new Error(program.error.message);
+    const section = encodeByteSection("test", "emission seam context");
+    if (!section.ok) throw new Error(section.error.message);
+    const base = authority({ runId: "run.emission-seam" as AgentRequestAuthority["runId"] });
+    const packet = buildContextPacket({
+      requestId: base.requestId,
+      role: base.role,
+      requiredSkill: "none",
+      outputContract: "test output",
+      fixedContext: [section.value],
+      variableContext: [],
+    });
+    if (!packet.ok) throw new Error(packet.error.message);
+    if (!(await created.value.publishContext(packet.value)).ok) throw new Error("context publication failed");
+    const request = authority({
+      runId: "run.emission-seam" as AgentRequestAuthority["runId"],
+      // The model profile resolves the harness binding: the qualified-local
+      // review profile is the one whose pi target IS the qualified desktop
+      // route, so the emission-enabled request must carry it.
+      modelProfile: qualifiedRoute ? "qualified-local-review" : "general-review",
+      contextDigest: packet.value.digest,
+      harnessBinding: {
+        pi: qualifiedRoute
+          ? { harness: "pi" as const, provider: "desktop-vllm" as const,
+              model: "glm-5.3-flash-spark-tp2-v14" as const, thinking: "high" as const }
+          : { harness: "pi" as const, provider: "openai-codex" as const,
+              model: "gpt-5.6-sol" as const, thinking: "high" as const },
+        claude: { harness: "claude-code" as const, model: "sonnet" as const },
+      },
+    });
+    const reserved = await created.value.reserveRequest(request);
+    if (!reserved.ok) throw new Error(reserved.error.message);
+    const correlated = await created.value.recordHarnessCorrelator({
+      schemaVersion: 1,
+      harness,
+      nativeId: options.nativeId ?? "pi-native-emission",
+      requestId: request.requestId,
+      role: request.role,
+      attempt: request.attempt,
+    });
+    if (!correlated.ok) throw new Error(correlated.error.message);
+    const reopened = openRunDirectory(runsRoot, directory);
+    if (!reopened.ok) throw new Error(reopened.error.message);
+    return { runsRoot, directory, request, handle: reopened.value };
+  }
+
+  const captureEmission = (
+    staged: StagedWaveRun,
+    frames: readonly unknown[],
+    candidates: readonly FinalPayloadCandidate[],
+  ): Promise<Awaited<ReturnType<typeof captureHarnessResult>>> =>
+    captureHarnessResult({
+      harness: "pi",
+      runsRoot: staged.runsRoot,
+      runDirectory: staged.directory,
+      nativeId: "pi-native-emission",
+      observe: () => captureEmissionObservation(frames as never, candidates),
+    });
+
+  const sourceRecord = (staged: StagedWaveRun): Record<string, unknown> | null => {
+    const read = staged.handle.readArtifactBytes(`capture-sources/${staged.request.requestId}.json`, 16_384);
+    if (!read.ok) throw new Error(read.error.message);
+    return read.value === null ? null : JSON.parse(Buffer.from(read.value).toString("utf-8")) as Record<string, unknown>;
+  };
+
+  it("captures a tool-only reviewer v2 emission payload and publishes its accepted-source record", async () => {
+    const staged = await stagedWaveRun();
+    const args = reviewerV2Arguments();
+    const outcome = await captureEmission(staged, [completeFrame(staged.request, "call-tool-only", args)], []);
+
+    expect(outcome.kind).toBe("captured");
+    if (outcome.kind !== "captured") return;
+    const bytes = readFileSync(join(staged.directory, "transcripts", staged.request.slotId, `attempt-${staged.request.attempt}.raw`), "utf-8");
+    expect(bytes).toBe(JSON.stringify(args, null, 2));
+    expect(outcome.receipt.digest).toBe(createHash("sha256").update(bytes).digest("hex"));
+
+    // The accepted source is durable BEFORE acceptance is declared, and it is
+    // the selection's own provenance: accepted call identity, the ISSUED
+    // schema digest, and the accepted payload identity — never reconstructed
+    // from the transcript later.
+    const record = sourceRecord(staged);
+    expect(record).not.toBeNull();
+    expect(record).toMatchObject({
+      schemaVersion: 1,
+      kind: "capture-source",
+      requestId: staged.request.requestId,
+      slotId: staged.request.slotId,
+      attempt: staged.request.attempt,
+      harness: "pi",
+      source: "emission-tool",
+      toolCallId: "call-tool-only",
+      producerKind: "reviewer-payload",
+      emissionSchemaVersion: "v2",
+      schemaDigest: V2_DIGEST,
+      payloadDigest: outcome.receipt.digest,
+    });
+  });
+
+  it("accepts extraction over a single refused call, retains the refusal in the source record, and consumes no attempt", async () => {
+    const staged = await stagedWaveRun();
+    const refusalArgs = whitespaceV2Arguments();
+    const finalText = "VERDICT: PASSED\n";
+    const outcome = await captureEmission(staged,
+      [completeFrame(staged.request, "call-refused", refusalArgs)],
+      [textCandidate("content[0].text", finalText)]);
+
+    expect(outcome.kind).toBe("captured");
+    if (outcome.kind !== "captured") return;
+    const bytes = readFileSync(join(staged.directory, "transcripts", staged.request.slotId, `attempt-${staged.request.attempt}.raw`), "utf-8");
+    expect(bytes).toBe(finalText);
+
+    const expected = admitEmissionArguments(V2_SPEC, "v2", refusalArgs);
+    if (expected.kind !== "refused") throw new Error("fixture must be engine-refused");
+    const record = sourceRecord(staged);
+    expect(record).toMatchObject({
+      source: "extraction",
+      emissionRefusal: { code: expected.code, message: expected.message },
+    });
+    expect(record).not.toHaveProperty("toolCallId");
+
+    // Extraction over a refused call consumed NO retry: the attempt is
+    // accepted, not tombstoned (FR-006/AD-9).
+    const rejected = staged.handle.readCaptureRejection(staged.request);
+    expect(rejected.ok).toBe(true);
+    if (rejected.ok) expect(rejected.value).toBeNull();
+  });
+
+  it("terminalises two distinct emission calls as ONE ambiguity rejection naming both identities", async () => {
+    const staged = await stagedWaveRun();
+    const outcome = await captureEmission(staged, [
+      completeFrame(staged.request, "call-first", reviewerV2Arguments()),
+      completeFrame(staged.request, "call-second", reviewerV2Arguments()),
+    ], [textCandidate("content[0].text", "usable final text")]);
+
+    expect(outcome.kind).toBe("terminal-rejection");
+    if (outcome.kind !== "terminal-rejection") return;
+    expect(outcome.reason).toBe("ambiguous-emission-call");
+    expect(outcome.message).toContain("call-first");
+    expect(outcome.message).toContain("call-second");
+    // Valid final text cannot rescue the ambiguity: no transcript landed.
+    expect(() => readFileSync(join(staged.directory, "transcripts", staged.request.slotId, "attempt-1.raw"))).toThrow();
+    const rejected = staged.handle.readCaptureRejection(staged.request);
+    expect(rejected.ok).toBe(true);
+    if (rejected.ok) expect(rejected.value).toContain("ambiguous-emission-call");
+  });
+
+  it("refuses a misbound emission call before schema selection and terminalises the attempt", async () => {
+    const staged = await stagedWaveRun();
+    const outcome = await captureEmission(staged,
+      [completeFrame(staged.request, "call-misbound", reviewerV2Arguments(), { requestId: "request:reviewer:other" })], []);
+
+    expect(outcome.kind).toBe("terminal-rejection");
+    if (outcome.kind !== "terminal-rejection") return;
+    expect(outcome.reason).toBe("wrong-request");
+    const rejected = staged.handle.readCaptureRejection(staged.request);
+    expect(rejected.ok).toBe(true);
+    if (rejected.ok) expect(rejected.value).not.toBeNull();
+  });
+
+  it("refuses an unusable observation instead of reclassifying it as absence", async () => {
+    const staged = await stagedWaveRun();
+    const outcome = await captureEmission(staged, [
+      { kind: "incomplete", toolCallId: "call-partial", reason: "emission tool call call-partial has no finalized tool result" },
+    ], [textCandidate("content[0].text", "usable final text")]);
+
+    expect(outcome.kind).toBe("terminal-rejection");
+    if (outcome.kind !== "terminal-rejection") return;
+    expect(outcome.reason).toBe("unusable-observation");
+    expect(outcome.message).toContain("call-partial");
+  });
+
+  it("keeps extraction-only authority un-upgradable by an observed emission call, with the zero-call baseline unchanged", async () => {
+    // An unqualified provider route is extraction-only by issuance (AD-7):
+    // the observed call is refused — it can never upgrade extraction-only
+    // authority — and the tombstone records it.
+    const extractionOnly = await stagedWaveRun({ qualifiedRoute: false });
+    const outcome = await captureEmission(extractionOnly,
+      [completeFrame(extractionOnly.request, "call-rogue", reviewerV2Arguments())], []);
+    expect(outcome.kind).toBe("terminal-rejection");
+    if (outcome.kind !== "terminal-rejection") return;
+    expect(outcome.reason).toBe("unexpected-emission-call");
+    expect(outcome.message).toContain("extraction-only authority cannot be upgraded");
+
+    // The zero-call extraction baseline on an extraction-only route is
+    // byte-identical to the pre-emission seam: captured, and NO source record
+    // (selection only publishes provenance where a selection decision ran).
+    const baseline = await stagedWaveRun({ qualifiedRoute: false });
+    const captured = await captureEmission(baseline, [], [textCandidate("content[0].text", "VERDICT: PASSED\n")]);
+    expect(captured.kind).toBe("captured");
+    expect(sourceRecord(baseline)).toBeNull();
+  });
+
+  it("refuses an exact replayed capture as duplicate and leaves the published source record byte-identical", async () => {
+    const staged = await stagedWaveRun();
+    const first = await captureEmission(staged, [completeFrame(staged.request, "call-replay", reviewerV2Arguments())], []);
+    expect(first.kind).toBe("captured");
+    const published = sourceRecord(staged);
+    expect(published).not.toBeNull();
+
+    const replay = await captureEmission(staged, [completeFrame(staged.request, "call-replay", reviewerV2Arguments())], []);
+    expect(replay.kind).toBe("terminal-rejection");
+    if (replay.kind !== "terminal-rejection") return;
+    expect(replay.reason).toBe("duplicate-capture");
+    expect(sourceRecord(staged)).toEqual(published);
+  });
+
+  it("reports unreadable issued emission authority as retriable infrastructure that preserves the attempt", async () => {
+    const staged = await stagedWaveRun();
+    writeFileSync(join(staged.directory, "program.json"), "{corrupt");
+    const outcome = await captureEmission(staged, [completeFrame(staged.request, "call-infra", reviewerV2Arguments())], []);
+
+    expect(outcome.kind).toBe("retriable-failure");
+    if (outcome.kind !== "retriable-failure") return;
+    // The registration read is the first gate that reports the corruption;
+    // whether the purpose read ("registration") or the emission-authority
+    // resolution ("emission-authority") surfaces it, the failure is retriable
+    // infrastructure and the attempt is preserved — never a semantic refusal.
+    expect(["registration", "emission-authority"]).toContain(outcome.reason);
+    const rejected = staged.handle.readCaptureRejection(staged.request);
+    expect(rejected.ok).toBe(true);
+    if (rejected.ok) expect(rejected.value).toBeNull();
+  });
+
+  describe("the AD-10 controls against the production capture path", () => {
+    it("the bypassed-selection control fails the tool-only acceptance through the production candidates arm", async () => {
+      const staged = await stagedWaveRun();
+      // Tool-only completion, selection bypassed: the runtime sees candidates
+      // only, so the tool-only transcript has no final payload to admit and
+      // the attempt is terminalised. The SAME observation captured through the
+      // selection seam above ("captures a tool-only reviewer v2 emission
+      // payload") — the acceptance criterion is discriminating.
+      const bypassed = await captureHarnessResult({
+        harness: "pi",
+        runsRoot: staged.runsRoot,
+        runDirectory: staged.directory,
+        nativeId: "pi-native-emission",
+        candidates: [],
+      });
+      expect(bypassed.kind).toBe("terminal-rejection");
+      if (bypassed.kind !== "terminal-rejection") return;
+      expect(bypassed.reason).toBe("no-final-payload");
+    });
+
+    it("the always-accept control would ingest exactly what the binding check refuses", async () => {
+      const staged = await stagedWaveRun();
+      const misbound = completeFrame(staged.request, "call-misbound", reviewerV2Arguments(), { requestId: "request:reviewer:other" });
+      // What an always-accept seam (registry admission without the binding
+      // check) would ingest: the arguments themselves are schema-valid.
+      const admitted = admitEmissionArguments(V2_SPEC, "v2", reviewerV2Arguments());
+      expect(admitted.kind).toBe("valid");
+      // Production refuses: the call was observed under another request.
+      const outcome = await captureEmission(staged, [misbound], []);
+      expect(outcome.kind).toBe("terminal-rejection");
+      if (outcome.kind !== "terminal-rejection") return;
+      expect(outcome.reason).toBe("wrong-request");
+    });
+
+    it("the always-reject control replaces acceptance with the observation refusal production does not produce", async () => {
+      const staged = await stagedWaveRun();
+      // Always-reject seam posture: every emission observation is refused as
+      // unusable. Through the production path that posture terminalises the
+      // attempt with the unusable-observation refusal — detectably different
+      // from the valid observation's capture above.
+      const alwaysReject = await captureEmission(staged, [
+        { kind: "incomplete", toolCallId: "call-any", reason: "always-reject control: the observation is refused unconditionally" },
+      ], [textCandidate("content[0].text", "usable final text")]);
+      expect(alwaysReject.kind).toBe("terminal-rejection");
+      if (alwaysReject.kind !== "terminal-rejection") return;
+      expect(alwaysReject.reason).toBe("unusable-observation");
+    });
+  });
+
+  describe("the Claude transcript scan observes the emission family", () => {
+    const REVIEWER_TOOL = EMISSION_TOOL_SPECS["reviewer-payload"].toolName;
+
+    it("classifies tool names by the frozen registry, never by shape", () => {
+      expect(claudeEmissionToolFamily(REVIEWER_TOOL)).toEqual({ kind: "registered", producerKind: "reviewer-payload" });
+      expect(claudeEmissionToolFamily("loom_emit_unknown_future_kind")).toEqual({ kind: "unregistered-emission-name" });
+      expect(claudeEmissionToolFamily("Bash")).toEqual({ kind: "unrelated" });
+      expect(claudeEmissionToolFamily(42)).toEqual({ kind: "unrelated" });
+    });
+
+    it("projects complete frames only for successfully executed calls, and refuses-class frames otherwise", () => {
+      const lines = [
+        JSON.stringify({ message: { role: "assistant", content: [
+          { type: "tool_use", id: "tu-ok", name: REVIEWER_TOOL, input: { schemaVersion: 2, kind: "standalone-review", findings: [] } },
+          { type: "tool_use", id: "tu-failed", name: REVIEWER_TOOL, input: { schemaVersion: 2 } },
+          { type: "tool_use", id: "tu-noresult", name: REVIEWER_TOOL, input: { schemaVersion: 2 } },
+          { type: "tool_use", name: REVIEWER_TOOL, input: { schemaVersion: 2 } },
+          { type: "tool_use", id: "tu-foreign", name: "loom_emit_unknown_future_kind", input: {} },
+          { type: "tool_use", id: "tu-scratch", name: "Bash", input: { command: "ls" } },
+          { type: "text", text: "{\"schemaVersion\":2}\n" },
+        ] } }),
+        JSON.stringify({ message: { role: "user", content: [
+          { type: "tool_result", tool_use_id: "tu-ok", is_error: false },
+          { type: "tool_result", tool_use_id: "tu-failed", is_error: true },
+        ] } }),
+      ];
+      const frames = claudeEmissionFramesFromLines(lines, { requestId: "request:reviewer:1", version: "v2" });
+      const complete = frames.filter((frame) => frame.kind === "complete");
+      expect(complete).toHaveLength(1);
+      if (complete[0]!.kind !== "complete") throw new Error("narrowing");
+      expect(complete[0]!.call).toMatchObject({ requestId: "request:reviewer:1", toolCallId: "tu-ok", kind: { kind: "reviewer-payload" }, version: "v2" });
+      // The text block stayed a candidate vocabulary item: it never became a frame.
+      expect(frames.some((frame) => frame.kind === "complete" && frame.call.toolCallId !== "tu-ok")).toBe(false);
+      const incomplete = frames.filter((frame): frame is Extract<EmissionCallFrame, { kind: "incomplete" }> => frame.kind === "incomplete");
+      const reasons = incomplete.map(({ reason }) => reason);
+      expect(reasons.some((reason) => reason.includes("tu-failed") && reason.includes("failed"))).toBe(true);
+      expect(reasons.some((reason) => reason.includes("tu-noresult") && reason.includes("no finalized tool result"))).toBe(true);
+      expect(reasons.some((reason) => reason.includes("without a recoverable tool-call identity"))).toBe(true);
+      expect(reasons.some((reason) => reason.includes("loom_emit_unknown_future_kind") && reason.includes("no frozen registry producer kind"))).toBe(true);
+      // The unrelated Bash call is not an emission observation at all.
+      expect(reasons.some((reason) => reason.includes("Bash"))).toBe(false);
+    });
+
+    it("refuses a rogue emission call through the real Claude capture without upgrading extraction-only authority", async () => {
+      const staged = await stagedWaveRun({ harness: "claude", nativeId: "agent-abc" });
+      const args = reviewerV2Arguments();
+      const transcriptPath = join(staged.directory, "rogue-transcript.jsonl");
+      writeFileSync(transcriptPath, [
+        JSON.stringify({ message: { role: "assistant", content: [
+          { type: "tool_use", id: "tu-rogue", name: EMISSION_TOOL_SPECS["reviewer-payload"].toolName, input: args },
+        ] } }),
+        JSON.stringify({ message: { role: "user", content: [
+          { type: "tool_result", tool_use_id: "tu-rogue", is_error: false },
+        ] } }),
+        JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "VERDICT: PASSED\n" }] } }),
+      ].join("\n") + "\n");
+
+      const outcome = await captureClaudeResult(
+        { session_id: "s1", agent_id: "agent-abc", agent_type: "code-reviewer", agent_transcript_path: transcriptPath },
+        staged.runsRoot,
+        staged.directory,
+      );
+      // A Claude harness has no Pi emission parent: the issued authority is
+      // extraction-only, and the observed call refuses instead of upgrading it
+      // or being absorbed as absence — even with usable final text.
+      expect(outcome.kind).toBe("terminal-rejection");
+      if (outcome.kind !== "terminal-rejection") return;
+      expect(outcome.reason).toBe("unexpected-emission-call");
+      const rejected = staged.handle.readCaptureRejection(staged.request);
+      expect(rejected.ok).toBe(true);
+      if (rejected.ok) expect(rejected.value).toContain("unexpected-emission-call");
+    });
+
+    it("keeps a Claude capture with no emission call on the unchanged extraction baseline", async () => {
+      const staged = await stagedWaveRun({ harness: "claude", nativeId: "agent-abc" });
+      const text = "## Machine Summary\nCRITICAL_COUNT: 0\n";
+      const transcriptPath = join(staged.directory, "plain-transcript.jsonl");
+      writeFileSync(transcriptPath, `${JSON.stringify({
+        message: { role: "assistant", content: [{ type: "text", text }] },
+      })}\n`);
+      const outcome = await captureClaudeResult(
+        { session_id: "s1", agent_id: "agent-abc", agent_type: "code-reviewer", agent_transcript_path: transcriptPath },
+        staged.runsRoot,
+        staged.directory,
+      );
+      expect(outcome.kind).toBe("captured");
+      if (outcome.kind !== "captured") return;
+      expect(outcome.receipt.byteLength).toBe(Buffer.byteLength(text, "utf-8"));
+      // No selection decision ran: no source record on the extraction baseline.
+      const read = staged.handle.readArtifactBytes(`capture-sources/${staged.request.requestId}.json`, 16_384);
+      expect(read.ok).toBe(true);
+      if (read.ok) expect(read.value).toBeNull();
+    });
+
+    it("represents an unclassifiable line as an incomplete frame instead of provable absence (AD-8)", () => {
+      // The upheld capture-review critical's exact scenario: the emission
+      // tool_use line is truncated (partial flush), the final line still
+      // parses as usable text. The tolerant walk cannot claim "no emission
+      // calls" — the corrupted line may hide the call — so the scan must
+      // surface the incompleteness in the closed vocabulary.
+      const lines = [
+        JSON.stringify({ message: { role: "assistant", content: [
+          { type: "text", text: "thinking" },
+        ] } }),
+        `{"message":{"role":"assistant","content":[{"type":"tool_use","id":"tu-lost","name":"${REVIEWER_TOOL}"`,
+        JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "VERDICT: PASSED\n" }] } }),
+      ];
+      const frames = claudeEmissionFramesFromLines(lines, { requestId: "request:reviewer:1", version: "v2" });
+      expect(frames).toHaveLength(1);
+      if (frames[0]!.kind !== "incomplete") throw new Error("narrowing");
+      expect(frames[0]!.reason).toContain("unclassifiable line");
+      expect(frames[0]!.reason).toContain("transcript.line[1]");
+      expect(frames[0]!.reason).toContain("cannot claim absence");
+    });
+
+    it("represents orphan tool results as incomplete frames naming the lost call ids", () => {
+      // The emission call's tool_use line was lost; its tool_result survived.
+      // The orphan id is the walk's only witness to the lost call.
+      const lines = [
+        JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "thinking" }] } }),
+        JSON.stringify({ message: { role: "user", content: [
+          { type: "tool_result", tool_use_id: "tu-orphan", is_error: false },
+        ] } }),
+        JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "VERDICT: PASSED\n" }] } }),
+      ];
+      const frames = claudeEmissionFramesFromLines(lines, { requestId: "request:reviewer:1", version: "v2" });
+      expect(frames).toHaveLength(1);
+      if (frames[0]!.kind !== "incomplete") throw new Error("narrowing");
+      expect(frames[0]!.reason).toContain("orphan tool result");
+      expect(frames[0]!.reason).toContain("tu-orphan");
+    });
+
+    it("keeps a clean zero-call walk on the ordinary no-tool observation", () => {
+      // The incompleteness guard must not fire on well-formed transcripts:
+      // a blank-padded, message-shaped walk with no unparseable lines and no
+      // orphan results observes absence legitimately.
+      const lines = [
+        "",
+        JSON.stringify({ message: { role: "assistant", content: [
+          { type: "tool_use", id: "tu-scratch", name: "Bash", input: { command: "ls" } },
+        ] } }),
+        JSON.stringify({ message: { role: "user", content: [
+          { type: "tool_result", tool_use_id: "tu-scratch", is_error: false },
+        ] } }),
+        JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "done" }] } }),
+        "",
+      ];
+      expect(claudeEmissionFramesFromLines(lines, { requestId: "request:reviewer:1", version: "v2" })).toEqual([]);
+    });
+
+    it("refuses a capture whose transcript lost an emission call to a corrupted line instead of silently extracting", async () => {
+      const staged = await stagedWaveRun({ harness: "claude", nativeId: "agent-abc" });
+      const transcriptPath = join(staged.directory, "corrupted-emission-transcript.jsonl");
+      // Line 1 carried the emission tool_use and was truncated mid-write; the
+      // final line's text would pass extraction. Pre-fix this captured as a
+      // plain extraction fallback with no trace of the lost call.
+      writeFileSync(transcriptPath, [
+        `{"message":{"role":"assistant","content":[{"type":"tool_use","id":"tu-lost","name":"${REVIEWER_TOOL}"`,
+        JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "VERDICT: PASSED\n" }] } }),
+      ].join("\n") + "\n");
+
+      const outcome = await captureClaudeResult(
+        { session_id: "s1", agent_id: "agent-abc", agent_type: "code-reviewer", agent_transcript_path: transcriptPath },
+        staged.runsRoot,
+        staged.directory,
+      );
+      // The incomplete walk yields a frame; extraction-only authority cannot
+      // be upgraded by an observed emission call, so the capture terminalises
+      // with the refusal naming the unreadable line — never silence.
+      expect(outcome.kind).toBe("terminal-rejection");
+      if (outcome.kind !== "terminal-rejection") return;
+      expect(outcome.reason).toBe("unexpected-emission-call");
+      const rejected = staged.handle.readCaptureRejection(staged.request);
+      expect(rejected.ok).toBe(true);
+      if (rejected.ok) expect(rejected.value).toContain("unexpected-emission-call");
+    });
+
+    it("surfaces a corrupted-line walk through the qualified route as an unusable observation naming the unreadable lines", async () => {
+      const staged = await stagedWaveRun();
+      const lines = [
+        `{"message":{"role":"assistant","content":[{"type":"tool_use","id":"tu-lost","name":"${REVIEWER_TOOL}"`,
+        JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "VERDICT: PASSED\n" }] } }),
+      ];
+      const frames = claudeEmissionFramesFromLines(lines, { requestId: staged.request.requestId, version: "v2" });
+      expect(frames.some((frame) => frame.kind === "incomplete")).toBe(true);
+      const outcome = await captureEmission(staged, frames, [textCandidate("content[0].text", "VERDICT: PASSED\n")]);
+
+      // The incomplete walk is represented as itself in the closed vocabulary:
+      // an unusable observation that terminalises the attempt with the reason
+      // naming the unreadable lines — usable final text never papers over a
+      // transcript known to have lost lines (the same class the sole
+      // incomplete-frame arm terminalises with).
+      expect(outcome.kind).toBe("terminal-rejection");
+      if (outcome.kind !== "terminal-rejection") return;
+      expect(outcome.reason).toBe("unusable-observation");
+      expect(outcome.message).toContain("unclassifiable line");
+      expect(outcome.message).toContain("cannot claim absence");
+      const rejected = staged.handle.readCaptureRejection(staged.request);
+      expect(rejected.ok).toBe(true);
+      if (rejected.ok) expect(rejected.value).toContain("unclassifiable line");
+    });
+  });
+});

@@ -34,7 +34,17 @@ import {
   rollbackTaskExecutionRegistration,
 } from "../engine/src/handlers/task-execution";
 import { validateTemplateSubstitution } from "../engine/src/core/validate-template-substitution";
-import { admitPiSpawnBatch, MAX_PI_ORCHESTRATION_BATCH_SIZE } from "../engine/src/core/spawn-admission";
+import {
+  admitPiSpawnBatch,
+  issuedReviewerPayloadClaim,
+  MAX_PI_ORCHESTRATION_BATCH_SIZE,
+  qualifyIssuedSpawnEmissionRoute,
+  type AdmittedSpawnItem,
+  type IssuedSpawnEmissionAuthority,
+  type SpawnAdmissionPorts,
+  type SpawnEmissionExpectation,
+} from "../engine/src/core/spawn-admission";
+import type { LoomAgentName } from "../engine/src/core/model-profiles";
 import { isRecord } from "../engine/src/core/plain-record";
 
 
@@ -58,10 +68,13 @@ import {
   piAllSlotsFailedNote,
   piReviewAuthorityProblem,
   piSpecCheckAuthorityProblem,
+  piSilentStopNote,
   parsePiSubagentResults,
   piSubagentFailureSignals,
   piSubagentResultFailed,
   retireCompletedOrMissingImplementation,
+  WRITE_TARGET_KEYS,
+  writeTargetPathOf,
   type PiResultOutcome,
   type PiReviewAttemptAuthority,
   type PiSpecCheckAttemptAuthority,
@@ -104,7 +117,29 @@ import { extractTaskId } from "../engine/src/utils/extract-task-id";
 // Linter integration (PostEdit lint via tool_result)
 import { processToolResult } from "../engine/src/handlers/pi-adapter";
 import { lintFile } from "../engine/src/linter/index";
-import { parsePiMessages, piResultFinalPayloadCandidates } from "./transcript-adapter";
+import {
+  decideEmissionToolRegistration,
+  decideReadinessGate,
+  describeEmissionRegistrationContradiction,
+  emissionReadinessReport,
+  emissionToolDefinition,
+  EMISSION_HOLD_ENTRY_TYPE,
+  EMISSION_READINESS_COMMAND,
+  EMISSION_READINESS_ENTRY_TYPE,
+  LOOM_EMISSION_BINDING_ENV,
+  parseEmissionChildProvisioning,
+  parseReadinessStageObservation,
+  type EmissionHoldPhase,
+  type EmissionReadinessExpectation,
+  type EmissionToolRegistration,
+} from "./emission-tool";
+import { parsePiMessages, piEmissionCallFrames, piResultFinalPayloadCandidates } from "./transcript-adapter";
+import { selectCanonicalPayload } from "../engine/src/core/emission-ingestion";
+import {
+  issueEmissionBinding,
+  type IssuedEmissionBinding,
+  type IssuedEmissionBindingOf,
+} from "../engine/src/core/emission-tool";
 // FR-033: Pi and Claude Code capture each completed reviewer/verifier output
 // into the SAME engine-declared slot under the same refusals. Both drive this
 // one runtime; only the native correlator and the payload observation differ.
@@ -127,12 +162,16 @@ import {
 import { openRegisteredRunDirectory, type RunDirHandle } from "../engine/src/orchestration/run-directory-handle";
 import {
   parseRegisteredFacadeProgram,
+  publishedReviewerRequest,
   readStandaloneReviewedSource,
   renderSpawnTask,
   replayStandaloneResultFromEvidence,
   replayStandaloneCapturedEvidence,
-  type StandaloneReviewedSource,
 } from "../engine/src/handlers/helpers/programs";
+import {
+  publishLoomReviewAuthorityBridge,
+  type LoomReviewAuthorityReceipt,
+} from "../engine/src/handlers/helpers/programs/review-authority-bridge";
 import {
   assertAnchoredFilesystemPlatformSupported,
   readRunBytesNoFollow,
@@ -141,13 +180,23 @@ import {
   readSessionRunBindings,
   type SessionRunBinding,
 } from "../engine/src/orchestration/session-run-bindings";
-import { captureKey, type CaptureKey } from "../engine/src/core/harness-capture";
+import { captureKey, observeEmissionCalls, type CaptureKey, type FinalPayload } from "../engine/src/core/harness-capture";
 import { reduceStandaloneReviewMachine } from "../engine/src/core/standalone-review-machine";
+import {
+  boundDiagnosticMessage,
+  boundedThrownCause,
+  describeUnknown,
+  failure,
+  success,
+  type DomainResult,
+} from "../engine/src/core/orchestration-contract/identity";
 import {
   parseArtifactDigest,
   parseContextDigest,
+  parseRequestId,
   type ArtifactDigest,
   type ContextDigest,
+  type RequestId,
 } from "../engine/src/core/orchestration-contract";
 import {
   parseIsoInstant,
@@ -155,6 +204,7 @@ import {
 } from "../engine/src/core/implementation-completion";
 import { materializePiResources } from "./resources";
 import { validatePiAgentDefinitionFile } from "../engine/src/utils/render-pi-agent";
+import { runtimeBaselineRestoreForTasks } from "../engine/src/utils/artifact-baseline";
 import { buildPiRoutingContext } from "../engine/src/utils/model-routing-context";
 import { planPiWriteGrants } from "../engine/src/core/pi-write-grant-plan";
 import {
@@ -177,27 +227,24 @@ import {
   registerInteractiveSubagentTool,
 } from "./interactive-subagent";
 import { observeSpawnBatchGraph, spawnEntryAt } from "./spawn-graph";
+import { expandImplementationBriefMarkers } from "./implementation-brief-expansion";
+import { renderTaskImplementationBrief } from "../engine/src/orchestration/implementation-brief";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 // Capture once, while this extension module is loaded. Fresh CLI processes
 // hash the checkout again before mutation; a changed checkout therefore cannot
 // write a schema this in-memory runtime may not parse.
 const LOADED_RUNTIME_IDENTITY = captureLoomRuntimeIdentity(PACKAGE_ROOT);
-// Also frozen at load. Correct under Pi, which sets the environment before it
-// loads any extension — but under `bun test` it pins the FIRST import of this
-// module to whichever environment is current in that process, and all files
-// share one process: a test file that imports this module before `pi-
-// extension-review-events.test.ts` sets `PI_CODING_AGENT_DIR` pins the real
-// `~/.pi` for the whole run and every agent-definition check there resolves
-// the wrong catalog.
-// Keep unit tests of this file's pure helpers importing `pi/subagent-result`,
-// which reads no environment, rather than pulling this module in early.
-const PI_AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
-const PI_RESOURCE_CACHE = join(PI_AGENT_DIR, "cache", "loom-resources");
+// Resource materialization remains process-scoped: one loaded extension owns
+// one content-addressed cache. Spawn-facing agent discovery is session setup
+// state instead and is sampled inside the extension factory below.
+const PI_RESOURCE_CACHE = join(
+  process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"),
+  "cache",
+  "loom-resources",
+);
 const isPiSpawnTool = (toolName: string): boolean =>
   toolName === "subagent" || toolName === LOOM_INTERACTIVE_SUBAGENT_TOOL;
-
-const LOOM_REVIEW_AUTHORITY_SYMBOL = Symbol.for("@peterstorm/loom/review-authority/v1");
 
 type TrustedReviewCapture = Readonly<{
   requestId: string;
@@ -222,18 +269,6 @@ type TrustedReviewRun = Readonly<{
 type TrustedReviewRoot = Readonly<{
   nextTouch: number;
   runs: ReadonlyMap<string, TrustedReviewRun>;
-}>;
-
-type LoomReviewAuthorityReceipt = Readonly<{
-  schemaVersion: 1;
-  kind: "loom-review-authority-receipt";
-  sessionId: string;
-  runId: string;
-  runsRoot: string;
-  runDirectory: string;
-  requestIds: readonly string[];
-  resultDigest: string;
-  reviewedSource: StandaloneReviewedSource;
 }>;
 
 const trustedReviewRuns = new Map<string, Map<string, TrustedReviewRoot>>();
@@ -383,8 +418,8 @@ export type PiWriteTargetPathsResult =
   | Readonly<{ ok: false; error: string }>;
 
 const writeTarget = (input: Record<string, unknown>, path: string): PiWriteTargetPathsResult => {
-  const target = input.path ?? input.file_path ?? input.filePath;
-  return typeof target === "string" && target !== ""
+  const target = writeTargetPathOf(input);
+  return target !== null
     ? Object.freeze({ ok: true, value: Object.freeze([target]) as readonly [string] })
     : Object.freeze({ ok: false, error: `${path} must name one non-empty path, file_path, or filePath target` });
 };
@@ -395,7 +430,7 @@ export function piWriteTargetPaths(raw: unknown): PiWriteTargetPathsResult {
     return Object.freeze({ ok: false, error: "write input must be a plain object" });
   }
   const input = raw as Record<string, unknown>;
-  if ("path" in input || "file_path" in input || "filePath" in input) return writeTarget(input, "write input");
+  if (WRITE_TARGET_KEYS.some((key) => key in input)) return writeTarget(input, "write input");
   if (!Array.isArray(input.edits) || input.edits.length === 0) {
     return Object.freeze({ ok: false, error: "write input must contain a target or a non-empty edits array" });
   }
@@ -432,6 +467,548 @@ export const piSpawnRosterId = (
   index,
   agent,
 ]));
+
+/**
+ * One admitted Pi spawn item carried through the parent shell as a structural
+ * value. The core admission has already paired the item, lifecycle guard, and
+ * emission expectation; this adapter adds only the transport slot and stable
+ * roster identity. Keeping that association intact prevents mixed batches
+ * from granting or guarding one child with a sibling's positional metadata.
+ */
+export type PiSpawnLifecycleAssociation = Readonly<{
+  slot: number;
+  rosterId: AgentId;
+  admission: AdmittedSpawnItem;
+}>;
+
+export function associatePiSpawnLifecycle(
+  itemAdmissions: readonly AdmittedSpawnItem[],
+  toolCallId: string,
+): readonly PiSpawnLifecycleAssociation[] {
+  return Object.freeze(itemAdmissions.map((admission, slot) => Object.freeze({
+    slot,
+    rosterId: piSpawnRosterId(toolCallId, slot, admission.item.agent),
+    admission,
+  })));
+}
+
+// ─── Installed subagent launcher port (AD-4 / FR-008 / FR-031) ──────────
+
+export const LOOM_SUBAGENT_LAUNCH_CHANNEL = "loom:subagent-launch:v2";
+
+export type PiSubagentLaunchSlot =
+  | Readonly<{ kind: "single"; index: 0 }>
+  | Readonly<{ kind: "parallel"; index: number }>
+  | Readonly<{ kind: "chain"; index: number }>;
+
+type PiSubagentReadinessClient = Readonly<{
+  getCommands: () => Promise<readonly Readonly<{ name: string; source?: string }>[]>;
+  invokeReadiness: () => Promise<readonly unknown[]>;
+  setModel: (provider: string, modelId: string) => Promise<void>;
+  getState: () => Promise<Readonly<{
+    model: null | Readonly<{ provider?: string; id?: string; [key: string]: unknown }>;
+  }>>;
+}>;
+
+type PiEmissionRpcDirective = Readonly<{
+  kind: "emission-rpc";
+  bindingEnv: string;
+  expectedProvider: string;
+  expectedModel: string;
+  expectedToolName: string;
+  verifyReadiness: (
+    client: PiSubagentReadinessClient,
+  ) => Promise<Readonly<{ ok: true }> | Readonly<{ ok: false; reason: string }>>;
+}>;
+
+export type PiSubagentLaunchReply =
+  | Readonly<{ kind: "not-admitted" }>
+  | Readonly<{ kind: "refused"; reason: string }>
+  | Readonly<{ kind: "emission-rpc"; directive: PiEmissionRpcDirective }>;
+
+type PiSubagentLaunchResolveRequest = Readonly<{
+  kind: "resolve";
+  sessionId: string;
+  toolCallId: string;
+  slot: PiSubagentLaunchSlot;
+  agent: string;
+  task: string;
+  cwd: string;
+  effectiveModel: Readonly<{ provider: string; id: string }>;
+  respond: (reply: Exclude<PiSubagentLaunchReply, { kind: "not-admitted" }>) => void;
+}>;
+
+type PiSubagentLaunchCapabilityReply = Readonly<{ kind: "available"; version: 2 }>;
+
+type PiSubagentLaunchCapabilityProbe = Readonly<{
+  kind: "capability";
+  version: 2;
+  respond: (reply: unknown) => void;
+}>;
+
+export type PiSubagentLaunchEventBus = Readonly<{
+  emit: (channel: string, event: unknown) => void;
+  on: (channel: string, handler: (event: unknown) => void) => () => void;
+}>;
+
+export type PiEmissionLaunchExpectation = Readonly<{
+  sessionId: string;
+  toolCallId: string;
+  slot: PiSubagentLaunchSlot;
+  agent: string;
+  task: string;
+  cwd: string;
+  expectation: Extract<SpawnEmissionExpectation, { kind: "emission-enabled" }>;
+  revision: string;
+}>;
+
+type PiEmissionLaunchStage =
+  | Readonly<{ ok: true }>
+  | Readonly<{ ok: false; reason: string }>;
+
+type PiEmissionLaunchAvailability =
+  | Readonly<{ kind: "available" }>
+  | Readonly<{ kind: "unavailable"; reason: string }>;
+
+export type PiEmissionLaunchBridge = Readonly<{
+  probe: () => PiEmissionLaunchAvailability;
+  stage: (expectations: readonly PiEmissionLaunchExpectation[]) => PiEmissionLaunchStage;
+  removeToolCall: (sessionId: string, toolCallId: string) => void;
+  removeSession: (sessionId: string) => void;
+}>;
+
+const launchSlotKey = (sessionId: string, toolCallId: string, slot: PiSubagentLaunchSlot): string =>
+  `${sessionId}\u0000${toolCallId}\u0000${slot.kind}\u0000${slot.index}`;
+
+const sameLaunchSlot = (left: PiSubagentLaunchSlot, right: PiSubagentLaunchSlot): boolean =>
+  left.kind === right.kind && left.index === right.index;
+
+const exactFields = (record: Readonly<Record<string, unknown>>, fields: readonly string[]): boolean => {
+  const keys = Object.keys(record);
+  return keys.length === fields.length && fields.every((field) => Object.hasOwn(record, field));
+};
+
+const parsePiSubagentLaunchCapabilityReply = (
+  raw: unknown,
+): DomainResult<PiSubagentLaunchCapabilityReply, Readonly<{ reason: string }>> => {
+  const expected = 'exactly { kind: "available", version: 2 }';
+  if (!isRecord(raw)) {
+    return failure(Object.freeze({
+      reason: `expected ${expected}; received ${describeUnknown(raw)}`,
+    }));
+  }
+  if (!exactFields(raw, ["kind", "version"])) {
+    return failure(Object.freeze({
+      reason: `expected ${expected}; received an object with incompatible fields`,
+    }));
+  }
+  if (raw.kind !== "available") {
+    return failure(Object.freeze({
+      reason: `expected ${expected}; received an object with an incompatible kind`,
+    }));
+  }
+  if (raw.version !== 2) {
+    return failure(Object.freeze({
+      reason: `expected ${expected}; received an object with an incompatible version`,
+    }));
+  }
+  return success(Object.freeze({ kind: "available" as const, version: 2 as const }));
+};
+
+const parsePiSubagentLaunchSlot = (raw: unknown): PiSubagentLaunchSlot | null => {
+  if (!isRecord(raw) || !exactFields(raw, ["kind", "index"]) ||
+      (raw.kind !== "single" && raw.kind !== "parallel" && raw.kind !== "chain") ||
+      typeof raw.index !== "number" || !Number.isSafeInteger(raw.index) || raw.index < 0 ||
+      (raw.kind === "single" && raw.index !== 0)) return null;
+  if (raw.kind === "single") return Object.freeze({ kind: "single" as const, index: 0 as const });
+  return raw.kind === "parallel"
+    ? Object.freeze({ kind: "parallel" as const, index: raw.index })
+    : Object.freeze({ kind: "chain" as const, index: raw.index });
+};
+
+/** Correlation-tier fields every resolve event must carry before the bridge
+ *  replies at all: without these the event cannot be correlated or answered,
+ *  so it is dropped silently (exactly as today). */
+type PiSubagentLaunchResolveCorrelation = Readonly<{
+  sessionId: string;
+  toolCallId: string;
+  slot: PiSubagentLaunchSlot;
+  respond: (reply: Exclude<PiSubagentLaunchReply, { kind: "not-admitted" }>) => void;
+}>;
+
+type PiSubagentLaunchResolveParse =
+  | Readonly<{ kind: "silent" }>
+  | Readonly<{ kind: "malformed"; correlation: PiSubagentLaunchResolveCorrelation; reason: string }>
+  | Readonly<{ kind: "resolved"; request: PiSubagentLaunchResolveRequest }>;
+
+/** A type-guard, not a truthiness cast: the narrowing carries the reply
+ *  signature so the parsed correlation is a validated type, not a `Function`. */
+const isPiSubagentLaunchResponder = (
+  value: unknown,
+): value is PiSubagentLaunchResolveCorrelation["respond"] => typeof value === "function";
+
+const malformedResolve = (
+  correlation: PiSubagentLaunchResolveCorrelation,
+  reason: string,
+): PiSubagentLaunchResolveParse => Object.freeze({ kind: "malformed" as const, correlation, reason });
+
+/** Parse, never cast: a correlated resolve with a malformed agent/task/cwd or
+ *  effectiveModel is still ANSWERABLE, so it gets one bounded field-specific
+ *  refusal instead of a silent drop or an untyped comparison downstream. The
+ *  effectiveModel is admitted only with EXACTLY the string fields provider and
+ *  id, so `launchRequestMismatch` reads a guaranteed shape — no optional
+ *  chain, no partial trust. */
+const parsePiSubagentLaunchResolveRequest = (raw: unknown): PiSubagentLaunchResolveParse => {
+  if (!isRecord(raw) || raw.kind !== "resolve" ||
+      typeof raw.sessionId !== "string" || typeof raw.toolCallId !== "string" ||
+      !isPiSubagentLaunchResponder(raw.respond)) return Object.freeze({ kind: "silent" as const });
+  const slot = parsePiSubagentLaunchSlot(raw.slot);
+  if (slot === null) return Object.freeze({ kind: "silent" as const });
+  const correlation: PiSubagentLaunchResolveCorrelation = Object.freeze({
+    sessionId: raw.sessionId,
+    toolCallId: raw.toolCallId,
+    slot,
+    respond: raw.respond,
+  });
+  if (typeof raw.agent !== "string") return malformedResolve(correlation, "expected a string agent");
+  if (typeof raw.task !== "string") return malformedResolve(correlation, "expected a string task");
+  if (typeof raw.cwd !== "string") return malformedResolve(correlation, "expected a string cwd");
+  const effectiveModel = raw.effectiveModel;
+  if (!isRecord(effectiveModel) || !exactFields(effectiveModel, ["provider", "id"])) {
+    return malformedResolve(
+      correlation,
+      "expected effectiveModel to be a record with exactly the string fields provider and id",
+    );
+  }
+  if (typeof effectiveModel.provider !== "string") {
+    return malformedResolve(correlation, "expected a string effectiveModel provider");
+  }
+  if (typeof effectiveModel.id !== "string") {
+    return malformedResolve(correlation, "expected a string effectiveModel id");
+  }
+  return Object.freeze({
+    kind: "resolved" as const,
+    request: Object.freeze({
+      kind: "resolve" as const,
+      sessionId: correlation.sessionId,
+      toolCallId: correlation.toolCallId,
+      slot: correlation.slot,
+      agent: raw.agent,
+      task: raw.task,
+      cwd: raw.cwd,
+      effectiveModel: Object.freeze({ provider: effectiveModel.provider, id: effectiveModel.id }),
+      respond: correlation.respond,
+    }),
+  });
+};
+
+const launchRequestMismatch = (
+  request: PiSubagentLaunchResolveRequest,
+  launch: PiEmissionLaunchExpectation,
+): "session" | "agent" | "task" | "cwd" | "effective route" | null => {
+  if (request.sessionId !== launch.sessionId) return "session";
+  if (request.agent !== launch.agent) return "agent";
+  if (request.task !== launch.task) return "task";
+  if (request.cwd !== launch.cwd) return "cwd";
+  if (request.effectiveModel.provider !== launch.expectation.route.provider ||
+      request.effectiveModel.id !== launch.expectation.route.model) return "effective route";
+  return null;
+};
+
+const readinessPayloadFromEntries = (
+  entries: readonly unknown[],
+): DomainResult<unknown, Readonly<{ message: string }>> => {
+  if (entries.length !== 1) {
+    return failure({ message: `readiness invocation produced ${entries.length} entries; exactly one is required` });
+  }
+  const entry = entries[0];
+  if (!isRecord(entry) || entry.customType !== EMISSION_READINESS_ENTRY_TYPE || !Object.hasOwn(entry, "data")) {
+    return failure({
+      message: `readiness invocation did not produce one ${EMISSION_READINESS_ENTRY_TYPE} custom entry`,
+    });
+  }
+  return success(entry.data);
+};
+
+const emissionBindingEnvironment = (
+  expectation: Extract<SpawnEmissionExpectation, { kind: "emission-enabled" }>,
+): string => JSON.stringify({
+  requestId: expectation.binding.requestId,
+  contextDigest: expectation.contextDigest,
+  kind: expectation.binding.kind.kind,
+  version: expectation.binding.version,
+  toolName: expectation.binding.toolName,
+  schemaDigest: expectation.binding.schemaDigest,
+});
+
+type PiReadinessVerification = Awaited<ReturnType<PiEmissionRpcDirective["verifyReadiness"]>>;
+
+const readinessRpcRefusal = (operation: string, thrown: unknown): PiReadinessVerification => {
+  const cause = boundedThrownCause(thrown, operation);
+  return Object.freeze({
+    ok: false as const,
+    reason: `Emission readiness RPC ${operation} failed (${cause.name}: ${cause.message}). ` +
+      "Inspect the child RPC channel, then retry the same issued request after restoring the launcher.",
+  });
+};
+
+const readinessVerifier = (
+  launch: PiEmissionLaunchExpectation,
+): PiEmissionRpcDirective["verifyReadiness"] => async (client) => {
+  let commands: Awaited<ReturnType<PiSubagentReadinessClient["getCommands"]>>;
+  try {
+    commands = await client.getCommands();
+  } catch (thrown) {
+    return readinessRpcRefusal("get_commands", thrown);
+  }
+  let commandListed: boolean;
+  try {
+    if (!Array.isArray(commands) || !commands.every((command) =>
+      isRecord(command) && typeof command.name === "string" &&
+      (command.source === undefined || typeof command.source === "string"))) {
+      return Object.freeze({ ok: false as const, reason: "Emission readiness RPC get_commands returned a malformed command inventory" });
+    }
+    commandListed = commands.some((command) =>
+      command.name === EMISSION_READINESS_COMMAND && command.source === "extension");
+  } catch (thrown) {
+    return readinessRpcRefusal("get_commands response", thrown);
+  }
+  if (!commandListed) {
+    return Object.freeze({
+      ok: false as const,
+      reason: `Required extension command /${EMISSION_READINESS_COMMAND} is unavailable`,
+    });
+  }
+
+  // Exactly one invocation in this verifier. The installed launcher also
+  // enforces this count and refuses prompt delivery if a verifier cheats.
+  let readinessEntries: readonly unknown[];
+  try {
+    readinessEntries = await client.invokeReadiness();
+  } catch (thrown) {
+    return readinessRpcRefusal("invoke_readiness", thrown);
+  }
+  try {
+    if (!Array.isArray(readinessEntries)) {
+      return Object.freeze({ ok: false as const, reason: "Emission readiness RPC invocation returned a malformed entry list" });
+    }
+    const payload = readinessPayloadFromEntries(readinessEntries);
+    if (!payload.ok) return Object.freeze({ ok: false as const, reason: payload.error.message });
+    const expectation: EmissionReadinessExpectation = Object.freeze({
+      binding: launch.expectation.binding,
+      contextDigest: launch.expectation.contextDigest,
+      revision: launch.revision,
+      readinessCommand: EMISSION_READINESS_COMMAND,
+    });
+    const decision = decideReadinessGate(expectation, parseReadinessStageObservation({
+      channelAlive: true,
+      channelDiagnostic: null,
+      commandListed: true,
+      readiness: Object.freeze({ kind: "observed" as const, payload: payload.value }),
+    }));
+    if (decision.kind === "refused") {
+      return Object.freeze({ ok: false as const, reason: decision.message });
+    }
+  } catch (thrown) {
+    return readinessRpcRefusal("invoke_readiness response", thrown);
+  }
+
+  // Route selection is deliberately after readiness. Both this verifier and
+  // the installed launcher observe the exact provider/model before Task prompt.
+  try {
+    await client.setModel(launch.expectation.route.provider, launch.expectation.route.model);
+  } catch (thrown) {
+    return readinessRpcRefusal("set_model", thrown);
+  }
+  let state: Awaited<ReturnType<PiSubagentReadinessClient["getState"]>>;
+  try {
+    state = await client.getState();
+  } catch (thrown) {
+    return readinessRpcRefusal("get_state", thrown);
+  }
+  try {
+    if (!isRecord(state) || !isRecord(state.model) ||
+        typeof state.model.provider !== "string" || typeof state.model.id !== "string") {
+      return Object.freeze({ ok: false as const, reason: "Emission readiness RPC get_state returned no exact provider/model record" });
+    }
+    if (state.model.provider !== launch.expectation.route.provider ||
+        state.model.id !== launch.expectation.route.model) {
+      return Object.freeze({
+        ok: false as const,
+        reason: `the child route ${state.model.provider}/${state.model.id} does not match ` +
+          `${launch.expectation.route.provider}/${launch.expectation.route.model}`,
+      });
+    }
+  } catch (thrown) {
+    return readinessRpcRefusal("get_state response", thrown);
+  }
+  return Object.freeze({ ok: true as const });
+};
+
+/** Register the synchronous request/reply adapter consumed by the installed
+ * normal subagent launcher. The bridge owns no model process; it retains only
+ * admitted, request-bound launch capabilities until result/shutdown cleanup. */
+export function registerPiEmissionLaunchBridge(
+  events: PiSubagentLaunchEventBus | undefined,
+): PiEmissionLaunchBridge {
+  if (events === undefined) {
+    return Object.freeze({
+      probe: (): PiEmissionLaunchAvailability => Object.freeze({
+        kind: "unavailable" as const,
+        reason: "this Pi runtime exposes no extension event bus",
+      }),
+      stage: (): PiEmissionLaunchStage => Object.freeze({
+        ok: false as const,
+        reason: "Emission launch unavailable: this Pi runtime exposes no extension event bus",
+      }),
+      removeToolCall: (): void => undefined,
+      removeSession: (): void => undefined,
+    });
+  }
+
+  const pending = new Map<string, PiEmissionLaunchExpectation>();
+  events.on(LOOM_SUBAGENT_LAUNCH_CHANNEL, (raw) => {
+    const parsed = parsePiSubagentLaunchResolveRequest(raw);
+    if (parsed.kind === "silent") return;
+    if (parsed.kind === "malformed") {
+      // Correlation holds but the launch shape does not: answer EXACTLY ONCE
+      // with a bounded, field-specific refusal — never throw, never compare
+      // against a cast, never mint a directive from untrusted shape.
+      parsed.correlation.respond(Object.freeze({
+        kind: "refused" as const,
+        reason: `staged emission launch resolve is malformed: ${parsed.reason}`,
+      }));
+      return;
+    }
+    const request = parsed.request;
+    const key = launchSlotKey(request.sessionId, request.toolCallId, request.slot);
+    const launch = pending.get(key);
+    if (launch === undefined) return;
+
+    const mismatch = launchRequestMismatch(request, launch);
+    if (mismatch !== null) {
+      request.respond(Object.freeze({
+        kind: "refused" as const,
+        reason: `staged emission launch ${request.toolCallId}/${request.slot.kind}[${request.slot.index}] does not match its issued ${mismatch}`,
+      }));
+      return;
+    }
+
+    pending.delete(key);
+    request.respond(Object.freeze({
+      kind: "emission-rpc" as const,
+      directive: Object.freeze({
+        kind: "emission-rpc" as const,
+        bindingEnv: emissionBindingEnvironment(launch.expectation),
+        expectedProvider: launch.expectation.route.provider,
+        expectedModel: launch.expectation.route.model,
+        expectedToolName: launch.expectation.binding.toolName,
+        verifyReadiness: readinessVerifier(launch),
+      }),
+    }));
+  });
+
+  return Object.freeze({
+    probe: (): PiEmissionLaunchAvailability => {
+      let replies = 0;
+      let malformedReplyReason: string | null = null;
+      const probe: PiSubagentLaunchCapabilityProbe = Object.freeze({
+        kind: "capability",
+        version: 2,
+        respond: (reply) => {
+          replies += 1;
+          const parsed = parsePiSubagentLaunchCapabilityReply(reply);
+          if (!parsed.ok && malformedReplyReason === null) malformedReplyReason = parsed.error.reason;
+        },
+      });
+      try {
+        events.emit(LOOM_SUBAGENT_LAUNCH_CHANNEL, probe);
+      } catch (thrown) {
+        const cause = boundedThrownCause(thrown, "emission launcher capability probe");
+        return Object.freeze({
+          kind: "unavailable" as const,
+          reason: `the installed subagent launcher capability probe failed (${cause.name}: ${cause.message})`,
+        });
+      }
+      if (replies !== 1) {
+        return Object.freeze({
+          kind: "unavailable" as const,
+          reason: replies > 1
+            ? `multiple launcher capabilities answered ${LOOM_SUBAGENT_LAUNCH_CHANNEL}; reload a single installed launcher`
+            : `the installed subagent launcher does not advertise ${LOOM_SUBAGENT_LAUNCH_CHANNEL}`,
+        });
+      }
+      if (malformedReplyReason !== null) {
+        return Object.freeze({
+          kind: "unavailable" as const,
+          reason: `the installed subagent launcher returned an incompatible v2 capability response: ${malformedReplyReason}`,
+        });
+      }
+      return Object.freeze({ kind: "available" as const });
+    },
+    stage: (expectations): PiEmissionLaunchStage => {
+      const staged = new Set<string>();
+      for (const expectation of expectations) {
+        const key = launchSlotKey(expectation.sessionId, expectation.toolCallId, expectation.slot);
+        if (staged.has(key) || pending.has(key)) {
+          return Object.freeze({
+            ok: false as const,
+            reason: `emission launch capability already exists for ${expectation.toolCallId}/${expectation.slot.kind}[${expectation.slot.index}]`,
+          });
+        }
+        staged.add(key);
+      }
+      for (const expectation of expectations) {
+        pending.set(
+          launchSlotKey(expectation.sessionId, expectation.toolCallId, expectation.slot),
+          Object.freeze(expectation),
+        );
+      }
+      return Object.freeze({ ok: true as const });
+    },
+    removeToolCall: (sessionId, toolCallId): void => {
+      for (const [key, launch] of pending) {
+        if (launch.sessionId === sessionId && launch.toolCallId === toolCallId) pending.delete(key);
+      }
+    },
+    removeSession: (sessionId): void => {
+      for (const [key, launch] of pending) {
+        if (launch.sessionId === sessionId) pending.delete(key);
+      }
+    },
+  });
+}
+
+function piSubagentLaunchSlot(raw: unknown, index: number): PiSubagentLaunchSlot {
+  if (isRecord(raw) && Array.isArray(raw.chain)) return Object.freeze({ kind: "chain" as const, index });
+  if (isRecord(raw) && Array.isArray(raw.tasks)) return Object.freeze({ kind: "parallel" as const, index });
+  if (index !== 0) throw new Error(`single Pi subagent launch cannot address slot ${index}`);
+  return Object.freeze({ kind: "single" as const, index: 0 });
+}
+
+type PiReservedEmissionLaunch = Readonly<{
+  slot: PiSubagentLaunchSlot;
+  binding: IssuedEmissionBindingOf<"reviewer-payload">;
+  contextDigest: ContextDigest;
+}>;
+
+const isReviewerEmissionBinding = (
+  binding: IssuedEmissionBinding,
+): binding is IssuedEmissionBindingOf<"reviewer-payload"> =>
+  binding.kind.kind === "reviewer-payload";
+
+const reservedReviewerEmissionLaunch = (
+  expectation: SpawnEmissionExpectation,
+  rawInput: unknown,
+  index: number,
+): PiReservedEmissionLaunch | null => {
+  if (expectation.kind !== "emission-enabled" || !isReviewerEmissionBinding(expectation.binding)) return null;
+  return Object.freeze({
+    slot: piSubagentLaunchSlot(rawInput, index),
+    binding: expectation.binding,
+    contextDigest: expectation.contextDigest,
+  });
+};
 
 type PiOrchestrationMarkers = Readonly<{
   requestId: string;
@@ -532,6 +1109,142 @@ function sessionRunBinding(
   return matches[0]!;
 }
 
+type PiRegisteredReviewProgram =
+  | Readonly<{ kind: "standalone-review" | "wave-gate"; schemaVersion: 1 }>
+  | Readonly<{
+      kind: "standalone-review" | "wave-gate";
+      schemaVersion: 2;
+      reviewerProtocol: Readonly<{ schemaDigest: string }>;
+    }>
+  | Readonly<{
+      kind: "standalone-review";
+      schemaVersion: 3;
+      reviewerProtocol: Readonly<{ schemaDigest: string }>;
+    }>;
+
+type PiIssuedReviewRequest = Readonly<{
+  runId: string;
+  requestId: RequestId;
+  contextDigest: ContextDigest;
+  program: string;
+  role: string;
+}>;
+
+export type PiIssuedReviewRequestClass =
+  | Readonly<{
+      kind: "review-program-emission";
+      claim: ReturnType<typeof issuedReviewerPayloadClaim>;
+    }>
+  | Readonly<{
+      kind: "refutation-panel-extraction";
+      claim: ReturnType<typeof issuedReviewerPayloadClaim>;
+    }>;
+
+/**
+ * Classify one exactly reserved request against its enclosing registered
+ * review program. A refutation panel is a child program of standalone-review
+ * or wave-gate, not a second facade registration. Until that child request
+ * carries its own issued emission descriptor, its authenticated capability is
+ * deliberately represented by the archived no-schema claim: the parent gate
+ * therefore preserves final-message extraction and cannot infer a tool from
+ * the verifier Agent's broader catalog eligibility.
+ */
+export function classifyPiIssuedReviewRequest(
+  registeredRunId: string,
+  program: PiRegisteredReviewProgram,
+  request: PiIssuedReviewRequest,
+): DomainResult<PiIssuedReviewRequestClass, Readonly<{ message: string }>> {
+  if (request.runId !== registeredRunId) {
+    return failure({ message: `request ${request.requestId} belongs to another orchestration run` });
+  }
+  if (request.program === program.kind) {
+    return success({
+      kind: "review-program-emission",
+      claim: issuedReviewerPayloadClaim(program, request),
+    });
+  }
+  if (request.program === "refutation-panel" && request.role === "review-verifier-agent") {
+    return success({
+      kind: "refutation-panel-extraction",
+      claim: issuedReviewerPayloadClaim({ schemaVersion: 1 }, request),
+    });
+  }
+  return failure({ message: `request ${request.requestId} has no matching registered review program` });
+}
+
+type PublishedPiReviewRouteAuthority = Readonly<{
+  role: LoomAgentName;
+  harnessBinding: Readonly<{
+    pi: Readonly<{ provider: string; model: string }>;
+  }>;
+}>;
+
+/**
+ * Qualify one classified request from its exact authenticated publication.
+ * The request's frozen Pi provider/model binding is the only route input:
+ * task text, role eligibility, and the parent's mutable model cannot upgrade
+ * extraction-only authority. A hard qualification refusal remains a typed
+ * authority failure for the spawn gate rather than a silent degradation.
+ */
+export function qualifyPiIssuedReviewRequest(
+  classified: PiIssuedReviewRequestClass,
+  published: PublishedPiReviewRouteAuthority,
+): DomainResult<IssuedSpawnEmissionAuthority, Readonly<{ message: string }>> {
+  const route = qualifyIssuedSpawnEmissionRoute(classified.claim, published, true);
+  if (route.kind === "refused") {
+    return failure({
+      message: `emission route qualification refused for request ${classified.claim.requestId}: ${route.reason}`,
+    });
+  }
+  return success({ role: published.role, claim: classified.claim, route });
+}
+
+/** Authenticate a descriptor against this session's reserved Run Directory
+ *  request before the pure admission may enable an emission capability. */
+/** Route qualification is the one substitutable pure adapter in this read:
+ * RunDirectory reservation, registration, and publication authentication stay
+ * fixed here. Production uses the frozen issued route; acceptance supplies the
+ * explicit capable-route adapter already used by the T6 projection fixtures. */
+export type PiIssuedReviewRouteQualifier = typeof qualifyPiIssuedReviewRequest;
+
+export function readPiIssuedSpawnRequest(
+  sessionId: string | null,
+  requestId: RequestId,
+  contextDigest: ContextDigest,
+  agent: LoomAgentName,
+  qualifyRoute: PiIssuedReviewRouteQualifier = qualifyPiIssuedReviewRequest,
+): ReturnType<SpawnAdmissionPorts["readIssuedRequest"]> {
+  if (sessionId === null) return failure({ message: "Pi session identity is unavailable" });
+  try {
+    const binding = environmentRunBinding() ?? sessionRunBinding(sessionId, [{ requestId, contextDigest }]);
+    const opened = openRegisteredRunDirectory(binding.runsRoot, binding.runDirectory);
+    if (!opened.ok) return failure({ message: opened.error.message });
+    const issued = opened.value.readIssuedRequests();
+    if (!issued.ok) return failure({ message: issued.error.message });
+    const matches = issued.value.filter((candidate) => candidate.requestId === requestId);
+    if (matches.length !== 1 || matches[0]!.contextDigest !== contextDigest || matches[0]!.role !== agent) {
+      return failure({ message: `no unique reserved ${agent} request ${requestId} binds context ${contextDigest}` });
+    }
+    const request = matches[0]!;
+    const stored = opened.value.readProgramRegistration();
+    if (!stored.ok) return failure({ message: stored.error.message });
+    const registration = parseRegisteredFacadeProgram(stored.value);
+    if (registration.kind !== "registered" ||
+        (registration.program.kind !== "wave-gate" && registration.program.kind !== "standalone-review")) {
+      return failure({ message: `request ${requestId} has no matching registered review program` });
+    }
+    const classified = classifyPiIssuedReviewRequest(opened.value.runId, registration.program, request);
+    if (!classified.ok) return classified;
+    // Reservation and registration do not issue a spawn. The exact immutable
+    // publication receipt must independently authenticate this same authority.
+    const published = publishedReviewerRequest(opened.value, request);
+    if (!published.ok) return failure({ message: published.message });
+    return qualifyRoute(classified.value, published.value.authority);
+  } catch (error) {
+    return failure({ message: error instanceof Error ? error.message : String(error) });
+  }
+}
+
 /**
  * Record Pi spawn correlators into their reserved run-directory slots before dispatch.
  *
@@ -553,18 +1266,18 @@ function sessionRunBinding(
  * rolls back lifecycle reservations, and refuses dispatch.
  */
 async function recordPiSpawnCorrelators(
-  items: readonly Readonly<{ agent: string; task: string }>[],
+  itemAdmissions: readonly AdmittedSpawnItem[],
   rosterIds: readonly string[],
   rawSessionId: string,
   rawInput: unknown,
 ): Promise<SessionRunBinding | null> {
-  if (items.length !== rosterIds.length) throw new Error("Pi correlator roster length does not match spawn batch");
-  const parsedMarkers = items.map((item, index) =>
+  if (itemAdmissions.length !== rosterIds.length) throw new Error("Pi correlator roster length does not match spawn batch");
+  const parsedMarkers = itemAdmissions.map(({ item }, index) =>
     orchestrationMarkers(item.task, `Pi spawn item ${index + 1}/${item.agent}`));
   const marked = parsedMarkers.filter((markers): markers is PiOrchestrationMarkers => markers !== null);
   const explicit = environmentRunBinding();
   if (marked.length === 0 && explicit === null) return null;
-  if (marked.length !== items.length) {
+  if (marked.length !== itemAdmissions.length) {
     throw new Error("Pi orchestration spawn batch must not mix request-bound and unbound items");
   }
   const runBinding = explicit ?? sessionRunBinding(rawSessionId, marked);
@@ -580,13 +1293,24 @@ async function recordPiSpawnCorrelators(
   const consumed = new Set<string>();
   const canonicalTasks: string[] = [];
 
-  for (const [index, item] of items.entries()) {
+  for (const [index, admission] of itemAdmissions.entries()) {
+    const { item } = admission;
     const markers = parsedMarkers[index]!;
     if (markers === null) throw new Error("Pi orchestration marker completeness invariant failed");
     const exactRequestId = markers.requestId;
     const request = available.find((candidate) => candidate.requestId === exactRequestId);
     if (request === undefined || consumed.has(request.requestId)) {
       throw new Error(`issued request ${exactRequestId} is unavailable for Pi spawn item ${index + 1}/${item.agent}`);
+    }
+    const captureRejection = opened.value.readCaptureRejection(request);
+    if (!captureRejection.ok) throw new Error(captureRejection.error.message);
+    if (captureRejection.value !== null) {
+      const retryAuthority = request.attempt === 1
+        ? "a new attempt-2 issuance is required"
+        : "attempt 2 is terminal; no further issuance is permitted";
+      throw new Error(
+        `issued request ${exactRequestId} attempt ${request.attempt} is terminally rejected; ${retryAuthority}`,
+      );
     }
     if (request.role !== item.agent) {
       throw new Error(`issued request ${exactRequestId} belongs to ${request.role}, not Pi spawn item role ${item.agent}`);
@@ -605,16 +1329,22 @@ async function recordPiSpawnCorrelators(
       attempt: request.attempt,
     });
     if (!recorded.ok) throw new Error(recorded.error.message);
-    canonicalTasks[index] = renderSpawnTask(
-      opened.value,
-      request,
-      "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required result.",
-      { standalone: hasStandaloneReviewContext(item.task) },
-    );
+    // Emission admission already authenticated this exact task's issuance
+    // markers and descriptor. Re-rendering through the durable fallback here
+    // could erase a descriptor selected by an explicit transport-route adapter;
+    // extraction-only tasks retain the established canonical re-render.
+    canonicalTasks[index] = admission.emissionExpectation.kind === "emission-enabled"
+      ? item.task
+      : renderSpawnTask(
+          opened.value,
+          request,
+          "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required result.",
+          { standalone: hasStandaloneReviewContext(item.task) },
+        );
     consumed.add(request.requestId);
   }
   for (const [index, task] of canonicalTasks.entries()) replacePiSpawnTask(rawInput, index, task);
-  if (items.some(({ task }) => hasStandaloneReviewContext(task))) {
+  if (itemAdmissions.some(({ item }) => hasStandaloneReviewContext(item.task))) {
     touchTrustedReviewRun(rawSessionId, runBinding);
   }
   return runBinding;
@@ -716,6 +1446,242 @@ function piResultAuthorityProblem(
     : `result context marker does not match correlated request ${request.requestId}`;
 }
 
+type PiEmissionStartupRefusalMarker = Readonly<{
+  kind: "emission-startup-refused";
+  sessionId: PiSessionId;
+  toolCallId: string;
+  slot: PiSubagentLaunchSlot;
+  requestId: RequestId;
+  contextDigest: ContextDigest;
+  toolName: string;
+  phase: "before-task-prompt";
+  reason: string;
+}>;
+
+type PiEmissionStartupMarkerObservation =
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "malformed"; reason: string }>
+  | Readonly<{ kind: "parsed"; marker: PiEmissionStartupRefusalMarker }>;
+
+/** Parse only the installed launcher's closed pre-prompt outcome. This is
+ * transport evidence, not model text: stderr, errorMessage, and guessed stop
+ * reasons deliberately have no constructor here. */
+function parsePiEmissionStartupMarker(rawResult: unknown): PiEmissionStartupMarkerObservation {
+  if (!isRecord(rawResult) || !Object.hasOwn(rawResult, "launchOutcome")) {
+    return Object.freeze({ kind: "absent" as const });
+  }
+  const raw = rawResult.launchOutcome;
+  const fields = [
+    "kind", "sessionId", "toolCallId", "slot", "requestId", "contextDigest", "toolName", "phase", "reason",
+  ] as const;
+  if (!isRecord(raw) || !exactFields(raw, fields)) {
+    return Object.freeze({ kind: "malformed" as const, reason: "launchOutcome is not the exact startup-refusal record" });
+  }
+  if (raw.kind !== "emission-startup-refused" || raw.phase !== "before-task-prompt") {
+    return Object.freeze({ kind: "malformed" as const, reason: "launchOutcome does not attest the before-task-prompt phase" });
+  }
+  const sessionId = typeof raw.sessionId === "string" ? parseSessionId(raw.sessionId) : null;
+  const requestId = parseRequestId(raw.requestId);
+  const contextDigest = parseContextDigest(raw.contextDigest);
+  const parsedSlot = parsePiSubagentLaunchSlot(raw.slot);
+  if (sessionId === null || !requestId.ok || !contextDigest.ok ||
+      typeof raw.toolCallId !== "string" || raw.toolCallId.length === 0 ||
+      typeof raw.toolName !== "string" || raw.toolName.length === 0 ||
+      typeof raw.reason !== "string" || raw.reason.length === 0 || Buffer.byteLength(raw.reason, "utf8") > 1024 ||
+      parsedSlot === null) {
+    return Object.freeze({ kind: "malformed" as const, reason: "launchOutcome carries malformed identity, slot, or reason fields" });
+  }
+  return Object.freeze({
+    kind: "parsed" as const,
+    marker: Object.freeze({
+      kind: "emission-startup-refused" as const,
+      sessionId,
+      toolCallId: raw.toolCallId,
+      slot: parsedSlot,
+      requestId: requestId.value,
+      contextDigest: contextDigest.value,
+      toolName: raw.toolName,
+      phase: "before-task-prompt" as const,
+      reason: raw.reason,
+    }),
+  });
+}
+
+type PiEmissionStartupClassification =
+  | Readonly<{ kind: "ordinary" }>
+  | Readonly<{ kind: "untrusted-marker"; reason: string }>
+  | Readonly<{ kind: "proven-startup-refusal"; marker: PiEmissionStartupRefusalMarker }>;
+
+function classifyPiEmissionStartupRefusal(input: Readonly<{
+  rawResult: unknown;
+  result: Extract<PiSubagentResultEntry, { ok: true }>["result"];
+  reservation: PiSpawnReservation;
+  reservedItem: PiSpawnReservation["items"][number];
+  runBinding: SessionRunBinding;
+  toolCallId: unknown;
+  resultIndex: number;
+  agentType: string;
+}>): PiEmissionStartupClassification {
+  let observed: PiEmissionStartupMarkerObservation;
+  try {
+    observed = parsePiEmissionStartupMarker(input.rawResult);
+  } catch (thrown) {
+    const cause = boundedThrownCause(thrown, "launchOutcome");
+    return Object.freeze({
+      kind: "untrusted-marker" as const,
+      reason: `launchOutcome inspection failed (${cause.name}: ${cause.message})`,
+    });
+  }
+  if (observed.kind === "absent") return Object.freeze({ kind: "ordinary" as const });
+  if (observed.kind === "malformed") {
+    return Object.freeze({ kind: "untrusted-marker" as const, reason: observed.reason });
+  }
+  const expected = input.reservedItem.emissionLaunch;
+  const marker = observed.marker;
+  if (expected === null || input.result.exitCode === 0 ||
+      !Array.isArray(input.result.messages) || input.result.messages.length !== 0 ||
+      marker.sessionId !== input.reservation.sessionId || marker.toolCallId !== input.toolCallId ||
+      !sameLaunchSlot(marker.slot, expected.slot) || marker.requestId !== expected.binding.requestId ||
+      marker.contextDigest !== expected.contextDigest || marker.toolName !== expected.binding.toolName) {
+    return Object.freeze({
+      kind: "untrusted-marker" as const,
+      reason: "launchOutcome does not exactly match the reserved failed launch and its empty pre-prompt transcript",
+    });
+  }
+  const correlation = piRequestCorrelation(input.runBinding, input.toolCallId, input.resultIndex, input.agentType);
+  if (!correlation.ok || correlation.value.request.requestId !== expected.binding.requestId ||
+      correlation.value.request.contextDigest !== expected.contextDigest) {
+    return Object.freeze({
+      kind: "untrusted-marker" as const,
+      reason: "launchOutcome has no independently authenticated issued request binding",
+    });
+  }
+  return Object.freeze({ kind: "proven-startup-refusal" as const, marker });
+}
+
+const captureSelectedPiPayload = (payload: FinalPayload): CaptureObservation =>
+  captureCandidates(Object.freeze([Object.freeze({ origin: payload.origin, text: payload.text })]));
+
+/**
+ * Pure Pi transcript decision for one authenticated reviewer emission binding.
+ * The adapter observes finalized execution, then the shared core selects once;
+ * this shell projection only translates that closed decision into the existing
+ * capture runtime vocabulary.
+ */
+function piReviewerCaptureFromObservation(
+  issued: IssuedEmissionBindingOf<"reviewer-payload">,
+  observation: ReturnType<typeof observeEmissionCalls>,
+  candidates: Extract<ReturnType<typeof piResultFinalPayloadCandidates>, { ok: true }>["value"],
+): CaptureObservation {
+  const selection = selectCanonicalPayload(issued, observation, candidates);
+  switch (selection.kind) {
+    case "emission-tool-arguments":
+      return captureSelectedPiPayload(selection.payload);
+    case "final-message-extraction":
+    case "extraction-over-refused-call":
+      return selection.fallback.ok
+        ? captureSelectedPiPayload(selection.fallback.value)
+        : terminalCaptureRefusal(selection.fallback.error.reason, selection.fallback.error.message);
+    case "duplicate-emission-call":
+      return terminalCaptureRefusal(
+        "ambiguous-emission-call",
+        "result carried multiple distinct emission tool calls; exactly one successfully executed call is allowed",
+      );
+    case "refused-call-no-fallback":
+      return terminalCaptureRefusal(
+        "emission-and-extraction-refused",
+        `emission arguments were refused [${selection.emissionRefusal.code}]: ${selection.emissionRefusal.message}; ` +
+          `final-message extraction was refused [${selection.extraction.reason}]: ${selection.extraction.message}`,
+      );
+    case "observation-refused":
+      return terminalCaptureRefusal(selection.refusal.code, selection.refusal.message);
+  }
+}
+
+export function piReviewerCaptureObservation(
+  messages: unknown,
+  issued: IssuedEmissionBindingOf<"reviewer-payload">,
+): CaptureObservation {
+  const frames = piEmissionCallFrames(messages, issued);
+  if (!frames.ok) {
+    return terminalCaptureRefusal("emission-observation", frames.errors.join("; "));
+  }
+  const observation = observeEmissionCalls(frames.value);
+  const candidates = piResultFinalPayloadCandidates(messages, "standalone-successor");
+  if (candidates.ok) return piReviewerCaptureFromObservation(issued, observation, candidates.value);
+
+  // The independent scanner may still prove one successfully executed,
+  // correctly bound emission when an unrelated transcript entry is malformed.
+  // Empty fallback candidates cannot authorize extraction, so the SAME shared
+  // decision runs once more over them: the emission-selected arm still captures
+  // via captureSelectedPiPayload, and every other arm's own typed refusal is
+  // RETAINED and composed with the transcript scan's refusal — the scan's
+  // diagnostics can never erase the selection arm's own code or message.
+  const selectionOutcome = piReviewerCaptureFromObservation(issued, observation, Object.freeze([]));
+  if (selectionOutcome.kind === "terminal-refusal") {
+    return terminalCaptureRefusal(
+      selectionOutcome.reason,
+      `${selectionOutcome.message}; the independent transcript scan also refused: ${candidates.errors.join("; ")}`,
+    );
+  }
+  return selectionOutcome;
+}
+
+const archivedReviewerCaptureObservation = (messages: unknown): CaptureObservation => {
+  const candidates = piResultFinalPayloadCandidates(messages ?? [], "standalone-successor");
+  return candidates.ok
+    ? captureCandidates(candidates.value)
+    : terminalCaptureRefusal("transcript-shape", candidates.errors.join("; "));
+};
+
+/** The production capture decision after request/program/publication authority
+ * has been authenticated. Archived reviewer-v1 and refutation requests retain
+ * explicit final-message extraction. Current review programs must mint their
+ * exact issued v2/v3 binding; a malformed binding is unavailable evidence and
+ * can never be reclassified as an archived extraction result. */
+export function piIssuedReviewerCaptureObservation(
+  classified: PiIssuedReviewRequestClass,
+  messages: unknown,
+): CaptureObservation {
+  if (classified.kind === "refutation-panel-extraction" || classified.claim.version === "v1") {
+    return archivedReviewerCaptureObservation(messages);
+  }
+  const claim = classified.claim;
+  const issued = issueEmissionBinding({
+    requestId: claim.requestId,
+    kind: "reviewer-payload" as const,
+    version: claim.version,
+    schemaDigest: claim.schemaDigest,
+  });
+  if (!issued.ok) {
+    return captureUnavailable(
+      "emission-binding",
+      boundDiagnosticMessage(
+        `issued reviewer emission binding is unavailable [${issued.error.code}]: ${issued.error.message}`,
+      ),
+    );
+  }
+  return piReviewerCaptureObservation(messages ?? [], issued.value);
+}
+
+const captureUnclaimedProgramObservation = (
+  registration: unknown | null,
+  messages: unknown,
+): CaptureObservation => {
+  if (registration !== null) {
+    return captureUnavailable(
+      "program-registration",
+      "program registration is unavailable: program registration does not name a registered orchestration program",
+    );
+  }
+  // Proven file absence cannot authorize semantic parsing, but the bounded
+  // structural walk still rejects hostile decoded input terminally.
+  const bounded = piResultFinalPayloadCandidates(messages ?? [], "standalone-successor");
+  return bounded.ok
+    ? captureUnavailable("program-registration", "program registration is unavailable: program registration does not name a registered orchestration program")
+    : terminalCaptureRefusal("transcript-shape", bounded.errors.join("; "));
+};
+
 export async function capturePiSubagentResult(
   toolCallId: unknown,
   resultIndex: number,
@@ -730,26 +1696,39 @@ export async function capturePiSubagentResult(
     if (observationRefusal !== null) return observationRefusal;
     const correlation = resolveCorrelatedRequest({ harness: "pi", runsRoot, runDirectory,
       nativeId: piSpawnRosterId(toolCallId, resultIndex, agentType) });
-    const registration = correlation.ok ? correlation.value.handle.readProgramRegistration(16_777_216) : null;
-    if (registration !== null && !registration.ok) {
+    if (!correlation.ok) {
+      return captureUnavailable("request-correlation", describeCaptureFailure(correlation.outcome));
+    }
+    const { handle, request } = correlation.value;
+    const registration = handle.readProgramRegistration(16_777_216);
+    if (!registration.ok) {
       return captureUnavailable("program-registration", `program registration is unavailable: ${registration.error.message}`);
     }
-    const raw = registration?.value ?? null;
-    const parsedRegistration = raw === null ? null : parseRegisteredFacadeProgram(raw);
-    if (parsedRegistration !== null && parsedRegistration.kind !== "registered") {
-      const problem = parsedRegistration.kind === "invalid"
-        ? parsedRegistration.message
-        : "program registration does not name a registered orchestration program";
-      return captureUnavailable("program-registration", `program registration is unavailable: ${problem}`);
+    const parsedRegistration = parseRegisteredFacadeProgram(registration.value);
+    if (parsedRegistration.kind === "invalid") {
+      return captureUnavailable("program-registration", `program registration is unavailable: ${parsedRegistration.message}`);
     }
-    // Every current capture applies the successor decoded-work budget before
-    // the legacy adapter allocates copied arrays; the old undefined purpose
-    // admitted the impossible foreign escape, because the correlated request
-    // carries no schema version to compare against.
-    const candidates = piResultFinalPayloadCandidates(messages ?? [], "standalone-successor");
-    return candidates.ok
-      ? captureCandidates(candidates.value)
-      : terminalCaptureRefusal("transcript-shape", candidates.errors.join("; "));
+    if (parsedRegistration.kind === "unclaimed") {
+      return captureUnclaimedProgramObservation(registration.value, messages);
+    }
+    if (parsedRegistration.program.kind === "wave-gate" || parsedRegistration.program.kind === "standalone-review") {
+      const classified = classifyPiIssuedReviewRequest(handle.runId, parsedRegistration.program, request);
+      if (!classified.ok) {
+        return captureUnavailable("program-registration", classified.error.message);
+      }
+      const published = publishedReviewerRequest(handle, request, 16_777_216);
+      if (!published.ok) {
+        return captureUnavailable("request-publication", `reviewer request publication is unavailable: ${published.message}`);
+      }
+      const captureAuthority: PiIssuedReviewRequestClass = classified.value.kind === "review-program-emission"
+        ? Object.freeze({
+            kind: "review-program-emission" as const,
+            claim: issuedReviewerPayloadClaim(parsedRegistration.program, published.value.authority),
+          })
+        : classified.value;
+      return piIssuedReviewerCaptureObservation(captureAuthority, messages ?? []);
+    }
+    return archivedReviewerCaptureObservation(messages);
   };
   const outcome = await captureHarnessResult({
     harness: "pi",
@@ -923,6 +1902,7 @@ type PiSpawnReservation = Readonly<{
     implementationAuthority: ImplementationAttemptAuthority | null;
     reviewAuthority: PiReviewAttemptAuthority | null;
     specCheckAuthority: PiSpecCheckAttemptAuthority | null;
+    emissionLaunch: PiReservedEmissionLaunch | null;
     /** The closed lifecycle union, not an independent boolean pair: two
      *  booleans admitted the impossible {implementation: true, standalone:
      *  true} and left the third lifecycle state nameless. The source union's
@@ -1041,6 +2021,7 @@ function recoverPiSpawnReservation(
           implementationAuthority: null,
           reviewAuthority: null,
           specCheckAuthority: null,
+          emissionLaunch: null,
           kind: "standalone" as const,
         });
       })),
@@ -1185,7 +2166,40 @@ async function verifyTrustedReviewRun(
   }) };
 }
 
-async function verifyTrustedStandaloneReview(input: Readonly<{ cwd: string; sessionId: string }>): Promise<unknown> {
+/**
+ * The runtime-baseline restoration map for the implementation settlements this
+ * batch finalizes: the whole runtime revision domain, provably clean at the
+ * in-flight attempts' start, hashed at those attempt-start bytes by the write
+ * boundary's revision comparison. An implementation attempt's writes live
+ * inside the runtime revision domain (`engine/src`, `pi`) and are NOT bounded
+ * by its declared artifact list — the attempt writing those files is the
+ * product — so without this restoration the settlement reads its own
+ * authorized writes as runtime drift and refuses the state update that records
+ * its outcome. Any proven-unrestorable input yields an empty map, which keeps
+ * the strict full-domain comparison in force (fail closed).
+ */
+function implementationBaselineRestoreFor(
+  manager: StateManager,
+  taskIds: readonly string[],
+): ReadonlyMap<string, string | null> {
+  if (taskIds.length === 0) return new Map();
+  try {
+    const state = manager.load();
+    const tasks = state.tasks.filter((task) => taskIds.includes(task.id));
+    if (tasks.length === 0) return new Map();
+    const boundary = observeTaskGraphProjectBoundary(manager.getPath());
+    if (boundary.kind !== "git-repository") return new Map();
+    return runtimeBaselineRestoreForTasks(boundary.root, tasks);
+  } catch (error) {
+    process.stderr.write(
+      `loom(pi): implementation runtime-baseline restore unavailable, strict revision comparison stays: ` +
+      `${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    return new Map();
+  }
+}
+
+async function verifyTrustedStandaloneReview(input: Readonly<{ cwd: string; sessionId: string }>): Promise<LoomReviewAuthorityReceipt> {
   const sessionRoots = trustedReviewRuns.get(input.sessionId);
   if (sessionRoots === undefined) throw new Error(`no request-bound Loom captures were witnessed for Pi session ${input.sessionId}`);
   const expectedRoot = resolve(input.cwd, ".claude/reviews/review-and-fix-runs");
@@ -1215,12 +2229,15 @@ async function verifyTrustedStandaloneReview(input: Readonly<{ cwd: string; sess
 export default function (
   pi: ExtensionAPI,
   startupSweepSource: PiStartupSweepSource = productionPiStartupSweeps,
+  qualifyIssuedRoute: PiIssuedReviewRouteQualifier = qualifyPiIssuedReviewRequest,
 ) {
   assertAnchoredFilesystemPlatformSupported();
-  registerInteractiveSubagentTool(pi, PACKAGE_ROOT, PI_AGENT_DIR);
-  (globalThis as unknown as Record<PropertyKey, unknown>)[LOOM_REVIEW_AUTHORITY_SYMBOL] = Object.freeze({
-    verify: verifyTrustedStandaloneReview,
-  });
+  const piAgentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+  registerInteractiveSubagentTool(pi, PACKAGE_ROOT, piAgentDir);
+  publishLoomReviewAuthorityBridge(globalThis, { verify: verifyTrustedStandaloneReview });
+  const emissionLaunchBridge = registerPiEmissionLaunchBridge(
+    pi.events as unknown as PiSubagentLaunchEventBus | undefined,
+  );
 
   // A Pi process may host overlapping sessions. Parent reservations and
   // capabilities are therefore aggregates owned by one parsed session, never
@@ -1316,7 +2333,15 @@ export default function (
         currentGuard = "block-direct-edits";
         const rejectedGrant = rejectedChildWriteGrantBlock(rejectedChildWriteGrantSessions.has(sessionId));
         if (rejectedGrant !== null) return rejectedGrant;
-        const result = shouldBlockDirectEdit(event.toolName, sessionId, () => graphIsActive, activeRosterProbe);
+        const result = shouldBlockDirectEdit(
+          event.toolName,
+          sessionId,
+          () => graphIsActive,
+          // No ArtifactWriteRequest: Pi cannot name the calling agent here.
+          // Phase/panel writers are admitted as scoped write-grant holders and
+          // confined to their grant's scope dirs just below.
+          activeRosterProbe,
+        );
         if (result.kind === "block") {
           return { block: true, reason: result.message };
         }
@@ -1412,13 +2437,19 @@ export default function (
         const spawnGraphPath = batchGraph.kind === "spawn" ? batchGraph.graphPath : null;
         const orchestrationGraphActive = spawnGraphPath !== null || graphIsActive;
         const orchestrationGraphPath = spawnGraphPath ?? taskGraphPath();
+        // Expand implementation brief markers BEFORE admission, so every gate
+        // below judges the exact engine-rendered brief the child receives.
+        currentGuard = "implementation-brief-expansion";
+        const briefs = expandImplementationBriefMarkers(event.input, (taskId) =>
+          renderTaskImplementationBrief(orchestrationGraphPath, PACKAGE_ROOT, taskId));
+        if (!briefs.ok) return { block: true, reason: briefs.reason };
         const routing = buildPiRoutingContext();
         const admission = admitPiSpawnBatch(event.input, {
           graphActive: orchestrationGraphActive,
           transport: event.toolName === LOOM_INTERACTIVE_SUBAGENT_TOOL ? "interactive-rpc" : "headless",
           packageRoot: PACKAGE_ROOT,
           validateDefinition: (agent) =>
-            validatePiAgentDefinitionFile(join(PI_AGENT_DIR, "agents", `${agent}.md`), agent, PACKAGE_ROOT, routing.context),
+            validatePiAgentDefinitionFile(join(piAgentDir, "agents", `${agent}.md`), agent, PACKAGE_ROOT, routing.context),
           readSourceAgent: (agent) => {
             currentGuard = "validate-agent-skill";
             const sourceAgentPath = join(PACKAGE_ROOT, "agents", `${agent}.md`);
@@ -1439,15 +2470,36 @@ export default function (
             currentGuard = "validate-template-substitution";
             return validateTemplateSubstitution(task, orchestrationGraphActive);
           },
+          readIssuedRequest: (requestId, contextDigest, agent) => {
+            currentGuard = "expected-emission-capability";
+            return readPiIssuedSpawnRequest(safeSessionId, requestId, contextDigest, agent, qualifyIssuedRoute);
+          },
         });
         if (admission.kind === "block") {
           currentGuard = admission.guard;
           return { block: true, reason: admission.reason };
         }
         if (admission.kind === "pass-through") return;
-        const parsedItems = admission.items;
-        const taskExecutionSpawns = admission.taskExecutionSpawns;
-        let dispatchTaskExecutionSpawns = taskExecutionSpawns;
+        const emissionEnabledItems = admission.itemAdmissions.filter(
+          ({ emissionExpectation }) => emissionExpectation.kind === "emission-enabled",
+        );
+        if (emissionEnabledItems.length > 0) {
+          currentGuard = "emission-launcher-capability";
+          if (event.toolName !== "subagent") {
+            return {
+              block: true,
+              reason: "Emission-enabled requests require the installed normal subagent launcher; interactive transport cannot provision the readiness barrier.",
+            };
+          }
+          const launcherCapability = emissionLaunchBridge.probe();
+          if (launcherCapability.kind === "unavailable") {
+            return {
+              block: true,
+              reason: `Emission-enabled spawn refused: ${launcherCapability.reason}. ` +
+                "Inspect/install/reload the shared launcher before retrying; Loom will not silently send a JSON-only prompt.",
+            };
+          }
+        }
         const needsTaskGraphLifecycle = admission.needsTaskGraphLifecycle;
 
         // Reserve every lifecycle identity before task-state mutation. A roster
@@ -1478,28 +2530,48 @@ export default function (
             reason: `Duplicate Pi subagent toolCallId ${JSON.stringify(toolCallId)} in session ${safeSessionId}; refusing spawn.`,
           };
         }
-        const rosterIds = parsedItems.map((item, index) =>
-          piSpawnRosterId(toolCallId, index, item.agent),
+        type LifecycleWriteGrant = Readonly<{
+          token: string;
+          task: string;
+          originalTask: string;
+          injected: boolean;
+        }>;
+        type SpawnLifecycleState = PiSpawnLifecycleAssociation & Readonly<{
+          dispatchTaskExecutionSpawn: TaskExecutionSpawn;
+          writeGrant: LifecycleWriteGrant | null;
+          reviewAuthority: PiReviewAttemptAuthority | null;
+          implementationAuthority: ImplementationAttemptAuthority | null;
+        }>;
+        let spawnLifecycle: readonly SpawnLifecycleState[] = Object.freeze(
+          associatePiSpawnLifecycle(admission.itemAdmissions, toolCallId).map((association) => Object.freeze({
+            ...association,
+            dispatchTaskExecutionSpawn: association.admission.taskExecutionSpawn,
+            writeGrant: null,
+            reviewAuthority: null,
+            implementationAuthority: null,
+          })),
         );
-        const reserved: Array<(typeof rosterIds)[number]> = [];
-        const writeGrants: Array<{ index: number; token: string; task: string; originalTask: string; injected: boolean }> = [];
+        const replaceLifecycleState = (replacement: SpawnLifecycleState): void => {
+          spawnLifecycle = Object.freeze(spawnLifecycle.map((state) =>
+            state.slot === replacement.slot ? replacement : state));
+        };
+        const reserved: AgentId[] = [];
         let taskGraphPointerBinding: SessionTaskGraphPointerBinding | null = null;
         let orchestrationRunBinding: SessionRunBinding | null = null;
-        let reviewAuthoritiesBySlot: readonly (PiReviewAttemptAuthority | null)[] =
-          Object.freeze(parsedItems.map(() => null));
         let specCheckAuthority: PiSpecCheckAttemptAuthority | null = null;
+        let emissionLaunchStaged = false;
         const grantRollbackActions = (revoked: Set<string>): readonly PiCleanupAction[] =>
-          writeGrants.flatMap((grant): readonly PiCleanupAction[] => [
+          spawnLifecycle.flatMap(({ slot, writeGrant }): readonly PiCleanupAction[] => writeGrant === null ? [] : [
             {
-              label: `revoke write grant for spawn item ${grant.index + 1}`,
+              label: `revoke write grant for spawn item ${slot + 1}`,
               run: () => {
-                revokePiWriteGrant(grant.token);
-                revoked.add(grant.token);
+                revokePiWriteGrant(writeGrant.token);
+                revoked.add(writeGrant.token);
               },
             },
-            ...(grant.injected ? [{
-              label: `restore child prompt for spawn item ${grant.index + 1}`,
-              run: () => replacePiSpawnTask(event.input, grant.index, grant.originalTask),
+            ...(writeGrant.injected ? [{
+              label: `restore child prompt for spawn item ${slot + 1}`,
+              run: () => replacePiSpawnTask(event.input, slot, writeGrant.originalTask),
             }] : []),
           ]);
         const rosterRollbackActions = (removed: Set<AgentId>): readonly PiCleanupAction[] =>
@@ -1515,8 +2587,8 @@ export default function (
           removed: ReadonlySet<AgentId>,
           pointerReleased: boolean,
         ): void => {
-          const remainingGrantTokens = writeGrants
-            .map(({ token }) => token)
+          const remainingGrantTokens = spawnLifecycle
+            .flatMap(({ writeGrant }) => writeGrant === null ? [] : [writeGrant.token])
             .filter((token) => !revoked.has(token));
           const remainingRosterIds = new Set(reserved.filter((agentId) => !removed.has(agentId)));
           const remainingPointerBinding = pointerReleased ? null : taskGraphPointerBinding;
@@ -1531,20 +2603,23 @@ export default function (
             graphActiveAtSpawn: orchestrationGraphActive,
             orchestrationRunBinding,
             pointerBinding: remainingPointerBinding,
-            items: Object.freeze(parsedItems.flatMap((item, index) => {
-              const rosterId = rosterIds[index]!;
-              return remainingRosterIds.has(rosterId)
+            items: Object.freeze(spawnLifecycle.flatMap((state) =>
+              remainingRosterIds.has(state.rosterId)
                 ? [Object.freeze({
-                    agentType: item.agent,
-                    rosterId,
-                    taskId: extractTaskId(item.task),
+                    agentType: state.admission.item.agent,
+                    rosterId: state.rosterId,
+                    taskId: extractTaskId(state.admission.item.task),
                     implementationAuthority: null,
                     reviewAuthority: null,
                     specCheckAuthority: null,
-                    kind: taskExecutionSpawns[index]?.kind ?? "non-implementation",
+                    emissionLaunch: reservedReviewerEmissionLaunch(
+                      state.admission.emissionExpectation,
+                      event.input,
+                      state.slot,
+                    ),
+                    kind: state.dispatchTaskExecutionSpawn.kind,
                   })]
-                : [];
-            })),
+                : [])),
           });
         };
         const rollbackLifecycle = async (): Promise<readonly string[]> => {
@@ -1564,6 +2639,13 @@ export default function (
             });
           }
           const errors = await runPiCleanupActions([
+            ...(emissionLaunchStaged ? [{
+              label: `remove emission launch capabilities for ${toolCallId}`,
+              run: () => {
+                emissionLaunchBridge.removeToolCall(safeSessionId, toolCallId);
+                emissionLaunchStaged = false;
+              },
+            }] : []),
             ...grantRollbackActions(revokedGrantTokens),
             ...rosterRollbackActions(removedRosterIds),
             ...pointerActions,
@@ -1578,7 +2660,8 @@ export default function (
         // observation typed so the registration core can limit this ordering
         // exception to current-protocol (timestamped) reservations.
         const rosterObservation: TaskExecutionRosterObservation | undefined =
-          orchestrationGraphActive && taskExecutionSpawns.some(({ kind }) => kind === "implementation")
+          orchestrationGraphActive && spawnLifecycle.some(({ admission }) =>
+            admission.taskExecutionSpawn.kind === "implementation")
             ? {
                 kind: "pre-roster-current-protocol",
                 anyActiveForGraph: anyActiveSubagent(orchestrationGraphPath),
@@ -1586,9 +2669,9 @@ export default function (
             : undefined;
         try {
           mkdirSync(subagentDir(), { recursive: true, mode: 0o700 });
-          for (const agentId of rosterIds) {
-            await fsSessionRegistry.markActive(safeSessionId, agentId);
-            reserved.push(agentId);
+          for (const { rosterId } of spawnLifecycle) {
+            await fsSessionRegistry.markActive(safeSessionId, rosterId);
+            reserved.push(rosterId);
           }
           if (needsTaskGraphLifecycle && pathExistsFailClosed(orchestrationGraphPath)) {
             taskGraphPointerBinding = await bindSessionTaskGraphPointer(
@@ -1600,9 +2683,14 @@ export default function (
           // request before the harness can dispatch the batch. The durable run
           // directory, not the in-memory lifecycle map below, owns capture
           // authority for both Pi and Claude.
-          orchestrationRunBinding = await recordPiSpawnCorrelators(parsedItems, rosterIds, safeSessionId, event.input);
+          orchestrationRunBinding = await recordPiSpawnCorrelators(
+            spawnLifecycle.map(({ admission }) => admission),
+            spawnLifecycle.map(({ rosterId }) => rosterId),
+            safeSessionId,
+            event.input,
+          );
           const unboundSpecChecks = orchestrationRunBinding === null
-            ? parsedItems.filter(({ agent }) => agent === "spec-check-invoker")
+            ? spawnLifecycle.filter(({ admission }) => admission.item.agent === "spec-check-invoker")
             : [];
           if (orchestrationGraphActive && unboundSpecChecks.length > 0) {
             if (unboundSpecChecks.length !== 1) {
@@ -1616,21 +2704,22 @@ export default function (
             }
           }
           const unboundReviewers = orchestrationRunBinding === null
-            ? parsedItems.filter(({ agent }, index) =>
-                isReviewAgent(agent) && taskExecutionSpawns[index]?.kind !== "standalone")
+            ? spawnLifecycle.filter(({ admission }) =>
+                isReviewAgent(admission.item.agent) && admission.taskExecutionSpawn.kind !== "standalone")
             : [];
           if (orchestrationGraphActive && unboundReviewers.length > 0) {
             const manager = StateManager.fromLocalSession(safeSessionId);
             if (manager === null) throw new Error("protected Pi reviewer spawn has no TaskGraph authority");
             const reviewGraph = manager.load();
-            reviewAuthoritiesBySlot = Object.freeze(parsedItems.map((item, index) => {
-              if (!isReviewAgent(item.agent) || taskExecutionSpawns[index]?.kind === "standalone") return null;
+            spawnLifecycle = Object.freeze(spawnLifecycle.map((state) => {
+              const { item, taskExecutionSpawn } = state.admission;
+              if (!isReviewAgent(item.agent) || taskExecutionSpawn.kind === "standalone") return state;
               const taskId = extractTaskId(item.task);
               const authority = taskId === null ? null : currentPiReviewAuthority(reviewGraph, item.agent, taskId);
               if (authority === null) {
                 throw new Error(`protected Pi reviewer ${item.agent} lacks exact current Task/Review Run authority`);
               }
-              return authority;
+              return Object.freeze({ ...state, reviewAuthority: authority });
             }));
           }
           // Implementation items get the classic whole-session capability bound
@@ -1646,49 +2735,105 @@ export default function (
           // block-direct-edits allows every edit when no task graph exists, so
           // a grant would authorize nothing that was not already permitted,
           // while its Task ID requirement refused the spawn outright.
-          const grantPlan = planPiWriteGrants(parsedItems, taskExecutionSpawns, orchestrationGraphActive);
+          const grantPlan = planPiWriteGrants(
+            spawnLifecycle.map(({ admission }) => admission.item),
+            spawnLifecycle.map(({ admission }) => admission.taskExecutionSpawn),
+            orchestrationGraphActive,
+          );
           if (!grantPlan.ok) throw new Error(grantPlan.error);
-          for (const [index, requirement] of grantPlan.requirements.entries()) {
+          if (grantPlan.requirements.length !== spawnLifecycle.length) {
+            throw new Error("Pi write-grant plan lost its structural spawn association");
+          }
+          for (const [slot, requirement] of grantPlan.requirements.entries()) {
             if (requirement.kind === "none") continue;
-            const item = parsedItems[index]!;
+            const state = spawnLifecycle[slot];
+            if (state === undefined || state.slot !== slot) {
+              throw new Error(`Pi write-grant slot ${slot + 1} lost its admitted spawn association`);
+            }
+            const item = state.admission.item;
             const grant = issuePiWriteGrant({
               agent: item.agent,
               taskId: requirement.taskId,
-              cwd: piSpawnCwd(event.input, index, ctx.cwd),
+              cwd: piSpawnCwd(event.input, slot, ctx.cwd),
               taskGraphPath: orchestrationGraphPath,
               ...(requirement.kind === "scoped" ? { scopeDirs: requirement.scopeDirs } : {}),
             });
-            // Track the issued token before prompt injection can fail. If its
-            // immediate revocation also fails, the outer rollback retries this
-            // exact token and reports both failures instead of orphaning it.
-            const trackedGrant = {
-              index,
-              token: grant.token,
-              task: item.task,
-              originalTask: item.task,
-              injected: false,
-            };
-            writeGrants.push(trackedGrant);
-            trackedGrant.task = await injectPiWriteGrantWithRevocation(item.task, grant, index);
+            // Track the issued token on the paired item before prompt injection
+            // can fail. If immediate revocation also fails, outer rollback
+            // retries this exact association instead of orphaning a sibling's
+            // grant.
+            replaceLifecycleState(Object.freeze({
+              ...state,
+              writeGrant: Object.freeze({
+                token: grant.token,
+                task: item.task,
+                originalTask: item.task,
+                injected: false,
+              }),
+            }));
+            const task = await injectPiWriteGrantWithRevocation(item.task, grant, slot);
+            const tracked = spawnLifecycle[slot];
+            if (tracked === undefined || tracked.writeGrant === null) {
+              throw new Error(`Pi write-grant slot ${slot + 1} lost its issued grant association`);
+            }
+            replaceLifecycleState(Object.freeze({
+              ...tracked,
+              writeGrant: Object.freeze({ ...tracked.writeGrant, task }),
+            }));
           }
           // Mutate before task-state validation. Rollback restores prompts and
           // revokes grants, leaving no post-validation operation that can fail
           // after executing_tasks/baselines have committed.
-          for (const grant of writeGrants) {
-            replacePiSpawnTask(event.input, grant.index, grant.task);
-            grant.injected = true;
+          for (const state of spawnLifecycle) {
+            if (state.writeGrant === null) continue;
+            replacePiSpawnTask(event.input, state.slot, state.writeGrant.task);
+            replaceLifecycleState(Object.freeze({
+              ...state,
+              writeGrant: Object.freeze({ ...state.writeGrant, injected: true }),
+            }));
           }
-          dispatchTaskExecutionSpawns = Object.freeze(taskExecutionSpawns.map((spawn, index) => {
-            if (spawn.kind !== "implementation") return spawn;
+          spawnLifecycle = Object.freeze(spawnLifecycle.map((state) => {
+            const spawn = state.admission.taskExecutionSpawn;
+            if (spawn.kind !== "implementation") return state;
             if (!isRecord(event.input)) {
               throw new Error("Pi implementation input became malformed before dispatch registration");
             }
-            const prompt = piSpawnItem(event.input as Record<string, unknown>, index).task;
+            const prompt = piSpawnItem(event.input as Record<string, unknown>, state.slot).task;
             if (typeof prompt !== "string") {
-              throw new Error(`Pi implementation spawn item ${index + 1} lost its child-visible prompt`);
+              throw new Error(`Pi implementation spawn item ${state.slot + 1} lost its child-visible prompt`);
             }
-            return Object.freeze({ ...spawn, prompt });
+            return Object.freeze({
+              ...state,
+              dispatchTaskExecutionSpawn: Object.freeze({ ...spawn, prompt }),
+            });
           }));
+
+          const launchExpectations = spawnLifecycle.flatMap((state): readonly PiEmissionLaunchExpectation[] => {
+            const expectation = state.admission.emissionExpectation;
+            if (expectation.kind !== "emission-enabled") return [];
+            if (!isRecord(event.input)) {
+              throw new Error("Pi emission input became malformed before launcher provisioning");
+            }
+            const finalTask = piSpawnItem(event.input as Record<string, unknown>, state.slot).task;
+            if (typeof finalTask !== "string") {
+              throw new Error(`Pi emission spawn item ${state.slot + 1} lost its final child task`);
+            }
+            return [Object.freeze({
+              sessionId: safeSessionId,
+              toolCallId,
+              slot: piSubagentLaunchSlot(event.input, state.slot),
+              agent: state.admission.item.agent,
+              task: finalTask,
+              cwd: piSpawnCwd(event.input, state.slot, ctx.cwd),
+              expectation,
+              revision: LOADED_RUNTIME_IDENTITY.revision,
+            })];
+          });
+          if (launchExpectations.length > 0) {
+            const staged = emissionLaunchBridge.stage(launchExpectations);
+            if (!staged.ok) throw new Error(staged.reason);
+            emissionLaunchStaged = true;
+          }
         } catch (error) {
           const cleanupErrors = await rollbackLifecycle();
           return {
@@ -1706,7 +2851,7 @@ export default function (
             : "parallel" as const;
           taskRegistration = orchestrationGraphActive
             ? await registerTaskExecutionBatch(
-                dispatchTaskExecutionSpawns,
+                spawnLifecycle.map(({ dispatchTaskExecutionSpawn }) => dispatchTaskExecutionSpawn),
                 executionMode,
                 rosterObservation,
                 spawnGraphPath === null ? undefined : piSpawnCwd(event.input, 0, ctx.cwd),
@@ -1725,13 +2870,13 @@ export default function (
         }
         const alignment = orchestrationGraphActive
           ? alignPiImplementationAuthorities(
-              parsedItems,
-              dispatchTaskExecutionSpawns,
+              spawnLifecycle.map(({ admission }) => admission.item),
+              spawnLifecycle.map(({ dispatchTaskExecutionSpawn }) => dispatchTaskExecutionSpawn),
               taskRegistration.authorities,
             )
           : {
               ok: true as const,
-              authoritiesBySlot: Object.freeze(parsedItems.map(() => null)),
+              authoritiesBySlot: Object.freeze(spawnLifecycle.map(() => null)),
             };
         if (!alignment.ok) {
           const registrationRollback = await rollbackTaskExecutionRegistration(
@@ -1748,9 +2893,29 @@ export default function (
             reason: `BLOCKED: ${alignment.error}${cleanupFailureSuffix(rollbackErrors)}`,
           };
         }
+        if (alignment.authoritiesBySlot.length !== spawnLifecycle.length) {
+          const registrationRollback = await rollbackTaskExecutionRegistration(
+            taskRegistration.authorities,
+            spawnGraphPath === null ? undefined : piSpawnCwd(event.input, 0, ctx.cwd),
+          );
+          const cleanupErrors = await rollbackLifecycle();
+          return {
+            block: true,
+            reason: `BLOCKED: implementation authority alignment lost its structural spawn association${cleanupFailureSuffix([
+              ...(registrationRollback.kind === "block" ? [registrationRollback.message] : []),
+              ...cleanupErrors,
+            ])}`,
+          };
+        }
+        spawnLifecycle = Object.freeze(spawnLifecycle.map((state) => Object.freeze({
+          ...state,
+          implementationAuthority: alignment.authoritiesBySlot[state.slot] ?? null,
+        })));
         const sessionRuntime = runtimeFor(safeSessionId);
-        if (writeGrants.length > 0) {
-          sessionRuntime.issuedWriteGrants.set(toolCallId, writeGrants.map((grant) => grant.token));
+        const issuedGrantTokens = spawnLifecycle.flatMap(({ writeGrant }) =>
+          writeGrant === null ? [] : [writeGrant.token]);
+        if (issuedGrantTokens.length > 0) {
+          sessionRuntime.issuedWriteGrants.set(toolCallId, Object.freeze(issuedGrantTokens));
         }
         sessionRuntime.spawnReservations.set(toolCallId, {
           sessionId: safeSessionId,
@@ -1758,18 +2923,20 @@ export default function (
           graphActiveAtSpawn: orchestrationGraphActive,
           orchestrationRunBinding,
           pointerBinding: taskGraphPointerBinding,
-          items: parsedItems.map((item, index) => {
-            const taskId = extractTaskId(item.task);
-            return {
-              agentType: item.agent,
-              rosterId: rosterIds[index]!,
-              taskId,
-              implementationAuthority: alignment.authoritiesBySlot[index] ?? null,
-              reviewAuthority: reviewAuthoritiesBySlot[index] ?? null,
-              specCheckAuthority: item.agent === "spec-check-invoker" ? specCheckAuthority : null,
-              kind: dispatchTaskExecutionSpawns[index]?.kind ?? "non-implementation",
-            };
-          }),
+          items: Object.freeze(spawnLifecycle.map((state) => ({
+            agentType: state.admission.item.agent,
+            rosterId: state.rosterId,
+            taskId: extractTaskId(state.admission.item.task),
+            implementationAuthority: state.implementationAuthority,
+            reviewAuthority: state.reviewAuthority,
+            specCheckAuthority: state.admission.item.agent === "spec-check-invoker" ? specCheckAuthority : null,
+            emissionLaunch: reservedReviewerEmissionLaunch(
+              state.admission.emissionExpectation,
+              event.input,
+              state.slot,
+            ),
+            kind: state.dispatchTaskExecutionSpawn.kind,
+          }))),
         });
       }
     } catch (err) {
@@ -1871,10 +3038,136 @@ export default function (
     return undefined;
   });
 
+  // ─── Emission Readiness (launcher barrier, AD-4/FR-008) ───────────────
+  // An emission-enabled child is PROVISIONED by its launcher with the issued
+  // binding before any prompt exists (LOOM_EMISSION_BINDING). The child never
+  // self-declares readiness: the launcher discovers /loom-emission-readiness
+  // via get_commands, invokes it through the RPC prompt command (extension
+  // commands execute without a model request — proven by
+  // probes/emission-readiness), and receives the bound readiness payload via
+  // entry_appended. The in-child awaited before_agent_start hold is the
+  // defense-in-depth layer: a prompt delivered without the readiness exchange
+  // WEDGES here — holds gate, throws are caught-and-continued by pi and can
+  // never carry this barrier. A non-emission child (no provisioning env) has
+  // no hold, and the command refuses explicitly when invoked.
+  const emissionChild = parseEmissionChildProvisioning(process.env[LOOM_EMISSION_BINDING_ENV]);
+  // The one transition a child's registration takes, wrapping the side
+  // effect that makes it true (pi.registerTool): unregistered → registered.
+  // The transition DECISION is pure (pi/emission-tool.ts); the shell applies
+  // it — this field is the child's process-local aggregate, the same posture
+  // as parentSessionRuntimes above.
+  const emissionRegistrationState: { state: EmissionToolRegistration } = { state: { kind: "unregistered" } };
+  type EmissionHold =
+    | Readonly<{ kind: "unprovisioned" }>
+    | Readonly<{ kind: "armed"; wait: Promise<void>; release: () => void }>
+    | Readonly<{ kind: "released" }>;
+  const armEmissionHold = (): EmissionHold => {
+    const deferred = Promise.withResolvers<void>();
+    return Object.freeze({ kind: "armed" as const, wait: deferred.promise, release: () => deferred.resolve() });
+  };
+  const emissionHoldState: { current: EmissionHold } = {
+    current: emissionChild.kind === "not-provisioned"
+      ? Object.freeze({ kind: "unprovisioned" as const })
+      : armEmissionHold(),
+  };
+  const appendEmissionHoldDiagnostic = (phase: EmissionHoldPhase): void => {
+    try {
+      pi.appendEntry(EMISSION_HOLD_ENTRY_TYPE, { phase });
+    } catch (thrown) {
+      // Diagnostics never carry the barrier: append failure is visible, while
+      // the armed hold below remains the operation that gates the prompt.
+      const cause = boundedThrownCause(thrown, "emission hold diagnostic append");
+      process.stderr.write(
+        `loom(pi): emission hold ${phase} diagnostic append failed (${cause.name}: ${cause.message}); the hold remains fail-closed\n`,
+      );
+    }
+  };
+
+  pi.registerCommand(EMISSION_READINESS_COMMAND, {
+    description: "Emission readiness: register the issued emission tool, verify it active, report the bound readiness payload.",
+    handler: async () => {
+      // Local narrowed copy of the once-parsed provisioning: the handler
+      // narrows its own view (closure narrowing of the outer const is not
+      // assumed).
+      const provisioned = emissionChild;
+      if (provisioned.kind === "not-provisioned") {
+        throw new Error(
+          "loom-emission-readiness is only for emission-enabled children: no LOOM_EMISSION_BINDING is provisioned in this child. " +
+            "Remediation: the launcher barrier provisions the issued emission binding before readiness.",
+        );
+      }
+      if (provisioned.kind === "provisioning-refused") {
+        throw new Error(
+          `the provisioned LOOM_EMISSION_BINDING is unusable [${provisioned.code}]: ${provisioned.reason}. ` +
+            "Remediation: respawn the child with the issued emission binding.",
+        );
+      }
+      const registration = decideEmissionToolRegistration(emissionRegistrationState.state, provisioned.binding);
+      if (registration.kind === "contradictory") {
+        throw new Error(
+          `${describeEmissionRegistrationContradiction(registration)}. ` +
+            "Remediation: spawn a fresh child for each issued request — a child holds exactly one binding.",
+        );
+      }
+      if (registration.kind === "register") {
+        const definition = emissionToolDefinition(provisioned.binding);
+        // THE confined TypeBox claim at the ONE pi registration surface: the
+        // parameters ARE the frozen bytes parsed once (one schema, no second
+        // contract — FR-021/SC-006); pi's registerTool types them as a
+        // TypeBox schema, and the byte-match guard is the contract suite's.
+        pi.registerTool(definition as unknown as Parameters<ExtensionAPI["registerTool"]>[0]);
+        emissionRegistrationState.state = { kind: "registered", binding: provisioned.binding };
+      }
+      const active = pi.getActiveTools().includes(provisioned.binding.toolName);
+      const report = emissionReadinessReport(provisioned, {
+        revision: LOADED_RUNTIME_IDENTITY.revision,
+        active,
+        childPid: process.pid,
+        registeredTools: pi.getAllTools().map((tool) => tool.name),
+      });
+      pi.appendEntry(EMISSION_READINESS_ENTRY_TYPE, report);
+      // The hold releases only when the registered tool is in the ACTUAL
+      // active set: an honestly-inactive tool is reported (the gate refuses)
+      // and its prompts stay wedged — fail-closed, never silently degraded.
+      const hold = emissionHoldState.current;
+      if (active && hold.kind === "armed") {
+        emissionHoldState.current = Object.freeze({ kind: "released" as const });
+        hold.release();
+      }
+      return undefined;
+    },
+  });
+
+  pi.on("before_agent_start", async () => {
+    const hold = emissionHoldState.current;
+    if (hold.kind !== "armed") return undefined;
+    appendEmissionHoldDiagnostic("entered");
+    await hold.wait;
+    appendEmissionHoldDiagnostic("resolved");
+    return undefined;
+  });
+
+  // Fail-safe hold resolution (AD-4's cleanup arm): a provisioned child whose
+  // hold is still ARMED at session shutdown must not leave its awaited
+  // before_agent_start handler pending forever — the wedged coroutine cannot
+  // outlive the session it gates. Releasing at shutdown admits no model
+  // request (the session is ending), so the barrier stays fail-closed for
+  // every prompt; the shutdown-released entry is the honest forensic marker
+  // that readiness never opened on this child. An already-released (or
+  // never-armed) hold is inert here.
+  pi.on("session_shutdown", async () => {
+    const hold = emissionHoldState.current;
+    if (hold.kind !== "armed") return;
+    emissionHoldState.current = Object.freeze({ kind: "released" as const });
+    hold.release();
+    appendEmissionHoldDiagnostic("shutdown-released");
+  });
+
   pi.on("session_shutdown", async (_event, ctx) => {
     const rawSessionId = ctx.sessionManager.getSessionId() ?? "";
     trustedReviewRuns.delete(rawSessionId);
     const sessionId = parseSessionId(rawSessionId);
+    if (sessionId !== null) emissionLaunchBridge.removeSession(sessionId);
     const binding = activeChildWriteGrants.get(rawSessionId);
     const actions: PiCleanupAction[] = [];
     const revokedTokens = new Set<string>();
@@ -2093,6 +3386,7 @@ export default function (
     const processingErrors: string[] = [];
     const toolCallId = (event as { toolCallId?: unknown }).toolCallId;
     const rawSessionId = _ctx.sessionManager.getSessionId() ?? "";
+    if (typeof toolCallId === "string") emissionLaunchBridge.removeToolCall(rawSessionId, toolCallId);
     const resultSessionId = parseSessionId(rawSessionId);
     let sessionRuntime = resultSessionId === null
       ? undefined
@@ -2230,8 +3524,20 @@ export default function (
       const finalizedAt = parseIsoInstant(new Date().toISOString(), "Pi crash-settlement instant");
       if (!finalizedAt.ok) return [finalizedAt.error.errors.join("; ")];
       try {
-        const manager = StateManager.fromLocalSession(reservation?.sessionId ?? "");
-        if (manager === null) return [`cannot settle crashed reserved implementation ${item.taskId ?? "unknown"}: task graph unavailable`];
+        const plainManager = StateManager.fromLocalSession(reservation?.sessionId ?? "");
+        if (plainManager === null) return [`cannot settle crashed reserved implementation ${item.taskId ?? "unknown"}: task graph unavailable`];
+        // The crashed attempt may have written engine/src/pi artifacts (declared
+        // or not) before failing: restore the whole in-flight batch's baseline
+        // domain for the write boundary's revision comparison, exactly like the
+        // finalize path below. Unprovable inputs yield an empty map: strict stays.
+        const crashRestore = implementationBaselineRestoreFor(
+          plainManager,
+          (reservation?.items ?? []).flatMap((reserved) =>
+            reserved.kind === "implementation" && reserved.taskId !== null ? [reserved.taskId] : []),
+        );
+        const manager = crashRestore.size > 0
+          ? StateManager.fromLocalSession(reservation?.sessionId ?? "", crashRestore) ?? plainManager
+          : plainManager;
         const applied = await manager.updateAndReturn((state) => {
           const settlement = settleUnavailableImplementation(
             state,
@@ -2291,6 +3597,25 @@ export default function (
       }
       const finalizedAt = parseIsoInstant(new Date().toISOString(), "Pi finalization instant");
       if (!finalizedAt.ok) return [finalizedAt.error.errors.join("; ")];
+      // Restore the reserved attempts' declared artifacts to their attempt-start
+      // bytes for the write boundary's revision comparison, so the settlement of
+      // an attempt that (correctly) wrote engine/src or pi files is not refused
+      // as runtime drift. Unprovable inputs yield an empty map: strict stays.
+      const finalizeRestore = implementationBaselineRestoreFor(
+        manager,
+        reservation.items.flatMap((item) =>
+          item.kind === "implementation" && item.taskId !== null ? [item.taskId] : []),
+      );
+      if (finalizeRestore.size > 0) {
+        try {
+          manager = StateManager.fromLocalSession(reservation.sessionId, finalizeRestore) ?? manager;
+        } catch (error) {
+          process.stderr.write(
+            `loom(pi): baseline-restored manager construction failed; strict comparison stays: ` +
+            `${error instanceof Error ? error.message : String(error)}\n`,
+          );
+        }
+      }
       try {
         const committed = await manager.updateAndReturn((initial) => {
           let state: TaskGraph = initial;
@@ -2368,6 +3693,17 @@ export default function (
     if (!spawnedWithoutTaskGraph(reservation)) {
       processingErrors.push(...await finalizeReservedImplementations(entries));
     }
+    // Silent-stop observability: an exit-0 result with no assistant text is the
+    // failure mode the appliers cannot name — they parse the empty transcript
+    // and report "not ready"/"no structured evidence" without the stopReason
+    // that discriminates it. The note is stderr-only: the state side above
+    // already settled or preserved what it owns, and a processing error here
+    // would turn a settled batch into an orchestration failure.
+    for (const entry of entries) {
+      if (!entry.ok) continue;
+      const note = piSilentStopNote(entry.result);
+      if (note !== null) process.stderr.write(`loom(pi): ${note}\n`);
+    }
 
     // A reservation is the authoritative expected batch. Pi may return a
     // shorter or reordered results array after a child disappears. Reconcile
@@ -2381,16 +3717,20 @@ export default function (
           reservation.orchestrationRunBinding !== null,
         );
       for (const { item, index } of missingRunResults) {
-        const diagnostic = `request-bound result ${index + 1} for ${item.agentType} was missing or mismatched`;
-        processingErrors.push(diagnostic);
-        process.stderr.write(`loom(pi): ${diagnostic}; run transcript was not captured\n`);
+        const diagnostic = "no typed pre-prompt outcome exists; terminal capture rejection";
+        const resultDiagnostic =
+          `request-bound result ${index + 1} for ${item.agentType} was absent or unusable; ${diagnostic}`;
+        const captureDiagnostic =
+          `request-bound result ${index + 1} for ${item.agentType} was missing or mismatched; ${diagnostic}`;
+        processingErrors.push(resultDiagnostic);
+        process.stderr.write(`loom(pi): ${resultDiagnostic}\n`);
         const runBinding = reservation.orchestrationRunBinding;
         if (runBinding === null) {
-          const failure = `cannot terminalize missing ${item.agentType}[${index}]: reservation lost its run binding`;
+          const failure = `cannot terminalize absent or unusable ${item.agentType}[${index}]: reservation lost its run binding`;
           processingErrors.push(failure);
           process.stderr.write(`loom(pi): ${failure}\n`);
         } else {
-          await persistCaptureRejection(runBinding, index, item.agentType, diagnostic);
+          await persistCaptureRejection(runBinding, index, item.agentType, captureDiagnostic);
         }
       }
       // An ad-hoc batch has no State File to mark, so the persistence arm below
@@ -2629,6 +3969,34 @@ export default function (
           }
         }
 
+        const startupClassification = durableRunBinding !== null && reservation !== undefined && reservedItem !== undefined
+          ? classifyPiEmissionStartupRefusal({
+              rawResult: rawResults[resultIndex],
+              result,
+              reservation,
+              reservedItem,
+              runBinding: durableRunBinding,
+              toolCallId,
+              resultIndex,
+              agentType,
+            })
+          : Object.freeze({ kind: "ordinary" as const });
+        if (startupClassification.kind === "untrusted-marker") {
+          const diagnostic = `untrusted emission launch outcome for ${agentType}[${resultIndex}]: ${startupClassification.reason}`;
+          processingErrors.push(diagnostic);
+          process.stderr.write(`loom(pi): ${diagnostic}; applying the ordinary failed-result lifecycle\n`);
+        }
+        if (startupClassification.kind === "proven-startup-refusal") {
+          const marker = startupClassification.marker;
+          const diagnostic =
+            `Emission startup refused before the Task prompt for issued request ${marker.requestId} ` +
+            `(${agentType}, ${marker.toolName}): ${marker.reason}. ` +
+            "Correct the launcher/readiness infrastructure and retry this same issued request with a new subagent tool call.";
+          processingErrors.push(diagnostic);
+          process.stderr.write(`loom(pi): ${diagnostic} Semantic capture authority was retained.\n`);
+          continue;
+        }
+
         // Request-bound capture runs BEFORE the standalone short-circuit and
         // before any StateManager resolution — the same two orderings dispatch.ts
         // documents as load-bearing on the Claude side. Standalone results are
@@ -2718,7 +4086,31 @@ export default function (
         // the state store and the repository as ports. They decide and persist;
         // this dispatcher owns stderr and owns which of their diagnostics count as
         // orchestration processing errors.
-        const store = mgr;
+        // Implementation settlement in this batch may have written declared
+        // engine/src/pi artifacts: restore those attempts' declared, clean-at-spawn
+        // artifacts to their attempt-start bytes for the write boundary's revision
+        // comparison (see implementationBaselineRestoreFor). Unprovable inputs yield
+        // an empty map and the strict full-domain comparison stays.
+        let settlementMgr = mgr;
+        try {
+          const state = mgr.load();
+          const settleTaskIds = [
+            ...new Set([
+              ...(state.executing_tasks ?? []),
+              ...(reservation?.items ?? []).flatMap((item) => item.taskId === null ? [] : [item.taskId]),
+            ]),
+          ];
+          const settleRestore = implementationBaselineRestoreFor(mgr, settleTaskIds);
+          if (settleRestore.size > 0) {
+            settlementMgr = StateManager.fromLocalSession(sessionId, settleRestore) ?? mgr;
+          }
+        } catch (error) {
+          process.stderr.write(
+            `loom(pi): implementation runtime-baseline restore unavailable, strict revision comparison stays: ` +
+            `${error instanceof Error ? error.message : String(error)}\n`,
+          );
+        }
+        const store = settlementMgr;
         // One observation owns both Pi adapters. A Git failure throws and the
         // per-result shell records infrastructure failure; it never substitutes
         // the runtime checkout or cwd for the TaskGraph's project boundary.

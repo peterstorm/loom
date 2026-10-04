@@ -1,3 +1,4 @@
+import { z } from "zod/v4";
 import {
   coverageErrors,
   fail,
@@ -14,6 +15,8 @@ import {
   type VerdictEnvelope,
 } from "./panel-kernel";
 import { compareStrings } from "./ordering";
+import { sha256Hex } from "./review-packet";
+import { type ArtifactDigest } from "./orchestration-contract/identity";
 
 // The architecture panel is consumer 1 of the kernel. Everything below is what
 // is genuinely architecture-specific: the interview digest, lens selection, the
@@ -477,10 +480,15 @@ function requireNonIncreasingScores(rankings: readonly JudgeRanking[]): readonly
   return [];
 }
 
-/** Parse untrusted judge output and return canonical, substitution-safe data. */
+/** Parse untrusted judge output and return canonical, substitution-safe data.
+ *  The expected criterion rides the closed `ArchitectureCriterion` brand — the
+ *  same discipline the refutation sibling applies to `ReviewLens` — so a
+ *  hand-typed criterion string cannot compile at the seam that binds a verdict
+ *  to its criterion. Untrusted checkpoint strings mint through
+ *  `architectureCriterion` (nullable) before the call. */
 export function parseJudgeVerdict(
   rawJson: string,
-  expectedCriterion: string,
+  expectedCriterion: ArchitectureCriterion,
   expectedCandidates: readonly CandidateFilename[],
 ): ParseResult<JudgeVerdict> {
   return parseVerdictEnvelope<JudgeRanking, CandidateFilename>(
@@ -582,6 +590,63 @@ export function serializeJudgeVerdict(verdict: JudgeVerdict): string {
 }
 
 // ---------------------------------------------------------------------------
+// Judge-verdict emission schema — the frozen parameter bytes for the
+// judge-verdict emission tool (one schema, no second contract)
+// ---------------------------------------------------------------------------
+
+/**
+ * The schema-conformance grammar for one judge verdict's arguments, derived
+ * from the current external snake_case contract of `serializeJudgeVerdict` —
+ * the SAME serialization chain the panel writes with, so the judge-verdict
+ * emission tool's parameter schema is the exact frozen bytes of this one schema
+ * (FR-021/SC-006). Shape, score domain, and prose sanitization are expressed
+ * here; the issuance-join constraints (criterion binding to the run's derived
+ * criteria, candidate coverage of the expected set, non-increasing scores) are
+ * NOT expressible in a standalone schema and stay in `parseJudgeVerdict` at the
+ * submission seam — the schema's criterion and candidate fields are therefore
+ * shape-level strings, bound by the seam's authority.
+ *
+ * Consumed by `EMISSION_TOOL_SPECS["judge-verdict"]` — the emission-tool
+ * kernel's one place kind→schema knowledge lives — whose
+ * `frozenPayloadSchemaParameters` is the ONE constructor of the tool's
+ * `parameters` object from these bytes (AD-5, byte-identity by construction).
+ */
+export const judgeVerdictV1Schema = z.strictObject({
+  criterion: z.string().min(1)
+    .describe("The judge criterion this verdict ranks under; ingress binds it to the run's derived criteria."),
+  rankings: z.array(z.strictObject({
+    candidate: z.string().min(1)
+      .describe("The run-scoped candidate filename this ranking judges; ingress binds it to the expected candidate set."),
+    score: z.number().int().min(0).max(10)
+      .describe("An integer from 0 to 10; judges score one candidate per criterion."),
+    fatal_flaw: z.string().min(1).refine((value) => sanitizeProse(value).length > 0).nullable()
+      .describe("The fatal flaw, or null. Non-empty after brace stripping and trimming when present."),
+    strongest_idea: z.string().min(1).refine((value) => sanitizeProse(value).length > 0)
+      .describe("The strongest idea; non-empty after brace stripping and trimming."),
+  }).readonly()).min(1).readonly(),
+}).readonly();
+export type JudgeVerdictArgsV1 = z.infer<typeof judgeVerdictV1Schema>;
+
+/** The frozen zod-derived parameter bytes; the byte-match guard is proven
+ *  through a different serialization chain than this stamper writes with.
+ *  Consumed verbatim by the emission-tool kernel's judge-verdict spec.
+ *
+ *  JSON Schema cannot represent refinements, and `z.toJSONSchema` silently
+ *  drops them: the frozen bytes grammar-constrain SHAPE only (minLength, the
+ *  integer score domain, nullability — the judge schema carries no enum; the
+ *  refutation schema's verdict enum lives in its own comment). The
+ *  prose-sanitization refinement rides the emission edge's parse —
+ *  `verdictArgsParser` re-runs `safeParse` on every generated argument — so
+ *  sanitization is enforced at the emission edge, never by the provider
+ *  grammar. A reader who believed the rendered bytes enforced it would be
+ *  wrong about the one sanitization the schema expresses. */
+export const JUDGE_VERDICT_SCHEMA_V1: string = JSON.stringify(z.toJSONSchema(judgeVerdictV1Schema, {
+  target: "draft-2020-12", io: "output", unrepresentable: "throw", cycles: "throw", reused: "ref",
+}), null, 2);
+
+export const JUDGE_VERDICT_SCHEMA_V1_DIGEST: ArtifactDigest = sha256Hex(JUDGE_VERDICT_SCHEMA_V1) as ArtifactDigest;
+
+// ---------------------------------------------------------------------------
 // Aggregation — the deterministic cross-verdict ranking
 // ---------------------------------------------------------------------------
 
@@ -650,11 +715,14 @@ function compareRankings(a: CandidateRanking, b: CandidateRanking): number {
  *     verdicts sharing a criterion would silently produce a wrong tie-break.
  *
  * Verdicts are matched to criteria BY NAME here, so their argument order is
- * irrelevant and a duplicated or missing criterion is a hard error.
+ * irrelevant and a duplicated or missing criterion is a hard error. The
+ * criteria order rides the closed `ArchitectureCriterion` brand — the order
+ * IS the tie-break order, so a hand-typed free-text list cannot compile at
+ * the seam that decides which architecture ships.
  */
 export function aggregateVerdicts(
   verdicts: readonly JudgeVerdict[],
-  criteriaInOrder: readonly string[],
+  criteriaInOrder: readonly ArchitectureCriterion[],
   expectedCandidates: readonly CandidateFilename[],
 ): ParseResult<readonly CandidateRanking[]> {
   const errors: string[] = [];

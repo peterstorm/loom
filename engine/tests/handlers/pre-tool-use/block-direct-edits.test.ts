@@ -11,7 +11,7 @@
  * decision that never touches the filesystem.
  */
 
-import { describe, it, expect, afterAll, vi } from "vitest";
+import { describe, it, expect, afterAll, afterEach, beforeEach, vi } from "vitest";
 import { mkdirSync, rmSync, writeFileSync, symlinkSync, mkdtempSync, chmodSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,7 +25,7 @@ import blockDirectEdits, {
   artifactWriteRequest,
   canonicalWritePath,
 } from "../../../src/handlers/pre-tool-use/block-direct-edits";
-import { SUBAGENT_DIR, TASK_GRAPH_PATH, pathExistsFailClosed } from "../../../src/config";
+import { SUBAGENT_DIR, pathExistsFailClosed } from "../../../src/config";
 import { parseSessionId } from "../../../src/machine/evidence";
 
 const orchestrating = () => true;
@@ -446,13 +446,20 @@ describe("pathExistsFailClosed — fail-closed existence probe (round-40 C1/C2)"
   });
 });
 
-describe("shouldBlockDirectEdit — default task-graph probe fails CLOSED (round-40 C1)", () => {
-  it("the default probe is the fail-closed probe (unreadable paths stay armed)", () => {
-    // Wiring regression guard: the default must be pathExistsFailClosed, whose
-    // non-ENOENT branch keeps the gate armed (exercised above via ELOOP).
-    const viaDefault = shouldBlockDirectEdit("Edit", sNoActive);
-    const viaFailClosed = shouldBlockDirectEdit("Edit", sNoActive, () => pathExistsFailClosed(TASK_GRAPH_PATH));
-    expect(viaDefault.kind).toBe(viaFailClosed.kind);
+describe("shouldBlockDirectEdit — the arming port is required (lazy-arming doctrine)", () => {
+  it("the probe decides: a proven-absent graph allows, a proven-present graph blocks", () => {
+    // The probe-to-decision mapping the lazy-arming doctrine pins: the SAME
+    // session must ALLOW when the injected probe proves no task graph and
+    // BLOCK when it proves one — the arming decision is the probe's, made at
+    // call time, never the module's (the old round-40 concern — fail-closed
+    // arming — now lives in the probe itself, `pathExistsFailClosed`).
+    expect(shouldBlockDirectEdit("Edit", sNoActive, () => false).kind).toBe("allow");
+    expect(shouldBlockDirectEdit("Edit", sNoActive, () => true).kind).toBe("block");
+    // Type-level pin: omitting the required port is a COMPILE error — no
+    // frozen default stands in for the arming decision. Typed, never executed.
+    // @ts-expect-error the task-graph port is required — no frozen default stands in
+    const omitted: Parameters<typeof shouldBlockDirectEdit> = ["Edit", sNoActive];
+    void omitted;
   });
 });
 
@@ -480,7 +487,13 @@ describe("activeRosterProbe — the adapter's catch branch (round-41 A2)", () =>
     }
   });
 
-  it("an ELOOP roster returns null AND announces the cause on stderr", () => {
+  /**
+   * The shared ELOOP fixture: both announcement cases below prove the SAME
+   * probe through the SAME failure (a self-referencing symlink roster), so the
+   * setup lives once here and each test keeps only the assertion that makes it
+   * distinct.
+   */
+  const eloopAnnouncement = (): { result: ReturnType<typeof activeRosterProbe>; written: string[] } => {
     const dir = mkdtempSync(join(tmpdir(), "loom-roster-eloop-"));
     dirs.push(dir);
     process.env.LOOM_SUBAGENT_DIR = dir;
@@ -494,10 +507,15 @@ describe("activeRosterProbe — the adapter's catch branch (round-41 A2)", () =>
       return true;
     });
     try {
-      expect(activeRosterProbe(session)).toBeNull();
+      return { result: activeRosterProbe(session), written };
     } finally {
       stderr.mockRestore();
     }
+  };
+
+  it("an ELOOP roster returns null AND announces the cause on stderr", () => {
+    const { result, written } = eloopAnnouncement();
+    expect(result).toBeNull();
     expect(written.join("")).toContain("block-direct-edits: cannot check");
     expect(written.join("")).toContain("ELOOP");
   });
@@ -526,25 +544,13 @@ describe("activeRosterProbe — the adapter's catch branch (round-41 A2)", () =>
     expect(written.join("")).toContain("falling through to block");
   });
 
-  it("an unstatable roster path returns null AND announces the cause on stderr", () => {
-    const dir = mkdtempSync(join(tmpdir(), "loom-roster-eloop-"));
-    dirs.push(dir);
-    process.env.LOOM_SUBAGENT_DIR = dir;
-    const session = parseSessionId(`roster-eloop-${process.pid}`)!;
-    const active = join(dir, `${session}.active`);
-    symlinkSync(active, active);
-
-    const written: string[] = [];
-    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
-      written.push(String(chunk));
-      return true;
-    });
-    try {
-      expect(activeRosterProbe(session)).toBeNull();
-    } finally {
-      stderr.mockRestore();
-    }
-    expect(written.join("")).toContain("block-direct-edits: cannot check");
+  it("the announcement names the ELOOP cause family", () => {
+    // Same probe, same failure as the case above — this test keeps only its
+    // distinguishing assertion: the cause WORD must be ELOOP (or the label a
+    // Node upgrade substitutes for it), which pinning the exact current
+    // message alone would not survive.
+    const { result, written } = eloopAnnouncement();
+    expect(result).toBeNull();
     expect(written.join("")).toMatch(/ELOOP|symbolic link/i);
   });
 
@@ -570,5 +576,145 @@ describe("activeRosterProbe — the adapter's catch branch (round-41 A2)", () =>
       stderr.mockRestore();
     }
     expect(written.join("")).toBe("");
+  });
+});
+
+describe("shouldBlockDirectEdit — panel-artifact admission (grammar-constrained-decoding seam gap)", () => {
+  /**
+   * The panel templates promise write capability the guard once did not admit:
+   * the interviewer writes the run's interview digest and the designer writes
+   * one candidate per lens under the run's panel-runs dir ("a spawn with no
+   * scoped Pi write grant fails confusingly at its first edit"). On Claude Code
+   * that capability is the ONE caller-identity admission (`ArtifactWriteRequest`
+   * + `artifactWriteRoots`): the CALLING panel writer may write under the spec
+   * tree, and nothing else on the roster lends it that capability.
+   */
+  const PROJECT = "/proj";
+  const INTERVIEWER = "a339f6fd51d78b179";
+  const JUDGE = "b448e7fe62e89c280";
+  const request = (callerAgentId: string | null, targetPath: string | null) =>
+    ({ callerAgentId, targetPath, projectRoot: PROJECT });
+  const panel = roster(entry(JUDGE, "arch-judge-agent"), entry(INTERVIEWER, "arch-interviewer-agent"));
+  const decide = (callerAgentId: string | null, targetPath: string | null) =>
+    shouldBlockDirectEdit("Write", s, orchestrating, panel, request(callerAgentId, targetPath)).kind;
+
+  it("allows each panel writer role on its run's panel-runs artifact path", () => {
+    expect(decide(INTERVIEWER, "/proj/.claude/specs/2026-09-16-grammar-constrained-decoding/panel-runs/run-1/interview.md")).toBe("allow");
+    const designer = roster(entry("opaque-designer", "arch-designer-agent"));
+    expect(shouldBlockDirectEdit("Write", s, orchestrating, designer,
+      request("opaque-designer", "/proj/.claude/specs/slug/panel-runs/run-1/candidates/candidate-lens.md")).kind).toBe("allow");
+  });
+
+  it("finds the caller's entry anywhere on the roster, not only the first", () => {
+    // The judge is listed first; the interviewer caller is still recognised.
+    expect(decide(INTERVIEWER, "/proj/.claude/specs/slug/panel-runs/run-1/interview.md")).toBe("allow");
+  });
+
+  it("blocks a panel writer targeting outside the spec tree, including a normalizing `..` escape", () => {
+    for (const evil of [
+      "/proj/.claude/plans/plan.md",
+      "/proj/engine/src/core/x.ts",
+      "/outside.md",
+      "/proj/.claude/specs/../state/active_task_graph.json",
+    ]) {
+      expect(decide(INTERVIEWER, evil), evil).toBe("block");
+    }
+  });
+
+  it("blocks a panel writer with NO provable target — fail closed", () => {
+    expect(decide(INTERVIEWER, null)).toBe("block");
+  });
+
+  it("blocks the judge on an in-scope target even beside an active panel writer — read-only role", () => {
+    expect(decide(JUDGE, "/proj/.claude/specs/slug/panel-runs/run-1/candidates/candidate-lens.md")).toBe("block");
+  });
+
+  it("blocks the main agent (no caller) while a panel writer is active — the writer's role is not lent out", () => {
+    expect(decide(null, "/proj/.claude/specs/slug/panel-runs/run-1/interview.md")).toBe("block");
+  });
+
+  it("keeps the impl admission untouched: the request is irrelevant to it", () => {
+    const impl = roster(entry("code-implementer-agent"));
+    expect(shouldBlockDirectEdit("Edit", s, orchestrating, impl).kind).toBe("allow");
+    expect(shouldBlockDirectEdit("Edit", s, orchestrating, impl, request(null, "/etc/passwd")).kind).toBe("allow");
+  });
+
+  it("both admissions share ONE roster probe", () => {
+    const probe = vi.fn<ActiveRosterProbe>(() => [entry(INTERVIEWER, "arch-interviewer-agent")]);
+    shouldBlockDirectEdit("Write", s, orchestrating, probe, request(INTERVIEWER, "/proj/.claude/specs/slug/panel-runs/run-1/interview.md"));
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it("a traversal session id still fails CLOSED before the artifact admission", () => {
+    const probe = vi.fn<ActiveRosterProbe>(() => [entry(INTERVIEWER, "arch-interviewer-agent")]);
+    const result = shouldBlockDirectEdit("Write", "../../etc", orchestrating, probe, request(INTERVIEWER, "/proj/.claude/specs/x.md"));
+    expect(result.kind).toBe("block");
+    expect(probe).not.toHaveBeenCalled();
+  });
+});
+
+describe("block-direct-edits handler — artifact-writer admission (end-to-end wiring)", () => {
+  /**
+   * The wiring proof the array-fixture cases above deliberately do not carry:
+   * the handler reads the real roster, canonicalizes the raw file_path against
+   * the hook's cwd and project dir, and hands core the CALLER's identity — so a
+   * real .claude/specs target admits the calling panel writer, while an
+   * outside-the-project target and a main-agent call stay blocked. The guard is
+   * armed HERE, not by the checkout: `LOOM_STATE_PATH` is re-pointed at a
+   * per-suite temp State File (the lazy resolver the handler probes reads it at
+   * decision time), so the assertions hold on a fresh CI checkout exactly as
+   * they do in a checkout hosting a live orchestration run — a test that
+   * silently depended on the developer's state file passed locally and allowed
+   * every edit on CI.
+   */
+  const statePath = join(tmpdir(), `block-direct-armed-${process.pid}.json`);
+  const originalStatePath = process.env.LOOM_STATE_PATH;
+  const originalProjectDir = process.env.CLAUDE_PROJECT_DIR;
+  const project = realpathSync(mkdtempSync(join(tmpdir(), "loom-handler-artifact-")));
+  const CALLER = "a339f6fd51d78b179";
+
+  beforeEach(() => {
+    writeFileSync(statePath, "{}");
+    process.env.LOOM_STATE_PATH = statePath;
+    process.env.CLAUDE_PROJECT_DIR = project;
+    mkdirSync(SUBAGENT_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(join(SUBAGENT_DIR, `${s}.active`), `${CALLER}\tarch-interviewer-agent\n`);
+  });
+
+  afterEach(() => {
+    if (originalStatePath === undefined) delete process.env.LOOM_STATE_PATH;
+    else process.env.LOOM_STATE_PATH = originalStatePath;
+    if (originalProjectDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+    else process.env.CLAUDE_PROJECT_DIR = originalProjectDir;
+    rmSync(statePath, { force: true });
+  });
+
+  afterAll(() => {
+    rmSync(project, { recursive: true, force: true });
+  });
+
+  const run = (over: Record<string, unknown>) => blockDirectEdits(JSON.stringify({
+    tool_name: "Write",
+    session_id: s,
+    cwd: project,
+    ...over,
+  }), []);
+
+  it("a real .claude/specs target admits the calling panel writer", async () => {
+    const target = join(project, ".claude", "specs", "panel-runs", `run-${process.pid}`, "interview.md");
+    expect((await run({ agent_id: CALLER, tool_input: { file_path: target } })).kind).toBe("allow");
+  });
+
+  it("an outside-the-project target stays blocked for the panel writer", async () => {
+    const result = await run({ agent_id: CALLER, tool_input: { file_path: join(tmpdir(), `outside-${process.pid}.md`) } });
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") expect(result.message).toContain("arch-interviewer-agent may write only its artifacts");
+  });
+
+  it("the main agent (no agent_id) stays blocked on the same in-scope target", async () => {
+    const target = join(project, ".claude", "specs", "panel-runs", `run-${process.pid}`, "interview.md");
+    const result = await run({ tool_input: { file_path: target } });
+    expect(result.kind).toBe("block");
+    if (result.kind === "block") expect(result.message).toContain("BLOCKED: Direct edits not allowed");
   });
 });

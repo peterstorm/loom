@@ -281,6 +281,68 @@ export function piSubagentFailureSignals(result: {
   ].join(", ");
 }
 
+/** Whether any assistant text block is observable in an unknown transcript. */
+const assistantTextPresent = (messages: unknown): boolean => {
+  if (!Array.isArray(messages)) return true;
+  return messages.some((message) => {
+    if (typeof message !== "object" || message === null) return false;
+    const record = message as Record<string, unknown>;
+    if (record.role !== "assistant" || !Array.isArray(record.content)) return false;
+    return record.content.some((block) => {
+      if (typeof block !== "object" || block === null) return false;
+      const text = (block as Record<string, unknown>).text;
+      return typeof text === "string" && text.trim() !== "";
+    });
+  });
+};
+
+/** The last non-empty text lines of an unknown transcript, for a diagnostic tail. */
+const transcriptTail = (messages: unknown): string => {
+  if (!Array.isArray(messages)) return "n/a (unreadable transcript shape)";
+  const texts = messages.flatMap((message) => {
+    if (typeof message !== "object" || message === null) return [];
+    const content = (message as Record<string, unknown>).content;
+    if (!Array.isArray(content)) return [];
+    return content.flatMap((block) => {
+      if (typeof block !== "object" || block === null) return [];
+      const text = (block as Record<string, unknown>).text;
+      return typeof text === "string" && text.trim() !== "" ? [text.trim().slice(0, 160)] : [];
+    });
+  });
+  return texts.length === 0 ? "(empty transcript)" : texts.slice(-3).join(" | ");
+};
+
+/**
+ * The diagnostic for a Pi subagent that exited CLEANLY but emitted no
+ * assistant text — the "silent stop" failure mode observed in in-memory RPC
+ * children: exitCode=0, a non-error stopReason, an empty transcript, and pi
+ * rendering "(no output)". The appliers then parse the empty transcript and
+ * report "not ready" or "no structured evidence" without surfacing the
+ * stopReason that discriminates the mode; this note carries it beside the
+ * transcript tail, so the operator reads the pattern where the symptoms are.
+ *
+ * Failed results return null: they already carry `piSubagentFailureSignals`
+ * through `applyFailedPiResult`, and a second diagnostic would repeat them. A
+ * result WITH assistant text also returns null — silence is positively
+ * identified only when no assistant text block is observable, so this helper
+ * reports only a case it can account for. `messages` is typed `unknown` and
+ * read defensively: pi versions differ on transcript shape, and a shape this
+ * helper cannot read degrades to "not provably silent" instead of a parse
+ * crash at the diagnostic site.
+ */
+export function piSilentStopNote(result: PiSubagentResult): string | null {
+  if (piSubagentResultFailed(result)) return null;
+  if (assistantTextPresent(result.messages)) return null;
+  const stopReason = typeof result.stopReason === "string" ? result.stopReason : "n/a";
+  const errorMessage = typeof result.errorMessage === "string" ? result.errorMessage.trim() : "";
+  return [
+    `${result.agent} exited cleanly but emitted no assistant text (silent stop): ` +
+      `exitCode=${result.exitCode}, stopReason=${stopReason}`,
+    `transcript tail: ${transcriptTail(result.messages)}`,
+    ...(errorMessage === "" ? [] : [`errorMessage=${JSON.stringify(errorMessage)}`]),
+  ].join("; ") + " — the child ended without a final message; its evidence was not applied";
+}
+
 /** The reserved slot this result answers for, when the spawn reserved one. */
 export type PiSpecCheckAttemptAuthority = Readonly<{
   runId: WaveReviewEpochAuthority["runId"];
@@ -538,36 +600,6 @@ async function applyFailedImplementationResult(args: FailedImplementationArgs): 
     : settleFailedExactImplementation(args, binding, authority);
 }
 
-type FailedReviewApplication =
-  | Readonly<{ kind: "missing" }>
-  | Readonly<{ kind: "unchanged" }>
-  | Readonly<{ kind: "authority-rejected"; problem: string }>
-  | Readonly<{ kind: "applied"; task: TaskGraph["tasks"][number] }>;
-
-function reduceFailedReviewResult(
-  state: TaskGraph,
-  taskId: string,
-  agentType: string,
-  reviewAuthority: PiReviewAttemptAuthority | null | undefined,
-  resolution: ReviewResolution,
-): Readonly<{ state: TaskGraph; value: FailedReviewApplication }> {
-  const target = state.tasks.find((task) => task.id === taskId);
-  if (target === undefined) return { state, value: { kind: "missing" } };
-  const authorityProblem = piReviewAuthorityProblem(target, agentType, reviewAuthority);
-  if (authorityProblem !== null) {
-    return { state, value: { kind: "authority-rejected", problem: authorityProblem } };
-  }
-  const appliedTask = applyReviewResolution(target, resolution);
-  if (appliedTask === target) return { state, value: { kind: "unchanged" } };
-  return {
-    state: {
-      ...state,
-      tasks: state.tasks.map((task) => task.id === taskId ? appliedTask : task),
-    },
-    value: { kind: "applied", task: appliedTask },
-  };
-}
-
 async function applyFailedReviewResult(args: Readonly<{
   store: TaskGraphStore;
   agentType: string;
@@ -587,25 +619,30 @@ async function applyFailedReviewResult(args: Readonly<{
     return processingFailure(message);
   }
   const failedTaskId = reservedTaskId;
-  const resolution = { kind: "evidence-failed" as const, agent: args.agentType, message: args.failure };
-  const application = await args.store.updateAndReturn((state) =>
-    reduceFailedReviewResult(
-      state,
-      failedTaskId,
-      args.agentType,
-      args.reservedSlot?.reviewAuthority,
-      resolution,
-    ));
+  const application = await args.store.updateAndReturn<LockedReviewEvidenceApplication>((state) =>
+    reduceLockedReviewEvidence(state, {
+      agentType: args.agentType,
+      taskId: failedTaskId,
+      reviewAuthority: args.reservedSlot?.reviewAuthority,
+      resolutionFor: () => ({
+        kind: "evidence-failed" as const,
+        agent: args.agentType,
+        message: args.failure,
+      }),
+    }));
   switch (application.kind) {
     case "applied":
-      return outcome([reviewResolutionLog(failedTaskId, resolution, application.task, true)]);
+      // `changed: false` is the shared reducer's folded "unchanged" arm: the
+      // task already rejected this failure evidence, so storing nothing is a
+      // processing failure, not a clean log line.
+      if (!application.changed) {
+        const message = `loom(pi): ${args.failure}; review task ${failedTaskId} rejected duplicate/stale failure evidence ` +
+          "under the state lock — review evidence NOT stored";
+        return processingFailure(message);
+      }
+      return outcome([reviewResolutionLog(failedTaskId, application.resolution, application.task, true)]);
     case "missing": {
       const message = `loom(pi): ${args.failure}; review task ${failedTaskId} disappeared ` +
-        "under the state lock — review evidence NOT stored";
-      return processingFailure(message);
-    }
-    case "unchanged": {
-      const message = `loom(pi): ${args.failure}; review task ${failedTaskId} rejected duplicate/stale failure evidence ` +
         "under the state lock — review evidence NOT stored";
       return processingFailure(message);
     }
@@ -704,6 +741,29 @@ export async function applyFailedPiResult(args: FailedPiResultArgs): Promise<PiR
 // Phase agents
 // ---------------------------------------------------------------------------
 
+/**
+ * The tool-call argument keys that may name a write target, in probe order.
+ * Both harnesses spell the same target three ways; ONE ordered vocabulary here
+ * keeps the transcript scanner (`writtenPathsOf`) and the extension's write
+ * guard (`piWriteTargetPaths`/`writeTarget`) from drifting apart.
+ */
+export const WRITE_TARGET_KEYS: readonly string[] = ["path", "file_path", "filePath"];
+
+/**
+ * The first NON-NULLISH value among `WRITE_TARGET_KEYS` as a non-empty string,
+ * or `null` when no key proves one. The `??=`-assignment defers only nullish
+ * values (`undefined`/`null`) to a later key; the first non-nullish value WINS
+ * the probe, and a winner that is not a non-empty string fails the string test
+ * — it does not defer to a later key either.
+ */
+export function writeTargetPathOf(args: unknown): string | null {
+  if (typeof args !== "object" || args === null) return null;
+  const record = args as Record<string, unknown>;
+  let value: unknown;
+  for (const key of WRITE_TARGET_KEYS) value ??= record[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
 /** Every path a transcript's `write`/`Write` tool calls targeted, in order. */
 export function writtenPathsOf(
   messages: readonly { role: string; content?: readonly { type: string; name?: string; arguments?: unknown }[] }[],
@@ -713,11 +773,8 @@ export function writtenPathsOf(
     if (message.role !== "assistant") continue;
     for (const block of message.content ?? []) {
       if (block.type !== "toolCall" || (block.name !== "write" && block.name !== "Write")) continue;
-      const args = block.arguments as Record<string, unknown> | undefined;
-      const path = (args?.path as string | undefined) ??
-        (args?.file_path as string | undefined) ??
-        (args?.filePath as string | undefined);
-      if (typeof path === "string" && path.length > 0) paths.push(path);
+      const path = writeTargetPathOf(block.arguments);
+      if (path !== null) paths.push(path);
     }
   }
   return Object.freeze(paths);
@@ -1594,6 +1651,47 @@ type LockedReviewEvidenceApplication =
       changed: boolean;
     }>;
 
+/**
+ * The pure locked-review application shared by EVERY reviewer evidence path —
+ * parsed findings, malformed transcripts, and failed results alike. Authority
+ * validation and resolution derivation stay inside one reducer so the callers
+ * cannot drift: it locks, derives the resolution under the lock, and applies;
+ * `changed: false` folds the failed path's former "unchanged" arm into the same
+ * "applied" shape for its caller to interpret.
+ */
+function reduceLockedReviewEvidence(
+  state: TaskGraph,
+  args: Readonly<{
+    agentType: string;
+    taskId: string;
+    reviewAuthority: PiReviewAttemptAuthority | null | undefined;
+    resolutionFor(task: LoomTask): ReviewResolution;
+  }>,
+): Readonly<{ state: TaskGraph; value: LockedReviewEvidenceApplication }> {
+  const task = state.tasks.find((candidate) => candidate.id === args.taskId);
+  if (task === undefined) return { state, value: { kind: "missing" } };
+  const authorityProblem = piReviewAuthorityProblem(task, args.agentType, args.reviewAuthority);
+  if (authorityProblem !== null) {
+    return { state, value: { kind: "authority-rejected", problem: authorityProblem } };
+  }
+  const resolution = args.resolutionFor(task);
+  const appliedTask = applyReviewResolution(task, resolution);
+  return {
+    state: appliedTask === task
+      ? state
+      : {
+          ...state,
+          tasks: state.tasks.map((candidate) => candidate.id === args.taskId ? appliedTask : candidate),
+        },
+    value: {
+      kind: "applied",
+      resolution,
+      task: appliedTask,
+      changed: appliedTask !== task,
+    },
+  };
+}
+
 /** Apply either parsed or malformed reviewer evidence under one locked protocol. */
 async function applyLockedReviewEvidence(args: Readonly<{
   store: TaskGraphStore;
@@ -1602,30 +1700,8 @@ async function applyLockedReviewEvidence(args: Readonly<{
   reviewAuthority: PiReviewAttemptAuthority | null | undefined;
   resolutionFor(task: LoomTask): ReviewResolution;
 }>): Promise<PiResultOutcome> {
-  const application = await args.store.updateAndReturn<LockedReviewEvidenceApplication>((state) => {
-    const task = state.tasks.find((candidate) => candidate.id === args.taskId);
-    if (task === undefined) return { state, value: { kind: "missing" } };
-    const authorityProblem = piReviewAuthorityProblem(task, args.agentType, args.reviewAuthority);
-    if (authorityProblem !== null) {
-      return { state, value: { kind: "authority-rejected", problem: authorityProblem } };
-    }
-    const resolution = args.resolutionFor(task);
-    const appliedTask = applyReviewResolution(task, resolution);
-    return {
-      state: appliedTask === task
-        ? state
-        : {
-            ...state,
-            tasks: state.tasks.map((candidate) => candidate.id === args.taskId ? appliedTask : candidate),
-          },
-      value: {
-        kind: "applied",
-        resolution,
-        task: appliedTask,
-        changed: appliedTask !== task,
-      },
-    };
-  });
+  const application = await args.store.updateAndReturn<LockedReviewEvidenceApplication>((state) =>
+    reduceLockedReviewEvidence(state, args));
   if (application.kind === "missing") {
     const message = `WARNING: ${args.agentType} review task ${args.taskId} disappeared before evidence application — findings NOT stored`;
     return processingFailure(message);

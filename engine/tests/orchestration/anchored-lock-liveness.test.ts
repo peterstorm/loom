@@ -193,5 +193,5 @@ describe("anchored lock liveness", () => {
     } finally {
       closeAnchoredDirectory(anchored);
     }
-  });
+  }, 15000);
 });

@@ -20,11 +20,31 @@
  * normalisation. Byte equality across harnesses is a stated acceptance
  * criterion, and any normalisation applied on one side and not the other would
  * break it while leaving both sides looking correct.
+ *
+ * The ADDITIVE EMISSION sections (AD-8, FR-002/FR-006/FR-007/FR-013/FR-014)
+ * extend this shared vocabulary with the emission side of the same seam. This
+ * module owns the emission observation/rejection vocabulary: how a harness
+ * adapter reports assistant emission-tool calls (frames — complete, or
+ * incomplete/failed with a reason), the ONE fold from frames to the closed
+ * emission observation (absent / one complete call / multiple distinct calls /
+ * unusable with a reason), and the observation-refusal codes. Adapters observe
+ * ASSISTANT TOOL CALLS, never JSON pasted into user or tool-result text: a
+ * final-message payload is a `FinalPayloadCandidate`, never an emission
+ * observation — the two vocabularies cannot be confused at the type level
+ * because they never share a constructor. Alongside the observation vocabulary,
+ * the module carries the two tool-surface contracts the real Pi registration
+ * shell binds to: the constrained-sampling request every emission tool
+ * registers with (`strict: "prefer"`, FR-002/INV-1) and the execute-shell
+ * decision (minimal terminating acknowledgment, or the typed refusal the shell
+ * throws — FR-013). The selection OVER the observation is `emission-ingestion`'s
+ * contract; this module mints only what the fold and the tool surface need.
  */
 
 import { createHash } from "node:crypto";
+import { admitEmissionArguments, type EmissionParseFailureCode, type EmissionSchemaVersion, type EmissionToolSpec } from "./emission-tool";
 import {
   canonicalRecord,
+  canonicalStructuralEquals,
   parseArtifactByteLength,
   parseRequestId,
   parseSlotId,
@@ -35,6 +55,7 @@ import {
   type RequestId,
   type SemanticAttempt,
 } from "./orchestration-contract";
+import type { PayloadProducerKind } from "./model-profiles";
 
 export const CAPTURE_SCHEMA_VERSION = 1;
 
@@ -357,4 +378,287 @@ export function capturesAgree(left: CaptureReceipt, right: CaptureReceipt): bool
     left.attempt === right.attempt &&
     left.byteLength === right.byteLength &&
     left.digest === right.digest;
+}
+
+// ---------------------------------------------------------------------------
+// Additive emission observation/rejection vocabulary (AD-8, FR-007/FR-014)
+// ---------------------------------------------------------------------------
+
+/**
+ * One complete, request-bound emission-tool call as the harness adapters
+ * observe it: the issued request attempt the frame was observed under (the
+ * adapter's attribution — verified, never trusted, by the selection's binding
+ * check in `emission-ingestion`), the transport's tool-call identity, the
+ * producer kind and schema version the call's tool carries, and the arguments
+ * as observed. Untrusted transport data: the selection compares `requestId`
+ * against the issued binding rather than re-parsing it, so a malformed id can
+ * only fail the match (wrong-request refusal), never impersonate the issued
+ * request.
+ */
+export type EmissionToolCall = Readonly<{
+  requestId: string;
+  toolCallId: string;
+  kind: PayloadProducerKind;
+  version: EmissionSchemaVersion;
+  arguments: unknown;
+}>;
+
+/**
+ * One observed emission-tool transport frame — complete (a full call with
+ * arguments) or incomplete/failed (the harness saw an emission call but could
+ * not observe it completely). The incomplete arm exists so an incomplete or
+ * failed observation is REPRESENTABLE as itself: the fold refuses it with a
+ * reason and never reclassifies it as absence (AD-8). `toolCallId` is null
+ * when the adapter could not recover which call failed; the refusal is the
+ * same either way.
+ */
+export type EmissionCallFrame =
+  | Readonly<{ kind: "complete"; call: EmissionToolCall }>
+  | Readonly<{ kind: "incomplete"; toolCallId: string | null; reason: string }>;
+
+/**
+ * The closed emission observation (AD-8): absent, one complete call, multiple
+ * distinct calls, or unusable with a reason. The vocabulary is closed — a
+ * consumer switching on `kind` over these four arms is exhaustive.
+ */
+export type EmissionObservation =
+  | Readonly<{ kind: "absent" }>
+  | Readonly<{ kind: "single-call"; call: EmissionToolCall }>
+  | Readonly<{ kind: "multiple-calls"; calls: readonly EmissionToolCall[] }>
+  | Readonly<{ kind: "unusable"; reason: string }>;
+
+/**
+ * The contract-field projection of one observed call, shared by the fold and
+ * by the selection's accepted-call provenance. Adapter provenance beyond the
+ * contract fields is projected away, so the observation — and therefore the
+ * selection — is a function of the contract fields only and never of how much
+ * provenance an adapter attached.
+ */
+export function canonicalCall(call: EmissionToolCall): EmissionToolCall {
+  return canonicalRecord({
+    requestId: call.requestId,
+    toolCallId: call.toolCallId,
+    kind: Object.freeze({ kind: call.kind.kind }),
+    version: call.version,
+    arguments: call.arguments,
+  });
+}
+
+/**
+ * The first contract field on which two contradictory frames sharing one
+ * tool-call identity differ, in the FR-014 contract-field order (request id,
+ * producer kind, schema version, arguments). The retained refusal names WHAT
+ * differed — the model's correction surface and the operator's journal read
+ * the reason, never just that a contradiction exists. The tool-call identity
+ * itself cannot be the differing field: the fold groups frames by it.
+ */
+const firstDifferingField = (seen: EmissionToolCall, call: EmissionToolCall): string => {
+  if (seen.requestId !== call.requestId) return "requestId";
+  if (!canonicalStructuralEquals(seen.kind, call.kind)) return "kind";
+  if (seen.version !== call.version) return "version";
+  return "arguments";
+};
+
+/**
+ * The ONE fold from observed transport frames to the closed emission
+ * observation — the observation decision both selection functions in
+ * `emission-ingestion` share, not a caller-maintained policy. The fold is
+ * binding-blind: it classifies by tool-call identity alone, so the same fold
+ * serves every issued binding and every path (misbinding is the selection's
+ * check against the issued binding).
+ *
+ * - Any incomplete/failed frame refuses the attempt with its reason: the
+ *   observation is unusable, never reclassified as absence (AD-8), and the
+ *   first incomplete frame in observation order names the refusal.
+ * - Frames sharing one tool-call identity are the same call replayed:
+ *   idempotent when every frame carries the identical record (request id,
+ *   kind, version and structurally-equal arguments — FR-007's "same observed
+ *   call"), and contradictory — unusable — when any frame differs (FR-007's
+ *   "contradictory records sharing call identity MUST refuse rather than
+ *   deduplicate silently"), with the refusal naming the first differing
+ *   contract field in FR-014 order (request id, producer kind, schema
+ *   version, arguments). Replayed frames with the same identity and bytes
+ *   therefore add no consumption and no publication.
+ * - The DISTINCT identities decide the count, in first-observed order: zero →
+ *   absent, one → single-call, ≥2 → multiple-calls (which is ambiguity by the
+ *   time the selection sees it).
+ * - An empty tool-call identity cannot be bound or replay-deduplicated, so a
+ *   complete frame carrying one makes the observation unusable.
+ */
+/**
+ * The frame fold's first phase: replay-deduplicate complete frames by
+ * tool-call identity (exact replays idempotent, contradictions refused with
+ * the FR-014 differing field), refuse incomplete frames and empty identities
+ * outright. The returned union keeps the refusal as data so the observation
+ * selection below stays a pure projection.
+ */
+const foldFramesToCalls = (
+  frames: readonly EmissionCallFrame[],
+): { kind: "observed"; calls: readonly EmissionToolCall[] } | { kind: "refused"; reason: string } => {
+  // One structure carries first-observed order: a Map's insertion order IS
+  // first-observed order, so the distinct-call set needs no parallel array to
+  // keep in agreement with it.
+  const callsByIdentity = new Map<string, EmissionToolCall>();
+  for (const frame of frames) {
+    if (frame.kind === "incomplete") {
+      return { kind: "refused", reason: frame.toolCallId === null
+        ? `an emission tool call was observed incomplete: ${frame.reason}`
+        : `emission tool call ${frame.toolCallId} was observed incomplete: ${frame.reason}` };
+    }
+    const call = canonicalCall(frame.call);
+    if (call.toolCallId.length === 0) {
+      // The reason names the observed producer kind: the operator journal reads
+      // this diagnostic to find WHICH family's calls cannot be bound, without
+      // re-opening the transcript.
+      return { kind: "refused", reason: `an observed ${call.kind.kind} emission tool call carries an empty tool-call identity` };
+    }
+    const seen = callsByIdentity.get(call.toolCallId);
+    if (seen === undefined) {
+      callsByIdentity.set(call.toolCallId, call);
+    } else if (!canonicalStructuralEquals(seen, call)) {
+      return { kind: "refused", reason:
+        `contradictory duplicate transport frames for emission tool call ${call.toolCallId} ` +
+        `(differing: ${firstDifferingField(seen, call)})` };
+    }
+    // else: an exact replay of one already-observed call — idempotent (FR-007).
+  }
+  return { kind: "observed", calls: Object.freeze([...callsByIdentity.values()]) };
+};
+
+export function observeEmissionCalls(frames: readonly EmissionCallFrame[]): EmissionObservation {
+  const folded = foldFramesToCalls(frames);
+  if (folded.kind === "refused") {
+    return canonicalRecord({ kind: "unusable" as const, reason: folded.reason });
+  }
+  const observed = folded.calls;
+  if (observed.length === 0) return canonicalRecord({ kind: "absent" as const });
+  const first = observed[0];
+  if (first === undefined) {
+    // Unreachable — `observed.length > 0` above proves the element exists; the
+    // explicit guard carries the invariant instead of a non-null assertion.
+    throw new Error("emission observation invariant failed: a non-empty observation lost its first call");
+  }
+  if (observed.length === 1) {
+    return canonicalRecord({ kind: "single-call" as const, call: first });
+  }
+  return canonicalRecord({
+    kind: "multiple-calls" as const,
+    calls: observed,
+  });
+}
+
+/**
+ * The closed refusal vocabulary for observations that are not a semantic
+ * payload decision (AD-9): an unusable observation (incomplete/failed or
+ * contradictory frames), or a call bound to the wrong request attempt,
+ * producer kind, or schema version. Never absence, never a fallback — the
+ * boundary classifies these as evidence/infrastructure, never as a consumed
+ * semantic attempt.
+ */
+export type EmissionObservationRefusalCode =
+  | "unusable-observation"
+  | "wrong-request"
+  | "unexpected-kind"
+  | "unexpected-version";
+
+export type EmissionObservationRefusal = Readonly<{
+  code: EmissionObservationRefusalCode;
+  message: string;
+}>;
+
+// ---------------------------------------------------------------------------
+// Additive emission tool-surface contracts (FR-002/INV-1, FR-013)
+// ---------------------------------------------------------------------------
+
+/**
+ * The ONE constrained-sampling request every emission tool registers with
+ * (FR-002/INV-1): JSON-schema constrained sampling requested with strict
+ * PREFERRED, never required. The harness's capability resolver
+ * (pi-ai's `resolveJsonSchemaStrictSampling`) resolves a preferred request on
+ * a strict-incapable ROUTE to "no strict flag", and (pi-ai ≥0.84) it likewise
+ * declines — never throws — a preferred request whose parameters the schema
+ * strictifier cannot strictify (the frozen bytes carry $defs/$ref and v2/v3's
+ * root oneOf, which the strictifier rejects); the wire request still goes out
+ * and the engine stays validity/count authoritative (AD-2's
+ * unconstrained-emission class). A required request is the INV-1 failure mode:
+ * the resolver THROWS on every decline path, failing the child's request
+ * before the extraction fallback could ever engage. The checkable INV-1 rule
+ * file is `.claude/linter/rules/inv-1-no-strict-require-constraint.json`; its
+ * regex is a spelling guard, and the behavioral acceptance crosses the REAL
+ * resolver (engine/tests/pi/emission-tool.test.ts). The resolver's
+ * strict-flag truth table is qualification evidence, not an engine contract:
+ * the installed 0.83.0 runtime carried `strict: true` for all four frozen
+ * schemas (the committed qualification recordings), and a resolver behavior
+ * change is a feasibility §2.8 requalification trigger.
+ *
+ * The shape is structurally pi-ai's `ConstrainedSamplingConfig`; the pi
+ * registration surface claims it as one — the same confined-cast pattern as
+ * `frozenPayloadSchemaParameters`' TSchema claim — because the engine core
+ * imports no pi package. The frozen registry's tool specs carry no separate
+ * request: ONE request vocabulary for every emission tool, minted here and
+ * nowhere else.
+ */
+export type EmissionConstrainedSamplingRequest = Readonly<{
+  type: "json_schema";
+  strict: "prefer";
+}>;
+
+export const EMISSION_CONSTRAINED_SAMPLING_REQUEST: EmissionConstrainedSamplingRequest =
+  Object.freeze({ type: "json_schema", strict: "prefer" });
+
+/**
+ * The minimal terminating tool result (FR-013): one bounded text line naming
+ * the outcome, empty details, and the harness's terminating flag. It NEVER
+ * echoes the payload (AD-3: no large payload echo in acknowledgment content),
+ * and `terminate: true` suppresses the follow-up model turn only when EVERY
+ * finalized result in the batch is terminating (pi 0.83.0 documented
+ * semantics) — the shell returns it verbatim, never wraps it.
+ */
+export type EmissionToolAcknowledgment = Readonly<{
+  content: readonly [Readonly<{ type: "text"; text: string }>];
+  details: Readonly<Record<string, never>>;
+  terminate: true;
+}>;
+
+/**
+ * The execute shell's ONE decision (FR-013): the arguments are admitted
+ * through the frozen registry's parser (the parse IS the gate — the same
+ * admission the engine's selection later re-runs), and the shell either
+ * returns the minimal terminating acknowledgment or carries the refusal the
+ * shell THROWS at the harness boundary. A refusal must never become a
+ * successful tool result: returning an error-labeled object does not set the
+ * harness's error flag, so the throw IS the error signal (AD-3). The outcome
+ * is closed — a consumer switching on `kind` is exhaustive — and the refused
+ * arm carries the admission's own code and message verbatim, so the model's
+ * correction surface (and the engine's retained diagnostics, FR-006) is the
+ * parse's vocabulary, never a shell-invented string.
+ */
+export type EmissionExecutionOutcome =
+  | Readonly<{ kind: "acknowledged"; acknowledgment: EmissionToolAcknowledgment }>
+  | Readonly<{ kind: "refused"; code: EmissionParseFailureCode; message: string }>;
+
+/**
+ * The production execute shell's decision, minted once: admit the untrusted
+ * arguments through the issued registry cell and acknowledge or refuse. The
+ * real Pi tool surface (T5's registration) calls exactly this, so the
+ * acceptance suite drives the same policy seam as production — never a test
+ * twin.
+ */
+export function acknowledgeEmissionExecution(
+  spec: EmissionToolSpec,
+  version: EmissionSchemaVersion,
+  args: unknown,
+): EmissionExecutionOutcome {
+  const admitted = admitEmissionArguments(spec, version, args);
+  if (admitted.kind === "refused") {
+    return canonicalRecord({ kind: "refused" as const, code: admitted.code, message: admitted.message });
+  }
+  return canonicalRecord({
+    kind: "acknowledged" as const,
+    acknowledgment: canonicalRecord({
+      content: Object.freeze([Object.freeze({ type: "text" as const, text: "payload acknowledged" })]),
+      details: Object.freeze({}),
+      terminate: true as const,
+    }),
+  });
 }

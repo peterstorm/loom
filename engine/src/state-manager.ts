@@ -26,9 +26,9 @@ import {
 } from "./machine";
 import type { ActiveWaveGateRegistration, CompletedWaveGateRegistration, TaskGraph } from "./types";
 import type { DomainResult } from "./core/orchestration-contract";
-import type { WaveCompletionCommit, WaveCompletionCommitError } from "./core/wave-gate-machine";
-import { assertPiCliMutationCompatible, captureLoomRuntimeIdentity } from "./runtime-compatibility";
-import { waveGateAuthorityDigest } from "./core/wave-review-authority";
+import { resetWaveGateReviewAuthority, type WaveCompletionCommit, type WaveCompletionCommitError } from "./core/wave-gate-machine";
+import { assertPiCliMutationCompatible, captureLoomRuntimeIdentityRestoring, type RuntimeBaselineRestore } from "./runtime-compatibility";
+import { admitWaveGateRegistration } from "./core/wave-gate-registration";
 import {
   anchoredDirectoryHasIdentity,
   anchoredDirectoryIdentity,
@@ -308,13 +308,20 @@ export function findRegisteredWaveGateCompletionReplay(
 export class StateManager {
   private readonly path: string;
   private readonly authority: TaskGraphFileAuthority;
+  /** Declared artifacts of the in-flight implementation attempts, hashed at
+   *  their attempt-start bytes by the write boundary's revision comparison.
+   *  Empty = the strict full-domain comparison (every non-implementation
+   *  caller). See captureLoomRuntimeIdentityRestoring. */
+  private readonly runtimeBaselineRestore: RuntimeBaselineRestore;
 
   constructor(
     path: string,
     authority: TaskGraphFileAuthority = captureTaskGraphFileAuthority(path, false),
+    runtimeBaselineRestore: RuntimeBaselineRestore = new Map(),
   ) {
     this.path = authority.path;
     this.authority = authority;
+    this.runtimeBaselineRestore = runtimeBaselineRestore;
   }
 
   static fromSession(sessionId?: string): StateManager | null {
@@ -323,9 +330,12 @@ export class StateManager {
   }
 
   /** Pi parent adapter seam; see resolveLocalSessionTaskGraphAuthority. */
-  static fromLocalSession(sessionId: string): StateManager | null {
+  static fromLocalSession(
+    sessionId: string,
+    runtimeBaselineRestore: RuntimeBaselineRestore = new Map(),
+  ): StateManager | null {
     const authority = resolveLocalSessionTaskGraphAuthority(sessionId);
-    return authority === null ? null : new StateManager(authority.path, authority);
+    return authority === null ? null : new StateManager(authority.path, authority, runtimeBaselineRestore);
   }
 
   /**
@@ -410,63 +420,21 @@ export class StateManager {
     const parsed = parseActiveWaveGateRegistration(rawRegistration);
     if (!parsed.ok) throw new Error(`Invalid active Wave Gate registration: ${parsed.error}`);
     const registration = parsed.value;
+    if (registration.revision !== 0 || registration.terminalOutcome !== null) {
+      throw new Error("A fresh active Wave Gate registration must start at revision 0 without a terminal outcome");
+    }
     return this.updateAndReturn((state) => {
-      if (state.current_phase !== "execute") {
-        throw new Error(`Cannot register Wave Gate run outside execute Phase (current: ${state.current_phase})`);
-      }
-      if (state.current_wave !== registration.wave) {
-        throw new Error(`Cannot register Wave Gate wave ${registration.wave}; protected current_wave is ${state.current_wave ?? "missing"}`);
-      }
-      if (registration.revision !== 0 || registration.terminalOutcome !== null) {
-        throw new Error("A fresh active Wave Gate registration must start at revision 0 without a terminal outcome");
-      }
-      const completed = state.wave_gate_history ?? [];
-      if (completed.some((entry) => entry.runId === registration.runId)) {
-        throw new Error(`Wave Gate run ${registration.runId} is already terminal`);
-      }
-      if (completed.some((entry) => entry.wave >= registration.wave)) {
-        throw new Error(`Wave ${registration.wave} is already completed or older than terminal Wave history`);
-      }
-      const existing = state.active_wave_gate;
-      if (existing !== undefined) {
-        const exactReplay = existing.runId === registration.runId &&
-          existing.wave === registration.wave &&
-          existing.authorityDigest === registration.authorityDigest && existing.runsRoot === registration.runsRoot &&
-          existing.revision === registration.revision && existing.terminalOutcome === null;
-        if (exactReplay) return { state, value: existing };
-        if (existing.terminalOutcome === null) {
-          throw new Error(`Active Wave Gate run ${existing.runId} already owns wave ${existing.wave}`);
-        }
-        if (existing.terminalOutcome.kind !== "terminal-abandoned") {
-          throw new Error(
-            `Legacy terminal Wave Gate run ${existing.runId} must be explicitly migrated to terminal history before registering another run`,
-          );
-        }
-        if (existing.terminalOutcome.supersededBy !== null &&
-            existing.terminalOutcome.supersededBy !== registration.runId) {
-          throw new Error(
-            `Abandoned Wave Gate run ${existing.runId} authorizes successor ${existing.terminalOutcome.supersededBy}, ` +
-            `not ${registration.runId}`,
-          );
-        }
-        // An operator-abandoned tombstone is not authority for the Wave: the
-        // fresh registration supersedes it below. Roster and digest are still
-        // re-proven against the locked state, and the tombstone is NOT
-        // archived into wave_gate_history — that history poisons later starts
-        // for the same Wave, and an abandoned run was never completed.
-      }
-      const lockedTaskIds = state.tasks
-        .filter((task) => task.wave === registration.wave)
-        .map(({ id }) => id);
-      const rosterMatches = lockedTaskIds.length === publishedTaskIds.length &&
-        lockedTaskIds.every((taskId, index) => taskId === publishedTaskIds[index]);
-      const lockedDigest = waveGateAuthorityDigest(registration.wave, lockedTaskIds, state);
-      if (!rosterMatches || lockedDigest !== registration.authorityDigest) {
-        throw new Error(
-          "Protected Wave authority changed after Run Directory publication; active Wave Gate was not installed",
-        );
-      }
-      return { state: { ...state, active_wave_gate: registration }, value: registration };
+      const admission = admitWaveGateRegistration(state, registration, publishedTaskIds);
+      if (admission.kind === "refused") throw new Error(admission.message);
+      if (admission.kind === "replay") return { state, value: admission.existing };
+      // An abandoned Run is not completion authority. Its review epoch and
+      // packet-bound evidence retire with the successor install, while
+      // accepted Findings and implementation proof survive. The tombstone is
+      // not archived as a completed Wave.
+      const successorBase = admission.supersedesAbandoned
+        ? resetWaveGateReviewAuthority(state, publishedTaskIds)
+        : state;
+      return { state: { ...successorBase, active_wave_gate: registration }, value: registration };
     });
   }
 
@@ -623,7 +591,15 @@ export class StateManager {
     // This is the final shared write boundary, including replacement/repair
     // paths. Check before lock creation so a skewed fresh CLI leaves the
     // protected graph byte-for-byte and metadata-for-metadata untouched.
-    assertPiCliMutationCompatible(process.env, captureLoomRuntimeIdentity(PACKAGE_ROOT));
+    // Implementation settlement restores the in-flight attempts' declared
+    // artifacts to their attempt-start bytes for this comparison: the attempt
+    // writing those files is the product, not runtime drift. Every path outside
+    // the restore map still hashes live, so any other drift refuses exactly as
+    // before. An empty restore map is the strict full-domain capture.
+    assertPiCliMutationCompatible(
+      process.env,
+      captureLoomRuntimeIdentityRestoring(PACKAGE_ROOT, this.runtimeBaselineRestore),
+    );
     const directory = this.openAuthorityDirectory();
     return withStateDirectoryAsync(directory, `TaskGraph atomic write of ${this.path}`, () =>
       withAnchoredDirectoryHandleLock(directory, ".task_graph", () => {

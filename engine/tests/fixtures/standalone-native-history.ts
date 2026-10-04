@@ -1,9 +1,14 @@
 import type { ContextPacket } from "../../src/core/context-packets";
 import type { RunDirHandle } from "../../src/orchestration/run-directory-handle";
+import type { ReviewerIssueRoute } from "../../src/core/model-profiles";
 import { value } from "./standalone-successor-remediation";
 
-/** Genuine owned legacy issuance, never a relocated history pack or downgraded current Run. */
-export async function startNativeLegacyReview(handle: RunDirHandle) {
+/** Genuine owned legacy issuance, never a relocated history pack or downgraded current Run.
+ *  `issueRoute` elects the roster's reviewer profile through the catalog's one
+ *  issue-route election (`issuedReviewerProfile`), so the SAME fixture mints
+ *  the archived v1 contract under either parent route without re-deriving
+ *  bindings from ambient environment. */
+export async function startNativeLegacyReview(handle: RunDirHandle, issueRoute: ReviewerIssueRoute = "catalog") {
   const core = await import("../../src/core/standalone-review");
   const packets = await import("../../src/core/context-packets");
   const models = await import("../../src/core/model-profiles");
@@ -16,14 +21,14 @@ export async function startNativeLegacyReview(handle: RunDirHandle) {
   const contexts: ContextPacket[] = [];
   const roster = core.STANDALONE_REVIEWER_ROLES.map(role => {
     const policy = value(models.resolveAgentPolicy(role));
-    const profile = value(models.resolveModelProfile(policy.profile));
+    const profile = value(models.issuedReviewerProfile(role, issueRoute));
     return { slotId: `slot:${role}`, attempts: ([1, 2] as const).map(attempt => {
       const identity = { runId: handle.runId, requestId: helpers.standaloneRequestId(handle.runId, role, attempt),
         role, attempt, requiredSkill: policy.requiredSkill };
       const legacy = history.legacyStandaloneContext(identity, scope);
       const packet = value(packets.buildContextPacket({ ...legacy, fixedContext: [...legacy.fixedContext, source] }));
       contexts.push(packet);
-      return { ...identity, slotId: `slot:${role}`, program: "standalone-review", modelProfile: policy.profile,
+      return { ...identity, slotId: `slot:${role}`, program: "standalone-review", modelProfile: profile.id,
         harnessBinding: { pi: models.lowerModelProfile(profile, "pi"), claude: models.lowerModelProfile(profile, "claude-code") },
         contextDigest: packet.digest, outputSlot: `transcripts/slot:${role}/attempt-${attempt}.raw` };
     }) };
@@ -35,7 +40,7 @@ export async function startNativeLegacyReview(handle: RunDirHandle) {
     scopeSafety: scope.map(path => ({ path, status: "safe" })), roster }));
   const registration = history.standaloneFixtureRegistration(prepared.authority);
   value(await handle.registerProgram(registration));
-  const batch = await helpers.publishInitialBatch(handle, prepared.initialRequests.map(authority => ({ authority,
+  const batch = await helpers.publishLegacyInitialBatch(handle, prepared.initialRequests.map(authority => ({ authority,
     context: { digest: authority.contextDigest, slot: `contexts/${authority.contextDigest}.json` } })), contexts, "standalone-review");
   if (!batch.ok) throw Error(batch.message);
   const awaiting = value(machine.reduceStandaloneReviewMachine(machine.startStandaloneReviewMachine(prepared.authority), { kind: "review-batch-published", runId: handle.runId }));

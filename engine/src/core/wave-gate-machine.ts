@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { match } from "ts-pattern";
+import { match, P } from "ts-pattern";
 import { reviewedWorkspaceDrift, type ReviewedWorkspaceObservation } from "./reviewed-workspace";
 import type {
   ActiveWaveGateRegistration,
@@ -1144,12 +1144,39 @@ function failedGateDecision(wave: number, checks: readonly GateCheck[], reason: 
   return canonicalRecord({ wave, checks, verdict: canonicalRecord({ kind: "fail", reason }) });
 }
 
-function waveGateChecks(state: TaskGraph, wave: number, waveTasks: readonly Task[], deps: GateDeps): readonly GateCheck[] {
+/**
+ * The Wave Gate's start prerequisites, defined ONCE. The gate evaluates them
+ * first, status projects them before it advises a start, and `start
+ * wave-gate` refuses on them before claiming a Run Directory — so status can
+ * never advise a start that the start would then register and block on.
+ */
+function waveStartPrerequisiteChecks(state: TaskGraph, waveTasks: readonly Task[]): readonly GateCheck[] {
   return Object.freeze([
     checkNoExecutingTasks(waveTasks, state.executing_tasks ?? []),
     checkImplementationProof(waveTasks),
     checkTestEvidence(waveTasks),
     checkNewTests(waveTasks),
+  ]);
+}
+
+export type WaveStartReadiness =
+  | Readonly<{ kind: "ready" }>
+  | Readonly<{ kind: "not-ready"; failures: NonEmpty<string> }>;
+
+/** Whether one Wave's Tasks satisfy every start prerequisite, with every
+ *  failed prerequisite's reason in gate order. */
+export function deriveWaveStartReadiness(state: TaskGraph, waveTasks: readonly Task[]): WaveStartReadiness {
+  const failures = waveStartPrerequisiteChecks(state, waveTasks)
+    .flatMap((check) => check.passed ? [] : [check.reason]);
+  const [first, ...rest] = failures;
+  return first === undefined
+    ? canonicalRecord({ kind: "ready" as const })
+    : canonicalRecord({ kind: "not-ready" as const, failures: Object.freeze([first, ...rest]) as NonEmpty<string> });
+}
+
+function waveGateChecks(state: TaskGraph, wave: number, waveTasks: readonly Task[], deps: GateDeps): readonly GateCheck[] {
+  return Object.freeze([
+    ...waveStartPrerequisiteChecks(state, waveTasks),
     checkWaveCompletionSuite(
       state,
       wave,
@@ -2277,29 +2304,41 @@ function waveImplementationAction(
   recovery: WaveImplementationRecovery,
 ): WaveImplementationAction {
   const common = canonicalRecord({ runId: statusRunId, message });
-  const diagnostic: WaveImplementationAction["diagnostic"] = recovery.kind === "escalate-wave-implementation"
-    ? canonicalRecord({
-        kind: "implementation-escalation-required",
-        category: "semantic-attempts-exhausted",
+  const terminalRetry = canonicalRecord({
+    kind: "advance-wave-lifecycle" as const,
+    eligible: false as const,
+    consumesSemanticAttempt: false as const,
+  });
+  const diagnostic: WaveImplementationAction["diagnostic"] = match(recovery)
+    .with({ kind: "escalate-wave-implementation" }, (escalation) => canonicalRecord({
+      kind: "implementation-escalation-required" as const,
+      category: "semantic-attempts-exhausted" as const,
+      ...common,
+      retry: terminalRetry,
+      recovery: escalation,
+    }))
+    .with({ kind: "repair-wave-start-readiness" }, (repair) => canonicalRecord({
+      kind: "wave-start-not-ready" as const,
+      category: "wave-start-prerequisites-unmet" as const,
+      ...common,
+      retry: terminalRetry,
+      recovery: repair,
+    }))
+    .with(
+      { kind: P.union("spawn-wave-implementation", "await-wave-implementation", "start-wave-gate") },
+      (healthy) => canonicalRecord({
+        kind: "wave-gate-not-started" as const,
+        category: "healthy-wave-unstarted" as const,
         ...common,
         retry: canonicalRecord({
-          kind: "advance-wave-lifecycle",
-          eligible: false,
-          consumesSemanticAttempt: false,
+          kind: "advance-wave-lifecycle" as const,
+          eligible: true as const,
+          consumesSemanticAttempt: false as const,
         }),
-        recovery,
-      })
-    : canonicalRecord({
-        kind: "wave-gate-not-started",
-        category: "healthy-wave-unstarted",
-        ...common,
-        retry: canonicalRecord({
-          kind: "advance-wave-lifecycle",
-          eligible: true,
-          consumesSemanticAttempt: false,
-        }),
-        recovery,
-      });
+        recovery: healthy,
+      }),
+    )
+    .exhaustive();
   return canonicalRecord({ kind: "blocked", runId: statusRunId, diagnostic });
 }
 
@@ -2582,15 +2621,61 @@ function committedTerminalStatus(
   });
 }
 
+export type TaskImplementationDispatchDerivation =
+  | Readonly<{ kind: "dispatch"; dispatch: WaveImplementationDispatch }>
+  | Readonly<{ kind: "escalated"; receiptId: string; failureKinds: NonEmpty<string> }>
+  | Readonly<{ kind: "invalid-retry"; errors: NonEmpty<string> }>
+  | Readonly<{ kind: "invalid-attestation"; error: string }>;
+
 /**
- * The implementation window: an execute Wave whose Wave Gate has not been
- * registered yet.
+ * The ONE derivation of what implementation dispatch a Task is owed, from its
+ * protected settlement history: status projects it into the Wave recovery and
+ * the implementation brief renders exactly it, so a rendered brief always
+ * carries the appendix the spawn gate will authorize.
+ *
+ * Attestation Tasks bind their dispatch to the engine-derived attestation
+ * context (digest over the stored attested obligation set + policy). The load
+ * boundary proved mode/obligations/policy lockstep, so derivation can only
+ * fail on an in-memory graph; either way no dispatch a child could not legally
+ * be admitted on is emitted.
+ */
+export function deriveTaskImplementationDispatch(task: Task): TaskImplementationDispatchDerivation {
+  const disposition = deriveImplementationRetryDisposition(task);
+  if (disposition.kind === "invalid") return canonicalRecord({ kind: "invalid-retry" as const, errors: disposition.errors });
+  if (disposition.kind === "escalated") {
+    return canonicalRecord({
+      kind: "escalated" as const,
+      receiptId: disposition.receiptId,
+      failureKinds: disposition.failureKinds as NonEmpty<string>,
+    });
+  }
+  let attestationLine: string | null = null;
+  if (task.implementation_attestation === true) {
+    const attestation = deriveImplementationAttestationContext(task);
+    if (!attestation.ok) return canonicalRecord({ kind: "invalid-attestation" as const, error: attestation.error });
+    attestationLine = attestation.promptAppendix;
+  }
+  const dispatch: WaveImplementationDispatch = disposition.kind === "initial"
+    ? canonicalRecord({ kind: "initial-implementation", taskId: task.id, semanticAttempt: 1, promptAppendix: attestationLine })
+    : canonicalRecord({
+        kind: "retry-implementation",
+        taskId: task.id,
+        semanticAttempt: 2,
+        promptAppendix: attestationLine === null ? disposition.promptAppendix : `${disposition.promptAppendix}\n${attestationLine}`,
+      });
+  return canonicalRecord({ kind: "dispatch" as const, dispatch });
+}
+
+/**
+ * The implementation window: an execute Wave without a live Wave Gate.
  *
  * Completion retires the outgoing registration in the same commit that
  * advances `current_wave`, and the next registration only appears when the
  * gate is started — so every Wave spends its whole implementation span with
- * `active_wave_gate === undefined`. Routing that through the readiness path
- * reported a healthy graph as terminal invalid authority and blanked all
+ * `active_wave_gate === undefined`. A terminal-abandoned Run without a named
+ * successor also leaves the Wave in this window: its protected tombstone is
+ * retained, but cannot authorize review or block a Task retry. Routing either
+ * case through the readiness path reported invalid authority and blanked all
  * fact categories. Here the facts are derivable and the owed move is known, so
  * both are reported.
  *
@@ -2602,7 +2687,11 @@ function unstartedWaveStatus(
   graph: TaskGraph,
   deps: GateDeps,
 ): LoomStatus | null {
-  if (graph.active_wave_gate !== undefined || graph.current_wave === undefined) return null;
+  if (graph.current_wave === undefined) return null;
+  const registration = graph.active_wave_gate;
+  if (registration !== undefined &&
+      (registration.wave !== graph.current_wave || registration.terminalOutcome?.kind !== "terminal-abandoned" ||
+        registration.terminalOutcome.supersededBy !== null)) return null;
   const wave = graph.current_wave;
   // A terminal receipt for the current Wave means this is not an unstarted
   // Wave. committedTerminalStatus already accepted the exact terminal graph;
@@ -2659,75 +2748,40 @@ function unstartedWaveStatus(
     !reclaimable.has(task.id) &&
     (executing.has(task.id) || task.active_implementation_attempt !== undefined));
   const activeTaskIds = new Set(active.map((task) => task.id));
-  const dispositions = outstanding.map((task) => ({
-    task,
-    disposition: deriveImplementationRetryDisposition(task),
-  }));
-  const invalid = dispositions.find(({ disposition }) => disposition.kind === "invalid");
-  if (invalid?.disposition.kind === "invalid") {
+  const derivations = outstanding.map((task) => ({ task, derivation: deriveTaskImplementationDispatch(task) }));
+  const invalidRetry = derivations.find(({ derivation }) => derivation.kind === "invalid-retry");
+  if (invalidRetry?.derivation.kind === "invalid-retry") {
     return deriveUnavailableLoomStatus(Object.freeze([
       reason(
         "authority-contradiction",
-        `${invalid.task.id} has invalid implementation retry authority: ${invalid.disposition.errors.join("; ")}`,
-        invalid.task.id,
+        `${invalidRetry.task.id} has invalid implementation retry authority: ${invalidRetry.derivation.errors.join("; ")}`,
+        invalidRetry.task.id,
       ),
     ]) as NonEmpty<StatusReason>);
   }
-  const escalated = dispositions.flatMap(({ task, disposition }) =>
-    disposition.kind === "escalated"
-      ? [canonicalRecord({
-          taskId: task.id,
-          receiptId: disposition.receiptId,
-          failureKinds: disposition.failureKinds as NonEmpty<string>,
-        })]
+  const escalated = derivations.flatMap(({ task, derivation }) =>
+    derivation.kind === "escalated"
+      ? [canonicalRecord({ taskId: task.id, receiptId: derivation.receiptId, failureKinds: derivation.failureKinds })]
       : []);
-  // Attestation Tasks bind their dispatch to the engine-derived attestation
-  // context (digest over the stored attested obligation set + policy). The
-  // load boundary proved mode/obligations/policy lockstep, so derivation can
-  // only fail on an in-memory graph; either way the wave reports unavailable
-  // instead of emitting a dispatch a child could not legally be admitted on.
-  const attestationAppendix = new Map(dispositions.flatMap(({ task, disposition }) => {
-    if (disposition.kind !== "initial" && disposition.kind !== "retry") return [];
-    if (task.implementation_attestation !== true) return [];
-    return [[task.id, deriveImplementationAttestationContext(task)] as const];
-  }));
-  const attestationFailure = [...attestationAppendix.entries()].find(([, derived]) => !derived.ok);
-  if (attestationFailure !== undefined) {
+  const invalidAttestation = derivations.find(({ derivation }) => derivation.kind === "invalid-attestation");
+  if (invalidAttestation?.derivation.kind === "invalid-attestation") {
     return deriveUnavailableLoomStatus(Object.freeze([
       reason(
         "authority-contradiction",
-        `${attestationFailure[0]} attestation mode could not derive its attestation context: ${attestationFailure[1].ok ? "" : attestationFailure[1].error}`,
-        attestationFailure[0],
+        `${invalidAttestation.task.id} attestation mode could not derive its attestation context: ${invalidAttestation.derivation.error}`,
+        invalidAttestation.task.id,
       ),
     ]) as NonEmpty<StatusReason>);
   }
-  const dispatches = dispositions.flatMap(({ task, disposition }): readonly WaveImplementationDispatch[] => {
-    if (activeTaskIds.has(task.id)) return [];
-    const attestation = attestationAppendix.get(task.id);
-    const attestationLine = attestation !== undefined && attestation.ok ? attestation.promptAppendix : null;
-    if (disposition.kind === "initial") {
-      return [canonicalRecord({
-        kind: "initial-implementation",
-        taskId: task.id,
-        semanticAttempt: 1,
-        promptAppendix: attestationLine,
-      })];
-    }
-    if (disposition.kind === "retry") {
-      return [canonicalRecord({
-        kind: "retry-implementation",
-        taskId: task.id,
-        semanticAttempt: 2,
-        promptAppendix: attestationLine === null
-          ? disposition.promptAppendix
-          : `${disposition.promptAppendix}\n${attestationLine}`,
-      })];
-    }
-    return [];
-  });
+  const dispatches = derivations.flatMap(({ task, derivation }): readonly WaveImplementationDispatch[] =>
+    derivation.kind === "dispatch" && !activeTaskIds.has(task.id) ? [derivation.dispatch] : []);
   let recovery: WaveImplementationRecovery;
   let message: string;
-  if (outstanding.length === 0) {
+  const startReadiness = outstanding.length === 0 ? deriveWaveStartReadiness(graph, waveTasks) : null;
+  if (startReadiness?.kind === "not-ready") {
+    recovery = canonicalRecord({ kind: "repair-wave-start-readiness", wave, failures: startReadiness.failures });
+    message = `Wave ${wave} implementation stopped but the Wave Gate cannot start: ${startReadiness.failures.join("; ")}`;
+  } else if (startReadiness?.kind === "ready") {
     recovery = canonicalRecord({ kind: "start-wave-gate", wave });
     message = `Wave ${wave} implementation is complete and no Wave Gate run is registered; start the Wave Gate`;
   } else if (escalated.length > 0) {
@@ -2771,7 +2825,7 @@ function unstartedWaveStatus(
       task.taskId,
     ));
   }
-  reasons.push(reason("wave-gate-not-started", message));
+  reasons.push(reason(recovery.kind === "repair-wave-start-readiness" ? "wave-start-not-ready" : "wave-gate-not-started", message));
 
   return canonicalRecord({
     schemaVersion: 1,
@@ -2919,8 +2973,8 @@ export function deriveLoomStatusFromParsedGraph(
     deps.currentWaveCompletionResult,
   );
   if (committed !== null) return committed;
-  // Before the readiness path, which requires a registration: an execute Wave
-  // legitimately has none for its whole implementation span.
+  // Before the readiness path, which requires a live registration: an execute
+  // Wave may have no registration or only an abandoned Run tombstone.
   const unstarted = unstartedWaveStatus(parsed.value, deps);
   if (unstarted !== null) return unstarted;
   if (lifecycleProof === null) {

@@ -8,13 +8,26 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   currentOrchestrationStatus,
   observedAdvisoryApproval,
+  panelSubmissionProblem,
+  panelVerdictEmissionPort,
+  parseRegisteredPanelProgram,
   renderStatus,
+  resolvePanelAttemptVerdictSource,
+  settlePanelAttemptSubmission,
 } from "../../../src/handlers/helpers/orchestration";
+import { candidateFilename, type PanelLens } from "../../../src/core/panel-contract";
+import {
+  panelVerdictSourceProvenance,
+  panelVerdictSourceRecord,
+} from "../../../src/core/panel-program";
+import { selectVerdictSource } from "../../../src/core/emission-ingestion";
+import { issueEmissionBinding } from "../../../src/core/emission-tool";
+import { captureKey, observeEmissionCalls } from "../../../src/core/harness-capture";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2, type ReviewerDraftV2 } from "../../../src/core/reviewer-contract";
 import { WAVE_REVIEW_AGENTS, type GateDeps } from "../../../src/core/wave-gate-machine";
 import { evaluateTaskProof } from "../../../src/core/proof-obligations";
 import { acceptedWaveCompletionSuite } from "../../fixtures/accepted-wave-completion-suite";
-import { parseAgentRequestAuthority, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
+import { parseAgentRequestAuthority, parseArtifactDigest, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
 import { agentRequestAuthority } from "../../fixtures/agent-request-authority";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } from "../../fixtures/pi-session";
 import { parseRegisteredFacadeProgram } from "../../../src/handlers/helpers/programs";
@@ -25,9 +38,9 @@ import {
   type StandaloneCaptureWitness,
 } from "../../../src/handlers/helpers/programs/standalone";
 import { StateManager } from "../../../src/state-manager";
-import { parseRegistration, publishInitialBatch } from "../../../src/handlers/helpers/programs/helpers";
+import { parseRegistration, publishLegacyInitialBatch } from "../../../src/handlers/helpers/programs/helpers";
+import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../src/core/spawn-admission";
 import { deriveWaveAttemptTwo, waveGateAuthorityDigest, waveRequests, installWaveReviewRuns, persistedWaveAttemptTwoCompatibilityProblem, prepareOrphanedWaveGateRecovery } from "../../../src/handlers/helpers/programs/wave-gate";
-import { captureKey } from "../../../src/core/harness-capture";
 import { buildContextPacket, encodeByteSection } from "../../../src/orchestration/context-packets";
 import { createRunDirectory, openRunDirectory, inspectRunDirectoryEntry, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
 import { readSessionRunBindings } from "../../../src/orchestration/session-run-bindings";
@@ -37,6 +50,16 @@ import {
   PI_EXTENSION_RUNTIME_REVISION_ENV,
   PI_EXTENSION_RUNTIME_ROOT_ENV,
 } from "../../../src/runtime-compatibility";
+
+// Route election is ambient-env sensitive: observedReviewerIssueRoute() reads
+// this process's PI_PROVIDER/PI_MODEL/PI_REASONING_LEVEL, and
+// fixturePiEnvironment spreads process.env into every CLI child. These
+// fixtures pin the catalog issue route, so an ambient Pi handshake (a wrapper
+// session running the suite under the qualified-local model) must not flip
+// the election and re-shape issued/retry prompts.
+for (const routeEnv of ["PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL"] as const) {
+  delete process.env[routeEnv];
+}
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));
 const PACKAGE_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -727,7 +750,7 @@ describe("orchestration CLI", () => {
         1,
         { kind: "state-layout", root },
       );
-      const published = await publishInitialBatch(handle.value, batch.requests, batch.packets, "wave-gate-current");
+      const published = await publishLegacyInitialBatch(handle.value, batch.requests, batch.packets, "wave-gate-current");
       if (!published.ok) throw new Error(published.message);
       await installWaveReviewRuns(manager, registration, batch);
     });
@@ -978,6 +1001,501 @@ describe("orchestration CLI", () => {
     expect(result.outcomes).toEqual([{ finding_id: "T1:finding-1", survives: true, refuted_by: [], votes: expect.any(Array) }]);
   }, 15_000);
 
+  // ---------------------------------------------------------------------------
+  // The legacy panel verdict fold (T8, AD-8/AD-9): the SAME selection policy the
+  // persistent submissions run, wired through the legacy panel path's
+  // submission boundary and its per-attempt scans, with the durable
+  // panel-verdict-source record as the replay authority.
+  // ---------------------------------------------------------------------------
+
+  describe("the legacy panel verdict fold", () => {
+    const artifactDigestOf = (hex: string) => {
+      const parsedDigest = parseArtifactDigest(hex);
+      if (!parsedDigest.ok) throw new Error(parsedDigest.error.message);
+      return parsedDigest.value;
+    };
+    /** The semantic refutation authority of a LEGACY panel run's context —
+     *  the `panel-authority` section materializePanelRequest publishes. */
+    function legacyRefutationVerdict(handle: RunDirHandle, authority: AgentRequestAuthority, verdict: "upheld" | "refuted"): string {
+      const context = handle.readContext(authority.contextDigest);
+      if (!context.ok) throw new Error(context.error.message);
+      const section = context.value.fixedContext.find(({ label }) => label === "panel-authority");
+      if (section === undefined) throw new Error("refutation context lacks semantic authority");
+      const semantic = JSON.parse(Buffer.from(section.bytes).toString("utf8")) as {
+        input: { criticalFindingIds: readonly string[]; lenses: readonly string[] };
+      };
+      return JSON.stringify({
+        criterion: semantic.input.lenses[0],
+        verdicts: semantic.input.criticalFindingIds.map((id) => ({
+          finding_id: id,
+          verdict,
+          reasoning: verdict === "upheld"
+            ? "The current immutable packet still exhibits the finding"
+            : "The current immutable packet does not exhibit the finding",
+        })),
+      });
+    }
+    const judgeRegistration = () => {
+      const input = { candidateLenses: ["type-driven-fp"], judgeCriteria: ["simplicity", "pure functional core"] };
+      const registration = parseRegisteredPanelProgram({ schemaVersion: 1, kind: "architecture", input });
+      if (registration === null) throw new Error("fixture judge registration refused");
+      return registration;
+    };
+    const refutationRegistration = () => {
+      const input = { criticalFindingIds: ["T1:finding-1"], lenses: ["reproduction"] };
+      const registration = parseRegisteredPanelProgram({ schemaVersion: 1, kind: "refutation", input });
+      if (registration === null) throw new Error("fixture refutation registration refused");
+      return registration;
+    };
+
+    function mintJudgeSelection(requestId: string, args: unknown, toolCallId = "legacy-call-1") {
+      const minted = issueEmissionBinding({ requestId, kind: "judge-verdict", version: "v1" });
+      if (!minted.ok) throw new Error(`fixture binding refused: ${minted.error.message}`);
+      const selection = selectVerdictSource(minted.value, observeEmissionCalls([Object.freeze({
+        kind: "complete" as const,
+        call: Object.freeze({ requestId, toolCallId, kind: Object.freeze({ kind: "judge-verdict" as const }), version: "v1" as const, arguments: args }),
+      })]), "the raw final text");
+      if (selection.kind !== "emission-tool-arguments") throw new Error(`fixture selection refused: ${selection.kind}`);
+      return { binding: minted.value, selection };
+    }
+
+    it("selects an emission judge verdict before the authoritative parse and keeps the criterion join", () => {
+      const registration = judgeRegistration();
+      const input = registration.input as { candidateLenses: string[]; judgeCriteria: string[] };
+      const candidates = (input.candidateLenses as PanelLens[]).map(candidateFilename);
+      const args = {
+        criterion: input.judgeCriteria[0],
+        rankings: candidates.map((candidate, index) => ({ candidate, score: 9 - index, fatal_flaw: null, strongest_idea: `idea ${index + 1}` })),
+      };
+      const { selection } = mintJudgeSelection("architecture:judge:1", args);
+      // Emission wins over the (parseable) final text; the emitted bytes
+      // satisfy the SAME criterion/candidate joins the extraction parse uses.
+      expect(panelSubmissionProblem(registration, "architecture:judge:1",
+        JSON.stringify({ criterion: input.judgeCriteria[0], rankings: candidates.map((candidate, index) => ({ candidate, score: 3 + index, fatal_flaw: null, strongest_idea: `x ${index}` })) }),
+        { kind: "selected", selection, record: null })).toBeNull();
+
+      // A schema-valid payload with a FOREIGN criterion refuses at the
+      // authoritative parse, and the diagnostic names the accepted call.
+      const foreign = mintJudgeSelection("architecture:judge:1", {
+        criterion: "my own taste",
+        rankings: candidates.map((candidate, index) => ({ candidate, score: 9 - index, fatal_flaw: null, strongest_idea: `idea ${index + 1}` })),
+      }, "legacy-call-foreign");
+      expect(panelSubmissionProblem(registration, "architecture:judge:1", "the raw final text",
+        { kind: "selected", selection: foreign.selection, record: null }))
+        .toContain("emission tool call legacy-call-foreign produced a judge verdict that refuses its authoritative parse");
+    });
+
+    it("rejects duplicate and misbound legacy emission observations and never falls back", () => {
+      const registration = judgeRegistration();
+      const input = registration.input as { candidateLenses: string[]; judgeCriteria: string[] };
+      const candidates = (input.candidateLenses as PanelLens[]).map(candidateFilename);
+      const args = { criterion: input.judgeCriteria[0], rankings: candidates.map((candidate, index) => ({ candidate, score: 9 - index, fatal_flaw: null, strongest_idea: `idea ${index + 1}` })) };
+      const binding = issueEmissionBinding({ requestId: "architecture:judge:1", kind: "judge-verdict", version: "v1" });
+      if (!binding.ok) throw new Error(binding.error.message);
+      const call = Object.freeze({ requestId: "architecture:judge:1", toolCallId: "call-a", kind: Object.freeze({ kind: "judge-verdict" as const }), version: "v1" as const, arguments: args });
+      const duplicated = selectVerdictSource(binding.value, observeEmissionCalls([
+        Object.freeze({ kind: "complete" as const, call }),
+        Object.freeze({ kind: "complete" as const, call: { ...call, toolCallId: "call-b" } }),
+      ]), "the raw final text");
+      expect(panelSubmissionProblem(registration, "architecture:judge:1", "the raw final text",
+        { kind: "selected", selection: duplicated, record: null }))
+        .toContain("2 distinct emission tool calls (call-a, call-b)");
+
+      const misbound = selectVerdictSource(binding.value, observeEmissionCalls([Object.freeze({
+        kind: "complete" as const,
+        call: Object.freeze({ requestId: "some-other-request", toolCallId: "call-c", kind: Object.freeze({ kind: "judge-verdict" as const }), version: "v1" as const, arguments: args }),
+      })]), "the raw final text");
+      expect(panelSubmissionProblem(registration, "architecture:judge:1", "the raw final text",
+        { kind: "selected", selection: misbound, record: null }))
+        .toContain("wrong-request");
+    });
+
+    it("accepts extraction over a refused legacy call with the refusal retained in the problem", () => {
+      const registration = judgeRegistration();
+      const input = registration.input as { candidateLenses: string[]; judgeCriteria: string[] };
+      const candidates = (input.candidateLenses as PanelLens[]).map(candidateFilename);
+      const binding = issueEmissionBinding({ requestId: "architecture:judge:1", kind: "judge-verdict", version: "v1" });
+      if (!binding.ok) throw new Error(binding.error.message);
+      const refused = selectVerdictSource(binding.value, observeEmissionCalls([Object.freeze({
+        kind: "complete" as const,
+        call: Object.freeze({
+          requestId: "architecture:judge:1",
+          toolCallId: "call-refused",
+          kind: Object.freeze({ kind: "judge-verdict" as const }),
+          version: "v1" as const,
+          arguments: { criterion: input.judgeCriteria[0], rankings: [{ candidate: candidates[0], score: 9.5, fatal_flaw: null, strongest_idea: "x" }] },
+        }),
+      })]), JSON.stringify({ criterion: input.judgeCriteria[0], rankings: candidates.map((candidate, index) => ({ candidate, score: 9 - index, fatal_flaw: null, strongest_idea: `idea ${index + 1}` })) }));
+      expect(refused.kind).toBe("extraction-over-refused-call");
+      // The extraction parse of the caller's raw bytes is usable: accepted, and
+      // the retained refusal rides the settle seam's source (asserted by the
+      // record round-trip test below), not silently dropped.
+      expect(panelSubmissionProblem(registration, "architecture:judge:1",
+        JSON.stringify({ criterion: input.judgeCriteria[0], rankings: candidates.map((candidate, index) => ({ candidate, score: 9 - index, fatal_flaw: null, strongest_idea: `idea ${index + 1}` })) }),
+        { kind: "selected", selection: refused, record: null })).toBeNull();
+
+      // Refused call + unusable extraction: ONE problem carrying BOTH causes.
+      expect(panelSubmissionProblem(registration, "architecture:judge:1", "not json at all",
+        { kind: "selected", selection: refused, record: null }))
+        .toMatch(/emission arguments were refused \[invalid-schema\].*authoritative verdict parse was refused: judge verdict is not valid JSON/s);
+    });
+
+    it("refuses an observed emission call under a candidate or finalize slot", () => {
+      const registration = judgeRegistration();
+      const input = registration.input as { candidateLenses: string[]; judgeCriteria: string[] };
+      const candidates = (input.candidateLenses as PanelLens[]).map(candidateFilename);
+      const { selection } = mintJudgeSelection("architecture:judge:1", {
+        criterion: input.judgeCriteria[0],
+        rankings: candidates.map((candidate, index) => ({ candidate, score: 9 - index, fatal_flaw: null, strongest_idea: `idea ${index + 1}` })),
+      });
+      expect(panelSubmissionProblem(registration, "architecture:candidate:1", "raw",
+        { kind: "selected", selection, record: null }))
+        .toContain("extraction-only panel slot that advertises no emission tool");
+      expect(panelSubmissionProblem(registration, "architecture:finalize", "raw",
+        { kind: "selected", selection, record: null }))
+        .toContain("extraction-only panel slot that advertises no emission tool");
+    });
+
+    it("refuses an emission binding minted for another request", () => {
+      const binding = issueEmissionBinding({ requestId: "refutation:verifier:1", kind: "refutation-verdict", version: "v1" });
+      if (!binding.ok) throw new Error(binding.error.message);
+      const resolved = resolvePanelAttemptVerdictSource({
+        handle: {} as never,
+        request: agentRequestAuthority("run.legacy-fold", { requestId: "refutation:verifier:2", slotId: "refutation-slot:x", attempt: 1 }),
+        raw: "raw",
+        emission: { binding: binding.value, observation: { kind: "absent" }, port: panelVerdictEmissionPort },
+      });
+      expect(resolved.ok).toBe(false);
+      if (resolved.ok) throw new Error("unreachable");
+      expect(resolved.error).toContain("issued emission binding certifies request refutation:verifier:1, not the submitted request refutation:verifier:2");
+    });
+
+    it.each([
+      ["refutation-panel", "judge-verdict", "refutation-verdict"],
+      ["architecture-panel", "refutation-verdict", "judge-verdict"],
+    ] as const)("refuses a %s attempt whose emission binding certifies %s instead of %s, before any selection", (program, boundKind, expectedKind) => {
+      const requestId = program === "refutation-panel" ? "refutation:verifier:2" : "architecture:judge:2";
+      // The binding certifies the RIGHT request but the WRONG verdict kind for
+      // the panel program: the legacy seam's second issuance join (the one the
+      // persistent seam's refinement types do at compile time) refuses it as a
+      // caller defect before any evidence is read or any selection runs — the
+      // attempt is never consumed on a defect that is not the model's.
+      const binding = issueEmissionBinding({ requestId, kind: boundKind, version: "v1" });
+      if (!binding.ok) throw new Error(binding.error.message);
+      const resolved = resolvePanelAttemptVerdictSource({
+        handle: {} as never,
+        request: agentRequestAuthority("run.legacy-fold", { requestId, slotId: "refutation-slot:x", attempt: 1, program }),
+        raw: "raw",
+        emission: { binding: binding.value, observation: { kind: "absent" }, port: panelVerdictEmissionPort },
+      });
+      expect(resolved.ok).toBe(false);
+      if (resolved.ok) throw new Error("unreachable");
+      expect(resolved.error).toContain(`issued emission binding certifies producer kind ${boundKind}, not the ${expectedKind} kind the ${program} attempt ${requestId} belongs to`);
+    });
+
+    /** Start a refutation run, mint the issued refutation-verdict binding for
+     *  its verifier attempt, and publish a durable source record through the
+     *  settle seam's own constructor/serializer — the shared fixture of the
+     *  precedence and fail-closed unit tests below. */
+    async function publishedRefutationRecord(runName: string, payloadDigestOverride?: string) {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      const runDir = join(runsRoot, runName);
+      mkdirSync(runDir, { recursive: true });
+      const program = JSON.stringify({ input: { criticalFindingIds: ["T1:finding-1"], lenses: ["reproduction"] }, events: [] });
+      const started = (await runCli(["start", "refutation", "--runs-root", runsRoot, "--run", runDir], program, root));
+      expect(started.status, started.stderr).toBe(0);
+      const request = (JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] }).requests[0]!.authority;
+      const opened = openRunDirectory(runsRoot, runDir);
+      if (!opened.ok) throw new Error(opened.error.message);
+      const context = opened.value.readContext(request.contextDigest);
+      if (!context.ok) throw new Error(context.error.message);
+      const authoritySection = context.value.fixedContext.find(({ label }) => label === "panel-authority");
+      if (authoritySection === undefined) throw new Error("refutation context lacks semantic authority");
+      const semantic = JSON.parse(Buffer.from(authoritySection.bytes).toString("utf8")) as {
+        input: { criticalFindingIds: readonly string[]; lenses: readonly string[] };
+      };
+      const minted = issueEmissionBinding({ requestId: request.requestId, kind: "refutation-verdict", version: "v1" });
+      if (!minted.ok) throw new Error(minted.error.message);
+      const selection = selectVerdictSource(minted.value, observeEmissionCalls([Object.freeze({
+        kind: "complete" as const,
+        call: Object.freeze({
+          requestId: request.requestId,
+          toolCallId: "precedence-call",
+          kind: Object.freeze({ kind: "refutation-verdict" as const }),
+          version: "v1" as const,
+          arguments: {
+            criterion: semantic.input.lenses[0],
+            verdicts: semantic.input.criticalFindingIds.map((id) => ({ finding_id: id, verdict: "refuted", reasoning: "the current packet does not exhibit the finding" })),
+          },
+        }),
+      })]), "prose, not a verdict");
+      if (selection.kind !== "emission-tool-arguments") throw new Error(`fixture selection refused: ${selection.kind}`);
+      const acceptedBytes = new TextEncoder().encode(selection.rawJson);
+      const record = panelVerdictSourceRecord({
+        requestId: request.requestId,
+        slotId: request.slotId,
+        attempt: request.attempt,
+        source: panelVerdictSourceProvenance(minted.value, selection),
+        acceptedCall: selection.call,
+        payloadDigest: artifactDigestOf(payloadDigestOverride ?? createHash("sha256").update(acceptedBytes).digest("hex")),
+        payloadByteLength: acceptedBytes.length,
+      });
+      if (!record.ok) throw new Error(record.error);
+      const published = await opened.value.publishArtifactSet([{
+        relativePath: `panel-verdict-sources/${request.requestId}.json`,
+        bytes: [...Buffer.from(`${JSON.stringify(record.value, null, 2)}\n`, "utf-8")],
+      }]);
+      expect(published.ok, published.ok ? "" : published.error.message).toBe(true);
+      return { opened: opened.value, request, binding: minted.value, record: record.value };
+    }
+
+    it("replays the durable record over a contradicting live emission input, and refuses a record whose payload digest does not certify the attempt bytes", async () => {
+      const good = await publishedRefutationRecord("run.record-precedence");
+      const resolved = resolvePanelAttemptVerdictSource({
+        handle: good.opened,
+        request: good.request,
+        raw: "prose, not a verdict",
+        // A LIVE emission input whose observation CONTRADICTS the record (an
+        // absent observation would otherwise select the extraction baseline):
+        // the durable record is authoritative when present (FR-009) — the
+        // returned selection is the record's accepted call, never the live
+        // input's arm, and the record rides beside it.
+        emission: { binding: good.binding, observation: { kind: "absent" }, port: panelVerdictEmissionPort },
+      });
+      expect(resolved.ok, resolved.ok ? "" : resolved.error).toBe(true);
+      if (!resolved.ok) throw new Error("unreachable");
+      expect(resolved.value.kind).toBe("selected");
+      if (resolved.value.kind !== "selected") throw new Error("unreachable");
+      expect(resolved.value.record).not.toBeNull();
+      expect(resolved.value.selection).toMatchObject({
+        kind: "emission-tool-arguments",
+        source: "emission-tool",
+        call: { toolCallId: "precedence-call" },
+      });
+
+      // A record whose payload digest does not certify THESE attempt bytes is
+      // stale/unavailable evidence and refuses closed — never a silent
+      // extraction baseline over a record that says otherwise.
+      const stale = await publishedRefutationRecord("run.record-stale-bytes", createHash("sha256").update("different bytes entirely").digest("hex"));
+      const refused = resolvePanelAttemptVerdictSource({
+        handle: stale.opened,
+        request: stale.request,
+        raw: "prose, not a verdict",
+        emission: { binding: stale.binding, observation: { kind: "absent" }, port: panelVerdictEmissionPort },
+      });
+      expect(refused.ok).toBe(false);
+      if (refused.ok) throw new Error("unreachable");
+      expect(refused.error).toContain(`the durable panel verdict source for request ${stale.request.requestId} does not describe the accepted attempt bytes`);
+    }, 30_000);
+
+    it("replays a durable panel verdict source record through the legacy refutation panel", async () => {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      const runDir = join(runsRoot, "run.refutation-emission-record");
+      mkdirSync(runDir, { recursive: true });
+      const program = JSON.stringify({ input: { criticalFindingIds: ["T1:finding-1"], lenses: ["reproduction"] }, events: [] });
+      const started = (await runCli(["start", "refutation", "--runs-root", runsRoot, "--run", runDir], program, root));
+      expect(started.status, started.stderr).toBe(0);
+      const request = (JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] }).requests[0]!.authority;
+      const opened = openRunDirectory(runsRoot, runDir);
+      if (!opened.ok) throw new Error(opened.error.message);
+
+      // The raw attempt bytes are PROSE — without the record, the legacy scan
+      // would refuse them ("not valid JSON") and the run would consume its
+      // attempt on a parse failure.
+      const raw = "the verifier answered in prose, never emitting a verdict";
+      expect((await opened.value.captureTranscript(request, [...Buffer.from(raw)])).ok).toBe(true);
+
+      // Mint the ISSUED refutation-verdict binding for THIS attempt's request,
+      // select the emission verdict, and publish the durable source record —
+      // the same constructor/settle seam production's capture-side caller runs.
+      const context = opened.value.readContext(request.contextDigest);
+      if (!context.ok) throw new Error(context.error.message);
+      const authoritySection = context.value.fixedContext.find(({ label }) => label === "panel-authority");
+      if (authoritySection === undefined) throw new Error("refutation context lacks semantic authority");
+      const semantic = JSON.parse(Buffer.from(authoritySection.bytes).toString("utf8")) as {
+        panel: string;
+        input: { criticalFindingIds: readonly string[]; lenses: readonly string[] };
+      };
+      const minted = issueEmissionBinding({ requestId: request.requestId, kind: "refutation-verdict", version: "v1" });
+      if (!minted.ok) throw new Error(minted.error.message);
+      const emissionCall = Object.freeze({
+        requestId: request.requestId,
+        toolCallId: "legacy-record-call",
+        kind: Object.freeze({ kind: "refutation-verdict" as const }),
+        version: "v1" as const,
+        arguments: {
+          criterion: semantic.input.lenses[0],
+          verdicts: semantic.input.criticalFindingIds.map((id) => ({ finding_id: id, verdict: "refuted", reasoning: "the current packet does not exhibit the finding" })),
+        },
+      });
+      const selection = selectVerdictSource(minted.value, observeEmissionCalls([Object.freeze({ kind: "complete" as const, call: emissionCall })]), raw);
+      if (selection.kind !== "emission-tool-arguments") throw new Error(`fixture selection refused: ${selection.kind}`);
+      const acceptedBytes = new TextEncoder().encode(selection.rawJson);
+      const record = panelVerdictSourceRecord({
+        requestId: request.requestId,
+        slotId: request.slotId,
+        attempt: request.attempt,
+        source: panelVerdictSourceProvenance(minted.value, selection),
+        acceptedCall: selection.call,
+        payloadDigest: artifactDigestOf(createHash("sha256").update(acceptedBytes).digest("hex")),
+        payloadByteLength: acceptedBytes.length,
+      });
+      if (!record.ok) throw new Error(record.error);
+      const published = await opened.value.publishArtifactSet([{
+        relativePath: `panel-verdict-sources/${request.requestId}.json`,
+        bytes: [...Buffer.from(`${JSON.stringify(record.value, null, 2)}\n`, "utf-8")],
+      }]);
+      expect(published.ok, published.ok ? "" : published.error.message).toBe(true);
+
+      // Resume: the reconciliation replays the record through the ONE selection
+      // seam, accepts the emission verdict, and drives the panel to done — the
+      // deterministic tally consumes the SELECTED bytes, not the prose.
+      const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
+      expect(resumed.status, resumed.stderr).toBe(0);
+      const action = JSON.parse(resumed.stdout) as { kind: string };
+      expect(action.kind).toBe("done");
+      const result = JSON.parse(readFileSync(join(runDir, "artifacts", "result.json"), "utf-8")) as {
+        outcomes: readonly { finding_id: string; survives: boolean }[];
+      };
+      expect(result.outcomes).toEqual([{ finding_id: "T1:finding-1", survives: false, refuted_by: ["reproduction"], votes: expect.any(Array) }]);
+      // The accepted source is durably bound: the record the settle seam
+      // replayed is the only provenance for this attempt, and a resubmission
+      // of the same attempt reproduces the same decision idempotently.
+      const idempotent = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
+      expect(idempotent.status, idempotent.stderr).toBe(0);
+      expect(JSON.parse(idempotent.stdout).kind).toBe("done");
+    }, 30_000);
+
+    it("fails closed when a durable record cannot be replayed, and keeps the no-record baseline byte-identical", async () => {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      const runDir = join(runsRoot, "run.refutation-record-failclosed");
+      mkdirSync(runDir, { recursive: true });
+      const program = JSON.stringify({ input: { criticalFindingIds: ["T1:finding-1"], lenses: ["reproduction"] }, events: [] });
+      const started = (await runCli(["start", "refutation", "--runs-root", runsRoot, "--run", runDir], program, root));
+      expect(started.status, started.stderr).toBe(0);
+      const request = (JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] }).requests[0]!.authority;
+      const opened = openRunDirectory(runsRoot, runDir);
+      if (!opened.ok) throw new Error(opened.error.message);
+      expect((await opened.value.captureTranscript(request, [...Buffer.from("prose, not a verdict")])).ok).toBe(true);
+
+      // A record whose schema digest does NOT certify the frozen schema is
+      // unavailable evidence, never a silent extraction baseline: the scan
+      // fails closed and the run does not advance.
+      const corrupted = {
+        schemaVersion: 1,
+        kind: "panel-verdict-source",
+        requestId: request.requestId,
+        slotId: request.slotId,
+        attempt: request.attempt,
+        source: {
+          source: "emission-tool",
+          toolCallId: "corrupt-call",
+          producerKind: "refutation-verdict",
+          emissionSchemaVersion: "v1",
+          schemaDigest: createHash("sha256").update("not the frozen schema bytes").digest("hex"),
+        },
+        acceptedCall: {
+          requestId: request.requestId,
+          toolCallId: "corrupt-call",
+          kind: { kind: "refutation-verdict" },
+          version: "v1",
+          arguments: { criterion: "reproduction", verdicts: [] },
+        },
+        payloadDigest: createHash("sha256").update(Buffer.from("prose, not a verdict")).digest("hex"),
+        payloadByteLength: Buffer.byteLength("prose, not a verdict"),
+      };
+      const published = await opened.value.publishArtifactSet([{
+        relativePath: `panel-verdict-sources/${request.requestId}.json`,
+        bytes: [...Buffer.from(`${JSON.stringify(corrupted, null, 2)}\n`, "utf-8")],
+      }]);
+      expect(published.ok, published.ok ? "" : published.error.message).toBe(true);
+      const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
+      expect(resumed.status).not.toBe(0);
+      expect(resumed.stderr).toContain("could not be replayed");
+      const events = await opened.value.readEvents();
+      expect(events.filter(({ event }) => (event as { type?: string }).type === "spawn-outcome")).toHaveLength(0);
+
+      // The no-record baseline is unchanged: a VALID verdict under the same
+      // slot without any record is accepted exactly as today, and no source
+      // record is written for it.
+      const baselineDir = join(runsRoot, "run.refutation-record-baseline");
+      mkdirSync(baselineDir, { recursive: true });
+      const baselineStarted = (await runCli(["start", "refutation", "--runs-root", runsRoot, "--run", baselineDir], program, root));
+      expect(baselineStarted.status, baselineStarted.stderr).toBe(0);
+      const baselineRequest = (JSON.parse(baselineStarted.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] }).requests[0]!.authority;
+      const baselineOpened = openRunDirectory(runsRoot, baselineDir);
+      if (!baselineOpened.ok) throw new Error(baselineOpened.error.message);
+      const verdict = legacyRefutationVerdict(baselineOpened.value, baselineRequest, "upheld");
+      expect((await baselineOpened.value.captureTranscript(baselineRequest, [...Buffer.from(verdict)])).ok).toBe(true);
+      const baselineResumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", baselineDir], "", root));
+      expect(baselineResumed.status, baselineResumed.stderr).toBe(0);
+      expect(JSON.parse(baselineResumed.stdout).kind).toBe("done");
+      expect(existsSync(join(baselineDir, "artifacts", "panel-verdict-sources"))).toBe(false);
+    }, 30_000);
+
+    it("settles a live emission selection with the write-ahead record through the production seam", async () => {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      const runDir = join(runsRoot, "run.refutation-live-settle");
+      mkdirSync(runDir, { recursive: true });
+      const program = JSON.stringify({ input: { criticalFindingIds: ["T1:finding-1"], lenses: ["reproduction"] }, events: [] });
+      const started = (await runCli(["start", "refutation", "--runs-root", runsRoot, "--run", runDir], program, root));
+      expect(started.status, started.stderr).toBe(0);
+      const request = (JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] }).requests[0]!.authority;
+      const opened = openRunDirectory(runsRoot, runDir);
+      if (!opened.ok) throw new Error(opened.error.message);
+      const context = opened.value.readContext(request.contextDigest);
+      if (!context.ok) throw new Error(context.error.message);
+      const authoritySection = context.value.fixedContext.find(({ label }) => label === "panel-authority");
+      if (authoritySection === undefined) throw new Error("refutation context lacks semantic authority");
+      const semantic = JSON.parse(Buffer.from(authoritySection.bytes).toString("utf8")) as {
+        panel: string;
+        input: { criticalFindingIds: readonly string[]; lenses: readonly string[] };
+      };
+      const minted = issueEmissionBinding({ requestId: request.requestId, kind: "refutation-verdict", version: "v1" });
+      if (!minted.ok) throw new Error(minted.error.message);
+      const emissionCall = Object.freeze({
+        requestId: request.requestId,
+        toolCallId: "live-settle-call",
+        kind: Object.freeze({ kind: "refutation-verdict" as const }),
+        version: "v1" as const,
+        arguments: {
+          criterion: semantic.input.lenses[0],
+          verdicts: semantic.input.criticalFindingIds.map((id) => ({ finding_id: id, verdict: "upheld", reasoning: "the current packet still exhibits the finding" })),
+        },
+      });
+      const settled = await settlePanelAttemptSubmission({
+        handle: opened.value,
+        registration: refutationRegistration(),
+        request,
+        logicalRequestId: request.requestId,
+        raw: "prose, not a verdict",
+        emission: { binding: minted.value, observation: observeEmissionCalls([Object.freeze({ kind: "complete" as const, call: emissionCall })]), port: panelVerdictEmissionPort },
+      });
+      expect(settled.ok, settled.ok ? "" : settled.error).toBe(true);
+      if (!settled.ok) throw new Error("unreachable");
+      expect(settled.value.problem).toBeNull();
+      expect(settled.value.source).toMatchObject({ source: "emission-tool", toolCallId: "live-settle-call" });
+      // The record is durable BEFORE any outcome is declared, and it replays.
+      const stored = await opened.value.readArtifactBytes(`panel-verdict-sources/${request.requestId}.json`, 65_536);
+      expect(stored.ok && stored.value !== null).toBe(true);
+      const republished = await settlePanelAttemptSubmission({
+        handle: opened.value,
+        registration: refutationRegistration(),
+        request,
+        logicalRequestId: request.requestId,
+        raw: "prose, not a verdict",
+        emission: { binding: minted.value, observation: observeEmissionCalls([Object.freeze({ kind: "complete" as const, call: emissionCall })]), port: panelVerdictEmissionPort },
+      });
+      expect(republished.ok, republished.ok ? "" : republished.error).toBe(true);
+      if (!republished.ok) throw new Error("unreachable");
+      expect(republished.value.source).toMatchObject({ source: "emission-tool", toolCallId: "live-settle-call" });
+    }, 30_000);
+  });
+
   it("resumes an anchored run idempotently without spawning anything", async () => {
     const root = project();
     const runsRoot = join(root, "runs");
@@ -1047,14 +1565,61 @@ describe("orchestration CLI", () => {
     expect(stored.value?.requestId).toBe(request.requestId);
   });
 
-  it("exposes the wave-gate façade and returns a typed blocked action when authority is unavailable", async () => {
+  it("refuses unavailable wave-gate authority before claiming a Run Directory", async () => {
     const root = project();
     const runsRoot = join(root, "runs");
     const runDir = join(runsRoot, "run.wave-gate");
-    mkdirSync(runDir, { recursive: true });
+    mkdirSync(runsRoot, { recursive: true });
     const result = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: null }), root));
-    expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout).kind, JSON.stringify(JSON.parse(result.stdout))).toBe("blocked");
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("active_task_graph.json");
+    expect(existsSync(runDir)).toBe(false);
+  });
+
+  it("renders the owed implementation dispatches as briefs with per-harness invocations", async () => {
+    const root = project();
+    writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), JSON.stringify(executeGraph()));
+
+    const listed = await runCli(["brief"], "", root);
+    expect(listed.status, listed.stderr).toBe(0);
+    const output = JSON.parse(listed.stdout) as { wave: number; briefs: readonly Record<string, unknown>[] };
+    expect(output).toEqual({
+      wave: 1,
+      briefs: [{
+        taskId: "T2",
+        agent: "code-implementer-agent",
+        dispatch: { kind: "initial-implementation", taskId: "T2", semanticAttempt: 1, promptAppendix: null },
+        pi: { agent: "code-implementer-agent", task: "LOOM_IMPLEMENTATION_BRIEF: T2" },
+        claude: { subagent_type: "code-implementer-agent", model: "opus", description: "Implement T2" },
+      }],
+    });
+
+    const withPrompt = await runCli(["brief", "--task", "T2", "--prompt"], "", root);
+    expect(withPrompt.status, withPrompt.stderr).toBe(0);
+    const prompt = (JSON.parse(withPrompt.stdout) as { briefs: readonly { prompt: string }[] }).briefs[0]!.prompt;
+    expect(prompt).toContain("**Task ID:** T2\n**Wave:** 1\n**Agent:** code-implementer-agent");
+    expect(prompt).toContain("Available at: plan.md");
+
+    const notOwed = await runCli(["brief", "--task", "T1"], "", root);
+    expect(notOwed.status).not.toBe(0);
+    expect(notOwed.stderr).toContain("Task T1 is not in the owed dispatches (T2)");
+  });
+
+  it("refuses a wave-gate start that another live run already owns before claiming a Run Directory", async () => {
+    const root = project();
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run.second");
+    mkdirSync(runsRoot, { recursive: true });
+    writeFileSync(join(root, ".claude", "state", "active_task_graph.json"), JSON.stringify(executeGraph({
+      active_wave_gate: {
+        schemaVersion: 1, kind: "active-wave-gate", runId: "run.first", wave: 1,
+        authorityDigest: "a".repeat(64), revision: 0, runsRoot, terminalOutcome: null,
+      },
+    })));
+    const result = (await runCli(["start", "wave-gate", "--runs-root", runsRoot, "--run", runDir], JSON.stringify({ wave: 1 }), root));
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("Active Wave Gate run run.first already owns wave 1");
+    expect(existsSync(runDir)).toBe(false);
   });
 
   it("refuses unavailable remediation source authority before claiming a Run Directory", async () => {
@@ -1335,6 +1900,62 @@ describe("orchestration CLI", () => {
     expect(panel.requests).toHaveLength(3);
     expect(panel.requests.every(({ authority }) => authority.role === "review-verifier-agent")).toBe(true);
   }, 15_000);
+
+  it("keeps the refutation panel spawn tool-free under a qualified emission-capable parent (FR-001/AD-6)", async () => {
+    // runCli's envOverrides override (and undefined-delete) the fixture env,
+    // so each arm pins its own issue-route election explicitly.
+    const CATALOG_ROUTE_ENV = { PI_PROVIDER: undefined, PI_MODEL: undefined, PI_REASONING_LEVEL: undefined } as const;
+    const QUALIFIED_ROUTE_ENV = { PI_PROVIDER: "desktop-vllm", PI_MODEL: "glm-5.3-flash-spark-tp2-v14", PI_REASONING_LEVEL: "high" } as const;
+    const runThroughPanel = async (routeEnv: Readonly<Record<string, string | undefined>>) => {
+      const root = repository();
+      writeFileSync(join(root, "README.md"), "fixture\npanel defect\n");
+      const runsRoot = join(root, ".claude", "reviews", "review-and-fix-runs");
+      const runDir = join(runsRoot, "run.panel-route");
+      mkdirSync(runDir, { recursive: true });
+      const startedResponse = await runCli(["start", "standalone-review", "--runs-root", runsRoot, "--run", runDir],
+        JSON.stringify({ kind: "all", files: null, dryRun: false }), root, routeEnv);
+      expect(startedResponse.status, startedResponse.stderr).toBe(0);
+      const started = JSON.parse(startedResponse.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority; task: string }[] };
+      const opened = openRunDirectory(runsRoot, runDir);
+      if (!opened.ok) throw new Error(opened.error.message);
+      const criticalTranscript = currentStandaloneCritical("README.md", "Panel route defect");
+      const cleanTranscript = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
+      for (const [index, { authority }] of started.requests.entries()) {
+        expect((await opened.value.captureTranscript(authority, [...Buffer.from(index === 0 ? criticalTranscript : cleanTranscript)])).ok).toBe(true);
+      }
+      const resumedResponse = await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, routeEnv);
+      expect(resumedResponse.status, resumedResponse.stderr).toBe(0);
+      const panel = JSON.parse(resumedResponse.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority; task: string }[] };
+      return { root, started, panel };
+    };
+    const catalog = await runThroughPanel(CATALOG_ROUTE_ENV);
+    const qualified = await runThroughPanel(QUALIFIED_ROUTE_ENV);
+
+    // The parent route is genuinely emission-capable: the reviewer slots of
+    // the qualified run issue descriptors, the catalog run's do not.
+    for (const { task } of qualified.started.requests) {
+      expect(parseEmissionDescriptor(task)).toMatchObject({ kind: "issued", binding: { version: "v2" } });
+      expect(task).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
+    }
+    for (const { task } of catalog.started.requests) {
+      expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
+    }
+
+    // AD-6: the panel verdict slots are not this feature's emission route —
+    // every panel task advertises no tool and is byte-identical across the
+    // two parent routes (modulo the project-local run-directory path).
+    const normalize = (task: string, root: string) => task.split(root).join("<RUN_ROOT>");
+    expect(qualified.panel.requests.map(({ authority }) => authority.role))
+      .toEqual(catalog.panel.requests.map(({ authority }) => authority.role));
+    for (const [catalogRequest, qualifiedRequest] of catalog.panel.requests.map((request, index) => [request, qualified.panel.requests[index]!] as const)) {
+      for (const task of [catalogRequest.task, qualifiedRequest.task]) {
+        expect(task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
+        expect(task).not.toContain("calling the exact tool loom_emit_reviewer_payload");
+        expect(parseEmissionDescriptor(task).kind).toBe("absent");
+      }
+      expect(normalize(qualifiedRequest.task, qualified.root)).toBe(normalize(catalogRequest.task, catalog.root));
+    }
+  }, 60_000);
 
   it("counts committed, staged, unstaged, and untracked additions once for reviewer selection", async () => {
     const root = repository();
@@ -1832,6 +2453,17 @@ describe("orchestration CLI", () => {
     const initial = JSON.parse(started.stdout) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
     expect(initial.kind, started.stdout).toBe("spawn-batch");
     expect(initial.requests.some(({ authority }) => authority.role === "spec-check-invoker" && authority.attempt === 1)).toBe(true);
+    // Spec-check reads its sections only through the delivered engine reader;
+    // running that exact command decodes its digest-verified authority.
+    const tasks = initial.requests as readonly { authority: AgentRequestAuthority; task: string }[];
+    const specTask = tasks.find(({ authority }) => authority.role === "spec-check-invoker")!.task;
+    const sectionCommand = /^LOOM_CONTEXT_SECTION_COMMAND: (.+)$/m.exec(specTask)?.[1];
+    expect(sectionCommand, specTask).toBeDefined();
+    const authoritySection = spawnSync("bash", ["-c", `${sectionCommand} --section wave-review-authority`], { encoding: "utf8" });
+    expect(authoritySection.status, authoritySection.stderr).toBe(0);
+    expect(JSON.parse(authoritySection.stdout)).toMatchObject({ subject: { role: "spec-check-invoker" } });
+    expect(tasks.filter(({ authority }) => authority.role !== "spec-check-invoker")
+      .every(({ task }) => !task.includes("LOOM_CONTEXT_SECTION_COMMAND"))).toBe(true);
     const opened = openRunDirectory(runsRoot, runDir);
     if (!opened.ok) throw new Error(opened.error.message);
 
@@ -2501,7 +3133,7 @@ describe("orchestration CLI", () => {
       expect((await previous.value.captureTranscript(authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
       if (authority.role !== "spec-check-invoker") {
         const retry = deriveWaveAttemptTwo(previous.value, authority);
-        const published = await withFixturePiSession(root, () => publishInitialBatch(previous.value, [retry.request], [retry.packet], `wave-gate-retry:${authority.slotId}`));
+        const published = await withFixturePiSession(root, () => publishLegacyInitialBatch(previous.value, [retry.request], [retry.packet], `wave-gate-retry:${authority.slotId}`));
         if (!published.ok) throw new Error(published.message);
       }
     }
@@ -3550,7 +4182,7 @@ describe("orchestration CLI", () => {
     expect(started.status, started.stderr).toBe(0);
     const action = JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] };
 
-    // Simulate the crash window: publishInitialBatch durably wrote contexts,
+    // Simulate the crash window: publishLegacyInitialBatch durably wrote contexts,
     // requests, and the publication receipt, but the awaiting-results
     // checkpoint write never happened.
     rmSync(join(runDir, "checkpoint.json"));
@@ -3805,7 +4437,8 @@ describe("orchestration CLI", () => {
       ], JSON.stringify({ kind: "not-a-review-kind", files: null, dryRun: false }), root));
 
       expect(invalidJson.status).not.toBe(0);
-      expect(invalidJson.stderr.trim()).toBe("Reviewer payload must be exactly one strict JSON object.");
+      expect(invalidJson.stderr.trim()).toContain("Reviewer payload must be exactly one strict JSON object.");
+      expect(invalidJson.stderr.trim()).toContain("Parse error:");
       expect(invalidJson.stdout).toBe("");
       expect(existsSync(join(runsRoot, "run.invalid-json"))).toBe(false);
       expect(invalidShape.status).not.toBe(0);
@@ -4042,7 +4675,9 @@ describe("orchestration CLI", () => {
       const replay = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
       expect(replay.status, replay.stderr).toBe(0);
       expect(JSON.parse(replay.stdout).kind, JSON.stringify(JSON.parse(replay.stdout))).toBe("done");
-    }, 15_000);
+      // Five cold CLI processes plus two concurrent status reads can exceed
+      // the default deadline under the full parallel project suite.
+    }, 30_000);
 
     it("refuses a decision id that is not the exact pending advisory request", async () => {
       const { root, runsRoot, runDir } = (await startedWaveRun("decide-wrong-id"));

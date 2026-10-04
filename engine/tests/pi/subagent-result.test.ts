@@ -39,6 +39,7 @@ import {
   piSubagentFailureSignals,
   parsePiSubagentResults,
   resolveImplementationTaskId,
+  writeTargetPathOf,
   writtenPathsOf,
   type PiReviewAttemptAuthority,
   type PiSubagentResult,
@@ -299,6 +300,24 @@ describe("writtenPathsOf", () => {
       { role: "assistant", content: [{ type: "toolCall", id: "c4", name: "Write", arguments: { file_path: "d.md" } }] },
       { role: "assistant", content: [{ type: "toolCall", id: "c5", name: "write", arguments: { filePath: "e.md" } }] },
     ] as never)).toEqual(["a.md", "d.md", "e.md"]);
+  });
+});
+
+describe("writeTargetPathOf — the probe order the ??= assignment encodes", () => {
+  it("a non-string winner FAILS instead of deferring to a later string key", () => {
+    // `path` holds a non-nullish non-string: it wins the probe at key 1, and
+    // the string test rejects it — the later `file_path` string is never
+    // consulted. A defer here would silently redirect the write target the
+    // guard verifies onto a path the tool did not name.
+    expect(writeTargetPathOf({ path: 42, file_path: "real.md" })).toBeNull();
+  });
+
+  it("a nullish winner DEFERS to the later key, and the FIRST non-nullish string wins", () => {
+    // null and undefined are the only deferring values: `null` at `path`
+    // leaves the probe open, so `file_path` proves the target; a later key
+    // cannot displace an earlier non-nullish one.
+    expect(writeTargetPathOf({ path: null, file_path: "real.md" })).toBe("real.md");
+    expect(writeTargetPathOf({ file_path: "real.md", filePath: "shadow.md" })).toBe("real.md");
   });
 });
 
@@ -915,6 +934,55 @@ describe("applyFailedPiResult", () => {
     });
 
     expect(applied.log.join("\n")).toContain('exitCode=0, stopReason=error, errorMessage="Connection error."');
+  });
+
+  it("reports duplicate/stale failure evidence as a processing error without storing", async () => {
+    // The slot already holds this agent's evidence (a successful capture ran
+    // first): a failed result arriving afterwards is stale noise, and the
+    // shared locked reducer's folded `changed:false` arm must surface as a
+    // processing failure, never as a clean log line.
+    const base = graph();
+    const withEvidence = graph({
+      tasks: [{
+        ...base.tasks[0]!,
+        review_generation: 2,
+        review_run: {
+          generation: 2,
+          packet_id: "b".repeat(64),
+          head_sha: "2".repeat(40),
+          expected_agents: ["code-reviewer"],
+          prior_finding_ids: [],
+          evidence: [{ agent: "code-reviewer", prior_assessments: [], new_findings: [], slot_id: "review-slot:current", attempted: 1 }],
+          slot_authority: [{ agent: "code-reviewer", slot_id: "review-slot:current", attempted: 1 }],
+        },
+      }],
+    });
+    const store = fakeStore(withEvidence);
+    const applied = await applyFailedPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ exitCode: 1 }),
+      reservedSlot: {
+        agentType: "code-reviewer",
+        taskId: "T1",
+        reviewAuthority: {
+          kind: "slot-bound",
+          taskId: "T1",
+          agentType: "code-reviewer",
+          generation: 2,
+          packetId: "b".repeat(64),
+          slotId: "review-slot:current",
+          attempted: 1,
+        },
+      },
+      now: NOW,
+    });
+
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("rejected duplicate/stale failure evidence under the state lock"),
+    ]);
+    expect(applied.log.join("\n")).toContain("review evidence NOT stored");
+    expect(store.current()).toEqual(parsedGraph(withEvidence));
   });
 });
 

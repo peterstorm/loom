@@ -15,9 +15,9 @@ import {
   type ProofTestResult,
   type TaskProof,
 } from "./proof-obligations";
-import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ContextPacket } from "./context-packets";
+import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ByteSection, type ContextPacket } from "./context-packets";
 import { parseReviewerProtocolDescriptor, type ReviewerProtocolDescriptor } from "./reviewer-contract";
-import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile, WAVE_REVIEW_AGENTS } from "./model-profiles";
+import { issuedReviewerProfile, lowerModelProfile, resolveAgentPolicy, WAVE_REVIEW_AGENTS, type ReviewerIssueRoute } from "./model-profiles";
 import {
   canonicalRecord,
   parseAgentRequestAuthority,
@@ -31,7 +31,13 @@ import {
   type InitialSpawnRequestInput,
   type OrchestrationRunId,
 } from "./orchestration-contract";
-import type { ReviewedWorkspaceObservation } from "./reviewed-workspace";
+import {
+  parseReviewedWorkspaceSnapshot,
+  waveFrozenSource,
+  WAVE_FROZEN_SOURCE_SECTION,
+  type ReviewedWorkspaceObservation,
+  type ReviewedWorkspaceSnapshot,
+} from "./reviewed-workspace";
 import {
   projectRequirementCoverage,
   renderRequirementCoverage,
@@ -71,6 +77,10 @@ export type WaveReviewRegistrationAuthority = Readonly<{
   orphanRecovery?: Readonly<{ previousRunId: string; previousAuthorityDigest: string }>;
 }> & (Readonly<{ schemaVersion: 1; reviewerProtocol?: never }> |
   Readonly<{ schemaVersion: 2; reviewerProtocol: ReviewerProtocolDescriptor }>);
+
+/** The Wave review packet section labels; spec-check reads both by name. */
+export const WAVE_REVIEW_AUTHORITY_SECTION = "wave-review-authority";
+export const REQUIREMENT_COVERAGE_SECTION = "requirement-coverage";
 
 /** Exact protected snapshot identity used by publication and locked install. */
 export function waveGateAuthorityDigest(
@@ -554,7 +564,7 @@ export function readWaveReviewContext(
   digest: string,
 ): WaveReviewContextRead {
   const packet = packets.find((candidate) => candidate.digest === digest);
-  const section = packet?.fixedContext.find(({ label }) => label === "wave-review-authority");
+  const section = packet?.fixedContext.find(({ label }) => label === WAVE_REVIEW_AUTHORITY_SECTION);
   if (section === undefined) return { kind: "absent" };
   try {
     const raw: unknown = JSON.parse(
@@ -679,7 +689,9 @@ export function prepareWaveReviewBatch(
   attempt: 1 | 2,
   workspace: readonly ReviewedWorkspaceObservation[],
   specCheckObservation: WaveSpecCheckObservation,
+  issueRoute: ReviewerIssueRoute = "catalog",
 ): DomainResult<WaveRequestBatch, WaveReviewPreparationError> {
+  const reviewerRoute = registration.schemaVersion === 2 ? issueRoute : "catalog";
   if (registration.schemaVersion === 2) {
     const protocol = parseReviewerProtocolDescriptor(registration.reviewerProtocol);
     if (!protocol.ok) return failure(protocol.error.message);
@@ -696,15 +708,23 @@ export function prepareWaveReviewBatch(
       currentWaveTasks.length !== tasks.length || currentWaveTasks.some((task, index) => task.id !== tasks[index]?.id)) {
     return failure("registered Wave Task roster drifted from the exact protected current-Wave roster");
   }
-  const workspaceByTask = new Map<string, ReviewedWorkspaceObservation>();
+  const observationsByTask = new Map<string, ReviewedWorkspaceObservation>();
   for (const observation of workspace) {
-    if (workspaceByTask.has(observation.taskId)) {
+    if (observationsByTask.has(observation.taskId)) {
       return failure(`Task ${observation.taskId} has duplicate workspace observations`);
     }
-    workspaceByTask.set(observation.taskId, observation);
+    observationsByTask.set(observation.taskId, observation);
   }
-  if (workspaceByTask.size !== tasks.length || tasks.some(({ id }) => !workspaceByTask.has(id))) {
+  if (observationsByTask.size !== tasks.length || tasks.some(({ id }) => !observationsByTask.has(id))) {
     return failure("current Wave workspace observations differ from the exact registered Task roster");
+  }
+  const workspaceByTask = new Map<string, ReviewedWorkspaceSnapshot>();
+  for (const task of tasks) {
+    const observation = observationsByTask.get(task.id)!;
+    const expectedScope = [...new Set([...(task.file_list ?? []), ...(task.files_modified ?? [])])].sort();
+    const snapshot = parseReviewedWorkspaceSnapshot(task.id, expectedScope, observation);
+    if (!snapshot.ok) return failure(snapshot.error);
+    workspaceByTask.set(task.id, snapshot.value);
   }
   if (specCheckDocuments.spec.path !== (graph.spec_file ?? null) ||
       specCheckDocuments.plan.path !== (graph.plan_file ?? null)) {
@@ -731,6 +751,7 @@ export function prepareWaveReviewBatch(
   );
   const batchEpoch = parseArtifactDigest(sha256Hex(JSON.stringify({
     runId,
+    ...(reviewerRoute === "qualified-local" ? { reviewerRoute } : {}),
     wave: registration.input.wave,
     authorityDigest: registration.authorityDigest,
     tasks: tasks.map((task) => ({
@@ -764,6 +785,16 @@ export function prepareWaveReviewBatch(
       headSha: batchEpoch.value,
       workspaceHeadSha: workspaceHeadSha.value,
     }));
+  }
+
+  const frozenSourceByTask = new Map<string, ByteSection>();
+  if (registration.schemaVersion === 2) {
+    for (const task of tasks) {
+      const snapshot = workspaceByTask.get(task.id)!;
+      const source = encodeByteSection(WAVE_FROZEN_SOURCE_SECTION, JSON.stringify(waveFrozenSource(snapshot)));
+      if (!source.ok) return failure(source.error.message);
+      frozenSourceByTask.set(task.id, source.value);
+    }
   }
 
   const subjects = [
@@ -803,10 +834,10 @@ export function prepareWaveReviewBatch(
     if (!requestId.ok) return failure(requestId.error.message);
     const policy = resolveAgentPolicy(subject.role);
     if (!policy.ok) return failure(policy.error.message);
-    const profile = resolveModelProfile(policy.value.profile);
+    const profile = issuedReviewerProfile(subject.role, reviewerRoute);
     if (!profile.ok) return failure(profile.error.message);
     const task = subject.taskId === null ? null : tasks.find(({ id }) => id === subject.taskId) ?? null;
-    const section = encodeByteSection("wave-review-authority", JSON.stringify({
+    const section = encodeByteSection(WAVE_REVIEW_AUTHORITY_SECTION, JSON.stringify({
       runId,
       wave: registration.input.wave,
       authorityDigest: registration.authorityDigest,
@@ -840,9 +871,15 @@ export function prepareWaveReviewBatch(
     // it — so widening the authority schema would buy a parser nobody calls.
     // Only the spec-check subject receives it; no reviewer has a use for it.
     const coverageSection = subject.taskId === null
-      ? encodeByteSection("requirement-coverage", renderRequirementCoverage(requirementCoverage))
+      ? encodeByteSection(REQUIREMENT_COVERAGE_SECTION, renderRequirementCoverage(requirementCoverage))
       : null;
     if (coverageSection !== null && !coverageSection.ok) return failure(coverageSection.error.message);
+    const sourceSection = subject.taskId === null ? null : frozenSourceByTask.get(subject.taskId) ?? null;
+    const fixedContext = [
+      section.value,
+      ...(sourceSection === null ? [] : [sourceSection]),
+      ...(coverageSection === null ? [] : [coverageSection.value]),
+    ];
     const packetInput = {
       requestId: requestId.value,
       role: subject.role,
@@ -850,9 +887,7 @@ export function prepareWaveReviewBatch(
       outputContract: subject.role === "spec-check-invoker"
         ? `Run the Wave ${registration.input.wave} spec alignment check and emit its exact Machine Summary.`
         : `Review Task ${subject.taskId} from the immutable packet and emit the exact Machine Summary and findings contract.`,
-      fixedContext: Object.freeze(
-        coverageSection === null ? [section.value] : [section.value, coverageSection.value],
-      ),
+      fixedContext: Object.freeze(fixedContext),
       variableContext: Object.freeze([]),
     };
     const packet = subject.taskId !== null && registration.schemaVersion === 2
