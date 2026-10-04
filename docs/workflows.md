@@ -272,8 +272,9 @@ For every Wave Task, Loom creates an immutable Review Packet and issues the exac
 
 Implementation changes increment `review_generation`. A new Review Run snapshots prior active Finding ids. Every expected reviewer must assess each prior Finding exactly once:
 
-- `resolved_by_remediation` from the complete roster retires it into `resolved_findings`;
-- any `still_present` assessment keeps it active;
+- it retires into `resolved_findings` when the reviewer role that raised it (its owner) assesses `resolved_by_remediation` and no other reviewer's `still_present` cites concrete counter-evidence — a `file.ext:line` reference in the reason;
+- the owner's own `still_present`, or a dissent with such a reference, keeps it active; a bare "not re-verified" or a file name without a line does not;
+- a Finding whose owner is not on the roster (recovered view claims, operator overrides) still needs `resolved_by_remediation` from the complete roster;
 - new Findings become active only at atomic finalization.
 
 This prevents a clean rerun from silently erasing an old blocker by omission.
