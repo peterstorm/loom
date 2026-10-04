@@ -253,13 +253,13 @@ export function analyzeNewTests(
 }
 
 export type FilePresenceResult =
-  | Readonly<{ ok: true; exists: boolean }>
+  | Readonly<{ ok: true; kind: "absent" | "file" | "directory" }>
   | Readonly<{ ok: false; error: string }>;
 
 export type NewTestObservationError =
   | Readonly<{
       kind: "git-observation-failed";
-      operation: "is-tracked" | "diff-since" | "diff-worktree" | "diff-index" | "diff-untracked";
+      operation: "is-tracked" | "diff-since" | "diff-worktree" | "diff-index" | "diff-untracked" | "list-untracked";
       message: string;
     }>
   | Readonly<{
@@ -290,16 +290,16 @@ export type DiffDeps = Readonly<{
   diffFilesSince: (revision: string, files: string[]) => git.GitDiffResult;
   diffUntracked: (file: string) => git.GitDiffResult;
   inspectFilePresence: (path: string) => FilePresenceResult;
+  untrackedLeaves: (path: string) => git.GitPathListResult;
 }>;
 
 function inspectFilePresence(path: string): FilePresenceResult {
   try {
-    lstatSync(path);
-    return { ok: true, exists: true };
+    return { ok: true, kind: lstatSync(path).isDirectory() ? "directory" : "file" };
   } catch (error) {
     const code = error instanceof Error && "code" in error ? error.code : undefined;
     return code === "ENOENT"
-      ? { ok: true, exists: false }
+      ? { ok: true, kind: "absent" }
       : { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
@@ -311,6 +311,7 @@ const REAL_DIFF_DEPS: DiffDeps = {
   diffFilesSince: git.diffFilesSince,
   diffUntracked: git.diffUntracked,
   inspectFilePresence,
+  untrackedLeaves: git.untrackedLeaves,
 };
 
 /** File presence rooted at the caller's repository. `inspectFilePresence`
@@ -338,6 +339,7 @@ export function realDiffDepsAt(root: string): DiffDeps {
     diffFilesSince: (revision, files) => git.diffFilesSinceAt(root, revision, files),
     diffUntracked: (file) => git.diffUntrackedAt(root, file),
     inspectFilePresence: (path) => inspectFilePresenceAt(root, path),
+    untrackedLeaves: (path) => git.untrackedLeavesAt(root, path),
   };
 }
 
@@ -347,18 +349,13 @@ export function collectDiff(
   startSha?: string,
 ): NewTestObservationResult<string> {
   if (filesModified.length === 0) return observationOk("");
-  const classified: Array<{ file: string; tracked: boolean }> = [];
+  const tracked: string[] = [];
+  const untracked = new Set<string>();
   for (const file of filesModified) {
-    const result = deps.isTracked(file);
-    if (!result.ok) {
-      return observationError({ kind: "git-observation-failed", operation: "is-tracked", message: result.error });
+    const tracking = deps.isTracked(file);
+    if (!tracking.ok) {
+      return observationError({ kind: "git-observation-failed", operation: "is-tracked", message: tracking.error });
     }
-    classified.push({ file, tracked: result.tracked });
-  }
-  const tracked = classified.flatMap(({ file, tracked: isTracked }) => isTracked ? [file] : []);
-  const untracked: string[] = [];
-  for (const { file, tracked: isTracked } of classified) {
-    if (isTracked) continue;
     const presence = deps.inspectFilePresence(file);
     if (!presence.ok) {
       return observationError({
@@ -368,7 +365,18 @@ export function collectDiff(
         message: presence.error,
       });
     }
-    if (presence.exists) untracked.push(file);
+    if (tracking.tracked) tracked.push(file);
+    // A directory artifact is a valid pathspec for the tracked arms, but its new
+    // files exist only as untracked leaves: `--no-index` cannot diff a directory.
+    if (presence.kind === "directory") {
+      const leaves = deps.untrackedLeaves(file);
+      if (!leaves.ok) {
+        return observationError({ kind: "git-observation-failed", operation: "list-untracked", message: leaves.error });
+      }
+      for (const leaf of leaves.paths) untracked.add(leaf);
+    } else if (!tracking.tracked && presence.kind === "file") {
+      untracked.add(file);
+    }
   }
   const diffs = [
     {
@@ -377,7 +385,7 @@ export function collectDiff(
     },
     { operation: "diff-worktree" as const, result: deps.diffFiles(tracked) },
     { operation: "diff-index" as const, result: deps.diffFilesStaged(tracked) },
-    ...untracked.map((file) => ({ operation: "diff-untracked" as const, result: deps.diffUntracked(file) })),
+    ...[...untracked].map((file) => ({ operation: "diff-untracked" as const, result: deps.diffUntracked(file) })),
   ];
   const failed = diffs.find(({ result }) => !result.ok);
   if (failed !== undefined && !failed.result.ok) {
