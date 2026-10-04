@@ -21,7 +21,7 @@ import {
   captureDeclaredArtifactBaseline,
   changedRepositoryArtifactsSince,
 } from "../../utils/artifact-baseline";
-import { canonicalRepositoryPaths } from "../../utils/repository-path";
+import { canonicalRepositoryPaths, partitionWriteEvidence } from "../../utils/repository-path";
 import type {
   NewTestWaiverReason,
   VerificationRequirement,
@@ -116,7 +116,7 @@ function observeAvailableTaskScope(
   try {
     const parserModifiedPaths = canonicalRepositoryPaths(
       args.repositoryRoot,
-      args.parserModifiedPaths,
+      partitionWriteEvidence(args.repositoryRoot, args.parserModifiedPaths).repository,
       args.parserPathLabel,
     );
     const priorAttributedPaths = canonicalRepositoryPaths(

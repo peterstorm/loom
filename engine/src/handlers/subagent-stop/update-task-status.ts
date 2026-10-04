@@ -18,7 +18,7 @@ import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { extractTaskId } from "../../utils/extract-task-id";
 import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
-import { canonicalRepositoryPaths } from "../../utils/repository-path";
+import { canonicalRepositoryPaths, partitionWriteEvidence } from "../../utils/repository-path";
 import { readSettledJsonl } from "../../utils/read-settled-jsonl";
 import {
   compareAttemptBaseline,
@@ -379,7 +379,7 @@ export const runUpdateTaskStatus = async (
   try {
     filesModified = [...canonicalRepositoryPaths(
       repositoryRoot,
-      rawFilesModified,
+      partitionWriteEvidence(repositoryRoot, rawFilesModified).repository,
       "transcript files_modified",
     )];
   } catch (error) {

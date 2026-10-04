@@ -86,6 +86,26 @@ describe("Task-local completion observation shell", () => {
     expect(observed.cumulativeProofArtifactChanges).toEqual(["src/a.ts"]);
   });
 
+  it("ignores an Agent write outside the repository instead of making bytes unobservable", () => {
+    // Production regression: a lint-remediation Agent wrote a throwaway
+    // tsconfig in its scratchpad, and the out-of-repository transcript path
+    // settled the finished attempt infrastructure-blocked.
+    const fixture = repository();
+    const scratch = canonicalTempDir("loom-task-local-scratch-");
+    roots.push(scratch);
+    writeFileSync(join(fixture.root, "src/a.ts"), "export const a = 2;\n");
+    writeFileSync(join(scratch, "tsconfig.json"), "{}\n");
+    const observed = observeTaskLocalCompletion({
+      repositoryRoot: fixture.root,
+      task: fixture.task,
+      authority: fixture.authority,
+      parserModifiedPaths: [join(fixture.root, "src/a.ts"), join(scratch, "tsconfig.json")],
+      parserPathLabel: "test transcript paths",
+      siblingOwnedPaths: [],
+    });
+    expect(observed.suite.checks[0]?.outcome).toEqual({ kind: "accepted", changedPaths: ["src/a.ts"] });
+  });
+
   it("keeps a foreign transcript path semantic even when it names an existing file", () => {
     const fixture = repository();
     const observed = observeTaskLocalCompletion({
