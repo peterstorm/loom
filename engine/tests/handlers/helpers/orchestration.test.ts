@@ -14,6 +14,8 @@ import {
   panelSubmissionProblem,
   panelVerdictEmissionPort,
   parseRegisteredPanelProgram,
+} from "../../../src/core/legacy-panel-decisions";
+import {
   resolvePanelAttemptVerdictSource,
   settlePanelAttemptSubmission,
 } from "../../../src/handlers/helpers/programs/legacy-panel";

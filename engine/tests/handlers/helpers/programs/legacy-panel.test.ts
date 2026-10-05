@@ -1,8 +1,9 @@
 /**
- * The legacy panel module's functional core, at its interface: registration,
- * the issuance join, record parsing, verdict-source selection, settlement, and
- * the deterministic operation reducer — all over plain data, no Run Directory.
- * The shell adapters (`resolvePanelAttemptVerdictSource`,
+ * The legacy panel program's functional core (core/legacy-panel-decisions), at
+ * its interface: registration, the issuance join, record parsing,
+ * verdict-source selection, settlement, and the deterministic operation
+ * reducer — all over plain data, no Run Directory. The shell adapters in
+ * handlers/helpers/programs/legacy-panel (`resolvePanelAttemptVerdictSource`,
  * `settlePanelAttemptSubmission`, `panelOperationEvidence`) are exercised
  * end-to-end by tests/handlers/helpers/orchestration.test.ts.
  */
@@ -11,7 +12,6 @@ import fc from "fast-check";
 import { agentRequestAuthority } from "../../../fixtures/agent-request-authority";
 import { issueEmissionBinding } from "../../../../src/core/emission-tool";
 import { observeEmissionCalls } from "../../../../src/core/harness-capture";
-import type { ProgramParse } from "../../../../src/handlers/helpers/programs/program-result";
 import {
   executeDeterministicPanelOperation,
   joinPanelAttemptIssuance,
@@ -22,9 +22,10 @@ import {
   selectPanelAttemptVerdictSource,
   settlePanelAttempt,
   type PanelAttempt,
+  type PanelEvidenceLookup,
   type PanelOperationEvidence,
   type RegisteredPanelProgram,
-} from "../../../../src/handlers/helpers/programs/legacy-panel";
+} from "../../../../src/core/legacy-panel-decisions";
 
 const RUN = "run.legacy-panel";
 const VERIFIER = "refutation:verifier:1";
@@ -91,9 +92,11 @@ describe("logicalPanelRequestId", () => {
 });
 
 describe("parseRegisteredPanelProgram", () => {
-  it.each([null, [], "text", { schemaVersion: 2, kind: "refutation", input: refutationInput },
-    { schemaVersion: 1, kind: "wave-gate", input: refutationInput }, { schemaVersion: 1, kind: "refutation", input: null },
-    { schemaVersion: 1, kind: "refutation", input: { lenses: ["not-a-lens"] } }])("refuses %j", (raw) => {
+  // Rows are explicit one-argument tuples: a bare `[]` row would be spread
+  // into zero arguments by an array-spreading runner, never reaching `raw`.
+  it.each<[unknown]>([[null], [[]], ["text"], [{ schemaVersion: 2, kind: "refutation", input: refutationInput }],
+    [{ schemaVersion: 1, kind: "wave-gate", input: refutationInput }], [{ schemaVersion: 1, kind: "refutation", input: null }],
+    [{ schemaVersion: 1, kind: "refutation", input: { lenses: ["not-a-lens"] } }]])("refuses %j", (raw) => {
     expect(parseRegisteredPanelProgram(raw)).toBeNull();
   });
 
@@ -192,7 +195,7 @@ describe("selectPanelAttemptVerdictSource and settlePanelAttempt", () => {
 
 describe("executeDeterministicPanelOperation", () => {
   const evidence = (raws: Readonly<Record<string, string>>): PanelOperationEvidence => {
-    const lookup = (id: string): ProgramParse<string> => id in raws
+    const lookup = (id: string): PanelEvidenceLookup<string> => id in raws
       ? { ok: true, value: raws[id]! }
       : { ok: false, message: `operation is missing captured result for ${id}` };
     return { capturedRaw: lookup, parseTarget: lookup };

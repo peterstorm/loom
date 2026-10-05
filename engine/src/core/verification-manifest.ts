@@ -25,8 +25,10 @@ import { canonicalJson, type JsonValue } from "./review-packet";
 import { sha256Bytes, sha256Hex } from "./digest";
 import {
   collectDenseArray,
+  exactRecordErrors,
   isPlainRecord,
   parseExactRecord,
+  toElementResult,
   type ElementResult,
   type UnknownRecord,
 } from "./plain-record";
@@ -151,12 +153,7 @@ function total<T>(parse: () => Parsed<T>): Parsed<T> {
 
 function exactRecord(raw: unknown, fields: readonly string[], path: string): Parsed<UnknownRecord> {
   const record = parseExactRecord(raw, fields, path);
-  if (record.ok) return success(record.value);
-  return failure(record.problem === "not-plain-record" ? [`${path} must be an object`] : record.errors);
-}
-
-function elementResult<T>(parsed: Parsed<T>): ElementResult<T> {
-  return parsed.ok ? parsed : freeze({ ok: false, errors: parsed.error.errors });
+  return record.ok ? success(record.value) : failure(exactRecordErrors(record, path, "an object"));
 }
 
 function projectCheck(check: VerificationManifestCheck): ProjectWaveCompletionCheck {
@@ -211,7 +208,7 @@ function parseCheck(raw: unknown, path: string): Parsed<VerificationManifestChec
 }
 
 function parseChecks(raw: unknown, path: string): Parsed<readonly VerificationManifestCheck[]> {
-  const collected = collectDenseArray(raw, path, (value, elementPath) => elementResult(parseCheck(value, elementPath)));
+  const collected = collectDenseArray(raw, path, (value, elementPath) => toElementResult(parseCheck(value, elementPath)));
   if (collected.kind === "not-array") return failure([`${path} must be an array`]);
   const checks = collected.values;
   const errors = [...collected.errors];

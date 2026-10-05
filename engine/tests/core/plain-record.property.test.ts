@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
   collectDenseArray,
+  exactRecordErrors,
   isPlainRecord,
   isRecord,
   parseExactRecord,
+  toElementResult,
   type ElementResult,
 } from "../../src/core/plain-record";
 
@@ -154,5 +156,54 @@ describe("collectDenseArray", () => {
     fc.assert(fc.property(fc.oneof(fc.constant(null), fc.string(), fc.object(), fc.integer()), (value) => {
       expect(collectDenseArray(value, "items", identity)).toEqual({ kind: "not-array" });
     }));
+  });
+});
+
+describe("exactRecordErrors", () => {
+  it.each([
+    ["an object", "root must be an object"],
+    ["a plain object", "root must be a plain object"],
+  ])("renders a not-plain-record failure with the caller's noun %j", (noun, expected) => {
+    const parsed = parseExactRecord(null, ["kind"], "root");
+    if (parsed.ok) throw new Error("null must not parse as a record");
+    expect(exactRecordErrors(parsed, "root", noun)).toEqual([expected]);
+  });
+
+  it("returns field-mismatch diagnostics unchanged, whatever the noun", () => {
+    fc.assert(fc.property(fieldList, fieldList, key, (fields, present, noun) => {
+      const parsed = parseExactRecord(recordOf(present), fields, "root");
+      if (parsed.ok || parsed.problem !== "field-mismatch") return;
+      expect(exactRecordErrors(parsed, "root", noun)).toBe(parsed.errors);
+    }));
+  });
+});
+
+describe("toElementResult", () => {
+  it("passes a success through as the same object", () => {
+    fc.assert(fc.property(fc.anything(), (value) => {
+      const parsed = Object.freeze({ ok: true as const, value });
+      expect(toElementResult(parsed)).toBe(parsed);
+    }));
+  });
+
+  it("lifts a failure's errors into a frozen ElementResult failure", () => {
+    fc.assert(fc.property(fc.array(fc.string()), (errors) => {
+      const lifted = toElementResult<never>({ ok: false, error: { errors } });
+      expect(lifted).toEqual({ ok: false, errors });
+      expect(Object.isFrozen(lifted)).toBe(true);
+      if (!lifted.ok) expect(lifted.errors).toBe(errors);
+    }));
+  });
+
+  it("feeds collectDenseArray so element diagnostics surface in index order", () => {
+    const parse = (value: unknown, path: string) =>
+      typeof value === "number"
+        ? { ok: true as const, value }
+        : { ok: false as const, error: { errors: [`${path} must be a number`] } };
+    expect(collectDenseArray([1, "x", 3, null], "items", (value, path) => toElementResult(parse(value, path)))).toEqual({
+      kind: "array",
+      values: [1, 3],
+      errors: ["items[1] must be a number", "items[3] must be a number"],
+    });
   });
 });

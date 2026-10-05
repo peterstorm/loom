@@ -127,7 +127,7 @@ describe("current reviewer codec", () => {
     ), { seed: 4010, numRuns: 100 });
   });
 
-  it.each([null, [], 2, "x", {}, { schemaVersion: 2, kind: "standalone-review" }, { schemaVersion: 1, kind: "standalone-review", findings: [] }, { ...standalone(), kind: "unknown" }, { ...standalone(), criticalCount: 0 }, { ...standalone(), packetId: "a".repeat(64) }, { ...standalone(), protocolVersion: 2 }, { ...wave(), extra: 1 }])
+  it.each<[unknown]>([[null], [[]], [2], ["x"], [{}], [{ schemaVersion: 2, kind: "standalone-review" }], [{ schemaVersion: 1, kind: "standalone-review", findings: [] }], [{ ...standalone(), kind: "unknown" }], [{ ...standalone(), criticalCount: 0 }], [{ ...standalone(), packetId: "a".repeat(64) }], [{ ...standalone(), protocolVersion: 2 }], [{ ...wave(), extra: 1 }]])
     ("refuses wrong root, version, missing fields or authored extras: %j", (value) => refuseValue(value));
 
   it.each(["severity", "file", "line", "claim", "basis"])("requires critical %s", (key) => {

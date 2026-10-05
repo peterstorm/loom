@@ -42,7 +42,7 @@ import {
   type TaskId,
 } from "./task-id";
 
-import { collectDenseArray, isPlainRecord, parseExactRecord, type UnknownRecord } from "./plain-record";
+import { collectDenseArray, exactRecordErrors, isPlainRecord, parseExactRecord, type UnknownRecord } from "./plain-record";
 
 export { parseTaskId, type TaskId } from "./task-id";
 
@@ -107,8 +107,7 @@ function total<T>(parse: () => Parsed<T>): Parsed<T> {
 
 function exactRecord(raw: unknown, fields: readonly string[], path: string): Parsed<UnknownRecord> {
   const record = parseExactRecord(raw, fields, path);
-  if (record.ok) return success(record.value);
-  return failure(record.problem === "not-plain-record" ? [`${path} must be a plain object`] : record.errors);
+  return record.ok ? success(record.value) : failure(exactRecordErrors(record, path, "a plain object"));
 }
 
 function parseDenseArray(raw: unknown, path: string): Parsed<readonly unknown[]> {

@@ -21,6 +21,7 @@ import {
   parseArtifactDigest, parseOrchestrationRunId, parseRequestId,
   type ArtifactDigest, type DomainResult, type NonEmpty, type OrchestrationRunId, type RequestId,
 } from "../../../core/orchestration-contract";
+import { isRecord } from "../../../core/plain-record";
 import type { StandaloneReviewedSource, StandaloneReviewedSourceFile } from "./standalone-evidence";
 
 /** The one key the bridge is published under. `unique symbol`, so a consumer
@@ -70,8 +71,6 @@ export type LoomReviewAuthorityBridge = Readonly<{
   verify: (input: VerifyInput) => Promise<VerifiedLoomReviewAuthorityReceipt>;
 }>;
 
-const isRecord = (raw: unknown): raw is Readonly<Record<string, unknown>> =>
-  typeof raw === "object" && raw !== null && !Array.isArray(raw);
 const exactKeys = (record: Readonly<Record<string, unknown>>, keys: readonly string[]): boolean =>
   Object.keys(record).length === keys.length && keys.every(key => Object.hasOwn(record, key));
 const nonEmptyString = (raw: unknown): raw is string => typeof raw === "string" && raw.length > 0;

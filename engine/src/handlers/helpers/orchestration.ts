@@ -144,12 +144,11 @@ import { translateLegacyPanelJournal } from "./panel-program";
 import {
   executeDeterministicPanelOperation,
   logicalPanelRequestId,
-  panelOperationEvidence,
   parseRegisteredPanelProgram,
   registeredPanelProgram,
-  settlePanelAttemptSubmission,
   type RegisteredPanelProgram,
-} from "./programs/legacy-panel";
+} from "../../core/legacy-panel-decisions";
+import { panelOperationEvidence, settlePanelAttemptSubmission } from "./programs/legacy-panel";
 import {
   applyWaveFacadeSubmission,
   inspectRemediationFacade,

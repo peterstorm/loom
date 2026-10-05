@@ -5,7 +5,8 @@ import { readStandaloneReviewPublication } from "../../src/core/standalone-revie
 import { standaloneFixture, valueOf } from "../fixtures/standalone-remediation-authority";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
 import { parseStandaloneReviewerPayloadV3 } from "../../src/core/reviewer-protocol";
-import { STANDALONE_LINEAGE_LIMITS, type StandaloneReviewerPayloadV3 } from "../../src/core/standalone-lineage-contract";
+import { STANDALONE_LINEAGE_LIMITS, standaloneLineageInventorySchema, type StandaloneReviewerPayloadV3 } from "../../src/core/standalone-lineage-contract";
+import { attributeFindings } from "../../src/core/findings";
 import {
   prepareStandaloneLineageSource,
   prepareStandaloneDisposition,
@@ -125,6 +126,48 @@ describe("Standalone Finding Origin and source membership", () => {
       expect(parseStandaloneLineageInventory(bytes([{ ...row, finding: { ...row.finding, id } }])))
         .toMatchObject({ ok: false, error: { code: "invalid-data" } });
     });
+  describe("the lineage row schema rehydrates exactly the minted FindingId grammar", () => {
+    const FINDING_ID_REFUSAL = "Finding id must be a task-local Finding ID";
+    const rowWithId = (id: string): unknown => {
+      const row = source(true, true).inventory[0]!;
+      return JSON.parse(JSON.stringify([{ ...row, finding: { ...row.finding, id } }]));
+    };
+    const legacyDraft = { severity: "advisory" as const, file: null, line: null, claim: "A minted identity probe." };
+    // Agent names stay inside the row schema's 2048-byte reference bound once
+    // sanitized and suffixed; a longer agent is not a reviewer role name.
+    const agent = fc.string({ minLength: 0, maxLength: 256 });
+    const ordinal = fc.integer({ min: 1, max: Number.MAX_SAFE_INTEGER });
+    const mintedId = fc.tuple(agent, ordinal).map(([name, start]) => attributeFindings([legacyDraft], name, start)[0]!.id);
+
+    it("accepts every id attributeFindings mints for any agent name and positive safe ordinal", () => {
+      fc.assert(fc.property(mintedId, id => {
+        const parsed = standaloneLineageInventorySchema.safeParse(rowWithId(id));
+        expect(parsed.success).toBe(true);
+        if (parsed.success) expect(parsed.data[0]?.finding.id).toBe(id);
+      }), { seed: 5141, numRuns: 200 });
+    });
+
+    const refusedFor = (id: string): boolean => {
+      const parsed = standaloneLineageInventorySchema.safeParse(rowWithId(id));
+      return !parsed.success && JSON.stringify(parsed.error.issues).includes(FINDING_ID_REFUSAL);
+    };
+
+    it("refuses a minted id once a ':' or whitespace is spliced in", () => {
+      const separator = fc.constantFrom(":", " ", "\t", "\n", "\r", " ", " ", "　");
+      fc.assert(fc.property(mintedId, separator, fc.nat(), (id, char, at) => {
+        const index = at % (id.length + 1);
+        expect(refusedFor(`${id.slice(0, index)}${char}${id.slice(index)}`)).toBe(true);
+      }), { seed: 5142, numRuns: 200 });
+    });
+
+    it("refuses a numeric suffix beyond the safe-integer range", () => {
+      const beyondSafe = fc.bigInt({ min: BigInt(Number.MAX_SAFE_INTEGER) + 1n, max: 10n ** 30n });
+      fc.assert(fc.property(agent, beyondSafe, (name, suffix) => {
+        const prefix = attributeFindings([legacyDraft], name, 1)[0]!.id.replace(/-1$/u, "");
+        expect(refusedFor(`${prefix}-${suffix}`)).toBe(true);
+      }), { seed: 5143, numRuns: 200 });
+    });
+  });
   it("bounds retained ingress before decoding, history count and origin ordinal", () => {
     expect(parseStandaloneLineageInventory(new Uint8Array(STANDALONE_LINEAGE_LIMITS.retainedBytes + 1))).toMatchObject({ ok: false, error: { code: "limit-exceeded" } });
     const row = source(true).inventory[0]!;

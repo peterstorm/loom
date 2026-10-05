@@ -17,6 +17,11 @@
  * Per-site labels stay with the caller: a failure carries a typed `problem`
  * and only the diagnostics every caller words identically. Each caller lifts
  * that into its own result shape, so persisted error text stays byte-stable.
+ * Two lifting helpers keep those adapters one line long:
+ * `exactRecordErrors` renders a failure as diagnostics, taking the caller's
+ * own record noun ("an object", "a plain object") for the not-a-record case;
+ * `toElementResult` narrows a caller's `{ ok, error: { errors } }` result to
+ * the `ElementResult` that `collectDenseArray` consumes.
  *
  * Descriptor-level snapshots that refuse getters and return `null` instead of
  * diagnostics live in `exact-data.ts`; that module reuses `isPlainRecord`.
@@ -60,9 +65,29 @@ export function parseExactRecord(raw: unknown, fields: readonly string[], path: 
   return Object.freeze({ ok: false, problem: "field-mismatch", errors });
 }
 
+/**
+ * Render a `parseExactRecord` failure as diagnostics. The not-a-record case
+ * reads `${path} must be ${recordNoun}`; the noun is the caller's own wording.
+ * A field mismatch returns its missing-then-surplus diagnostics unchanged.
+ */
+export function exactRecordErrors(
+  failure: Extract<ExactRecordResult, { ok: false }>,
+  path: string,
+  recordNoun: string,
+): readonly [string, ...string[]] {
+  return failure.problem === "not-plain-record" ? [`${path} must be ${recordNoun}`] : failure.errors;
+}
+
 export type ElementResult<T> =
   | Readonly<{ ok: true; value: T }>
   | Readonly<{ ok: false; errors: readonly string[] }>;
+
+/** Narrow a caller's `{ ok, error: { errors } }` result to an `ElementResult`; success passes through as-is. */
+export function toElementResult<T>(
+  parsed: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error: Readonly<{ errors: readonly string[] }> }>,
+): ElementResult<T> {
+  return parsed.ok ? parsed : Object.freeze({ ok: false, errors: parsed.error.errors });
+}
 
 export type DenseArrayCollection<T> =
   | Readonly<{ kind: "not-array" }>

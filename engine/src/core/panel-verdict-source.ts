@@ -35,8 +35,8 @@ import {
 // Purity boundary: this module is a declared pure module, so it never imports
 // the emission transport modules (`emission-ingestion`/`emission-tool`/
 // `harness-capture`). The kernel capabilities arrive as the injected port —
-// the shell that owns the emission transport supplies the ONE production
-// adapter. The structural types below mirror the kernel's frozen contract
+// `legacy-panel-decisions`, which imports the emission transport, supplies the
+// ONE production adapter. The structural types below mirror the kernel's frozen contract
 // shapes; a kernel drift fails to compile at the adapter, never silently
 // here. The core keeps every decision arm: which bytes won, the retained
 // refusal, the durable provenance, the record protocol, and the AD-9 exact
@@ -149,8 +149,8 @@ export type PanelVerdictSourceSelection =
   | Readonly<{ kind: "observation-refused"; refusal: PanelVerdictObservationRefusal }>;
 
 /**
- * The injected kernel port — the purity boundary's ONE seam. The shell that
- * owns the emission transport supplies the fold (the kernel's ONE
+ * The injected kernel port — the purity boundary's ONE seam. The module that
+ * imports the emission transport (`legacy-panel-decisions`) supplies the fold (the kernel's ONE
  * verdict-source selection) and the AD-9 replay capability that re-certifies
  * a record's emission claims against the frozen registry and re-folds the
  * single accepted call. The replay returns the minted schema digest beside

@@ -77,12 +77,21 @@ import {
   type RemediationStartInputV2,
 } from "./remediation-registration";
 import type { RemediationInspectionLabel } from "../../../core/run-inspection";
-import { failed, type FacadeDriveResult, type RemediationInstalledOutcome } from "./program-result";
+import {
+  failed,
+  type FacadeBlockedAction,
+  type FacadeBlockedDiagnostic,
+  type FacadeDoneAction,
+  type FacadeDriveResult,
+  type RemediationInstalledOutcome,
+} from "./program-result";
 
 /** What a remediation drive emits: a defect-family accounting block, or the installed remediation. */
 type RemediationFacadeAction =
-  | Readonly<{ kind: "blocked"; runId: OrchestrationRunId; diagnostic: Readonly<{ kind: "defect-family-accounting-blocked"; message: string }> }>
-  | Readonly<{ kind: "done"; runId: OrchestrationRunId; outcome: RemediationInstalledOutcome }>;
+  | (FacadeBlockedAction & Readonly<{
+      diagnostic: Extract<FacadeBlockedDiagnostic, Readonly<{ kind: "defect-family-accounting-blocked" }>>;
+    }>)
+  | (Extract<FacadeDoneAction, Readonly<{ runId: OrchestrationRunId }>> & Readonly<{ outcome: RemediationInstalledOutcome }>);
 type RemediationDriveResult = FacadeDriveResult<RemediationFacadeAction>;
 
 export function remediationBlocked(handle: RunDirHandle, message: string): RemediationDriveResult {

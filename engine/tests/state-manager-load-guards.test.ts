@@ -484,13 +484,13 @@ describe("parseTaskGraph spec_anchor_hashes load boundary", () => {
     expect(Object.isFrozen(parsed.value.tasks[0]?.spec_anchor_hashes)).toBe(true);
   });
 
-  it.each([42, null, true, {}, []])("refuses non-string hash value %j", (value) => {
+  it.each<[unknown]>([[42], [null], [true], [{}], [[]]])("refuses non-string hash value %j", (value) => {
     expect(errorOf(graph({
       tasks: [{ ...validTask, spec_anchor_hashes: { "FR-001": value } }],
     }))).toContain('tasks[0].spec_anchor_hashes["FR-001"] must be a string');
   });
 
-  it.each([null, [], "hash"])("refuses non-record spec_anchor_hashes %j", (value) => {
+  it.each<[unknown]>([[null], [[]], ["hash"]])("refuses non-record spec_anchor_hashes %j", (value) => {
     expect(errorOf(graph({
       tasks: [{ ...validTask, spec_anchor_hashes: value }],
     }))).toContain("spec_anchor_hashes must be a record of strings");

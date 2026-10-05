@@ -24,9 +24,10 @@ import {
 import { sha256Hex } from "./digest";
 import {
   collectDenseArray,
+  exactRecordErrors,
   isPlainRecord,
   parseExactRecord,
-  type ElementResult,
+  toElementResult,
   type UnknownRecord,
 } from "./plain-record";
 
@@ -234,12 +235,7 @@ function total<T>(parse: () => Parsed<T>): Parsed<T> {
 
 function exactRecord(raw: unknown, fields: readonly string[], path: string): Parsed<UnknownRecord> {
   const record = parseExactRecord(raw, fields, path);
-  if (record.ok) return success(record.value);
-  return failure(record.problem === "not-plain-record" ? [`${path} must be an object`] : record.errors);
-}
-
-function elementResult<T>(parsed: Parsed<T>): ElementResult<T> {
-  return parsed.ok ? parsed : freeze({ ok: false, errors: parsed.error.errors });
+  return record.ok ? success(record.value) : failure(exactRecordErrors(record, path, "an object"));
 }
 
 function collect<T>(results: readonly Parsed<T>[]): Parsed<readonly T[]> {
@@ -744,7 +740,7 @@ export function parseCompletionCheckResult(raw: unknown, path = "result"): Parse
 
 function parseCheckResults(raw: unknown, path: string): Parsed<readonly CompletionCheckResult[]> {
   const results = collectDenseArray(raw, path, (value, elementPath) =>
-    elementResult(parseCheckResult(value, elementPath)));
+    toElementResult(parseCheckResult(value, elementPath)));
   if (results.kind === "not-array") return failure([`${path} must be an array`]);
   return results.errors.length === 0
     ? success(freezeArray([...results.values].sort((left, right) => compareStrings(left.checkId, right.checkId))))

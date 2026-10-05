@@ -6,6 +6,7 @@
  * module and answers with a WavePhase; starting and replacing a run live in
  * wave-gate-start.ts and wave-gate-replacement.ts. */
 import { canonicalStructuralEquals } from '../../../core/orchestration-contract';
+import { isRecord } from '../../../core/plain-record';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { observeTaskGraphProjectBoundary, TASK_GRAPH_PATH } from '../../../config';
 import { StateManager } from '../../../state-manager';
@@ -95,23 +96,22 @@ export async function resumeWaveGateFacade(
       let raw: unknown;
       try { raw = JSON.parse(terminal); }
       catch (error) { return waveBlocked(handle, `Wave Gate checkpoint is invalid JSON: ${error instanceof Error ? error.message : String(error)}`); }
-      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      if (!isRecord(raw)) {
         return waveBlocked(handle, "Wave Gate checkpoint must be a typed object");
       }
-      const record = raw as Record<string, unknown>;
-      if (record.kind === "wave-gate-done") {
+      if (raw.kind === "wave-gate-done") {
         verifyCompletedWaveProtocols(handle, registration);
-        if (!exactObject(record, ["schemaVersion", "kind", "receipt"]) || record.schemaVersion !== 1) {
+        if (!exactObject(raw, ["schemaVersion", "kind", "receipt"]) || raw.schemaVersion !== 1) {
           return waveBlocked(handle, "terminal Wave Gate checkpoint has invalid schema");
         }
-        const receipt = record.receipt;
+        const receipt = raw.receipt;
         const history = graph.wave_gate_history?.find((entry) => entry.runId === handle.runId);
         if (history === undefined || !provenEqualTo(history.completionReceipt, receipt)) {
           return waveBlocked(handle, "terminal Wave Gate checkpoint does not match protected completion history");
         }
         return { ok: true, action: { kind: "done", runId: handle.runId, outcome: receipt } };
       }
-      return waveBlocked(handle, `unknown or non-terminal Wave Gate checkpoint kind: ${String(record.kind ?? "missing")}`);
+      return waveBlocked(handle, `unknown or non-terminal Wave Gate checkpoint kind: ${String(raw.kind ?? "missing")}`);
     }
     // Completion crash-window recovery: the graph commit is atomic and durable
     // BEFORE the terminal checkpoint is written, so a crash between
