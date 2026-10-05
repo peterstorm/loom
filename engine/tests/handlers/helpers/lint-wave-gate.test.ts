@@ -375,7 +375,7 @@ describe("lint-wave-gate handler", () => {
     });
 
   it("fails closed with the engine-error block when the task graph cannot be loaded", () => {
-    const dir = mkdtempSync(join(tmpdir(), "loom-lint-handler-"));
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-lint-handler-")));
     try {
       const statePath = join(dir, "active_task_graph.json");
       writeFileSync(statePath, '{"current_phase":');
@@ -389,7 +389,7 @@ describe("lint-wave-gate handler", () => {
   });
 
   it("reports an absent task graph without the engine-error prefix", () => {
-    const dir = mkdtempSync(join(tmpdir(), "loom-lint-handler-"));
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-lint-handler-")));
     try {
       const statePath = join(dir, "absent.json");
       const run = cli(statePath);

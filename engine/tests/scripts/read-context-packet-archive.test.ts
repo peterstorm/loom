@@ -7,18 +7,18 @@
  */
 import { afterAll, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 import { buildReviewerContextPacket, buildStandaloneReviewerContextPacketV3, encodeByteSection, type ByteSection } from "../../src/core/context-packets";
 import { sha256Bytes } from "../../src/core/digest";
 import { parseRequestId, type RequestId } from "../../src/core/orchestration-contract";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 
 const SCRIPT = resolve(__dirname, "../../../scripts/read-context-packet.ts");
 const ROLE = "code-reviewer";
 const LABEL = `predecessor-context:${ROLE}`;
-const root = mkdtempSync(join(tmpdir(), "loom-archive-reader-"));
+const root = canonicalTempDir("loom-archive-reader-");
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 const ok = <T>(result: { ok: true; value: T } | { ok: false; error: unknown }): T => {
