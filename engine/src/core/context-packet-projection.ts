@@ -2,7 +2,7 @@
 import { match } from "ts-pattern";
 import { parseContextPacket, parseStandaloneReviewerContextPacketV3, type ContextPacket, type StandaloneReviewerContextPacketV3 } from "./context-packets";
 import { boundDiagnosticMessage, boundedThrownCause, type DomainResult } from "./orchestration-contract";
-import { parseWaveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "./reviewed-workspace";
+import { parseWaveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "./wave-frozen-source";
 
 type ProjectedPacket = ContextPacket | StandaloneReviewerContextPacketV3;
 
@@ -57,26 +57,27 @@ export function parseContextProjectionArguments(args: readonly string[]): Domain
 const decode = (bytes: Iterable<number>): string => new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes));
 const record = (raw: unknown): raw is Record<string, unknown> => typeof raw === "object" && raw !== null && !Array.isArray(raw);
 
+/** Run one decode step; a throw is re-raised as a bounded Error naming the
+ *  step, so `projectContextPacket`'s outer catch reports WHICH step failed. */
+function attributed<T>(operation: string, message: string, step: () => T): T {
+  try {
+    return step();
+  } catch (cause) {
+    const attribution = boundedThrownCause(cause, operation);
+    throw new Error(`${message} (${attribution.name}: ${attribution.message})`);
+  }
+}
+
 function fileText(packet: ProjectedPacket, path: string): DomainResult<string, string> {
   const sections = [...packet.fixedContext, ...packet.variableContext].filter(({ label }) =>
     label === "standalone-frozen-source" || label === WAVE_FROZEN_SOURCE_SECTION);
   if (sections.length === 0) return failed("packet has no frozen source; use the section index for its supplied context");
   if (sections.length !== 1) return failed("packet has ambiguous frozen source sections");
   const section = sections[0]!;
-  let text: string;
-  try {
-    text = decode(section.bytes);
-  } catch (cause) {
-    const attribution = boundedThrownCause(cause, "frozen source index UTF-8");
-    throw new Error(`frozen source index could not be decoded as UTF-8 (${attribution.name}: ${attribution.message})`);
-  }
-  let source: unknown;
-  try {
-    source = JSON.parse(text);
-  } catch (cause) {
-    const attribution = boundedThrownCause(cause, "frozen source index JSON");
-    throw new Error(`frozen source index could not be parsed from the section bytes (${attribution.name}: ${attribution.message})`);
-  }
+  const text = attributed("frozen source index UTF-8", "frozen source index could not be decoded as UTF-8",
+    () => decode(section.bytes));
+  const source: unknown = attributed("frozen source index JSON", "frozen source index could not be parsed from the section bytes",
+    () => JSON.parse(text));
   if (section.label === WAVE_FROZEN_SOURCE_SECTION) {
     const parsed = parseWaveFrozenSource(source);
     if (!parsed.ok) return failed(parsed.error);
@@ -92,14 +93,12 @@ function fileText(packet: ProjectedPacket, path: string): DomainResult<string, s
   if (files.length !== 1 || !record(file)) return failed("source file is absent or ambiguous in this packet");
   if (file.kind === "text" && typeof file.content === "string") return { ok: true, value: file.content };
   if (packet.schemaVersion === 3 && file.kind === "binary" && typeof file.contentBase64 === "string") {
-    let bytes: Uint8Array;
-    try {
-      bytes = Uint8Array.from(atob(file.contentBase64), character => character.charCodeAt(0));
-    } catch (cause) {
-      const attribution = boundedThrownCause(cause, "binary source content base64");
-      throw new Error(`binary source content could not be decoded from its base64 payload (${attribution.name}: ${attribution.message})`);
-    }
-    return { ok: true, value: new TextDecoder("utf-8", { fatal: true }).decode(bytes) };
+    const base64 = file.contentBase64;
+    const bytes = attributed("binary source content base64", "binary source content could not be decoded from its base64 payload",
+      () => Uint8Array.from(atob(base64), character => character.charCodeAt(0)));
+    // Deliberately unattributed: a fatal UTF-8 failure here reaches the outer
+    // catch in `projectContextPacket`, which names the selected file.
+    return { ok: true, value: decode(bytes) };
   }
   return failed("source file is binary or absent; no text projection available");
 }
@@ -109,7 +108,7 @@ function sectionText(packet: ProjectedPacket, label: string): DomainResult<strin
   const section = [...packet.fixedContext, ...packet.variableContext].find((entry) => entry.label === label);
   if (section === undefined) return failed("selected section is absent");
   const text = decode(section.bytes);
-  if (!/^[\s]*[\[{]/.test(text)) return { ok: true, value: text };
+  if (!/^\s*[\[{]/.test(text)) return { ok: true, value: text };
   // The projected shape is decided by parse outcome, not by the leading byte:
   // a brace-leading section is probably structured data, but prose or
   // malformed JSON must project verbatim here rather than escaping as a

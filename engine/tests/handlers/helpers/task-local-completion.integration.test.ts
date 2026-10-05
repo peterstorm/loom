@@ -11,10 +11,8 @@ import {
   observeTaskLocalCompletion,
   realDiffDepsAt,
 } from "../../../src/handlers/helpers/task-local-completion";
-import {
-  captureDeclaredArtifactBaseline,
-  captureRepositoryChangeBaseline,
-} from "../../../src/utils/artifact-baseline";
+import { captureDeclaredArtifactBaseline } from "../../../src/utils/declared-artifact-snapshot";
+import { captureRepositoryChangeBaseline } from "../../../src/utils/repository-change-baseline";
 import { taskFixture } from "../../fixtures/task-lifecycle";
 
 const roots: string[] = [];

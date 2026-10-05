@@ -15,14 +15,21 @@ import {
   renderEmissionDescriptor,
 } from "../../../../src/core/spawn-admission";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, type ReviewerDraftV2 } from "../../../../src/core/reviewer-contract";
-import { parseRegisteredFacadeProgram, publishLegacyInitialBatch, renderSpawnTask, reviewerProtocolResolver } from "../../../../src/handlers/helpers/programs/helpers";
-import { handleWaveReviewContext, installWaveReviewRuns, waveGateAuthorityDigest, waveRequests, deriveWaveAttemptTwo, persistedWaveAttemptTwoCompatibilityProblem, currentWaveTaskReviewRetries, markWaveTaskReviewRetriesIssued } from "../../../../src/handlers/helpers/programs/wave-gate";
+import { parseRegisteredFacadeProgram } from "../../../../src/handlers/helpers/programs/registration";
+import { publishLegacyInitialBatch } from "../../../../src/handlers/helpers/programs/request-publication";
+import { renderSpawnTask } from "../../../../src/handlers/helpers/programs/spawn-task";
+import { reviewerProtocolResolver } from "../../../../src/handlers/helpers/programs/reviewer-protocol-resolution";
+import { handleWaveReviewContext } from "../../../../src/handlers/helpers/programs/wave-review-context";
+import { installWaveReviewRuns, waveRequests } from "../../../../src/handlers/helpers/programs/wave-review-requests";
+import { waveGateAuthorityDigest } from "../../../../src/core/wave-review-authority";
+import { deriveWaveAttemptTwo, currentWaveTaskReviewRetries, markWaveTaskReviewRetriesIssued } from "../../../../src/handlers/helpers/programs/wave-review-retries";
+import { persistedWaveAttemptTwoCompatibilityProblem } from "../../../../src/core/wave-gate-membership";
 import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { captureHarnessResult } from "../../../../src/orchestration/harness-capture-runtime";
 import { parseTaskGraph, StateManager } from "../../../../src/state-manager";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } from "../../../fixtures/pi-session";
 import type { Finding, TaskGraph } from "../../../../src/types";
-import { parseWaveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../../../src/core/reviewed-workspace";
+import { parseWaveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../../../src/core/wave-frozen-source";
 import { graphFixture, taskFixture } from "../../../fixtures/task-lifecycle";
 
 // Route election is ambient-env sensitive: observedReviewerIssueRoute() reads

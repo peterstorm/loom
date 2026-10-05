@@ -43,12 +43,18 @@ export type AuthoredTaskRosterParseResult =
   | Readonly<{ ok: true; value: ValidatedAuthoredTaskRoster }>
   | Readonly<{ ok: false; error: string }>;
 
+/** The roster's ordered distinct Wave set: the one definition read by both the
+ *  contiguity check and the Wave Gate construction. */
+function taskWaves(tasks: readonly AuthoredTask[]): readonly number[] {
+  return Object.freeze([...new Set(tasks.map(({ wave }) => wave))].sort((left, right) => left - right));
+}
+
 function taskWaveRosterError(tasks: readonly AuthoredTask[]): string | null {
   const invalid = tasks.find(({ wave }) => !Number.isSafeInteger(wave) || wave < 1);
   if (invalid !== undefined) {
     return `Task ${invalid.id} Wave must be a positive safe integer, got ${JSON.stringify(invalid.wave)}`;
   }
-  const waves = [...new Set(tasks.map(({ wave }) => wave))].sort((left, right) => left - right);
+  const waves = taskWaves(tasks);
   const gap = waves.findIndex((wave, index) => wave !== index + 1);
   return gap < 0
     ? null
@@ -155,10 +161,6 @@ function sanitizeTask(
     refuted_findings: Object.freeze([]),
     resolved_findings: Object.freeze([]),
   });
-}
-
-function taskWaves(tasks: readonly AuthoredTask[]): readonly number[] {
-  return Object.freeze([...new Set(tasks.map(({ wave }) => wave))].sort((left, right) => left - right));
 }
 
 /**

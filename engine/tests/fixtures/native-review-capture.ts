@@ -1,6 +1,7 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { capturePiSubagentResult, piSpawnRosterId } from "../../../pi/extension";
+import { capturePiSubagentResult } from "../../../pi/review-capture";
+import { piSpawnRosterId } from "../../../pi/tool-input";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import type { RunDirHandle } from "../../src/orchestration/run-directory-handle";
 import { readSessionRunBindings, registerSessionRunBinding } from "../../src/orchestration/session-run-bindings";

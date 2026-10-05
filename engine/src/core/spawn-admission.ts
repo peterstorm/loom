@@ -27,11 +27,13 @@
  * only decides and carries those expectations.
  */
 
+import { match } from "ts-pattern";
 import type { HookResult } from "../types";
 import { checkAgentSkillPrompt } from "./agent-skills";
 import {
   agentRequiresInteractiveTransport,
   classifyPiSpawnItems,
+  DESKTOP_VLLM_ROUTE,
   expectedSpawnModel,
   producerKindsOfAgent,
   type LoomAgentName,
@@ -61,7 +63,7 @@ import {
   type DomainResult,
   type RequestId,
 } from "./orchestration-contract/identity";
-import { sha256Hex } from "./review-packet";
+import { sha256Hex } from "./digest";
 
 /** Pi's transport cap per native subagent call; larger engine batches are
  *  chunked by the parent. Single source — the extension imports it. */
@@ -185,7 +187,7 @@ function itemAdmission(item: PiSpawnItem, ports: SpawnAdmissionPorts): ItemGateO
   const emission = expectedSpawnEmissionCapability(item, ports.readIssuedRequest);
   return emission.ok
     ? canonicalRecord({ kind: "item" as const, expectation: emission.expectation })
-    : itemBlocked("expected-emission-capability", emission.reason);
+    : itemBlocked("expected-emission-capability", spawnEmissionRefusalMessage(emission.refusal));
 }
 
 /** The external-batch arm of `admitPiSpawnBatch`. Interactive transport
@@ -438,29 +440,12 @@ function parseTaskIssuedIdentity(task: string): TaskIssuedIdentity {
   return canonicalRecord({ kind: "bound" as const, requestId: requestId.value, contextDigest: contextDigest.value });
 }
 
-/**
- * The parent's expected emission capability for ONE spawn item — the pure
- * expected-capability decision (AD-4's parent half). Ordinary tasks carrying
- * neither issuance marker nor descriptor retain the no-tool baseline. Once a
- * task carries issuance identity, however, the independently read request
- * authority decides whether emission is required; the descriptor is only an
- * untrusted projection that must exactly match that decision:
- *
- * - an issued, catalog-eligible claim selecting a frozen registry cell MUST
- *   carry its exact descriptor or admission blocks;
- * - an issued non-producer or extraction-only claim MUST carry no descriptor;
- * - malformed/partial identity or unavailable authority blocks rather than
- *   silently degrading a request-bound task;
- * - matching prompt markers and descriptor can never mint capability without
- *   the independently issued record (FR-001).
- */
 /** The exact route whose provider serializer accepted every frozen emission
- * schema during qualification. It is deliberately module-local policy data:
+ * schema during qualification (ADR-0012). Qualification is deliberately
+ * module-local policy, separate from the model-profile catalog: it names the
+ * catalog's one local vLLM route rather than re-spelling its literal, and
  * neither callers nor ambient parent state can choose an enabled child route. */
-const QUALIFIED_EMISSION_ROUTE: Readonly<{ provider: string; model: string }> = Object.freeze({
-  provider: "desktop-vllm",
-  model: "glm-5.3-flash-spark-tp2-v14",
-});
+const QUALIFIED_EMISSION_ROUTE: Readonly<{ provider: string; model: string }> = DESKTOP_VLLM_ROUTE;
 
 export type SpawnEmissionExpectation =
   | Readonly<{ kind: "no-emission-tool" }>
@@ -471,24 +456,86 @@ export type SpawnEmissionExpectation =
       route: Readonly<{ provider: string; model: string }>;
     }>;
 
+/** Why an issued no-tool decision cannot be upgraded by a task descriptor. */
+export type ExtractionOnlyBasis =
+  | Readonly<{
+      kind: "ineligible-producer";
+      producerKind: PayloadProducerKindName;
+      eligible: readonly PayloadProducerKindName[];
+    }>
+  | Readonly<{ kind: "extraction-only-route"; reason: string }>;
+
+/**
+ * Why the parent refuses ONE spawn item's emission capability. Closed and
+ * typed so callers and tests discriminate on `code`; the prose is rendered
+ * once, by `spawnEmissionRefusalMessage`, at the batch admission's block edge.
+ */
+export type SpawnEmissionRefusal =
+  | Readonly<{ code: "descriptor-without-identity"; agent: LoomAgentName }>
+  | Readonly<{ code: "identity-malformed"; agent: LoomAgentName; detail: string }>
+  | Readonly<{ code: "authority-unreadable"; cause: Readonly<{ name: string; message: string }> }>
+  | Readonly<{ code: "authority-unavailable"; detail: string }>
+  | Readonly<{ code: "authority-mismatch"; agent: LoomAgentName; requestId: RequestId }>
+  | Readonly<{ code: "extraction-upgrade"; agent: LoomAgentName; basis: ExtractionOnlyBasis }>
+  | Readonly<{
+      code: "unregistered-claim";
+      agent: LoomAgentName;
+      producerKind: PayloadProducerKindName;
+      version: IssuedProducerClaim["version"];
+      bindingCode: EmissionBindingRefusalCode;
+    }>
+  | Readonly<{ code: "route-mismatch"; agent: LoomAgentName; routeRequestId: RequestId; requestId: RequestId }>
+  | Readonly<{ code: "descriptor-missing"; requestId: RequestId }>
+  | Readonly<{
+      code: "descriptor-malformed";
+      agent: LoomAgentName;
+      descriptorCode: EmissionDescriptorRefusalCode;
+      detail: string;
+    }>
+  | Readonly<{ code: "descriptor-mismatch"; agent: LoomAgentName; requestId: RequestId }>;
+
 export type SpawnEmissionAdmission =
   | Readonly<{ ok: true; expectation: SpawnEmissionExpectation }>
-  | Readonly<{ ok: false; reason: string }>;
+  | Readonly<{ ok: false; refusal: SpawnEmissionRefusal }>;
+
+const NO_UPGRADE = "extraction-only authority cannot be upgraded by task text";
+
+/** The ONE renderer of a spawn emission refusal. */
+export function spawnEmissionRefusalMessage(refusal: SpawnEmissionRefusal): string {
+  return match<SpawnEmissionRefusal, string>(refusal)
+    .with({ code: "descriptor-without-identity" }, ({ agent }) =>
+      `Pi agent '${agent}' carries an emission descriptor without exact task issuance identity markers`)
+    .with({ code: "identity-malformed" }, ({ agent, detail }) =>
+      `Pi agent '${agent}' carries unusable task issuance identity: ${detail}`)
+    .with({ code: "authority-unreadable" }, ({ cause }) =>
+      `issued emission request authority could not be read safely (${cause.name}: ${cause.message})`)
+    .with({ code: "authority-unavailable" }, ({ detail }) =>
+      `issued emission request authority unavailable: ${detail}`)
+    .with({ code: "authority-mismatch" }, ({ agent, requestId }) =>
+      `issued emission request authority differs from the exact task identity for ${agent}/${requestId}`)
+    .with({ code: "extraction-upgrade", basis: { kind: "ineligible-producer" } }, ({ agent, basis }) =>
+      `Pi agent '${agent}' carries an emission descriptor, but it cannot produce ${basis.producerKind} payloads: ` +
+        `the Agent Catalog authorizes ${basis.eligible.length === 0 ? "no producer kind" : basis.eligible.join(", ")} ` +
+        `for it (AD-6); ${NO_UPGRADE}`)
+    .with({ code: "extraction-upgrade", basis: { kind: "extraction-only-route" } }, ({ agent, basis }) =>
+      `Pi agent '${agent}' carries an emission descriptor, but the independently issued route is extraction-only ` +
+        `(${basis.reason}); ${NO_UPGRADE}`)
+    .with({ code: "unregistered-claim" }, ({ agent, producerKind, version, bindingCode }) =>
+      `Pi agent '${agent}' carries an emission-enabled route, but the issued ${producerKind}/${version} claim ` +
+        `selects no frozen registry cell (${bindingCode}); ${NO_UPGRADE}`)
+    .with({ code: "route-mismatch" }, ({ agent, routeRequestId, requestId }) =>
+      `issued emission route ${routeRequestId} differs from the exact request/protocol authority ${requestId} for ${agent}`)
+    .with({ code: "descriptor-missing" }, ({ requestId }) =>
+      `issued emission-enabled request ${requestId} is missing its required ${EMISSION_DESCRIPTOR_MARKER} descriptor`)
+    .with({ code: "descriptor-malformed" }, ({ agent, detail }) =>
+      `Pi agent '${agent}' carries an unusable issued emission descriptor: ${detail}`)
+    .with({ code: "descriptor-mismatch" }, ({ agent, requestId }) =>
+      `issued emission request/protocol authority differs from the descriptor for ${agent}/${requestId}`)
+    .exhaustive();
+}
 
 /** Derived from a reserved Run Directory request and its registered program,
  *  never from the prompt's descriptor or identity markers. */
-export type IssuedSpawnEmissionRoute =
-  | Readonly<{
-      kind: "emission-enabled";
-      binding: IssuedEmissionBinding;
-      contextDigest: ContextDigest;
-    }>
-  | Readonly<{ kind: "extraction-only"; reason: string }>;
-
-export type IssuedSpawnEmissionRouteDecision =
-  | IssuedSpawnEmissionRoute
-  | Readonly<{ kind: "refused"; reason: string }>;
-
 export type IssuedSpawnEmissionAuthority = Readonly<{
   role: LoomAgentName;
   claim: IssuedProducerClaim;
@@ -497,13 +544,135 @@ export type IssuedSpawnEmissionAuthority = Readonly<{
   route: IssuedSpawnEmissionRoute;
 }>;
 
-const sameEmissionBinding = (left: IssuedEmissionBinding, right: IssuedEmissionBinding): boolean =>
-  left.requestId === right.requestId &&
-  left.kind.kind === right.kind.kind &&
-  left.version === right.version &&
-  left.toolName === right.toolName &&
-  left.schemaDigest === right.schemaDigest;
+/** One binding of issued emission authority: the exact registry cell plus the
+ *  context it was issued for. Route and descriptor are both held to it. */
+type EmissionAuthorityBinding = Readonly<{ binding: IssuedEmissionBinding; contextDigest: ContextDigest }>;
 
+/** The single "matches authority" comparison: a route or descriptor never
+ *  exceeds issued authority because both must equal it exactly here. */
+const matchesAuthority = (candidate: EmissionAuthorityBinding, expected: EmissionAuthorityBinding): boolean =>
+  candidate.contextDigest === expected.contextDigest &&
+  candidate.binding.requestId === expected.binding.requestId &&
+  candidate.binding.kind.kind === expected.binding.kind.kind &&
+  candidate.binding.version === expected.binding.version &&
+  candidate.binding.toolName === expected.binding.toolName &&
+  candidate.binding.schemaDigest === expected.binding.schemaDigest;
+
+type BoundTaskIdentity = Extract<TaskIssuedIdentity, Readonly<{ kind: "bound" }>>;
+type CapabilityStep<T> = DomainResult<T, SpawnEmissionRefusal>;
+
+/** The issued authority's decision, before the untrusted descriptor is read. */
+type IssuedEmissionDecision =
+  | Readonly<{ kind: "no-tool"; basis: ExtractionOnlyBasis }>
+  | Readonly<{ kind: "emission"; expected: EmissionAuthorityBinding }>;
+
+const stepOk = <T>(value: T): CapabilityStep<T> => canonicalRecord({ ok: true as const, value });
+const stepRefused = <T>(error: SpawnEmissionRefusal): CapabilityStep<T> =>
+  canonicalRecord({ ok: false as const, error });
+const admitted = (expectation: SpawnEmissionExpectation): SpawnEmissionAdmission =>
+  canonicalRecord({ ok: true as const, expectation });
+const refusedCapability = (refusal: SpawnEmissionRefusal): SpawnEmissionAdmission =>
+  canonicalRecord({ ok: false as const, refusal: canonicalRecord(refusal) });
+const NO_EMISSION_TOOL: SpawnEmissionExpectation = canonicalRecord({ kind: "no-emission-tool" as const });
+
+/** Read the independently issued authority the task identity names, and prove
+ *  it is that exact role/request/context. A throwing reader fails closed. */
+function readIssuedAuthority(
+  agent: LoomAgentName,
+  identity: BoundTaskIdentity,
+  readIssuedRequest: SpawnAdmissionPorts["readIssuedRequest"],
+): CapabilityStep<IssuedSpawnEmissionAuthority> {
+  let issued: DomainResult<IssuedSpawnEmissionAuthority, Readonly<{ message: string }>>;
+  try {
+    issued = readIssuedRequest(identity.requestId, identity.contextDigest, agent);
+  } catch (thrown) {
+    return stepRefused({
+      code: "authority-unreadable",
+      cause: boundedThrownCause(thrown, "issued spawn request authority"),
+    });
+  }
+  if (!issued.ok) return stepRefused({ code: "authority-unavailable", detail: issued.error.message });
+  const { role, claim } = issued.value;
+  return role === agent && claim.requestId === identity.requestId && claim.contextDigest === identity.contextDigest
+    ? stepOk(issued.value)
+    : stepRefused({ code: "authority-mismatch", agent, requestId: identity.requestId });
+}
+
+/** Decide, from issued authority alone, whether this item owes an emission
+ *  tool: catalog eligibility, then the issued route, then the claim's registry
+ *  cell, then the route's agreement with that cell. */
+function decideIssuedEmission(
+  agent: LoomAgentName,
+  identity: BoundTaskIdentity,
+  { claim, route }: IssuedSpawnEmissionAuthority,
+): CapabilityStep<IssuedEmissionDecision> {
+  const eligible = producerKindsOfAgent(agent).map(({ kind }) => kind);
+  if (!eligible.includes(claim.producerKind)) {
+    return stepOk({ kind: "no-tool", basis: { kind: "ineligible-producer", producerKind: claim.producerKind, eligible } });
+  }
+  if (route.kind === "extraction-only") {
+    return stepOk({ kind: "no-tool", basis: { kind: "extraction-only-route", reason: route.reason } });
+  }
+  const minted = issueProducerClaimBinding(claim);
+  if (!minted.ok) {
+    return stepRefused({
+      code: "unregistered-claim",
+      agent,
+      producerKind: claim.producerKind,
+      version: claim.version,
+      bindingCode: minted.error.code,
+    });
+  }
+  const expected: EmissionAuthorityBinding = canonicalRecord({ binding: minted.value, contextDigest: identity.contextDigest });
+  return matchesAuthority(route, expected)
+    ? stepOk({ kind: "emission", expected })
+    : stepRefused({ code: "route-mismatch", agent, routeRequestId: route.binding.requestId, requestId: identity.requestId });
+}
+
+/** Hold the untrusted descriptor to the issued decision: absent exactly when
+ *  no tool is owed, and otherwise equal to the expected authority. */
+function admitDescriptor(
+  agent: LoomAgentName,
+  requestId: RequestId,
+  decision: IssuedEmissionDecision,
+  descriptor: EmissionDescriptorParse,
+): SpawnEmissionAdmission {
+  if (decision.kind === "no-tool") {
+    return descriptor.kind === "absent"
+      ? admitted(NO_EMISSION_TOOL)
+      : refusedCapability({ code: "extraction-upgrade", agent, basis: decision.basis });
+  }
+  if (descriptor.kind === "absent") return refusedCapability({ code: "descriptor-missing", requestId });
+  if (descriptor.kind === "malformed") {
+    return refusedCapability({ code: "descriptor-malformed", agent, descriptorCode: descriptor.code, detail: descriptor.reason });
+  }
+  return matchesAuthority(descriptor, decision.expected)
+    ? admitted(canonicalRecord({
+        kind: "emission-enabled" as const,
+        binding: decision.expected.binding,
+        contextDigest: decision.expected.contextDigest,
+        route: QUALIFIED_EMISSION_ROUTE,
+      }))
+    : refusedCapability({ code: "descriptor-mismatch", agent, requestId });
+}
+
+/**
+ * The parent's expected emission capability for ONE spawn item — the pure
+ * expected-capability decision (AD-4's parent half), as a parse pipeline:
+ * task identity → issued authority → issued decision → descriptor. Ordinary
+ * tasks carrying neither issuance marker nor descriptor retain the no-tool
+ * baseline. Once a task carries issuance identity, however, the independently
+ * read request authority decides whether emission is required; the descriptor
+ * is only an untrusted projection that must exactly match that decision:
+ *
+ * - an issued, catalog-eligible claim selecting a frozen registry cell MUST
+ *   carry its exact descriptor or admission blocks;
+ * - an issued non-producer or extraction-only claim MUST carry no descriptor;
+ * - malformed/partial identity or unavailable authority blocks rather than
+ *   silently degrading a request-bound task;
+ * - matching prompt markers and descriptor can never mint capability without
+ *   the independently issued record (FR-001).
+ */
 export function expectedSpawnEmissionCapability(
   item: PiSpawnItem,
   readIssuedRequest: SpawnAdmissionPorts["readIssuedRequest"],
@@ -512,109 +681,18 @@ export function expectedSpawnEmissionCapability(
   const identity = parseTaskIssuedIdentity(item.task);
   if (identity.kind === "unbound") {
     return descriptor.kind === "absent"
-      ? canonicalRecord({ ok: true, expectation: canonicalRecord({ kind: "no-emission-tool" as const }) })
-      : canonicalRecord({
-          ok: false,
-          reason: `Pi agent '${item.agent}' carries an emission descriptor without exact task issuance identity markers`,
-        });
+      ? admitted(NO_EMISSION_TOOL)
+      : refusedCapability({ code: "descriptor-without-identity", agent: item.agent });
   }
   if (identity.kind === "malformed") {
-    return canonicalRecord({ ok: false, reason: `Pi agent '${item.agent}' carries unusable task issuance identity: ${identity.reason}` });
+    return refusedCapability({ code: "identity-malformed", agent: item.agent, detail: identity.reason });
   }
-
-  let issued: DomainResult<IssuedSpawnEmissionAuthority, Readonly<{ message: string }>>;
-  try {
-    issued = readIssuedRequest(identity.requestId, identity.contextDigest, item.agent);
-  } catch (thrown) {
-    const cause = boundedThrownCause(thrown, "issued spawn request authority");
-    return canonicalRecord({
-      ok: false,
-      reason: `issued emission request authority could not be read safely (${cause.name}: ${cause.message})`,
-    });
-  }
-  if (!issued.ok) {
-    return canonicalRecord({ ok: false, reason: `issued emission request authority unavailable: ${issued.error.message}` });
-  }
-  const { claim, route } = issued.value;
-  if (issued.value.role !== item.agent || claim.requestId !== identity.requestId ||
-      claim.contextDigest !== identity.contextDigest) {
-    return canonicalRecord({
-      ok: false,
-      reason: `issued emission request authority differs from the exact task identity for ${item.agent}/${identity.requestId}`,
-    });
-  }
-
-  const eligible = producerKindsOfAgent(item.agent).map(({ kind }) => kind);
-  if (!eligible.includes(claim.producerKind)) {
-    if (descriptor.kind === "absent") {
-      return canonicalRecord({ ok: true, expectation: canonicalRecord({ kind: "no-emission-tool" as const }) });
-    }
-    return canonicalRecord({
-      ok: false,
-      reason: `Pi agent '${item.agent}' carries an emission descriptor, but it cannot produce ${claim.producerKind} payloads: ` +
-        `the Agent Catalog authorizes ${eligible.length === 0 ? "no producer kind" : eligible.join(", ")} for it (AD-6); ` +
-        `extraction-only authority cannot be upgraded by task text`,
-    });
-  }
-  if (route.kind === "extraction-only") {
-    return descriptor.kind === "absent"
-      ? canonicalRecord({ ok: true, expectation: canonicalRecord({ kind: "no-emission-tool" as const }) })
-      : canonicalRecord({
-          ok: false,
-          reason: `Pi agent '${item.agent}' carries an emission descriptor, but the independently issued route is extraction-only ` +
-            `(${route.reason}); extraction-only authority cannot be upgraded by task text`,
-        });
-  }
-
-  const expected = issueProducerClaimBinding(claim);
-  if (!expected.ok) {
-    return canonicalRecord({
-      ok: false,
-      reason: `Pi agent '${item.agent}' carries an emission-enabled route, but the issued ` +
-        `${claim.producerKind}/${claim.version} claim selects no frozen registry cell (${expected.error.code}); ` +
-        `extraction-only authority cannot be upgraded by task text`,
-    });
-  }
-
-  const routeMatchesAuthority = route.contextDigest === identity.contextDigest &&
-    sameEmissionBinding(route.binding, expected.value);
-  if (!routeMatchesAuthority) {
-    return canonicalRecord({
-      ok: false,
-      reason: `issued emission route ${route.binding.requestId} differs from the exact request/protocol authority ` +
-        `${identity.requestId} for ${item.agent}`,
-    });
-  }
-
-  if (descriptor.kind === "absent") {
-    return canonicalRecord({
-      ok: false,
-      reason: `issued emission-enabled request ${identity.requestId} is missing its required ${EMISSION_DESCRIPTOR_MARKER} descriptor`,
-    });
-  }
-  if (descriptor.kind === "malformed") {
-    return canonicalRecord({
-      ok: false,
-      reason: `Pi agent '${item.agent}' carries an unusable issued emission descriptor: ${descriptor.reason}`,
-    });
-  }
-  const descriptorMatchesAuthority = descriptor.contextDigest === identity.contextDigest &&
-    sameEmissionBinding(descriptor.binding, expected.value);
-  if (!descriptorMatchesAuthority) {
-    return canonicalRecord({
-      ok: false,
-      reason: `issued emission request/protocol authority differs from the descriptor for ${item.agent}/${identity.requestId}`,
-    });
-  }
-  return canonicalRecord({
-    ok: true,
-    expectation: canonicalRecord({
-      kind: "emission-enabled" as const,
-      binding: expected.value,
-      contextDigest: identity.contextDigest,
-      route: QUALIFIED_EMISSION_ROUTE,
-    }),
-  });
+  const authority = readIssuedAuthority(item.agent, identity, readIssuedRequest);
+  if (!authority.ok) return refusedCapability(authority.error);
+  const decision = decideIssuedEmission(item.agent, identity, authority.value);
+  return decision.ok
+    ? admitDescriptor(item.agent, identity.requestId, decision.value, descriptor)
+    : refusedCapability(decision.error);
 }
 
 /** Fields shared by every issued producer contract. Request identity is
@@ -698,11 +776,18 @@ function issueProducerClaimBinding(claim: IssuedProducerClaim) {
  * 3. a not-provided surface follows its own degradation class: `extraction`
  *   is the capability-aware extraction route (AS-010 admits it), `refuse` is
  *   the hard refusal.
+ *
+ * This is the ONE closed route vocabulary: request programs, issued spawn
+ * authority, and parent admission all discriminate on the same `kind`.
  */
 export type EmissionRouteDecision =
   | Readonly<{ kind: "emission"; binding: IssuedEmissionBinding; contextDigest: ContextDigest }>
   | Readonly<{ kind: "extraction-only"; reason: string }>
   | Readonly<{ kind: "refused"; reason: string }>;
+
+/** A route that was not refused: what issued spawn authority carries and what
+ *  the task-text projection renders. A refusal fails closed at its shell. */
+export type IssuedSpawnEmissionRoute = Exclude<EmissionRouteDecision, Readonly<{ kind: "refused" }>>;
 
 export function decideRequestEmissionRoute(
   claim: IssuedProducerClaim,
@@ -731,42 +816,6 @@ export function decideRequestEmissionRoute(
         reason: `the child emission surface cannot provide the issued emission tool: ${capability.reason}`,
       })
     : canonicalRecord({ kind: "extraction-only" as const, reason: capability.reason });
-}
-
-/** Translate capability qualification into the exact route carried by issued
- * spawn authority. This is the sole bridge between request projection and
- * parent admission, so the adapter never reconstructs route semantics. */
-export function decideIssuedSpawnEmissionRoute(
-  claim: IssuedProducerClaim,
-  capability: EmissionToolCapability,
-): IssuedSpawnEmissionRouteDecision {
-  const route = decideRequestEmissionRoute(claim, capability);
-  return route.kind === "emission"
-    ? canonicalRecord({
-        kind: "emission-enabled" as const,
-        binding: route.binding,
-        contextDigest: route.contextDigest,
-      })
-    : route;
-}
-
-/**
- * The ONE projection of an issued spawn route back onto the request
- * programs' route decision — the inverse of `decideIssuedSpawnEmissionRoute`'s
- * enabled arm, owned here so no consumer re-derives the discriminant mapping.
- * The extraction-only and refused arms are the same closed values in both
- * vocabularies and pass through unchanged.
- */
-export function issuedSpawnEmissionRouteDecision(
-  route: IssuedSpawnEmissionRouteDecision,
-): EmissionRouteDecision {
-  return route.kind === "emission-enabled"
-    ? canonicalRecord({
-        kind: "emission" as const,
-        binding: route.binding,
-        contextDigest: route.contextDigest,
-      })
-    : route;
 }
 
 export type IssuedRequestPiRoute = Readonly<{
@@ -805,14 +854,17 @@ function emissionCapabilityForIssuedRoute(
 }
 
 /** Pure qualification from authenticated, frozen request route data plus the
- * shell-observed existence of a Pi parent. The parent's mutable provider/model
- * is intentionally not an input and therefore cannot upgrade cloud issuance. */
+ * shell-observed existence of a Pi parent — the single entry point from issued
+ * request authority to a route decision, shared by the request programs, the
+ * capture runtime, and Pi parent admission. The parent's mutable
+ * provider/model is intentionally not an input and therefore cannot upgrade
+ * cloud issuance. */
 export function qualifyIssuedSpawnEmissionRoute(
   claim: IssuedProducerClaim,
   request: IssuedRequestPiRoute,
   piParentExists: boolean,
-): IssuedSpawnEmissionRouteDecision {
-  return decideIssuedSpawnEmissionRoute(
+): EmissionRouteDecision {
+  return decideRequestEmissionRoute(
     claim,
     emissionCapabilityForIssuedRoute(claim, request, piParentExists),
   );
@@ -844,11 +896,11 @@ export type EmissionTaskTextProjection = Readonly<{
   instruction: string;
   /** Retained separately from task bytes so extraction-only remains verbatim
    *  while its exact admission reason can reach an operator-owned surface. */
-  decision: Exclude<EmissionRouteDecision, { kind: "refused" }>;
+  decision: IssuedSpawnEmissionRoute;
 }>;
 
 export function projectEmissionTaskText(
-  route: Exclude<EmissionRouteDecision, { kind: "refused" }>,
+  route: IssuedSpawnEmissionRoute,
   baseInstruction: string,
 ): EmissionTaskTextProjection {
   return route.kind === "emission"

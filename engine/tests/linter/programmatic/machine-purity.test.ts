@@ -270,9 +270,9 @@ const IMPURE_PROBES = [
 
 const HASH_MODULES = [
   "engine/src/core/review-packet.ts",
-  "engine/src/core/standalone-review.ts",
+  "engine/src/core/digest.ts",
   SOURCE_AUTHORITY,
-  "engine/src/core/panel-program.ts",
+  "engine/src/core/digest.ts",
   "engine/src/core/parse-spec.ts",
   "engine/src/core/orchestration-contract/bytes.ts",
   "engine/src/core/orchestration-contract/publication.ts",

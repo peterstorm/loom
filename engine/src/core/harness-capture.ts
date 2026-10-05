@@ -40,8 +40,8 @@
  * contract; this module mints only what the fold and the tool surface need.
  */
 
-import { createHash } from "node:crypto";
-import { admitEmissionArguments, type EmissionParseFailureCode, type EmissionSchemaVersion, type EmissionToolSpec } from "./emission-tool";
+import { sha256Bytes, sha256Hex } from "./digest";
+import { admitIssuedEmissionArguments, type EmissionParseFailureCode, type EmissionSchemaVersion, type IssuedEmissionBinding } from "./emission-tool";
 import {
   canonicalRecord,
   canonicalStructuralEquals,
@@ -117,6 +117,24 @@ export type FinalPayload = Readonly<{
 const encoder = new TextEncoder();
 
 /**
+ * The ONE construction of a final payload from its text: encoded ONCE,
+ * verbatim — no trim, no join, no re-indent — with the byte length and digest
+ * derived from those exact bytes. Both payload sources build through it (the
+ * extracted final message here, validated emission arguments in
+ * `emission-ingestion`), so the encode-once rule cannot drift between them.
+ */
+export function finalPayloadOf(origin: string, text: string): FinalPayload {
+  const bytes = encoder.encode(text);
+  return canonicalRecord({
+    origin,
+    text,
+    bytes: Object.freeze(Array.from(bytes)),
+    byteLength: bytes.length,
+    digest: sha256Bytes(bytes) as ArtifactDigest,
+  });
+}
+
+/**
  * Reduce observed candidates to the single final payload, or reject.
  *
  * An adapter is expected to hand over every candidate it found rather than
@@ -143,14 +161,7 @@ export function parseFinalPayload(
   }
 
   // Encoded ONCE, verbatim. Nothing here trims, joins, or reformats.
-  const bytes = Array.from(encoder.encode(only.text));
-  return accept(canonicalRecord({
-    origin: only.origin,
-    text: only.text,
-    bytes: Object.freeze(bytes),
-    byteLength: bytes.length,
-    digest: createHash("sha256").update(Uint8Array.from(bytes)).digest("hex") as ArtifactDigest,
-  }));
+  return accept(finalPayloadOf(only.origin, only.text));
 }
 
 // ---------------------------------------------------------------------------
@@ -332,7 +343,7 @@ export type CaptureRejectionAuditRecord = Readonly<{
  * happened once as two.
  */
 export function captureRejectionDedupKey(requestId: RequestId, attempt: SemanticAttempt): string {
-  return `capture-rejected:${createHash("sha256").update(`${requestId}:${attempt}`).digest("hex")}`;
+  return `capture-rejected:${sha256Hex(`${requestId}:${attempt}`)}`;
 }
 
 /** Build the one audit record a terminalised rejection is allowed to write. */
@@ -639,17 +650,17 @@ export type EmissionExecutionOutcome =
 
 /**
  * The production execute shell's decision, minted once: admit the untrusted
- * arguments through the issued registry cell and acknowledge or refuse. The
- * real Pi tool surface (T5's registration) calls exactly this, so the
- * acceptance suite drives the same policy seam as production — never a test
- * twin.
+ * arguments through the issued binding — `admitIssuedEmissionArguments`, the
+ * SAME admission the engine's selection runs over the observed call — and
+ * acknowledge or refuse. The real Pi tool surface (T5's registration) calls
+ * exactly this, so the acceptance suite drives the same policy seam as
+ * production — never a test twin.
  */
 export function acknowledgeEmissionExecution(
-  spec: EmissionToolSpec,
-  version: EmissionSchemaVersion,
+  binding: IssuedEmissionBinding,
   args: unknown,
 ): EmissionExecutionOutcome {
-  const admitted = admitEmissionArguments(spec, version, args);
+  const admitted = admitIssuedEmissionArguments(binding, args);
   if (admitted.kind === "refused") {
     return canonicalRecord({ kind: "refused" as const, code: admitted.code, message: admitted.message });
   }

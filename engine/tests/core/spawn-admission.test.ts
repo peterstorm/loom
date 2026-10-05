@@ -181,21 +181,21 @@ describe("spawn admission properties", () => {
 
 import {
   EMISSION_DESCRIPTOR_MARKER,
-  decideIssuedSpawnEmissionRoute,
   decideRequestEmissionRoute,
   emissionToolPrimaryInstruction,
   expectedSpawnEmissionCapability as decideSpawnEmissionCapability,
   issuedReviewerPayloadClaim,
-  issuedSpawnEmissionRouteDecision,
   parseEmissionDescriptor,
   projectEmissionTaskText,
   qualifyIssuedSpawnEmissionRoute,
   renderEmissionDescriptor,
+  spawnEmissionRefusalMessage,
   type EmissionDescriptorParse,
   type IssuedProducerClaim,
   type IssuedSpawnEmissionAuthority,
   type IssuedSpawnEmissionRoute,
-  type IssuedSpawnEmissionRouteDecision,
+  type SpawnEmissionAdmission,
+  type SpawnEmissionRefusal,
 } from "../../src/core/spawn-admission";
 import {
   issueEmissionBinding,
@@ -213,16 +213,10 @@ import {
 } from "../../src/core/orchestration-contract/identity";
 import { buildContextPacket, buildStandaloneReviewerContextPacketV3, encodeByteSection } from "../../src/core/context-packets";
 import { parseAgentRequestAuthority } from "../../src/core/orchestration-contract";
-import {
-  REVIEWER_EXTRACTION_RETRY_INSTRUCTION,
-  decideRefutationTranscriptRead,
-  publishLegacyInitialBatch,
-  publishReviewInitialBatch,
-  renderReviewProgramSpawnTask,
-  renderSpawnTask,
-  standaloneRetryTask,
-} from "../../src/handlers/helpers/programs/helpers";
-import { renderCurrentWaveRetryTask } from "../../src/handlers/helpers/programs/wave-gate";
+import { REVIEWER_EXTRACTION_RETRY_INSTRUCTION, decideRefutationTranscriptRead, standaloneRetryTask } from "../../src/core/reviewer-retry";
+import { publishLegacyInitialBatch, publishReviewInitialBatch } from "../../src/handlers/helpers/programs/request-publication";
+import { renderReviewProgramSpawnTask, renderSpawnTask } from "../../src/handlers/helpers/programs/spawn-task";
+import { renderCurrentWaveRetryTask } from "../../src/core/reviewer-retry";
 import type { RunDirHandle } from "../../src/orchestration/run-directory-handle";
 
 const mustMint = (issued: {
@@ -253,7 +247,7 @@ const REGISTRY_CELLS: readonly IssuedEmissionBinding[] = [REVIEWER_V2, REVIEWER_
 const emissionRouteFor = (
   binding: IssuedEmissionBinding,
   contextDigest: ContextDigest = CONTEXT_DIGEST,
-): IssuedSpawnEmissionRoute => Object.freeze({ kind: "emission-enabled", binding, contextDigest });
+): IssuedSpawnEmissionRoute => Object.freeze({ kind: "emission", binding, contextDigest });
 
 /** Legal issued-claim fixture construction follows the production ADT: v1
  *  carries no digest; v2/v3 require the binding's frozen digest. */
@@ -281,10 +275,22 @@ const issuedFor = (
     ? { ok: true, value: { role: agent, claim: claimOf(binding, contextDigest), route } }
     : { ok: false, error: { message: "the fixture's issued authority belongs to another request" } };
 
+type RenderedEmissionAdmission =
+  | Extract<SpawnEmissionAdmission, { ok: true }>
+  | Readonly<{ ok: false; refusal: SpawnEmissionRefusal; reason: string }>;
+
+/** The pure decision, with each typed refusal rendered exactly as the batch
+ *  admission's block edge renders it: `refusal.code` pins the cause and
+ *  `reason` pins the byte-identical operator text. */
 const expectedSpawnEmissionCapability = (
   spawnItem: PiSpawnItem,
   readIssuedRequest: SpawnAdmissionPorts["readIssuedRequest"] = missingIssuedRequest,
-) => decideSpawnEmissionCapability(spawnItem, readIssuedRequest);
+): RenderedEmissionAdmission => {
+  const admission = decideSpawnEmissionCapability(spawnItem, readIssuedRequest);
+  return admission.ok
+    ? admission
+    : { ok: false, refusal: admission.refusal, reason: spawnEmissionRefusalMessage(admission.refusal) };
+};
 
 /** One engine-issued task carrying exact request identity markers, with
  *  the role's required-Skill line intact. */
@@ -436,6 +442,7 @@ describe("expected spawn emission capability", () => {
     expect(reads).toBe(1);
     expect(admission).toMatchObject({
       ok: false,
+      refusal: { code: "descriptor-missing", requestId: REVIEWER_V2.requestId },
       reason: expect.stringContaining("missing its required LOOM_EMISSION_DESCRIPTOR"),
     });
   });
@@ -452,13 +459,14 @@ describe("expected spawn emission capability", () => {
       reader,
     )).toMatchObject({
       ok: false,
+      refusal: { code: "extraction-upgrade", basis: { kind: "extraction-only-route", reason: "issued route was not qualified" } },
       reason: expect.stringContaining("independently issued route is extraction-only"),
     });
   });
 
   it("requires the descriptor for an explicit emission-enabled issued route", () => {
     const route = Object.freeze({
-      kind: "emission-enabled" as const,
+      kind: "emission" as const,
       binding: REVIEWER_V2,
       contextDigest: CONTEXT_DIGEST,
     });
@@ -489,6 +497,12 @@ describe("expected spawn emission capability", () => {
     );
     expect(admission.ok).toBe(false);
     if (admission.ok) return;
+    expect(admission.refusal).toEqual({
+      code: "route-mismatch",
+      agent: "code-reviewer",
+      routeRequestId: routeBinding.requestId,
+      requestId: REVIEWER_V2.requestId,
+    });
     expect(admission.reason).toContain("issued emission route");
     expect(admission.reason).toContain(routeBinding.requestId);
     expect(admission.reason).toContain(REVIEWER_V2.requestId);
@@ -501,6 +515,7 @@ describe("expected spawn emission capability", () => {
     );
     expect(admission).toMatchObject({
       ok: false,
+      refusal: { code: "authority-unavailable" },
       reason: expect.stringContaining("issued emission request authority unavailable"),
     });
   });
@@ -512,6 +527,7 @@ describe("expected spawn emission capability", () => {
     );
     expect(admission).toMatchObject({
       ok: false,
+      refusal: { code: "authority-unreadable", cause: { name: "Error", message: "run directory read exploded" } },
       reason: expect.stringMatching(/could not be read safely.*run directory read exploded/),
     });
   });
@@ -539,6 +555,7 @@ describe("expected spawn emission capability", () => {
       archivedReader,
     )).toMatchObject({
       ok: false,
+      refusal: { code: "extraction-upgrade", basis: { kind: "extraction-only-route" } },
       reason: expect.stringContaining("extraction-only authority cannot be upgraded by task text"),
     });
   });
@@ -558,7 +575,11 @@ describe("expected spawn emission capability", () => {
     const admission = expectedSpawnEmissionCapability(item("code-reviewer", `${marker}\nreview`), () => {
       throw new Error("malformed identity must refuse before authority lookup");
     });
-    expect(admission).toMatchObject({ ok: false, reason: expect.stringContaining("unusable task issuance identity") });
+    expect(admission).toMatchObject({
+      ok: false,
+      refusal: { code: "identity-malformed" },
+      reason: expect.stringContaining("unusable task issuance identity"),
+    });
   });
 
   it("expects the exact issued binding when the catalog grants the kind and the markers bind", () => {
@@ -574,7 +595,9 @@ describe("expected spawn emission capability", () => {
       const agent = binding.kind.kind === "judge-verdict" ? "arch-judge-agent" : "review-verifier-agent";
       const forged = emissionItem(agent, binding);
       expect(expectedSpawnEmissionCapability(forged)).toMatchObject({
-        ok: false, reason: expect.stringContaining("no independently issued request"),
+        ok: false,
+        refusal: { code: "authority-unavailable" },
+        reason: expect.stringContaining("no independently issued request"),
       });
       expect(admitPiSpawnBatch(forged, allowPorts())).toMatchObject({
         kind: "block", guard: "expected-emission-capability",
@@ -601,7 +624,11 @@ describe("expected spawn emission capability", () => {
     for (const issued of mismatches) {
       const admission = expectedSpawnEmissionCapability(forged, () => ({ ok: true, value: issued }));
       expect(admission.ok).toBe(false);
-      if (!admission.ok) expect(admission.reason).toMatch(/differs|cannot be upgraded/);
+      if (!admission.ok) {
+        expect(["authority-mismatch", "extraction-upgrade", "unregistered-claim", "route-mismatch"])
+          .toContain(admission.refusal.code);
+        expect(admission.reason).toMatch(/differs|cannot be upgraded/);
+      }
     }
   });
 
@@ -629,6 +656,11 @@ describe("expected spawn emission capability", () => {
     );
     expect(admission).toMatchObject({ ok: false });
     if (admission.ok) return;
+    expect(admission.refusal).toEqual({
+      code: "extraction-upgrade",
+      agent: "arch-judge-agent",
+      basis: { kind: "ineligible-producer", producerKind: "reviewer-payload", eligible: ["judge-verdict"] },
+    });
     expect(admission.reason).toContain("cannot produce reviewer-payload");
     expect(admission.reason).toContain("judge-verdict");
     expect(admission.reason).toContain("AD-6");
@@ -641,6 +673,7 @@ describe("expected spawn emission capability", () => {
     );
     expect(admission).toMatchObject({ ok: false });
     if (admission.ok) return;
+    expect(admission.refusal).toMatchObject({ code: "extraction-upgrade", basis: { kind: "ineligible-producer", eligible: [] } });
     expect(admission.reason).toContain("no producer kind");
   });
 
@@ -666,7 +699,11 @@ describe("expected spawn emission capability", () => {
         schemaDigest: REVIEWER_V2.schemaDigest,
       }, route: emissionRouteFor(otherBinding) },
     }));
-    expect(admission).toMatchObject({ ok: false, reason: expect.stringContaining("differs from the descriptor") });
+    expect(admission).toMatchObject({
+      ok: false,
+      refusal: { code: "descriptor-mismatch" },
+      reason: expect.stringContaining("differs from the descriptor"),
+    });
   });
 
   it("refuses when the task carries no request identity marker at all", () => {
@@ -677,6 +714,7 @@ describe("expected spawn emission capability", () => {
     const admission = expectedSpawnEmissionCapability(item("code-reviewer", task));
     expect(admission).toMatchObject({ ok: false });
     if (admission.ok) return;
+    expect(admission.refusal.code).toBe("identity-malformed");
     expect(admission.reason).toContain("LOOM_REQUEST_ID marker is absent");
   });
 
@@ -695,7 +733,11 @@ describe("expected spawn emission capability", () => {
         schemaDigest: REVIEWER_V2.schemaDigest,
       }, route: emissionRouteFor(REVIEWER_V2, OTHER_CONTEXT.value) },
     }));
-    expect(admission).toMatchObject({ ok: false, reason: expect.stringContaining("differs from the descriptor") });
+    expect(admission).toMatchObject({
+      ok: false,
+      refusal: { code: "descriptor-mismatch" },
+      reason: expect.stringContaining("differs from the descriptor"),
+    });
   });
 
   it.each([
@@ -705,7 +747,10 @@ describe("expected spawn emission capability", () => {
     const task = emissionTask("code-reviewer", REVIEWER_V2).replace(marker, `${marker}\n${contradiction}`);
     const admission = expectedSpawnEmissionCapability(item("code-reviewer", task));
     expect(admission).toMatchObject({ ok: false });
-    if (!admission.ok) expect(admission.reason).toContain("is contradictory");
+    if (!admission.ok) {
+      expect(admission.refusal.code).toBe("identity-malformed");
+      expect(admission.reason).toContain("is contradictory");
+    }
   });
 
   it("refuses a whitespace-bearing identity marker value as contradictory", () => {
@@ -713,7 +758,10 @@ describe("expected spawn emission capability", () => {
     const task = emissionTask("code-reviewer", REVIEWER_V2).replace(marker, `${marker} foreign`);
     const admission = expectedSpawnEmissionCapability(item("code-reviewer", task));
     expect(admission).toMatchObject({ ok: false });
-    if (!admission.ok) expect(admission.reason).toContain("is contradictory");
+    if (!admission.ok) {
+      expect(admission.refusal.code).toBe("identity-malformed");
+      expect(admission.reason).toContain("is contradictory");
+    }
   });
 
   it("refuses a malformed descriptor instead of defaulting to any tool", () => {
@@ -724,6 +772,7 @@ describe("expected spawn emission capability", () => {
     );
     expect(admission).toMatchObject({ ok: false });
     if (admission.ok) return;
+    expect(admission.refusal).toMatchObject({ code: "descriptor-malformed", descriptorCode: "unsupported-schema-version" });
     expect(admission.reason).toContain("unusable issued emission descriptor");
     expect(admission.reason).toContain("unsupported-schema-version");
   });
@@ -889,7 +938,7 @@ describe("request emission routes", () => {
     const claim = claimOf(REVIEWER_V2);
     const qualified = issuedPiRoute("desktop-vllm", "glm-5.3-flash-spark-tp2-v14");
     expect(qualifyIssuedSpawnEmissionRoute(claim, qualified, true)).toMatchObject({
-      kind: "emission-enabled",
+      kind: "emission",
       binding: REVIEWER_V2,
       contextDigest: CONTEXT_DIGEST,
     });
@@ -904,13 +953,32 @@ describe("request emission routes", () => {
     if (!profile.ok) throw new Error(`fixture profile refused: ${profile.error.message}`);
     const pi = lowerModelProfile(profile.value, "pi");
     // The emission capability trusts exactly the catalog profile the issue
-    // route election derives from the qualified-local parent handshake: a
-    // catalog model change must fail this guard and force requalification,
-    // never silently re-qualify a new model against the frozen schemas.
+    // route election derives from the qualified-local parent handshake. Both
+    // name the catalog's single route owner, so they cannot drift apart.
+    expect({ provider: pi.provider, model: pi.model }).toEqual(DESKTOP_VLLM_ROUTE);
     expect(qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V2), issuedPiRoute(pi.provider, pi.model), true))
-      .toMatchObject({ kind: "emission-enabled" });
+      .toMatchObject({ kind: "emission" });
     expect(qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V2), issuedPiRoute("desktop-vllm", "some-other-local-model"), true))
       .toMatchObject({ kind: "extraction-only" });
+  });
+
+  it("binds the single qualified route literal to the retained qualification evidence (requalification guard)", () => {
+    // One owner means a catalog model switch moves emission qualification with
+    // it, so the switch must not land without new evidence (ADR-0012
+    // requalification trigger): the owner is pinned to the served model and
+    // provider the retained wire recordings were captured against.
+    const evidence = join(LOOM_PACKAGE_ROOT, "probes", "emission-qualification");
+    const recordedModels = new Set(readdirSync(join(evidence, "recordings"))
+      .filter((name) => name.endsWith("-request.json"))
+      .map((name) => (JSON.parse(readFileSync(join(evidence, "recordings", name), "utf8")) as { model: string }).model));
+    expect([...recordedModels]).toEqual([DESKTOP_VLLM_ROUTE.model]);
+    expect(readFileSync(join(evidence, "README.md"), "utf8"))
+      .toContain(`**Qualified route:** \`${DESKTOP_VLLM_ROUTE.provider}\` (vLLM) · model \`${DESKTOP_VLLM_ROUTE.model}\``);
+    expect(qualifyIssuedSpawnEmissionRoute(
+      claimOf(REVIEWER_V2),
+      issuedPiRoute(DESKTOP_VLLM_ROUTE.provider, DESKTOP_VLLM_ROUTE.model),
+      true,
+    )).toMatchObject({ kind: "emission" });
   });
 
   it("carries only the exact qualified child route in enabled expectations", () => {
@@ -919,8 +987,8 @@ describe("request emission routes", () => {
       issuedPiRoute("desktop-vllm", "glm-5.3-flash-spark-tp2-v14"),
       true,
     );
-    expect(qualified.kind).toBe("emission-enabled");
-    if (qualified.kind !== "emission-enabled") throw new Error("qualified fixture must enable emission");
+    expect(qualified.kind).toBe("emission");
+    if (qualified.kind !== "emission") throw new Error("qualified fixture must enable emission");
     const enabledAdmission = expectedSpawnEmissionCapability(
       emissionItem("code-reviewer", REVIEWER_V2),
       issuedFor("code-reviewer", REVIEWER_V2, CONTEXT_DIGEST, qualified),
@@ -1118,17 +1186,14 @@ describe("request emission routes", () => {
       );
       expect(claim.version).toBe(testCase.binding.version);
 
-      const issuedRoute = decideIssuedSpawnEmissionRoute(
+      const issuedRoute = decideRequestEmissionRoute(
         claim,
         providedEmissionCapability(testCase.binding.schemaDigest),
       );
-      if (issuedRoute.kind !== "emission-enabled") {
-        throw new Error(`reviewer ${claim.version} fixture route must be emission-enabled`);
+      if (issuedRoute.kind !== "emission") {
+        throw new Error(`reviewer ${claim.version} fixture route must be emission`);
       }
-      const projection = projectEmissionTaskText(
-        { kind: "emission", binding: issuedRoute.binding, contextDigest: issuedRoute.contextDigest },
-        testCase.instruction,
-      );
+      const projection = projectEmissionTaskText(issuedRoute, testCase.instruction);
       expect(projection.descriptor).toBe(renderEmissionDescriptor(testCase.binding, CONTEXT_DIGEST));
       expect(parseEmissionDescriptor(projection.descriptor)).toEqual({
         kind: "issued",
@@ -1137,7 +1202,7 @@ describe("request emission routes", () => {
       });
       expect(projection.instruction).toContain(`calling the exact tool ${testCase.binding.toolName} exactly once`);
 
-      const refused = decideIssuedSpawnEmissionRoute(
+      const refused = decideRequestEmissionRoute(
         claim,
         providedEmissionCapability("e".repeat(64) as typeof testCase.binding.schemaDigest),
       );
@@ -1178,27 +1243,32 @@ describe("request emission routes", () => {
   });
 });
 
-describe("the issued spawn-route projection join (T6)", () => {
-  it("projects the enabled arm onto the request programs' emission decision without re-deriving the binding", () => {
-    const route = issuedSpawnEmissionRouteDecision(emissionRouteFor(REVIEWER_V2));
-    expect(route).toEqual({ kind: "emission", binding: REVIEWER_V2, contextDigest: CONTEXT_DIGEST });
+describe("one closed emission-route vocabulary (T6)", () => {
+  const qualifiedRoute = Object.freeze({
+    harnessBinding: Object.freeze({
+      pi: Object.freeze({ provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14" }),
+    }),
   });
 
-  it("passes the extraction-only and refused arms through as the same closed values", () => {
-    const extractionOnly: IssuedSpawnEmissionRoute = Object.freeze({ kind: "extraction-only" as const, reason: "no frozen registry cell" });
-    const refused: IssuedSpawnEmissionRouteDecision = Object.freeze({ kind: "refused" as const, reason: "stale loaded revision" });
-    expect(issuedSpawnEmissionRouteDecision(extractionOnly)).toEqual(extractionOnly);
-    expect(issuedSpawnEmissionRouteDecision(refused)).toEqual(refused);
-  });
-
-  it("round-trips the issued route decisions of the current reviewer cells back onto the request-programs' vocabulary", () => {
+  it("issues the request programs' own decision as spawn authority and projection input, with no translation", () => {
     for (const binding of [REVIEWER_V2, REVIEWER_V3]) {
-      const enabled = decideIssuedSpawnEmissionRoute(claimOf(binding), providedEmissionCapability(binding.schemaDigest));
-      if (enabled.kind !== "emission-enabled") throw new Error("fixture route must enable emission");
-      expect(issuedSpawnEmissionRouteDecision(enabled)).toEqual({
-        kind: "emission", binding, contextDigest: CONTEXT_DIGEST,
-      });
+      const route = qualifyIssuedSpawnEmissionRoute(claimOf(binding), qualifiedRoute, true);
+      expect(route).toEqual({ kind: "emission", binding, contextDigest: CONTEXT_DIGEST });
+      expect(route).toEqual(decideRequestEmissionRoute(claimOf(binding), providedEmissionCapability(binding.schemaDigest)));
+      if (route.kind !== "emission") throw new Error("qualified fixture route must emit");
+      // The same value is parent-admission authority and projection input.
+      expect(expectedSpawnEmissionCapability(
+        emissionItem("code-reviewer", binding),
+        issuedFor("code-reviewer", binding, CONTEXT_DIGEST, route),
+      )).toMatchObject({ ok: true, expectation: { kind: "emission-enabled", binding } });
+      expect(projectEmissionTaskText(route, "review").descriptor).toBe(renderEmissionDescriptor(binding, CONTEXT_DIGEST));
     }
+  });
+
+  it("names exactly emission, extraction-only, and refused, and issued authority excludes refused", () => {
+    expectTypeOf<ReturnType<typeof qualifyIssuedSpawnEmissionRoute>["kind"]>()
+      .toEqualTypeOf<"emission" | "extraction-only" | "refused">();
+    expectTypeOf<IssuedSpawnEmissionRoute["kind"]>().toEqualTypeOf<"emission" | "extraction-only">();
   });
 });
 
@@ -1267,8 +1337,8 @@ describe("successor v3 route parity across every degraded arm (T9)", () => {
 
   it("admits the successor v3 route exactly like v2: qualified route, exact binding, and the qualified child route carried (T9 v3 parity)", () => {
     const qualified = qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V3), qualifiedRoute, true);
-    expect(qualified).toMatchObject({ kind: "emission-enabled", binding: REVIEWER_V3, contextDigest: CONTEXT_DIGEST });
-    if (qualified.kind !== "emission-enabled") throw new Error("qualified fixture must enable emission");
+    expect(qualified).toMatchObject({ kind: "emission", binding: REVIEWER_V3, contextDigest: CONTEXT_DIGEST });
+    if (qualified.kind !== "emission") throw new Error("qualified fixture must enable emission");
     const admission = expectedSpawnEmissionCapability(
       emissionItem("code-reviewer", REVIEWER_V3),
       issuedFor("code-reviewer", REVIEWER_V3, CONTEXT_DIGEST, qualified),
@@ -1305,7 +1375,7 @@ describe("successor v3 route parity across every degraded arm (T9)", () => {
     const profile = fixtureValue(resolveModelProfile("qualified-local-review"));
     const pi = lowerModelProfile(profile, "pi");
     expect(qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V3), issuedPiRoute(pi.provider, pi.model), true))
-      .toMatchObject({ kind: "emission-enabled" });
+      .toMatchObject({ kind: "emission" });
     expect(qualifyIssuedSpawnEmissionRoute(claimOf(REVIEWER_V3), issuedPiRoute("desktop-vllm", "some-other-local-model"), true))
       .toMatchObject({ kind: "extraction-only" });
   });
@@ -1424,7 +1494,7 @@ describe("refutation transcript read decision (T6 remediation)", () => {
 // ---------------------------------------------------------------------------
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1433,15 +1503,14 @@ import { CURRENT_REVIEWER_PROTOCOL } from "../../src/core/reviewer-contract";
 import { STANDALONE_REVIEWER_PROTOCOL_V3 } from "../../src/core/standalone-lineage-contract";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
 import {
+  DESKTOP_VLLM_ROUTE,
   lowerModelProfile,
   resolveAgentPolicy,
   resolveModelProfile,
 } from "../../src/core/model-profiles";
-import {
-  parseRegisteredFacadeProgram,
-  type RegisteredStandaloneProgram,
-  type RegisteredWaveGateProgram,
-} from "../../src/handlers/helpers/programs/helpers";
+import { LOOM_PACKAGE_ROOT } from "../../src/utils/loom-package-root";
+import { parseRegisteredFacadeProgram, type RegisteredStandaloneProgram } from "../../src/handlers/helpers/programs/registration";
+import { type RegisteredWaveGateProgram } from "../../src/core/wave-gate-program";
 import { createRunDirectory, openRunDirectory } from "../../src/orchestration/run-directory-handle";
 import { parseTaskGraph } from "../../src/state-manager";
 import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../src/orchestration/harness-capture-runtime";
@@ -1835,7 +1904,7 @@ describe("positive program-path issuance through the qualified local Pi parent (
     const specCheck = requests.find(({ authority }) => authority.role === "spec-check-invoker");
     expect(specCheck?.authority.modelProfile).toBe("spec-check-review");
     expect(specCheck?.task).not.toContain(EMISSION_DESCRIPTOR_MARKER);
-    const { readPiIssuedSpawnRequest } = await import("../../../pi/extension");
+    const { readPiIssuedSpawnRequest } = await import("../../../pi/review-run-authority");
     const previous = { root: process.env[RUNS_ROOT_ENV], run: process.env[RUN_DIR_ENV] };
     try {
       process.env[RUNS_ROOT_ENV] = project.runsRoot;
@@ -1850,7 +1919,7 @@ describe("positive program-path issuance through the qualified local Pi parent (
         expect(descriptor.binding.requestId).toBe(authority.requestId);
         expect(task).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
         expect(readPiIssuedSpawnRequest("019fca39-f989-7510-8e62-50dadbcad4ff", authority.requestId, authority.contextDigest, authority.role))
-          .toMatchObject({ ok: true, value: { route: { kind: "emission-enabled" } } });
+          .toMatchObject({ ok: true, value: { route: { kind: "emission" } } });
       }
     } finally {
       if (previous.root === undefined) delete process.env[RUNS_ROOT_ENV]; else process.env[RUNS_ROOT_ENV] = previous.root;
@@ -1891,7 +1960,7 @@ describe("the Pi issuance read behind the spawn admission port (T6)", () => {
     const reviewer = action.requests?.find(({ authority }) => authority.role === "code-reviewer");
     if (reviewer === undefined) throw new Error("fixture did not publish a reviewer request");
     const authority = mustAuthority(reviewer.authority);
-    const { readPiIssuedSpawnRequest } = await import("../../../pi/extension");
+    const { readPiIssuedSpawnRequest } = await import("../../../pi/review-run-authority");
     const beforeRoot = process.env[RUNS_ROOT_ENV];
     const beforeRun = process.env[RUN_DIR_ENV];
     try {

@@ -21,35 +21,39 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
-  completePersistentRefutationPanel,
   deriveRefutationVerifierBinding,
-  panelRequestIdentity,
   parseArchitecturePanelAuthority,
-  parsePanelVerdictSourceRecord,
+  parseRefutationPanelAuthority,
+  type ArchitecturePanelAuthority,
+  type RefutationPanelAuthority,
+} from "../../src/core/panel-authority";
+import {
+  completePersistentRefutationPanel,
+  panelRequestIdentity,
   parsePersistentArchitecturePanelEvent,
   parsePersistentRefutationPanelEvent,
-  parseRefutationPanelAuthority,
   parseRefutationPanelCheckpoint,
   parsePersistentRefutationPanelHistory,
-  panelVerdictSourceProvenance,
-  panelVerdictSourceRecord,
   planRefutationPanelPersistence,
-  projectPanelVerdictSourceArm,
   reducePersistentRefutationPanel,
   refutationPanelCheckpoint,
-  replayPanelVerdictSourceSelection,
   startPersistentArchitecturePanel,
   startPersistentRefutationPanel,
   submitArchitectureCandidateResult,
   submitArchitectureJudgeResult,
   submitRefutationVerdict,
-  type ArchitecturePanelAuthority,
   type ArchitecturePanelState,
+} from "../../src/core/persistent-panel";
+import {
+  parsePanelVerdictSourceRecord,
+  panelVerdictSourceProvenance,
+  panelVerdictSourceRecord,
+  projectPanelVerdictSourceArm,
+  replayPanelVerdictSourceSelection,
   type PanelVerdictEmissionPort,
   type PanelVerdictSource,
   type PanelVerdictSourceRecord,
-  type RefutationPanelAuthority,
-} from "../../src/core/panel-program";
+} from "../../src/core/panel-verdict-source";
 import { selectVerdictSource } from "../../src/core/emission-ingestion";
 import { issueEmissionBinding, type IssuedEmissionBindingOf } from "../../src/core/emission-tool";
 import { observeEmissionCalls, type EmissionCallFrame, type EmissionToolCall } from "../../src/core/harness-capture";
@@ -316,7 +320,14 @@ const singleCallObservation = (call: EmissionToolCall) =>
  *  shell. The production composition itself is pinned by the orchestration
  *  CLI tests, which run the shell's own exported adapter. */
 const testVerdictEmissionPort: PanelVerdictEmissionPort = {
-  fold: ({ binding, observation, rawJson }) => selectVerdictSource(binding, observation, rawJson),
+  // The core's binding is a structural mirror; like the production port, the
+  // adapter parses it back through the mint before the nominal kernel folds.
+  fold: ({ binding, observation, rawJson }) => {
+    const minted = issueEmissionBinding({ requestId: binding.requestId, kind: binding.kind.kind, version: binding.version,
+      toolName: binding.toolName, schemaDigest: binding.schemaDigest });
+    if (!minted.ok) throw new Error(`fixture verdict binding refused: ${minted.error.message}`);
+    return selectVerdictSource(minted.value, observation, rawJson);
+  },
   replayAcceptedCall: (claims, call, rawJson) => {
     const minted = issueEmissionBinding(claims);
     if (!minted.ok) return { ok: false, error: minted.error.message };

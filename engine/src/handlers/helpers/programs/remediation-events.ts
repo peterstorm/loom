@@ -6,7 +6,7 @@ import {
   type EngineObservedRepairedCheck,
 } from "../../../core/defect-family-accounting";
 import type { ArtifactDigest, DomainResult } from "../../../core/orchestration-contract";
-import { sha256Bytes } from "../../../core/review-packet";
+import { sha256Bytes } from "../../../core/digest";
 import { MAX_STRUCTURED_REPORT_BYTES, parseStructuredTestReportBytes } from "../../../core/structured-test-report";
 import type {
   RemediationCheckExecution,

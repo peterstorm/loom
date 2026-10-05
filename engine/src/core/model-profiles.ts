@@ -36,10 +36,21 @@ export type PiCopilotModel = "gpt-5.6-terra";
 export type PiThinkingLevel = "medium" | "high";
 export type Harness = "claude-code" | "pi";
 
+/**
+ * The one local vLLM deployment the catalog targets: the single owner of its
+ * provider/served-model literal. Emission route qualification
+ * (`spawn-admission.ts`) is separate policy that names this route rather than
+ * re-spelling it, so a catalog rename cannot desynchronize the two.
+ */
+export const DESKTOP_VLLM_ROUTE = Object.freeze({
+  provider: "desktop-vllm",
+  model: "glm-5.3-flash-spark-tp2-v14",
+} as const);
+
 export type ClaudeCodeTarget = Readonly<{ model: ClaudeCodeModel }>;
 export type PiTarget =
   | Readonly<{ provider: "openai-codex"; model: PiOpenAiModel; thinking: PiThinkingLevel }>
-  | Readonly<{ provider: "desktop-vllm"; model: "glm-5.3-flash-spark-tp2-v14"; thinking: "high" }>
+  | Readonly<typeof DESKTOP_VLLM_ROUTE & { thinking: "high" }>
   | Readonly<{ provider: "github-copilot"; model: PiCopilotModel; thinking: PiThinkingLevel }>;
 export type PiProvider = PiTarget["provider"];
 
@@ -88,6 +99,7 @@ const copilotTarget = (
   model: PiCopilotModel,
   thinking: PiThinkingLevel,
 ): PiTarget => Object.freeze({ provider: "github-copilot", model, thinking });
+const desktopVllmTarget: PiTarget = Object.freeze({ ...DESKTOP_VLLM_ROUTE, thinking: "high" });
 const profile = (
   id: LlmProfileId,
   claudeCode: ClaudeCodeModel,
@@ -100,18 +112,14 @@ const profile = (
 
 /** Exact, calibrated-by-policy targets. None is an alias for a parent model. */
 export const LLM_PROFILES: readonly LlmProfile[] = Object.freeze([
-  profile("implementation", "opus", Object.freeze({
-    provider: "desktop-vllm",
-    model: "glm-5.3-flash-spark-tp2-v14",
-    thinking: "high",
-  } as const)),
+  profile("implementation", "opus", desktopVllmTarget),
   profile("architecture-finalize", "opus", piTarget("gpt-5.6-sol", "high")),
   profile("general-review", "sonnet", piTarget("gpt-5.6-sol", "high")),
   profile("focused-review", "sonnet", piTarget("gpt-5.5", "high")),
   Object.freeze({
     id: "qualified-local-review",
     claudeCode: claudeTarget("sonnet"),
-    pi: Object.freeze({ provider: "desktop-vllm", model: "glm-5.3-flash-spark-tp2-v14", thinking: "high" }),
+    pi: desktopVllmTarget,
   }),
   profile("panel-design", "opus", piTarget("gpt-5.6-sol", "high")),
   profile("panel-judge", "opus", piTarget("gpt-5.6-sol", "high")),
@@ -623,7 +631,7 @@ export function lowerModelProfile(profileValue: LlmProfile, harness: Harness): H
   // object assigns to that member of the PiBinding union.
   return target.provider === "openai-codex"
     ? Object.freeze({ harness, provider: target.provider, model: target.model, thinking: target.thinking })
-    : target.provider === "desktop-vllm"
+    : target.provider === DESKTOP_VLLM_ROUTE.provider
     ? Object.freeze({ harness, provider: target.provider, model: target.model, thinking: target.thinking })
     : Object.freeze({ harness, provider: target.provider, model: target.model, thinking: target.thinking });
 }

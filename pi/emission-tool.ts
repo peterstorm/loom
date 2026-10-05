@@ -2,7 +2,7 @@
  * The Pi-side emission tool shell — the PURE half of the child's emission
  * registration/readiness surface (T5; FR-001/FR-008/FR-013/FR-014/FR-021/
  * SC-006). The imperative half is the readiness command + hold wiring in
- * `pi/extension.ts`; this module owns every decision that wiring acts on, so
+ * `pi/emission-readiness.ts`; this module owns every decision that wiring acts on, so
  * the acceptance suite drives the same policy seam production registers with
  * — never a test twin.
  *
@@ -45,6 +45,7 @@
  */
 
 import {
+  canonicalizeEmissionWireArguments,
   EMISSION_TOOL_SPECS,
   frozenPayloadSchemaParameters,
   issueEmissionBinding,
@@ -60,7 +61,7 @@ import {
   type EmissionExecutionOutcome,
   type EmissionToolAcknowledgment,
 } from "../engine/src/core/harness-capture";
-import { canonicalizeEmissionWireArguments } from "../engine/src/core/emission-tool";
+import { isRecord } from "../engine/src/core/plain-record";
 import {
   boundDiagnosticMessage,
   canonicalRecord,
@@ -206,9 +207,6 @@ type ProvisioningClaims = Readonly<{
   schemaDigest: unknown;
 }>;
 
-const recordOf = (value: unknown): Record<string, unknown> | null =>
-  typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
-
 /** The provisioning text's claims: `not-provisioned` (absent env only),
  *  `refused` (unparseable JSON or a non-object), or the six extracted claim
  *  fields for certification. Certification itself stays in
@@ -236,8 +234,7 @@ function parseProvisioningClaims(raw: string | undefined): ProvisioningClaimsPar
       ),
     });
   }
-  const record = recordOf(parsed);
-  if (record === null) {
+  if (!isRecord(parsed)) {
     return canonicalRecord({
       kind: "refused" as const,
       code: "non-object" as const,
@@ -247,12 +244,12 @@ function parseProvisioningClaims(raw: string | undefined): ProvisioningClaimsPar
   return canonicalRecord({
     kind: "claims" as const,
     claims: canonicalRecord({
-      requestId: record["requestId"],
-      contextDigest: record["contextDigest"],
-      kind: record["kind"],
-      version: record["version"],
-      toolName: record["toolName"],
-      schemaDigest: record["schemaDigest"],
+      requestId: parsed["requestId"],
+      contextDigest: parsed["contextDigest"],
+      kind: parsed["kind"],
+      version: parsed["version"],
+      toolName: parsed["toolName"],
+      schemaDigest: parsed["schemaDigest"],
     }),
   });
 }
@@ -442,7 +439,7 @@ export function emissionToolDefinition(binding: IssuedEmissionBinding): Emission
     prepareArguments: (args: unknown): unknown => canonicalizeEmissionWireArguments(parameters, args),
     constrainedSampling: EMISSION_CONSTRAINED_SAMPLING_REQUEST,
     execute: async (_toolCallId: string, params: unknown): Promise<EmissionToolAcknowledgment> => {
-      const outcome: EmissionExecutionOutcome = acknowledgeEmissionExecution(spec, binding.version, params);
+      const outcome: EmissionExecutionOutcome = acknowledgeEmissionExecution(binding, params);
       if (outcome.kind === "refused") {
         // The shell boundary's error signal (AD-3): the admission's own code
         // and message verbatim — the model's correction surface is the
@@ -621,26 +618,25 @@ const presentReadinessField = <T>(value: T | undefined): T => {
 /** Parse, don't validate: arbitrary command-entry data becomes one immutable
  * readiness report or one bounded rejection naming every malformed field. */
 export function parseReadinessReport(raw: unknown): DomainResult<ReadinessReport, ReadinessPayloadRejection> {
-  const record = recordOf(raw);
-  if (record === null) {
+  if (!isRecord(raw)) {
     return failure(canonicalRecord({
       kind: "malformed-readiness-payload" as const,
       reason: `the readiness payload is ${describeUnknown(raw)}, not an object`,
     }));
   }
   const violations: string[] = [];
-  const requestId = checkedField("requestId", parseRequestId(record["requestId"]), violations);
-  const contextDigest = checkedField("contextDigest", parseContextDigest(record["contextDigest"]), violations);
-  const schemaDigest = checkedField("schemaDigest", parseArtifactDigest(record["schemaDigest"]), violations);
-  const kind = checkedField("kind", nonEmptyString("kind", record["kind"]), violations);
-  const version = checkedField("version", nonEmptyString("version", record["version"]), violations);
-  const toolName = checkedField("toolName", nonEmptyString("toolName", record["toolName"]), violations);
-  const revision = checkedField("revision", nonEmptyString("revision", record["revision"]), violations);
-  const active = checkedField("active", booleanValue("active", record["active"]), violations);
-  const childPid = checkedField("childPid", positiveInteger("childPid", record["childPid"]), violations);
+  const requestId = checkedField("requestId", parseRequestId(raw["requestId"]), violations);
+  const contextDigest = checkedField("contextDigest", parseContextDigest(raw["contextDigest"]), violations);
+  const schemaDigest = checkedField("schemaDigest", parseArtifactDigest(raw["schemaDigest"]), violations);
+  const kind = checkedField("kind", nonEmptyString("kind", raw["kind"]), violations);
+  const version = checkedField("version", nonEmptyString("version", raw["version"]), violations);
+  const toolName = checkedField("toolName", nonEmptyString("toolName", raw["toolName"]), violations);
+  const revision = checkedField("revision", nonEmptyString("revision", raw["revision"]), violations);
+  const active = checkedField("active", booleanValue("active", raw["active"]), violations);
+  const childPid = checkedField("childPid", positiveInteger("childPid", raw["childPid"]), violations);
   const registeredTools = checkedField(
     "registeredTools",
-    stringArray("registeredTools", record["registeredTools"]),
+    stringArray("registeredTools", raw["registeredTools"]),
     violations,
   );
   if (violations.length > 0) {

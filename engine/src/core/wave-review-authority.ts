@@ -1,4 +1,4 @@
-import { sha256Hex } from "./review-packet";
+import { sha256Hex } from "./digest";
 import type {
   Finding,
   Task,
@@ -40,11 +40,10 @@ import {
 } from "./orchestration-contract";
 import {
   parseReviewedWorkspaceSnapshot,
-  waveFrozenSource,
-  WAVE_FROZEN_SOURCE_SECTION,
   type ReviewedWorkspaceObservation,
   type ReviewedWorkspaceSnapshot,
 } from "./reviewed-workspace";
+import { waveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "./wave-frozen-source";
 import {
   projectRequirementCoverage,
   renderRequirementCoverage,

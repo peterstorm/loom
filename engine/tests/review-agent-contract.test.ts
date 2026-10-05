@@ -10,7 +10,7 @@ import { CURRENT_REVIEWER_PROTOCOL } from "../src/core/reviewer-contract";
 import { parseIssuedReviewerProtocol, parseReviewerEvidence } from "../src/core/review-output";
 import { createPublicationAuthorityResolver, parseAgentRequestAuthority, parseIssuedSpawnRequest, parseOrchestrationRunId, parseRequestId } from "../src/core/orchestration-contract";
 import { resolveAgentPolicy, resolveModelProfile, lowerModelProfile } from "../src/core/model-profiles";
-import { sha256Hex } from "../src/core/review-packet";
+import { sha256Hex } from "../src/core/digest";
 import { extractWireContractRegion } from "../src/core/wire-contract";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");

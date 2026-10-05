@@ -50,7 +50,7 @@ import {
   issuedReviewerPayloadClaim,
 } from "../../src/core/spawn-admission";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_SCHEMA_V2, reviewerPayloadV2Schema, CURRENT_REVIEWER_PROTOCOL } from "../../src/core/reviewer-contract";
-import { sha256Hex } from "../../src/core/review-packet";
+import { sha256Hex } from "../../src/core/digest";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import { buildContextPacket, encodeByteSection } from "../../src/orchestration/context-packets";
 import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../src/orchestration/run-directory-handle";

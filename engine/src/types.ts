@@ -1110,7 +1110,7 @@ export interface TaskGraph {
 // These are pure data shapes describing what a plan DECLARED, not how it is
 // parsed. They live here rather than in `parsers/parse-plan-models.ts` because
 // both the producer (that parser) and a consumer in the functional core
-// (`core/wave-gate-machine.ts`, which binds lifecycle artifacts to a wave) need
+// (`core/wave-gate-checks.ts`, which binds lifecycle artifacts to a wave) need
 // them. Keeping them in the parser forced core to import across a denied
 // boundary for a type-only dependency; keeping them here lets the arrow point
 // at shared data instead. `parse-plan-models.ts` re-exports them, so its

@@ -6,3 +6,5 @@ export type ProgramParse<T> =
 export type FacadeDriveResult =
   | Readonly<{ ok: true; action: unknown }>
   | Readonly<{ ok: false; message: string }>;
+
+export const failed = (message: string): FacadeDriveResult => ({ ok: false, message });

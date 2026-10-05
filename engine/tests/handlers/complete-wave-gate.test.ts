@@ -17,12 +17,12 @@ import completeWaveGateHandler, {
   type GateIO,
 } from "../../src/handlers/helpers/complete-wave-gate";
 // The gate checks, the decision functions, and the status renderers live in
-// `core/wave-gate-machine` and are imported from it directly. They used to
-// arrive through a `complete-wave-gate` facade that re-exported them
-// unchanged; production never routed through that facade (`orchestration`
-// already imported the core originals), so the second path was pinned by
-// these tests alone. Deleting it removes the divergence its own parity case
-// was written to detect.
+// `core/wave-gate-checks` and `core/loom-status` and are imported from them
+// directly. They used to arrive through a `complete-wave-gate` facade that
+// re-exported them unchanged; production never routed through that facade
+// (`orchestration` already imported the core originals), so the second path
+// was pinned by these tests alone. Deleting it removes the divergence its own
+// parity case was written to detect.
 import {
   applyGateDecision,
   checkCriticalFindings,
@@ -32,11 +32,18 @@ import {
   checkSpecAlignment,
   checkTestEvidence,
   computeNextWave,
+  deriveWaveStartReadiness,
   evaluateWaveGate,
   gateCheckMessage,
+  type GateDeps as CoreGateDeps,
+} from "../../src/core/wave-gate-checks";
+import {
+  deriveLoomStatus,
+  deriveLoomStatusFromParsedGraph,
+  deriveNextAction,
   renderLoomStatusHuman,
   renderLoomStatusJson,
-} from "../../src/core/wave-gate-machine";
+} from "../../src/core/loom-status";
 import {
   parseNewTestEvidence,
   type CapturedSpecCheck,
@@ -59,28 +66,24 @@ import { waveGateAuthorityDigest } from "../../src/core/wave-review-authority";
 import {
   commitWaveGateCompletion,
   createWaveGateState,
-  WAVE_REVIEW_AGENTS,
-  deriveLoomStatus,
-  deriveLoomStatusFromParsedGraph,
-  deriveNextAction,
-  deriveWaveAdvisoryDecisionRequest,
-  deriveWaveAdvisoryNextAction,
-  deriveWaveGateDriveStep,
   deriveWaveReadiness,
-  deriveWaveRefutationPlan,
-  deriveWaveStartReadiness,
-  evaluateWaveGate as evaluateCoreWaveGate,
-  prepareWaveRefutationPanel,
+  isCanonicalWaveReadiness,
   projectWaveGateLifecycle,
   proveWaveGateNextAction,
   reduceWaveGate,
-  waveAdvisoryDecisionActionRequest,
-  renderLoomStatusHuman as renderCoreLoomStatusHuman,
-  renderLoomStatusJson as renderCoreLoomStatusJson,
-  type GateDeps as CoreGateDeps,
+  snapshotActionProofIsExact,
   type WaveGateEvent,
   type WaveGateState,
 } from "../../src/core/wave-gate-machine";
+import {
+  deriveWaveAdvisoryDecisionRequest,
+  deriveWaveAdvisoryNextAction,
+  deriveWaveGateDriveStep,
+  deriveWaveRefutationPlan,
+  prepareWaveRefutationPanel,
+  waveAdvisoryDecisionActionRequest,
+} from "../../src/core/wave-gate-preparation";
+import { WAVE_REVIEW_AGENTS } from "../../src/core/model-profiles";
 import {
   blockedAction,
   doneAction,
@@ -1178,6 +1181,15 @@ describe("LC-1 Wave Gate lifecycle reducer", () => {
     }
   });
 
+  it("recognises only the readiness snapshot deriveWaveReadiness minted, through read-only predicates", () => {
+    const minted = authorityValue(deriveWaveReadiness(registeredGraph(), statusDeps));
+    expect(isCanonicalWaveReadiness(minted)).toBe(true);
+    expect(isCanonicalWaveReadiness({ ...minted })).toBe(false);
+    // An unproven snapshot carries neither half of the lifecycle proof pair.
+    expect(snapshotActionProofIsExact(minted)).toBe(true);
+    expect(snapshotActionProofIsExact({ ...minted, lifecycleCheckpointDigest: minted.readinessDigest })).toBe(false);
+  });
+
   it("rejects forged readiness, wrong-run/revision/digest receipts, and ineligible completion", () => {
     const preparing = lifecycleInitialState();
     const awaiting = authorityValue(reduceWaveGate(preparing, { kind: "preparation-published" }));
@@ -1293,7 +1305,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     const readiness = deriveWaveReadiness(graph, statusDeps);
     expect(readiness.ok).toBe(true);
     if (!readiness.ok) return;
-    expect(readiness.value.gateDecision).toEqual(evaluateCoreWaveGate(graph, 1, statusDeps));
+    expect(readiness.value.gateDecision).toEqual(evaluateWaveGate(graph, 1, statusDeps));
     const resumeDecision = deriveNextAction(readiness.value);
     expect(resumeDecision.action).toMatchObject({
       kind: "blocked",
@@ -1890,7 +1902,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
     it("renders as a status rather than an authority failure", () => {
       const graph = unstarted({ tasks: [taskState({ id: "T1", wave: 1, status: "pending" })] });
 
-      const human = renderCoreLoomStatusHuman(
+      const human = renderLoomStatusHuman(
         deriveLoomStatusFromParsedGraph({ ok: true, value: graph }, statusDeps),
       );
 
@@ -2064,10 +2076,10 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
   it("renders versioned human and machine status from the same complete value", () => {
     const status = deriveLoomStatusFromParsedGraph({ ok: true, value: registeredGraph() }, statusDeps);
     const json = renderLoomStatusJson(status);
-    expect(renderCoreLoomStatusJson(status)).toBe(json);
+    expect(renderLoomStatusJson(status)).toBe(json);
     expect(JSON.parse(json)).toEqual(status);
     const human = renderLoomStatusHuman(status);
-    expect(renderCoreLoomStatusHuman(status)).toBe(human);
+    expect(renderLoomStatusHuman(status)).toBe(human);
     for (const category of Object.keys(status.facts)) expect(human).toContain(category);
     expect(human).toContain(`nextAction: ${status.next.action.kind}`);
     for (const entry of status.next.reasons) expect(human).toContain(entry.message);
@@ -2897,6 +2909,6 @@ describe("final-Wave compatibility completion replay", () => {
 describe("complete-wave-gate compatibility delegation", () => {
   it("returns the core decision byte-for-byte without weakening any check", () => {
     const state = registeredGraph();
-    expect(evaluateWaveGate(state, null, statusDeps)).toEqual(evaluateCoreWaveGate(state, null, statusDeps));
+    expect(evaluateWaveGate(state, null, statusDeps)).toEqual(evaluateWaveGate(state, null, statusDeps));
   });
 });

@@ -435,15 +435,33 @@ export function settledCriticalCount(coverage: RequirementCoverage): SettledCrit
  * the Agent packet. `legacy-settled` is a parsed compatibility state for an
  * epoch written before identities were persisted; it remains count-enforced
  * for its original packet and upgrades on the next byte-identical install.
+ *
+ * A current floor's `count` is persisted wire data, never independent
+ * authority: the brand is minted only by `currentSettledFloor`, which derives
+ * it from `criticalFindings.length`, so a count that disagrees with its
+ * findings is unrepresentable.
  */
 export type SettledFloor =
-  | Readonly<{
-      kind: "settled";
-      count: SettledCriticalCount;
-      criticalFindings: readonly SettledCriticalFinding[];
-    }>
+  | CurrentSettledFloor
   | Readonly<{ kind: "legacy-settled"; count: SettledCriticalCount }>
   | Readonly<{ kind: "unprojected"; reason: string }>;
+
+declare const CURRENT_SETTLED_FLOOR: unique symbol;
+export type CurrentSettledFloor = Readonly<{
+  kind: "settled";
+  count: SettledCriticalCount;
+  criticalFindings: readonly SettledCriticalFinding[];
+  readonly [CURRENT_SETTLED_FLOOR]: true;
+}>;
+
+/** The only constructor of a current floor: its count is the findings' length. */
+function currentSettledFloor(criticalFindings: readonly SettledCriticalFinding[]): CurrentSettledFloor {
+  return Object.freeze({
+    kind: "settled",
+    count: criticalFindings.length as SettledCriticalCount,
+    criticalFindings,
+  }) as CurrentSettledFloor;
+}
 
 declare const MANUAL_OVERRIDE_FLOOR: unique symbol;
 /** Parser-minted authority from the separately authorized manual helper. */
@@ -459,12 +477,7 @@ export function settledFloorOf(coverage: RequirementCoverage): SettledFloor {
   if (coverage.kind === "unavailable") {
     return unprojectedFloor(specIndexUnavailableMessage(coverage.reason));
   }
-  const criticalFindings = settledCriticalFindings(coverage);
-  return Object.freeze({
-    kind: "settled",
-    count: criticalFindings.length as SettledCriticalCount,
-    criticalFindings,
-  });
+  return currentSettledFloor(settledCriticalFindings(coverage));
 }
 
 /** A stated absence of projection authority; blank absence reasons are illegal. */
@@ -735,7 +748,7 @@ const FLOOR_VARIANTS: Readonly<Record<SettledFloor["kind"], (record: Record<stri
       if (!hasExactFields(record, ["kind", "count", "criticalFindings"])) return null;
       const criticalFindings = parseSettledCriticalFindings(record.criticalFindings);
       return criticalFindings !== null && criticalFindings.length === count
-        ? Object.freeze({ kind: "settled" as const, count, criticalFindings })
+        ? currentSettledFloor(criticalFindings)
         : null;
     },
     "legacy-settled": (record) => {

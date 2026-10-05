@@ -3,9 +3,13 @@ import { dirname, join } from "node:path";
 import { canonicalStructuralEquals } from "../../../core/orchestration-contract";
 import { parseBoundedReviewerJson } from "../../../core/reviewer-protocol";
 import { STANDALONE_LINEAGE_LIMITS } from "../../../core/standalone-lineage-contract";
-import { prepareStandaloneDisposition, readPublishedStandaloneDisposition,
-  type StandaloneLineageSource, type PreparedStandaloneDisposition, type PublishedStandaloneDisposition,
-  type StandaloneDispositionPublicationReference } from "../../../core/standalone-lineage";
+import {
+  prepareStandaloneDisposition,
+  readPublishedStandaloneDisposition,
+  type StandaloneLineageSource,
+  type PreparedStandaloneDisposition,
+} from "../../../core/standalone-lineage";
+import { type PublishedStandaloneDisposition, type StandaloneDispositionPublicationReference } from "../../../core/standalone-review-model";
 import { parseRegisteredStandaloneDispositionProgram, startStandaloneDisposition,
   standaloneDispositionReceipt, reduceStandaloneDisposition, checkStandaloneDispositionCheckpoint,
   type RegisteredStandaloneDispositionProgram, type StandaloneDispositionStartInput, type StandaloneDispositionState } from "../../../core/standalone-disposition-machine";

@@ -16,7 +16,7 @@ import {
   type RuleDocument,
 } from "../core/implementation-brief";
 import type { DomainResult } from "../core/orchestration-contract";
-import { deriveTaskImplementationDispatch } from "../core/wave-gate-machine";
+import { deriveTaskImplementationDispatch } from "../core/task-implementation-dispatch";
 import { StateManager } from "../state-manager";
 import { observeSpecIndex } from "./spec-index-observation";
 
@@ -54,7 +54,6 @@ export function renderTaskImplementationBrief(
     const specFile = graph.spec_file === null || graph.spec_file === undefined
       ? null
       : isAbsolute(graph.spec_file) ? graph.spec_file : resolve(projectRoot, graph.spec_file);
-    const spec = observeSpecIndex(specFile);
     const rules = new Map<RuleDocument, string>(ruleDocumentsFor(task.file_list ?? []).map((name) =>
       [name, readFileSync(join(packageRoot, "rules", name), "utf8")] as const));
     const rendered = renderImplementationBrief({
@@ -62,7 +61,7 @@ export function renderTaskImplementationBrief(
       task,
       dispatch: derivation.dispatch,
       planFile: graph.plan_file ?? null,
-      spec: spec.kind === "indexed" ? spec.index : null,
+      spec: observeSpecIndex(specFile),
       rules,
     });
     return rendered.ok ? rendered : { ok: false, error: rendered.error.message };

@@ -11,7 +11,8 @@ import {
   type ImplementationRetryDisposition,
 } from "./implementation-retry";
 import { derivePendingTaskProof, type PendingTaskProof } from "./proof-obligations";
-import { canonicalJson, sha256Hex } from "./review-packet";
+import { canonicalJson } from "./review-packet";
+import { sha256Hex } from "./digest";
 import {
   serializeVerificationPolicy,
   type VerificationPolicy,

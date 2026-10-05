@@ -3,21 +3,40 @@
  * this volume never loads a predecessor or drives program publication.
  */
 import { createHash } from 'node:crypto';
-import type { PreparedStandaloneSuccessor } from '../../../core/standalone-lineage';
+import type { PreparedStandaloneSuccessor } from '../../../core/standalone-review-model';
 import { admitStandaloneSuccessorReviewer } from '../../../core/standalone-successor-reviewer';
-import { standaloneCurrentPanelCriticals, type StandaloneReviewerProtocolResolver } from '../../../core/standalone-review';
+import { standaloneCurrentPanelCriticals } from '../../../core/standalone-refutation-panel';
+import { type StandaloneReviewerProtocolResolver } from '../../../core/standalone-review';
 import type { IssuedStandaloneReviewerProtocol } from '../../../core/review-output';
 import { canonicalStructuralEquals, parseEffectId, sameAgentRequestAuthority, parseAgentRequestAuthority, parseIssuedSpawnRequest, boundedThrownCause, type AgentRequestAuthority, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
-import { aggregateStandaloneReview, bindStandaloneCaptureAuthority, captureStandaloneReviewerBytes, completeStandaloneReviewerCapture, proveStandaloneRosterCompletion, serializeAdjudicatedStandaloneReview, admitStandaloneTranscript, type FrozenStandaloneReviewAuthority, type StandaloneTranscriptAdmission } from '../../../core/standalone-review';
-import { reduceStandaloneReviewMachine, freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion, startStandaloneReviewMachine, type StandaloneReviewMachineState } from '../../../core/standalone-review-machine';
+import { aggregateStandaloneReview, proveStandaloneRosterCompletion } from '../../../core/standalone-review';
+import { bindStandaloneCaptureAuthority, captureStandaloneReviewerBytes, completeStandaloneReviewerCapture } from '../../../core/standalone-reviewer-capture';
+import { serializeAdjudicatedStandaloneReview } from '../../../core/standalone-review-records';
+import { admitStandaloneTranscript, type StandaloneTranscriptAdmission } from '../../../core/standalone-transcript-admission';
+import { type FrozenStandaloneReviewAuthority } from '../../../core/standalone-review-model';
+import { reduceStandaloneReviewMachine, startStandaloneReviewMachine, type StandaloneReviewMachineState } from '../../../core/standalone-review-machine';
+import { freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion } from '../../../core/standalone-refutation-completion';
 import { buildStandaloneFindingBrief, defaultRefutationThreshold, reviewSignals, selectReviewLenses } from '../../../core/review-panel';
-import { completePersistentRefutationPanel, deriveRefutationVerifierBinding, panelRequestIdentity, parseRefutationPanelAuthority, refutationPanelCheckpoint, rejectRefutationVerdict, startPersistentRefutationPanel, submitRefutationVerdict, type PersistentPanelResult, type PersistentRefutationPanelEvent, type PersistentRefutationStep } from '../../../core/panel-program';
+import { deriveRefutationVerifierBinding, parseRefutationPanelAuthority, type PersistentPanelResult } from '../../../core/panel-authority';
+import {
+  completePersistentRefutationPanel,
+  panelRequestIdentity,
+  refutationPanelCheckpoint,
+  rejectRefutationVerdict,
+  startPersistentRefutationPanel,
+  submitRefutationVerdict,
+  type PersistentRefutationPanelEvent,
+  type PersistentRefutationStep,
+} from '../../../core/persistent-panel';
 import { buildContextPacket, encodeByteSection, type ContextPacket } from '../../../orchestration/context-packets';
 import { captureKey } from '../../../core/harness-capture';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
 import { boundedStandaloneReadHandle, successorSourceSnapshot } from './standalone-successor-source';
-import { parseRegistration, standaloneReviewerProtocolResolver, durablePublicationDigest, durableRefutationRequests, durableRequests, exactObject, readRegisteredStandaloneAuthority, publicationResolver, standaloneRetryEffectId, type RegisteredStandaloneProgram } from './helpers';
+import { parseRegistration, exactObject, type RegisteredStandaloneProgram } from './registration';
+import { standaloneReviewerProtocolResolver, readRegisteredStandaloneAuthority } from './reviewer-protocol-resolution';
+import { durablePublicationDigest, durableRefutationRequests, publicationResolver } from './durable-requests';
+import { durableRequests, standaloneRetryEffectId } from './standalone-requests';
 import type { ProgramParse } from './program-result';
 
 function standalonePanelSources(handle: RunDirHandle, authority: FrozenStandaloneReviewAuthority) {
@@ -36,7 +55,7 @@ function standalonePanelSources(handle: RunDirHandle, authority: FrozenStandalon
 export function standaloneRefutationPreparation(
   handle: RunDirHandle,
   authority: FrozenStandaloneReviewAuthority,
-  aggregate: import("../../../core/standalone-review").StandaloneReviewAggregate,
+  aggregate: import("../../../core/standalone-review-model").StandaloneReviewAggregate,
 ) {
   const brief = buildStandaloneFindingBrief({ subjectId: aggregate.subjectId, findings: standaloneCurrentPanelCriticals(aggregate) });
   const selected = selectReviewLenses(reviewSignals(brief.findings), 3);

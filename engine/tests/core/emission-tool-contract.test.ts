@@ -8,7 +8,7 @@ import type { PayloadProducerKindName } from "../../src/core/model-profiles";
 import { emissionToolDefinition } from "../../../pi/emission-tool";
 import { JUDGE_VERDICT_SCHEMA_V1, JUDGE_VERDICT_SCHEMA_V1_DIGEST } from "../../src/core/panel-contract";
 import { REFUTATION_VERDICT_SCHEMA_V1, REFUTATION_VERDICT_SCHEMA_V1_DIGEST } from "../../src/core/review-panel";
-import { sha256Hex } from "../../src/core/review-packet";
+import { sha256Hex } from "../../src/core/digest";
 import type { ArtifactDigest } from "../../src/core/orchestration-contract/identity";
 
 /**
@@ -94,7 +94,7 @@ describe("emission tool parameter schemas byte-match the frozen payload schema b
  * The REGISTERED tool surface (FR-021/SC-006, AS-013): the byte identity is
  * proven where the tool is actually REGISTERED, not only at the parameters
  * constructor above. `emissionToolDefinition` is the production definition
- * pi/extension.ts registers — the same definition the readiness barrier and
+ * pi/emission-readiness.ts registers — the same definition the readiness barrier and
  * the Pi validation suite (`engine/tests/pi/emission-tool.test.ts`) drive —
  * so one minted binding per supported (kind, version) registry cell proves
  * 100% of the per-kind emission-tool parameter schemas byte-match the frozen

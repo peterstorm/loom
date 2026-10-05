@@ -22,7 +22,7 @@ import { canonicalRepositoryPaths, partitionWriteEvidence } from "../../utils/re
 import { readSettledJsonl } from "../../utils/read-settled-jsonl";
 import {
   compareAttemptBaseline,
-} from "../../utils/artifact-baseline";
+} from "../../utils/attempt-baseline";
 import { parseTranscript } from "../../parsers/parse-transcript";
 import { parseFilesModified } from "../../parsers/parse-files-modified";
 import { parseBashTestOutput } from "../../parsers/parse-bash-test-output";

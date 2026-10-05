@@ -20,9 +20,10 @@ import { parseAgentRequestAuthority } from "../src/core/orchestration-contract";
 import { parseTaskGraph } from "../src/state-manager";
 import { observeTaskGraphProjectBoundary } from "../src/config";
 import { graphFixture, taskFixture } from "./fixtures/task-lifecycle";
-import { publishLegacyInitialBatch } from "../src/handlers/helpers/programs/helpers";
+import { publishLegacyInitialBatch } from "../src/handlers/helpers/programs/request-publication";
 import { readLoomReviewAuthorityBridge } from "../src/handlers/helpers/programs/review-authority-bridge";
-import { waveGateAuthorityDigest, waveRequests } from "../src/handlers/helpers/programs/wave-gate";
+import { waveGateAuthorityDigest } from "../src/core/wave-review-authority";
+import { waveRequests } from "../src/handlers/helpers/programs/wave-review-requests";
 import type { AgentRequestAuthority } from "../src/core/orchestration-contract";
 import { fsSessionRegistry, TASK_GRAPH_POINTER_LEASES_SUFFIX } from "../src/machine";
 import { openRunDirectory, type RunDirHandle } from "../src/orchestration/run-directory-handle";
@@ -405,13 +406,13 @@ async function additionalPiFixtureRequest(staged: Awaited<ReturnType<typeof piCa
 
 describe("Pi extension review tool_result integration", () => {
   /**
-   * Resolve `piSpawnRosterId` from the SAME module `extension()` loads.
+   * Resolve `piSpawnRosterId` from the SAME module instance `extension()` loads.
    *
    * Keep the dynamic import in one helper so every case resolves the function
-   * from the same extension module instance that `extension()` loads.
+   * from the same `pi/tool-input` module instance the extension imports.
    */
   const rosterId = async (toolCallId: unknown, index: number, agent: string): Promise<string> => {
-    const extensionSpecifier = "../../pi/extension.ts";
+    const extensionSpecifier = "../../pi/tool-input.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
       piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
     };
@@ -455,7 +456,7 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("preserves write-grant injection failure when direct revocation also fails", async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
+    const extensionSpecifier = "../../pi/cleanup-actions.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
       injectPiWriteGrantWithRevocation: (
         task: string,
@@ -669,8 +670,12 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("retains malformed Pi transcript diagnostics in the capture rejection", async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
-    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
+    const toolInputSpecifier = "../../pi/tool-input.ts";
+    const captureSpecifier = "../../pi/review-capture.ts";
+    const module = {
+      ...await import(/* @vite-ignore */ toolInputSpecifier),
+      ...await import(/* @vite-ignore */ captureSpecifier),
+    } as {
       piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
       capturePiSubagentResult: (
         toolCallId: unknown,
@@ -817,7 +822,7 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("runs later capability cleanup after an earlier cleanup action fails", async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
+    const extensionSpecifier = "../../pi/cleanup-actions.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
       runPiCleanupActions: (actions: readonly { label: string; run: () => void | Promise<void> }[]) => Promise<readonly string[]>;
     };
@@ -834,7 +839,7 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("continues startup cleanup and attempts every reporting channel", async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
+    const extensionSpecifier = "../../pi/cleanup-actions.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
       runPiStartupSweeps: (
         sweeps: readonly { name: string; run: () => void }[],
@@ -869,7 +874,7 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("does not throw when one reporting channel receives the sweep failure", async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
+    const extensionSpecifier = "../../pi/cleanup-actions.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
       runPiStartupSweeps: (
         sweeps: readonly { name: string; run: () => void }[],
@@ -894,7 +899,7 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("throws one stack-preserving aggregate only after all reporting routes and later sweeps fail", async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
+    const extensionSpecifier = "../../pi/cleanup-actions.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
       runPiStartupSweeps: (
         sweeps: readonly { name: string; run: () => void }[],
@@ -1014,7 +1019,7 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("makes rejected child write grants an unconditional direct-edit denial", async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
+    const extensionSpecifier = "../../pi/child-write-grant.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
       rejectedChildWriteGrantBlock: (rejected: boolean) => unknown;
     };
@@ -1026,7 +1031,7 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("retains malformed completion checkpoint parser diagnostics", async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
+    const extensionSpecifier = "../../pi/review-run-authority.ts";
     const module = await import(/* @vite-ignore */ extensionSpecifier) as {
       standaloneCompletionCheckpointProblem: (checkpoint: string) => string | null;
     };
@@ -1036,8 +1041,12 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("preserves malformed Pi transcript extraction as an explicit capture rejection", async () => {
-    const extensionSpecifier = "../../pi/extension.ts";
-    const module = await import(/* @vite-ignore */ extensionSpecifier) as {
+    const toolInputSpecifier = "../../pi/tool-input.ts";
+    const captureSpecifier = "../../pi/review-capture.ts";
+    const module = {
+      ...await import(/* @vite-ignore */ toolInputSpecifier),
+      ...await import(/* @vite-ignore */ captureSpecifier),
+    } as {
       piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
       capturePiSubagentResult: (
         toolCallId: unknown,

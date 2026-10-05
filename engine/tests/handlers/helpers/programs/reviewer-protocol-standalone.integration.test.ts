@@ -16,9 +16,16 @@ import {
   renderEmissionDescriptor,
 } from "../../../../src/core/spawn-admission";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_IMPACT_RUBRIC_V1, REVIEWER_PAYLOAD_SCHEMA_V2 } from "../../../../src/core/reviewer-contract";
-import { prepareStandaloneReview, serializeStandaloneReviewAuthority, STANDALONE_REVIEWER_ROLES } from "../../../../src/core/standalone-review";
-import { reduceStandaloneReviewMachine, serializeStandaloneReviewMachineState, startStandaloneReviewMachine } from "../../../../src/core/standalone-review-machine";
-import { parseRegistration, parseRegisteredFacadeProgram, parsedAuthority, publicationFile, standalonePublicationEffectId, publishLegacyInitialBatch, reviewerProtocolResolver, standaloneRequestId } from "../../../../src/handlers/helpers/programs/helpers";
+import { prepareStandaloneReview } from "../../../../src/core/standalone-review-preparation";
+import { serializeStandaloneReviewAuthority } from "../../../../src/core/standalone-review-records";
+import { STANDALONE_REVIEWER_ROLES } from "../../../../src/core/standalone-review-scope";
+import { reduceStandaloneReviewMachine, startStandaloneReviewMachine } from "../../../../src/core/standalone-review-machine";
+import { serializeStandaloneReviewMachineState } from "../../../../src/core/standalone-review-checkpoint";
+import { parseRegistration, parseRegisteredFacadeProgram, parsedAuthority } from "../../../../src/handlers/helpers/programs/registration";
+import { publicationFile } from "../../../../src/handlers/helpers/programs/durable-requests";
+import { standalonePublicationEffectId, standaloneRequestId } from "../../../../src/handlers/helpers/programs/standalone-requests";
+import { publishLegacyInitialBatch } from "../../../../src/handlers/helpers/programs/request-publication";
+import { reviewerProtocolResolver } from "../../../../src/handlers/helpers/programs/reviewer-protocol-resolution";
 import { inspectStandaloneFacade, readStandaloneReviewedSource, replayStandaloneResultFromEvidence, type StandaloneCaptureWitness } from "../../../../src/handlers/helpers/programs/standalone";
 import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { captureHarnessResult } from "../../../../src/orchestration/harness-capture-runtime";

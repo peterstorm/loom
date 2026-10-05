@@ -8,8 +8,6 @@ import {
   parseReviewPacket,
   parseReviewPacketRecovery,
   serializeReviewPacket,
-  sha256Bytes,
-  sha256Hex,
   parseBaseSha,
   parseHeadSha,
   type BaseSha,
@@ -19,6 +17,7 @@ import {
   type ReviewPacketInput,
   type ReviewPath,
 } from "../../src/core/review-packet";
+import { sha256Bytes, sha256Hex } from "../../src/core/digest";
 
 const base = (hex: string): BaseSha => {
   const parsed = parseBaseSha(hex);

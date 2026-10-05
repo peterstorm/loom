@@ -23,7 +23,8 @@ import {
   type SemanticAttempt,
 } from "./implementation-completion";
 import { compareStrings } from "./ordering";
-import { canonicalJson, sha256Hex, type JsonValue } from "./review-packet";
+import { canonicalJson, type JsonValue } from "./review-packet";
+import { sha256Hex } from "./digest";
 import { parseTaskId, type TaskId } from "./task-id";
 import {
   parseTaskProof,

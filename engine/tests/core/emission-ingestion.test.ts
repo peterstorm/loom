@@ -31,7 +31,7 @@ import {
   type ArtifactDigest,
   type DomainResult,
 } from "../../src/core/orchestration-contract/identity";
-import { sha256Hex } from "../../src/core/review-packet";
+import { sha256Hex } from "../../src/core/digest";
 import type { PayloadProducerKind, PayloadProducerKindName } from "../../src/core/model-profiles";
 import { standaloneReviewerPayloadV3Schema } from "../../src/core/standalone-lineage-contract";
 import { parseStandaloneReviewerPayloadV3 } from "../../src/core/reviewer-protocol";
@@ -1216,45 +1216,67 @@ describe("the binding-scoped admission canonicalizes the observed wire form", ()
 });
 
 // ---------------------------------------------------------------------------
+// The observed request id is parsed where it meets issued authority
+// ---------------------------------------------------------------------------
+
+describe("the observed request id is parsed at the binding check (FR-014)", () => {
+  it.each([
+    ["an empty id", ""],
+    ["a non-canonical id", "request with spaces/../x"],
+    ["the issued id with trailing whitespace", `${REQUEST_ID} `],
+  ])("refuses %s as wrong-request — never absence, never a fallback — on both paths", (_label, requestId) => {
+    const reviewer = selectCanonicalPayload(
+      REVIEWER_V2,
+      observeEmissionCalls([frameOf({ ...callOf(REVIEWER_V2, "call-malformed", validReviewerArguments("the registry")), requestId })]),
+      USABLE_CANDIDATES,
+    );
+    expect(reviewer).toMatchObject({ kind: "observation-refused", refusal: { code: "wrong-request" } });
+    const verdict = selectVerdictSource(
+      JUDGE_V1,
+      observeEmissionCalls([frameOf({ ...callOf(JUDGE_V1, "call-malformed", validJudgeArguments("extensibility")), requestId })]),
+      "raw",
+    );
+    expect(verdict).toMatchObject({ kind: "observation-refused", refusal: { code: "wrong-request" } });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The selection's binding-certification invariant (AD-8: the expected
 // kind/version/schema is CHECKED, never trusted)
 // ---------------------------------------------------------------------------
 
-/** The mint stamps the exact tool name and the frozen bytes' digest; nothing
- *  in the type system stops a caller from hand-building the record shape. The
- *  selection re-verifies the certification against its own registry cell, so
- *  an uncertified digest can never flow into the accepted call's journal
- *  provenance as if it were the issued schema identity. */
+/** The mint stamps the exact tool name and the frozen bytes' digest, and the
+ *  binding type is NOMINAL: only `issueEmissionBinding` produces one, so an
+ *  uncertified digest or tool name cannot reach the selection — and therefore
+ *  can never flow into the accepted call's journal provenance as if it were the
+ *  issued schema identity. The certification is a compile-time fact; these
+ *  pins fail to type-check (the `@ts-expect-error` goes unused) the moment a
+ *  forged record would be accepted. */
 describe("the selection's binding-certification invariant", () => {
-  it("throws at the selection when the binding's schema digest does not certify its registry cell — never admits, never journals fabricated provenance", () => {
+  it("rejects a spread-forged schema digest at compile time — the selection never receives an uncertified binding", () => {
     const forgedDigest = { ...REVIEWER_V2, schemaDigest: "0".repeat(64) as ArtifactDigest };
     const call = frameOf(callOf(REVIEWER_V2, "call-cert", validReviewerArguments("the registry")));
-    expect(() =>
-      selectCanonicalPayload(forgedDigest, observeEmissionCalls([call]), USABLE_CANDIDATES),
-    ).toThrow(/does not certify its registry cell/);
+    // @ts-expect-error a spread copy of a minted binding is not a minted binding
+    const reviewerForgery = (): IngestionSelection => selectCanonicalPayload(forgedDigest, observeEmissionCalls([call]), USABLE_CANDIDATES);
 
     const forgedVerdict = { ...JUDGE_V1, schemaDigest: "f".repeat(64) as ArtifactDigest };
-    expect(() =>
-      selectVerdictSource(
-        forgedVerdict,
-        observeEmissionCalls([frameOf(callOf(JUDGE_V1, "call-cert", validJudgeArguments("extensibility")))]),
-        "raw",
-      ),
-    ).toThrow(/does not certify its registry cell/);
+    // @ts-expect-error a spread copy of a minted binding is not a minted binding
+    const verdictForgery = (): VerdictSourceSelection => selectVerdictSource(forgedVerdict, observeEmissionCalls([]), "raw");
+    expect([reviewerForgery, verdictForgery]).toHaveLength(2);
   });
 
-  it("throws when the binding claims another cell's tool name — the exact tool name is part of the issued contract", () => {
+  it("rejects a binding that claims another cell's tool name, or a hand-built record, at compile time", () => {
     const forgedTool = { ...JUDGE_V1, toolName: EMISSION_TOOL_SPECS["reviewer-payload"].toolName };
-    expect(() =>
-      selectVerdictSource(
-        forgedTool,
-        observeEmissionCalls([frameOf(callOf(JUDGE_V1, "call-tool", validJudgeArguments("extensibility")))]),
-        "raw",
-      ),
-    ).toThrow(/does not certify its registry cell/);
+    // @ts-expect-error the exact tool name is part of the minted, issued contract
+    const toolForgery = (): VerdictSourceSelection => selectVerdictSource(forgedTool, observeEmissionCalls([]), "raw");
+    // @ts-expect-error an object literal can never carry the mint's nominal brand
+    const literal: IssuedEmissionBinding = {
+      requestId: JUDGE_V1.requestId, kind: JUDGE_V1.kind, version: JUDGE_V1.version, toolName: JUDGE_V1.toolName, schemaDigest: JUDGE_V1.schemaDigest,
+    };
+    expect([toolForgery, literal]).toHaveLength(2);
   });
 
-  it("never trips the guard for any minted registry cell — the positive control over the certification invariant", () => {
+  it("admits through every minted registry cell — the positive control over the compile-time certification", () => {
     const v3Arguments = standaloneReviewerPayloadV3Schema.parse({
       schemaVersion: 3,
       kind: "standalone-successor-review",

@@ -1102,9 +1102,8 @@ function contextPublished(
   return success(canonicalRecord({ kind: "context-published" as const, runId, digest, slotPath: path }));
 }
 
-/** Write each section blob once; an existing blob must hold the exact bytes. */
 /** The first part of a stored packet no bounded reader could read back, or
- *  null when the packet file and every section blob fit the bound. */
+ *  null when the packet file and every section (one blob each) fit the bound. */
 function oversizeStoredPacket(
   packet: ContextPacket | StandaloneReviewerContextPacketV3,
   stored: StoredContextPacket,
@@ -1114,14 +1113,15 @@ function oversizeStoredPacket(
   if (fileBytes > CONTEXT_PACKET_MAX_BYTES) {
     return `context packet ${packet.digest} is ${fileBytes} bytes, over the ${CONTEXT_PACKET_MAX_BYTES}-byte Context Packet bound; ${narrow}`;
   }
-  const labels = new Map([...packet.fixedContext, ...packet.variableContext].map((section) => [section.digest, section.label] as const));
-  const blob = stored.blobs.find(({ bytes }) => bytes.length > CONTEXT_PACKET_MAX_BYTES);
-  return blob === undefined
+  // A section's blob holds exactly its bytes, so its byteLength is the blob size.
+  const section = [...packet.fixedContext, ...packet.variableContext].find(({ byteLength }) => byteLength > CONTEXT_PACKET_MAX_BYTES);
+  return section === undefined
     ? null
-    : `context packet ${packet.digest} section ${labels.get(blob.digest) ?? blob.digest} is ${blob.bytes.length} bytes, ` +
+    : `context packet ${packet.digest} section ${section.label} is ${section.byteLength} bytes, ` +
       `over the ${CONTEXT_PACKET_MAX_BYTES}-byte Context Packet bound; ${narrow}`;
 }
 
+/** Write each section blob once; an existing blob must hold the exact bytes. */
 function publishSectionBlobs(directory: string, stored: StoredContextPacket): DomainResult<void, RunDirectoryError> {
   for (const { digest, bytes } of stored.blobs) {
     // A blob is named by its section digest; bytes that do not hash to it
@@ -1202,7 +1202,7 @@ function contextOperations(runId: OrchestrationRunId, directory: string) {
       return claimed.ok ? contextPublished(runId, packet.digest, path) : claimed;
     },
 
-    readStandaloneSuccessorContext(digest: ContextPacket["digest"], maximumBytes = 16_777_216): DomainResult<StandaloneReviewerContextPacketV3, RunDirectoryError> {
+    readStandaloneSuccessorContext(digest: ContextPacket["digest"], maximumBytes = CONTEXT_PACKET_MAX_BYTES): DomainResult<StandaloneReviewerContextPacketV3, RunDirectoryError> {
       try {
         const bytes = readRunBytesNoFollow(join(directory, CONTEXTS, `${digest}.json`), maximumBytes);
         const prior = successorPackets.get(digest);

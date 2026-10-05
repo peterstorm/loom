@@ -135,8 +135,10 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       // path math (posix.normalize) before the prefix test — no filesystem I/O.
       "engine/src/core/block-direct-edits.ts": ["node:path"],
       // The emission ingestion folds a digest over captured payload bytes —
-      // digest-only hashing, mirroring review-packet/panel-program.
+      // digest-only hashing, mirroring review-packet.
       "engine/src/core/emission-ingestion.ts": ["node:crypto"],
+      // The shared deterministic SHA-256 leaf (sha256Bytes/sha256Hex).
+      "engine/src/core/digest.ts": ["node:crypto"],
       // The shared rules gate classifies target files by extension: pure
       // path math (extname/join) over strings, no filesystem.
       "engine/src/core/bash-code-mutation.ts": ["node:path"],
@@ -156,16 +158,17 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       "engine/src/core/parse-spec.ts": ["node:crypto"],
       "engine/src/core/panel-kernel.ts": ["node:path"],
       "engine/src/core/phase-artifact-paths.ts": ["node:path"],
-      "engine/src/core/panel-program.ts": ["node:crypto"],
+      // The retained predecessor-archive codec inflates an inline gzip archive
+      // in memory under an explicit output bound — pure decompression, no I/O.
+      "engine/src/core/predecessor-archive.ts": ["node:zlib"],
       "engine/src/core/remediation-machine.ts": ["node:crypto"],
       "engine/src/core/repository-path.ts": ["node:path"],
       "engine/src/core/review-packet.ts": ["node:crypto"],
       "engine/src/core/review-panel.ts": ["node:path"],
       "engine/src/core/rules-gate.ts": ["node:path"],
-      "engine/src/core/standalone-review.ts": ["node:crypto", "node:util"],
+      "engine/src/core/standalone-review.ts": ["node:util"],
       // Exact runtime entry and transitive implementation bytes are gated by machine-purity.
       "engine/src/core/structured-test-report.ts": ["saxes"],
-      "engine/src/core/wave-gate-machine.ts": ["node:crypto"],
       // Cross-branch pre-provisioning, deliberate. TODAY this per-file grant
       // is INERT with zero granted capability: `find-file` sits in utils/,
       // which NO boundary rule governs, so the per-file lookup only runs for

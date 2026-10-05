@@ -11,10 +11,9 @@ import {
   type BriefFinding,
 } from "../../src/core/review-panel";
 import { REVIEW_LAYOUT } from "../../src/core/panel-kernel";
-import {
-  canonicalStandalonePanelFindingAuthority, canonicalDigest, freezeStandalonePanelAuthority, parseFrozenStandalonePanelAuthority,
-  type StandaloneReviewAggregate,
-} from "../../src/core/standalone-review";
+import { canonicalStandalonePanelFindingAuthority, freezeStandalonePanelAuthority, parseFrozenStandalonePanelAuthority } from "../../src/core/standalone-refutation-panel";
+import { canonicalDigest } from "../../src/core/digest";
+import { type StandaloneReviewAggregate } from "../../src/core/standalone-review-model";
 
 function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T {
   if (!result.ok) throw new Error(JSON.stringify(result));

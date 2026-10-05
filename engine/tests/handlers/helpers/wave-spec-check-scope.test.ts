@@ -4,13 +4,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { createRunDirectory } from "../../../src/orchestration/run-directory-handle";
-import {
-  handleWaveReviewContext,
-  installWaveReviewRuns,
-  waveRequests as waveRequestsWithBoundary,
-  waveSpecCheckScope,
-} from "../../../src/handlers/helpers/programs/wave-gate";
-import type { RegisteredWaveGateProgram } from "../../../src/handlers/helpers/programs/helpers";
+import { handleWaveReviewContext } from "../../../src/handlers/helpers/programs/wave-review-context";
+import { installWaveReviewRuns, waveRequests as waveRequestsWithBoundary } from "../../../src/handlers/helpers/programs/wave-review-requests";
+import { waveSpecCheckScope } from "../../../src/core/wave-review-authority";
+import type { RegisteredWaveGateProgram } from "../../../src/core/wave-gate-program";
 import type { TaskGraph, WaveReviewEpochAuthority } from "../../../src/types";
 import { parseTaskGraph, StateManager } from "../../../src/state-manager";
 import { taskFixture } from "../../fixtures/task-lifecycle";
@@ -34,11 +31,8 @@ import {
 } from "../../../src/core/orchestration-contract";
 import { buildContextPacket, encodeByteSection } from "../../../src/core/context-packets";
 import { capturedSpecCheck } from "../../../src/core/spec-check";
-import {
-  parseWaveFrozenSource,
-  reviewedWorkspaceObservation,
-  WAVE_FROZEN_SOURCE_SECTION,
-} from "../../../src/core/reviewed-workspace";
+import { parseWaveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../../src/core/wave-frozen-source";
+import { observedWorkspace } from "../../fixtures/reviewed-workspace";
 
 const DIGEST = (fill: string): ArtifactDigest => {
   const parsed = parseArtifactDigest(fill.repeat(64));
@@ -599,7 +593,7 @@ describe("Wave reviewer slot identity projection", () => {
       const graph = { ...preparedGraph, tasks: preparedGraph.tasks.map((task) => ({ ...task, review_generation: generation })) };
       const legacy = { ...plain, schemaVersion: 1 as const, input: { wave: 1 } };
       const current = { ...legacy, schemaVersion: 2 as const, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL };
-      const workspace = [reviewedWorkspaceObservation("T1", ["engine/src/core/wave-review-authority.ts"], [
+      const workspace = [observedWorkspace("T1", ["engine/src/core/wave-review-authority.ts"], [
         { path: "engine/src/core/wave-review-authority.ts", bytes: Buffer.from("reviewed source") },
       ])];
       const observation = observeDocuments(null, null);
@@ -653,8 +647,8 @@ describe("Wave frozen source authority", () => {
     schemaVersion: 2, reviewerProtocol: CURRENT_REVIEWER_PROTOCOL, kind: "wave-gate", input: { wave: 1 },
     taskIds: ["T1", "T2"], authorityDigest: "a".repeat(64),
   };
-  const first = reviewedWorkspaceObservation("T1", ["src/a.ts"], [{ path: "src/a.ts", bytes: Buffer.from("first task") }]);
-  const second = reviewedWorkspaceObservation("T2", ["src/b.ts"], [{ path: "src/b.ts", bytes: Buffer.from("second task") }]);
+  const first = observedWorkspace("T1", ["src/a.ts"], [{ path: "src/a.ts", bytes: Buffer.from("first task") }]);
+  const second = observedWorkspace("T2", ["src/b.ts"], [{ path: "src/b.ts", bytes: Buffer.from("second task") }]);
   const prepare = (workspace: readonly typeof first[]) => prepareWaveReviewBatch(
     parsedRunId.value, { ...registration, input: { wave: 1 } }, parsedGraph.value, 1, workspace, observeDocuments(null, null),
   );
@@ -685,7 +679,8 @@ describe("Wave frozen source authority", () => {
     ["missing artifact", { ...first, artifacts: [] }, "omitted declared artifact"],
     ["mismatched digest", { ...first, headSha: "f".repeat(64) }, "disagree with observed workspaceHeadSha"],
     ["duplicate artifact", { ...first, artifacts: [...first.artifacts, ...first.artifacts] }, "duplicate artifact"],
-    ["out-of-scope artifact", { ...first, artifacts: [{ path: "src/foreign.ts", bytes: [] }] }, "out-of-scope artifact"],
+    // A hostile observation built around the smart constructor, as a fake port could.
+    ["out-of-scope artifact", { ...first, artifacts: [{ path: "src/foreign.ts" as (typeof first.artifacts)[number]["path"], bytes: [] }] }, "out-of-scope artifact"],
   ] as const)("refuses a %s observation", (_name, malformed, message) => {
     const batch = prepare([malformed, second]);
     expect(batch.ok).toBe(false);
@@ -940,7 +935,7 @@ describe("Wave spec-check authority guards", () => {
     return parsed.value;
   };
 
-  const workspace = [reviewedWorkspaceObservation("T1", ["src/a.ts"], [
+  const workspace = [observedWorkspace("T1", ["src/a.ts"], [
     { path: "src/a.ts", bytes: Buffer.from("reviewed source") },
   ])];
 

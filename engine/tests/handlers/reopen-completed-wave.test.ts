@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { checkImplementationProof, checkReviewedWorkspace } from "../../src/core/wave-gate-machine";
+import { checkImplementationProof, checkReviewedWorkspace } from "../../src/core/wave-gate-checks";
 import { parseArtifactDigest, parseOrchestrationRunId } from "../../src/core/orchestration-contract";
-import { reviewedWorkspaceObservation } from "../../src/core/reviewed-workspace";
+import { observedWorkspace } from "../fixtures/reviewed-workspace";
 import reopenCompletedWaveHandler, {
   commitCompletedWaveReopening,
   deriveWaveReopeningProof,
@@ -24,7 +24,7 @@ import {
   createReclaimedImplementationAttemptReceipt,
   type ImplementationAttemptAuthority,
 } from "../../src/core/implementation-completion";
-import type { WaveReviewContextAuthority } from "../../src/handlers/helpers/programs/wave-gate";
+import type { WaveReviewContextAuthority } from "../../src/core/wave-review-authority";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 
@@ -103,21 +103,21 @@ const modernProof = (taskIds: readonly string[]): WaveReopeningProof => ({ mode:
 
 describe("reviewed workspace integrity", () => {
   it("fails closed after accepted evidence when current dirty/untracked declared bytes drift", () => {
-    const changed = reviewedWorkspaceObservation("T22", ["src/a.ts"], [{ path: "src/a.ts", bytes: Buffer.from("dirty and untracked") }]);
+    const changed = observedWorkspace("T22", ["src/a.ts"], [{ path: "src/a.ts", bytes: Buffer.from("dirty and untracked") }]);
     const result = checkReviewedWorkspace([task("T22", 3)], { loadPlanModels: () => ({ kind: "none" }), filePresence: () => ({ ok: true, exists: true }), reviewedWorkspace: () => [changed] });
     expect(result.passed).toBe(false);
     if (!result.passed) expect(result.reason).toContain("refresh review evidence");
   });
 
   it("accepts an unchanged declared scope", () => {
-    const unchanged = { taskId: "T22", scope: ["src/a.ts"], headSha: head, artifacts: [{ path: "src/a.ts", bytes: [] }] };
+    const unchanged = { ...observedWorkspace("T22", ["src/a.ts"], [{ path: "src/a.ts", bytes: [] }]), headSha: head };
     expect(checkReviewedWorkspace([task("T22", 3)], { loadPlanModels: () => ({ kind: "none" }), filePresence: () => ({ ok: true, exists: true }), reviewedWorkspace: () => [unchanged] }).passed).toBe(true);
   });
 
   it("property: a byte mutation changes the snapshot authority", () => {
     fc.assert(fc.property(fc.uint8Array(), fc.integer({ min: 0, max: 255 }), (bytes, extra) => {
-      const original = reviewedWorkspaceObservation("T", ["a.ts"], [{ path: "a.ts", bytes }]);
-      const changed = reviewedWorkspaceObservation("T", ["a.ts"], [{ path: "a.ts", bytes: Uint8Array.from([...bytes, extra]) }]);
+      const original = observedWorkspace("T", ["a.ts"], [{ path: "a.ts", bytes }]);
+      const changed = observedWorkspace("T", ["a.ts"], [{ path: "a.ts", bytes: Uint8Array.from([...bytes, extra]) }]);
       expect(changed.headSha).not.toBe(original.headSha);
     }));
   });

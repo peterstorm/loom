@@ -1,11 +1,11 @@
 /**
  * Existing LC-2 entry surface for production drivers, replay and P3 consumers.
- * The executable reducer and its publication proof now share the Standalone
- * Review aggregate owner with source admission. No raw-result mint is exported.
+ * The executable reducer and its publication proof share the Standalone Review
+ * custody core with source admission. No raw-result mint is exported. Refutation
+ * completion receipts live in standalone-refutation-completion and the durable
+ * checkpoint codec in standalone-review-checkpoint; callers import those directly.
  */
 export {
-  freezeStandaloneRefutationPanelAuthority,
-  parseStandaloneRefutationCompletion,
   parseAuthoritativeStandaloneReviewResult,
   isAuthoritativeStandaloneReviewResult,
   readStandaloneReviewPublication,
@@ -13,9 +13,6 @@ export {
   isDeclaredStandaloneReviewTransition,
   startStandaloneReviewMachine,
   reduceStandaloneReviewMachine,
-  serializeStandaloneReviewMachineState,
-  parseStandaloneReviewMachineState,
-  type StandaloneRefutationCompletionReceipt,
   type StandaloneReadyToFinalizeState,
   type AuthoritativeStandaloneReviewResult,
   type StandaloneDoneState,

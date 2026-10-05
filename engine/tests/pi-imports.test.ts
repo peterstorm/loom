@@ -244,7 +244,16 @@ describe("pi/ imports resolve against the engine that has to satisfy them", () =
     // to `config` ON PURPOSE, so `core/review-output` could keep claiming it is
     // free of config, and the fix for the broken import must not be to move it
     // back.
-    const source = readFileSync(join(PI_DIR, "extension.ts"), "utf-8");
-    expect(source).toMatch(/import\s*\{[^}]*\bisReviewAgent\b[^}]*\}\s*from\s*["']\.\.\/engine\/src\/config["']/);
+    // Every Pi module that imports it — the spawn lifecycle and the result
+    // dispatcher, since the extension shell was split — imports it from config.
+    const importsOf = (file: string): readonly string[] => [
+      ...readFileSync(join(PI_DIR, file), "utf-8")
+        .matchAll(/import\s*\{[^}]*\bisReviewAgent\b[^}]*\}\s*from\s*["']([^"']+)["']/g),
+    ].map((match) => match[1]!);
+    const importers = PI_FILES.filter((file) => importsOf(file).length > 0);
+    expect(importers).toEqual(expect.arrayContaining(["spawn-lifecycle.ts", "subagent-stop.ts"]));
+    for (const file of importers) {
+      expect(importsOf(file), file).toEqual(["../engine/src/config"]);
+    }
   });
 });

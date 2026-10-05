@@ -17,7 +17,7 @@
  *   the feasibility record's triggers; this suite pins the harness-side
  *   semantics those recordings observed.
  * - The registered tool is the PRODUCTION emission tool definition
- *   (pi/emission-tool.ts, wired by pi/extension.ts's readiness command): the
+ *   (pi/emission-tool.ts, wired by pi/emission-readiness.ts's readiness command): the
  *   execute shell is the shared `acknowledgeEmissionExecution` decision
  *   (refusals THROW at the harness boundary — returning never sets the error
  *   flag; AD-3) over the registry's admission gate, the constrained-sampling
@@ -83,7 +83,7 @@ import {
   reviewerPayloadV2Schema,
 } from "../../src/core/reviewer-contract";
 import { standaloneReviewerPayloadV3Schema } from "../../src/core/standalone-lineage-contract";
-import { sha256Hex } from "../../src/core/review-packet";
+import { sha256Hex } from "../../src/core/digest";
 import {
   decideEmissionToolRegistration,
   describeEmissionRegistrationContradiction,
@@ -98,17 +98,17 @@ import {
   type EmissionToolRegistration,
 } from "../../../pi/emission-tool";
 import { piEmissionCallFrames } from "../../../pi/transcript-adapter";
+import { associatePiSpawnLifecycle } from "../../../pi/tool-input";
 import {
-  associatePiSpawnLifecycle,
   classifyPiIssuedReviewRequest,
-  piIssuedReviewerCaptureObservation,
-  piReviewerCaptureObservation,
   qualifyPiIssuedReviewRequest,
   type PiIssuedReviewRequestClass,
-} from "../../../pi/extension";
+} from "../../../pi/review-run-authority";
+import { piIssuedReviewerCaptureObservation, piReviewerCaptureObservation } from "../../../pi/review-capture";
 import {
   expectedSpawnEmissionCapability,
   renderEmissionDescriptor,
+  spawnEmissionRefusalMessage,
   type AdmittedSpawnItem,
   type IssuedSpawnEmissionAuthority,
 } from "../../src/core/spawn-admission";
@@ -545,7 +545,7 @@ describe("real pi validateToolArguments against the exact frozen registry bytes"
       // ENGINE HALF: the same validated arguments are refused by the
       // production shell's admission — never ingested (FR-006), the refusal
       // the tool result carries and the selection retains.
-      const outcome = acknowledgeEmissionExecution(registryCell.spec, registryCell.version, validated);
+      const outcome = acknowledgeEmissionExecution(mintedBindingFor(registryCell, "req-emission-tool-t5-ws"), validated);
       expect(outcome.kind, `${registryCell.kind}/${registryCell.version}`).toBe("refused");
     }
   });
@@ -1374,7 +1374,10 @@ describe("qualified published Pi request routes bind descriptor admission indepe
           renderEmissionDescriptor(minted.value, authority.claim.contextDigest),
         );
         expect(forgedUpgrade.ok, version).toBe(false);
-        if (!forgedUpgrade.ok) expect(forgedUpgrade.reason).toContain("independently issued route is extraction-only");
+        if (!forgedUpgrade.ok) {
+          expect(forgedUpgrade.refusal).toMatchObject({ code: "extraction-upgrade", basis: { kind: "extraction-only-route" } });
+          expect(spawnEmissionRefusalMessage(forgedUpgrade.refusal)).toContain("independently issued route is extraction-only");
+        }
       }
     } finally {
       if (previousAmbientModel === undefined) delete process.env["PI_MODEL"];
@@ -1399,13 +1402,16 @@ describe("qualified published Pi request routes bind descriptor admission indepe
         "desktop-vllm",
         "glm-5.3-flash-spark-tp2-v14",
       );
-      if (authority.route?.kind !== "emission-enabled") {
-        throw new Error(`expected an emission-enabled ${version} route`);
+      if (authority.route?.kind !== "emission") {
+        throw new Error(`expected an emission ${version} route`);
       }
 
       const omitted = admissionFor(authority, request.role);
       expect(omitted.ok, version).toBe(false);
-      if (!omitted.ok) expect(omitted.reason).toContain("missing its required LOOM_EMISSION_DESCRIPTOR descriptor");
+      if (!omitted.ok) {
+        expect(omitted.refusal.code).toBe("descriptor-missing");
+        expect(spawnEmissionRefusalMessage(omitted.refusal)).toContain("missing its required LOOM_EMISSION_DESCRIPTOR descriptor");
+      }
 
       const forgedContext = parseContextDigest(sha256Hex(`t5-forged-descriptor-${version}`));
       if (!forgedContext.ok) throw new Error(forgedContext.error.message);
@@ -1415,7 +1421,10 @@ describe("qualified published Pi request routes bind descriptor admission indepe
         renderEmissionDescriptor(authority.route.binding, forgedContext.value),
       );
       expect(forged.ok, version).toBe(false);
-      if (!forged.ok) expect(forged.reason).toContain("differs from the descriptor");
+      if (!forged.ok) {
+        expect(forged.refusal.code).toBe("descriptor-mismatch");
+        expect(spawnEmissionRefusalMessage(forged.refusal)).toContain("differs from the descriptor");
+      }
 
       expect(admissionFor(
         authority,
@@ -1472,7 +1481,10 @@ describe("qualified published Pi request routes bind descriptor admission indepe
       renderEmissionDescriptor(descriptorBinding.value, request.contextDigest),
     );
     expect(forgedUpgrade.ok).toBe(false);
-    if (!forgedUpgrade.ok) expect(forgedUpgrade.reason).toContain("independently issued route is extraction-only");
+    if (!forgedUpgrade.ok) {
+      expect(forgedUpgrade.refusal).toMatchObject({ code: "extraction-upgrade", basis: { kind: "extraction-only-route" } });
+      expect(spawnEmissionRefusalMessage(forgedUpgrade.refusal)).toContain("independently issued route is extraction-only");
+    }
   });
 });
 

@@ -29,7 +29,8 @@ import {
   evaluateWaveCompletionSuite,
   type AcceptedWaveCompletionReceipt,
 } from "../src/core/completion-suite";
-import { canonicalJson, sha256Hex } from "../src/core/review-packet";
+import { canonicalJson } from "../src/core/review-packet";
+import { sha256Hex } from "../src/core/digest";
 import fc from "fast-check";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../src/core/reviewer-contract";
 

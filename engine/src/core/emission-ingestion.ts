@@ -18,9 +18,16 @@
  *   → the count of DISTINCT tool-call identities decides
  *     (zero → extraction verbatim; one → schema admission; ≥2 → ambiguity,
  *     with the ambiguity arm carrying its observed calls)
- *   → the single-call state admits the arguments through the registry's
- *     `admitEmissionArguments` (schema selection), after the schema-driven
- *     wire-form canonicalization of the observed transport form
+ *   → the single-call state admits the arguments through
+ *     `admitIssuedEmissionArguments` (schema-driven wire-form
+ *     canonicalization of the observed transport form, then schema selection
+ *     through the issued registry cell — the execute shell's own admission).
+ *     The canonicalization matters here because the transcript records what
+ *     the model emitted, not what the child executed: on routes without
+ *     server-side constrained decoding a conforming payload is observed with
+ *     JSON-encoded strings for declared non-string fields. The binding is
+ *     nominal (mint-only), so its registry cell is certified by type (AD-8)
+ *     and accepted-call provenance can only carry a minted schema digest.
  *
  * The observation side of that pipeline — the transport frames, the closed
  * emission observation and its ONE fold — lives in `harness-capture` (the
@@ -38,7 +45,7 @@
  * all and stays the shell's existing infrastructure recovery.
  *
  * Pure module: no I/O, no clock, no randomness; it must not import
- * panel-program.ts or any I/O adapter (a placement constraint this header
+ * the panel modules (panel-verdict-source.ts, persistent-panel.ts) or any I/O adapter (a placement constraint this header
  * states and review audits: the cross-import linter admits core-to-core
  * imports and the module is not enrolled in the purity closure, so this
  * declaration is the invariant's stated home, not an automated gate). PR
@@ -53,20 +60,16 @@
  * rather than skip them under a misleading universal containment name).
  */
 
-import { createHash } from "node:crypto";
 import {
-  admitEmissionArguments,
-  canonicalizeEmissionWireArguments,
-  EMISSION_TOOL_SPECS,
-  frozenPayloadSchemaParameters,
+  admitIssuedEmissionArguments,
   type EmissionArgumentAdmission,
   type EmissionParseFailure,
-  type EmissionToolSpec,
   type IssuedEmissionBinding,
   type IssuedEmissionBindingOf,
 } from "./emission-tool";
 import {
   canonicalCall,
+  finalPayloadOf,
   parseFinalPayload,
   type CaptureRejection,
   type EmissionObservation,
@@ -75,10 +78,9 @@ import {
   type FinalPayload,
   type FinalPayloadCandidate,
 } from "./harness-capture";
-import { sha256Hex } from "./review-packet";
 import {
   canonicalRecord,
-  type ArtifactDigest,
+  parseRequestId,
   type DomainResult,
 } from "./orchestration-contract/identity";
 
@@ -102,12 +104,19 @@ type ObservationDecision =
 
 /** The first misbinding of one observed call against the issued binding, or
  *  null when the call is correctly bound. Field order is the FR-014 check
- *  order: request attempt, then producer kind, then schema version. */
+ *  order: request attempt, then producer kind, then schema version.
+ *
+ *  The observed request id is untrusted transport data (the adapter's
+ *  attribution), so it is PARSED here — where it first meets issued
+ *  authority — and compared brand to brand: a malformed id and a foreign id
+ *  are the same `wrong-request` refusal, never a raw string compared against
+ *  a branded identity. */
 const misbindingOf = (
   expected: IssuedEmissionBinding,
   call: EmissionToolCall,
 ): EmissionObservationRefusal | null => {
-  if (call.requestId !== expected.requestId) {
+  const observedRequest = parseRequestId(call.requestId);
+  if (!observedRequest.ok || observedRequest.value !== expected.requestId) {
     return canonicalRecord({
       code: "wrong-request" as const,
       message: `emission tool call ${call.toolCallId} was observed under request ${call.requestId} rather than the issued request ${expected.requestId}`,
@@ -139,60 +148,6 @@ function observationCalls(observation: EmissionObservation): readonly EmissionTo
     case "unusable": return [];
   }
 }
-
-/** The binding-scoped admission: the arguments are admitted through the
- *  ISSUED binding's registry cell — the schema selection happens here and
- *  only here, after the binding check, never from the call's own claims.
- *
- *  The observed wire form is canonicalized FIRST — the same schema-driven
- *  transport parse the child's `prepareArguments` runs over the frozen bytes.
- *  The transcript records what the model emitted (the raw transport form),
- *  not what the child executed (the canonical payload pi validated), so on
- *  routes without server-side constrained decoding the observed arguments
- *  carry JSON-encoded strings for declared non-string fields even when the
- *  payload itself conforms. The canonicalization parses only values a
- *  declared non-string type can accept from their JSON encoding; every
- *  genuinely non-conforming form still refuses through the SAME frozen-bytes
- *  parse with its own vocabulary — one schema, one contract, a transport
- *  parse rather than a second schema. */
-const admitBoundCall = (
-  expected: IssuedEmissionBinding,
-  call: EmissionToolCall,
-): EmissionArgumentAdmission => {
-  // The annotation collapses the registry's frozen literal union to the spec
-  // interface: the (kind, version) pair is registry-carried by the mint, so
-  // the indexed cell is defined for every minted binding (the undefined arm
-  // below is the typed lookup miss admitEmissionArguments itself refuses).
-  const spec: EmissionToolSpec = EMISSION_TOOL_SPECS[expected.kind.kind];
-  const schemaVersion = spec.schemaVersions[expected.version];
-  if (schemaVersion === undefined) {
-    return admitEmissionArguments(spec, expected.version, call.arguments);
-  }
-  // The binding-certification invariant (AD-8: the expected kind/version/schema
-  // is CHECKED, never trusted). The mint stamps the exact tool name and the
-  // frozen bytes' digest; nothing in the type system stops a caller from
-  // hand-building the record shape, and an uncertified digest would flow into
-  // the accepted call's journal provenance as if it were the issued schema
-  // identity. The same derivation the mint applies (`sha256Hex` over the exact
-  // frozen bytes) is re-verified here. A fabricated or stale binding is a
-  // caller defect, not a transport observation, so it throws instead of
-  // refusing: invariant guards may throw, and misbound CALLS — the model/transport
-  // failure class — never reach this arm, because the binding check above
-  // refuses them first.
-  const schemaDigest = sha256Hex(schemaVersion.schemaBytes);
-  if (expected.toolName !== spec.toolName || expected.schemaDigest !== schemaDigest) {
-    throw new Error(
-      `issued emission binding does not certify its registry cell: kind ${expected.kind.kind} at version ${expected.version} ` +
-        `carries tool ${spec.toolName} with schema digest ${schemaDigest}, but the binding claims ` +
-        `tool ${expected.toolName} with digest ${expected.schemaDigest} — mint bindings through issueEmissionBinding, never by hand`,
-    );
-  }
-  const canonical = canonicalizeEmissionWireArguments(
-    frozenPayloadSchemaParameters(schemaVersion.schemaBytes),
-    call.arguments,
-  );
-  return admitEmissionArguments(spec, expected.version, canonical);
-};
 
 /** The retained single-call refusal (FR-006): the admission's code and
  *  message verbatim, canonical-recorded so the diagnostic is bounded. */
@@ -318,24 +273,16 @@ export type IngestionSelection =
     }>
   | Readonly<{ kind: "observation-refused"; refusal: EmissionObservationRefusal }>;
 
-const encoder = new TextEncoder();
-
 /**
- * The canonical payload bytes for validated emission arguments: encoded ONCE,
- * deterministically — no trim, no join, no re-indent — the same encode-once
- * rule the fallback's `parseFinalPayload` applies to harness text.
+ * The canonical payload bytes for validated emission arguments: the ADMITTED
+ * value (the registry parser's output) serialized deterministically, then
+ * built through the fallback's own encode-once constructor. The stored bytes
+ * are therefore this canonical encoding of what was admitted, not the
+ * observed transport bytes — Pi exposes only parsed arguments at this seam
+ * (ADR-0015), so no "exact admitted bytes" exist to store instead.
  */
-function finalPayloadOfArguments(payload: unknown): FinalPayload {
-  const text = JSON.stringify(payload, null, 2);
-  const bytes = encoder.encode(text);
-  return canonicalRecord({
-    origin: "emission-tool-arguments",
-    text,
-    bytes: Object.freeze(Array.from(bytes)),
-    byteLength: bytes.length,
-    digest: createHash("sha256").update(bytes).digest("hex") as ArtifactDigest,
-  });
-}
+const finalPayloadOfArguments = (payload: unknown): FinalPayload =>
+  finalPayloadOf("emission-tool-arguments", JSON.stringify(payload, null, 2));
 
 export function selectCanonicalPayload(
   expected: IssuedEmissionBindingOf<"reviewer-payload">,
@@ -348,7 +295,7 @@ export function selectCanonicalPayload(
     case "duplicate-emission-call":
       return decision;
     case "single-call": {
-      const admitted = admitBoundCall(expected, decision.call);
+      const admitted = admitIssuedEmissionArguments(expected, decision.call.arguments);
       if (admitted.kind === "valid") {
         return canonicalRecord({
           kind: "emission-tool-arguments" as const,
@@ -462,7 +409,7 @@ export function selectVerdictSource(
     case "duplicate-emission-call":
       return decision;
     case "single-call": {
-      const admitted = admitBoundCall(expected, decision.call);
+      const admitted = admitIssuedEmissionArguments(expected, decision.call.arguments);
       if (admitted.kind === "valid") {
         return canonicalRecord({
           kind: "emission-tool-arguments" as const,

@@ -15,7 +15,7 @@ import {
   type NonEmpty,
   type OrchestrationRunId,
 } from "../../../core/orchestration-contract";
-import { sha256Hex } from "../../../core/review-packet";
+import { sha256Hex } from "../../../core/digest";
 import type { FrozenVerificationManifest } from "../../../core/verification-manifest";
 
 export type RemediationStartInputV1 = Readonly<{

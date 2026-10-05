@@ -23,9 +23,17 @@ export const CONTEXT_SECTION_BLOBS = "blobs";
 export const CONTEXT_PACKET_MAX_BYTES = 16_777_216;
 
 /** Byte bounds for one stored packet read: the packet file itself, and each
- *  section blob it names. A reference that pins the packet FILE's exact length
- *  bounds only the file; its sections carry their own bound. */
-export type StoredPacketBounds = Readonly<{ file?: number; section?: number }>;
+ *  section blob it names. Both are required, so a read by path is never
+ *  unbounded. A reference that pins the packet FILE's exact length bounds only
+ *  the file; its sections carry their own bound. */
+export type StoredPacketBounds = Readonly<{ file: number; section: number }>;
+
+/** The bounds every publishable packet fits: CONTEXT_PACKET_MAX_BYTES for the
+ *  file and for each section. */
+export const CONTEXT_PACKET_BOUNDS: StoredPacketBounds = Object.freeze({
+  file: CONTEXT_PACKET_MAX_BYTES,
+  section: CONTEXT_PACKET_MAX_BYTES,
+});
 
 export type StoredContextRecord = Readonly<{
   record: unknown;
@@ -34,12 +42,14 @@ export type StoredContextRecord = Readonly<{
 }>;
 
 /** A stored packet file's record with its section bytes restored from
- *  `runDirectory`'s blob store; each blob is read under `sectionBound`. */
+ *  `runDirectory`'s blob store; each blob is read under `sectionBound`. The
+ *  bound is explicit: `undefined` is the Run Directory handle's legacy
+ *  unbounded `readContext`, which immutable pre-bound evidence still needs. */
 export function readStoredContextRecord(
   runDirectory: string,
   packetFile: Buffer,
-  sectionBound?: number,
-): DomainResult<StoredContextRecord, string> {
+  sectionBound: number | undefined,
+):DomainResult<StoredContextRecord, string> {
   let sectionBytes = 0;
   const resolved = withStoredSectionBytes(JSON.parse(packetFile.toString("utf8")) as unknown, (digest) => {
     try {
@@ -64,7 +74,7 @@ export function readStoredContextRecord(
  */
 export function readStoredContextPacketFile(
   packetPath: string,
-  bounds: StoredPacketBounds = {},
+  bounds: StoredPacketBounds,
 ): DomainResult<Readonly<{ fileBytes: Buffer } & StoredContextRecord>, string> {
   try {
     const fileBytes = readRunBytesNoFollow(packetPath, bounds.file);

@@ -25,7 +25,7 @@ import {
   type CompletionTimeoutMs,
   type RepositoryRelativePath,
 } from "./completion-suite";
-import { canonicalStandaloneResultArtifact, serializeAdjudicatedStandaloneReview } from "./standalone-review";
+import { canonicalStandaloneResultArtifact, serializeAdjudicatedStandaloneReview } from "./standalone-review-records";
 import {
   isAuthoritativeStandaloneReviewResult,
   readStandaloneReviewPublication,
@@ -33,7 +33,8 @@ import {
 } from "./standalone-review-machine";
 import { parseFindingId as parseCanonicalFindingId, parseStoredFindings, type Finding, type RefutedFinding } from "./findings";
 import { STANDALONE_LINEAGE_LIMITS } from "./standalone-lineage-contract";
-import { parseReviewPath, sha256Hex, type ReviewPath } from "./review-packet";
+import { parseReviewPath, type ReviewPath } from "./review-packet";
+import { sha256Hex } from "./digest";
 import {
   parseFrozenVerificationManifest,
   type FrozenVerificationManifest,

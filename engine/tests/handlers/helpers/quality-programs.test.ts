@@ -187,7 +187,6 @@ describe("quality-program helper boundaries", () => {
       "startStandaloneFacade",
       "startWaveGateFacade",
       "waveAdvisoryDecisionRequestId",
-      "waveGateDecisionMismatch",
     ]);
     // The program-path emission seam (T6) is deliberately volume-internal: the
     // issued descriptor/route projection and its required registration
@@ -204,7 +203,7 @@ describe("quality-program helper boundaries", () => {
     const productionFiles = [join(ENGINE, "src"), join(ROOT, "pi"), join(ROOT, "hooks"), join(ROOT, "scripts")]
       .flatMap(productionTypeScriptFiles)
       .filter((path) => !path.startsWith(PROGRAM_VOLUMES));
-    const owningVolumeImport = /from\s+["'][^"']*\/programs\/(?:helpers|standalone|wave-gate|remediation)["']/;
+    const owningVolumeImport = /from\s+["'][^"']*\/programs\/(?:standalone|remediation|registration|changed-paths|durable-requests|refutation-requests|request-publication|reviewer-protocol-resolution|spawn-task|standalone-requests|wave-[\w-]+)["']/;
     const offenders = productionFiles
       .filter((path) => owningVolumeImport.test(readFileSync(path, "utf-8")))
       .map((path) => relative(ROOT, path));

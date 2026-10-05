@@ -10,11 +10,15 @@
  *   requests, emission calls, errored tool results (Pi's in-child
  *   validation-retry loop), acknowledgments and follow-up turns. Nothing here
  *   re-implements selection; a calibration that measured a private copy of
- *   the policy would measure the copy.
+ *   the policy would measure the copy. The extraction-only arm is offered no
+ *   emission tool, so its transcript is classified by final-message
+ *   extraction alone — the PR #52-only baseline — with no emission counters.
  * - `piArmDispatch` (I/O SHELL) launches the child exactly as production
  *   does per arm: the extraction-only arm is the launcher's print-mode JSON
  *   child; the emission-enabled arm goes through the INSTALLED production
- *   launcher's `runRpcAgent` readiness barrier (AD-4) with the issued binding
+ *   launcher's `runRpcAgent` readiness barrier (AD-4, loaded through the
+ *   `loadLauncher` port — `importRpcLauncher` in production, a plain fake in
+ *   tests) with the issued binding
  *   provisioned in `LOOM_EMISSION_BINDING`. Both load the STAGED Loom runtime
  *   (`-ne -e <checkout>/pi/extension.ts`) so the arms share one frozen,
  *   content-addressed runtime. No provider serializer exists here: Pi's own
@@ -27,6 +31,7 @@ import { match } from "ts-pattern";
 import {
   EMISSION_TOOL_SPECS,
   issueEmissionBinding,
+  type EmissionToolSpec,
   type IssuedEmissionBindingOf,
 } from "../../engine/src/core/emission-tool";
 import { observeEmissionCalls, parseFinalPayload } from "../../engine/src/core/harness-capture";
@@ -45,6 +50,8 @@ import {
   contentDigest,
   type AttemptObservation,
   type CellKey,
+  type EmissionArmAttempt,
+  type ExtractionArmAttempt,
   type PilotArm,
   type RejectionCause,
   type Result,
@@ -89,6 +96,9 @@ export type LaunchEnd =
   | Readonly<{ kind: "infrastructure-failure"; reason: string }>
   | Readonly<{ kind: "timeout"; afterMs: number }>;
 
+/** The extraction-only arm passes no readiness barrier, so it is never refused at startup. */
+export type ExtractionLaunchEnd = Exclude<LaunchEnd, { kind: "startup-refused" }>;
+
 export type AttemptClassification = Readonly<{
   observation: AttemptObservation;
   /** The accepted payload as canonical JSON data (identical form for both
@@ -105,31 +115,62 @@ const textOf = (content: unknown): string =>
 
 const encoder = new TextEncoder();
 
-type PayloadDecision =
-  | Readonly<{ kind: "accepted"; source: "emission-tool" | "extraction"; fallbackOverRefusal: boolean; bytes: Uint8Array }>
-  | Readonly<{ kind: "rejected"; cause: RejectionCause }>;
+/** Which source an accepted payload came from; the fallback flag exists only on extraction. */
+type AcceptedSource =
+  | Readonly<{ source: "emission-tool"; fallbackOverRefusal: false }>
+  | Readonly<{ source: "extraction"; fallbackOverRefusal: boolean }>;
 
-function rejected(cause: RejectionCause): PayloadDecision {
+type Accepted<S extends AcceptedSource> = Readonly<{ kind: "accepted"; selection: S; bytes: Uint8Array }>;
+type Rejected<C extends RejectionCause> = Readonly<{ kind: "rejected"; cause: C }>;
+
+/** Final-message extraction: accepted from the extraction source, or an extraction failure. */
+type ExtractionDecision<F extends boolean> =
+  | Accepted<Readonly<{ source: "extraction"; fallbackOverRefusal: F }>>
+  | Rejected<Extract<RejectionCause, { kind: "extraction-failure" }>>;
+
+type PayloadDecision = Accepted<AcceptedSource> | Rejected<RejectionCause>;
+
+const EMISSION_TOOL = Object.freeze({ source: "emission-tool" as const, fallbackOverRefusal: false as const });
+
+function accepted<S extends AcceptedSource>(selection: S, bytes: ArrayLike<number>): Accepted<S> {
+  return Object.freeze({ kind: "accepted" as const, selection, bytes: Uint8Array.from(bytes) });
+}
+
+function rejected<C extends RejectionCause>(cause: C): Rejected<C> {
   return Object.freeze({ kind: "rejected" as const, cause });
 }
 
-function selectPayload(cellBinding: CellBinding, messages: readonly unknown[]): PayloadDecision {
+/** PR #52's fail-closed final-message admission over the transcript's final payload candidates. */
+function extractFinalMessage<F extends boolean>(
+  fallbackOverRefusal: F,
+  candidates: ReturnType<typeof piResultFinalPayloadCandidates>,
+  fallback: ReturnType<typeof parseFinalPayload>,
+): ExtractionDecision<F> {
+  return fallback.ok
+    ? accepted({ source: "extraction" as const, fallbackOverRefusal }, fallback.value.bytes)
+    : rejected({ kind: "extraction-failure" as const, detail: candidates.ok ? fallback.error.message : candidates.errors.join("; ") });
+}
+
+/** The extraction-only arm: the PR #52-only baseline is offered no emission
+ *  tool and observes no emission call, so its decision is the final message alone. */
+function selectExtractionPayload(messages: readonly unknown[]): ExtractionDecision<false> {
+  const candidates = piResultFinalPayloadCandidates(messages);
+  return extractFinalMessage(false, candidates, parseFinalPayload(candidates.ok ? candidates.value : []));
+}
+
+/** The emission-enabled arm: the engine's own observation and selection kernel. */
+function selectEmissionPayload(cellBinding: CellBinding, messages: readonly unknown[]): PayloadDecision {
   const frames = piEmissionCallFrames(messages, cellBinding.binding);
   if (!frames.ok) return rejected({ kind: "observation-refused", detail: frames.errors.join("; ") });
   const observation = observeEmissionCalls(frames.value);
   const candidates = piResultFinalPayloadCandidates(messages);
   const finalCandidates = candidates.ok ? candidates.value : [];
-  const extracted = (fallbackOverRefusal: boolean, fallback: ReturnType<typeof parseFinalPayload>): PayloadDecision =>
-    fallback.ok
-      ? Object.freeze({ kind: "accepted" as const, source: "extraction" as const, fallbackOverRefusal, bytes: Uint8Array.from(fallback.value.bytes) })
-      : rejected({ kind: "extraction-failure", detail: candidates.ok ? fallback.error.message : candidates.errors.join("; ") });
   if (cellBinding.path === "reviewer") {
     const selection = selectCanonicalPayload(cellBinding.binding, observation, finalCandidates);
     return match(selection)
-      .with({ kind: "emission-tool-arguments" }, (chosen): PayloadDecision =>
-        Object.freeze({ kind: "accepted" as const, source: "emission-tool" as const, fallbackOverRefusal: false, bytes: Uint8Array.from(chosen.payload.bytes) }))
-      .with({ kind: "final-message-extraction" }, (chosen) => extracted(false, chosen.fallback))
-      .with({ kind: "extraction-over-refused-call" }, (chosen) => extracted(true, chosen.fallback))
+      .with({ kind: "emission-tool-arguments" }, (chosen): PayloadDecision => accepted(EMISSION_TOOL, chosen.payload.bytes))
+      .with({ kind: "final-message-extraction" }, (chosen) => extractFinalMessage(false, candidates, chosen.fallback))
+      .with({ kind: "extraction-over-refused-call" }, (chosen) => extractFinalMessage(true, candidates, chosen.fallback))
       .with({ kind: "refused-call-no-fallback" }, (chosen) =>
         rejected({ kind: "refused-call-no-fallback", detail: `${chosen.emissionRefusal.code}: ${chosen.emissionRefusal.message}` }))
       .with({ kind: "duplicate-emission-call" }, (chosen) => rejected({ kind: "duplicate-call", calls: chosen.calls.length }))
@@ -142,41 +183,57 @@ function selectPayload(cellBinding: CellBinding, messages: readonly unknown[]): 
   const fallback = parseFinalPayload(finalCandidates);
   const selection = selectVerdictSource(cellBinding.binding, observation, fallback.ok ? fallback.value.text : "");
   return match(selection)
-    .with({ kind: "emission-tool-arguments" }, (chosen): PayloadDecision =>
-      Object.freeze({ kind: "accepted" as const, source: "emission-tool" as const, fallbackOverRefusal: false, bytes: encoder.encode(chosen.rawJson) }))
-    .with({ kind: "final-message-extraction" }, () => extracted(false, fallback))
-    .with({ kind: "extraction-over-refused-call" }, () => extracted(true, fallback))
+    .with({ kind: "emission-tool-arguments" }, (chosen): PayloadDecision => accepted(EMISSION_TOOL, encoder.encode(chosen.rawJson)))
+    .with({ kind: "final-message-extraction" }, () => extractFinalMessage(false, candidates, fallback))
+    .with({ kind: "extraction-over-refused-call" }, () => extractFinalMessage(true, candidates, fallback))
     .with({ kind: "duplicate-emission-call" }, (chosen) => rejected({ kind: "duplicate-call", calls: chosen.calls.length }))
     .with({ kind: "observation-refused" }, (chosen) =>
       rejected({ kind: "observation-refused", detail: `${chosen.refusal.code}: ${chosen.refusal.message}` }))
     .exhaustive();
 }
 
-/** Accepted ingestion: the selected bytes must pass the frozen registry's
- *  parser for the issued kind/version (the same parse the engine applies). */
-function ingest(cell: CellKey, bytes: Uint8Array): Result<unknown, string> {
+type PayloadRefused = Extract<RejectionCause, { kind: "payload-refused" }>;
+
+/**
+ * Accepted ingestion: the selected bytes must pass the frozen registry's
+ * parser for the issued kind/version (the same parse the engine applies).
+ * The parser's contract value IS the canonical payload — one parse, and the
+ * same normalization (schema key order, schema transforms) for both arms, so
+ * the payload digest and the blinded packet never reveal the arm through the
+ * shape of the model's own JSON text.
+ */
+function ingest<S extends AcceptedSource>(
+  cell: CellKey,
+  decision: Accepted<S>,
+): Result<Readonly<{ outcome: Readonly<{ kind: "accepted" } & S & { payloadDigest: string }>; payload: unknown }>, PayloadRefused> {
   const producer = CELL_PRODUCER[cell];
-  const versions: Readonly<Partial<Record<string, Readonly<{ parsePayload: (raw: Uint8Array) => Result<unknown, Readonly<{ code: string; message: string }>> }>>>> =
-    EMISSION_TOOL_SPECS[producer.kind].schemaVersions;
-  const parser = versions[producer.version];
-  if (parser === undefined) return { ok: false, error: `frozen registry carries no ${cell} parser` };
-  const parsed = parser.parsePayload(bytes);
-  return parsed.ok ? { ok: true, value: parsed.value } : { ok: false, error: `${parsed.error.code}: ${parsed.error.message}` };
+  const spec: EmissionToolSpec = EMISSION_TOOL_SPECS[producer.kind];
+  const parser = spec.schemaVersions[producer.version];
+  if (parser === undefined) return { ok: false, error: { kind: "payload-refused", detail: `frozen registry carries no ${cell} parser` } };
+  const parsed = parser.parsePayload(decision.bytes);
+  if (!parsed.ok) return { ok: false, error: { kind: "payload-refused", detail: `${parsed.error.code}: ${parsed.error.message}` } };
+  const outcome = Object.freeze<{ kind: "accepted" } & S & { payloadDigest: string }>({
+    kind: "accepted", ...decision.selection, payloadDigest: contentDigest(JSON.stringify(parsed.value)),
+  });
+  return { ok: true, value: Object.freeze({ outcome, payload: parsed.value }) };
 }
 
-export type TranscriptInput = Readonly<{
+type TranscriptCommon = Readonly<{
   cell: CellKey;
   cellBinding: CellBinding;
   messages: readonly unknown[];
   attempt: number;
   elapsedMs: number;
-  readinessMs: number | null;
-  launch: LaunchEnd;
 }>;
 
-export function classifyAttemptTranscript(input: TranscriptInput): AttemptClassification {
-  const toolName = input.cellBinding.binding.toolName;
-  const records = input.messages.filter(isRecord);
+/** One settled attempt's transcript, per arm: only the emission arm has a
+ *  readiness barrier (and so a readiness time and a startup refusal). */
+export type TranscriptInput =
+  | (TranscriptCommon & Readonly<{ arm: "emission-enabled"; readinessMs: number | null; launch: LaunchEnd }>)
+  | (TranscriptCommon & Readonly<{ arm: "extraction-only"; launch: ExtractionLaunchEnd }>);
+
+/** The counters of the emission tool's calls and results in one transcript. */
+function emissionCounters(toolName: string, records: readonly Rec[], assistantIndices: readonly number[]) {
   const callIds = new Set<string>();
   for (const message of records) {
     if (message["role"] !== "assistant" || !Array.isArray(message["content"])) continue;
@@ -191,35 +248,53 @@ export function classifyAttemptTranscript(input: TranscriptInput): AttemptClassi
     .filter(({ message }) => message["isError"] === true)
     .map(({ message }) => classifyEmissionToolError(textOf(message["content"])));
   const firstAck = emissionResults.find(({ message }) => message["isError"] === false);
-  const assistantIndices = records.flatMap((message, index) => (message["role"] === "assistant" ? [index] : []));
-  const counters = {
-    attempt: input.attempt,
-    elapsedMs: input.elapsedMs,
-    readinessMs: input.readinessMs,
-    modelRequests: assistantIndices.length,
+  return {
     emissionCalls: callIds.size,
     toolErrors: Object.freeze(toolErrors),
     toolAcknowledged: firstAck !== undefined,
     followUpTurnsAfterAck: firstAck === undefined ? 0 : assistantIndices.filter((index) => index > firstAck.index).length,
   };
-  const end = (outcome: AttemptObservation["outcome"], acceptedPayload: unknown = null): AttemptClassification =>
+}
+
+export function classifyAttemptTranscript(input: TranscriptInput): AttemptClassification {
+  const records = input.messages.filter(isRecord);
+  const assistantIndices = records.flatMap((message, index) => (message["role"] === "assistant" ? [index] : []));
+  const base = { attempt: input.attempt, elapsedMs: input.elapsedMs, modelRequests: assistantIndices.length };
+  if (input.arm === "extraction-only") {
+    const end = (outcome: ExtractionArmAttempt["outcome"], acceptedPayload: unknown = null): AttemptClassification => Object.freeze({
+      observation: Object.freeze({
+        ...base, readinessMs: null, emissionCalls: 0 as const, toolErrors: Object.freeze([] as const),
+        toolAcknowledged: false as const, followUpTurnsAfterAck: 0 as const, outcome: Object.freeze(outcome),
+      }),
+      acceptedPayload,
+    });
+    return match(input.launch)
+      .with({ kind: "infrastructure-failure" }, (launch) => end({ kind: "infrastructure-failure", reason: launch.reason }))
+      .with({ kind: "timeout" }, (launch) => end({ kind: "timeout", afterMs: launch.afterMs }))
+      .with({ kind: "settled" }, () => {
+        const decision = selectExtractionPayload(input.messages);
+        if (decision.kind === "rejected") return end({ kind: "rejected", cause: decision.cause });
+        const ingested = ingest(input.cell, decision);
+        return ingested.ok ? end(ingested.value.outcome, ingested.value.payload) : end({ kind: "rejected", cause: ingested.error });
+      })
+      .exhaustive();
+  }
+  const counters = {
+    ...base,
+    readinessMs: input.readinessMs,
+    ...emissionCounters(input.cellBinding.binding.toolName, records, assistantIndices),
+  };
+  const end = (outcome: EmissionArmAttempt["outcome"], acceptedPayload: unknown = null): AttemptClassification =>
     Object.freeze({ observation: Object.freeze({ ...counters, outcome: Object.freeze(outcome) }), acceptedPayload });
   return match(input.launch)
     .with({ kind: "startup-refused" }, (launch) => end({ kind: "startup-refused", reason: launch.reason }))
     .with({ kind: "infrastructure-failure" }, (launch) => end({ kind: "infrastructure-failure", reason: launch.reason }))
     .with({ kind: "timeout" }, (launch) => end({ kind: "timeout", afterMs: launch.afterMs }))
     .with({ kind: "settled" }, () => {
-      const decision = selectPayload(input.cellBinding, input.messages);
+      const decision = selectEmissionPayload(input.cellBinding, input.messages);
       if (decision.kind === "rejected") return end({ kind: "rejected", cause: decision.cause });
-      const ingested = ingest(input.cell, decision.bytes);
-      if (!ingested.ok) return end({ kind: "rejected", cause: { kind: "payload-refused", detail: ingested.error } });
-      const canonical: unknown = JSON.parse(new TextDecoder().decode(decision.bytes));
-      return end({
-        kind: "accepted",
-        source: decision.source,
-        fallbackOverRefusal: decision.fallbackOverRefusal,
-        payloadDigest: contentDigest(JSON.stringify(canonical)),
-      }, canonical);
+      const ingested = ingest(input.cell, decision);
+      return ingested.ok ? end(ingested.value.outcome, ingested.value.payload) : end({ kind: "rejected", cause: ingested.error });
     })
     .exhaustive();
 }
@@ -242,8 +317,8 @@ export type ArmDispatch = (request: ArmRequest) => Promise<AttemptClassification
 export type PiDispatchConfig = Readonly<{
   repoRoot: string;
   piCommand: string;
-  /** The installed production launcher module exporting `runRpcAgent`. */
-  launcherModule: string;
+  /** Loads the installed production launcher's `runRpcAgent` (`importRpcLauncher`). */
+  loadLauncher: () => Promise<RpcLauncher>;
   provider: string;
   model: string;
   thinking: string;
@@ -258,14 +333,16 @@ type RpcLaunchOutcome =
   | Readonly<{ ok: true; stderr: string }>
   | Readonly<{ ok: false; kind: string; phase: "before-task-prompt" | "task-prompt-sent"; reason: string; stderr: string }>;
 
-type ReadinessClient = Readonly<{
+/** The launcher barrier's view of the child before the task prompt is sent. */
+export type ReadinessClient = Readonly<{
   getCommands: () => Promise<readonly Readonly<{ name: string; source?: string }>[]>;
   invokeReadiness: () => Promise<readonly unknown[]>;
   setModel: (provider: string, modelId: string) => Promise<void>;
   getState: () => Promise<Readonly<{ model: null | Readonly<{ provider?: string; id?: string }> }>>;
 }>;
 
-type RunRpcAgent = (input: Readonly<{
+/** The installed launcher's `runRpcAgent`, as far as the pilot uses it. */
+export type RunRpcAgent = (input: Readonly<{
   command: string;
   args: readonly string[];
   cwd: string;
@@ -283,6 +360,19 @@ type RunRpcAgent = (input: Readonly<{
   readinessTimeoutMs?: number;
   onMessage: (message: unknown) => void;
 }>) => Promise<RpcLaunchOutcome>;
+
+export type RpcLauncher =
+  | Readonly<{ kind: "loaded"; runRpcAgent: RunRpcAgent }>
+  | Readonly<{ kind: "unavailable"; reason: string }>;
+
+/** The production launcher port adapter: import the installed module and
+ *  take its `runRpcAgent`. A module that cannot be imported throws. */
+export const importRpcLauncher = (launcherModule: string) => async (): Promise<RpcLauncher> => {
+  const imported: unknown = await import(launcherModule);
+  return isRecord(imported) && typeof imported["runRpcAgent"] === "function"
+    ? { kind: "loaded", runRpcAgent: imported["runRpcAgent"] as RunRpcAgent }
+    : { kind: "unavailable", reason: `${launcherModule} exports no runRpcAgent` };
+};
 
 const stagedExtension = (config: PiDispatchConfig): string => join(config.repoRoot, "pi", "extension.ts");
 
@@ -343,17 +433,15 @@ function emissionArgs(config: PiDispatchConfig, toolName: string): readonly stri
 }
 
 async function dispatchEmission(config: PiDispatchConfig, request: ArmRequest): Promise<AttemptClassification> {
-  const imported: unknown = await import(config.launcherModule);
-  const runRpcAgent = isRecord(imported) && typeof imported["runRpcAgent"] === "function" ? imported["runRpcAgent"] as RunRpcAgent : null;
+  const launcher = await config.loadLauncher();
   const started = performance.now();
   const messages: unknown[] = [];
   const classify = (launch: LaunchEnd, readinessMs: number | null): AttemptClassification => classifyAttemptTranscript({
-    cell: request.cell, cellBinding: request.cellBinding, messages, attempt: request.attempt,
+    arm: "emission-enabled", cell: request.cell, cellBinding: request.cellBinding, messages, attempt: request.attempt,
     elapsedMs: performance.now() - started, readinessMs, launch,
   });
-  if (runRpcAgent === null) {
-    return classify({ kind: "infrastructure-failure", reason: `${config.launcherModule} exports no runRpcAgent` }, null);
-  }
+  if (launcher.kind === "unavailable") return classify({ kind: "infrastructure-failure", reason: launcher.reason }, null);
+  const { runRpcAgent } = launcher;
   const { binding } = request.cellBinding;
   const bindingEnv = emissionBindingEnv(request.cellBinding);
   let readinessMs: number | null = null;
@@ -392,7 +480,7 @@ async function dispatchExtraction(config: PiDispatchConfig, request: ArmRequest)
   const started = performance.now();
   const messages: unknown[] = [];
   const malformed: string[] = [];
-  const launch = await new Promise<LaunchEnd>((resolve) => {
+  const launch = await new Promise<ExtractionLaunchEnd>((resolve) => {
     const child = spawn(config.piCommand, [
       "--mode", "json", "-p", "--no-session", "-ne", "-e", stagedExtension(config),
       "--provider", config.provider, "--model", config.model, "--thinking", config.thinking,
@@ -433,8 +521,8 @@ async function dispatchExtraction(config: PiDispatchConfig, request: ArmRequest)
     });
   });
   return classifyAttemptTranscript({
-    cell: request.cell, cellBinding: request.cellBinding, messages, attempt: request.attempt,
-    elapsedMs: performance.now() - started, readinessMs: null, launch,
+    arm: "extraction-only", cell: request.cell, cellBinding: request.cellBinding, messages, attempt: request.attempt,
+    elapsedMs: performance.now() - started, launch,
   });
 }
 

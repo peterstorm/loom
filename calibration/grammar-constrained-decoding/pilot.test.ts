@@ -303,6 +303,35 @@ describe("observations", () => {
     expect(parseSampleObservation(raw([rejected, rejected])).ok).toBe(true);
   });
 
+  it("refuses observations whose arm, source and counters contradict each other", () => {
+    const pair = buildPairSchedule(retainedPreregistration())[0] as ScheduledPair;
+    const attempt = (overrides: Record<string, unknown>) => ({
+      attempt: 1, elapsedMs: 1, readinessMs: null, modelRequests: 1, emissionCalls: 0, toolErrors: [],
+      toolAcknowledged: false, followUpTurnsAfterAck: 0, outcome: ACCEPT_EXTRACTION.outcome, ...overrides,
+    });
+    const parses = (arm: PilotArm, overrides: Record<string, unknown>): boolean => parseSampleObservation({
+      pairId: pair.pairId, cell: pair.cell, caseId: pair.caseId, arm, dispatchToIngestionMs: 1,
+      attempts: [attempt(overrides)], rawArgumentObservation: "unavailable",
+    }).ok;
+    const accepted = (source: string, fallbackOverRefusal: boolean) => ({ outcome: { kind: "accepted", source, fallbackOverRefusal, payloadDigest: "a".repeat(64) } });
+
+    // The extraction-only arm is offered no emission tool and passes no readiness barrier.
+    expect(parses("extraction-only", {})).toBe(true);
+    expect(parses("extraction-only", { emissionCalls: 1 })).toBe(false);
+    expect(parses("extraction-only", { readinessMs: 50 })).toBe(false);
+    expect(parses("extraction-only", { toolErrors: [{ class: "unclassified", excerpt: "Tool not found" }] })).toBe(false);
+    expect(parses("extraction-only", { toolAcknowledged: true })).toBe(false);
+    expect(parses("extraction-only", accepted("emission-tool", false))).toBe(false);
+    expect(parses("extraction-only", accepted("extraction", true))).toBe(false);
+    expect(parses("extraction-only", { outcome: { kind: "startup-refused", reason: "barrier" } })).toBe(false);
+    expect(parses("extraction-only", { outcome: { kind: "rejected", cause: { kind: "duplicate-call", calls: 2 } } })).toBe(false);
+    // Only extraction selected over a refused call carries the fallback flag.
+    expect(parses("emission-enabled", { ...accepted("emission-tool", false), emissionCalls: 1, readinessMs: 50 })).toBe(true);
+    expect(parses("emission-enabled", { ...accepted("emission-tool", true), emissionCalls: 1 })).toBe(false);
+    expect(parses("emission-enabled", { ...accepted("extraction", true), emissionCalls: 1 })).toBe(true);
+    expect(parses("emission-enabled", { outcome: { kind: "startup-refused", reason: "barrier" } })).toBe(true);
+  });
+
   it("attributes retries to separate series: provider-enforced vs unenforced vs engine-only", () => {
     const pair = buildPairSchedule(retainedPreregistration())[0] as ScheduledPair;
     const observed = sample(pair, "emission-enabled", 30_000, [
@@ -389,6 +418,18 @@ describe("release decision", () => {
     expect(v2.measurement.emissionRates.toolUseRate).toBe(1);
     expect(v2.measurement.structural.providerEnforcedStructuralRetries).toBe(0);
     expect(v2.measurement.structural.rawArgumentObservation.duplicateKeyMeasurement).toBe("not-claimed");
+  });
+
+  it("derives a measured cell's verdicts from its own measurement; a hand-built measured cell does not type-check", () => {
+    const prereg = testPreregistration();
+    const cell = measured(evaluate(prereg, fullWindow(prereg, matchedArms)).cells, "judge-verdict/v1");
+    const { measurement, guardrails } = cell;
+    expect(guardrails["measurement-complete"].detail).toBe(`${measurement.observedPairs}/${measurement.scheduledPairs} preregistered pairs observed in both arms`);
+    expect(guardrails["latency-p95"].detail).toContain(`p95 ratio ${measurement.latency.p95Ratio?.toFixed(3)}`);
+    expect(guardrails["provider-structural-retries"].verdict).toBe(measurement.structural.providerEnforcedStructuralRetries === "not-applicable" ? "not-applicable" : "pass");
+    // @ts-expect-error — only the evaluator's measureCell constructs a MeasuredCell.
+    const forged: CellOutcome = { kind: "measured", cell: cell.cell, qualification: cell.qualification, measurement, guardrails };
+    expect(forged.kind).toBe("measured");
   });
 
   it("never allows done on the retained (unconstrained) deployment route, however good the window", () => {
@@ -775,7 +816,7 @@ describe("transcript classification through the engine's own selection", () => {
   const toolResult = (id: string, name: string, isError: boolean, text: string) => ({ role: "toolResult", toolCallId: id, toolName: name, isError, content: [{ type: "text", text }] });
   const finalText = (text: string) => ({ role: "assistant", stopReason: "stop", content: [{ type: "text", text }] });
   const classify = (cell: CellKey, messages: readonly unknown[], launch: Parameters<typeof classifyAttemptTranscript>[0]["launch"] = { kind: "settled" }) =>
-    classifyAttemptTranscript({ cell, cellBinding: cellBinding(cell), messages, attempt: 1, elapsedMs: 1234, readinessMs: 80, launch });
+    classifyAttemptTranscript({ arm: "emission-enabled", cell, cellBinding: cellBinding(cell), messages, attempt: 1, elapsedMs: 1234, readinessMs: 80, launch });
 
   it("accepts one successful emission call (tool-only completion, no final text)", () => {
     const result = classify("judge-verdict/v1", [toolCall("c1", "loom_emit_judge_verdict", judgePayload), toolResult("c1", "loom_emit_judge_verdict", false, "accepted")]);
@@ -827,6 +868,35 @@ describe("transcript classification through the engine's own selection", () => {
     expect(classify("judge-verdict/v1", [finalText("no json here")]).observation.outcome).toMatchObject({ kind: "rejected", cause: { kind: "payload-refused" } });
     expect(classify("judge-verdict/v1", [finalText(JSON.stringify({ criterion: "c", rankings: [{ candidate: "a", score: 12, fatal_flaw: null, strongest_idea: "x" }] }))]).observation.outcome)
       .toMatchObject({ kind: "rejected", cause: { kind: "payload-refused" } });
+  });
+
+  it("classifies the extraction-only arm by its final message alone, with no emission counters", () => {
+    const extraction = (messages: readonly unknown[]) => classifyAttemptTranscript({
+      arm: "extraction-only", cell: "judge-verdict/v1", cellBinding: cellBinding("judge-verdict/v1"), messages, attempt: 1, elapsedMs: 5, launch: { kind: "settled" },
+    });
+    // A call to the tool the arm was never offered is not an emission call: the baseline extracts.
+    const result = extraction([
+      toolCall("c1", "loom_emit_judge_verdict", judgePayload),
+      toolResult("c1", "loom_emit_judge_verdict", true, "Tool loom_emit_judge_verdict not found"),
+      finalText(JSON.stringify(judgePayload)),
+    ]);
+    expect(result.observation).toEqual({
+      attempt: 1, elapsedMs: 5, readinessMs: null, modelRequests: 2, emissionCalls: 0, toolErrors: [], toolAcknowledged: false, followUpTurnsAfterAck: 0,
+      outcome: { kind: "accepted", source: "extraction", fallbackOverRefusal: false, payloadDigest: contentDigest(JSON.stringify(judgePayload)) },
+    });
+    expect(extraction([]).observation.outcome).toMatchObject({ kind: "rejected", cause: { kind: "extraction-failure" } });
+    expect(extraction([finalText("no json here")]).observation.outcome).toMatchObject({ kind: "rejected", cause: { kind: "payload-refused" } });
+  });
+
+  it("canonicalizes an accepted payload identically for both arms, whatever the model's key order", () => {
+    const reordered = `{"rankings":[{"strongest_idea":"reuse the budget","fatal_flaw":null,"score":7,"candidate":"a.md"}],"criterion":"correctness"}`;
+    const emission = classify("judge-verdict/v1", [toolCall("c1", "loom_emit_judge_verdict", judgePayload), toolResult("c1", "loom_emit_judge_verdict", false, "accepted")]);
+    const extraction = classifyAttemptTranscript({
+      arm: "extraction-only", cell: "judge-verdict/v1", cellBinding: cellBinding("judge-verdict/v1"), messages: [finalText(reordered)],
+      attempt: 1, elapsedMs: 5, launch: { kind: "settled" },
+    });
+    expect(JSON.stringify(extraction.acceptedPayload)).toBe(JSON.stringify(emission.acceptedPayload));
+    expect(extraction.observation.outcome).toMatchObject({ payloadDigest: (emission.observation.outcome as { payloadDigest: string }).payloadDigest });
   });
 
   it("passes launch failures through as their own terminal classes", () => {

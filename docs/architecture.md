@@ -67,15 +67,22 @@ Claude Code lifecycle coverage:
 
 ### Pi
 
-`pi/extension.ts` maps Pi `tool_call`, `tool_result`, Agent lifecycle, and resource discovery events to the same core decisions. It also owns Pi-specific concerns:
+`pi/extension.ts` is the Pi registration shell: it maps Pi `tool_call`, `tool_result`, Agent lifecycle, and resource discovery events to the same core decisions, and owns the per-process session state those handlers share. Pi-specific concerns live in adapter modules beside it:
 
-- deriving package identity from `import.meta.url`;
-- capturing a content-addressed **Runtime Revision** and publishing it to child CLI processes;
+- deriving package identity from `import.meta.url` and capturing a content-addressed **Runtime Revision** published to child CLI processes (`pi/extension.ts`);
+- preparing each spawn batch through one ordered pipeline — observe its governing task graph, expand implementation brief markers, then run the Spawn Admission core (`pi/spawn-preparation.ts`, `pi/implementation-brief-expansion.ts`, `pi/spawn-graph.ts`);
+- reading and rewriting Pi tool-call payloads and deriving per-slot roster identities (`pi/tool-input.ts`);
+- reserving an admitted batch's lifecycle — roster rows, pointer lease, request correlators, review and spec-check authorities, write grants, task execution — with rollback before Pi may dispatch it (`pi/spawn-lifecycle.ts`);
 - rendering resources through `pi/resources.ts`;
 - adapting Pi messages through `pi/transcript-adapter.ts`;
+- settling finished subagent results: `pi/subagent-result-batch.ts` parses the harness batch, `pi/reserved-slot.ts` parses each stored reservation into one role authority, `pi/subagent-settlement.ts` holds the pure locked reducers, and `pi/subagent-result.ts` is the shell that observes evidence and runs them under the TaskGraph lock;
 - minting and consuming scoped write grants through `pi/write-grant.ts`;
-- correlating native Pi batch-item identities to engine-issued request identities;
-- capturing exact final result bytes into reserved Run Directory slots;
+- correlating native Pi batch-item identities to engine-issued request identities and witnessing captured review transcripts (`pi/review-run-authority.ts`);
+- capturing exact final result bytes into reserved Run Directory slots (`pi/review-capture.ts`);
+- staging emission-enabled launches with the installed subagent launcher (`pi/emission-launch-bridge.ts`);
+- holding each parent session's spawn reservations and cleanup debt (`pi/spawn-reservation.ts`), and settling a completed batch against its reservation through the SubagentStop dispatcher and its per-concern appliers (`pi/subagent-stop.ts`, `pi/subagent-result.ts`, `pi/reserved-results.ts`);
+- activating a child's write grant and keeping a rejected child's direct edits blocked (`pi/child-write-grant.ts`), and releasing every capability a session still holds at shutdown (`pi/session-shutdown.ts`);
+- holding an emission-enabled child behind its launcher readiness barrier (`pi/emission-readiness.ts`);
 - running interactive phase Agents as RPC children and relaying their standard dialogs to the parent TUI.
 
 The legacy `pi/loom-bridge.ts` bridge was removed; `pi/extension.ts` is the only Pi state adapter, and the Pi package manifest pins the bridge's absence.
@@ -112,7 +119,7 @@ The project follows “parse, do not cast”: untrusted JSON, transcripts, paths
 | Standalone review | `standalone-review.ts` — the cohesive aggregate owner: source/disposition/successor preparation, issued admission, roster aggregation, the LC-2 reducer and its private publication/lineage custody share one owner. `standalone-review-machine.ts`, `standalone-lineage.ts` and `standalone-successor-reviewer.ts` are consumed named entry surfaces into that owner, not three independent implementations | Frozen scope/roster, successor admission, aggregation, current refutation work, authoritative result |
 | Standalone lineage (P5) | `standalone-lineage-contract.ts` (wire contract below the aggregate) plus the `standalone-review.ts` cohesive owner; `standalone-lineage.ts` and `standalone-successor-reviewer.ts` are consumed named entry surfaces | Original identity/history, explicit policy/source joins, complete current assessment and canonical projections |
 | Advisory publication (P5) | `standalone-disposition-machine.ts` | No-agent immutable DECLARED publication and exact effect reconciliation |
-| Wave Gate | `wave-gate-machine.ts` | Review/refutation/advisory/completion lifecycle and canonical status |
+| Wave Gate | `wave-gate-machine.ts` (LC-1 reducer, proof-carrying readiness snapshot, next-action proof, completion commit), `wave-gate-checks.ts` (gate evaluation), `wave-completion-suite-readiness.ts`, `wave-gate-preparation.ts` (refutation/advisory actions), `wave-gate-registration.ts` (admission, install with abandoned-run supersession, review-authority reset), `wave-status-facts.ts`, `loom-status.ts` (canonical status read model), `task-implementation-dispatch.ts` | Review/refutation/advisory/completion lifecycle and canonical status |
 | Remediation | `remediation-machine.ts` | Scope authority, excluded evidence paths, audit/stage/install lifecycle |
 | Model policy | `model-profiles.ts`, `model-calibration.ts` | Explicit cross-harness bindings and deterministic calibration scoring |
 | Compatibility | `legacy-archive.ts` | Read-only parsers for historical artifacts; never new domain behavior |

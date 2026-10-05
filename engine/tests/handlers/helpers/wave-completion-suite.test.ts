@@ -25,7 +25,7 @@ import {
   observeCurrentWaveWorkspace,
   type RunCompletionCheck,
 } from "../../../src/handlers/helpers/wave-completion-suite";
-import type { RegisteredWaveGateProgram } from "../../../src/handlers/helpers/programs/helpers";
+import type { RegisteredWaveGateProgram } from "../../../src/core/wave-gate-program";
 import { createRunDirectory, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
 import { StateManager } from "../../../src/state-manager";
 import {

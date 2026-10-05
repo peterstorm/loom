@@ -18,10 +18,45 @@
 export type ReadTranscript = () => string;
 export type Sleep = (ms: number) => Promise<void>;
 
-export type SettlePolicy = Readonly<{ attempts: number; delayMs: number }>;
+declare const settlePolicyBrand: unique symbol;
+
+/**
+ * A re-read budget: `attempts` is the total number of reads (a positive safe
+ * integer, so the first read always happens) and `delayMs` the pause between
+ * reads (a non-negative safe integer). Branded, so `parseSettlePolicy` is the
+ * only way to hold one — a zero, negative, fractional or NaN budget is
+ * unrepresentable instead of silently degrading to a single read.
+ */
+export type SettlePolicy = Readonly<{ attempts: number; delayMs: number }> & {
+  readonly [settlePolicyBrand]: true;
+};
+
+export type SettlePolicyParse =
+  | Readonly<{ ok: true; value: SettlePolicy }>
+  | Readonly<{ ok: false; error: string }>;
+
+export function parseSettlePolicy(raw: Readonly<{ attempts: number; delayMs: number }>): SettlePolicyParse {
+  if (!Number.isSafeInteger(raw.attempts) || raw.attempts < 1) {
+    return Object.freeze({ ok: false, error: `settle attempts must be a positive safe integer, got ${String(raw.attempts)}` });
+  }
+  if (!Number.isSafeInteger(raw.delayMs) || raw.delayMs < 0) {
+    return Object.freeze({ ok: false, error: `settle delayMs must be a non-negative safe integer, got ${String(raw.delayMs)}` });
+  }
+  return Object.freeze({
+    ok: true,
+    value: Object.freeze({ attempts: raw.attempts, delayMs: raw.delayMs }) as SettlePolicy,
+  });
+}
+
+/** Constructor invariant for compile-time budgets: a literal that fails the parse is a programming error. */
+function settlePolicy(raw: Readonly<{ attempts: number; delayMs: number }>): SettlePolicy {
+  const parsed = parseSettlePolicy(raw);
+  if (!parsed.ok) throw new Error(`settle policy invariant failed: ${parsed.error}`);
+  return parsed.value;
+}
 
 /** About two seconds: far beyond the observed sub-second flush lag, well inside the hook timeout. */
-export const DEFAULT_SETTLE_POLICY: SettlePolicy = Object.freeze({ attempts: 20, delayMs: 100 });
+export const DEFAULT_SETTLE_POLICY: SettlePolicy = settlePolicy({ attempts: 20, delayMs: 100 });
 
 const realSleep: Sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 

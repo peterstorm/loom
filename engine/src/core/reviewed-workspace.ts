@@ -1,16 +1,25 @@
+/**
+ * Reviewed-workspace identity: the exact bytes a Wave review saw for one
+ * Task's declared scope, their content digest (`headSha`), and the drift of an
+ * accepted review against current bytes. The persisted frozen-source codec
+ * over these observations lives in `wave-frozen-source.ts`.
+ */
 import type { Task } from "../types";
-import { sha256Bytes, sha256Hex } from "./review-packet";
+import { sha256Hex } from "./digest";
 import type { DomainResult } from "./orchestration-contract";
 import { artifactCovers } from "./path-coverage";
 import { compareStrings } from "./ordering";
+import { parseReviewPath, type ReviewPath } from "./review-packet";
 
-export const WAVE_FROZEN_SOURCE_SECTION = "wave-frozen-source";
-export const WAVE_FROZEN_SOURCE_SCHEMA_VERSION = 1;
+/** Bytes the shell observed for one file, before the core proves them.
+ * `null` means the path was absent. */
+export type ObservedArtifact = Readonly<{ path: string; bytes: Iterable<number> | null }>;
 
-/** Bytes observed for one file. `null` means the path was absent. A scoped
- * file is its own artifact; a scoped directory contributes one artifact per
- * Git-visible leaf below it, or a single absent artifact when it has none. */
-export type ReviewedArtifact = Readonly<{ path: string; bytes: Iterable<number> | null }>;
+/** One proven reviewed file: a canonical repository path and its owned bytes,
+ * or `null` when absent. A scoped file is its own artifact; a scoped directory
+ * contributes one artifact per Git-visible leaf below it, or a single absent
+ * artifact when it has none. */
+export type ReviewedArtifact = Readonly<{ path: ReviewPath; bytes: readonly number[] | null }>;
 
 export type ReviewedWorkspaceAuthority = Readonly<{
   taskId: string;
@@ -22,108 +31,109 @@ export type ReviewedWorkspaceAuthority = Readonly<{
   authorityDigest?: string;
 }>;
 
-/** One observation owns both the exact bytes and their derived identity. */
+/** One observation owns both the exact bytes and their derived identity.
+ * Only `reviewedWorkspaceObservation` and `parseReviewedWorkspaceSnapshot`
+ * construct one the core trusts. */
 export type ReviewedWorkspaceObservation = Readonly<{
   taskId: string;
   headSha: string;
-  scope: readonly string[];
+  scope: readonly ReviewPath[];
   artifacts: readonly ReviewedArtifact[];
 }>;
 
 export type ReviewedWorkspaceSnapshot = ReviewedWorkspaceObservation;
 
-export type WaveFrozenSourceFile =
-  | Readonly<{ path: string; kind: "absent"; digest: null; byteLength: 0 }>
-  | Readonly<{ path: string; kind: "text"; digest: string; byteLength: number; content: string }>
-  | Readonly<{ path: string; kind: "binary"; digest: string; byteLength: number; contentBase64: string }>;
-
-export type WaveFrozenSource = Readonly<{
-  schemaVersion: typeof WAVE_FROZEN_SOURCE_SCHEMA_VERSION;
-  taskId: string;
-  workspaceHeadSha: string;
-  files: readonly WaveFrozenSourceFile[];
-}>;
+/** A proven scope beside its proven artifacts. */
+export type ReviewedArtifacts = Readonly<{ scope: readonly ReviewPath[]; artifacts: readonly ReviewedArtifact[] }>;
 
 const failed = <T>(error: string): DomainResult<T, string> => ({ ok: false, error });
 const isByte = (byte: unknown): byte is number =>
   typeof byte === "number" && Number.isInteger(byte) && byte >= 0 && byte <= 255;
 
+/** A scope of unique canonical repository paths, sorted. A non-canonical path
+ * (a trailing slash, `./`, `..`) is refused here, so `artifactCovers` is total
+ * over what follows. */
+function parseScope(scope: readonly unknown[]): DomainResult<readonly ReviewPath[], string> {
+  const paths: ReviewPath[] = [];
+  for (const raw of scope) {
+    const path = parseReviewPath(raw, "reviewed workspace scope path");
+    if (!path.ok) return failed(path.errors.join("; "));
+    paths.push(path.value);
+  }
+  if (new Set(paths).size !== paths.length) return failed("reviewed workspace scope must contain unique paths");
+  return { ok: true, value: Object.freeze(paths.sort(compareStrings)) };
+}
+
 /** Artifacts sorted by path, each at or below a scoped path, every scoped
  * path covering at least one. A file-only scope is exactly one artifact per
  * scoped path, so its encoding is unchanged. */
-function canonicalArtifacts(
-  scope: readonly string[],
-  artifacts: readonly ReviewedArtifact[],
-): DomainResult<readonly ReviewedArtifact[], string> {
-  if (scope.some((path) => typeof path !== "string" || path.trim() === "") || new Set(scope).size !== scope.length) {
-    return failed("reviewed workspace scope must contain unique nonblank paths");
-  }
-  const byPath = new Map<string, ReviewedArtifact>();
+export function parseReviewedArtifacts(
+  rawScope: readonly unknown[],
+  artifacts: readonly ObservedArtifact[],
+): DomainResult<ReviewedArtifacts, string> {
+  const scope = parseScope(rawScope);
+  if (!scope.ok) return scope;
+  const byPath = new Map<ReviewPath, ReviewedArtifact>();
   for (const artifact of artifacts) {
     if (typeof artifact !== "object" || artifact === null || typeof artifact.path !== "string") {
       return failed("reviewed workspace contains a malformed artifact observation");
     }
-    if (!scope.some((scoped) => artifactCovers(scoped, artifact.path))) {
-      return failed(`reviewed workspace contains out-of-scope artifact ${artifact.path}`);
+    const path = parseReviewPath(artifact.path, "reviewed workspace artifact path");
+    if (!path.ok) return failed(path.errors.join("; "));
+    if (!scope.value.some((scoped) => artifactCovers(scoped, path.value))) {
+      return failed(`reviewed workspace contains out-of-scope artifact ${path.value}`);
     }
-    if (byPath.has(artifact.path)) {
-      return failed(`reviewed workspace contains duplicate artifact ${artifact.path}`);
+    if (byPath.has(path.value)) {
+      return failed(`reviewed workspace contains duplicate artifact ${path.value}`);
     }
     if (artifact.bytes === null) {
-      byPath.set(artifact.path, Object.freeze({ path: artifact.path, bytes: null }));
+      byPath.set(path.value, Object.freeze({ path: path.value, bytes: null }));
       continue;
     }
     let materialized: readonly unknown[];
     try {
       materialized = Array.from(artifact.bytes);
     } catch {
-      return failed(`reviewed workspace artifact ${artifact.path} does not contain iterable bytes`);
+      return failed(`reviewed workspace artifact ${path.value} does not contain iterable bytes`);
     }
     if (!materialized.every(isByte)) {
-      return failed(`reviewed workspace artifact ${artifact.path} contains an invalid byte`);
+      return failed(`reviewed workspace artifact ${path.value} contains an invalid byte`);
     }
-    byPath.set(artifact.path, Object.freeze({
-      path: artifact.path,
-      bytes: Object.freeze(materialized),
-    }));
+    byPath.set(path.value, Object.freeze({ path: path.value, bytes: Object.freeze(materialized) }));
   }
   const paths = [...byPath.keys()];
-  const missing = scope.find((scoped) => !paths.some((path) => artifactCovers(scoped, path)));
+  const missing = scope.value.find((scoped) => !paths.some((path) => artifactCovers(scoped, path)));
   if (missing !== undefined) return failed(`reviewed workspace snapshot omitted declared artifact ${missing}`);
-  return { ok: true, value: Object.freeze(paths.sort(compareStrings).map((path) => byPath.get(path)!)) };
+  return {
+    ok: true,
+    value: Object.freeze({ scope: scope.value, artifacts: Object.freeze(paths.sort(compareStrings).map((path) => byPath.get(path)!)) }),
+  };
 }
 
-function headSha(artifacts: readonly ReviewedArtifact[]): string {
+/** Canonical content identity for proven bytes, independent of Git state. */
+export function reviewedWorkspaceHeadSha(artifacts: readonly ReviewedArtifact[]): string {
   return sha256Hex(JSON.stringify(artifacts.map(({ path, bytes }) =>
     [path, bytes === null ? null : Buffer.from(Uint8Array.from(bytes)).toString("base64")])));
 }
 
-/** Canonical content identity for exact observed bytes, independent of Git state. */
-export function reviewedWorkspaceHeadSha(
-  scope: readonly string[],
-  artifacts: readonly ReviewedArtifact[],
-): string {
-  const canonicalScope = [...scope].sort();
-  const parsed = canonicalArtifacts(canonicalScope, artifacts);
-  if (!parsed.ok) throw new Error(parsed.error);
-  return headSha(parsed.value);
-}
-
-/** Smart constructor: copy mutable shell buffers before deriving the digest. */
+/** Smart constructor: prove the observed scope and bytes, copying mutable
+ * shell buffers, then derive the digest. */
 export function reviewedWorkspaceObservation(
   taskId: string,
   scope: readonly string[],
-  artifacts: readonly ReviewedArtifact[],
-): ReviewedWorkspaceObservation {
-  const canonicalScope = Object.freeze([...scope].sort());
-  const parsed = canonicalArtifacts(canonicalScope, artifacts);
-  if (!parsed.ok) throw new Error(parsed.error);
-  return Object.freeze({
-    taskId,
-    scope: canonicalScope,
-    artifacts: parsed.value,
-    headSha: headSha(parsed.value),
-  });
+  artifacts: readonly ObservedArtifact[],
+): DomainResult<ReviewedWorkspaceObservation, string> {
+  const parsed = parseReviewedArtifacts(scope, artifacts);
+  if (!parsed.ok) return parsed;
+  return {
+    ok: true,
+    value: Object.freeze({
+      taskId,
+      scope: parsed.value.scope,
+      artifacts: parsed.value.artifacts,
+      headSha: reviewedWorkspaceHeadSha(parsed.value.artifacts),
+    }),
+  };
 }
 
 /** Parse an untrusted observation against one Task's exact review scope. */
@@ -132,7 +142,7 @@ export function parseReviewedWorkspaceSnapshot(
   expectedScope: readonly string[],
   observation: ReviewedWorkspaceObservation,
 ): DomainResult<ReviewedWorkspaceSnapshot, string> {
-  const canonicalScope = Object.freeze([...expectedScope].sort());
+  const canonicalScope = [...expectedScope].sort();
   if (new Set(canonicalScope).size !== canonicalScope.length) {
     return failed(`Task ${taskId} expected review scope contains duplicate paths`);
   }
@@ -141,111 +151,16 @@ export function parseReviewedWorkspaceSnapshot(
       observation.scope.some((path, index) => path !== canonicalScope[index])) {
     return failed(`Task ${taskId} workspace observation differs from its exact review scope`);
   }
-  const artifacts = canonicalArtifacts(canonicalScope, observation.artifacts);
-  if (!artifacts.ok) return failed(`Task ${taskId}: ${artifacts.error}`);
-  const computed = headSha(artifacts.value);
+  const parsed = parseReviewedArtifacts(canonicalScope, observation.artifacts);
+  if (!parsed.ok) return failed(`Task ${taskId}: ${parsed.error}`);
+  const computed = reviewedWorkspaceHeadSha(parsed.value.artifacts);
   if (observation.headSha !== computed) {
     return failed(`Task ${taskId} workspace bytes disagree with observed workspaceHeadSha`);
   }
   return {
     ok: true,
-    value: Object.freeze({ taskId, scope: canonicalScope, artifacts: artifacts.value, headSha: computed }),
+    value: Object.freeze({ taskId, scope: parsed.value.scope, artifacts: parsed.value.artifacts, headSha: computed }),
   };
-}
-
-export function waveFrozenSource(snapshot: ReviewedWorkspaceSnapshot): WaveFrozenSource {
-  const files = snapshot.artifacts.map(({ path, bytes }): WaveFrozenSourceFile => {
-    if (bytes === null) return Object.freeze({ path, kind: "absent", digest: null, byteLength: 0 });
-    const materialized = Uint8Array.from(bytes);
-    const digest = sha256Bytes(materialized);
-    try {
-      return Object.freeze({
-        path,
-        kind: "text",
-        digest,
-        byteLength: materialized.byteLength,
-        content: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(materialized),
-      });
-    } catch {
-      return Object.freeze({
-        path,
-        kind: "binary",
-        digest,
-        byteLength: materialized.byteLength,
-        contentBase64: Buffer.from(materialized).toString("base64"),
-      });
-    }
-  });
-  return Object.freeze({
-    schemaVersion: WAVE_FROZEN_SOURCE_SCHEMA_VERSION,
-    taskId: snapshot.taskId,
-    workspaceHeadSha: snapshot.headSha,
-    files: Object.freeze(files),
-  });
-}
-
-const exactObject = (raw: unknown, keys: readonly string[]): raw is Record<string, unknown> =>
-  typeof raw === "object" && raw !== null && !Array.isArray(raw) &&
-  Object.keys(raw).length === keys.length && keys.every((key) => Object.hasOwn(raw, key));
-
-/** Decode and re-prove every byte/digest/head join before reader projection. */
-export function parseWaveFrozenSource(raw: unknown): DomainResult<WaveFrozenSource, string> {
-  if (!exactObject(raw, ["schemaVersion", "taskId", "workspaceHeadSha", "files"]) ||
-      raw.schemaVersion !== WAVE_FROZEN_SOURCE_SCHEMA_VERSION || typeof raw.taskId !== "string" || raw.taskId.trim() === "" ||
-      typeof raw.workspaceHeadSha !== "string" || !/^[0-9a-f]{64}$/.test(raw.workspaceHeadSha) || !Array.isArray(raw.files)) {
-    return failed("wave frozen source has an invalid schema");
-  }
-  const files: WaveFrozenSourceFile[] = [];
-  const artifacts: ReviewedArtifact[] = [];
-  const paths = new Set<string>();
-  for (const [index, entry] of raw.files.entries()) {
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry) ||
-        typeof entry.path !== "string" || entry.path.trim() === "" || paths.has(entry.path)) {
-      return failed(`wave frozen source file ${index} has an invalid or duplicate path`);
-    }
-    paths.add(entry.path);
-    if (entry.kind === "absent") {
-      if (!exactObject(entry, ["path", "kind", "digest", "byteLength"]) || entry.digest !== null || entry.byteLength !== 0) {
-        return failed(`wave frozen source absent file ${index} is malformed`);
-      }
-      files.push(Object.freeze({ path: entry.path, kind: "absent", digest: null, byteLength: 0 }));
-      artifacts.push(Object.freeze({ path: entry.path, bytes: null }));
-      continue;
-    }
-    const contentKey = entry.kind === "text" ? "content" : entry.kind === "binary" ? "contentBase64" : null;
-    if (contentKey === null || !exactObject(entry, ["path", "kind", "digest", "byteLength", contentKey]) ||
-        typeof entry.digest !== "string" || !/^[0-9a-f]{64}$/.test(entry.digest) ||
-        !Number.isSafeInteger(entry.byteLength) || (entry.byteLength as number) < 0 || typeof entry[contentKey] !== "string") {
-      return failed(`wave frozen source file ${index} is malformed`);
-    }
-    const content = entry[contentKey] as string;
-    const bytes = entry.kind === "text" ? Buffer.from(content, "utf8") : Buffer.from(content, "base64");
-    if ((entry.kind === "binary" && bytes.toString("base64") !== content) || bytes.byteLength !== entry.byteLength ||
-        sha256Bytes(bytes) !== entry.digest) {
-      return failed(`wave frozen source file ${index} content differs from its digest or length`);
-    }
-    if (entry.kind === "text") {
-      files.push(Object.freeze({ path: entry.path, kind: "text", digest: entry.digest,
-        byteLength: entry.byteLength as number, content }));
-    } else {
-      files.push(Object.freeze({ path: entry.path, kind: "binary", digest: entry.digest,
-        byteLength: entry.byteLength as number, contentBase64: content }));
-    }
-    artifacts.push(Object.freeze({ path: entry.path, bytes }));
-  }
-  const scope = files.map(({ path }) => path);
-  const canonical = [...scope].sort();
-  if (scope.some((path, index) => path !== canonical[index])) return failed("wave frozen source files must be sorted by path");
-  const parsedArtifacts = canonicalArtifacts(scope, artifacts);
-  if (!parsedArtifacts.ok || headSha(parsedArtifacts.value) !== raw.workspaceHeadSha) {
-    return failed("wave frozen source bytes disagree with workspaceHeadSha");
-  }
-  return { ok: true, value: Object.freeze({
-    schemaVersion: WAVE_FROZEN_SOURCE_SCHEMA_VERSION,
-    taskId: raw.taskId,
-    workspaceHeadSha: raw.workspaceHeadSha,
-    files: Object.freeze(files),
-  }) };
 }
 
 export function reviewedWorkspaceDrift(

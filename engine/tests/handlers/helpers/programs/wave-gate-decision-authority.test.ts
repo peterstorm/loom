@@ -17,24 +17,21 @@ import { fileURLToPath } from "node:url";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_ROOT_ENV, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../../../../src/runtime-compatibility";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
-import {
-  applyCurrentSpecCheckCaptureRejection,
-  applyWaveFacadeSubmission,
-  handleWaveReviewContext,
-  installWaveReviewRuns,
-  publishWaveAdvisoryDecisionRequest,
-  reportUncaughtWaveGateFailure,
-  specCheckSlotBelongsToWaveEpoch,
-  waveAdvisoryDecisionRequestId,
-  waveGateAuthorityDigest,
-  waveGateDecisionMismatch,
-  waveRefutationCommitProblem,
-  waveRequests,
-} from "../../../../src/handlers/helpers/programs/wave-gate";
+import { applyCurrentSpecCheckCaptureRejection, specCheckSlotBelongsToWaveEpoch, waveGateDecisionMismatch, waveRefutationCommitProblem } from "../../../../src/core/wave-gate-membership";
+import { applyWaveFacadeSubmission } from "../../../../src/handlers/helpers/programs/wave-gate-submission";
+import { handleWaveReviewContext } from "../../../../src/handlers/helpers/programs/wave-review-context";
+import { installWaveReviewRuns, waveRequests } from "../../../../src/handlers/helpers/programs/wave-review-requests";
+import { publishWaveAdvisoryDecisionRequest, waveAdvisoryDecisionRequestId } from "../../../../src/handlers/helpers/programs/wave-advisory-decision";
+import { reportUncaughtWaveGateFailure } from "../../../../src/handlers/helpers/programs/wave-gate-outcome";
+import { waveGateAuthorityDigest } from "../../../../src/core/wave-review-authority";
 import {
   deriveLoomStatusFromParsedGraph,
+} from "../../../../src/core/loom-status";
+import {
   deriveWaveAdvisoryDecisionRequest,
   deriveWaveGateDriveStep,
+} from "../../../../src/core/wave-gate-preparation";
+import {
   deriveWaveReadiness,
 } from "../../../../src/core/wave-gate-machine";
 import { observedAdvisoryApproval } from "../../../../src/handlers/helpers/orchestration";
@@ -50,7 +47,7 @@ import {
 import type { WaveReviewRegistrationAuthority } from "../../../../src/core/wave-review-authority";
 import { buildContextPacket, encodeByteSection } from "../../../../src/orchestration/context-packets";
 import { openRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
-import type { RegisteredWaveGateProgram } from "../../../../src/handlers/helpers/programs/helpers";
+import type { RegisteredWaveGateProgram } from "../../../../src/core/wave-gate-program";
 import { parseTaskGraph, StateManager } from "../../../../src/state-manager";
 import { capturedSpecCheck } from "../../../../src/core/spec-check";
 import type { TaskGraph } from "../../../../src/types";

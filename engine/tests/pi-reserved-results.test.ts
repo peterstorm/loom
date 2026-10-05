@@ -1,6 +1,6 @@
 /**
  * Unit tests for the reserved-result classification extracted out of
- * `pi/extension.ts`'s `tool_result` handler.
+ * the `tool_result` handler now in `pi/subagent-stop.ts`.
  *
  * These rules decide which gate-owned evidence gets invalidated when a Pi child
  * disappears. Before the extraction the only test that reached them was the

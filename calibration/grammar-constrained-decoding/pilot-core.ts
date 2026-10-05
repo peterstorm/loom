@@ -304,42 +304,72 @@ export function classifyEmissionToolError(resultText: string): ToolError {
   return Object.freeze({ class: "unclassified" as const, excerpt: resultText.slice(0, 200) });
 }
 
-const rejectionCauseSchema = z.discriminatedUnion("kind", [
+/** Rejections the extraction-only arm can produce: it observes no emission
+ *  call, so only the final message and the frozen parser can refuse. */
+const extractionRejectionCauses = [
   /** Zero emission calls (or extraction-only arm) and the final message was unusable. */
   z.object({ kind: z.literal("extraction-failure"), detail: z.string() }).strict(),
+  /** A payload was selected but the frozen ingestion parser refused it. */
+  z.object({ kind: z.literal("payload-refused"), detail: z.string() }).strict(),
+] as const;
+
+const rejectionCauseSchema = z.discriminatedUnion("kind", [
+  ...extractionRejectionCauses,
   /** One complete call refused by engine admission with no usable fallback. */
   z.object({ kind: z.literal("refused-call-no-fallback"), detail: z.string() }).strict(),
   /** Two or more distinct emission calls (AD-9 ambiguity). */
   z.object({ kind: z.literal("duplicate-call"), calls: z.number().int().min(2) }).strict(),
   /** Incomplete/failed/misbound observation (an errored tool result lands here on Pi). */
   z.object({ kind: z.literal("observation-refused"), detail: z.string() }).strict(),
-  /** A payload was selected but the frozen ingestion parser refused it. */
-  z.object({ kind: z.literal("payload-refused"), detail: z.string() }).strict(),
 ]);
 export type RejectionCause = DeepReadonly<z.infer<typeof rejectionCauseSchema>>;
 
-const attemptOutcomeSchema = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("accepted"),
-    source: z.enum(["emission-tool", "extraction"]),
-    /** Extraction selected over exactly one engine-refused call (AD-9 row 3). */
-    fallbackOverRefusal: z.boolean(),
-    payloadDigest: hex64,
-  }).strict(),
+const payloadDigestField = { payloadDigest: hex64 };
+const infrastructureFailureSchema = z.object({ kind: z.literal("infrastructure-failure"), reason: z.string() }).strict();
+const timeoutSchema = z.object({ kind: z.literal("timeout"), afterMs: z.number().nonnegative() }).strict();
+
+/**
+ * The emission-enabled arm's outcomes. An accepted source is coherent with
+ * its fallback flag by construction: `fallbackOverRefusal` (extraction
+ * selected over exactly one engine-refused call, AD-9 row 3) exists only on
+ * the extraction source; an accepted emission-tool payload never carries it.
+ */
+const emissionOutcomeSchema = z.discriminatedUnion("kind", [
+  z.discriminatedUnion("source", [
+    z.object({ kind: z.literal("accepted"), source: z.literal("emission-tool"), fallbackOverRefusal: z.literal(false), ...payloadDigestField }).strict(),
+    z.object({ kind: z.literal("accepted"), source: z.literal("extraction"), fallbackOverRefusal: z.boolean(), ...payloadDigestField }).strict(),
+  ]),
   z.object({ kind: z.literal("rejected"), cause: rejectionCauseSchema }).strict(),
   /** The readiness barrier refused before any model request. */
   z.object({ kind: z.literal("startup-refused"), reason: z.string() }).strict(),
-  z.object({ kind: z.literal("infrastructure-failure"), reason: z.string() }).strict(),
-  z.object({ kind: z.literal("timeout"), afterMs: z.number().nonnegative() }).strict(),
+  infrastructureFailureSchema,
+  timeoutSchema,
 ]);
 
-const attemptSchema = z.object({
+/**
+ * The extraction-only arm's outcomes: the PR #52-only baseline has no
+ * readiness barrier and no emission tool, so it accepts only by final-message
+ * extraction (never over a refused call) and rejects only for extraction or
+ * ingestion causes.
+ */
+const extractionOutcomeSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("accepted"), source: z.literal("extraction"), fallbackOverRefusal: z.literal(false), ...payloadDigestField }).strict(),
+  z.object({ kind: z.literal("rejected"), cause: z.discriminatedUnion("kind", [...extractionRejectionCauses]) }).strict(),
+  infrastructureFailureSchema,
+  timeoutSchema,
+]);
+
+const attemptCounters = {
   attempt: z.number().int().min(1).max(SPEC_SEMANTIC_ATTEMPT_BUDGET),
   /** Wall clock of this attempt from child spawn (startup included). */
   elapsedMs: z.number().nonnegative(),
-  /** Readiness-barrier time (emission arm); null where no barrier exists. */
-  readinessMs: z.number().nonnegative().nullable(),
   modelRequests: z.number().int().nonnegative(),
+};
+
+const emissionAttemptSchema = z.object({
+  ...attemptCounters,
+  /** Readiness-barrier time; null when the barrier never completed. */
+  readinessMs: z.number().nonnegative().nullable(),
   /** Distinct emission tool-call identities observed. */
   emissionCalls: z.number().int().nonnegative(),
   /** Every errored emission tool result, in order (each is a Pi in-child re-prompt). */
@@ -347,23 +377,54 @@ const attemptSchema = z.object({
   toolAcknowledged: z.boolean(),
   /** Model turns after the first successful tool acknowledgment. */
   followUpTurnsAfterAck: z.number().int().nonnegative(),
-  outcome: attemptOutcomeSchema,
+  outcome: emissionOutcomeSchema,
 }).strict();
-export type AttemptObservation = DeepReadonly<z.infer<typeof attemptSchema>>;
 
-const sampleSchema = z.object({
+/** The extraction-only arm is offered no emission tool and passes no
+ *  readiness barrier: its emission counters are fixed by the arm. */
+const extractionAttemptSchema = z.object({
+  ...attemptCounters,
+  readinessMs: z.null(),
+  emissionCalls: z.literal(0),
+  toolErrors: z.tuple([]),
+  toolAcknowledged: z.literal(false),
+  followUpTurnsAfterAck: z.literal(0),
+  outcome: extractionOutcomeSchema,
+}).strict();
+
+export type EmissionArmAttempt = DeepReadonly<z.infer<typeof emissionAttemptSchema>>;
+export type ExtractionArmAttempt = DeepReadonly<z.infer<typeof extractionAttemptSchema>>;
+export type AttemptObservation = EmissionArmAttempt | ExtractionArmAttempt;
+
+const sampleFields = {
   pairId: text,
   cell: z.enum(CELL_KEYS),
   caseId: text,
-  arm: z.enum(PILOT_ARMS),
+};
+const sampleMeasures = {
   /** Initial producer dispatch → accepted ingestion (or terminal failure),
    *  including startup, readiness, tool acknowledgments, follow-up turns,
    *  in-child re-prompts and the semantic retry. */
   dispatchToIngestionMs: z.number().nonnegative(),
-  attempts: z.array(attemptSchema).min(1).max(SPEC_SEMANTIC_ATTEMPT_BUDGET),
   /** Pi exposes parsed arguments only — never the generated bytes. */
   rawArgumentObservation: z.literal("unavailable"),
-}).strict().superRefine((sample, ctx) => {
+};
+
+/** One arm's sample, discriminated by arm: every attempt is that arm's attempt. */
+const sampleSchema = z.discriminatedUnion("arm", [
+  z.object({
+    ...sampleFields,
+    arm: z.literal("emission-enabled"),
+    ...sampleMeasures,
+    attempts: z.array(emissionAttemptSchema).min(1).max(SPEC_SEMANTIC_ATTEMPT_BUDGET),
+  }).strict(),
+  z.object({
+    ...sampleFields,
+    arm: z.literal("extraction-only"),
+    ...sampleMeasures,
+    attempts: z.array(extractionAttemptSchema).min(1).max(SPEC_SEMANTIC_ATTEMPT_BUDGET),
+  }).strict(),
+]).superRefine((sample, ctx) => {
   sample.attempts.forEach((attempt, index) => {
     if (attempt.attempt !== index + 1) ctx.addIssue({ code: "custom", message: "attempts must be numbered 1..n in order", path: ["attempts", index] });
     const isLast = index === sample.attempts.length - 1;
@@ -819,14 +880,24 @@ export type CellMeasurement = Readonly<{
   quality: QualityComparison | null;
 }>;
 
+declare const derivedFromMeasurement: unique symbol;
+
+/**
+ * A measured cell: its guardrail verdicts together with the measurement they
+ * were derived from. Only `measureCell` constructs one — it computes both
+ * from the same observed pairs — so a record pairing verdicts with a
+ * measurement they were not derived from cannot be written outside it.
+ */
+export type MeasuredCell = Readonly<{
+  kind: "measured";
+  cell: CellKey;
+  qualification: EmissionRouteQualification;
+  measurement: CellMeasurement;
+  guardrails: GuardrailRecord;
+}> & Readonly<{ [derivedFromMeasurement]: true }>;
+
 export type CellOutcome =
-  | Readonly<{
-      kind: "measured";
-      cell: CellKey;
-      qualification: EmissionRouteQualification;
-      measurement: CellMeasurement;
-      guardrails: GuardrailRecord;
-    }>
+  | MeasuredCell
   | Readonly<{
       kind: "qualification-only";
       cell: CellKey;
@@ -1238,6 +1309,18 @@ function evaluateCell(
   if (pairs.length < scheduled.length) {
     return notMeasured(`${pairs.length}/${scheduled.length} preregistered pairs observed in both arms`);
   }
+  return measureCell(cell, qualification, scheduled.length, pairs, evidence);
+}
+
+/** The one constructor of a `MeasuredCell`: every measurement value and the
+ *  guardrail verdict read from it come from the same complete set of pairs. */
+function measureCell(
+  cell: CellPreregistration,
+  qualification: EmissionRouteQualification,
+  scheduledPairs: number,
+  pairs: readonly Pair[],
+  evidence: PilotEvidence,
+): Result<MeasuredCell, readonly string[]> {
   const latency = latencyGuardrail(pairs, evidence.preregistration);
   const terminal = terminalGuardrail(pairs, evidence.preregistration);
   const emissionSamples = pairs.map((pair) => pair.emission);
@@ -1245,7 +1328,7 @@ function evaluateCell(
   const quality = compareQuality(cell, pairs, evidence.preregistration, evidence.quality);
   if (!quality.ok) return quality;
   const measurement: CellMeasurement = Object.freeze({
-    scheduledPairs: scheduled.length,
+    scheduledPairs,
     observedPairs: pairs.length,
     arms: Object.freeze({
       "emission-enabled": summarizeArm(emissionSamples, qualification),
@@ -1258,19 +1341,14 @@ function evaluateCell(
     byDifficulty: byDifficulty(pairs),
     quality: quality.value.comparison,
   });
-  return ok(Object.freeze({
-    kind: "measured" as const,
-    cell: cell.cell,
-    qualification,
-    measurement,
-    guardrails: Object.freeze({
-      "measurement-complete": outcome("measurement-complete", "pass", `${pairs.length}/${scheduled.length} preregistered pairs observed in both arms`),
-      "latency-p95": latency.guardrail,
-      "terminal-failure-non-increase": terminal.guardrail,
-      "provider-structural-retries": structuralGuardrail(structural),
-      "escaped-defect-severity": quality.value.guardrail,
-    }),
-  }));
+  const guardrails: GuardrailRecord = Object.freeze({
+    "measurement-complete": outcome("measurement-complete", "pass", `${pairs.length}/${scheduledPairs} preregistered pairs observed in both arms`),
+    "latency-p95": latency.guardrail,
+    "terminal-failure-non-increase": terminal.guardrail,
+    "provider-structural-retries": structuralGuardrail(structural),
+    "escaped-defect-severity": quality.value.guardrail,
+  });
+  return ok(Object.freeze({ kind: "measured" as const, cell: cell.cell, qualification, measurement, guardrails }) as MeasuredCell);
 }
 
 function consistencyProblems(evidence: PilotEvidence, schedule: readonly ScheduledPair[]): readonly string[] {
@@ -1331,7 +1409,7 @@ function cellFindings(cell: CellOutcome): CellFindings {
     .exhaustive();
 }
 
-function measuredCellFindings(measured: Extract<CellOutcome, { kind: "measured" }>): CellFindings {
+function measuredCellFindings(measured: MeasuredCell): CellFindings {
   const guardrails = GUARDRAIL_IDS.map((id) => measured.guardrails[id]);
   const violations = guardrails.flatMap((guardrail): readonly GuardrailViolation[] => guardrail.verdict === "violated"
     ? [Object.freeze({ cell: measured.cell, guardrail: guardrail.guardrail, requirement: GUARDRAIL_REQUIREMENT[guardrail.guardrail], detail: guardrail.detail })]

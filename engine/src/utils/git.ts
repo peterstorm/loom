@@ -21,7 +21,7 @@ import { observeGitProbe } from "./git-probe";
  * implementation, one diagnostic.
  *
  * It is deliberately NOT the only path to `git` in the engine, and claiming
- * otherwise would be false: `utils/artifact-baseline.ts` and several
+ * otherwise would be false: `utils/git-leaves.ts` and several
  * handlers/orchestration modules shell out directly because they need failures
  * to THROW, where this module's helpers warn and return `undefined`. Two
  * failure contracts, chosen per call site; a caller that wants the warning

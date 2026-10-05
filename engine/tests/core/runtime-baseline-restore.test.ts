@@ -7,14 +7,25 @@ import {
   captureLoomRuntimeIdentity,
   captureLoomRuntimeIdentityRestoring,
 } from "../../src/runtime-compatibility";
-import { runtimeBaselineRestoreForTasks } from "../../src/utils/artifact-baseline";
+import { runtimeBaselineRestoreForTasks } from "../../src/utils/runtime-baseline-restore";
+import {
+  describeRuntimeBaselineRestoreRefusal,
+  runtimeBaselineRestoreAt,
+  runtimeBaselineRestoreCandidates,
+  type RuntimeBaselineFacts,
+} from "../../src/core/runtime-baseline-restore";
+import fc from "fast-check";
 
 const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-type RuntimeBaselineTask = Parameters<typeof runtimeBaselineRestoreForTasks>[1][number];
+/** The restore reads only the repository baseline; `file_list` documents each
+ *  fixture's declared intent, which the rules deliberately ignore. */
+type RuntimeBaselineTask = Parameters<typeof runtimeBaselineRestoreForTasks>[1][number] & {
+  readonly file_list?: readonly string[];
+};
 
 /** A minimal loom-shaped checkout: the runtime revision domain is exactly
  *  `engine/src` + `pi` + the identity files, so the fixtures mirror that. */
@@ -113,17 +124,75 @@ describe("runtimeBaselineRestoreForTasks", () => {
     expect(restore.has("pi/extension.ts")).toBe(false);
   });
 
-  it("fails closed for the whole map when any baseline is unparseable", () => {
+  it("refuses the whole map with its parse cause when any baseline is unparseable", () => {
     const { root } = gitFixture();
     writeFileSync(join(root, "engine", "src", "core", "task.ts"), "export const task = 2;\n");
-    const restore = runtimeBaselineRestoreForTasks(root, [
+    expect(() => runtimeBaselineRestoreForTasks(root, [
       taskWith(),
       taskWith({
-        // @ts-expect-error hostile baseline shape drives the fail-closed branch.
+        // @ts-expect-error hostile baseline shape drives the refusal.
         attempt_repository_baseline: [{ artifact: 42 }],
       }),
-    ]);
-    expect(restore.size).toBe(0);
+    ])).toThrow(
+      "an in-flight attempt repository baseline is unparseable, so no runtime-baseline restore applies: " +
+      "attempt repository baseline[0].artifact must be non-empty",
+    );
+  });
+
+  it("needs no baseline at all while the runtime domain is clean", () => {
+    const { root } = gitFixture();
+    expect(runtimeBaselineRestoreForTasks(root, [
+      // @ts-expect-error a clean domain has nothing to restore, so nothing is parsed.
+      taskWith({ attempt_repository_baseline: [{ artifact: 42 }] }),
+    ]).size).toBe(0);
+  });
+});
+
+describe("runtime-baseline restoration rules (pure)", () => {
+  const facts = (overrides: Partial<RuntimeBaselineFacts> = {}): RuntimeBaselineFacts => ({
+    dirtyNow: new Set(["engine/src/a.ts", "engine/src/b.ts", "docs/c.md"]),
+    domainPaths: ["engine/src/a.ts", "engine/src/b.ts", "engine/src/clean.ts"],
+    attemptRepositoryBaselines: [],
+    ...overrides,
+  });
+  const dirtyAtSpawn = (artifact: string) => [{ artifact, snapshot: { kind: "missing" } }];
+
+  it("restores exactly the domain paths dirty now, mapping each to HEAD or to null when absent there", () => {
+    const candidates = runtimeBaselineRestoreCandidates(facts());
+    expect(candidates).toEqual({ ok: true, value: ["engine/src/a.ts", "engine/src/b.ts"] });
+    if (!candidates.ok) return;
+    expect([...runtimeBaselineRestoreAt(candidates.value, "f".repeat(40), new Set(["engine/src/a.ts"]))])
+      .toEqual([["engine/src/a.ts", "f".repeat(40)], ["engine/src/b.ts", null]]);
+  });
+
+  it("keeps a path strict when ANY attempt saw it dirty at spawn; an attempt without a baseline proves nothing", () => {
+    expect(runtimeBaselineRestoreCandidates(facts({
+      attemptRepositoryBaselines: [undefined, dirtyAtSpawn("engine/src/b.ts"), []],
+    }))).toEqual({ ok: true, value: ["engine/src/a.ts"] });
+  });
+
+  it("refuses with every parse error rather than silently restoring nothing", () => {
+    const refused = runtimeBaselineRestoreCandidates(facts({
+      attemptRepositoryBaselines: [dirtyAtSpawn("engine/src/a.ts"), [{ artifact: "../escape", snapshot: { kind: "missing" } }]],
+    }));
+    expect(refused.ok).toBe(false);
+    if (refused.ok) return;
+    expect(refused.error.kind).toBe("unparseable-attempt-baseline");
+    expect(describeRuntimeBaselineRestoreRefusal(refused.error)).toContain("attempt repository baseline[0].artifact");
+  });
+
+  it("property: candidates are always dirty domain paths, and adding dirt at spawn never adds a candidate", () => {
+    const path = fc.constantFrom<string>("engine/src/a.ts", "engine/src/b.ts", "pi/c.ts", "docs/d.md");
+    fc.assert(fc.property(fc.uniqueArray(path), fc.uniqueArray(path), fc.uniqueArray(path), (dirty, domain, spawn) => {
+      const base = runtimeBaselineRestoreCandidates({ dirtyNow: new Set(dirty), domainPaths: domain, attemptRepositoryBaselines: [[]] });
+      const stricter = runtimeBaselineRestoreCandidates({
+        dirtyNow: new Set(dirty), domainPaths: domain,
+        attemptRepositoryBaselines: [spawn.flatMap(dirtyAtSpawn)],
+      });
+      if (!base.ok || !stricter.ok) throw new Error("well-formed baselines must parse");
+      expect(base.value.every((candidate) => dirty.includes(candidate) && domain.includes(candidate))).toBe(true);
+      expect(stricter.value.every((candidate) => base.value.includes(candidate) && !spawn.includes(candidate))).toBe(true);
+    }));
   });
 });
 

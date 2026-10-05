@@ -7,7 +7,7 @@ import {
   REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, reviewerPayloadV2Schema,
   type FindingBasis, type ReviewerDraftV2, type ReviewerPayloadV2, type ReviewerProtocolFailure,
 } from "../../src/core/reviewer-contract";
-import { sha256Hex } from "../../src/core/review-packet";
+import { sha256Hex } from "../../src/core/digest";
 
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
 const decode = (value: unknown) => parseReviewerPayloadV2(bytes(JSON.stringify(value)));
@@ -211,6 +211,15 @@ describe("current reviewer codec", () => {
     refused(bytes("[".repeat(32) + "0" + "]".repeat(32)), "invalid-payload");
     refused(bytes("[".repeat(33) + "0" + "]".repeat(33)), "depth-exceeded");
     expect(decode(standalone([{ ...advisory, claim: '\\"' + "[{}]".repeat(500) }])).ok).toBe(true);
+  });
+  it("applies one string rule to the depth precheck and prose extraction alike", () => {
+    // Escaped quotes and unbalanced delimiters deeper than the depth limit, all
+    // inside one string value: the precheck must not count them and the
+    // extractor must not split a candidate on them.
+    const claim = '\\" ' + "{[".repeat(REVIEWER_PAYLOAD_LIMITS.depth + 1) + ' \\\\" }';
+    const payload = standalone([{ ...advisory, claim }]);
+    const wrapped = `Summary before the payload.\n\n${JSON.stringify(payload)}\n\nTrailing prose.`;
+    expect(parseReviewerPayloadV2(bytes(wrapped))).toEqual({ ok: true, value: payload });
   });
 
   it.each([

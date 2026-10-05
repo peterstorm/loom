@@ -6,7 +6,7 @@ import gateHandler, {
   loadPlanModelsSource,
   type PlanModelsSource,
 } from "../../src/handlers/helpers/complete-wave-gate";
-import { checkLifecycleArtifacts } from "../../src/core/wave-gate-machine";
+import { checkLifecycleArtifacts } from "../../src/core/wave-gate-checks";
 import type { Task } from "../../src/types";
 import type { PlanModels } from "../../src/parsers/parse-plan-models";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";

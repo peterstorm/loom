@@ -16,15 +16,13 @@ import {
   settlePanelAttemptSubmission,
 } from "../../../src/handlers/helpers/orchestration";
 import { candidateFilename, type PanelLens } from "../../../src/core/panel-contract";
-import {
-  panelVerdictSourceProvenance,
-  panelVerdictSourceRecord,
-} from "../../../src/core/panel-program";
+import { panelVerdictSourceProvenance, panelVerdictSourceRecord } from "../../../src/core/panel-verdict-source";
 import { selectVerdictSource } from "../../../src/core/emission-ingestion";
 import { issueEmissionBinding } from "../../../src/core/emission-tool";
 import { captureKey, observeEmissionCalls } from "../../../src/core/harness-capture";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2, type ReviewerDraftV2 } from "../../../src/core/reviewer-contract";
-import { WAVE_REVIEW_AGENTS, type GateDeps } from "../../../src/core/wave-gate-machine";
+import { type GateDeps } from "../../../src/core/wave-gate-checks";
+import { WAVE_REVIEW_AGENTS } from "../../../src/core/model-profiles";
 import { evaluateTaskProof } from "../../../src/core/proof-obligations";
 import { acceptedWaveCompletionSuite } from "../../fixtures/accepted-wave-completion-suite";
 import { parseAgentRequestAuthority, parseArtifactDigest, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";
@@ -38,9 +36,14 @@ import {
   type StandaloneCaptureWitness,
 } from "../../../src/handlers/helpers/programs/standalone";
 import { StateManager } from "../../../src/state-manager";
-import { parseRegistration, publishLegacyInitialBatch } from "../../../src/handlers/helpers/programs/helpers";
+import { parseRegistration } from "../../../src/handlers/helpers/programs/registration";
+import { publishLegacyInitialBatch } from "../../../src/handlers/helpers/programs/request-publication";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../src/core/spawn-admission";
-import { deriveWaveAttemptTwo, waveGateAuthorityDigest, waveRequests, installWaveReviewRuns, persistedWaveAttemptTwoCompatibilityProblem, prepareOrphanedWaveGateRecovery } from "../../../src/handlers/helpers/programs/wave-gate";
+import { deriveWaveAttemptTwo } from "../../../src/handlers/helpers/programs/wave-review-retries";
+import { waveGateAuthorityDigest } from "../../../src/core/wave-review-authority";
+import { waveRequests, installWaveReviewRuns } from "../../../src/handlers/helpers/programs/wave-review-requests";
+import { persistedWaveAttemptTwoCompatibilityProblem } from "../../../src/core/wave-gate-membership";
+import { prepareOrphanedWaveGateRecovery } from "../../../src/core/wave-gate-replacement";
 import { buildContextPacket, encodeByteSection } from "../../../src/orchestration/context-packets";
 import { createRunDirectory, openRunDirectory, inspectRunDirectoryEntry, type RunDirHandle } from "../../../src/orchestration/run-directory-handle";
 import { readSessionRunBindings } from "../../../src/orchestration/session-run-bindings";
@@ -5109,5 +5112,28 @@ describe("orchestration CLI", () => {
       expect(usage.stderr).toContain("inspect --runs-root <root> --run <run-directory> [--json]");
       expect(usage.stderr).toContain("abandon --runs-root <root> --run <run-directory> --reason <text>");
     });
+  });
+});
+
+describe("the production panel verdict port certifies the core's structural binding", () => {
+  // The declared-pure panel core relays bindings as a structural mirror; the
+  // port is where it re-enters the nominal kernel, so it parses the mirror
+  // through the mint instead of trusting the shape.
+  const minted = issueEmissionBinding({ requestId: "request:panel-port-cert", kind: "judge-verdict", version: "v1" });
+  if (!minted.ok) throw new Error(minted.error.message);
+  type RelayedBinding = Parameters<typeof panelVerdictEmissionPort.fold>[0]["binding"];
+
+  it("folds a minted binding the core relayed unchanged", () => {
+    expect(panelVerdictEmissionPort.fold({ binding: minted.value, observation: observeEmissionCalls([]), rawJson: "raw" }))
+      .toMatchObject({ kind: "final-message-extraction", rawJson: "raw" });
+  });
+
+  it.each([
+    ["schema digest", { schemaDigest: "0".repeat(64) }, "schema-digest-mismatch"],
+    ["tool name", { toolName: "loom_emit_reviewer_payload" }, "tool-name-mismatch"],
+  ] as const)("throws on a mirror whose %s does not certify the registry cell — never folds it", (_label, forged, code) => {
+    const mirror = { ...minted.value, ...forged } as unknown as RelayedBinding;
+    expect(() => panelVerdictEmissionPort.fold({ binding: mirror, observation: observeEmissionCalls([]), rawJson: "raw" }))
+      .toThrow(`panel verdict emission binding does not certify its registry cell [${code}]`);
   });
 });

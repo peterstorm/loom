@@ -5,6 +5,7 @@
 **Runner:** `scripts/run-model-calibration.ts --pilot` / `--decide`
 **Pure core:** `pilot-core.ts` (preregistration, schedule, counters, guardrails, release decision), `pilot-workload.ts` (fixtures, matched prompts, rubric assessor), `pilot-dispatch.ts` (transcript classification through the engine's own selection; the live Pi adapter)
 **Window dispatch shell:** `pilot-window.ts` (matched-arm dispatch with the attempt-2 retry behind the `ArmDispatch` port, blinding key and packet, rubric wiring)
+**Window retention:** `pilot-retention.ts` (the window's files and decision rules behind the `WindowStore` port: never-overwrite, preregistration-drift refusal, assessment retention, decision record and append-only log)
 
 ## Release decision: INCOMPLETE. Done cannot be claimed
 
@@ -71,7 +72,8 @@ The preflight recomputes each digest from the staged frozen registry, and a mism
 ### Measurement definitions
 
 - **Dispatch-to-ingestion wall clock** runs from the first child spawn to accepted ingestion. It includes startup, the readiness barrier, tool acknowledgments, follow-up model turns, Pi's in-child validation re-prompts and the semantic attempt 2.
-- **Accepted ingestion** means the engine's own selection (`piEmissionCallFrames` → `observeEmissionCalls` → `selectCanonicalPayload` / `selectVerdictSource`) followed by the frozen registry parser for the issued kind and version.
+- **Accepted ingestion** means the engine's own selection (`piEmissionCallFrames` → `observeEmissionCalls` → `selectCanonicalPayload` / `selectVerdictSource`) followed by the frozen registry parser for the issued kind and version. The extraction-only arm is offered no emission tool, so it is classified by final-message extraction alone (the PR #52-only baseline): it records no emission calls, tool errors or readiness time, and a call to the tool it was never offered is not an emission call. The parser's contract value is the canonical accepted payload for both arms: its digest and its blinded-packet form never depend on the model's own JSON key order.
+  - *Typed observations:* a sample is discriminated by arm. An extraction-only attempt with emission counters or a readiness time, an extraction-arm acceptance from the emission tool, or a `fallbackOverRefusal` on an emission-tool acceptance is refused when the sample is parsed.
   - *Limitation:* the run-directory issuance joins (roster, scope, prior-origin, criterion/lens bindings) are not exercised by this child-level harness.
 - **Retry:**
   - a *semantic retry* is the one fresh engine-issued attempt 2 after a rejection (AD-9's shared budget);
@@ -99,7 +101,7 @@ Supporting parameters:
 
 - Effect sizes and uncertainty: p95 ratio with interval, median paired latency difference with interval, terminal-rate difference with interval, and mean paired severity difference with interval. All use a percentile bootstrap with 2000 resamples (`bootstrapResamples`) and base seed 52 (`bootstrapSeed`) plus a per-statistic offset, so each interval draws its own resample stream: p95 ratio seed 52 (+0), median paired latency difference seed 53 (+1), terminal-rate difference seed 54 (+2), mean paired severity difference seed 55 (+3).
 - Severity rubric: minor = 1, major = 2, critical = 3. The score is the sum over escaped known defects, and a request with no accepted payload lets every known defect escape.
-- At least **2 blinded assessors**: `rubric-v1`, which is deterministic and blind by construction, plus one independent assessor scoring `blinded-assessment-packet.json`. Disagreements are retained, and adjudication takes the maximum severity, identically for both arms. `rubric-v1` fails closed. If a blinded entry's case is not preregistered, its input is unresolved, or an escaped defect id is not declared by its case, the whole assessment is an error that names every such entry, and the `--pilot` run stops after retaining the key and packet without writing `rubric-v1.json`. A later decision then counts one assessor fewer, so escaped-defect severity reads as not measured. An unresolvable entry never counts as zero escapes.
+- At least **2 blinded assessors**: `rubric-v1`, which is deterministic and blind by construction, plus one independent assessor scoring `blinded-assessment-packet.json`. Disagreements are retained, and adjudication takes the maximum severity, identically for both arms. `rubric-v1` fails closed. If a blinded entry's case is not preregistered, its input is unresolved, or an escaped defect id is not declared by its case, the whole assessment is an error that names every such entry, and the `--pilot` run stops after retaining the key and packet without writing `rubric-v1.json`. `window.json` is closed (`endedAt`, `observations`) before the packet is derived, so such a window still records how it ended. A later decision then counts one assessor fewer, so escaped-defect severity reads as not measured. An unresolvable entry never counts as zero escapes.
 - Release precedence: any violation gives `blocked-guardrail-violated` (with design reconsideration). Otherwise any missing, not-measured or inconclusive result gives `incomplete-missing-measurement`. Only a complete, all-pass record with a capable route gives `done-allowed`. The types make a "done" decision carrying a non-passing guardrail unrepresentable.
 
 This is a minimum operational pilot, not a statistical proof of universal non-regression.
@@ -140,8 +142,13 @@ This is a minimum operational pilot, not a statistical proof of universal non-re
 | `pilot-workload.ts` | pure: fixtures, matched prompt rendering, request identity, rubric assessor |
 | `pilot-dispatch.ts` | pure transcript classification + the live Pi dispatch adapter |
 | `pilot-window.ts` | shell: matched-arm window dispatch over the `ArmDispatch` port and an injected clock, the attempt-2 retry, blinding key, arm-free packet, rubric assessor wiring |
-| `pilot.test.ts`, `runner.test.ts` | unit/property tests; shell-level runner tests (unreachable-route subprocess runs, and the dispatch path against a fake route) |
+| `pilot-retention.ts` | the window's retained files over the `WindowStore` port: pure derivations (preregistration and assessment parsing, drift check, observation log, assessment retention, decision record) and the `--pilot` / `--decide` sequences; `scripts/run-model-calibration.ts` is its filesystem adapter |
+| `pilot.test.ts` | unit/property tests of the pure core, prompts, rubric and transcript classification |
+| `pilot-retention.test.ts` | retention rules at the `WindowStore` port with an in-memory store |
+| `pilot-dispatch.test.ts` | the live Pi adapter against a fake launcher, readiness client and `pi` executable |
+| `runner.test.ts`, `pilot-test-fixtures.ts` | CLI subprocess runs against an unreachable route, and the dispatch path against a fake route |
+| `../corpus-calibration.ts` | pure core of the script's default (historical corpus) mode, tested in `../corpus-calibration.test.ts` |
 | `package.json` | private test entry point: runs these tests on the engine's pinned Vitest and config. It is not a Runtime Revision input. |
 | `windows/<window-id>/` | `window.json` (identity, preflight facts, dispatch plan), `observations.jsonl`, `accepted-payloads.jsonl`, `blinding-key.json`, `blinded-assessment-packet.json`, `assessments/`, `release-decision.json`, `decision-log.jsonl` (windows from the second one on) |
 
-Tests: `npm test --prefix calibration/grammar-constrained-decoding`. It runs `engine/node_modules/.bin/vitest run --root engine --dir calibration/grammar-constrained-decoding`. The engine's Vitest config also includes `calibration/**/*.test.ts` and its typecheck includes `calibration/`, so `npm run verify` runs and typechecks them too.
+Tests: `npm test --prefix calibration/grammar-constrained-decoding` from the repo root. Its `test` script, run from this directory, is `env -u PI_CODING_AGENT ../../engine/node_modules/.bin/vitest run --root ../../engine --dir .` — the `env -u PI_CODING_AGENT` is deliberate (like the engine's own test scripts, it keeps a surrounding Pi session from leaking into the tests), so invoke the script rather than copying the Vitest command without it. The engine's Vitest config also includes `calibration/**/*.test.ts` and its typecheck includes `calibration/`, so `npm run verify` runs and typechecks them too.

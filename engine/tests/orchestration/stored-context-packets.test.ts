@@ -152,7 +152,7 @@ describe("Run Directory Context Packet storage", () => {
     const read = readStoredContextPacketFile(path, { file: fileLength, section: 1_000_000 });
     expect(read.ok).toBe(true);
     if (read.ok) expect(read.value.sectionBytes).toBe(packet.fixedContext.reduce((total, { byteLength }) => total + byteLength, 0));
-    expect(readStoredContextPacketFile(path, { file: fileLength - 1 }).ok).toBe(false);
+    expect(readStoredContextPacketFile(path, { file: fileLength - 1, section: 1_000_000 }).ok).toBe(false);
     expect(readStoredContextPacketFile(path, { file: fileLength, section: 1_000 }).ok).toBe(false);
   });
 });

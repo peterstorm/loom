@@ -21,7 +21,8 @@ import {
   type DomainResult,
   type NonEmpty,
 } from "./orchestration-contract";
-import { canonicalJson, sha256Bytes, sha256Hex, type JsonValue } from "./review-packet";
+import { canonicalJson, type JsonValue } from "./review-packet";
+import { sha256Bytes, sha256Hex } from "./digest";
 
 export const VERIFICATION_MANIFEST_SOURCE_PATH = ".loom/verification-manifest.json" as const;
 export const VERIFICATION_MANIFEST_SCHEMA_VERSION = 1 as const;

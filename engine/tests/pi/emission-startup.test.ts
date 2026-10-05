@@ -112,25 +112,23 @@ import {
   type ContextDigest,
 } from "../../src/core/orchestration-contract/identity";
 import type { PayloadProducerKindName } from "../../src/core/model-profiles";
-import loomPiExtension, {
+import loomPiExtension from "../../../pi/extension";
+import {
   LOOM_SUBAGENT_LAUNCH_CHANNEL,
   registerPiEmissionLaunchBridge,
   type PiEmissionLaunchExpectation,
-  type PiIssuedReviewRouteQualifier,
   type PiSubagentLaunchEventBus,
   type PiSubagentLaunchSlot,
-} from "../../../pi/extension";
+} from "../../../pi/emission-launch-bridge";
+import type { PiIssuedReviewRouteQualifier } from "../../../pi/review-run-authority";
 import { buildReviewerContextPacket, encodeByteSection } from "../../src/core/context-packets";
-import { prepareFreshStandaloneReview } from "../../src/core/standalone-review";
+import { prepareFreshStandaloneReview } from "../../src/core/standalone-review-preparation";
 import { createRunDirectory, openRegisteredRunDirectory } from "../../src/orchestration/run-directory-handle";
 import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../src/orchestration/harness-capture-runtime";
-import {
-  parsedAuthority,
-  publishReviewInitialBatch,
-  renderReviewProgramSpawnTask,
-  standaloneRequestId,
-  type RegisteredStandaloneProgram,
-} from "../../src/handlers/helpers/programs/helpers";
+import { parsedAuthority, type RegisteredStandaloneProgram } from "../../src/handlers/helpers/programs/registration";
+import { publishReviewInitialBatch } from "../../src/handlers/helpers/programs/request-publication";
+import { renderReviewProgramSpawnTask } from "../../src/handlers/helpers/programs/spawn-task";
+import { standaloneRequestId } from "../../src/handlers/helpers/programs/standalone-requests";
 import { standaloneFixtureRegistration } from "../fixtures/standalone-reviewer-protocol";
 import { fixtureSession, withFixturePiSession } from "../fixtures/pi-session";
 
@@ -3080,7 +3078,7 @@ const qualifiedPublishedReviewerRoute = (
     role: published.role,
     claim: classified.claim,
     route: Object.freeze({
-      kind: "emission-enabled" as const,
+      kind: "emission" as const,
       binding: binding.value,
       contextDigest: classified.claim.contextDigest,
     }),

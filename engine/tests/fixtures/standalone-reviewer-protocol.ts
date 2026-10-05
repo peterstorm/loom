@@ -1,8 +1,9 @@
 import { buildContextPacket, encodeByteSection, type ContextPacket } from "../../src/core/context-packets";
 import { parseIssuedSpawnRequest, parseRequestId, sameAgentRequestAuthority, type AgentRequestAuthority, type PublicationAuthorityResolver, type SpawnRequest } from "../../src/core/orchestration-contract";
 import { parseIssuedReviewerProtocol, type ReviewerProtocolAuthorityResolver } from "../../src/core/review-output";
-import { serializeStandaloneReviewAuthority, type FrozenStandaloneReviewAuthority } from "../../src/core/standalone-review";
-import { parseRegistration, parsedAuthority } from "../../src/handlers/helpers/programs/helpers";
+import { serializeStandaloneReviewAuthority } from "../../src/core/standalone-review-records";
+import { type FrozenStandaloneReviewAuthority } from "../../src/core/standalone-review-model";
+import { parseRegistration, parsedAuthority } from "../../src/handlers/helpers/programs/registration";
 
 function value<T>(parsed: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T {
   if (!parsed.ok) throw new Error(JSON.stringify(parsed));

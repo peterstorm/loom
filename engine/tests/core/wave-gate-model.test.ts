@@ -4,10 +4,10 @@
  *
  * These two functions had no test at all, despite five production call sites
  * (`state-manager.ts`, `store-review-findings.ts`, `review-panel.ts`,
- * `store-spec-check-findings.ts`, `wave-gate-machine.ts`) and a doc comment
+ * `store-spec-check-findings.ts`, `wave-gate-checks.ts`) and a doc comment
  * recording a silent bug that already shipped once: counting raw
  * `critical_findings.length` made a WHITESPACE-ONLY finding a block cause, so a
- * wave passed `wave-gate-machine`'s `checkCriticalFindings` (which counts only
+ * wave passed `wave-gate-checks`'s `checkCriticalFindings` (which counts only
  * `finding.trim() !== ""`) and then re-blocked against this predicate — dead
  * ending behind a "BLOCKED due to:" list with nothing in it.
  *

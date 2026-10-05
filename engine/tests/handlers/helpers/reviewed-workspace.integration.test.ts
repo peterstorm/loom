@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { waveFrozenSource } from "../../../src/core/reviewed-workspace";
+import { waveFrozenSource } from "../../../src/core/wave-frozen-source";
 import { observeReviewedWorkspace } from "../../../src/handlers/helpers/reviewed-workspace";
 import { taskFixture } from "../../fixtures/task-lifecycle";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";

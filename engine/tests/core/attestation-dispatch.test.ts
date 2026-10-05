@@ -7,10 +7,8 @@
  */
 
 import { describe, expect, it } from "vitest";
-import {
-  deriveLoomStatusFromParsedGraph,
-  type GateDeps,
-} from "../../src/core/wave-gate-machine";
+import { deriveLoomStatusFromParsedGraph } from "../../src/core/loom-status";
+import { type GateDeps } from "../../src/core/wave-gate-checks";
 import {
   IMPLEMENTATION_ATTESTATION_CONTEXT_LABEL,
   deriveImplementationAttestationContext,

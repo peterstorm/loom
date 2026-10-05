@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   checkNewTests,
   checkTestEvidence,
-} from "../../src/core/wave-gate-machine";
+} from "../../src/core/wave-gate-checks";
 import { evaluateTaskProof } from "../../src/core/proof-obligations";
 import type { Task } from "../../src/types";
 import { pendingTaskProof } from "../fixtures/task-lifecycle";

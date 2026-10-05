@@ -4,8 +4,8 @@ import { disposeFixturePiSessions, withFixturePiSession as inDirectory } from ".
 import { createHash } from "node:crypto";
 import { captureKey } from "../../../../src/core/harness-capture";
 import { prepareDefectFamilyAccounting } from "../../../../src/core/defect-family-accounting";
-import { parseStandaloneReviewMachineState } from "../../../../src/core/standalone-review-machine";
-import { renderStandaloneReviewSummary } from "../../../../src/core/standalone-review";
+import { parseStandaloneReviewMachineState } from "../../../../src/core/standalone-review-checkpoint";
+import { renderStandaloneReviewSummary } from "../../../../src/core/standalone-review-records";
 import {
   mkdirSync,
   mkdtempSync,
@@ -23,7 +23,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import { REMEDIATION_EVENT_RESOURCE_POLICY } from "../../../../src/handlers/helpers/programs/remediation-events";
-import { parsedAuthority, publicationResolver, reviewerProtocolResolver, parseRegistration, parseRegisteredFacadeProgram } from "../../../../src/handlers/helpers/programs/helpers";
+import { parsedAuthority, parseRegistration, parseRegisteredFacadeProgram } from "../../../../src/handlers/helpers/programs/registration";
+import { publicationResolver } from "../../../../src/handlers/helpers/programs/durable-requests";
+import { reviewerProtocolResolver } from "../../../../src/handlers/helpers/programs/reviewer-protocol-resolution";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../../../src/core/reviewer-contract";
 import {
   inspectRemediationFacade,

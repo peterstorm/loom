@@ -4,7 +4,11 @@ import {
   CODEBASE_FIT_CRITERION,
   PRIMARY_AXES,
   TESTABILITY_BARS,
+  admitJudgeVerdict,
+  admitPanelRun,
   aggregateVerdicts,
+  rankPanelVerdicts,
+  serializeCriteria,
   architectureCriterion,
   candidateFilename,
   deriveJudgeCriteria,
@@ -607,5 +611,74 @@ describe("serializeRankings", () => {
     );
     if (!ranked.ok) throw new Error("fixture invalid");
     expect(serializeRankings(ranked.value, CRITERIA)).not.toMatch(/\{[A-Za-z_][A-Za-z0-9_]*\}/);
+  });
+});
+
+describe("admitPanelRun and its operations (pure run admission)", () => {
+  const digestJson = (): unknown => {
+    const parsed = parseInterviewDigest(VALID_DIGEST);
+    if (!parsed.ok) throw new Error("fixture digest invalid");
+    return JSON.parse(JSON.stringify(parsed.value));
+  };
+  const manifestJson = (lenses: readonly ("simplicity-first" | "type-driven-fp")[] = ["simplicity-first", "type-driven-fp"]) => ({
+    run_id: "run-1",
+    interview_file: "/tmp/run-1/interview.md",
+    interview_json: "/tmp/run-1/interview.json",
+    candidates: lenses.map((lens) => ({
+      lens,
+      path: `/tmp/run-1/candidates/candidate-${lens}.md`,
+      filename: `candidate-${lens}.md`,
+    })),
+  });
+  const admit = (overrides: Partial<{ manifestJson: unknown; interviewJson: unknown; interviewMarkdown: string }> = {}, designers = 2) =>
+    admitPanelRun({ manifestJson: manifestJson(), interviewJson: digestJson(), interviewMarkdown: VALID_DIGEST, ...overrides }, "/tmp/run-1", ARCHITECTURE_LAYOUT, designers);
+
+  it("derives criteria and candidate ids from the validated artifacts, never from the caller", () => {
+    const run = admit();
+    if (!run.ok) throw new Error(JSON.stringify(run.failure));
+    expect(run.value.criteria).toEqual(["simplicity", "pure functional core", CODEBASE_FIT_CRITERION]);
+    expect(run.value.candidates).toEqual(CANDIDATES);
+    // The candidate record carries no independent filename to drift from its lens.
+    expect(run.value.manifest.candidates.map((candidate) => Object.keys(candidate).sort())).toEqual([["lens", "path"], ["lens", "path"]]);
+    expect(serializeCriteria(run.value)).toBe(JSON.stringify(run.value.criteria, null, 2));
+  });
+
+  it("names the contract each refusal belongs to, in the helper's order", () => {
+    expect(admit({ interviewJson: [] })).toMatchObject({ ok: false, failure: { contract: "canonical interview digest" } });
+    expect(admit({ interviewMarkdown: "" })).toMatchObject({ ok: false, failure: { contract: "interview Markdown digest" } });
+    expect(admit({ interviewMarkdown: VALID_DIGEST.replace("**Deployment:** no change", "**Deployment:** blue/green") }))
+      .toEqual({ ok: false, failure: { contract: "interview authority", errors: ["interview.md and interview.json describe different validated constraints"] } });
+    expect(admit({}, 1)).toMatchObject({ ok: false, failure: { contract: "panel lens selection" } });
+    expect(admit({ manifestJson: manifestJson(["simplicity-first"]) })).toMatchObject({ ok: false, failure: { contract: "panel manifest" } });
+  });
+
+  it("admits a verdict only for a derived criterion and returns its canonical bytes", () => {
+    const run = admit();
+    if (!run.ok) throw new Error("fixture invalid");
+    const parsed = parseJudgeVerdict(verdict(), mintedCriterion("simplicity"), CANDIDATES);
+    if (!parsed.ok) throw new Error("fixture invalid");
+    expect(admitJudgeVerdict(run.value, "simplicity", verdict())).toEqual({ ok: true, value: serializeJudgeVerdict(parsed.value) });
+    // In the closed vocabulary but not derived by this digest, and outside it entirely.
+    for (const criterion of ["performance", "made up"]) {
+      expect(admitJudgeVerdict(run.value, criterion, verdict({ criterion }))).toEqual({ ok: false, failure: {
+        contract: "judge verdict",
+        errors: [`criterion must be one of the derived criteria: simplicity, pure functional core, ${CODEBASE_FIT_CRITERION}; received: ${criterion}`],
+      } });
+    }
+    expect(admitJudgeVerdict(run.value, "simplicity", "{")).toMatchObject({ ok: false, failure: { contract: "judge verdict" } });
+  });
+
+  it("ranks re-validated verdicts and returns a refusal, never a throw, for an incomplete set", () => {
+    const run = admit();
+    if (!run.ok) throw new Error("fixture invalid");
+    const verdicts = run.value.criteria.map((criterion) => {
+      const parsed = parseJudgeVerdict(verdict({ criterion }), criterion, CANDIDATES);
+      if (!parsed.ok) throw new Error("fixture invalid");
+      return parsed.value;
+    });
+    const expected = aggregateVerdicts(verdicts, run.value.criteria, CANDIDATES);
+    if (!expected.ok) throw new Error("fixture invalid");
+    expect(rankPanelVerdicts(run.value, verdicts)).toEqual({ ok: true, value: serializeRankings(expected.value, run.value.criteria) });
+    expect(rankPanelVerdicts(run.value, verdicts.slice(1))).toMatchObject({ ok: false, failure: { contract: "panel aggregate" } });
   });
 });

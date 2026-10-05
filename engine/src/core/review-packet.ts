@@ -5,9 +5,9 @@
  * git identities, and artifact bytes. It performs no filesystem or git I/O.
  */
 
-import { createHash } from "node:crypto";
 import { fail, isRecord, ok, type ParseResult } from "./panel-kernel";
 import { compareStrings } from "./ordering";
+import { sha256Bytes, sha256Hex } from "./digest";
 import { isExactGitSha } from "./git-sha";
 import { artifactCovers } from "./path-coverage";
 
@@ -335,16 +335,6 @@ export function canonicalJson(value: JsonValue): string {
     .sort(compareStrings)
     .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key]!)}`)
     .join(",")}}`;
-}
-
-/** Deterministic SHA-256 over bytes, without an intervening text decode. */
-export function sha256Bytes(bytes: Uint8Array): string {
-  return createHash("sha256").update(bytes).digest("hex");
-}
-
-/** Deterministic SHA-256 over UTF-8 text. */
-export function sha256Hex(text: string): string {
-  return sha256Bytes(Buffer.from(text, "utf-8"));
 }
 
 /**

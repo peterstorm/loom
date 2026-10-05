@@ -91,9 +91,10 @@ Route decision (pure, `engine/src/core/spawn-admission.ts`):
   - A Pi provider/model other than the qualified route is extraction-only.
   - A missing registry cell is extraction-only.
   - The parent's mutable provider/model is deliberately not an input.
-- `issuedSpawnEmissionRouteDecision` is the one projection between the
-  issued-spawn and request-program vocabularies, so no consumer re-derives the
-  discriminant.
+- `EmissionRouteDecision` is the one route vocabulary. Issued spawn authority
+  carries its non-refused subtype (`IssuedSpawnEmissionRoute`), so request
+  programs, the capture runtime, and Pi parent admission all discriminate on
+  the same `kind` and no consumer translates between vocabularies.
 
 Instruction and descriptor projection:
 - `projectEmissionTaskText(route, baseInstruction)` (`spawn-admission.ts`) is
@@ -118,7 +119,7 @@ Instruction and descriptor projection:
     It reaches stamped shims only through `scripts/stamp-wire-contract.ts`.
   - Schema and rubric bytes are unchanged, so protocol descriptor digests are
     stable.
-- `reviewerEmissionProjection` (`engine/src/handlers/helpers/programs/helpers.ts`)
+- `reviewerEmissionProjection` (`engine/src/handlers/helpers/programs/spawn-task.ts`)
   is the shell.
   - It gates eligibility with `reviewerEmissionEligible`: reviewer roles on
     `standalone-review` or `wave-gate` only. Spec-check slots, panel verdicts and

@@ -9,12 +9,12 @@ import { captureNativeReview } from "../../../fixtures/native-review-capture";
 import { captureClaudeResult, claudeFinalPayloadCandidates } from "../../../../src/handlers/subagent-stop/capture-orchestration-result";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import { captureKey } from "../../../../src/core/harness-capture";
-import { STANDALONE_REVIEWER_ROLES } from "../../../../src/core/standalone-review";
+import { STANDALONE_REVIEWER_ROLES } from "../../../../src/core/standalone-review-scope";
 import { graphFixture, taskFixture } from "../../../fixtures/task-lifecycle";
 import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
 import { parseTaskGraph } from "../../../../src/state-manager";
-import { handleWaveReviewContext } from "../../../../src/handlers/helpers/programs/wave-gate";
-import { parseRegisteredFacadeProgram, parseRegistration } from "../../../../src/handlers/helpers/programs/helpers";
+import { handleWaveReviewContext } from "../../../../src/handlers/helpers/programs/wave-review-context";
+import { parseRegisteredFacadeProgram, parseRegistration } from "../../../../src/handlers/helpers/programs/registration";
 import { startStandaloneFacade, resumeStandaloneFacade, replayStandaloneResultFromEvidence } from "../../../../src/handlers/helpers/programs/standalone";
 import { createRunDirectory, type RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession as inDirectory } from "../../../fixtures/pi-session";
@@ -241,7 +241,7 @@ async function waveFixture() {
     // config owns an import-time State File path: reload inside this disposable
     // fixture rather than calling a driver bound to the test runner's cwd.
     vi.resetModules();
-    const driver = await import("../../../../src/handlers/helpers/programs/wave-gate");
+    const driver = await import("../../../../src/handlers/helpers/programs/wave-gate-start");
     const prepared = driver.prepareWaveGateFacadeStart({ wave: 1 }, join(root, "runs"), "run.native-wave");
     if (!prepared.ok) throw new Error(prepared.message);
     return driver.startWaveGateFacade(handle, prepared.value);
@@ -301,7 +301,7 @@ describe("current Wave native capture settles only through the registered facade
     }
     const first = initial.requests![1]!.authority;
     const admitted = await inDirectory(root, async () => {
-      const driver = await import("../../../../src/handlers/helpers/programs/wave-gate");
+      const driver = await import("../../../../src/handlers/helpers/programs/wave-gate-submission");
       return driver.applyWaveFacadeSubmission(handle, first, wavePayload(handle, first));
     });
     expect(admitted.ok, JSON.stringify(admitted)).toBe(true);
@@ -311,7 +311,7 @@ describe("current Wave native capture settles only through the registered facade
     for (const { authority } of initial.requests!.slice(1)) {
       const raw = wavePayload(handle, authority);
       const manual = await inDirectory(root, async () => {
-        const driver = await import("../../../../src/handlers/helpers/programs/wave-gate");
+        const driver = await import("../../../../src/handlers/helpers/programs/wave-gate-submission");
         return driver.applyWaveFacadeSubmission(handle, authority, raw);
       });
       expect(manual).toMatchObject({ ok: false, message: expect.stringContaining("exact current Review Packet slot") });

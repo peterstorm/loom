@@ -1,47 +1,50 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { parseCalibrationCorpus, type CalibrationCase } from "../../engine/src/core/model-calibration";
 import {
   buildPairSchedule,
   evaluatePilot,
   parseBlindingKey,
-  parsePreregistration,
   parseQualityAssessment,
-  type AttemptObservation,
-  type PreflightDecision,
   type Preregistration,
 } from "./pilot-core";
-import type { ArmDispatch, ArmRequest } from "./pilot-dispatch";
+import type { ArmRequest } from "./pilot-dispatch";
+import { pilotRequestId, renderTaskBody, rubricEscapes, type CaseInput } from "./pilot-workload";
+import { blind, blindedPacket, caseInputKey, rubricAssessment } from "./pilot-window";
 import {
-  parseCaseSource,
-  parseWorkloadFixtures,
-  pilotRequestId,
-  renderTaskBody,
-  rubricEscapes,
-  type CaseInput,
-  type WorkloadFixtures,
-} from "./pilot-workload";
-import { blind, blindedPacket, caseInputKey, dispatchSchedule, rubricAssessment, type SampleRecord } from "./pilot-window";
+  accepted,
+  ATTEMPT_MS,
+  fakeRoute,
+  fixtures,
+  HERE,
+  inputs,
+  prereg,
+  READY,
+  REJECTED,
+  REPO_ROOT,
+  runWindow,
+  TIMEOUT,
+  WINDOW_ID,
+} from "./pilot-test-fixtures";
 
 /**
  * Shell-level behaviour of `scripts/run-model-calibration.ts --pilot/--decide`:
  *
- * - against an unreachable route, the preflight records the blocked
- *   observation honestly, dispatches nothing, fabricates nothing, and the
- *   release decision is incomplete;
- * - against a fake route (a plain `ArmDispatch` function and a fake clock
- *   wired into the window dispatch path the script runs, `pilot-window.ts`),
- *   the matched-arm dispatch, the attempt-2 retry budget, the blinding key /
- *   packet and the rubric assessor wiring are pinned. Transcript
- *   classification is covered in pilot.test.ts.
+ * - the CLI itself (spawned): the explicit opt-in, and — against an
+ *   unreachable route — a blocked preflight recorded honestly (nothing
+ *   dispatched, nothing fabricated, decision incomplete), the never-overwrite
+ *   refusal and the offline re-decision with its preregistration-drift
+ *   refusal. The retention rules behind them are pinned directly at the
+ *   `WindowStore` port in pilot-retention.test.ts;
+ * - against a fake route (pilot-test-fixtures.ts) wired into the window
+ *   dispatch path the script runs (`pilot-window.ts`): the matched-arm
+ *   dispatch, the attempt-2 retry budget, the blinding key / packet and the
+ *   rubric assessor wiring. Transcript classification is covered in
+ *   pilot.test.ts, the live Pi adapter in pilot-dispatch.test.ts.
  */
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(HERE, "../..");
 const temps: string[] = [];
 
 afterEach(() => {
@@ -54,9 +57,9 @@ function unreachablePreregistration(): Readonly<{ dir: string; prereg: string; w
   const raw = JSON.parse(readFileSync(join(HERE, "preregistration.json"), "utf-8")) as { route: { baseUrl: string } };
   // Port 9 (discard) on loopback: refused immediately, never a model server.
   raw.route.baseUrl = "http://127.0.0.1:9/v1";
-  const prereg = join(dir, "preregistration.json");
-  writeFileSync(prereg, JSON.stringify(raw, null, 2));
-  return { dir, prereg, window: join(dir, "window") };
+  const preregPath = join(dir, "preregistration.json");
+  writeFileSync(preregPath, JSON.stringify(raw, null, 2));
+  return { dir, prereg: preregPath, window: join(dir, "window") };
 }
 
 const run = (args: readonly string[], env: NodeJS.ProcessEnv = {}) => spawnSync("bun", ["scripts/run-model-calibration.ts", ...args], {
@@ -89,6 +92,7 @@ describe("run-model-calibration --pilot", () => {
     expect(window.preflight.blocks.map((block: { kind: string }) => block.kind)).toContain("route-unreachable");
     expect(window.dispatch.kind).toBe("not-attempted");
     expect(window.observations).toBe(0);
+    expect(Date.parse(window.endedAt)).not.toBeNaN();
     expect(window.preflightFacts.stagedRuntimeRevision).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(existsSync(join(fixture.window, "observations.jsonl"))).toBe(false);
 
@@ -97,6 +101,7 @@ describe("run-model-calibration --pilot", () => {
     expect(decision.decision.missing.map((missing: { kind: string }) => missing.kind)).toEqual(
       expect.arrayContaining(["preflight-blocked", "no-qualified-capable-route", "cell-not-measured"]));
     expect(decision.cells.map((cell: { kind: string }) => cell.kind)).toEqual(["not-measured", "not-measured", "not-measured", "not-measured"]);
+    expect(decision.preregistration.path).not.toMatch(/^\//);
   });
 
   it("never overwrites a retained window", () => {
@@ -109,52 +114,22 @@ describe("run-model-calibration --pilot", () => {
     expect(JSON.parse(readFileSync(join(fixture.window, "window.json"), "utf-8")).dispatch.kind).toBe("not-attempted");
   });
 
-  it("re-decides a retained window offline and refuses a preregistration changed after the window", () => {
+  it("re-decides a retained window offline, retaining an --assessment, and refuses a preregistration changed after the window", () => {
     const fixture = unreachablePreregistration();
     run(["--pilot", fixture.prereg, "--fixtures", join(HERE, "workload-fixtures.json"), "--window-dir", fixture.window], { LOOM_RUN_MODEL_CALIBRATION: "1" });
-    const redecided = run(["--decide", fixture.window], { LOOM_RUN_MODEL_CALIBRATION: "" });
-    expect(redecided.status).toBe(1);
+    const external = join(fixture.dir, "human-blind-1.json");
+    const assessment = JSON.stringify({ schemaVersion: 1, assessorId: "human-blind-1", method: "independent blinded review", blinded: true, entries: [] }, null, 2);
+    writeFileSync(external, assessment);
+    const redecided = run(["--decide", fixture.window, "--assessment", external], { LOOM_RUN_MODEL_CALIBRATION: "" });
+    expect(redecided.status, redecided.stderr).toBe(1);
     expect(redecided.stderr).toContain("Release decision: incomplete-missing-measurement");
+    expect(readFileSync(join(fixture.window, "assessments", "human-blind-1.json"), "utf-8")).toBe(assessment);
+    expect(readFileSync(join(fixture.window, "decision-log.jsonl"), "utf-8").trim().split("\n")).toHaveLength(2);
 
     writeFileSync(fixture.prereg, readFileSync(fixture.prereg, "utf-8").replace("gcd-ad11-pilot-1", "gcd-ad11-pilot-edited"));
     const tampered = run(["--decide", fixture.window]);
     expect(tampered.status).not.toBe(0);
     expect(tampered.stderr).toContain("changed after window");
-  });
-
-  it("retains every assessment a decision reads and never overwrites a retained one (AS-017)", () => {
-    const fixture = unreachablePreregistration();
-    run(["--pilot", fixture.prereg, "--fixtures", join(HERE, "workload-fixtures.json"), "--window-dir", fixture.window], { LOOM_RUN_MODEL_CALIBRATION: "1" });
-    const assessment = (method: string) => JSON.stringify({ schemaVersion: 1, assessorId: "human-blind-1", method, blinded: true, entries: [] }, null, 2);
-    const external = join(fixture.dir, "human-blind-1.json");
-    writeFileSync(external, assessment("independent blinded review"));
-
-    const decided = run(["--decide", fixture.window, "--assessment", external]);
-    expect(decided.status, decided.stderr).toBe(1);
-    const retained = join(fixture.window, "assessments", "human-blind-1.json");
-    expect(readFileSync(retained, "utf-8")).toBe(assessment("independent blinded review"));
-    const decision = JSON.parse(readFileSync(join(fixture.window, "release-decision.json"), "utf-8"));
-    expect(decision.decidedFrom.assessors).toEqual(["human-blind-1", "rubric-v1"]);
-
-    // Identical bytes again: idempotent. A different assessment by the same assessor: refused.
-    expect(run(["--decide", fixture.window, "--assessment", external]).status).toBe(1);
-    writeFileSync(external, assessment("a second, more favourable opinion"));
-    const conflicting = run(["--decide", fixture.window, "--assessment", external]);
-    expect(conflicting.status).not.toBe(0);
-    expect(conflicting.stderr).toContain("never overwritten");
-    expect(readFileSync(retained, "utf-8")).toBe(assessment("independent blinded review"));
-  });
-
-  it("appends every decision to an append-only log, so a re-decision never erases an earlier verdict", () => {
-    const fixture = unreachablePreregistration();
-    run(["--pilot", fixture.prereg, "--fixtures", join(HERE, "workload-fixtures.json"), "--window-dir", fixture.window], { LOOM_RUN_MODEL_CALIBRATION: "1" });
-    run(["--decide", fixture.window]);
-    const log = readFileSync(join(fixture.window, "decision-log.jsonl"), "utf-8").trim().split("\n").map((line) => JSON.parse(line));
-    expect(log).toHaveLength(2);
-    expect(log.map((entry: { decision: { kind: string } }) => entry.decision.kind)).toEqual(["incomplete-missing-measurement", "incomplete-missing-measurement"]);
-    const current = JSON.parse(readFileSync(join(fixture.window, "release-decision.json"), "utf-8"));
-    expect(current).toEqual(log[1]);
-    expect(Date.parse(current.decidedAt)).not.toBeNaN();
   });
 });
 
@@ -162,88 +137,7 @@ describe("run-model-calibration --pilot", () => {
 // The live dispatch path against a fake route
 // ---------------------------------------------------------------------------
 
-type Outcome = AttemptObservation["outcome"];
-type Script = (request: ArmRequest) => Outcome;
-type FakeRoute = Readonly<{ dispatch: ArmDispatch; now: () => number; requests: readonly ArmRequest[] }>;
-
-const WINDOW_ID = "fake-route-window";
-const ATTEMPT_MS = 100;
-const READY: PreflightDecision = {
-  kind: "ready",
-  runtime: { stagedRuntimeRevision: "sha256:abc", loadedRuntime: { kind: "unobserved" }, piVersion: "0.83.0" },
-};
-
-function retainedWorkload(): Readonly<{ prereg: Preregistration; fixtures: WorkloadFixtures; cases: readonly CalibrationCase[] }> {
-  const prereg = parsePreregistration(JSON.parse(readFileSync(join(HERE, "preregistration.json"), "utf-8")));
-  if (!prereg.ok) throw new Error(prereg.error.join("\n"));
-  const fixtures = parseWorkloadFixtures(JSON.parse(readFileSync(join(HERE, "workload-fixtures.json"), "utf-8")));
-  if (!fixtures.ok) throw new Error(fixtures.error.join("\n"));
-  const corpus = parseCalibrationCorpus(readFileSync(join(REPO_ROOT, fixtures.value.reviewer.corpus), "utf-8"));
-  if (!corpus.ok) throw new Error(corpus.errors.join("\n"));
-  return { prereg: prereg.value, fixtures: fixtures.value, cases: corpus.value.cases };
-}
-
-/** Case inputs as the script resolves them, minus the git-derived changed paths. */
-function caseInput(source: string, cases: readonly CalibrationCase[], fixtures: WorkloadFixtures): CaseInput {
-  const parsed = parseCaseSource(source);
-  if (!parsed.ok) throw new Error(parsed.error);
-  const { kind, id } = parsed.value;
-  if (kind === "corpus") {
-    const corpusCase = cases.find((entry) => entry.id === id);
-    if (corpusCase === undefined) throw new Error(`corpus case ${id} missing`);
-    return { kind: "corpus", corpusCase, changedPaths: [] };
-  }
-  const fixture = fixtures.fixtures[id];
-  if (fixture === undefined) throw new Error(`fixture ${id} missing`);
-  return fixture.kind === "judge-verdict" ? { kind: "judge", fixture } : { kind: "refutation", fixture };
-}
-
-const { prereg, fixtures, cases } = retainedWorkload();
-const inputs: ReadonlyMap<string, CaseInput> = new Map(prereg.cells.flatMap((cell) => cell.workload.cases.map((entry) =>
-  [caseInputKey(cell.cell, entry.caseId), caseInput(entry.source, cases, fixtures)] as const)));
 const schedule = buildPairSchedule(prereg);
-
-const accepted = (request: ArmRequest): Outcome => ({
-  kind: "accepted",
-  source: request.arm === "emission-enabled" ? "emission-tool" : "extraction",
-  fallbackOverRefusal: false,
-  payloadDigest: "a".repeat(64),
-});
-const REJECTED: Outcome = { kind: "rejected", cause: { kind: "extraction-failure", detail: "final message carried no JSON" } };
-const TIMEOUT: Outcome = { kind: "timeout", afterMs: ATTEMPT_MS };
-
-/** A route substitute: every attempt advances the fake clock by ATTEMPT_MS,
- *  is recorded, and settles with the scripted outcome. */
-function fakeRoute(script: Script): FakeRoute {
-  const requests: ArmRequest[] = [];
-  let clock = 0;
-  const dispatch: ArmDispatch = async (request) => {
-    requests.push(request);
-    clock += ATTEMPT_MS;
-    const outcome = script(request);
-    const emission = request.arm === "emission-enabled";
-    return {
-      observation: {
-        attempt: request.attempt, elapsedMs: ATTEMPT_MS, readinessMs: emission ? 5 : null, modelRequests: 1,
-        emissionCalls: emission ? 1 : 0, toolErrors: [], toolAcknowledged: emission && outcome.kind === "accepted",
-        followUpTurnsAfterAck: 0, outcome,
-      },
-      acceptedPayload: outcome.kind === "accepted" ? { findings: [], nonce: requests.length } : null,
-    };
-  };
-  return { dispatch, now: () => clock, requests };
-}
-
-async function runWindow(route: FakeRoute) {
-  const landed: SampleRecord[] = [];
-  const progress: string[] = [];
-  const records = await dispatchSchedule({
-    windowId: WINDOW_ID, prereg, fixtures, inputs, dispatch: route.dispatch, now: route.now,
-    onSample: (record) => { landed.push(record); },
-    onPair: (index, total, pair) => { progress.push(`${index + 1}/${total} ${pair.pairId}`); },
-  });
-  return { records, landed, progress };
-}
 
 const inputOf = (cell: ArmRequest["cell"], caseId: string): CaseInput => {
   const input = inputs.get(caseInputKey(cell, caseId));

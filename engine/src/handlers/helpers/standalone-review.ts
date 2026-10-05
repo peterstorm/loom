@@ -15,16 +15,14 @@ import { isReviewAgent } from "../../config";
 import type { HookHandler, HookResult } from "../../types";
 import {
   captureStandaloneReviewerBytes,
-  finalizeStandaloneReview,
-  parseStandaloneReviewScope,
-  serializeHistoricalAdjudicatedStandaloneReview,
-  serializeStandaloneAggregate,
   type PreparedStandaloneReviewerCapture,
   type StandaloneCaptureAuthority,
   type StandaloneCaptureError,
-  type StandaloneReviewAggregate,
-  type StandaloneReviewerRole,
-} from "../../core/standalone-review";
+} from "../../core/standalone-reviewer-capture";
+import { finalizeStandaloneReview } from "../../core/standalone-review";
+import { parseStandaloneReviewScope, type StandaloneReviewerRole } from "../../core/standalone-review-scope";
+import { serializeHistoricalAdjudicatedStandaloneReview, serializeStandaloneAggregate } from "../../core/standalone-review-records";
+import { type StandaloneReviewAggregate } from "../../core/standalone-review-model";
 import { aggregateLegacyStandaloneReview, parseHistoricalStandaloneAggregate } from "../../core/legacy-archive";
 import { parseArtifactRef, type ArtifactRef } from "../../core/orchestration-contract";
 import { resolveReviewFindings, reviewResolutionLog } from "../../core/review-output";

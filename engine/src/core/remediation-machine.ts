@@ -24,10 +24,7 @@ import {
   type VerifiedIndexInstalled,
 } from "./orchestration-contract";
 import { readDenseDataArray, type DataBoundaryError } from "./orchestration-contract/bytes";
-import {
-  STANDALONE_RESULT_SLOT,
-  serializeAdjudicatedStandaloneReview,
-} from "./standalone-review";
+import { STANDALONE_RESULT_SLOT, serializeAdjudicatedStandaloneReview } from "./standalone-review-records";
 import {
   isAuthoritativeStandaloneReviewResult,
   type AuthoritativeStandaloneReviewResult,

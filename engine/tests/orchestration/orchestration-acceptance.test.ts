@@ -14,7 +14,7 @@ import {
 } from "../../src/core/harness-capture";
 import { admitEmissionArguments, EMISSION_TOOL_SPECS } from "../../src/core/emission-tool";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, reviewerPayloadV2Schema } from "../../src/core/reviewer-contract";
-import { sha256Hex } from "../../src/core/review-packet";
+import { sha256Hex } from "../../src/core/digest";
 import type { EmissionCallFrame } from "../../src/core/harness-capture";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import captureOrchestrationResult, {

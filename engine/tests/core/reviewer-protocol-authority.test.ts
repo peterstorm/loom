@@ -2,7 +2,7 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import fc from "fast-check";
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ContextPacket } from "../../src/core/context-packets";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
-import { sha256Hex } from "../../src/core/review-packet";
+import { sha256Hex } from "../../src/core/digest";
 import { createPublicationAuthorityResolver, parseAgentRequestAuthority, parseIssuedSpawnRequest, parseOrchestrationRunId, parseRequestId, type SpawnRequest } from "../../src/core/orchestration-contract";
 import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "../../src/core/model-profiles";
 import { reconcileFindings, makeParsedFindings, type CurrentParsedFindings, resolveReviewFindings, parseIssuedReviewerProtocol, parseReviewerEvidence, resolveIssuedTaskReviewFindings, applyReviewResolution, type IssuedReviewerProtocol, type ReviewerProtocolRegistration, type ReviewerSubjectBinding } from "../../src/core/review-output";
@@ -138,6 +138,37 @@ describe("authority refusal", () => {
     expect(reads).toBe(0);
     const f = fixture();
     expect(parseReviewerEvidence({ ...f.authority }, bytes(payload(f.subject))).ok).toBe(false);
+  });
+  it("names the thrown error class, never its payload-bearing message, when evidence inspection throws", () => {
+    const f = fixture(2);
+    for (const [thrown, name] of [
+      [new TypeError("SECRET payload text"), "TypeError"],
+      [new RangeError("SECRET payload text"), "RangeError"],
+      ["SECRET payload text", "NonErrorThrown"],
+    ] as const) {
+      // The decoder's first observation of the bytes throws: a programming
+      // defect and a hostile value must both fail closed, distinguishably.
+      const raw = new Proxy(new Uint8Array(), { get() { throw thrown; } });
+      const result = parseReviewerEvidence(f.authority, raw);
+      expect(result).toMatchObject({ ok: false, error: {
+        code: "invalid-payload", path: "/", message: `reviewer evidence could not be inspected (${name})`,
+      } });
+      expect(JSON.stringify(result)).not.toContain("SECRET");
+    }
+    // The historical decoder shares the boundary.
+    const legacy = parseReviewerEvidence(fixture(1).authority, new Proxy(new Uint8Array(), { get() { throw new TypeError("SECRET"); } }));
+    expect(legacy).toMatchObject({ ok: false, error: { code: "invalid-payload", path: "/" } });
+    if (!legacy.ok) expect(legacy.error.message).toMatch(/^reviewer evidence could not be inspected \(\w+\)$/);
+    expect(JSON.stringify(legacy)).not.toContain("SECRET");
+  });
+  it("names the thrown error class when authority inspection throws", () => {
+    const f = fixture();
+    const input = Object.defineProperty({ ...f }, "packet", { get() { throw new TypeError("SECRET packet text"); } });
+    const result = parseIssuedReviewerProtocol(input);
+    expect(result).toMatchObject({ ok: false, error: {
+      code: "authority-unavailable", path: "/", message: "reviewer authority could not be inspected (TypeError)",
+    } });
+    expect(JSON.stringify(result)).not.toContain("SECRET");
   });
   it("refuses a genuinely published request whose role differs from the packet", () => {
     const f = fixture();

@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   mkdirSync,
@@ -15,11 +16,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   captureDeclaredArtifactBaseline,
   captureDeclaredArtifactBaselineAtRevision,
-  captureRepositoryChangeBaseline,
   changedDeclaredArtifactsSince,
   changedDeclaredArtifactsSinceRevision,
-  changedRepositoryArtifactsSince,
-} from "../../src/utils/artifact-baseline";
+} from "../../src/utils/declared-artifact-snapshot";
+import { treeSnapshotDigest } from "../../src/core/artifact-baseline";
 
 const cleanup: string[] = [];
 afterEach(() => {
@@ -41,68 +41,6 @@ function repository(): { root: string; revision: string } {
   return { root, revision };
 }
 
-describe("repository attempt change boundaries", () => {
-  it("detects tracked edits and new untracked paths from a clean boundary", () => {
-    const { root } = repository();
-    const baseline = captureRepositoryChangeBaseline(root);
-    expect(baseline).toEqual([]);
-
-    writeFileSync(join(root, "unchanged.txt"), "changed\n");
-    writeFileSync(join(root, "new file.txt"), "new\n");
-
-    expect(changedRepositoryArtifactsSince(root, baseline)).toEqual([
-      "new file.txt",
-      "unchanged.txt",
-    ]);
-  });
-
-  it("detects byte changes, deletion, and reversion of paths already dirty at spawn", () => {
-    const { root } = repository();
-    writeFileSync(join(root, "unchanged.txt"), "dirty before spawn\n");
-    writeFileSync(join(root, "preexisting.txt"), "dirty before spawn\n");
-    const baseline = captureRepositoryChangeBaseline(root);
-
-    writeFileSync(join(root, "unchanged.txt"), "changed during attempt\n");
-    rmSync(join(root, "preexisting.txt"));
-    expect(changedRepositoryArtifactsSince(root, baseline)).toEqual([
-      "preexisting.txt",
-      "unchanged.txt",
-    ]);
-
-    writeFileSync(join(root, "unchanged.txt"), "same\n");
-    expect(changedRepositoryArtifactsSince(root, baseline)).toEqual([
-      "preexisting.txt",
-      "unchanged.txt",
-    ]);
-  });
-
-  it("detects a mode-only change to a path already dirty at spawn", () => {
-    const { root } = repository();
-    writeFileSync(join(root, "unchanged.txt"), "dirty before spawn\n");
-    const baseline = captureRepositoryChangeBaseline(root);
-
-    chmodSync(join(root, "unchanged.txt"), 0o755);
-
-    expect(changedRepositoryArtifactsSince(root, baseline)).toEqual(["unchanged.txt"]);
-  });
-
-  it("snapshots a changed leaf symlink without following it", () => {
-    const { root } = repository();
-    symlinkSync("unchanged.txt", join(root, "linked.txt"));
-    const baseline = captureRepositoryChangeBaseline(root);
-
-    rmSync(join(root, "linked.txt"));
-    symlinkSync("assets/icon.bin", join(root, "linked.txt"));
-
-    expect(changedRepositoryArtifactsSince(root, baseline)).toEqual(["linked.txt"]);
-  });
-
-  it("rejects a missing repository boundary instead of preserving stale evidence", () => {
-    const { root } = repository();
-    expect(() => changedRepositoryArtifactsSince(root, undefined))
-      .toThrow(/No implementation-attempt repository baseline/);
-  });
-});
 
 describe("changedDeclaredArtifactsSinceRevision", () => {
   it("recovers binary and newly-created artifact changes from a retained git baseline", () => {
@@ -223,11 +161,52 @@ describe("directory artifacts", () => {
     expect(changedDeclaredArtifactsSince(root, baseline)).toEqual([]);
   });
 
-  it.skipIf(!hasMkfifo)("rejects a fifo inside the directory with its path", () => {
-    const { root } = directoryRepository();
+  it.skipIf(!hasMkfifo)("leaves a fifo out: Git cannot see it, so no revision could hold it either", () => {
+    const { root, revision } = directoryRepository();
+    const before = captureDeclaredArtifactBaseline(root, ["calibration/run"]);
     execFileSync("mkfifo", [join(root, "calibration", "run", "pipe")]);
+    expect(captureDeclaredArtifactBaseline(root, ["calibration/run"])).toEqual(before);
+    expect(changedDeclaredArtifactsSinceRevision(root, revision, ["calibration/run"])).toEqual([]);
+  });
+
+  it("rejects an embedded repository inside the directory with its path", () => {
+    const { root } = directoryRepository();
+    mkdirSync(join(root, "calibration", "run", "inner"));
+    execFileSync("git", ["init", "--quiet"], { cwd: join(root, "calibration", "run", "inner") });
+    writeFileSync(join(root, "calibration", "run", "inner", "f.json"), "{}\n");
     expect(() => captureDeclaredArtifactBaseline(root, ["calibration/run"]))
-      .toThrow(/calibration\/run\/pipe/);
+      .toThrow("declared artifact calibration/run contains a node that is not a file, directory or symlink: calibration/run/inner");
+  });
+
+  it("pins the directory digest bytes: Git-visible leaves only, by repository ignore rules", () => {
+    const { root } = directoryRepository();
+    const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+    // Ignored by the repository's own info/exclude, not only by .gitignore files.
+    mkdirSync(join(root, ".git", "info"), { recursive: true });
+    writeFileSync(join(root, ".git", "info", "exclude"), "*.tmp\n");
+    writeFileSync(join(root, "calibration", "run", "scratch.tmp"), "ignored\n");
+    // A tracked leaf deleted from the worktree has no bytes to hash.
+    rmSync(join(root, "calibration", "run", "nested", "b.json"));
+    // A literal path: glob characters in the artifact never widen the listing.
+    mkdirSync(join(root, "calibration", "run", "x[1]"));
+    writeFileSync(join(root, "calibration", "run", "x[1]", "c.json"), "{}\n");
+    mkdirSync(join(root, "calibration", "run", "x1"));
+    writeFileSync(join(root, "calibration", "run", "x1", "d.json"), "{}\n");
+    symlinkSync("a.json", join(root, "calibration", "run", "latest"));
+
+    expect(captureDeclaredArtifactBaseline(root, ["calibration/run"])[0]?.snapshot).toEqual({
+      kind: "sha256",
+      digest: treeSnapshotDigest([
+        { path: "a.json", kind: "file", contentSha256: sha("{\"a\":1}\n") },
+        { path: "latest", kind: "symlink", contentSha256: sha("a.json") },
+        { path: "x1/d.json", kind: "file", contentSha256: sha("{}\n") },
+        { path: "x[1]/c.json", kind: "file", contentSha256: sha("{}\n") },
+      ]),
+    });
+    expect(captureDeclaredArtifactBaseline(root, ["calibration/run/x[1]"])[0]?.snapshot).toEqual({
+      kind: "sha256",
+      digest: treeSnapshotDigest([{ path: "c.json", kind: "file", contentSha256: sha("{}\n") }]),
+    });
   });
 
   it("ignores Git-ignored leaves so worktree and revision cover the same Git-visible set", () => {

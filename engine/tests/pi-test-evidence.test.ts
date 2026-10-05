@@ -3,7 +3,12 @@ import { messagesToClaudeJsonl, parsePiMessages, piStructuredTestDiagnostics, pi
 import { parseBashTestOutput } from "../src/parsers/parse-bash-test-output";
 import { extractTestEvidence } from "../src/core/test-evidence";
 
-const testRun = (output: string, command = "bun test src/domain/calendar.test.ts"): PiMessage[] => [
+type PiToolResultMessage = Extract<PiMessage, { role: "toolResult" }>;
+
+const testRun = (
+  output: string,
+  command = "bun test src/domain/calendar.test.ts",
+): [PiMessage, PiToolResultMessage] => [
   {
     role: "assistant",
     content: [{
@@ -17,6 +22,7 @@ const testRun = (output: string, command = "bun test src/domain/calendar.test.ts
     role: "toolResult",
     toolCallId: "call-test-1",
     toolName: "bash",
+    isError: false,
     content: [{ type: "text", text: output }],
   },
 ];
@@ -207,13 +213,14 @@ describe("Pi test-evidence transcript adapter", () => {
         role: "toolResult",
         toolCallId: "call-1",
         toolName: "bash",
+        isError: false,
         content: [{ type: "text", text: "command output" }],
       },
     ],
     [
       "custom role",
       { role: "custom", content: "custom harness output" },
-      { role: "custom", content: [{ type: "text", text: "custom harness output" }] },
+      { role: "other", originalRole: "custom", content: [{ type: "text", text: "custom harness output" }] },
     ],
   ] as const)("normalizes Pi %s string content to one immutable text block", (_role, message, expected) => {
     const parsed = parsePiMessages([message]);
@@ -282,6 +289,28 @@ describe("Pi test-evidence transcript adapter", () => {
     expect(Object.isFrozen(parsedText)).toBe(true);
     expect(Object.isFrozen(parsedToolCall)).toBe(true);
     expect(Object.isFrozen(parsedToolCall.arguments)).toBe(true);
+  });
+
+  it("carries tool identity only on the tool-result arm, with a total isError flag", () => {
+    const parsed = parsePiMessages([
+      { role: "assistant", toolCallId: "stray", toolName: "bash", isError: true, content: "prose" },
+      { role: "toolResult", toolCallId: "call-1", toolName: "bash", content: "ok" },
+      { role: "toolResult", toolCallId: "call-2", toolName: "bash", isError: true, content: "boom" },
+      { role: "summary", toolCallId: "call-3", content: "compacted" },
+    ]);
+
+    expect(parsed).toEqual({
+      ok: true,
+      value: [
+        { role: "assistant", content: [{ type: "text", text: "prose" }] },
+        { role: "toolResult", toolCallId: "call-1", toolName: "bash", isError: false, content: [{ type: "text", text: "ok" }] },
+        { role: "toolResult", toolCallId: "call-2", toolName: "bash", isError: true, content: [{ type: "text", text: "boom" }] },
+        { role: "other", originalRole: "summary", content: [{ type: "text", text: "compacted" }] },
+      ],
+    });
+    // A present-but-empty tool field is malformed on every role, not only on tool results.
+    expect(parsePiMessages([{ role: "assistant", toolCallId: " ", content: "prose" }]))
+      .toMatchObject({ ok: false, errors: ["messages[0].toolCallId must be non-empty when present"] });
   });
 
   it("omits unknown-role strings from JSONL and test evidence", () => {

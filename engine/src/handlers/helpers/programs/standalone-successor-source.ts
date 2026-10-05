@@ -7,7 +7,7 @@ import { encodeByteSection, serializeStandaloneReviewerContextPacketV3, type Byt
 import { parseBoundedReviewerJson } from "../../../core/reviewer-protocol";
 import { canonicalStructuralEquals, parseRequestId, parseOrchestrationRunId, AGENT_REQUIRED_SKILLS } from "../../../core/orchestration-contract";
 import { STANDALONE_LINEAGE_LIMITS, standaloneSuccessorSelectionSchema, type StandaloneSnapshot } from "../../../core/standalone-lineage-contract";
-import type { PreparedStandaloneSuccessor } from "../../../core/standalone-lineage";
+import type { PreparedStandaloneSuccessor } from "../../../core/standalone-review-model";
 import { buildStandaloneSuccessorReviewerContext } from "../../../core/standalone-successor-reviewer";
 import type { ProgramParse } from "./program-result";
 import type { RunDirHandle } from "../../../orchestration/run-directory-handle";

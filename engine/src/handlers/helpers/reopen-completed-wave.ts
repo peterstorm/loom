@@ -7,7 +7,8 @@ import { parseTaskId } from "../../core/task-id";
 import { taskVerificationPolicy } from "../../core/verification-policy";
 import { observeReviewedWorkspace } from "./reviewed-workspace";
 import { openRunDirectory } from "../../orchestration/run-directory-handle";
-import { handleWaveReviewContext, type WaveReviewContextAuthority } from "./programs";
+import { handleWaveReviewContext } from "./programs";
+import type { WaveReviewContextAuthority } from "../../core/wave-review-authority";
 import type { HookHandler, Task, TaskGraph, WaveReopeningAudit } from "../../types";
 
 const USAGE = "Usage: helper reopen-completed-wave --runs-root <root> < exact-reopening.json";

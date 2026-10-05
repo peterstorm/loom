@@ -28,7 +28,7 @@ import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
 import { observeSpecIndex } from "../../orchestration/spec-index-observation";
 import { specIndexUnavailableMessage } from "../../core/requirement-coverage";
 import type { DeclaredArtifactBaseline } from "../../core/artifact-baseline";
-import { captureDeclaredArtifactBaselineAtRevision } from "../../utils/artifact-baseline";
+import { captureDeclaredArtifactBaselineAtRevision } from "../../utils/declared-artifact-snapshot";
 import { observeExactHead } from "../../utils/git";
 import {
   parseAuthoredTaskRoster,

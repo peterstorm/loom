@@ -43,6 +43,7 @@ package.json                  Pi extension registration
 pi/extension.ts               supported Pi adapter
 pi/resources.ts               content-addressed resource renderer
 pi/transcript-adapter.ts      Pi message/result lowering
+pi/subagent-result.ts         Pi result settlement shell (core: subagent-settlement.ts)
 pi/write-grant.ts             Pi child capability lifecycle
 engine/src/                   shared engine
 commands/ skills/ agents/     shared semantic resources

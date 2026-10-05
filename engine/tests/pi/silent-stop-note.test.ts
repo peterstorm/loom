@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { piSilentStopNote } from "../../../pi/subagent-result";
+import { piSilentStopNote } from "../../../pi/subagent-result-batch";
 
 /**
  * A silent stop is the failure mode every applier reads blind: the child

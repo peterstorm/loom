@@ -86,16 +86,15 @@ import type {
   LoomStatus,
   WaveCompletionResultObservation,
 } from "../../types";
+import { deriveWaveReadiness } from "../../core/wave-gate-machine";
+import { type GateDeps, type ImplementationReservationStatusObservation } from "../../core/wave-gate-checks";
 import {
   deriveLoomStatusFromParsedGraph,
-  deriveWaveReadiness,
   renderLoomStatusHuman,
   renderLoomStatusJson,
   type ActiveRunDirectoryObservation,
   type AdvisoryApprovalObservation,
-  type GateDeps,
-  type ImplementationReservationStatusObservation,
-} from "../../core/wave-gate-machine";
+} from "../../core/loom-status";
 import { inspectFilePresence, loadPlanModelsSource } from "./complete-wave-gate";
 import {
   observeCurrentWaveCompletionResult,
@@ -134,6 +133,14 @@ import {
   type EffectIntent,
 } from "../../core/orchestration-contract";
 import {
+  reduceArchitectureProgram,
+  reduceRefutationProgram,
+  startArchitectureDispatchProgram,
+  startRefutationDispatchProgram,
+  type PanelProgramAction,
+  type SpawnRequest as PanelSpawnRequest,
+} from "../../core/panel-program";
+import {
   describePanelRefusalPair,
   describePanelVerdictEmissionParseFailure,
   panelVerdictSelectionRejection,
@@ -141,20 +148,15 @@ import {
   panelVerdictSourceRecord,
   parsePanelVerdictSourceRecord,
   replayPanelVerdictSourceSelection,
-  reduceArchitectureProgram,
-  reduceRefutationProgram,
-  startArchitectureDispatchProgram,
-  startRefutationDispatchProgram,
-  type PanelProgramAction,
+  type PanelVerdictEmissionBindingOf,
   type PanelVerdictEmissionPort,
   type PanelVerdictEmissionSelection,
   type PanelVerdictSource,
   type PanelVerdictSourceRecord,
   type PanelVerdictSourceSelection,
-  type SpawnRequest as PanelSpawnRequest,
-} from "../../core/panel-program";
+} from "../../core/panel-verdict-source";
 import { selectVerdictSource } from "../../core/emission-ingestion";
-import { issueEmissionBinding } from "../../core/emission-tool";
+import { issueEmissionBinding, type IssuedEmissionBindingOf } from "../../core/emission-tool";
 import { observeEmissionCalls } from "../../core/harness-capture";
 import { expectedSpawnModel, resolveModelProfile, lowerModelProfile } from "../../core/model-profiles";
 import { buildContextPacket, encodeByteSection, type ContextPacket } from "../../orchestration/context-packets";
@@ -191,23 +193,24 @@ import {
   prepareWaveGateFacadeStart,
   startWaveGateFacade,
   waveAdvisoryDecisionRequestId,
-  waveGateDecisionMismatch,
   type FacadeDriveResult,
   type ProgramParse,
   type RemediationStartInputV2,
   type RegisteredStandaloneProgram,
-  type RegisteredWaveGateProgram,
 } from "./programs";
+import type { RegisteredWaveGateProgram } from "../../core/wave-gate-program";
+import { advisoryDecisionApproved, waveGateDecisionMismatch } from "../../core/wave-gate-membership";
 import { parseBoundedReviewerJson } from '../../core/reviewer-protocol';
 import { remediateOperation } from "./remediate-implementation-escalation";
 import { attestOperation } from "./attest-implementation";
-import { renderStandaloneReviewSummary } from "../../core/standalone-review";
-import { serializeStandaloneReviewMachineState } from "../../core/standalone-review-machine";
+import { renderStandaloneReviewSummary } from "../../core/standalone-review-records";
+import { serializeStandaloneReviewMachineState } from "../../core/standalone-review-checkpoint";
 import { argumentValue, hasFlag } from "./cli-args";
 import { REMEDIATION_EVENT_RESOURCE_POLICY } from "./programs/remediation-events";
 import { parseStandaloneDispositionStartBytes } from "../../core/standalone-disposition-machine";
 import { STANDALONE_LINEAGE_LIMITS, standalonePublicationReferenceSchema } from "../../core/standalone-lineage-contract";
-import { projectStandaloneLineageSource, type StandaloneDispositionSelection } from "../../core/standalone-lineage";
+import { projectStandaloneLineageSource } from "../../core/standalone-lineage";
+import { type StandaloneDispositionSelection } from "../../core/standalone-review-model";
 import { readAuthenticatedStandaloneLineageSource } from "./programs/standalone-source";
 import { prepareStandaloneDispositionFacadeStart, startStandaloneDispositionFacade,
   resumeStandaloneDispositionFacade, inspectStandaloneDispositionFacade, readSelectedStandaloneDisposition,
@@ -487,15 +490,7 @@ async function observedAdvisoryApprovalFromParsed(
   }
   const decisionId = waveAdvisoryDecisionRequestId(observation.runId, readiness.value.waveTasks);
   try {
-    const events = await opened.value.readEvents();
-    const approved = events.some(({ event }) => {
-      if (typeof event !== "object" || event === null) return false;
-      const record = event as Record<string, unknown>;
-      const decision = record.decision;
-      return record.kind === "user-decision-recorded" && record.decisionId === decisionId &&
-        typeof decision === "object" && decision !== null && !Array.isArray(decision) &&
-        Object.keys(decision).length === 1 && (decision as Record<string, unknown>).kind === "approve";
-    });
+    const approved = advisoryDecisionApproved(await opened.value.readEvents(), decisionId);
     return Object.freeze({ kind: approved ? "approved" : "not-approved" });
   } catch (error) {
     return unavailable(
@@ -1695,7 +1690,7 @@ function logicalPanelRequestId(requestId: string, attempt: 1 | 2): string {
 // ---------------------------------------------------------------------------
 // The legacy panel path's verdict-source seam (AD-8, FR-006/009/011/012) — the
 // same selection policy the persistent panel submissions use, shared through
-// core/panel-program's vocabulary. One attempt's emission evidence is resolved
+// core/panel-verdict-source's vocabulary. One attempt's emission evidence is resolved
 // ONCE per scan (`resolvePanelAttemptVerdictSource`) from the durable
 // panel-verdict-source record (the accepted call's exact-replay authority) or
 // the caller's live observation; every later scan of the same attempt
@@ -1711,6 +1706,32 @@ export type PanelAttemptVerdictSource =
 const BASELINE_VERDICT_SOURCE: PanelAttemptVerdictSource = Object.freeze({ kind: "baseline" as const });
 
 /**
+ * Re-establish the kernel's nominal binding where the panel core's structural
+ * mirror re-enters it. The declared-pure panel core may not import the
+ * emission transport, so it relays bindings as `PanelVerdictEmissionBinding`;
+ * this port is the ONE place that mirror crosses back, and it parses it
+ * through the mint — certifying the tool name and schema digest against the
+ * registry cell — rather than trusting the shape. The panel core only ever
+ * relays minted bindings, so a mirror the mint refuses is a caller defect and
+ * the shell throws instead of folding it.
+ */
+function certifiedVerdictBinding(
+  binding: PanelVerdictEmissionBindingOf<"judge-verdict" | "refutation-verdict">,
+): IssuedEmissionBindingOf<"judge-verdict" | "refutation-verdict"> {
+  const minted = issueEmissionBinding({
+    requestId: binding.requestId,
+    kind: binding.kind.kind,
+    version: binding.version,
+    toolName: binding.toolName,
+    schemaDigest: binding.schemaDigest,
+  });
+  if (!minted.ok) {
+    throw new Error(`panel verdict emission binding does not certify its registry cell [${minted.error.code}]: ${minted.error.message}`);
+  }
+  return minted.value;
+}
+
+/**
  * The PRODUCTION adapter of the panel seam's kernel port — the ONE place the
  * handler shell couples the declared-pure panel core to the emission kernel
  * (the core never imports the transport modules). The fold is the kernel's
@@ -1720,7 +1741,7 @@ const BASELINE_VERDICT_SOURCE: PanelAttemptVerdictSource = Object.freeze({ kind:
  * schema digest for the core's certification cross-check.
  */
 export const panelVerdictEmissionPort: PanelVerdictEmissionPort = {
-  fold: ({ binding, observation, rawJson }) => selectVerdictSource(binding, observation, rawJson),
+  fold: ({ binding, observation, rawJson }) => selectVerdictSource(certifiedVerdictBinding(binding), observation, rawJson),
   replayAcceptedCall: (claims, call, rawJson) => {
     const minted = issueEmissionBinding(claims);
     if (!minted.ok) return { ok: false, error: minted.error.message };

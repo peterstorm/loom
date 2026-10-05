@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { piAllSlotsFailedNote } from "../../../pi/subagent-result";
+import { piAllSlotsFailedNote } from "../../../pi/subagent-result-batch";
 
 /**
  * A shared-infrastructure fault hits every slot of a batch at once, and that is

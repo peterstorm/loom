@@ -14,7 +14,8 @@ import {
   parseEmissionDescriptor,
   renderEmissionDescriptor,
 } from "../../../../src/core/spawn-admission";
-import { standaloneOriginReference, standaloneDecisionReference, type PreparedStandaloneSuccessor } from "../../../../src/core/standalone-lineage";
+import { standaloneOriginReference, standaloneDecisionReference } from "../../../../src/core/standalone-finding-origin";
+import { type PreparedStandaloneSuccessor } from "../../../../src/core/standalone-review-model";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../../../src/core/reviewer-contract";
 import type { StandaloneReviewerPayloadV3 } from "../../../../src/core/standalone-lineage-contract";
 
@@ -68,7 +69,7 @@ async function predecessor(root: string, criticalHistory = false) {
   // Runtime/session/cwd/transport ownership precedes every shell import and operation.
   const handles = await import("../../../../src/orchestration/run-directory-handle");
   const shell = await import("../../../../src/handlers/helpers/programs/standalone");
-  const helpers = await import("../../../../src/handlers/helpers/programs/helpers");
+  const helpers = await import("../../../../src/handlers/helpers/programs/registration");
   const handle = value(handles.createRunDirectory(join(root, "runs"), "source"));
   const started = await shell.startStandaloneFacade(handle, { kind: "types", files: ["a.ts"], dryRun: false });
   if (!started.ok) throw Error(started.message);
@@ -296,11 +297,13 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
     const root = project(); await ownedSession(root, async () => {
       const handles = await import("../../../../src/orchestration/run-directory-handle");
       const shell = await import("../../../../src/handlers/helpers/programs/standalone");
-      const helpers = await import("../../../../src/handlers/helpers/programs/helpers");
+      const publication = await import("../../../../src/handlers/helpers/programs/request-publication");
+      const helpers = await import("../../../../src/handlers/helpers/programs/registration");
       const publisher = await import("../../../../src/handlers/helpers/programs/standalone-disposition");
       const { legacyStandaloneContext, standaloneFixtureRegistration } = await import("../../../fixtures/standalone-reviewer-protocol");
-      const { prepareStandaloneReview } = await import("../../../../src/core/standalone-review");
+      const { prepareStandaloneReview } = await import("../../../../src/core/standalone-review-preparation");
       const machine = await import("../../../../src/core/standalone-review-machine");
+      const checkpoint = await import("../../../../src/core/standalone-review-checkpoint");
       const { resolveAgentPolicy, resolveModelProfile, lowerModelProfile } = await import("../../../../src/core/model-profiles");
       const handle = value(handles.createRunDirectory(join(root, "runs"), "source"));
       const agent = value(resolveAgentPolicy("code-reviewer")); const profile = value(resolveModelProfile(agent.profile));
@@ -318,11 +321,11 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
           comments_changed: false, additions: 1, file_count: 1, new_structure: false, languages: ["TypeScript"] },
         scopeSafety: [{ path: "a.ts", status: "safe" }], roster: [{ slotId: "slot:legacy", attempts: attempts.map(row => row.authority) }] }));
       const registration = standaloneFixtureRegistration(prepared.authority); value(await handle.registerProgram(registration));
-      const batch = await helpers.publishLegacyInitialBatch(handle, prepared.initialRequests.map(authority => ({ authority,
+      const batch = await publication.publishLegacyInitialBatch(handle, prepared.initialRequests.map(authority => ({ authority,
         context: { digest: authority.contextDigest, slot: `contexts/${authority.contextDigest}.json` } })), attempts.map(row => row.packet), "standalone-review");
       expect(batch.ok).toBe(true);
       const awaiting = value(machine.reduceStandaloneReviewMachine(machine.startStandaloneReviewMachine(prepared.authority), { kind: "review-batch-published", runId: handle.runId }));
-      await handle.writeCheckpoint(machine.serializeStandaloneReviewMachineState(awaiting));
+      await handle.writeCheckpoint(checkpoint.serializeStandaloneReviewMachineState(awaiting));
       value(await handle.captureTranscript(prepared.initialRequests[0], [...Buffer.from("Missing historical required markers")]));
       const retried = await shell.resumeStandaloneFacade(handle, registration);
       if (!retried.ok) throw Error(retried.message);
@@ -631,6 +634,46 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
         expect(stripped).toBe(extractionTask);
         expect(emissionTask).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
       }
+    });
+  });
+
+  it("publishes the accepted-source record when a native successor capture is won by the emission tool (FR-009)", async () => {
+    const root = project();
+    await ownedSession(root, async () => {
+      const f = await predecessor(root);
+      const p = await policy(root, "source", "policy-source-record", f.publisher);
+      writeFileSync(join(root, "a.ts"), "export const value = 2;\n");
+      const qualified = { PI_PROVIDER: "desktop-vllm", PI_MODEL: "glm-5.3-flash-spark-tp2-v14", PI_REASONING_LEVEL: "high" };
+      const previous = Object.keys(qualified).map((key) => [key, process.env[key]] as const);
+      Object.assign(process.env, qualified);
+      let s: Awaited<ReturnType<typeof successor>>;
+      try {
+        s = await successor(root, "emission-source", p, f);
+      } finally {
+        for (const [key, prior] of previous) { if (prior === undefined) delete process.env[key]; else process.env[key] = prior; }
+      }
+      const { authority, task } = s.started.requests[0]!;
+      const descriptor = parseEmissionDescriptor(task);
+      if (descriptor.kind !== "issued") throw Error("qualified-route successor must issue an emission descriptor");
+      value(await s.handle.recordHarnessCorrelator({ schemaVersion: 1, harness: "pi", nativeId: "native-emission-source",
+        requestId: authority.requestId, role: authority.role, attempt: authority.attempt }));
+      const args = payload(s);
+      const runtime = await import("../../../../src/orchestration/harness-capture-runtime");
+      const outcome = await runtime.captureHarnessResult({
+        harness: "pi", runsRoot: join(root, "runs"), runDirectory: s.handle.runDirectory, nativeId: "native-emission-source",
+        observe: () => runtime.captureEmissionObservation([{ kind: "complete", call: { requestId: authority.requestId,
+          toolCallId: "call-successor-source", kind: { kind: "reviewer-payload" }, version: "v3", arguments: args } }], []),
+      });
+      expect(outcome.kind, JSON.stringify(outcome)).toBe("captured");
+      if (outcome.kind !== "captured") return;
+      const record = value(s.handle.readArtifactBytes(`capture-sources/${authority.requestId}.json`, 16_384));
+      expect(record, "the successor capture won by the emission tool left no accepted-source record").not.toBeNull();
+      expect(JSON.parse(Buffer.from(record!).toString("utf8"))).toEqual({
+        schemaVersion: 1, kind: "capture-source", requestId: authority.requestId, slotId: authority.slotId, attempt: authority.attempt,
+        harness: "pi", source: "emission-tool", toolCallId: "call-successor-source", producerKind: "reviewer-payload",
+        emissionSchemaVersion: "v3", schemaDigest: descriptor.binding.schemaDigest,
+        payloadDigest: outcome.receipt.digest, payloadByteLength: outcome.receipt.byteLength,
+      });
     });
   });
 });

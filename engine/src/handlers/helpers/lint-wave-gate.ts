@@ -11,7 +11,7 @@
  * Usage: bun cli.ts helper lint-wave-gate [--wave N]
  */
 
-import { existsSync, lstatSync } from "node:fs";
+import { lstatSync } from "node:fs";
 import type { HookHandler, HookResult, Task } from "../../types";
 import { TASK_GRAPH_PATH, DEFAULT_RULES_DIR, PROJECT_RULES_DIR } from "../../config";
 import { StateManager } from "../../state-manager";
@@ -39,17 +39,6 @@ export function collectModifiedFiles(tasks: readonly Task[]): readonly string[] 
     }
   }
   return [...files].sort();
-}
-
-/**
- * Filters file paths to only those that exist on disk.
- * Deleted files are skipped gracefully.
- */
-export function filterExistingFiles(
-  files: readonly string[],
-  existsFn: (path: string) => boolean = existsSync
-): readonly string[] {
-  return files.filter(existsFn);
 }
 
 /** Repository-relative files at or below one directory, Git-visible only. */
@@ -132,9 +121,9 @@ export function aggregateResults(results: readonly FileLintResult[]): HookResult
 }
 
 /**
- * Runs lintFile on each file path and collects results.
- * Uses batch loading (rules loaded once) for efficiency.
- * lintFn injectable for testability.
+ * Runs full-tier lint on each file path and collects results.
+ * Production loads rules once for the whole batch; an injected per-file
+ * lintFn (tests) replaces only how each LintResult is obtained.
  */
 export function lintFiles(
   files: readonly string[],
@@ -142,27 +131,31 @@ export function lintFiles(
   projectRulesDir: string | null,
   lintFn?: (filePath: string, tier: "full", defaultDir: string, projectDir: string | null) => LintResult
 ): readonly FileLintResult[] {
-  // If custom lintFn provided (tests), use per-file invocation
-  if (lintFn) {
-    return files.map((file) => {
-      const result = lintFn(file, "full", defaultRulesDir, projectRulesDir);
-      const output = formatOutput(result, file);
-      return { file, result, output };
-    });
-  }
-
-  // Production path: use batch linting (loads rules once)
-  const resultsMap = lintFilesBatch(files, "full", defaultRulesDir, projectRulesDir);
+  const resultFor = lintFn
+    ? (file: string): LintResult => lintFn(file, "full", defaultRulesDir, projectRulesDir)
+    : batchResultLookup(lintFilesBatch(files, "full", defaultRulesDir, projectRulesDir));
   return files.map((file) => {
-    const result = resultsMap.get(file) ?? { kind: "error" as const, message: "File not in results map" };
-    const output = formatOutput(result, file);
-    return { file, result, output };
+    const result = resultFor(file);
+    return { file, result, output: formatOutput(result, file) };
   });
+}
+
+function batchResultLookup(results: ReadonlyMap<string, LintResult>): (file: string) => LintResult {
+  return (file) => results.get(file) ?? { kind: "error", message: "File not in results map" };
 }
 
 // --- Imperative shell (I/O at edges) ---
 
-/** Execute full-tier lint for one already-authorized Wave task set. */
+/** Fail closed: every unexpected engine error blocks the gate with one message shape. */
+function engineError(error: unknown): HookResult {
+  return {
+    kind: "block",
+    message: `🚫 WAVE-GATE LINT ENGINE ERROR: ${error instanceof Error ? error.message : String(error)}`,
+  };
+}
+
+/** Execute full-tier lint for one already-authorized Wave task set. Never
+ *  throws: every failure becomes the engine-error block. */
 export function runFullTierWaveLint(tasks: readonly Task[]): HookResult {
   try {
     const root = repositoryRoot() ?? process.cwd();
@@ -170,14 +163,13 @@ export function runFullTierWaveLint(tasks: readonly Task[]): HookResult {
     if (existingFiles.length === 0) return { kind: "allow" };
     return aggregateResults(lintFiles(existingFiles, DEFAULT_RULES_DIR, PROJECT_RULES_DIR));
   } catch (error) {
-    return {
-      kind: "block",
-      message: `🚫 WAVE-GATE LINT ENGINE ERROR: ${error instanceof Error ? error.message : String(error)}`,
-    };
+    return engineError(error);
   }
 }
 
 const handler: HookHandler = async (_stdin, args) => {
+  let wave: number;
+  let waveTasks: readonly Task[];
   try {
     const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
     if (!mgr) {
@@ -186,30 +178,23 @@ const handler: HookHandler = async (_stdin, args) => {
         message: `🚫 WAVE-GATE LINT: Cannot read task graph at ${TASK_GRAPH_PATH}`,
       };
     }
-
     const state = mgr.load();
-    const waveArg = parseWaveArg(args);
-    const wave = waveArg ?? state.current_wave ?? 1;
-
-    const waveTasks = state.tasks.filter((t) => t.wave === wave);
-    const modifiedCount = collectModifiedFiles(waveTasks).length;
-    if (modifiedCount === 0) {
-      process.stderr.write(`lint-wave-gate: wave ${wave} — no modified files to lint.\n`);
-      return { kind: "allow" };
-    }
-
-    process.stderr.write(`lint-wave-gate: wave ${wave} — running full-tier lint...\n`);
-    const result = runFullTierWaveLint(waveTasks);
-    if (result.kind === "allow") process.stderr.write(`lint-wave-gate: wave ${wave} passed full-tier lint.\n`);
-    return result;
+    const selectedWave = parseWaveArg(args) ?? state.current_wave ?? 1;
+    wave = selectedWave;
+    waveTasks = state.tasks.filter((t) => t.wave === selectedWave);
   } catch (error: unknown) {
-    // Fail closed — any unexpected error blocks the gate
-    const message = error instanceof Error ? error.message : String(error);
-    return {
-      kind: "block",
-      message: `🚫 WAVE-GATE LINT ENGINE ERROR: ${message}`,
-    };
+    return engineError(error);
   }
+
+  if (collectModifiedFiles(waveTasks).length === 0) {
+    process.stderr.write(`lint-wave-gate: wave ${wave} — no modified files to lint.\n`);
+    return { kind: "allow" };
+  }
+
+  process.stderr.write(`lint-wave-gate: wave ${wave} — running full-tier lint...\n`);
+  const result = runFullTierWaveLint(waveTasks);
+  if (result.kind === "allow") process.stderr.write(`lint-wave-gate: wave ${wave} passed full-tier lint.\n`);
+  return result;
 };
 
 export default handler;

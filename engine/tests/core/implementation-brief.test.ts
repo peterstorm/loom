@@ -13,9 +13,11 @@ import {
   type RuleDocument,
 } from "../../src/core/implementation-brief";
 import { authorizeImplementationSpawn } from "../../src/core/implementation-retry";
-import { parseSpec, type ParsedSpec } from "../../src/core/parse-spec";
+import { parseSpec } from "../../src/core/parse-spec";
+import type { ArtifactDigest } from "../../src/core/orchestration-contract";
+import type { SpecIndexAvailability } from "../../src/core/requirement-coverage";
 import { validateTemplateSubstitution } from "../../src/core/validate-template-substitution";
-import { deriveTaskImplementationDispatch } from "../../src/core/wave-gate-machine";
+import { deriveTaskImplementationDispatch } from "../../src/core/task-implementation-dispatch";
 import type { Task, WaveImplementationDispatch } from "../../src/types";
 import { extractTaskId } from "../../src/utils/extract-task-id";
 import { derivePendingTaskProof } from "../../src/core/proof-obligations";
@@ -55,7 +57,13 @@ const parsed = parseSpec([
   "",
 ].join("\n"));
 if (!parsed.ok) throw new Error("spec fixture must parse");
-const SPEC: ParsedSpec = parsed.value;
+const SPEC: SpecIndexAvailability = {
+  kind: "indexed",
+  path: "/repo/.claude/specs/brief/spec.md",
+  contentDigest: "a".repeat(64) as ArtifactDigest,
+  index: parsed.value,
+};
+const NO_SPEC_FILE: SpecIndexAvailability = { kind: "unavailable", reason: { kind: "no-spec-file" } };
 
 const task = (overrides: Partial<Parameters<typeof taskFixture>[0]> = {}): Task => taskFixture({
   id: "T5",
@@ -167,7 +175,7 @@ describe("renderImplementationBrief", () => {
     const dispatch = dispatchFor(value);
     expect(dispatch).toMatchObject({ kind: "initial-implementation", promptAppendix: expect.stringContaining("LOOM_IMPLEMENTATION_ATTESTATION_CONTEXT:") });
 
-    const rendered = renderImplementationBrief(input(value, { dispatch, spec: null }));
+    const rendered = renderImplementationBrief(input(value, { dispatch, spec: NO_SPEC_FILE }));
     expect(rendered.ok).toBe(true);
     if (!rendered.ok) return;
     expect(authorizeImplementationSpawn(value, rendered.value.prompt)).toMatchObject({ ok: true });
@@ -202,10 +210,48 @@ describe("renderImplementationBrief", () => {
     ["a template with an unowned variable", (value) => input(value, { template: `${TEMPLATE}\n{surprise}` }), "template-variables-mismatch"],
     ["a missing rule document", (value) => input(value, { rules: new Map() }), "rule-document-missing"],
     ["a Requirement the Spec Index lacks", (value) => input({ ...value, spec_anchors: ["FR-099"] }), "requirement-text-unavailable"],
-    ["claims without a Spec Index", (value) => input(value, { spec: null }), "requirement-text-unavailable"],
+    ["claims without a Spec Index", (value) => input(value, { spec: NO_SPEC_FILE }), "requirement-text-unavailable"],
     ["plan text the gate reads as a variable", (value) => input({ ...value, plan_context: "Use {placeholder} here" }), "residual-placeholders"],
   ])("refuses %s", (_name, build, kind) => {
     expect(renderImplementationBrief(build(task()))).toMatchObject({ ok: false, error: { kind } });
+  });
+
+  it.each<[string, SpecIndexAvailability, string]>([
+    ["no spec_file", NO_SPEC_FILE, "the TaskGraph records no spec_file"],
+    [
+      "an unreadable spec file",
+      { kind: "unavailable", reason: { kind: "unreadable", path: "/repo/spec.md", reason: "ENOENT: no such file" } },
+      "spec file /repo/spec.md could not be read: ENOENT: no such file",
+    ],
+    [
+      "a spec file that is not UTF-8",
+      {
+        kind: "unavailable",
+        reason: { kind: "invalid-encoding", path: "/repo/spec.md", contentDigest: "b".repeat(64) as ArtifactDigest, reason: "bad byte" },
+      },
+      "spec file /repo/spec.md is not valid UTF-8: bad byte",
+    ],
+    [
+      "a spec file that does not parse",
+      {
+        kind: "unavailable",
+        reason: {
+          kind: "unparsed",
+          path: "/repo/spec.md",
+          contentDigest: "c".repeat(64) as ArtifactDigest,
+          errors: [{ kind: "no-acceptance-block" }],
+        },
+      },
+      "spec file /repo/spec.md is not a canonical specification: ",
+    ],
+  ])("names why the Spec Index is unavailable when claims cannot be resolved: %s", (_name, spec, cause) => {
+    const rendered = renderImplementationBrief(input(task(), { spec }));
+    expect(rendered).toMatchObject({ ok: false, error: { kind: "requirement-text-unavailable" } });
+    if (rendered.ok) return;
+    expect(rendered.error.message).toContain(
+      "T5 claims Requirements (FR-001, AS-001, FR-002) but the protected spec_file has no Spec Index: ",
+    );
+    expect(rendered.error.message).toContain(cause);
   });
 });
 

@@ -40,36 +40,31 @@ import {
   type SpawnRequest,
   type PublicationAuthorityResolver,
 } from "../../src/core/orchestration-contract";
+import { aggregateStandaloneReview, proveStandaloneRosterCompletion } from "../../src/core/standalone-review";
+import { standaloneCurrentPanelCriticals, type FrozenStandalonePanelAuthority } from "../../src/core/standalone-refutation-panel";
+import { capturedReviewerResultFromText } from "../../src/core/standalone-reviewer-capture";
+import { prepareStandaloneReview } from "../../src/core/standalone-review-preparation";
+import { serializeAdjudicatedStandaloneReview } from "../../src/core/standalone-review-records";
+import { type FrozenStandaloneReviewAuthority, type StandaloneReviewAggregate } from "../../src/core/standalone-review-model";
+import { freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion, type StandaloneRefutationCompletionReceipt } from "../../src/core/standalone-refutation-completion";
 import {
-  aggregateStandaloneReview,
-  standaloneCurrentPanelCriticals,
-  capturedReviewerResultFromText,
-  prepareStandaloneReview,
-  proveStandaloneRosterCompletion,
-  serializeAdjudicatedStandaloneReview,
-  type FrozenStandalonePanelAuthority,
-  type FrozenStandaloneReviewAuthority,
-  type StandaloneReviewAggregate,
-} from "../../src/core/standalone-review";
-import {
-  freezeStandaloneRefutationPanelAuthority,
   parseAuthoritativeStandaloneReviewResult,
-  parseStandaloneRefutationCompletion,
   reduceStandaloneReviewMachine,
   startStandaloneReviewMachine,
   type AuthoritativeStandaloneReviewResult,
-  type StandaloneRefutationCompletionReceipt,
 } from "../../src/core/standalone-review-machine";
 import {
-  completePersistentRefutationPanel,
   deriveRefutationVerifierBinding,
-  panelRequestIdentity,
   parseRefutationPanelAuthority,
+  type RefutationPanelAuthority,
+} from "../../src/core/panel-authority";
+import {
+  completePersistentRefutationPanel,
+  panelRequestIdentity,
   startPersistentRefutationPanel,
   submitRefutationVerdict,
-  type NonEmpty,
-  type RefutationPanelAuthority,
-} from "../../src/core/panel-program";
+} from "../../src/core/persistent-panel";
+import type { NonEmpty } from "../../src/core/orchestration-contract";
 
 
 type AnyResult<T> = DomainResult<T, unknown>;

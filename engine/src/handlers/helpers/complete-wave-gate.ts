@@ -24,9 +24,8 @@ import { parsePlanModels } from "../../parsers/parse-plan-models";
 import { pathsMatch } from "./validate-model-bindings";
 import { inspectRepositoryPath } from "../../utils/repository-path";
 import { observeReviewedWorkspace } from "./reviewed-workspace";
+import { commitWaveGateCompletion, deriveWaveReadiness } from "../../core/wave-gate-machine";
 import {
-  commitWaveGateCompletion,
-  deriveWaveReadiness,
   evaluateWaveGate as evaluateCoreWaveGate,
   gateCheckMessage as coreGateCheckMessage,
   type GateCheck as CoreGateCheck,
@@ -34,7 +33,7 @@ import {
   type FilePresence,
   type GateDeps as CoreGateDeps,
   type PlanModelsSource as CorePlanModelsSource,
-} from "../../core/wave-gate-machine";
+} from "../../core/wave-gate-checks";
 
 /** Resolve the plan's executable models from state — effectful shell helper */
 export function loadPlanModelsSource(planFile: string | null | undefined): PlanModelsSource {

@@ -14,10 +14,8 @@ import {
   decideRequestEmissionRoute, emissionToolPrimaryInstruction, issuedReviewerPayloadClaim,
   projectEmissionTaskText, type IssuedProducerClaim,
 } from "../../src/core/spawn-admission";
-import {
-  renderPanelVerdictInstructions, type PanelVerdictInstructionRoute,
-} from "../../src/core/panel-program";
-import { sha256Hex } from "../../src/core/review-packet";
+import { renderPanelVerdictInstructions, type PanelVerdictInstructionRoute } from "../../src/core/panel-verdict-source";
+import { sha256Hex } from "../../src/core/digest";
 import {
   parseContextDigest, parseRequestId,
 } from "../../src/core/orchestration-contract/identity";

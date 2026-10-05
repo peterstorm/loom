@@ -30,11 +30,11 @@ import { compareStrings } from "./ordering";
 import {
   canonicalJson,
   parseReviewPath,
-  sha256Hex,
   type JsonValue,
   type ReviewPath,
 } from "./review-packet";
-import type { DeclaredArtifactBaseline } from "./artifact-baseline";
+import { sha256Hex } from "./digest";
+import { artifactBaseline, type ArtifactBaseline, type ArtifactBaselineEntry, type DeclaredArtifactBaseline } from "./artifact-baseline";
 import {
   parseTaskId,
   type CanonicalTaskIdParseError,
@@ -238,11 +238,11 @@ function parseSnapshot(raw: unknown, path: string): Parsed<DeclaredArtifactBasel
 export function parseCanonicalArtifactBaseline(
   raw: unknown,
   path = "baseline",
-): Parsed<readonly DeclaredArtifactBaseline[]> {
+): Parsed<ArtifactBaseline> {
   return total(() => {
     const array = parseDenseArray(raw, path);
     if (!array.ok) return array;
-    const entries = collect<DeclaredArtifactBaseline>(array.value, path, (value, entryPath) => {
+    const entries = collect<ArtifactBaselineEntry>(array.value, path, (value, entryPath) => {
       const record = exactRecord(value, ["artifact", "snapshot"], entryPath);
       if (!record.ok) return record;
       const artifact = parseReviewPath(record.value.artifact, `${entryPath}.artifact`);
@@ -258,9 +258,9 @@ export function parseCanonicalArtifactBaseline(
     if (!entries.ok) return entries;
     const sorted = [...entries.value].sort((left, right) => compareStrings(left.artifact, right.artifact));
     const duplicate = sorted.find((entry, index) => index > 0 && sorted[index - 1]?.artifact === entry.artifact);
-    return duplicate === undefined
-      ? success(freezeArray(sorted))
-      : failure([`${path} repeats artifact ${JSON.stringify(duplicate.artifact)}`]);
+    if (duplicate !== undefined) return failure([`${path} repeats artifact ${JSON.stringify(duplicate.artifact)}`]);
+    const proven = artifactBaseline(sorted, path);
+    return proven.ok ? success(proven.value) : failure(proven.errors);
   });
 }
 

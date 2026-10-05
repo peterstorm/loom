@@ -18,10 +18,10 @@ import {
 import {
   canonicalJson,
   parseReviewPath,
-  sha256Hex,
   type JsonValue,
   type ReviewPath,
 } from "./review-packet";
+import { sha256Hex } from "./digest";
 
 const CHECK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
 const RESERVED_CHECK_PREFIX = "loom:";

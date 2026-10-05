@@ -6,11 +6,12 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync, symlinkSync, mkdirSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { sha256Bytes } from "../../src/core/review-packet";
+import { sha256Bytes } from "../../src/core/digest";
 import { buildContextPacket, buildReviewerContextPacket, buildStandaloneReviewerContextPacketV3, contextPacketDigest, encodeByteSection } from "../../src/core/context-packets";
 import { parseContextProjectionArguments, projectContextPacket } from "../../src/core/context-packet-projection";
 import { parseArtifactDigest, parseRequestId } from "../../src/core/orchestration-contract";
-import { reviewedWorkspaceObservation, waveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../src/core/reviewed-workspace";
+import { waveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../src/core/wave-frozen-source";
+import { observedWorkspace } from "../fixtures/reviewed-workspace";
 
 const script = fileURLToPath(new URL("../../../scripts/read-context-packet.ts", import.meta.url));
 const roots: string[] = [];
@@ -74,7 +75,7 @@ describe("read-only packet command", () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "loom-wave-reader-")));
     roots.push(root);
     const text = "export const dirty = 'exact workspace bytes';\n";
-    const snapshot = reviewedWorkspaceObservation("T1", ["absent.ts", "binary.bin", "src/a.ts"], [
+    const snapshot = observedWorkspace("T1", ["absent.ts", "binary.bin", "src/a.ts"], [
       { path: "src/a.ts", bytes: Buffer.from(text) },
       { path: "binary.bin", bytes: Uint8Array.from([0xff, 0x00, 0x61]) },
       { path: "absent.ts", bytes: null },
@@ -110,7 +111,7 @@ describe("read-only packet command", () => {
 
   it("refuses ambiguous Wave paths and a Wave source whose bytes disagree with workspaceHeadSha", () => {
     const requestId = value(parseRequestId("request:wave-reader-ambiguity"));
-    const source = reviewedWorkspaceObservation("T1", ["src/a.ts"], [
+    const source = observedWorkspace("T1", ["src/a.ts"], [
       { path: "src/a.ts", bytes: Buffer.from("exact") },
     ]);
     const wire = waveFrozenSource(source);
@@ -266,6 +267,23 @@ describe("read-only packet command", () => {
     if (!sectionRefusal.ok) {
       expect(sectionRefusal.error).toContain("selected section hostile-utf8 cannot be decoded safely as text data (");
       expect(sectionRefusal.error).toContain("The encoded data was not valid");
+    }
+
+    // The same hostile bytes as the frozen-source INDEX: the UTF-8 decode of
+    // the index names itself, beneath the selected file's subject.
+    const hostileIndex = {
+      ...identity,
+      fixedContext: [{ label: "standalone-frozen-source", bytes: hostileBytes, digest: hostileDigest, byteLength: 2 }],
+    } as const;
+    const hostileIndexPacket = { ...hostileIndex, digest: contextPacketDigest(hostileIndex as unknown as Parameters<typeof contextPacketDigest>[0]) };
+    const utf8IndexRefusal = projectContextPacket(hostileIndexPacket, value(parseContextProjectionArguments([
+      "--packet", "/fixture/packet.json", "--request", identity.requestId, "--digest", hostileIndexPacket.digest,
+      "--role", identity.role, "--skill", identity.requiredSkill, "--file", "src/a.ts",
+    ])));
+    expect(utf8IndexRefusal).toMatchObject({ ok: false });
+    if (!utf8IndexRefusal.ok) {
+      expect(utf8IndexRefusal.error).toContain("source file src/a.ts cannot be decoded safely as text data (");
+      expect(utf8IndexRefusal.error).toContain("frozen source index could not be decoded as UTF-8");
     }
   });
 

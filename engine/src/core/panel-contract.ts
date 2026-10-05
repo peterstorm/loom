@@ -7,7 +7,6 @@ import {
   parseCriteriaSet,
   parseRunManifest,
   parseVerdictEnvelope,
-  requireEntry,
   sanitizeProse,
   selectLenses,
   type ParseResult,
@@ -15,7 +14,7 @@ import {
   type VerdictEnvelope,
 } from "./panel-kernel";
 import { compareStrings } from "./ordering";
-import { sha256Hex } from "./review-packet";
+import { sha256Hex } from "./digest";
 import { type ArtifactDigest } from "./orchestration-contract/identity";
 
 // The architecture panel is consumer 1 of the kernel. Everything below is what
@@ -339,10 +338,14 @@ declare const CANDIDATE_FILENAME: unique symbol;
  */
 export type CandidateFilename = string & { readonly [CANDIDATE_FILENAME]: true };
 
+/**
+ * One manifest candidate. Its filename is NOT a field: it is a pure function of
+ * the lens (`candidateFilename`), and storing both let a record pair lens X
+ * with lens Y's filename. Derive it at the use site instead.
+ */
 export type PanelCandidate = Readonly<{
   lens: PanelLens;
   path: string;
-  filename: CandidateFilename;
 }>;
 
 export type PanelManifest = Readonly<{
@@ -387,16 +390,11 @@ export function parsePanelManifest(
 
   // `entry.id` is a proven `PanelLens`, not a cast one: `parseRunManifest`
   // resolves each raw id against `expectedLenses` and returns that element.
-  //
-  // The filename is re-MINTED through `candidateFilename` rather than branded by
-  // assertion. `parseRunManifest` has just proved `entry.filename` equals
-  // `spec.filenameOf(entry.id)`, so the two are the same string — and going
-  // through the constructor means the brand is never claimed for a value the
-  // constructor did not produce.
+  // `parseRunManifest` has also proved the wire `filename` equals
+  // `candidateFilename(entry.id)`, so dropping it loses nothing.
   const candidates: PanelCandidate[] = parsed.value.entries.map((entry) => ({
     lens: entry.id,
     path: entry.path,
-    filename: candidateFilename(entry.id),
   }));
 
   return ok({
@@ -778,20 +776,26 @@ export function aggregateVerdicts(
 
   if (errors.length > 0) return fail(errors);
 
-  const ranked = expectedCandidates.map((candidate): CandidateRanking => {
-    // No `?? 0`: coverage above proves every (criterion, candidate) pair has a
-    // ranking, and a defaulted zero would silently change which architecture
-    // wins if that proof ever stopped holding.
-    const scores = criteriaInOrder.map((criterion): CriterionScore => ({
-      criterion,
-      score: requireEntry(envelopes, criterion, candidate, (r) => r.candidate).score,
-    }));
-    return {
-      candidate,
-      totalScore: scores.reduce((sum, entry) => sum + entry.score, 0),
-      scores,
-    };
-  });
+  // No `?? 0` and no throw: coverage above proves every (criterion, candidate)
+  // pair has a ranking. A defaulted zero would silently change which
+  // architecture wins if that proof ever stopped holding, and a throw would
+  // make this exported aggregator partial — so a broken proof is a returned
+  // error, which keeps every caller (the panel-contract helper included) free
+  // of a try/catch around it.
+  const ranked: CandidateRanking[] = [];
+  for (const candidate of expectedCandidates) {
+    const scores: CriterionScore[] = [];
+    for (const criterion of criteriaInOrder) {
+      const entry = envelopes.get(criterion)?.entries.find((ranking) => ranking.candidate === candidate);
+      if (entry === undefined) {
+        errors.push(`panel kernel invariant: verdict for '${criterion}' has no entry for '${candidate}' after coverage check`);
+      } else {
+        scores.push({ criterion, score: entry.score });
+      }
+    }
+    ranked.push({ candidate, totalScore: scores.reduce((sum, entry) => sum + entry.score, 0), scores });
+  }
+  if (errors.length > 0) return fail(errors);
 
   return ok([...ranked].sort(compareRankings));
 }
@@ -819,4 +823,111 @@ export function serializeRankings(
       scores: entry.scores.map((score) => ({ criterion: score.criterion, score: score.score })),
     })),
   }, null, 2);
+}
+
+// ---------------------------------------------------------------------------
+// Run admission — the cross-artifact validation one run-scoped panel-contract
+// operation performs, as pure functions over already-read artifacts
+// ---------------------------------------------------------------------------
+
+/** One failed panel-contract step: the contract it belongs to (the helper's
+ *  diagnostic heading) and its errors. */
+export type PanelContractFailure = Readonly<{ contract: string; errors: readonly string[] }>;
+
+export type PanelContractResult<T> =
+  | Readonly<{ ok: true; value: T }>
+  | Readonly<{ ok: false; failure: PanelContractFailure }>;
+
+const admitted = <T>(value: T): PanelContractResult<T> => ({ ok: true, value });
+const refused = <T>(contract: string, errors: readonly string[]): PanelContractResult<T> =>
+  ({ ok: false, failure: { contract, errors } });
+
+/** The raw run artifacts, read by the shell and handed in untrusted. */
+export type PanelRunArtifacts = Readonly<{
+  manifestJson: unknown;
+  interviewJson: unknown;
+  interviewMarkdown: string;
+}>;
+
+/**
+ * A run whose interview Markdown, canonical interview JSON, lens selection and
+ * candidate manifest are proven to agree. The criteria and candidate ids are
+ * DERIVED here — never supplied by the caller — so the orchestrator and the
+ * finalizer cannot disagree about what they are or what order they are in.
+ */
+export type AdmittedPanelRun = Readonly<{
+  interview: InterviewDigest;
+  manifest: PanelManifest;
+  criteria: readonly ArchitectureCriterion[];
+  candidates: readonly CandidateFilename[];
+}>;
+
+/**
+ * Admit one panel run from its raw artifacts: both interview directions must
+ * parse and describe the same validated constraints, the lens set is derived
+ * from that digest and the designer count, and the manifest must bind exactly
+ * that lens set to `runDir`. Filesystem facts (existence, symlinks, surplus
+ * files) stay in the shell; everything decidable from the bytes is here.
+ */
+export function admitPanelRun(
+  artifacts: PanelRunArtifacts,
+  runDir: string,
+  layout: RunLayout<"architecture">,
+  designerCount: number,
+): PanelContractResult<AdmittedPanelRun> {
+  const interview = parseInterviewDigestJson(artifacts.interviewJson);
+  if (!interview.ok) return refused("canonical interview digest", interview.errors);
+  const markdownInterview = parseInterviewDigest(artifacts.interviewMarkdown);
+  if (!markdownInterview.ok) return refused("interview Markdown digest", markdownInterview.errors);
+  if (JSON.stringify(markdownInterview.value) !== JSON.stringify(interview.value)) {
+    return refused("interview authority", [
+      "interview.md and interview.json describe different validated constraints",
+    ]);
+  }
+  const lenses = selectPanelLenses(interview.value, designerCount);
+  if (!lenses.ok) return refused("panel lens selection", lenses.errors);
+  const manifest = parsePanelManifest(artifacts.manifestJson, runDir, layout, lenses.value);
+  if (!manifest.ok) return refused("panel manifest", manifest.errors);
+  return admitted({
+    interview: interview.value,
+    manifest: manifest.value,
+    criteria: deriveJudgeCriteria(interview.value),
+    candidates: manifest.value.candidates.map((candidate) => candidateFilename(candidate.lens)),
+  });
+}
+
+/** The canonical criteria output of an admitted run. */
+export function serializeCriteria(run: AdmittedPanelRun): string {
+  return JSON.stringify(run.criteria, null, 2);
+}
+
+/**
+ * Admit one judge's raw output for a CLI-supplied criterion. The criterion is
+ * minted through the closed vocabulary — never asserted into the brand — and
+ * must be one this run's digest derives, so a typo'd or stale criterion cannot
+ * produce a verdict that aggregation later rejects as "unexpected". Returns the
+ * canonical serialized verdict.
+ */
+export function admitJudgeVerdict(
+  run: AdmittedPanelRun,
+  criterion: string,
+  rawJson: string,
+): PanelContractResult<string> {
+  const expectedCriterion = architectureCriterion(criterion);
+  if (expectedCriterion === null || !run.criteria.includes(expectedCriterion)) {
+    return refused("judge verdict", [
+      `criterion must be one of the derived criteria: ${run.criteria.join(", ")}; received: ${criterion}`,
+    ]);
+  }
+  const verdict = parseJudgeVerdict(rawJson, expectedCriterion, run.candidates);
+  return verdict.ok ? admitted(serializeJudgeVerdict(verdict.value)) : refused("judge verdict", verdict.errors);
+}
+
+/** Rank an admitted run's re-validated verdicts; returns the canonical ranking. */
+export function rankPanelVerdicts(
+  run: AdmittedPanelRun,
+  verdicts: readonly JudgeVerdict[],
+): PanelContractResult<string> {
+  const ranked = aggregateVerdicts(verdicts, run.criteria, run.candidates);
+  return ranked.ok ? admitted(serializeRankings(ranked.value, run.criteria)) : refused("panel aggregate", ranked.errors);
 }

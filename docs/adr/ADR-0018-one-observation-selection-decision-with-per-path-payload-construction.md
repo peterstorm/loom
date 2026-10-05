@@ -51,7 +51,7 @@ The decision also feeds the retry budget (ADR-0019: one existing request-slot bu
 1. An unusable observation refuses.
 2. Every observed call is checked against the issued binding, in order: request attempt, then producer kind, then schema version. A misbound call is never filtered out, never decoded with its own decoder, and never absorbed into an ambiguity count.
 3. The distinct-call count decides: zero means extraction verbatim, one goes to schema admission, two or more is `duplicate-emission-call`, and that arm carries the observed calls.
-4. Only the single-call state reaches `admitEmissionArguments` (schema selection through the frozen registry). This happens after the schema-driven wire-form canonicalization.
+4. Only the single-call state reaches `admitIssuedEmissionArguments`: the schema-driven wire-form canonicalization, then `admitEmissionArguments` (schema selection through the issued binding's frozen registry cell). The Pi execute shell admits through the same function. The binding is nominal (only `issueEmissionBinding` mints it), so its registry cell is certified by type and the kernel does not re-verify it.
 
 Wrong kind, version or request, and unusable observations, therefore reject before schema selection. They are refusals, not absence.
 
@@ -87,7 +87,7 @@ Two functions share this decision and differ only in how they build output:
 
 **Layering.**
 - `emission-ingestion.ts` is pure: no I/O, no clock, no randomness.
-- It imports only `emission-tool.ts` (frozen registry, binding types, `admitEmissionArguments`), `harness-capture.ts` (observation vocabulary, `parseFinalPayload`), `review-packet.ts`, and `orchestration-contract/identity` (`DomainResult`, `canonicalRecord`).
+- It imports only `emission-tool.ts` (binding types, `admitIssuedEmissionArguments`), `harness-capture.ts` (observation vocabulary, `finalPayloadOf`, `parseFinalPayload`), and `orchestration-contract/identity` (`DomainResult`, `canonicalRecord`, `parseRequestId`).
 - It must not import `panel-program.ts` or any I/O adapter.
 - Shared schema definitions stay below the program layer, so no registry-to-program import cycle exists.
 - Results use the existing `DomainResult` and `canonicalRecord` immutable-record conventions. No branded wrappers were added for values that carry no invariant.

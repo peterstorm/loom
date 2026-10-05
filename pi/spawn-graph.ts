@@ -33,7 +33,7 @@ import { findTaskGraphPathFrom, pathExistsFailClosed } from "../engine/src/confi
  *  `chain`, or a bare single entry). `null` = the input is too malformed to
  *  address entries at all; the admission's parse refuses those batches, so
  *  the observation answers with the runtime polarity instead of guessing.
- *  Shared with `pi/extension.ts`'s `piSpawnItem` so the batch-shape read
+ *  Shared with `pi/tool-input.ts`'s `piSpawnItem` so the batch-shape read
  *  lives in exactly one place. */
 export function spawnBatchEntries(raw: unknown): readonly unknown[] | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;

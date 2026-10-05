@@ -40,6 +40,7 @@ import {
   captureRejectionAuditRecord,
   captureRejectionDedupKey,
   parseFinalPayload,
+  type CaptureKey,
   type CaptureReceipt,
   type EmissionCallFrame,
   type FinalPayload,
@@ -49,14 +50,12 @@ import {
 import { selectCanonicalPayload } from "../core/emission-ingestion";
 import type { IssuedEmissionBindingOf } from "../core/emission-tool";
 import {
-  issuedReviewerPayloadClaim,
-  issuedSpawnEmissionRouteDecision,
-  qualifyIssuedSpawnEmissionRoute,
-} from "../core/spawn-admission";
-import { STANDALONE_REVIEWER_ROLES } from "../core/standalone-review";
-import { CURRENT_REVIEWER_PROTOCOL } from "../core/reviewer-contract";
-import { canonicalRecord, canonicalStructuralEquals, parseEffectId, type AgentRequestAuthority, type ArtifactRef, type ContextDigest, type DomainResult } from "../core/orchestration-contract";
-import { createHash } from "node:crypto";
+  issuedReviewerEmissionRoute,
+  projectRegisteredReviewerProtocol,
+  reviewerEmissionEligible,
+} from "../core/reviewer-emission-route";
+import { canonicalRecord, parseEffectId, type AgentRequestAuthority, type ArtifactRef, type ContextDigest, type DomainResult } from "../core/orchestration-contract";
+import { sha256Hex } from "../core/digest";
 import { canonicalJson, type JsonValue } from "../core/review-packet";
 import { parseStandaloneReviewerProtocolV3 } from "../core/standalone-lineage-contract";
 import { verifyStandalonePanelView } from "./standalone-panel-context";
@@ -71,7 +70,7 @@ import { CONTEXT_PACKET_MAX_BYTES } from "./stored-context-packets";
  * (`registerSessionRunBinding`, keyed by `PI_SESSION_ID` on Pi and by
  * `CLAUDE_CODE_SESSION_ID` on Claude Code), and that binding — not the
  * environment — is what carries capture authority across a process boundary:
- * `pi/extension` reads it back for Pi, `claude-run-authority` for Claude's
+ * `pi/review-run-authority` reads it back for Pi, `claude-run-authority` for Claude's
  * PostToolUse and SubagentStop hooks. When either variable is set it takes
  * precedence over the binding and half of it is a fault; a supervisor or a test
  * may use them to pin a harness to one run. Absent, with no binding claiming the
@@ -133,10 +132,10 @@ const retriableFailure = (reason: string, message: string): CaptureOutcome =>
 
 /**
  * What the capture seam's issued-authority resolution concluded for ONE
- * correlated reviewer request — the capture-side mirror of the render path's
- * emission-eligibility join (`reviewerEmissionProjection`), composed from the
- * SAME pure pieces so the two sides cannot disagree about which requests are
- * emission-enabled:
+ * correlated reviewer request. The eligibility predicate, the registration's
+ * protocol projection and the route decision are the render path's own
+ * (`core/reviewer-emission-route`), so the two sides cannot disagree about
+ * which requests are emission-enabled:
  *
  * - `ineligible` — the request names no issued reviewer-payload contract
  *   (non-producer roles/programs): the no-tool baseline. Observed emission
@@ -152,10 +151,9 @@ const retriableFailure = (reason: string, message: string): CaptureOutcome =>
  *
  * The claim is minted from the DURABLE program registration and the issued
  * request authority — never from prompt markers, harness claims, or model
- * arguments (FR-001) — and the route decision is the render path's own
- * `qualifyIssuedSpawnEmissionRoute`, so a Claude harness (no Pi parent) is
- * extraction-only by construction and a non-qualified provider route cannot
- * be upgraded by any capture-side input.
+ * arguments (FR-001) — so a Claude harness (no Pi parent) is extraction-only
+ * by construction and a non-qualified provider route cannot be upgraded by
+ * any capture-side input.
  */
 export type ReviewerCaptureEmissionAuthority =
   | Readonly<{ kind: "ineligible" }>
@@ -165,102 +163,33 @@ export type ReviewerCaptureEmissionAuthority =
 
 /**
  * Resolve the issued reviewer emission authority for one correlated request
- * from the run directory's own durable registration. The eligibility predicate
- * is the render path's (`reviewerEmissionEligible` semantics: reviewer role on
- * a standalone-review or wave-gate request); the protocol projection is the
- * registration's own schema version and issued descriptor, projected from the
- * raw registration bytes the runtime itself reads and accepted ONLY for the
- * frozen descriptors; the claim mint and route decision are the render path's
- * exact pure pieces.
+ * from the run directory's own durable registration: this shell owns only the
+ * registration read; the decision is `core/reviewer-emission-route`'s.
  */
 export function resolveReviewerCaptureEmissionAuthority(
   handle: RunDirHandle,
   request: AgentRequestAuthority,
   harness: HarnessResultIdentity["harness"],
 ): ReviewerCaptureEmissionAuthority {
-  const eligible = (STANDALONE_REVIEWER_ROLES as readonly string[]).includes(request.role) &&
-    (request.program === "standalone-review" || request.program === "wave-gate");
-  if (!eligible) return Object.freeze({ kind: "ineligible" as const });
+  if (!reviewerEmissionEligible(request)) return Object.freeze({ kind: "ineligible" as const });
   const stored = handle.readProgramRegistration(16_777_216);
   if (!stored.ok) {
     return Object.freeze({ kind: "unavailable" as const, message: stored.error.message });
   }
-  const projected = projectRegisteredReviewerRegistration(stored.value);
+  const projected = projectRegisteredReviewerProtocol(stored.value);
   if (!projected.ok) {
     return Object.freeze({ kind: "unavailable" as const, message: projected.error });
   }
   if (projected.value === null) return Object.freeze({ kind: "ineligible" as const });
-  const claim = issuedReviewerPayloadClaim(
-    projected.value.schemaVersion === 1
-      ? Object.freeze({ schemaVersion: 1 as const })
-      : Object.freeze({
-          schemaVersion: projected.value.schemaVersion,
-          reviewerProtocol: Object.freeze({ schemaDigest: projected.value.schemaDigest }),
-        }),
-    request,
-  );
-  const route = issuedSpawnEmissionRouteDecision(qualifyIssuedSpawnEmissionRoute(claim, request, harness === "pi"));
-  if (route.kind === "emission") {
-    // The claim's producer kind is `reviewer-payload` by construction (the
-    // mint takes only the reviewer protocol projection), so the minted
-    // binding's path refinement is a type fact of this composition, not a
-    // runtime claim the caller could get wrong.
-    return Object.freeze({
-      kind: "emission" as const,
-      binding: route.binding as IssuedEmissionBindingOf<"reviewer-payload">,
-      contextDigest: route.contextDigest,
-    });
+  const route = issuedReviewerEmissionRoute(projected.value, request, harness === "pi");
+  switch (route.kind) {
+    case "emission":
+      return Object.freeze({ kind: "emission" as const, binding: route.binding, contextDigest: route.contextDigest });
+    case "extraction-only":
+      return Object.freeze({ kind: "extraction-only" as const, reason: route.reason });
+    case "refused":
+      return Object.freeze({ kind: "unavailable" as const, message: route.reason });
   }
-  if (route.kind === "extraction-only") {
-    return Object.freeze({ kind: "extraction-only" as const, reason: route.reason });
-  }
-  return Object.freeze({ kind: "unavailable" as const, message: route.reason });
-}
-
-/**
- * The capture seam's projection of the DURABLE program registration onto the
- * reviewer-protocol inputs the issued claim mint consumes — the same
- * eligibility inputs the render path derives through the facade registration
- * parser, projected here from the raw registration bytes the runtime itself
- * reads (its purpose classification already inspects these same descriptor
- * fields, so this is the existing minimal inspection layer, extended).
- *
- * The projection ACCEPTS ONLY the frozen descriptors: a schema-2 registration
- * must carry the exact current reviewer protocol and a schema-3 successor the
- * exact frozen v3 protocol — a drifted descriptor is unavailable evidence,
- * never an extraction downgrade of a corrupt issuance. `null` is the ordinary
- * ineligible arm (no reviewer program, or the archived schema-1 contract,
- * which binds no emission schema).
- */
-type RegisteredReviewerRegistration =
-  | Readonly<{ schemaVersion: 1; schemaDigest?: never }>
-  | Readonly<{ schemaVersion: 2 | 3; schemaDigest: string }>;
-
-function projectRegisteredReviewerRegistration(
-  raw: unknown,
-): DomainResult<RegisteredReviewerRegistration | null, string> {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { ok: true, value: null };
-  const record = raw as Readonly<Record<string, unknown>>;
-  const kind = Object.getOwnPropertyDescriptor(record, "kind")?.value;
-  if (kind !== "standalone-review" && kind !== "wave-gate") return { ok: true, value: null };
-  const schemaVersion = Object.getOwnPropertyDescriptor(record, "schemaVersion")?.value;
-  if (schemaVersion === 1) return { ok: true, value: Object.freeze({ schemaVersion: 1 as const }) };
-  if (schemaVersion === 2) {
-    const descriptor = Object.getOwnPropertyDescriptor(record, "reviewerProtocol")?.value;
-    return canonicalStructuralEquals(descriptor, CURRENT_REVIEWER_PROTOCOL)
-      ? { ok: true, value: Object.freeze({ schemaVersion: 2 as const, schemaDigest: CURRENT_REVIEWER_PROTOCOL.schemaDigest }) }
-      : { ok: false, error: "program registration does not carry the exact frozen reviewer protocol descriptor" };
-  }
-  if (schemaVersion === 3 && kind === "standalone-review") {
-    const parsed = parseStandaloneReviewerProtocolV3(Object.getOwnPropertyDescriptor(record, "reviewerProtocol")?.value);
-    return parsed.ok
-      ? { ok: true, value: Object.freeze({ schemaVersion: 3 as const, schemaDigest: parsed.value.schemaDigest }) }
-      : { ok: false, error: parsed.error.message };
-  }
-  return {
-    ok: false,
-    error: `program registration carries no supported reviewer protocol projection (schema version ${String(schemaVersion)})`,
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -361,6 +290,22 @@ async function publishCaptureSourceRecord(
   const published = await handle.publishArtifactSet([{ relativePath: path, bytes: [...bytes] }]);
   return published.ok ? { ok: true, value: true } : { ok: false, error: published.error.message };
 }
+
+/**
+ * Where an accepted payload came from, as the capture pipeline carries it to
+ * persistence: chosen BY a selection decision (its provenance is published),
+ * or the candidates-only arm no selection ran over (today's byte-identical
+ * layout, no record). A closed union rather than a nullable provenance, so the
+ * shared persistence pipeline below — not each purpose — decides publication.
+ */
+type CaptureSource =
+  | Readonly<{ kind: "selected"; provenance: CaptureSourceProvenance }>
+  | Readonly<{ kind: "unselected" }>;
+
+const selectedSource = (provenance: CaptureSourceProvenance): CaptureSource =>
+  Object.freeze({ kind: "selected" as const, provenance: Object.freeze(provenance) });
+
+const UNSELECTED_SOURCE: CaptureSource = Object.freeze({ kind: "unselected" as const });
 
 /**
  * Why a capture did not happen, in operator-facing words.
@@ -591,9 +536,125 @@ type CaptureHarnessInput = Readonly<{
   | Readonly<{ candidates: readonly FinalPayloadCandidate[]; observe?: never }>
 );
 
-type NativeCapturePurpose = "legacy" | "standalone-successor";
+// ---------------------------------------------------------------------------
+// Per-purpose capture persistence: ONE interface, both purposes behind it
+// ---------------------------------------------------------------------------
 
-function readNativeCapturePurpose(handle: RunDirHandle): DomainResult<NativeCapturePurpose, string> {
+/**
+ * Everything that differs between the legacy capture purpose and the native
+ * standalone-successor purpose, behind one interface. The purpose used to be a
+ * flag branched at four call sites (candidate byte limit, duplicate set,
+ * context reading, persistence); the successor branch of the last one returned
+ * before the accepted-source publication, so a successor capture won by an
+ * emission call recorded no source (FR-009). Now the purpose only supplies
+ * its own steps, and `persistBoundCapture` runs the shared pipeline —
+ * admit → publish the accepted source → write — so no purpose can skip the
+ * publication.
+ */
+type CapturePersistence = Readonly<{
+  /** A purpose-specific refusal over the observed candidates, decided before
+   *  any selection or transcript work; null admits them. */
+  refuseCandidates: (candidates: readonly FinalPayloadCandidate[]) => Readonly<{ reason: string; message: string }> | null;
+  /** The already-captured set `bindCapture` refuses duplicates against. */
+  duplicateGuard: (captured: ReadonlySet<CaptureKey>) => ReadonlySet<CaptureKey>;
+  /** Every pre-write check this purpose owns (context binding, durable-receipt
+   *  state). A returned outcome stops the capture; null proceeds. */
+  admit: (handle: RunDirHandle, request: AgentRequestAuthority) => Promise<CaptureOutcome | null>;
+  /** The purpose's durable write of the accepted bytes. */
+  write: (
+    handle: RunDirHandle,
+    request: AgentRequestAuthority,
+    receipt: CaptureReceipt,
+    payload: FinalPayload,
+    observation: "fresh" | "recapture",
+  ) => Promise<CaptureOutcome>;
+}>;
+
+/** The context-binding refusal both purposes share: the packet the request
+ *  names must describe that exact request and role. */
+const contextBindingRefusal = (
+  handle: RunDirHandle,
+  request: AgentRequestAuthority,
+  context: Readonly<{ requestId: string; role: string }>,
+): Promise<CaptureOutcome> | null =>
+  context.requestId === request.requestId && context.role === request.role
+    ? null
+    : terminalizeCaptureRejection(handle, request, terminalCaptureRefusal(
+        "context-binding",
+        `context ${request.contextDigest} does not describe request ${request.requestId}/${request.role}`,
+      ));
+
+const LEGACY_CAPTURE: CapturePersistence = Object.freeze<CapturePersistence>({
+  refuseCandidates: () => null,
+  duplicateGuard: (captured) => captured,
+  admit: async (handle, request) => {
+    const context = handle.readContext(request.contextDigest);
+    if (!context.ok) return retriableFailure("context", context.error.message);
+    return contextBindingRefusal(handle, request, context.value);
+  },
+  write: async (handle, request, receipt, payload) => {
+    const written = await handle.captureTranscript(request, payload.bytes);
+    if (!written.ok) {
+      const rejection = handle.readCaptureRejection(request);
+      return rejection.ok && rejection.value !== null
+        ? { kind: "terminal-rejection", reason: "transcript", message: written.error.message }
+        : retriableFailure("transcript", written.error.message);
+    }
+    return { kind: "captured", receipt };
+  },
+});
+
+const nativeCaptureEffect = (request: AgentRequestAuthority) =>
+  parseEffectId(`effect:capture:${sha256Hex(`${request.requestId}:${request.attempt}`)}`);
+
+const STANDALONE_SUCCESSOR_CAPTURE: CapturePersistence = Object.freeze<CapturePersistence>({
+  refuseCandidates: (candidates) =>
+    candidates.some(candidate => Buffer.byteLength(candidate.text, "utf8") > 1_048_576)
+      ? Object.freeze({ reason: "payload-byte-limit", message: "native successor final exceeds the unchanged 1048576-byte reviewer budget" })
+      : null,
+  // Only current native capture can reconcile an unreceipted write. Its durable
+  // observation and exact bytes are proved by `write`; legacy duplicate rules stay intact.
+  duplicateGuard: () => new Set(),
+  admit: async (handle, request) => {
+    const context = request.program === "standalone-review"
+      ? handle.readStandaloneSuccessorContext(request.contextDigest, CONTEXT_PACKET_MAX_BYTES)
+      : handle.readContext(request.contextDigest);
+    if (!context.ok) return retriableFailure("context", context.error.message);
+    const unbound = contextBindingRefusal(handle, request, context.value);
+    if (unbound !== null) return unbound;
+    if (request.program === "refutation-panel") {
+      if (context.value.schemaVersion === 3) return retriableFailure("context", "refutation uses its own explicit packet contract");
+      const view = verifyStandalonePanelView(handle, context.value);
+      if (!view.ok) return retriableFailure("context", view.error);
+    }
+    const effect = nativeCaptureEffect(request);
+    if (!effect.ok) return retriableFailure("receipt", effect.error.message);
+    const existing = handle.readReceipt(effect.value, 16_384);
+    if (!existing.ok) return retriableFailure("receipt", existing.error.message);
+    // Any existing receipt (including a foreign/contradictory one) precludes repair.
+    // Normal already-receipted duplicate delivery remains a refusal, not a new witness.
+    if (existing.value !== null) return { kind: "terminal-rejection", reason: "duplicate-capture", message: "native capture already has a durable receipt; duplicate delivery cannot replace it" };
+    const rejected = handle.readCaptureRejection(request);
+    if (!rejected.ok) return retriableFailure("transcript", rejected.error.message);
+    if (rejected.value !== null) return { kind: "terminal-rejection", reason: "transcript", message: rejected.value };
+    return null;
+  },
+  write: async (handle, request, receipt, payload, observation) => {
+    const effect = nativeCaptureEffect(request);
+    if (!effect.ok) return retriableFailure("receipt", effect.error.message);
+    const artifact = await observeNativeCaptureArtifact(handle, request, receipt, payload, observation);
+    if (!artifact.ok) return retriableFailure("transcript", artifact.error);
+    const recorded = await handle.recordReceipt({ kind: "raw-transcript-captured", effectId: effect.value,
+      runId: handle.runId, requestId: request.requestId, artifact: artifact.value });
+    if (!recorded.ok) return retriableFailure("receipt", `native bytes captured but durable receipt unavailable: ${recorded.error.message}`);
+    return { kind: "captured", receipt };
+  },
+});
+
+/** The capture persistence the run's durable registration selects: a schema-3
+ *  standalone-review registration (with the exact frozen v3 protocol) is the
+ *  native successor purpose; every other registration is legacy. */
+function readCapturePersistence(handle: RunDirHandle): DomainResult<CapturePersistence, string> {
   const registration = handle.readProgramRegistration(16_777_216);
   if (!registration.ok) return { ok: false, error: registration.error.message };
   const raw = registration.value;
@@ -602,7 +663,7 @@ function readNativeCapturePurpose(handle: RunDirHandle): DomainResult<NativeCapt
   if (successor && !parseStandaloneReviewerProtocolV3(Object.getOwnPropertyDescriptor(raw, "reviewerProtocol")?.value).ok) {
     return { ok: false, error: "successor capture requires the exact registered protocol descriptor" };
   }
-  return { ok: true, value: successor ? "standalone-successor" : "legacy" };
+  return { ok: true, value: successor ? STANDALONE_SUCCESSOR_CAPTURE : LEGACY_CAPTURE };
 }
 
 export async function captureHarnessResult(args: CaptureHarnessInput): Promise<CaptureOutcome> {
@@ -620,11 +681,10 @@ export async function captureHarnessResult(args: CaptureHarnessInput): Promise<C
   if (observation.kind === "terminal-refusal") {
     return terminalizeCaptureRejection(handle, request, observation);
   }
-  const purpose = readNativeCapturePurpose(handle);
-  if (!purpose.ok) return retriableFailure("registration", purpose.error);
-  if (purpose.value === "standalone-successor" && observation.candidates.some(candidate => Buffer.byteLength(candidate.text, "utf8") > 1_048_576)) {
-    return reject("payload-byte-limit", "native successor final exceeds the unchanged 1048576-byte reviewer budget");
-  }
+  const persistence = readCapturePersistence(handle);
+  if (!persistence.ok) return retriableFailure("registration", persistence.error);
+  const refused = persistence.value.refuseCandidates(observation.candidates);
+  if (refused !== null) return reject(refused.reason, refused.message);
   // The canonical selection seam (T7, AD-8/AD-9): an adapter that observed the
   // transcript through the emission vocabulary hands over BOTH projections —
   // assistant emission-tool-call frames and the unchanged final-payload
@@ -633,11 +693,11 @@ export async function captureHarnessResult(args: CaptureHarnessInput): Promise<C
   // below is the pre-selection adapters' existing contract and stays
   // byte-identical.
   if (observation.kind === "emission-observed") {
-    return captureSelectedEmission(handle, request, identity, issued, args.harness, observation, purpose.value, reject);
+    return captureSelectedEmission(handle, request, identity, issued, args.harness, observation, persistence.value, reject);
   }
   const payload = parseFinalPayload(observation.candidates);
   if (!payload.ok) return reject(payload.error.reason, payload.error.message);
-  return bindAndPersistCapture(handle, request, identity, issued, payload.value, purpose.value, null);
+  return bindAndPersistCapture(handle, request, identity, issued, payload.value, persistence.value, UNSELECTED_SOURCE);
 }
 
 /**
@@ -652,8 +712,8 @@ async function bindAndPersistCapture(
   identity: HarnessResultIdentity,
   issued: readonly AgentRequestAuthority[],
   payload: FinalPayload,
-  purpose: NativeCapturePurpose,
-  provenance: CaptureSourceProvenance | null,
+  persistence: CapturePersistence,
+  source: CaptureSource,
 ): Promise<CaptureOutcome> {
   const captured = handle.readCapturedAttempts();
   if (!captured.ok) return retriableFailure("transcripts", captured.error.message);
@@ -661,16 +721,14 @@ async function bindAndPersistCapture(
     issued,
     identity,
     payload,
-    // Only current native capture can reconcile an unreceipted write. Its durable
-    // observation and exact bytes are proved below; legacy duplicate rules stay intact.
-    alreadyCaptured: purpose === "standalone-successor" ? new Set() : captured.value,
+    alreadyCaptured: persistence.duplicateGuard(captured.value),
   });
   if (!bound.ok) {
     return bound.error.reason === "duplicate-capture"
       ? { kind: "terminal-rejection", reason: bound.error.reason, message: bound.error.message }
       : terminalizeCaptureRejection(handle, request, terminalCaptureRefusal(bound.error.reason, bound.error.message));
   }
-  return persistBoundCapture(handle, request, bound.value, payload, purpose, provenance,
+  return persistBoundCapture(handle, request, bound.value, payload, persistence, source,
     captured.value.has(captureKey(request.slotId, request.attempt)) ? "recapture" : "fresh");
 }
 
@@ -710,7 +768,7 @@ async function captureSelectedEmission(
   issued: readonly AgentRequestAuthority[],
   harness: HarnessResultIdentity["harness"],
   observation: Extract<CaptureObservation, { kind: "emission-observed" }>,
-  purpose: NativeCapturePurpose,
+  persistence: CapturePersistence,
   reject: (reason: string, message: string) => Promise<CaptureOutcome>,
 ): Promise<CaptureOutcome> {
   const authority = resolveReviewerCaptureEmissionAuthority(handle, request, harness);
@@ -727,7 +785,7 @@ async function captureSelectedEmission(
     }
     const payload = parseFinalPayload(observation.candidates);
     if (!payload.ok) return reject(payload.error.reason, payload.error.message);
-    return bindAndPersistCapture(handle, request, identity, issued, payload.value, purpose, null);
+    return bindAndPersistCapture(handle, request, identity, issued, payload.value, persistence, UNSELECTED_SOURCE);
   }
   const selection = selectCanonicalPayload(
     authority.binding,
@@ -736,24 +794,25 @@ async function captureSelectedEmission(
   );
   switch (selection.kind) {
     case "emission-tool-arguments":
-      return bindAndPersistCapture(handle, request, identity, issued, selection.payload, purpose, {
+      return bindAndPersistCapture(handle, request, identity, issued, selection.payload, persistence, selectedSource({
         source: "emission-tool" as const,
         toolCallId: selection.call.toolCallId,
         producerKind: selection.call.kind.kind,
         emissionSchemaVersion: authority.binding.version,
         schemaDigest: authority.binding.schemaDigest,
-      });
+      }));
     case "final-message-extraction":
       if (!selection.fallback.ok) return reject(selection.fallback.error.reason, selection.fallback.error.message);
-      return bindAndPersistCapture(handle, request, identity, issued, selection.fallback.value, purpose, { source: "extraction" as const });
+      return bindAndPersistCapture(handle, request, identity, issued, selection.fallback.value, persistence,
+        selectedSource({ source: "extraction" as const }));
     case "extraction-over-refused-call":
       if (!selection.fallback.ok) {
         return reject("emission-and-extraction-refused", describeRefusalPair(selection.emissionRefusal, selection.fallback.error));
       }
-      return bindAndPersistCapture(handle, request, identity, issued, selection.fallback.value, purpose, {
+      return bindAndPersistCapture(handle, request, identity, issued, selection.fallback.value, persistence, selectedSource({
         source: "extraction" as const,
         emissionRefusal: { code: selection.emissionRefusal.code, message: selection.emissionRefusal.message },
-      });
+      }));
     case "duplicate-emission-call":
       return reject("ambiguous-emission-call",
         `result carried ${selection.calls.length} distinct emission tool calls ` +
@@ -765,50 +824,31 @@ async function captureSelectedEmission(
   }
 }
 
+/**
+ * The shared persistence pipeline every purpose runs: the purpose's own
+ * pre-write checks, then the accepted source published BEFORE the write
+ * (write-ahead, same posture as the native capture observation) whenever a
+ * selection decision produced the payload, then the purpose's write. The
+ * candidates-only arm publishes nothing and keeps today's byte-identical
+ * layout. Publication failure is retriable infrastructure, never a consumed
+ * attempt and never a silently-unrecorded source.
+ */
 async function persistBoundCapture(
   handle: RunDirHandle,
   request: AgentRequestAuthority,
   receipt: CaptureReceipt,
   payload: FinalPayload,
-  purpose: NativeCapturePurpose,
-  provenance: CaptureSourceProvenance | null,
+  persistence: CapturePersistence,
+  source: CaptureSource,
   observation: "fresh" | "recapture",
 ): Promise<CaptureOutcome> {
-  const context = purpose === "standalone-successor" && request.program === "standalone-review"
-    ? handle.readStandaloneSuccessorContext(request.contextDigest, CONTEXT_PACKET_MAX_BYTES)
-    : handle.readContext(request.contextDigest);
-  if (!context.ok) return retriableFailure("context", context.error.message);
-  if (context.value.requestId !== request.requestId || context.value.role !== request.role) {
-    return terminalizeCaptureRejection(handle, request, terminalCaptureRefusal(
-      "context-binding",
-      `context ${request.contextDigest} does not describe request ${request.requestId}/${request.role}`,
-    ));
-  }
-  if (purpose === "standalone-successor" && request.program === "refutation-panel") {
-    if (context.value.schemaVersion === 3) return retriableFailure("context", "refutation uses its own explicit packet contract");
-    const view = verifyStandalonePanelView(handle, context.value);
-    if (!view.ok) return retriableFailure("context", view.error);
-  }
-  if (purpose === "standalone-successor") return persistNativeCapture(handle, request, receipt, payload, observation);
-  // The accepted source is published BEFORE the transcript write (write-ahead,
-  // same posture as the native capture observation) and only when a selection
-  // decision produced the payload — extraction-only captures keep today's
-  // byte-identical legacy layout. Publication failure is retriable
-  // infrastructure, never a consumed attempt and never a silently-unrecorded
-  // source.
-  if (provenance !== null) {
-    const published = await publishCaptureSourceRecord(handle, request, receipt.harness, provenance, payload);
+  const stopped = await persistence.admit(handle, request);
+  if (stopped !== null) return stopped;
+  if (source.kind === "selected") {
+    const published = await publishCaptureSourceRecord(handle, request, receipt.harness, source.provenance, payload);
     if (!published.ok) return retriableFailure("capture-source", published.error);
   }
-  const written = await handle.captureTranscript(request, payload.bytes);
-  if (!written.ok) {
-    const rejection = handle.readCaptureRejection(request);
-    return rejection.ok && rejection.value !== null
-      ? { kind: "terminal-rejection", reason: "transcript", message: written.error.message }
-      : retriableFailure("transcript", written.error.message);
-  }
-
-  return { kind: "captured", receipt };
+  return persistence.write(handle, request, receipt, payload, observation);
 }
 
 async function observeNativeCaptureArtifact(
@@ -834,31 +874,6 @@ async function observeNativeCaptureArtifact(
   if (!observed.ok) return { ok: false, error: observed.error.message };
   const written = await handle.captureTranscript(request, payload.bytes);
   return written.ok ? written : { ok: false, error: written.error.message };
-}
-
-async function persistNativeCapture(
-  handle: RunDirHandle,
-  request: AgentRequestAuthority,
-  receipt: CaptureReceipt,
-  payload: FinalPayload,
-  observation: "fresh" | "recapture",
-): Promise<CaptureOutcome> {
-  const effect = parseEffectId(`effect:capture:${createHash("sha256").update(`${request.requestId}:${request.attempt}`).digest("hex")}`);
-  if (!effect.ok) return retriableFailure("receipt", effect.error.message);
-  const existing = handle.readReceipt(effect.value, 16_384);
-  if (!existing.ok) return retriableFailure("receipt", existing.error.message);
-  // Any existing receipt (including a foreign/contradictory one) precludes repair.
-  // Normal already-receipted duplicate delivery remains a refusal, not a new witness.
-  if (existing.value !== null) return { kind: "terminal-rejection", reason: "duplicate-capture", message: "native capture already has a durable receipt; duplicate delivery cannot replace it" };
-  const rejected = handle.readCaptureRejection(request);
-  if (!rejected.ok) return retriableFailure("transcript", rejected.error.message);
-  if (rejected.value !== null) return { kind: "terminal-rejection", reason: "transcript", message: rejected.value };
-  const artifact = await observeNativeCaptureArtifact(handle, request, receipt, payload, observation);
-  if (!artifact.ok) return retriableFailure("transcript", artifact.error);
-  const recorded = await handle.recordReceipt({ kind: "raw-transcript-captured", effectId: effect.value,
-    runId: handle.runId, requestId: request.requestId, artifact: artifact.value });
-  if (!recorded.ok) return retriableFailure("receipt", `native bytes captured but durable receipt unavailable: ${recorded.error.message}`);
-  return { kind: "captured", receipt };
 }
 
 /**

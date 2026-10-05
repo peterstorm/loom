@@ -64,7 +64,7 @@ import {
   type VerdictEnvelope,
 } from "./panel-kernel";
 import { STANDALONE_REVIEW_SUBJECT } from "./reviewer-contract";
-import { sha256Hex } from "./review-packet";
+import { sha256Hex } from "./digest";
 import { type ArtifactDigest } from "./orchestration-contract/identity";
 
 // ---------------------------------------------------------------------------

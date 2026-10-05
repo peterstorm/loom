@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
-import { STANDALONE_REVIEWER_ROLES } from "../../src/core/standalone-review";
+import { STANDALONE_REVIEWER_ROLES } from "../../src/core/standalone-review-scope";
 import { recordClaudeSpawnCorrelation } from "../../src/handlers/post-tool-use/record-orchestration-spawn";
 import { runDispatch } from "../../src/handlers/subagent-stop/dispatch";
 import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../src/orchestration/harness-capture-runtime";

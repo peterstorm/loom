@@ -22,7 +22,7 @@ import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { afterEach, describe, expect, it } from "vitest";
 import { armImplementationAttestation } from "../../../src/core/implementation-lifecycle";
 import { derivePendingTaskProof } from "../../../src/core/proof-obligations";
-import { captureDeclaredArtifactBaseline } from "../../../src/utils/artifact-baseline";
+import { captureDeclaredArtifactBaseline } from "../../../src/utils/declared-artifact-snapshot";
 import { parseTaskGraph } from "../../../src/state-manager";
 
 const ENGINE = fileURLToPath(new URL("../../../", import.meta.url));

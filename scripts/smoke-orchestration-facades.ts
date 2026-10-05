@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { evaluateTaskProof } from "../engine/src/core/proof-obligations";
 import { parseContextPacket, type ContextPacket } from "../engine/src/core/context-packets";
-import { readStoredContextPacketFile } from "../engine/src/orchestration/stored-context-packets";
+import { CONTEXT_PACKET_BOUNDS, readStoredContextPacketFile } from "../engine/src/orchestration/stored-context-packets";
 import { readWaveReviewContext } from "../engine/src/core/wave-review-authority";
 import type { ReviewerDraftV2 } from "../engine/src/core/reviewer-contract";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_ROOT_ENV, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../engine/src/runtime-compatibility";
@@ -214,7 +214,7 @@ function scriptedFindings(severity: "clean" | "critical" | "advisory", path: str
 
 /** The issued request's Context Packet, read the way the engine stores it. */
 function issuedPacket(runDir: string, request: SpawnRequest): ContextPacket {
-  const stored = readStoredContextPacketFile(join(runDir, "contexts", `${request.authority.contextDigest}.json`));
+  const stored = readStoredContextPacketFile(join(runDir, "contexts", `${request.authority.contextDigest}.json`), CONTEXT_PACKET_BOUNDS);
   check(stored.ok, "issued Context Packet is unreadable");
   const parsed = parseContextPacket(stored.value.record);
   check(parsed.ok, "issued Context Packet failed parsing");

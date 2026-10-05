@@ -14,7 +14,7 @@
  */
 
 import { z } from "zod/v4";
-import { sha256Hex } from "./review-packet";
+import { sha256Hex } from "./digest";
 import { REVIEWER_PAYLOAD_SCHEMA_V2, type ReviewerProtocolFailure } from "./reviewer-contract";
 import { parseReviewerPayloadV2, parseStandaloneReviewerPayloadV3 } from "./reviewer-protocol";
 import { STANDALONE_REVIEWER_SCHEMA_V3 } from "./standalone-lineage-contract";
@@ -416,9 +416,11 @@ const canonicalizeAt = (node: JsonSchemaNode, value: unknown, root: JsonSchemaNo
  * the frozen bytes; this step runs in pi's `prepareArguments` hook BEFORE the
  * harness validates against those same bytes, so every genuinely
  * non-conforming form is still refused with the frozen schema's own
- * vocabulary, and the registry's admission gate re-parses the canonical form
- * unchanged. One schema, one contract — the canonicalization adds a
- * deterministic transport parse, not a second schema.
+ * vocabulary; `admitIssuedEmissionArguments` runs it again before the
+ * registry's parse gate (a no-op on an already-canonical form), so the engine
+ * selection and the execute shell admit through one function. One schema, one
+ * contract — the canonicalization adds a deterministic transport parse, not a
+ * second schema.
  *
  * Pure, total, and idempotent: unknown schema shapes and unmatched arguments
  * pass through verbatim; unchanged subtrees return the original reference;
@@ -507,6 +509,18 @@ export type EmissionBindingRefusalCode =
 export type EmissionBindingRefusal = Readonly<{ code: EmissionBindingRefusalCode; message: string }>;
 
 /**
+ * The nominal brand only `issueEmissionBinding` can apply. A class-private
+ * name is excluded from object-spread types and cannot be written by an object
+ * literal, so neither a hand-built record nor `{ ...minted, schemaDigest }`
+ * type-checks as a binding: forging one needs an explicit cast. Type-only — no
+ * class exists at runtime, and a minted binding stays a frozen null-prototype
+ * record that serializes and compares exactly as before.
+ */
+declare class IssuedEmissionBindingMint {
+  #minted: true;
+}
+
+/**
  * The parsed issued binding: ONE cell of the frozen registry selected by
  * authenticated issuance, carried as a valid-pair record rather than
  * independent string fields that allow unsupported combinations — a minted
@@ -514,7 +528,8 @@ export type EmissionBindingRefusal = Readonly<{ code: EmissionBindingRefusalCode
  * tool name is the registry's exact tool name, and its schema digest is
  * derived from the frozen bytes, never trusted from the claims. The request
  * identity is the issued request attempt the binding holds the emission
- * observations to (FR-014).
+ * observations to (FR-014). Nominal: the mint is the only producer, so every
+ * consumer holds a registry-certified cell by type, not by re-verification.
  */
 export type IssuedEmissionBinding = Readonly<{
   requestId: RequestId;
@@ -522,7 +537,7 @@ export type IssuedEmissionBinding = Readonly<{
   version: EmissionSchemaVersion;
   toolName: EmissionToolName;
   schemaDigest: ArtifactDigest;
-}>;
+}> & IssuedEmissionBindingMint;
 
 /**
  * The path-refined binding view. `selectCanonicalPayload` takes the
@@ -611,11 +626,12 @@ export function issueEmissionBinding<K extends PayloadProducerKindName>(
     }
   }
   // The vocabulary parse above proves claimedVersion is a registry-carried
-  // version, the definedness check proves the kind selects a cell, and the K
-  // constraint (K extends PayloadProducerKindName) proves the kind member —
-  // this is the one justified construction cast at the ONE minting point, so
-  // every minted binding is a valid-pair record by construction and no
-  // consumer ever re-narrows.
+  // version, the definedness check proves the kind selects a cell, the K
+  // constraint (K extends PayloadProducerKindName) proves the kind member, and
+  // the tool name and digest are the cell's own — this is the one justified
+  // construction cast at the ONE minting point (it also applies the nominal
+  // brand), so every minted binding is a certified valid-pair record by
+  // construction and no consumer ever re-narrows or re-verifies.
   return success(canonicalRecord({
     requestId: requestId.value,
     kind: Object.freeze({ kind: issued.kind }),
@@ -623,6 +639,32 @@ export function issueEmissionBinding<K extends PayloadProducerKindName>(
     toolName: spec.toolName,
     schemaDigest,
   }) as IssuedEmissionBindingOf<K>);
+}
+
+/**
+ * The ONE admission of untrusted emission arguments under an issued binding,
+ * shared by both shells that admit them — the Pi execute shell
+ * (`acknowledgeEmissionExecution`) and the engine's selection over the
+ * observed transcript (`emission-ingestion`) — so "the same admission" is one
+ * function rather than two call sequences kept equal by convention.
+ *
+ * The schema-driven wire-form canonicalization runs first (the transport
+ * parse of `canonicalizeEmissionWireArguments` over the cell's frozen
+ * parameters; idempotent, so arguments Pi's `prepareArguments` already
+ * canonicalized pass through unchanged), then the registry cell's parse gate.
+ * The binding is nominal, so its cell is registry-certified by type; the
+ * lookup miss below is unreachable for a minted binding and refuses through
+ * the admission's own `unsupported-schema-version` vocabulary.
+ */
+export function admitIssuedEmissionArguments(
+  binding: IssuedEmissionBinding,
+  rawArgs: unknown,
+): EmissionArgumentAdmission {
+  const spec: EmissionToolSpec = EMISSION_TOOL_SPECS[binding.kind.kind];
+  const schemaVersion = spec.schemaVersions[binding.version];
+  if (schemaVersion === undefined) return admitEmissionArguments(spec, binding.version, rawArgs);
+  const canonical = canonicalizeEmissionWireArguments(frozenPayloadSchemaParameters(schemaVersion.schemaBytes), rawArgs);
+  return admitEmissionArguments(spec, binding.version, canonical);
 }
 
 /**

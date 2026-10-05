@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseSpecCheckOutput } from "../../../src/core/spec-check";
-import {
-  SPEC_CHECK_RETRY_TAIL,
-  WAVE_RETRY_PREAMBLE,
-  specCheckRetryDiagnostic,
-} from "../../../src/handlers/helpers/programs/wave-gate";
+import { SPEC_CHECK_RETRY_TAIL, WAVE_RETRY_PREAMBLE, specCheckRetryDiagnostic } from "../../../src/core/reviewer-retry";
 
 describe("specCheckRetryDiagnostic", () => {
   it("names the exact attempt-1 complaint and the footer order the parser reads", () => {

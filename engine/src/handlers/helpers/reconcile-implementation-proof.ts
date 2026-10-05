@@ -25,7 +25,7 @@ import {
   captureDeclaredArtifactBaselineAtRevision,
   changedDeclaredArtifactsSince,
   changedDeclaredArtifactsSinceRevision,
-} from "../../utils/artifact-baseline";
+} from "../../utils/declared-artifact-snapshot";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
 import {
   isWaveComplete,

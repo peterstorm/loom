@@ -31,7 +31,7 @@
  * `resolveReviewFindings` + `applyReviewResolution` are the SINGLE path from a
  * review transcript to a task update. Claude Code reaches them through the
  * `store-reviewer-findings` SubagentStop handler; Pi reaches them through
- * `pi/extension.ts`'s subagent-result interception. The two harnesses used to
+ * `pi/subagent-stop.ts`'s subagent-result interception. The two harnesses used to
  * re-run the same parse → reconcile → merge sequence independently, which is how
  * the review findings on one harness could drift from the other's. There is now
  * one decision function and one state transform; the harnesses supply only the
@@ -67,7 +67,7 @@ import { parseReviewPath } from "./review-packet";
 import { parseContextPacket, type ContextPacket, type LegacyContextPacket, type ReviewerContextPacketV2 } from "./context-packets";
 import { parseReviewerPayloadV2, renderReviewerPayloadDiagnostic } from "./reviewer-protocol";
 import { parseReviewerProtocolDescriptor, REVIEWER_PAYLOAD_LIMITS, type ReviewerProtocolDescriptor, type ReviewerProtocolFailure } from "./reviewer-contract";
-import { acceptedAgentResult, canonicalStructuralEquals, type AgentRequestAuthority, type DomainResult, type OrchestrationRunId, type SpawnRequest } from "./orchestration-contract";
+import { acceptedAgentResult, boundedThrownCause, canonicalStructuralEquals, type AgentRequestAuthority, type DomainResult, type OrchestrationRunId, type SpawnRequest } from "./orchestration-contract";
 import { readWaveReviewContext } from "./wave-review-authority";
 import { readExactDataRecord } from "./orchestration-contract/bytes";
 import { isStandaloneReviewAgent } from "./model-profiles";
@@ -110,6 +110,24 @@ function protocolFailure(code: ReviewerProtocolFailure["code"], path: string, me
     safe += rendered;
   }
   return Object.freeze({ ok: false, error: Object.freeze({ kind: "reviewer-protocol-failed", code, path, message: safe }) });
+}
+
+/**
+ * The fail-closed refusal for an exception thrown while inspecting reviewer
+ * authority or evidence. The fixed admission sentence is kept, and the thrown
+ * value's error CLASS is appended so a decoder regression (`TypeError`,
+ * `RangeError`) is distinguishable from a malformed input (`SyntaxError`)
+ * without re-running anything. Only the class crosses: an exception MESSAGE can
+ * quote the reviewer payload it choked on, and this diagnostic reaches the
+ * retry preamble and the operator.
+ */
+function inspectionFailure(
+  code: "authority-unavailable" | "invalid-payload",
+  sentence: string,
+  thrown: unknown,
+  subject: string,
+): DomainResult<never, ReviewerProtocolFailure> {
+  return protocolFailure(code, "/", `${sentence} (${boundedThrownCause(thrown, subject).name})`);
 }
 
 function packetReviewerSubject(packet: ContextPacket, request: AgentRequestAuthority): ReviewerSubjectBinding | null {
@@ -193,8 +211,8 @@ export function parseIssuedReviewerProtocol(input: Readonly<{
     const authority = Object.freeze({ request, subject, ...version }) as IssuedReviewerProtocol;
     issuedReviewerProtocols.add(authority);
     return Object.freeze({ ok: true, value: authority });
-  } catch {
-    return protocolFailure("authority-unavailable", "/", "reviewer authority could not be inspected");
+  } catch (thrown) {
+    return inspectionFailure("authority-unavailable", "reviewer authority could not be inspected", thrown, "reviewer authority");
   }
 }
 
@@ -263,8 +281,8 @@ export function parseReviewerEvidence(authority: IssuedReviewerProtocol, rawByte
       return Object.freeze({ ok: true, value });
     }
     return parseCurrentReviewerEvidence(authority, rawBytes);
-  } catch {
-    return protocolFailure("invalid-payload", "/", "reviewer evidence could not be inspected");
+  } catch (thrown) {
+    return inspectionFailure("invalid-payload", "reviewer evidence could not be inspected", thrown, "reviewer evidence");
   }
 }
 

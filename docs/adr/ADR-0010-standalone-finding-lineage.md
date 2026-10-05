@@ -144,6 +144,17 @@ which alone can admit the next source. The old `standalone-review-machine.ts`,
 named entry surfaces for actual callers, not three independent implementations, driver
 adapters or per-function forwarding wrappers; they preserve consumed names/signatures
 and point only inward, and the implementation never imports its entry surfaces.
+Only the membership proof chain shares that owner. Concerns outside it are separate
+pure modules on an acyclic graph: below the core, `standalone-review-scope.ts` (scope,
+changed-path/metadata parsing, reviewer selection), `standalone-review-model.ts`
+(types and nominal brands, minted only by the core), `standalone-finding-origin.ts`,
+`standalone-reviewer-capture.ts`, `standalone-transcript-admission.ts`,
+`standalone-review-records.ts` (wire forms, result artifact, summary),
+`standalone-refutation-panel.ts` and `standalone-refutation-completion.ts`; above it,
+`standalone-review-preparation.ts` (which admits a successor only through the core's
+read-only `isPreparedStandaloneSuccessor` predicate) and `standalone-review-checkpoint.ts`.
+No module exports a membership registrar. Moved symbols are imported from their owners,
+not re-exported through the entry surfaces.
 The disposition reducer owns only its no-agent publication. Shell shared computation
 is extracted **downward** into three named lower owners — `program-result.ts`
 (dependency-free ProgramParse/FacadeDriveResult vocabulary), `standalone-evidence.ts`

@@ -23,10 +23,9 @@ import {
   type TaskExecutionSpawn,
   type ValidateTaskExecutionInput,
 } from "../core/validate-task-execution";
-import {
-  captureDeclaredArtifactBaseline,
-  captureRepositoryChangeBaseline,
-} from "../utils/artifact-baseline";
+import type { DeclaredArtifactBaseline } from "../core/artifact-baseline";
+import { captureDeclaredArtifactBaseline } from "../utils/declared-artifact-snapshot";
+import { captureRepositoryChangeBaseline } from "../utils/repository-change-baseline";
 import { repositoryContext } from "../utils/git";
 import { anyActiveSubagent } from "../machine";
 
@@ -122,7 +121,7 @@ export async function registerTaskExecutionBatch(
   const baselines = new Map<string, Readonly<{
     proof: ReturnType<typeof captureDeclaredArtifactBaseline>;
     attempt: ReturnType<typeof captureDeclaredArtifactBaseline>;
-    repositoryAttempt: ReturnType<typeof captureRepositoryChangeBaseline>;
+    repositoryAttempt: readonly DeclaredArtifactBaseline[];
     repositoryObservation: ReturnType<typeof captureRepositoryChangeBaseline>;
   }>>();
   let repositoryAttempt: ReturnType<typeof captureRepositoryChangeBaseline>;

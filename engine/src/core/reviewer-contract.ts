@@ -1,6 +1,7 @@
 /** Reviewer wire definitions only: no issuance, Findings behavior, or shell authority. */
 import { z } from "zod/v4";
-import { parseReviewPath, sha256Hex } from "./review-packet";
+import { parseReviewPath } from "./review-packet";
+import { sha256Hex } from "./digest";
 import { readExactDataRecord } from "./orchestration-contract/bytes";
 import { canonicalRecord, failure, success, type ArtifactDigest, type DomainResult } from "./orchestration-contract/identity";
 

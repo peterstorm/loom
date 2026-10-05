@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { lowerModelProfile, resolveModelProfile } from "../../src/core/model-profiles";
 import { parseAgentRequestAuthority, parseStoredAgentRequestAuthority } from "../../src/core/orchestration-contract";
-import { prepareFreshStandaloneReview, parseStandaloneReviewAuthority, serializeStandaloneReviewAuthority } from "../../src/core/standalone-review";
+import { prepareFreshStandaloneReview, parseStandaloneReviewAuthority } from "../../src/core/standalone-review-preparation";
+import { serializeStandaloneReviewAuthority } from "../../src/core/standalone-review-records";
 
 const local = resolveModelProfile("qualified-local-review");
 if (!local.ok) throw new Error(local.error.message);

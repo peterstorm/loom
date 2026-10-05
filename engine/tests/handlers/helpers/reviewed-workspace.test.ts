@@ -4,12 +4,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { spawnSync } from "node:child_process";
 import { observeReviewedWorkspace } from "../../../src/handlers/helpers/reviewed-workspace";
-import {
-  parseWaveFrozenSource,
-  reviewedWorkspaceHeadSha,
-  reviewedWorkspaceObservation,
-  waveFrozenSource,
-} from "../../../src/core/reviewed-workspace";
+import { parseWaveFrozenSource, waveFrozenSource } from "../../../src/core/wave-frozen-source";
+import { observedWorkspace } from "../../fixtures/reviewed-workspace";
 import { taskFixture } from "../../fixtures/task-lifecycle";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 
@@ -50,7 +46,7 @@ describe("reviewed workspace shell observation", () => {
     expect(observed!.scope).toEqual([
       "src/binary.bin", "src/deleted.ts", "src/tracked.ts", "src/untracked.ts",
     ]);
-    expect(observed!.headSha).toBe(reviewedWorkspaceHeadSha(observed!.scope, observed!.artifacts));
+    expect(observed!.headSha).toBe(observedWorkspace("T1", observed!.scope, observed!.artifacts).headSha);
 
     const source = waveFrozenSource(observed!);
     expect(parseWaveFrozenSource(source)).toEqual({ ok: true, value: source });
@@ -64,7 +60,7 @@ describe("reviewed workspace shell observation", () => {
 
   it("property: every byte sequence round-trips through the versioned source representation", () => {
     fc.assert(fc.property(fc.uint8Array({ maxLength: 4096 }), (bytes) => {
-      const snapshot = reviewedWorkspaceObservation("T1", ["artifact"], [{ path: "artifact", bytes }]);
+      const snapshot = observedWorkspace("T1", ["artifact"], [{ path: "artifact", bytes }]);
       const source = waveFrozenSource(snapshot);
       const parsed = parseWaveFrozenSource(JSON.parse(JSON.stringify(source)));
       expect(parsed).toEqual({ ok: true, value: source });

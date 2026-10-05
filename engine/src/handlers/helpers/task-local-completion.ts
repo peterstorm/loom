@@ -17,10 +17,8 @@ import {
   type TaskLocalByteObservation,
 } from "../../core/implementation-application";
 import type { ImplementationAttemptAuthority } from "../../core/implementation-completion";
-import {
-  captureDeclaredArtifactBaseline,
-  changedRepositoryArtifactsSince,
-} from "../../utils/artifact-baseline";
+import { captureDeclaredArtifactBaseline } from "../../utils/declared-artifact-snapshot";
+import { changedRepositoryArtifactsSince } from "../../utils/repository-change-baseline";
 import { canonicalRepositoryPaths, partitionWriteEvidence } from "../../utils/repository-path";
 import type {
   NewTestWaiverReason,

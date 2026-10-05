@@ -6,6 +6,7 @@ import { extractTestEvidence } from "../engine/src/core/test-evidence";
 import { boundedThrownCause, describeUnknown } from "../engine/src/core/orchestration-contract/identity";
 import type { IssuedEmissionBinding } from "../engine/src/core/emission-tool";
 import type { EmissionCallFrame } from "../engine/src/core/harness-capture";
+import { isRecord } from "../engine/src/core/plain-record";
 import { emissionToolFamily } from "./emission-tool";
 
 const TOOL_NAME_MAP: Readonly<Record<string, string>> = Object.freeze({
@@ -28,21 +29,30 @@ export type PiContentBlock =
     }>
   | Readonly<{ type: "opaque"; originalType: string }>;
 
-export interface PiMessage {
-  readonly role: string;
-  readonly content: readonly PiContentBlock[];
-  readonly toolCallId?: string;
-  readonly toolName?: string;
-  readonly isError?: boolean;
-}
+/**
+ * One parsed Pi message, discriminated by role. Only a tool result carries
+ * tool identity, and it always carries all of it: a `toolResult` without its
+ * `toolCallId`/`toolName` is unrepresentable, so no consumer re-checks it.
+ * `isError` is a plain boolean — an absent harness flag means "not an error",
+ * the one reading every consumer applied. Roles no consumer interprets
+ * (custom harness entries, summaries) keep their spelling in `originalRole`
+ * under the single `other` arm instead of widening `role` to `string`.
+ */
+export type PiMessage =
+  | Readonly<{ role: "user"; content: readonly PiContentBlock[] }>
+  | Readonly<{ role: "assistant"; content: readonly PiContentBlock[] }>
+  | Readonly<{
+      role: "toolResult";
+      content: readonly PiContentBlock[];
+      toolCallId: string;
+      toolName: string;
+      isError: boolean;
+    }>
+  | Readonly<{ role: "other"; originalRole: string; content: readonly PiContentBlock[] }>;
 
 export type PiTranscriptResult<T> =
   | Readonly<{ ok: true; value: T }>
   | Readonly<{ ok: false; errors: readonly string[] }>;
-
-function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function parsePiContentBlock(
   block: unknown,
@@ -120,7 +130,12 @@ function classifyMessageContent(
   return { kind: "invalid" };
 }
 
-function parseToolFields(message: Readonly<Record<string, unknown>>, messageLabel: string, errors: string[]): Pick<PiMessage, "toolCallId" | "toolName" | "isError"> {
+type PiToolFields = Readonly<{ toolCallId: string | null; toolName: string | null; isError: boolean }>;
+
+/** Tool identity is validated on every role (a present-but-empty field is
+ * malformed wherever it appears) and required on `toolResult`; only the
+ * tool-result arm of `PiMessage` keeps it. */
+function parseToolFields(message: Readonly<Record<string, unknown>>, messageLabel: string, errors: string[]): PiToolFields {
   const toolCallId = typeof message.toolCallId === "string" && message.toolCallId.trim() !== "" ? message.toolCallId : null;
   const toolName = typeof message.toolName === "string" && message.toolName.trim() !== "" ? message.toolName : null;
   if (message.toolCallId !== undefined && toolCallId === null) {
@@ -136,11 +151,23 @@ function parseToolFields(message: Readonly<Record<string, unknown>>, messageLabe
   if (message.isError !== undefined && typeof message.isError !== "boolean") {
     errors.push(`${messageLabel}.isError must be a boolean when present`);
   }
-  return Object.freeze({
-    ...(toolCallId === null ? {} : { toolCallId }),
-    ...(toolName === null ? {} : { toolName }),
-    ...(typeof message.isError === "boolean" ? { isError: message.isError } : {}),
-  });
+  return Object.freeze({ toolCallId, toolName, isError: message.isError === true });
+}
+
+/** The role arm for an already-validated message; `null` only for a tool
+ * result whose missing identity `parseToolFields` has already reported. */
+function piMessageOf(role: string, content: readonly PiContentBlock[], tool: PiToolFields): PiMessage | null {
+  switch (role) {
+    case "user":
+    case "assistant":
+      return Object.freeze({ role, content });
+    case "toolResult":
+      return tool.toolCallId === null || tool.toolName === null
+        ? null
+        : Object.freeze({ role, content, toolCallId: tool.toolCallId, toolName: tool.toolName, isError: tool.isError });
+    default:
+      return Object.freeze({ role: "other" as const, originalRole: role, content });
+  }
 }
 
 /** Parse the untrusted harness payload once so every consumer receives fresh,
@@ -174,14 +201,51 @@ export function parsePiMessages(messages: unknown): PiTranscriptResult<readonly 
     }
 
     const toolFields = parseToolFields(message, messageLabel, errors);
-
-    if (role !== null && errors.length === blockErrorsBefore) {
-      parsedMessages.push(Object.freeze({ role, content: Object.freeze(content), ...toolFields }));
-    }
+    const parsed = role !== null && errors.length === blockErrorsBefore
+      ? piMessageOf(role, Object.freeze(content), toolFields)
+      : null;
+    if (parsed !== null) parsedMessages.push(parsed);
   });
   return errors.length > 0
     ? { ok: false, errors: Object.freeze(errors) }
     : { ok: true, value: Object.freeze(parsedMessages) };
+}
+
+/**
+ * The tool-call argument keys that may name a write target, in probe order.
+ * Both harnesses spell the same target three ways; ONE ordered vocabulary here
+ * keeps the transcript scanner (`writtenPathsOf`) and the extension's write
+ * guard (`piWriteTargetPaths`/`writeTarget`) from drifting apart.
+ */
+export const WRITE_TARGET_KEYS: readonly string[] = ["path", "file_path", "filePath"];
+
+/**
+ * The first NON-NULLISH value among `WRITE_TARGET_KEYS` as a non-empty string,
+ * or `null` when no key proves one. The `??=`-assignment defers only nullish
+ * values (`undefined`/`null`) to a later key; the first non-nullish value WINS
+ * the probe, and a winner that is not a non-empty string fails the string test
+ * — it does not defer to a later key either.
+ */
+export function writeTargetPathOf(args: unknown): string | null {
+  if (typeof args !== "object" || args === null) return null;
+  const record = args as Record<string, unknown>;
+  let value: unknown;
+  for (const key of WRITE_TARGET_KEYS) value ??= record[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/** Every path a transcript's `write`/`Write` tool calls targeted, in order. */
+export function writtenPathsOf(messages: readonly PiMessage[]): readonly string[] {
+  const paths: string[] = [];
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    for (const block of message.content) {
+      if (block.type !== "toolCall" || (block.name !== "write" && block.name !== "Write")) continue;
+      const path = writeTargetPathOf(block.arguments);
+      if (path !== null) paths.push(path);
+    }
+  }
+  return Object.freeze(paths);
 }
 
 /** An explicit zero-failure marker from the common runner summaries. The
@@ -317,11 +381,11 @@ function* structuredTestPairs(messages: readonly PiMessage[]): Generator<TestPai
       }
       continue;
     }
-    if (message.role !== "toolResult" || !message.toolCallId) continue;
+    if (message.role !== "toolResult") continue;
     const entry = testCalls.get(message.toolCallId);
     if (entry === undefined) continue;
     const attributed = attributeExitForStructuredEvidence(
-      message.isError === true ? 1 : 0,
+      message.isError ? 1 : 0,
       entry.classified,
       entry.command,
     );
@@ -446,7 +510,6 @@ export function messagesToClaudeJsonl(input: unknown): PiTranscriptResult<string
     }
 
     if (msg.role === "toolResult") {
-      if (!msg.toolCallId) throw new Error("validated Pi tool result lost its call identity");
       const resultContent = normalizedTextBlocks(msg.content);
       lines.push(JSON.stringify({
         message: {

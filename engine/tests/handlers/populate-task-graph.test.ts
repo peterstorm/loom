@@ -13,7 +13,7 @@ import { execFileSync } from "node:child_process";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import populate, { resolvedSpecFile } from "../../src/handlers/helpers/populate-task-graph";
 import type { Task, TaskGraph } from "../../src/types";
-import { deriveWaveCompletionSuiteReadiness } from "../../src/core/wave-gate-machine";
+import { deriveWaveCompletionSuiteReadiness } from "../../src/core/wave-completion-suite-readiness";
 import { StateManager } from "../../src/state-manager";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import {

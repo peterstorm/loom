@@ -2,25 +2,41 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { valueOf, standaloneFixture, publishBatch, upholdStandaloneCriticals } from "../fixtures/standalone-remediation-authority";
 import { dispositionPublicationFixture } from "../fixtures/standalone-disposition-publication";
-import { prepareStandaloneLineageSource, prepareStandaloneSuccessor, prepareStandaloneDisposition,
-  standaloneOriginReference, standaloneDecisionReference, type PreparedStandaloneSuccessor } from "../../src/core/standalone-lineage";
+import { prepareStandaloneLineageSource, prepareStandaloneSuccessor, prepareStandaloneDisposition } from "../../src/core/standalone-lineage";
+import { standaloneOriginReference, standaloneDecisionReference } from "../../src/core/standalone-finding-origin";
+import { type PreparedStandaloneSuccessor } from "../../src/core/standalone-review-model";
 import { type StandaloneReviewerPayloadV3, STANDALONE_REVIEWER_PROTOCOL_V3, standaloneReviewerPayloadV3Schema } from "../../src/core/standalone-lineage-contract";
 import { buildStandaloneSuccessorReviewerContext, parseIssuedStandaloneSuccessorReviewer,
-  standaloneSuccessorReviewerRegistration, standaloneSuccessorEmissionBinding } from "../../src/core/standalone-successor-reviewer";
+  standaloneSuccessorReviewerRegistration } from "../../src/core/standalone-successor-reviewer";
 import { selectCanonicalPayload } from "../../src/core/emission-ingestion";
+import { issueEmissionBinding } from "../../src/core/emission-tool";
 import { observeEmissionCalls } from "../../src/core/harness-capture";
-import { prepareFreshStandaloneReview, parseStandaloneReviewAuthority, serializeStandaloneReviewAuthority,
-  capturedReviewerResultFromBytes, proveStandaloneRosterCompletion, aggregateStandaloneReview,
-  serializeAdjudicatedStandaloneReview, serializeStandaloneAggregate, parseStandaloneAggregate,
-  type StandaloneReviewerProtocolResolver, type StandaloneReviewState } from "../../src/core/standalone-review";
-import { startStandaloneReviewMachine, reduceStandaloneReviewMachine, serializeStandaloneReviewMachineState,
-  parseAuthoritativeStandaloneReviewResult, parseStandaloneReviewMachineState, readStandaloneReviewPublication, isAuthoritativeStandaloneReviewResult,
-  type AuthoritativeStandaloneReviewResult, type StandaloneReviewMachineState, type StandaloneReadyToFinalizeState } from "../../src/core/standalone-review-machine";
+import { prepareFreshStandaloneReview, parseStandaloneReviewAuthority } from "../../src/core/standalone-review-preparation";
+import { serializeStandaloneReviewAuthority, serializeAdjudicatedStandaloneReview, serializeStandaloneAggregate } from "../../src/core/standalone-review-records";
+import { capturedReviewerResultFromBytes } from "../../src/core/standalone-reviewer-capture";
+import {
+  proveStandaloneRosterCompletion,
+  aggregateStandaloneReview,
+  parseStandaloneAggregate,
+  type StandaloneReviewerProtocolResolver,
+} from "../../src/core/standalone-review";
+import { type StandaloneReviewState } from "../../src/core/standalone-review-model";
+import {
+  startStandaloneReviewMachine,
+  reduceStandaloneReviewMachine,
+  parseAuthoritativeStandaloneReviewResult,
+  readStandaloneReviewPublication,
+  isAuthoritativeStandaloneReviewResult,
+  type AuthoritativeStandaloneReviewResult,
+  type StandaloneReviewMachineState,
+  type StandaloneReadyToFinalizeState,
+} from "../../src/core/standalone-review-machine";
+import { serializeStandaloneReviewMachineState, parseStandaloneReviewMachineState } from "../../src/core/standalone-review-checkpoint";
 import { acceptedAgentResult, createPublicationAuthorityResolver, parseArtifactRef, parseRequestId,
   parseOrchestrationRunId, parseIssuedSpawnRequest, prepareInitialBatchPublicationIntent,
   type PublicationAuthorityResolver } from "../../src/core/orchestration-contract";
 import { resolveAgentPolicy } from "../../src/core/model-profiles";
-import { sha256Bytes, sha256Hex } from "../../src/core/review-packet";
+import { sha256Bytes, sha256Hex } from "../../src/core/digest";
 import { prepareDefectFamilyAccounting } from "../../src/core/defect-family-accounting";
 import { freezePathAuthority, parseRemediationPathAuthority, createStandaloneResultPublicationAuthorityResolver } from "../../src/core/remediation-machine";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
@@ -357,9 +373,10 @@ describe("actual LC-2 standalone v3 publication and lineage", () => {
 // reaches the lifecycle joins as arguments.
 // ---------------------------------------------------------------------------
 
-/** The successor's issued emission binding for a fixture request. */
+/** The successor's issued emission binding for a fixture request: the ONE
+ *  registry mint over the frozen v3 descriptor's certified digest. */
 const successorEmissionBinding = (requestId: string) => {
-  const minted = standaloneSuccessorEmissionBinding({ requestId, protocolDescriptor: STANDALONE_REVIEWER_PROTOCOL_V3 });
+  const minted = issueEmissionBinding({ requestId, kind: "reviewer-payload", version: "v3", schemaDigest: STANDALONE_REVIEWER_PROTOCOL_V3.schemaDigest });
   if (!minted.ok) throw new Error(`fixture successor emission binding refused: ${minted.error.message}`);
   return minted.value;
 };

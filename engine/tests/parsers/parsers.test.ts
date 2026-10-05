@@ -185,7 +185,7 @@ describe("parseFilesModified", () => {
 
   // Pi transcripts embed tool calls as { type: "toolCall", name, arguments }
   // inside assistant messages, keyed by `path` (or `file_path`). This branch
-  // is live production code (pi/extension.ts threads it) and format-shape
+  // is live production code (pi/subagent-result.ts threads it) and format-shape
   // regressions here would ship silently.
   it("extracts pi toolCall write paths via `path` (explicit format)", () => {
     const content =

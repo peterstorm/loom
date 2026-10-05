@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  classifyScope,
-  parseRegisteredFacadeProgram,
-} from "../../../src/handlers/helpers/programs/helpers";
+import { classifyScope } from "../../../src/core/scope-classification";
+import { parseRegisteredFacadeProgram } from "../../../src/handlers/helpers/programs/registration";
 
 const classify = (scope: readonly string[], created: readonly string[] = []) =>
   classifyScope("all", scope, new Set(created), 0);

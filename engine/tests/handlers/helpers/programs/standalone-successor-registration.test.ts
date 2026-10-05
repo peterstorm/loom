@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { parseStandaloneSuccessorStartInput, parseStandaloneSuccessorRegistration } from "../../../../src/handlers/helpers/programs/standalone-successor-registration";
-import { parseStandaloneStartInput, parseRegisteredFacadeProgram } from "../../../../src/handlers/helpers/programs/helpers";
+import { parseStandaloneStartInput, parseRegisteredFacadeProgram } from "../../../../src/handlers/helpers/programs/registration";
 import { encodeByteSection } from "../../../../src/core/context-packets";
 import { STANDALONE_REVIEWER_PROTOCOL_V3 } from "../../../../src/core/standalone-lineage-contract";
 import { CURRENT_REVIEWER_PROTOCOL } from "../../../../src/core/reviewer-contract";

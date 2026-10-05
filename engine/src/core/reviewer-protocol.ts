@@ -19,19 +19,32 @@ const rejected = (
   ...(byteOffset === undefined ? {} : { byteOffset }),
 }));
 
-/** Only a resource precheck, not another JSON grammar. Local state never escapes. */
-function excessiveDepthOffset(text: string): number | null {
-  let depth = 0;
+/**
+ * The characters of `text` that lie OUTSIDE JSON string literals, with their
+ * indices. The one place the quote/escape rules live: both scans below consume
+ * it, so the depth precheck and candidate extraction cannot disagree about
+ * what is inside a string. A quote that opens or closes a string is itself
+ * string syntax and is never yielded. Local state never escapes.
+ */
+function* structuralCharacters(text: string): Generator<readonly [index: number, char: string]> {
   let quoted = false;
   let escaped = false;
   for (let index = 0; index < text.length; index++) {
-    const char = text[index];
+    const char = text.charAt(index);
     if (quoted) {
       if (escaped) escaped = false;
       else if (char === "\\") escaped = true;
       else if (char === '"') quoted = false;
     } else if (char === '"') quoted = true;
-    else if (char === "{" || char === "[") {
+    else yield [index, char];
+  }
+}
+
+/** Only a resource precheck, not another JSON grammar. Local state never escapes. */
+function excessiveDepthOffset(text: string): number | null {
+  let depth = 0;
+  for (const [index, char] of structuralCharacters(text)) {
+    if (char === "{" || char === "[") {
       depth++;
       if (depth > REVIEWER_PAYLOAD_LIMITS.depth) return index;
     } else if (char === "}" || char === "]") depth--;
@@ -59,18 +72,8 @@ function excessiveDepthOffset(text: string): number | null {
 function extractStrictObject(text: string): { value: unknown; text: string } | null {
   const spans: Array<[number, number]> = [];
   let depth = 0;
-  let quoted = false;
-  let escaped = false;
   let objectStart = -1;
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index];
-    if (quoted) {
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === '"') quoted = false;
-      continue;
-    }
-    if (char === '"') { quoted = true; continue; }
+  for (const [index, char] of structuralCharacters(text)) {
     if (char === "{") {
       if (objectStart === -1) objectStart = index;
       depth += 1;

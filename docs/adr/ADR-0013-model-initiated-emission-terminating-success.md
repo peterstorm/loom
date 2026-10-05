@@ -72,9 +72,11 @@ Concrete shape:
   `REVIEWER_EMISSION_TOOL_CONTRACT_TEMPLATE` in `engine/src/core/reviewer-protocol.ts`
   carries the matching tool-primary wording for reviewers.
 - **The acknowledgment decision is pure and in the core.**
-  `acknowledgeEmissionExecution(spec, version, args)` in
-  `engine/src/core/harness-capture.ts` admits the arguments through the same registry
-  admission gate (`admitEmissionArguments`) that engine selection runs again later.
+  `acknowledgeEmissionExecution(binding, args)` in
+  `engine/src/core/harness-capture.ts` admits the arguments under the issued binding
+  through `admitIssuedEmissionArguments` (`engine/src/core/emission-tool.ts`): the
+  same function engine selection runs again later over the observed call, so the two
+  shells share one admission rather than two call sequences kept equal by convention.
   It returns a closed `EmissionExecutionOutcome`:
   - `acknowledged`: an `EmissionToolAcknowledgment` whose content is exactly one text
     block, `"payload acknowledged"`, with empty `details` and `terminate: true`. The

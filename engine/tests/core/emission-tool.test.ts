@@ -6,9 +6,11 @@ import {
 } from "../../src/core/harness-capture";
 import {
   admitEmissionArguments,
+  admitIssuedEmissionArguments,
   canonicalizeEmissionWireArguments,
   EMISSION_TOOL_SPECS,
   frozenPayloadSchemaParameters,
+  issueEmissionBinding,
   notProvidedEmissionCapability,
   providedEmissionCapability,
   type EmissionArgumentAdmission,
@@ -21,6 +23,13 @@ import { judgeVerdictV1Schema } from "../../src/core/panel-contract";
 import { parseReviewerPayloadV2, parseStandaloneReviewerPayloadV3 } from "../../src/core/reviewer-protocol";
 import { standaloneReviewerPayloadV3Schema } from "../../src/core/standalone-lineage-contract";
 import { canonicalStructuralEquals, type ArtifactDigest } from "../../src/core/orchestration-contract/identity";
+
+/** A binding for one registry cell, through the ONE mint. */
+function mintedBinding<K extends PayloadProducerKindName>(kind: K, version: EmissionSchemaVersion) {
+  const minted = issueEmissionBinding({ requestId: "request:emission-tool", kind, version });
+  if (!minted.ok) throw new Error(`fixture binding refused: ${minted.error.code} — ${minted.error.message}`);
+  return minted.value;
+}
 
 /** Non-empty prose matching the frozen verdict schemas' min(1) constraints. */
 const proseArb = fc.stringMatching(/^[a-z0-9][a-z0-9 .,;:\-]{0,60}$/);
@@ -367,13 +376,14 @@ describe("whitespace-only schema-vs-parser disagreement (AD-5, engine half)", ()
 
 describe("acknowledgeEmissionExecution — the FR-013 execute-shell decision", () => {
   const JUDGE_SPEC = EMISSION_TOOL_SPECS["judge-verdict"];
+  const JUDGE_BINDING = mintedBinding("judge-verdict", "v1");
   const validJudgeArgs = {
     criterion: "extensibility",
     rankings: [{ candidate: "candidate-type-driven-fp.md", score: 8, fatal_flaw: null, strongest_idea: "the frozen registry" }],
   };
 
   it("acknowledges valid arguments with the minimal terminating result — never echoing the payload", () => {
-    const outcome = acknowledgeEmissionExecution(JUDGE_SPEC, "v1", validJudgeArgs);
+    const outcome = acknowledgeEmissionExecution(JUDGE_BINDING, validJudgeArgs);
     expect(outcome.kind).toBe("acknowledged");
     if (outcome.kind === "acknowledged") {
       expect(outcome.acknowledgment.terminate).toBe(true);
@@ -387,25 +397,26 @@ describe("acknowledgeEmissionExecution — the FR-013 execute-shell decision", (
   });
 
   it("carries the refusal the shell must THROW — the admission's own code and message, never a shell-invented string", () => {
-    for (const [version, args] of [
-      ["v1", { criterion: "extensibility", rankings: [{ candidate: "candidate-x.md", score: 11, fatal_flaw: null, strongest_idea: "out of domain" }] }],
-      ["v2", validJudgeArgs],
-    ] as const) {
-      const outcome = acknowledgeEmissionExecution(JUDGE_SPEC, version as EmissionSchemaVersion, args);
-      expect(outcome.kind).toBe("refused");
-      if (outcome.kind === "refused") {
-        const direct = admitEmissionArguments(JUDGE_SPEC, version as EmissionSchemaVersion, args);
-        expect(direct.kind).toBe("refused");
-        if (direct.kind === "refused") {
-          expect(outcome.code).toBe(direct.code);
-          expect(outcome.message).toBe(direct.message);
-        }
-      }
+    const args = { criterion: "extensibility", rankings: [{ candidate: "candidate-x.md", score: 11, fatal_flaw: null, strongest_idea: "out of domain" }] };
+    const outcome = acknowledgeEmissionExecution(JUDGE_BINDING, args);
+    const direct = admitEmissionArguments(JUDGE_SPEC, "v1", args);
+    expect(outcome.kind).toBe("refused");
+    expect(direct.kind).toBe("refused");
+    if (outcome.kind === "refused" && direct.kind === "refused") {
+      expect(outcome.code).toBe(direct.code);
+      expect(outcome.message).toBe(direct.message);
     }
   });
 
+  it("cannot be asked to admit under a version its tool does not carry — the mint refuses the cell before any shell exists", () => {
+    // The unsupported (kind, version) degradation is refused at issuance: no
+    // binding exists for it, so the execute shell never sees one.
+    expect(issueEmissionBinding({ requestId: "request:emission-tool", kind: "judge-verdict", version: "v2" }))
+      .toMatchObject({ ok: false, error: { code: "unsupported-schema-version" } });
+  });
+
   it("refuses whitespace-only prose the harness validator admits — the shell is engine-authoritative", () => {
-    const outcome = acknowledgeEmissionExecution(JUDGE_SPEC, "v1", {
+    const outcome = acknowledgeEmissionExecution(JUDGE_BINDING, {
       criterion: "extensibility",
       rankings: [{ candidate: "candidate-type-driven-fp.md", score: 8, fatal_flaw: null, strongest_idea: "   " }],
     });
@@ -413,14 +424,14 @@ describe("acknowledgeEmissionExecution — the FR-013 execute-shell decision", (
   });
 
   it("is frozen at every arm — a caller-side push cannot widen the outcome behind the shell", () => {
-    const acknowledged = acknowledgeEmissionExecution(JUDGE_SPEC, "v1", validJudgeArgs);
+    const acknowledged = acknowledgeEmissionExecution(JUDGE_BINDING, validJudgeArgs);
     expect(Object.isFrozen(acknowledged)).toBe(true);
     if (acknowledged.kind === "acknowledged") {
       expect(Object.isFrozen(acknowledged.acknowledgment)).toBe(true);
       expect(Object.isFrozen(acknowledged.acknowledgment.content)).toBe(true);
       expect(Object.isFrozen(acknowledged.acknowledgment.content[0])).toBe(true);
     }
-    const refused = acknowledgeEmissionExecution(JUDGE_SPEC, "v1", { criterion: "x", rankings: [] });
+    const refused = acknowledgeEmissionExecution(JUDGE_BINDING, { criterion: "x", rankings: [] });
     expect(Object.isFrozen(refused)).toBe(true);
   });
 });
@@ -601,44 +612,43 @@ describe("canonicalizeEmissionWireArguments — the emission edge's wire-form ca
 });
 
 // ---------------------------------------------------------------------------
-// The shell/canonicalization boundary — the wire-form parse happens BEFORE pi
-// validates (the tool definition's prepareArguments), never inside the shell's
-// admission
+// The ONE admission — the execute shell and the engine's selection admit
+// untrusted arguments through the same function, so they cannot disagree
 // ---------------------------------------------------------------------------
 
-describe("the shell never canonicalizes — the wire-form parse happens before pi validates", () => {
-  it("refuses the recorded string-typed wire form at the shell, and the canonicalized form acknowledges — the canonicalization belongs to prepareArguments, never to the shell's admission", () => {
-    const v2Spec = EMISSION_TOOL_SPECS["reviewer-payload"];
+describe("the execute shell and the engine selection share ONE admission", () => {
+  it("decides the recorded string-typed wire form and its canonical form identically in the shell and the selection", () => {
+    const binding = mintedBinding("reviewer-payload", "v2");
     // The recorded transport class the unconstrained route produces: a
     // string-typed schemaVersion and the findings array serialized as one
-    // JSON string — exactly what the transcript observes. The production
-    // definition canonicalizes this in prepareArguments BEFORE pi validates
-    // (pinned through the real loop in engine/tests/pi/emission-tool.test.ts);
-    // this pin holds the boundary itself: the shell's admission is
-    // engine-authoritative over what it receives, so a caller that skips the
-    // prepareArguments layer cannot smuggle a wire form past the same
-    // admission the engine's selection later re-runs.
+    // JSON string — exactly what the transcript observes. Pi's
+    // prepareArguments canonicalizes it before pi validates; the shell's
+    // admission canonicalizes again (idempotently), exactly as the engine's
+    // selection does over the observed call, so whichever surface sees the
+    // wire form, the decision is the same.
     const wire = {
       schemaVersion: "2",
       kind: "standalone-review",
       findings: JSON.stringify([{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim: "real claim" }]),
     };
-    expect(acknowledgeEmissionExecution(v2Spec, "v2", wire).kind).toBe("refused");
-
-    // The canonical form the prepareArguments layer produces admits, and the
-    // shell acknowledges it with the minimal terminating result.
     const canonical = canonicalizeEmissionWireArguments(
-      frozenPayloadSchemaParameters(v2Spec.schemaVersions["v2"]!.schemaBytes),
+      frozenPayloadSchemaParameters(EMISSION_TOOL_SPECS["reviewer-payload"].schemaVersions["v2"]!.schemaBytes),
       wire,
     );
-    expect(acknowledgeEmissionExecution(v2Spec, "v2", canonical)).toEqual({
+    const acknowledged = {
       kind: "acknowledged",
-      acknowledgment: {
-        content: [{ type: "text", text: "payload acknowledged" }],
-        details: {},
-        terminate: true,
-      },
-    });
+      acknowledgment: { content: [{ type: "text", text: "payload acknowledged" }], details: {}, terminate: true },
+    };
+    expect(acknowledgeEmissionExecution(binding, wire)).toEqual(acknowledged);
+    expect(acknowledgeEmissionExecution(binding, canonical)).toEqual(acknowledged);
+    expect(admitIssuedEmissionArguments(binding, wire)).toEqual(admitIssuedEmissionArguments(binding, canonical));
+
+    // Canonicalization never rescues a genuinely non-conforming form: a
+    // string that no declared non-string type accepts is refused by the same
+    // frozen-bytes parse in both shells.
+    const nonConforming = { ...wire, findings: "not json" };
+    expect(acknowledgeEmissionExecution(binding, nonConforming).kind).toBe("refused");
+    expect(admitIssuedEmissionArguments(binding, nonConforming).kind).toBe("refused");
   });
 });
 

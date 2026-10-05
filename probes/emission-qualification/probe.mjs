@@ -30,6 +30,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { analyzePhase, classifyOutcome, detector, probeExitCode, streamErrors } from "./probe-analysis.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const recordingsDir = path.join(here, "recordings");
@@ -113,31 +114,6 @@ function startRecordingProxy(key) {
   });
 }
 
-/** Assemble streamed tool-call arguments from OpenAI-completions SSE chunks. */
-function assembleToolCalls(rawResponse) {
-  const calls = new Map();
-  for (const line of rawResponse.split("\n")) {
-    if (!line.startsWith("data:")) continue;
-    const payload = line.slice(5).trim();
-    if (!payload || payload === "[DONE]") continue;
-    let chunk;
-    try {
-      chunk = JSON.parse(payload);
-    } catch {
-      continue;
-    }
-    const delta = chunk.choices?.[0]?.delta;
-    for (const toolCall of delta?.tool_calls ?? []) {
-      const index = toolCall.index ?? 0;
-      const existing = calls.get(index) ?? { name: undefined, arguments: "" };
-      if (toolCall.function?.name) existing.name = toolCall.function.name;
-      if (typeof toolCall.function?.arguments === "string") existing.arguments += toolCall.function.arguments;
-      calls.set(index, existing);
-    }
-  }
-  return [...calls.values()];
-}
-
 function makeBus(stdout) {
   const events = [];
   const waiters = [];
@@ -193,10 +169,6 @@ function makeBus(stdout) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function deepEqual(a, b) {
-  return JSON.stringify(a) === JSON.stringify(b);
-}
-
 async function runPhase(bus, child, records, argsEntries, spec, instruction, label) {
   const recordStart = records.length;
   const argsStart = argsEntries.length;
@@ -227,97 +199,6 @@ async function runPhase(bus, child, records, argsEntries, spec, instruction, lab
   return { phaseRecords, phaseArgs, recordStart, argsStart, argsEnd: argsEntries.length };
 }
 
-/** Classification follows only from the observations (AD-2). Infrastructure
- *  unavailability is reported as such — never dressed in route-verdict
- *  vocabulary — and a "conformed" claim requires the emitted arguments to be
- *  schema-SHAPED (the frozen-shape skeleton), so shape garbage that merely
- *  parses as JSON cannot read as a pass. */
-function classifyOutcome(a, v, d) {
-  if (a.upstreamError !== undefined) return `INFRASTRUCTURE: upstream unreachable (${a.upstreamError}) — no route verdict recorded`;
-  if (a.promptRejected !== undefined) return `prompt rejected (${a.promptRejected}) — no route verdict recorded`;
-  if (!a.modelRequests) return "no-request-observed";
-  if (!a.accepted) return `rejected (HTTP ${a.httpStatus}) → extraction-only`;
-  if (d?.argsEmitted !== undefined && d.argsConforms === false) return "direct enforcement probe inconclusive (emitted arguments are not schema-shaped)";
-  if (d?.violationEmitted === false && d.argsEmitted !== undefined) return a.strictFlag === true
-    ? "CONSTRAINED: strict requested and the forced adversarial call still conforms — provider grammar enforces the tool schema"
-    : "provider-enforced without strict flag — native schema enforcement";
-  if (d?.violationEmitted === true) return "UNCONSTRAINED: forced adversarial call emitted the violation — provider ignores the tool schema (engine-authoritative)";
-  if (d?.parseError) return `direct enforcement probe inconclusive (${d.parseError})`;
-  if (v.rawArgs === undefined && !v.executeObserved) return a.strictFlag === true
-    ? "strict requested; no call emitted under temptation (model refused) — enforcement inconclusive"
-    : "forwarded-unchanged; no call emitted under temptation — enforcement inconclusive";
-  if (a.strictFlag === true && v.rawArgsViolation === false && v.rawArgsConforms !== false) return "strict requested; temptation conformed";
-  if (v.rawArgsConforms === false && v.rawArgsViolation === false) return "non-conforming call emitted under temptation — shape inconclusive";
-  if (a.strictFlag === true) return "strict requested; violation emitted → unconstrained (engine-authoritative)";
-  if (v.rawArgsViolation === true) return "violation emitted → unconstrained (engine-authoritative)";
-  return "violation inconclusive";
-}
-
-function analyzePhase(spec, { phaseRecords, phaseArgs, promptRejected }) {
-  const conforms = spec.conformsDetect !== undefined ? new Function(`return (${spec.conformsDetect})`)() : null;
-  const analysis = {
-    modelRequests: phaseRecords.length,
-    upstreamError: undefined,
-    promptRejected: promptRejected ?? undefined,
-    accepted: false,
-    httpStatus: undefined,
-    toolSent: false,
-    strictFlag: undefined,
-    wireParamsEqualFrozen: undefined,
-    wireParamsNote: undefined,
-    responseFormat: undefined,
-    rawArgs: undefined,
-    rawArgsParseError: undefined,
-    rawArgsConforms: undefined,
-    rawArgsViolation: undefined,
-    executeObserved: false,
-    duplicateExecute: phaseArgs.length > 1,
-  };
-  const record = phaseRecords[0];
-  if (!record) return analysis;
-  analysis.httpStatus = record.response?.status;
-  analysis.accepted = record.response?.status === 200;
-  // Infrastructure unavailability (the proxy could not reach the upstream, or
-  // no response body ever landed) is recorded AS infrastructure: the
-  // classifier reports it without route-verdict vocabulary.
-  const upstreamFailure = phaseRecords.find((r) => r.upstreamError !== undefined);
-  analysis.upstreamError = upstreamFailure?.upstreamError ??
-    (phaseRecords.some((r) => r.response === undefined)
-      ? "no response body was captured from the recording proxy"
-      : undefined);
-  const toolDef = record.request.tools?.find(
-    (t) => t.function?.name === spec.registeredToolName || t.name === spec.registeredToolName,
-  );
-  if (toolDef) {
-    analysis.toolSent = true;
-    const fn = toolDef.function ?? toolDef;
-    analysis.strictFlag = fn.strict;
-    analysis.wireToolDef = toolDef;
-    const frozen = JSON.parse(spec.schemaBytes);
-    analysis.wireParamsEqualFrozen = deepEqual(fn.parameters, frozen);
-    if (!analysis.wireParamsEqualFrozen) {
-      const wireKeys = Object.keys(fn.parameters ?? {});
-      const frozenKeys = Object.keys(frozen);
-      analysis.wireParamsNote = `wire top-level keys [${wireKeys.join(", ")}] vs frozen [${frozenKeys.join(", ")}]`;
-    }
-    analysis.responseFormat = record.request.response_format ?? undefined;
-  }
-  const raw = assembleToolCalls(record.response?.raw ?? "").find((c) => c.name === spec.registeredToolName);
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw.arguments);
-      analysis.rawArgs = parsed;
-      if (conforms !== null) analysis.rawArgsConforms = conforms(parsed) === true;
-      const detect = new Function(`return (${spec.violationDetect})`)();
-      analysis.rawArgsViolation = detect(parsed) === true;
-    } catch (error) {
-      analysis.rawArgsParseError = error.message;
-    }
-  }
-  analysis.executeObserved = phaseArgs.some((entry) => entry.tool === spec.registeredToolName);
-  return analysis;
-}
-
 /** The direct-enforcement stage: reuse the EXACT wire tool def pi serialized
  *  (strict flag included), force the tool choice, and demand the violating
  *  arguments. Model cooperation is irrelevant — the SAMPLER decides whether
@@ -339,7 +220,7 @@ async function directEnforcement(proxyPort, spec, wireToolDef, model) {
     max_tokens: 4_096,
     stream: false,
   };
-  const conforms = spec.conformsDetect !== undefined ? new Function(`return (${spec.conformsDetect})`)() : null;
+  const conforms = spec.conformsDetect !== undefined ? detector(spec.conformsDetect) : null;
   const result = { attempted: true, httpStatus: undefined, argsEmitted: undefined, parseError: undefined, violationEmitted: undefined, argsConforms: undefined };
   try {
     const res = await fetch(`http://127.0.0.1:${proxyPort}/v1/chat/completions`, {
@@ -355,8 +236,7 @@ async function directEnforcement(proxyPort, spec, wireToolDef, model) {
       try {
         result.argsEmitted = JSON.parse(argsRaw);
         if (conforms !== null) result.argsConforms = conforms(result.argsEmitted) === true;
-        const detect = new Function(`return (${spec.violationDetect})`)();
-        result.violationEmitted = detect(result.argsEmitted) === true;
+        result.violationEmitted = detector(spec.violationDetect)(result.argsEmitted) === true;
       } catch (error) {
         result.parseError = `argument parse: ${error.message}`;
       }
@@ -475,6 +355,9 @@ async function main() {
     toolReport.violation = analyzePhase(spec, phaseWindow(bounds.violation));
     toolReport.classification = classifyOutcome(toolReport.acceptance, toolReport.violation, toolReport.directEnforcement);
   }
+  // A malformed chunk in a recorded stream may have dropped an argument
+  // fragment: it is an error of the run, never a silently skipped line.
+  report.errors.push(...streamErrors(report));
 
   writeFileSync(path.join(recordingsDir, "probe-report.json"), JSON.stringify(report, null, 2));
   for (const record of records) {
@@ -487,6 +370,10 @@ async function main() {
   if (stderrText) report.stderr = stderrText.slice(0, 800);
 
   console.log(JSON.stringify(report, null, 2));
+  // Errors are recorded in the report AND fail the run, so a wrapper that
+  // checks only the exit status cannot mistake an errored run for a clean one.
+  if (report.errors.length > 0) process.stderr.write(`probe recorded ${report.errors.length} error(s):\n  - ${report.errors.join("\n  - ")}\n`);
+  process.exitCode = probeExitCode(report);
 }
 
 await main();

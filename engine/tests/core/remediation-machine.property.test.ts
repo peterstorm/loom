@@ -38,7 +38,7 @@ import {
   type VerifiedIndexInstallation,
   type VerifiedTemporaryIndex,
 } from "../../src/core/remediation-machine";
-import { serializeAdjudicatedStandaloneReview } from "../../src/core/standalone-review";
+import { serializeAdjudicatedStandaloneReview } from "../../src/core/standalone-review-records";
 import {
   createCandidateRepositoryWitness,
   prepareDefectFamilyAccounting,

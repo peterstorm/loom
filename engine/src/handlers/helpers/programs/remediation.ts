@@ -76,7 +76,7 @@ import {
   type RemediationStartInputV2,
 } from "./remediation-registration";
 import type { RemediationInspectionLabel } from "../../../core/run-inspection";
-import { failed, type FacadeDriveResult } from "./helpers";
+import { failed, type FacadeDriveResult } from "./program-result";
 
 export function remediationBlocked(handle: RunDirHandle, message: string): FacadeDriveResult {
   return {

@@ -11,7 +11,7 @@ import { analyzeNewTests } from "../../src/handlers/helpers/task-local-completio
 import { extractTestEvidence, type TestEvidence } from "../../src/core/test-evidence";
 import { legacyTestsPassedNote } from "../../src/types";
 import type { TaskGraph } from "../../src/types";
-import { captureDeclaredArtifactBaseline } from "../../src/utils/artifact-baseline";
+import { captureDeclaredArtifactBaseline } from "../../src/utils/declared-artifact-snapshot";
 import { derivePendingTaskProof } from "../../src/core/proof-obligations";
 import { StateManager } from "../../src/state-manager";
 

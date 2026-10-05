@@ -3,7 +3,8 @@ import { z } from "zod/v4";
 import { boundedText, evidenceSchema, reviewerDraftV2Schema, REVIEWER_IMPACT_RUBRIC_V1, type ReviewerProtocolFailure } from "./reviewer-contract";
 import { readExactDataRecord } from "./orchestration-contract/bytes";
 import { canonicalRecord, success, failure, type DomainResult, SAFE_AUTHORITY_ID, SHA256_HEX } from "./orchestration-contract/identity";
-import { parseReviewPath, sha256Hex } from "./review-packet";
+import { parseReviewPath } from "./review-packet";
+import { sha256Hex } from "./digest";
 
 export const STANDALONE_LINEAGE_LIMITS = Object.freeze({
   retainedBytes: 16_777_216, inventory: 4_096, historyPerOrigin: 64,

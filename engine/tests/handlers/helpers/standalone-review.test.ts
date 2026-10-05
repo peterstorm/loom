@@ -12,10 +12,8 @@ import {
   prepareInitialBatchPublicationIntent,
   spawnBatchAction,
 } from "../../../src/core/orchestration-contract";
-import {
-  bindStandaloneCaptureAuthority,
-  prepareStandaloneReview,
-} from "../../../src/core/standalone-review";
+import { bindStandaloneCaptureAuthority } from "../../../src/core/standalone-reviewer-capture";
+import { prepareStandaloneReview } from "../../../src/core/standalone-review-preparation";
 import { prepareStandaloneReviewHarnessCapture } from "../../../src/handlers/helpers/standalone-review";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../../../..");

@@ -6,10 +6,27 @@ import { standaloneFixture, valueOf } from "../fixtures/standalone-remediation-a
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
 import { parseStandaloneReviewerPayloadV3 } from "../../src/core/reviewer-protocol";
 import { STANDALONE_LINEAGE_LIMITS, type StandaloneReviewerPayloadV3 } from "../../src/core/standalone-lineage-contract";
-import { prepareStandaloneLineageSource, prepareStandaloneDisposition, prepareStandaloneSuccessor, parseFindingOrigin,
-  parseStandaloneLineageInventory, standaloneOriginReference, standaloneDecisionReference, aggregateStandaloneAssessments,
-  attributeStandaloneSuccessorFindings, assessStandaloneSuccessor, findingOf, projectStandaloneLineageSource,
-  type PreparedStandaloneSuccessor, type StandaloneLineageSource, type PreparedStandaloneDisposition } from "../../src/core/standalone-lineage";
+import {
+  prepareStandaloneLineageSource,
+  prepareStandaloneDisposition,
+  prepareStandaloneSuccessor,
+  aggregateStandaloneAssessments,
+  attributeStandaloneSuccessorFindings,
+  assessStandaloneSuccessor,
+  projectStandaloneLineageSource,
+  type StandaloneLineageSource,
+  type PreparedStandaloneDisposition,
+} from "../../src/core/standalone-lineage";
+import {
+  parseFindingOrigin,
+  parseStandaloneLineageInventory,
+  standaloneOriginReference,
+  standaloneDecisionReference,
+  findingOf,
+} from "../../src/core/standalone-finding-origin";
+import { type PreparedStandaloneSuccessor } from "../../src/core/standalone-review-model";
+import { isPreparedStandaloneSuccessor } from "../../src/core/standalone-review";
+import { prepareFreshStandaloneReview } from "../../src/core/standalone-review-preparation";
 
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
 const historical = { kind: "historical-decision-unavailable" } as const;
@@ -46,6 +63,19 @@ describe("Standalone Finding Origin and source membership", () => {
     expect(reads).toBe(0);
     expect(prepareStandaloneSuccessor({ ...source() }, bytes({}), historical).ok).toBe(false);
     expectTypeOf<readonly unknown[]>().not.toMatchTypeOf<StandaloneLineageSource>();
+  });
+  it("lets successor custody leave the core only as a read-only predicate that a structural copy cannot satisfy", () => {
+    const minted = successor();
+    expect(isPreparedStandaloneSuccessor(minted)).toBe(true);
+    const copy = { ...minted };
+    expect(isPreparedStandaloneSuccessor(copy)).toBe(false);
+    // Preparation sits above the custody core and admits a successor only through that predicate.
+    const fresh = prepareFreshStandaloneReview({
+      runId: minted.runId, changedPaths: {}, scopeSafety: [], reviewerContexts: [], successor: copy,
+      reviewMetadata: { requested_kinds: ["all"], docs_only: false, source_or_test_changed: true, types_changed: false,
+        comments_changed: false, additions: 1, file_count: 1, new_structure: false, languages: ["TypeScript"] },
+    });
+    expect(fresh).toMatchObject({ ok: false, error: { errors: ["successor membership is required"] } });
   });
   it("joins the original LC-2 publication bytes, not mutable legacy children or a newly computed hash", () => {
     const result = standaloneFixture(scope, false, { firstTranscript: "CRITICAL_COUNT: 0\nADVISORY_COUNT: 1\nADVISORY: isolated integrity probe" }).input.standaloneResult;

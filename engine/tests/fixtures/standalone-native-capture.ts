@@ -80,7 +80,7 @@ export async function nativeSuccessorCapture(root: string, harness: "claude" | "
     if (harness === "pi") {
       const extension = await import("../../../pi/extension");
       const render = await import("../../src/utils/render-pi-agent");
-      const { STANDALONE_REVIEWER_ROLES } = await import("../../src/core/standalone-review");
+      const { STANDALONE_REVIEWER_ROLES } = await import("../../src/core/standalone-review-scope");
       for (const role of [...STANDALONE_REVIEWER_ROLES, "review-verifier-agent"]) {
         writeFileSync(join(process.env.PI_CODING_AGENT_DIR, "agents", `${role}.md`), render.expectedPiAgentDefinition(role, packageRoot));
       }

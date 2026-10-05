@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { checkAgentSkillPrompt, parseDeclaredSkills } from "../src/core/agent-skills";
 import { IMPL_AGENTS } from "../src/config";
 import { renderImplementationBrief, RULE_DOCUMENTS, type RuleDocument } from "../src/core/implementation-brief";
-import { deriveTaskImplementationDispatch } from "../src/core/wave-gate-machine";
+import { deriveTaskImplementationDispatch } from "../src/core/task-implementation-dispatch";
 import { taskFixture } from "./fixtures/task-lifecycle";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -38,7 +38,8 @@ describe("implementation prompt required-skill contract", () => {
       const derivation = deriveTaskImplementationDispatch(task);
       if (derivation.kind !== "dispatch") throw new Error(`fixture must be owed a dispatch, got ${derivation.kind}`);
       const rendered = renderImplementationBrief({
-        template, task, dispatch: derivation.dispatch, planFile: "plan.md", spec: null, rules,
+        template, task, dispatch: derivation.dispatch, planFile: "plan.md",
+        spec: { kind: "unavailable", reason: { kind: "no-spec-file" } }, rules,
       });
       if (!rendered.ok) throw new Error(rendered.error.message);
       expect(checkAgentSkillPrompt(source, rendered.value.prompt)).toEqual({ ok: true });

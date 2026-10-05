@@ -10,7 +10,6 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { describe, expect, it } from "vitest";
-import fc from "fast-check";
 import type { TaskGraph } from "../../src/types";
 import type { TaskGraphProjectBoundary } from "../../src/config";
 import { parseTaskGraph, type ParsedTaskGraph } from "../../src/state-manager";
@@ -24,27 +23,23 @@ import {
   createImplementationAttemptContext,
 } from "../../src/core/implementation-retry";
 import { parseArtifactDigest, parseOrchestrationRunId } from "../../src/core/orchestration-contract";
-import {
-  captureDeclaredArtifactBaseline,
-  captureRepositoryChangeBaseline,
-} from "../../src/utils/artifact-baseline";
+import { captureDeclaredArtifactBaseline } from "../../src/utils/declared-artifact-snapshot";
+import { captureRepositoryChangeBaseline } from "../../src/utils/repository-change-baseline";
 import {
   applyFailedPiResult as applyFailedPiResultWithBoundary,
   applyImplementationPiResult as applyImplementationPiResultWithAuthority,
   applyPhaseAgentPiResult,
   applyReviewPiResult,
   applySpecCheckPiResult as applySpecCheckPiResultWithBoundary,
-  currentPiReviewAuthority,
-  currentPiSpecCheckAuthority,
-  piSubagentFailureSignals,
-  parsePiSubagentResults,
-  resolveImplementationTaskId,
-  writeTargetPathOf,
-  writtenPathsOf,
-  type PiReviewAttemptAuthority,
-  type PiSubagentResult,
   type TaskGraphStore,
 } from "../../../pi/subagent-result";
+import { parsePiSubagentResults, type PiSubagentResult } from "../../../pi/subagent-result-batch";
+import {
+  currentPiReviewAuthority,
+  currentPiSpecCheckAuthority,
+  type PiReviewAttemptAuthority,
+} from "../../../pi/reserved-slot";
+import { slot } from "../fixtures/pi-reserved-slot";
 
 /**
  * The concerns the Pi `tool_result` handler used to hold inline, exercised
@@ -166,7 +161,7 @@ function graphWithSpecCheckAuthority(
   if (authority === null) throw new Error("spec-check fixture lacks exact authority");
   return Object.freeze({
     state,
-    reservedSlot: Object.freeze({
+    reservedSlot: slot({
       agentType: "spec-check-invoker",
       taskId: null,
       specCheckAuthority: authority,
@@ -230,41 +225,7 @@ const writeCall = (path: string) => ({
   content: [{ type: "toolCall", id: `call-${(toolCallSeq += 1)}`, name: "write", arguments: { path } }],
 });
 
-describe("parsePiSubagentResults", () => {
-  it("rejects a missing transcript and preserves the following result's position", () => {
-    const parsed = parsePiSubagentResults([
-      { agent: "silent-failure-hunter", task: "Task: T1", exitCode: 0 },
-      { agent: "code-reviewer", task: "Task: T1", exitCode: 0, messages: [] },
-    ]);
-
-    expect(parsed).toHaveLength(2);
-    expect(parsed[0]).toMatchObject({
-      ok: false,
-      problem: expect.stringContaining("messages is missing"),
-    });
-    expect(parsed[1]).toMatchObject({
-      ok: true,
-      result: { agent: "code-reviewer" },
-    });
-  });
-
-  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0.5, Number.MAX_SAFE_INTEGER + 1])(
-    "rejects non-safe-integer exitCode %s",
-    (exitCode) => {
-      const [parsed] = parsePiSubagentResults([{
-        agent: "code-reviewer",
-        task: "Task: T1",
-        exitCode,
-        messages: [],
-      }]);
-
-      expect(parsed).toMatchObject({
-        ok: false,
-        problem: expect.stringContaining("exitCode must be a finite safe integer"),
-      });
-    },
-  );
-
+describe("parsed results through the appliers", () => {
   it("rejects null transcript evidence rather than accepting it as empty", async () => {
     const [parsed] = parsePiSubagentResults([
       { agent: "code-reviewer", task: "Task: T1", exitCode: 0, messages: null },
@@ -277,76 +238,51 @@ describe("parsePiSubagentResults", () => {
         store,
         agentType: parsed.result.agent,
         result: parsed.result,
-        reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+        reservedSlot: slot({ agentType: "code-reviewer", taskId: "T1" }),
         parentPrompt: "",
       });
       expect(store.current().tasks[0]!.review_status).toBe("evidence_capture_failed");
     }
   });
-
-  it("retains exactly one positional entry for every unknown result", () => {
-    fc.assert(fc.property(fc.array(fc.anything()), (raw) => {
-      expect(parsePiSubagentResults(raw)).toHaveLength(raw.length);
-    }));
-  });
 });
 
-describe("writtenPathsOf", () => {
-  it("reads write/Write tool-call paths in order and ignores everything else", () => {
-    expect(writtenPathsOf([
-      writeCall("a.md"),
-      { role: "assistant", content: [{ type: "toolCall", id: "c2", name: "bash", arguments: { path: "b.md" } }] },
-      { role: "user", content: [{ type: "toolCall", id: "c3", name: "write", arguments: { path: "c.md" } }] },
-      { role: "assistant", content: [{ type: "toolCall", id: "c4", name: "Write", arguments: { file_path: "d.md" } }] },
-      { role: "assistant", content: [{ type: "toolCall", id: "c5", name: "write", arguments: { filePath: "e.md" } }] },
-    ] as never)).toEqual(["a.md", "d.md", "e.md"]);
-  });
-});
+describe("contradictory reserved slots are refused at the applier seam", () => {
+  it("refuses a reviewer slot carrying two role authorities before touching review state", async () => {
+    const store = fakeStore(graph());
+    const applied = await applyReviewPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ messages: assistantText("review output") }),
+      reservedSlot: slot({
+        agentType: "code-reviewer",
+        taskId: "T1",
+        reviewAuthority: { kind: "legacy", taskId: "T1", agentType: "code-reviewer", generation: 0 },
+        specCheckAuthority: graphWithSpecCheckAuthority().reservedSlot.specCheckAuthority,
+      }),
+      parentPrompt: "",
+    });
 
-describe("writeTargetPathOf — the probe order the ??= assignment encodes", () => {
-  it("a non-string winner FAILS instead of deferring to a later string key", () => {
-    // `path` holds a non-nullish non-string: it wins the probe at key 1, and
-    // the string test rejects it — the later `file_path` string is never
-    // consulted. A defer here would silently redirect the write target the
-    // guard verifies onto a path the tool did not name.
-    expect(writeTargetPathOf({ path: 42, file_path: "real.md" })).toBeNull();
-  });
-
-  it("a nullish winner DEFERS to the later key, and the FIRST non-nullish string wins", () => {
-    // null and undefined are the only deferring values: `null` at `path`
-    // leaves the probe open, so `file_path` proves the target; a later key
-    // cannot displace an earlier non-nullish one.
-    expect(writeTargetPathOf({ path: null, file_path: "real.md" })).toBe("real.md");
-    expect(writeTargetPathOf({ file_path: "real.md", filePath: "shadow.md" })).toBe("real.md");
-  });
-});
-
-describe("resolveImplementationTaskId", () => {
-  const base = { agentType: "code-implementer-agent", resultPrompt: "", parentPrompt: "", executingTasks: [] };
-
-  it("prefers the reservation over either prompt", () => {
-    expect(resolveImplementationTaskId({
-      ...base,
-      reservedTaskId: "T9",
-      resultPrompt: "Task ID: T1",
-      parentPrompt: "Task ID: T2",
-    })).toEqual({ kind: "bound", taskId: "T9", inferred: false });
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("carries 2 role authorities (review, spec-check)"),
+    ]);
+    expect(store.current()).toEqual(parsedGraph(graph()));
   });
 
-  it("falls back to the result prompt, then the parent prompt", () => {
-    expect(resolveImplementationTaskId({ ...base, reservedTaskId: null, resultPrompt: "Task ID: T1" }))
-      .toEqual({ kind: "bound", taskId: "T1", inferred: false });
-    expect(resolveImplementationTaskId({ ...base, reservedTaskId: null, parentPrompt: "Task ID: T2" }))
-      .toEqual({ kind: "bound", taskId: "T2", inferred: false });
-  });
+  it("refuses a failed result whose slot holds another role's authority", async () => {
+    const fixture = graphWithSpecCheckAuthority();
+    const store = fakeStore(fixture.state);
+    const applied = await applyFailedPiResult({
+      store,
+      agentType: "code-reviewer",
+      result: result({ exitCode: 1 }),
+      reservedSlot: slot({ ...fixture.reservedSlot, agentType: "code-reviewer", taskId: "T1" }),
+      now: NOW,
+    });
 
-  it("infers a single executing task, and refuses an ambiguous or empty set", () => {
-    expect(resolveImplementationTaskId({ ...base, reservedTaskId: null, executingTasks: ["T5"] }))
-      .toEqual({ kind: "bound", taskId: "T5", inferred: true });
-    expect(resolveImplementationTaskId({ ...base, reservedTaskId: null, executingTasks: ["T5", "T6"] }))
-      .toMatchObject({ kind: "unbound", reason: expect.stringContaining("ambiguous") });
-    expect(resolveImplementationTaskId({ ...base, reservedTaskId: null, executingTasks: [] }))
-      .toMatchObject({ kind: "unbound", reason: expect.stringContaining("executing_tasks is empty") });
+    expect(applied.processingErrors).toEqual([
+      expect.stringContaining("carries spec-check authority, but the agent is not spec-check-invoker"),
+    ]);
+    expect(store.current()).toEqual(fixture.state);
   });
 });
 
@@ -535,7 +471,7 @@ describe("applyFailedPiResult", () => {
       store,
       agentType: "architecture-agent",
       result: result({ agent: "architecture-agent", exitCode: 1 }),
-      reservedSlot: { agentType: "architecture-agent", taskId: null },
+      reservedSlot: slot({ agentType: "architecture-agent", taskId: null }),
       now: NOW,
     });
 
@@ -549,7 +485,7 @@ describe("applyFailedPiResult", () => {
       store,
       agentType: "code-reviewer",
       result: result({ exitCode: 1 }),
-      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-reviewer", taskId: "T1" }),
       now: NOW,
     });
 
@@ -571,7 +507,7 @@ describe("applyFailedPiResult", () => {
       store,
       agentType: "code-reviewer",
       result: result({ exitCode: 1 }),
-      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-reviewer", taskId: "T1" }),
       now: NOW,
     });
 
@@ -587,7 +523,7 @@ describe("applyFailedPiResult", () => {
       store,
       agentType: "code-reviewer",
       result: result({ exitCode: 1, task: "Task: T2" }),
-      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-reviewer", taskId: "T1" }),
       now: NOW,
     });
 
@@ -619,7 +555,7 @@ describe("applyFailedPiResult", () => {
       store,
       agentType: "code-reviewer",
       result: result({ exitCode: 1 }),
-      reservedSlot: {
+      reservedSlot: slot({
         agentType: "code-reviewer",
         taskId: "T1",
         reviewAuthority: {
@@ -631,7 +567,7 @@ describe("applyFailedPiResult", () => {
           slotId: "review-slot:old",
           attempted: 1,
         },
-      },
+      }),
       now: NOW,
     });
 
@@ -663,7 +599,7 @@ describe("applyFailedPiResult", () => {
       store,
       agentType: "code-reviewer",
       result: result({ messages: assistantText("review output without required markers") }),
-      reservedSlot: {
+      reservedSlot: slot({
         agentType: "code-reviewer",
         taskId: "T1",
         reviewAuthority: {
@@ -675,7 +611,7 @@ describe("applyFailedPiResult", () => {
           slotId: "review-slot:old",
           attempted: 1,
         },
-      },
+      }),
       parentPrompt: "",
     });
 
@@ -707,7 +643,7 @@ describe("applyFailedPiResult", () => {
       store,
       agentType: "code-reviewer",
       result: result({ messages: [{ role: 42 }] }),
-      reservedSlot: {
+      reservedSlot: slot({
         agentType: "code-reviewer",
         taskId: "T1",
         reviewAuthority: {
@@ -715,7 +651,7 @@ describe("applyFailedPiResult", () => {
           taskId: "T1", agentType: "code-reviewer", generation: 1,
           packetId: "c".repeat(64), slotId: "review-slot:old-malformed", attempted: 1,
         },
-      },
+      }),
       parentPrompt: "",
     });
 
@@ -771,7 +707,7 @@ describe("applyFailedPiResult", () => {
       store,
       agentType: "code-implementer-agent",
       result: result({ agent: "code-implementer-agent", exitCode: 1 }),
-      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
       now: NOW,
     });
 
@@ -929,7 +865,7 @@ describe("applyFailedPiResult", () => {
       store,
       agentType: "code-reviewer",
       result: { ...result({ exitCode: 0 }), stopReason: "error", errorMessage: "Connection error." },
-      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-reviewer", taskId: "T1" }),
       now: NOW,
     });
 
@@ -962,7 +898,7 @@ describe("applyFailedPiResult", () => {
       store,
       agentType: "code-reviewer",
       result: result({ exitCode: 1 }),
-      reservedSlot: {
+      reservedSlot: slot({
         agentType: "code-reviewer",
         taskId: "T1",
         reviewAuthority: {
@@ -974,7 +910,7 @@ describe("applyFailedPiResult", () => {
           slotId: "review-slot:current",
           attempted: 1,
         },
-      },
+      }),
       now: NOW,
     });
 
@@ -983,32 +919,6 @@ describe("applyFailedPiResult", () => {
     ]);
     expect(applied.log.join("\n")).toContain("review evidence NOT stored");
     expect(store.current()).toEqual(parsedGraph(withEvidence));
-  });
-});
-
-/**
- * An infrastructure fault and an agent-contract fault must not read alike. The
- * fields that separate them are in scope wherever the diagnostic is composed;
- * the whole point of this helper is that none of them get dropped.
- */
-describe("piSubagentFailureSignals", () => {
-  it("reports the exit/stop pair and the harness cause line", () => {
-    expect(piSubagentFailureSignals({ exitCode: 0, stopReason: "error", errorMessage: "Connection error." }))
-      .toBe('exitCode=0, stopReason=error, errorMessage="Connection error."');
-  });
-
-  it("omits the cause line rather than printing an empty or absent one", () => {
-    expect(piSubagentFailureSignals({ exitCode: 1, stopReason: "aborted" }))
-      .toBe("exitCode=1, stopReason=aborted");
-    expect(piSubagentFailureSignals({ exitCode: 1, stopReason: "aborted", errorMessage: "   " }))
-      .toBe("exitCode=1, stopReason=aborted");
-    expect(piSubagentFailureSignals({ exitCode: 1, stopReason: "aborted", errorMessage: { not: "a string" } }))
-      .toBe("exitCode=1, stopReason=aborted");
-  });
-
-  it("degrades a malformed exit code or stop reason to n/a instead of undefined", () => {
-    expect(piSubagentFailureSignals({})).toBe("exitCode=n/a, stopReason=n/a");
-    expect(piSubagentFailureSignals({ exitCode: "1", stopReason: 7 })).toBe("exitCode=n/a, stopReason=n/a");
   });
 });
 
@@ -1026,7 +936,7 @@ describe("applyReviewPiResult", () => {
       store,
       agentType: "code-reviewer",
       result: result({ messages: assistantText(machineSummary) }),
-      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-reviewer", taskId: "T1" }),
       parentPrompt: "",
     });
 
@@ -1054,7 +964,7 @@ describe("applyReviewPiResult", () => {
       store,
       agentType: "code-reviewer",
       result: result({ messages: assistantText(machineSummary) }),
-      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-reviewer", taskId: "T1" }),
       parentPrompt: "",
     });
 
@@ -1077,14 +987,14 @@ describe("applyReviewPiResult", () => {
       store,
       agentType: "code-reviewer",
       result: result({ task: "Task: T2", messages: assistantText(machineSummary) }),
-      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-reviewer", taskId: "T1" }),
       parentPrompt: "",
     });
     const second = await applyReviewPiResult({
       store,
       agentType: "code-reviewer",
       result: result({ task: "Task: T1", messages: assistantText(machineSummary) }),
-      reservedSlot: { agentType: "code-reviewer", taskId: "T2" },
+      reservedSlot: slot({ agentType: "code-reviewer", taskId: "T2" }),
       parentPrompt: "",
     });
 
@@ -1123,7 +1033,7 @@ describe("applyReviewPiResult", () => {
       store,
       agentType: "code-reviewer",
       result: result({ messages: assistantText(machineSummary) }),
-      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-reviewer", taskId: "T1" }),
       parentPrompt: "",
     });
 
@@ -1162,7 +1072,7 @@ describe("applyReviewPiResult", () => {
       store,
       agentType: "code-reviewer",
       result: result({ messages: [{ role: 42 }] }),
-      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-reviewer", taskId: "T1" }),
       parentPrompt: "",
     });
 
@@ -1186,7 +1096,7 @@ describe("applyReviewPiResult", () => {
       store,
       agentType: "code-reviewer",
       result: result({ messages: [{ role: 42 }] }),
-      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-reviewer", taskId: "T1" }),
       parentPrompt: "",
     });
 
@@ -1217,7 +1127,7 @@ describe("applyReviewPiResult", () => {
       store,
       agentType: "code-reviewer",
       result: result({ messages: [{ role: 42 }] }),
-      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-reviewer", taskId: "T1" }),
       parentPrompt: "",
     });
 
@@ -1233,7 +1143,7 @@ describe("applyReviewPiResult", () => {
       store,
       agentType: "code-reviewer",
       result: result({ messages: [{ role: 42 }] }),
-      reservedSlot: { agentType: "code-reviewer", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-reviewer", taskId: "T1" }),
       parentPrompt: "",
     });
 
@@ -1392,7 +1302,7 @@ describe("applySpecCheckPiResult", () => {
       const applied = await applySpecCheckPiResult({
         store,
         result: result({ agent: "spec-check-invoker", messages: assistantText(specCheckText(0)) }),
-        reservedSlot: { agentType: "spec-check-invoker", taskId: null, specCheckAuthority: authority },
+        reservedSlot: slot({ agentType: "spec-check-invoker", taskId: null, specCheckAuthority: authority }),
         now: NOW,
         projectBoundary: projectBoundaryAt(root),
       });
@@ -1556,11 +1466,11 @@ describe("applyImplementationPiResult", () => {
           reserved_at: authority.value.reservedAt,
         })],
       },
-      reservedSlot: {
+      reservedSlot: slot({
         agentType: "code-implementer-agent",
         taskId: task.id,
         implementationAuthority: authority.value,
-      },
+      }),
     };
   };
 
@@ -1639,7 +1549,7 @@ describe("applyImplementationPiResult", () => {
         agent: "code-implementer-agent",
         messages: assistantText("Revalidation complete without an inapplicable regression run."),
       }),
-      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
       parentPrompt: "",
     });
 
@@ -1779,7 +1689,7 @@ describe("applyImplementationPiResult", () => {
         agent: "code-implementer-agent",
         messages: assistantText("Applied the reopened Task result."),
       }),
-      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
       parentPrompt: "",
     });
 
@@ -1805,7 +1715,7 @@ describe("applyImplementationPiResult", () => {
       repository: repositoryAt(process.cwd()),
       agentType: "code-implementer-agent",
       result: result({ agent: "code-implementer-agent", messages: "not a message array" }),
-      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
       parentPrompt: "",
     });
 
@@ -1867,7 +1777,7 @@ describe("applyImplementationPiResult", () => {
       repository: repositoryAt("/nonexistent/loom-repo-root"),
       agentType: "code-implementer-agent",
       result: result({ agent: "code-implementer-agent", messages: "not a message array" }),
-      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
       parentPrompt: "",
     });
 
@@ -1907,7 +1817,7 @@ describe("applyImplementationPiResult", () => {
         agent: "code-implementer-agent",
         messages: [writeCall("../outside.ts")],
       }),
-      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
       parentPrompt: "",
     });
 
@@ -1972,7 +1882,7 @@ describe("applyImplementationPiResult", () => {
         agent: "code-implementer-agent",
         messages: [...structuredBashPass(), writeCall("engine/src/x.ts")],
       }),
-      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
       parentPrompt: "",
     });
 
@@ -2013,7 +1923,7 @@ describe("applyImplementationPiResult", () => {
         agent: "code-implementer-agent",
         messages: [writeCall("pi/subagent-result.ts")],
       }),
-      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
       parentPrompt: "",
     });
 
@@ -2081,7 +1991,7 @@ describe("applyImplementationPiResult", () => {
           agent: "code-implementer-agent",
           messages: assistantText("I changed the code but did not run tests."),
         }),
-        reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+        reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
         parentPrompt: "",
       });
 
@@ -2110,7 +2020,7 @@ describe("applyImplementationPiResult", () => {
         agent: "code-implementer-agent",
         messages: assistantText("I made the change but ran no tests."),
       }),
-      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
       parentPrompt: "",
     });
 
@@ -2157,7 +2067,7 @@ describe("applyImplementationPiResult", () => {
           content: [{ type: "text", text: "  1 passing\n" }],
         }],
       }),
-      reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+      reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
       parentPrompt: "",
     });
 
@@ -2393,7 +2303,7 @@ describe("applyImplementationPiResult", () => {
         repository: repositoryAt(worktree),
         agentType: "code-implementer-agent",
         result: result({ agent: "code-implementer-agent", messages: [writeCall(testPath)] }),
-        reservedSlot: { agentType: "code-implementer-agent", taskId: "T1" },
+        reservedSlot: slot({ agentType: "code-implementer-agent", taskId: "T1" }),
         parentPrompt: "",
       });
       expect(applied.processingErrors).toEqual([]);

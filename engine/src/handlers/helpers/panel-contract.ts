@@ -1,17 +1,14 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { HookHandler } from "../../types";
+import type { HookHandler, HookResult } from "../../types";
 import {
-  aggregateVerdicts,
-  architectureCriterion,
-  deriveJudgeCriteria,
+  admitJudgeVerdict,
+  admitPanelRun,
   parseInterviewDigest,
-  parseInterviewDigestJson,
   parseJudgeVerdict,
-  parsePanelManifest,
-  selectPanelLenses,
-  serializeJudgeVerdict,
-  serializeRankings,
+  rankPanelVerdicts,
+  serializeCriteria,
+  type PanelContractResult,
   type PanelManifest,
 } from "../../core/panel-contract";
 import {
@@ -55,130 +52,103 @@ export const PANEL_CONTRACT_OPERATIONS = [
 
 const USAGE = `Usage: helper panel-contract <${PANEL_CONTRACT_OPERATIONS.join("|")}> [--runs-root <dir> --manifest <file> --designers <N> --criterion <text>]`;
 
-/** Operations that share the run-boundary → manifest → interview prelude —
- *  every one but the `interview` that produces the digest they all read.
- *  Derived, so a new operation cannot leave this set silently stale. */
-const RUN_SCOPED: ReadonlySet<string> = new Set(
-  PANEL_CONTRACT_OPERATIONS.filter((operation) => operation !== "interview"),
-);
+/**
+ * One parsed run-scoped invocation — every operation but the `interview` that
+ * produces the digest they all read. `--criterion` is part of the `verdict`
+ * arm and of no other, so the requirement is stated once, here, and the
+ * verdict branch below receives a criterion that cannot be absent.
+ */
+type RunScopedRequest = Readonly<{
+  runsRoot: string;
+  manifestPath: string;
+  designerCount: number;
+  operation:
+    | Readonly<{ kind: "manifest" | "criteria" | "aggregate" }>
+    | Readonly<{ kind: "verdict"; criterion: string }>;
+}>;
 
-/** Validate untrusted panel handoffs at the imperative filesystem boundary. */
+function parseRunScopedRequest(args: readonly string[]): RunScopedRequest | null {
+  const kind = args[0];
+  const manifestPath = argumentValue(args, "--manifest");
+  const runsRoot = argumentValue(args, "--runs-root");
+  const rawDesigners = argumentValue(args, "--designers");
+  if (!manifestPath || !runsRoot || !rawDesigners || !/^\d+$/.test(rawDesigners)) return null;
+  const designerCount = Number(rawDesigners);
+  if (kind === "verdict") {
+    const criterion = argumentValue(args, "--criterion");
+    return criterion ? { runsRoot, manifestPath, designerCount, operation: { kind, criterion } } : null;
+  }
+  return kind === "manifest" || kind === "criteria" || kind === "aggregate"
+    ? { runsRoot, manifestPath, designerCount, operation: { kind } }
+    : null;
+}
+
+/** The shell's one translation of a core refusal into a hook diagnostic. */
+function emit(result: PanelContractResult<string>): HookResult {
+  return result.ok ? writeCanonicalOutput(result.value + "\n") : contractError(result.failure.contract, result.failure.errors);
+}
+
+/**
+ * Validate untrusted panel handoffs at the imperative filesystem boundary.
+ * The shell reads files and writes output; every rule decidable from the bytes
+ * — interview parity, lens selection, manifest binding, criterion membership,
+ * aggregation — is a pure `core/panel-contract` function.
+ */
 const handler: HookHandler = async (stdin, args) => {
-  const operation = args[0];
-
-  if (operation === "interview") {
+  if (args[0] === "interview") {
     const parsed = parseInterviewDigest(stdin);
     if (!parsed.ok) return contractError("interview digest", parsed.errors);
     return writeCanonicalOutput(JSON.stringify(parsed.value, null, 2) + "\n");
   }
 
-  if (operation && RUN_SCOPED.has(operation)) {
-    const criterion = argumentValue(args, "--criterion");
-    const manifestPath = argumentValue(args, "--manifest");
-    const runsRoot = argumentValue(args, "--runs-root");
-    const rawDesigners = argumentValue(args, "--designers");
-    if (!manifestPath || !runsRoot || !rawDesigners || !/^\d+$/.test(rawDesigners) || (operation === "verdict" && !criterion)) {
-      return { kind: "error", message: USAGE };
-    }
-    const designerCount = Number(rawDesigners);
+  const request = parseRunScopedRequest(args);
+  if (request === null) return { kind: "error", message: USAGE };
+  const { operation } = request;
 
-    const boundary = parseRunBoundary(runsRoot, manifestPath);
-    if (!boundary.ok) return contractError("panel run boundary", boundary.errors);
-    const { runDir } = boundary.value;
+  const boundary = parseRunBoundary(request.runsRoot, request.manifestPath);
+  if (!boundary.ok) return contractError("panel run boundary", boundary.errors);
+  const { runDir } = boundary.value;
 
-    let manifestJson: unknown;
-    let interviewJson: unknown;
-    let interviewMarkdown: string;
-    try {
-      manifestJson = JSON.parse(readFileSync(manifestPath, "utf-8"));
-      interviewJson = JSON.parse(readFileSync(join(runDir, LAYOUT.contextJson), "utf-8"));
-      interviewMarkdown = readFileSync(join(runDir, LAYOUT.contextMd), "utf-8");
-    } catch (error) {
-      return contractError("panel JSON", [
-        `cannot read manifest/interview artifacts: ${error instanceof Error ? error.message : String(error)}`,
-      ]);
-    }
-
-    const interview = parseInterviewDigestJson(interviewJson);
-    if (!interview.ok) return contractError("canonical interview digest", interview.errors);
-    const markdownInterview = parseInterviewDigest(interviewMarkdown);
-    if (!markdownInterview.ok) return contractError("interview Markdown digest", markdownInterview.errors);
-    if (JSON.stringify(markdownInterview.value) !== JSON.stringify(interview.value)) {
-      return contractError("interview authority", [
-        "interview.md and interview.json describe different validated constraints",
-      ]);
-    }
-    const expectedLenses = selectPanelLenses(interview.value, designerCount);
-    if (!expectedLenses.ok) return contractError("panel lens selection", expectedLenses.errors);
-
-    const manifest = parsePanelManifest(manifestJson, runDir, LAYOUT, expectedLenses.value);
-    if (!manifest.ok) return contractError("panel manifest", manifest.errors);
-    const needsCandidates = operation === "verdict" || operation === "aggregate";
-    const artifacts = artifactErrors(manifest.value, runDir, needsCandidates);
-    if (artifacts.length > 0) return contractError("panel artifacts", artifacts);
-    if (operation === "manifest") return { kind: "allow" };
-
-    // The criteria set is DERIVED from the validated digest, not supplied by
-    // the caller — the orchestrator and the finalizer can no longer disagree
-    // about what the criteria are or what order they are in.
-    const criteria = deriveJudgeCriteria(interview.value);
-    const candidateFilenames = manifest.value.candidates.map((candidate) => candidate.filename);
-
-    if (operation === "criteria") {
-      return writeCanonicalOutput(JSON.stringify(criteria, null, 2) + "\n");
-    }
-
-    if (operation === "verdict") {
-      if (criterion === null) return contractError("judge verdict", ["criterion is required"]);
-      // Reject a criterion that is not one this run's digest derives, so a
-      // typo'd or stale --criterion cannot produce a verdict that aggregation
-      // will later reject as "unexpected" with no way to tell which step lied.
-      // The CLI string is minted through the closed vocabulary — never asserted
-      // into the brand — so the seam that binds a verdict to its criterion
-      // cannot compile with a free-text value.
-      const expectedCriterion = architectureCriterion(criterion);
-      if (expectedCriterion === null || !criteria.includes(expectedCriterion)) {
-        return contractError("judge verdict", [
-          `criterion must be one of the derived criteria: ${criteria.join(", ")}; received: ${criterion}`,
-        ]);
-      }
-      const verdict = parseJudgeVerdict(stdin, expectedCriterion, candidateFilenames);
-      if (!verdict.ok) return contractError("judge verdict", verdict.errors);
-      return writeCanonicalOutput(serializeJudgeVerdict(verdict.value) + "\n");
-    }
-
-    // aggregate — re-read and re-validate every verdict from disk, then rank.
-    const resolved = realRunDir(runDir);
-    if (!resolved.ok) return contractError("panel aggregate", resolved.errors);
-
-    const verdictsDir = join(resolved.value, LAYOUT.verdictDir);
-    const verdicts = readVerdicts(runDir, LAYOUT, verdictsDir, criteria, (raw, expectedCriterion) =>
-      parseJudgeVerdict(raw, expectedCriterion, candidateFilenames),
-    );
-    if (!verdicts.ok) return contractError("panel verdicts", verdicts.errors);
-
-    // Wrapped for the same reason `tallyRefutations` is on the review side:
-    // `aggregateVerdicts` reaches `requireEntry`, which THROWS on a broken
-    // coverage invariant rather than defaulting a vote, and `panel-run` states
-    // the rule this helper follows — "errors are returned, never thrown; a
-    // panel helper's failure must reach the operator as a contract
-    // diagnostic". The throw is unreachable only while the coverage guard
-    // holds; if it is ever weakened the operator gets a stack trace out of a
-    // hook. This was the one asymmetry between the two mirrored helpers.
-    let ranked: ReturnType<typeof aggregateVerdicts>;
-    try {
-      ranked = aggregateVerdicts(verdicts.value, criteria, candidateFilenames);
-    } catch (error) {
-      return contractError("panel aggregate", [
-        error instanceof Error ? error.message : String(error),
-      ]);
-    }
-    if (!ranked.ok) return contractError("panel aggregate", ranked.errors);
-
-    return writeCanonicalOutput(serializeRankings(ranked.value, criteria) + "\n");
+  let manifestJson: unknown;
+  let interviewJson: unknown;
+  let interviewMarkdown: string;
+  try {
+    manifestJson = JSON.parse(readFileSync(request.manifestPath, "utf-8"));
+    interviewJson = JSON.parse(readFileSync(join(runDir, LAYOUT.contextJson), "utf-8"));
+    interviewMarkdown = readFileSync(join(runDir, LAYOUT.contextMd), "utf-8");
+  } catch (error) {
+    return contractError("panel JSON", [
+      `cannot read manifest/interview artifacts: ${error instanceof Error ? error.message : String(error)}`,
+    ]);
   }
 
-  return { kind: "error", message: USAGE };
+  const admitted = admitPanelRun({ manifestJson, interviewJson, interviewMarkdown }, runDir, LAYOUT, request.designerCount);
+  if (!admitted.ok) return contractError(admitted.failure.contract, admitted.failure.errors);
+  const run = admitted.value;
+
+  const needsCandidates = operation.kind === "verdict" || operation.kind === "aggregate";
+  const artifacts = artifactErrors(run.manifest, runDir, needsCandidates);
+  if (artifacts.length > 0) return contractError("panel artifacts", artifacts);
+
+  switch (operation.kind) {
+    case "manifest":
+      return { kind: "allow" };
+    case "criteria":
+      return writeCanonicalOutput(serializeCriteria(run) + "\n");
+    case "verdict":
+      return emit(admitJudgeVerdict(run, operation.criterion, stdin));
+    case "aggregate": {
+      // Re-read and re-validate every verdict from disk, then rank.
+      const resolved = realRunDir(runDir);
+      if (!resolved.ok) return contractError("panel aggregate", resolved.errors);
+      const verdictsDir = join(resolved.value, LAYOUT.verdictDir);
+      const verdicts = readVerdicts(runDir, LAYOUT, verdictsDir, run.criteria, (raw, expectedCriterion) =>
+        parseJudgeVerdict(raw, expectedCriterion, run.candidates),
+      );
+      if (!verdicts.ok) return contractError("panel verdicts", verdicts.errors);
+      return emit(rankPanelVerdicts(run, verdicts.value));
+    }
+  }
 };
 
 export default handler;

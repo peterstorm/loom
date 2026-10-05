@@ -14,13 +14,9 @@ import { describe, expect, it, afterAll } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  deriveWaveAttemptTwo,
-  persistedWaveAttemptTwoCompatibilityProblem,
-  parseWaveRetryDiagnosticSection,
-  WAVE_RETRY_PREAMBLE,
-  WAVE_RETRY_FIXED_TAIL,
-} from "../../src/handlers/helpers/programs/wave-gate";
+import { deriveWaveAttemptTwo } from "../../src/handlers/helpers/programs/wave-review-retries";
+import { persistedWaveAttemptTwoCompatibilityProblem } from "../../src/core/wave-gate-membership";
+import { parseWaveRetryDiagnosticSection, WAVE_RETRY_PREAMBLE, WAVE_RETRY_FIXED_TAIL } from "../../src/core/reviewer-retry";
 import { openRunDirectory, type RunDirHandle } from "../../src/orchestration/run-directory-handle";
 import { buildContextPacket, buildReviewerContextPacket, contextPacketDigest, parseContextPacket, encodeByteSection, type ContextPacket } from "../../src/orchestration/context-packets";
 import {

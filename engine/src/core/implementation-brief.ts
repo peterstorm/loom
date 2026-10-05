@@ -18,6 +18,7 @@
 import { AGENT_CATALOG, type LoomAgentName } from "./model-profiles";
 import { canonicalRecord, type DomainResult } from "./orchestration-contract";
 import type { ParsedSpec } from "./parse-spec";
+import { specIndexUnavailableMessage, type SpecIndexAvailability } from "./requirement-coverage";
 import { findResidualPlaceholders } from "./validate-template-substitution";
 import { taskVerificationPolicy, type VerificationRequirement } from "./verification-policy";
 import type { Task, WaveImplementationDispatch } from "../types";
@@ -82,8 +83,9 @@ export type ImplementationBriefInput = Readonly<{
   task: Task;
   dispatch: WaveImplementationDispatch;
   planFile: string | null;
-  /** The indexed Spec, or null when the protected spec_file is unindexed. */
-  spec: ParsedSpec | null;
+  /** The protected spec_file's Spec Index observation. An unavailable one
+   *  carries its stated reason, so a refusal can name why there is no index. */
+  spec: SpecIndexAvailability;
   /** Contents of every rule document `ruleDocumentsFor(task.file_list)` names. */
   rules: ReadonlyMap<RuleDocument, string>;
 }>;
@@ -171,14 +173,16 @@ export function renderImplementationBrief(
     ? NO_CODE_RULES
     : ruleNames.map((name) => (input.rules.get(name) ?? "").trimEnd()).join("\n\n");
 
-  const anchors = formattedRequirements(task.spec_anchors ?? [], input.spec);
-  const contributions = formattedRequirements(task.spec_contributions ?? [], input.spec);
+  const index = input.spec.kind === "indexed" ? input.spec.index : null;
+  const anchors = formattedRequirements(task.spec_anchors ?? [], index);
+  const contributions = formattedRequirements(task.spec_contributions ?? [], index);
   if (!anchors.ok || !contributions.ok) {
     const missing = [...(anchors.ok ? [] : anchors.error), ...(contributions.ok ? [] : contributions.error)];
     return refused(
       "requirement-text-unavailable",
-      input.spec === null
-        ? `${task.id} claims Requirements (${missing.join(", ")}) but the protected spec_file has no Spec Index`
+      input.spec.kind === "unavailable"
+        ? `${task.id} claims Requirements (${missing.join(", ")}) but the protected spec_file has no Spec Index: ` +
+          specIndexUnavailableMessage(input.spec.reason)
         : `${task.id} claims Requirements the Spec Index does not define: ${missing.join(", ")}`,
     );
   }
