@@ -295,7 +295,33 @@ describe("remediation candidate workspace capture", () => {
     git(root, "rm", "--quiet", "--cached", "ignored-sibling.ts");
     expect(named("ignored-sibling.ts")).toMatchObject({
       ok: false,
-      error: { message: expect.stringContaining("nor committed paths with a staged deletion") },
+      error: { message: expect.stringContaining("committed paths with a staged deletion") },
+    });
+  });
+
+  it("admits a reviewed path the reviewed change deleted in an earlier commit, and only as a reviewed path", () => {
+    const root = fixtureRepository();
+    write(root, "src/retired.ts", "export const retired = 1;\n");
+    git(root, "add", "src/retired.ts");
+    git(root, "commit", "--quiet", "-m", "add retired");
+    git(root, "rm", "--quiet", "src/retired.ts");
+    git(root, "commit", "--quiet", "-m", "retire it");
+    const base = input(root);
+    const withSources = (sources: Partial<RemediationCandidateCaptureInput["pathSources"]>) =>
+      captureResult(root, { ...base, pathSources: { ...base.pathSources, ...sources } });
+
+    const reviewed = withSources({ reviewedPaths: [...base.pathSources.reviewedPaths, "src/retired.ts"] });
+    expect(reviewed.ok).toBe(true);
+    if (reviewed.ok) expect(reviewed.value.observedPaths).not.toContain("src/retired.ts");
+    expect(withSources({ supportPaths: ["src/retired.ts"] })).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("src/retired.ts") },
+    });
+
+    write(root, "ignored-sibling.ts", "present but ignored\n");
+    expect(withSources({ reviewedPaths: [...base.pathSources.reviewedPaths, "ignored-sibling.ts"] })).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("ignored-sibling.ts") },
     });
   });
 
