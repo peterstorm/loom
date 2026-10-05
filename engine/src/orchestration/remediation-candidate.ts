@@ -132,6 +132,8 @@ function selectedGeneratedReports(
 type ParsedPathPolicy = Readonly<{
   generatedReports: readonly ReviewPath[];
   candidateSources: readonly ReviewPath[];
+  /** The source review's frozen scope, which may name paths the reviewed change deleted. */
+  reviewedPaths: ReadonlySet<ReviewPath>;
 }>;
 
 function parsePathPolicy(
@@ -139,8 +141,9 @@ function parsePathPolicy(
 ): DomainResult<ParsedPathPolicy, RemediationCandidateCaptureError> {
   const reports = selectedGeneratedReports(input.verification);
   if (!reports.ok) return reports;
+  const reviewed = parsePathList(input.pathSources.reviewedPaths, "pathSources.reviewedPaths");
+  if (!reviewed.ok) return reviewed;
   const sourceLists: readonly (readonly [readonly string[], string])[] = [
-    [input.pathSources.reviewedPaths, "pathSources.reviewedPaths"],
     [input.pathSources.supportPaths, "pathSources.supportPaths"],
     [input.pathSources.siblingPaths, "pathSources.siblingPaths"],
     [input.pathSources.inputSourcePaths, "pathSources.inputSourcePaths"],
@@ -148,7 +151,7 @@ function parsePathPolicy(
       ? [[[VERIFICATION_MANIFEST_SOURCE_PATH], "verification.manifestPath"]] as const
       : []),
   ];
-  const sources: ReviewPath[] = [];
+  const sources: ReviewPath[] = [...reviewed.value];
   for (const [raw, field] of sourceLists) {
     const parsed = parsePathList(raw, field);
     if (!parsed.ok) return parsed;
@@ -162,6 +165,7 @@ function parsePathPolicy(
   return success(Object.freeze({
     generatedReports: reports.value,
     candidateSources: Object.freeze([...sourceSet].sort(compareStrings)),
+    reviewedPaths: new Set(reviewed.value),
   }));
 }
 
@@ -365,21 +369,30 @@ function stagedCommittedDeletions(
   return success(new Set(paths.filter((path) => names.has(path) && absentFromWorktree(root, path))));
 }
 
+/**
+ * A reviewed path may be absent everywhere — not in HEAD, the index, or the
+ * worktree — because the reviewed change itself deleted it (a branch diff
+ * against its base names deletions). Such a path carries no candidate bytes to
+ * authorize, and re-creating it would make it observed and so digest-visible.
+ * Support, sibling and input-source paths get no such allowance: a name the
+ * caller supplies that does not exist is refused, never silently accepted.
+ */
 function requireObservedCandidateSources(
   root: CanonicalRepositoryRoot,
-  sources: readonly ReviewPath[],
+  policy: ParsedPathPolicy,
   observed: readonly ReviewPath[],
 ): DomainResult<null, RemediationCandidateCaptureError> {
   const roster = new Set(observed);
-  const unobserved = sources.filter((path) => !roster.has(path));
+  const unobserved = policy.candidateSources.filter((path) => !roster.has(path));
   const deletions = stagedCommittedDeletions(root, unobserved);
   if (!deletions.ok) return deletions;
-  const missing = unobserved.filter((path) => !deletions.value.has(path));
+  const missing = unobserved.filter((path) =>
+    !deletions.value.has(path) && !(policy.reviewedPaths.has(path) && absentFromWorktree(root, path)));
   return missing.length === 0
     ? success(null)
     : failure(
       "pathSources",
-      `candidate input paths are not Git-visible tracked or non-ignored untracked paths, nor committed paths with a staged deletion: ${missing.join(", ")}`,
+      `candidate input paths are not Git-visible tracked or non-ignored untracked paths, committed paths with a staged deletion, nor reviewed paths absent from the worktree: ${missing.join(", ")}`,
     );
 }
 
@@ -414,7 +427,7 @@ export function captureRemediationCandidateWorkspace(
   }
   const runAfter = auditRunDirectory(root.value, input.runDirectory);
   if (!runAfter.ok) return runAfter;
-  const observedSources = requireObservedCandidateSources(root.value, policy.value.candidateSources, workspace.value.observedPaths);
+  const observedSources = requireObservedCandidateSources(root.value, policy.value, workspace.value.observedPaths);
   if (!observedSources.ok) return observedSources;
   const candidate = createCandidateRepositoryWitness({
     kind: "candidate-repository-witness",
