@@ -20,7 +20,9 @@ import { z } from "zod";
 import {
   contentDigest,
   decidePreflight,
+  err,
   evaluatePilot,
+  ok,
   parseBlindingKey,
   parsePreflightFacts,
   parsePreregistration,
@@ -40,8 +42,6 @@ import {
 import type { CaseInput } from "./pilot-workload";
 import { blind, blindedPacket, rubricAssessment, type SampleRecord } from "./pilot-window";
 
-const ok = <T>(value: T): Result<T, never> => Object.freeze({ ok: true as const, value });
-const err = <E>(error: E): Result<never, E> => Object.freeze({ ok: false as const, error });
 
 // ---------------------------------------------------------------------------
 // The window's files and the store port

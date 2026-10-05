@@ -233,4 +233,13 @@ describe("piArmDispatch extraction-only arm (print-mode JSON child)", () => {
     const result = await extraction(fakePi([], 0, 5), 100);
     expect(result.observation.outcome).toEqual({ kind: "timeout", afterMs: 100 });
   });
+
+  it("bounds the attempt by its timeout even when a descendant holds the child's pipes", async () => {
+    // The fake's `sleep 5` is a grandchild (more script follows, so bash does
+    // not exec it) that inherits stdout/stderr. Killing only the direct child
+    // would leave the pipes open until the sleep exits, about 5 s later.
+    const result = await extraction(fakePi([], 0, 5), 100);
+    expect(result.observation.outcome).toEqual({ kind: "timeout", afterMs: 100 });
+    expect(result.observation.elapsedMs).toBeLessThan(2_000);
+  });
 });

@@ -25,7 +25,7 @@
  *   resolver serializes every request.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { match } from "ts-pattern";
 import {
@@ -476,6 +476,22 @@ async function dispatchEmission(config: PiDispatchConfig, request: ArmRequest): 
   }
 }
 
+/**
+ * Kill the child's whole process group. The child leads its own group
+ * (`detached: true`), so its tool subprocesses die with it: a descendant that
+ * survived would keep the inherited stdout/stderr pipes open, `close` would
+ * not fire, and the attempt would outlive `timeoutMs`. If the group cannot be
+ * signalled, the direct child is still killed.
+ */
+function killProcessGroup(child: ChildProcess): void {
+  if (child.pid === undefined) return;
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch {
+    child.kill("SIGKILL");
+  }
+}
+
 async function dispatchExtraction(config: PiDispatchConfig, request: ArmRequest): Promise<AttemptClassification> {
   const started = performance.now();
   const messages: unknown[] = [];
@@ -486,11 +502,11 @@ async function dispatchExtraction(config: PiDispatchConfig, request: ArmRequest)
       "--provider", config.provider, "--model", config.model, "--thinking", config.thinking,
       "--tools", config.tools.join(","),
       `Task: ${request.prompt}`,
-    ], { cwd: config.repoRoot, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    ], { cwd: config.repoRoot, env: process.env, stdio: ["ignore", "pipe", "pipe"], detached: true });
     let buffer = "";
     let stderr = "";
     let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, config.timeoutMs);
+    const timer = setTimeout(() => { timedOut = true; killProcessGroup(child); }, config.timeoutMs);
     const consume = (line: string): void => {
       if (!line.trim()) return;
       try {
