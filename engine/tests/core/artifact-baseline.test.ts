@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import fc from "fast-check";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { artifactCovers } from "../../src/core/path-coverage";
 import {
@@ -29,7 +29,7 @@ afterEach(() => {
 });
 
 function fixture(): string {
-  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-artifact-baseline-")));
+  const root = canonicalTempDir("loom-artifact-baseline-");
   roots.push(root);
   mkdirSync(join(root, "src"));
   writeFileSync(join(root, "src", "existing.ts"), "before\n");

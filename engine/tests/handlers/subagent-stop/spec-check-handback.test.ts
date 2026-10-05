@@ -1,5 +1,5 @@
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { deliveredSpecCheckText } from "../../../src/handlers/subagent-stop/store-spec-check-findings";
@@ -20,7 +20,7 @@ afterEach(() => {
 });
 
 function transcript(lines: readonly object[]): string {
-  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-spec-check-handback-")));
+  const dir = canonicalTempDir("loom-spec-check-handback-");
   dirs.push(dir);
   const path = join(dir, "agent.jsonl");
   writeFileSync(path, lines.map((line) => JSON.stringify(line)).join("\n") + "\n");

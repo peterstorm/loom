@@ -12,7 +12,8 @@
  */
 
 import { describe, it, expect, afterAll, afterEach, beforeEach, vi } from "vitest";
-import { mkdirSync, rmSync, writeFileSync, symlinkSync, mkdtempSync, chmodSync, readFileSync, realpathSync } from "node:fs";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { mkdirSync, rmSync, writeFileSync, symlinkSync, mkdtempSync, chmodSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -289,7 +290,7 @@ describe("artifactWriteRequest — the handler's canonicalization shell", () => 
   const dirs: string[] = [];
   afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
   const project = () => {
-    const d = realpathSync(mkdtempSync(join(tmpdir(), "loom-artifact-write-")));
+    const d = canonicalTempDir("loom-artifact-write-");
     dirs.push(d);
     mkdirSync(join(d, ".claude", "specs", "foo"), { recursive: true });
     return d;
@@ -670,7 +671,7 @@ describe("block-direct-edits handler — artifact-writer admission (end-to-end w
   const statePath = join(tmpdir(), `block-direct-armed-${process.pid}.json`);
   const originalStatePath = process.env.LOOM_STATE_PATH;
   const originalProjectDir = process.env.CLAUDE_PROJECT_DIR;
-  const project = realpathSync(mkdtempSync(join(tmpdir(), "loom-handler-artifact-")));
+  const project = canonicalTempDir("loom-handler-artifact-");
   const CALLER = "a339f6fd51d78b179";
 
   beforeEach(() => {

@@ -1,4 +1,6 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { git } from "../fixtures/git-repository";
 import fc from "fast-check";
 import {
   admitPiSpawnBatch,
@@ -1493,9 +1495,8 @@ describe("refutation transcript read decision (T6 remediation)", () => {
 // durable registration (AD-7, FR-012).
 // ---------------------------------------------------------------------------
 
-import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { spawn } from "node:child_process";
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach } from "vitest";
@@ -1718,7 +1719,7 @@ const waveSpecText = `# Feature: Wave fixture
 `;
 
 function waveEmissionProject(): { root: string; runsRoot: string } {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "loom-t6-wave-wiring-")));
+  const root = canonicalTempDir("loom-t6-wave-wiring-");
   waveCliRoots.push(root);
   mkdirSync(join(root, "src"));
   mkdirSync(join(root, "runs"));
@@ -1726,13 +1727,9 @@ function waveEmissionProject(): { root: string; runsRoot: string } {
   writeFileSync(join(root, "src", "x.ts"), "export const x = 1;\n");
   writeFileSync(join(root, "spec.md"), waveSpecText);
   writeFileSync(join(root, "plan.md"), "# Model-free plan\n");
-  const git = (args: readonly string[]): void => {
-    const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
-    if (result.status !== 0) throw new Error(`fixture git ${args.join(" ")} failed: ${result.stderr}`);
-  };
-  git(["init", "-q"]);
-  git(["add", "src/x.ts", "spec.md", "plan.md"]);
-  git(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"]);
+  git(root, ["init", "-q"]);
+  git(root, ["add", "src/x.ts", "spec.md", "plan.md"]);
+  git(root, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"]);
   const proof = evaluateTaskProof(
     { newTestsRequired: true, declaredArtifacts: ["src/x.ts"] },
     { taskCompleted: true, testResult: { verdict: "trusted-pass" }, filesModified: ["src/x.ts"], newTestsWritten: true },
@@ -1756,18 +1753,14 @@ function waveEmissionProject(): { root: string; runsRoot: string } {
 }
 
 function standaloneEmissionProject(): { root: string; runsRoot: string } {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "loom-t6-standalone-wiring-")));
+  const root = canonicalTempDir("loom-t6-standalone-wiring-");
   waveCliRoots.push(root);
   mkdirSync(join(root, "src"));
   mkdirSync(join(root, "runs"));
   writeFileSync(join(root, "src", "x.ts"), "export const x = 1;\n");
-  const git = (args: readonly string[]): void => {
-    const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
-    if (result.status !== 0) throw new Error(`fixture git ${args.join(" ")} failed: ${result.stderr}`);
-  };
-  git(["init", "-q"]);
-  git(["add", "src/x.ts"]);
-  git(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"]);
+  git(root, ["init", "-q"]);
+  git(root, ["add", "src/x.ts"]);
+  git(root, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture"]);
   return { root, runsRoot: join(root, "runs") };
 }
 

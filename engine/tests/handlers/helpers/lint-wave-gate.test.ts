@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 import {
@@ -118,7 +118,7 @@ describe("collectModifiedFiles", () => {
 
 describe("resolveLintTargets", () => {
   it("canonicalizes absolute in-repo paths and skips deleted files", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-lint-targets-")));
+    const root = canonicalTempDir("loom-lint-targets-");
     try {
       mkdirSync(join(root, "src"));
       writeFileSync(join(root, "src", "a.ts"), "export {};\n");
@@ -130,8 +130,8 @@ describe("resolveLintTargets", () => {
   });
 
   it("rejects external and symlink-traversing transcript paths before lint reads", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-lint-root-")));
-    const outside = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-lint-outside-")));
+    const root = canonicalTempDir("loom-lint-root-");
+    const outside = canonicalTempDir("loom-lint-outside-");
     try {
       writeFileSync(join(outside, "secret.ts"), "secret\n");
       symlinkSync(outside, join(root, "linked"));
@@ -148,7 +148,7 @@ describe("resolveLintTargets", () => {
   it("lints a directory artifact as its Git-visible regular files", () => {
     // Production regression: a Wave whose Task declared a directory artifact
     // blocked the completion suite with "lint target must be a regular file".
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-lint-directory-")));
+    const root = canonicalTempDir("loom-lint-directory-");
     try {
       execFileSync("git", ["init", "--quiet"], { cwd: root });
       mkdirSync(join(root, "calibration", "pilot", "cache"), { recursive: true });
@@ -170,7 +170,7 @@ describe("resolveLintTargets", () => {
   });
 
   it("fails closed when a directory artifact's files cannot be listed", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-lint-listing-")));
+    const root = canonicalTempDir("loom-lint-listing-");
     try {
       mkdirSync(join(root, "calibration"));
       expect(() => resolveLintTargets(root, ["calibration"], () => {
@@ -326,7 +326,7 @@ describe("aggregateResults", () => {
 
 describe("lintFiles batch path", () => {
   it("assembles each FileLintResult from the batch result, in input order", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-lint-batch-")));
+    const root = canonicalTempDir("loom-lint-batch-");
     try {
       const rules = join(root, "rules");
       mkdirSync(rules);
@@ -352,7 +352,7 @@ describe("runFullTierWaveLint", () => {
   });
 
   it("converts a target-resolution failure into the WAVE-GATE LINT ENGINE ERROR block", () => {
-    const outside = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-lint-engine-error-")));
+    const outside = canonicalTempDir("loom-lint-engine-error-");
     try {
       writeFileSync(join(outside, "secret.ts"), "export {};\n");
       const result = runFullTierWaveLint([makeTask({ files_modified: [join(outside, "secret.ts")] })]);
@@ -375,7 +375,7 @@ describe("lint-wave-gate handler", () => {
     });
 
   it("fails closed with the engine-error block when the task graph cannot be loaded", () => {
-    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-lint-handler-")));
+    const dir = canonicalTempDir("loom-lint-handler-");
     try {
       const statePath = join(dir, "active_task_graph.json");
       writeFileSync(statePath, '{"current_phase":');
@@ -389,7 +389,7 @@ describe("lint-wave-gate handler", () => {
   });
 
   it("reports an absent task graph without the engine-error prefix", () => {
-    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-lint-handler-")));
+    const dir = canonicalTempDir("loom-lint-handler-");
     try {
       const statePath = join(dir, "absent.json");
       const run = cli(statePath);

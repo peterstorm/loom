@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import fc from "fast-check";
 import { afterEach, describe, expect, it } from "vitest";
@@ -42,7 +42,7 @@ afterEach(() => {
 const RUN_ID = "run.publication-1" as OrchestrationRunId;
 
 function runsRoot(): string {
-  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-publication-")));
+  const root = canonicalTempDir("loom-publication-");
   cleanup.push(root);
   return root;
 }
@@ -266,7 +266,7 @@ describe("creating a run directory", () => {
 
   it("refuses an entry already occupied by a symlink rather than following it", () => {
     const root = runsRoot();
-    const outside = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-publication-outside-")));
+    const outside = canonicalTempDir("loom-publication-outside-");
     cleanup.push(outside);
     symlinkSync(outside, join(root, RUN_ID));
 

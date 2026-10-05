@@ -5,9 +5,10 @@ import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fc from "fast-check";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } from "../../../fixtures/pi-session";
+import { git, gitResult } from "../../../fixtures/git-repository";
 import { nativeSuccessorCapture } from "../../../fixtures/standalone-native-capture";
 import { representativeNativeWorkload } from "../../../fixtures/standalone-native-workload";
-import { addRepairTest, git, hash, publishedSuccessorForRemediation, repairDeclaration, successorRemediationRepository, value } from "../../../fixtures/standalone-successor-remediation";
+import { addRepairTest, hash, publishedSuccessorForRemediation, repairDeclaration, successorRemediationRepository, value } from "../../../fixtures/standalone-successor-remediation";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import type { RunDirHandle } from "../../../../src/orchestration/run-directory-handle";
 
@@ -321,13 +322,13 @@ describe("owned native v3 → canonical replay → authentic guarded P3", { time
     // Only this disposable repository's scope is staged/committed. Both states defeat
     // the old diff-plus-untracked recipe; neither changes this explicit source roster.
     git(root, ["add", "--", "scope"]);
-    expect(git(root, ["diff", "--name-only", "--", "scope"])).toBe("");
-    expect(git(root, ["ls-files", "--others", "--exclude-standard", "--", "scope"])).toBe("");
+    expect(gitResult(root, ["diff", "--name-only", "--", "scope"]).stdout).toBe("");
+    expect(gitResult(root, ["ls-files", "--others", "--exclude-standard", "--", "scope"]).stdout).toBe("");
     const staged = representativeNativeWorkload(join(root, "scope"));
     expect(staged.map(file => file.path)).toEqual(source.map(file => file.path));
     expect(staged.every((file, index) => file.bytes.equals(source[index]!.bytes))).toBe(true);
     git(root, ["commit", "-qm", "owned representative production workload"]);
-    expect(git(root, ["status", "--porcelain", "--", "scope"])).toBe("");
+    expect(gitResult(root, ["status", "--porcelain", "--", "scope"]).stdout).toBe("");
     const workload = representativeNativeWorkload(join(root, "scope"));
     expect(workload.map(file => file.path)).toEqual(source.map(file => file.path));
     expect(workload.every((file, index) => file.bytes.equals(source[index]!.bytes))).toBe(true);
@@ -508,7 +509,7 @@ describe("owned native v3 → canonical replay → authentic guarded P3", { time
       const handle = value(f.handles.createRunDirectory(f.runsRoot, "current-witness-installed"));
       expect(await f.remediation.startRemediationFacade(handle, prepared.registration)).toMatchObject({ ok: true, action: { kind: "done", outcome: {
         installation: { kind: "verified-index-installed" }, defectFamilyAssessment: { status: "repair-checked" } } } });
-      const staged = git(root, ["ls-files", "--stage", "-z"]);
+      const staged = gitResult(root, ["ls-files", "--stage", "-z"]).stdout;
       if (f.registration.schemaVersion !== 3) throw Error("successor required");
       const later = value(await f.standalone.prepareStandaloneSuccessorFacadeStart(f.runsRoot, "later", f.registration.input));
       // pta-4 pin of the minted-once seam: registration must publish exactly
@@ -535,8 +536,8 @@ describe("owned native v3 → canonical replay → authentic guarded P3", { time
       const one = (started.action as { requests: Requests }).requests.slice(0, 1);
       await native.capture(laterHandle, one, [["invalid current JSON"]]);
       await expect(native.verify()).rejects.toThrow("current witnessed Standalone Review rejected: later:");
-      expect(git(root, ["ls-files", "--stage", "-z"])).toBe(staged);
-      expect(git(root, ["diff", "--cached", "--name-only"]).trim().split("\n")).toEqual(["README.md", "src/repair.mjs", "src/types.ts", "tests/repair.test.mjs"]);
+      expect(gitResult(root, ["ls-files", "--stage", "-z"]).stdout).toBe(staged);
+      expect(gitResult(root, ["diff", "--cached", "--name-only"]).stdout.trim().split("\n")).toEqual(["README.md", "src/repair.mjs", "src/types.ts", "tests/repair.test.mjs"]);
       await native.emit("session_shutdown", { reason: "quit" });
       await expect(native.verify()).rejects.toThrow("no request-bound Loom captures were witnessed");
     } finally { await native.close(); }
@@ -585,7 +586,7 @@ describe("owned native v3 → canonical replay → authentic guarded P3", { time
       const handle = value(f.handles.createRunDirectory(f.runsRoot, "native-install"));
       const done = await f.remediation.startRemediationFacade(handle, prepared.registration);
       expect(done).toMatchObject({ ok: true, action: { kind: "done", outcome: { installation: { kind: "verified-index-installed" }, defectFamilyAssessment: { status: "repair-checked" } } } });
-      expect(git(root, ["diff", "--cached", "--name-only"]).trim().split("\n")).toEqual(["README.md", "src/repair.mjs", "src/types.ts", "tests/repair.test.mjs"]);
+      expect(gitResult(root, ["diff", "--cached", "--name-only"]).stdout.trim().split("\n")).toEqual(["README.md", "src/repair.mjs", "src/types.ts", "tests/repair.test.mjs"]);
       const index = readFileSync(join(root, ".git/index"));
       expect(await f.remediation.resumeRemediationFacade(handle, prepared.registration)).toEqual(done);
       expect(readFileSync(join(root, ".git/index"))).toEqual(index);
@@ -599,7 +600,7 @@ describe("owned native v3 → canonical replay → authentic guarded P3", { time
       if (harness === "pi") await expect(native.verify()).rejects.toThrow("durable capture receipt unavailable");
       writeFileSync(receiptPath, receiptBytes);
       expect(readFileSync(join(root, ".git/index"))).toEqual(index);
-      expect(git(root, ["diff", "--cached", "--name-only"]).trim().split("\n")).toEqual(["README.md", "src/repair.mjs", "src/types.ts", "tests/repair.test.mjs"]);
+      expect(gitResult(root, ["diff", "--cached", "--name-only"]).stdout.trim().split("\n")).toEqual(["README.md", "src/repair.mjs", "src/types.ts", "tests/repair.test.mjs"]);
     } finally { await native.close(); }
   }));
 });

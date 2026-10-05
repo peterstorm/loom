@@ -1,5 +1,10 @@
 /**
- * Shared Git fixture primitives for the remediation orchestration tests.
+ * Shared Git fixture primitives for suites that build fixture repositories.
+ *
+ * Run fixture Git through `gitResult` (stdout via `.stdout`) or `git` rather
+ * than a private spawn, so the fixture never inherits the developer's global
+ * config (`HOME` is the fixture root) or locale. Suites set any identity they
+ * rely on in repository config or `-c`, never through the ambient environment.
  *
  * `remediation-index.test.ts` and `remediation-faults.test.ts` each declared
  * their own `git`/`write`/`pathspecContract` — `pathspecContract` byte-for-byte

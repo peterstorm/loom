@@ -20,9 +20,9 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 const fixture = await vi.hoisted(async () => {
   const fs = await import("node:fs");
-  const os = await import("node:os");
   const path = await import("node:path");
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "loom-lazy-binding-")));
+  const { canonicalTempDir } = await import("../fixtures/canonical-temp-dir");
+  const root = canonicalTempDir("loom-lazy-binding-");
   const statePath = path.join(root, "active_task_graph.json");
   fs.writeFileSync(statePath, "{}\n");
   process.env.LOOM_STATE_PATH = statePath;

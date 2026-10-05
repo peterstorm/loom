@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -355,7 +355,7 @@ describe("orchestration status", () => {
   });
 
   it("reports unavailable reservation liveness instead of inventing an active Agent", async () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-status-roster-unavailable-")));
+    const root = canonicalTempDir("loom-status-roster-unavailable-");
     cleanup.push(root);
     const statePath = join(root, "active_task_graph.json");
     const rosterDir = join(root, "subagents");
@@ -468,7 +468,7 @@ describe("observedAdvisoryApproval", () => {
 
 describe("inspectRunDirectoryEntry", () => {
   it("classifies a symlink at the run path as occupied, never as a usable directory", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-inspect-")));
+    const root = canonicalTempDir("loom-inspect-");
     cleanup.push(root);
     const runsRoot = join(root, "runs");
     mkdirSync(runsRoot, { recursive: true });
@@ -485,7 +485,7 @@ describe("inspectRunDirectoryEntry", () => {
   });
 
   it("classifies a non-directory entry (file) as occupied, never as a usable directory", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-inspect-")));
+    const root = canonicalTempDir("loom-inspect-");
     cleanup.push(root);
     const runsRoot = join(root, "runs");
     mkdirSync(runsRoot, { recursive: true });
@@ -502,7 +502,7 @@ describe("inspectRunDirectoryEntry", () => {
   });
 
   it("classifies a missing entry as absent and a real directory as a directory", () => {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-inspect-")));
+    const root = canonicalTempDir("loom-inspect-");
     cleanup.push(root);
     const runsRoot = join(root, "runs");
     mkdirSync(join(runsRoot, "run.real"), { recursive: true });
@@ -681,7 +681,7 @@ describe("prepareOrphanedWaveGateRecovery", () => {
 
 describe("orchestration CLI", () => {
   function project(): string {
-    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-orchestration-")));
+    const root = canonicalTempDir("loom-orchestration-");
     cleanup.push(root);
     mkdirSync(join(root, ".claude", "state"), { recursive: true });
     return root;
@@ -1802,7 +1802,7 @@ describe("orchestration CLI", () => {
     const root = repository();
     mkdirSync(join(root, "src"));
     writeFileSync(join(root, "secret.ts"), "export const secret = true;\n");
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-noncanonical-scope-runs-")));
+    const runsRoot = canonicalTempDir("loom-noncanonical-scope-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.noncanonical-scope");
     mkdirSync(runDir);
@@ -1819,13 +1819,13 @@ describe("orchestration CLI", () => {
 
   it("refuses to freeze scope bytes through a symlinked ancestor", async () => {
     const root = repository();
-    const outside = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-frozen-scope-outside-")));
+    const outside = canonicalTempDir("loom-frozen-scope-outside-");
     cleanup.push(outside);
     writeFileSync(join(outside, "secret.ts"), "export const secret = true;\n");
     mkdirSync(join(root, "linked"));
     rmSync(join(root, "linked"), { recursive: true });
     symlinkSync(outside, join(root, "linked"));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-frozen-scope-runs-")));
+    const runsRoot = canonicalTempDir("loom-frozen-scope-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.symlinked-frozen-scope");
     mkdirSync(runDir);
@@ -1840,7 +1840,7 @@ describe("orchestration CLI", () => {
 
   it("freezes untracked files into default scope and accepts findings against them", async () => {
     const root = repository();
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-orchestration-runs-")));
+    const runsRoot = canonicalTempDir("loom-orchestration-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.untracked-scope");
     mkdirSync(join(root, "src"));
@@ -1977,7 +1977,7 @@ describe("orchestration CLI", () => {
     writeFileSync(join(root, "layered.ts"), lines(75, "final"));
     writeFileSync(join(root, "working.ts"), lines(100, "working"));
     writeFileSync(join(root, "untracked.ts"), lines(150, "untracked"));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-orchestration-runs-")));
+    const runsRoot = canonicalTempDir("loom-orchestration-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.complete-additions");
     mkdirSync(runDir, { recursive: true });
@@ -2075,7 +2075,7 @@ describe("orchestration CLI", () => {
     });
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-missing-task-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-missing-task-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-missing-task");
     mkdirSync(runDir);
@@ -2109,7 +2109,7 @@ describe("orchestration CLI", () => {
       plan_file: null,
       tasks: [reviewReadyTask(proof)],
     })));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-stale-request-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-stale-request-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-stale-request");
     mkdirSync(runDir);
@@ -2154,7 +2154,7 @@ describe("orchestration CLI", () => {
         review_generation: 0, findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-fresh-generation-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-fresh-generation-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-fresh-generation");
     mkdirSync(runDir);
@@ -2212,7 +2212,7 @@ describe("orchestration CLI", () => {
       current_phase: "execute", current_wave: 1, phase_artifacts: {}, skipped_phases: [],
       spec_file: null, plan_file: null, wave_gates: {}, tasks: [task("T1"), task("T2")],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-sibling-stability-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-sibling-stability-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-sibling-stability");
     mkdirSync(runDir);
@@ -2271,7 +2271,7 @@ describe("orchestration CLI", () => {
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-review-recovery-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-review-recovery-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-review-recovery");
     mkdirSync(runDir);
@@ -2449,7 +2449,7 @@ describe("orchestration CLI", () => {
         findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-spec-retry-epoch-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-spec-retry-epoch-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-spec-retry-epoch");
     mkdirSync(runDir);
@@ -2617,7 +2617,7 @@ describe("orchestration CLI", () => {
         findings: [finding], critical_findings: [finding.claim], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-spec-retry-lost-context-")));
+    const runsRoot = canonicalTempDir("loom-wave-spec-retry-lost-context-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-spec-retry-lost-context");
     mkdirSync(runDir);
@@ -2697,7 +2697,7 @@ describe("orchestration CLI", () => {
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-facade-floor-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-facade-floor-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-facade-floor");
     mkdirSync(runDir);
@@ -2763,7 +2763,7 @@ describe("orchestration CLI", () => {
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-attempt-one-rejection-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-attempt-one-rejection-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-attempt-one-rejection");
     mkdirSync(runDir);
@@ -2833,7 +2833,7 @@ describe("orchestration CLI", () => {
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-mixed-retry-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-mixed-retry-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-mixed-retry");
     mkdirSync(runDir);
@@ -2929,7 +2929,7 @@ describe("orchestration CLI", () => {
         }],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-orphan-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-orphan-runs-");
     cleanup.push(runsRoot);
     const oldRun = join(runsRoot, "run.wave-orphaned");
     mkdirSync(oldRun);
@@ -2974,7 +2974,7 @@ describe("orchestration CLI", () => {
       "--new-run", replacementRun,
     ] as const;
 
-    const foreignRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-foreign-root-")));
+    const foreignRoot = canonicalTempDir("loom-wave-foreign-root-");
     cleanup.push(foreignRoot);
     const foreignReplacement = join(foreignRoot, "run.wave-orphan-replacement");
     mkdirSync(foreignReplacement);
@@ -3125,7 +3125,7 @@ describe("orchestration CLI", () => {
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-restart-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-restart-runs-");
     cleanup.push(runsRoot);
     const previousRun = join(runsRoot, "run.wave-exhausted");
     mkdirSync(previousRun);
@@ -3380,7 +3380,7 @@ describe("orchestration CLI", () => {
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-partial-restart-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-partial-restart-runs-");
     cleanup.push(runsRoot);
     const previousRun = join(runsRoot, "run.wave-partial-exhausted");
     mkdirSync(previousRun);
@@ -3452,7 +3452,7 @@ describe("orchestration CLI", () => {
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-valid-retry-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-valid-retry-runs-");
     cleanup.push(runsRoot);
     const previousRun = join(runsRoot, "run.wave-valid-retry");
     mkdirSync(previousRun);
@@ -3501,7 +3501,7 @@ describe("orchestration CLI", () => {
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-crash-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-crash-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-crash-window");
     mkdirSync(runDir);
@@ -3601,7 +3601,7 @@ describe("orchestration CLI", () => {
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-upheld-tally-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-upheld-tally-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-upheld-tally");
     mkdirSync(runDir);
@@ -3683,7 +3683,7 @@ describe("orchestration CLI", () => {
     };
     const statePath = join(root, ".claude", "state", "active_task_graph.json");
     writeFileSync(statePath, JSON.stringify(graph));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-refuted-tally-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-refuted-tally-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-refuted-tally");
     mkdirSync(runDir);
@@ -3746,7 +3746,7 @@ describe("orchestration CLI", () => {
         findings: [], critical_findings: [], advisory_findings: [],
       }],
     }));
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-lint-block-runs-")));
+    const runsRoot = canonicalTempDir("loom-wave-lint-block-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.wave-lint-block");
     mkdirSync(runDir);
@@ -3766,7 +3766,7 @@ describe("orchestration CLI", () => {
   it("publishes standalone refutation attempt 2 after a malformed attempt-1 verdict", async () => {
     const root = repository();
     writeFileSync(join(root, "a.txt"), "changed\n");
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-standalone-refutation-retry-runs-")));
+    const runsRoot = canonicalTempDir("loom-standalone-refutation-retry-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.standalone-refutation-retry");
     mkdirSync(runDir);
@@ -3840,7 +3840,7 @@ describe("orchestration CLI", () => {
   it("advances a capture-rejected refutation attempt 1 to its attempt-2 retry and completes the run", async () => {
     const root = repository();
     writeFileSync(join(root, "a.txt"), "changed\n");
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-standalone-refutation-tombstone-runs-")));
+    const runsRoot = canonicalTempDir("loom-standalone-refutation-tombstone-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.standalone-refutation-tombstone");
     mkdirSync(runDir);
@@ -3940,7 +3940,7 @@ describe("orchestration CLI", () => {
   it("terminalizes the refutation panel when the attempt-2 capture is terminally rejected", async () => {
     const root = repository();
     writeFileSync(join(root, "a.txt"), "changed\n");
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-standalone-refutation-attempt2-tombstone-runs-")));
+    const runsRoot = canonicalTempDir("loom-standalone-refutation-attempt2-tombstone-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.standalone-refutation-attempt2-tombstone");
     mkdirSync(runDir);
@@ -4093,7 +4093,7 @@ describe("orchestration CLI", () => {
   it("advances a capture-rejected standalone reviewer attempt 1 to diagnostic-rich attempt 2", async () => {
     const root = repository();
     writeFileSync(join(root, "a.txt"), "changed\n");
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-standalone-capture-rejection-runs-")));
+    const runsRoot = canonicalTempDir("loom-standalone-capture-rejection-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.standalone-capture-rejection");
     mkdirSync(runDir);
@@ -4177,7 +4177,7 @@ describe("orchestration CLI", () => {
   it("heals a standalone crash after batch publication but before the checkpoint write", async () => {
     const root = repository();
     writeFileSync(join(root, "a.txt"), "changed\n");
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-standalone-crash-runs-")));
+    const runsRoot = canonicalTempDir("loom-standalone-crash-runs-");
     cleanup.push(runsRoot);
     const runDir = join(runsRoot, "run.standalone-crash-window");
     mkdirSync(runDir);
@@ -4221,7 +4221,7 @@ describe("orchestration CLI", () => {
    */
   async function cleanStandaloneReviewFixture(slug: string) {
     const repository = project();
-    const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), slug)));
+    const runsRoot = canonicalTempDir(slug);
     cleanup.push(runsRoot);
     const git = (args: readonly string[]) => spawnSync("git", args, { cwd: repository, encoding: "utf8" });
     expect(git(["init", "-q"]).status).toBe(0);
@@ -4617,7 +4617,7 @@ describe("orchestration CLI", () => {
           findings: [], critical_findings: [], advisory_findings: [],
         }],
       }));
-      const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), `loom-${label}-runs-`)));
+      const runsRoot = canonicalTempDir(`loom-${label}-runs-`);
       cleanup.push(runsRoot);
       const runDir = join(runsRoot, `run.${label}`);
       mkdirSync(runDir);
@@ -4764,7 +4764,7 @@ describe("orchestration CLI", () => {
 
     it("refuses a decision against a program that does not accept user decisions", async () => {
       const root = repository();
-      const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-decide-wrong-program-runs-")));
+      const runsRoot = canonicalTempDir("loom-decide-wrong-program-runs-");
       cleanup.push(runsRoot);
       const runDir = join(runsRoot, "run.decide-wrong-program");
       mkdirSync(runDir);
@@ -5073,7 +5073,7 @@ describe("orchestration CLI", () => {
           findings: [], critical_findings: [], advisory_findings: [],
         }],
       }));
-      const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-wave-abandon-stamp-runs-")));
+      const runsRoot = canonicalTempDir("loom-wave-abandon-stamp-runs-");
       cleanup.push(runsRoot);
       const runDir = join(runsRoot, "run.wave-abandon-stamp");
       mkdirSync(runDir);

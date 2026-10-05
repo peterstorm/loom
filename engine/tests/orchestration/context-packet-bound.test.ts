@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { AgentRequestAuthority, OrchestrationRunId } from "../../src/core/orchestration-contract";
@@ -31,7 +31,7 @@ afterEach(() => {
 const RUN_ID = "run.packet-bound" as OrchestrationRunId;
 
 function freshRun(): Readonly<{ directory: string; handle: RunDirHandle; root: string }> {
-  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-packet-bound-")));
+  const root = canonicalTempDir("loom-packet-bound-");
   const directory = join(root, RUN_ID);
   mkdirSync(directory, { recursive: true });
   const opened = openRunDirectory(root, directory);

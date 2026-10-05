@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import advancePhaseHandler, {
   applyEligiblePhaseTransition,
   countMarkers,
@@ -18,9 +19,8 @@ import {
 import { stripNamespace } from "../../../src/utils/strip-namespace";
 import type { Phase, TaskGraph } from "../../../src/types";
 import { StateManager } from "../../../src/state-manager";
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 
 /** Minimal TaskGraph for transition tests */
 function mkState(overrides: Partial<TaskGraph> = {}): TaskGraph {
@@ -41,7 +41,7 @@ function mkState(overrides: Partial<TaskGraph> = {}): TaskGraph {
 describe("countMarkers", () => {
   let tmpDir: string;
 
-  beforeEach(() => { tmpDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-cm-"))); });
+  beforeEach(() => { tmpDir = canonicalTempDir("loom-cm-"); });
   afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }); });
 
   it("counts NEEDS CLARIFICATION markers", () => {
@@ -72,7 +72,7 @@ describe("countMarkers", () => {
 describe("findFile", () => {
   let tmpDir: string;
 
-  beforeEach(() => { tmpDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-ff-"))); });
+  beforeEach(() => { tmpDir = canonicalTempDir("loom-ff-"); });
   afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }); });
 
   it("finds file in top directory", () => {
@@ -193,7 +193,7 @@ describe("phase transitions", () => {
   let origCwd: string;
 
   beforeEach(() => {
-    tmpDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-rt-")));
+    tmpDir = canonicalTempDir("loom-rt-");
     origCwd = process.cwd();
     process.chdir(tmpDir);
   });
@@ -274,7 +274,7 @@ describe("phase transitions", () => {
   });
 
   it("refuses a project-local spec symlink whose target is outside the project", () => {
-    const externalRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-external-spec-")));
+    const externalRoot = canonicalTempDir("loom-external-spec-");
     const externalSpec = join(externalRoot, "spec.md");
     const localSpec = join(tmpDir, ".claude", "specs", "feat", "spec.md");
     mkdirSync(join(tmpDir, ".claude", "specs", "feat"), { recursive: true });
@@ -410,7 +410,7 @@ describe("phase transitions", () => {
   });
 
   it("refuses a Plan reached through a symlinked ancestor", () => {
-    const externalRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-external-plan-")));
+    const externalRoot = canonicalTempDir("loom-external-plan-");
     writeFileSync(join(externalRoot, "plan.md"), "external authority");
     mkdirSync(join(tmpDir, ".claude"), { recursive: true });
     symlinkSync(externalRoot, join(tmpDir, ".claude", "plans"));
@@ -557,7 +557,7 @@ describe("panel agents — advance-phase passthrough (never mutates phase)", () 
   let origCwd: string;
 
   beforeEach(() => {
-    tmpDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-panel-")));
+    tmpDir = canonicalTempDir("loom-panel-");
     origCwd = process.cwd();
     process.chdir(tmpDir);
   });

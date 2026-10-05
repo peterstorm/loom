@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { lstatSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   prepareWriteTargets,
@@ -23,7 +23,7 @@ afterEach(() => {
  */
 describe("panel run no-follow writes", () => {
   it("refuses a symlink swapped in after target preparation", () => {
-    const runDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-panel-write-")));
+    const runDir = canonicalTempDir("loom-panel-write-");
     roots.push(runDir);
     const outside = join(runDir, "outside.txt");
     const target = join(runDir, "brief.md");
@@ -38,7 +38,7 @@ describe("panel run no-follow writes", () => {
   });
 
   it("refuses a parent directory swapped to a symlink after preparation", () => {
-    const runDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-panel-parent-write-")));
+    const runDir = canonicalTempDir("loom-panel-parent-write-");
     roots.push(runDir);
     const outside = join(runDir, "outside");
     const verdicts = join(runDir, "verdicts");
@@ -56,7 +56,7 @@ describe("panel run no-follow writes", () => {
   });
 
   it("publishes a staged authority file without following a raced final symlink", () => {
-    const runDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-panel-publish-")));
+    const runDir = canonicalTempDir("loom-panel-publish-");
     roots.push(runDir);
     const outside = join(runDir, "outside.txt");
     const staged = join(runDir, ".result.pending.json");

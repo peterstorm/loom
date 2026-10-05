@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
+import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -72,7 +72,7 @@ function git(root: string, args: readonly string[]) {
 	return result.stdout.trim();
 }
 function project() {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "loom-p4-standalone-")));
+  const root = canonicalTempDir("loom-p4-standalone-");
   roots.push(root);
   mkdirSync(join(root, "src"));
   mkdirSync(join(root, "runs"));

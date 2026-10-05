@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { git, gitResult } from "../fixtures/git-repository";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   captureLoomRuntimeIdentity,
@@ -30,13 +30,11 @@ type RuntimeBaselineTask = Parameters<typeof runtimeBaselineRestoreForTasks>[1][
 /** A minimal loom-shaped checkout: the runtime revision domain is exactly
  *  `engine/src` + `pi` + the identity files, so the fixtures mirror that. */
 function gitFixture(): { root: string; revision: string } {
-  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-runtime-baseline-")));
+  const root = canonicalTempDir("loom-runtime-baseline-");
   roots.push(root);
-  const git = (...args: readonly string[]): string =>
-    execFileSync("git", args, { cwd: root, encoding: "utf8" });
-  git("init", "-q", "-b", "main");
-  git("config", "user.email", "loom@example.test");
-  git("config", "user.name", "loom");
+  git(root, ["init", "-q", "-b", "main"]);
+  git(root, ["config", "user.email", "loom@example.test"]);
+  git(root, ["config", "user.name", "loom"]);
   mkdirSync(join(root, "engine", "src", "core"), { recursive: true });
   mkdirSync(join(root, "pi"), { recursive: true });
   writeFileSync(join(root, "engine", "src", "core", "task.ts"), "export const task = 1;\n");
@@ -44,9 +42,9 @@ function gitFixture(): { root: string; revision: string } {
   writeFileSync(join(root, "package.json"), "{}\n");
   writeFileSync(join(root, "engine", "package.json"), "{}\n");
   writeFileSync(join(root, "engine", "bun.lock"), "\n");
-  git("add", ".");
-  git("commit", "-q", "-m", "baseline");
-  return { root, revision: git("rev-parse", "HEAD").trim() };
+  git(root, ["add", "."]);
+  git(root, ["commit", "-q", "-m", "baseline"]);
+  return { root, revision: gitResult(root, ["rev-parse", "HEAD"]).stdout.trim() };
 }
 
 const taskWith = (overrides: Partial<RuntimeBaselineTask> = {}): RuntimeBaselineTask => ({

@@ -3,8 +3,8 @@
  * calls are gated, and the shape of the block it returns.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { registerRulesGate } from "../../../pi/rules-gate";
 
@@ -30,7 +30,7 @@ const saved = {
 };
 
 beforeAll(() => {
-  dir = realpathSync(mkdtempSync(join(tmpdir(), "pi-gate-")));
+  dir = canonicalTempDir("pi-gate-");
   target = join(dir, "x.ts");
   writeFileSync(target, "export const x = 1;\n");
   mkdirSync(join(dir, "rules"));

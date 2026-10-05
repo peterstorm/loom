@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { captureNativeReview } from "../../../fixtures/native-review-capture";
 import { disposeFixturePiSessions, withFixturePiSession as inDirectory } from "../../../fixtures/pi-session";
 import { createHash } from "node:crypto";
@@ -8,17 +9,14 @@ import { parseStandaloneReviewMachineState } from "../../../../src/core/standalo
 import { renderStandaloneReviewSummary } from "../../../../src/core/standalone-review-records";
 import {
   mkdirSync,
-  mkdtempSync,
   chmodSync,
   readFileSync,
   readdirSync,
-  realpathSync,
   rmSync,
   truncateSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
@@ -278,8 +276,8 @@ function applyRepair(repository: string, testBody = 'test("repair predicate", ()
 }
 
 function repositoryFixture(): Readonly<{ repository: string; runsRoot: string }> {
-  const repository = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-p3-facade-repo-")));
-  const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-p3-facade-runs-")));
+  const repository = canonicalTempDir("loom-p3-facade-repo-");
+  const runsRoot = canonicalTempDir("loom-p3-facade-runs-");
   cleanup.push(repository, runsRoot);
   git(repository, ["init", "--quiet", "--initial-branch=main"]);
   git(repository, ["config", "user.email", "fixture@example.invalid"]);

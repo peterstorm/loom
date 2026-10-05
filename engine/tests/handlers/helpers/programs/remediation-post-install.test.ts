@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,7 +37,7 @@ function runCli(repository: string, args: readonly string[], input = "") {
 
 async function completedReviewFixture() {
   const repository = mkdtempSync(join(tmpdir(), "loom-remediation-post-install-repo-"));
-  const runsRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-remediation-post-install-runs-")));
+  const runsRoot = canonicalTempDir("loom-remediation-post-install-runs-");
   cleanup.push(repository, runsRoot);
   git(repository, ["init", "--quiet", "--initial-branch=main"]);
   git(repository, ["config", "user.email", "fixture@example.invalid"]);

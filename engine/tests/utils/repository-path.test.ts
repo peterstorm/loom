@@ -1,12 +1,12 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { partitionWriteEvidence } from "../../src/utils/repository-path";
 
 const dirs: string[] = [];
 function tempDir(prefix: string): string {
-  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
+  const dir = canonicalTempDir(prefix);
   dirs.push(dir);
   return dir;
 }

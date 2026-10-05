@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
+import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -29,7 +29,7 @@ function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: fals
   return result.value;
 }
 function fixture() {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "loom-p4-native-")));
+  const root = canonicalTempDir("loom-p4-native-");
   roots.push(root);
   mkdirSync(join(root, "src")); mkdirSync(join(root, "runs"));
   writeFileSync(join(root, "src/a.ts"), "export const fixture = 1;\n");

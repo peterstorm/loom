@@ -1,14 +1,11 @@
-import { execFileSync } from "node:child_process";
 import {
   chmodSync,
-  mkdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
   unlinkSync,
-  writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseRepositorySnapshotWitness } from "../../src/core/remediation-machine";
 import {
@@ -22,30 +19,18 @@ import {
   snapshotRepositoryWitness,
 } from "../../src/orchestration/git-remediation";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { git, write } from "../fixtures/git-repository";
 
 const REPORT_PATH = ".loom/completion-reports/repair.xml";
 const roots: string[] = [];
 
-function git(root: string, ...args: string[]): string {
-  return execFileSync("git", ["-C", root, ...args], {
-    encoding: "utf-8",
-    env: { PATH: process.env["PATH"] ?? "", HOME: root, LC_ALL: "C" },
-  }).trim();
-}
-
-function write(root: string, path: string, contents: string): void {
-  const absolute = join(root, ...path.split("/"));
-  mkdirSync(dirname(absolute), { recursive: true });
-  writeFileSync(absolute, contents);
-}
-
 function fixtureRepository(): string {
   const root = canonicalTempDir("loom-remediation-candidate-");
   roots.push(root);
-  git(root, "init", "--quiet", "--initial-branch=main");
-  git(root, "config", "user.email", "loom-tests@example.invalid");
-  git(root, "config", "user.name", "Loom Tests");
-  git(root, "config", "commit.gpgsign", "false");
+  git(root, ["init", "--quiet", "--initial-branch=main"]);
+  git(root, ["config", "user.email", "loom-tests@example.invalid"]);
+  git(root, ["config", "user.name", "Loom Tests"]);
+  git(root, ["config", "commit.gpgsign", "false"]);
   write(root, ".gitignore", `${REPORT_PATH}\n.claude/reviews/review-and-fix-runs/\nignored-sibling.ts\n`);
   write(root, ".loom/verification-manifest.json", "{\"fixture\":true}\n");
   write(root, "src/reviewed.ts", "export const reviewed = 1;\n");
@@ -56,8 +41,8 @@ function fixtureRepository(): string {
   write(root, "target-a.txt", "target\n");
   write(root, "target-b.txt", "target\n");
   symlinkSync("target-a.txt", join(root, "link.txt"));
-  git(root, "add", "-A");
-  git(root, "commit", "--quiet", "-m", "fixture");
+  git(root, ["add", "-A"]);
+  git(root, ["commit", "--quiet", "-m", "fixture"]);
   write(root, "src/reviewed.ts", "export const reviewed = 2;\n");
   unlinkSync(join(root, "src/removed.ts"));
   write(root, "tests/regression.test.ts", "test('repair', () => {});\n");
@@ -195,8 +180,8 @@ describe("remediation candidate workspace capture", () => {
 
     const trackedRoot = fixtureRepository();
     write(trackedRoot, REPORT_PATH, "tracked report\n");
-    git(trackedRoot, "add", "-f", REPORT_PATH);
-    git(trackedRoot, "commit", "--quiet", "-m", "track report");
+    git(trackedRoot, ["add", "-f", REPORT_PATH]);
+    git(trackedRoot, ["commit", "--quiet", "-m", "track report"]);
     const tracked = captureResult(trackedRoot);
     expect(tracked).toMatchObject({
       ok: false,
@@ -273,7 +258,7 @@ describe("remediation candidate workspace capture", () => {
     const root = fixtureRepository();
     const unstaged = capture(root);
     expect(unstaged.observedPaths).toContain("src/removed.ts");
-    git(root, "rm", "--quiet", "--cached", "src/removed.ts");
+    git(root, ["rm", "--quiet", "--cached", "src/removed.ts"]);
     const staged = capture(root);
     expect(staged.observedPaths).not.toContain("src/removed.ts");
     expect(staged.candidateWitness.observedPaths).toEqual(staged.observedPaths);
@@ -290,9 +275,9 @@ describe("remediation candidate workspace capture", () => {
       error: { message: expect.stringContaining("src/never-committed.ts") },
     });
     write(root, "ignored-sibling.ts", "committed then untracked\n");
-    git(root, "add", "-f", "ignored-sibling.ts");
-    git(root, "commit", "--quiet", "-m", "track ignored path");
-    git(root, "rm", "--quiet", "--cached", "ignored-sibling.ts");
+    git(root, ["add", "-f", "ignored-sibling.ts"]);
+    git(root, ["commit", "--quiet", "-m", "track ignored path"]);
+    git(root, ["rm", "--quiet", "--cached", "ignored-sibling.ts"]);
     expect(named("ignored-sibling.ts")).toMatchObject({
       ok: false,
       error: { message: expect.stringContaining("committed paths with a staged deletion") },
@@ -302,10 +287,10 @@ describe("remediation candidate workspace capture", () => {
   it("admits a reviewed path the reviewed change deleted in an earlier commit, and only as a reviewed path", () => {
     const root = fixtureRepository();
     write(root, "src/retired.ts", "export const retired = 1;\n");
-    git(root, "add", "src/retired.ts");
-    git(root, "commit", "--quiet", "-m", "add retired");
-    git(root, "rm", "--quiet", "src/retired.ts");
-    git(root, "commit", "--quiet", "-m", "retire it");
+    git(root, ["add", "src/retired.ts"]);
+    git(root, ["commit", "--quiet", "-m", "add retired"]);
+    git(root, ["rm", "--quiet", "src/retired.ts"]);
+    git(root, ["commit", "--quiet", "-m", "retire it"]);
     const base = input(root);
     const withSources = (sources: Partial<RemediationCandidateCaptureInput["pathSources"]>) =>
       captureResult(root, { ...base, pathSources: { ...base.pathSources, ...sources } });

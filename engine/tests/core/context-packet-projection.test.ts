@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import fc from "fast-check";
 import { match } from "ts-pattern";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync, symlinkSync, mkdirSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync, symlinkSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sha256Bytes } from "../../src/core/digest";
@@ -21,7 +21,7 @@ const value = <T>(result: { ok: true; value: T } | { ok: false }): T => {
   return result.value;
 };
 function fixture(version: 1 | 2 | 3 = 2) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "loom-reader-")));
+  const root = canonicalTempDir("loom-reader-");
   roots.push(root);
   const text = "export const literal = 'do not execute $(touch /tmp/not-authority)';\n".repeat(1500);
   const section = value(encodeByteSection("standalone-frozen-source", JSON.stringify({ schemaVersion: 1, headRevision: "fixture", files: [
@@ -72,7 +72,7 @@ describe("read-only packet command", () => {
   });
 
   it("reads exact Wave text while section browsing exposes only binary/absent metadata", () => {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), "loom-wave-reader-")));
+    const root = canonicalTempDir("loom-wave-reader-");
     roots.push(root);
     const text = "export const dirty = 'exact workspace bytes';\n";
     const snapshot = observedWorkspace("T1", ["absent.ts", "binary.bin", "src/a.ts"], [

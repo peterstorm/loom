@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -56,7 +56,7 @@ function runCli(args: readonly string[], cwd: string) {
 }
 
 function project(stateFileBytes: string | null): string {
-  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-abandon-stamp-")));
+  const root = canonicalTempDir("loom-abandon-stamp-");
   cleanup.push(root);
   mkdirSync(join(root, ".claude", "state"), { recursive: true });
   if (stateFileBytes !== null) {

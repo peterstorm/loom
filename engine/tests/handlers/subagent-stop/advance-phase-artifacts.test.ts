@@ -15,14 +15,14 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import advancePhaseHandler from "../../../src/handlers/subagent-stop/advance-phase";
 import { SUBAGENT_DIR } from "../../../src/config";
 import { StateManager } from "../../../src/state-manager";
 import type { TaskGraph } from "../../../src/types";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 
 function mkState(overrides: Partial<TaskGraph> = {}): TaskGraph {
   return {
@@ -48,7 +48,7 @@ describe("advance-phase artifact authority", () => {
   let origCwd: string;
 
   beforeEach(() => {
-    tmpDir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-artifact-authority-")));
+    tmpDir = canonicalTempDir("loom-artifact-authority-");
     origCwd = process.cwd();
     process.chdir(tmpDir);
   });

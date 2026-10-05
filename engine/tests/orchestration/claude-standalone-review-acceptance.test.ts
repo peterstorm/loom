@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,7 @@ import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../src/orchestration/harness-capt
 import { openRunDirectory } from "../../src/orchestration/run-directory-handle";
 import { ORCHESTRATION_RUNS_SUFFIX, readSessionRunBindings } from "../../src/orchestration/session-run-bindings";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { git } from "../fixtures/git-repository";
 
 /**
  * A standalone review driven end to end the way Claude Code drives it: the
@@ -45,11 +46,6 @@ type Action = Readonly<{
   kind: string;
   requests?: readonly Readonly<{ authority: AgentRequestAuthority; task: string }>[];
 }>;
-
-function git(root: string, args: readonly string[]): void {
-  const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
-  if (result.status !== 0) throw new Error(result.stderr);
-}
 
 function project() {
   const root = canonicalTempDir("loom-claude-standalone-");

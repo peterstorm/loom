@@ -53,6 +53,27 @@ Remediation is registered per slice, because a remediation run authorizes only i
 
 None. The only critical was upheld by all three panel lenses (reproduction, intent, blast-radius).
 
+## Engine defect hit during remediation
+
+The s1 and s2 remediation starts were refused with "candidate input paths are not Git-visible tracked or non-ignored untracked paths". Each source review's frozen scope names a path this branch deleted (`engine/src/utils/artifact-baseline.ts`, `engine/src/handlers/helpers/programs/helpers.ts`), and such a path is absent from HEAD, the index and the worktree.
+
+`0c00f83b` (with a regression test that fails without it) admits a reviewed path that is absent from the worktree. Support, sibling and input-source paths keep the strict rule. The loaded runtime is the main checkout, so `96603e4c` and `0c00f83b` were cherry-picked onto its branch `fix/artifact-baseline-directory-artifacts` as `0e74223b` and `d83084b8`.
+
+## Outcome
+
+| Slice | Remediation run | Assessment | Installed index | Commit |
+|---|---|---|---|---|
+| s4 | `raf-grammar-20261005-s4-remediation` | repair-checked | `3682c0825d27` | `1587e519` |
+| s1 | `raf-grammar-20261005-s1-remediation` | not-required | `cdd3bcf596fd` | `a9ee52fd` |
+| s2 | `raf-grammar-20261005-s2-remediation` | not-required | `48695858cfef` | `5388e501` |
+| s3 | `raf-grammar-20261005-s3-remediation` | not-required | recorded in its commit | this plan's commit |
+
+Follow-ups, out of scope and not changed:
+- `remediation-registration.ts` parsers throw on hostile Proxy inputs (revoked or trapping proxies) instead of returning their typed refusal. Stored input comes from `JSON.parse`, so this is low impact.
+- `completion-suite` `canonicalAuthorizedChecks` skips array holes via `raw.map`.
+- Other private `exactRecord`/`isRecord` copies (remediation-machine, remediation-events, session-run-bindings, …) could move onto the `plain-record` kernel.
+- Remaining inline git helpers in other test files (quality-programs, git.test, task-local-completion, …).
+
 ## Validation
 
 - `npm run verify` (root, which runs `engine` typecheck, unit tests with the JUnit report, and smokes) before every registered remediation run.

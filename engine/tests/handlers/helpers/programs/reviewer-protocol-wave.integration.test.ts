@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -97,7 +97,7 @@ const specText = `# Feature: Wave fixture
 const specPass = "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: PASSED\n";
 
 function project(priors: readonly Finding[] = []) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "loom-p4-wave-")));
+  const root = canonicalTempDir("loom-p4-wave-");
   roots.push(root);
   mkdirSync(join(root, "src"));
   mkdirSync(join(root, "runs"));

@@ -1,8 +1,8 @@
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalTempDir } from "./canonical-temp-dir";
+import { git } from "./git-repository";
 import { captureStandaloneCliEvidence as capture } from "./standalone-cli-capture";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import type { RunDirHandle } from "../../src/orchestration/run-directory-handle";
@@ -14,11 +14,6 @@ export const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).di
 export function value<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T {
   if (!result.ok) throw Error(JSON.stringify(result));
   return result.value;
-}
-export function git(root: string, args: readonly string[]): string {
-  const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
-  if (result.status !== 0) throw Error(result.stderr);
-  return result.stdout;
 }
 
 /** Same enrolled fixed command as the existing P3 fixture; never edits the project manifest. */
