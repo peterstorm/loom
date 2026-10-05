@@ -8,13 +8,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   currentOrchestrationStatus,
   observedAdvisoryApproval,
+  renderStatus,
+} from "../../../src/handlers/helpers/orchestration";
+import {
   panelSubmissionProblem,
   panelVerdictEmissionPort,
   parseRegisteredPanelProgram,
-  renderStatus,
   resolvePanelAttemptVerdictSource,
   settlePanelAttemptSubmission,
-} from "../../../src/handlers/helpers/orchestration";
+} from "../../../src/handlers/helpers/programs/legacy-panel";
 import { candidateFilename, type PanelLens } from "../../../src/core/panel-contract";
 import { panelVerdictSourceProvenance, panelVerdictSourceRecord } from "../../../src/core/panel-verdict-source";
 import { selectVerdictSource } from "../../../src/core/emission-ingestion";
@@ -4236,7 +4238,8 @@ describe("orchestration CLI", () => {
     await withFixturePiSession(repository, async () => {
       const started = await startStandaloneFacade(opened.value, { kind: "comments", files: ["a.txt"], dryRun: false });
       if (!started.ok) throw new Error(started.message);
-      const action = started.action as { requests: { authority: AgentRequestAuthority }[] };
+      const action = started.action;
+      if (action.kind !== "spawn-batch") throw new Error(`expected spawn-batch, got ${action.kind}`);
       const transcript = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
       for (const request of action.requests) {
         expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(transcript)])).ok).toBe(true);
@@ -4246,7 +4249,7 @@ describe("orchestration CLI", () => {
       const registered = parseRegistration(raw.value);
       if (!registered.ok) throw new Error(registered.message);
       const done = await resumeStandaloneFacade(opened.value, registered.value);
-      expect(done.ok && (done.action as { kind: string }).kind === "done").toBe(true);
+      expect(done.ok && done.action.kind === "done").toBe(true);
     });
     return { repository, runsRoot, sourceRun, remediationRun, git };
   }

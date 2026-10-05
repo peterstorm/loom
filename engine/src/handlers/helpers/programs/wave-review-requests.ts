@@ -128,15 +128,15 @@ export async function reconcileWaveReviewIssuance(
     // as a corrupt batch and stranding the active replacement authority.
     const published = await publishReviewInitialBatch(handle, batch.requests, batch.packets, "wave-gate-current", registration);
     if (!published.ok) return settled(failed(published.message));
-    const action = published.action as { requests: readonly Record<string, unknown>[] };
+    const action = published.action;
     await installWaveReviewRuns(manager, registration, batch);
     return settled({ ok: true, action: {
       ...action,
       requests: action.requests.map((request, index) => ({
         ...request,
         task: index === 0
-          ? `${String(request.task)}\nSpec-check Wave ${registration.input.wave}.`
-          : `${String(request.task)}\nReview Task ${registration.taskIds[Math.floor((index - 1) / WAVE_REVIEW_AGENTS.length)]}.`,
+          ? `${request.task}\nSpec-check Wave ${registration.input.wave}.`
+          : `${request.task}\nReview Task ${registration.taskIds[Math.floor((index - 1) / WAVE_REVIEW_AGENTS.length)]}.`,
       })),
     } });
   }

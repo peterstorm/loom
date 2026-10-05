@@ -13,7 +13,7 @@ export {
   type RegisteredStandaloneProgram,
 } from './registration';
 export type { RegisteredRemediationProgram, RemediationStartInputV2 } from './remediation-registration';
-export type { FacadeDriveResult, ProgramParse } from './program-result';
+export type { FacadeAction, FacadeDriveResult, ProgramParse } from './program-result';
 // Parent-side spawn admission must prove publication, not trust prompt markers.
 export { publishedReviewerRequest } from './durable-requests';
 export { reviewerProtocolResolver } from './reviewer-protocol-resolution';

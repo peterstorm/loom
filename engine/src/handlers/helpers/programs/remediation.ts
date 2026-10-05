@@ -13,6 +13,7 @@ import {
   canonicalStructuralEquals,
   parseEffectId,
   parseVerifiedIndexInstalled,
+  type OrchestrationRunId,
   type VerifiedIndexInstalled,
 } from "../../../core/orchestration-contract";
 import {
@@ -76,9 +77,15 @@ import {
   type RemediationStartInputV2,
 } from "./remediation-registration";
 import type { RemediationInspectionLabel } from "../../../core/run-inspection";
-import { failed, type FacadeDriveResult } from "./program-result";
+import { failed, type FacadeDriveResult, type RemediationInstalledOutcome } from "./program-result";
 
-export function remediationBlocked(handle: RunDirHandle, message: string): FacadeDriveResult {
+/** What a remediation drive emits: a defect-family accounting block, or the installed remediation. */
+type RemediationFacadeAction =
+  | Readonly<{ kind: "blocked"; runId: OrchestrationRunId; diagnostic: Readonly<{ kind: "defect-family-accounting-blocked"; message: string }> }>
+  | Readonly<{ kind: "done"; runId: OrchestrationRunId; outcome: RemediationInstalledOutcome }>;
+type RemediationDriveResult = FacadeDriveResult<RemediationFacadeAction>;
+
+export function remediationBlocked(handle: RunDirHandle, message: string): RemediationDriveResult {
   return {
     ok: true,
     action: {
@@ -230,7 +237,7 @@ export async function recordInstalledRemediation(
   handle: RunDirHandle,
   state: Extract<RemediationState, { state: "done" }>,
   receipt: VerifiedIndexInstalled,
-): Promise<FacadeDriveResult> {
+): Promise<RemediationDriveResult> {
   try {
     await handle.writeCheckpoint(JSON.stringify({ schemaVersion: 2, state }));
   } catch (cause) {
@@ -256,7 +263,7 @@ export async function recordInstalledRemediation(
 export async function startRemediationFacade(
   handle: RunDirHandle,
   registration: RegisteredRemediationProgramV2,
-): Promise<FacadeDriveResult> {
+): Promise<RemediationDriveResult> {
   if (registration.schemaVersion !== 2 || registration.candidateBaseline.repositoryRoot === handle.runDirectory) {
     return failed("remediation start requires a prepared schema-v2 registration");
   }
@@ -497,7 +504,7 @@ async function completedV2(
   runtime: RuntimeV2,
   repository: GitRepository,
   checkpoint: string,
-): Promise<FacadeDriveResult | null> {
+): Promise<RemediationDriveResult | null> {
   let raw: unknown;
   try { raw = JSON.parse(checkpoint) as unknown; } catch (cause) { return failed(`remediation checkpoint is invalid JSON: ${messageOf(cause)}`); }
   if (typeof raw !== "object" || raw === null || (raw as Record<string, unknown>).schemaVersion !== 2) return null;
@@ -540,10 +547,10 @@ export async function inspectRemediationFacade(
   if (registration.schemaVersion === 1) {
     const historical = await resumeRemediationFacade(handle, registration);
     if (!historical.ok) return historical;
-    const action = historical.action as { kind?: unknown; diagnostic?: { message?: unknown } };
+    const action = historical.action;
     return action.kind === "done"
       ? { ok: true, label: "done — historical P3 assessment unknown" }
-      : { ok: false, message: typeof action.diagnostic?.message === "string" ? action.diagnostic.message : "legacy remediation is not terminal" };
+      : { ok: false, message: action.diagnostic.message };
   }
   const checkpoint = await handle.readCheckpoint();
   if (checkpoint === null) return { ok: true, label: null };
@@ -554,15 +561,9 @@ export async function inspectRemediationFacade(
   const completed = await completedV2(handle, runtime.value, repository.value, checkpoint);
   if (completed === null) return { ok: false, message: "schema-v2 remediation checkpoint is not a valid terminal checkpoint" };
   if (!completed.ok) return completed;
-  const action = completed.action as {
-    kind?: unknown;
-    diagnostic?: { message?: unknown };
-    outcome?: { defectFamilyAssessment?: { status?: unknown } };
-  };
-  if (action.kind !== "done") {
-    return { ok: false, message: typeof action.diagnostic?.message === "string" ? action.diagnostic.message : "schema-v2 remediation is not terminal" };
-  }
-  const status = action.outcome?.defectFamilyAssessment?.status;
+  const action = completed.action;
+  if (action.kind !== "done") return { ok: false, message: action.diagnostic.message };
+  const status = action.outcome.defectFamilyAssessment?.status;
   if (status === "repair-checked") return { ok: true, label: "repair-checked" };
   if (status === "not-required") return { ok: true, label: "repair-check-not-required" };
   return { ok: false, message: "terminal schema-v2 remediation has no authenticated P3 assessment" };
@@ -571,7 +572,7 @@ export async function inspectRemediationFacade(
 export async function resumeRemediationFacade(
   handle: RunDirHandle,
   registration: RegisteredRemediationProgram,
-): Promise<FacadeDriveResult> {
+): Promise<RemediationDriveResult> {
   if (registration.schemaVersion === 1) {
     const checkpoint = await handle.readCheckpoint();
     if (checkpoint !== null) {
@@ -605,7 +606,7 @@ export async function resumeRemediationFacade(
 export async function driveRemediationFacade(
   handle: RunDirHandle,
   rawRegistration: RegisteredRemediationProgram,
-): Promise<FacadeDriveResult> {
+): Promise<RemediationDriveResult> {
   if (rawRegistration.schemaVersion === 1) {
     return remediationBlocked(handle, "schema-v1 remediation is read-only; start a fresh schema-v2 run");
   }

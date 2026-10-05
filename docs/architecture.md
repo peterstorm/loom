@@ -267,7 +267,8 @@ The pure core separates prepared data, issued request membership, admitted evide
 complete roster proof and published result authority, concentrated in the cohesive
 `standalone-review.ts` aggregate owner. Self-hashes never substitute
 for independent publication. Shell shared computation has three named lower owners:
-`program-result.ts` owns the dependency-free ProgramParse/FacadeDriveResult vocabulary,
+`program-result.ts` owns the ProgramParse/FacadeDriveResult vocabulary and the closed
+`FacadeAction` union every driver emits (type-only imports, never a driver or parser),
 `standalone-evidence.ts` owns checkpoint-independent evidence, source observation and
 refutation replay, and `standalone-disposition-source.ts` owns bounded published
 advisory revision authentication. `standalone-source.ts`, `standalone.ts` and

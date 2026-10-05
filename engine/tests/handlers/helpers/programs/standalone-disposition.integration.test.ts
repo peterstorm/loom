@@ -353,7 +353,7 @@ describe.sequential("admitted standalone advisory publication, correction and re
       await handle.writeCheckpoint(serializeStandaloneReviewMachineState(awaiting));
       valueOf(await handle.captureTranscript(prepared.initialRequests[0], [...Buffer.from("### Machine Summary\nCRITICAL_COUNT: 0\nADVISORY_COUNT: 1\nADVISORY: exact historical advisory")]));
       const completed = await resumeStandaloneFacade(handle, registration);
-      expect(completed.ok && (completed.action as { kind: string }).kind).toBe("done");
+      expect(completed.ok && completed.action.kind).toBe("done");
       const result = readFileSync(join(handle.runDirectory, "result.json"));
       const receipts = readdirSync(join(handle.runDirectory, "receipts")).map(name => [name, readFileSync(join(handle.runDirectory, "receipts", name))] as const);
       const reference = { locator: handle.runDirectory, runId: handle.runId, resultDigest: hash(result) };

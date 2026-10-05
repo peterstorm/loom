@@ -8,6 +8,7 @@ import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { captureStandaloneCliEvidence } from "../../../fixtures/standalone-cli-capture";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } from "../../../fixtures/pi-session";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
+import type { FacadeAction } from "../../../../src/handlers/helpers/programs/program-result";
 import {
   EMISSION_DESCRIPTOR_MARKER,
   emissionToolPrimaryInstruction,
@@ -35,6 +36,10 @@ const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("h
 const json = (raw: unknown) => JSON.stringify(raw);
 const flags = (root: string, run: string) => ["--runs-root", join(root, "runs"), "--run", run];
 type Action = { kind: string; requests: { authority: AgentRequestAuthority; task: string }[]; digest: string; json: string };
+const spawnBatch = (action: FacadeAction) => {
+  if (action.kind !== "spawn-batch") throw Error(`expected spawn-batch, got ${action.kind}`);
+  return action;
+};
 function project() {
   const root = canonicalTempDir("loom-p5-successor-"); roots.push(root);
   mkdirSync(join(root, "runs")); writeFileSync(join(root, "a.ts"), "export const value = 0;\n");
@@ -73,14 +78,14 @@ async function predecessor(root: string, criticalHistory = false) {
   const handle = value(handles.createRunDirectory(join(root, "runs"), "source"));
   const started = await shell.startStandaloneFacade(handle, { kind: "types", files: ["a.ts"], dryRun: false });
   if (!started.ok) throw Error(started.message);
-  const action = started.action as Action;
+  const action = spawnBatch(started.action);
   for (const [index, { authority }] of action.requests.entries()) value(await handle.captureTranscript(authority, [...Buffer.from(json({ schemaVersion: 2, kind: "standalone-review",
     findings: index === 0 ? criticalHistory ? [critical, { ...critical, claim: "Unchanged upheld blocker" }]
       : [{ severity: "advisory", file: "a.ts", line: 1, claim: "Original assertion", reason: "Clarity" }] : [] }))]));
   const registration = value(helpers.parseRegistration(value(handle.readProgramRegistration())));
   let completed = await shell.resumeStandaloneFacade(handle, registration); if (!completed.ok) throw Error(completed.message);
   if (criticalHistory) {
-    for (const { authority } of (completed.action as Action).requests) {
+    for (const { authority } of spawnBatch(completed.action).requests) {
       const packet = value(handle.readContext(authority.contextDigest));
       const context = JSON.parse(Buffer.from(packet.fixedContext[0]!.bytes).toString());
       value(await handle.captureTranscript(authority, [...Buffer.from(json({ criterion: context.lens,
@@ -89,7 +94,7 @@ async function predecessor(root: string, criticalHistory = false) {
     }
     completed = await shell.resumeStandaloneFacade(handle, registration); if (!completed.ok) throw Error(completed.message);
   }
-  expect((completed.action as Action).kind).toBe("done");
+  expect(completed.action.kind).toBe("done");
   const publisher = await import("../../../../src/handlers/helpers/programs/standalone-disposition");
   return { handles, shell, helpers, publisher };
 }
@@ -329,7 +334,7 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
       value(await handle.captureTranscript(prepared.initialRequests[0], [...Buffer.from("Missing historical required markers")]));
       const retried = await shell.resumeStandaloneFacade(handle, registration);
       if (!retried.ok) throw Error(retried.message);
-      const retry = (retried.action as Action).requests[0]!.authority;
+      const retry = spawnBatch(retried.action).requests[0]!.authority;
       expect(retry.attempt).toBe(2);
       value(await handle.captureTranscript(retry, [...Buffer.from("### Machine Summary\nCRITICAL_COUNT: 0\nADVISORY_COUNT: 1\nADVISORY: exact original v1 assertion")]));
       expect((await shell.resumeStandaloneFacade(handle, registration)).ok).toBe(true);

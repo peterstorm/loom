@@ -45,6 +45,9 @@ function currentWaveGateDeps(graph: TaskGraph, authorityStartPath: string) {
       });
 }
 
+/** Canonical structural equality to a typed witness proves the raw value carries the witness's type. */
+const provenEqualTo = <T>(witness: T, raw: unknown): raw is T => canonicalStructuralEquals(witness, raw);
+
 function verifyCompletedWaveProtocols(handle: RunDirHandle, registration: RegisteredWaveGateProgram): void {
   const requests = handle.readIssuedRequests();
   if (!requests.ok) throw new Error(requests.error.message);
@@ -103,7 +106,7 @@ export async function resumeWaveGateFacade(
         }
         const receipt = record.receipt;
         const history = graph.wave_gate_history?.find((entry) => entry.runId === handle.runId);
-        if (history === undefined || !canonicalStructuralEquals(history.completionReceipt, receipt)) {
+        if (history === undefined || !provenEqualTo(history.completionReceipt, receipt)) {
           return waveBlocked(handle, "terminal Wave Gate checkpoint does not match protected completion history");
         }
         return { ok: true, action: { kind: "done", runId: handle.runId, outcome: receipt } };

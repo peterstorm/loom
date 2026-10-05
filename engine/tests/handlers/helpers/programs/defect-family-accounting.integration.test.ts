@@ -161,7 +161,7 @@ async function completeCriticalStandaloneReview(repository: string, runsRoot: st
   const done = await inDirectory(repository, () => resumeStandaloneFacade(created.value, registeredStandalone(created.value)));
   expect(done.ok).toBe(true);
   if (!done.ok) throw new Error(done.message);
-  expect((done.action as { kind: string }).kind).toBe("done");
+  expect(done.action.kind).toBe("done");
   const published = JSON.parse(readFileSync(join(created.value.runDirectory, "result.json"), "utf8")) as {
     surviving_critical_findings: readonly { id: string }[];
     refuted_critical_findings: readonly { finding: { id: string } }[];
@@ -235,7 +235,7 @@ async function completeCleanStandaloneReview(repository: string, runsRoot: strin
     expect((await created.value.captureTranscript(authority, [...Buffer.from(reviewerTranscript(false))])).ok).toBe(true);
   }
   const done = await inDirectory(repository, () => resumeStandaloneFacade(created.value, registeredStandalone(created.value)));
-  expect(done.ok && (done.action as { kind: string }).kind).toBe("done");
+  expect(done.ok && done.action.kind).toBe("done");
   return sourceRun;
 }
 
@@ -376,7 +376,7 @@ describe.sequential("Defect-Family Accounting production facade", () => {
     expect(remediation.ok).toBe(true);
     if (!remediation.ok) return;
     const done = await startRemediationFacade(remediation.value, prepared.value.registration);
-    expect(done.ok && (done.action as { kind: string }).kind).toBe("done");
+    expect(done.ok && done.action.kind).toBe("done");
     expect(done.ok && (done.action as {
       outcome: { defectFamilyAssessment: { status: string } };
     }).outcome.defectFamilyAssessment.status).toBe("not-required");
@@ -595,7 +595,7 @@ describe.sequential("Defect-Family Accounting production facade", () => {
       expect((await remediation.value.registerProgram(prepared.value.registration)).ok).toBe(true);
       mutate(fixture.repository);
       const resumed = await resumeRemediationFacade(remediation.value, prepared.value.registration);
-      expect(resumed.ok && (resumed.action as { kind: string }).kind, kind).toBe("blocked");
+      expect(resumed.ok && resumed.action.kind, kind).toBe("blocked");
       expect(await remediation.value.readEvents()).toHaveLength(0);
       expect(readFileSync(join(fixture.repository, ".git", "index"))).toEqual(indexBefore);
     }
@@ -636,7 +636,7 @@ describe.sequential("Defect-Family Accounting production facade", () => {
     }).outcome.defectFamilyAssessment.status).toBe("historical-unknown");
     expect(readFileSync(join(completed.value.runDirectory, "checkpoint.json"))).toEqual(checkpointBefore);
     const refused = await resumeRemediationFacade(pending.value, registration);
-    expect(refused.ok && (refused.action as { kind: string }).kind).toBe("blocked");
+    expect(refused.ok && refused.action.kind).toBe("blocked");
     expect(readFileSync(join(fixture.repository, ".git", "index"))).toEqual(indexBefore);
   });
 
@@ -671,7 +671,7 @@ describe.sequential("Defect-Family Accounting production facade", () => {
       if (!remediation.ok) continue;
       const blocked = await startRemediationFacade(remediation.value, prepared.value.registration);
       expect(blocked.ok).toBe(true);
-      expect(blocked.ok && (blocked.action as { kind: string }).kind, mode).toBe("blocked");
+      expect(blocked.ok && blocked.action.kind, mode).toBe("blocked");
       expect(readFileSync(join(fixture.repository, ".git", "index"))).toEqual(indexBefore);
       const events = await remediation.value.readEvents();
       expect(events).toHaveLength(1);
@@ -687,7 +687,7 @@ describe.sequential("Defect-Family Accounting production facade", () => {
         report: { kind: "unreadable", message: expect.stringContaining("byte limit") },
       } });
       const replay = await resumeRemediationFacade(remediation.value, prepared.value.registration);
-      expect(replay.ok && (replay.action as { kind: string }).kind, mode).toBe("blocked");
+      expect(replay.ok && replay.action.kind, mode).toBe("blocked");
       expect(await remediation.value.readEvents()).toHaveLength(1);
       expect(readFileSync(join(fixture.repository, ".git", "index"))).toEqual(indexBefore);
     }
@@ -710,7 +710,7 @@ describe.sequential("Defect-Family Accounting production facade", () => {
     if (!remediation.ok) throw new Error(remediation.error.message);
     const indexBefore = readFileSync(join(fixture.repository, ".git", "index"));
     const first = await startRemediationFacade(remediation.value, prepared.value.registration);
-    expect(first.ok && (first.action as { kind: string }).kind).toBe("blocked");
+    expect(first.ok && first.action.kind).toBe("blocked");
     // Corrupt an actual retained observation, not hand-built live source/check authority.
     // The retained observation is selected by SHAPE, never by readdir order:
     // entry order within one directory is platform-defined, and mutating the
@@ -735,7 +735,7 @@ describe.sequential("Defect-Family Accounting production facade", () => {
     writeFileSync(eventPath, JSON.stringify(retained));
     try {
       const replay = await resumeRemediationFacade(remediation.value, prepared.value.registration);
-      expect(replay.ok && (replay.action as { kind: string }).kind).toBe("blocked");
+      expect(replay.ok && replay.action.kind).toBe("blocked");
       expect(readFileSync(join(fixture.repository, ".git", "index"))).toEqual(indexBefore);
     } finally { writeFileSync(eventPath, original); }
   });
@@ -840,7 +840,7 @@ describe.sequential("Defect-Family Accounting production facade", () => {
     chmodSync(parent, 0o500);
     try {
       const blocked = await startRemediationFacade(remediation.value, prepared.value.registration);
-      expect(blocked.ok && (blocked.action as { kind: string }).kind).toBe("blocked");
+      expect(blocked.ok && blocked.action.kind).toBe("blocked");
       expect(await remediation.value.readEvents()).toMatchObject([{ event: {
         kind: "remediation-check-runner-failed", message: expect.stringContaining("report reset failed before launch"),
       } }]);
@@ -848,7 +848,7 @@ describe.sequential("Defect-Family Accounting production facade", () => {
       expect(readFileSync(join(fixture.repository, ".git", "index"))).toEqual(indexBefore);
     } finally { chmodSync(parent, 0o700); }
     const replay = await resumeRemediationFacade(remediation.value, prepared.value.registration);
-    expect(replay.ok && (replay.action as { kind: string }).kind).toBe("blocked");
+    expect(replay.ok && replay.action.kind).toBe("blocked");
     expect(await remediation.value.readEvents()).toHaveLength(1);
     expect(readFileSync(join(fixture.repository, REPORT_PATH), "utf8")).toBe("old sentinel");
     expect(readFileSync(join(fixture.repository, ".git", "index"))).toEqual(indexBefore);
@@ -925,7 +925,7 @@ describe.sequential("Defect-Family Accounting production facade", () => {
     const firstEvents = await remediation.value.readEvents();
     expect(firstEvents.filter(({ event }) => (event as { kind?: string }).kind === "remediation-check-observed")).toHaveLength(1);
     const resumed = await resumeRemediationFacade(remediation.value, parsed.program);
-    expect(resumed.ok && (resumed.action as { kind: string }).kind).toBe("done");
+    expect(resumed.ok && resumed.action.kind).toBe("done");
     const replayEvents = await remediation.value.readEvents();
     expect(replayEvents.filter(({ event }) => (event as { kind?: string }).kind === "remediation-check-observed")).toHaveLength(1);
     const checkpoint = JSON.parse((await remediation.value.readCheckpoint())!);

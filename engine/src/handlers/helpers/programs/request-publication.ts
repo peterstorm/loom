@@ -23,6 +23,7 @@ import { parseRegisteredFacadeProgram, type RegisteredReviewProgram } from './re
 import { publicationFile } from './durable-requests';
 import { renderReviewProgramSpawnTask, renderSpawnTask } from './spawn-task';
 import { reviewerEmissionEligible } from '../../../core/reviewer-emission-route';
+import type { FacadePublishedSpawnBatch } from './program-result';
 
 /** Private publication core: `emissionAuthority` is REQUIRED and typed
  *  `RegisteredReviewProgram | null` — `null` is the explicit archived
@@ -35,7 +36,7 @@ async function publishInitialBatch(
   packets: readonly (ContextPacket | StandaloneReviewerContextPacketV3)[],
   label: string,
   emissionAuthority: RegisteredReviewProgram | null,
-): Promise<Readonly<{ ok: true; requests: readonly SpawnRequest[]; action: unknown }> | Readonly<{ ok: false; message: string }>> {
+): Promise<Readonly<{ ok: true; requests: readonly SpawnRequest[]; action: FacadePublishedSpawnBatch }> | Readonly<{ ok: false; message: string }>> {
   const effectId = parseEffectId(`effect:${label}:${createHash("sha256").update(requests.map((entry) =>
     (entry.authority as AgentRequestAuthority).requestId).join("|")).digest("hex")}`);
   if (!effectId.ok) return { ok: false, message: effectId.error.message };
@@ -105,7 +106,7 @@ export async function publishLegacyInitialBatch(
   requests: readonly InitialSpawnRequestInput[],
   packets: readonly (ContextPacket | StandaloneReviewerContextPacketV3)[],
   label: string,
-): Promise<Readonly<{ ok: true; requests: readonly SpawnRequest[]; action: unknown }> | Readonly<{ ok: false; message: string }>> {
+): Promise<Readonly<{ ok: true; requests: readonly SpawnRequest[]; action: FacadePublishedSpawnBatch }> | Readonly<{ ok: false; message: string }>> {
   const eligible = requests.some(({ authority }) => reviewerEmissionEligible(authority as AgentRequestAuthority));
   if (!eligible) return publishInitialBatch(handle, requests, packets, label, null);
   const raw = handle.readProgramRegistration(16_777_216);
