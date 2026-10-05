@@ -45,7 +45,16 @@ export interface LegacyDraftFinding {
 /** Exact current wire data plus its engine-owned durable discriminator. */
 export type CurrentDraftFinding = ReviewerDraftV2 & Readonly<{ protocolVersion: 2 }>;
 export type DraftFinding = LegacyDraftFinding | CurrentDraftFinding;
-export type FindingIdentity = Readonly<{ id: string; agent: string }> & (
+declare const FINDING_ID: unique symbol;
+/**
+ * A task-local Finding ID (e.g. `code-reviewer-1`): colon- and
+ * whitespace-free, with any trailing decimal ordinal a safe integer, so it
+ * composes unambiguously into a `task-id:finding-id` WaveFindingId.
+ * `parseFindingId` in core/findings.ts is its only constructor. The brand is
+ * type-only, so persisted JSON is byte-identical to the plain string.
+ */
+export type FindingId = string & { readonly [FINDING_ID]: true };
+export type FindingIdentity = Readonly<{ id: FindingId; agent: string }> & (
   | Readonly<{ review_generation?: never; review_packet_id?: never }>
   | Readonly<{ review_generation: number; review_packet_id: string }>
 );

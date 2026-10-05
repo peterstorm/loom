@@ -22,6 +22,13 @@ import {
   type ReviewPath,
 } from "./review-packet";
 import { sha256Hex } from "./digest";
+import {
+  collectDenseArray,
+  isPlainRecord,
+  parseExactRecord,
+  type ElementResult,
+  type UnknownRecord,
+} from "./plain-record";
 
 const CHECK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
 const RESERVED_CHECK_PREFIX = "loom:";
@@ -204,7 +211,6 @@ export type CompletionSuiteEvaluation =
     }>;
 
 type Parsed<T> = DomainResult<T, CompletionSuiteParseError>;
-type UnknownRecord = Record<string, unknown>;
 
 const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(value);
 const freezeArray = <T>(values: readonly T[]): readonly T[] => Object.freeze([...values]);
@@ -226,22 +232,14 @@ function total<T>(parse: () => Parsed<T>): Parsed<T> {
   }
 }
 
-function isRecord(raw: unknown): raw is UnknownRecord {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
-  const prototype: unknown = Object.getPrototypeOf(raw);
-  return prototype === null || prototype === Object.prototype;
+function exactRecord(raw: unknown, fields: readonly string[], path: string): Parsed<UnknownRecord> {
+  const record = parseExactRecord(raw, fields, path);
+  if (record.ok) return success(record.value);
+  return failure(record.problem === "not-plain-record" ? [`${path} must be an object`] : record.errors);
 }
 
-function exactRecord(raw: unknown, fields: readonly string[], path: string): Parsed<UnknownRecord> {
-  if (!isRecord(raw)) return failure([`${path} must be an object`]);
-  const expected = new Set(fields);
-  const missing = fields
-    .filter((field) => !Object.prototype.hasOwnProperty.call(raw, field))
-    .map((field) => `${path}.${field} is required`);
-  const surplus = Reflect.ownKeys(raw).flatMap((key) =>
-    typeof key === "string" && expected.has(key) ? [] : [`${path}.${String(key)} is not allowed`]);
-  const errors = [...missing, ...surplus];
-  return errors.length === 0 ? success(raw) : failure(errors);
+function elementResult<T>(parsed: Parsed<T>): ElementResult<T> {
+  return parsed.ok ? parsed : freeze({ ok: false, errors: parsed.error.errors });
 }
 
 function collect<T>(results: readonly Parsed<T>[]): Parsed<readonly T[]> {
@@ -427,7 +425,7 @@ function parseTimeoutMs(raw: unknown, path: string): Parsed<CompletionTimeoutMs>
 }
 
 function parseReportPolicy(raw: unknown, path: string): Parsed<ReportPolicy> {
-  if (!isRecord(raw)) return failure([`${path} must be an object`]);
+  if (!isPlainRecord(raw)) return failure([`${path} must be an object`]);
   if (raw.kind === "not-required") {
     const record = exactRecord(raw, ["kind"], path);
     return record.ok ? success(freeze({ kind: "not-required" })) : record;
@@ -502,7 +500,7 @@ function parseProjectAuthorizedCheck(raw: UnknownRecord, path: string): Parsed<A
 }
 
 function parseAuthorizedCheck(raw: unknown, path: string): Parsed<AuthorizedWaveCompletionCheck> {
-  if (!isRecord(raw)) return failure([`${path} must be an object`]);
+  if (!isPlainRecord(raw)) return failure([`${path} must be an object`]);
   if (raw.kind === "engine-full-tier-lint") return parseEngineAuthorizedCheck(raw, path);
   return raw.kind === "project-command"
     ? parseProjectAuthorizedCheck(raw, path)
@@ -622,7 +620,7 @@ export function parseAuthorizedWaveCompletionSuite(raw: unknown): Parsed<Authori
 }
 
 function parseReportOutcome(raw: unknown, path: string): Parsed<CompletionReportOutcome> {
-  if (!isRecord(raw)) return failure([`${path} must be an object`]);
+  if (!isPlainRecord(raw)) return failure([`${path} must be an object`]);
   if (raw.kind === "not-required") {
     const record = exactRecord(raw, ["kind"], path);
     return record.ok ? success(freeze({ kind: "not-required" })) : record;
@@ -682,7 +680,7 @@ export function parseCompletionReportOutcome(
 }
 
 function parseOutcome(raw: unknown, path: string): Parsed<CompletionProcessOutcome> {
-  if (!isRecord(raw)) return failure([`${path} must be an object`]);
+  if (!isPlainRecord(raw)) return failure([`${path} must be an object`]);
   if (raw.kind === "spawn-failed") {
     const record = exactRecord(raw, ["kind", "message"], path);
     if (!record.ok) return record;
@@ -745,21 +743,12 @@ export function parseCompletionCheckResult(raw: unknown, path = "result"): Parse
 }
 
 function parseCheckResults(raw: unknown, path: string): Parsed<readonly CompletionCheckResult[]> {
-  if (!Array.isArray(raw)) return failure([`${path} must be an array`]);
-  const errors: string[] = [];
-  const results: CompletionCheckResult[] = [];
-  for (let index = 0; index < raw.length; index += 1) {
-    if (!Object.prototype.hasOwnProperty.call(raw, index)) {
-      errors.push(`${path}[${index}] must be present`);
-      continue;
-    }
-    const parsed = parseCheckResult(raw[index], `${path}[${index}]`);
-    if (parsed.ok) results.push(parsed.value);
-    else errors.push(...parsed.error.errors);
-  }
-  return errors.length === 0
-    ? success(freezeArray(results.sort((left, right) => compareStrings(left.checkId, right.checkId))))
-    : failure(errors);
+  const results = collectDenseArray(raw, path, (value, elementPath) =>
+    elementResult(parseCheckResult(value, elementPath)));
+  if (results.kind === "not-array") return failure([`${path} must be an array`]);
+  return results.errors.length === 0
+    ? success(freezeArray([...results.values].sort((left, right) => compareStrings(left.checkId, right.checkId))))
+    : failure(results.errors);
 }
 
 function parseAcceptedChecks(raw: unknown, path: string): Parsed<NonEmpty<CompletionCheckResult>> {

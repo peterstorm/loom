@@ -30,6 +30,7 @@ import {
 import { applyReviewResolution, resolveReviewFindings } from "../../src/core/review-output";
 import { parseTaskGraph } from "../../src/state-manager";
 import { updateTaskFindings } from "../../src/handlers/helpers/store-review-findings";
+import { findingId } from "../fixtures/finding-id";
 
 const draft = (severity: "critical" | "advisory", claim: string) =>
   makeDraftFinding({ severity, claim })!;
@@ -324,7 +325,7 @@ describe("updateTaskFindings mints ids that removal cannot rewind", () => {
 describe("finding ids are unique ACROSS findings and refuted_findings", () => {
   const live = { id: "code-reviewer-1", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "live claim" };
   const refuted: RefutedFinding = {
-    finding: { id: "code-reviewer-1", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "dead claim" },
+    finding: { id: findingId("code-reviewer-1"), agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "dead claim" },
     refutations: [{ lens: "intent", reason: "deliberate" }],
   };
 
@@ -407,7 +408,7 @@ describe("nextOrdinal counts every id a task ever minted", () => {
         (liveOrdinals, refutedOrdinals) => {
           const mk = (n: number): Finding => ({
             ...draft("critical", `claim ${n}`),
-            id: `code-reviewer-${n}`,
+            id: findingId(`code-reviewer-${n}`),
             agent: "code-reviewer",
           });
           const next = nextOrdinal(

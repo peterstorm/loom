@@ -42,6 +42,8 @@ import {
   type TaskId,
 } from "./task-id";
 
+import { collectDenseArray, isPlainRecord, parseExactRecord, type UnknownRecord } from "./plain-record";
+
 export { parseTaskId, type TaskId } from "./task-id";
 
 const RESERVATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
@@ -76,7 +78,6 @@ export type ImplementationSettlementReceiptId = string & { readonly [SETTLEMENT_
 export type ImplementationCompletionParseError = CanonicalTaskIdParseError;
 export type ImplementationCompletionParseResult<T> = CanonicalTaskIdParseResult<T>;
 
-type UnknownRecord = Record<string, unknown>;
 type Parsed<T> = ImplementationCompletionParseResult<T>;
 
 const freeze = <const T extends object>(value: T): Readonly<T> => Object.freeze(value);
@@ -104,33 +105,16 @@ function total<T>(parse: () => Parsed<T>): Parsed<T> {
   }
 }
 
-function isRecord(raw: unknown): raw is UnknownRecord {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
-  const prototype: unknown = Object.getPrototypeOf(raw);
-  return prototype === null || prototype === Object.prototype;
-}
-
 function exactRecord(raw: unknown, fields: readonly string[], path: string): Parsed<UnknownRecord> {
-  if (!isRecord(raw)) return failure([`${path} must be a plain object`]);
-  const expected = new Set(fields);
-  const keys = Reflect.ownKeys(raw);
-  const surplus = keys.flatMap((key) =>
-    typeof key === "string" && expected.has(key) ? [] : [`${path}.${String(key)} is not allowed`]);
-  const missing = fields
-    .filter((field) => !Object.prototype.hasOwnProperty.call(raw, field))
-    .map((field) => `${path}.${field} is required`);
-  return surplus.length === 0 && missing.length === 0 ? success(raw) : failure([...missing, ...surplus]);
+  const record = parseExactRecord(raw, fields, path);
+  if (record.ok) return success(record.value);
+  return failure(record.problem === "not-plain-record" ? [`${path} must be a plain object`] : record.errors);
 }
 
 function parseDenseArray(raw: unknown, path: string): Parsed<readonly unknown[]> {
-  if (!Array.isArray(raw)) return failure([`${path} must be an array`]);
-  const values: unknown[] = [];
-  const errors: string[] = [];
-  for (let index = 0; index < raw.length; index += 1) {
-    if (!Object.prototype.hasOwnProperty.call(raw, index)) errors.push(`${path}[${index}] must be present`);
-    else values.push(raw[index]);
-  }
-  return errors.length === 0 ? success(freezeArray(values)) : failure(errors);
+  const array = collectDenseArray(raw, path, (value) => freeze({ ok: true, value }));
+  if (array.kind === "not-array") return failure([`${path} must be an array`]);
+  return array.errors.length === 0 ? success(array.values) : failure(array.errors);
 }
 
 function collect<T>(raw: readonly unknown[], path: string, parser: (value: unknown, path: string) => Parsed<T>): Parsed<readonly T[]> {
@@ -217,7 +201,7 @@ export function parseImplementationSettlementReceiptId(
 }
 
 function parseSnapshot(raw: unknown, path: string): Parsed<DeclaredArtifactBaseline["snapshot"]> {
-  if (!isRecord(raw)) return failure([`${path} must be a plain object`]);
+  if (!isPlainRecord(raw)) return failure([`${path} must be a plain object`]);
   if (raw.kind === "missing") {
     const record = exactRecord(raw, ["kind"], path);
     return record.ok ? success(freeze({ kind: "missing" })) : record;
@@ -562,7 +546,7 @@ function parseNonEmptyCanonicalPaths(
 }
 
 function parseTaskCheckOutcome(raw: unknown, path: string): Parsed<TaskByteScopeOutcome> {
-  if (!isRecord(raw)) return failure([`${path} must be a plain object`]);
+  if (!isPlainRecord(raw)) return failure([`${path} must be a plain object`]);
   if (raw.kind === "accepted") {
     const record = exactRecord(raw, ["kind", "changedPaths"], path);
     if (!record.ok) return record;
@@ -890,7 +874,7 @@ function parseUnavailableImplementation(raw: UnknownRecord): Parsed<Implementati
 /** Exact parser/smart constructor for normalized Claude/Pi observations. */
 export function parseImplementationObservation(raw: unknown): Parsed<ImplementationObservation> {
   return total(() => {
-    if (!isRecord(raw)) return failure(["implementationObservation must be a plain object"]);
+    if (!isPlainRecord(raw)) return failure(["implementationObservation must be a plain object"]);
     return raw.kind === "implementation-observed"
       ? parseObservedImplementation(raw)
       : parseUnavailableImplementation(raw);

@@ -27,6 +27,7 @@ import {
 import type { WaveReviewContextAuthority } from "../../src/core/wave-review-authority";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { findingId } from "../fixtures/finding-id";
 
 const proof = (() => {
   const evaluated = evaluateTaskProof({ newTestsRequired: false, declaredArtifacts: [] }, {
@@ -205,7 +206,7 @@ describe("later-Wave progress refusal", () => {
     [(entry) => ({ ...entry, accepted_review_authority: {} as never }), "accepted authority"],
     [(entry) => ({ ...entry, review_error: "rejected" }), "review error"],
     [(entry) => ({ ...entry, review_evidence_failures: [] }), "review evidence failure"],
-    [(entry) => ({ ...entry, findings: [{ id: "code-reviewer-1", agent: "code-reviewer", severity: "advisory", file: null, line: null, claim: "reviewed" }] }), "findings"],
+    [(entry) => ({ ...entry, findings: [{ id: findingId("code-reviewer-1"), agent: "code-reviewer", severity: "advisory", file: null, line: null, claim: "reviewed" }] }), "findings"],
     [(entry) => ({ ...entry, critical_findings: ["reviewed"] }), "critical findings"],
     [(entry) => ({ ...entry, advisory_findings: ["reviewed"] }), "advisory findings"],
     [(entry) => ({ ...entry, refuted_findings: [{}] as never }), "refuted findings"],

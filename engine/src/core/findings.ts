@@ -74,6 +74,7 @@ import type {
   LegacyDraftFinding,
   DraftFinding,
   Finding,
+  FindingId,
   FindingIdentity,
   FindingResolutionAssessment,
   FindingSeverity,
@@ -96,6 +97,7 @@ export type {
   CurrentReviewRunSlotAuthority,
   DraftFinding,
   Finding,
+  FindingId,
   FindingIdentity,
   FindingResolution,
   FindingResolutionAssessment,
@@ -129,11 +131,12 @@ export function parseFindingSeverity(raw: unknown): FindingSeverity | null {
 /** Parse the task-local identity that can be safely composed into a
  * `task-id:finding-id` panel identity. Colons and whitespace would make that
  * composition ambiguous or unparsable. A decimal suffix must also be a safe
- * integer because it participates in monotonic ordinal minting. */
-export function parseFindingId(raw: unknown): string | null {
+ * integer because it participates in monotonic ordinal minting. The only
+ * constructor of the `FindingId` brand. */
+export function parseFindingId(raw: unknown): FindingId | null {
   if (typeof raw !== "string" || !/^[^:\s]+$/.test(raw)) return null;
   const suffix = /-(\d+)$/u.exec(raw);
-  return suffix === null || Number.isSafeInteger(Number(suffix[1])) ? raw : null;
+  return suffix === null || Number.isSafeInteger(Number(suffix[1])) ? raw as FindingId : null;
 }
 
 /**
@@ -1647,7 +1650,7 @@ export function recordReviewRunEvidence(
       error: `${evidence.agent} must assess every prior finding exactly once in packet order`,
     };
   }
-  const prior = new Map((task.findings ?? []).map((finding) => [finding.id, finding]));
+  const prior = new Map<string, Finding>((task.findings ?? []).map((finding) => [finding.id, finding]));
   const contradictory = evidence.prior_assessments.find((assessment) => {
     if (assessment.verdict !== "resolved_by_remediation") return false;
     const finding = prior.get(assessment.finding_id);

@@ -119,6 +119,12 @@ describe("Standalone Finding Origin and source membership", () => {
       [{ ...row, history: [{ ...row.history[0], threshold: 1 }] }], [{ ...row, history: [{ ...row.history[0], survives: true }] }],
       [{ ...row, history: [{ ...row.history[0], refutations: [] }] }]]) expect(parseStandaloneLineageInventory(bytes(inventory)).ok).toBe(false);
   });
+  it.each(["code-reviewer:1", "code reviewer-1", `code-reviewer-${Number.MAX_SAFE_INTEGER}0`])(
+    "rejects a stored Finding id outside the task-local FindingId grammar: %s", id => {
+      const row = source(true, true).inventory[0]!;
+      expect(parseStandaloneLineageInventory(bytes([{ ...row, finding: { ...row.finding, id } }])))
+        .toMatchObject({ ok: false, error: { code: "invalid-data" } });
+    });
   it("bounds retained ingress before decoding, history count and origin ordinal", () => {
     expect(parseStandaloneLineageInventory(new Uint8Array(STANDALONE_LINEAGE_LIMITS.retainedBytes + 1))).toMatchObject({ ok: false, error: { code: "limit-exceeded" } });
     const row = source(true).inventory[0]!;

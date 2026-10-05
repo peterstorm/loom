@@ -31,7 +31,7 @@ import {
   readStandaloneReviewPublication,
   type AuthoritativeStandaloneReviewResult,
 } from "./standalone-review-machine";
-import { parseFindingId as parseCanonicalFindingId, parseStoredFindings, type Finding, type RefutedFinding } from "./findings";
+import { parseFindingId as parseCanonicalFindingId, parseStoredFindings, type Finding, type FindingId, type RefutedFinding } from "./findings";
 import { STANDALONE_LINEAGE_LIMITS } from "./standalone-lineage-contract";
 import { parseReviewPath, type ReviewPath } from "./review-packet";
 import { sha256Hex } from "./digest";
@@ -360,20 +360,18 @@ function createSourceFindingInventory(
 
 declare const DECLARED_TEXT: unique symbol;
 declare const REPAIR_GROUP_ID: unique symbol;
-declare const FINDING_ID: unique symbol;
 type DeclaredText = string & { readonly [DECLARED_TEXT]: true };
 type RepairGroupId = string & { readonly [REPAIR_GROUP_ID]: true };
-type FindingId = string & { readonly [FINDING_ID]: true };
-
-/** Every disposition and repair-group join keys on the Finding id; branding it
- *  through the canonical parseFindingId shape extends the kernel's identity-branded
- *  pattern (OrchestrationRunId, RequestId, SlotId, RepairGroupId) to that id, so a
- *  RepairGroupId-shaped string is no longer silently assignable where a finding
- *  id is expected. */
+/** Every disposition and repair-group join keys on the Finding id; parsing it
+ *  through the canonical `parseFindingId` (the sole minter of the shared
+ *  `FindingId` brand) extends the kernel's identity-branded pattern
+ *  (OrchestrationRunId, RequestId, SlotId, RepairGroupId) to that id, so a
+ *  RepairGroupId-shaped string is not silently assignable where a finding id
+ *  is expected, and declared ids join the source inventory's ids type-for-type. */
 function parseFindingId(raw: unknown, path: string): InternalParse<FindingId> {
   const canonical = parseCanonicalFindingId(raw);
   return canonical !== null
-    ? parsed(canonical as FindingId)
+    ? parsed(canonical)
     : rejected(problem("invalid-declaration", path, `${path} must be a non-empty exact source Finding id`));
 }
 
@@ -688,7 +686,7 @@ function parseRepairGroup(raw: unknown, path: string): InternalParse<DeclaredRep
 
 function classifyForeignFinding(
   inventory: SourceFindingInventory,
-  id: string,
+  id: FindingId,
   path: string,
 ): DefectFamilyFailure | null {
   if (inventory.survivingCriticals.some((finding) => finding.id === id)) return null;
@@ -707,10 +705,7 @@ function validateAccounting(
   groups: readonly DeclaredRepairGroup[],
 ): readonly DefectFamilyFailure[] {
   const failures: DefectFamilyFailure[] = [];
-  // The inventory's surviving-critical ids are plain strings; comparisons
-  // against them are string comparisons. The FindingId brand earns its keep at
-  // the parse boundary and the repair-group join, not here.
-  const dispositionIds: readonly string[] = dispositions.map(({ findingId }) => findingId);
+  const dispositionIds: readonly FindingId[] = dispositions.map(({ findingId }) => findingId);
   for (const id of dispositionIds) {
     const foreign = classifyForeignFinding(inventory, id, "defectFamily.dispositions");
     if (foreign !== null) failures.push(foreign);

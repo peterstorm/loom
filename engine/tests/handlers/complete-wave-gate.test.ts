@@ -104,6 +104,7 @@ import {
   parseTaskGraph,
   StateManager,
 } from "../../src/state-manager";
+import { findingId } from "../fixtures/finding-id";
 
 const satisfiedProof = evaluateTaskProof(
   { newTestsRequired: true, declaredArtifacts: [] },
@@ -682,7 +683,7 @@ describe("generateWaveGateSummary (pure)", () => {
       critical_findings: [],
       refuted_findings: [{
         finding: {
-          id: "code-reviewer-1",
+          id: findingId("code-reviewer-1"),
           agent: "code-reviewer",
           severity: "critical",
           file: "src/x.ts",
@@ -1340,11 +1341,11 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       { ...taskState({ id: "T1", wave: 1, status: "completed" }),
         critical_findings: ["critical"], advisory_findings: ["advisory"],
         refuted_findings: [{
-          finding: { id: "old-1", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "old" },
+          finding: { id: findingId("old-1"), agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "old" },
           refutations: [{ lens: "intent", reason: "false positive" }],
         }],
         resolved_findings: [{
-          finding: { id: "old-2", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "fixed" },
+          finding: { id: findingId("old-2"), agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "fixed" },
           resolution: {
             kind: "resolved_by_remediation", generation: 1, packet_id: "packet", head_sha: "head",
             expected_agents: ["code-reviewer"],
@@ -1388,7 +1389,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
 
   it("uses wave-scoped canonical Finding identities when two Tasks emit the same Finding id", () => {
     const shared = {
-      id: "code-reviewer-1",
+      id: findingId("code-reviewer-1"),
       agent: "code-reviewer",
       severity: "critical" as const,
       file: null,
@@ -1931,7 +1932,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
       review_status: "blocked",
       findings: [
         {
-          id: "code-reviewer-1",
+          id: findingId("code-reviewer-1"),
           agent: "code-reviewer",
           severity: "critical",
           file: null,
@@ -1939,7 +1940,7 @@ describe("canonical Wave Gate readiness and LoomStatus", () => {
           claim: "retained later-Wave critical",
         },
         {
-          id: "code-reviewer-2",
+          id: findingId("code-reviewer-2"),
           agent: "code-reviewer",
           severity: "advisory",
           file: null,
@@ -2187,7 +2188,7 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
 
   it("refuses stale criticals on a pending generation that has no current Review Packet", () => {
     const finding = {
-      id: "code-reviewer-1", agent: "code-reviewer", severity: "critical" as const,
+      id: findingId("code-reviewer-1"), agent: "code-reviewer", severity: "critical" as const,
       file: "engine/src/core/wave-gate-machine.ts", line: 1, claim: "stale until current review completes",
     };
     const pending = authorityValue(deriveWaveReadiness(registeredGraph({
@@ -2210,7 +2211,7 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
 
   it("binds Wave refutation identity to the exact readiness epoch", () => {
     const finding = {
-      id: "code-reviewer-1", agent: "code-reviewer", severity: "critical" as const,
+      id: findingId("code-reviewer-1"), agent: "code-reviewer", severity: "critical" as const,
       file: "engine/src/core/wave-gate-machine.ts", line: 1, claim: "completion can advance without authority",
     };
     const first = authorityValue(deriveWaveReadiness(registeredGraph({
@@ -2230,7 +2231,7 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
     expect(deriveWaveRefutationPlan(clean)).toMatchObject({ ok: false });
 
     const finding = {
-      id: "code-reviewer-1",
+      id: findingId("code-reviewer-1"),
       agent: "code-reviewer",
       severity: "critical" as const,
       file: "engine/src/core/wave-gate-machine.ts",
@@ -2265,7 +2266,7 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
 
   it("derives advisory await-user internally and exposes it as the sole status action", () => {
     const advisory = {
-      id: "comment-analyzer-1",
+      id: findingId("comment-analyzer-1"),
       agent: "comment-analyzer",
       severity: "advisory" as const,
       file: null,
@@ -2296,7 +2297,7 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
    */
   const advisoryGraph = (): TaskGraph => {
     const advisory = {
-      id: "comment-analyzer-1",
+      id: findingId("comment-analyzer-1"),
       agent: "comment-analyzer",
       severity: "advisory" as const,
       file: null,

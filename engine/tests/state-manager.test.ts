@@ -11,6 +11,7 @@ import { parseArtifactDigest, parseOrchestrationRunId } from "../src/core/orches
 import { capturedSpecCheck } from "../src/core/spec-check";
 import type { TaskId } from "../src/core/task-id";
 import { acceptedWaveCompletionSuite as acceptedCompletionSuite } from "./fixtures/accepted-wave-completion-suite";
+import { findingId } from "./fixtures/finding-id";
 
 function makeTmpDir(): string {
   const dir = join(tmpdir(), `loom-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -1626,7 +1627,7 @@ describe("protected Wave Gate abandonment stamp (orchestration abandon → tombs
             prior_finding_ids: ["code-reviewer-1"], expected_agents: ["code-reviewer"], evidence: [],
           },
           findings: [{
-            id: "code-reviewer-1", agent: "code-reviewer", severity: "advisory" as const,
+            id: findingId("code-reviewer-1"), agent: "code-reviewer", severity: "advisory" as const,
             file: null, line: null, claim: "retain original finding",
           }],
           advisory_findings: ["retain original finding"],

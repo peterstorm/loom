@@ -51,6 +51,7 @@ import type { RegisteredWaveGateProgram } from "../../../../src/core/wave-gate-p
 import { parseTaskGraph, StateManager } from "../../../../src/state-manager";
 import { capturedSpecCheck } from "../../../../src/core/spec-check";
 import type { TaskGraph } from "../../../../src/types";
+import { findingId } from "../../../fixtures/finding-id";
 
 const RUN_ID = "run.wave-decision";
 const DIGEST = "a".repeat(64);
@@ -707,7 +708,7 @@ describe("locked Refutation Panel authority", () => {
           ...entry,
           review_status: "blocked" as const,
           findings: [{
-            id: "code-reviewer-1",
+            id: findingId("code-reviewer-1"),
             agent: "code-reviewer",
             severity: "critical" as const,
             file: "engine/src/example.ts",

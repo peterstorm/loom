@@ -4,47 +4,9 @@
  * consumes, and how Git numstat output counts additions. The program volume
  * runs the Git probes; every rule here is table-testable with plain data.
  */
+import { posix } from "node:path";
 import { isExcludedRemediationPath, parseCanonicalRepositoryRelativePath } from "./remediation-machine";
 import type { StandaloneReviewKind, StandaloneReviewMetadata } from "./standalone-review-scope";
-
-/**
- * POSIX `path.extname`, stated here because core modules hold no `node:path`
- * capability: the extension of the last path segment from its last `.`, or ""
- * when that segment has no dot, starts with its only dot, or is `..`.
- */
-export function pathExtension(path: string): string {
-  let startDot = -1;
-  let startPart = 0;
-  let end = -1;
-  let matchedSlash = true;
-  // 0: no dot before startDot in this segment; 1: another dot; -1: a non-dot.
-  let preDotState = 0;
-  for (let index = path.length - 1; index >= 0; index -= 1) {
-    const character = path[index];
-    if (character === "/") {
-      if (!matchedSlash) {
-        startPart = index + 1;
-        break;
-      }
-      continue;
-    }
-    if (end === -1) {
-      matchedSlash = false;
-      end = index + 1;
-    }
-    if (character === ".") {
-      if (startDot === -1) startDot = index;
-      else if (preDotState !== 1) preDotState = 1;
-    } else if (startDot !== -1) {
-      preDotState = -1;
-    }
-  }
-  if (startDot === -1 || end === -1 || preDotState === 0 ||
-      (preDotState === 1 && startDot === end - 1 && startDot === startPart + 1)) {
-    return "";
-  }
-  return path.slice(startDot, end);
-}
 
 export const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".java", ".rs", ".py", ".go", ".c", ".cpp"]);
 export const TYPE_EXTENSIONS = new Set([".ts", ".tsx", ".d.ts", ".java", ".rs"]);
@@ -82,7 +44,7 @@ export function classifyScope(
   created: ReadonlySet<string>,
   additions: number,
 ): StandaloneReviewMetadata {
-  const extensions = scope.map((path) => pathExtension(path).toLowerCase());
+  const extensions = scope.map((path) => posix.extname(path).toLowerCase());
   const languages = [...new Set(extensions.filter(Boolean).map((extension) => extension.slice(1)))].sort();
   const sourceOrTestChanged = scope.some((path, index) =>
     SOURCE_EXTENSIONS.has(extensions[index]!) || /(^|\/)(test|tests|__tests__)(\/|$)/.test(path));

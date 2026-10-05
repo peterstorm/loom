@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import fc from "fast-check";
 import type { LegacyDraftFinding as DraftFinding, Task, TaskCommonMetadata } from "../../src/types";
 import { taskFixture as makeTaskFixture } from "../fixtures/task-lifecycle";
@@ -31,8 +31,10 @@ import {
   salvageFindingsFromMalformedRefutations,
   salvageFindingsFromMalformedResolutions,
   type Finding,
+  type FindingId,
   type RefutedFinding,
 } from "../../src/core/findings";
+import { findingId } from "../fixtures/finding-id";
 
 /** One reviewer emission of N criticals, shaped the way the parser produces it. */
 const makeParsed = (critical: readonly string[]) =>
@@ -73,6 +75,22 @@ describe("parseFindingId", () => {
     ]) {
       expect(parseFindingId(raw)).toBeNull();
     }
+  });
+
+  it("is the sole minter of the FindingId brand: a plain string is not a FindingId", () => {
+    expectTypeOf(parseFindingId).returns.toEqualTypeOf<FindingId | null>();
+    expectTypeOf<string>().not.toMatchTypeOf<FindingId>();
+    expectTypeOf<Finding["id"]>().toEqualTypeOf<FindingId>();
+  });
+
+  it("brands without changing the value: an accepted id is the identical string, so persisted JSON is unchanged", () => {
+    fc.assert(fc.property(fc.string({ maxLength: 40 }), (raw) => {
+      const id = parseFindingId(raw);
+      if (id !== null) {
+        expect(id).toBe(raw);
+        expect(JSON.stringify({ id })).toBe(JSON.stringify({ id: raw }));
+      }
+    }), { seed: 1331, numRuns: 500 });
   });
 });
 
@@ -167,7 +185,7 @@ describe("attributeFindings — derived, never agent-chosen identity", () => {
       .toThrow(/positive safe ordinals/u);
     const exhausted: Finding = {
       ...draft(),
-      id: `code-reviewer-${Number.MAX_SAFE_INTEGER}`,
+      id: findingId(`code-reviewer-${Number.MAX_SAFE_INTEGER}`),
       agent: "code-reviewer",
     };
     expect(() => nextOrdinal([exhausted], [], "code-reviewer")).toThrow(/ordinal space exhausted/u);
@@ -269,7 +287,7 @@ describe("parseFindingsBlock — the optional structured Machine Summary block",
 
 describe("parseStoredFindings — untrusted state file", () => {
   const stored: Finding = {
-    id: "code-reviewer-1",
+    id: findingId("code-reviewer-1"),
     agent: "code-reviewer",
     severity: "critical",
     file: "src/x.ts",
@@ -313,7 +331,7 @@ describe("parseStoredFindings — untrusted state file", () => {
 
 describe("malformed remediation-record salvage", () => {
   const finding: Finding = {
-    id: "code-reviewer-1",
+    id: findingId("code-reviewer-1"),
     agent: "code-reviewer",
     severity: "critical",
     file: null,
@@ -332,7 +350,7 @@ describe("malformed remediation-record salvage", () => {
 
 describe("parseStoredRefutations", () => {
   const finding: Finding = {
-    id: "code-reviewer-1",
+    id: findingId("code-reviewer-1"),
     agent: "code-reviewer",
     severity: "critical",
     file: null,
@@ -765,7 +783,7 @@ describe("applyFindingOutcomes refuses to adjudicate what it cannot find", () =>
 
 describe("deduplicateFindingIds — the repair for what the boundary rejects", () => {
   const finding = (id: string, claim: string): Finding => ({
-    id, agent: "code-reviewer", severity: "critical", file: null, line: null, claim,
+    id: findingId(id), agent: "code-reviewer", severity: "critical", file: null, line: null, claim,
   });
 
   it("re-mints the collision rather than dropping the second claim", () => {
@@ -798,7 +816,7 @@ describe("deduplicateFindingIds — the repair for what the boundary rejects", (
 describe("recoverViewOnlyClaims", () => {
   it("mints identity for exactly the claims no finding accounts for", () => {
     const held: Finding = {
-      id: "code-reviewer-1", agent: "code-reviewer", severity: "critical",
+      id: findingId("code-reviewer-1"), agent: "code-reviewer", severity: "critical",
       file: null, line: null, claim: "already identified",
     };
     const recovered = recoverViewOnlyClaims([held], [], { critical: ["already identified", "orphan"], advisory: ["a nit"] });

@@ -10,6 +10,7 @@ import type { ActiveWaveGateTerminalOutcome, TaskGraph } from "../../../src/type
 import { terminalBlockedDiagnostic } from "../../../src/core/orchestration-contract";
 import { pendingTaskProof } from "../../fixtures/task-lifecycle";
 import { capturedSpecCheck } from "../../../src/core/spec-check";
+import { findingId } from "../../fixtures/finding-id";
 
 const cleanup: string[] = [];
 let inheritedEnvironment: readonly (readonly [string, string | undefined])[] = [];
@@ -26,7 +27,7 @@ afterEach(() => {
 });
 
 const finding = {
-  id: "code-reviewer-1",
+  id: findingId("code-reviewer-1"),
   agent: "code-reviewer",
   severity: "advisory" as const,
   file: null,

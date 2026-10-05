@@ -8,8 +8,14 @@
  * code or admitting a value the JSON form could never have carried. The
  * snapshot is frozen and detached from its input.
  *
+ * Unlike `plain-record.ts` (diagnostic exact-key parsing), a snapshot here
+ * admits any subset of `fields` and refuses with `null`; both share the one
+ * plain-prototype predicate, `isPlainRecord`.
+ *
  * Pure module: no I/O, no clock, no randomness.
  */
+
+import { isPlainRecord } from "./plain-record";
 
 export function safeArray(raw: unknown): readonly unknown[] | null {
   try {
@@ -37,9 +43,7 @@ export function safeRecord(
   fields: readonly string[],
 ): Readonly<Record<string, unknown>> | null {
   try {
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
-    const prototype = Object.getPrototypeOf(raw);
-    if (prototype !== Object.prototype && prototype !== null) return null;
+    if (!isPlainRecord(raw)) return null;
     const keys = Reflect.ownKeys(raw);
     if (keys.some((key) => typeof key !== "string") ||
         (keys as string[]).some((key) => !fields.includes(key))) return null;

@@ -9,6 +9,7 @@ import { parseFindings, updateTaskFindings, OVERRIDE_AGENT } from "../../src/han
 import { claimsOfSeverity } from "../../src/core/findings";
 import { parseTaskGraph } from "../../src/state-manager";
 import type { Task } from "../../src/types";
+import { findingId } from "../fixtures/finding-id";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "src", "cli.ts");
 
@@ -133,8 +134,8 @@ describe("the manual override keeps findings and its derived views in lockstep",
     ...baseTask,
     review_status: "blocked",
     findings: [
-      { id: "code-reviewer-1", agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "false positive" },
-      { id: "code-reviewer-2", agent: "code-reviewer", severity: "advisory", file: null, line: null, claim: "kept nit" },
+      { id: findingId("code-reviewer-1"), agent: "code-reviewer", severity: "critical", file: null, line: null, claim: "false positive" },
+      { id: findingId("code-reviewer-2"), agent: "code-reviewer", severity: "advisory", file: null, line: null, claim: "kept nit" },
     ],
     critical_findings: ["false positive"],
     advisory_findings: ["kept nit"],
@@ -176,7 +177,7 @@ describe("the manual override keeps findings and its derived views in lockstep",
     const withRefutation: Task = {
       ...reviewed,
       refuted_findings: [{
-        finding: { id: "manual-override-1", agent: OVERRIDE_AGENT, severity: "critical", file: null, line: null, claim: "killed" },
+        finding: { id: findingId("manual-override-1"), agent: OVERRIDE_AGENT, severity: "critical", file: null, line: null, claim: "killed" },
         refutations: [{ lens: "intent", reason: "deliberate" }],
       }],
     };

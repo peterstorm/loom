@@ -8,6 +8,7 @@ import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "../.
 import { reconcileFindings, makeParsedFindings, type CurrentParsedFindings, resolveReviewFindings, parseIssuedReviewerProtocol, parseReviewerEvidence, resolveIssuedTaskReviewFindings, applyReviewResolution, type IssuedReviewerProtocol, type ReviewerProtocolRegistration, type ReviewerSubjectBinding } from "../../src/core/review-output";
 import { makeDraftFinding, mergeFindings, attributeFindings, parseStoredFindings, reviewFindingCounts, recoverViewOnlyClaims } from "../../src/core/findings";
 import { taskFixture } from "../fixtures/task-lifecycle";
+import { findingId } from "../fixtures/finding-id";
 
 const bytes = (raw: unknown) => new TextEncoder().encode(JSON.stringify(raw));
 function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T {
@@ -236,11 +237,11 @@ describe("Wave current binding and lifecycle", () => {
 
   it.each(["count", "ID length", "NUL", "surrogate", "minimum payload bytes"])("refuses an unrepresentable current prior roster: %s", (bound) => {
     let priors = prior;
-    if (bound === "count") priors = Array.from({ length: 4097 }, (_, index) => ({ ...prior[0]!, id: `prior-${index + 1}` }));
-    if (bound === "ID length") priors = [{ ...prior[0]!, id: "x".repeat(2049) }];
-    if (bound === "NUL") priors = [{ ...prior[0]!, id: "prior\0id" }];
-    if (bound === "surrogate") priors = [{ ...prior[0]!, id: "prior\ud800" }];
-    if (bound === "minimum payload bytes") priors = Array.from({ length: 600 }, (_, index) => ({ ...prior[0]!, id: `${"x".repeat(2000)}-${index}` }));
+    if (bound === "count") priors = Array.from({ length: 4097 }, (_, index) => ({ ...prior[0]!, id: findingId(`prior-${index + 1}`) }));
+    if (bound === "ID length") priors = [{ ...prior[0]!, id: findingId("x".repeat(2049)) }];
+    if (bound === "NUL") priors = [{ ...prior[0]!, id: findingId("prior\0id") }];
+    if (bound === "surrogate") priors = [{ ...prior[0]!, id: findingId("prior\ud800") }];
+    if (bound === "minimum payload bytes") priors = Array.from({ length: 600 }, (_, index) => ({ ...prior[0]!, id: findingId(`${"x".repeat(2000)}-${index}`) }));
     expect(() => fixture(2, "wave-review", 1, priors)).toThrow("published subject must match full scope and ordered prior roster");
   });
   it.each(["packet", "generation", "missing", "foreign", "duplicate"])("refuses %s prior/binding mutation", (mutation) => {

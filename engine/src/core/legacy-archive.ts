@@ -158,7 +158,7 @@ function normalizeHistoricalPanel(
   criticals: readonly Finding[],
 ): Record<string, unknown> {
   const rawOutcomes = Array.isArray(rawPanel.outcomes) ? rawPanel.outcomes : [];
-  const localIds = new Set(criticals.map(({ id }) => id));
+  const localIds = new Set<string>(criticals.map(({ id }) => id));
   const outcomes = rawOutcomes.map((rawOutcome) => {
     if (!isRecord(rawOutcome)) return rawOutcome;
     const rawId = historicalPanelOutcomeValue(rawOutcome, "finding_id", "findingId");

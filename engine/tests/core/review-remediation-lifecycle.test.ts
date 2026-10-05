@@ -95,6 +95,7 @@ import { fixFull } from "../../src/handlers/helpers/validate-task-graph";
 import { parseTaskGraph } from "../../src/state-manager";
 import type { HeadSha, PacketId } from "../../src/core/review-packet";
 import type { PriorFindingVerdict, ReviewRun, Task, TaskGraph } from "../../src/types";
+import { findingId } from "../fixtures/finding-id";
 
 // Branded as parsePacketId/parseHeadSha would mint them, so these fixtures
 // bind exactly the way the production call site does.
@@ -103,7 +104,7 @@ const HEAD = "b".repeat(40) as HeadSha;
 const AGENTS = ["code-reviewer", "silent-failure-hunter"] as const;
 
 const prior = (id: string, agent: string, severity: "critical" | "advisory", claim: string): Finding => ({
-  id,
+  id: findingId(id),
   agent,
   severity,
   file: "src/x.ts",
