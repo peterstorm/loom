@@ -122,6 +122,26 @@ export function piRuntimeHandshakeRequired(
     extraArgs[0] !== undefined && SKEW_SAFE_ORCHESTRATION_READS.has(extraArgs[0]));
 }
 
+/**
+ * The orchestration operations whose input arrives on stdin. Every other
+ * orchestration operation takes only flags, so the CLI must not wait for an
+ * end-of-input that an inherited, still-open stdin never delivers — that wait
+ * hung `abandon`/`resume`/`inspect` indefinitely under a parent whose stdin
+ * stayed open. Hook routes always receive their event payload on stdin.
+ */
+const ORCHESTRATION_STDIN_OPERATIONS: ReadonlySet<string> = new Set(["start", "submit", "decide"]);
+
+export function routeConsumesStdin(
+  hookType: string | undefined,
+  handlerName: string | undefined,
+  extraArgs: readonly string[] = [],
+): boolean {
+  if (hookType === "helper" && handlerName === "orchestration") {
+    return extraArgs[0] !== undefined && ORCHESTRATION_STDIN_OPERATIONS.has(extraArgs[0]);
+  }
+  return true;
+}
+
 /** Exit code for a crash outside the handler, derived from the route. */
 export function failureExitCode(hookType: string | undefined, handlerName: string | undefined): 1 | 2 {
   return FAIL_CLOSED_ROUTES.has(`${hookType}/${handlerName}`) ? 2 : 1;

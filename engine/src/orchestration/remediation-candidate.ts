@@ -333,17 +333,53 @@ function sameReportAudits(
   });
 }
 
+function absentFromWorktree(root: CanonicalRepositoryRoot, path: ReviewPath): boolean {
+  try {
+    lstatSync(join(root, ...path.split("/")));
+    return false;
+  } catch (cause) {
+    return (cause as NodeJS.ErrnoException).code === "ENOENT";
+  }
+}
+
+/**
+ * Committed paths whose deletion is already STAGED: present in HEAD's tree,
+ * absent from the index (so outside the observed roster) and absent from the
+ * worktree. That is the same candidate change as an unstaged deletion — which
+ * the observed roster already admits — so it must be authorizable too;
+ * otherwise a remediation that installed (staged) a deletion leaves the next
+ * remediation over the same tree unable to name the path it must authorize.
+ */
+function stagedCommittedDeletions(
+  root: CanonicalRepositoryRoot,
+  paths: readonly ReviewPath[],
+): DomainResult<ReadonlySet<ReviewPath>, RemediationCandidateCaptureError> {
+  if (paths.length === 0) return success(new Set());
+  const head = gitQuery(root, "HEAD tree lookup", ["rev-parse", "--verify", "--quiet", "HEAD^{tree}"]);
+  if (!head.ok) return head;
+  if (head.value.status !== 0) return success(new Set());
+  const committed = gitQuery(root, "committed deletion lookup", ["ls-tree", "-z", "--name-only", "HEAD", "--", ...paths]);
+  if (!committed.ok) return committed;
+  if (committed.value.status !== 0) return failure("pathSources", "cannot list committed candidate input paths");
+  const names = new Set(committed.value.stdout.toString("utf-8").split("\0").filter((name) => name.length > 0));
+  return success(new Set(paths.filter((path) => names.has(path) && absentFromWorktree(root, path))));
+}
+
 function requireObservedCandidateSources(
+  root: CanonicalRepositoryRoot,
   sources: readonly ReviewPath[],
   observed: readonly ReviewPath[],
 ): DomainResult<null, RemediationCandidateCaptureError> {
   const roster = new Set(observed);
-  const missing = sources.filter((path) => !roster.has(path));
+  const unobserved = sources.filter((path) => !roster.has(path));
+  const deletions = stagedCommittedDeletions(root, unobserved);
+  if (!deletions.ok) return deletions;
+  const missing = unobserved.filter((path) => !deletions.value.has(path));
   return missing.length === 0
     ? success(null)
     : failure(
       "pathSources",
-      `candidate input paths are not Git-visible tracked or non-ignored untracked paths: ${missing.join(", ")}`,
+      `candidate input paths are not Git-visible tracked or non-ignored untracked paths, nor committed paths with a staged deletion: ${missing.join(", ")}`,
     );
 }
 
@@ -378,7 +414,7 @@ export function captureRemediationCandidateWorkspace(
   }
   const runAfter = auditRunDirectory(root.value, input.runDirectory);
   if (!runAfter.ok) return runAfter;
-  const observedSources = requireObservedCandidateSources(policy.value.candidateSources, workspace.value.observedPaths);
+  const observedSources = requireObservedCandidateSources(root.value, policy.value.candidateSources, workspace.value.observedPaths);
   if (!observedSources.ok) return observedSources;
   const candidate = createCandidateRepositoryWitness({
     kind: "candidate-repository-witness",

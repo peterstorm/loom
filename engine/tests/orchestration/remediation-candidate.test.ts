@@ -269,6 +269,36 @@ describe("remediation candidate workspace capture", () => {
     });
   });
 
+  it("admits a committed path whose deletion an earlier remediation already staged", () => {
+    const root = fixtureRepository();
+    const unstaged = capture(root);
+    expect(unstaged.observedPaths).toContain("src/removed.ts");
+    git(root, "rm", "--quiet", "--cached", "src/removed.ts");
+    const staged = capture(root);
+    expect(staged.observedPaths).not.toContain("src/removed.ts");
+    expect(staged.candidateWitness.observedPaths).toEqual(staged.observedPaths);
+  });
+
+  it("refuses an unobserved source unless it is a committed path absent from both index and worktree", () => {
+    const root = fixtureRepository();
+    const named = (path: string) => {
+      const base = input(root);
+      return captureResult(root, { ...base, pathSources: { ...base.pathSources, supportPaths: [path] } });
+    };
+    expect(named("src/never-committed.ts")).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("src/never-committed.ts") },
+    });
+    write(root, "ignored-sibling.ts", "committed then untracked\n");
+    git(root, "add", "-f", "ignored-sibling.ts");
+    git(root, "commit", "--quiet", "-m", "track ignored path");
+    git(root, "rm", "--quiet", "--cached", "ignored-sibling.ts");
+    expect(named("ignored-sibling.ts")).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("nor committed paths with a staged deletion") },
+    });
+  });
+
   it.each([
     ["dirty M bytes", (root: string) => write(root, "src/reviewed.ts", "export const reviewed = 3;\n")],
     ["clean tracked bytes", (root: string) => write(root, "clean.txt", "clean-v2\n")],
