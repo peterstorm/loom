@@ -61,6 +61,7 @@ import { canonicalJson, type JsonValue } from "../core/review-packet";
 import { parseStandaloneReviewerProtocolV3 } from "../core/standalone-lineage-contract";
 import { verifyStandalonePanelView } from "./standalone-panel-context";
 import { openRegisteredRunDirectory, type RunDirHandle } from "./run-directory-handle";
+import { CONTEXT_PACKET_MAX_BYTES } from "./stored-context-packets";
 
 /**
  * Where a run directory is announced explicitly.
@@ -774,7 +775,7 @@ async function persistBoundCapture(
   observation: "fresh" | "recapture",
 ): Promise<CaptureOutcome> {
   const context = purpose === "standalone-successor" && request.program === "standalone-review"
-    ? handle.readStandaloneSuccessorContext(request.contextDigest, 16_777_216)
+    ? handle.readStandaloneSuccessorContext(request.contextDigest, CONTEXT_PACKET_MAX_BYTES)
     : handle.readContext(request.contextDigest);
   if (!context.ok) return retriableFailure("context", context.error.message);
   if (context.value.requestId !== request.requestId || context.value.role !== request.role) {

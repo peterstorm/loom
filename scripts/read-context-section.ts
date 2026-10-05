@@ -11,7 +11,7 @@
  */
 import { parseContextPacket } from "../engine/src/orchestration/context-packets";
 import { safeIoCause } from "../engine/src/core/safe-io-cause";
-import { readStoredContextPacketFile } from "../engine/src/orchestration/stored-context-packets";
+import { CONTEXT_PACKET_MAX_BYTES, readStoredContextPacketFile } from "../engine/src/orchestration/stored-context-packets";
 
 const SECTION_OUTPUT_BOUND = 4 * 1024 * 1024;
 
@@ -28,7 +28,7 @@ try {
   const digest = flag(args, "--digest");
   const label = flag(args, "--section");
   if (!path.startsWith("/")) throw Error("--packet must be an absolute path");
-  const stored = readStoredContextPacketFile(path, { file: 16_777_216, section: 16_777_216 });
+  const stored = readStoredContextPacketFile(path, { file: CONTEXT_PACKET_MAX_BYTES, section: CONTEXT_PACKET_MAX_BYTES });
   if (!stored.ok) throw Error(stored.error);
   const packet = parseContextPacket(stored.value.record);
   if (!packet.ok) throw Error(packet.error.message);

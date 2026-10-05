@@ -2,6 +2,7 @@
 import { lstatSync, type Stats } from "node:fs";
 import { createHash } from "node:crypto";
 import { readRunBytesNoFollow } from "../../../orchestration/no-follow-fs";
+import { CONTEXT_PACKET_MAX_BYTES } from "../../../orchestration/stored-context-packets";
 import { encodeByteSection, serializeStandaloneReviewerContextPacketV3, type ByteSection, type StandaloneReviewerContextPacketV3 } from "../../../core/context-packets";
 import { parseBoundedReviewerJson } from "../../../core/reviewer-protocol";
 import { canonicalStructuralEquals, parseRequestId, parseOrchestrationRunId, AGENT_REQUIRED_SKILLS } from "../../../core/orchestration-contract";
@@ -24,8 +25,9 @@ export function boundedStandaloneReadHandle(handle: RunDirHandle): RunDirHandle 
     readIssuedRequests: () => handle.readIssuedRequests(16_384, 128),
     readCapturedAttempts: () => handle.readCapturedAttempts(128),
     readTranscriptBytes: (request: Parameters<RunDirHandle["readTranscriptBytes"]>[0]) => handle.readTranscriptBytes(request, maximum),
-    readContext: (digest: Parameters<RunDirHandle["readContext"]>[0]) => handle.readContext(digest, maximum),
-    readStandaloneSuccessorContext: (digest: Parameters<RunDirHandle["readContext"]>[0]) => handle.readStandaloneSuccessorContext(digest, maximum),
+    readContext: (digest: Parameters<RunDirHandle["readContext"]>[0]) => handle.readContext(digest, CONTEXT_PACKET_MAX_BYTES),
+    readStandaloneSuccessorContext: (digest: Parameters<RunDirHandle["readContext"]>[0]) =>
+      handle.readStandaloneSuccessorContext(digest, CONTEXT_PACKET_MAX_BYTES),
     readReceipt: (effect: Parameters<RunDirHandle["readReceipt"]>[0]) => handle.readReceipt(effect, maximum),
   });
 }

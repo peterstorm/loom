@@ -24,6 +24,7 @@ import { serializeAdjudicatedStandaloneReview, STANDALONE_REVIEWER_ROLES, serial
 import { safeIoCause } from '../../../core/safe-io-cause';
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ContextPacket } from '../../../core/context-packets';
 import { readRunBytesNoFollow, openDirectoryNoFollow, closeAnchoredDirectory, listDirectoryNamesNoFollow, readDirectoryFileNoFollow } from '../../../orchestration/no-follow-fs';
+import { CONTEXT_PACKET_MAX_BYTES } from '../../../orchestration/stored-context-packets';
 import { parseReviewerProtocolDescriptor, type ReviewerProtocolDescriptor, type ReviewerProtocolFailure } from '../../../core/reviewer-contract';
 import {
   emissionToolPrimaryInstruction,
@@ -1099,7 +1100,7 @@ function standalonePanelBootstrap(handle: RunDirHandle, request: AgentRequestAut
   if (registration.kind === "invalid") throw Error(registration.message);
   if (registration.kind !== "registered" || registration.program.kind !== "standalone-review" || registration.program.schemaVersion !== 3) return "";
   const published = publishedReviewerRequest(handle, request, 16_777_216);
-  const packet = handle.readContext(request.contextDigest, 16_777_216);
+  const packet = handle.readContext(request.contextDigest, CONTEXT_PACKET_MAX_BYTES);
   if (!published.ok || !packet.ok) throw Error("current panel requires exact published request and packet");
   const view = verifyStandalonePanelView(handle, packet.value);
   if (!view.ok) throw Error(view.error);

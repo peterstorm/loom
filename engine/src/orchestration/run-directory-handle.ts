@@ -60,7 +60,7 @@ import { parseSemanticAttempt } from "../core/implementation-completion";
 import { canonicalJson, parseJsonValue } from "../core/review-packet";
 import type { ContextPacket } from "./context-packets";
 import { parseStandaloneReviewerContextPacketV3, storedContextPacket, type StandaloneReviewerContextPacketV3, type StoredContextPacket } from "../core/context-packets";
-import { CONTEXT_SECTION_BLOBS, readStoredContextRecord } from "./stored-context-packets";
+import { CONTEXT_PACKET_MAX_BYTES, CONTEXT_SECTION_BLOBS, readStoredContextRecord } from "./stored-context-packets";
 import { parseContextPacket } from "./context-packets";
 import {
   ensureRelativeDirectoryNoFollow,
@@ -1103,6 +1103,25 @@ function contextPublished(
 }
 
 /** Write each section blob once; an existing blob must hold the exact bytes. */
+/** The first part of a stored packet no bounded reader could read back, or
+ *  null when the packet file and every section blob fit the bound. */
+function oversizeStoredPacket(
+  packet: ContextPacket | StandaloneReviewerContextPacketV3,
+  stored: StoredContextPacket,
+): string | null {
+  const narrow = "narrow the review scope (for example with --files)";
+  const fileBytes = Buffer.byteLength(stored.text, "utf8");
+  if (fileBytes > CONTEXT_PACKET_MAX_BYTES) {
+    return `context packet ${packet.digest} is ${fileBytes} bytes, over the ${CONTEXT_PACKET_MAX_BYTES}-byte Context Packet bound; ${narrow}`;
+  }
+  const labels = new Map([...packet.fixedContext, ...packet.variableContext].map((section) => [section.digest, section.label] as const));
+  const blob = stored.blobs.find(({ bytes }) => bytes.length > CONTEXT_PACKET_MAX_BYTES);
+  return blob === undefined
+    ? null
+    : `context packet ${packet.digest} section ${labels.get(blob.digest) ?? blob.digest} is ${blob.bytes.length} bytes, ` +
+      `over the ${CONTEXT_PACKET_MAX_BYTES}-byte Context Packet bound; ${narrow}`;
+}
+
 function publishSectionBlobs(directory: string, stored: StoredContextPacket): DomainResult<void, RunDirectoryError> {
   for (const { digest, bytes } of stored.blobs) {
     // A blob is named by its section digest; bytes that do not hash to it
@@ -1170,6 +1189,10 @@ function contextOperations(runId: OrchestrationRunId, directory: string) {
     async publishContext(packet: ContextPacket | StandaloneReviewerContextPacketV3): Promise<DomainResult<ContextPublishedReceipt, RunDirectoryError>> {
       const path = join(directory, CONTEXTS, `${packet.digest}.json`);
       const stored = storedContextPacket(packet);
+      // Refuse before any write: a part over the bound would publish evidence
+      // that lineage authentication and remediation could never read back.
+      const oversize = oversizeStoredPacket(packet, stored);
+      if (oversize !== null) return failure("context", oversize);
       // Blobs first: a packet file is never visible before the bytes it names.
       const blobs = publishSectionBlobs(directory, stored);
       if (!blobs.ok) return blobs;

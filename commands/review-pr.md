@@ -59,7 +59,10 @@ structure.
 `--files` is a comma-separated explicit scope. Without it, the engine freezes
 the canonical sorted union of branch-committed, staged, unstaged tracked, and
 untracked non-ignored paths, excluding Loom run/state evidence. Empty scope is a
-hard stop. `--dry-run` is recorded in review authority; it does not weaken
+hard stop. Each reviewer packet's frozen source must fit the 16 MiB Context Packet
+bound; a larger scope is refused at start, before any reviewer runs. Split a large
+change into several `--files` reviews, which also keeps each reviewer's slice
+small enough to read in full. `--dry-run` is recorded in review authority; it does not weaken
 review/adjudication.
 
 Do not use this command to feed one Wave Task. `/wave-gate` owns packet-bound

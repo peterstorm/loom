@@ -15,6 +15,13 @@ import { readRunBytesNoFollow } from "./no-follow-fs";
 /** The Run Directory child holding section blobs, one file per section digest. */
 export const CONTEXT_SECTION_BLOBS = "blobs";
 
+/** The byte bound for one stored Context Packet file and for each section blob
+ *  it names. Publication refuses anything larger, and every reader that bounds
+ *  a stored packet (lineage authentication, the predecessor panel view, the
+ *  section reader and native capture) uses this one bound, so a packet a review
+ *  could publish is always readable again, on Claude Code and Pi alike. */
+export const CONTEXT_PACKET_MAX_BYTES = 16_777_216;
+
 /** Byte bounds for one stored packet read: the packet file itself, and each
  *  section blob it names. A reference that pins the packet FILE's exact length
  *  bounds only the file; its sections carry their own bound. */
