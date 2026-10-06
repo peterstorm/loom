@@ -3,19 +3,18 @@
  *
  * The standalone read-coverage obligation (ADR-0022) freezes one diff text
  * per scoped file into the Context Packet, so the diff must be a pure function
- * of the frozen bytes: no Git process, no locale, no configuration. The
- * algorithm is Myers' O(ND) shortest edit script over the lines left after
- * trimming the common prefix and suffix. When the remaining edit distance
- * exceeds `MAX_EDIT_DISTANCE`, the middle is emitted as one replacement
- * (every base line removed, every head line added). That is still an exact
- * diff that `applyUnifiedDiff` reproduces, only not a minimal one, and it
- * bounds the trace memory to roughly `MAX_EDIT_DISTANCE²` integers.
+ * of the frozen bytes: no Git process, no locale, no configuration. The edit
+ * script is Myers' shortest one, found by linear-space bisection (the "middle
+ * snake" divide and conquer, as in diff-match-patch's `diff_bisect`) over
+ * interned lines after trimming the common prefix and suffix. Memory is O(N+M)
+ * per level whatever the edit distance, so a heavily rewritten file still gets
+ * a minimal diff — never an inflated whole-file replacement that would push a
+ * reviewable file past the read budget.
  *
  * Pure module: no I/O, no clock, no randomness.
  */
 
 export const DIFF_CONTEXT_LINES = 3;
-const MAX_EDIT_DISTANCE = 2_000;
 const NO_NEWLINE_MARKER = "\\ No newline at end of file";
 
 /** One side of a diffed file: absent, or text whose final line may lack a newline. */
@@ -33,70 +32,98 @@ function splitLines(text: string): Lines {
   return { lines: body.split("\n"), finalNewline };
 }
 
-/** Myers forward search with a windowed trace; null once the distance cap is exceeded. */
-function myersEdits(base: readonly string[], head: readonly string[]): Edit[] | null {
-  const n = base.length, m = head.length, offset = n + m;
-  const frontier = new Int32Array(2 * offset + 2);
-  const trace: Int32Array[] = [];
-  for (let d = 0; d <= Math.min(offset, MAX_EDIT_DISTANCE); d += 1) {
-    // trace[d] holds the frontier BEFORE step d, for diagonals -d..d.
-    trace.push(frontier.slice(offset - d, offset + d + 1));
-    for (let k = -d; k <= d; k += 2) {
-      let x = k === -d || (k !== d && frontier[offset + k - 1]! < frontier[offset + k + 1]!)
-        ? frontier[offset + k + 1]!
-        : frontier[offset + k - 1]! + 1;
-      let y = x - k;
-      while (x < n && y < m && base[x] === head[y]) { x += 1; y += 1; }
-      frontier[offset + k] = x;
-      if (x >= n && y >= m) return backtrack(trace, base.length, head.length, d);
+/** Lines as small integers, so the inner loops compare numbers, not strings. */
+function intern(base: readonly string[], head: readonly string[]): readonly [Int32Array, Int32Array] {
+  const ids = new Map<string, number>();
+  const id = (line: string): number => {
+    let value = ids.get(line);
+    if (value === undefined) { value = ids.size; ids.set(line, value); }
+    return value;
+  };
+  return [Int32Array.from(base, id), Int32Array.from(head, id)];
+}
+
+/**
+ * Append the shortest edit script of a[aLo, aHi) → b[bLo, bHi) to `out`.
+ * Common prefix and suffix are emitted directly; the remaining middle is split
+ * at its middle snake and each half is solved recursively.
+ */
+function solve(a: Int32Array, aLo: number, aHi: number, b: Int32Array, bLo: number, bHi: number, out: Edit[]): void {
+  while (aLo < aHi && bLo < bHi && a[aLo] === b[bLo]) { out.push({ kind: "equal", base: aLo, head: bLo }); aLo += 1; bLo += 1; }
+  let suffix = 0;
+  while (aHi - suffix > aLo && bHi - suffix > bLo && a[aHi - 1 - suffix] === b[bHi - 1 - suffix]) suffix += 1;
+  const aEnd = aHi - suffix, bEnd = bHi - suffix;
+  if (aLo === aEnd) {
+    for (let y = bLo; y < bEnd; y += 1) out.push({ kind: "insert", head: y });
+  } else if (bLo === bEnd) {
+    for (let x = aLo; x < aEnd; x += 1) out.push({ kind: "delete", base: x });
+  } else {
+    const split = middleSnake(a, aLo, aEnd, b, bLo, bEnd);
+    if (split === null) {
+      for (let x = aLo; x < aEnd; x += 1) out.push({ kind: "delete", base: x });
+      for (let y = bLo; y < bEnd; y += 1) out.push({ kind: "insert", head: y });
+    } else {
+      solve(a, aLo, split[0], b, bLo, split[1], out);
+      solve(a, split[0], aEnd, b, split[1], bEnd, out);
+    }
+  }
+  for (let i = 0; i < suffix; i += 1) out.push({ kind: "equal", base: aEnd + i, head: bEnd + i });
+}
+
+/**
+ * The split point of the middle snake of a[aLo, aHi) → b[bLo, bHi): forward
+ * and reverse Myers searches advance one edit at a time until their furthest
+ * paths overlap. Null means the halves share no line at all (both sides are
+ * non-empty here, and their first and last lines already differ).
+ */
+function middleSnake(a: Int32Array, aLo: number, aHi: number, b: Int32Array, bLo: number, bHi: number): readonly [number, number] | null {
+  const n = aHi - aLo, m = bHi - bLo;
+  const maxD = Math.ceil((n + m) / 2);
+  const offset = maxD, length = 2 * maxD + 2;
+  const forward = new Int32Array(length).fill(-1), reverse = new Int32Array(length).fill(-1);
+  forward[offset + 1] = 0; reverse[offset + 1] = 0;
+  const delta = n - m, front = delta % 2 !== 0;
+  let k1start = 0, k1end = 0, k2start = 0, k2end = 0;
+  for (let d = 0; d < maxD; d += 1) {
+    for (let k1 = -d + k1start; k1 <= d - k1end; k1 += 2) {
+      const k1Offset = offset + k1;
+      let x1 = k1 === -d || (k1 !== d && forward[k1Offset - 1]! < forward[k1Offset + 1]!) ? forward[k1Offset + 1]! : forward[k1Offset - 1]! + 1;
+      let y1 = x1 - k1;
+      while (x1 < n && y1 < m && a[aLo + x1] === b[bLo + y1]) { x1 += 1; y1 += 1; }
+      forward[k1Offset] = x1;
+      if (x1 > n) k1end += 2;
+      else if (y1 > m) k1start += 2;
+      else if (front) {
+        const k2Offset = offset + delta - k1;
+        if (k2Offset >= 0 && k2Offset < length && reverse[k2Offset] !== -1 && x1 >= n - reverse[k2Offset]!) return [aLo + x1, bLo + y1];
+      }
+    }
+    for (let k2 = -d + k2start; k2 <= d - k2end; k2 += 2) {
+      const k2Offset = offset + k2;
+      let x2 = k2 === -d || (k2 !== d && reverse[k2Offset - 1]! < reverse[k2Offset + 1]!) ? reverse[k2Offset + 1]! : reverse[k2Offset - 1]! + 1;
+      let y2 = x2 - k2;
+      while (x2 < n && y2 < m && a[aHi - 1 - x2] === b[bHi - 1 - y2]) { x2 += 1; y2 += 1; }
+      reverse[k2Offset] = x2;
+      if (x2 > n) k2end += 2;
+      else if (y2 > m) k2start += 2;
+      else if (!front) {
+        const k1Offset = offset + delta - k2;
+        if (k1Offset >= 0 && k1Offset < length && forward[k1Offset] !== -1) {
+          const x1 = forward[k1Offset]!;
+          const y1 = offset + x1 - k1Offset;
+          if (x1 >= n - x2) return [aLo + x1, bLo + y1];
+        }
+      }
     }
   }
   return null;
 }
 
-function backtrack(trace: readonly Int32Array[], n: number, m: number, distance: number): Edit[] {
-  const edits: Edit[] = [];
-  let x = n, y = m;
-  for (let d = distance; d >= 0; d -= 1) {
-    const window = trace[d]!;
-    const at = (k: number): number => window[k + d]!;
-    const k = x - y;
-    const previousK = k === -d || (k !== d && at(k - 1) < at(k + 1)) ? k + 1 : k - 1;
-    const previousX = d === 0 ? 0 : at(previousK);
-    const previousY = previousX - previousK;
-    while (x > previousX && y > previousY) { x -= 1; y -= 1; edits.push({ kind: "equal", base: x, head: y }); }
-    if (d > 0) {
-      if (x === previousX) edits.push({ kind: "insert", head: previousY });
-      else edits.push({ kind: "delete", base: previousX });
-    }
-    x = previousX; y = previousY;
-  }
-  return edits.reverse();
-}
-
-/** The full edit script: shared prefix and suffix, Myers (or one replacement) in between. */
+/** The full shortest edit script, in base/head order. */
 function editScript(base: readonly string[], head: readonly string[]): Edit[] {
-  let prefix = 0;
-  while (prefix < base.length && prefix < head.length && base[prefix] === head[prefix]) prefix += 1;
-  let suffix = 0;
-  while (suffix < base.length - prefix && suffix < head.length - prefix &&
-      base[base.length - 1 - suffix] === head[head.length - 1 - suffix]) suffix += 1;
-  const baseMiddle = base.slice(prefix, base.length - suffix);
-  const headMiddle = head.slice(prefix, head.length - suffix);
-  const middle = myersEdits(baseMiddle, headMiddle) ?? [
-    ...baseMiddle.map((_, index): Edit => ({ kind: "delete", base: index })),
-    ...headMiddle.map((_, index): Edit => ({ kind: "insert", head: index })),
-  ];
+  const [a, b] = intern(base, head);
   const edits: Edit[] = [];
-  for (let i = 0; i < prefix; i += 1) edits.push({ kind: "equal", base: i, head: i });
-  for (const edit of middle) {
-    if (edit.kind === "equal") edits.push({ kind: "equal", base: edit.base + prefix, head: edit.head + prefix });
-    else if (edit.kind === "delete") edits.push({ kind: "delete", base: edit.base + prefix });
-    else edits.push({ kind: "insert", head: edit.head + prefix });
-  }
-  for (let i = 0; i < suffix; i += 1) {
-    edits.push({ kind: "equal", base: base.length - suffix + i, head: head.length - suffix + i });
-  }
+  solve(a, 0, a.length, b, 0, b.length, edits);
   return edits;
 }
 

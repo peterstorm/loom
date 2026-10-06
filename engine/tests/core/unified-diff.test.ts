@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
+import { spawnSync } from "node:child_process";
+import { rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { applyUnifiedDiff, unifiedDiff } from "../../src/core/unified-diff";
 
 /** Texts built from a small line alphabet so generated pairs share many lines. */
@@ -53,10 +57,26 @@ describe("unifiedDiff", () => {
     expect(unifiedDiff("x", base, head).match(/^@@ /gm)).toHaveLength(2);
   });
 
-  it("stays exact past the edit-distance cap by emitting one replacement", () => {
-    const base = Array.from({ length: 2_500 }, (_, i) => `base-${i}`).join("\n") + "\n";
-    const head = Array.from({ length: 2_500 }, (_, i) => `head-${i}`).join("\n") + "\n";
+  it("stays exact and minimal for a large, heavily rewritten file without any distance cap", () => {
+    // Every third line kept: a large edit distance whose minimal script keeps the shared lines.
+    const base = Array.from({ length: 6_000 }, (_, i) => i % 3 === 0 ? `kept-${i}` : `base-${i}`).join("\n") + "\n";
+    const head = Array.from({ length: 6_000 }, (_, i) => i % 3 === 0 ? `kept-${i}` : `head-${i}`).join("\n") + "\n";
     const diff = unifiedDiff("big.ts", base, head);
     expect(applyUnifiedDiff(base, diff)).toBe(head);
+    expect(diff.split("\n").filter((row) => row.startsWith(" kept-")).length).toBeGreaterThan(1_000);
+  });
+
+  it("changes exactly as many lines as Git's minimal diff", () => {
+    const root = canonicalTempDir("loom-unified-diff-");
+    try {
+      fc.assert(fc.property(text, text, (base, head) => {
+        writeFileSync(join(root, "a"), base); writeFileSync(join(root, "b"), head);
+        const git = spawnSync("git", ["diff", "--no-index", "--minimal", "--numstat", "--", join(root, "a"), join(root, "b")], { encoding: "utf8" });
+        const [added = "0", removed = "0"] = git.stdout.trim() === "" ? [] : git.stdout.trim().split(/\s+/);
+        const rows = unifiedDiff("f", base, head).split("\n").filter((row) => !row.startsWith("+++ ") && !row.startsWith("--- "));
+        expect([rows.filter((row) => row.startsWith("+")).length, rows.filter((row) => row.startsWith("-")).length])
+          .toEqual([Number(added), Number(removed)]);
+      }), { seed: 22_004, numRuns: 150 });
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
