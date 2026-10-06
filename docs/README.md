@@ -76,6 +76,7 @@ Architecture Decision Records preserve why the system has its current shape:
 - [ADR-0019: One existing request-slot budget; no same-spawn correction protocol](adr/ADR-0019-one-existing-request-slot-budget-no-same-spawn-correction-protocol.md)
 - [ADR-0020: Acceptance and a real vertical slice before breadth](adr/ADR-0020-acceptance-and-a-real-vertical-slice-before-breadth.md)
 - [ADR-0021: Measure useful acceptance, not only syntactic success](adr/ADR-0021-measure-useful-acceptance-not-only-syntactic-success.md)
+- [ADR-0022: Admit a standalone reviewer only after the engine observed it read the whole frozen diff](adr/ADR-0022-engine-observed-standalone-read-coverage.md)
 
 ## Harness and migration notes
 

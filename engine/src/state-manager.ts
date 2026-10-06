@@ -27,7 +27,8 @@ import {
 import type { ActiveWaveGateRegistration, CompletedWaveGateRegistration, TaskGraph } from "./types";
 import type { DomainResult } from "./core/orchestration-contract";
 import type { WaveCompletionCommit, WaveCompletionCommitError } from "./core/wave-gate-machine";
-import { assertPiCliMutationCompatible, captureLoomRuntimeIdentityRestoring, type RuntimeBaselineRestore } from "./runtime-compatibility";
+import { assertPiCliMutationCompatible, captureLoomRuntimeIdentityRestoring } from "./runtime-compatibility";
+import type { RuntimeBaselineRestore } from "./core/runtime-baseline-restore";
 import { installWaveGateRegistration } from "./core/wave-gate-registration";
 import {
   anchoredDirectoryHasIdentity,
@@ -419,12 +420,8 @@ export class StateManager {
   ): Promise<ActiveWaveGateRegistration> {
     const parsed = parseActiveWaveGateRegistration(rawRegistration);
     if (!parsed.ok) throw new Error(`Invalid active Wave Gate registration: ${parsed.error}`);
-    const registration = parsed.value;
-    if (registration.revision !== 0 || registration.terminalOutcome !== null) {
-      throw new Error("A fresh active Wave Gate registration must start at revision 0 without a terminal outcome");
-    }
     return this.updateAndReturn((state) => {
-      const decision = installWaveGateRegistration(state, registration, publishedTaskIds);
+      const decision = installWaveGateRegistration(state, parsed.value, publishedTaskIds);
       if (decision.kind === "refused") throw new Error(decision.message);
       return decision.kind === "replayed"
         ? { state, value: decision.registration }

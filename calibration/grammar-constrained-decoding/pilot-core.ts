@@ -453,7 +453,8 @@ const routeProbeSchema = z.discriminatedUnion("kind", [
 ]);
 export type RouteProbe = DeepReadonly<z.infer<typeof routeProbeSchema>>;
 
-const registryCellSchema = z.object({ toolName: z.string(), schemaDigest: z.string() }).strict().nullable();
+/** Retained digests parse as strictly as the preregistered digests they are compared with. */
+const registryCellSchema = z.object({ toolName: z.string(), schemaDigest: hex64 }).strict().nullable();
 
 const preflightFactsSchema = z.object({
   /** Frozen registry cells as the staged runtime computes them (null = no cell). */
@@ -463,7 +464,7 @@ const preflightFactsSchema = z.object({
     "judge-verdict/v1": registryCellSchema,
     "refutation-verdict/v1": registryCellSchema,
   }).strict(),
-  workloadFixturesDigest: z.string(),
+  workloadFixturesDigest: hex64,
   piVersion: z.string().nullable(),
   /** Content-addressed Runtime Revision of the staged checkout children load. */
   stagedRuntimeRevision: text,
@@ -1069,8 +1070,9 @@ function latencyGuardrail(pairs: readonly Pair[], prereg: Preregistration): Read
   const both = pairs.filter((pair) => Number.isFinite(latencyOf(pair.emission)) && Number.isFinite(latencyOf(pair.extraction)));
   const differences = both.map((pair) => latencyOf(pair.emission) - latencyOf(pair.extraction));
   const differenceInterval = bootstrapInterval(differences, median, bootstrapResamples, bootstrapSeed + 1, confidenceLevel);
-  const describe = `p95 ratio ${Number.isFinite(ratio) ? ratio.toFixed(3) : String(ratio)} (bootstrap ${(confidenceLevel * 100).toFixed(0)}% interval ` +
-    `${Number.isFinite(interval.lower) ? interval.lower.toFixed(3) : "∞"}–${Number.isFinite(interval.upper) ? interval.upper.toFixed(3) : "∞"}) vs bound ${bound}`;
+  const fixed3 = (value: number, nonFinite: string): string => (Number.isFinite(value) ? value.toFixed(3) : nonFinite);
+  const describe = `p95 ratio ${fixed3(ratio, String(ratio))} (bootstrap ${(confidenceLevel * 100).toFixed(0)}% interval ` +
+    `${fixed3(interval.lower, "∞")}–${fixed3(interval.upper, "∞")}) vs bound ${bound}`;
   return Object.freeze({
     measurement: Object.freeze({
       p95Ratio: finiteOrNull(ratio),
@@ -1390,11 +1392,23 @@ function preregistrationGaps(evidence: PilotEvidence): readonly MissingMeasureme
   const blocked: readonly MissingMeasurement[] = evidence.preflight.kind === "blocked"
     ? [Object.freeze({ kind: "preflight-blocked" as const, blocks: evidence.preflight.blocks })]
     : [];
-  if (evidence.preregistration.cells.some((cell) => cell.qualification.kind === "constrained-emission")) return blocked;
+  const { cells } = evidence.preregistration;
+  if (!cells.some((cell) => cell.qualification.kind === "constrained-emission")) {
+    return [...blocked, Object.freeze({
+      kind: "no-qualified-capable-route" as const,
+      detail: "no preregistered cell is qualified constrained-emission on the intended deployment route; " +
+        "AD-11: without a qualified capable route the constrained feature cannot be declared measured/done",
+    })];
+  }
+  // Capability is per cell: a measured (emission-arm) cell on an unconstrained
+  // route passes AS-004 only as not-applicable, so one capable cell must not
+  // carry the others to done. Extraction-only cells stay qualification-only.
+  const unconstrained = cells.filter((cell) => cell.qualification.kind === "unconstrained-emission").map((cell) => cell.cell);
+  if (unconstrained.length === 0) return blocked;
   return [...blocked, Object.freeze({
     kind: "no-qualified-capable-route" as const,
-    detail: "no preregistered cell is qualified constrained-emission on the intended deployment route; " +
-      "AD-11: without a qualified capable route the constrained feature cannot be declared measured/done",
+    detail: `cells ${unconstrained.join(", ")} are qualified unconstrained-emission on the intended deployment route; ` +
+      "AD-11: every measured cell needs a qualified capable route before the constrained feature can be declared measured/done",
   })];
 }
 
@@ -1431,7 +1445,7 @@ function measuredCellFindings(measured: MeasuredCell): CellFindings {
  *  demands design reconsideration — never more windows until one looks
  *  favourable); otherwise any missing, not-measured or inconclusive
  *  measurement leaves the claim incomplete; only a complete, all-passing
- *  record on a qualified capable route allows done. */
+ *  record with every measured cell on a qualified capable route allows done. */
 function decideRelease(evidence: PilotEvidence, cells: readonly CellOutcome[]): ReleaseDecision {
   const perCell = cells.map(cellFindings);
   const violations = perCell.flatMap((findings) => findings.violations);

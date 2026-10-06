@@ -9,12 +9,7 @@ import { buildContextPacket, encodeByteSection } from "../../../../src/core/cont
 import { captureKey } from "../../../../src/core/harness-capture";
 import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "../../../../src/core/model-profiles";
 import { parseRequestId, type AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
-import {
-  EMISSION_DESCRIPTOR_MARKER,
-  emissionToolPrimaryInstruction,
-  parseEmissionDescriptor,
-  renderEmissionDescriptor,
-} from "../../../../src/core/spawn-admission";
+import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/spawn-admission";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_IMPACT_RUBRIC_V1, REVIEWER_PAYLOAD_SCHEMA_V2 } from "../../../../src/core/reviewer-contract";
 import { prepareStandaloneReview } from "../../../../src/core/standalone-review-preparation";
 import { serializeStandaloneReviewAuthority } from "../../../../src/core/standalone-review-records";
@@ -33,16 +28,20 @@ import { disposeFixturePiSessions, fixturePiEnvironment, fixtureSession, withFix
 import { startNativeLegacyReview } from "../../../fixtures/standalone-native-history";
 import { readSessionRunBindings } from "../../../../src/orchestration/session-run-bindings";
 import { frozenDiffReaderPages } from "../../../fixtures/read-coverage";
+import { gitResult, PINNED_COMMIT_DATES } from "../../../fixtures/git-repository";
+import {
+  CATALOG_ROUTE_ENV,
+  normalizeRunRoot,
+  QUALIFIED_ROUTE_ENV,
+  scrubAmbientIssueRoute,
+  withoutEmissionRouteDelta,
+  withRouteEnv,
+  type EnvironmentOverlay,
+} from "../../../fixtures/issue-route-env";
 
-// Route election is ambient-env sensitive: observedReviewerIssueRoute() reads
-// this process's PI_PROVIDER/PI_MODEL/PI_REASONING_LEVEL, and
-// fixturePiEnvironment spreads process.env into every CLI child. These
-// fixtures pin the catalog issue route, so an ambient Pi handshake (a wrapper
-// session running the suite under the qualified-local model) must not flip
-// the election and re-shape issued/retry prompts.
-for (const routeEnv of ["PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL"] as const) {
-  delete process.env[routeEnv];
-}
+// These fixtures pin the catalog issue route; an ambient Pi handshake must not
+// re-shape issued/retry prompts (see fixtures/issue-route-env).
+scrubAmbientIssueRoute();
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 const cli = fileURLToPath(new URL("../../../../src/cli.ts", import.meta.url));
@@ -56,22 +55,9 @@ function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: fals
   if (!result.ok) throw new Error(JSON.stringify(result));
   return result.value;
 }
-function git(root: string, args: readonly string[]) {
-	// Fixture commit SHAs must be deterministic: frozen-source sections embed
-	// workspaceHead/headRevision, and the byte-identity assertions compare
-	// packets minted by separate fixture projects. Wall-clock commit dates
-	// give different SHAs whenever two commits straddle a second boundary — a
-	// time-flake that only appears under full-suite load. Pin both dates so
-	// identical trees always yield identical SHAs. (The FR-012 test's
-	// withIssueRoute date pins stay: identical values, no conflict.)
-	const result = spawnSync("git", args, {
-		cwd: root,
-		encoding: "utf8",
-		env: { ...process.env, GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z", GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z" },
-	});
-	if (result.status !== 0) throw new Error(result.stderr);
-	return result.stdout.trim();
-}
+// Deterministic commit SHAs: frozen-source sections embed the head revision, and
+// packets minted by separate fixture projects are compared byte-for-byte.
+const git = (root: string, args: readonly string[]) => gitResult(root, args, PINNED_COMMIT_DATES).stdout.trim();
 function project() {
   const root = canonicalTempDir("loom-p4-standalone-");
   roots.push(root);
@@ -358,45 +344,19 @@ describe("standalone registered protocol delivery and publication", () => {
 // and the archived v1 contract stays extraction-only under a qualified parent.
 // ---------------------------------------------------------------------------
 
-const QUALIFIED_ROUTE_ENV: Readonly<Record<string, string>> = Object.freeze({
-  PI_PROVIDER: "desktop-vllm",
-  PI_MODEL: "glm-5.3-flash-spark-tp2-v14",
-  PI_REASONING_LEVEL: "high",
-});
-
-/** Pin the issue-route election for the CLI children this test spawns, and
- *  restore the catalog-pinned ambient state afterwards so sibling tests keep
- *  their deterministic prompts. */
-async function withIssueRoute<T>(environment: Readonly<Record<string, string>>, operation: () => Promise<T>): Promise<T> {
-  const previous = Object.keys(environment).map((key) => [key, process.env[key]] as const);
-  try {
-    Object.assign(process.env, environment);
-    return await operation();
-  } finally {
-    for (const [key, value] of previous) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
-}
-
 describe("the issued emission route on the standalone program path (T6)", () => {
   it("retains every issuance join across the extraction and emission routes and changes only task text (FR-012)", async () => {
     // Both fixture repositories must freeze the SAME head revision: the
     // standalone-frozen-source section embeds it, so the packet digests are
     // byte-comparable across routes only when the fixture commits are
     // content-identical (fixed author/committer timestamps, identical trees).
-    const startRun = async (environment: Readonly<Record<string, string>>) => withIssueRoute({
-      GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z",
-      GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z",
-      ...environment,
-    }, async () => {
+    const startRun = async (environment: EnvironmentOverlay) => withRouteEnv({ ...PINNED_COMMIT_DATES, ...environment }, async () => {
       const p = project();
       const initial = await runCli(p.root, ["start", "standalone-review", "--runs-root", p.runsRoot, "--run", "run.route"],
         JSON.stringify({ kind: "all", files: p.scope, dryRun: false }));
       return { p, requests: initial.requests! };
     });
-    const extraction = await startRun({});
+    const extraction = await startRun(CATALOG_ROUTE_ENV);
     const emission = await startRun(QUALIFIED_ROUTE_ENV);
     expect(extraction.requests.map(({ authority }) => authority.modelProfile))
       .not.toEqual(emission.requests.map(({ authority }) => authority.modelProfile));
@@ -416,19 +376,15 @@ describe("the issued emission route on the standalone program path (T6)", () => 
     // The route delta on the wire is EXACTLY the descriptor line plus the
     // appended tool-primary instruction; every other task byte is identical
     // once the project-local run-directory paths are normalized away.
-    const normalizeRoot = (task: string, root: string) => task.split(root).join("<RUN_ROOT>");
     for (const [extractionRequest, emissionRequest] of extraction.requests.map((request, index) => [request, emission.requests[index]!] as const)) {
-      const extractionTask = normalizeRoot(extractionRequest.task, extraction.p.root);
-      const emissionTask = normalizeRoot(emissionRequest.task, emission.p.root);
+      const extractionTask = normalizeRunRoot(extractionRequest.task, extraction.p.root);
+      const emissionTask = normalizeRunRoot(emissionRequest.task, emission.p.root);
       expect(extractionTask).not.toContain(EMISSION_DESCRIPTOR_MARKER);
       const descriptor = parseEmissionDescriptor(emissionTask);
       expect(descriptor).toMatchObject({ kind: "issued", contextDigest: emissionRequest.authority.contextDigest,
         binding: { requestId: emissionRequest.authority.requestId, version: "v2" } });
       if (descriptor.kind !== "issued") throw new Error("qualified-route fixture must mint an issued descriptor");
-      const stripped = emissionTask
-        .replace(renderEmissionDescriptor(descriptor.binding, descriptor.contextDigest), "")
-        .replace(`\n${emissionToolPrimaryInstruction(descriptor.binding)}`, "");
-      expect(stripped).toBe(extractionTask);
+      expect(withoutEmissionRouteDelta(emissionTask, descriptor.binding, descriptor.contextDigest)).toBe(extractionTask);
       expect(emissionTask).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
 
       // The delivery joins survive on the emission route: the packet read
@@ -469,7 +425,6 @@ describe("the issued emission route on the standalone program path (T6)", () => 
       .not.toEqual(qualified.requests.map(({ authority }) => authority.modelProfile));
 
     for (const [catalogRequest, qualifiedRequest] of catalog.requests.map((request, index) => [request, qualified.requests[index]!] as const)) {
-      const normalizeRoot = (task: string, root: string) => task.split(root).join("<RUN_ROOT>");
       // AD-7: extraction-only and archived issued contracts keep their exact
       // final-message delivery; no tool is advertised on either route.
       expectLegacyDelivery(Object.freeze({ kind: "spawn-batch", requests: Object.freeze([catalogRequest]) }));
@@ -480,7 +435,7 @@ describe("the issued emission route on the standalone program path (T6)", () => 
       expect(parseEmissionDescriptor(qualifiedRequest.task).kind).toBe("absent");
       // The archived v1 route is extraction-only BY ISSUANCE, so even a
       // qualified parent renders byte-identical tasks and packet bytes.
-      expect(normalizeRoot(qualifiedRequest.task, qualified.p.root)).toBe(normalizeRoot(catalogRequest.task, catalog.p.root));
+      expect(normalizeRunRoot(qualifiedRequest.task, qualified.p.root)).toBe(normalizeRunRoot(catalogRequest.task, catalog.p.root));
       expect(readFileSync(join(qualified.handle.runDirectory, "contexts", `${qualifiedRequest.authority.contextDigest}.json`)))
         .toEqual(readFileSync(join(catalog.handle.runDirectory, "contexts", `${catalogRequest.authority.contextDigest}.json`)));
     }

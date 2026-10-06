@@ -33,9 +33,11 @@
  *   exist.
  *
  * An unparseable baseline refuses the WHOLE map (strict comparison
- * everywhere), not just its own task, and the refusal names its cause.
+ * everywhere), not just its own task, and the refusal names its cause. So does
+ * an in-flight attempt with NO recorded baseline: it proves nothing clean at
+ * its spawn, so no path can be restored on its behalf.
  */
-import { parseArtifactBaseline } from "./artifact-baseline";
+import { parseArtifactBaseline, type DeclaredArtifactBaseline } from "./artifact-baseline";
 import { compareStrings } from "./ordering";
 import type { DomainResult } from "./orchestration-contract";
 
@@ -45,18 +47,45 @@ export type RuntimeBaselineFacts = Readonly<{
   dirtyNow: ReadonlySet<string>;
   /** Every path of the runtime revision domain. */
   domainPaths: readonly string[];
-  /** Each in-flight attempt's stored repository baseline, unparsed; an
-   *  attempt without one contributes `undefined`. */
-  attemptRepositoryBaselines: readonly unknown[];
+  /** Each in-flight attempt's repository baseline fact. */
+  attemptRepositoryBaselines: readonly InFlightAttemptBaseline[];
 }>;
+
+/** One in-flight attempt's stored repository baseline: recorded (unparsed),
+ *  or unrecorded — which proves nothing clean at its spawn. */
+export type InFlightAttemptBaseline =
+  | Readonly<{ kind: "recorded"; repositoryBaseline: unknown }>
+  | Readonly<{ kind: "unrecorded"; taskId: string }>;
+
+/** The task fields the rules read to find its in-flight attempt. */
+export type RuntimeBaselineTask = Readonly<{
+  id: string;
+  active_implementation_attempt?: unknown;
+  legacy_execution_reservation?: true;
+  attempt_repository_baseline?: readonly DeclaredArtifactBaseline[];
+}>;
+
+/**
+ * The attempt baseline fact one task contributes, or `null` when it has no
+ * in-flight attempt (a task under review, say) and so no spawn to prove clean.
+ * A stored baseline is recorded whatever the task's attempt shape; an active
+ * or legacy-reserved attempt WITHOUT one is unrecorded.
+ */
+export function inFlightAttemptBaseline(task: RuntimeBaselineTask): InFlightAttemptBaseline | null {
+  if (task.attempt_repository_baseline !== undefined) {
+    return Object.freeze({ kind: "recorded", repositoryBaseline: task.attempt_repository_baseline });
+  }
+  return task.active_implementation_attempt !== undefined || task.legacy_execution_reservation === true
+    ? Object.freeze({ kind: "unrecorded", taskId: task.id })
+    : null;
+}
 
 /** A path restored at HEAD's bytes, or `null` when the attempt created it. */
 export type RuntimeBaselineRestore = ReadonlyMap<string, string | null>;
 
-export type RuntimeBaselineRestoreRefusal = Readonly<{
-  kind: "unparseable-attempt-baseline";
-  errors: readonly string[];
-}>;
+export type RuntimeBaselineRestoreRefusal =
+  | Readonly<{ kind: "unparseable-attempt-baseline"; errors: readonly string[] }>
+  | Readonly<{ kind: "unrecorded-attempt-baseline"; taskId: string }>;
 
 /** The dirty domain paths the rules let a settlement restore. */
 export function runtimeBaselineRestoreCandidates(
@@ -66,20 +95,22 @@ export function runtimeBaselineRestoreCandidates(
   // Dirty-at-spawn knowledge is unioned across every in-flight attempt: a path
   // ANY attempt observed dirty at its spawn stays strict for all of them.
   const dirtyAtSpawn = new Set<string>();
-  let baselineSeen = false;
-  for (const raw of facts.attemptRepositoryBaselines) {
-    if (raw === undefined) continue;
-    const parsed = parseArtifactBaseline<"repository-change">(raw, "attempt repository baseline");
+  for (const attempt of facts.attemptRepositoryBaselines) {
+    // An unrecorded baseline cannot say what was dirty at spawn; skipping it
+    // would read every one of its paths as provably clean.
+    if (attempt.kind === "unrecorded") {
+      return { ok: false, error: Object.freeze({ kind: "unrecorded-attempt-baseline", taskId: attempt.taskId }) };
+    }
+    const parsed = parseArtifactBaseline<"repository-change">(attempt.repositoryBaseline, "attempt repository baseline");
     if (!parsed.ok) {
       return { ok: false, error: Object.freeze({ kind: "unparseable-attempt-baseline", errors: parsed.errors }) };
     }
-    baselineSeen = true;
     for (const entry of parsed.value) dirtyAtSpawn.add(entry.artifact);
   }
   return {
     ok: true,
     value: Object.freeze(facts.domainPaths.filter((path) =>
-      facts.dirtyNow.has(path) && !(baselineSeen && dirtyAtSpawn.has(path)))),
+      facts.dirtyNow.has(path) && !dirtyAtSpawn.has(path))),
   };
 }
 
@@ -97,5 +128,10 @@ export function runtimeBaselineRestoreAt(
 
 /** One diagnosable line for a refused restoration map. */
 export function describeRuntimeBaselineRestoreRefusal(refusal: RuntimeBaselineRestoreRefusal): string {
-  return `an in-flight attempt repository baseline is unparseable, so no runtime-baseline restore applies: ${refusal.errors.join("; ")}`;
+  switch (refusal.kind) {
+    case "unparseable-attempt-baseline":
+      return `an in-flight attempt repository baseline is unparseable, so no runtime-baseline restore applies: ${refusal.errors.join("; ")}`;
+    case "unrecorded-attempt-baseline":
+      return `in-flight attempt ${refusal.taskId} has no recorded repository baseline, so no runtime-baseline restore applies`;
+  }
 }

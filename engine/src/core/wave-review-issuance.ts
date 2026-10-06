@@ -25,6 +25,7 @@ import {
   decideWaveReviewEpochReplay,
   prepareWaveReviewBatch,
   readWaveReviewContext,
+  taskReviewScope,
   waveSpecCheckDocumentsMatch,
   type WaveRequestBatch,
   type WaveReviewRegistrationAuthority,
@@ -131,7 +132,7 @@ export function installWaveReviewRunsTransition(
     }
     const taskRun = batch.taskRuns.find(({ taskId }) => taskId === task.id);
     const currentWorkspace = workspaceByTask.get(task.id);
-    const lockedScope = [...new Set([...(task.file_list ?? []), ...(task.files_modified ?? [])])].sort();
+    const lockedScope = taskReviewScope(task);
     const exactScope = currentWorkspace !== undefined && lockedScope.length === currentWorkspace.scope.length &&
       lockedScope.every((path, index) => path === currentWorkspace.scope[index]);
     if (taskRun === undefined || taskRun.generation !== (task.review_generation ?? 0) || !exactScope ||

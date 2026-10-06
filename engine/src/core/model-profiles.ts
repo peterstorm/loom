@@ -100,6 +100,9 @@ const copilotTarget = (
   thinking: PiThinkingLevel,
 ): PiTarget => Object.freeze({ provider: "github-copilot", model, thinking });
 const desktopVllmTarget: PiTarget = Object.freeze({ ...DESKTOP_VLLM_ROUTE, thinking: "high" });
+/** The Pi target of the `qualified-local-review` profile: a value, so the
+ *  parent-route election below compares against it without a catalog lookup. */
+const QUALIFIED_LOCAL_REVIEW_TARGET: PiTarget = desktopVllmTarget;
 const profile = (
   id: LlmProfileId,
   claudeCode: ClaudeCodeModel,
@@ -116,11 +119,7 @@ export const LLM_PROFILES: readonly LlmProfile[] = Object.freeze([
   profile("architecture-finalize", "opus", piTarget("gpt-5.6-sol", "high")),
   profile("general-review", "sonnet", piTarget("gpt-5.6-sol", "high")),
   profile("focused-review", "sonnet", piTarget("gpt-5.5", "high")),
-  Object.freeze({
-    id: "qualified-local-review",
-    claudeCode: claudeTarget("sonnet"),
-    pi: desktopVllmTarget,
-  }),
+  profile("qualified-local-review", "sonnet", QUALIFIED_LOCAL_REVIEW_TARGET),
   profile("panel-design", "opus", piTarget("gpt-5.6-sol", "high")),
   profile("panel-judge", "opus", piTarget("gpt-5.6-sol", "high")),
   profile("refutation", "opus", piTarget("gpt-5.6-sol", "high")),
@@ -598,7 +597,7 @@ export function reviewerIssueRouteForParent(parent: Readonly<{
   model: string | undefined;
   thinking: string | undefined;
 }>): ReviewerIssueRoute {
-  const qualified = LLM_PROFILES.find(({ id }) => id === "qualified-local-review")!.pi;
+  const qualified = QUALIFIED_LOCAL_REVIEW_TARGET;
   return parent.pi && parent.provider === qualified.provider && parent.model === qualified.model &&
     parent.thinking === qualified.thinking ? "qualified-local" : "catalog";
 }
@@ -625,15 +624,7 @@ export function lowerModelProfile(profileValue: LlmProfile, harness: "pi"): PiBi
 export function lowerModelProfile(profileValue: LlmProfile, harness: Harness): HarnessBinding;
 export function lowerModelProfile(profileValue: LlmProfile, harness: Harness): HarnessBinding {
   if (harness === "claude-code") return Object.freeze({ harness, model: profileValue.claudeCode.model });
-  const target = profileValue.pi;
-  // The arm split is load-bearing for the TYPE: each arm freezes through the
-  // provider literal that names exactly one closed-union member, so the frozen
-  // object assigns to that member of the PiBinding union.
-  return target.provider === "openai-codex"
-    ? Object.freeze({ harness, provider: target.provider, model: target.model, thinking: target.thinking })
-    : target.provider === DESKTOP_VLLM_ROUTE.provider
-    ? Object.freeze({ harness, provider: target.provider, model: target.model, thinking: target.thinking })
-    : Object.freeze({ harness, provider: target.provider, model: target.model, thinking: target.thinking });
+  return Object.freeze({ harness, ...profileValue.pi });
 }
 
 export function piModelPattern(target: PiTarget | PiBinding): string {

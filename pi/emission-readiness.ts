@@ -75,23 +75,19 @@ export function registerPiEmissionReadiness(pi: ExtensionAPI, runtimeRevision: s
   pi.registerCommand(EMISSION_READINESS_COMMAND, {
     description: "Emission readiness: register the issued emission tool, verify it active, report the bound readiness payload.",
     handler: async () => {
-      // Local narrowed copy of the once-parsed provisioning: the handler
-      // narrows its own view (closure narrowing of the outer const is not
-      // assumed).
-      const provisioned = emissionChild;
-      if (provisioned.kind === "not-provisioned") {
+      if (emissionChild.kind === "not-provisioned") {
         throw new Error(
           "loom-emission-readiness is only for emission-enabled children: no LOOM_EMISSION_BINDING is provisioned in this child. " +
             "Remediation: the launcher barrier provisions the issued emission binding before readiness.",
         );
       }
-      if (provisioned.kind === "provisioning-refused") {
+      if (emissionChild.kind === "provisioning-refused") {
         throw new Error(
-          `the provisioned LOOM_EMISSION_BINDING is unusable [${provisioned.code}]: ${provisioned.reason}. ` +
+          `the provisioned LOOM_EMISSION_BINDING is unusable [${emissionChild.code}]: ${emissionChild.reason}. ` +
             "Remediation: respawn the child with the issued emission binding.",
         );
       }
-      const registration = decideEmissionToolRegistration(emissionRegistrationState.state, provisioned.binding);
+      const registration = decideEmissionToolRegistration(emissionRegistrationState.state, emissionChild.binding);
       if (registration.kind === "contradictory") {
         throw new Error(
           `${describeEmissionRegistrationContradiction(registration)}. ` +
@@ -99,16 +95,16 @@ export function registerPiEmissionReadiness(pi: ExtensionAPI, runtimeRevision: s
         );
       }
       if (registration.kind === "register") {
-        const definition = emissionToolDefinition(provisioned.binding);
+        const definition = emissionToolDefinition(emissionChild.binding);
         // THE confined TypeBox claim at the ONE pi registration surface: the
         // parameters ARE the frozen bytes parsed once (one schema, no second
         // contract — FR-021/SC-006); pi's registerTool types them as a
         // TypeBox schema, and the byte-match guard is the contract suite's.
         pi.registerTool(definition as unknown as Parameters<ExtensionAPI["registerTool"]>[0]);
-        emissionRegistrationState.state = { kind: "registered", binding: provisioned.binding };
+        emissionRegistrationState.state = { kind: "registered", binding: emissionChild.binding };
       }
-      const active = pi.getActiveTools().includes(provisioned.binding.toolName);
-      const report = emissionReadinessReport(provisioned, {
+      const active = pi.getActiveTools().includes(emissionChild.binding.toolName);
+      const report = emissionReadinessReport(emissionChild, {
         revision: runtimeRevision,
         active,
         childPid: process.pid,

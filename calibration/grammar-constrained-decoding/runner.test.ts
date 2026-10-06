@@ -12,7 +12,7 @@ import {
 } from "./pilot-core";
 import type { ArmRequest } from "./pilot-dispatch";
 import { pilotRequestId, renderTaskBody, rubricEscapes, type CaseInput } from "./pilot-workload";
-import { blind, blindedPacket, caseInputKey, rubricAssessment } from "./pilot-window";
+import { blind, blindedPacket, caseInputKey, dispatchSchedule, rubricAssessment } from "./pilot-window";
 import {
   accepted,
   ATTEMPT_MS,
@@ -41,7 +41,8 @@ import {
  * - against a fake route (pilot-test-fixtures.ts) wired into the window
  *   dispatch path the script runs (`pilot-window.ts`): the matched-arm
  *   dispatch, the attempt-2 retry budget, the blinding key / packet and the
- *   rubric assessor wiring. Transcript classification is covered in
+ *   rubric assessor wiring, and the fail-closed aborts on a missing input or
+ *   an inconsistent recorded sample. Transcript classification is covered in
  *   pilot.test.ts, the live Pi adapter in pilot-dispatch.test.ts.
  */
 
@@ -185,7 +186,7 @@ describe("run-model-calibration --pilot dispatch path against a fake route", () 
     for (const record of records) {
       expect(record.sample.attempts.map((attempt) => [attempt.attempt, attempt.outcome.kind])).toEqual([[1, "rejected"], [2, "accepted"]]);
       expect(record.sample.dispatchToIngestionMs).toBe(2 * ATTEMPT_MS);
-      expect(record.acceptedPayload).not.toBeNull();
+      expect(record.kind).toBe("accepted");
     }
     const retries = route.requests.filter((request) => request.attempt === 2);
     expect(new Set(retries.map((request) => request.cellBinding.binding.requestId)).size).toBe(retries.length);
@@ -197,7 +198,7 @@ describe("run-model-calibration --pilot dispatch path against a fake route", () 
     const rejected = await runWindow(exhausted);
     expect(Math.max(...exhausted.requests.map((request) => request.attempt))).toBe(2);
     expect(exhausted.requests).toHaveLength(schedule.length * 4);
-    expect(rejected.records.every((record) => record.sample.attempts.length === 2 && record.acceptedPayload === null)).toBe(true);
+    expect(rejected.records.every((record) => record.sample.attempts.length === 2 && record.kind === "terminal")).toBe(true);
 
     const timedOut = fakeRoute(() => TIMEOUT);
     const terminal = await runWindow(timedOut);
@@ -205,7 +206,7 @@ describe("run-model-calibration --pilot dispatch path against a fake route", () 
     for (const record of terminal.records) {
       expect(record.sample.attempts.map((attempt) => attempt.outcome.kind)).toEqual(["timeout"]);
       expect(record.sample.dispatchToIngestionMs).toBe(ATTEMPT_MS);
-      expect(record.acceptedPayload).toBeNull();
+      expect(record.kind).toBe("terminal");
     }
   });
 
@@ -213,7 +214,7 @@ describe("run-model-calibration --pilot dispatch path against a fake route", () 
     // The judge cell's extraction arm never lands: terminal samples are never blinded.
     const { records } = await runWindow(fakeRoute((request) =>
       request.cell === "judge-verdict/v1" && request.arm === "extraction-only" ? REJECTED : accepted(request)));
-    const acceptedRecords = records.filter((record) => record.acceptedPayload !== null);
+    const acceptedRecords = records.flatMap((record) => (record.kind === "accepted" ? [record] : []));
     expect(acceptedRecords.length).toBeLessThan(records.length);
     const blinded = blind(WINDOW_ID, records);
     const key = parseBlindingKey(blinded.key);
@@ -261,6 +262,40 @@ describe("run-model-calibration --pilot dispatch path against a fake route", () 
     });
     if (!evaluated.ok) throw new Error(evaluated.error.problems.join("\n"));
     expect(evaluated.value.cells.every((cell) => cell.kind !== "not-measured")).toBe(true);
+  });
+
+  describe("aborts the window loudly instead of recording a fabricated sample", () => {
+    const first = schedule[0] as (typeof schedule)[number];
+
+    it("refuses a preregistered case with no resolved input before dispatching it", async () => {
+      const route = fakeRoute(accepted);
+      const landed: unknown[] = [];
+      const missing = new Map([...inputs].filter(([key]) => key !== caseInputKey(first.cell, first.caseId)));
+      await expect(dispatchSchedule({
+        windowId: WINDOW_ID, prereg, fixtures, inputs: missing, dispatch: route.dispatch, now: route.now,
+        onSample: (record) => { landed.push(record); }, onPair: () => {},
+      })).rejects.toThrow(`no resolved input for ${first.cell} case ${first.caseId}`);
+      expect(route.requests).toHaveLength(0);
+      expect(landed).toHaveLength(0);
+    });
+
+    it("refuses a recorded observation the sample parser rejects", async () => {
+      // An extraction-only attempt claiming the emission-tool source contradicts its arm.
+      const route = fakeRoute(() => ({ kind: "accepted", source: "emission-tool", fallbackOverRefusal: false, payloadDigest: "a".repeat(64) }));
+      const landed: unknown[] = [];
+      await expect(runWindow(route, (record) => { landed.push(record); }))
+        .rejects.toThrow(/^recorded observation for \S+\/extraction-only is malformed: /);
+      expect(landed.length).toBeLessThan(2);
+    });
+
+    it("refuses an accepted attempt that carries no accepted payload", async () => {
+      const route = fakeRoute(accepted);
+      const payloadless = { ...route, dispatch: async (request: ArmRequest) => ({ ...(await route.dispatch(request)), acceptedPayload: null }) };
+      const landed: unknown[] = [];
+      await expect(runWindow(payloadless, (record) => { landed.push(record); }))
+        .rejects.toThrow(`recorded sample for ${first.pairId}/${first.armOrder[0]} is inconsistent: its accepted outcome carries no accepted payload`);
+      expect(landed).toHaveLength(0);
+    });
   });
 
   describe("fails closed on an unresolvable entry — never zero escapes", () => {

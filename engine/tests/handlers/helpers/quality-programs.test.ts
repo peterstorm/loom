@@ -203,12 +203,29 @@ describe("quality-program helper boundaries", () => {
     const productionFiles = [join(ENGINE, "src"), join(ROOT, "pi"), join(ROOT, "hooks"), join(ROOT, "scripts")]
       .flatMap(productionTypeScriptFiles)
       .filter((path) => !path.startsWith(PROGRAM_VOLUMES));
-    const owningVolumeImport = /from\s+["'][^"']*\/programs\/(?:standalone|remediation|registration|changed-paths|durable-requests|refutation-requests|request-publication|reviewer-protocol-resolution|spawn-task|standalone-requests|wave-[\w-]+)["']/;
-    const offenders = productionFiles
-      .filter((path) => owningVolumeImport.test(readFileSync(path, "utf-8")))
-      .map((path) => relative(ROOT, path));
+    // Deny by default: every module under programs/ except the curated index is
+    // volume-private. The only exceptions are these named importer -> module
+    // seams, each a separate published adapter rather than a program volume.
+    const allowedVolumeImports = new Set([
+      "engine/src/handlers/helpers/orchestration.ts -> legacy-panel",
+      "engine/src/handlers/helpers/orchestration.ts -> remediation-events",
+      "engine/src/handlers/helpers/orchestration.ts -> standalone-disposition",
+      "engine/src/handlers/helpers/orchestration.ts -> standalone-source",
+      "pi/extension.ts -> review-authority-bridge",
+      "pi/review-run-authority.ts -> review-authority-bridge",
+    ]);
+    const volumeSpecifier = /(?:from\s+|import\(\s*)["'][^"']*\/programs\/([\w-]+)(?:\.ts)?["']/g;
+    const volumeImports = productionFiles.flatMap((path) =>
+      [...readFileSync(path, "utf-8").matchAll(volumeSpecifier)]
+        .map((match) => match[1]!)
+        .filter((module) => module !== "index")
+        .map((module) => `${relative(ROOT, path)} -> ${module}`));
+    const volumes = new Set(readdirSync(PROGRAM_VOLUMES).filter((entry) => entry.endsWith(".ts")).map((entry) => entry.slice(0, -3)));
 
-    expect(offenders).toEqual([]);
+    expect(volumeImports.filter((edge) => !allowedVolumeImports.has(edge))).toEqual([]);
+    // The allowlist stays exact: no stale edge, and every named module still exists.
+    expect([...allowedVolumeImports].filter((edge) => !volumeImports.includes(edge))).toEqual([]);
+    expect([...allowedVolumeImports].map((edge) => edge.split(" -> ")[1]!).filter((module) => !volumes.has(module))).toEqual([]);
   });
 
   it("validates source profiles and renders exact Pi OpenAI models", () => {

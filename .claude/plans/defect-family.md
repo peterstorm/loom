@@ -24,6 +24,8 @@ The engine CLI runs under bun, whose `JSON.parse` errors carry no position — a
 
 `.claude/specs/defect-family/spec.md` is the canonical feature spec: FR-001/FR-002 plus acceptance scenarios AS-001–AS-004 (the wave's planned completion owners), glossary and exclusions as authored. The plan roster below claims every requirement so the wave's spec-alignment floor has no unclaimed owners.
 
+Moves 1 and 2 implement the spec: Move 1 is FR-001 (AS-001, AS-002) and Move 2 is FR-002 (AS-003, AS-004). Moves 3 and 4 are supporting changes outside the spec. No FR, AS or OOS entry covers them, and the spec is not their source of authority. Move 3 is a consequence of FR-001: without it, the population-time stamps FR-001 requires would make the completed-wave reopen guard refuse an untouched later-wave Task. Move 4 is an unrelated reviewer-protocol diagnostic fix, delivered in the same Task. Its behavior is pinned by the tests named in Move 4, not by spec scenarios. Spec-to-plan traceability therefore holds for FR-001/FR-002 only. A spec-alignment check should not read Moves 3 and 4 as specified behavior.
+
 ## Task roster
 
 | Task | Agent | Wave | Spec anchors | Declared artifacts |

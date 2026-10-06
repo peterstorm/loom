@@ -10,7 +10,7 @@
  * refused at the seam instead of being half-read by whichever applier runs.
  */
 
-import { agentsOfKind } from "../engine/src/core/model-profiles";
+import { IMPL_AGENTS, REVIEW_SUB_AGENTS } from "../engine/src/core/model-profiles";
 import { waveSpecCheckDocumentsMatch } from "../engine/src/core/wave-review-authority";
 import type { ImplementationAttemptAuthority } from "../engine/src/core/implementation-completion";
 import type {
@@ -22,8 +22,6 @@ import type {
 
 type LoomTask = TaskGraph["tasks"][number];
 
-const IMPL_AGENTS: ReadonlySet<string> = new Set(agentsOfKind("impl"));
-const REVIEW_AGENTS: ReadonlySet<string> = new Set(agentsOfKind("reviewer"));
 const SPEC_CHECK_AGENT = "spec-check-invoker";
 
 /** The exact Wave spec-check slot/attempt a spec-check reservation answers for. */
@@ -92,30 +90,37 @@ export type ReservedSlotParse =
  */
 export function parseReservedSlot(record: ReservedSlotRecord): ReservedSlotParse {
   const base = { agentType: record.agentType, taskId: record.taskId };
-  const carried = [
-    ...(record.implementationAuthority === null ? [] : ["implementation"]),
-    ...(record.reviewAuthority === null ? [] : ["review"]),
-    ...(record.specCheckAuthority === null ? [] : ["spec-check"]),
+  // One row per role authority the record carries: the slot it parses to, and
+  // whether the reserved agent plays that role (`playedBy` names the role's
+  // agents for the refusal).
+  const carried: readonly Readonly<{ slot: ReservedSlot; plays: boolean; playedBy: string }>[] = [
+    ...(record.implementationAuthority === null ? [] : [{
+      slot: { ...base, role: "implementation" as const, authority: record.implementationAuthority },
+      plays: IMPL_AGENTS.has(record.agentType),
+      playedBy: "an implementation agent",
+    }]),
+    ...(record.reviewAuthority === null ? [] : [{
+      slot: { ...base, role: "review" as const, authority: record.reviewAuthority },
+      plays: REVIEW_SUB_AGENTS.has(record.agentType),
+      playedBy: "a reviewer",
+    }]),
+    ...(record.specCheckAuthority === null ? [] : [{
+      slot: { ...base, role: "spec-check" as const, authority: record.specCheckAuthority },
+      plays: record.agentType === SPEC_CHECK_AGENT,
+      playedBy: SPEC_CHECK_AGENT,
+    }]),
   ];
   const refuse = (problem: string): ReservedSlotParse =>
     Object.freeze({ ok: false as const, error: `reserved slot for ${record.agentType} ${problem}` });
-  if (carried.length > 1) return refuse(`carries ${carried.length} role authorities (${carried.join(", ")}); exactly one is allowed`);
-  if (record.implementationAuthority !== null) {
-    return IMPL_AGENTS.has(record.agentType)
-      ? Object.freeze({ ok: true as const, value: Object.freeze({ ...base, role: "implementation" as const, authority: record.implementationAuthority }) })
-      : refuse("carries implementation authority, but the agent is not an implementation agent");
+  if (carried.length > 1) {
+    const roles = carried.map(({ slot }) => slot.role);
+    return refuse(`carries ${carried.length} role authorities (${roles.join(", ")}); exactly one is allowed`);
   }
-  if (record.reviewAuthority !== null) {
-    return REVIEW_AGENTS.has(record.agentType)
-      ? Object.freeze({ ok: true as const, value: Object.freeze({ ...base, role: "review" as const, authority: record.reviewAuthority }) })
-      : refuse("carries review authority, but the agent is not a reviewer");
-  }
-  if (record.specCheckAuthority !== null) {
-    return record.agentType === SPEC_CHECK_AGENT
-      ? Object.freeze({ ok: true as const, value: Object.freeze({ ...base, role: "spec-check" as const, authority: record.specCheckAuthority }) })
-      : refuse(`carries spec-check authority, but the agent is not ${SPEC_CHECK_AGENT}`);
-  }
-  return Object.freeze({ ok: true as const, value: Object.freeze({ ...base, role: "legacy" as const }) });
+  const [only] = carried;
+  if (only === undefined) return Object.freeze({ ok: true as const, value: Object.freeze({ ...base, role: "legacy" as const }) });
+  return only.plays
+    ? Object.freeze({ ok: true as const, value: Object.freeze(only.slot) })
+    : refuse(`carries ${only.slot.role} authority, but the agent is not ${only.playedBy}`);
 }
 
 /** The slot's implementation authority, or `null` for every other arm and for no reservation. */

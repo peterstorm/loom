@@ -151,11 +151,13 @@ describe("populateTaskGraph aggregate command", () => {
     const populationRevision = "b".repeat(40);
     const result = populateTaskGraph(graph(), command({
       tasks: roster([authoredTask("T1", 1), authoredTask("T2", 2, ["AS-001"])]),
-      proofBaselines: new Map([
-        ["T1", gitBaseline("src/T1.ts", parsedDigest.value)],
-        ["T2", missingBaseline("src/T2.ts")],
-      ]),
-      populationRevision,
+      proofBoundary: {
+        baselines: new Map([
+          ["T1", gitBaseline("src/T1.ts", parsedDigest.value)],
+          ["T2", missingBaseline("src/T2.ts")],
+        ]),
+        revision: populationRevision,
+      },
     }));
 
     expect(result.ok).toBe(true);

@@ -9,19 +9,18 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import {
   aggregateVerdicts,
-  architectureCriterion,
   candidateFilename,
   deriveJudgeCriteria,
   parseInterviewDigest,
   PRIMARY_AXES,
   selectPanelLenses,
   serializeRankings,
-  type ArchitectureCriterion,
   type CandidateFilename,
   type JudgeRanking,
   type JudgeVerdict,
 } from "../../src/core/panel-contract";
 import { coverageErrors, exactOrderedSetErrors } from "../../src/core/panel-kernel";
+import { mintedCriterion } from "../fixtures/architecture-criterion";
 
 const digestOf = (overrides: Partial<Record<string, string>> = {}): string => {
   const fields: Record<string, string> = {
@@ -68,15 +67,6 @@ const verdictOf = (
   criterion,
   entries: scores.map(([candidate, score]) => ranking(candidate, score)),
 });
-
-/** Mint a test criterion through the closed vocabulary — the same boundary the
- *  production callers mint at — so a foreign test criterion fails loudly here
- *  instead of compiling into the branded criteria order. */
-const mintedCriterion = (raw: string): ArchitectureCriterion => {
-  const criterion = architectureCriterion(raw);
-  if (criterion === null) throw new Error(`test criterion outside the validated interview vocabulary: ${raw}`);
-  return criterion;
-};
 
 // ---------------------------------------------------------------------------
 // C4 — the tie-break past the first criterion, and the criteria ORDER

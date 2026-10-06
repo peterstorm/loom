@@ -167,32 +167,40 @@ export function runFullTierWaveLint(tasks: readonly Task[]): HookResult {
   }
 }
 
-const handler: HookHandler = async (_stdin, args) => {
-  let wave: number;
-  let waveTasks: readonly Task[];
+/** Load the protected graph and select the Wave to lint: `--wave`, else the
+ *  current Wave, else Wave 1. Never throws: an unreadable graph is the
+ *  read-failure block and any other failure the engine-error block. */
+function selectLintWave(args: string[]):
+  | Readonly<{ ok: true; wave: number; tasks: readonly Task[] }>
+  | Readonly<{ ok: false; result: HookResult }> {
   try {
     const mgr = StateManager.fromPath(TASK_GRAPH_PATH);
     if (!mgr) {
       return {
-        kind: "block",
-        message: `🚫 WAVE-GATE LINT: Cannot read task graph at ${TASK_GRAPH_PATH}`,
+        ok: false,
+        result: { kind: "block", message: `🚫 WAVE-GATE LINT: Cannot read task graph at ${TASK_GRAPH_PATH}` },
       };
     }
     const state = mgr.load();
-    const selectedWave = parseWaveArg(args) ?? state.current_wave ?? 1;
-    wave = selectedWave;
-    waveTasks = state.tasks.filter((t) => t.wave === selectedWave);
+    const wave = parseWaveArg(args) ?? state.current_wave ?? 1;
+    return { ok: true, wave, tasks: state.tasks.filter((t) => t.wave === wave) };
   } catch (error: unknown) {
-    return engineError(error);
+    return { ok: false, result: engineError(error) };
   }
+}
 
-  if (collectModifiedFiles(waveTasks).length === 0) {
+const handler: HookHandler = async (_stdin, args) => {
+  const selected = selectLintWave(args);
+  if (!selected.ok) return selected.result;
+  const { wave, tasks } = selected;
+
+  if (collectModifiedFiles(tasks).length === 0) {
     process.stderr.write(`lint-wave-gate: wave ${wave} — no modified files to lint.\n`);
     return { kind: "allow" };
   }
 
   process.stderr.write(`lint-wave-gate: wave ${wave} — running full-tier lint...\n`);
-  const result = runFullTierWaveLint(waveTasks);
+  const result = runFullTierWaveLint(tasks);
   if (result.kind === "allow") process.stderr.write(`lint-wave-gate: wave ${wave} passed full-tier lint.\n`);
   return result;
 };

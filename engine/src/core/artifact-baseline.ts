@@ -119,7 +119,9 @@ export function capturedArtifactBaseline<Scheme extends SnapshotScheme>(
 }
 
 /** Parse a persisted baseline whose digest scheme the caller knows from the
- *  Task field it came from. */
+ *  Task field it came from. Errors are reported in raw index order, a
+ *  duplicate artifact inline at its own index (even when that entry's snapshot
+ *  also fails to parse). */
 export function parseArtifactBaseline<Scheme extends SnapshotScheme>(
   raw: unknown,
   path = "artifact_baseline",
@@ -127,6 +129,7 @@ export function parseArtifactBaseline<Scheme extends SnapshotScheme>(
   if (!Array.isArray(raw)) return fail([`${path} must be an array`]);
   const entries: ArtifactBaselineEntry[] = [];
   const errors: string[] = [];
+  const seen = new Set<string>();
   raw.forEach((entry, index) => {
     const entryPath = `${path}[${index}]`;
     if (!isRecord(entry)) {
@@ -138,18 +141,20 @@ export function parseArtifactBaseline<Scheme extends SnapshotScheme>(
       errors.push(...artifact.errors);
       return;
     }
+    if (seen.has(artifact.value)) errors.push(`${entryPath}.artifact duplicates ${JSON.stringify(artifact.value)}`);
+    seen.add(artifact.value);
     const snapshot = parseArtifactSnapshot(entry.snapshot, `${entryPath}.snapshot`);
     if (!snapshot.ok) errors.push(...snapshot.errors);
     else entries.push({ artifact: artifact.value, snapshot: snapshot.value });
   });
-  const unique = artifactBaseline<Scheme>(entries, path);
-  const allErrors = [...errors, ...(unique.ok ? [] : unique.errors)];
-  return allErrors.length > 0 ? fail(allErrors) : unique;
+  // Every entry parsed and every artifact is unique, so the brand proof holds.
+  return errors.length > 0 ? fail(errors) : artifactBaseline<Scheme>(entries, path);
 }
 
-/** Validate a persisted baseline at the State File boundary, where one wire
- *  shape carries either digest scheme and Task fields store the wire record.
- *  A comparison parses its field again under the field's own scheme. */
+/** The scheme-agnostic State File wire parse and nothing more: one wire shape
+ *  carries either digest scheme and Task fields store the wire record, so the
+ *  result is widened to that record and cannot reach a comparison. A
+ *  comparison parses its field again under the field's own scheme. */
 export function parseDeclaredArtifactBaseline(
   raw: unknown,
   path = "artifact_baseline",
@@ -177,10 +182,17 @@ export function attributedChangedArtifacts<Artifact extends string>(
  * Pure comparison of two exact artifact sets hashed under ONE digest scheme.
  * Both sides are already parsed; a missing or foreign current entry is
  * contract corruption, never evidence that an artifact changed.
+ *
+ * `Scheme` must be one concrete scheme: a baseline typed with the wide
+ * `SnapshotScheme` union (a parse site that cannot know its scheme) would
+ * otherwise accept either concrete current baseline through the brand's
+ * covariance, so the trailing rest parameter demands an impossible `never`
+ * argument for the union and the call fails to compile.
  */
 export function changedDeclaredArtifacts<Scheme extends SnapshotScheme>(
   baseline: ArtifactBaseline<Scheme>,
   current: ArtifactBaseline<NoInfer<Scheme>>,
+  ..._concreteScheme: SnapshotScheme extends Scheme ? [wideSchemeIsNotComparable: never] : []
 ): ParseResult<readonly ReviewPath[]> {
   const currentByArtifact = new Map(current.map((entry) => [entry.artifact, entry]));
   const expected = new Set<string>(baseline.map((entry) => entry.artifact));

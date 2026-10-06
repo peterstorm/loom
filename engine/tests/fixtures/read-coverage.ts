@@ -35,6 +35,43 @@ export function frozenDiffReaderPages(handle: RunDirHandle, request: AgentReques
   return lines;
 }
 
+/** The reader command and `read-N` tool-call ids every scripted native transcript uses. */
+const READER_COMMAND = "read-context-packet --diff";
+
+/** Pi `toolCall`/`toolResult` message pairs for a scripted reviewer that printed `pages`. */
+export function piReadMessages(pages: readonly string[]): readonly Record<string, unknown>[] {
+  return pages.flatMap((text, read) => [
+    { role: "assistant", content: [{ type: "toolCall", id: `read-${read}`, name: "bash", arguments: { command: READER_COMMAND } }] },
+    { role: "toolResult", toolCallId: `read-${read}`, toolName: "bash", isError: false, content: [{ type: "text", text }] },
+  ]);
+}
+
+/** Claude `tool_use`/`tool_result` JSONL lines for a scripted reviewer that printed `pages`. */
+export function claudeReadLines(pages: readonly string[]): readonly string[] {
+  return pages.flatMap((text, read) => [
+    JSON.stringify({ message: { role: "assistant", content: [{ type: "tool_use", id: `read-${read}`, name: "Bash", input: { command: READER_COMMAND } }] } }),
+    JSON.stringify({ message: { role: "user", content: [{ type: "tool_result", tool_use_id: `read-${read}`, content: text }] } }),
+  ]);
+}
+
+/**
+ * Record what a scripted reviewer read through the engine's own observation
+ * recorder: by default every frozen diff page, or the explicit `pages` a test
+ * supplies to script a partial (`[...]`) or absent (`null`) read. A no-op for
+ * requests without a read obligation; throws when the engine refuses.
+ */
+export async function recordReviewedReads(
+  handle: RunDirHandle,
+  request: AgentRequestAuthority,
+  pages: readonly string[] | null = frozenDiffReaderPages(handle, request),
+): Promise<void> {
+  const policy = runReadCoverage(handle);
+  if (!policy.ok) throw new Error(policy.error);
+  if (request.program !== "standalone-review" || policy.value === null) return;
+  const recorded = await recordReadCoverageObservation(handle, request, pages);
+  if (!recorded.ok) throw new Error(recorded.error);
+}
+
 /**
  * `handle.captureTranscript` for a scripted reviewer who read its whole frozen
  * diff: the observation is recorded first, through the engine's own recorder
@@ -47,12 +84,7 @@ export async function captureReviewedTranscript(
   request: AgentRequestAuthority,
   bytes: readonly number[],
 ): ReturnType<RunDirHandle["captureTranscript"]> {
-  const policy = runReadCoverage(handle);
-  if (!policy.ok) throw new Error(policy.error);
-  if (request.program === "standalone-review" && policy.value !== null) {
-    const recorded = await recordReadCoverageObservation(handle, request, frozenDiffReaderPages(handle, request));
-    if (!recorded.ok) throw new Error(recorded.error);
-  }
+  await recordReviewedReads(handle, request);
   return handle.captureTranscript(request, bytes);
 }
 

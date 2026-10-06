@@ -164,33 +164,13 @@ function integerField(raw: Readonly<Record<string, unknown>>, key: "additions" |
   return value;
 }
 
+/** The producer's docs-only invariants (`classifyScope`): a docs-only scope
+ *  changes comments and changes no source or test file. A record that
+ *  contradicts either is rejected here, not normalized by the caller. */
 function checkDocsOnlyInvariants(docsOnly: boolean, sourceOrTestChanged: boolean, commentsChanged: boolean, errors: string[]): void {
-  // A docs-only scope always changes comments — comment-analyzer is the role
-  // selected specifically for docs, so the producer's invariant (`metadata` in
-  // handlers/helpers/programs/standalone.ts: commentsChanged = docsOnly || scope
-  // has .md/.mdx) must hold at the boundary too. The check's remaining value is
-  // rejecting the contradictory record outright: without it, the caller's ok
-  // branch silently NORMALIZES docs_only=true to commentsChanged=true, so the
-  // contradiction hides behind accepted output instead of failing at the
-  // untrusted-JSON boundary (parse-don't-validate honesty).
   if (docsOnly && !commentsChanged) {
     errors.push("review_metadata.comments_changed must be true when docs_only is true (a docs-only scope always changes comments)");
   }
-  // The producer's OTHER docs-only invariant, and the more dangerous one to
-  // leave unproven. `docs_only` is by definition "no source or test file
-  // changed" — `classifyScope` derives it as the docs pattern AND
-  // `!sourceOrTestChanged`, precisely so the pair cannot both be true — yet
-  // only the comments half was checked here, leaving
-  // `docs_only && source_or_test_changed` representable at the boundary.
-  // The check's remaining value is rejecting that record outright: without it,
-  // the caller's ok branch normalizes it to {docsOnly: true,
-  // sourceOrTestChanged: false, commentsChanged: true}, so the contradictory
-  // pair never reaches `selectStandaloneReviewers` — the metadata passed to
-  // selection claims docs-only (not real source changed), pr-test-analyzer is
-  // never admitted, and the silent-failure-hunter drop is the same accepted
-  // docs-only behavior `classifyScope` produces for a genuinely docs-only
-  // scope. Rejecting the record keeps the contradiction audible instead of
-  // silently normalized.
   if (docsOnly && sourceOrTestChanged) {
     errors.push("review_metadata.source_or_test_changed must be false when docs_only is true (a docs-only scope changes no source or test file)");
   }

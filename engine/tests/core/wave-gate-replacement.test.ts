@@ -10,6 +10,7 @@ import type { RegisteredWaveGateProgram } from "../../src/core/wave-gate-program
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import type { WaveRequestBatch } from "../../src/core/wave-review-authority";
 import type { TaskGraph } from "../../src/types";
+import { CURRENT_REVIEWER_PROTOCOL } from "../../src/core/reviewer-contract";
 
 const DIGEST = "a".repeat(64);
 const registration = (overrides: Partial<Extract<RegisteredWaveGateProgram, { schemaVersion: 1 }>> = {}):
@@ -106,5 +107,49 @@ describe("Wave review issuance transitions", () => {
     expect(waveBatchSpecCheckAuthority(batch([{ role: "spec-check-invoker", attempt: 2 }])).ok).toBe(false);
     const authority = { role: "spec-check-invoker", attempt: 1 };
     expect(waveBatchSpecCheckAuthority(batch([authority]))).toEqual({ ok: true, value: authority });
+  });
+});
+
+describe("replacement registration identity is shared by restart and orphan recovery", () => {
+  const schemaTwo = (overrides: Partial<Extract<RegisteredWaveGateProgram, { schemaVersion: 2 }>> = {}): RegisteredWaveGateProgram => ({
+    schemaVersion: 2,
+    reviewerProtocol: CURRENT_REVIEWER_PROTOCOL,
+    kind: "wave-gate",
+    input: { wave: 1 },
+    taskIds: ["T1", "T2"],
+    authorityDigest: DIGEST,
+    ...overrides,
+  });
+  const schemaOne = (overrides: Partial<Extract<RegisteredWaveGateProgram, { schemaVersion: 1 }>> = {}): RegisteredWaveGateProgram =>
+    registration({ taskIds: ["T1", "T2"], ...overrides });
+  const restart = { previousRunId: "run.previous", exhaustedSlots: ["T1/code-reviewer"] };
+  const orphan = { previousRunId: "run.previous", previousAuthorityDigest: DIGEST };
+
+  it("restart refuses a schema or reviewer-protocol difference, as orphan recovery always did", () => {
+    const current = schemaTwo({ restart });
+    expect(sameRestartRegistration(current, current)).toBe(true);
+    expect(sameRestartRegistration(current, schemaOne({ restart }))).toBe(false);
+    expect(CURRENT_REVIEWER_PROTOCOL.rubricDigest).not.toBe(CURRENT_REVIEWER_PROTOCOL.schemaDigest);
+    expect(sameRestartRegistration(current, schemaTwo({
+      restart,
+      reviewerProtocol: { ...CURRENT_REVIEWER_PROTOCOL, schemaDigest: CURRENT_REVIEWER_PROTOCOL.rubricDigest },
+    }))).toBe(false);
+    const recovered = schemaTwo({ orphanRecovery: orphan });
+    expect(sameOrphanRecoveryRegistration(recovered, schemaOne({ orphanRecovery: orphan }))).toBe(false);
+  });
+
+  it("both predicates compare the ordered Task roster", () => {
+    expect(sameRestartRegistration(schemaTwo({ restart }), schemaTwo({ restart, taskIds: ["T2", "T1"] }))).toBe(false);
+    expect(sameOrphanRecoveryRegistration(
+      schemaTwo({ orphanRecovery: orphan }), schemaTwo({ orphanRecovery: orphan, taskIds: ["T1"] }),
+    )).toBe(false);
+  });
+
+  it("restart still compares its exhausted-slot audit in order", () => {
+    const two = { previousRunId: "run.previous", exhaustedSlots: ["T1/code-reviewer", "T2/code-reviewer"] };
+    expect(sameRestartRegistration(schemaTwo({ restart: two }), schemaTwo({
+      restart: { ...two, exhaustedSlots: ["T2/code-reviewer", "T1/code-reviewer"] },
+    }))).toBe(false);
+    expect(sameRestartRegistration(schemaTwo(), schemaTwo())).toBe(true);
   });
 });

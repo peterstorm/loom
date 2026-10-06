@@ -440,14 +440,15 @@ function scopeErrors(
 ): string[] {
   const errors: string[] = [];
   const scope = [...new Set([...declared, ...modified])];
+  const artifacts = [...artifactPaths];
   if (scope.length === 0) errors.push("review packet scope must be non-empty");
-  for (const path of artifactPaths) {
+  for (const path of artifacts) {
     if (!scope.some((scoped) => artifactCovers(scoped, path))) {
       errors.push(`artifact '${path}' is outside the declared/modified scope`);
     }
   }
   for (const scoped of scope) {
-    if (![...artifactPaths].some((path) => artifactCovers(scoped, path))) {
+    if (!artifacts.some((path) => artifactCovers(scoped, path))) {
       errors.push(`scoped path '${scoped}' has no artifact`);
     }
   }

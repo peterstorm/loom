@@ -435,7 +435,7 @@ export type EmissionCallFrame =
 export type EmissionObservation =
   | Readonly<{ kind: "absent" }>
   | Readonly<{ kind: "single-call"; call: EmissionToolCall }>
-  | Readonly<{ kind: "multiple-calls"; calls: readonly EmissionToolCall[] }>
+  | Readonly<{ kind: "multiple-calls"; calls: readonly [EmissionToolCall, EmissionToolCall, ...EmissionToolCall[]] }>
   | Readonly<{ kind: "unusable"; reason: string }>;
 
 /**
@@ -470,32 +470,6 @@ const firstDifferingField = (seen: EmissionToolCall, call: EmissionToolCall): st
   return "arguments";
 };
 
-/**
- * The ONE fold from observed transport frames to the closed emission
- * observation — the observation decision both selection functions in
- * `emission-ingestion` share, not a caller-maintained policy. The fold is
- * binding-blind: it classifies by tool-call identity alone, so the same fold
- * serves every issued binding and every path (misbinding is the selection's
- * check against the issued binding).
- *
- * - Any incomplete/failed frame refuses the attempt with its reason: the
- *   observation is unusable, never reclassified as absence (AD-8), and the
- *   first incomplete frame in observation order names the refusal.
- * - Frames sharing one tool-call identity are the same call replayed:
- *   idempotent when every frame carries the identical record (request id,
- *   kind, version and structurally-equal arguments — FR-007's "same observed
- *   call"), and contradictory — unusable — when any frame differs (FR-007's
- *   "contradictory records sharing call identity MUST refuse rather than
- *   deduplicate silently"), with the refusal naming the first differing
- *   contract field in FR-014 order (request id, producer kind, schema
- *   version, arguments). Replayed frames with the same identity and bytes
- *   therefore add no consumption and no publication.
- * - The DISTINCT identities decide the count, in first-observed order: zero →
- *   absent, one → single-call, ≥2 → multiple-calls (which is ambiguity by the
- *   time the selection sees it).
- * - An empty tool-call identity cannot be bound or replay-deduplicated, so a
- *   complete frame carrying one makes the observation unusable.
- */
 /**
  * The frame fold's first phase: replay-deduplicate complete frames by
  * tool-call identity (exact replays idempotent, contradictions refused with
@@ -536,25 +510,43 @@ const foldFramesToCalls = (
   return { kind: "observed", calls: Object.freeze([...callsByIdentity.values()]) };
 };
 
+/**
+ * The ONE fold from observed transport frames to the closed emission
+ * observation — the observation decision both selection functions in
+ * `emission-ingestion` share, not a caller-maintained policy. The fold is
+ * binding-blind: it classifies by tool-call identity alone, so the same fold
+ * serves every issued binding and every path (misbinding is the selection's
+ * check against the issued binding).
+ *
+ * - Any incomplete/failed frame refuses the attempt with its reason: the
+ *   observation is unusable, never reclassified as absence (AD-8), and the
+ *   first incomplete frame in observation order names the refusal.
+ * - Frames sharing one tool-call identity are the same call replayed:
+ *   idempotent when every frame carries the identical record (request id,
+ *   kind, version and structurally-equal arguments — FR-007's "same observed
+ *   call"), and contradictory — unusable — when any frame differs (FR-007's
+ *   "contradictory records sharing call identity MUST refuse rather than
+ *   deduplicate silently"), with the refusal naming the first differing
+ *   contract field in FR-014 order (request id, producer kind, schema
+ *   version, arguments). Replayed frames with the same identity and bytes
+ *   therefore add no consumption and no publication.
+ * - The DISTINCT identities decide the count, in first-observed order: zero →
+ *   absent, one → single-call, ≥2 → multiple-calls (which is ambiguity by the
+ *   time the selection sees it).
+ * - An empty tool-call identity cannot be bound or replay-deduplicated, so a
+ *   complete frame carrying one makes the observation unusable.
+ */
 export function observeEmissionCalls(frames: readonly EmissionCallFrame[]): EmissionObservation {
   const folded = foldFramesToCalls(frames);
   if (folded.kind === "refused") {
     return canonicalRecord({ kind: "unusable" as const, reason: folded.reason });
   }
-  const observed = folded.calls;
-  if (observed.length === 0) return canonicalRecord({ kind: "absent" as const });
-  const first = observed[0];
-  if (first === undefined) {
-    // Unreachable — `observed.length > 0` above proves the element exists; the
-    // explicit guard carries the invariant instead of a non-null assertion.
-    throw new Error("emission observation invariant failed: a non-empty observation lost its first call");
-  }
-  if (observed.length === 1) {
-    return canonicalRecord({ kind: "single-call" as const, call: first });
-  }
+  const [first, second, ...rest] = folded.calls;
+  if (first === undefined) return canonicalRecord({ kind: "absent" as const });
+  if (second === undefined) return canonicalRecord({ kind: "single-call" as const, call: first });
   return canonicalRecord({
     kind: "multiple-calls" as const,
-    calls: observed,
+    calls: Object.freeze([first, second, ...rest] as const),
   });
 }
 

@@ -58,6 +58,7 @@ import {
 } from "./panel-verdict-source";
 import {
   acceptedAgentResult,
+  boundedThrownCause,
   parseArtifactDigest,
   parseCompleteRoster,
   parseEffectId,
@@ -597,8 +598,11 @@ function parseCanonicalJudge(raw: unknown, authority: ArchitecturePanelAuthority
     };
     const parsed = parseJudgeVerdict(JSON.stringify(external), expectedCriterion, authority.candidateIds);
     return parsed.ok ? { ok: true, value: parsed.value } : { ok: false, error: { message: parsed.errors.join("; ") } };
-  } catch {
-    return { ok: false, error: { message: "judge result could not be safely parsed" } };
+  } catch (error) {
+    // Fail closed to the fixed sentence, but keep the thrown class so a code
+    // regression stays distinguishable from malformed input (the reducers'
+    // reason; `review-output`'s `inspectionFailure` keeps the class the same way).
+    return { ok: false, error: { message: `judge result could not be safely parsed (${boundedThrownCause(error, "judge result").name})` } };
   }
 }
 
@@ -617,8 +621,9 @@ function parseCanonicalRefutation(raw: unknown, authority: RefutationPanelAuthor
     };
     const parsed = parseRefutationVerdict(JSON.stringify(external), expectedLens, authority.findings.map(({ id }) => id));
     return parsed.ok ? { ok: true, value: parsed.value } : { ok: false, error: { message: parsed.errors.join("; ") } };
-  } catch {
-    return { ok: false, error: { message: "refutation result could not be safely parsed" } };
+  } catch (error) {
+    // Same reason as `parseCanonicalJudge`: keep the thrown class.
+    return { ok: false, error: { message: `refutation result could not be safely parsed (${boundedThrownCause(error, "refutation result").name})` } };
   }
 }
 
@@ -1019,6 +1024,15 @@ export function submitArchitectureCandidateResult(state: ArchitecturePanelState,
   return reduceParsedArchitecture(state, Object.freeze({ schemaVersion: 1, type: "architecture-candidate-accepted", request: resolved.value.identity, value: parsed.value }), resolver);
 }
 
+/** The parsed JSON value of `text`, or `null` when it is not JSON. */
+function parseJsonText(text: string): Readonly<{ value: unknown }> | null {
+  try {
+    return Object.freeze({ value: JSON.parse(text) as unknown });
+  } catch {
+    return null;
+  }
+}
+
 function publicResultClaimsForeignAuthority(
   rawJson: unknown,
   expectedCriterion: string,
@@ -1028,20 +1042,22 @@ function publicResultClaimsForeignAuthority(
   expectedIdentities: readonly string[],
 ): boolean {
   if (typeof rawJson !== "string") return false;
-  try {
-    const root = safeRecord(JSON.parse(rawJson) as unknown, ["criterion", collectionField]);
-    if (root === null) return false;
-    if (typeof root.criterion === "string" && root.criterion !== expectedCriterion) return true;
-    const entries = safeArray(root[collectionField]);
-    if (entries === null) return false;
-    return entries.some((rawEntry) => {
-      const entry = safeRecord(rawEntry, entryFields);
-      const claimedIdentity = entry?.[identityField];
-      return typeof claimedIdentity === "string" && !expectedIdentities.includes(claimedIdentity);
-    });
-  } catch {
-    return false;
-  }
+  // Only the JSON parse is guarded: invalid JSON is ordinary malformed input
+  // and claims no foreign authority. Everything after it reads through the
+  // non-throwing `safeRecord`/`safeArray` snapshots, so a throw there is a code
+  // regression and must surface, not silently downgrade the classification.
+  const parsedJson = parseJsonText(rawJson);
+  if (parsedJson === null) return false;
+  const root = safeRecord(parsedJson.value, ["criterion", collectionField]);
+  if (root === null) return false;
+  if (typeof root.criterion === "string" && root.criterion !== expectedCriterion) return true;
+  const entries = safeArray(root[collectionField]);
+  if (entries === null) return false;
+  return entries.some((rawEntry) => {
+    const entry = safeRecord(rawEntry, entryFields);
+    const claimedIdentity = entry?.[identityField];
+    return typeof claimedIdentity === "string" && !expectedIdentities.includes(claimedIdentity);
+  });
 }
 
 export function submitArchitectureJudgeResult(

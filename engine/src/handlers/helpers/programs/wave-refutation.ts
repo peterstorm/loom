@@ -30,7 +30,7 @@ type WaveReadiness = Extract<ReturnType<typeof deriveWaveReadiness>, { ok: true 
 
 function waveRefutationPreparation(
   handle: RunDirHandle,
-  readiness: Extract<ReturnType<typeof deriveWaveReadiness>, { ok: true }>["value"],
+  readiness: WaveReadiness,
 ) {
   const plan = deriveWaveRefutationPlan(readiness);
   if (!plan.ok) throw new Error(plan.error.message);
@@ -165,7 +165,6 @@ export async function driveWaveRefutation(
         if (retry.kind !== "capture-rejected" || retry.request === null) return settled(waveBlocked(handle, retry.message));
         submitted = rejectRefutationVerdict(panelState, resolver, panelRequestIdentity(retry.request), retry.rejection);
         if (!submitted.ok) return settled(waveBlocked(handle, submitted.error.message));
-        panelState = submitted.value.state;
         if (submitted.value.action?.kind === "refutation-blocked") {
           return settled(waveBlocked(handle, `Wave refutation panel terminally blocked: ${submitted.value.action.diagnostic.message}`));
         }

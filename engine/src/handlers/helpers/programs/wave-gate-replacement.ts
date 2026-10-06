@@ -126,11 +126,6 @@ export async function restartWaveGateFacade(
       if (!pristine.ok) return failed(pristine.error.message);
       if (!pristine.value) return failed("replacement Wave Gate run must be pristine before authority installation");
     }
-    const exhausted = alreadyRestarted
-      ? null
-      : await exhaustedWaveReviewerAttempts(previousHandle, before, previousRegistration);
-    if (exhausted !== null && !exhausted.ok) return failed(exhausted.message);
-
     let prepared: WaveGateRestartPreparation;
     if (alreadyRestarted) {
       const active = before.active_wave_gate!;
@@ -144,13 +139,15 @@ export async function restartWaveGateFacade(
       }
       prepared = Object.freeze({ graph: before, registration: stored, exhaustedSlots: stored.restart.exhaustedSlots });
     } else {
+      const exhausted = await exhaustedWaveReviewerAttempts(previousHandle, before, previousRegistration);
+      if (!exhausted.ok) return failed(exhausted.message);
       const candidate = prepareExhaustedWaveGateRestart(
         before,
         previousHandle.runId,
         previousRegistration,
         nextHandle.runId,
         nextHandle.identity.runsRoot,
-        exhausted!.value,
+        exhausted.value,
       );
       if (!candidate.ok) return failed(candidate.message);
       if (existingProgram.value === null) {
@@ -169,7 +166,7 @@ export async function restartWaveGateFacade(
           previousRegistration,
           nextHandle.runId,
           nextHandle.identity.runsRoot,
-          exhausted!.value,
+          exhausted.value,
         );
         if (!transition.ok) throw new Error(transition.message);
         if (!sameRestartRegistration(transition.value.registration, candidate.value.registration)) {

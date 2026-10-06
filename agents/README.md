@@ -80,11 +80,13 @@ invented original inputs for an unfrozen historical rubric/persona. Both complet
 and unfinished issued v1 reviews retain their protocol and retry bytes.
 
 The shared fragment and all seven regions are generated from the executable
-contract. Run `bun scripts/stamp-wire-contract.ts --check` to detect drift; never
-hand-edit stamped schema/rubric copies. Spec-check, verifiers, designers/judges,
+contract. The same script stamps each reviewer's `LOOM_READ_COVERAGE` bullet from
+`agents/_shared/read-coverage.md`, the one hand-authored source for that obligation.
+Run `bun scripts/stamp-wire-contract.ts --check` to detect drift; never
+hand-edit stamped schema/rubric copies or the stamped bullet. Spec-check, verifiers, designers/judges,
 security-agent and skill-content-reviewer are not reviewer-wire targets.
-See [protocol operations](../docs/operations.md#reviewer-protocol-v2). P4 source
-review, merge, publication and loaded-runtime cutover remain pending.
+See [protocol operations](../docs/operations.md#reviewer-protocol-v2). P4 merged
+as `96153ed` on 2026-09-10; publication and loaded-runtime cutover were verified.
 
 ### Producer emission-tool flow
 

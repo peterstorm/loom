@@ -88,7 +88,7 @@ Two functions share this decision and differ only in how they build output:
 **Layering.**
 - `emission-ingestion.ts` is pure: no I/O, no clock, no randomness.
 - It imports only `emission-tool.ts` (binding types, `admitIssuedEmissionArguments`), `harness-capture.ts` (observation vocabulary, `finalPayloadOf`, `parseFinalPayload`), and `orchestration-contract/identity` (`DomainResult`, `canonicalRecord`, `parseRequestId`).
-- It must not import `panel-program.ts` or any I/O adapter.
+- It must not import `panel-program.ts`, the panel verdict modules (`panel-verdict-source.ts`, `persistent-panel.ts`) or any I/O adapter.
 - Shared schema definitions stay below the program layer, so no registry-to-program import cycle exists.
 - Results use the existing `DomainResult` and `canonicalRecord` immutable-record conventions. No branded wrappers were added for values that carry no invariant.
 
@@ -105,6 +105,6 @@ Two functions share this decision and differ only in how they build output:
 **Negative:**
 - Two selection functions with deliberately different unions (the verdict path has no `refused-call-no-fallback` arm) are a lasting maintenance cost. Anyone extending one must decide whether the asymmetry still holds.
 - `panel-program.ts` mirrors the kernel's result shapes structurally behind an injected port to keep its purity. Kernel drift fails to compile at the adapter rather than at the core, which is an indirection future readers must follow.
-- The rule that `emission-ingestion.ts` does not import `panel-program.ts` or I/O adapters is stated in the module header and enforced by review, not by an automated gate. The cross-import linter allows core-to-core imports, and the module is not enrolled in the purity closure.
+- The rule that `emission-ingestion.ts` does not import `panel-program.ts`, the panel verdict modules or I/O adapters is stated in the module header and enforced by review, not by an automated gate. The cross-import linter allows core-to-core imports, and the module is not enrolled in the purity closure.
 - The closed observation and refusal unions mean any new harness observation state (for example, a new partial-frame shape) requires a deliberate kernel change and new matrix rows. It cannot be absorbed ad hoc in an adapter.
 - Treating incomplete or contradictory observations as refusals rather than absence means some attempts that a lenient selector would have "rescued" through extraction now surface as evidence/infrastructure refusals at the boundary. This trade of availability for honesty is accepted.

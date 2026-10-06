@@ -17,6 +17,7 @@ import {
 } from "../src/core/implementation-retry";
 import type { DeclaredArtifactBaseline } from "../src/core/artifact-baseline";
 import { parseAgentRequestAuthority } from "../src/core/orchestration-contract";
+import { lowerModelProfile, resolveModelProfile } from "../src/core/model-profiles";
 import { parseTaskGraph } from "../src/state-manager";
 import { observeTaskGraphProjectBoundary } from "../src/config";
 import { graphFixture, taskFixture } from "./fixtures/task-lifecycle";
@@ -346,9 +347,9 @@ async function piCaptureRun(runSuffix: string, contextText = "Pi capture context
     const published = await opened.value.publishContext(packet.value);
     if (!published.ok) throw new Error(published.error.message);
     const profile = issueRoute === "qualified-local" ? "qualified-local-review" : "general-review";
-    const resolved = (await import("../src/core/model-profiles")).resolveModelProfile(profile);
+    const resolved = resolveModelProfile(profile);
     if (!resolved.ok) throw new Error(resolved.error.message);
-    const lowered = (await import("../src/core/model-profiles")).lowerModelProfile(resolved.value, "pi");
+    const lowered = lowerModelProfile(resolved.value, "pi");
     const request = {
       runId: `run.${runSuffix}`,
       requestId,
@@ -402,6 +403,26 @@ async function additionalPiFixtureRequest(staged: Awaited<ReturnType<typeof piCa
   if (!request.ok) throw new Error(JSON.stringify(request.error));
   await publishPiFixtureRequest(staged.handle, request.value);
   return request.value;
+}
+
+/** The Pi tool-input and review-capture modules, merged, resolved by dynamic
+ *  specifier so they are the SAME module instances the extension loads. */
+async function piCaptureModules() {
+  const toolInputSpecifier = "../../pi/tool-input.ts";
+  const captureSpecifier = "../../pi/review-capture.ts";
+  return {
+    ...await import(/* @vite-ignore */ toolInputSpecifier),
+    ...await import(/* @vite-ignore */ captureSpecifier),
+  } as {
+    piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
+    capturePiSubagentResult: (
+      toolCallId: unknown,
+      resultIndex: number,
+      agentType: string,
+      messages: unknown,
+      runBinding?: unknown,
+    ) => Promise<{ kind: string; reason?: string; message?: string }>;
+  };
 }
 
 describe("Pi extension review tool_result integration", () => {
@@ -670,20 +691,7 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("retains malformed Pi transcript diagnostics in the capture rejection", async () => {
-    const toolInputSpecifier = "../../pi/tool-input.ts";
-    const captureSpecifier = "../../pi/review-capture.ts";
-    const module = {
-      ...await import(/* @vite-ignore */ toolInputSpecifier),
-      ...await import(/* @vite-ignore */ captureSpecifier),
-    } as {
-      piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
-      capturePiSubagentResult: (
-        toolCallId: unknown,
-        resultIndex: number,
-        agentType: string,
-        messages: unknown,
-      ) => Promise<{ kind: string; reason?: string; message?: string }>;
-    };
+    const module = await piCaptureModules();
     const staged = await piCaptureRun("pi-malformed-transcript-shape");
     const nativeId = module.piSpawnRosterId("call-malformed-transcript", 0, "code-reviewer");
     expect((await staged.handle.recordHarnessCorrelator({
@@ -1041,21 +1049,7 @@ describe("Pi extension review tool_result integration", () => {
   });
 
   it("preserves malformed Pi transcript extraction as an explicit capture rejection", async () => {
-    const toolInputSpecifier = "../../pi/tool-input.ts";
-    const captureSpecifier = "../../pi/review-capture.ts";
-    const module = {
-      ...await import(/* @vite-ignore */ toolInputSpecifier),
-      ...await import(/* @vite-ignore */ captureSpecifier),
-    } as {
-      piSpawnRosterId: (toolCallId: unknown, index: number, agent: string) => string;
-      capturePiSubagentResult: (
-        toolCallId: unknown,
-        resultIndex: number,
-        agentType: string,
-        messages: unknown,
-        runBinding: unknown,
-      ) => Promise<unknown>;
-    };
+    const module = await piCaptureModules();
     const staged = await piCaptureRun("malformed-transcript");
     const nativeId = module.piSpawnRosterId("call-malformed-transcript", 0, "code-reviewer");
     expect((await staged.handle.recordHarnessCorrelator({

@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { REVIEWER_OUTPUT_CONTRACT, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../engine/src/core/reviewer-contract";
@@ -34,40 +33,26 @@ import {
 import {
   cellSchemaBytes,
   parseCaseSource,
-  parseWorkloadFixtures,
   pilotRequestId,
   renderPilotPrompt,
   renderTaskBody,
   rubricEscapes,
   type CaseInput,
-  type WorkloadFixtures,
 } from "./pilot-workload";
 import { classifyAttemptTranscript, mintCellBinding, type CellBinding } from "./pilot-dispatch";
+import { fixtures as retainedFixtureSet, HERE, prereg as retainedPrereg, READY, REPO_ROOT } from "./pilot-test-fixtures";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(HERE, "../..");
 const preregBytes = readFileSync(join(HERE, "preregistration.json"));
 const fixtureBytes = readFileSync(join(HERE, "workload-fixtures.json"));
 
-function retainedPreregistration(): Preregistration {
-  const parsed = parsePreregistration(JSON.parse(preregBytes.toString("utf-8")));
-  if (!parsed.ok) throw new Error(parsed.error.join("\n"));
-  return parsed.value;
-}
-
-function retainedFixtures(): WorkloadFixtures {
-  const parsed = parseWorkloadFixtures(JSON.parse(fixtureBytes.toString("utf-8")));
-  if (!parsed.ok) throw new Error(parsed.error.join("\n"));
-  return parsed.value;
-}
-
-/** A test preregistration: the retained one, optionally with every cell
+/** A test preregistration: the retained one, optionally with every cell (but
+ *  `unconstrained`, which keeps the retained unconstrained qualification)
  *  qualified as a capable (constrained) route and a cheaper bootstrap. */
-function testPreregistration(options: Readonly<{ constrained?: boolean; extractionOnly?: CellKey }> = {}): Preregistration {
+function testPreregistration(options: Readonly<{ constrained?: boolean; extractionOnly?: CellKey; unconstrained?: CellKey }> = {}): Preregistration {
   const raw = JSON.parse(preregBytes.toString("utf-8")) as { guardrails: { bootstrapResamples: number }; cells: Array<{ cell: string; qualification: unknown }> };
   raw.guardrails.bootstrapResamples = 200;
   for (const cell of raw.cells) {
-    if (options.constrained) {
+    if (options.constrained && options.unconstrained !== cell.cell) {
       cell.qualification = { kind: "constrained-emission", enforcedConstraints: ["type", "required", "enum", "additionalProperties"], evidence: "test" };
     }
     if (options.extractionOnly === cell.cell) {
@@ -78,11 +63,6 @@ function testPreregistration(options: Readonly<{ constrained?: boolean; extracti
   if (!parsed.ok) throw new Error(parsed.error.join("\n"));
   return parsed.value;
 }
-
-const READY: PreflightDecision = {
-  kind: "ready",
-  runtime: { stagedRuntimeRevision: "sha256:abc", loadedRuntime: { kind: "unobserved" }, piVersion: "0.83.0" },
-};
 
 type AttemptSpec = Readonly<{
   outcome: Record<string, unknown>;
@@ -176,7 +156,7 @@ const matchedArms = (pair: ScheduledPair, arm: PilotArm): SampleSpec => ({
 
 describe("preregistration (retained before any window)", () => {
   it("parses the retained preregistration with the four required cells and >=100 pairs each", () => {
-    const prereg = retainedPreregistration();
+    const prereg = retainedPrereg;
     expect(prereg.cells.map((cell) => cell.cell).sort()).toEqual([...CELL_KEYS].sort());
     const schedule = buildPairSchedule(prereg);
     const perCell = Object.fromEntries(CELL_KEYS.map((cell) => [cell, schedule.filter((pair) => pair.cell === cell).length]));
@@ -185,20 +165,20 @@ describe("preregistration (retained before any window)", () => {
   });
 
   it("pins the exact workload fixture bytes by content address", () => {
-    expect(retainedPreregistration().workloadFixturesDigest).toBe(contentDigest(fixtureBytes));
+    expect(retainedPrereg.workloadFixturesDigest).toBe(contentDigest(fixtureBytes));
   });
 
   it("pins the frozen registry schema digests and tool names of every cell", () => {
-    for (const cell of retainedPreregistration().cells) {
+    for (const cell of retainedPrereg.cells) {
       expect(cell.schemaDigest).toBe(contentDigest(cellSchemaBytes(cell.cell)));
     }
   });
 
   it("resolves every case source to a corpus case or a fixture of the right kind", () => {
-    const fixtures = retainedFixtures();
+    const fixtures = retainedFixtureSet;
     const corpus = parseCalibrationCorpus(readFileSync(join(REPO_ROOT, fixtures.reviewer.corpus), "utf-8"));
     if (!corpus.ok) throw new Error(corpus.errors.join("\n"));
-    for (const cell of retainedPreregistration().cells) {
+    for (const cell of retainedPrereg.cells) {
       for (const entry of cell.workload.cases) {
         const source = parseCaseSource(entry.source);
         if (!source.ok) throw new Error(source.error);
@@ -252,7 +232,7 @@ describe("preregistration (retained before any window)", () => {
 
 describe("paired schedule", () => {
   it("is deterministic, unique and ABBA-counterbalanced per cell", () => {
-    const prereg = retainedPreregistration();
+    const prereg = retainedPrereg;
     const first = buildPairSchedule(prereg);
     expect(buildPairSchedule(prereg)).toEqual(first);
     expect(new Set(first.map((pair) => pair.pairId)).size).toBe(first.length);
@@ -286,7 +266,7 @@ describe("observations", () => {
   });
 
   it("refuses attempt sequences the request-slot budget cannot produce", () => {
-    const pair = buildPairSchedule(retainedPreregistration())[0] as ScheduledPair;
+    const pair = buildPairSchedule(retainedPrereg)[0] as ScheduledPair;
     const raw = (attempts: readonly AttemptSpec[]) => ({
       pairId: pair.pairId, cell: pair.cell, caseId: pair.caseId, arm: "emission-enabled", dispatchToIngestionMs: 1,
       attempts: attempts.map((spec, index) => ({
@@ -304,7 +284,7 @@ describe("observations", () => {
   });
 
   it("refuses observations whose arm, source and counters contradict each other", () => {
-    const pair = buildPairSchedule(retainedPreregistration())[0] as ScheduledPair;
+    const pair = buildPairSchedule(retainedPrereg)[0] as ScheduledPair;
     const attempt = (overrides: Record<string, unknown>) => ({
       attempt: 1, elapsedMs: 1, readinessMs: null, modelRequests: 1, emissionCalls: 0, toolErrors: [],
       toolAcknowledged: false, followUpTurnsAfterAck: 0, outcome: ACCEPT_EXTRACTION.outcome, ...overrides,
@@ -333,7 +313,7 @@ describe("observations", () => {
   });
 
   it("attributes retries to separate series: provider-enforced vs unenforced vs engine-only", () => {
-    const pair = buildPairSchedule(retainedPreregistration())[0] as ScheduledPair;
+    const pair = buildPairSchedule(retainedPrereg)[0] as ScheduledPair;
     const observed = sample(pair, "emission-enabled", 30_000, [
       { outcome: { kind: "rejected", cause: { kind: "observation-refused", detail: "incomplete" } }, emissionCalls: 1, toolErrors: [{ class: "harness-schema-validation" }] },
       { ...ACCEPT_EMISSION, toolErrors: [{ class: "engine-refusal", code: "invalid-payload" }] },
@@ -350,7 +330,7 @@ describe("observations", () => {
 });
 
 describe("preflight (content-addressed frozen runtime + live route)", () => {
-  const prereg = retainedPreregistration();
+  const prereg = retainedPrereg;
   const facts = (overrides: Partial<PreflightFacts> = {}): PreflightFacts => ({
     registry: Object.fromEntries(prereg.cells.map((cell) => [cell.cell, { toolName: cell.toolName, schemaDigest: cell.schemaDigest }])) as PreflightFacts["registry"],
     workloadFixturesDigest: prereg.workloadFixturesDigest,
@@ -385,6 +365,16 @@ describe("preflight (content-addressed frozen runtime + live route)", () => {
     const parsed = parsePreflightFacts(retained);
     expect(parsed.ok && decidePreflight(prereg, parsed.value).kind).toBe("blocked");
     expect(parsePreflightFacts({ ...retained, route: { kind: "maybe" } }).ok).toBe(false);
+  });
+
+  it("parses retained digests as strictly as the preregistration (lowercase SHA-256 hex)", () => {
+    const retained = JSON.parse(JSON.stringify(facts()));
+    const judge = retained.registry["judge-verdict/v1"];
+    for (const digest of [judge.schemaDigest.toUpperCase(), `sha256-${judge.schemaDigest}`, judge.schemaDigest.slice(1)]) {
+      expect(parsePreflightFacts({ ...retained, registry: { ...retained.registry, "judge-verdict/v1": { ...judge, schemaDigest: digest } } }).ok).toBe(false);
+    }
+    expect(parsePreflightFacts({ ...retained, workloadFixturesDigest: "not-a-digest" }).ok).toBe(false);
+    expect(parsePreflightFacts(retained).ok).toBe(true);
   });
 });
 
@@ -441,8 +431,21 @@ describe("release decision", () => {
     expect(measured(result.cells, "judge-verdict/v1").guardrails["provider-structural-retries"].verdict).toBe("not-applicable");
   });
 
+  it("never lets one capable cell carry a measured unconstrained cell to done (capability is per cell)", () => {
+    const prereg = testPreregistration({ constrained: true, unconstrained: "judge-verdict/v1" });
+    const result = evaluate(prereg, fullWindow(prereg, matchedArms));
+    expect(measured(result.cells, "judge-verdict/v1").guardrails["provider-structural-retries"].verdict).toBe("not-applicable");
+    expect(result.decision.kind).toBe("incomplete-missing-measurement");
+    if (result.decision.kind !== "incomplete-missing-measurement") return;
+    expect(result.decision.missing).toEqual([{
+      kind: "no-qualified-capable-route",
+      detail: "cells judge-verdict/v1 are qualified unconstrained-emission on the intended deployment route; " +
+        "AD-11: every measured cell needs a qualified capable route before the constrained feature can be declared measured/done",
+    }]);
+  });
+
   it("records a blocked preflight as incomplete with every cell not measured and nothing fabricated", () => {
-    const prereg = retainedPreregistration();
+    const prereg = retainedPrereg;
     const blocked: PreflightDecision = {
       kind: "blocked",
       blocks: [{ kind: "route-unreachable", reason: "ECONNREFUSED" }],
@@ -674,7 +677,7 @@ describe("decision soundness (properties)", () => {
 });
 
 describe("matched workload prompts", () => {
-  const fixtures = retainedFixtures();
+  const fixtures = retainedFixtureSet;
   const judgeInput: CaseInput = { kind: "judge", fixture: fixtures.fixtures["judge-hard-readiness-barrier"] as Extract<CaseInput, { kind: "judge" }>["fixture"] };
   const corpusInput = (): CaseInput => {
     const corpus = parseCalibrationCorpus(readFileSync(join(REPO_ROOT, fixtures.reviewer.corpus), "utf-8"));
@@ -719,8 +722,8 @@ describe("matched workload prompts", () => {
 });
 
 describe("rubric assessor", () => {
-  const fixtures = retainedFixtures();
-  const prereg = retainedPreregistration();
+  const fixtures = retainedFixtureSet;
+  const prereg = retainedPrereg;
   const caseOf = (cell: CellKey, caseId: string) =>
     prereg.cells.find((entry) => entry.cell === cell)?.workload.cases.find((entry) => entry.caseId === caseId) as Preregistration["cells"][number]["workload"]["cases"][number];
   /** The escapes of a payload whose every escaped defect the case declares. */
@@ -743,6 +746,23 @@ describe("rubric assessor", () => {
     expect(escapesOf(workloadCase, input, verdict(2, "throws are caught"))).toEqual([]);
     expect(escapesOf(workloadCase, input, verdict(2, null))).toEqual([{ defectId: "caught-throw-is-not-a-barrier", severity: "critical" }]);
     expect(escapesOf(workloadCase, input, verdict(9, "throws are caught"))).toHaveLength(1);
+  });
+
+  it("refuses a named planted flaw whose ranking cannot be compared — never 'not escaped'", () => {
+    const fixture = retainedFixtureSet.fixtures["judge-hard-readiness-barrier"] as Extract<CaseInput, { kind: "judge" }>["fixture"];
+    const input: CaseInput = { kind: "judge", fixture };
+    const workloadCase = caseOf("judge-verdict/v1", "judge-hard-readiness-barrier");
+    const sound = fixture.candidates.find((entry) => entry.candidate !== fixture.plantedFlaw.candidate)?.candidate;
+    const payload = {
+      criterion: fixture.criterion,
+      rankings: fixture.candidates.map((entry) => entry.candidate === fixture.plantedFlaw.candidate
+        ? { candidate: entry.candidate, score: 2, fatal_flaw: "throws are caught", strongest_idea: "x" }
+        : { candidate: entry.candidate, score: entry.candidate === sound ? "high" : 7, fatal_flaw: null, strongest_idea: "y" }),
+    };
+    expect(rubricEscapes(workloadCase, input, payload)).toEqual({
+      ok: false,
+      error: `case ${workloadCase.caseId}: the judge ranking of candidate(s) ${JSON.stringify(sound)} carries no numeric score, so the planted flaw cannot be ranked`,
+    });
   });
 
   it("flags a refuted real defect but not an upheld one or a refuted false positive", () => {

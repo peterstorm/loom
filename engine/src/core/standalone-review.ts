@@ -584,7 +584,6 @@ export function prepareStandaloneDisposition(source: StandaloneLineageSource, in
   return success(prepared);
 }
 
-
 const publishedDispositions = new WeakSet<object>();
 /** Port evidence is observed by the shell (or an in-memory adapter), never inferred from a self-hash. */
 export type StandaloneDispositionPublicationReader = (reference: StandaloneDispositionPublicationReference) => DomainResult<
@@ -614,8 +613,6 @@ export function readPublishedStandaloneDisposition(prepared: PreparedStandaloneD
   publishedDispositions.add(published);
   return success(published);
 }
-
-
 
 function freezeDispositionSelection(selection: StandaloneDispositionSelection): StandaloneDispositionSelection {
   return selection.kind === "selected-record"
@@ -662,7 +659,6 @@ export function projectStandaloneLineageSource(source: StandaloneLineageSource, 
       origin: row.originReference, findingId: row.finding.id }))),
   }));
 }
-
 
 const successors = new WeakSet<object>();
 /** Read-only custody membership: true only for a value prepareStandaloneSuccessor minted. */
@@ -762,7 +758,6 @@ export function assessStandaloneSuccessor(prepared: PreparedStandaloneSuccessor,
       (row.relation.kind === "distinct-related" && !origins.has(row.relation.origin)))) return rejectLineage("invalid-assessments", "New Findings require scoped locations and exact distinct-related origins.");
   return success(payload);
 }
-
 
 /** Whole-roster semantic aggregation, never an installable or Refutation Panel authority. */
 export function aggregateStandaloneAssessments(prepared: PreparedStandaloneSuccessor,
@@ -867,7 +862,6 @@ export function parseIssuedStandaloneSuccessorReviewer(input: Readonly<{
   return success(authority);
 }
 
-
 const admittedEvidence = new WeakSet<object>();
 
 export function admitStandaloneSuccessorReviewer(authority: IssuedStandaloneSuccessorReviewer,
@@ -899,8 +893,6 @@ export function aggregateIssuedStandaloneSuccessorEvidence(prepared: PreparedSta
       !sameAgentRequestAuthority(report.request, requests[index]!))) return rejected("Current evidence does not match the exact expected request/attempt roster.");
   return aggregateStandaloneAssessments(prepared, reports.map(report => ({ role: report.request.role, payload: report.payload })));
 }
-
-
 
 function successorDispositionState(
   prepared: PreparedStandaloneSuccessor,
@@ -992,7 +984,6 @@ function deriveStandaloneSuccessorLineage(prepared: PreparedStandaloneSuccessor,
       advisory: inventory.filter(row => findingOf(row).severity === "advisory").length, currentCriticalCoverageLimited: limited.length }),
   }));
 }
-
 
 type AcceptedStandaloneSlot = Readonly<{
   slotId: SlotId;
@@ -1368,7 +1359,6 @@ function eventRunId(event: StandaloneReviewMachineEvent): string | null {
     case "recovery-receipt-accepted": return event.receipt.runId;
   }
 }
-
 
 function acceptedPayloadMatchesAuthority(
   result: AcceptedAgentResult<CapturedReviewerResult>,

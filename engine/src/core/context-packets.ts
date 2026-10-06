@@ -592,10 +592,9 @@ export function withStoredSectionBytes(
   readBlob: (digest: string) => Uint8Array | null,
 ): DomainResult<unknown, ContextPacketError> {
   if (!isRecord(raw)) return success(raw);
-  const record = raw as Record<string, unknown>;
-  const resolved: Record<string, unknown> = { ...record };
+  const resolved: Record<string, unknown> = { ...raw };
   for (const key of ["fixedContext", "variableContext"] as const) {
-    const sections = record[key];
+    const sections = raw[key];
     if (!Array.isArray(sections)) continue;
     const restored: unknown[] = [];
     for (const [index, section] of sections.entries()) {
@@ -603,7 +602,7 @@ export function withStoredSectionBytes(
         restored.push(section);
         continue;
       }
-      const digest = (section as Record<string, unknown>)["digest"];
+      const digest = section.digest;
       if (typeof digest !== "string" || !SECTION_BLOB_NAME.test(digest)) {
         return failure(`${key}[${index}].digest`, "a stored context section must name its blob by a sha256 hex digest");
       }

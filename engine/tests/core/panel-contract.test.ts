@@ -9,7 +9,6 @@ import {
   aggregateVerdicts,
   rankPanelVerdicts,
   serializeCriteria,
-  architectureCriterion,
   candidateFilename,
   deriveJudgeCriteria,
   parseInterviewDigest,
@@ -25,6 +24,7 @@ import {
 } from "../../src/core/panel-contract";
 import { ARCHITECTURE_LAYOUT } from "../../src/core/panel-kernel";
 import { PANEL_JUDGES_DEFAULT } from "../../src/config";
+import { mintedCriterion } from "../fixtures/architecture-criterion";
 
 const VALID_DIGEST = [
   "**Primary axis:** simplicity",
@@ -47,15 +47,6 @@ const VALID_DIGEST = [
 ].join("\n");
 
 const CANDIDATES = [candidateFilename("simplicity-first"), candidateFilename("type-driven-fp")] as const;
-
-/** Mint a test criterion through the closed vocabulary — the same boundary the
- *  production callers use — so a typo'd test criterion fails here, loudly,
- *  instead of compiling into the seam the brand guards. */
-const mintedCriterion = (raw: string): ArchitectureCriterion => {
-  const minted = architectureCriterion(raw);
-  if (minted === null) throw new Error(`test criterion is outside the validated interview vocabulary: ${raw}`);
-  return minted;
-};
 
 function verdict(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({

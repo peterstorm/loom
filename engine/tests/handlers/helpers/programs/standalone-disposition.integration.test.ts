@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
+import { CATALOG_ROUTE_ENV, QUALIFIED_ROUTE_ENV, withRouteEnv, type EnvironmentOverlay } from "../../../fixtures/issue-route-env";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession as runInFixturePiSession } from "../../../fixtures/pi-session";
 import { standaloneOriginReference } from "../../../../src/core/standalone-finding-origin";
 import { prepareStandaloneSuccessor } from "../../../../src/core/standalone-lineage";
@@ -74,24 +75,10 @@ async function command(root: string, args: readonly string[], raw = "") {
   return JSON.parse(result.stdout) as Action;
 }
 const flags = (root: string, run: string) => ["--runs-root", join(root, "runs"), "--run", run];
-async function sourceFixture(root: string, environment: Readonly<Record<string, string | undefined>> = {}) {
-  // Route-election pinning for the source run's issuing CLI child: the arms
-  // of the route-agnostic disposition control pin explicit routes, and the
-  // ambient session's qualified-local handshake must not leak into either.
-  const previous = Object.keys(environment).map((key) => [key, process.env[key]] as const);
-  try {
-    for (const [key, value] of Object.entries(environment)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-    return await sourceFixturePinned(root);
-  } finally {
-    for (const [key, value] of previous) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
-}
+/** Route-election pinning for the source run's issuing CLI child: the arms of the
+ *  route-agnostic disposition control pin explicit routes, and the ambient
+ *  session's qualified-local handshake must not leak into either. */
+const sourceFixture = (root: string, environment: EnvironmentOverlay = {}) => withRouteEnv(environment, () => sourceFixturePinned(root));
 
 async function sourceFixturePinned(root: string) {
   const initial = await command(root, ["start", "standalone-review", ...flags(root, "source")], JSON.stringify({ kind: "simplify", files: ["README.md"], dryRun: false }));
@@ -457,12 +444,6 @@ describe.sequential("admitted standalone advisory publication, correction and re
     // The outer Loom session may run under the qualified-local model, so both
     // arms pin their route explicitly: the catalog arm DELETES the election
     // variables, the emission arm pins the qualified local route.
-    const CATALOG_ROUTE_ENV: Readonly<Record<string, string | undefined>> = Object.freeze({
-      PI_PROVIDER: undefined, PI_MODEL: undefined, PI_REASONING_LEVEL: undefined,
-    });
-    const QUALIFIED_ROUTE_ENV: Readonly<Record<string, string>> = Object.freeze({
-      PI_PROVIDER: "desktop-vllm", PI_MODEL: "glm-5.3-flash-spark-tp2-v14", PI_REASONING_LEVEL: "high",
-    });
     const catalogRoot = project();
     const qualifiedRoot = project();
     const catalog = await sourceFixture(catalogRoot, CATALOG_ROUTE_ENV);

@@ -347,10 +347,11 @@ export async function recordWindow(run: WindowRun): Promise<Result<DecisionOutco
   }
   store.write(WINDOW_FILES.window, jsonText(record));
   const dispatched = record.dispatch.kind === "dispatched"
-    ? await run.dispatch(({ sample, acceptedPayload }) => {
+    ? await run.dispatch((landed) => {
+        const { sample } = landed;
         store.append(WINDOW_FILES.observations, `${JSON.stringify(sample)}\n`);
-        if (acceptedPayload !== null) {
-          store.append(WINDOW_FILES.payloads, `${JSON.stringify({ pairId: sample.pairId, arm: sample.arm, payload: acceptedPayload })}\n`);
+        if (landed.kind === "accepted") {
+          store.append(WINDOW_FILES.payloads, `${JSON.stringify({ pairId: sample.pairId, arm: sample.arm, payload: landed.acceptedPayload })}\n`);
         }
       })
     : { records: [], inputs: new Map<string, CaseInput>() };

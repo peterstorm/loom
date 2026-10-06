@@ -245,8 +245,8 @@ function deriveCompletionSuiteOutcome(
       verificationManifestDigest: manifest.manifestDigest,
       suiteDigest: authorized.value.suiteDigest,
       workspaceDigest: authorized.value.workspaceDigest,
-      failureKinds: Object.freeze(failureKinds),
-      checkIds: Object.freeze(checkIds),
+      failureKinds,
+      checkIds,
     });
   }
   if (source.registration === undefined) {

@@ -22,6 +22,7 @@ import { gunzipSync } from "node:zlib";
 import { match } from "ts-pattern";
 import { sha256Bytes } from "./digest";
 import { parseArtifactDigest, type ArtifactDigest, type DomainResult } from "./orchestration-contract";
+import { isRecord, parseExactRecord } from "./plain-record";
 
 /** How the reader must decode the retained predecessor packet — explicit, never guessed. */
 export type PredecessorArchivePurpose = "v1-v2" | "standalone-successor";
@@ -68,18 +69,18 @@ type Refused<T> = DomainResult<T, PredecessorArchiveRefusal>;
 const refuse = <T>(kind: Exclude<PredecessorArchiveRefusal["kind"], "expansion-failed">, message: string): Refused<T> =>
   ({ ok: false, error: { kind, message } });
 
-const isPlainRecord = (raw: unknown): raw is Readonly<Record<string, unknown>> =>
-  typeof raw === "object" && raw !== null && !Array.isArray(raw);
-const hasExactKeys = (record: Readonly<Record<string, unknown>>, keys: readonly string[]): boolean => {
-  const actual = Object.keys(record);
-  return actual.length === keys.length && keys.every(key => Object.hasOwn(record, key));
-};
+// Record admission is the shared kernel's: `isRecord` asks only the shape
+// question, and the exact key set (own string keys only, symbol keys refused,
+// a null or Object.prototype prototype required) is `parseExactRecord`'s. The
+// refusal kinds here are fixed, so the kernel's diagnostics are not surfaced.
+const hasExactKeys = (record: unknown, keys: readonly string[]): boolean =>
+  parseExactRecord(record, keys, "predecessor-archive").ok;
 const boundedLength = (raw: unknown, maximum: number): raw is number =>
   typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 1 && raw <= maximum;
 
 /** Parse one decoded retained record into the ADT; exact keys per encoding, every field typed. */
 export function parsePredecessorArchiveRecord(raw: unknown, bounds: PredecessorArchiveBounds): Refused<PredecessorArchiveRecord> {
-  if (!isPlainRecord(raw)) return refuse("malformed-record", "retained predecessor archive is not a JSON object");
+  if (!isRecord(raw)) return refuse("malformed-record", "retained predecessor archive is not a JSON object");
   const digest = parseArtifactDigest(raw["digest"]);
   if (raw["encoding"] === "published-packet-reference") {
     const path = raw["path"], purpose = raw["purpose"];

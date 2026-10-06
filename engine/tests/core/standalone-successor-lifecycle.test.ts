@@ -11,6 +11,7 @@ import { buildStandaloneSuccessorReviewerContext, parseIssuedStandaloneSuccessor
 import { selectCanonicalPayload } from "../../src/core/emission-ingestion";
 import { issueEmissionBinding } from "../../src/core/emission-tool";
 import { observeEmissionCalls } from "../../src/core/harness-capture";
+import { emissionCallFrame } from "../fixtures/emission-call-frame";
 import { prepareFreshStandaloneReview, parseStandaloneReviewAuthority } from "../../src/core/standalone-review-preparation";
 import { serializeStandaloneReviewAuthority, serializeAdjudicatedStandaloneReview, serializeStandaloneAggregate } from "../../src/core/standalone-review-records";
 import { capturedReviewerResultFromBytes } from "../../src/core/standalone-reviewer-capture";
@@ -69,7 +70,7 @@ type Reports = (prepared: PreparedStandaloneSuccessor, index: number) => Standal
  *  canonical selection, proving the lifecycle is source-blind (T9). */
 function collect(sourceResult: AuthoritativeStandaloneReviewResult, runId: string, reports: Reports = payload,
   snapshotRevision = runId,
-  captureVia: (prepared: PreparedStandaloneSuccessor, request: Readonly<{ requestId: string }>, raw: Uint8Array) => Uint8Array = (_prepared, _request, raw) => raw) {
+  captureVia: (request: Readonly<{ requestId: string }>, raw: Uint8Array) => Uint8Array = (_request, raw) => raw) {
   const source = valueOf(prepareStandaloneLineageSource(sourceResult, `/owned/${sourceResult.runId}`));
   const disposition = dispositionPublicationFixture(valueOf(prepareStandaloneDisposition(source, bytes({
     schemaVersion: 1, source: source.publication, provenance: "DECLARED", revision: { kind: "initial" },
@@ -110,7 +111,7 @@ function collect(sourceResult: AuthoritativeStandaloneReviewResult, runId: strin
       registration: standaloneSuccessorReviewerRegistration(prepared) });
   };
   const accepted = published.action.requests.map((request, index) => {
-    const raw = captureVia(prepared, request.authority, bytes(reports(prepared, index)));
+    const raw = captureVia(request.authority, bytes(reports(prepared, index)));
     const artifact = valueOf(parseArtifactRef({ runId, slot: request.authority.outputSlot, digest: sha256Bytes(raw), byteLength: raw.length }));
     return valueOf(acceptedAgentResult(request, valueOf(capturedReviewerResultFromBytes(artifact, raw))));
   });
@@ -385,15 +386,12 @@ const successorEmissionBinding = (requestId: string) => {
  *  ONE correctly bound v3 emission call, the kernel's canonical selection
  *  admits it, and the selected canonical bytes become the captured bytes —
  *  the exact composition the production capture runtime runs. */
-function emissionCapturedBytes(_prepared: PreparedStandaloneSuccessor, request: Readonly<{ requestId: string }>, raw: Uint8Array): Uint8Array {
+function emissionCapturedBytes(request: Readonly<{ requestId: string }>, raw: Uint8Array): Uint8Array {
   const binding = successorEmissionBinding(request.requestId);
   const arguments_ = JSON.parse(new TextDecoder().decode(raw)) as unknown;
   const selection = selectCanonicalPayload(
     binding,
-    observeEmissionCalls([{
-      kind: "complete" as const,
-      call: { requestId: binding.requestId, toolCallId: `call:${request.requestId}`, kind: binding.kind, version: binding.version, arguments: arguments_ },
-    }]),
+    observeEmissionCalls([emissionCallFrame(binding, `call:${request.requestId}`, arguments_)]),
     [],
   );
   if (selection.kind !== "emission-tool-arguments") {
@@ -414,7 +412,7 @@ describe("the v3 lifecycle is source-blind to the emission seam (T9)", () => {
     // via the extraction path and once through the kernel's canonical
     // selection. Byte-identity of the two finalized publications then pins
     // that the accepted source never enters the lifecycle joins.
-    const canonicalBytes = (_prepared: PreparedStandaloneSuccessor, _request: Readonly<{ requestId: string }>, raw: Uint8Array): Uint8Array =>
+    const canonicalBytes = (_request: Readonly<{ requestId: string }>, raw: Uint8Array): Uint8Array =>
       new TextEncoder().encode(JSON.stringify(standaloneReviewerPayloadV3Schema.parse(JSON.parse(new TextDecoder().decode(raw))), null, 2));
     const extraction = finalize(collect(predecessor(), "run.source-blind", reports, "run.source-blind", canonicalBytes));
     const emission = finalize(collect(predecessor(), "run.source-blind", reports, "run.source-blind", emissionCapturedBytes));
@@ -444,10 +442,7 @@ describe("the v3 lifecycle is source-blind to the emission seam (T9)", () => {
     const binding = successorEmissionBinding("request:refined-refusal");
     const selection = selectCanonicalPayload(
       binding,
-      observeEmissionCalls([{
-        kind: "complete" as const,
-        call: { requestId: binding.requestId, toolCallId: "call:refined", kind: binding.kind, version: binding.version, arguments: refined as unknown },
-      }]),
+      observeEmissionCalls([emissionCallFrame(binding, "call:refined", refined)]),
       [{ origin: "content[0].text", text: JSON.stringify(valid) }],
     );
     expect(selection.kind).toBe("extraction-over-refused-call");

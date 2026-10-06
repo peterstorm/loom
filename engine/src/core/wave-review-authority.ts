@@ -16,7 +16,8 @@ import {
   type TaskProof,
 } from "./proof-obligations";
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ByteSection, type ContextPacket } from "./context-packets";
-import { parseReviewerProtocolDescriptor, type ReviewerProtocolDescriptor } from "./reviewer-contract";
+import { parseReviewerProtocolDescriptor } from "./reviewer-contract";
+import type { OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, WaveGateRestartAudit } from "./wave-gate-program";
 import {
   DECISION_RECORD_AGENT,
   issuedReviewerProfile,
@@ -79,10 +80,19 @@ export type WaveReviewRegistrationAuthority = Readonly<{
   input: Readonly<{ wave: number }>;
   taskIds: readonly string[];
   authorityDigest: string;
-  restart?: Readonly<{ previousRunId: string; exhaustedSlots: readonly string[] }>;
-  orphanRecovery?: Readonly<{ previousRunId: string; previousAuthorityDigest: string }>;
-}> & (Readonly<{ schemaVersion: 1; reviewerProtocol?: never }> |
-  Readonly<{ schemaVersion: 2; reviewerProtocol: ReviewerProtocolDescriptor }>);
+  restart?: WaveGateRestartAudit;
+  orphanRecovery?: OrphanedWaveGateRecoveryAudit;
+}> & RegisteredReviewerProtocol;
+
+/**
+ * The exact reviewed scope of one Task: its declared and modified paths,
+ * de-duplicated and in default sort order. Batch preparation, the locked
+ * install and reviewer slot membership each compare this against a persisted
+ * protocol scope, so the rule has this one definition.
+ */
+export function taskReviewScope(task: Pick<Task, "file_list" | "files_modified">): readonly string[] {
+  return [...new Set([...(task.file_list ?? []), ...(task.files_modified ?? [])])].sort();
+}
 
 /** The Wave review packet section labels; spec-check reads both by name. */
 export const WAVE_REVIEW_AUTHORITY_SECTION = "wave-review-authority";
@@ -728,8 +738,7 @@ export function prepareWaveReviewBatch(
   const workspaceByTask = new Map<string, ReviewedWorkspaceSnapshot>();
   for (const task of tasks) {
     const observation = observationsByTask.get(task.id)!;
-    const expectedScope = [...new Set([...(task.file_list ?? []), ...(task.files_modified ?? [])])].sort();
-    const snapshot = parseReviewedWorkspaceSnapshot(task.id, expectedScope, observation);
+    const snapshot = parseReviewedWorkspaceSnapshot(task.id, taskReviewScope(task), observation);
     if (!snapshot.ok) return failure(snapshot.error);
     workspaceByTask.set(task.id, snapshot.value);
   }

@@ -276,108 +276,98 @@ const emissionBindingEnvironment = (
 });
 
 type PiReadinessVerification = Awaited<ReturnType<PiEmissionRpcDirective["verifyReadiness"]>>;
+type PiReadinessRefusal = Extract<PiReadinessVerification, { ok: false }>;
 
-const readinessRpcRefusal = (operation: string, thrown: unknown): PiReadinessVerification => {
+const readinessRefusal = (reason: string): PiReadinessRefusal => Object.freeze({ ok: false as const, reason });
+
+const readinessRpcRefusal = (operation: string, thrown: unknown): PiReadinessRefusal => {
   const cause = boundedThrownCause(thrown, operation);
-  return Object.freeze({
-    ok: false as const,
-    reason: `Emission readiness RPC ${operation} failed (${cause.name}: ${cause.message}). ` +
+  return readinessRefusal(
+    `Emission readiness RPC ${operation} failed (${cause.name}: ${cause.message}). ` +
       "Inspect the child RPC channel, then retry the same issued request after restoring the launcher.",
+  );
+};
+
+/** One readiness RPC step: await the call, then check its response. A throw
+ * from the call is refused as `<operation>`, a throw while inspecting the
+ * response as `<operation> response`; a check that returns a reason refuses
+ * with that reason. `null` means the step passed and the next one may run. */
+const readinessExchange = async <T>(
+  operation: string,
+  call: () => Promise<T>,
+  responseRefusal: (response: T) => string | null,
+): Promise<PiReadinessRefusal | null> => {
+  let response: T;
+  try {
+    response = await call();
+  } catch (thrown) {
+    return readinessRpcRefusal(operation, thrown);
+  }
+  try {
+    const reason = responseRefusal(response);
+    return reason === null ? null : readinessRefusal(reason);
+  } catch (thrown) {
+    return readinessRpcRefusal(`${operation} response`, thrown);
+  }
+};
+
+const commandInventoryRefusal = (commands: unknown): string | null => {
+  if (!Array.isArray(commands) || !commands.every((command) =>
+    isRecord(command) && typeof command.name === "string" &&
+    (command.source === undefined || typeof command.source === "string"))) {
+    return "Emission readiness RPC get_commands returned a malformed command inventory";
+  }
+  return commands.some((command) => command.name === EMISSION_READINESS_COMMAND && command.source === "extension")
+    ? null
+    : `Required extension command /${EMISSION_READINESS_COMMAND} is unavailable`;
+};
+
+const readinessEntriesRefusal = (launch: PiEmissionLaunchExpectation) => (entries: unknown): string | null => {
+  if (!Array.isArray(entries)) return "Emission readiness RPC invocation returned a malformed entry list";
+  const payload = readinessPayloadFromEntries(entries);
+  if (!payload.ok) return payload.error.message;
+  const expectation: EmissionReadinessExpectation = Object.freeze({
+    binding: launch.expectation.binding,
+    contextDigest: launch.expectation.contextDigest,
+    revision: launch.revision,
+    readinessCommand: EMISSION_READINESS_COMMAND,
   });
+  const decision = decideReadinessGate(expectation, parseReadinessStageObservation({
+    channelAlive: true,
+    channelDiagnostic: null,
+    commandListed: true,
+    readiness: Object.freeze({ kind: "observed" as const, payload: payload.value }),
+  }));
+  return decision.kind === "refused" ? decision.message : null;
+};
+
+const routeRefusal = (launch: PiEmissionLaunchExpectation) => (state: unknown): string | null => {
+  if (!isRecord(state) || !isRecord(state.model) ||
+      typeof state.model.provider !== "string" || typeof state.model.id !== "string") {
+    return "Emission readiness RPC get_state returned no exact provider/model record";
+  }
+  const { route } = launch.expectation;
+  return state.model.provider === route.provider && state.model.id === route.model
+    ? null
+    : `the child route ${state.model.provider}/${state.model.id} does not match ${route.provider}/${route.model}`;
 };
 
 const readinessVerifier = (
   launch: PiEmissionLaunchExpectation,
-): PiEmissionRpcDirective["verifyReadiness"] => async (client) => {
-  let commands: Awaited<ReturnType<PiSubagentReadinessClient["getCommands"]>>;
-  try {
-    commands = await client.getCommands();
-  } catch (thrown) {
-    return readinessRpcRefusal("get_commands", thrown);
-  }
-  let commandListed: boolean;
-  try {
-    if (!Array.isArray(commands) || !commands.every((command) =>
-      isRecord(command) && typeof command.name === "string" &&
-      (command.source === undefined || typeof command.source === "string"))) {
-      return Object.freeze({ ok: false as const, reason: "Emission readiness RPC get_commands returned a malformed command inventory" });
-    }
-    commandListed = commands.some((command) =>
-      command.name === EMISSION_READINESS_COMMAND && command.source === "extension");
-  } catch (thrown) {
-    return readinessRpcRefusal("get_commands response", thrown);
-  }
-  if (!commandListed) {
-    return Object.freeze({
-      ok: false as const,
-      reason: `Required extension command /${EMISSION_READINESS_COMMAND} is unavailable`,
-    });
-  }
-
+): PiEmissionRpcDirective["verifyReadiness"] => async (client) =>
+  await readinessExchange("get_commands", () => client.getCommands(), commandInventoryRefusal) ??
   // Exactly one invocation in this verifier. The installed launcher also
   // enforces this count and refuses prompt delivery if a verifier cheats.
-  let readinessEntries: readonly unknown[];
-  try {
-    readinessEntries = await client.invokeReadiness();
-  } catch (thrown) {
-    return readinessRpcRefusal("invoke_readiness", thrown);
-  }
-  try {
-    if (!Array.isArray(readinessEntries)) {
-      return Object.freeze({ ok: false as const, reason: "Emission readiness RPC invocation returned a malformed entry list" });
-    }
-    const payload = readinessPayloadFromEntries(readinessEntries);
-    if (!payload.ok) return Object.freeze({ ok: false as const, reason: payload.error.message });
-    const expectation: EmissionReadinessExpectation = Object.freeze({
-      binding: launch.expectation.binding,
-      contextDigest: launch.expectation.contextDigest,
-      revision: launch.revision,
-      readinessCommand: EMISSION_READINESS_COMMAND,
-    });
-    const decision = decideReadinessGate(expectation, parseReadinessStageObservation({
-      channelAlive: true,
-      channelDiagnostic: null,
-      commandListed: true,
-      readiness: Object.freeze({ kind: "observed" as const, payload: payload.value }),
-    }));
-    if (decision.kind === "refused") {
-      return Object.freeze({ ok: false as const, reason: decision.message });
-    }
-  } catch (thrown) {
-    return readinessRpcRefusal("invoke_readiness response", thrown);
-  }
-
+  await readinessExchange("invoke_readiness", () => client.invokeReadiness(), readinessEntriesRefusal(launch)) ??
   // Route selection is deliberately after readiness. Both this verifier and
   // the installed launcher observe the exact provider/model before Task prompt.
-  try {
-    await client.setModel(launch.expectation.route.provider, launch.expectation.route.model);
-  } catch (thrown) {
-    return readinessRpcRefusal("set_model", thrown);
-  }
-  let state: Awaited<ReturnType<PiSubagentReadinessClient["getState"]>>;
-  try {
-    state = await client.getState();
-  } catch (thrown) {
-    return readinessRpcRefusal("get_state", thrown);
-  }
-  try {
-    if (!isRecord(state) || !isRecord(state.model) ||
-        typeof state.model.provider !== "string" || typeof state.model.id !== "string") {
-      return Object.freeze({ ok: false as const, reason: "Emission readiness RPC get_state returned no exact provider/model record" });
-    }
-    if (state.model.provider !== launch.expectation.route.provider ||
-        state.model.id !== launch.expectation.route.model) {
-      return Object.freeze({
-        ok: false as const,
-        reason: `the child route ${state.model.provider}/${state.model.id} does not match ` +
-          `${launch.expectation.route.provider}/${launch.expectation.route.model}`,
-      });
-    }
-  } catch (thrown) {
-    return readinessRpcRefusal("get_state response", thrown);
-  }
-  return Object.freeze({ ok: true as const });
-};
+  await readinessExchange(
+    "set_model",
+    () => client.setModel(launch.expectation.route.provider, launch.expectation.route.model),
+    () => null,
+  ) ??
+  await readinessExchange("get_state", () => client.getState(), routeRefusal(launch)) ??
+  Object.freeze({ ok: true as const });
 
 /** Register the synchronous request/reply adapter consumed by the installed
  * normal subagent launcher. The bridge owns no model process; it retains only

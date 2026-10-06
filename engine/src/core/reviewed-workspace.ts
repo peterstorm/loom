@@ -32,8 +32,11 @@ export type ReviewedWorkspaceAuthority = Readonly<{
 }>;
 
 /** One observation owns both the exact bytes and their derived identity.
- * Only `reviewedWorkspaceObservation` and `parseReviewedWorkspaceSnapshot`
- * construct one the core trusts. */
+ * `reviewedWorkspaceObservation` and `parseReviewedWorkspaceSnapshot` derive
+ * `headSha` from the artifacts. The type is structural and carries no brand,
+ * so it does not prove that agreement: any caller can build one, and code that
+ * needs it proven passes the value through `parseReviewedWorkspaceSnapshot`,
+ * which recomputes `headSha`. */
 export type ReviewedWorkspaceObservation = Readonly<{
   taskId: string;
   headSha: string;
@@ -41,6 +44,9 @@ export type ReviewedWorkspaceObservation = Readonly<{
   artifacts: readonly ReviewedArtifact[];
 }>;
 
+/** The name for an observation that `parseReviewedWorkspaceSnapshot` checked
+ * against one Task's exact review scope. It is an alias of
+ * `ReviewedWorkspaceObservation`, not a distinct type. */
 export type ReviewedWorkspaceSnapshot = ReviewedWorkspaceObservation;
 
 /** A proven scope beside its proven artifacts. */

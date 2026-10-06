@@ -1805,6 +1805,14 @@ describe("the engine capture seam selects the canonical emission source", () => 
       expect(outcome.kind).toBe("terminal-rejection");
       if (outcome.kind !== "terminal-rejection") return;
       expect(outcome.reason).toBe("unexpected-emission-call");
+      // Walk-only refusal: no call was observed, so the message names the
+      // transcript walk that may have lost one — never a call count.
+      expect(outcome.message).toContain(
+        "capture cannot rule out a hidden emission tool call under extraction-only authority",
+      );
+      expect(outcome.message).toContain("an emission call the transcript walk may have lost; ");
+      expect(outcome.message).toContain("unclassifiable line");
+      expect(outcome.message).not.toMatch(/observed \d+ emission tool call/);
       const rejected = staged.handle.readCaptureRejection(staged.request);
       expect(rejected.ok).toBe(true);
       if (rejected.ok) expect(rejected.value).toContain("unexpected-emission-call");

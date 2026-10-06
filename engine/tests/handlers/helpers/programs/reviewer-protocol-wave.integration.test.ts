@@ -8,12 +8,7 @@ import { attributeFindings } from "../../../../src/core/findings";
 import { evaluateTaskProof } from "../../../../src/core/proof-obligations";
 import { WAVE_REVIEW_AGENTS } from "../../../../src/core/model-profiles";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
-import {
-  EMISSION_DESCRIPTOR_MARKER,
-  emissionToolPrimaryInstruction,
-  parseEmissionDescriptor,
-  renderEmissionDescriptor,
-} from "../../../../src/core/spawn-admission";
+import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/spawn-admission";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, type ReviewerDraftV2 } from "../../../../src/core/reviewer-contract";
 import { parseRegisteredFacadeProgram } from "../../../../src/handlers/helpers/programs/registration";
 import { publishLegacyInitialBatch } from "../../../../src/handlers/helpers/programs/request-publication";
@@ -31,16 +26,19 @@ import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } 
 import type { Finding, TaskGraph } from "../../../../src/types";
 import { parseWaveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "../../../../src/core/wave-frozen-source";
 import { graphFixture, taskFixture } from "../../../fixtures/task-lifecycle";
+import { git as gitWithEnvironment, PINNED_COMMIT_DATES } from "../../../fixtures/git-repository";
+import {
+  CATALOG_ROUTE_ENV,
+  QUALIFIED_ROUTE_ENV,
+  scrubAmbientIssueRoute,
+  withoutEmissionRouteDelta,
+  withRouteEnv,
+  type EnvironmentOverlay,
+} from "../../../fixtures/issue-route-env";
 
-// Route election is ambient-env sensitive: observedReviewerIssueRoute() reads
-// this process's PI_PROVIDER/PI_MODEL/PI_REASONING_LEVEL, and
-// fixturePiEnvironment spreads process.env into every CLI child. These
-// fixtures pin the catalog issue route, so an ambient Pi handshake (a wrapper
-// session running the suite under the qualified-local model) must not flip
-// the election and re-shape issued/retry prompts.
-for (const routeEnv of ["PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL"] as const) {
-  delete process.env[routeEnv];
-}
+// These fixtures pin the catalog issue route; an ambient Pi handshake must not
+// re-shape issued/retry prompts (see fixtures/issue-route-env).
+scrubAmbientIssueRoute();
 
 const packageRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 const cli = fileURLToPath(new URL("../../../../src/cli.ts", import.meta.url));
@@ -50,20 +48,9 @@ function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: fals
   if (!result.ok) throw new Error(JSON.stringify(result));
   return result.value;
 }
-function git(root: string, args: readonly string[]) {
-	// Fixture commit SHAs must be deterministic: frozen-source sections embed
-	// workspaceHead, and packet byte-identity assertions compare sections
-	// minted by separate fixture projects. Wall-clock commit dates give
-	// different SHAs whenever two commits straddle a second boundary — a
-	// time-flake that only appears under full-suite load. Pin both dates so
-	// identical trees always yield identical SHAs.
-	const result = spawnSync("git", args, {
-		cwd: root,
-		encoding: "utf8",
-		env: { ...process.env, GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z", GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z" },
-	});
-	if (result.status !== 0) throw new Error(result.stderr);
-}
+// Deterministic commit SHAs: frozen-source sections embed workspaceHead, and
+// sections minted by separate fixture projects are compared byte-for-byte.
+const git = (root: string, args: readonly string[]) => gitWithEnvironment(root, args, PINNED_COMMIT_DATES);
 const critical = REVIEWER_PAYLOAD_EXAMPLE_V2.findings.find((finding) => finding.severity === "critical")!;
 const criticalDraft: ReviewerDraftV2 = { ...critical, file: "src/x.ts", line: 1, claim: "  exact current claim\nwith detail  " };
 const advisory: ReviewerDraftV2 = { severity: "advisory", file: "src/x.ts", line: 1, claim: " optional cleanup ", reason: " clearer operator explanation " };
@@ -467,25 +454,6 @@ describe("registered Wave reviewer protocol", () => {
 // non-producer spec-check slot stays byte-identical on both routes.
 // ---------------------------------------------------------------------------
 
-const QUALIFIED_ROUTE_ENV: Readonly<Record<string, string>> = Object.freeze({
-  PI_PROVIDER: "desktop-vllm",
-  PI_MODEL: "glm-5.3-flash-spark-tp2-v14",
-  PI_REASONING_LEVEL: "high",
-});
-
-async function withIssueRoute<T>(environment: Readonly<Record<string, string>>, operation: () => Promise<T>): Promise<T> {
-  const previous = Object.keys(environment).map((key) => [key, process.env[key]] as const);
-  try {
-    Object.assign(process.env, environment);
-    return await operation();
-  } finally {
-    for (const [key, value] of previous) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
-}
-
 /** Scope the Pi-parent observation for in-process renders without touching
  *  the CLI children this suite spawns (their fixture environment is fixed). */
 async function withPiParent<T>(enabled: boolean, operation: () => T | Promise<T>): Promise<T> {
@@ -510,12 +478,12 @@ function executePacketCommand(task: string) {
 
 describe("the issued emission route on the Wave program path (T6)", () => {
   it("retains every issuance join across the extraction and emission routes and changes only reviewer task text (FR-012)", async () => {
-    const startRun = async (environment: Readonly<Record<string, string>>) => withIssueRoute(environment, async () => {
+    const startRun = async (environment: EnvironmentOverlay) => withRouteEnv(environment, async () => {
       const p = project();
       const { action, handle } = await start(p, "run.route");
       return { p, handle, requests: action.requests! };
     });
-    const extraction = await startRun({});
+    const extraction = await startRun(CATALOG_ROUTE_ENV);
     const emission = await startRun(QUALIFIED_ROUTE_ENV);
 
     // The route election is genuinely exercised: reviewers bind the
@@ -556,10 +524,7 @@ describe("the issued emission route on the Wave program path (T6)", () => {
       expect(descriptor).toMatchObject({ kind: "issued", contextDigest: authority.contextDigest,
         binding: { requestId: authority.requestId, version: "v2" } });
       if (descriptor.kind !== "issued") throw new Error("qualified-route fixture must mint an issued descriptor");
-      const stripped = emissionRender
-        .replace(renderEmissionDescriptor(descriptor.binding, descriptor.contextDigest), "")
-        .replace(`\n${emissionToolPrimaryInstruction(descriptor.binding)}`, "");
-      expect(stripped).toBe(extractionRender);
+      expect(withoutEmissionRouteDelta(emissionRender, descriptor.binding, descriptor.contextDigest)).toBe(extractionRender);
     }
 
     // The extraction route keeps its exact baseline: no descriptor, verbatim

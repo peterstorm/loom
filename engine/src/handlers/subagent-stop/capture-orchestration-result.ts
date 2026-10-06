@@ -392,6 +392,38 @@ function collectClaudeToolResults(
   }
 }
 
+/** One non-blank transcript line as the tolerant walks see it: a message with
+ *  a content array, or a line that is not a JSON object at all. Lines that
+ *  parse but carry no message content array are neither and are omitted. */
+type TranscriptMessageLine =
+  | Readonly<{ kind: "message"; index: number; role: unknown; content: readonly unknown[] }>
+  | Readonly<{ kind: "unclassifiable"; index: number }>;
+
+/** Parse each non-blank line once. Unclassifiable lines are YIELDED, not
+ *  dropped, so each walk states its own policy for them: the emission walk
+ *  counts them, the tool-output walk skips them. */
+function* transcriptMessageLines(lines: readonly string[]): Generator<TranscriptMessageLine> {
+  for (const [index, line] of lines.entries()) {
+    if (line.trim().length === 0) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line) as unknown;
+    } catch {
+      yield { kind: "unclassifiable", index };
+      continue;
+    }
+    if (typeof parsed !== "object" || parsed === null) {
+      yield { kind: "unclassifiable", index };
+      continue;
+    }
+    const message = (parsed as Record<string, unknown>)["message"];
+    if (typeof message !== "object" || message === null) continue;
+    const record = message as Record<string, unknown>;
+    if (!Array.isArray(record["content"])) continue;
+    yield { kind: "message", index, role: record["role"], content: record["content"] };
+  }
+}
+
 /** Collect the assistant `tool_use` blocks and the tool results (keyed by
  *  `tool_use_id`) from one bounded line walk, PLUS the walk's own
  *  incompleteness evidence. TOLERANT, like the Pi adapter's independent scan:
@@ -415,32 +447,14 @@ function collectClaudeToolBlocks(lines: readonly string[]): {
   const resultCounts = new Map<string, { isError: unknown; count: number }>();
   let unclassifiableLineCount = 0;
   let firstUnclassifiableLineOrigin: string | null = null;
-  const noteUnclassifiable = (lineIndex: number): void => {
-    unclassifiableLineCount += 1;
-    if (firstUnclassifiableLineOrigin === null) {
-      firstUnclassifiableLineOrigin = `transcript.line[${lineIndex}]`;
-    }
-  };
-  for (const [lineIndex, line] of lines.entries()) {
-    if (line.trim().length === 0) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line) as unknown;
-    } catch {
-      noteUnclassifiable(lineIndex); // May hide an emission call: counted, never silence.
-      continue;
-    }
-    if (typeof parsed !== "object" || parsed === null) {
-      noteUnclassifiable(lineIndex);
-      continue;
-    }
-    const message = (parsed as Record<string, unknown>)["message"];
-    if (typeof message !== "object" || message === null) continue;
-    const record = message as Record<string, unknown>;
-    if (!Array.isArray(record["content"])) continue;
-    const origin = `transcript.line[${lineIndex}]`;
-    if (record["role"] === "assistant") collectClaudeToolUses(record["content"], origin, toolUses);
-    else if (record["role"] === "user") collectClaudeToolResults(record["content"], resultCounts);
+  for (const line of transcriptMessageLines(lines)) {
+    const origin = `transcript.line[${line.index}]`;
+    if (line.kind === "unclassifiable") {
+      // May hide an emission call: counted, never silence.
+      unclassifiableLineCount += 1;
+      firstUnclassifiableLineOrigin ??= origin;
+    } else if (line.role === "assistant") collectClaudeToolUses(line.content, origin, toolUses);
+    else if (line.role === "user") collectClaudeToolResults(line.content, resultCounts);
   }
   const observedCallIds = new Set(toolUses.flatMap(({ id }) => id === null ? [] : [id]));
   const orphanResultIds = [...resultCounts.keys()].filter((id) => !observedCallIds.has(id));
@@ -463,15 +477,9 @@ function collectClaudeToolBlocks(lines: readonly string[]): {
  */
 export function claudeToolOutputsFromLines(lines: readonly string[]): readonly string[] {
   const outputs: string[] = [];
-  for (const line of lines) {
-    let parsed: unknown;
-    try { parsed = JSON.parse(line) as unknown; } catch { continue; }
-    if (typeof parsed !== "object" || parsed === null) continue;
-    const message = (parsed as Record<string, unknown>)["message"];
-    if (typeof message !== "object" || message === null) continue;
-    const record = message as Record<string, unknown>;
-    if (record["role"] !== "user" || !Array.isArray(record["content"])) continue;
-    for (const block of record["content"] as unknown[]) {
+  for (const line of transcriptMessageLines(lines)) {
+    if (line.kind === "unclassifiable" || line.role !== "user") continue;
+    for (const block of line.content) {
       if (typeof block !== "object" || block === null) continue;
       const result = block as Record<string, unknown>;
       if (result["type"] !== "tool_result" || result["is_error"] === true) continue;
@@ -500,98 +508,96 @@ export function claudeToolOutputsFromLines(lines: readonly string[]): readonly s
  * become incomplete frames, so a streamed-but-unexecuted call can never
  * become authoritative output. An incomplete observation is REPRESENTABLE as
  * itself and the runtime's fold refuses it — never reclassified as absence.
+ *
+ * The walk's own incompleteness is returned BESIDE the call frames, not as
+ * one of them: it is evidence about the transcript, and a refusal under
+ * extraction-only authority must name the walk instead of counting it as an
+ * observed emission call.
  */
-export function claudeEmissionFramesFromLines(
+export type ClaudeEmissionScan = Readonly<{
+  frames: readonly EmissionCallFrame[];
+  walkIncompleteness: string | null;
+}>;
+
+const incomplete = (toolCallId: string | null, reason: string): EmissionCallFrame =>
+  Object.freeze({ kind: "incomplete" as const, toolCallId, reason });
+
+/** One observed emission-family call as its frame: the guards run in order and
+ *  the first that fails names why the call is incomplete. */
+function emissionCallFrame(
+  toolUse: ClaudeToolUseBlock,
+  producerKind: PayloadProducerKindName,
+  resultsByCallId: ReadonlyMap<string, { readonly isError: unknown; readonly count: number }>,
+  attributed: ClaudeEmissionAttribution,
+): EmissionCallFrame {
+  const { id, origin } = toolUse;
+  if (id === null) {
+    return incomplete(null, `an emission tool call to ${JSON.stringify(toolUse.name)} was observed without a recoverable tool-call identity (${origin})`);
+  }
+  if (attributed.version === null) {
+    return incomplete(id, `emission tool call ${id} carries no issued schema version to bind against (${origin})`);
+  }
+  if (typeof toolUse.input !== "object" || toolUse.input === null || Array.isArray(toolUse.input)) {
+    return incomplete(id, `emission tool call ${id} was observed with ${JSON.stringify(toolUse.input)} arguments, not an object (${origin})`);
+  }
+  const result = resultsByCallId.get(id);
+  if (result === undefined) return incomplete(id, `emission tool call ${id} has no finalized tool result (${origin})`);
+  if (result.count !== 1) {
+    return incomplete(id, `emission tool call ${id} has ${result.count} finalized tool results; exactly one is required (${origin})`);
+  }
+  if (result.isError === true) return incomplete(id, `emission tool call ${id} failed (${origin})`);
+  return Object.freeze({
+    kind: "complete" as const,
+    call: Object.freeze({
+      requestId: attributed.requestId,
+      toolCallId: id,
+      kind: Object.freeze({ kind: producerKind }),
+      version: attributed.version,
+      arguments: Object.freeze({ ...(toolUse.input as Record<string, unknown>) }),
+    }),
+  });
+}
+
+export function claudeEmissionScanFromLines(
   lines: readonly string[],
   attributed: ClaudeEmissionAttribution,
-): readonly EmissionCallFrame[] {
+): ClaudeEmissionScan {
   const walk = collectClaudeToolBlocks(lines);
-  const { toolUses, resultsByCallId } = walk;
-  const frames: EmissionCallFrame[] = [];
-  for (const toolUse of toolUses) {
+  const frames = walk.toolUses.flatMap((toolUse): EmissionCallFrame[] => {
     const family = claudeEmissionToolFamily(toolUse.name);
-    if (family.kind === "unrelated") continue;
-    if (family.kind === "unregistered-emission-name") {
-      frames.push(Object.freeze({
-        kind: "incomplete" as const,
-        toolCallId: toolUse.id,
-        reason: `${toolUse.origin} names tool ${JSON.stringify(toolUse.name)}, which selects no frozen registry producer kind`,
-      }));
-      continue;
-    }
-    if (toolUse.id === null) {
-      frames.push(Object.freeze({
-        kind: "incomplete" as const,
-        toolCallId: null,
-        reason: `an emission tool call to ${JSON.stringify(toolUse.name)} was observed without a recoverable tool-call identity (${toolUse.origin})`,
-      }));
-      continue;
-    }
-    if (attributed.version === null) {
-      frames.push(Object.freeze({
-        kind: "incomplete" as const,
-        toolCallId: toolUse.id,
-        reason: `emission tool call ${toolUse.id} carries no issued schema version to bind against (${toolUse.origin})`,
-      }));
-      continue;
-    }
-    if (typeof toolUse.input !== "object" || toolUse.input === null || Array.isArray(toolUse.input)) {
-      frames.push(Object.freeze({
-        kind: "incomplete" as const,
-        toolCallId: toolUse.id,
-        reason: `emission tool call ${toolUse.id} was observed with ${JSON.stringify(toolUse.input)} arguments, not an object (${toolUse.origin})`,
-      }));
-      continue;
-    }
-    const result = resultsByCallId.get(toolUse.id);
-    if (result === undefined || result.count !== 1) {
-      frames.push(Object.freeze({
-        kind: "incomplete" as const,
-        toolCallId: toolUse.id,
-        reason: result === undefined
-          ? `emission tool call ${toolUse.id} has no finalized tool result (${toolUse.origin})`
-          : `emission tool call ${toolUse.id} has ${result.count} finalized tool results; exactly one is required (${toolUse.origin})`,
-      }));
-      continue;
-    }
-    if (result.isError === true) {
-      frames.push(Object.freeze({
-        kind: "incomplete" as const,
-        toolCallId: toolUse.id,
-        reason: `emission tool call ${toolUse.id} failed (${toolUse.origin})`,
-      }));
-      continue;
-    }
-    frames.push(Object.freeze({
-      kind: "complete" as const,
-      call: Object.freeze({
-        requestId: attributed.requestId,
-        toolCallId: toolUse.id,
-        kind: Object.freeze({ kind: family.producerKind }),
-        version: attributed.version,
-        arguments: Object.freeze({ ...(toolUse.input as Record<string, unknown>) }),
-      }),
-    }));
-  }
+    if (family.kind === "unrelated") return [];
+    return [family.kind === "unregistered-emission-name"
+      ? incomplete(toolUse.id, `${toolUse.origin} names tool ${JSON.stringify(toolUse.name)}, which selects no frozen registry producer kind`)
+      : emissionCallFrame(toolUse, family.producerKind, walk.resultsByCallId, attributed)];
+  });
   // An incomplete walk is represented as itself, never reclassified as
   // absence (AD-8; the upheld capture-review critical): an unclassifiable
   // line could carry the emission call and an orphan tool result proves a
   // tool_use was lost, so "zero emission frames" would be a claim the walk
-  // cannot prove. The frame routes through the runtime's existing refused-call
-  // vocabulary — the fallback records the refusal in the durable capture
-  // source instead of absorbing the loss as silence.
-  if (walk.unclassifiableLineCount > 0 || walk.orphanResultIds.length > 0) {
-    const orphanPart = walk.orphanResultIds.length === 0 ? "" :
-      `; ${walk.orphanResultIds.length} orphan tool result(s) with call ids ${walk.orphanResultIds.slice(0, 5).join(", ")}${walk.orphanResultIds.length > 5 ? ", …" : ""} whose tool_use block was never observed`;
-    frames.push(Object.freeze({
-      kind: "incomplete" as const,
-      toolCallId: null,
-      reason: `the transcript line walk is incomplete (${walk.unclassifiableLineCount} unclassifiable line(s)` +
+  // cannot prove. The capture runtime refuses it under every authority —
+  // never absorbing the loss as silence.
+  const complete = walk.unclassifiableLineCount === 0 && walk.orphanResultIds.length === 0;
+  const orphanPart = walk.orphanResultIds.length === 0 ? "" :
+    `; ${walk.orphanResultIds.length} orphan tool result(s) with call ids ${walk.orphanResultIds.slice(0, 5).join(", ")}${walk.orphanResultIds.length > 5 ? ", …" : ""} whose tool_use block was never observed`;
+  return Object.freeze({
+    frames: Object.freeze(frames),
+    walkIncompleteness: complete ? null
+      : `the transcript line walk is incomplete (${walk.unclassifiableLineCount} unclassifiable line(s)` +
         (walk.firstUnclassifiableLineOrigin === null ? "" : `, first at ${walk.firstUnclassifiableLineOrigin}`) +
         `${orphanPart}); an emission call could be hidden there, so the emission observation cannot claim absence (AD-8)`,
-    }));
-  }
-  return Object.freeze(frames);
+  });
+}
+
+/** The scan as ONE closed frame list, the walk's incompleteness as a trailing
+ *  call-less incomplete frame — the shape an emission-authority fold sees. */
+export function claudeEmissionFramesFromLines(
+  lines: readonly string[],
+  attributed: ClaudeEmissionAttribution,
+): readonly EmissionCallFrame[] {
+  const scan = claudeEmissionScanFromLines(lines, attributed);
+  return scan.walkIncompleteness === null
+    ? scan.frames
+    : Object.freeze([...scan.frames, incomplete(null, scan.walkIncompleteness)]);
 }
 
 /** The registration's issued emission schema version, as the transcript scan
@@ -738,9 +744,9 @@ export async function captureClaudeResult(
       const lines = claudeTranscriptLines(transcriptPath, 16_777_216);
       observedLines = lines;
       const candidates = claudeCandidatesFromLines(lines);
-      return attributed === null
-        ? captureCandidates(candidates)
-        : captureEmissionObservation(claudeEmissionFramesFromLines(lines, attributed), candidates);
+      if (attributed === null) return captureCandidates(candidates);
+      const scan = claudeEmissionScanFromLines(lines, attributed);
+      return captureEmissionObservation(scan.frames, candidates, scan.walkIncompleteness);
     } catch (error) {
       if (error instanceof ClaudeTranscriptReadError) {
         return claudeObservationUnavailable(input, runsRoot, runDirectory, "transcript-read", error.message);

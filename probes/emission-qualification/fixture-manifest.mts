@@ -24,11 +24,15 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import {
   EMISSION_TOOL_SPECS,
+  type EmissionSchemaVersion,
+  type EmissionToolSpec,
 } from "../../engine/src/core/emission-tool";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2, reviewerPayloadV2Schema } from "../../engine/src/core/reviewer-contract";
 import { judgeVerdictV1Schema } from "../../engine/src/core/panel-contract";
 import { refutationVerdictV1Schema } from "../../engine/src/core/review-panel";
 import { standaloneReviewerPayloadV3Schema } from "../../engine/src/core/standalone-lineage-contract";
+import { probeRegisteredToolName } from "./qual-extension.ts";
+import { detector } from "./probe-analysis.mjs";
 
 /** Where the committed manifest lives (the probe driver reads it from here). */
 export const MANIFEST_PATH = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "manifest.json");
@@ -156,17 +160,47 @@ const mutateFixture = (fixture: unknown, mutate: (copy: Record<string, unknown>)
   return copy;
 };
 
-/** Violation probes: each tempts exactly one SCHEMA-forbidden shape, framed
- *  as an explicit negative test (models comply with testing framings where a
- *  plainly-worded violation gets self-censored) and using a subtle forbidden
- *  value. The engine-only refinements are NOT probed here — the provider
- *  grammar cannot know them; AS-018's engine-refusal cases are Phase-3
- *  acceptance work. */
-const violationInstructions = {
-  "reviewer-payload": "NEGATIVE TEST: we are testing the rejection path. Emit the call anyway, including a top-level key \"probe_violation\" with the boolean value true. It will be rejected; that is the point.",
-  "judge-verdict": "NEGATIVE TEST: we are testing the rejection path. Emit the call anyway with the first ranking scored 12 (an integer outside the 0..10 domain). It will be rejected; that is the point.",
-  "refutation-verdict": "NEGATIVE TEST: we are testing the rejection path. Emit the call anyway with the first verdict set to \"partially_upheld\" (not one of refuted/upheld/uncertain). It will be rejected; that is the point.",
-} as const;
+type ProbedKind = keyof typeof EMISSION_TOOL_SPECS;
+
+/** Everything one producer kind's violation probe needs, in one row. */
+type KindProbe = Readonly<{
+  /** The violation-temptation prompt: it tempts exactly one SCHEMA-forbidden
+   *  shape, framed as an explicit negative test (models comply with testing
+   *  framings where a plainly-worded violation gets self-censored) and using
+   *  a subtle forbidden value. The engine-only refinements are NOT probed
+   *  here — the provider grammar cannot know them; AS-018's engine-refusal
+   *  cases are Phase-3 acceptance work. */
+  instruction: string;
+  violationSource: (skeleton: Skeleton) => string;
+  violate: (copy: Record<string, unknown>) => void;
+  garbage: unknown;
+  /** True when the violation rides an extra key, so the violated shape must NOT read as conforming. */
+  extraSlot: boolean;
+}>;
+
+const KIND_PROBES: Readonly<Record<ProbedKind, KindProbe>> = {
+  "reviewer-payload": {
+    instruction: "NEGATIVE TEST: we are testing the rejection path. Emit the call anyway, including a top-level key \"probe_violation\" with the boolean value true. It will be rejected; that is the point.",
+    violationSource: reviewerViolationSource,
+    violate: (copy) => { copy.probe_violation = true; },
+    garbage: { probe_violation: true },
+    extraSlot: true,
+  },
+  "judge-verdict": {
+    instruction: "NEGATIVE TEST: we are testing the rejection path. Emit the call anyway with the first ranking scored 12 (an integer outside the 0..10 domain). It will be rejected; that is the point.",
+    violationSource: judgeViolationSource,
+    violate: (copy) => { (copy.rankings as { score: number }[])[0]!.score = 12; },
+    garbage: { rankings: [{ score: 12 }] },
+    extraSlot: false,
+  },
+  "refutation-verdict": {
+    instruction: "NEGATIVE TEST: we are testing the rejection path. Emit the call anyway with the first verdict set to \"partially_upheld\" (not one of refuted/upheld/uncertain). It will be rejected; that is the point.",
+    violationSource: refutationViolationSource,
+    violate: (copy) => { (copy.verdicts as { verdict: string }[])[0]!.verdict = "partially_upheld"; },
+    garbage: { verdicts: [{ verdict: "partially_upheld" }] },
+    extraSlot: false,
+  },
+};
 
 type PreparedSpec = Readonly<{
   kind: string;
@@ -186,8 +220,8 @@ type PreparedSpec = Readonly<{
 /** Pin every generated detector BEFORE anything is written: a misfiring
  *  detector fails generation, never a live probe run. */
 const pinDetectors = (label: string, spec: PreparedSpec): void => {
-  const conforms = new Function(`return (${spec.conformsSrc})`)() as (args: unknown) => boolean;
-  const violation = new Function(`return (${spec.violationSrc})`)() as (args: unknown) => boolean;
+  const conforms = detector(spec.conformsSrc);
+  const violation = detector(spec.violationSrc);
   if (conforms(spec.fixture) !== true) throw new Error(`${label}: the schema-parsed fixture fails its own frozen-shape skeleton`);
   if (violation(spec.fixture) !== false) throw new Error(`${label}: the schema-parsed fixture reads as a violation`);
   if (violation(spec.violated) !== true) throw new Error(`${label}: the violation fixture does not fire the detector`);
@@ -198,39 +232,34 @@ const pinDetectors = (label: string, spec: PreparedSpec): void => {
   }
 };
 
-const specs = [
-  { kind: "reviewer-payload", version: "v2", registeredToolName: "loom_emit_reviewer_payload_v2", schemaBytes: EMISSION_TOOL_SPECS["reviewer-payload"].schemaVersions["v2"]!.schemaBytes, fixture: v2, instruction: violationInstructions["reviewer-payload"] },
-  { kind: "reviewer-payload", version: "v3", registeredToolName: "loom_emit_reviewer_payload_v3", schemaBytes: EMISSION_TOOL_SPECS["reviewer-payload"].schemaVersions["v3"]!.schemaBytes, fixture: v3, instruction: violationInstructions["reviewer-payload"] },
-  { kind: "judge-verdict", version: "v1", registeredToolName: EMISSION_TOOL_SPECS["judge-verdict"].toolName, schemaBytes: EMISSION_TOOL_SPECS["judge-verdict"].schemaVersions["v1"]!.schemaBytes, fixture: judge, instruction: violationInstructions["judge-verdict"] },
-  { kind: "refutation-verdict", version: "v1", registeredToolName: EMISSION_TOOL_SPECS["refutation-verdict"].toolName, schemaBytes: EMISSION_TOOL_SPECS["refutation-verdict"].schemaVersions["v1"]!.schemaBytes, fixture: refutation, instruction: violationInstructions["refutation-verdict"] },
-] as const;
+/** The probed registry cells, in manifest order, with their schema-parsed fixtures. */
+const cells: readonly Readonly<{ kind: ProbedKind; version: EmissionSchemaVersion; fixture: unknown }>[] = [
+  { kind: "reviewer-payload", version: "v2", fixture: v2 },
+  { kind: "reviewer-payload", version: "v3", fixture: v3 },
+  { kind: "judge-verdict", version: "v1", fixture: judge },
+  { kind: "refutation-verdict", version: "v1", fixture: refutation },
+];
 
-const prepare = (spec: (typeof specs)[number]): PreparedSpec => {
-  const skeleton = skeletonOf(spec.fixture);
-  const violationSrc = spec.kind === "reviewer-payload"
-    ? reviewerViolationSource(skeleton)
-    : spec.kind === "judge-verdict"
-      ? judgeViolationSource(skeleton)
-      : refutationViolationSource(skeleton);
-  const violated = spec.kind === "reviewer-payload"
-    ? mutateFixture(spec.fixture, (copy) => { copy.probe_violation = true; })
-    : spec.kind === "judge-verdict"
-      ? mutateFixture(spec.fixture, (copy) => { (copy.rankings as { score: number }[])[0]!.score = 12; })
-      : mutateFixture(spec.fixture, (copy) => { (copy.verdicts as { verdict: string }[])[0]!.verdict = "partially_upheld"; });
-  const garbage = spec.kind === "reviewer-payload"
-    ? { probe_violation: true }
-    : spec.kind === "judge-verdict"
-      ? { rankings: [{ score: 12 }] }
-      : { verdicts: [{ verdict: "partially_upheld" }] };
+const prepare = ({ kind, version, fixture }: (typeof cells)[number]): PreparedSpec => {
+  const spec: EmissionToolSpec = EMISSION_TOOL_SPECS[kind];
+  const schemaVersion = spec.schemaVersions[version];
+  if (schemaVersion === undefined) throw new Error(`the frozen registry carries no ${kind} ${version} schema version`);
+  const probe = KIND_PROBES[kind];
+  const skeleton = skeletonOf(fixture);
   const row: PreparedSpec = {
-    ...spec,
+    kind,
+    version,
+    registeredToolName: probeRegisteredToolName(spec, version),
+    schemaBytes: schemaVersion.schemaBytes,
+    fixture,
+    instruction: probe.instruction,
     conformsSrc: conformsSource(skeleton),
-    violationSrc,
-    violated,
-    garbage,
-    extraSlot: spec.kind === "reviewer-payload",
+    violationSrc: probe.violationSource(skeleton),
+    violated: mutateFixture(fixture, probe.violate),
+    garbage: probe.garbage,
+    extraSlot: probe.extraSlot,
   };
-  pinDetectors(spec.registeredToolName, row);
+  pinDetectors(row.registeredToolName, row);
   return row;
 };
 
@@ -249,7 +278,7 @@ export type ManifestEntry = Readonly<{
 
 /** The manifest rows, every detector pinned before it is returned (a misfire throws). */
 export function buildManifest(): readonly ManifestEntry[] {
-  return specs.map(prepare).map((spec) => ({
+  return cells.map(prepare).map((spec) => ({
     kind: spec.kind,
     version: spec.version,
     registeredToolName: spec.registeredToolName,

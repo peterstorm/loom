@@ -72,6 +72,10 @@ describe("unifiedDiff", () => {
       fc.assert(fc.property(text, text, (base, head) => {
         writeFileSync(join(root, "a"), base); writeFileSync(join(root, "b"), head);
         const git = spawnSync("git", ["diff", "--no-index", "--minimal", "--numstat", "--", join(root, "a"), join(root, "b")], { encoding: "utf8" });
+        // A dead oracle (git unspawnable, or a git failure) must fail loudly,
+        // never read as "no diff": `--no-index` exits 1 exactly when the files differ.
+        expect(git.error, "git could not be spawned").toBeUndefined();
+        expect(git.status, git.stderr).toBe(base === head ? 0 : 1);
         const [added = "0", removed = "0"] = git.stdout.trim() === "" ? [] : git.stdout.trim().split(/\s+/);
         const rows = unifiedDiff("f", base, head).split("\n").filter((row) => !row.startsWith("+++ ") && !row.startsWith("--- "));
         expect([rows.filter((row) => row.startsWith("+")).length, rows.filter((row) => row.startsWith("-")).length])

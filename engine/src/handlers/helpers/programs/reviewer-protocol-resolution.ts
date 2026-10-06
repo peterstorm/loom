@@ -4,9 +4,8 @@
  * durable publication, and the published Context Packet — never from the
  * reviewer payload's shape or a global current version.
  */
-import type { PreparedStandaloneSuccessor } from '../../../core/standalone-review-model';
+import type { FrozenStandaloneReviewAuthority, PreparedStandaloneSuccessor } from '../../../core/standalone-review-model';
 import { parseIssuedStandaloneSuccessorReviewer, standaloneSuccessorReviewerRegistration } from '../../../core/standalone-successor-reviewer';
-import type { FrozenStandaloneReviewAuthority } from '../../../core/standalone-review-model';
 import type { StandaloneReviewerProtocolResolver } from '../../../core/standalone-review';
 import { canonicalStructuralEquals, sameAgentRequestAuthority, type AgentRequestAuthority, type DomainResult } from '../../../core/orchestration-contract';
 import { safeIoCause } from '../../../core/safe-io-cause';

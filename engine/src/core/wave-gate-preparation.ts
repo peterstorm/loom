@@ -114,9 +114,8 @@ function deriveWaveRefutationVerifierSlots(plan: WaveRefutationPlan): DomainResu
     claude: canonicalRecord({ harness: "claude-code" as const, model: "opus" as const }),
   });
   const slots: AgentRosterSlot[] = [];
-  for (let index = 0; index < plan.lenses.length; index++) {
-    const lens = plan.lenses[index]!;
-    const findingIds = [plan.findings[0].id, ...plan.findings.slice(1).map(({ id }) => id)] as const;
+  const findingIds = [plan.findings[0].id, ...plan.findings.slice(1).map(({ id }) => id)] as const;
+  for (const lens of plan.lenses) {
     const binding = deriveRefutationVerifierBinding(plan.runId, lens, findingIds);
     if (!binding.ok) return preparationFailure(binding.errors.join("; "));
     const attempts = ([1, 2] as const).map((attempt) => {

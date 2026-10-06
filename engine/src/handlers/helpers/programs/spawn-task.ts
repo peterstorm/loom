@@ -75,6 +75,27 @@ const describeProtocolProjection = (projection: RegisteredReviewProtocolProjecti
     ? "the archived schema-1 contract (no issued emission schema)"
     : `schema version ${projection.schemaVersion} with issued digest ${projection.reviewerProtocol.schemaDigest}`;
 
+/** What `reviewerEmissionProjection` renders for one request. */
+type ReviewerEmissionProjection = Readonly<{
+  /** The bootstrap text, rendered once and reused by renderSpawnTask. */
+  bootstrap: string;
+  /** The descriptor line; empty when the route is not emission. */
+  descriptor: string;
+  /** The tool-primary instruction on the emission route; otherwise the
+   *  caller's instruction verbatim (FR-020). */
+  instruction: string;
+}>;
+
+type EmissionRouteObservation = Readonly<{
+  kind: "extraction-only";
+  requestId: string;
+  reason: string;
+}>;
+
+const reportEmissionRoute = (observation: EmissionRouteObservation): void => {
+  process.stderr.write(`${JSON.stringify({ event: "loom-emission-route", ...observation })}\n`);
+};
+
 /**
  * One reviewer request's issued emission projection (AD-6/AD-7): the request
  * programs' descriptor/instruction rendering from ISSUED authority. The
@@ -98,26 +119,6 @@ const describeProtocolProjection = (projection: RegisteredReviewProtocolProjecti
  * drive reports it — no silent degradation, no fallback to a tool the surface
  * cannot provide (US4).
  */
-type ReviewerEmissionProjection = Readonly<{
-  /** The bootstrap text, rendered once and reused by renderSpawnTask. */
-  bootstrap: string;
-  /** The descriptor line; empty when the route is not emission. */
-  descriptor: string;
-  /** The tool-primary instruction on the emission route; otherwise the
-   *  caller's instruction verbatim (FR-020). */
-  instruction: string;
-}>;
-
-type EmissionRouteObservation = Readonly<{
-  kind: "extraction-only";
-  requestId: string;
-  reason: string;
-}>;
-
-const reportEmissionRoute = (observation: EmissionRouteObservation): void => {
-  process.stderr.write(`${JSON.stringify({ event: "loom-emission-route", ...observation })}\n`);
-};
-
 function reviewerEmissionProjection(
   handle: RunDirHandle,
   authority: AgentRequestAuthority,

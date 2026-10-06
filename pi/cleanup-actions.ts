@@ -60,7 +60,7 @@ export function runPiStartupSweeps(
           else reportingFailures.push(`${label} unavailable`);
         } catch (reportError) {
           reportingFailures.push(
-            `${label} failed: ${reportError instanceof Error ? reportError.message : String(reportError)}`,
+            `${label} failed: ${describeCause(reportError)}`,
           );
         }
       };
@@ -100,7 +100,7 @@ export async function runPiCleanupActions(
     try {
       await action.run();
     } catch (error) {
-      errors.push(`${action.label}: ${error instanceof Error ? error.message : String(error)}`);
+      errors.push(`${action.label}: ${describeCause(error)}`);
     }
   }
   return errors;
@@ -108,6 +108,10 @@ export async function runPiCleanupActions(
 
 export const cleanupFailureSuffix = (errors: readonly string[]): string =>
   errors.length === 0 ? "" : ` Cleanup failures: ${errors.join("; ")}`;
+
+/** The message of a thrown cause: an `Error`'s own message, anything else stringified. */
+export const describeCause = (cause: unknown): string =>
+  cause instanceof Error ? cause.message : String(cause);
 
 type PiWriteGrantInjectionPorts = Readonly<{
   inject(task: string, grant: IssuedWriteGrant): string;
@@ -132,7 +136,7 @@ export async function injectPiWriteGrantWithRevocation(
       run: () => ports.revoke(grant.token),
     }]);
     throw new Error(
-      `write-grant injection failed: ${injectionError instanceof Error ? injectionError.message : String(injectionError)}` +
+      `write-grant injection failed: ${describeCause(injectionError)}` +
         cleanupFailureSuffix(cleanupErrors),
       { cause: injectionError },
     );

@@ -91,13 +91,13 @@ function resolveObservation<T, R>(
   return observedValue(observed.value);
 }
 
-/** One file-local shape for the module's six spawnSync→probe wraps
+/** One file-local shape for the module's eight spawnSync→probe wraps
  *  (gitPaths, gitText, candidateReference, candidateMergeBase,
- *  trackedAdditions, untrackedAdditions): the adapter states the shared
+ *  trackedAdditions, untrackedAdditions, and baselineBlob's two): the adapter states the shared
  *  spawn-failure refusal once, and each call site passes only its own spawn
  *  options, value decode, and refusal labels — the real per-site differences
  *  (buffer vs utf8 stderr decoding, the no-index probe's status-1 acceptance,
- *  message labels) stay visible as parameters instead of a diff across six
+ *  message labels) stay visible as parameters instead of a diff across eight
  *  near-identical blocks. */
 function gitSpawnProbe<T>(
   args: readonly string[],
@@ -289,27 +289,50 @@ export function reviewBaseline(changed: DerivedChangedPaths): string {
   return changed.authority.base_revision ?? changed.authority.head_revision;
 }
 
+/** One `ls-tree -z` entry: `<mode> <type> <object>\t<path>\0`. */
+const TREE_ENTRY = /^[0-7]{6} ([a-z]+) ([0-9a-f]+)\t([^\0]*)\0$/;
+
 /**
  * The exact bytes of `path` in `revision`, or null when the revision has no
  * such path (the file is new in this change). The read-coverage frozen diff
- * (ADR-0022) takes its base side from here. Only Git's two "path is not in
- * this revision" refusals mean absence; any other failure (an invalid
- * revision, an unreadable object) throws with attribution, so an unreadable
- * base can never become an "added file" diff.
+ * (ADR-0022) takes its base side from here. Absence is the plumbing answer an
+ * `ls-tree` of the exact path gives by listing nothing — never a match on
+ * Git's localized stderr text. Every other outcome (an invalid revision, a
+ * path that names a tree or submodule, an unreadable object) throws with
+ * attribution, so an unreadable base can never become an "added file" diff.
+ * Both probes go through the module's `gitSpawnProbe`/`observeGitProbe` seam.
  */
 export function baselineBlob(revision: string, path: string): Uint8Array | null {
   const object = `${revision}:${path}`;
-  const probe = spawnSync("git", ["cat-file", "-e", object], { encoding: "buffer" });
-  if (probe.error) throw new Error(`git cat-file could not be spawned: ${probe.error.message}`);
-  if (probe.status !== 0) {
-    const stderr = spawnText(probe.stderr).trim();
-    if (/^fatal: path '.*' (does not exist in|exists on disk, but not in) '/.test(stderr)) return null;
-    throw new Error(stderr || `git cat-file -e failed for ${object}`);
+  const listing = resolveObservation(
+    observeGitProbe(
+      gitSpawnProbe(["ls-tree", "-z", "--full-tree", revision, "--", path], { encoding: "buffer" }, (result) =>
+        result.status !== 0
+          ? stderrRefusal(result.stderr, `git ls-tree failed for ${object}`)
+          : { ok: true as const, value: spawnText(result.stdout) }),
+      (entry) => entry === "",
+    ),
+    () => null,
+    (entry: string | null) => entry,
+  );
+  if (listing === null) return null;
+  const [, type, blobId, listedPath] = TREE_ENTRY.exec(listing) ?? [];
+  if (type === undefined || blobId === undefined || listedPath !== path) {
+    throw new Error(`git ls-tree listed an unexpected entry for ${object}`);
   }
-  const blob = spawnSync("git", ["cat-file", "blob", object], { encoding: "buffer", maxBuffer: 64 * 1024 * 1024 });
-  if (blob.error) throw new Error(`git cat-file could not be spawned: ${blob.error.message}`);
-  if (blob.status !== 0) throw new Error(spawnText(blob.stderr).trim() || `git cat-file blob failed for ${object}`);
-  return new Uint8Array(blob.stdout);
+  if (type !== "blob") throw new Error(`${object} is a ${type}, not a file`);
+  return resolveObservation(
+    observeGitProbe(
+      gitSpawnProbe(["cat-file", "blob", blobId], { encoding: "buffer", maxBuffer: 64 * 1024 * 1024 }, (result) =>
+        result.status !== 0
+          ? stderrRefusal(result.stderr, `git cat-file blob failed for ${object}`)
+          : { ok: true as const, value: new Uint8Array(Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.from(result.stdout)) }),
+      (bytes) => bytes.length === 0,
+    ),
+    // An empty file is a real blob: confirmed-empty bytes are its content.
+    (confirmed) => confirmed.third,
+    (bytes) => bytes,
+  );
 }
 
 export function metadata(

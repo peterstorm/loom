@@ -16,7 +16,7 @@ import { settleSpecCheck } from "./spec-check";
 import { deriveWaveAdvisoryDecisionRequest } from "./wave-gate-preparation";
 import { WAVE_REVIEW_AGENTS } from "./model-profiles";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
-import { waveSpecCheckDocumentsMatch, type WaveReviewContextAuthority } from "./wave-review-authority";
+import { taskReviewScope, waveSpecCheckDocumentsMatch, type WaveReviewContextAuthority } from "./wave-review-authority";
 
 /**
  * Which dimension of a Wave Gate decision's authority failed to match, or `null`
@@ -169,13 +169,12 @@ export function waveReviewerSlotProblem(
     return "request does not belong to the exact current Wave Review Packet slot";
   }
   if (protocol.protocolVersion === 2) {
-    const scope = [...new Set([...(task.file_list ?? []), ...(task.files_modified ?? [])])].sort();
     if (!canonicalStructuralEquals(run.expected_agents, WAVE_REVIEW_AGENTS) ||
         !canonicalStructuralEquals(run.reviewer_protocol, protocol.reviewerProtocol) ||
         run.wave_gate_run_id !== request.runId || run.wave_gate_authority_digest !== context.authorityDigest ||
         run.workspace_head_sha !== taskRun.workspaceHeadSha ||
         !canonicalStructuralEquals(run.workspace_scope, protocol.subject.scope) ||
-        !canonicalStructuralEquals(scope, protocol.subject.scope) ||
+        !canonicalStructuralEquals(taskReviewScope(task), protocol.subject.scope) ||
         !canonicalStructuralEquals(run.prior_finding_ids, protocol.subject.priorFindingIds) ||
         (checkAttempt && (slot.request_id !== request.requestId || slot.context_digest !== request.contextDigest))) {
       return "current reviewer protocol differs from protected workspace/request/context authority";

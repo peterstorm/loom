@@ -21,8 +21,9 @@
  * PRODUCTION execute, exactly as emission-tool.test.ts does), the transcript
  * is scanned by the production adapters, and the capture crosses the same
  * runtime the Pi and Claude adapters call. The model transport is scripted
- * (the same counting posture as emission-tool.test.ts), so "real" means the
- * real harness surfaces and real run directory, never a real provider dial.
+ * through the shared `fixtures/pi-scripted-loop` harness emission-tool.test.ts
+ * also runs, so "real" means the real harness surfaces and real run
+ * directory, never a real provider dial.
  *
  * The discriminating controls (AD-10/AS-022) run against the SAME production
  * path: a bypassed selection (candidates-only arm) fails the tool-only
@@ -34,13 +35,17 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  createAssistantMessageEventStream,
-  type AssistantMessage,
-  type Model,
-} from "@earendil-works/pi-ai";
-import { runAgentLoop, type AgentContext, type AgentEvent, type AgentLoopConfig, type StreamFn } from "@earendil-works/pi-agent-core";
+import type { AgentEvent } from "@earendil-works/pi-agent-core";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { validJudgeArguments, validReviewerArgumentsV2, whitespaceOnlyArguments } from "../fixtures/emission-arguments";
+import {
+  acknowledgedEmissionCall,
+  assistantFinalTextMessage,
+  assistantToolCallMessage,
+  observedEmissionTool,
+  runScriptedLoop,
+  scriptTurns,
+} from "../fixtures/pi-scripted-loop";
 import {
   admitEmissionArguments,
   EMISSION_TOOL_SPECS,
@@ -49,13 +54,12 @@ import {
 import {
   issuedReviewerPayloadClaim,
 } from "../../src/core/spawn-admission";
-import { REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_SCHEMA_V2, reviewerPayloadV2Schema, CURRENT_REVIEWER_PROTOCOL } from "../../src/core/reviewer-contract";
+import { REVIEWER_PAYLOAD_SCHEMA_V2, CURRENT_REVIEWER_PROTOCOL } from "../../src/core/reviewer-contract";
 import { sha256Hex } from "../../src/core/digest";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import { buildContextPacket, encodeByteSection } from "../../src/orchestration/context-packets";
 import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../src/orchestration/run-directory-handle";
 import { captureEmissionObservation, captureHarnessResult } from "../../src/orchestration/harness-capture-runtime";
-import { emissionToolDefinition } from "../../../pi/emission-tool";
 import { piEmissionCallFrames, piResultFinalPayloadCandidates } from "../../../pi/transcript-adapter";
 import type { EmissionCallFrame } from "../../src/core/harness-capture";
 import type { IssuedEmissionBinding } from "../../src/core/emission-tool";
@@ -161,144 +165,24 @@ async function stagedReviewerRequest(nativeId: string): Promise<StagedRun> {
 }
 
 // ---------------------------------------------------------------------------
-// The real Pi child loop with the PRODUCTION emission tool (scripted transport)
+// Canonical fixtures (the shared emission-argument fixtures) and the
+// production transcript projection
 // ---------------------------------------------------------------------------
 
-const scriptedModel: Model<"openai-completions"> = {
-  id: "scripted-vertical-model",
-  name: "scripted-vertical-model",
-  api: "openai-completions",
-  provider: "scripted",
-  baseUrl: "http://127.0.0.1:9/v1",
-  reasoning: false,
-  input: ["text"],
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  contextWindow: 128_000,
-  maxTokens: 4_096,
-};
+const reviewerV2Arguments = (): unknown => validReviewerArgumentsV2("the vertical slice carried the frozen schema");
 
-const zeroUsage = () => ({
-  input: 1,
-  output: 1,
-  cacheRead: 0,
-  cacheWrite: 0,
-  totalTokens: 2,
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-});
+/** The judge-verdict v1 arguments the misbound-kind cases emit. */
+const JUDGE_ARGUMENTS = validJudgeArguments("extensibility");
 
-const assistantToolCallMessage = (calls: readonly { type: "toolCall"; id: string; name: string; arguments: unknown }[]): AssistantMessage =>
-  ({
-    role: "assistant",
-    content: calls,
-    api: "openai-completions",
-    provider: "scripted",
-    model: scriptedModel.id,
-    usage: zeroUsage(),
-    stopReason: "toolUse",
-    timestamp: Date.now(),
-  }) as AssistantMessage;
-
-const assistantFinalTextMessage = (text: string): AssistantMessage =>
-  ({
-    role: "assistant",
-    content: [{ type: "text", text }],
-    api: "openai-completions",
-    provider: "scripted",
-    model: scriptedModel.id,
-    usage: zeroUsage(),
-    stopReason: "stop",
-    timestamp: Date.now(),
-  }) as AssistantMessage;
-
-interface ScriptedTurn {
-  readonly streamFn: StreamFn;
-  readonly callCount: () => number;
-}
-
-const scriptTurns = (responses: readonly AssistantMessage[]): ScriptedTurn => {
-  let call = 0;
-  const streamFn: StreamFn = (_model, _context, options) => {
-    const message: AssistantMessage | undefined = options?.signal?.aborted ? undefined : responses[call];
-    if (message === undefined) {
-      throw new Error(`scripted transport exhausted after ${call} response(s)`);
-    }
-    call += 1;
-    const stream = createAssistantMessageEventStream();
-    stream.push({ type: "start", partial: message });
-    stream.push({
-      type: "done",
-      reason: message.stopReason === "toolUse" ? "toolUse" : "stop",
-      message,
-    });
-    return stream;
-  };
-  return { streamFn, callCount: () => call };
-};
-
-const asAgentContext = (tools: readonly Record<string, unknown>[]): AgentContext =>
-  ({ systemPrompt: "loom reviewer agent", messages: [], tools }) as unknown as AgentContext;
-
-const asLoopConfig = (): AgentLoopConfig =>
-  ({ model: scriptedModel, convertToLlm: (messages: readonly unknown[]) => messages }) as unknown as AgentLoopConfig;
-
-const runScriptedLoop = async (
-  tools: readonly Record<string, unknown>[],
-  script: ScriptedTurn,
-): Promise<{ readonly events: AgentEvent[]; readonly messages: readonly unknown[] }> => {
-  const events: AgentEvent[] = [];
-  const messages = await runAgentLoop(
-    [{ role: "user", content: "Emit the issued payload exactly once.", timestamp: Date.now() }],
-    asAgentContext(tools),
-    asLoopConfig(),
-    (event) => {
-      events.push(event);
-    },
-    undefined,
-    script.streamFn as StreamFn,
-  );
-  return { events, messages };
-};
-
-/** The PRODUCTION emission tool definition over the issued binding, with the
- *  suite's observation record wrapping the PRODUCTION execute — the exact
- *  registration surface the extension registers, never a test twin. */
-const productionEmissionTool = (issued: IssuedEmissionBinding, observed: unknown[]): Record<string, unknown> => {
-  const definition = emissionToolDefinition(issued);
-  return {
-    ...definition,
-    execute: async (toolCallId: string, params: unknown) => {
-      observed.push(params);
-      return definition.execute(toolCallId, params);
-    },
-  } as Record<string, unknown>;
-};
-
-// ---------------------------------------------------------------------------
-// Canonical fixtures
-// ---------------------------------------------------------------------------
-
-const reviewerV2Arguments = (): unknown => reviewerPayloadV2Schema.parse({
-  schemaVersion: 2,
-  kind: "standalone-review",
-  findings: [{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim: "the vertical slice carried the frozen schema" }],
-});
-
-const whitespaceV2Arguments = (): unknown => {
-  const finding = reviewerPayloadV2Schema.parse({
-    schemaVersion: 2,
-    kind: "standalone-review",
-    findings: [{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim: "real claim" }],
-  }).findings[0]!;
-  return { schemaVersion: 2, kind: "standalone-review", findings: [{ ...finding, claim: "   " }] };
-};
+type ProductionObservation = Readonly<{
+  frames: readonly EmissionCallFrame[];
+  candidates: readonly Readonly<{ origin: string; text: string }>[];
+}>;
 
 /** The production transcript projection over a settled child transcript: the
  *  REAL `piEmissionCallFrames` scan (request-bound, successful-execution-only)
  *  beside the REAL `piResultFinalPayloadCandidates` fallback projection. */
-function productionObservation(messages: readonly unknown[], issued: IssuedEmissionBinding): {
-  readonly frames: readonly EmissionCallFrame[];
-  readonly candidates: readonly { readonly origin: string; readonly text: string }[];
-} {
+function productionObservation(messages: readonly unknown[], issued: IssuedEmissionBinding): ProductionObservation {
   const scanned = piEmissionCallFrames(messages, issued);
   if (!scanned.ok) throw new Error(scanned.errors.join("; "));
   const candidates = piResultFinalPayloadCandidates(messages);
@@ -310,7 +194,7 @@ function productionObservation(messages: readonly unknown[], issued: IssuedEmiss
 
 const captureThroughSeam = (
   staged: StagedRun,
-  observation: { readonly frames: readonly EmissionCallFrame[]; readonly candidates: readonly { readonly origin: string; readonly text: string }[] },
+  observation: ProductionObservation,
 ) =>
   captureHarnessResult({
     harness: "pi",
@@ -347,7 +231,7 @@ describe("the real reviewer v2 request-to-ingestion vertical slice", () => {
     const script = scriptTurns([
       assistantToolCallMessage([{ type: "toolCall", id: "call-vertical-1", name: V2_SPEC.toolName, arguments: canonical }]),
     ]);
-    const { events, messages } = await runScriptedLoop([productionEmissionTool(staged.issued, observed)], script);
+    const { events, messages } = await runScriptedLoop([observedEmissionTool(staged.issued, observed)], script);
     expect(script.callCount()).toBe(1);
     expect(observed).toHaveLength(1);
     expect(observed[0]).toEqual(canonical);
@@ -389,13 +273,9 @@ describe("the real reviewer v2 request-to-ingestion vertical slice", () => {
 
   it("captures the final-message fallback when the model never calls the tool, recording the extraction source", async () => {
     const staged = await stagedReviewerRequest("pi-vertical-fallback");
-    const finalPayload = reviewerPayloadV2Schema.parse({
-      schemaVersion: 2,
-      kind: "standalone-review",
-      findings: [{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim: "fallback extraction" }],
-    });
+    const finalPayload = validReviewerArgumentsV2("fallback extraction");
     const script = scriptTurns([assistantFinalTextMessage(JSON.stringify(finalPayload, null, 2))]);
-    const { messages } = await runScriptedLoop([productionEmissionTool(staged.issued, [])], script);
+    const { messages } = await runScriptedLoop([observedEmissionTool(staged.issued, [])], script);
 
     const outcome = await captureThroughSeam(staged, productionObservation(messages, staged.issued));
     expect(outcome.kind).toBe("captured");
@@ -415,12 +295,8 @@ describe("the real reviewer v2 request-to-ingestion vertical slice", () => {
     // production transcript scan.
     const args = reviewerV2Arguments();
     const messages: readonly unknown[] = [
-      assistantToolCallMessage([{ type: "toolCall", id: "call-a", name: V2_SPEC.toolName, arguments: args }]),
-      { role: "toolResult", toolCallId: "call-a", toolName: V2_SPEC.toolName, isError: false,
-        content: [{ type: "text", text: "payload acknowledged" }], details: {}, timestamp: Date.now() },
-      assistantToolCallMessage([{ type: "toolCall", id: "call-b", name: V2_SPEC.toolName, arguments: args }]),
-      { role: "toolResult", toolCallId: "call-b", toolName: V2_SPEC.toolName, isError: false,
-        content: [{ type: "text", text: "payload acknowledged" }], details: {}, timestamp: Date.now() },
+      ...acknowledgedEmissionCall("call-a", V2_SPEC.toolName, args),
+      ...acknowledgedEmissionCall("call-b", V2_SPEC.toolName, args),
       assistantFinalTextMessage(JSON.stringify(reviewerV2Arguments(), null, 2)),
     ];
     const outcome = await captureThroughSeam(staged, productionObservation(messages, staged.issued));
@@ -441,11 +317,7 @@ describe("the real reviewer v2 request-to-ingestion vertical slice", () => {
     const staged = await stagedReviewerRequest("pi-vertical-misbound");
     const judgeSpec = EMISSION_TOOL_SPECS["judge-verdict"];
     const messages: readonly unknown[] = [
-      assistantToolCallMessage([{ type: "toolCall", id: "call-judge", name: judgeSpec.toolName,
-        arguments: { criterion: "extensibility",
-          rankings: [{ candidate: "candidate-type-driven-fp.md", score: 8, fatal_flaw: null, strongest_idea: "the frozen registry" }] } }]),
-      { role: "toolResult", toolCallId: "call-judge", toolName: judgeSpec.toolName, isError: false,
-        content: [{ type: "text", text: "payload acknowledged" }], details: {}, timestamp: Date.now() },
+      ...acknowledgedEmissionCall("call-judge", judgeSpec.toolName, JUDGE_ARGUMENTS),
     ];
     const outcome = await captureThroughSeam(staged, productionObservation(messages, staged.issued));
     expect(outcome.kind).toBe("terminal-rejection");
@@ -458,9 +330,7 @@ describe("the real reviewer v2 request-to-ingestion vertical slice", () => {
     const staged = await stagedReviewerRequest("pi-vertical-replay");
     const canonical = reviewerV2Arguments();
     const messages: readonly unknown[] = [
-      assistantToolCallMessage([{ type: "toolCall", id: "call-replay", name: V2_SPEC.toolName, arguments: canonical }]),
-      { role: "toolResult", toolCallId: "call-replay", toolName: V2_SPEC.toolName, isError: false,
-        content: [{ type: "text", text: "payload acknowledged" }], details: {}, timestamp: Date.now() },
+      ...acknowledgedEmissionCall("call-replay", V2_SPEC.toolName, canonical),
     ];
     const observation = productionObservation(messages, staged.issued);
     const first = await captureThroughSeam(staged, observation);
@@ -481,9 +351,7 @@ describe("the real reviewer v2 request-to-ingestion vertical slice", () => {
     writeFileSync(join(staged.directory, "program.json"), "{corrupt");
     const canonical = reviewerV2Arguments();
     const messages: readonly unknown[] = [
-      assistantToolCallMessage([{ type: "toolCall", id: "call-infra", name: V2_SPEC.toolName, arguments: canonical }]),
-      { role: "toolResult", toolCallId: "call-infra", toolName: V2_SPEC.toolName, isError: false,
-        content: [{ type: "text", text: "payload acknowledged" }], details: {}, timestamp: Date.now() },
+      ...acknowledgedEmissionCall("call-infra", V2_SPEC.toolName, canonical),
     ];
     const outcome = await captureThroughSeam(staged, productionObservation(messages, staged.issued));
     expect(outcome.kind).toBe("retriable-failure");
@@ -505,16 +373,10 @@ describe("the real reviewer v2 request-to-ingestion vertical slice", () => {
     // an incomplete observation (its own terminal posture, proven in
     // emission-tool.test.ts); this case exercises the kernel's complete-call
     // row through the same production scan and seam.
-    const refusalArgs = whitespaceV2Arguments();
-    const finalPayload = reviewerPayloadV2Schema.parse({
-      schemaVersion: 2,
-      kind: "standalone-review",
-      findings: [{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim: "settled after the refusal" }],
-    });
+    const refusalArgs = whitespaceOnlyArguments("reviewer-payload");
+    const finalPayload = validReviewerArgumentsV2("settled after the refusal");
     const messages: readonly unknown[] = [
-      assistantToolCallMessage([{ type: "toolCall", id: "call-refused", name: V2_SPEC.toolName, arguments: refusalArgs }]),
-      { role: "toolResult", toolCallId: "call-refused", toolName: V2_SPEC.toolName, isError: false,
-        content: [{ type: "text", text: "payload acknowledged" }], details: {}, timestamp: Date.now() },
+      ...acknowledgedEmissionCall("call-refused", V2_SPEC.toolName, refusalArgs),
       assistantFinalTextMessage(JSON.stringify(finalPayload, null, 2)),
     ];
     const outcome = await captureThroughSeam(staged, productionObservation(messages, staged.issued));
@@ -538,9 +400,7 @@ describe("the real reviewer v2 request-to-ingestion vertical slice", () => {
       const staged = await stagedReviewerRequest("pi-vertical-bypass");
       const canonical = reviewerV2Arguments();
       const messages: readonly unknown[] = [
-        assistantToolCallMessage([{ type: "toolCall", id: "call-bypass", name: V2_SPEC.toolName, arguments: canonical }]),
-        { role: "toolResult", toolCallId: "call-bypass", toolName: V2_SPEC.toolName, isError: false,
-          content: [{ type: "text", text: "payload acknowledged" }], details: {}, timestamp: Date.now() },
+        ...acknowledgedEmissionCall("call-bypass", V2_SPEC.toolName, canonical),
       ];
       // Selection bypassed: the runtime sees the candidates projection only,
       // and a tool-only transcript has no final payload — the acceptance
@@ -565,17 +425,10 @@ describe("the real reviewer v2 request-to-ingestion vertical slice", () => {
       // check) would ingest these schema-valid arguments. Production refuses
       // the misbound kind before any schema selection.
       const judgeSpec = EMISSION_TOOL_SPECS["judge-verdict"];
-      const admitted = admitEmissionArguments(judgeSpec, "v1", {
-        criterion: "extensibility",
-        rankings: [{ candidate: "candidate-type-driven-fp.md", score: 8, fatal_flaw: null, strongest_idea: "the frozen registry" }],
-      });
+      const admitted = admitEmissionArguments(judgeSpec, "v1", JUDGE_ARGUMENTS);
       expect(admitted.kind).toBe("valid");
       const messages: readonly unknown[] = [
-        assistantToolCallMessage([{ type: "toolCall", id: "call-judge-control", name: judgeSpec.toolName,
-          arguments: { criterion: "extensibility",
-            rankings: [{ candidate: "candidate-type-driven-fp.md", score: 8, fatal_flaw: null, strongest_idea: "the frozen registry" }] } }]),
-        { role: "toolResult", toolCallId: "call-judge-control", toolName: judgeSpec.toolName, isError: false,
-          content: [{ type: "text", text: "payload acknowledged" }], details: {}, timestamp: Date.now() },
+        ...acknowledgedEmissionCall("call-judge-control", judgeSpec.toolName, JUDGE_ARGUMENTS),
       ];
       const outcome = await captureThroughSeam(staged, productionObservation(messages, staged.issued));
       expect(outcome.kind).toBe("terminal-rejection");

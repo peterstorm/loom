@@ -4,7 +4,7 @@ import { parseContextProjectionArguments, projectContextPacket } from "../engine
 import { parseStandaloneReviewerContextPacketV3 } from "../engine/src/core/context-packets";
 import type { DomainResult } from "../engine/src/core/orchestration-contract";
 import { expandGzipPredecessorArchive, parsePredecessorArchiveArguments, parsePredecessorArchiveRecord, verifyPredecessorArchiveBytes,
-  type PredecessorArchivePurpose, type PredecessorArchiveRefusal } from "../engine/src/core/predecessor-archive";
+  type PredecessorArchivePurpose, type PredecessorArchiveRecord, type PredecessorArchiveRefusal } from "../engine/src/core/predecessor-archive";
 import { safeIoCause } from "../engine/src/core/safe-io-cause";
 import { CONTEXT_PACKET_MAX_BYTES, readStoredContextPacketFile } from "../engine/src/orchestration/stored-context-packets";
 
@@ -26,23 +26,25 @@ function archivedIdentity(packet: unknown, key: "requestId" | "digest" | "role" 
   return value;
 }
 
-/** Expand one retained archive section to its verified predecessor packet record. */
-function expandRetainedPredecessor(sectionBytes: Uint8Array, purpose: PredecessorArchivePurpose): unknown {
-  const retained = orThrow(parsePredecessorArchiveRecord(JSON.parse(decodeUtf8(sectionBytes)), ARCHIVE_BOUNDS));
-  let expanded: Uint8Array;
-  let prior: unknown;
+/** One retained encoding's expanded bytes and the predecessor packet record they carry, still unverified. */
+function expandRetainedEncoding(retained: PredecessorArchiveRecord, purpose: PredecessorArchivePurpose):
+    Readonly<{ expanded: Uint8Array; prior: unknown }> {
   if (retained.encoding === "published-packet-reference") {
     if (retained.purpose !== purpose) throw Error("invalid explicit predecessor reference");
     // The reference pins the predecessor's packet FILE bytes; its sections
     // resolve from the predecessor run's own blob store.
     const predecessor = readStoredContextPacketFile(retained.path, { file: retained.byteLength, section: CONTEXT_PACKET_MAX_BYTES });
     if (!predecessor.ok) throw Error(predecessor.error);
-    expanded = predecessor.value.fileBytes;
-    prior = predecessor.value.record;
-  } else {
-    expanded = orThrow(expandGzipPredecessorArchive(retained));
-    prior = JSON.parse(decodeUtf8(expanded));
+    return { expanded: predecessor.value.fileBytes, prior: predecessor.value.record };
   }
+  const expanded = orThrow(expandGzipPredecessorArchive(retained));
+  return { expanded, prior: JSON.parse(decodeUtf8(expanded)) };
+}
+
+/** Expand one retained archive section to its verified predecessor packet record. */
+function expandRetainedPredecessor(sectionBytes: Uint8Array, purpose: PredecessorArchivePurpose): unknown {
+  const retained = orThrow(parsePredecessorArchiveRecord(JSON.parse(decodeUtf8(sectionBytes)), ARCHIVE_BOUNDS));
+  const { expanded, prior } = expandRetainedEncoding(retained, purpose);
   orThrow(verifyPredecessorArchiveBytes(retained, expanded));
   return prior;
 }

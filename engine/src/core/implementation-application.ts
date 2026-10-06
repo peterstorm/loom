@@ -97,8 +97,10 @@ function compareExactBaselines(
   baseline: readonly DeclaredArtifactBaseline[];
   changed: readonly ReviewPath[];
 }> | Readonly<{ ok: false; errors: readonly string[] }> {
-  const parsedBaseline = parseCanonicalArtifactBaseline(baseline, `${path}.baseline`);
-  const parsedCurrent = parseCanonicalArtifactBaseline(current, `${path}.current`);
+  // Both Task-local scopes (attempt and proof) are captured as declared-artifact
+  // snapshots, so both sides parse under that one digest scheme.
+  const parsedBaseline = parseCanonicalArtifactBaseline<"declared-artifact">(baseline, `${path}.baseline`);
+  const parsedCurrent = parseCanonicalArtifactBaseline<"declared-artifact">(current, `${path}.current`);
   if (!parsedBaseline.ok || !parsedCurrent.ok) {
     return freeze({
       ok: false,
@@ -492,6 +494,23 @@ function evidenceFields(evidence: NormalizedImplementationEvidence) {
   };
 }
 
+/**
+ * Each attempt owns the repository boundary frozen at its own spawn, so every
+ * settlement retires it with its unresolved-foreign diagnostics. A retry or an
+ * infrastructure-blocked settlement then re-arms an attempt that freezes a
+ * FRESH boundary instead of inheriting a stale snapshot that turns every
+ * unrelated repository movement between attempts into out-of-scope evidence
+ * for THIS task (the wave-3 cross-task retry jam). Foreign or sibling paths
+ * observed DURING an attempt still invalidate its review — only the
+ * inter-attempt carry is gone. The pair retires together, which keeps the
+ * State File wire invariant (unresolved_repository_paths requires
+ * repository_baseline) satisfiable.
+ */
+const RETIRED_ATTEMPT_BOUNDARY = Object.freeze({
+  repository_baseline: undefined,
+  unresolved_repository_paths: undefined,
+});
+
 function transitionedTask(
   task: Task,
   transition: Exclude<ImplementationCompletionTransition, { kind: "ignored" }>,
@@ -500,6 +519,7 @@ function transitionedTask(
   const history = [...(task.implementation_attempt_history ?? []), transition.receipt];
   const common = {
     ...clearAttempt(task),
+    ...RETIRED_ATTEMPT_BOUNDARY,
     implementation_attempt_history: history,
   };
   if (transition.kind === "implemented") {
@@ -507,8 +527,6 @@ function transitionedTask(
     return {
       ...common,
       status: "implemented",
-      repository_baseline: undefined,
-      unresolved_repository_paths: undefined,
       proof: transition.proof,
       revalidation_required: undefined,
       legacy_missing_proof: undefined,
@@ -519,21 +537,9 @@ function transitionedTask(
   }
   if (transition.kind === "retry-required" || transition.kind === "escalation-required") {
     if (facts.normalizedEvidence === undefined) throw new Error(`${transition.kind} transition requires normalized evidence`);
-    // Each attempt owns the repository boundary frozen at its own spawn. A
-    // retry retires the prior attempt's boundary and its unresolved-foreign
-    // diagnostics: the next registration freezes a FRESH boundary instead of
-    // inheriting a stale attempt-1 snapshot that turns every unrelated
-    // repository movement between attempts into out-of-scope evidence for
-    // THIS task (the wave-3 cross-task retry jam). Foreign or sibling paths
-    // observed DURING an attempt still invalidate its review — only the
-    // inter-attempt carry is gone. The cleared pair also keeps the State File
-    // wire invariant (unresolved_repository_paths requires repository_baseline)
-    // satisfiable — they retire together or not at all.
     const pending = {
       ...common,
       status: "pending" as const,
-      repository_baseline: undefined,
-      unresolved_repository_paths: undefined,
       legacy_missing_proof: undefined,
       failure_reason: `${transition.kind}: ${transitionFailureKinds(transition).join(", ")}`,
       retry_count: transition.kind === "retry-required" ? 1 : 2,
@@ -544,17 +550,10 @@ function transitionedTask(
       : { ...pending, proof: transition.proof, revalidation_required: undefined };
   }
   if (task.proof === undefined) throw new Error("infrastructure settlement requires historical Proof audit data");
-  // Same per-attempt boundary policy as the semantic retry arms above: an
-  // infrastructure-blocked settlement retires the attempt boundary and its
-  // unresolved-foreign diagnostics too — whether newly observed during this
-  // attempt or carried from the suspended one — so the re-armed attempt
-  // freezes a fresh boundary instead of resurrecting a stale snapshot.
   return {
     ...common,
     status: "pending",
     proof: task.proof,
-    repository_baseline: undefined,
-    unresolved_repository_paths: undefined,
     revalidation_required: true,
     legacy_missing_proof: undefined,
     failure_reason: `infrastructure-blocked: ${transitionFailureKinds(transition).join(", ")}`,

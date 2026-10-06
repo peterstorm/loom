@@ -146,14 +146,22 @@ export function prepareExhaustedWaveGateRestart(
   };
 }
 
-/** Restart registrations agree on wave, authority, Task roster, and the exact
- *  restart audit (predecessor and ordered exhausted slots). */
+/** The registration identity both replacement predicates share: schema and
+ *  issued reviewer protocol, wave, authority, and the ordered Task roster. Each
+ *  replacement kind compares its own audit on top, so the two predicates guard
+ *  the re-derive-under-lock seam with the same strictness. */
+function sameReplacementRegistration(left: RegisteredWaveGateProgram, right: RegisteredWaveGateProgram): boolean {
+  return left.schemaVersion === right.schemaVersion && canonicalStructuralEquals(left.reviewerProtocol, right.reviewerProtocol) &&
+    left.input.wave === right.input.wave && left.authorityDigest === right.authorityDigest &&
+    canonicalStructuralEquals(left.taskIds, right.taskIds);
+}
+
+/** Restart registrations agree on the shared replacement identity and the
+ *  exact restart audit (predecessor and ordered exhausted slots). */
 export function sameRestartRegistration(left: RegisteredWaveGateProgram, right: RegisteredWaveGateProgram): boolean {
-  return left.input.wave === right.input.wave && left.authorityDigest === right.authorityDigest &&
-    left.taskIds.length === right.taskIds.length && left.taskIds.every((taskId, index) => taskId === right.taskIds[index]) &&
+  return sameReplacementRegistration(left, right) &&
     left.restart?.previousRunId === right.restart?.previousRunId &&
-    (left.restart?.exhaustedSlots.length ?? 0) === (right.restart?.exhaustedSlots.length ?? 0) &&
-    (left.restart?.exhaustedSlots.every((slot, index) => slot === right.restart?.exhaustedSlots[index]) ?? true);
+    canonicalStructuralEquals(left.restart?.exhaustedSlots ?? [], right.restart?.exhaustedSlots ?? []);
 }
 
 export type OrphanedWaveGateRecoveryExpectation = Readonly<{
@@ -240,15 +248,13 @@ export function prepareOrphanedWaveGateRecovery(
   };
 }
 
-/** Orphan-recovery registrations agree on protocol, wave, authority, Task
- *  roster, and the exact retired predecessor. */
+/** Orphan-recovery registrations agree on the shared replacement identity and
+ *  the exact retired predecessor. */
 export function sameOrphanRecoveryRegistration(
   left: RegisteredWaveGateProgram,
   right: RegisteredWaveGateProgram,
 ): boolean {
-  return left.schemaVersion === right.schemaVersion && canonicalStructuralEquals(left.reviewerProtocol, right.reviewerProtocol) &&
-    left.input.wave === right.input.wave && left.authorityDigest === right.authorityDigest &&
-    left.taskIds.length === right.taskIds.length && left.taskIds.every((taskId, index) => taskId === right.taskIds[index]) &&
+  return sameReplacementRegistration(left, right) &&
     left.orphanRecovery?.previousRunId === right.orphanRecovery?.previousRunId &&
     left.orphanRecovery?.previousAuthorityDigest === right.orphanRecovery?.previousAuthorityDigest;
 }

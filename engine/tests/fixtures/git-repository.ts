@@ -22,19 +22,30 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { FixedGitPathspecContract } from "../../src/core/remediation-machine";
 
-/** Real Git, fixed identity and config so the fixture is deterministic. */
-export function gitResult(root: string, args: readonly string[]): SpawnSyncReturns<string> {
+/**
+ * Fixed author and committer dates, for suites whose assertions compare commit
+ * SHAs (or packets embedding them) across separate fixture projects: identical
+ * trees then always yield identical SHAs, never split by a second boundary.
+ */
+export const PINNED_COMMIT_DATES: Readonly<Record<string, string>> = Object.freeze({
+  GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z",
+  GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z",
+});
+
+/** Real Git, fixed identity and config so the fixture is deterministic. `environment`
+ *  adds variables (such as `PINNED_COMMIT_DATES`) but never overrides PATH, HOME or locale. */
+export function gitResult(root: string, args: readonly string[], environment: Readonly<Record<string, string>> = {}): SpawnSyncReturns<string> {
   const result = spawnSync("git", [...args], {
     cwd: root,
     encoding: "utf-8",
-    env: { PATH: process.env["PATH"] ?? "", HOME: root, LC_ALL: "C" },
+    env: { ...environment, PATH: process.env["PATH"] ?? "", HOME: root, LC_ALL: "C" },
   });
   if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
   return result;
 }
 
-export function git(root: string, args: readonly string[]): void {
-  gitResult(root, args);
+export function git(root: string, args: readonly string[], environment: Readonly<Record<string, string>> = {}): void {
+  gitResult(root, args, environment);
 }
 
 export function write(root: string, path: string, contents: string): void {

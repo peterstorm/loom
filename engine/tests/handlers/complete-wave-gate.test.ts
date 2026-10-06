@@ -22,7 +22,7 @@ import completeWaveGateHandler, {
 // re-exported them unchanged; production never routed through that facade
 // (`orchestration` already imported the core originals), so the second path
 // was pinned by these tests alone. Deleting it removes the divergence its own
-// parity case was written to detect.
+// parity case was written to detect, so that case went with it.
 import {
   applyGateDecision,
   checkCriticalFindings,
@@ -2904,12 +2904,5 @@ describe("final-Wave compatibility completion replay", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
-});
-
-describe("complete-wave-gate compatibility delegation", () => {
-  it("returns the core decision byte-for-byte without weakening any check", () => {
-    const state = registeredGraph();
-    expect(evaluateWaveGate(state, null, statusDeps)).toEqual(evaluateWaveGate(state, null, statusDeps));
   });
 });

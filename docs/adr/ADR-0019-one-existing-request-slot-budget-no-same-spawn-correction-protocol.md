@@ -31,7 +31,7 @@ The engine needed one rule for how emission-path and extraction-path failures ma
 ## Decision
 **Emission and extraction rejection share the existing semantic request-slot attempts 1 and 2, with separate diagnostic causes and no separate retry counter. This supersedes the original separate-emission-budget wording in the Spec and Plan (now FR-006/FR-007).**
 
-The pure selection kernel in `engine/src/core/emission-ingestion.ts` applies this once per issued attempt. It works over a closed `EmissionObservation` (`absent` | `single-call` | `duplicate-emission-call` | `observation-refused`) bound to request/kind/version/schema digest and tool-call identity. `selectCanonicalPayload` (reviewer) and `selectVerdictSource` (judge/refutation) return one tagged outcome from the same decision. Callers never re-derive the policy.
+The pure selection kernel in `engine/src/core/emission-ingestion.ts` applies this once per issued attempt. It works over the closed `EmissionObservation` from `harness-capture.ts` (`absent` | `single-call` | `multiple-calls` | `unusable{reason}`, as ADR-0018 defines it). It checks every observed call against the issued binding (request, kind, version and schema digest) and counts distinct tool-call identities. The shared decision maps `multiple-calls` to the `duplicate-emission-call` selection outcome, and maps an `unusable` observation or a misbound call to the `observation-refused` selection outcome. Those two names are selection outcomes, not observation arms. `selectCanonicalPayload` (reviewer) and `selectVerdictSource` (judge/refutation) return one tagged outcome from the same decision. Callers never re-derive the policy.
 
 | Observation in one issued attempt | Selection outcome | Attempt effect |
 |---|---|---|

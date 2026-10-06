@@ -34,7 +34,7 @@ import { parseSpecArtifactDirectory } from "../engine/src/core/phase-artifact-pa
 import { agentsOfKind } from "../engine/src/core/model-profiles";
 import type { Phase, TaskGraph } from "../engine/src/types";
 import type { ParsedTaskGraph } from "../engine/src/state-manager";
-import type { TaskGraphProjectBoundary } from "../engine/src/config";
+import { IMPL_AGENTS, isReviewAgent, type TaskGraphProjectBoundary } from "../engine/src/config";
 import {
   parseIsoInstant,
   type ImplementationAttemptAuthority,
@@ -58,6 +58,7 @@ import { compareAttemptBaseline } from "../engine/src/utils/attempt-baseline";
 import { requiresNewTests, taskVerificationPolicy } from "../engine/src/core/verification-policy";
 import { parsePiMessages, writtenPathsOf, type PiMessage } from "./transcript-adapter";
 import { piSubagentFailureSignals, type PiSubagentResult } from "./subagent-result-batch";
+import { describeCause } from "./cleanup-actions";
 import {
   implementationAuthorityOf,
   parseReservedSlot,
@@ -95,10 +96,7 @@ import {
   type PiSpecCheckObservation,
 } from "./subagent-settlement";
 
-const IMPL_AGENTS: ReadonlySet<string> = new Set(agentsOfKind("impl"));
 const PHASE_AGENTS: ReadonlySet<string> = new Set(agentsOfKind("phase"));
-const REVIEW_AGENTS: ReadonlySet<string> = new Set(agentsOfKind("reviewer"));
-const isReviewAgent = (agentType: string): boolean => REVIEW_AGENTS.has(agentType);
 
 type LoomTask = TaskGraph["tasks"][number];
 
@@ -137,8 +135,6 @@ function parseSlot(record: ReservedSlotRecord | undefined): SlotParse {
     ? { ok: true, slot: parsed.value }
     : { ok: false, outcome: processingFailure(`loom(pi): ${parsed.error} — evidence NOT applied`) };
 }
-
-const describeCause = (cause: unknown): string => cause instanceof Error ? cause.message : String(cause);
 
 async function settleCompletedOrMissingImplementation(
   store: TaskGraphStore,
@@ -282,11 +278,13 @@ type FailedPiResultArgs = Readonly<{
   projectBoundary: TaskGraphProjectBoundary;
 }>;
 
-async function applyFailedSpecCheckResult(
-  args: FailedPiResultArgs,
-  slot: ReservedSlot | undefined,
-  failure: string,
-): Promise<PiResultOutcome> {
+async function applyFailedSpecCheckResult(args: Readonly<{
+  store: TaskGraphStore;
+  slot: ReservedSlot | undefined;
+  failure: string;
+  now: string;
+  projectBoundary: TaskGraphProjectBoundary;
+}>): Promise<PiResultOutcome> {
   let observedState: ParsedTaskGraph;
   try {
     observedState = args.store.load();
@@ -309,8 +307,8 @@ async function applyFailedSpecCheckResult(
     return await args.store.updateAndReturn((state) =>
       reducePiSpecCheckResult(
         state,
-        specCheckAuthorityOf(slot),
-        { kind: "capture-failed", error: failure },
+        specCheckAuthorityOf(args.slot),
+        { kind: "capture-failed", error: args.failure },
         specObservation.authority,
         args.now,
       ));
@@ -344,7 +342,7 @@ export async function applyFailedPiResult(args: FailedPiResultArgs): Promise<PiR
   }
 
   if (agentType === "spec-check-invoker") {
-    return applyFailedSpecCheckResult(args, slot, failure);
+    return applyFailedSpecCheckResult({ store, slot, failure, now: args.now, projectBoundary: args.projectBoundary });
   }
 
   // The dispatcher normally settled a reserved failure through

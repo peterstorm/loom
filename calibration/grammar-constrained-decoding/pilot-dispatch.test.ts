@@ -192,6 +192,42 @@ describe("piArmDispatch emission-enabled arm (readiness barrier)", () => {
     const result = await piArmDispatch(config({ loadLauncher: importRpcLauncher(module) }))(request("emission-enabled"));
     expect(result.observation.outcome).toEqual({ kind: "infrastructure-failure", reason: `${module} exports no runRpcAgent` });
   });
+
+  it("is an infrastructure failure of the attempt, not a thrown window abort, when the launcher cannot be imported", async () => {
+    const missing = join(tmpdir(), "loom-gcd-no-such-launcher", "rpc-launcher.mjs");
+    const result = await piArmDispatch(config({ loadLauncher: importRpcLauncher(missing) }))(request("emission-enabled"));
+    expect(result.observation.outcome).toMatchObject({
+      kind: "infrastructure-failure", reason: expect.stringMatching(/^the installed launcher could not be loaded: /),
+    });
+    expect(result.observation.readinessMs).toBeNull();
+    expectArmSample("emission-enabled", result.observation);
+  });
+
+  it("is an infrastructure failure of the attempt when runRpcAgent rejects mid-run", async () => {
+    const arm = request("emission-enabled");
+    const client = fakeClient(arm.cellBinding);
+    const runRpcAgent: RunRpcAgent = async (input) => {
+      await input.directive.verifyReadiness(client);
+      throw new Error("child pipe closed");
+    };
+    const result = await piArmDispatch(config({ loadLauncher: async () => ({ kind: "loaded", runRpcAgent }) }))(arm);
+    expect(result.observation.outcome).toEqual({ kind: "infrastructure-failure", reason: "the installed launcher's runRpcAgent rejected: child pipe closed" });
+    expectArmSample("emission-enabled", result.observation);
+  });
+
+  it("refuses to record a settled sample when the launcher skipped the readiness barrier", async () => {
+    const arm = request("emission-enabled");
+    const runRpcAgent: RunRpcAgent = async (input) => {
+      emitted(arm.cellBinding.binding.toolName).forEach(input.onMessage);
+      return { ok: true, stderr: "" };
+    };
+    const result = await piArmDispatch(config({ loadLauncher: async () => ({ kind: "loaded", runRpcAgent }) }))(arm);
+    expect(result.observation.outcome).toEqual({
+      kind: "infrastructure-failure", reason: "the launcher reported success, but the readiness barrier never verified the child",
+    });
+    expect(result.observation.readinessMs).toBeNull();
+    expect(result.acceptedPayload).toBeNull();
+  });
 });
 
 describe("piArmDispatch extraction-only arm (print-mode JSON child)", () => {
@@ -229,12 +265,7 @@ describe("piArmDispatch extraction-only arm (print-mode JSON child)", () => {
     expect(missing.observation.outcome).toMatchObject({ kind: "infrastructure-failure", reason: expect.stringMatching(/^spawn .*no-such-pi-binary: /) });
   });
 
-  it("kills a child that outlives its timeout and records the timeout", async () => {
-    const result = await extraction(fakePi([], 0, 5), 100);
-    expect(result.observation.outcome).toEqual({ kind: "timeout", afterMs: 100 });
-  });
-
-  it("bounds the attempt by its timeout even when a descendant holds the child's pipes", async () => {
+  it("kills a child that outlives its timeout, records the timeout, and bounds the attempt even when a descendant holds the child's pipes", async () => {
     // The fake's `sleep 5` is a grandchild (more script follows, so bash does
     // not exec it) that inherits stdout/stderr. Killing only the direct child
     // would leave the pipes open until the sleep exits, about 5 s later.

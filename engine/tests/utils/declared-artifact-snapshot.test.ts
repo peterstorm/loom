@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
+import { artifactBaselineRepository, type ArtifactBaselineRepository } from "../fixtures/artifact-baseline-repository";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -24,21 +24,11 @@ afterEach(() => {
   for (const dir of cleanup.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-function repository(): { root: string; revision: string } {
-  const root = canonicalTempDir("loom-artifact-revision-");
-  cleanup.push(root);
-  execFileSync("git", ["init", "--quiet"], { cwd: root });
-  execFileSync("git", ["config", "user.email", "loom@example.invalid"], { cwd: root });
-  execFileSync("git", ["config", "user.name", "Loom Test"], { cwd: root });
-  mkdirSync(join(root, "assets"));
-  writeFileSync(join(root, "assets", "icon.bin"), Buffer.from([0x00, 0xff, 0x01]));
-  writeFileSync(join(root, "unchanged.txt"), "same\n");
-  execFileSync("git", ["add", "."], { cwd: root });
-  execFileSync("git", ["commit", "--quiet", "-m", "baseline"], { cwd: root });
-  const revision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf-8" }).trim();
-  return { root, revision };
+function repository(): ArtifactBaselineRepository {
+  const repo = artifactBaselineRepository();
+  cleanup.push(repo.root);
+  return repo;
 }
-
 
 describe("changedDeclaredArtifactsSinceRevision", () => {
   it("recovers binary and newly-created artifact changes from a retained git baseline", () => {

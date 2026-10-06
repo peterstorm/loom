@@ -49,8 +49,11 @@ every request's context digest, so the obligation cannot drift.
 
 **Reading uses one mode.** `read-context-packet.ts --diff EXACT_SOURCE_PATH`
 prints one page as a JSON record (`loom-frozen-diff-page`) carrying path, diff
-digest, offset, `nextOffset` and text. Pages are up to 12,000 UTF-16 units, so a
-JSON-escaped page stays under Claude Code's 30,000-character Bash output limit.
+digest, offset, `nextOffset` and text. Pages are up to 12,000 UTF-16 units, so for
+ordinary source and diff text a JSON-escaped page stays under Claude Code's
+30,000-character Bash output limit. The reader bounds units, not encoded size: a
+page dense in control characters (each escaped as six-character `\u00XX`) could
+exceed that limit.
 Every other selection keeps its unchanged 4,096-unit page. Section browsing
 shows the diff index (paths, digests, unit counts) but not the diff text.
 

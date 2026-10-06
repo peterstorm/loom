@@ -289,6 +289,26 @@ describe("decideRetainedWindow (--decide)", () => {
     expect(store.files.get(WINDOW_FILES.decisionLog)).toBe(decisions);
   });
 
+  it("refuses inconsistent evidence (AS-017): surfaces every problem and records no decision", async () => {
+    const store = await blockedWindow();
+    const decisionBefore = store.files.get(WINDOW_FILES.decision);
+    const logBefore = store.files.get(WINDOW_FILES.decisionLog);
+    const { records } = await runWindow(fakeRoute(accepted));
+    const sample = JSON.stringify(records[0]?.sample);
+    // A sample behind a blocked preflight, recorded twice.
+    store.files.set(WINDOW_FILES.observations, `${sample}\n${sample}\n`);
+    const writes = store.writes.length;
+    const result = decideRetainedWindow({ store, loadPreregistration: loadSame, externalAssessments: [], now: clock });
+    if (!result.ok) throw new Error(result.error);
+    expect(result.value.kind).toBe("inconsistent");
+    const problems = result.value.kind === "inconsistent" ? result.value.problems.join("\n") : "";
+    expect(problems).toContain("is recorded twice");
+    expect(problems).toContain("a blocked preflight dispatches nothing, yet samples are recorded");
+    expect(store.writes).toHaveLength(writes);
+    expect(store.files.get(WINDOW_FILES.decision)).toBe(decisionBefore);
+    expect(store.files.get(WINDOW_FILES.decisionLog)).toBe(logBefore);
+  });
+
   it("refuses a window whose observation log is corrupt", async () => {
     const store = await blockedWindow();
     store.files.set(WINDOW_FILES.observations, "{oops\n");

@@ -33,8 +33,11 @@ export type PiContentBlock =
  * One parsed Pi message, discriminated by role. Only a tool result carries
  * tool identity, and it always carries all of it: a `toolResult` without its
  * `toolCallId`/`toolName` is unrepresentable, so no consumer re-checks it.
- * `isError` is a plain boolean — an absent harness flag means "not an error",
- * the one reading every consumer applied. Roles no consumer interprets
+ * `isError` is a plain boolean — an absent harness flag means "not an error"
+ * for every `PiMessage` consumer. The emission scan (`piEmissionCallFrames`)
+ * reads the raw transcript instead and deliberately requires an explicit
+ * `isError: false`; both readings classify the flag through `toolResultFlag`.
+ * Roles no consumer interprets
  * (custom harness entries, summaries) keep their spelling in `originalRole`
  * under the single `other` arm instead of widening `role` to `string`.
  */
@@ -54,6 +57,10 @@ export type PiTranscriptResult<T> =
   | Readonly<{ ok: true; value: T }>
   | Readonly<{ ok: false; errors: readonly string[] }>;
 
+/** A tool identity field (call id or tool name) as the non-blank string it must be, or `null`. */
+const toolIdentity = (value: unknown): string | null =>
+  typeof value === "string" && value.trim() !== "" ? value : null;
+
 function parsePiContentBlock(
   block: unknown,
   label: string,
@@ -71,8 +78,8 @@ function parsePiContentBlock(
     return Object.freeze({ type: "text", text: block.text });
   }
   if (block.type === "toolCall") {
-    const id = typeof block.id === "string" && block.id.trim() !== "" ? block.id : null;
-    const name = typeof block.name === "string" && block.name.trim() !== "" ? block.name : null;
+    const id = toolIdentity(block.id);
+    const name = toolIdentity(block.name);
     const argumentsValue = isRecord(block.arguments) ? block.arguments : null;
     if (id === null) errors.push(`${label}.id must be non-empty`);
     if (name === null) errors.push(`${label}.name must be non-empty`);
@@ -130,14 +137,28 @@ function classifyMessageContent(
   return { kind: "invalid" };
 }
 
+/**
+ * The harness `isError` flag of one raw message, classified once for both
+ * projections of a transcript. Each projection then states its own policy for
+ * the `absent` arm: `parsePiMessages` reads it as "not an error", while the
+ * emission scan counts only `explicit-success` as a successful execution.
+ */
+type ToolResultFlag = "explicit-success" | "failed" | "absent" | "malformed";
+
+const toolResultFlag = (message: Readonly<Record<string, unknown>>): ToolResultFlag =>
+  message.isError === false ? "explicit-success"
+    : message.isError === true ? "failed"
+    : message.isError === undefined ? "absent"
+    : "malformed";
+
 type PiToolFields = Readonly<{ toolCallId: string | null; toolName: string | null; isError: boolean }>;
 
 /** Tool identity is validated on every role (a present-but-empty field is
  * malformed wherever it appears) and required on `toolResult`; only the
  * tool-result arm of `PiMessage` keeps it. */
 function parseToolFields(message: Readonly<Record<string, unknown>>, messageLabel: string, errors: string[]): PiToolFields {
-  const toolCallId = typeof message.toolCallId === "string" && message.toolCallId.trim() !== "" ? message.toolCallId : null;
-  const toolName = typeof message.toolName === "string" && message.toolName.trim() !== "" ? message.toolName : null;
+  const toolCallId = toolIdentity(message.toolCallId);
+  const toolName = toolIdentity(message.toolName);
   if (message.toolCallId !== undefined && toolCallId === null) {
     errors.push(`${messageLabel}.toolCallId must be non-empty when present`);
   }
@@ -148,10 +169,9 @@ function parseToolFields(message: Readonly<Record<string, unknown>>, messageLabe
     if (toolCallId === null) errors.push(`${messageLabel}.toolCallId must be non-empty`);
     if (toolName === null) errors.push(`${messageLabel}.toolName must be non-empty`);
   }
-  if (message.isError !== undefined && typeof message.isError !== "boolean") {
-    errors.push(`${messageLabel}.isError must be a boolean when present`);
-  }
-  return Object.freeze({ toolCallId, toolName, isError: message.isError === true });
+  const flag = toolResultFlag(message);
+  if (flag === "malformed") errors.push(`${messageLabel}.isError must be a boolean when present`);
+  return Object.freeze({ toolCallId, toolName, isError: flag === "failed" });
 }
 
 /** The role arm for an already-validated message; `null` only for a tool
@@ -668,8 +688,10 @@ export function piResultFinalPayloadCandidates(
  *   request and kind against the same issued authority.
  * - SUCCESSFUL EXECUTION ONLY (AS-021). An assistant tool-call block becomes
  *   complete only when the transcript also carries its finalized, successful
- *   Pi `toolResult`. Aborted/error turns, missing, duplicate, malformed, or
- *   `isError: true` results become incomplete frames, so streamed but
+ *   Pi `toolResult` — one carrying an explicit `isError: false`. Unlike
+ *   `parsePiMessages`, an absent flag is NOT read as success here. Aborted/error
+ *   turns, missing, duplicate, malformed, flagless, or `isError: true` results
+ *   become incomplete frames, so streamed but
  *   unexecuted arguments can never become authoritative output. Schema
  *   rejection before execute remains observable through its error result.
  * - ARGUMENTS AS OBSERVED. Complete frames carry a frozen shallow snapshot of
@@ -689,19 +711,22 @@ export function piEmissionCallFrames(
     const cause = boundedThrownCause(thrown, "transcript");
     return { ok: false, errors: [`emission transcript cannot be inspected safely: ${cause.name}: ${cause.message}`] };
   }
-  const collectedResults = new Map<string, Record<string, unknown>[]>();
+  // Local and never escaping: only each call's result count and singleton are read.
+  const resultsByCallId = new Map<string, Record<string, unknown>[]>();
   for (const message of messages) {
     if (!isRecord(message) || message["role"] !== "toolResult") continue;
-    const toolCallId = message["toolCallId"];
-    if (typeof toolCallId !== "string" || toolCallId.trim() === "") continue;
-    const results = collectedResults.get(toolCallId);
-    if (results === undefined) collectedResults.set(toolCallId, [message]);
+    const toolCallId = toolIdentity(message["toolCallId"]);
+    if (toolCallId === null) continue;
+    const results = resultsByCallId.get(toolCallId);
+    if (results === undefined) resultsByCallId.set(toolCallId, [message]);
     else results.push(message);
   }
-  const resultsByCallId = new Map(
-    [...collectedResults].map(([toolCallId, results]) => [toolCallId, Object.freeze(results)] as const),
-  );
   const frames: EmissionCallFrame[] = [];
+  // Every refusal arm below records one incomplete frame and moves on; their
+  // ORDER is the diagnostic precedence.
+  const incomplete = (toolCallId: string | null, reason: string): void => {
+    frames.push(Object.freeze({ kind: "incomplete" as const, toolCallId, reason }));
+  };
   for (const [messageIndex, message] of messages.entries()) {
     // A corrupt unrelated entry cannot carry an emission call; the fallback
     // projection's own parse still refuses the transcript wholesale.
@@ -712,21 +737,13 @@ export function piEmissionCallFrames(
       if (!isRecord(block) || block["type"] !== "toolCall") continue;
       const family = emissionToolFamily(block["name"]);
       if (family.kind === "unrelated") continue;
-      const toolCallId = typeof block["id"] === "string" && block["id"].trim() !== "" ? block["id"] : null;
+      const toolCallId = toolIdentity(block["id"]);
       if (family.kind === "unregistered-emission-name") {
-        frames.push(Object.freeze({
-          kind: "incomplete" as const,
-          toolCallId,
-          reason: `${origin} names tool ${describeUnknown(block["name"])}, which selects no frozen registry producer kind`,
-        }));
+        incomplete(toolCallId, `${origin} names tool ${describeUnknown(block["name"])}, which selects no frozen registry producer kind`);
         continue;
       }
       if (toolCallId === null) {
-        frames.push(Object.freeze({
-          kind: "incomplete" as const,
-          toolCallId: null,
-          reason: `an emission tool call to ${describeUnknown(block["name"])} was observed without a recoverable tool-call identity (${origin})`,
-        }));
+        incomplete(null, `an emission tool call to ${describeUnknown(block["name"])} was observed without a recoverable tool-call identity (${origin})`);
         continue;
       }
       // Causal diagnostic precedence (FR-014): turn finalization is checked
@@ -735,30 +752,18 @@ export function piEmissionCallFrames(
       // the reason an observation is incomplete, not the argument form.
       const stopReason = message["stopReason"];
       if (stopReason === "aborted" || stopReason === "error") {
-        frames.push(Object.freeze({
-          kind: "incomplete" as const,
-          toolCallId,
-          reason: `emission tool call ${toolCallId} belongs to an assistant turn finalized as ${stopReason} (${origin})`,
-        }));
+        incomplete(toolCallId, `emission tool call ${toolCallId} belongs to an assistant turn finalized as ${stopReason} (${origin})`);
         continue;
       }
       if (!isRecord(block["arguments"])) {
-        frames.push(Object.freeze({
-          kind: "incomplete" as const,
-          toolCallId,
-          reason: `emission tool call ${toolCallId} was observed with ${describeUnknown(block["arguments"])} arguments, not an object (${origin})`,
-        }));
+        incomplete(toolCallId, `emission tool call ${toolCallId} was observed with ${describeUnknown(block["arguments"])} arguments, not an object (${origin})`);
         continue;
       }
       const results = resultsByCallId.get(toolCallId) ?? [];
       if (results.length !== 1) {
-        frames.push(Object.freeze({
-          kind: "incomplete" as const,
-          toolCallId,
-          reason: results.length === 0
-            ? `emission tool call ${toolCallId} has no finalized tool result (${origin})`
-            : `emission tool call ${toolCallId} has ${results.length} finalized tool results; exactly one is required (${origin})`,
-        }));
+        incomplete(toolCallId, results.length === 0
+          ? `emission tool call ${toolCallId} has no finalized tool result (${origin})`
+          : `emission tool call ${toolCallId} has ${results.length} finalized tool results; exactly one is required (${origin})`);
         continue;
       }
       // The exactly-one result was enforced above; index the proven singleton
@@ -767,18 +772,17 @@ export function piEmissionCallFrames(
       if (singleton === undefined) {
         throw new Error("emission scan invariant failed: an exactly-one result set produced no element");
       }
-      if (singleton["toolName"] !== block["name"] || singleton["isError"] !== false) {
-        const resultName = describeUnknown(singleton["toolName"]);
-        const resultState = singleton["isError"] === true
-          ? "failed"
-          : `has non-success isError ${describeUnknown(singleton["isError"])}`;
-        frames.push(Object.freeze({
-          kind: "incomplete" as const,
-          toolCallId,
-          reason: singleton["toolName"] !== block["name"]
-            ? `emission tool call ${toolCallId} finalized under mismatched tool result ${resultName} (${origin})`
-            : `emission tool call ${toolCallId} ${resultState} (${origin})`,
-        }));
+      if (singleton["toolName"] !== block["name"]) {
+        incomplete(toolCallId, `emission tool call ${toolCallId} finalized under mismatched tool result ${describeUnknown(singleton["toolName"])} (${origin})`);
+        continue;
+      }
+      // Only an explicit `isError: false` is a successful execution here; an
+      // absent flag is incomplete, unlike the `PiMessage` reading.
+      const flag = toolResultFlag(singleton);
+      if (flag !== "explicit-success") {
+        incomplete(toolCallId, flag === "failed"
+          ? `emission tool call ${toolCallId} failed (${origin})`
+          : `emission tool call ${toolCallId} has non-success isError ${describeUnknown(singleton["isError"])} (${origin})`);
         continue;
       }
       frames.push(Object.freeze({

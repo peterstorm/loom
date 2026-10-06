@@ -222,6 +222,11 @@ export function deriveLoomStatus(snapshot: WaveReadinessSnapshot): LoomStatus {
   return canonicalRecord({ schemaVersion: 1, facts: snapshot.facts, next: deriveNextAction(snapshot) });
 }
 
+/** Fail-closed status for one unavailable reason. */
+function unavailableStatus(message: string): LoomStatus {
+  return deriveUnavailableLoomStatus([unavailableStatusReason(message)]);
+}
+
 /** Fail-closed status retains the complete fact inventory; no zero/ready value is fabricated. */
 function deriveUnavailableLoomStatus(rawReasons: NonEmpty<StatusReason>): LoomStatus {
   const reasons = Object.freeze([...rawReasons]) as NonEmpty<StatusReason>;
@@ -344,9 +349,7 @@ function persistedTerminalBlockedStatus(
   if (registration?.terminalOutcome?.kind !== "terminal-blocked") return null;
   const built = blockedAction(registration.terminalOutcome.diagnostic);
   if (!built.ok) {
-    return deriveUnavailableLoomStatus(Object.freeze([
-      unavailableStatusReason(`cannot construct persisted terminal-blocked action: ${built.error.message}`),
-    ]) as NonEmpty<StatusReason>);
+    return unavailableStatus(`cannot construct persisted terminal-blocked action: ${built.error.message}`);
   }
   const blockedReason = statusReason("blocked-diagnostic", registration.terminalOutcome.diagnostic.message);
   return canonicalRecord({
@@ -387,9 +390,7 @@ function committedTerminalStatus(
     byteLength: receiptBytes.byteLength,
   });
   if (!done.ok) {
-    return deriveUnavailableLoomStatus(Object.freeze([
-      unavailableStatusReason(`cannot construct committed terminal action: ${done.error.message}`),
-    ]) as NonEmpty<StatusReason>);
+    return unavailableStatus(`cannot construct committed terminal action: ${done.error.message}`);
   }
   const completeReason = statusReason("run-complete", `Wave Gate run ${terminal.runId} completed with committed revision ${terminal.revision}`);
   return canonicalRecord({
@@ -447,13 +448,13 @@ function unstartedWaveStatus(
     task.status === "completed" &&
     (executing.has(task.id) || task.active_implementation_attempt !== undefined));
   if (completedReservation !== undefined) {
-    return deriveUnavailableLoomStatus(Object.freeze([
+    return deriveUnavailableLoomStatus([
       statusReason(
         "authority-contradiction",
         `${completedReservation.id} is completed but retains implementation reservation authority; repair the Task Graph`,
         completedReservation.id,
       ),
-    ]) as NonEmpty<StatusReason>);
+    ]);
   }
   const outstanding = waveTasks.filter((task) =>
     (task.status !== "implemented" && task.status !== "completed") ||
@@ -464,20 +465,18 @@ function unstartedWaveStatus(
   const nonCurrentReservation = reservationCandidates.find((task) =>
     task.reserved_at === undefined || Number.isNaN(Date.parse(task.reserved_at)));
   if (nonCurrentReservation !== undefined) {
-    return deriveUnavailableLoomStatus(Object.freeze([
+    return deriveUnavailableLoomStatus([
       statusReason(
         "authority-contradiction",
         `${nonCurrentReservation.id} has timestamp-less legacy implementation authority that canonical status cannot reclaim; repair or migrate the Task Graph`,
         nonCurrentReservation.id,
       ),
-    ]) as NonEmpty<StatusReason>);
+    ]);
   }
   if (reservationCandidates.length > 0 && observation?.kind === "unavailable") {
-    return deriveUnavailableLoomStatus(Object.freeze([
-      unavailableStatusReason(
-        `cannot determine implementation reservation liveness: ${observation.reason}`,
-      ),
-    ]) as NonEmpty<StatusReason>);
+    return unavailableStatus(
+      `cannot determine implementation reservation liveness: ${observation.reason}`,
+    );
   }
   const reclaimable = observation?.kind === "observed"
     ? staleReservationsForRosterObservation(
@@ -493,13 +492,13 @@ function unstartedWaveStatus(
   const derivations = outstanding.map((task) => ({ task, derivation: deriveTaskImplementationDispatch(task) }));
   const invalidRetry = derivations.find(({ derivation }) => derivation.kind === "invalid-retry");
   if (invalidRetry?.derivation.kind === "invalid-retry") {
-    return deriveUnavailableLoomStatus(Object.freeze([
+    return deriveUnavailableLoomStatus([
       statusReason(
         "authority-contradiction",
         `${invalidRetry.task.id} has invalid implementation retry authority: ${invalidRetry.derivation.errors.join("; ")}`,
         invalidRetry.task.id,
       ),
-    ]) as NonEmpty<StatusReason>);
+    ]);
   }
   const escalated = derivations.flatMap(({ task, derivation }) =>
     derivation.kind === "escalated"
@@ -507,13 +506,13 @@ function unstartedWaveStatus(
       : []);
   const invalidAttestation = derivations.find(({ derivation }) => derivation.kind === "invalid-attestation");
   if (invalidAttestation?.derivation.kind === "invalid-attestation") {
-    return deriveUnavailableLoomStatus(Object.freeze([
+    return deriveUnavailableLoomStatus([
       statusReason(
         "authority-contradiction",
         `${invalidAttestation.task.id} attestation mode could not derive its attestation context: ${invalidAttestation.derivation.error}`,
         invalidAttestation.task.id,
       ),
-    ]) as NonEmpty<StatusReason>);
+    ]);
   }
   const dispatches = derivations.flatMap(({ task, derivation }): readonly WaveImplementationDispatch[] =>
     derivation.kind === "dispatch" && !activeTaskIds.has(task.id) ? [derivation.dispatch] : []);
@@ -549,9 +548,9 @@ function unstartedWaveStatus(
     });
     message = `Wave ${wave} implementation is in progress; wait for ${active.length} active task(s)`;
   } else {
-    return deriveUnavailableLoomStatus(Object.freeze([
+    return deriveUnavailableLoomStatus([
       statusReason("authority-contradiction", `Wave ${wave} has outstanding Tasks but no legal implementation recovery`),
-    ]) as NonEmpty<StatusReason>);
+    ]);
   }
   const reasons: StatusReason[] = outstanding.flatMap((task) =>
     task.status === "implemented"
@@ -599,12 +598,6 @@ function unstartedWaveStatus(
  * placeholder. A failed projection or proof returns explicit unavailable
  * status; `null` is reserved for a successfully proven non-advisory stage.
  */
-function unavailableAdvisoryProjection(message: string): LoomStatus {
-  return deriveUnavailableLoomStatus(Object.freeze([
-    unavailableStatusReason(message),
-  ]) as NonEmpty<StatusReason>);
-}
-
 function projectedAdvisoryStatus(
   graph: TaskGraph,
   deps: GateDeps,
@@ -615,7 +608,7 @@ function projectedAdvisoryStatus(
   const counts = snapshot.value.facts.findingCounts;
   const runs = snapshot.value.facts.reviewRuns;
   if (counts.kind !== "known" || runs.kind !== "known") {
-    return unavailableAdvisoryProjection(
+    return unavailableStatus(
       "LC-1 advisory projection requires canonical Finding and Review Run facts",
     );
   }
@@ -637,12 +630,12 @@ function projectedAdvisoryStatus(
 
   const state = projectWaveGateLifecycle(snapshot.value, evidence);
   if (!state.ok) {
-    return unavailableAdvisoryProjection(`cannot project LC-1 advisory lifecycle: ${state.error.message}`);
+    return unavailableStatus(`cannot project LC-1 advisory lifecycle: ${state.error.message}`);
   }
   if (state.value.kind !== "awaiting-advisory-decision") return null;
   const proven = deriveWaveAdvisoryNextAction(snapshot.value, state.value);
   if (!proven.ok) {
-    return unavailableAdvisoryProjection(`cannot prove LC-1 advisory action: ${proven.error.message}`);
+    return unavailableStatus(`cannot prove LC-1 advisory action: ${proven.error.message}`);
   }
 
   const bound = deriveWaveReadiness(graph, deps, canonicalRecord({
@@ -651,7 +644,7 @@ function projectedAdvisoryStatus(
   }));
   return bound.ok
     ? deriveLoomStatus(bound.value)
-    : unavailableAdvisoryProjection(
+    : unavailableStatus(
         `cannot bind LC-1 advisory action to protected readiness: ${bound.error.reasons.map(({ message }) => message).join("; ")}`,
       );
 }
@@ -664,9 +657,7 @@ export function deriveLoomStatusFromParsedGraph(
   runDirectory: ActiveRunDirectoryObservation = canonicalRecord({ kind: "unverified" }),
 ): LoomStatus {
   if (!parsed.ok) {
-    return deriveUnavailableLoomStatus(Object.freeze([
-      unavailableStatusReason(`protected authority is malformed: ${parsed.error}`),
-    ]) as NonEmpty<StatusReason>);
+    return unavailableStatus(`protected authority is malformed: ${parsed.error}`);
   }
   if (parsed.value.current_phase !== "execute") {
     return deriveNonExecuteLoomStatus(
@@ -678,29 +669,21 @@ export function deriveLoomStatusFromParsedGraph(
   const active = parsed.value.active_wave_gate;
   if (active?.terminalOutcome === null && runDirectory.kind !== "unverified") {
     if (runDirectory.runId !== active.runId) {
-      return deriveUnavailableLoomStatus(Object.freeze([
-        unavailableStatusReason(`Run Directory observation belongs to ${runDirectory.runId}, not active run ${active.runId}`),
-      ]) as NonEmpty<StatusReason>);
+      return unavailableStatus(`Run Directory observation belongs to ${runDirectory.runId}, not active run ${active.runId}`);
     }
     if (runDirectory.kind === "absent") {
-      return deriveUnavailableLoomStatus(Object.freeze([
-        unavailableStatusReason(
-          `orphaned active Wave Gate run ${active.runId}: authoritative Run Directory does not exist at ${runDirectory.path}; ` +
-          `recover with exact wave ${active.wave} and authority digest ${active.authorityDigest}`,
-        ),
-      ]) as NonEmpty<StatusReason>);
+      return unavailableStatus(
+        `orphaned active Wave Gate run ${active.runId}: authoritative Run Directory does not exist at ${runDirectory.path}; ` +
+        `recover with exact wave ${active.wave} and authority digest ${active.authorityDigest}`,
+      );
     }
     if (runDirectory.kind === "invalid") {
-      return deriveUnavailableLoomStatus(Object.freeze([
-        unavailableStatusReason(`cannot verify authoritative Run Directory ${runDirectory.path}: ${runDirectory.message}`),
-      ]) as NonEmpty<StatusReason>);
+      return unavailableStatus(`cannot verify authoritative Run Directory ${runDirectory.path}: ${runDirectory.message}`);
     }
     if (runDirectory.kind === "present" && runDirectory.advisoryApproval?.kind === "unavailable") {
-      return deriveUnavailableLoomStatus(Object.freeze([
-        unavailableStatusReason(
-          `cannot determine advisory approval for Wave Gate run ${active.runId}: ${runDirectory.advisoryApproval.reason}`,
-        ),
-      ]) as NonEmpty<StatusReason>);
+      return unavailableStatus(
+        `cannot determine advisory approval for Wave Gate run ${active.runId}: ${runDirectory.advisoryApproval.reason}`,
+      );
     }
   }
   const persistedBlocked = persistedTerminalBlockedStatus(

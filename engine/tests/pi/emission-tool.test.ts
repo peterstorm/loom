@@ -53,20 +53,16 @@
 
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import {
-  createAssistantMessageEventStream,
-  validateToolArguments,
-  type AssistantMessage,
-  type Model,
-} from "@earendil-works/pi-ai";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 import { resolveJsonSchemaStrictSampling } from "@earendil-works/pi-ai/api/constrained-sampling";
-import { runAgentLoop, type AgentContext, type AgentEvent, type AgentLoopConfig, type StreamFn } from "@earendil-works/pi-agent-core";
+import type { AgentEvent, AgentLoopConfig } from "@earendil-works/pi-agent-core";
 import {
   acknowledgeEmissionExecution,
   EMISSION_CONSTRAINED_SAMPLING_REQUEST,
   observeEmissionCalls,
   type EmissionCallFrame,
   type EmissionToolAcknowledgment,
+  type FinalPayloadCandidate,
 } from "../../src/core/harness-capture";
 import { selectCanonicalPayload } from "../../src/core/emission-ingestion";
 import {
@@ -77,12 +73,11 @@ import {
   type EmissionSchemaVersion,
   type EmissionToolSpec,
   type IssuedEmissionBinding,
+  type IssuedEmissionBindingOf,
 } from "../../src/core/emission-tool";
-import {
-  REVIEWER_PAYLOAD_EXAMPLE_V2,
-  reviewerPayloadV2Schema,
-} from "../../src/core/reviewer-contract";
-import { standaloneReviewerPayloadV3Schema } from "../../src/core/standalone-lineage-contract";
+import type { PayloadProducerKindName } from "../../src/core/model-profiles";
+import { canonicalStructuralEquals, parseContextDigest } from "../../src/core/orchestration-contract/identity";
+import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
 import { sha256Hex } from "../../src/core/digest";
 import {
   decideEmissionToolRegistration,
@@ -113,57 +108,58 @@ import {
   type IssuedSpawnEmissionAuthority,
 } from "../../src/core/spawn-admission";
 import { planPiWriteGrants } from "../../src/core/pi-write-grant-plan";
+import {
+  validJudgeArguments,
+  validRefutationArguments,
+  validReviewerArgumentsV2,
+  validReviewerArgumentsV3,
+  whitespaceOnlyArguments,
+} from "../fixtures/emission-arguments";
+import {
+  assistantAbortedToolCallMessage,
+  assistantFinalTextMessage,
+  assistantToolCallMessage,
+  observedEmissionTool,
+  runScriptedLoop,
+  scriptTurns,
+} from "../fixtures/pi-scripted-loop";
 
 // ---------------------------------------------------------------------------
 // Canonical and discriminating fixtures — minted from the real zod schemas
 // ---------------------------------------------------------------------------
 
-interface RegistryCell {
-  readonly kind: keyof typeof EMISSION_TOOL_SPECS;
+interface RegistryCell<K extends PayloadProducerKindName = PayloadProducerKindName> {
+  readonly kind: K;
   readonly version: EmissionSchemaVersion;
   readonly spec: EmissionToolSpec;
 }
 
-const REGISTRY_CELLS: readonly RegistryCell[] = [
-  { kind: "reviewer-payload", version: "v2", spec: EMISSION_TOOL_SPECS["reviewer-payload"] },
-  { kind: "reviewer-payload", version: "v3", spec: EMISSION_TOOL_SPECS["reviewer-payload"] },
-  { kind: "judge-verdict", version: "v1", spec: EMISSION_TOOL_SPECS["judge-verdict"] },
-  { kind: "refutation-verdict", version: "v1", spec: EMISSION_TOOL_SPECS["refutation-verdict"] },
-];
+const REVIEWER_V2_CELL: RegistryCell<"reviewer-payload"> = {
+  kind: "reviewer-payload", version: "v2", spec: EMISSION_TOOL_SPECS["reviewer-payload"],
+};
+const REVIEWER_V3_CELL: RegistryCell<"reviewer-payload"> = {
+  kind: "reviewer-payload", version: "v3", spec: EMISSION_TOOL_SPECS["reviewer-payload"],
+};
+const JUDGE_V1_CELL: RegistryCell<"judge-verdict"> = {
+  kind: "judge-verdict", version: "v1", spec: EMISSION_TOOL_SPECS["judge-verdict"],
+};
+const REFUTATION_V1_CELL: RegistryCell<"refutation-verdict"> = {
+  kind: "refutation-verdict", version: "v1", spec: EMISSION_TOOL_SPECS["refutation-verdict"],
+};
 
-/** Canonical emission arguments per registry cell, minted through the real
- *  zod schemas (the qualification probe's fixture posture: a fixture exists
- *  only after `schema.parse` succeeds). */
+const REGISTRY_CELLS: readonly RegistryCell[] = [REVIEWER_V2_CELL, REVIEWER_V3_CELL, JUDGE_V1_CELL, REFUTATION_V1_CELL];
+
+/** Canonical emission arguments per registry cell, minted through the shared
+ *  emission-argument fixtures over the real zod schemas (the qualification
+ *  probe's fixture posture: a fixture exists only after `schema.parse`
+ *  succeeds). */
 const canonicalArguments = (kind: RegistryCell["kind"], version: EmissionSchemaVersion): unknown => {
-  if (kind === "reviewer-payload" && version === "v2") {
-    return reviewerPayloadV2Schema.parse({
-      schemaVersion: 2,
-      kind: "standalone-review",
-      findings: [{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim: "supported input bypasses the authorization check" }],
-    });
+  if (kind === "reviewer-payload") {
+    return version === "v2"
+      ? validReviewerArgumentsV2("supported input bypasses the authorization check")
+      : validReviewerArgumentsV3();
   }
-  if (kind === "reviewer-payload" && version === "v3") {
-    return standaloneReviewerPayloadV3Schema.parse({
-      schemaVersion: 3,
-      kind: "standalone-successor-review",
-      lineageDigest: "a".repeat(64),
-      snapshotDigest: "b".repeat(64),
-      priorAssessments: [],
-      findings: [],
-    });
-  }
-  if (kind === "judge-verdict") {
-    return {
-      criterion: "extensibility",
-      rankings: [
-        { candidate: "candidate-type-driven-fp.md", score: 8, fatal_flaw: null, strongest_idea: "the frozen registry" },
-      ],
-    };
-  }
-  return {
-    criterion: "reproduction",
-    verdicts: [{ finding_id: "T1:code-reviewer-1", verdict: "refuted", reasoning: "the failure cannot be triggered" }],
-  };
+  return kind === "judge-verdict" ? validJudgeArguments("extensibility") : validRefutationArguments("reproduction");
 };
 
 /** The discriminating malformed shapes: exactly the violation classes the
@@ -190,172 +186,19 @@ const malformedArguments = (kind: RegistryCell["kind"], version: EmissionSchemaV
   };
 };
 
-/** Whitespace-only advisory prose: shape-valid under the frozen bytes (JSON
- *  Schema expresses minLength, never the zod refinements) — the AD-5
- *  disagreement's pi half. */
-const whitespaceOnlyArguments = (kind: RegistryCell["kind"]): unknown => {
-  if (kind === "reviewer-payload") {
-    const finding = reviewerPayloadV2Schema.parse({
-      schemaVersion: 2,
-      kind: "standalone-review",
-      findings: [{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim: "real claim" }],
-    }).findings[0]!;
-    return {
-      schemaVersion: 2,
-      kind: "standalone-review",
-      findings: [{ ...finding, claim: "   " }],
-    };
-  }
-  if (kind === "judge-verdict") {
-    return {
-      criterion: "extensibility",
-      rankings: [{ candidate: "candidate-type-driven-fp.md", score: 8, fatal_flaw: null, strongest_idea: "   " }],
-    };
-  }
-  return {
-    criterion: "reproduction",
-    verdicts: [{ finding_id: "T1:code-reviewer-1", verdict: "refuted", reasoning: "   " }],
-  };
-};
-
 // ---------------------------------------------------------------------------
 // The production emission tool definition and the scripted transport
+// (`fixtures/pi-scripted-loop`)
 // ---------------------------------------------------------------------------
 
-/** The minimal complete pi Model record — the readiness probe discovered a
- *  definition without `input`/`cost` crashes pi-ai client-side before any
- *  request; the scripted transport never dials `baseUrl`. */
-const scriptedModel: Model<"openai-completions"> = {
-  id: "scripted-emission-model",
-  name: "scripted-emission-model",
-  api: "openai-completions",
-  provider: "scripted",
-  baseUrl: "http://127.0.0.1:9/v1",
-  reasoning: false,
-  input: ["text"],
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  contextWindow: 128_000,
-  maxTokens: 4_096,
-};
-
-const zeroUsage = () => ({
-  input: 1,
-  output: 1,
-  cacheRead: 0,
-  cacheWrite: 0,
-  totalTokens: 2,
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-});
-
-const assistantToolCallMessage = (calls: readonly { type: "toolCall"; id: string; name: string; arguments: unknown }[]): AssistantMessage =>
-  ({
-    role: "assistant",
-    content: calls,
-    api: "openai-completions",
-    provider: "scripted",
-    model: scriptedModel.id,
-    usage: zeroUsage(),
-    stopReason: "toolUse",
-    timestamp: Date.now(),
-  }) as AssistantMessage;
-
-const assistantFinalTextMessage = (text: string): AssistantMessage =>
-  ({
-    role: "assistant",
-    content: [{ type: "text", text }],
-    api: "openai-completions",
-    provider: "scripted",
-    model: scriptedModel.id,
-    usage: zeroUsage(),
-    stopReason: "stop",
-    timestamp: Date.now(),
-  }) as AssistantMessage;
-
-/** The transport's aborted-turn result: the final AssistantMessage carries
- *  stopReason "aborted" (pi-ai's cancellation contract — the final message of
- *  an aborted assistant turn) and whatever partial content had streamed when
- *  the cancel arrived — here, nothing. */
-const assistantAbortedTurnMessage = (): AssistantMessage =>
-  ({
-    role: "assistant",
-    content: [],
-    api: "openai-completions",
-    provider: "scripted",
-    model: scriptedModel.id,
-    usage: zeroUsage(),
-    stopReason: "aborted",
-    errorMessage: "aborted by the caller",
-    timestamp: Date.now(),
-  }) as AssistantMessage;
-
-/** The caller's cancellation arrived while the model streamed the emission
- *  tool call: the aborted turn's partial message still carries a structurally
- *  complete toolCall block. Because execute never ran, the transcript adapter
- *  classifies the call as incomplete and unusable rather than authoritative. */
-const assistantAbortedToolCallMessage = (calls: readonly { type: "toolCall"; id: string; name: string; arguments: unknown }[]): AssistantMessage =>
-  ({
-    ...assistantToolCallMessage(calls),
-    stopReason: "aborted",
-    errorMessage: "aborted by the caller",
-  }) as AssistantMessage;
-
-interface ScriptedTurn {
-  /** The transport for one assistant turn — the ONLY scripted part. */
-  readonly streamFn: StreamFn;
-  /** What the model saw on each request — the tool-role error feedback the
-   *  re-prompt loop carries is asserted from these. */
-  readonly contexts: readonly { readonly role: string; readonly isError?: boolean }[][];
-  readonly callCount: () => number;
-}
-
-/** Script ONLY the model transport: one AssistantMessageEventStream per turn,
- *  shaped exactly as pi-ai's real streams are consumed (`start`, then the
- *  completing `done`). */
-const scriptTurns = (responses: readonly AssistantMessage[]): ScriptedTurn => {
-  let call = 0;
-  const contexts: { role: string; isError?: boolean }[][] = [];
-  const streamFn: StreamFn = (_model, context, options) => {
-    contexts.push(structuredClone(context.messages) as { role: string; isError?: boolean }[]);
-    // The transport honours the caller's cancellation signal the way real
-    // pi-ai streams do: a request whose signal fires before its response
-    // completes finishes as an aborted turn — it never consumes a scripted
-    // response.
-    const message: AssistantMessage = options?.signal?.aborted
-      ? assistantAbortedTurnMessage()
-      : responses[call];
-    if (message === undefined) {
-      // A script exhausted by an unexpected follow-up turn is a test defect,
-      // never a silent empty stream: pi would treat an immediately-ended
-      // stream as an error turn, masking the behavior under test.
-      throw new Error(`scripted transport exhausted after ${call} response(s)`);
-    }
-    call += 1;
-    const stream = createAssistantMessageEventStream();
-    stream.push({ type: "start", partial: message });
-    if (message.stopReason === "aborted") {
-      // pi-ai's stream contract: an aborted turn completes through the
-      // stream's `error` event, whose extracted result is the aborted
-      // AssistantMessage the agent loop reads.
-      stream.push({ type: "error", reason: "aborted", error: message });
-    } else {
-      stream.push({
-        type: "done",
-        reason: message.stopReason === "toolUse" ? "toolUse" : "stop",
-        message,
-      });
-    }
-    return stream;
-  };
-  return { streamFn, contexts, callCount: () => call };
-};
-
-/** The PRODUCTION registration surface (pi/emission-tool.ts) over a minted
- *  issued binding: the exact tool definition production registers, with the
- *  suite's observation record wrapping the PRODUCTION execute — the
- *  arguments pi validated, seen beside the same admission decision. The suite
- *  crosses the same seam the extension's readiness command registers with —
- *  never a test twin. */
-const mintedBindingFor = (cell: RegistryCell, requestId: string): IssuedEmissionBinding => {
+/** The ONE binding mint for every fixture: the registry-certified issued
+ *  binding for `cell` under `requestId`. The cell's kind parameter carries
+ *  through, so a reviewer cell mints the path-refined reviewer binding the
+ *  capture observation takes, with no cast. */
+const mintedBindingFor = <K extends PayloadProducerKindName>(
+  cell: RegistryCell<K>,
+  requestId: string,
+): IssuedEmissionBindingOf<K> => {
   const minted = issueEmissionBinding({
     requestId,
     kind: cell.kind,
@@ -367,16 +210,10 @@ const mintedBindingFor = (cell: RegistryCell, requestId: string): IssuedEmission
   return minted.value;
 };
 
-const executeShellTool = (cell: RegistryCell, observed: unknown[]): Record<string, unknown> => {
-  const definition = emissionToolDefinition(mintedBindingFor(cell, "req-emission-tool-t5-shell"));
-  return {
-    ...definition,
-    execute: async (toolCallId: string, params: unknown) => {
-      observed.push(params);
-      return definition.execute(toolCallId, params);
-    },
-  } as Record<string, unknown>;
-};
+/** The request id the loop cases register the PRODUCTION emission tool under
+ *  (`observedEmissionTool`: the exact definition the extension's readiness
+ *  command registers, with the observation record around its execute). */
+const SHELL_REQUEST_ID = "req-emission-tool-t5-shell";
 
 /** The AD-10 always-accept control: a shell that SKIPS the engine's admission
  *  gate would acknowledge exactly the arguments production refuses. */
@@ -410,31 +247,6 @@ const abortPlainToolPreparation = (controller: AbortController): NonNullable<Age
     return undefined;
   };
 
-const asAgentContext = (tools: readonly Record<string, unknown>[]): AgentContext =>
-  ({ systemPrompt: "loom producer agent", messages: [], tools }) as unknown as AgentContext;
-
-const asLoopConfig = (extra?: { beforeToolCall?: AgentLoopConfig["beforeToolCall"] }): AgentLoopConfig =>
-  ({ model: scriptedModel, convertToLlm: (messages: readonly unknown[]) => messages, ...extra }) as unknown as AgentLoopConfig;
-
-const runScriptedLoop = async (
-  tools: readonly Record<string, unknown>[],
-  script: ScriptedTurn,
-  loop?: { readonly signal?: AbortSignal; readonly beforeToolCall?: AgentLoopConfig["beforeToolCall"] },
-): Promise<{ readonly events: AgentEvent[]; readonly messages: readonly unknown[] }> => {
-  const events: AgentEvent[] = [];
-  const messages = await runAgentLoop(
-    [{ role: "user", content: "Emit the issued payload exactly once.", timestamp: Date.now() }],
-    asAgentContext(tools),
-    asLoopConfig(loop?.beforeToolCall ? { beforeToolCall: loop.beforeToolCall } : undefined),
-    (event) => {
-      events.push(event);
-    },
-    loop?.signal,
-    script.streamFn as StreamFn,
-  );
-  return { events, messages };
-};
-
 const toolResultMessages = (messages: readonly unknown[]): { isError?: boolean; content: { text: string }[]; toolName: string }[] =>
   messages.filter((message): message is { role: "toolResult"; isError?: boolean; content: { text: string }[]; toolName: string } =>
     (message as { role?: string })?.role === "toolResult");
@@ -460,37 +272,32 @@ describe("real pi validateToolArguments against the exact frozen registry bytes"
     }
   });
 
+  /** The refusal message pi's REAL validator throws for the cell's malformed
+   *  shape against its exact frozen parameters — or "" if the validator
+   *  admitted it, which every fragment assertion below then fails on. */
+  const malformedRefusalMessage = (cell: RegistryCell): string => {
+    const parameters = frozenPayloadSchemaParameters(cell.spec.schemaVersions[cell.version]!.schemaBytes);
+    try {
+      validateToolArguments(
+        { name: cell.spec.toolName, description: "d", parameters } as never,
+        { id: "call-bad", name: cell.spec.toolName, arguments: malformedArguments(cell.kind, cell.version) } as never,
+      );
+      return "";
+    } catch (error) {
+      return (error as Error).message;
+    }
+  };
+
   it("refuses the recorded malformed shapes with precise per-branch errors (feasibility §2.7)", () => {
     for (const registryCell of REGISTRY_CELLS) {
-      const parameters = frozenPayloadSchemaParameters(registryCell.spec.schemaVersions[registryCell.version]!.schemaBytes);
-      const tool = { name: registryCell.spec.toolName, description: "d", parameters };
-      let message = "";
-      try {
-        validateToolArguments(
-          tool as never,
-          { id: "call-bad", name: registryCell.spec.toolName, arguments: malformedArguments(registryCell.kind, registryCell.version) } as never,
-        );
-      } catch (error) {
-        message = (error as Error).message;
-      }
-      expect(message, `${registryCell.kind}/${registryCell.version} must be refused by pi's validator`).toContain(
+      expect(malformedRefusalMessage(registryCell), `${registryCell.kind}/${registryCell.version} must be refused by pi's validator`).toContain(
         `Validation failed for tool "${registryCell.spec.toolName}"`,
       );
     }
   });
 
   it("reproduces the recorded per-branch fragments for the string-typed v2 violation class", () => {
-    const v2 = REGISTRY_CELLS[0]!;
-    const parameters = frozenPayloadSchemaParameters(v2.spec.schemaVersions[v2.version]!.schemaBytes);
-    let message = "";
-    try {
-      validateToolArguments(
-        { name: v2.spec.toolName, description: "d", parameters } as never,
-        { id: "call-bad", name: v2.spec.toolName, arguments: malformedArguments("reviewer-payload", "v2") } as never,
-      );
-    } catch (error) {
-      message = (error as Error).message;
-    }
+    const message = malformedRefusalMessage(REVIEWER_V2_CELL);
     // The exact branches the qualification recordings show pi reporting — the
     // string-typed schemaVersion is NOT coerced to the const number and the
     // JSON-encoded findings is NOT coerced to the array; the discriminator's
@@ -501,29 +308,8 @@ describe("real pi validateToolArguments against the exact frozen registry bytes"
   });
 
   it("admits no malformed judge score or refutation verdict enum through the real validator", () => {
-    const judge = REGISTRY_CELLS[2]!;
-    let judgeMessage = "";
-    try {
-      validateToolArguments(
-        { name: judge.spec.toolName, description: "d", parameters: frozenPayloadSchemaParameters(judge.spec.schemaVersions.v1!.schemaBytes) } as never,
-        { id: "c", name: judge.spec.toolName, arguments: malformedArguments("judge-verdict", "v1") } as never,
-      );
-    } catch (error) {
-      judgeMessage = (error as Error).message;
-    }
-    expect(judgeMessage).toContain("score");
-
-    const refutation = REGISTRY_CELLS[3]!;
-    let refutationMessage = "";
-    try {
-      validateToolArguments(
-        { name: refutation.spec.toolName, description: "d", parameters: frozenPayloadSchemaParameters(refutation.spec.schemaVersions.v1!.schemaBytes) } as never,
-        { id: "c", name: refutation.spec.toolName, arguments: malformedArguments("refutation-verdict", "v1") } as never,
-      );
-    } catch (error) {
-      refutationMessage = (error as Error).message;
-    }
-    expect(refutationMessage).toContain("verdict");
+    expect(malformedRefusalMessage(JUDGE_V1_CELL)).toContain("score");
+    expect(malformedRefusalMessage(REFUTATION_V1_CELL)).toContain("verdict");
   });
 
   it("admits whitespace-only advisory prose the engine refuses — the AD-5 disagreement, both halves in one flow", () => {
@@ -557,12 +343,12 @@ describe("real pi validateToolArguments against the exact frozen registry bytes"
 
 describe("real pi agent loop — terminating execute and the in-child validation-retry loop", () => {
   it("a valid emission executes, acknowledges, and settles WITHOUT a follow-up model request (FR-013)", async () => {
-    const registryCell = REGISTRY_CELLS[2]!; // judge-verdict v1
+    const registryCell = JUDGE_V1_CELL;
     const observed: unknown[] = [];
     const script = scriptTurns([
       assistantToolCallMessage([{ type: "toolCall", id: "call-1", name: registryCell.spec.toolName, arguments: canonicalArguments(registryCell.kind, registryCell.version) }]),
     ]);
-    const { events } = await runScriptedLoop([executeShellTool(registryCell, observed)], script);
+    const { events } = await runScriptedLoop([observedEmissionTool(mintedBindingFor(registryCell, SHELL_REQUEST_ID), observed)], script);
 
     expect(script.callCount()).toBe(1);
     // Execute observed the VALIDATED arguments, parsed-equal to the fixture.
@@ -578,13 +364,13 @@ describe("real pi agent loop — terminating execute and the in-child validation
   });
 
   it("a validation failure feeds the error back as a tool result and the loop re-prompts — the observed retry loop", async () => {
-    const registryCell = REGISTRY_CELLS[2]!; // judge-verdict v1
+    const registryCell = JUDGE_V1_CELL;
     const observed: unknown[] = [];
     const script = scriptTurns([
       assistantToolCallMessage([{ type: "toolCall", id: "call-bad", name: registryCell.spec.toolName, arguments: malformedArguments(registryCell.kind, registryCell.version) }]),
       assistantToolCallMessage([{ type: "toolCall", id: "call-good", name: registryCell.spec.toolName, arguments: canonicalArguments(registryCell.kind, registryCell.version) }]),
     ]);
-    const { events } = await runScriptedLoop([executeShellTool(registryCell, observed)], script);
+    const { events } = await runScriptedLoop([observedEmissionTool(mintedBindingFor(registryCell, SHELL_REQUEST_ID), observed)], script);
 
     // TWO model requests: the original turn and one re-prompt after this
     // validation failure. Feasibility §2.7 separately records up to ~2 extra
@@ -609,7 +395,7 @@ describe("real pi agent loop — terminating execute and the in-child validation
   });
 
   it("the recorded string-typed wire form is canonicalized BEFORE pi validates — the violation class now executes without a re-prompt", async () => {
-    const registryCell = REGISTRY_CELLS[0]!; // reviewer-payload v2, string-typed violation class
+    const registryCell = REVIEWER_V2_CELL; // string-typed violation class
     const observed: unknown[] = [];
     // The children's ACTUAL wire shape: the whole findings ARRAY serialized as
     // one JSON string (a lone object would correctly stay a string at an
@@ -622,7 +408,7 @@ describe("real pi agent loop — terminating execute and the in-child validation
     const script = scriptTurns([
       assistantToolCallMessage([{ type: "toolCall", id: "call-stringy", name: registryCell.spec.toolName, arguments: stringyArrayForm }]),
     ]);
-    const { events, messages } = await runScriptedLoop([executeShellTool(registryCell, observed)], script);
+    const { events, messages } = await runScriptedLoop([observedEmissionTool(mintedBindingFor(registryCell, SHELL_REQUEST_ID), observed)], script);
 
     // The wire-form canonicalization parsed the JSON-encoded fields against
     // the frozen schema's declared types; validation then admitted, execute
@@ -645,7 +431,7 @@ describe("real pi agent loop — terminating execute and the in-child validation
   });
 
   it("a wire form no declared type can accept still refuses before execute — the canonicalization never invents a field", async () => {
-    const registryCell = REGISTRY_CELLS[0]!; // reviewer-payload v2
+    const registryCell = REVIEWER_V2_CELL;
     const observed: unknown[] = [];
     const unparseable = {
       schemaVersion: "two",
@@ -656,7 +442,7 @@ describe("real pi agent loop — terminating execute and the in-child validation
       assistantToolCallMessage([{ type: "toolCall", id: "call-unparseable", name: registryCell.spec.toolName, arguments: unparseable }]),
       assistantFinalTextMessage("giving up; extraction fallback owns the attempt"),
     ]);
-    const { events, messages } = await runScriptedLoop([executeShellTool(registryCell, observed)], script);
+    const { events, messages } = await runScriptedLoop([observedEmissionTool(mintedBindingFor(registryCell, SHELL_REQUEST_ID), observed)], script);
 
     // The canonicalization cannot parse these values into any declared type,
     // so they pass through unchanged and the validator refuses verbatim
@@ -679,14 +465,14 @@ describe("real pi agent loop — terminating execute and the in-child validation
   });
 
   it("an engine-refined refusal THROWS at the shell — isError, never a successful tool result, with the bypass control attributing the refusal (FR-013)", async () => {
-    const registryCell = REGISTRY_CELLS[2]!; // judge-verdict v1, whitespace-only strongest_idea
+    const registryCell = JUDGE_V1_CELL; // whitespace-only strongest_idea
     const whitespaceArgs = whitespaceOnlyArguments(registryCell.kind);
     const observed: unknown[] = [];
     const script = scriptTurns([
       assistantToolCallMessage([{ type: "toolCall", id: "call-ws", name: registryCell.spec.toolName, arguments: whitespaceArgs }]),
       assistantFinalTextMessage("the engine refused my emission; finishing in prose"),
     ]);
-    const { messages } = await runScriptedLoop([executeShellTool(registryCell, observed)], script);
+    const { messages } = await runScriptedLoop([observedEmissionTool(mintedBindingFor(registryCell, SHELL_REQUEST_ID), observed)], script);
 
     // pi's validator ADMITTED the whitespace shape, so execute ran and
     // observed the arguments — then the engine's admission refused and the
@@ -704,41 +490,12 @@ describe("real pi agent loop — terminating execute and the in-child validation
     expect(bypassAcknowledgment.terminate).toBe(true);
   });
 
-  /** The PRODUCTION tool definition over an explicit issued binding, with the
-   *  suite's observation record around the PRODUCTION execute — the same
-   *  posture as executeShellTool, parametrized by the binding so the settled
-   *  transcript can be captured under the SAME issued request the tool was
-   *  registered with. */
-  const observedProductionTool = (issued: IssuedEmissionBinding, observed: unknown[]): Record<string, unknown> => {
-    const definition = emissionToolDefinition(issued);
-    return {
-      ...definition,
-      execute: async (toolCallId: string, params: unknown) => {
-        observed.push(params);
-        return definition.execute(toolCallId, params);
-      },
-    } as Record<string, unknown>;
-  };
-
-  /** The path-REFINED reviewer binding mint: the capture observation takes the
-   *  reviewer-payload refinement, so the fixture mints the refined view
-   *  directly (the path scoping is a type fact, never a runtime check). */
-  const mintedReviewerBindingFor = (requestId: string): IssuedEmissionBindingOf<"reviewer-payload"> => {
-    const minted = issueEmissionBinding({ requestId, kind: "reviewer-payload", version: "v2" });
-    if (!minted.ok) throw new Error(`fixture binding refused: ${minted.error.code} — ${minted.error.message}`);
-    return minted.value;
-  };
-
   it("an engine-refined refusal that threw is terminal even with usable final text — one re-prompt, the retained diagnostic, and the final text never resurrects the attempt (AD-8/FR-006)", async () => {
-    const cell = REGISTRY_CELLS[0]!; // reviewer-payload v2 — the prose-bearing cell the disagreement is defined for
-    const issued = mintedReviewerBindingFor("req-emission-invalid-plus-final");
+    const cell = REVIEWER_V2_CELL; // the prose-bearing cell the disagreement is defined for
+    const issued = mintedBindingFor(REVIEWER_V2_CELL, "req-emission-invalid-plus-final");
     const observed: unknown[] = [];
-    const tool = observedProductionTool(issued, observed);
-    const settledPayload = reviewerPayloadV2Schema.parse({
-      schemaVersion: 2,
-      kind: "standalone-review",
-      findings: [{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim: "real claim" }],
-    });
+    const tool = observedEmissionTool(issued, observed);
+    const settledPayload = validReviewerArgumentsV2("real claim");
     const whitespaceArgs = whitespaceOnlyArguments(cell.kind);
     const script = scriptTurns([
       assistantToolCallMessage([{ type: "toolCall", id: "call-ws", name: cell.spec.toolName, arguments: whitespaceArgs }]),
@@ -780,15 +537,11 @@ describe("real pi agent loop — terminating execute and the in-child validation
   });
 
   it("an engine-refused emission followed by a corrected re-emission refuses the attempt — the failed call is never reclassified as absence and the corrected sibling cannot rescue it (AD-9)", async () => {
-    const cell = REGISTRY_CELLS[0]!; // reviewer-payload v2
-    const issued = mintedReviewerBindingFor("req-emission-refused-then-corrected");
+    const cell = REVIEWER_V2_CELL;
+    const issued = mintedBindingFor(REVIEWER_V2_CELL, "req-emission-refused-then-corrected");
     const observed: unknown[] = [];
-    const tool = observedProductionTool(issued, observed);
-    const corrected = reviewerPayloadV2Schema.parse({
-      schemaVersion: 2,
-      kind: "standalone-review",
-      findings: [{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim: "real claim" }],
-    });
+    const tool = observedEmissionTool(issued, observed);
+    const corrected = validReviewerArgumentsV2("real claim");
     const script = scriptTurns([
       assistantToolCallMessage([{ type: "toolCall", id: "call-refused", name: cell.spec.toolName, arguments: whitespaceOnlyArguments(cell.kind) }]),
       assistantToolCallMessage([{ type: "toolCall", id: "call-corrected", name: cell.spec.toolName, arguments: corrected }]),
@@ -827,7 +580,7 @@ describe("real pi agent loop — terminating execute and the in-child validation
   });
 
   it("a mixed batch does NOT terminate — one non-terminating result forces the follow-up turn (AD-3)", async () => {
-    const registryCell = REGISTRY_CELLS[2]!; // judge-verdict v1
+    const registryCell = JUDGE_V1_CELL;
     const observed: unknown[] = [];
     const script = scriptTurns([
       assistantToolCallMessage([
@@ -836,7 +589,7 @@ describe("real pi agent loop — terminating execute and the in-child validation
       ]),
       assistantFinalTextMessage("batch finished with a plain note; the emission alone would have terminated"),
     ]);
-    const { events } = await runScriptedLoop([executeShellTool(registryCell, observed), plainTool], script);
+    const { events } = await runScriptedLoop([observedEmissionTool(mintedBindingFor(registryCell, SHELL_REQUEST_ID), observed), plainTool], script);
 
     // Both tools executed; the emission's result was terminating, the plain
     // one was not — the batch is not terminating, so the loop re-prompted.
@@ -850,7 +603,7 @@ describe("real pi agent loop — terminating execute and the in-child validation
   });
 
   it("a cancelled assistant turn aborts the loop BEFORE the emission executes — no tool execution, no follow-up model request, the toolCall block stays observable (AD-3)", async () => {
-    const registryCell = REGISTRY_CELLS[2]!; // judge-verdict v1
+    const registryCell = JUDGE_V1_CELL;
     const observed: unknown[] = [];
     // The caller cancelled while the model streamed the emission tool call:
     // the transport completes the turn as aborted, partial toolCall block
@@ -860,7 +613,7 @@ describe("real pi agent loop — terminating execute and the in-child validation
         { type: "toolCall", id: "call-1", name: registryCell.spec.toolName, arguments: canonicalArguments(registryCell.kind, registryCell.version) },
       ]),
     ]);
-    const { events, messages } = await runScriptedLoop([executeShellTool(registryCell, observed)], script);
+    const { events, messages } = await runScriptedLoop([observedEmissionTool(mintedBindingFor(registryCell, SHELL_REQUEST_ID), observed)], script);
 
     // Exactly ONE transport call: the aborted turn ends the loop — no
     // follow-up request, no re-prompt, no script exhaustion.
@@ -897,7 +650,7 @@ describe("real pi agent loop — terminating execute and the in-child validation
   });
 
   it("cancellation mid-batch: the cancelled sibling's error result keeps the batch non-terminating and the abort suppresses the follow-up turn (AD-3)", async () => {
-    const registryCell = REGISTRY_CELLS[2]!; // judge-verdict v1
+    const registryCell = JUDGE_V1_CELL;
     const observed: unknown[] = [];
     const controller = new AbortController();
     // The cancel arrives while the plain sibling is being prepared: pi
@@ -911,7 +664,7 @@ describe("real pi agent loop — terminating execute and the in-child validation
       ]),
     ]);
     const { events, messages } = await runScriptedLoop(
-      [executeShellTool(registryCell, observed), plainTool],
+      [observedEmissionTool(mintedBindingFor(registryCell, SHELL_REQUEST_ID), observed), plainTool],
       script,
       { signal: controller.signal, beforeToolCall: abortPlainToolPreparation(controller) },
     );
@@ -1029,7 +782,7 @@ describe("EMISSION_CONSTRAINED_SAMPLING_REQUEST through the real pi-ai resolver 
   it("every registry cell's production tool definition carries the SAME preferred request beside its frozen parameters", () => {
     for (const registryCell of REGISTRY_CELLS) {
       const observed: unknown[] = [];
-      const productionTool = executeShellTool(registryCell, observed);
+      const productionTool = observedEmissionTool(mintedBindingFor(registryCell, SHELL_REQUEST_ID), observed);
       // The registration shape: ONE request vocabulary for every emission
       // tool — the same frozen object the qualification probe registered as
       // the production shape — beside parameters minted from that cell's
@@ -1046,31 +799,8 @@ describe("EMISSION_CONSTRAINED_SAMPLING_REQUEST through the real pi-ai resolver 
 // the complete request-bound transcript observations (pi/transcript-adapter.ts)
 // ---------------------------------------------------------------------------
 
-import {
-  canonicalStructuralEquals,
-  parseContextDigest,
-} from "../../src/core/orchestration-contract/identity";
-import type { IssuedEmissionBindingOf } from "../../src/core/emission-tool";
-import type { FinalPayloadCandidate } from "../../src/core/harness-capture";
-
-const REVIEWER_V2_CELL = REGISTRY_CELLS[0]!;
-const REVIEWER_V3_CELL = REGISTRY_CELLS[1]!;
-const JUDGE_V1_CELL = REGISTRY_CELLS[2]!;
-const REFUTATION_V1_CELL = REGISTRY_CELLS[3]!;
-
-const mintedRefusal = (minted: { ok: boolean; error?: { code: string; message: string } }): never => {
-  throw new Error(`fixture binding refused: ${minted.error?.code} — ${minted.error?.message}`);
-};
-
-const mintedJudgeBinding = (): IssuedEmissionBinding => {
-  const minted = issueEmissionBinding({ requestId: "req-emission-tool-t5-obs", kind: "judge-verdict", version: "v1" });
-  return minted.ok ? minted.value : mintedRefusal(minted);
-};
-
-const mintedReviewerBinding = (): IssuedEmissionBindingOf<"reviewer-payload"> => {
-  const minted = issueEmissionBinding({ requestId: "req-emission-tool-t5-obs", kind: "reviewer-payload", version: "v2" });
-  return minted.ok ? minted.value : mintedRefusal(minted);
-};
+/** The request id the T5 observation fixtures mint their issued bindings under. */
+const OBSERVED_REQUEST_ID = "req-emission-tool-t5-obs";
 
 const issuedLookupContext = (() => {
   const parsed = parseContextDigest(sha256Hex("t5-issued-refutation-lookup"));
@@ -1080,7 +810,7 @@ const issuedLookupContext = (() => {
 
 describe("Pi mixed-batch lifecycle association", () => {
   it("keeps each item paired with its guard, emission expectation, roster identity, and write-grant decision", () => {
-    const emissionBinding = mintedReviewerBinding();
+    const emissionBinding = mintedBindingFor(REVIEWER_V2_CELL, OBSERVED_REQUEST_ID);
     const contextDigest = parseContextDigest(sha256Hex("t5-mixed-batch-context"));
     if (!contextDigest.ok) throw new Error(`fixture context digest refused: ${contextDigest.error.message}`);
 
@@ -1151,7 +881,7 @@ describe("Pi mixed-batch lifecycle association", () => {
 
 describe("Pi issued-request classification under a registered review facade", () => {
   const runId = "run.t5-issued-refutation";
-  const requestId = mintedReviewerBinding().requestId;
+  const requestId = mintedBindingFor(REVIEWER_V2_CELL, OBSERVED_REQUEST_ID).requestId;
   const refutationRequest = {
     runId,
     requestId,
@@ -1190,7 +920,7 @@ describe("Pi issued-request classification under a registered review facade", ()
   });
 
   it("keeps a direct registered reviewer request on its exact issued emission protocol", () => {
-    const schemaDigest = mintedReviewerBinding().schemaDigest;
+    const schemaDigest = mintedBindingFor(REVIEWER_V2_CELL, OBSERVED_REQUEST_ID).schemaDigest;
     const classified = classifyPiIssuedReviewRequest(
       runId,
       { kind: "wave-gate", schemaVersion: 2, reviewerProtocol: { schemaDigest } },
@@ -1232,7 +962,7 @@ describe("the production issued-review capture decision", () => {
   const runId = "run.t5-capture-decision";
   const request = {
     runId,
-    requestId: mintedReviewerBinding().requestId,
+    requestId: mintedBindingFor(REVIEWER_V2_CELL, OBSERVED_REQUEST_ID).requestId,
     contextDigest: issuedLookupContext,
     program: "wave-gate",
     role: "code-reviewer",
@@ -1790,7 +1520,7 @@ const asCompleteCalls = (frames: readonly EmissionCallFrame[]): readonly Extract
     .map((frame) => frame.call);
 
 describe("piEmissionCallFrames — complete, request-bound emission observations (FR-014/AD-8)", () => {
-  const issued = mintedReviewerBinding();
+  const issued = mintedBindingFor(REVIEWER_V2_CELL, OBSERVED_REQUEST_ID);
   const reviewerTool = REVIEWER_V2_CELL.spec.toolName;
   const judgeTool = JUDGE_V1_CELL.spec.toolName;
 
@@ -1933,7 +1663,7 @@ describe("piEmissionCallFrames — complete, request-bound emission observations
     // wire never completed. The frame's reason is the FINALIZATION, not the
     // argument form — the call died with its turn regardless of how its
     // arguments look, and the diagnostic must say which.
-    const registryCell = REGISTRY_CELLS[2]!; // judge-verdict v1
+    const registryCell = JUDGE_V1_CELL;
     const messages = [
       {
         role: "assistant",
@@ -2272,7 +2002,7 @@ describe("piEmissionCallFrames — complete, request-bound emission observations
       role: fc.constantFrom("assistant", "user", "toolResult"),
       content: fc.array(blockArb, { maxLength: 4 }),
     });
-    const judgeIssued = mintedJudgeBinding();
+    const judgeIssued = mintedBindingFor(JUDGE_V1_CELL, OBSERVED_REQUEST_ID);
     fc.assert(
       fc.property(fc.array(messageArb, { maxLength: 5 }), (messages) => {
         const first = piEmissionCallFrames(messages, judgeIssued);

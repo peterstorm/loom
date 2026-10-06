@@ -30,7 +30,7 @@ Any fix must meet several requirements. Readiness has to be bound to the specifi
 
 5. **Launcher-side, request-bound, pre-model readiness barrier over `pi --mode rpc` (chosen)**
    - Pros: It is a hard stop, because the prompt is not delivered until the gate opens. It observes the actual child. It binds to the request. An absent extension fails closed because the readiness command is missing. It was proven with zero model requests on every negative control.
-   - Cons: It needs a launcher change in another repository. It adds two RPC round trips on top of child startup. Startup measured about 1.7 to 2.0 s with the minimal probe extension; a production child loading the full Loom graph can take about 20 s, and the launcher bounds the whole gate at 45 s. It depends on Pi RPC primitives whose true upstream minimum version is unverified.
+   - Cons: It needs a launcher change in another repository. It adds two RPC round trips on top of child startup (the measured startup cost is under Consequences). It depends on Pi RPC primitives whose true upstream minimum version is unverified.
 
 ## Decision
 **The launcher holds model prompt delivery behind a bounded, request-bound readiness barrier that inspects the actual child. Parent spawn admission remains the pure batch decision.**
@@ -70,7 +70,7 @@ The decision applies at four layers.
 - Non-emission and Claude Code paths are untouched (`not-admitted` and extraction-only).
 
 **Negative:**
-- Each emission child adds two RPC round trips on top of child startup. The 1.7 to 2.0 s figure was measured with the minimal probe extension; a production Loom child can take about 20 s to reach `get_state`, and the launcher bounds the gate at 45 s (`DEFAULT_READINESS_TIMEOUT_MS`). Calibration must measure production children and include that cost in the p95 budget.
+- Each emission child adds two RPC round trips on top of child startup. Startup measured about 1.7 to 2.0 s with the minimal probe extension; a production child loading the full Loom graph can take about 20 s to reach `get_state`, and the launcher bounds the gate at 45 s (`DEFAULT_READINESS_TIMEOUT_MS`). Calibration must measure production children and include that cost in the p95 budget.
 - Correctness depends on a launcher change in `~/.dotfiles/pi/extensions/subagent/`, outside this repository. The change is owned and versioned separately, and Loom cannot enforce that the deployed launcher is current. An old print-mode launcher does not run emission children through the barrier. That is a known gap in the fail-closed guarantee, which holds only for the current RPC launcher; Loom cannot detect it from this repository. Engine-side parsing still validates every payload, so the gap weakens readiness assurance, not payload admission.
 - The design relies on observed Pi RPC behavior: extension commands execute without a model request, `entry_appended` reaches stdout, `session_start` precedes the stdout attach, and unknown commands fall through to the model. These were proven on pi 0.83.0. The true upstream minimum is unverified, and a Pi change could invalidate the seam. The re-run in `emission-startup.test.ts` is the tripwire.
 - The child extension must register only inside event or command handlers, never at factory top level. This constraint is easy to violate during later refactors.

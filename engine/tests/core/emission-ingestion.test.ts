@@ -33,12 +33,15 @@ import {
 } from "../../src/core/orchestration-contract/identity";
 import { sha256Hex } from "../../src/core/digest";
 import type { PayloadProducerKind, PayloadProducerKindName } from "../../src/core/model-profiles";
-import { standaloneReviewerPayloadV3Schema } from "../../src/core/standalone-lineage-contract";
 import { parseStandaloneReviewerPayloadV3 } from "../../src/core/reviewer-protocol";
+import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
 import {
-  REVIEWER_PAYLOAD_EXAMPLE_V2,
-  reviewerPayloadV2Schema,
-} from "../../src/core/reviewer-contract";
+  validJudgeArguments,
+  validRefutationArguments,
+  validReviewerArgumentsV2,
+  validReviewerArgumentsV3,
+  whitespaceOnlyArguments,
+} from "../fixtures/emission-arguments";
 
 /**
  * The AD-8/AD-9 selection matrix as executable behavior: the issued binding
@@ -86,11 +89,6 @@ const candidatesArb = fc.array(
   { maxLength: 3 },
 );
 
-/** The frozen v2 schema bytes — read through the registry, the one source. */
-function REVIEWER_PAYLOAD_SCHEMA_BYTES(): string {
-  return EMISSION_TOOL_SPECS["reviewer-payload"].schemaVersions["v2"]!.schemaBytes;
-}
-
 const callOf = (
   binding: IssuedEmissionBinding,
   toolCallId: string,
@@ -115,26 +113,6 @@ const incompleteFrame = (toolCallId: string | null, reason: string): EmissionCal
 });
 
 const INVALID_ARGUMENTS = { arbitrary: "not a payload" };
-
-/** A valid reviewer payload as emission arguments, parametrized by claim text. */
-const validReviewerArguments = (claim: string): unknown =>
-  reviewerPayloadV2Schema.parse({
-    schemaVersion: 2,
-    kind: "standalone-review",
-    findings: [{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim }],
-  });
-
-const validJudgeArguments = (criterion: string): unknown => ({
-  criterion,
-  rankings: [
-    { candidate: "candidate-type-driven-fp.md", score: 8, fatal_flaw: null, strongest_idea: "the registry" },
-  ],
-});
-
-const validRefutationArguments = (criterion: string): unknown => ({
-  criterion,
-  verdicts: [{ finding_id: "T1:code-reviewer-1", verdict: "refuted", reasoning: "cannot be triggered" }],
-});
 
 const USABLE_CANDIDATES = [{ origin: "content[0].text", text: "prose payload" }];
 const invalidArgsArb = fc.record({ arbitrary: fc.string({ maxLength: 20 }) });
@@ -233,7 +211,7 @@ describe("issueEmissionBinding", () => {
   });
 
   it("verifies the claimed schema digest against the frozen bytes and refuses stale or malformed digests", () => {
-    const digest = sha256Hex(REVIEWER_PAYLOAD_SCHEMA_BYTES());
+    const digest = sha256Hex(EMISSION_TOOL_SPECS["reviewer-payload"].schemaVersions["v2"]!.schemaBytes);
     const certified = issueEmissionBinding({
       requestId: REQUEST_ID,
       kind: "reviewer-payload",
@@ -336,7 +314,7 @@ describe("observeEmissionCalls", () => {
   });
 
   it("folds an exact replay of one call back to a single call — idempotent (FR-007)", () => {
-    const call = callOf(REVIEWER_V2, "call-1", validReviewerArguments("the registry"));
+    const call = callOf(REVIEWER_V2, "call-1", validReviewerArgumentsV2("the registry"));
     const replayed = structuredClone(frameOf(call));
     const observation = observeEmissionCalls([frameOf(call), replayed]);
     expect(observation.kind).toBe("single-call");
@@ -344,7 +322,7 @@ describe("observeEmissionCalls", () => {
   });
 
   it("refuses contradictory frames sharing one call identity, naming the first differing contract field (FR-007)", () => {
-    const call = callOf(REVIEWER_V2, "call-1", validReviewerArguments("the registry"));
+    const call = callOf(REVIEWER_V2, "call-1", validReviewerArgumentsV2("the registry"));
     for (const [field, variant] of [
       ["arguments", { ...call, arguments: { different: "arguments" } }],
       ["requestId", { ...call, requestId: OTHER_REQUEST_ID }],
@@ -520,13 +498,13 @@ describe("selectCanonicalPayload", () => {
       fc.property(proseArb, candidatesArb, (claim, candidates) => {
         const selection = selectCanonicalPayload(
           REVIEWER_V2,
-          observeEmissionCalls([frameOf(callOf(REVIEWER_V2, "call-1", validReviewerArguments(claim)))]),
+          observeEmissionCalls([frameOf(callOf(REVIEWER_V2, "call-1", validReviewerArgumentsV2(claim)))]),
           candidates,
         );
         expect(selection.kind).toBe("emission-tool-arguments");
         if (selection.kind === "emission-tool-arguments") {
           expect(selection.source).toBe("emission-tool");
-          expect(canonicalStructuralEquals(JSON.parse(selection.payload.text), validReviewerArguments(claim))).toBe(true);
+          expect(canonicalStructuralEquals(JSON.parse(selection.payload.text), validReviewerArgumentsV2(claim))).toBe(true);
         }
       }),
     );
@@ -547,7 +525,7 @@ describe("selectCanonicalPayload", () => {
   });
 
   it("returns the accepted call's identity as provenance on the emission arm (FR-009/AD-8)", () => {
-    const args = validReviewerArguments("the registry");
+    const args = validReviewerArgumentsV2("the registry");
     const selection = selectCanonicalPayload(
       REVIEWER_V2,
       observeEmissionCalls([frameOf(callOf(REVIEWER_V2, "call-7", args))]),
@@ -642,13 +620,13 @@ describe("selectCanonicalPayload", () => {
 
   it("rejects a refused-then-corrected pair in either order, and identical arguments under different call ids", () => {
     const invalid = frameOf(callOf(REVIEWER_V2, "call-a", INVALID_ARGUMENTS));
-    const valid = frameOf(callOf(REVIEWER_V2, "call-b", validReviewerArguments("the registry")));
+    const valid = frameOf(callOf(REVIEWER_V2, "call-b", validReviewerArgumentsV2("the registry")));
     expect(selectCanonicalPayload(REVIEWER_V2, observeEmissionCalls([invalid, valid]), USABLE_CANDIDATES))
       .toMatchObject({ kind: "duplicate-emission-call" });
     expect(selectCanonicalPayload(REVIEWER_V2, observeEmissionCalls([valid, invalid]), USABLE_CANDIDATES))
       .toMatchObject({ kind: "duplicate-emission-call" });
 
-    const sameArgs = validReviewerArguments("the registry");
+    const sameArgs = validReviewerArgumentsV2("the registry");
     const identicalA = frameOf(callOf(REVIEWER_V2, "call-a", sameArgs));
     const identicalB = frameOf(callOf(REVIEWER_V2, "call-b", structuredClone(sameArgs)));
     expect(selectCanonicalPayload(REVIEWER_V2, observeEmissionCalls([identicalA, identicalB]), USABLE_CANDIDATES))
@@ -657,7 +635,7 @@ describe("selectCanonicalPayload", () => {
 
   it("carries the ambiguity's observed calls on the duplicate arm in first-observed order — the rejection names what was observed (FR-007)", () => {
     const first = frameOf(callOf(REVIEWER_V2, "call-a", INVALID_ARGUMENTS));
-    const second = frameOf(callOf(REVIEWER_V2, "call-b", validReviewerArguments("the registry")));
+    const second = frameOf(callOf(REVIEWER_V2, "call-b", validReviewerArgumentsV2("the registry")));
     const selection = selectCanonicalPayload(REVIEWER_V2, observeEmissionCalls([first, second]), USABLE_CANDIDATES);
     expect(selection.kind).toBe("duplicate-emission-call");
     if (selection.kind === "duplicate-emission-call") {
@@ -828,7 +806,7 @@ describe("selectCanonicalPayload", () => {
       kind: Object.freeze({ kind: "judge-verdict" }) as PayloadProducerKind,
       version: "v1" as const,
     };
-    const reviewerCall = frameOf(callOf(REVIEWER_V2, "call-r", validReviewerArguments("the registry")));
+    const reviewerCall = frameOf(callOf(REVIEWER_V2, "call-r", validReviewerArgumentsV2("the registry")));
     for (const calls of [[frameOf(judgeCall), reviewerCall], [reviewerCall, frameOf(judgeCall)]]) {
       const selection = selectCanonicalPayload(REVIEWER_V2, observeEmissionCalls(calls), USABLE_CANDIDATES);
       expect(selection).toEqual({
@@ -839,8 +817,8 @@ describe("selectCanonicalPayload", () => {
   });
 
   it("refuses an unusable observation before counting — incompleteness is never absorbed into ambiguity", () => {
-    const validA = frameOf(callOf(REVIEWER_V2, "call-a", validReviewerArguments("the registry")));
-    const validB = frameOf(callOf(REVIEWER_V2, "call-b", validReviewerArguments("second registry")));
+    const validA = frameOf(callOf(REVIEWER_V2, "call-a", validReviewerArgumentsV2("the registry")));
+    const validB = frameOf(callOf(REVIEWER_V2, "call-b", validReviewerArgumentsV2("second registry")));
     const selection = selectCanonicalPayload(
       REVIEWER_V2,
       observeEmissionCalls([incompleteFrame("call-x", "stream interrupted"), validA, validB]),
@@ -1052,29 +1030,6 @@ describe("selectVerdictSource", () => {
  * call is a REFUSED call at the selection, never an ingested payload — and the
  * refusal is retained on whichever extraction arm the final candidates allow.
  */
-const whitespaceOnlyArguments = (kind: PayloadProducerKindName): unknown => {
-  switch (kind) {
-    case "reviewer-payload": {
-      const finding = reviewerPayloadV2Schema.parse({
-        schemaVersion: 2,
-        kind: "standalone-review",
-        findings: [{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim: "real claim" }],
-      }).findings[0]!;
-      return { schemaVersion: 2, kind: "standalone-review", findings: [{ ...finding, claim: "   " }] };
-    }
-    case "judge-verdict":
-      return {
-        criterion: "extensibility",
-        rankings: [{ candidate: "candidate-type-driven-fp.md", score: 8, fatal_flaw: null, strongest_idea: "   " }],
-      };
-    case "refutation-verdict":
-      return {
-        criterion: "reproduction",
-        verdicts: [{ finding_id: "T1:code-reviewer-1", verdict: "refuted", reasoning: "   " }],
-      };
-  }
-};
-
 describe("whitespace-only schema-vs-parser disagreement (AD-5)", () => {
   it("refuses the whitespace-only call for every kind even though its shape passes the frozen JSON Schema", () => {
     for (const [kindName, spec] of Object.entries(EMISSION_TOOL_SPECS)) {
@@ -1135,19 +1090,15 @@ describe("whitespace-only schema-vs-parser disagreement (AD-5)", () => {
 /** The recorded transport class the unconstrained local route produces: the
  *  transcript observes what the model emitted — JSON-encoded strings for
  *  declared non-string fields — while the child executed the canonical
- *  payload pi validated through `prepareArguments`. */
-const wireFormOf = (payload: unknown): unknown => {
-  const record = payload as Record<string, unknown>;
-  const wire: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(record)) {
-    wire[key] = typeof value === "number"
-      ? JSON.stringify(value)
-      : Array.isArray(value) || (typeof value === "object" && value !== null)
-        ? JSON.stringify(value)
-        : value;
-  }
-  return wire;
-};
+ *  payload pi validated through `prepareArguments`. The ONE inverse of the
+ *  wire-form canonicalization for every reviewer version: each top-level
+ *  number, array, or object field is JSON-encoded; every other value passes
+ *  through. */
+const wireFormOf = (payload: unknown): unknown =>
+  Object.fromEntries(Object.entries(payload as Record<string, unknown>).map(([key, value]) => [
+    key,
+    typeof value === "number" || (typeof value === "object" && value !== null) ? JSON.stringify(value) : value,
+  ]));
 
 describe("the binding-scoped admission canonicalizes the observed wire form", () => {
   it("selects the recorded string-typed wire form as emission-tool-arguments with the canonical payload", () => {
@@ -1227,7 +1178,7 @@ describe("the observed request id is parsed at the binding check (FR-014)", () =
   ])("refuses %s as wrong-request — never absence, never a fallback — on both paths", (_label, requestId) => {
     const reviewer = selectCanonicalPayload(
       REVIEWER_V2,
-      observeEmissionCalls([frameOf({ ...callOf(REVIEWER_V2, "call-malformed", validReviewerArguments("the registry")), requestId })]),
+      observeEmissionCalls([frameOf({ ...callOf(REVIEWER_V2, "call-malformed", validReviewerArgumentsV2("the registry")), requestId })]),
       USABLE_CANDIDATES,
     );
     expect(reviewer).toMatchObject({ kind: "observation-refused", refusal: { code: "wrong-request" } });
@@ -1255,7 +1206,7 @@ describe("the observed request id is parsed at the binding check (FR-014)", () =
 describe("the selection's binding-certification invariant", () => {
   it("rejects a spread-forged schema digest at compile time — the selection never receives an uncertified binding", () => {
     const forgedDigest = { ...REVIEWER_V2, schemaDigest: "0".repeat(64) as ArtifactDigest };
-    const call = frameOf(callOf(REVIEWER_V2, "call-cert", validReviewerArguments("the registry")));
+    const call = frameOf(callOf(REVIEWER_V2, "call-cert", validReviewerArgumentsV2("the registry")));
     // @ts-expect-error a spread copy of a minted binding is not a minted binding
     const reviewerForgery = (): IngestionSelection => selectCanonicalPayload(forgedDigest, observeEmissionCalls([call]), USABLE_CANDIDATES);
 
@@ -1277,14 +1228,6 @@ describe("the selection's binding-certification invariant", () => {
   });
 
   it("admits through every minted registry cell — the positive control over the compile-time certification", () => {
-    const v3Arguments = standaloneReviewerPayloadV3Schema.parse({
-      schemaVersion: 3,
-      kind: "standalone-successor-review",
-      lineageDigest: "a".repeat(64),
-      snapshotDigest: "b".repeat(64),
-      priorAssessments: [],
-      findings: [],
-    });
     // Per-path thunks: the path scoping is a type fact, so each control mints
     // its own binding literal and crosses its own selection entry.
     const positiveControls: readonly (readonly [string, () => IngestionSelection | VerdictSourceSelection])[] = [
@@ -1292,7 +1235,7 @@ describe("the selection's binding-certification invariant", () => {
         const minted = mustMint({ requestId: REQUEST_ID, kind: "reviewer-payload", version: "v2" });
         return selectCanonicalPayload(
           minted,
-          observeEmissionCalls([frameOf(callOf(minted, "call-ok", validReviewerArguments("the registry")))]),
+          observeEmissionCalls([frameOf(callOf(minted, "call-ok", validReviewerArgumentsV2("the registry")))]),
           [],
         );
       }],
@@ -1300,7 +1243,7 @@ describe("the selection's binding-certification invariant", () => {
         const minted = mustMint({ requestId: REQUEST_ID, kind: "reviewer-payload", version: "v3" });
         return selectCanonicalPayload(
           minted,
-          observeEmissionCalls([frameOf(callOf(minted, "call-ok", v3Arguments))]),
+          observeEmissionCalls([frameOf(callOf(minted, "call-ok", validReviewerArgumentsV3()))]),
           [],
         );
       }],
@@ -1386,21 +1329,6 @@ describe("the verdict extraction arms preserve the existing raw input byte-verba
 // The successor v3 reviewer path rides the shared selection kernel (T9)
 // ---------------------------------------------------------------------------
 
-/** A schema-valid successor v3 payload as emission arguments. The lineage
- *  digests are fixture-local; the successor's OWN joins re-check them
- *  against the prepared successor (the successor suites), so the kernel
- *  selection only ever sees the parser's verdict. */
-const v3Arguments = (overrides: Record<string, unknown> = {}): unknown =>
-  standaloneReviewerPayloadV3Schema.parse({
-    schemaVersion: 3,
-    kind: "standalone-successor-review",
-    lineageDigest: "a".repeat(64),
-    snapshotDigest: "b".repeat(64),
-    priorAssessments: [],
-    findings: [],
-    ...overrides,
-  });
-
 /** The engine-refined v3 refusal fixtures, built as RAW argument objects —
  *  they are invalid BY the engine-only refinements, so the schema parse must
  *  never mint them. Whitespace-only prose and an authored finding id both
@@ -1418,20 +1346,6 @@ const v3AuthoredIdRefusal = (): Record<string, unknown> => ({
   findings: [{ draft: { severity: "advisory", file: null, line: null, claim: "Authored id", reason: "Useful, nonblocking improvement." }, relation: { kind: "independent" }, id: "chosen-1" }],
 });
 
-/** The wire form routes without server-side constrained decoding emit:
- *  declared non-string fields serialized as JSON-encoded strings. */
-const wireFormOfV3 = (value: unknown): unknown => {
-  const record = value as Record<string, unknown>;
-  return {
-    schemaVersion: "3",
-    kind: record["kind"],
-    lineageDigest: record["lineageDigest"],
-    snapshotDigest: record["snapshotDigest"],
-    priorAssessments: JSON.stringify(record["priorAssessments"]),
-    findings: JSON.stringify(record["findings"]),
-  };
-};
-
 const v3RefusalOf = (arguments_: unknown): { code: string; message: string } => {
   const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS["reviewer-payload"], "v3", arguments_);
   if (admitted.kind !== "refused") throw new Error("fixture v3 admission must be refused");
@@ -1442,7 +1356,7 @@ describe("the successor v3 reviewer path rides the shared selection kernel (T9)"
   it("selects a valid v3 emission call over final text through the v3 registry cell, with the call's provenance (FR-003/AS-003)", () => {
     const selection = selectCanonicalPayload(
       REVIEWER_V3,
-      observeEmissionCalls([frameOf(callOf(REVIEWER_V3, "call-v3-ok", v3Arguments()))]),
+      observeEmissionCalls([frameOf(callOf(REVIEWER_V3, "call-v3-ok", validReviewerArgumentsV3()))]),
       USABLE_CANDIDATES,
     );
     expect(selection.kind).toBe("emission-tool-arguments");
@@ -1457,7 +1371,7 @@ describe("the successor v3 reviewer path rides the shared selection kernel (T9)"
   });
 
   it("canonicalizes the v3 wire form through the frozen v3 schema and selects identically to the child-executed form", () => {
-    const value = v3Arguments({
+    const value = validReviewerArgumentsV3({
       findings: [{ draft: { severity: "advisory", file: null, line: null, claim: "Distinct v3 assertion", reason: "Useful, nonblocking improvement." }, relation: { kind: "independent" } }],
     });
     const fromCanonical = selectCanonicalPayload(
@@ -1467,7 +1381,7 @@ describe("the successor v3 reviewer path rides the shared selection kernel (T9)"
     );
     const fromWire = selectCanonicalPayload(
       REVIEWER_V3,
-      observeEmissionCalls([frameOf(callOf(REVIEWER_V3, "call-v3-wire", wireFormOfV3(value)))]),
+      observeEmissionCalls([frameOf(callOf(REVIEWER_V3, "call-v3-wire", wireFormOf(value)))]),
       [],
     );
     expect(fromCanonical.kind).toBe("emission-tool-arguments");
@@ -1519,9 +1433,9 @@ describe("the successor v3 reviewer path rides the shared selection kernel (T9)"
 
   it("rejects duplicate v3 calls as ambiguity — refused-then-corrected in either order, and identical arguments under different call ids (FR-007/AS-019)", () => {
     for (const [label, frames] of [
-      ["refused then corrected", [frameOf(callOf(REVIEWER_V3, "call-v3-bad", v3WhitespaceRefusal())), frameOf(callOf(REVIEWER_V3, "call-v3-good", v3Arguments()))]],
-      ["corrected then refused", [frameOf(callOf(REVIEWER_V3, "call-v3-good", v3Arguments())), frameOf(callOf(REVIEWER_V3, "call-v3-bad", v3WhitespaceRefusal()))]],
-      ["identical arguments, distinct identities", [frameOf(callOf(REVIEWER_V3, "call-v3-one", v3Arguments())), frameOf(callOf(REVIEWER_V3, "call-v3-two", v3Arguments()))]],
+      ["refused then corrected", [frameOf(callOf(REVIEWER_V3, "call-v3-bad", v3WhitespaceRefusal())), frameOf(callOf(REVIEWER_V3, "call-v3-good", validReviewerArgumentsV3()))]],
+      ["corrected then refused", [frameOf(callOf(REVIEWER_V3, "call-v3-good", validReviewerArgumentsV3())), frameOf(callOf(REVIEWER_V3, "call-v3-bad", v3WhitespaceRefusal()))]],
+      ["identical arguments, distinct identities", [frameOf(callOf(REVIEWER_V3, "call-v3-one", validReviewerArgumentsV3())), frameOf(callOf(REVIEWER_V3, "call-v3-two", validReviewerArgumentsV3()))]],
     ] as const) {
       const selection = selectCanonicalPayload(REVIEWER_V3, observeEmissionCalls(frames), USABLE_CANDIDATES);
       expect(selection.kind, label).toBe("duplicate-emission-call");
@@ -1532,14 +1446,14 @@ describe("the successor v3 reviewer path rides the shared selection kernel (T9)"
 
   it("refuses each v3 misbinding before counting — a v2 call in a v3 attempt never self-decodes, a verdict call never consults, a foreign request never binds (FR-014)", () => {
     const misbindings = [
-      ["unexpected version", { ...callOf(REVIEWER_V3, "call-v2-in-v3", validReviewerArguments("misbound version")), version: "v2" as const }],
+      ["unexpected version", { ...callOf(REVIEWER_V3, "call-v2-in-v3", validReviewerArgumentsV2("misbound version")), version: "v2" as const }],
       ["unexpected kind", { ...callOf(REVIEWER_V3, "call-judge-in-v3", validJudgeArguments("extensibility")), kind: JUDGE_V1.kind }],
-      ["wrong request", { ...callOf(REVIEWER_V3, "call-foreign-request", v3Arguments()), requestId: OTHER_REQUEST_ID }],
+      ["wrong request", { ...callOf(REVIEWER_V3, "call-foreign-request", validReviewerArgumentsV3()), requestId: OTHER_REQUEST_ID }],
     ] as const;
     for (const [label, misbound] of misbindings) {
       const selection = selectCanonicalPayload(
         REVIEWER_V3,
-        observeEmissionCalls([frameOf(misbound), frameOf(callOf(REVIEWER_V3, "call-v3-good", v3Arguments()))]),
+        observeEmissionCalls([frameOf(misbound), frameOf(callOf(REVIEWER_V3, "call-v3-good", validReviewerArgumentsV3()))]),
         USABLE_CANDIDATES,
       );
       expect(selection.kind, label).toBe("observation-refused");
@@ -1555,14 +1469,14 @@ describe("the successor v3 reviewer path rides the shared selection kernel (T9)"
   });
 
   it("folds an exact v3 replay back to a single call — idempotent (FR-007)", () => {
-    const frame = frameOf(callOf(REVIEWER_V3, "call-v3-replay", v3Arguments()));
+    const frame = frameOf(callOf(REVIEWER_V3, "call-v3-replay", validReviewerArgumentsV3()));
     const selection = selectCanonicalPayload(REVIEWER_V3, observeEmissionCalls([frame, frame]), USABLE_CANDIDATES);
     expect(selection).toEqual(selectCanonicalPayload(REVIEWER_V3, observeEmissionCalls([frame]), USABLE_CANDIDATES));
   });
 
   it("keeps the v3 extraction arms equal to the no-op baseline on the same final candidates, and asserts duplicate/misbound rejection outcomes (AD-9 containment law, property)", () => {
     const refusedV3 = v3WhitespaceRefusal();
-    const misboundV2 = { ...callOf(REVIEWER_V3, "call-v2-in-v3", validReviewerArguments("misbound")), version: "v2" as const };
+    const misboundV2 = { ...callOf(REVIEWER_V3, "call-v2-in-v3", validReviewerArgumentsV2("misbound")), version: "v2" as const };
     fc.assert(
       fc.property(candidatesArb, (candidates) => {
         const baseline = parseFinalPayload(candidates);
@@ -1585,7 +1499,7 @@ describe("the successor v3 reviewer path rides the shared selection kernel (T9)"
         // skipped under a universal containment name (AD-9).
         const duplicate = selectCanonicalPayload(
           REVIEWER_V3,
-          observeEmissionCalls([frameOf(callOf(REVIEWER_V3, "call-v3-one", v3Arguments())), frameOf(callOf(REVIEWER_V3, "call-v3-two", v3Arguments()))]),
+          observeEmissionCalls([frameOf(callOf(REVIEWER_V3, "call-v3-one", validReviewerArgumentsV3())), frameOf(callOf(REVIEWER_V3, "call-v3-two", validReviewerArgumentsV3()))]),
           candidates,
         );
         expect(duplicate.kind).toBe("duplicate-emission-call");

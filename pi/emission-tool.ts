@@ -598,21 +598,26 @@ const stringArray = (field: string, value: unknown): DomainResult<readonly strin
   return success(Object.freeze(names));
 };
 
-const checkedField = <T, E extends FieldParseError>(
-  field: string,
-  parsed: DomainResult<T, E>,
-  violations: string[],
-): T | undefined => {
-  if (parsed.ok) return parsed.value;
-  violations.push(`${field}: ${parsed.error.message}`);
-  return undefined;
+type ParsedFieldValues<F> = {
+  readonly [K in keyof F]: F[K] extends DomainResult<infer T, FieldParseError> ? T : never;
 };
 
-const presentReadinessField = <T>(value: T | undefined): T => {
-  if (value === undefined) {
-    throw new Error("readiness parse invariant failed: a field value is absent without a recorded violation");
+/** Collect-all field parse: every malformed field is named, in declaration
+ * order, or every value is returned under its own key, so no caller ever holds
+ * a half-parsed field. The one assertion is sound by construction: a success
+ * means each key of `fields` was copied from an `ok` result. */
+const parseAllFields = <F extends Readonly<Record<string, DomainResult<unknown, FieldParseError>>>>(
+  fields: F,
+): DomainResult<ParsedFieldValues<F>, readonly string[]> => {
+  const violations: string[] = [];
+  const values: Record<string, unknown> = {};
+  for (const [field, parsed] of Object.entries(fields)) {
+    if (parsed.ok) values[field] = parsed.value;
+    else violations.push(`${field}: ${parsed.error.message}`);
   }
-  return value;
+  return violations.length > 0
+    ? failure(Object.freeze(violations))
+    : success(values as ParsedFieldValues<F>);
 };
 
 /** Parse, don't validate: arbitrary command-entry data becomes one immutable
@@ -624,38 +629,36 @@ export function parseReadinessReport(raw: unknown): DomainResult<ReadinessReport
       reason: `the readiness payload is ${describeUnknown(raw)}, not an object`,
     }));
   }
-  const violations: string[] = [];
-  const requestId = checkedField("requestId", parseRequestId(raw["requestId"]), violations);
-  const contextDigest = checkedField("contextDigest", parseContextDigest(raw["contextDigest"]), violations);
-  const schemaDigest = checkedField("schemaDigest", parseArtifactDigest(raw["schemaDigest"]), violations);
-  const kind = checkedField("kind", nonEmptyString("kind", raw["kind"]), violations);
-  const version = checkedField("version", nonEmptyString("version", raw["version"]), violations);
-  const toolName = checkedField("toolName", nonEmptyString("toolName", raw["toolName"]), violations);
-  const revision = checkedField("revision", nonEmptyString("revision", raw["revision"]), violations);
-  const active = checkedField("active", booleanValue("active", raw["active"]), violations);
-  const childPid = checkedField("childPid", positiveInteger("childPid", raw["childPid"]), violations);
-  const registeredTools = checkedField(
-    "registeredTools",
-    stringArray("registeredTools", raw["registeredTools"]),
-    violations,
-  );
-  if (violations.length > 0) {
+  const parsed = parseAllFields({
+    requestId: parseRequestId(raw["requestId"]),
+    contextDigest: parseContextDigest(raw["contextDigest"]),
+    schemaDigest: parseArtifactDigest(raw["schemaDigest"]),
+    kind: nonEmptyString("kind", raw["kind"]),
+    version: nonEmptyString("version", raw["version"]),
+    toolName: nonEmptyString("toolName", raw["toolName"]),
+    revision: nonEmptyString("revision", raw["revision"]),
+    active: booleanValue("active", raw["active"]),
+    childPid: positiveInteger("childPid", raw["childPid"]),
+    registeredTools: stringArray("registeredTools", raw["registeredTools"]),
+  });
+  if (!parsed.ok) {
     return failure(canonicalRecord({
       kind: "malformed-readiness-payload" as const,
-      reason: `the readiness payload violates its contract (${violations.join("; ")})`,
+      reason: `the readiness payload violates its contract (${parsed.error.join("; ")})`,
     }));
   }
+  const fields = parsed.value;
   return success(canonicalRecord({
-    requestId: presentReadinessField(requestId),
-    contextDigest: presentReadinessField(contextDigest),
-    kind: presentReadinessField(kind),
-    version: presentReadinessField(version),
-    toolName: presentReadinessField(toolName),
-    schemaDigest: presentReadinessField(schemaDigest),
-    revision: presentReadinessField(revision),
-    active: presentReadinessField(active),
-    childPid: presentReadinessField(childPid),
-    registeredTools: presentReadinessField(registeredTools),
+    requestId: fields.requestId,
+    contextDigest: fields.contextDigest,
+    kind: fields.kind,
+    version: fields.version,
+    toolName: fields.toolName,
+    schemaDigest: fields.schemaDigest,
+    revision: fields.revision,
+    active: fields.active,
+    childPid: fields.childPid,
+    registeredTools: fields.registeredTools,
   }));
 }
 

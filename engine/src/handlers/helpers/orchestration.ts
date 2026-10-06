@@ -77,7 +77,7 @@ import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
 import { dirname, join, resolve } from "node:path";
 import { isReviewAgent, SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
-import { IMPLEMENTATION_BRIEF_MARKER } from "../../core/implementation-brief";
+import { IMPLEMENTATION_BRIEF_MARKER, type ImplementationBrief } from "../../core/implementation-brief";
 import { renderTaskImplementationBrief } from "../../orchestration/implementation-brief";
 import { parseTaskGraph, StateManager, type ActiveWaveGateAbandonmentResult } from "../../state-manager";
 import { observeAnyActiveSubagent } from "../../machine";
@@ -187,7 +187,7 @@ import { remediateOperation } from "./remediate-implementation-escalation";
 import { attestOperation } from "./attest-implementation";
 import { renderStandaloneReviewSummary } from "../../core/standalone-review-records";
 import { serializeStandaloneReviewMachineState } from "../../core/standalone-review-checkpoint";
-import { argumentValue, hasFlag } from "./cli-args";
+import { argumentValue, hasFlag, unconsumedValueArguments } from "./cli-args";
 import { REMEDIATION_EVENT_RESOURCE_POLICY } from "./programs/remediation-events";
 import { parseStandaloneDispositionStartBytes } from "../../core/standalone-disposition-machine";
 import { STANDALONE_LINEAGE_LIMITS, standalonePublicationReferenceSchema } from "../../core/standalone-lineage-contract";
@@ -564,17 +564,56 @@ async function statusOperation(args: readonly string[]): Promise<HookResult> {
   return { kind: "allow" };
 }
 
+/** `brief`'s whole argument grammar: `--task <id>` and the `--prompt` switch.
+ *  Brief answers only while canonical status owes implementation dispatches
+ *  for the protected current Wave, so a status selector (`--wave`,
+ *  `--runs-root`, `--run`) would have nothing to select; it and any other
+ *  argument are refused rather than silently ignored. */
+const BRIEF_VALUE_FLAGS: ReadonlySet<string> = new Set(["--task"]);
+const BRIEF_SWITCHES: ReadonlySet<string> = new Set(["--prompt"]);
+
+/** One owed dispatch's brief and its exact spawn invocation per harness. */
+export type BriefInvocation = Readonly<{
+  taskId: string;
+  agent: string;
+  dispatch: ImplementationBrief["dispatch"];
+  pi: Readonly<{ agent: string; task: string }>;
+  claude: Readonly<{ subagent_type: string; model: string; description: string }>;
+  prompt?: string;
+}>;
+
+/**
+ * Pure harness projection of one rendered brief. Pi passes the brief MARKER
+ * as the task; the Loom extension expands it to the rendered brief before any
+ * gate reads the prompt. Claude Code has no expansion seam, so `withPrompt`
+ * carries the rendered brief to pass verbatim.
+ */
+export function briefInvocation(brief: ImplementationBrief, claudeModel: string, withPrompt: boolean): BriefInvocation {
+  return Object.freeze({
+    taskId: brief.taskId,
+    agent: brief.agent,
+    dispatch: brief.dispatch,
+    pi: Object.freeze({ agent: brief.agent, task: `${IMPLEMENTATION_BRIEF_MARKER}: ${brief.taskId}` }),
+    claude: Object.freeze({ subagent_type: brief.agent, model: claudeModel, description: `Implement ${brief.taskId}` }),
+    ...(withPrompt ? { prompt: brief.prompt } : {}),
+  });
+}
+
 /**
  * `brief [--task Tn] [--prompt]` — the engine-rendered implementation brief
  * for every dispatch canonical status owes (or the one named Task), with the
- * exact spawn invocation per harness. A pure read: the spawn gate still
- * registers and authorizes the attempt.
- *
- * Pi spawns pass the brief MARKER as the task; the Loom extension expands it
- * to the rendered brief before any gate reads the prompt. Claude Code has no
- * expansion seam, so `--prompt` includes the rendered brief to pass verbatim.
+ * exact spawn invocation per harness (`briefInvocation`). A pure read: the
+ * spawn gate still registers and authorizes the attempt. Any argument outside
+ * that grammar, a status selector included, is refused.
  */
 async function briefOperation(args: readonly string[]): Promise<HookResult> {
+  const unconsumed = unconsumedValueArguments(args, BRIEF_VALUE_FLAGS).filter((token) => !BRIEF_SWITCHES.has(token));
+  if (unconsumed.length > 0) {
+    return {
+      kind: "error",
+      message: `brief takes only --task <id> and --prompt; unknown or unconsumed argument(s): ${unconsumed.join(" ")}`,
+    };
+  }
   const status = await deriveCurrentOrchestrationStatus([], TASK_GRAPH_PATH);
   const action = status.next.action;
   const recovery = action.kind === "blocked" && action.diagnostic.kind === "wave-gate-not-started"
@@ -593,24 +632,13 @@ async function briefOperation(args: readonly string[]): Promise<HookResult> {
     };
   }
   const withPrompt = hasFlag(args, "--prompt");
-  const briefs = [];
+  const briefs: BriefInvocation[] = [];
   for (const dispatch of dispatches) {
     const rendered = renderTaskImplementationBrief(TASK_GRAPH_PATH, LOOM_PACKAGE_ROOT, dispatch.taskId);
     if (!rendered.ok) return { kind: "error", message: rendered.error };
     const claudeModel = expectedSpawnModel(rendered.value.agent, "claude-code");
     if (!claudeModel.ok) return { kind: "error", message: claudeModel.error.message };
-    briefs.push({
-      taskId: rendered.value.taskId,
-      agent: rendered.value.agent,
-      dispatch: rendered.value.dispatch,
-      pi: { agent: rendered.value.agent, task: `${IMPLEMENTATION_BRIEF_MARKER}: ${rendered.value.taskId}` },
-      claude: {
-        subagent_type: rendered.value.agent,
-        model: claudeModel.value,
-        description: `Implement ${rendered.value.taskId}`,
-      },
-      ...(withPrompt ? { prompt: rendered.value.prompt } : {}),
-    });
+    briefs.push(briefInvocation(rendered.value, claudeModel.value, withPrompt));
   }
   process.stdout.write(`${JSON.stringify({ wave: recovery.wave, briefs }, null, 2)}\n`);
   return { kind: "allow" };
@@ -1381,78 +1409,80 @@ const driveStart = (handle: RunDirHandle, request: DirectStartRequest): Promise<
     })
     .exhaustive();
 
+/** The Run Directory a start names: both `--runs-root` and `--run`, or the
+ *  program's exact usage refusal. */
+function startRunLocation(
+  args: readonly string[],
+  usage: string,
+): Readonly<{ ok: true; runsRoot: string; run: string }> | Readonly<{ ok: false; result: HookResult }> {
+  const runsRoot = argumentValue(args, "--runs-root");
+  const run = argumentValue(args, "--run");
+  return runsRoot === null || run === null
+    ? { ok: false, result: { kind: "error", message: usage } }
+    : { ok: true, runsRoot, run };
+}
+
+/** The one start tail: create and bind the live Run Directory, drive the
+ *  program the start prepared, and emit its action. Each start arm differs only
+ *  in its usage and prepare step and hands its driver here. */
+async function driveCreatedRun(
+  args: readonly string[],
+  drive: (handle: RunDirHandle) => Promise<FacadeDriveResult>,
+): Promise<HookResult> {
+  const bound = bindLiveRun(args, createRunDirectory);
+  if (!isBound(bound)) return bound;
+  const driven = await drive(bound.value.handle);
+  return driven.ok ? emitRunAction(bound.value.handle, driven.action) : { kind: "error", message: driven.message };
+}
+
 async function startOperation(stdin: string, args: readonly string[]): Promise<HookResult> {
   const program = args[0];
   if (!isStartProgram(program)) {
     return { kind: "error", message: `start requires ${START_PROGRAMS.join(", ")}` };
   }
-  if (program === "standalone-disposition") return startDispositionOperation(stdin, args.slice(1));
+  const runArgs = args.slice(1);
+  if (program === "standalone-disposition") return startDispositionOperation(stdin, runArgs);
   const request = parseStartRequest(program, stdin);
   if (!request.ok) return { kind: "error", message: request.message };
-  if (request.value.kind === "standalone-review" && "schemaVersion" in request.value.input) {
-    const root = argumentValue(args.slice(1), "--runs-root");
-    const run = argumentValue(args.slice(1), "--run");
-    if (root === null || run === null) return { kind: "error", message: "successor start requires --runs-root and --run" };
-    const prepared = await prepareStandaloneSuccessorFacadeStart(root, run, request.value.input);
+  const startRequest = request.value;
+  if (startRequest.kind === "standalone-review" && "schemaVersion" in startRequest.input) {
+    const location = startRunLocation(runArgs, "successor start requires --runs-root and --run");
+    if (!location.ok) return location.result;
+    const prepared = await prepareStandaloneSuccessorFacadeStart(location.runsRoot, location.run, startRequest.input);
     if (!prepared.ok) return { kind: "error", message: prepared.message };
-    const bound = bindLiveRun(args.slice(1), createRunDirectory);
-    if (!isBound(bound)) return bound;
-    const driven = await startPreparedStandaloneSuccessor(bound.value.handle, prepared.value);
-    return driven.ok ? emitRunAction(bound.value.handle, driven.action) : { kind: "error", message: driven.message };
+    return driveCreatedRun(runArgs, (handle) => startPreparedStandaloneSuccessor(handle, prepared.value));
   }
-  if (request.value.kind === "remediation") {
-    const runRoot = argumentValue(args.slice(1), "--runs-root");
-    const run = argumentValue(args.slice(1), "--run");
-    if (runRoot === null || run === null) {
-      return { kind: "error", message: "remediation start requires --runs-root and --run" };
-    }
+  if (startRequest.kind === "remediation") {
+    const location = startRunLocation(runArgs, "remediation start requires --runs-root and --run");
+    if (!location.ok) return location.result;
     const prepared = await prepareRemediationFacadeStart({
-      input: request.value.input,
+      input: startRequest.input,
       repositoryStartPath: process.cwd(),
-      remediationRunsRoot: runRoot,
-      remediationRun: run,
+      remediationRunsRoot: location.runsRoot,
+      remediationRun: location.run,
     });
     if (!prepared.ok) return { kind: "error", message: prepared.message };
-    const bound = bindLiveRun(args.slice(1), createRunDirectory);
-    if (!isBound(bound)) return bound;
-    const driven = await startRemediationFacade(bound.value.handle, prepared.value.registration);
-    if (!driven.ok) return { kind: "error", message: driven.message };
-    return emitRunAction(bound.value.handle, driven.action);
+    return driveCreatedRun(runArgs, (handle) => startRemediationFacade(handle, prepared.value.registration));
   }
-  if (request.value.kind === "wave-gate") {
-    const runRoot = argumentValue(args.slice(1), "--runs-root");
-    const run = argumentValue(args.slice(1), "--run");
-    if (runRoot === null || run === null) {
-      return { kind: "error", message: "wave-gate start requires --runs-root and --run" };
-    }
-    const prepared = prepareWaveGateFacadeStart(request.value.input, runRoot, run);
+  if (startRequest.kind === "wave-gate") {
+    const location = startRunLocation(runArgs, "wave-gate start requires --runs-root and --run");
+    if (!location.ok) return location.result;
+    const prepared = prepareWaveGateFacadeStart(startRequest.input, location.runsRoot, location.run);
     if (!prepared.ok) return { kind: "error", message: prepared.message };
-    const bound = bindLiveRun(args.slice(1), createRunDirectory);
-    if (!isBound(bound)) return bound;
-    const driven = await startWaveGateFacade(bound.value.handle, prepared.value);
-    if (!driven.ok) return { kind: "error", message: driven.message };
-    return emitRunAction(bound.value.handle, driven.action);
+    return driveCreatedRun(runArgs, (handle) => startWaveGateFacade(handle, prepared.value));
   }
-  const bound = bindLiveRun(args.slice(1), createRunDirectory);
-  if (!isBound(bound)) return bound;
-  const driven = await driveStart(bound.value.handle, request.value);
-  if (!driven.ok) return { kind: "error", message: driven.message };
-  return emitRunAction(bound.value.handle, driven.action);
+  return driveCreatedRun(runArgs, (handle) => driveStart(handle, startRequest));
 }
 
 async function startDispositionOperation(stdin: string, args: readonly string[]): Promise<HookResult> {
   if (Buffer.byteLength(stdin) > STANDALONE_LINEAGE_LIMITS.retainedBytes) return { kind: "error", message: "disposition input exceeds byte budget" };
   const input = parseStandaloneDispositionStartBytes(Buffer.from(stdin));
   if (!input.ok) return { kind: "error", message: input.error.message };
-  const root = argumentValue(args, "--runs-root");
-  const run = argumentValue(args, "--run");
-  if (root === null || run === null) return { kind: "error", message: "disposition start requires --runs-root and --run" };
-  const prepared = await prepareStandaloneDispositionFacadeStart(input.value, root, run);
+  const location = startRunLocation(args, "disposition start requires --runs-root and --run");
+  if (!location.ok) return location.result;
+  const prepared = await prepareStandaloneDispositionFacadeStart(input.value, location.runsRoot, location.run);
   if (!prepared.ok) return { kind: "error", message: prepared.message };
-  const bound = bindLiveRun(args, createRunDirectory);
-  if (!isBound(bound)) return bound;
-  const driven = await startStandaloneDispositionFacade(bound.value.handle, prepared.value);
-  return driven.ok ? emitRunAction(bound.value.handle, driven.action) : { kind: "error", message: driven.message };
+  return driveCreatedRun(args, (handle) => startStandaloneDispositionFacade(handle, prepared.value));
 }
 
 async function recoverOrphanOperation(args: readonly string[]): Promise<HookResult> {

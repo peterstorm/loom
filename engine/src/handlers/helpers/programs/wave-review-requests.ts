@@ -99,6 +99,9 @@ export type IssuedWaveReviewBatch = Readonly<{
   currentIssued: readonly AgentRequestAuthority[];
 }>;
 
+/** The effect label every current-batch publication and its durable recovery share. */
+const CURRENT_BATCH_LABEL = "wave-gate-current";
+
 /**
  * Resume phase: publish and install the initial batch, install a fresh batch
  * for Tasks that need one, or prove the collecting batch's exact durable
@@ -112,21 +115,24 @@ export async function reconcileWaveReviewIssuance(
   graph: ReturnType<StateManager["load"]>,
   issued: readonly AgentRequestAuthority[],
 ): Promise<WavePhase<IssuedWaveReviewBatch>> {
+  // The three issuance paths differ only in the graph they derive the
+  // deterministic batch from and in what they do after publishing it under
+  // the one current-batch effect label.
+  const batchFor = (state: ReturnType<StateManager["load"]>): WaveRequestBatch =>
+    waveRequests(handle, registration, state, 1, observeTaskGraphProjectBoundary(manager.getPath()));
+  const publishCurrent = (
+    requests: Parameters<typeof publishReviewInitialBatch>[1],
+    packets: Parameters<typeof publishReviewInitialBatch>[2],
+  ) => publishReviewInitialBatch(handle, requests, packets, CURRENT_BATCH_LABEL, registration);
   const initialBatchMissingOrPartial = graph.wave_review_epoch === undefined &&
     graph.tasks.every((task) => !registration.taskIds.includes(task.id) || task.review_run === undefined);
   if (initialBatchMissingOrPartial) {
-    const batch = waveRequests(
-      handle,
-      registration,
-      graph,
-      1,
-      observeTaskGraphProjectBoundary(manager.getPath()),
-    );
+    const batch = batchFor(graph);
     // Publication is deterministic and idempotent per context/request slot.
     // Re-running the complete effect reconciles a crash after any strict
     // prefix of requests was reserved instead of treating partial issuance
     // as a corrupt batch and stranding the active replacement authority.
-    const published = await publishReviewInitialBatch(handle, batch.requests, batch.packets, "wave-gate-current", registration);
+    const published = await publishCurrent(batch.requests, batch.packets);
     if (!published.ok) return settled(failed(published.message));
     const action = published.action;
     await installWaveReviewRuns(manager, registration, batch);
@@ -148,15 +154,9 @@ export async function reconcileWaveReviewIssuance(
     registration.taskIds.includes(task.id) && task.review_run === undefined &&
     task.review_status !== "passed" && task.review_status !== "blocked");
   if (!hasCollectingPacket && needsFreshPacket) {
-    const batch = waveRequests(
-      handle,
-      registration,
-      refreshed,
-      1,
-      observeTaskGraphProjectBoundary(manager.getPath()),
-    );
+    const batch = batchFor(refreshed);
     await installWaveReviewRuns(manager, registration, batch);
-    const published = await publishReviewInitialBatch(handle, batch.requests, batch.packets, "wave-gate-current", registration);
+    const published = await publishCurrent(batch.requests, batch.packets);
     return settled(published.ok ? { ok: true, action: published.action } : failed(published.message));
   }
 
@@ -186,23 +186,11 @@ export async function reconcileWaveReviewIssuance(
     candidates.sort((left, right) => rank(left) - rank(right));
     const expectedCount = 1 + registration.taskIds.length * WAVE_REVIEW_AGENTS.length;
     if (candidates.length !== expectedCount || candidates.some((candidate, index) => rank(candidate) !== index)) {
-      const expectedBatch = waveRequests(
-        handle,
-        registration,
-        refreshed,
-        1,
-        observeTaskGraphProjectBoundary(manager.getPath()),
-      );
+      const expectedBatch = batchFor(refreshed);
       if (expectedBatch.batchEpoch !== epoch.batchEpoch) {
         return settled(waveBlocked(handle, "persisted current Wave review batch differs from deterministic protected authority"));
       }
-      const republished = await publishReviewInitialBatch(
-        handle,
-        expectedBatch.requests,
-        expectedBatch.packets,
-        "wave-gate-current",
-        registration,
-      );
+      const republished = await publishCurrent(expectedBatch.requests, expectedBatch.packets);
       if (!republished.ok) return settled(failed(republished.message));
       return settled({ ok: true, action: republished.action });
     }
@@ -214,15 +202,13 @@ export async function reconcileWaveReviewIssuance(
       }),
     }));
     const recovered = durableRefutationRequests(
-      handle, inputs, publicationResolver(handle), "wave-gate-current",
+      handle, inputs, publicationResolver(handle), CURRENT_BATCH_LABEL,
     );
     if (recovered.kind === "corrupt") return settled(waveBlocked(handle, recovered.message));
     if (recovered.kind === "found") {
       currentIssued = Object.freeze(recovered.requests.map(({ authority }) => authority));
     } else {
-      const published = await publishReviewInitialBatch(
-        handle, inputs, candidates.map(({ packet }) => packet), "wave-gate-current", registration,
-      );
+      const published = await publishCurrent(inputs, candidates.map(({ packet }) => packet));
       if (!published.ok) return settled(failed(published.message));
       currentIssued = Object.freeze(published.requests.map(({ authority }) => authority));
     }

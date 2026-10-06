@@ -19,22 +19,42 @@ import {
 } from '../../../core/orchestration-contract';
 import type { ContextPacket, StandaloneReviewerContextPacketV3 } from '../../../core/context-packets';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
-import { parseRegisteredFacadeProgram, type RegisteredReviewProgram } from './registration';
+import { parseRegisteredFacadeProgram, type FacadeRegistrationParse, type RegisteredReviewProgram } from './registration';
 import { publicationFile } from './durable-requests';
 import { renderReviewProgramSpawnTask, renderSpawnTask } from './spawn-task';
 import { reviewerEmissionEligible } from '../../../core/reviewer-emission-route';
 import type { FacadePublishedSpawnBatch } from './program-result';
 
+/** Which review run a batch belongs to. A `standalone` batch renders every
+ *  task with the `LOOM_REVIEW_CONTEXT: standalone` marker; a `wave-gate`
+ *  batch renders none. */
+type PublicationRoute = "standalone" | "wave-gate";
+
+/** The review-program route reads the run from its registration's kind, so
+ *  the effect label is durable effect identity only. */
+const reviewProgramRoute = (program: RegisteredReviewProgram): PublicationRoute =>
+  program.kind === "standalone-review" ? "standalone" : "wave-gate";
+
+/** The archived route carries no registration to read, so its run is still
+ *  named by the effect label's `standalone` stem (every standalone caller's
+ *  label starts with it; no Wave Gate label does). */
+const legacyLabelRoute = (label: string): PublicationRoute =>
+  label.startsWith("standalone") ? "standalone" : "wave-gate";
+
+const REVIEWER_RESULT_INSTRUCTION =
+  "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.";
+
 /** Private publication core: `emissionAuthority` is REQUIRED and typed
  *  `RegisteredReviewProgram | null` — `null` is the explicit archived
  *  extraction-only route, a registration is the issued-descriptor route, and
  *  there is no third (implicit/undefined) state. The exported wrappers below
- *  are honest about which state they hand the core. */
+ *  are honest about which state and which `route` they hand the core. */
 async function publishInitialBatch(
   handle: RunDirHandle,
   requests: readonly InitialSpawnRequestInput[],
   packets: readonly (ContextPacket | StandaloneReviewerContextPacketV3)[],
   label: string,
+  route: PublicationRoute,
   emissionAuthority: RegisteredReviewProgram | null,
 ): Promise<Readonly<{ ok: true; requests: readonly SpawnRequest[]; action: FacadePublishedSpawnBatch }> | Readonly<{ ok: false; message: string }>> {
   const effectId = parseEffectId(`effect:${label}:${createHash("sha256").update(requests.map((entry) =>
@@ -83,24 +103,43 @@ async function publishInitialBatch(
   if (!issuance.ok) return { ok: false, message: issuance.error.message };
   const action = spawnBatchAction(issuance.value, requests);
   if (!action.ok) return { ok: false, message: action.error.message };
-  const standalone = label.startsWith("standalone");
+  const options = { standalone: route === "standalone" };
   return { ok: true, requests: action.value.requests, action: Object.freeze({
     ...action.value,
     requests: Object.freeze(action.value.requests.map((request) => Object.freeze({
       ...request,
       task: emissionAuthority === null
-        ? renderSpawnTask(handle, request.authority, "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.", { standalone })
-        : renderReviewProgramSpawnTask(handle, request.authority, "Read the immutable context packet at LOOM_CONTEXT_PATH and emit only the required reviewer result.", emissionAuthority, { standalone }),
+        ? renderSpawnTask(handle, request.authority, REVIEWER_RESULT_INSTRUCTION, options)
+        : renderReviewProgramSpawnTask(handle, request.authority, REVIEWER_RESULT_INSTRUCTION, emissionAuthority, options),
     }))),
   }) };
 }
 
+/** Pure legacy-route admission over the run's parsed program registration,
+ *  asked only when a request is emission-eligible: `null` admits (an archived
+ *  schema-1 review program, or a program kind that issues no reviewer
+ *  descriptor), a string is the exact refusal. */
+export function legacyPublicationRefusal(registration: FacadeRegistrationParse): string | null {
+  if (registration.kind !== "registered") {
+    const reason = registration.kind === "invalid"
+      ? registration.message
+      : "no program registration is durably claimed for this run";
+    return `legacy publication route refused an emission-eligible request: the run's program registration is unparseable (${reason})`;
+  }
+  const program = registration.program;
+  if ((program.kind === "standalone-review" || program.kind === "wave-gate") && program.schemaVersion >= 2) {
+    return `legacy publication route refused an emission-eligible request: the run's registered ${program.kind} program is current (schemaVersion ${program.schemaVersion}), not an archived schema-1 contract`;
+  }
+  return null;
+}
+
 /** Archived route (schema-1 registration, panel verdicts, extraction-only
  *  requests): publishes with NO emission authority, rendering every task
- *  extraction-only. Fails closed before any durable effect when any request is
- *  emission-eligible but the run's durable program registration does not prove
- *  an archived schema-1 review program — including when that registration
- *  cannot be read or parsed. */
+ *  extraction-only, on the label's route (`legacyLabelRoute`). Fails closed before any
+ *  durable effect when any request is emission-eligible but the run's durable
+ *  program registration does not prove an archived schema-1 review program
+ *  (`legacyPublicationRefusal`) — including when that registration cannot be
+ *  read. */
 export async function publishLegacyInitialBatch(
   handle: RunDirHandle,
   requests: readonly InitialSpawnRequestInput[],
@@ -108,28 +147,21 @@ export async function publishLegacyInitialBatch(
   label: string,
 ): Promise<Readonly<{ ok: true; requests: readonly SpawnRequest[]; action: FacadePublishedSpawnBatch }> | Readonly<{ ok: false; message: string }>> {
   const eligible = requests.some(({ authority }) => reviewerEmissionEligible(authority as AgentRequestAuthority));
-  if (!eligible) return publishInitialBatch(handle, requests, packets, label, null);
-  const raw = handle.readProgramRegistration(16_777_216);
-  if (!raw.ok) {
-    return { ok: false, message: `legacy publication route refused an emission-eligible request: the run's program registration is unreadable (${raw.error.message})` };
+  if (eligible) {
+    const raw = handle.readProgramRegistration(16_777_216);
+    if (!raw.ok) {
+      return { ok: false, message: `legacy publication route refused an emission-eligible request: the run's program registration is unreadable (${raw.error.message})` };
+    }
+    const refusal = legacyPublicationRefusal(parseRegisteredFacadeProgram(raw.value));
+    if (refusal !== null) return { ok: false, message: refusal };
   }
-  const registration = parseRegisteredFacadeProgram(raw.value);
-  if (registration.kind !== "registered") {
-    const reason = registration.kind === "invalid"
-      ? registration.message
-      : "no program registration is durably claimed for this run";
-    return { ok: false, message: `legacy publication route refused an emission-eligible request: the run's program registration is unparseable (${reason})` };
-  }
-  const program = registration.program;
-  if ((program.kind === "standalone-review" || program.kind === "wave-gate") && program.schemaVersion >= 2) {
-    return { ok: false, message: `legacy publication route refused an emission-eligible request: the run's registered ${program.kind} program is current (schemaVersion ${program.schemaVersion}), not an archived schema-1 contract` };
-  }
-  return publishInitialBatch(handle, requests, packets, label, null);
+  return publishInitialBatch(handle, requests, packets, label, legacyLabelRoute(label), null);
 }
 
 /** Review-program publication requires issued descriptor authority in its
  *  type: the required `RegisteredReviewProgram` parameter makes publication
- *  without an emission authority unrepresentable on this route. */
+ *  without an emission authority unrepresentable on this route, and its kind
+ *  fixes the route. */
 export function publishReviewInitialBatch(
   handle: RunDirHandle,
   requests: readonly InitialSpawnRequestInput[],
@@ -137,5 +169,5 @@ export function publishReviewInitialBatch(
   label: string,
   emissionAuthority: RegisteredReviewProgram,
 ): ReturnType<typeof publishInitialBatch> {
-  return publishInitialBatch(handle, requests, packets, label, emissionAuthority);
+  return publishInitialBatch(handle, requests, packets, label, reviewProgramRoute(emissionAuthority), emissionAuthority);
 }

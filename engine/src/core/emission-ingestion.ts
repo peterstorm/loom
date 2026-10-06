@@ -45,7 +45,8 @@
  * all and stays the shell's existing infrastructure recovery.
  *
  * Pure module: no I/O, no clock, no randomness; it must not import
- * the panel modules (panel-verdict-source.ts, persistent-panel.ts) or any I/O adapter (a placement constraint this header
+ * panel-program.ts, the panel verdict modules (panel-verdict-source.ts,
+ * persistent-panel.ts) or any I/O adapter (a placement constraint this header
  * states and review audits: the cross-import linter admits core-to-core
  * imports and the module is not enrolled in the purity closure, so this
  * declaration is the invariant's stated home, not an automated gate). PR
@@ -335,7 +336,7 @@ export function selectCanonicalPayload(
 
 /**
  * The panel verdict paths' deterministic verdict-source selection — the same
- * shared decision (`observeEmissionCalls` fold, binding check, count) with
+ * shared decision (binding check, count) over the caller-folded observation, with
  * the verdict paths' own output construction: the admitted arguments become
  * the rawJson the submission seam parses with the panel authority's bindings
  * inside (FR-012 retained verbatim); extraction preserves the caller's

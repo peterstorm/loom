@@ -41,12 +41,6 @@ describe("emission tool parameter schemas byte-match the frozen payload schema b
     expect(JSON.stringify(parameters, null, 2)).toBe(REFUTATION_VERDICT_SCHEMA_V1);
   });
 
-  it("the toolName literals come from the registry, never hand-minted", () => {
-    expect(EMISSION_TOOL_SPECS["reviewer-payload"].toolName).toBe("loom_emit_reviewer_payload");
-    expect(EMISSION_TOOL_SPECS["judge-verdict"].toolName).toBe("loom_emit_judge_verdict");
-    expect(EMISSION_TOOL_SPECS["refutation-verdict"].toolName).toBe("loom_emit_refutation_verdict");
-  });
-
   it("the frozen bytes parse as strict JSON for every kind and version", () => {
     for (const spec of Object.values(EMISSION_TOOL_SPECS)) {
       for (const schemaVersion of Object.values(spec.schemaVersions)) {

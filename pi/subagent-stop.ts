@@ -87,7 +87,7 @@ import {
   sessionRunBinding,
 } from "./review-run-authority";
 import { capturePiSubagentResult, classifyPiEmissionStartupRefusal } from "./review-capture";
-import { runPiCleanupActions, type PiCleanupAction } from "./cleanup-actions";
+import { describeCause, runPiCleanupActions, type PiCleanupAction } from "./cleanup-actions";
 import {
   recoverPiSpawnReservation,
   reservedImplementationFailure,
@@ -130,7 +130,7 @@ function implementationBaselineRestoreFor(
   } catch (error) {
     process.stderr.write(
       `loom(pi): implementation runtime-baseline restore unavailable, strict revision comparison stays: ` +
-      `${error instanceof Error ? error.message : String(error)}\n`,
+      `${describeCause(error)}\n`,
     );
     return new Map();
   }
@@ -174,7 +174,7 @@ export async function dispatchPiSubagentStop(
       }
     } catch (error) {
       reservationRecoveryFailed = true;
-      const diagnostic = `durable Pi orchestration reservation recovery failed: ${error instanceof Error ? error.message : String(error)}`;
+      const diagnostic = `durable Pi orchestration reservation recovery failed: ${describeCause(error)}`;
       processingErrors.push(diagnostic);
       process.stderr.write(`loom(pi): ${diagnostic}\n`);
     }
@@ -326,7 +326,7 @@ export async function dispatchPiSubagentStop(
     } catch (error) {
       return [
         `cannot settle crashed reserved implementation ${item.taskId ?? "unknown"}: ` +
-        `${error instanceof Error ? error.message : String(error)}`,
+        `${describeCause(error)}`,
       ];
     }
   };
@@ -347,7 +347,7 @@ export async function dispatchPiSubagentStop(
       // no capture terminalization, zero diagnostics, tasks stuck
       // `executing`. The throw becomes a diagnostic and the batch continues.
       const diagnostic = `cannot finalize reserved implementation attempts for session ${reservation.sessionId} ` +
-        `— task graph pointer unreadable: ${error instanceof Error ? error.message : String(error)}`;
+        `— task graph pointer unreadable: ${describeCause(error)}`;
       process.stderr.write(`loom(pi): ${diagnostic}\n`);
       return [diagnostic];
     }
@@ -381,7 +381,7 @@ export async function dispatchPiSubagentStop(
       } catch (error) {
         process.stderr.write(
           `loom(pi): baseline-restored manager construction failed; strict comparison stays: ` +
-          `${error instanceof Error ? error.message : String(error)}\n`,
+          `${describeCause(error)}\n`,
         );
       }
     }
@@ -443,7 +443,7 @@ export async function dispatchPiSubagentStop(
       for (const line of committed.logs) process.stderr.write(`loom(pi): ${line}\n`);
       return committed.diagnostics;
     } catch (error) {
-      const diagnostic = `reserved implementation finalization failed: ${error instanceof Error ? error.message : String(error)}`;
+      const diagnostic = `reserved implementation finalization failed: ${describeCause(error)}`;
       process.stderr.write(`loom(pi): ${diagnostic}\n`);
       return [diagnostic];
     }
@@ -534,7 +534,7 @@ export async function dispatchPiSubagentStop(
         pointerReadFailed = true;
         const diagnostic = `cannot persist ${missingReviews.length} missing reserved review result(s) and ` +
           `${missingSpecChecks.length} missing reserved spec-check result(s) for session ${reservation.sessionId} ` +
-          `— task graph pointer unreadable: ${error instanceof Error ? error.message : String(error)}`;
+          `— task graph pointer unreadable: ${describeCause(error)}`;
         processingErrors.push(diagnostic);
         process.stderr.write(`loom(pi): ${diagnostic}\n`);
       }
@@ -630,7 +630,7 @@ export async function dispatchPiSubagentStop(
           // write would report a state change that never happened.
           const diagnostic = `cannot persist ${missingReviews.length} missing reserved review result(s) and ` +
             `${missingSpecChecks.length} missing reserved spec-check result(s) for session ${reservation.sessionId}: ` +
-            `${error instanceof Error ? error.message : String(error)}`;
+            `${describeCause(error)}`;
           processingErrors.push(diagnostic);
           process.stderr.write(`loom(pi): ${diagnostic}\n`);
         }
@@ -731,7 +731,7 @@ export async function dispatchPiSubagentStop(
           const rosterId = piSpawnRosterId(toolCallId, resultIndex, agentType);
           await fsSessionRegistry.removeActive(safeSessionId, rosterId);
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
+          const message = describeCause(err);
           const diagnostic = `subagent flag cleanup failed for ${agentType}/${safeSessionId}: ${message}`;
           processingErrors.push(diagnostic);
           process.stderr.write(`loom: ${diagnostic}\n`);
@@ -792,7 +792,7 @@ export async function dispatchPiSubagentStop(
         try {
           rememberTrustedReviewCapture(resultSessionId, durableRunBinding, agentType, result.task, captureOutcome);
         } catch (error) {
-          const diagnostic = `cannot retain process-local review authority for ${agentType}: ${error instanceof Error ? error.message : String(error)}`;
+          const diagnostic = `cannot retain process-local review authority for ${agentType}: ${describeCause(error)}`;
           processingErrors.push(diagnostic);
           process.stderr.write(`loom(pi): ${diagnostic}\n`);
         }
@@ -876,7 +876,7 @@ export async function dispatchPiSubagentStop(
       } catch (error) {
         process.stderr.write(
           `loom(pi): implementation runtime-baseline restore unavailable, strict revision comparison stays: ` +
-          `${error instanceof Error ? error.message : String(error)}\n`,
+          `${describeCause(error)}\n`,
         );
       }
       const store = settlementMgr;
@@ -974,9 +974,9 @@ export async function dispatchPiSubagentStop(
       try {
         taskIdForLog = extractTaskId(result?.task ?? "") ?? "<unknown>";
       } catch (error) {
-        taskIdFailure = `; task-id extraction failed: ${error instanceof Error ? error.message : String(error)}`;
+        taskIdFailure = `; task-id extraction failed: ${describeCause(error)}`;
       }
-      const diagnostic = `result ${resultIndex + 1} for agent ${String(result?.agent ?? "<unknown>")} (task ${taskIdForLog}${taskIdFailure}): ${err instanceof Error ? err.message : String(err)}`;
+      const diagnostic = `result ${resultIndex + 1} for agent ${String(result?.agent ?? "<unknown>")} (task ${taskIdForLog}${taskIdFailure}): ${describeCause(err)}`;
       const settlementErrors = await settleReservedImplementationCrash(
         reservation?.items[resultIndex],
         diagnostic,

@@ -21,7 +21,12 @@ import { producerKindsOfAgent, type PayloadProducerKindName } from "../../src/co
 import { REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_SCHEMA_V2 } from "../../src/core/reviewer-contract";
 import { judgeVerdictV1Schema } from "../../src/core/panel-contract";
 import { parseReviewerPayloadV2, parseStandaloneReviewerPayloadV3 } from "../../src/core/reviewer-protocol";
-import { standaloneReviewerPayloadV3Schema } from "../../src/core/standalone-lineage-contract";
+import {
+  validJudgeArguments,
+  validRefutationArguments,
+  validReviewerArgumentsV3,
+  whitespaceOnlyArguments,
+} from "../fixtures/emission-arguments";
 import { canonicalStructuralEquals, type ArtifactDigest } from "../../src/core/orchestration-contract/identity";
 
 /** A binding for one registry cell, through the ONE mint. */
@@ -122,14 +127,7 @@ describe("admitEmissionArguments", () => {
   });
 
   it("admits valid standalone-successor (v3) arguments through the registry's v3 parser", () => {
-    const payload = standaloneReviewerPayloadV3Schema.parse({
-      schemaVersion: 3,
-      kind: "standalone-successor-review",
-      lineageDigest: "a".repeat(64),
-      snapshotDigest: "b".repeat(64),
-      priorAssessments: [],
-      findings: [],
-    });
+    const payload = validReviewerArgumentsV3();
     const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS["reviewer-payload"], "v3", payload);
     expect(admitted.kind).toBe("valid");
     if (admitted.kind === "valid") {
@@ -138,20 +136,12 @@ describe("admitEmissionArguments", () => {
   });
 
   it("admits valid judge-verdict arguments — shape, score domain, prose sanitization", () => {
-    const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS["judge-verdict"], "v1", {
-      criterion: "extensibility",
-      rankings: [
-        { candidate: "candidate-type-driven-fp.md", score: 8, fatal_flaw: null, strongest_idea: "the frozen registry" },
-      ],
-    });
+    const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS["judge-verdict"], "v1", validJudgeArguments("extensibility"));
     expect(admitted.kind).toBe("valid");
   });
 
   it("admits valid refutation-verdict arguments", () => {
-    const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS["refutation-verdict"], "v1", {
-      criterion: "reproduction",
-      verdicts: [{ finding_id: "T1:code-reviewer-1", verdict: "refuted", reasoning: "the failure cannot be triggered" }],
-    });
+    const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS["refutation-verdict"], "v1", validRefutationArguments("reproduction"));
     expect(admitted.kind).toBe("valid");
   });
 
@@ -275,17 +265,6 @@ describe("admitEmissionArguments", () => {
   });
 });
 
-describe("frozenPayloadSchemaParameters", () => {
-  it("is the ONE constructor for every kind and version: parse once, re-serialize is identity", () => {
-    for (const spec of Object.values(EMISSION_TOOL_SPECS)) {
-      for (const schemaVersion of Object.values(spec.schemaVersions)) {
-        const parameters = frozenPayloadSchemaParameters(schemaVersion.schemaBytes);
-        expect(JSON.stringify(parameters, null, 2)).toBe(schemaVersion.schemaBytes);
-      }
-    }
-  });
-});
-
 describe("EmissionToolCapability", () => {
   it("mints the provided capability with its branded schema digest", () => {
     const digest = "a".repeat(64) as ArtifactDigest;
@@ -321,25 +300,15 @@ describe("whitespace-only schema-vs-parser disagreement (AD-5, engine half)", ()
    *  schema's guarantees). The REAL pi validation half — these arguments
    *  passing `validateToolArguments` against the exact frozen bytes — is
    *  pinned by engine/tests/pi/emission-tool.test.ts. */
-  const whitespacePerKind: readonly (readonly [PayloadProducerKindName, string, unknown])[] = [
-    ["reviewer-payload", "v2", {
-      schemaVersion: 2,
-      kind: "standalone-review",
-      findings: [{ ...REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!, claim: "   " }],
-    }],
-    ["judge-verdict", "v1", {
-      criterion: "extensibility",
-      rankings: [{ candidate: "candidate-type-driven-fp.md", score: 8, fatal_flaw: null, strongest_idea: "   " }],
-    }],
-    ["refutation-verdict", "v1", {
-      criterion: "reproduction",
-      verdicts: [{ finding_id: "T1:code-reviewer-1", verdict: "refuted", reasoning: "   " }],
-    }],
+  const whitespacePerKind: readonly (readonly [PayloadProducerKindName, EmissionSchemaVersion])[] = [
+    ["reviewer-payload", "v2"],
+    ["judge-verdict", "v1"],
+    ["refutation-verdict", "v1"],
   ];
 
   it("refuses whitespace-only advisory prose the frozen JSON Schema's shape rules admit", () => {
-    for (const [kindName, version, args] of whitespacePerKind) {
-      const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS[kindName], version as EmissionSchemaVersion, args);
+    for (const [kindName, version] of whitespacePerKind) {
+      const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS[kindName], version, whitespaceOnlyArguments(kindName));
       expect(admitted.kind, `${kindName}/${version}`).toBe("refused");
     }
   });
@@ -347,16 +316,16 @@ describe("whitespace-only schema-vs-parser disagreement (AD-5, engine half)", ()
   it("refuses with the parse's own vocabulary — reviewer through the fallback's parser, verdicts through the frozen schema", () => {
     const reviewer = admitEmissionArguments(
       EMISSION_TOOL_SPECS["reviewer-payload"], "v2",
-      whitespacePerKind[0]![2],
+      whitespaceOnlyArguments("reviewer-payload"),
     );
     expect(reviewer.kind).toBe("refused");
     if (reviewer.kind === "refused") expect(reviewer.code).toBe("invalid-payload");
 
-    const judge = admitEmissionArguments(EMISSION_TOOL_SPECS["judge-verdict"], "v1", whitespacePerKind[1]![2]);
+    const judge = admitEmissionArguments(EMISSION_TOOL_SPECS["judge-verdict"], "v1", whitespaceOnlyArguments("judge-verdict"));
     expect(judge.kind).toBe("refused");
     if (judge.kind === "refused") expect(judge.code).toBe("invalid-schema");
 
-    const refutation = admitEmissionArguments(EMISSION_TOOL_SPECS["refutation-verdict"], "v1", whitespacePerKind[2]![2]);
+    const refutation = admitEmissionArguments(EMISSION_TOOL_SPECS["refutation-verdict"], "v1", whitespaceOnlyArguments("refutation-verdict"));
     expect(refutation.kind).toBe("refused");
     if (refutation.kind === "refused") expect(refutation.code).toBe("invalid-schema");
   });
@@ -377,10 +346,7 @@ describe("whitespace-only schema-vs-parser disagreement (AD-5, engine half)", ()
 describe("acknowledgeEmissionExecution — the FR-013 execute-shell decision", () => {
   const JUDGE_SPEC = EMISSION_TOOL_SPECS["judge-verdict"];
   const JUDGE_BINDING = mintedBinding("judge-verdict", "v1");
-  const validJudgeArgs = {
-    criterion: "extensibility",
-    rankings: [{ candidate: "candidate-type-driven-fp.md", score: 8, fatal_flaw: null, strongest_idea: "the frozen registry" }],
-  };
+  const validJudgeArgs = validJudgeArguments("extensibility");
 
   it("acknowledges valid arguments with the minimal terminating result — never echoing the payload", () => {
     const outcome = acknowledgeEmissionExecution(JUDGE_BINDING, validJudgeArgs);
@@ -416,10 +382,7 @@ describe("acknowledgeEmissionExecution — the FR-013 execute-shell decision", (
   });
 
   it("refuses whitespace-only prose the harness validator admits — the shell is engine-authoritative", () => {
-    const outcome = acknowledgeEmissionExecution(JUDGE_BINDING, {
-      criterion: "extensibility",
-      rankings: [{ candidate: "candidate-type-driven-fp.md", score: 8, fatal_flaw: null, strongest_idea: "   " }],
-    });
+    const outcome = acknowledgeEmissionExecution(JUDGE_BINDING, whitespaceOnlyArguments("judge-verdict"));
     expect(outcome).toMatchObject({ kind: "refused", code: "invalid-schema" });
   });
 
@@ -443,11 +406,13 @@ describe("EMISSION_CONSTRAINED_SAMPLING_REQUEST — the FR-002/INV-1 request voc
   });
 
   it("is ONE request vocabulary for every emission tool — the registry's specs carry no separate request", () => {
-    for (const spec of Object.values(EMISSION_TOOL_SPECS)) {
-      for (const schemaVersion of Object.values(spec.schemaVersions)) {
-        void schemaVersion;
-        expect(EMISSION_CONSTRAINED_SAMPLING_REQUEST.type).toBe("json_schema");
-        expect(EMISSION_CONSTRAINED_SAMPLING_REQUEST.strict).toBe("prefer");
+    // The module constant is the only request; every registry spec and
+    // version cell carries exactly its declared fields, so a per-tool
+    // sampling request (or any other field) added to a cell fails here.
+    for (const [kindName, spec] of Object.entries(EMISSION_TOOL_SPECS)) {
+      expect(Object.keys(spec).sort(), kindName).toEqual(["schemaVersions", "toolName"]);
+      for (const [version, schemaVersion] of Object.entries(spec.schemaVersions)) {
+        expect(Object.keys(schemaVersion).sort(), `${kindName}/${version}`).toEqual(["parsePayload", "schemaBytes"]);
       }
     }
   });

@@ -114,12 +114,12 @@ export function pilotRequestId(windowId: string, pairId: string, arm: PilotArm, 
   return `cal-${contentDigest(`${windowId}\0${pairId}`).slice(0, 16)}-${armCode}-a${attempt}`;
 }
 
-export const CELL_PRODUCER: Readonly<Record<CellKey, Readonly<{ kind: keyof typeof EMISSION_TOOL_SPECS; version: "v1" | "v2" | "v3" }>>> = Object.freeze({
-  "reviewer-payload/v2": Object.freeze({ kind: "reviewer-payload" as const, version: "v2" as const }),
-  "reviewer-payload/v3": Object.freeze({ kind: "reviewer-payload" as const, version: "v3" as const }),
-  "judge-verdict/v1": Object.freeze({ kind: "judge-verdict" as const, version: "v1" as const }),
-  "refutation-verdict/v1": Object.freeze({ kind: "refutation-verdict" as const, version: "v1" as const }),
-});
+export const CELL_PRODUCER = {
+  "reviewer-payload/v2": { kind: "reviewer-payload", version: "v2" },
+  "reviewer-payload/v3": { kind: "reviewer-payload", version: "v3" },
+  "judge-verdict/v1": { kind: "judge-verdict", version: "v1" },
+  "refutation-verdict/v1": { kind: "refutation-verdict", version: "v1" },
+} as const satisfies Readonly<Record<CellKey, Readonly<{ kind: keyof typeof EMISSION_TOOL_SPECS; version: "v1" | "v2" | "v3" }>>>;
 
 /** The frozen schema bytes of a cell — read from the registry, never restated. */
 export function cellSchemaBytes(cell: CellKey): string {
@@ -265,14 +265,17 @@ function reviewerPredictions(payload: unknown): readonly CalibrationPrediction[]
 /**
  * Escaped known defects in ONE accepted payload, each resolved to its
  * preregistered severity. Fails closed: an escaped defect id the case does
- * not declare is an error naming it — never dropped, so a lookup drift can
+ * not declare, or a judge ranking that cannot be compared, is an error
+ * naming it — never dropped, so a lookup drift or an unscorable ranking can
  * never read as fewer escapes.
  */
 export function rubricEscapes(workloadCase: WorkloadCase, input: CaseInput, payload: unknown): Result<readonly EscapedDefect[], string> {
+  const escaped = escapedDefectIds(input, payload);
+  if (!escaped.ok) return { ok: false, error: `case ${workloadCase.caseId}: ${escaped.error}` };
   const known = new Map(workloadCase.knownDefects.map((defect) => [defect.defectId, defect] as const));
   const escapes: EscapedDefect[] = [];
   const unknown: string[] = [];
-  for (const defectId of escapedDefectIds(input, payload)) {
+  for (const defectId of escaped.value) {
     const defect = known.get(defectId);
     if (defect === undefined) unknown.push(JSON.stringify(defectId));
     else escapes.push(Object.freeze({ defectId, severity: defect.severity }));
@@ -288,30 +291,35 @@ export function rubricEscapes(workloadCase: WorkloadCase, input: CaseInput, payl
  * match rules (`matchCalibrationFindings`); a judge escape is a planted fatal
  * flaw that is not named or that scores at least as high as every sound
  * candidate; a refutation escape is a real defect verdicted `refuted`
- * (`uncertain` counts toward neither side, as in the tally).
+ * (`uncertain` counts toward neither side, as in the tally). A named planted
+ * flaw whose ranking cannot be compared — its own or a sound candidate's
+ * score is not a number — is an error, never read as "not escaped".
  */
-function escapedDefectIds(input: CaseInput, payload: unknown): readonly string[] {
+function escapedDefectIds(input: CaseInput, payload: unknown): Result<readonly string[], string> {
+  const escaped = (ids: readonly string[]): Result<readonly string[], never> => ({ ok: true, value: ids });
   return match(input)
     .with({ kind: "corpus" }, ({ corpusCase }) => {
-      if (corpusCase.state !== "vulnerable") return [];
+      if (corpusCase.state !== "vulnerable") return escaped([]);
       const matching = matchCalibrationFindings(corpusCase.expectedCriticals, reviewerPredictions(payload));
-      return matching.missedExpectations.map((expectation) => expectation.id);
+      return escaped(matching.missedExpectations.map((expectation) => expectation.id));
     })
-    .with({ kind: "judge" }, ({ fixture }) => {
+    .with({ kind: "judge" }, ({ fixture }): Result<readonly string[], string> => {
       const rankings = isRecord(payload) && Array.isArray(payload["rankings"]) ? payload["rankings"].filter(isRecord) : [];
       const flawed = rankings.find((ranking) => ranking["candidate"] === fixture.plantedFlaw.candidate);
+      if (flawed === undefined || flawed["fatal_flaw"] === null) return escaped([fixture.plantedFlaw.defectId]);
+      const unscored = rankings.filter((ranking) => typeof ranking["score"] !== "number").map((ranking) => JSON.stringify(ranking["candidate"]));
+      if (unscored.length > 0) {
+        return { ok: false, error: `the judge ranking of candidate(s) ${unscored.join(", ")} carries no numeric score, so the planted flaw cannot be ranked` };
+      }
+      const score = (ranking: Readonly<Record<string, unknown>>): number => Number(ranking["score"]);
       const others = rankings.filter((ranking) => ranking["candidate"] !== fixture.plantedFlaw.candidate);
-      const score = (ranking: Readonly<Record<string, unknown>> | undefined): number =>
-        typeof ranking?.["score"] === "number" ? ranking["score"] : Number.POSITIVE_INFINITY;
-      const missed = flawed === undefined || flawed["fatal_flaw"] === null ||
-        others.every((other) => score(flawed) >= score(other));
-      return missed ? [fixture.plantedFlaw.defectId] : [];
+      return escaped(others.every((other) => score(flawed) >= score(other)) ? [fixture.plantedFlaw.defectId] : []);
     })
     .with({ kind: "refutation" }, ({ fixture }) => {
-      if (fixture.groundTruth.kind !== "real-defect") return [];
+      if (fixture.groundTruth.kind !== "real-defect") return escaped([]);
       const verdicts = isRecord(payload) && Array.isArray(payload["verdicts"]) ? payload["verdicts"].filter(isRecord) : [];
       const entry = verdicts.find((verdict) => verdict["finding_id"] === fixture.finding.findingId);
-      return entry === undefined || entry["verdict"] === "refuted" ? [fixture.groundTruth.defectId] : [];
+      return escaped(entry === undefined || entry["verdict"] === "refuted" ? [fixture.groundTruth.defectId] : []);
     })
     .exhaustive();
 }

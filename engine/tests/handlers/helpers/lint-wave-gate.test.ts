@@ -1,4 +1,5 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -14,6 +15,7 @@ import {
 } from "../../../src/handlers/helpers/lint-wave-gate";
 import type { Task, TaskCommonMetadata } from "../../../src/types";
 import { taskFixture } from "../../fixtures/task-lifecycle";
+import { git } from "../../fixtures/git-repository";
 import type { LintResult } from "../../../src/linter/types";
 import { formatOutput } from "../../../src/linter/formatter";
 
@@ -150,12 +152,12 @@ describe("resolveLintTargets", () => {
     // blocked the completion suite with "lint target must be a regular file".
     const root = canonicalTempDir("loom-lint-directory-");
     try {
-      execFileSync("git", ["init", "--quiet"], { cwd: root });
+      git(root, ["init", "--quiet"]);
       mkdirSync(join(root, "calibration", "pilot", "cache"), { recursive: true });
       writeFileSync(join(root, ".gitignore"), "calibration/pilot/cache/\n");
       writeFileSync(join(root, "calibration", "pilot", "tracked.ts"), "export {};\n");
-      execFileSync("git", ["add", "."], { cwd: root });
-      execFileSync("git", ["-c", "user.name=Loom Test", "-c", "user.email=loom@example.test", "commit", "--quiet", "-m", "seed"], { cwd: root });
+      git(root, ["add", "."]);
+      git(root, ["-c", "user.name=Loom Test", "-c", "user.email=loom@example.test", "commit", "--quiet", "-m", "seed"]);
       writeFileSync(join(root, "calibration", "pilot", "untracked.ts"), "export {};\n");
       writeFileSync(join(root, "calibration", "pilot", "cache", "ignored.ts"), "export {};\n");
       symlinkSync("tracked.ts", join(root, "calibration", "pilot", "alias.ts"));
@@ -366,10 +368,14 @@ describe("runFullTierWaveLint", () => {
   });
 });
 
+// Resolved from this file, not the runner's cwd, so the suite passes from any launch directory.
+const ENGINE_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+const CLI_PATH = join(ENGINE_ROOT, "src", "cli.ts");
+
 describe("lint-wave-gate handler", () => {
   const cli = (statePath: string) =>
-    spawnSync("bun", ["src/cli.ts", "helper", "lint-wave-gate"], {
-      cwd: process.cwd(),
+    spawnSync("bun", [CLI_PATH, "helper", "lint-wave-gate"], {
+      cwd: ENGINE_ROOT,
       encoding: "utf-8",
       env: { ...process.env, LOOM_STATE_PATH: statePath, PI_CODING_AGENT: "" },
     });

@@ -20,6 +20,7 @@ import {
 } from "./standalone-review";
 import type { FrozenStandaloneReviewAuthority } from "./standalone-review-model";
 import { parseStandaloneReviewAuthority } from "./standalone-review-preparation";
+import { exactKeys } from "./standalone-review-scope";
 import {
   serializeAdjudicatedStandaloneReview, serializeStandaloneAggregate, serializeStandaloneReviewAuthority,
 } from "./standalone-review-records";
@@ -225,7 +226,7 @@ export function parseStandaloneReviewMachineState(
       return failure("terminal-blocked checkpoint failed result is malformed");
     }
     const failed = record.failed as Record<string, unknown>;
-    if (Object.keys(failed).sort().join(",") !== ["attempt", "message", "requestId", "slotId"].sort().join(",") ||
+    if (exactKeys(failed, ["attempt", "message", "requestId", "slotId"], "failed").length > 0 ||
         failed.attempt !== 2 || typeof failed.message !== "string" || failed.message.trim() !== failed.message ||
         failed.message.length === 0) {
       return failure("terminal-blocked checkpoint failed result fields are invalid");
@@ -318,8 +319,8 @@ export function parseStandaloneReviewMachineState(
       panelAuthority.value,
       publicationResolver,
     );
-    if (refutation === null) return failure("checkpoint lacks a valid durable Refutation Panel completion receipt");
-    const ready = reduceStandaloneReviewMachine(routed.value, { kind: "refutation-completed", completion: refutation });
+    if (!refutation.ok) return failure(`checkpoint lacks a valid durable Refutation Panel completion receipt: ${refutation.error}`);
+    const ready = reduceStandaloneReviewMachine(routed.value, { kind: "refutation-completed", completion: refutation.value });
     if (!ready.ok) return failure(ready.error.message);
     readyOrAwaiting = ready.value;
   }

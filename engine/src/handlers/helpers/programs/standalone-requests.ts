@@ -229,6 +229,9 @@ export function durableRequests(
   return { kind: "found", requests: Object.freeze(requests) };
 }
 
+/** The effect label one reviewer slot's attempt-2 retry batch publishes under. */
+const standaloneRetryLabel = (slotId: string): string => `standalone-review-retry:${slotId}`;
+
 /**
  * One rejected reviewer slot's attempt-2 recovery identity.
  *
@@ -239,7 +242,7 @@ export function durableRequests(
  * authority from prose.
  */
 export function standaloneRetryEffectId(slotId: string, requestId: string): ProgramParse<EffectId> {
-  const label = `standalone-review-retry:${slotId}`;
+  const label = standaloneRetryLabel(slotId);
   const parsed = parseEffectId(`effect:${label}:${createHash("sha256").update(requestId).digest("hex")}`);
   return parsed.ok ? { ok: true, value: parsed.value } : { ok: false, message: parsed.error.message };
 }
@@ -252,6 +255,7 @@ export async function recoverOrPublishStandaloneRetry(
   emissionAuthority: RegisteredReviewProgram,
 ): Promise<Readonly<{ ok: true; request: SpawnRequest }> | Readonly<{ ok: false; message: string }>> {
   const retryAuthority = slot.attempts[1];
+  const retryLabel = standaloneRetryLabel(slot.slotId);
   if (retryAuthority.attempt !== 2 || retryAuthority.program !== "standalone-review") {
     return { ok: false, message: `slot ${slot.slotId} has no canonical standalone attempt-2 authority` };
   }
@@ -268,10 +272,10 @@ export async function recoverOrPublishStandaloneRetry(
     if (!packet.ok) return { ok: false, message: packet.error.message };
     const rebuilt = buildStandaloneSuccessorReviewerContext(authority.successor, retryAuthority, packet.value.variableContext);
     if (!rebuilt.ok || rebuilt.value.digest !== retryAuthority.contextDigest) return { ok: false, message: "successor retry packet differs from frozen authority" };
-    const recovered = durableRefutationRequests(handle, [input], resolver, `standalone-review-retry:${slot.slotId}`);
+    const recovered = durableRefutationRequests(handle, [input], resolver, retryLabel);
     if (recovered.kind === "corrupt") return { ok: false, message: recovered.message };
     if (recovered.kind === "found") return { ok: true, request: recovered.requests[0]! };
-    const published = await publishReviewInitialBatch(handle, [input], [packet.value], `standalone-review-retry:${slot.slotId}`, emissionAuthority);
+    const published = await publishReviewInitialBatch(handle, [input], [packet.value], retryLabel, emissionAuthority);
     return published.ok ? { ok: true, request: published.requests[0]! } : published;
   }
   let packet = handle.readContext(retryAuthority.contextDigest);
@@ -298,11 +302,11 @@ export async function recoverOrPublishStandaloneRetry(
     if (attemptOne.value.schemaVersion !== authority.schemaVersion) {
       return { ok: false, message: "retry predecessor protocol differs from frozen registration" };
     }
-    const input = { requestId: retryAuthority.requestId, role: retryAuthority.role,
+    const packetInput = { requestId: retryAuthority.requestId, role: retryAuthority.role,
       requiredSkill: attemptOne.value.requiredSkill,
       fixedContext: Object.freeze([authoritySection.value, frozenSource]), variableContext: Object.freeze([]) };
-    const rebuilt = authority.schemaVersion === 2 ? buildReviewerContextPacket(input)
-      : buildContextPacket({ ...input, outputContract: attemptOne.value.outputContract });
+    const rebuilt = authority.schemaVersion === 2 ? buildReviewerContextPacket(packetInput)
+      : buildContextPacket({ ...packetInput, outputContract: attemptOne.value.outputContract });
     if (!rebuilt.ok) return { ok: false, message: rebuilt.error.message };
     if (rebuilt.value.digest !== retryAuthority.contextDigest) {
       return {
@@ -334,7 +338,7 @@ export async function recoverOrPublishStandaloneRetry(
     if (!parsed.ok) return { ok: false, message: `durable standalone retry request is invalid: ${parsed.error.message}` };
     return { ok: true, request: parsed.value };
   }
-  const publishedBatch = await publishReviewInitialBatch(handle, [input], [packet.value], `standalone-review-retry:${slot.slotId}`, emissionAuthority);
+  const publishedBatch = await publishReviewInitialBatch(handle, [input], [packet.value], retryLabel, emissionAuthority);
   return publishedBatch.ok
     ? { ok: true, request: publishedBatch.requests[0]! }
     : { ok: false, message: publishedBatch.message };

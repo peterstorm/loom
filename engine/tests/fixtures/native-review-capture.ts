@@ -7,7 +7,7 @@ import type { RunDirHandle } from "../../src/orchestration/run-directory-handle"
 import { readSessionRunBindings, registerSessionRunBinding } from "../../src/orchestration/session-run-bindings";
 import { runDispatch } from "../../src/handlers/subagent-stop/dispatch";
 import { fixtureSession, withFixturePiSession } from "./pi-session";
-import { frozenDiffReaderPages } from "./read-coverage";
+import { claudeReadLines, frozenDiffReaderPages, piReadMessages } from "./read-coverage";
 
 /** Scripted fixture transport only: no model execution or authored receipt. */
 export async function captureNativeReview(
@@ -37,20 +37,13 @@ export async function captureNativeReview(
       if (!bindings.ok) throw new Error(bindings.message);
       const binding = bindings.value.find(({ runId, requestIds }) => runId === handle.runId && requestIds.includes(request.requestId));
       if (binding === undefined) throw new Error("production fixture session binding not published");
-      const reads = toolOutputs.flatMap((text, index) => [
-        { role: "assistant", content: [{ type: "toolCall", id: `read-${index}`, name: "bash", arguments: { command: "read-context-packet --diff" } }] },
-        { role: "toolResult", toolCallId: `read-${index}`, toolName: "bash", isError: false, content: [{ type: "text", text }] },
-      ]);
       const result = await capturePiSubagentResult(toolCallId, 0, request.role,
-        [...reads, { role: "assistant", content: texts.map((text) => ({ type: "text", text })) }], binding);
+        [...piReadMessages(toolOutputs), { role: "assistant", content: texts.map((text) => ({ type: "text", text })) }], binding);
       return { captured: result.kind === "captured", diagnostic: JSON.stringify(result) };
     }
     const transcript = join(session.directory, "fixture-native-final.jsonl");
     writeFileSync(transcript, [
-      ...toolOutputs.flatMap((text, index) => [
-        JSON.stringify({ message: { role: "assistant", content: [{ type: "tool_use", id: `read-${index}`, name: "Bash", input: { command: "read-context-packet --diff" } }] } }),
-        JSON.stringify({ message: { role: "user", content: [{ type: "tool_result", tool_use_id: `read-${index}`, content: text }] } }),
-      ]),
+      ...claudeReadLines(toolOutputs),
       JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "Scripted earlier narrative; MUST NOT enter final evidence." }] } }),
       JSON.stringify({ message: { role: "assistant", content: texts.map((text) => ({ type: "text", text })) } }),
     ].join("\n"));

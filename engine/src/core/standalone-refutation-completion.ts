@@ -8,8 +8,9 @@
 import { canonicalDigest } from "./digest";
 import {
   canonicalRecord, canonicalStructuralEquals, parseArtifactDigest,
-  type ArtifactDigest, type OrchestrationRunId, type PublicationAuthorityResolver,
+  type ArtifactDigest, type DomainResult, type OrchestrationRunId, type PublicationAuthorityResolver,
 } from "./orchestration-contract";
+import { failure, success } from "./orchestration-contract/identity";
 import {
   parseRefutationPanelAuthority,
   type RefutationPanelAuthority,
@@ -32,7 +33,15 @@ type StandaloneRefutationAuthorityError = Readonly<{
   message: string;
 }>;
 
+declare const completionReceiptBrand: unique symbol;
+
+/** Opaque completion authority. The brand is minted only by
+ *  `parseStandaloneRefutationCompletion` (which `restoreRefutationCompletion`
+ *  also goes through), so an object literal of the same shape does not
+ *  typecheck as a receipt. The brand is type-only and absent from the persisted
+ *  form, which is re-proved on restore. */
 export type StandaloneRefutationCompletionReceipt = Readonly<{
+  [completionReceiptBrand]: true;
   schemaVersion: 1;
   kind: "standalone-refutation-completed";
   /** The SAME branded identities `FrozenStandalonePanelAuthority` carries. The
@@ -54,7 +63,13 @@ export type StandaloneRefutationCompletionReceipt = Readonly<{
   completedPanelCheckpoint: RefutationPanelCheckpoint | null;
 }>;
 
-const refutationAuthorityFailure = (message: string): Readonly<{ ok: false; error: StandaloneRefutationAuthorityError }> =>
+/** Brand the receipt fields. Private: `parseStandaloneRefutationCompletion` is
+ *  its only caller. */
+const mintCompletionReceipt = (
+  fields: Omit<StandaloneRefutationCompletionReceipt, typeof completionReceiptBrand>,
+): StandaloneRefutationCompletionReceipt => fields as StandaloneRefutationCompletionReceipt;
+
+const refutationAuthorityFailure =(message: string): Readonly<{ ok: false; error: StandaloneRefutationAuthorityError }> =>
   canonicalRecord({ ok: false, error: canonicalRecord({
     kind: "standalone-refutation-authority-rejected" as const,
     message,
@@ -71,8 +86,6 @@ function deepFreezeJson<T>(value: T): T {
   }
   return value;
 }
-
-
 
 function refutationManifestValue(authority: RefutationPanelAuthority): unknown {
   return {
@@ -118,10 +131,8 @@ export function freezeStandaloneRefutationPanelAuthority(input: Readonly<{
   return canonicalRecord({ ok: true, value: frozen.value });
 }
 
-/**
- * Produce opaque completion authority only from a T2 parser/reducer-produced
- * done state whose exact authority and deterministic decision remain frozen.
- */
+/** Replay a persisted done state through T2 events and prove it equals the
+ *  persisted projection; the replayed done state, or why it is refused. */
 function replaySerializedRefutationCompletion(
   raw: unknown,
   resolver: PublicationAuthorityResolver,
@@ -172,6 +183,10 @@ function replaySerializedRefutationCompletion(
   return { ok: true, value: replayed.value.state };
 }
 
+/**
+ * Produce opaque completion authority only from a T2 parser/reducer-produced
+ * done state whose exact authority and deterministic decision remain frozen.
+ */
 export function parseStandaloneRefutationCompletion(input: Readonly<{
   panelAuthority: FrozenStandalonePanelAuthority;
   aggregate: StandaloneReviewAggregate;
@@ -257,11 +272,11 @@ export function parseStandaloneRefutationCompletion(input: Readonly<{
     manifestDigest: completedManifestDigest,
     threshold: input.panelAuthority.threshold,
   });
-  if (!independentlyFrozen.ok || JSON.stringify(independentlyFrozen.value) !== JSON.stringify(persistedPanelAuthority.value) ||
+  if (!independentlyFrozen.ok || !canonicalStructuralEquals(independentlyFrozen.value, persistedPanelAuthority.value) ||
       completed.authority.runId !== input.panelAuthority.panelRunId ||
       completedManifestDigest !== input.panelAuthority.manifestDigest ||
       completed.decision.threshold !== input.panelAuthority.threshold ||
-      JSON.stringify(completed.decision.lenses) !== JSON.stringify(input.panelAuthority.lenses)) {
+      !canonicalStructuralEquals(completed.decision.lenses, input.panelAuthority.lenses)) {
     return refutationAuthorityFailure("completed Refutation Panel does not match the exact frozen run/manifest/lens/threshold authority");
   }
   const rawOutcomes = {
@@ -295,7 +310,8 @@ export function parseStandaloneRefutationCompletion(input: Readonly<{
     slots: completed.slots,
     decision: completed.decision,
   });
-  const receipt = canonicalRecord({
+  // The ONE mint of the receipt brand: every field above is re-proved here.
+  const receipt = mintCompletionReceipt(canonicalRecord({
     schemaVersion: 1 as const,
     kind: "standalone-refutation-completed" as const,
     standaloneRunId: input.panelAuthority.standaloneRunId,
@@ -309,7 +325,7 @@ export function parseStandaloneRefutationCompletion(input: Readonly<{
     panel: panel.value,
     completedPanelState: completed,
     completedPanelCheckpoint: checkpoint,
-  });
+  }));
   return canonicalRecord({ ok: true, value: receipt });
 }
 
@@ -332,9 +348,7 @@ export function serializableRefutationAuthority(authority: RefutationPanelAuthor
  */
 type SerializedRefutationPanelState = Readonly<{ authority: RefutationPanelAuthority }> & Record<string, unknown>;
 
-function serializableCompletedPanelState(
-  state: Readonly<{ authority: RefutationPanelAuthority }> & Record<string, unknown>,
-): unknown {
+function serializableCompletedPanelState(state: SerializedRefutationPanelState): unknown {
   return { ...state, authority: serializableRefutationAuthority(state.authority) };
 }
 
@@ -371,18 +385,22 @@ function restoreRefutationPanelState(raw: unknown): SerializedRefutationPanelSta
 
 /**
  * Rebuild a durable completion receipt by re-proving it from its persisted T2 state or
- * checkpoint; null when the persisted receipt is absent or differs from the re-proof.
+ * checkpoint. A refusal names its cause: the receipt is absent or malformed, the
+ * re-proof itself refused (its own diagnostic), or the persisted receipt differs
+ * from the re-proof.
  */
 export function restoreRefutationCompletion(
   raw: unknown,
   aggregate: StandaloneReviewAggregate,
   panelAuthority: FrozenStandalonePanelAuthority,
   publicationResolver: PublicationAuthorityResolver,
-): StandaloneRefutationCompletionReceipt | null {
-  if (typeof raw !== "object" || raw === null) return null;
+): DomainResult<StandaloneRefutationCompletionReceipt, string> {
+  if (typeof raw !== "object" || raw === null) return failure("the persisted completion receipt is absent or not an object");
   const record = raw as Record<string, unknown>;
   const completedPanelState = restoreRefutationPanelState(record.completedPanelState);
-  if (completedPanelState === null && record.completedPanelCheckpoint === undefined) return null;
+  if (completedPanelState === null && record.completedPanelCheckpoint === undefined) {
+    return failure("the persisted completion receipt carries neither a parseable completed T2 state nor a T2 checkpoint");
+  }
   const parsed = parseStandaloneRefutationCompletion({
     panelAuthority,
     aggregate,
@@ -392,7 +410,7 @@ export function restoreRefutationCompletion(
       : { completedPanelCheckpoint: record.completedPanelCheckpoint }),
     publicationResolver,
   });
-  if (!parsed.ok) return null;
+  if (!parsed.ok) return failure(parsed.error.message);
   const supplied = {
     ...record,
     completedPanelState: completedPanelState ?? parsed.value.completedPanelState,
@@ -401,5 +419,5 @@ export function restoreRefutationCompletion(
   return canonicalStructuralEquals(
     serializableRefutationCompletion(parsed.value),
     serializableRefutationCompletion(supplied),
-  ) ? parsed.value : null;
+  ) ? success(parsed.value) : failure("the persisted completion receipt differs from its re-proof");
 }

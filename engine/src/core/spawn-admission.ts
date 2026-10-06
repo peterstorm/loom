@@ -845,12 +845,22 @@ function emissionCapabilityForIssuedRoute(
   }
   const spec: EmissionToolSpec = EMISSION_TOOL_SPECS[claim.producerKind];
   const cell = spec.schemaVersions[claim.version];
-  return cell === undefined
-    ? notProvidedEmissionCapability(
-        `the loaded emission registry carries no ${claim.producerKind}/${claim.version} cell`,
-        "extraction",
-      )
-    : providedEmissionCapability(sha256Hex(cell.schemaBytes) as ArtifactDigest);
+  if (cell === undefined) {
+    return notProvidedEmissionCapability(
+      `the loaded emission registry carries no ${claim.producerKind}/${claim.version} cell`,
+      "extraction",
+    );
+  }
+  // The digest is engine-computed, but it still enters the brand through its
+  // one parser; a digest the parser refuses is a broken registry and refuses
+  // the route rather than degrading it to extraction.
+  const schemaDigest = parseArtifactDigest(sha256Hex(cell.schemaBytes));
+  return schemaDigest.ok
+    ? providedEmissionCapability(schemaDigest.value)
+    : notProvidedEmissionCapability(
+        `the loaded ${claim.producerKind}/${claim.version} emission schema digest is not an artifact digest: ${schemaDigest.error.message}`,
+        "refuse",
+      );
 }
 
 /** Pure qualification from authenticated, frozen request route data plus the

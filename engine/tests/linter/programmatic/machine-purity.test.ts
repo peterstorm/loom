@@ -268,11 +268,13 @@ const IMPURE_PROBES = [
   'import { isDeepStrictEqual, debuglog } from "node:util";',
 ] as const;
 
+// The modules granted named deterministic hashing. standalone-review.ts and
+// panel-program.ts left this list when their hashing moved into digest.ts; both
+// stay in DEFAULT_PURE_MODULES, so the shipped-default-rule case still audits them.
 const HASH_MODULES = [
   "engine/src/core/review-packet.ts",
   "engine/src/core/digest.ts",
   SOURCE_AUTHORITY,
-  "engine/src/core/digest.ts",
   "engine/src/core/parse-spec.ts",
   "engine/src/core/orchestration-contract/bytes.ts",
   "engine/src/core/orchestration-contract/publication.ts",
@@ -312,6 +314,11 @@ describe("functional core — executable purity closure", () => {
   it.each(IMPURE_PROBES)("rejects source-authority transitive impurity: %s", (probe) => {
     const audit = auditClosure([ACCOUNTING], new Map([[SOURCE_AUTHORITY, `${readSource(SOURCE_AUTHORITY)}\n${probe}`]]));
     expect(audit.errors.some((error) => error.startsWith(`${SOURCE_AUTHORITY}:`))).toBe(true);
+  });
+
+  it("declares each hashing module once and keeps the former hashers on the pure list", () => {
+    expect(new Set(HASH_MODULES).size).toBe(HASH_MODULES.length);
+    expect(DEFAULT_PURE_MODULES).toEqual(expect.arrayContaining(["engine/src/core/standalone-review.ts", "engine/src/core/panel-program.ts"]));
   });
 
   it.each([ACCOUNTING, ...HASH_MODULES])("%s allows only named deterministic hashing", (mod) => {

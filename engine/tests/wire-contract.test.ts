@@ -3,7 +3,13 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentsOfKind } from "../src/core/model-profiles";
-import { extractWireContractRegion, stampWireContract } from "../src/core/wire-contract";
+import {
+  READ_COVERAGE_BULLET_ANCHOR,
+  extractReadCoverageBullet,
+  extractWireContractRegion,
+  stampReadCoverageBullet,
+  stampWireContract,
+} from "../src/core/wire-contract";
 import { renderReviewerWireContract, renderReviewerWireInstructions } from "../src/core/reviewer-protocol";
 import {
   REVIEWER_EMISSION_TOOL_CONTRACT_PLACEHOLDER, REVIEWER_EMISSION_TOOL_CONTRACT_TEMPLATE,
@@ -15,6 +21,7 @@ import { parseRequestId } from "../src/core/orchestration-contract/identity";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const fragment = readFileSync(join(REPO_ROOT, "agents", "_shared", "wire-contract.md"), "utf-8");
+const readCoverageFragment = readFileSync(join(REPO_ROOT, "agents", "_shared", "read-coverage.md"), "utf-8");
 const reviewers = agentsOfKind("reviewer");
 
 const REQUEST = parseRequestId("request:wire-contract");
@@ -62,6 +69,45 @@ describe("every reviewer carries the exact stamped Wire Contract", () => {
     }
     expect(fragment).not.toContain("CRITICAL_COUNT:");
     expect(fragment).not.toContain("```findings");
+  });
+});
+
+/**
+ * The read-coverage bullet has ONE source too: agents/_shared/read-coverage.md,
+ * stamped by the same script over each reviewer's single anchored bullet. The
+ * drift gate uses the stamper's own extraction, exactly like the region above.
+ */
+describe("every reviewer carries the exact stamped read-coverage bullet", () => {
+  it("the fragment is one anchored line naming the engine-verified obligation", () => {
+    expect(readCoverageFragment.endsWith("\n")).toBe(true);
+    expect(readCoverageFragment.slice(0, -1)).not.toContain("\n");
+    expect(readCoverageFragment.startsWith(`${READ_COVERAGE_BULLET_ANCHOR}every-frozen-diff-unit\``)).toBe(true);
+    expect(readCoverageFragment).toContain("ADR-0022");
+  });
+
+  it.each([...reviewers])("agents/%s.md bullet is byte-identical to the fragment, and stamping it is idempotent", (agent) => {
+    const markdown = readFileSync(join(REPO_ROOT, "agents", `${agent}.md`), "utf-8");
+    expect(extractReadCoverageBullet(markdown)).toEqual({ ok: true, value: readCoverageFragment.replace(/\n$/, "") });
+    expect(stampReadCoverageBullet(markdown, readCoverageFragment)).toEqual({ ok: true, value: markdown });
+  });
+
+  it("restamps a drifted bullet in place and leaves every other line untouched", () => {
+    const drifted = `# agent\n\n- first\n${READ_COVERAGE_BULLET_ANCHOR}every-frozen-diff-unit\`, stale wording.\n- last\n`;
+    expect(stampReadCoverageBullet(drifted, readCoverageFragment)).toEqual({
+      ok: true,
+      value: `# agent\n\n- first\n${readCoverageFragment}- last\n`,
+    });
+  });
+
+  it.each<readonly [string, string, string, string]>([
+    ["no bullet", "# agent\n- first\n", readCoverageFragment, "missing read-coverage bullet"],
+    ["two bullets", `${READ_COVERAGE_BULLET_ANCHOR}a\n${READ_COVERAGE_BULLET_ANCHOR}b\n`, readCoverageFragment,
+      "2 read-coverage bullets; expected exactly one"],
+    ["an unanchored fragment", `${READ_COVERAGE_BULLET_ANCHOR}a\n`, "- something else\n", "read-coverage fragment must be one line starting with its anchor"],
+    ["a multi-line fragment", `${READ_COVERAGE_BULLET_ANCHOR}a\n`, `${READ_COVERAGE_BULLET_ANCHOR}a\nb\n`,
+      "read-coverage fragment must be one line starting with its anchor"],
+  ])("refuses %s", (_name, markdown, bullet, error) => {
+    expect(stampReadCoverageBullet(markdown, bullet)).toEqual({ ok: false, error });
   });
 });
 

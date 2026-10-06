@@ -20,7 +20,9 @@ import { issuedWaveProtocol, readWaveRequestContext } from './wave-review-contex
 import type { IssuedWaveReviewBatch } from './wave-review-requests';
 
 /** Resume phase: settle the current batch's attempt-1 evidence, spawning any
- *  undelivered attempt-1 request; proceeds once none remains outstanding. */
+ *  undelivered attempt-1 request; proceeds once none remains outstanding.
+ *  `wave` is the caller's narrowed `registration.input.wave` and the only
+ *  Wave this phase reads. */
 export async function reconcileCurrentReviewEvidence(
   handle: RunDirHandle,
   manager: StateManager,
@@ -141,7 +143,7 @@ export async function reconcileCurrentReviewEvidence(
   for (const request of currentIssued.filter((authority) => authority.program === "wave-gate" && authority.attempt === 1)) {
     if (await durableCaptureRejection(handle, request) !== null) rejectedInitials.add(request.requestId);
   }
-  const settledSpecCheck = refreshed.spec_check?.wave === registration.input.wave &&
+  const settledSpecCheck = refreshed.spec_check?.wave === wave &&
     refreshed.spec_check.verdict !== "EVIDENCE_CAPTURE_FAILED";
   const uncapturedInitialReviews = currentIssued.filter((request) => request.program === "wave-gate" && request.attempt === 1 &&
     belongsToCurrentPacket(request) && !(request.role === "spec-check-invoker" && settledSpecCheck) &&

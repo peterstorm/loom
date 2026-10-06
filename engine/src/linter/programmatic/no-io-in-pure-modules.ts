@@ -50,7 +50,6 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/ordering.ts",
   "engine/src/core/completion-suite.ts",
   "engine/src/core/verification-manifest.ts",
-  "engine/src/core/digest.ts",
   "engine/src/core/standalone-review.ts",
   "engine/src/core/standalone-review-machine.ts",
   "engine/src/core/standalone-review-scope.ts",
@@ -88,6 +87,9 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/context-packet-projection.ts",
   "engine/src/core/safe-io-cause.ts",
   "engine/src/core/wave-review-authority.ts",
+  // The registered Wave Gate program's data shapes, which wave-review-authority
+  // shares instead of restating the reviewer-protocol arms.
+  "engine/src/core/wave-gate-program.ts",
   "engine/src/core/reviewed-workspace.ts",
   "engine/src/core/wave-frozen-source.ts",
   "engine/src/core/model-profiles.ts",

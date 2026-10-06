@@ -23,20 +23,27 @@ const candidate = (graph: TaskGraph, overrides: Partial<WaveGateRegistrationCand
   ...overrides,
 });
 
-const active = (
+/** The one registration constructor: the `as unknown as` cast lives here
+ *  alone, so an unnormalized `terminalOutcome` fixture is built in one place. */
+const registrationFor = (
   graph: TaskGraph,
-  runId: string,
+  wave: number,
+  roster: readonly string[],
+  runId = "run.next",
   terminalOutcome: unknown = null,
 ): ActiveWaveGateRegistration => ({
   schemaVersion: 1,
   kind: "active-wave-gate",
   runId,
-  wave: 1,
-  authorityDigest: waveGateAuthorityDigest(1, [...ROSTER], graph),
+  wave,
+  authorityDigest: waveGateAuthorityDigest(wave, [...roster], graph),
   revision: 0,
   runsRoot: "/runs",
   terminalOutcome,
 } as unknown as ActiveWaveGateRegistration);
+
+const active = (graph: TaskGraph, runId: string, terminalOutcome: unknown = null): ActiveWaveGateRegistration =>
+  registrationFor(graph, 1, ROSTER, runId, terminalOutcome);
 
 const withActive = (registration: ActiveWaveGateRegistration): TaskGraph => ({ ...base, active_wave_gate: registration });
 const abandoned = (supersededBy: string | null) =>
@@ -109,17 +116,6 @@ describe("admitWaveGateRegistration", () => {
   });
 });
 
-const registrationFor = (graph: TaskGraph, wave: number, roster: readonly string[], runId = "run.next"): ActiveWaveGateRegistration => ({
-  schemaVersion: 1,
-  kind: "active-wave-gate",
-  runId,
-  wave,
-  authorityDigest: waveGateAuthorityDigest(wave, [...roster], graph),
-  revision: 0,
-  runsRoot: "/runs",
-  terminalOutcome: null,
-} as unknown as ActiveWaveGateRegistration);
-
 describe("installWaveGateRegistration", () => {
   it("installs a fresh registration over an otherwise untouched graph", () => {
     const registration = registrationFor(base, 1, ROSTER);
@@ -131,6 +127,19 @@ describe("installWaveGateRegistration", () => {
     const registration = registrationFor(base, 1, ROSTER);
     const graph = withActive(registration);
     expect(installWaveGateRegistration(graph, registration, ROSTER)).toEqual({ kind: "replayed", registration });
+  });
+
+  it.each<readonly [string, Partial<ActiveWaveGateRegistration>]>([
+    ["a revision past 0", { revision: 1 } as Partial<ActiveWaveGateRegistration>],
+    ["a terminal outcome", { terminalOutcome: abandoned(null) } as unknown as Partial<ActiveWaveGateRegistration>],
+  ])("refuses a registration carrying %s before admission, even over its own live anchor", (_name, drift) => {
+    const stale = { ...registrationFor(base, 1, ROSTER), ...drift } as ActiveWaveGateRegistration;
+    for (const graph of [base, withActive(stale)]) {
+      expect(installWaveGateRegistration(graph, stale, ROSTER)).toEqual({
+        kind: "refused",
+        message: "A fresh active Wave Gate registration must start at revision 0 without a terminal outcome",
+      });
+    }
   });
 
   it.each(refusals)("refuses %s with the admission's message", (_name, scenario, message) => {

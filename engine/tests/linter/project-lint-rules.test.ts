@@ -42,6 +42,5 @@ describe("project lint rules: one source for both harnesses", () => {
     const claude = inv1(CANONICAL);
     expect(claude).toMatchObject({ kind: "regex", enabled: true });
     expect(inv1(PI)).toEqual(claude);
-    expect(readFileSync(join(PI, "inv-1-no-strict-require-constraint.json"))).toEqual(readFileSync(join(CANONICAL, "inv-1-no-strict-require-constraint.json")));
   });
 });

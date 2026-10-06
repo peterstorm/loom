@@ -9,7 +9,7 @@ import {
   type StandaloneLineageSource,
   type PreparedStandaloneDisposition,
 } from "../../../core/standalone-lineage";
-import { type PublishedStandaloneDisposition, type StandaloneDispositionPublicationReference } from "../../../core/standalone-review-model";
+import type { PublishedStandaloneDisposition, StandaloneDispositionPublicationReference } from "../../../core/standalone-review-model";
 import { parseRegisteredStandaloneDispositionProgram, startStandaloneDisposition,
   standaloneDispositionReceipt, reduceStandaloneDisposition, checkStandaloneDispositionCheckpoint,
   type RegisteredStandaloneDispositionProgram, type StandaloneDispositionStartInput, type StandaloneDispositionState } from "../../../core/standalone-disposition-machine";

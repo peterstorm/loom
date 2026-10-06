@@ -39,7 +39,21 @@ import {
   type WorkloadFixtures,
 } from "./pilot-workload";
 
-export type SampleRecord = Readonly<{ sample: SampleObservation; acceptedPayload: unknown }>;
+/** One landed sample: an accepted sample carries its canonical payload; a
+ *  terminal (non-accepted) sample carries none. */
+export type SampleRecord =
+  | Readonly<{ kind: "accepted"; sample: SampleObservation; acceptedPayload: unknown }>
+  | Readonly<{ kind: "terminal"; sample: SampleObservation }>;
+
+/** Pair a parsed sample with its final attempt's payload; an accepted outcome
+ *  without a payload (or a payload on any other outcome) is refused. */
+function sampleRecord(sample: SampleObservation, last: AttemptClassification | undefined): Result<SampleRecord, string> {
+  const accepted = last?.observation.outcome.kind === "accepted";
+  const payload = last?.acceptedPayload ?? null;
+  if (accepted && payload === null) return { ok: false, error: "its accepted outcome carries no accepted payload" };
+  if (!accepted && payload !== null) return { ok: false, error: "it carries an accepted payload without an accepted outcome" };
+  return { ok: true, value: Object.freeze(accepted ? { kind: "accepted" as const, sample, acceptedPayload: payload } : { kind: "terminal" as const, sample }) };
+}
 
 /** The key of one preregistered case's resolved input: `<cell>|<caseId>`. */
 export const caseInputKey = (cell: CellKey, caseId: string): string => `${cell}|${caseId}`;
@@ -86,7 +100,9 @@ async function dispatchSample(window: WindowDispatch, pair: ScheduledPair, arm: 
     rawArgumentObservation: "unavailable",
   });
   if (!sample.ok) throw new Error(`recorded observation for ${pair.pairId}/${arm} is malformed: ${sample.error.join("; ")}`);
-  return Object.freeze({ sample: sample.value, acceptedPayload: attempts[attempts.length - 1]?.acceptedPayload ?? null });
+  const record = sampleRecord(sample.value, attempts[attempts.length - 1]);
+  if (!record.ok) throw new Error(`recorded sample for ${pair.pairId}/${arm} is inconsistent: ${record.error}`);
+  return record.value;
 }
 
 /** Matched dispatch of the whole preregistered schedule. */
@@ -119,7 +135,7 @@ const byCodeUnits = (left: string, right: string): number => {
  *  packet order is a shuffle of the schedule. Only accepted payloads are blinded. */
 export function blind(windowId: string, records: readonly SampleRecord[]): Readonly<{ key: BlindingKey; entries: readonly BlindedEntry[] }> {
   const entries: BlindedEntry[] = records
-    .filter((record) => record.acceptedPayload !== null)
+    .flatMap((record) => (record.kind === "accepted" ? [record] : []))
     .map((record) => ({
       blindId: randomUUID(), pairId: record.sample.pairId, arm: record.sample.arm,
       cell: record.sample.cell, caseId: record.sample.caseId, payload: record.acceptedPayload,

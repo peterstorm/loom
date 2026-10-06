@@ -4,6 +4,7 @@
  */
 import { sha256Bytes } from "./digest";
 import type { DomainResult } from "./orchestration-contract";
+import { isRecord, parseExactRecord, type UnknownRecord } from "./plain-record";
 import {
   parseReviewedArtifacts,
   reviewedWorkspaceHeadSha,
@@ -59,9 +60,10 @@ export function waveFrozenSource(snapshot: ReviewedWorkspaceSnapshot): WaveFroze
   });
 }
 
-const exactObject = (raw: unknown, keys: readonly string[]): raw is Record<string, unknown> =>
-  typeof raw === "object" && raw !== null && !Array.isArray(raw) &&
-  Object.keys(raw).length === keys.length && keys.every((key) => Object.hasOwn(raw, key));
+/** Exact own key set through the shared kernel: a plain prototype, no symbol
+ *  keys, no missing or surplus field. The codec's diagnostics are its own. */
+const exactObject = (raw: unknown, keys: readonly string[]): raw is UnknownRecord =>
+  parseExactRecord(raw, keys, "wave frozen source").ok;
 
 /** Decode and re-prove every byte/digest/head join before reader projection. */
 export function parseWaveFrozenSource(raw: unknown): DomainResult<WaveFrozenSource, string> {
@@ -74,8 +76,7 @@ export function parseWaveFrozenSource(raw: unknown): DomainResult<WaveFrozenSour
   const artifacts: ObservedArtifact[] = [];
   const paths = new Set<string>();
   for (const [index, entry] of raw.files.entries()) {
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry) ||
-        typeof entry.path !== "string" || entry.path.trim() === "" || paths.has(entry.path)) {
+    if (!isRecord(entry) || typeof entry.path !== "string" || entry.path.trim() === "" || paths.has(entry.path)) {
       return failed(`wave frozen source file ${index} has an invalid or duplicate path`);
     }
     paths.add(entry.path);

@@ -34,7 +34,13 @@ import {
   type ReviewPath,
 } from "./review-packet";
 import { sha256Hex } from "./digest";
-import { artifactBaseline, type ArtifactBaseline, type ArtifactBaselineEntry, type DeclaredArtifactBaseline } from "./artifact-baseline";
+import {
+  artifactBaseline,
+  type ArtifactBaseline,
+  type ArtifactBaselineEntry,
+  type DeclaredArtifactBaseline,
+  type SnapshotScheme,
+} from "./artifact-baseline";
 import {
   parseTaskId,
   type CanonicalTaskIdParseError,
@@ -216,12 +222,15 @@ function parseSnapshot(raw: unknown, path: string): Parsed<DeclaredArtifactBasel
 
 /**
  * Parse an exact baseline as an unordered path-keyed set and return canonical
- * path order. Duplicate paths and all surplus fields fail closed.
+ * path order. Duplicate paths and all surplus fields fail closed. A caller
+ * that compares the result names the digest scheme its field was captured
+ * under; the default wide scheme serves digest-only callers and cannot reach
+ * `changedDeclaredArtifacts`.
  */
-export function parseCanonicalArtifactBaseline(
+export function parseCanonicalArtifactBaseline<Scheme extends SnapshotScheme = SnapshotScheme>(
   raw: unknown,
   path = "baseline",
-): Parsed<ArtifactBaseline> {
+): Parsed<ArtifactBaseline<Scheme>> {
   return total(() => {
     const array = parseDenseArray(raw, path);
     if (!array.ok) return array;
@@ -242,7 +251,7 @@ export function parseCanonicalArtifactBaseline(
     const sorted = [...entries.value].sort((left, right) => compareStrings(left.artifact, right.artifact));
     const duplicate = sorted.find((entry, index) => index > 0 && sorted[index - 1]?.artifact === entry.artifact);
     if (duplicate !== undefined) return failure([`${path} repeats artifact ${JSON.stringify(duplicate.artifact)}`]);
-    const proven = artifactBaseline(sorted, path);
+    const proven = artifactBaseline<Scheme>(sorted, path);
     return proven.ok ? success(proven.value) : failure(proven.errors);
   });
 }

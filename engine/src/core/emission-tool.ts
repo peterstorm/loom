@@ -80,8 +80,10 @@ export type EmissionParseFailureCode =
 /**
  * The failure the emission edge refuses. `code` is the parse's own code
  * vocabulary, never-ingestable per FR-006; `message` is the deterministic
- * diagnostic the tool result carries and the model re-emits within the
- * bounded budget.
+ * diagnostic the tool result carries. There is no same-spawn correction
+ * (ADR-0019): the model is instructed to finish with the final-message
+ * fallback after a refusal, and a second distinct call in the same spawn is a
+ * `duplicate-emission-call` rejection that consumes the attempt.
  */
 export type EmissionParseFailure = Readonly<{ code: EmissionParseFailureCode; message: string }>;
 
@@ -128,9 +130,10 @@ const verdictArgsParser = (schema: z.ZodType): EmissionPayloadParser => (raw: Ui
   }
   const parsed = schema.safeParse(value);
   if (parsed.success) return success(parsed.data);
-  // The refusal is the model's correction surface within the bounded budget:
+  // The refusal is what the model sees before it finishes with the
+  // final-message fallback (it must not re-emit in the same spawn, ADR-0019):
   // one message names every fixable violation in the call (bounded, in parse
-  // order) instead of spending a retry per issue.
+  // order) so the fallback payload can avoid all of them at once.
   const issues = parsed.error.issues;
   const named = issues.slice(0, 5).map((issue) => issue.message).join("; ");
   const overflow = issues.length > 5 ? `; (+${issues.length - 5} more)` : "";
@@ -259,74 +262,69 @@ const schemaPositions = (
   return positions;
 };
 
-/** Parse one JSON-encoded string as ONE declared JSON Schema type. Accepts
- *  only the value the declared type names at the runtime-type level; anything
- *  else fails so the unchanged string reaches validation and is refused with
- *  its own vocabulary. Pure and total — never throws. */
-const parseStringAsDeclaredType = (
-  type: string,
-  raw: string,
-): { ok: true; value: unknown } | { ok: false } => {
-  const trimmed = raw.trim();
-  switch (type) {
-    case "number": {
-      if (trimmed === "") return { ok: false };
-      const parsed = Number(trimmed);
-      return Number.isFinite(parsed) ? { ok: true, value: parsed } : { ok: false };
-    }
-    case "integer": {
-      if (trimmed === "") return { ok: false };
-      const parsed = Number(trimmed);
-      return Number.isFinite(parsed) && Number.isInteger(parsed) ? { ok: true, value: parsed } : { ok: false };
-    }
-    case "boolean":
-      if (raw === "true") return { ok: true, value: true };
-      if (raw === "false") return { ok: true, value: false };
-      return { ok: false };
-    case "null":
-      return raw === "null" ? { ok: true, value: null } : { ok: false };
-    case "array": {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        return { ok: false };
-      }
-      return Array.isArray(parsed) ? { ok: true, value: parsed } : { ok: false };
-    }
-    case "object": {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        return { ok: false };
-      }
-      return isPlainJsonRecord(parsed) ? { ok: true, value: parsed } : { ok: false };
-    }
-    default:
-      return { ok: false };
+type DeclaredTypeParse = { ok: true; value: unknown } | { ok: false };
+
+const NOT_PARSED: DeclaredTypeParse = Object.freeze({ ok: false });
+
+/** `JSON.parse` as a total function: the parsed value, or not parsed. */
+const parseJsonValue = (raw: string): DeclaredTypeParse => {
+  try {
+    return { ok: true, value: JSON.parse(raw) };
+  } catch {
+    return NOT_PARSED;
   }
 };
 
-/** The string branch: parse the value against the declared non-string types
- *  of the node's effective positions; a string-typed position or an
- *  unparseable value leaves the string verbatim for validation to refuse. */
+/** Parse one JSON-encoded string as ONE declared JSON Schema type. Accepts
+ *  only the JSON encoding of a value the declared type names: numbers follow
+ *  the JSON number grammar (so `0x10`, `+5`, `.5` and `5.` stay strings;
+ *  `1e2` is JSON and parses), booleans and null are the exact literals.
+ *  Anything else fails so the unchanged string reaches validation and is
+ *  refused with its own vocabulary. Pure and total — never throws. */
+const parseStringAsDeclaredType = (type: string, raw: string): DeclaredTypeParse => {
+  switch (type) {
+    case "boolean":
+      return raw === "true" || raw === "false" ? { ok: true, value: raw === "true" } : NOT_PARSED;
+    case "null":
+      return raw === "null" ? { ok: true, value: null } : NOT_PARSED;
+    default: {
+      const parsed = parseJsonValue(raw);
+      if (!parsed.ok) return NOT_PARSED;
+      const { value } = parsed;
+      const accepted =
+        type === "number" ? typeof value === "number" && Number.isFinite(value)
+        : type === "integer" ? typeof value === "number" && Number.isInteger(value)
+        : type === "array" ? Array.isArray(value)
+        : type === "object" ? isPlainJsonRecord(value)
+        : false;
+      return accepted ? parsed : NOT_PARSED;
+    }
+  }
+};
+
+/** The declared `type` names of one schema position. */
+const declaredTypes = (position: JsonSchemaNode): readonly string[] => {
+  const declared = position["type"];
+  if (typeof declared === "string") return [declared];
+  return Array.isArray(declared) ? declared.filter((member): member is string => typeof member === "string") : [];
+};
+
+/** The string branch: when any effective position declares `string`, the
+ *  value is already a legitimate string and stays verbatim (a literal
+ *  `"null"` at an `anyOf [string, null]` field is never coerced to null).
+ *  Otherwise the value is parsed against the declared non-string types; an
+ *  unparseable value stays verbatim for validation to refuse. */
 const canonicalizeStringAt = (
   node: JsonSchemaNode,
   value: string,
   root: JsonSchemaNode,
   depth: number,
 ): unknown => {
-  for (const position of schemaPositions(node, root, depth)) {
-    const declared = position["type"];
-    const types = typeof declared === "string" ? [declared] : Array.isArray(declared)
-      ? declared.filter((member): member is string => typeof member === "string")
-      : [];
-    for (const type of types) {
-      if (type === "string") continue;
-      const parsed = parseStringAsDeclaredType(type, value);
-      if (parsed.ok) return parsed.value;
-    }
+  const types = schemaPositions(node, root, depth).flatMap(declaredTypes);
+  if (types.includes("string")) return value;
+  for (const type of types) {
+    const parsed = parseStringAsDeclaredType(type, value);
+    if (parsed.ok) return parsed.value;
   }
   return value;
 };
@@ -352,6 +350,23 @@ const canonicalizeArrayAt = (
   return changed ? next : value;
 };
 
+/** The declared properties across a node's effective positions. */
+const declaredProperties = (
+  node: JsonSchemaNode,
+  root: JsonSchemaNode,
+  depth: number,
+): ReadonlyMap<string, JsonSchemaNode> => {
+  const properties = new Map<string, JsonSchemaNode>();
+  for (const position of schemaPositions(node, root, depth)) {
+    const declared = position["properties"];
+    if (!isPlainJsonRecord(declared)) continue;
+    for (const [key, propertySchema] of Object.entries(declared)) {
+      if (isPlainJsonRecord(propertySchema) && !properties.has(key)) properties.set(key, propertySchema);
+    }
+  }
+  return properties;
+};
+
 /** The object branch: the declared properties of every effective position
  *  (first declaration wins, matching ajv's resolution); unchanged objects
  *  keep the original reference. */
@@ -374,23 +389,6 @@ const canonicalizeObjectAt = (
     }
   }
   return changed ? next : value;
-};
-
-/** The declared properties across a node's effective positions. */
-const declaredProperties = (
-  node: JsonSchemaNode,
-  root: JsonSchemaNode,
-  depth: number,
-): ReadonlyMap<string, JsonSchemaNode> => {
-  const properties = new Map<string, JsonSchemaNode>();
-  for (const position of schemaPositions(node, root, depth)) {
-    const declaredProperties = position["properties"];
-    if (!isPlainJsonRecord(declaredProperties)) continue;
-    for (const [key, propertySchema] of Object.entries(declaredProperties)) {
-      if (isPlainJsonRecord(propertySchema) && !properties.has(key)) properties.set(key, propertySchema);
-    }
-  }
-  return properties;
 };
 
 /** One canonicalization step at one schema node, dispatched over the value's
@@ -452,7 +450,9 @@ export type EmissionArgumentAdmission =
  * reviewer-payload the SAME full schema-level parser the fallback uses; for
  * the verdict kinds the pure schema-conformance parse of the frozen verdict
  * schema. A refused admission is never-ingestable (FR-006); the tool result
- * is an error the model sees and re-emits within the bounded budget.
+ * is an error the model sees. The model then finishes with the final-message
+ * fallback; re-emitting in the same spawn is a `duplicate-emission-call`
+ * rejection that consumes the attempt (ADR-0019).
  */
 export function admitEmissionArguments(
   spec: EmissionToolSpec,
@@ -669,15 +669,18 @@ export function admitIssuedEmissionArguments(
 
 /**
  * The capability ADT (US4/US2): per harness × producer kind, whether the
- * constrained path can be provided. Design intent for the later-wave wiring
- * (spawn/request programs, T6/T7 — no production caller in this revision):
- * the Pi-side declaration is to return degradation "refuse" when the child's
- * loaded revision does not carry this emission tool (the revision check is
- * parent-side loaded-revision containment — NOT the FR-008 child-readiness
- * proof, which the launcher gate owns); that is the US4 hard fail whose
- * remediation is /reload. The Claude Code declaration is to return
- * not-provided with degradation "extraction" (no Loom extension seam) — the
- * US2 capability-aware-degradation class, which the guard admits (AD-7).
+ * constrained path can be provided. The producer is
+ * `qualifyIssuedSpawnEmissionRoute` in `spawn-admission.ts`: it declares
+ * not-provided with degradation "extraction" for a non-Pi parent (Claude Code
+ * has no Loom extension seam), for a Pi route that is not the qualified
+ * emission route, and for a missing registry cell; otherwise it declares
+ * provided with the issued cell's schema digest. The consumer is
+ * `decideRequestEmissionRoute`: a provided digest that differs from the
+ * issued cell's is the US4 hard refusal (parent-side loaded-revision
+ * containment, remediated by /reload — NOT the FR-008 child-readiness proof,
+ * which the launcher gate owns), and a not-provided "refuse" degradation is
+ * the same hard refusal; "extraction" is the US2 capability-aware degradation
+ * the guard admits (AD-7). ADR-0017 records the route decision.
  */
 export type EmissionToolCapability =
   | Readonly<{ kind: "provided"; schemaDigest: ArtifactDigest }>

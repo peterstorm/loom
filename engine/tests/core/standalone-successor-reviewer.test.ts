@@ -14,10 +14,11 @@ import { STANDALONE_REVIEWER_SCHEMA_V3, STANDALONE_LINEAGE_LIMITS, STANDALONE_RE
 import { buildStandaloneSuccessorReviewerContext, standaloneSuccessorReviewerRegistration, parseIssuedStandaloneSuccessorReviewer,
   admitStandaloneSuccessorReviewer, aggregateIssuedStandaloneSuccessorEvidence,
   type IssuedStandaloneSuccessorReviewer } from "../../src/core/standalone-successor-reviewer";
-import { EMISSION_TOOL_SPECS, issueEmissionBinding, type IssuedEmissionBinding, type IssuedEmissionBindingOf } from "../../src/core/emission-tool";
+import { EMISSION_TOOL_SPECS, issueEmissionBinding, type IssuedEmissionBindingOf } from "../../src/core/emission-tool";
 import { issuedReviewerEmissionRoute, projectRegisteredReviewerProtocol } from "../../src/core/reviewer-emission-route";
 import { selectCanonicalPayload } from "../../src/core/emission-ingestion";
 import { observeEmissionCalls } from "../../src/core/harness-capture";
+import { emissionCallFrame } from "../fixtures/emission-call-frame";
 
 const bytes = (raw: unknown) => new TextEncoder().encode(JSON.stringify(raw));
 const prior = valueOf(prepareStandaloneLineageSource(standaloneFixture(undefined, true).input.standaloneResult, "/owned/predecessor"));
@@ -219,9 +220,6 @@ describe("the successor's issued emission authority (T9)", () => {
 // ---------------------------------------------------------------------------
 
 describe("emission-sourced successor payloads cross the unchanged issuance joins (FR-012, T9)", () => {
-  const emissionCallFrame = (binding: IssuedEmissionBinding, toolCallId: string, arguments_: unknown) =>
-    ({ kind: "complete" as const, call: { requestId: binding.requestId, toolCallId, kind: binding.kind, version: binding.version, arguments: arguments_ } });
-
   it("selects a valid v3 emission call through the successor's own binding and admits the selected bytes through the identical joins", () => {
     const f = fixture("code-reviewer", 1);
     const binding = successorBinding(f.request.authority);

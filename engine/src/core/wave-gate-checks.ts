@@ -350,7 +350,7 @@ function waveGateAuthorityCheck(state: TaskGraph, waveArg: number | null): WaveG
   if (state.current_phase !== "execute") failures.push(`current Phase is ${state.current_phase}, not execute`);
   if (currentWave === undefined) failures.push("protected current_wave authority is missing");
   if (registration === undefined) failures.push("active Wave Gate registration is missing; explicitly register or migrate legacy authority first");
-  if (registration?.terminalOutcome !== null && registration !== undefined) {
+  if (registration !== undefined && registration.terminalOutcome !== null) {
     failures.push(`active Wave Gate run ${registration.runId} is terminal and must be archived before another completion`);
   }
   if (requestedWave === undefined) failures.push("no Wave was selected by protected authority");

@@ -21,13 +21,15 @@
  * pages in. Pure module: no I/O, no clock, no randomness.
  */
 import { sha256Hex } from "./digest";
-import { canonicalRecord, type DomainResult } from "./orchestration-contract/identity";
+import { canonicalRecord, canonicalStructuralEquals, type DomainResult } from "./orchestration-contract/identity";
 import { isRecord } from "./plain-record";
 import { unifiedDiff } from "./unified-diff";
 
 export const STANDALONE_FROZEN_DIFF_SECTION = "standalone-frozen-diff";
-/** Largest page the reader prints: the JSON-escaped page stays well under
- *  Claude Code's 30,000-character Bash output limit, so pages are never truncated. */
+/** Largest page the reader prints. For ordinary source and diff text the
+ *  JSON-escaped page stays under Claude Code's 30,000-character Bash output
+ *  limit. The bound is on UTF-16 units, not encoded size: a page dense in
+ *  control characters (each escaped as six-character `\u00XX`) could exceed it. */
 export const FROZEN_DIFF_PAGE_UNITS = 12_000;
 /** The most diff text one reviewer can be obliged to read; larger scopes must be partitioned. */
 export const READ_COVERAGE_SCOPE_BUDGET_UNITS = 240_000;
@@ -42,11 +44,11 @@ export const STANDALONE_READ_COVERAGE_V1 = canonicalRecord({
 });
 export type StandaloneReadCoveragePolicy = typeof STANDALONE_READ_COVERAGE_V1;
 
-/** Exact supported policy bytes; any other value refuses rather than selecting a variant. */
+/** Exact supported policy bytes; any other value refuses rather than selecting a variant.
+ *  `canonicalStructuralEquals` is at least as strict as an own-key comparison:
+ *  the same own key set, a null or Object.prototype prototype, equal values. */
 export function parseStandaloneReadCoverage(raw: unknown): DomainResult<StandaloneReadCoveragePolicy, string> {
-  const keys = Object.keys(STANDALONE_READ_COVERAGE_V1);
-  return isRecord(raw) && Object.keys(raw).length === keys.length &&
-      keys.every((key) => (raw as Record<string, unknown>)[key] === (STANDALONE_READ_COVERAGE_V1 as Record<string, unknown>)[key])
+  return canonicalStructuralEquals(raw, STANDALONE_READ_COVERAGE_V1)
     ? { ok: true, value: STANDALONE_READ_COVERAGE_V1 }
     : { ok: false, error: "read coverage policy must be exactly loom-standalone-read-coverage v1" };
 }

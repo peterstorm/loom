@@ -10,8 +10,10 @@ import {
 import { runtimeBaselineRestoreForTasks } from "../../src/utils/runtime-baseline-restore";
 import {
   describeRuntimeBaselineRestoreRefusal,
+  inFlightAttemptBaseline,
   runtimeBaselineRestoreAt,
   runtimeBaselineRestoreCandidates,
+  type InFlightAttemptBaseline,
   type RuntimeBaselineFacts,
 } from "../../src/core/runtime-baseline-restore";
 import fc from "fast-check";
@@ -48,6 +50,7 @@ function gitFixture(): { root: string; revision: string } {
 }
 
 const taskWith = (overrides: Partial<RuntimeBaselineTask> = {}): RuntimeBaselineTask => ({
+  id: "T1",
   attempt_repository_baseline: [],
   file_list: ["engine/src/core/task.ts"],
   ...overrides,
@@ -137,6 +140,15 @@ describe("runtimeBaselineRestoreForTasks", () => {
     );
   });
 
+  it("refuses the whole map when an in-flight attempt recorded no baseline, yet ignores a task with no attempt", () => {
+    const { root, revision } = gitFixture();
+    writeFileSync(join(root, "engine", "src", "core", "task.ts"), "export const task = 2;\n");
+    const { attempt_repository_baseline: _omitted, ...unrecorded } = taskWith({ id: "T7" });
+    expect(() => runtimeBaselineRestoreForTasks(root, [taskWith(), { ...unrecorded, legacy_execution_reservation: true }]))
+      .toThrow("in-flight attempt T7 has no recorded repository baseline, so no runtime-baseline restore applies");
+    expect(runtimeBaselineRestoreForTasks(root, [taskWith(), unrecorded]).get("engine/src/core/task.ts")).toBe(revision);
+  });
+
   it("needs no baseline at all while the runtime domain is clean", () => {
     const { root } = gitFixture();
     expect(runtimeBaselineRestoreForTasks(root, [
@@ -147,10 +159,11 @@ describe("runtimeBaselineRestoreForTasks", () => {
 });
 
 describe("runtime-baseline restoration rules (pure)", () => {
+  const recorded = (repositoryBaseline: unknown): InFlightAttemptBaseline => ({ kind: "recorded", repositoryBaseline });
   const facts = (overrides: Partial<RuntimeBaselineFacts> = {}): RuntimeBaselineFacts => ({
     dirtyNow: new Set(["engine/src/a.ts", "engine/src/b.ts", "docs/c.md"]),
     domainPaths: ["engine/src/a.ts", "engine/src/b.ts", "engine/src/clean.ts"],
-    attemptRepositoryBaselines: [],
+    attemptRepositoryBaselines: [recorded([])],
     ...overrides,
   });
   const dirtyAtSpawn = (artifact: string) => [{ artifact, snapshot: { kind: "missing" } }];
@@ -163,15 +176,37 @@ describe("runtime-baseline restoration rules (pure)", () => {
       .toEqual([["engine/src/a.ts", "f".repeat(40)], ["engine/src/b.ts", null]]);
   });
 
-  it("keeps a path strict when ANY attempt saw it dirty at spawn; an attempt without a baseline proves nothing", () => {
+  it("keeps a path strict when ANY attempt saw it dirty at spawn", () => {
     expect(runtimeBaselineRestoreCandidates(facts({
-      attemptRepositoryBaselines: [undefined, dirtyAtSpawn("engine/src/b.ts"), []],
+      attemptRepositoryBaselines: [recorded(dirtyAtSpawn("engine/src/b.ts")), recorded([])],
     }))).toEqual({ ok: true, value: ["engine/src/a.ts"] });
+  });
+
+  it("refuses the whole map for an attempt without a baseline: it proves nothing clean at its spawn", () => {
+    const refused = runtimeBaselineRestoreCandidates(facts({
+      attemptRepositoryBaselines: [recorded([]), { kind: "unrecorded", taskId: "T4" }, recorded(dirtyAtSpawn("engine/src/b.ts"))],
+    }));
+    expect(refused).toEqual({ ok: false, error: { kind: "unrecorded-attempt-baseline", taskId: "T4" } });
+    if (refused.ok) return;
+    expect(describeRuntimeBaselineRestoreRefusal(refused.error))
+      .toBe("in-flight attempt T4 has no recorded repository baseline, so no runtime-baseline restore applies");
+  });
+
+  it.each<readonly [string, RuntimeBaselineTask, ReturnType<typeof inFlightAttemptBaseline>]>([
+    ["a stored baseline", { id: "T1", attempt_repository_baseline: [] }, { kind: "recorded", repositoryBaseline: [] }],
+    ["an active attempt without one", { id: "T2", active_implementation_attempt: {} }, { kind: "unrecorded", taskId: "T2" }],
+    ["a legacy reservation without one", { id: "T3", legacy_execution_reservation: true }, { kind: "unrecorded", taskId: "T3" }],
+    ["no in-flight attempt", { id: "T4" }, null],
+  ])("classifies a task with %s", (_name, task, expected) => {
+    expect(inFlightAttemptBaseline(task)).toEqual(expected);
   });
 
   it("refuses with every parse error rather than silently restoring nothing", () => {
     const refused = runtimeBaselineRestoreCandidates(facts({
-      attemptRepositoryBaselines: [dirtyAtSpawn("engine/src/a.ts"), [{ artifact: "../escape", snapshot: { kind: "missing" } }]],
+      attemptRepositoryBaselines: [
+        recorded(dirtyAtSpawn("engine/src/a.ts")),
+        recorded([{ artifact: "../escape", snapshot: { kind: "missing" } }]),
+      ],
     }));
     expect(refused.ok).toBe(false);
     if (refused.ok) return;
@@ -182,10 +217,10 @@ describe("runtime-baseline restoration rules (pure)", () => {
   it("property: candidates are always dirty domain paths, and adding dirt at spawn never adds a candidate", () => {
     const path = fc.constantFrom<string>("engine/src/a.ts", "engine/src/b.ts", "pi/c.ts", "docs/d.md");
     fc.assert(fc.property(fc.uniqueArray(path), fc.uniqueArray(path), fc.uniqueArray(path), (dirty, domain, spawn) => {
-      const base = runtimeBaselineRestoreCandidates({ dirtyNow: new Set(dirty), domainPaths: domain, attemptRepositoryBaselines: [[]] });
+      const base = runtimeBaselineRestoreCandidates({ dirtyNow: new Set(dirty), domainPaths: domain, attemptRepositoryBaselines: [recorded([])] });
       const stricter = runtimeBaselineRestoreCandidates({
         dirtyNow: new Set(dirty), domainPaths: domain,
-        attemptRepositoryBaselines: [spawn.flatMap(dirtyAtSpawn)],
+        attemptRepositoryBaselines: [recorded(spawn.flatMap(dirtyAtSpawn))],
       });
       if (!base.ok || !stricter.ok) throw new Error("well-formed baselines must parse");
       expect(base.value.every((candidate) => dirty.includes(candidate) && domain.includes(candidate))).toBe(true);

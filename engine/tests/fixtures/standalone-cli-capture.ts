@@ -9,14 +9,9 @@ import type { RunDirHandle } from "../../src/orchestration/run-directory-handle"
  * explicit `toolOutputs` a test supplies to script a partial or absent read. */
 export async function captureStandaloneCliEvidence(handle: RunDirHandle, request: AgentRequestAuthority, payload: unknown,
   toolOutputs?: readonly string[] | null): Promise<void> {
-  const { recordReadCoverageObservation, runReadCoverage } = await import("../../src/orchestration/standalone-read-coverage-evidence");
-  const { frozenDiffReaderPages } = await import("./read-coverage");
-  const policy = runReadCoverage(handle);
-  if (!policy.ok) throw Error(policy.error);
-  if (policy.value !== null && request.program === "standalone-review") {
-    const recorded = await recordReadCoverageObservation(handle, request, toolOutputs === undefined ? frozenDiffReaderPages(handle, request) : toolOutputs);
-    if (!recorded.ok) throw Error(recorded.error);
-  }
+  const { recordReviewedReads } = await import("./read-coverage");
+  // An omitted `toolOutputs` takes the helper's every-page default; `null` scripts an absent read.
+  await recordReviewedReads(handle, request, toolOutputs);
   const { createEffectRunner } = await import("../../src/orchestration/effect-runner");
   const { parseEffectId } = await import("../../src/core/orchestration-contract");
   const unreachable = async (): Promise<never> => { throw Error("run-directory capture reached an external port"); };

@@ -12,8 +12,13 @@
 A recording proxy sits between the probe child and the real vLLM server; the
 child registers the four REAL emission tools — the frozen registry's exact
 bytes, the production registration shape, and `constrainedSampling:
-{ type: "json_schema", strict: "prefer" }` — so every captured request is what
-production will send. Per schema: an acceptance call (canonical fixture minted
+{ type: "json_schema", strict: "prefer" }` — so every captured request carries
+the schema and request shape production will send. Tool names differ in one
+place: the judge and refutation tools keep their production names, while
+reviewer v2/v3 (one production name, two schema versions) register as
+`loom_emit_reviewer_payload_v2`/`_v3` so both exist at once
+(`probeRegisteredToolName` in `qual-extension.ts`, which the manifest's
+`registeredToolName` derives from). Per schema: an acceptance call (canonical fixture minted
 by `schema.parse`, never hand-authored) and a violation-temptation call, plus
 a **direct-enforcement stage** that reuses the exact wire tool def, forces
 `tool_choice`, and demands the violating arguments — model cooperation is

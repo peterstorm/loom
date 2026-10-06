@@ -169,7 +169,7 @@ function makeBus(stdout) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function runPhase(bus, child, records, argsEntries, spec, instruction, label) {
+async function runPhase(bus, child, records, argsEntries, instruction, label) {
   const recordStart = records.length;
   const argsStart = argsEntries.length;
   const promptId = `p-${label}`;
@@ -303,13 +303,13 @@ async function main() {
       const toolReport = { schemaDigest: spec.schemaDigest, schemaKB: +(spec.schemaBytes.length / 1024).toFixed(1), acceptance: undefined, violation: undefined, classification: undefined };
       const fixtureInstruction =
         `Call the ${spec.registeredToolName} tool exactly once, with arguments EXACTLY this JSON object (no extra or missing fields):\n${spec.fixtureJson}\nDo not call any other tool.`;
-      const acceptancePhase = await runPhase(bus, child, records, argsEntries, spec, fixtureInstruction, `acc-${spec.version}`);
+      const acceptancePhase = await runPhase(bus, child, records, argsEntries, fixtureInstruction, `acc-${spec.version}`);
       const acceptanceEnd = records.length;
       toolReport.acceptance = analyzePhase(spec, acceptancePhase);
 
       const violationInstruction =
         `Call the ${spec.registeredToolName} tool exactly once. ${spec.violationInstruction}. Everything else stays exactly as in this JSON:\n${spec.fixtureJson}`;
-      const violationPhase = await runPhase(bus, child, records, argsEntries, spec, violationInstruction, `vio-${spec.version}`);
+      const violationPhase = await runPhase(bus, child, records, argsEntries, violationInstruction, `vio-${spec.version}`);
       const violationEnd = records.length;
       toolReport.violation = analyzePhase(spec, violationPhase);
 

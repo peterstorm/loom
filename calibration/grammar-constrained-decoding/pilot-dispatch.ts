@@ -218,6 +218,22 @@ function ingest<S extends AcceptedSource>(
   return { ok: true, value: Object.freeze({ outcome, payload: parsed.value }) };
 }
 
+/** A settled attempt's outcome: the frozen parser's accepted payload, or the
+ *  selection's or the parser's rejection. */
+type SettledOutcome<S extends AcceptedSource, C extends RejectionCause> =
+  | Readonly<{ kind: "accepted" } & S & { payloadDigest: string }>
+  | Readonly<{ kind: "rejected"; cause: C | PayloadRefused }>;
+
+/** The settled branch both arms share: a rejected decision stands; an accepted one must pass ingestion. */
+function settle<S extends AcceptedSource, C extends RejectionCause>(
+  cell: CellKey,
+  decision: Accepted<S> | Rejected<C>,
+): Readonly<{ outcome: SettledOutcome<S, C>; payload: unknown }> {
+  if (decision.kind === "rejected") return { outcome: { kind: "rejected", cause: decision.cause }, payload: null };
+  const ingested = ingest(cell, decision);
+  return ingested.ok ? ingested.value : { outcome: { kind: "rejected", cause: ingested.error }, payload: null };
+}
+
 type TranscriptCommon = Readonly<{
   cell: CellKey;
   cellBinding: CellBinding;
@@ -272,10 +288,8 @@ export function classifyAttemptTranscript(input: TranscriptInput): AttemptClassi
       .with({ kind: "infrastructure-failure" }, (launch) => end({ kind: "infrastructure-failure", reason: launch.reason }))
       .with({ kind: "timeout" }, (launch) => end({ kind: "timeout", afterMs: launch.afterMs }))
       .with({ kind: "settled" }, () => {
-        const decision = selectExtractionPayload(input.messages);
-        if (decision.kind === "rejected") return end({ kind: "rejected", cause: decision.cause });
-        const ingested = ingest(input.cell, decision);
-        return ingested.ok ? end(ingested.value.outcome, ingested.value.payload) : end({ kind: "rejected", cause: ingested.error });
+        const settled = settle(input.cell, selectExtractionPayload(input.messages));
+        return end(settled.outcome, settled.payload);
       })
       .exhaustive();
   }
@@ -291,10 +305,8 @@ export function classifyAttemptTranscript(input: TranscriptInput): AttemptClassi
     .with({ kind: "infrastructure-failure" }, (launch) => end({ kind: "infrastructure-failure", reason: launch.reason }))
     .with({ kind: "timeout" }, (launch) => end({ kind: "timeout", afterMs: launch.afterMs }))
     .with({ kind: "settled" }, () => {
-      const decision = selectEmissionPayload(input.cellBinding, input.messages);
-      if (decision.kind === "rejected") return end({ kind: "rejected", cause: decision.cause });
-      const ingested = ingest(input.cell, decision);
-      return ingested.ok ? end(ingested.value.outcome, ingested.value.payload) : end({ kind: "rejected", cause: ingested.error });
+      const settled = settle(input.cell, selectEmissionPayload(input.cellBinding, input.messages));
+      return end(settled.outcome, settled.payload);
     })
     .exhaustive();
 }
@@ -432,23 +444,49 @@ function emissionArgs(config: PiDispatchConfig, toolName: string): readonly stri
   ];
 }
 
+const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+/**
+ * How an emission launch ended, from the launcher's outcome (PURE). A launch
+ * the launcher reports as successful counts as settled only if the adapter's
+ * own readiness verification returned ok (`readinessMs` is set): a launcher
+ * that skipped the AD-4 barrier would otherwise yield an unverified sample.
+ */
+function emissionLaunchEnd(
+  outcome: RpcLaunchOutcome, aborted: boolean, readinessMs: number | null, timeoutMs: number,
+): LaunchEnd {
+  if (outcome.ok) {
+    return readinessMs === null
+      ? { kind: "infrastructure-failure", reason: "the launcher reported success, but the readiness barrier never verified the child" }
+      : { kind: "settled" };
+  }
+  if (aborted) return { kind: "timeout", afterMs: timeoutMs };
+  return outcome.phase === "before-task-prompt"
+    ? { kind: "startup-refused", reason: outcome.reason }
+    : { kind: "infrastructure-failure", reason: outcome.reason };
+}
+
+/** A launcher that cannot be loaded or that rejects mid-run is an
+ *  infrastructure failure of this one attempt, never an exception that aborts
+ *  the window (the extraction arm maps its spawn errors the same way). */
 async function dispatchEmission(config: PiDispatchConfig, request: ArmRequest): Promise<AttemptClassification> {
-  const launcher = await config.loadLauncher();
+  const launcher = await config.loadLauncher().catch((error: unknown): RpcLauncher =>
+    ({ kind: "unavailable", reason: `the installed launcher could not be loaded: ${messageOf(error)}` }));
   const started = performance.now();
   const messages: unknown[] = [];
-  const classify = (launch: LaunchEnd, readinessMs: number | null): AttemptClassification => classifyAttemptTranscript({
+  const readiness: { ms: number | null } = { ms: null };
+  const classify = (launch: LaunchEnd): AttemptClassification => classifyAttemptTranscript({
     arm: "emission-enabled", cell: request.cell, cellBinding: request.cellBinding, messages, attempt: request.attempt,
-    elapsedMs: performance.now() - started, readinessMs, launch,
+    elapsedMs: performance.now() - started, readinessMs: readiness.ms, launch,
   });
-  if (launcher.kind === "unavailable") return classify({ kind: "infrastructure-failure", reason: launcher.reason }, null);
+  if (launcher.kind === "unavailable") return classify({ kind: "infrastructure-failure", reason: launcher.reason });
   const { runRpcAgent } = launcher;
   const { binding } = request.cellBinding;
   const bindingEnv = emissionBindingEnv(request.cellBinding);
-  let readinessMs: number | null = null;
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), config.timeoutMs);
   try {
-    const outcome = await runRpcAgent({
+    const launch = await runRpcAgent({
       command: config.piCommand,
       args: emissionArgs(config, binding.toolName),
       cwd: config.repoRoot,
@@ -460,17 +498,18 @@ async function dispatchEmission(config: PiDispatchConfig, request: ArmRequest): 
         expectedProvider: config.provider,
         expectedModel: config.model,
         expectedToolName: binding.toolName,
-        verifyReadiness: readinessVerifier(config, request.cellBinding, () => { readinessMs = performance.now() - started; }),
+        verifyReadiness: readinessVerifier(config, request.cellBinding, () => { readiness.ms = performance.now() - started; }),
       },
       signal: abort.signal,
       readinessTimeoutMs: config.readinessTimeoutMs,
       onMessage: (message) => { messages.push(message); },
-    });
-    if (outcome.ok) return classify({ kind: "settled" }, readinessMs);
-    if (abort.signal.aborted) return classify({ kind: "timeout", afterMs: config.timeoutMs }, readinessMs);
-    return classify(outcome.phase === "before-task-prompt"
-      ? { kind: "startup-refused", reason: outcome.reason }
-      : { kind: "infrastructure-failure", reason: outcome.reason }, readinessMs);
+    }).then(
+      (outcome) => emissionLaunchEnd(outcome, abort.signal.aborted, readiness.ms, config.timeoutMs),
+      (error: unknown): LaunchEnd => abort.signal.aborted
+        ? { kind: "timeout", afterMs: config.timeoutMs }
+        : { kind: "infrastructure-failure", reason: `the installed launcher's runRpcAgent rejected: ${messageOf(error)}` },
+    );
+    return classify(launch);
   } finally {
     clearTimeout(timer);
   }

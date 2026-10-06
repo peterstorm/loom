@@ -20,11 +20,11 @@
  * Variants (env PROBE_VARIANT):
  *   matching      — readiness emitted, active verified, digest correct.
  *   contradictory — readiness emitted with a WRONG schema digest.
- *   missing       — the readiness command is never registered, so the
- *                   launcher's invocation is unknown and nothing is ever
- *                   emitted (the launcher must refuse via bounded timeout;
- *                   also covers the absent-extension case by construction:
- *                   no `-e`, no command, no signal).
+ *   missing       — the readiness command is never registered, so
+ *                   get_commands does not list it and the launcher refuses
+ *                   by absence without invoking it; no readiness wait
+ *                   occurs. Also covers the absent-extension case by
+ *                   construction: no `-e`, no command, no signal.
  *   held          — matching readiness + a `before_agent_start` hold resolved
  *                   after PROBE_HOLD_MS, with ordering markers around the hold.
  *

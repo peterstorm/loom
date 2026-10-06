@@ -153,7 +153,7 @@ describe("Standalone Finding Origin and source membership", () => {
     };
 
     it("refuses a minted id once a ':' or whitespace is spliced in", () => {
-      const separator = fc.constantFrom(":", " ", "\t", "\n", "\r", " ", " ", "　");
+      const separator = fc.constantFrom(":", " ", "\t", "\n", "\r", "\u00a0", "\u2003", "\u3000");
       fc.assert(fc.property(mintedId, separator, fc.nat(), (id, char, at) => {
         const index = at % (id.length + 1);
         expect(refusedFor(`${id.slice(0, index)}${char}${id.slice(index)}`)).toBe(true);

@@ -9,22 +9,18 @@ import { dirname, join } from "node:path";
 import { encodeByteSection, parseStandaloneReviewerContextPacketV3, type ByteSection } from "../../../core/context-packets";
 import { parseContextPacket } from "../../../orchestration/context-packets";
 import { parseBoundedReviewerJson } from "../../../core/reviewer-protocol";
-import { selectStandaloneReviewers } from "../../../core/standalone-review-scope";
-import { prepareStandaloneSuccessor } from "../../../core/standalone-lineage";
-import { type PreparedStandaloneSuccessor, type StandaloneDispositionSelection } from "../../../core/standalone-review-model";
+import { selectStandaloneReviewers, type StandaloneReviewMetadata } from "../../../core/standalone-review-scope";
+import type { FrozenStandaloneReviewAuthority, PreparedStandaloneSuccessor, StandaloneDispositionSelection } from "../../../core/standalone-review-model";
 import { readSelectedStandaloneDisposition } from "./standalone-disposition-source";
 import { boundedStandaloneReadHandle as boundedSourceHandle, successorSourceSnapshot, standaloneSuccessorPackets, SUCCESSOR_CONTEXT_PAYLOAD_BYTES } from "./standalone-successor-source";
 import type { RegisteredStandaloneSuccessorProgram, StandaloneSuccessorStartInput } from "./standalone-successor-registration";
-import type { StandaloneReviewMetadata } from "../../../core/standalone-review-scope";
-import type { FrozenStandaloneReviewAuthority } from "../../../core/standalone-review-model";
-import { sameRegisteredStandalonePrograms } from "./registration";
 import { standaloneReviewerProtocolResolver } from "./reviewer-protocol-resolution";
 import { canonicalStructuralEquals } from "../../../core/orchestration-contract";
 import { parseStandaloneReviewMachineState } from "../../../core/standalone-review-checkpoint";
 import { reduceStandaloneReviewMachine, type StandaloneDoneState } from "../../../core/standalone-review-machine";
 import { serializeStandaloneReviewAuthority } from "../../../core/standalone-review-records";
 import { STANDALONE_LINEAGE_LIMITS, type StandalonePreviousSnapshot } from "../../../core/standalone-lineage-contract";
-import { prepareStandaloneLineageSource, type StandaloneLineageSource } from "../../../core/standalone-lineage";
+import { prepareStandaloneLineageSource, prepareStandaloneSuccessor, type StandaloneLineageSource } from "../../../core/standalone-lineage";
 import { admitFrozenPredecessorArchive, publishedPacketReference, serializePublishedPacketReference,
   type PredecessorArchivePurpose, type PredecessorArchiveRecord } from "../../../core/predecessor-archive";
 import { admitAnchoredRunAuthority, chargePredecessorBytes, enterPredecessorRun, predecessorAttemptRoster, predecessorContextLabel,
@@ -34,10 +30,10 @@ import { readStandaloneReviewedSource, replayStandaloneCliCaptures } from "./sta
 import { readRunBytesNoFollow } from "../../../orchestration/no-follow-fs";
 import { openRegisteredRunDirectory, type RunDirHandle } from "../../../orchestration/run-directory-handle";
 import { readStoredContextPacketFile } from "../../../orchestration/stored-context-packets";
-import { parsedAuthority, parseRegistration } from "./registration";
+import { parsedAuthority, parseRegistration, sameRegisteredStandalonePrograms } from "./registration";
 import { publishedReviewerRequest, publicationResolver } from "./durable-requests";
 import { readPublishedStandaloneResult } from "./standalone-requests";
-import { type ProgramParse } from "./program-result";
+import type { ProgramParse } from "./program-result";
 
 type SuccessorSourcePreparation = Readonly<{ prepared: PreparedStandaloneSuccessor;
   packets: Extract<ReturnType<typeof standaloneSuccessorPackets>, { ok: true }>["value"]["packets"];

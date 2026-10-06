@@ -27,7 +27,6 @@ import {
 import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
 import { observeSpecIndex } from "../../orchestration/spec-index-observation";
 import { specIndexUnavailableMessage } from "../../core/requirement-coverage";
-import type { DeclaredArtifactBaseline } from "../../core/artifact-baseline";
 import { captureDeclaredArtifactBaselineAtRevision } from "../../utils/declared-artifact-snapshot";
 import { observeExactHead } from "../../utils/git";
 import {
@@ -35,6 +34,7 @@ import {
   populateTaskGraph,
   resolvedSpecFile,
   type AuthoredTask,
+  type PopulationProofBoundary,
   type TaskGraphPopulationCommand,
   type TaskGraphPopulationResult,
 } from "../../core/task-graph-population";
@@ -209,25 +209,30 @@ function prepareVerificationManifest(
 
 /** The population-time proof boundary captured from GIT, or an honest absence.
  *  Absent is a distinct fact from captured: the degraded case leaves the first
- *  dispatch stamping its own boundary instead of inventing one here. */
+ *  dispatch stamping its own boundary instead of inventing one here, and its
+ *  cause is reported in the population result so the weaker boundary stays
+ *  visible to the operator. */
 type PreparedProofBoundary =
-  | Readonly<{
-      kind: "captured";
-      baselines: ReadonlyMap<string, readonly DeclaredArtifactBaseline[]>;
-      populationRevision: string;
-    }>
-  | Readonly<{ kind: "absent" }>;
+  | Readonly<{ kind: "captured"; boundary: PopulationProofBoundary }>
+  | Readonly<{ kind: "absent"; cause: string }>;
 
-function proofBoundaryAbsent(cause: string): PreparedProofBoundary {
-  process.stderr.write(`Task proof boundaries NOT captured: ${cause}\n`);
-  return Object.freeze({ kind: "absent" });
-}
+const proofBoundaryAbsent = (cause: string): PreparedProofBoundary => Object.freeze({ kind: "absent", cause });
+
+/** An unreadable Git object or declared artifact, which baseline capture
+ *  reports as a plain `Error` (including a failed `git` child) — as opposed to
+ *  a programming defect inside capture (a non-`Error` throw, or a `TypeError`,
+ *  `ReferenceError`, `RangeError` or `SyntaxError`). A defect must not pass as
+ *  a benign absence, so only this class degrades the boundary. */
+const isUnreadableCaptureSource = (error: unknown): error is Error =>
+  error instanceof Error && !(error instanceof TypeError || error instanceof ReferenceError ||
+    error instanceof RangeError || error instanceof SyntaxError);
 
 /** Capture each Task's declared-artifact proof boundary from GIT at the exact
  *  repository HEAD, BEFORE any work exists, so the boundary always predates the
  *  Task's production (INV-DF1). Degraded to absent when Git, the exact HEAD, or
  *  a declared artifact is unreadable — the first dispatch then stamps its own
- *  boundary rather than a partially captured one. */
+ *  boundary rather than a partially captured one. A defect inside capture
+ *  propagates and fails population instead. */
 function captureProofBoundary(
   repositoryRoot: CanonicalGitRootObservation,
   tasks: readonly [AuthoredTask, ...AuthoredTask[]],
@@ -240,14 +245,17 @@ function captureProofBoundary(
   try {
     return Object.freeze({
       kind: "captured",
-      baselines: new Map(tasks.map((task) => [
-        task.id,
-        captureDeclaredArtifactBaselineAtRevision(repositoryRoot.root, head.headSha, task.file_list),
-      ])),
-      populationRevision: head.headSha,
+      boundary: Object.freeze({
+        baselines: new Map(tasks.map((task) => [
+          task.id,
+          captureDeclaredArtifactBaselineAtRevision(repositoryRoot.root, head.headSha, task.file_list),
+        ])),
+        revision: head.headSha,
+      }),
     });
   } catch (error) {
-    return proofBoundaryAbsent(error instanceof Error ? error.message : String(error));
+    if (!isUnreadableCaptureSource(error)) throw error;
+    return proofBoundaryAbsent(error.message);
   }
 }
 
@@ -448,9 +456,7 @@ const handler: HookHandler = async (stdin, args) => {
     force,
     ...(issue === undefined ? {} : { issue }),
     ...(repo === undefined ? {} : { repo }),
-    ...(proofBoundary.kind === "captured"
-      ? { proofBaselines: proofBoundary.baselines, populationRevision: proofBoundary.populationRevision }
-      : {}),
+    ...(proofBoundary.kind === "captured" ? { proofBoundary: proofBoundary.boundary } : {}),
   });
   const preflight = populateTaskGraph(existingState, command);
   if (!preflight.ok) return { kind: "error", message: preflight.error.message };
@@ -470,12 +476,17 @@ const handler: HookHandler = async (stdin, args) => {
 
   const taskCount = decompose.tasks.length;
   process.stderr.write(`Task graph populated: ${taskCount} tasks, waves: ${applied.value.waves.join(", ")}\n`);
+  const boundaryNotice = proofBoundary.kind === "absent"
+    ? `Task proof boundaries NOT captured: ${proofBoundary.cause}; each Task's first dispatch stamps its own boundary.`
+    : null;
+  if (boundaryNotice !== null) process.stderr.write(`${boundaryNotice}\n`);
 
   return {
     kind: "passthrough",
     systemMessage: renderProjectVerificationCoverage(deriveProjectVerificationCoverage(preparedManifest.value)) +
       ` Install ${VERIFICATION_MANIFEST_SOURCE_PATH} before population to configure project checks; ` +
-      "later source edits do not change this TaskGraph's frozen authority.",
+      "later source edits do not change this TaskGraph's frozen authority." +
+      (boundaryNotice === null ? "" : ` ${boundaryNotice}`),
   };
 };
 

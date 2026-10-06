@@ -636,7 +636,7 @@ export function deriveWaveReadiness(
   if (registration !== undefined && registration.wave !== graph.current_wave) {
     failures.push(statusReason("authority-contradiction", `active Wave Gate wave ${registration.wave} does not match current wave ${graph.current_wave ?? "missing"}`));
   }
-  if (registration?.terminalOutcome !== null && registration !== undefined) {
+  if (registration !== undefined && registration.terminalOutcome !== null) {
     failures.push(statusReason("authority-contradiction", "terminal Wave Gate history cannot serve as active current-Wave authority"));
   }
   if (failures.length > 0 || registration === undefined) {

@@ -2,7 +2,7 @@
 
 **Spec ID:** 2026-09-16-grammar-constrained-decoding
 **Created:** 2026-09-16
-**Status:** Revised 2026-09-19 — feasibility and fresh plan alignment required before execution
+**Status:** Revised 2026-09-19. The 2026-09-19 prerequisites are met: both feasibility prerequisites are RESOLVED (`feasibility.md`) and fresh plan alignment reports no gaps (`plan-alignment.md`, 2026-09-19). As of 2026-10-06 the plan's Phases 3–5 are implemented on `feat/grammar-constrained-decoding` (PR #66); the AD-11 calibration release decision is INCOMPLETE (`calibration/grammar-constrained-decoding/README.md`), so the feature is not done.
 **Owner:** Loom maintainer (roadmap churn row 1)
 
 ## Summary

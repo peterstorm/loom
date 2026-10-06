@@ -21,7 +21,7 @@
 
 import type { ActiveWaveGateRegistration, TaskGraph } from "../types";
 import { preserveAcceptedReviewRunFindings } from "./findings";
-import { canonicalRecord } from "./orchestration-contract";
+import { canonicalRecord, canonicalStructuralEquals } from "./orchestration-contract";
 import { reconcileWaveBlock } from "./wave-gate-model";
 import { waveGateAuthorityDigest } from "./wave-review-authority";
 
@@ -59,10 +59,6 @@ const isExactReplay = (existing: ActiveWaveGateRegistration, candidate: WaveGate
   existing.runsRoot === candidate.runsRoot &&
   existing.revision === 0 &&
   existing.terminalOutcome === null;
-
-/** The Run Directory published exactly the protected roster, in protected Task order. */
-const sameRoster = (locked: readonly string[], published: readonly string[]): boolean =>
-  locked.length === published.length && locked.every((taskId, index) => taskId === published[index]);
 
 /**
  * Decide registration for one candidate whose Run Directory published
@@ -124,7 +120,7 @@ function admission(
   const lockedTaskIds = state.tasks
     .filter((task) => task.wave === candidate.wave)
     .map(({ id }) => id);
-  if (!sameRoster(lockedTaskIds, publishedTaskIds) ||
+  if (!canonicalStructuralEquals(lockedTaskIds, publishedTaskIds) ||
       waveGateAuthorityDigest(candidate.wave, lockedTaskIds, state) !== candidate.authorityDigest) {
     return { kind: "refused", message: "Protected Wave authority changed after Run Directory publication; active Wave Gate was not installed" };
   }
@@ -132,14 +128,23 @@ function admission(
 }
 
 /**
- * The locked install: admission, abandoned-predecessor supersession and the
- * new active registration, decided together as one pure transition.
+ * The locked install: freshness, admission, abandoned-predecessor supersession
+ * and the new active registration, decided together as one pure transition.
+ * Only a fresh registration — revision 0, no terminal outcome — may install;
+ * that refusal precedes admission, so a stale or terminal candidate is never
+ * mistaken for an exact replay.
  */
 export function installWaveGateRegistration(
   state: TaskGraph,
   registration: ActiveWaveGateRegistration,
   publishedTaskIds: readonly string[],
 ): WaveGateInstallDecision {
+  if (registration.revision !== 0 || registration.terminalOutcome !== null) {
+    return canonicalRecord({
+      kind: "refused",
+      message: "A fresh active Wave Gate registration must start at revision 0 without a terminal outcome",
+    });
+  }
   const admitted = admitWaveGateRegistration(state, registration, publishedTaskIds);
   switch (admitted.kind) {
     case "refused":

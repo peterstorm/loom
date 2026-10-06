@@ -168,16 +168,7 @@ function issue(requests: readonly AgentRequestAuthority[]): readonly IssuedSpawn
     authority,
     context: { digest: authority.contextDigest, slot: `contexts/${authority.contextDigest}.json` },
   }));
-  const canonical = {
-    schemaVersion: 1,
-    kind: "batch-published",
-    effectId,
-    runId,
-    requestIds: requests.map(({ requestId }) => requestId),
-    contextDigests: requests.map(({ contextDigest }) => contextDigest),
-    issuedRequests: rawRequests,
-  };
-  const publicationDigest = createHash("sha256").update(new TextEncoder().encode(JSON.stringify({
+  const published = {
     schemaVersion: 1,
     kind: "batch-published",
     effectId,
@@ -188,11 +179,9 @@ function issue(requests: readonly AgentRequestAuthority[]): readonly IssuedSpawn
       authority,
       context: { digest: authority.contextDigest, slot: { kind: "fixed-artifact-slot", path: `contexts/${authority.contextDigest}.json` } },
     })),
-  }))).digest("hex");
-  const rawReceipt = { ...canonical, issuedRequests: requests.map((authority) => ({
-    authority,
-    context: { digest: authority.contextDigest, slot: { kind: "fixed-artifact-slot", path: `contexts/${authority.contextDigest}.json` } },
-  })), publicationDigest };
+  };
+  const publicationDigest = createHash("sha256").update(new TextEncoder().encode(JSON.stringify(published))).digest("hex");
+  const rawReceipt = { ...published, publicationDigest };
   const receipt = parsed(parseBatchPublishedReceipt(rawReceipt));
   const intent = parsed(prepareInitialBatchPublicationIntent(runId, effectId, rawRequests));
   const reconcile = createInitialBatchPublicationReconciler(
@@ -476,22 +465,20 @@ describe("judge v1 through the persistent panel seam", () => {
     const step = submitCandidatesBaseline(fixture);
     const binding = mintJudgeBinding(fixture.judges[0]!.authority.requestId);
     // The frozen schema cannot bind the criterion (shape-level string), so a
-    // foreign criterion ADMIITS at the emission edge and must refuse at the
+    // foreign criterion ADMITS at the emission edge and must refuse at the
     // authoritative parse — the source never overrides issuance (FR-012).
     const foreign = validJudgeArguments("my own taste", fixture.authority.candidateIds);
-    const submitted = submitJudgeEmission(step.state, fixture, 0, {
+    const submitted = reduced(submitJudgeEmission(step.state, fixture, 0, {
       binding,
       observation: singleCallObservation(callOf(binding, "tool-call-foreign", foreign)),
-    }, judgeExtractionText(fixture, 0));
-    expect(submitted.ok).toBe(true);
-    if (!submitted.ok) throw new Error("unreachable");
-    expect(submitted.value.recordedEvent).toMatchObject({
+    }, judgeExtractionText(fixture, 0)));
+    expect(submitted.recordedEvent).toMatchObject({
       type: "architecture-judge-rejected",
       category: "result-binding-mismatch",
       message: expect.stringContaining("emission tool call tool-call-foreign produced a judge verdict that refuses its authoritative parse"),
     });
     // The slot still waits: one rejection consumed the attempt, nothing accepted.
-    expect(awaitingJudgeSlots(submitted.value.state).every((slot) => slot.status === "pending")).toBe(true);
+    expect(awaitingJudgeSlots(submitted.state).every((slot) => slot.status === "pending")).toBe(true);
   });
 
   it.each([
@@ -518,13 +505,11 @@ describe("judge v1 through the persistent panel seam", () => {
     const fixture = architectureFixture("misbound");
     const step = submitCandidatesBaseline(fixture);
     const binding = mintJudgeBinding(fixture.judges[0]!.authority.requestId);
-    const submitted = submitJudgeEmission(step.state, fixture, 0, {
+    const submitted = reduced(submitJudgeEmission(step.state, fixture, 0, {
       binding,
       observation: singleCallObservation(buildCall(binding)),
-    }, judgeExtractionText(fixture, 0));
-    expect(submitted.ok).toBe(true);
-    if (!submitted.ok) throw new Error("unreachable");
-    const event = submitted.value.recordedEvent!;
+    }, judgeExtractionText(fixture, 0)));
+    const event = submitted.recordedEvent!;
     expect(event).toMatchObject({
       type: "architecture-judge-rejected",
       category: "result-binding-mismatch",
@@ -532,7 +517,7 @@ describe("judge v1 through the persistent panel seam", () => {
     });
     // The usable final text is NOT consulted: a misbound observation refuses,
     // it never falls back (FR-014/AD-9).
-    expect(awaitingJudgeSlots(submitted.value.state).every((slot) => slot.status === "pending")).toBe(true);
+    expect(awaitingJudgeSlots(submitted.state).every((slot) => slot.status === "pending")).toBe(true);
   });
 
   it("rejects two distinct emission calls as ambiguity even with valid final text", () => {
@@ -544,10 +529,8 @@ describe("judge v1 through the persistent panel seam", () => {
       Object.freeze({ kind: "complete" as const, call: callOf(binding, "call-a", args) }),
       Object.freeze({ kind: "complete" as const, call: callOf(binding, "call-b", args) }),
     ] as readonly EmissionCallFrame[]);
-    const submitted = submitJudgeEmission(step.state, fixture, 0, { binding, observation }, judgeExtractionText(fixture, 0));
-    expect(submitted.ok).toBe(true);
-    if (!submitted.ok) throw new Error("unreachable");
-    expect(submitted.value.recordedEvent).toMatchObject({
+    const submitted = reduced(submitJudgeEmission(step.state, fixture, 0, { binding, observation }, judgeExtractionText(fixture, 0)));
+    expect(submitted.recordedEvent).toMatchObject({
       type: "architecture-judge-rejected",
       category: "malformed-result",
       message: expect.stringContaining("2 distinct emission tool calls (call-a, call-b)"),
@@ -596,13 +579,11 @@ describe("judge v1 through the persistent panel seam", () => {
     const fixture = architectureFixture("refused-no-fallback");
     const step = submitCandidatesBaseline(fixture);
     const binding = mintJudgeBinding(fixture.judges[0]!.authority.requestId);
-    const submitted = submitJudgeEmission(step.state, fixture, 0, {
+    const submitted = reduced(submitJudgeEmission(step.state, fixture, 0, {
       binding,
       observation: singleCallObservation(callOf(binding, "call-refused", refusedJudgeArguments(fixture.authority.judgeCriteria[0], fixture.authority.candidateIds))),
-    }, "not json at all");
-    expect(submitted.ok).toBe(true);
-    if (!submitted.ok) throw new Error("unreachable");
-    const event = submitted.value.recordedEvent!;
+    }, "not json at all"));
+    const event = submitted.recordedEvent!;
     expect(event).toMatchObject({ type: "architecture-judge-rejected", category: "malformed-result" });
     if (event.type !== "architecture-judge-rejected") throw new Error("unreachable");
     expect(event.message).toContain("emission arguments were refused [invalid-schema]");
@@ -680,13 +661,11 @@ describe("refutation v1 through the persistent panel seam", () => {
     const step = startPersistentRefutationPanel(fixture.authority);
     const binding = mintRefutationBinding(fixture.requests[0]!.authority.requestId);
     const findingIds = fixture.authority.findings.map(({ id }) => id);
-    const submitted = submitRefutationEmission(step.state, fixture, 0, {
+    const submitted = reduced(submitRefutationEmission(step.state, fixture, 0, {
       binding,
       observation: singleCallObservation(callOf(binding, "tool-call-foreign-lens", validRefutationArguments("blast-radius", findingIds))),
-    }, refutationExtractionText(fixture, 0));
-    expect(submitted.ok).toBe(true);
-    if (!submitted.ok) throw new Error("unreachable");
-    expect(submitted.value.recordedEvent).toMatchObject({
+    }, refutationExtractionText(fixture, 0)));
+    expect(submitted.recordedEvent).toMatchObject({
       type: "refutation-verdict-rejected",
       category: "result-binding-mismatch",
       message: expect.stringContaining("emission tool call tool-call-foreign-lens produced a refutation verdict that refuses its authoritative parse"),
@@ -700,16 +679,14 @@ describe("refutation v1 through the persistent panel seam", () => {
     const findingIds = fixture.authority.findings.map(({ id }) => id);
     const args = validRefutationArguments(fixture.authority.lenses[0], findingIds);
 
-    const duplicated = submitRefutationEmission(step.state, fixture, 0, {
+    const duplicated = reduced(submitRefutationEmission(step.state, fixture, 0, {
       binding,
       observation: observeEmissionCalls([
         Object.freeze({ kind: "complete" as const, call: callOf(binding, "call-a", args) }),
         Object.freeze({ kind: "complete" as const, call: callOf(binding, "call-b", args) }),
       ] as readonly EmissionCallFrame[]),
-    }, refutationExtractionText(fixture, 0));
-    expect(duplicated.ok).toBe(true);
-    if (!duplicated.ok) throw new Error("unreachable");
-    expect(duplicated.value.recordedEvent).toMatchObject({
+    }, refutationExtractionText(fixture, 0)));
+    expect(duplicated.recordedEvent).toMatchObject({
       type: "refutation-verdict-rejected",
       message: expect.stringContaining("2 distinct emission tool calls (call-a, call-b)"),
     });
@@ -736,17 +713,15 @@ describe("refutation v1 through the persistent panel seam", () => {
     const fixture = refutationFixture("incomplete-observation");
     const step = startPersistentRefutationPanel(fixture.authority);
     const binding = mintRefutationBinding(fixture.requests[0]!.authority.requestId);
-    const submitted = submitRefutationEmission(step.state, fixture, 0, {
+    const submitted = reduced(submitRefutationEmission(step.state, fixture, 0, {
       binding,
       observation: observeEmissionCalls([Object.freeze({
         kind: "incomplete" as const,
         toolCallId: "call-truncated",
         reason: "the tool call ended without arguments",
       })] as readonly EmissionCallFrame[]),
-    }, refutationExtractionText(fixture, 0));
-    expect(submitted.ok).toBe(true);
-    if (!submitted.ok) throw new Error("unreachable");
-    expect(submitted.value.recordedEvent).toMatchObject({
+    }, refutationExtractionText(fixture, 0)));
+    expect(submitted.recordedEvent).toMatchObject({
       type: "refutation-verdict-rejected",
       category: "malformed-result",
       message: expect.stringContaining("unusable-observation"),
@@ -754,9 +729,9 @@ describe("refutation v1 through the persistent panel seam", () => {
     // The usable final text is NOT consulted: an unusable observation is
     // representable as itself, never as absence (AD-8), so there is no
     // extraction fallback and no acceptance.
-    expect(submitted.value.state.stage).toBe("awaiting-verdicts");
-    if (submitted.value.state.stage !== "awaiting-verdicts") throw new Error("unreachable");
-    expect(submitted.value.state.slots[0]?.status).toBe("pending");
+    expect(submitted.state.stage).toBe("awaiting-verdicts");
+    if (submitted.state.stage !== "awaiting-verdicts") throw new Error("unreachable");
+    expect(submitted.state.slots[0]?.status).toBe("pending");
   });
 
   it("records both causes when a refused refutation call's extraction fallback also refuses its parse", () => {
@@ -769,13 +744,11 @@ describe("refutation v1 through the persistent panel seam", () => {
       criterion: fixture.authority.lenses[0],
       verdicts: [{ finding_id: findingIds[0], verdict: "maybe", reasoning: "unknown verdict enum" }],
     };
-    const submitted = submitRefutationEmission(step.state, fixture, 0, {
+    const submitted = reduced(submitRefutationEmission(step.state, fixture, 0, {
       binding,
       observation: singleCallObservation(callOf(binding, "call-refused-both", invalidArgs)),
-    }, "not json at all");
-    expect(submitted.ok).toBe(true);
-    if (!submitted.ok) throw new Error("unreachable");
-    const event = submitted.value.recordedEvent!;
+    }, "not json at all"));
+    const event = submitted.recordedEvent!;
     expect(event).toMatchObject({ type: "refutation-verdict-rejected", category: "malformed-result" });
     if (event.type !== "refutation-verdict-rejected") throw new Error("unreachable");
     expect(event.message).toContain("emission arguments were refused [invalid-schema]");
@@ -1062,121 +1035,137 @@ const judgeArgumentsArb = fc.record({
   scoreBase: fc.integer({ min: 5, max: 9 }),
 });
 
-type FoldObservationKind = "absent" | "valid-call" | "refused-call" | "duplicate" | "replayed" | "wrong-request" | "unusable";
+/** Every AD-9 observation row the judge fold distinguishes. */
+const FOLD_OBSERVATION_KINDS = ["absent", "valid-call", "refused-call", "duplicate", "replayed", "wrong-request", "unusable"] as const;
+type FoldObservationKind = (typeof FOLD_OBSERVATION_KINDS)[number];
 
 describe("property: judge submissions fold every AD-9 row through the panel seam", () => {
-  it("accepts exactly the single-call rows, records the source by decision, and rejects duplicates and misbindings", () => {
+  it("accepts exactly the single-call rows, records the source by decision, and rejects duplicates, misbindings, and unusable observations", () => {
     const fixture = architectureFixture("property");
     const baseState = submitCandidatesBaseline(fixture).state;
     const binding = mintJudgeBinding(fixture.judges[0]!.authority.requestId);
     const extractionRaw = judgeExtractionText(fixture, 0);
-    const observationKindArb: fc.Arbitrary<FoldObservationKind> = fc.constantFrom(
-      "absent", "valid-call", "refused-call", "duplicate", "replayed", "wrong-request", "unusable",
-    );
-    const property = fc.property(
-      judgeArgumentsArb,
-      observationKindArb,
-      fc.string({ minLength: 2, maxLength: 12 }).filter((s) => /^[a-z][a-z0-9]+$/.test(s)),
-      (raw, kind, callId) => {
-        // The rankings always cover the authority's EXACT candidate set (the
-        // property's variable is the criterion and the score level — the join
-        // the payload must satisfy to be acceptable).
-        const args = {
-          criterion: raw.criterion,
-          rankings: fixture.authority.candidateIds.map((candidate, index) => ({
-            candidate,
-            score: raw.scoreBase - index,
-            fatal_flaw: null,
-            strongest_idea: `idea ${index + 1}`,
-          })),
+    /** One row of the matrix: fold `kind` over the generated payload and assert
+     *  that row's outcome. The property drives EVERY row per generated case, so
+     *  no row's assertion depends on the generator happening to draw it. */
+    const assertRow = (raw: Readonly<{ criterion: string; scoreBase: number }>, kind: FoldObservationKind, callId: string): void => {
+      // The rankings always cover the authority's EXACT candidate set (the
+      // property's variable is the criterion and the score level — the join
+      // the payload must satisfy to be acceptable).
+      const args = {
+        criterion: raw.criterion,
+        rankings: fixture.authority.candidateIds.map((candidate, index) => ({
+          candidate,
+          score: raw.scoreBase - index,
+          fatal_flaw: null,
+          strongest_idea: `idea ${index + 1}`,
+        })),
+      };
+      const frames: readonly EmissionCallFrame[] = (() => {
+        const argumentsFor = kind === "refused-call"
+          ? { ...args, rankings: [{ ...args.rankings[0]!, score: 9.5 }, ...args.rankings.slice(1)] }
+          : args;
+        const requestIdFor = kind === "wrong-request" ? "some-other-request" : binding.requestId;
+        const call: EmissionToolCall = {
+          requestId: requestIdFor,
+          toolCallId: callId,
+          kind: { kind: "judge-verdict" },
+          version: "v1",
+          arguments: argumentsFor,
         };
-        const frames: readonly EmissionCallFrame[] = (() => {
-          const argumentsFor = kind === "refused-call"
-            ? { ...args, rankings: [{ ...args.rankings[0]!, score: 9.5 }, ...args.rankings.slice(1)] }
-            : args;
-          const requestIdFor = kind === "wrong-request" ? "some-other-request" : binding.requestId;
-          const call: EmissionToolCall = {
-            requestId: requestIdFor,
-            toolCallId: callId,
-            kind: { kind: "judge-verdict" },
-            version: "v1",
-            arguments: argumentsFor,
-          };
-          const frame = (frameCall: EmissionToolCall): EmissionCallFrame =>
-            Object.freeze({ kind: "complete" as const, call: frameCall });
-          if (kind === "unusable") {
-            // An incomplete/failed frame is representable as itself: the fold
-            // refuses it with its reason and never reclassifies it as absence.
-            return [Object.freeze({ kind: "incomplete" as const, toolCallId: callId, reason: "the tool call ended without arguments" })];
-          }
-          if (kind === "absent") return [];
-          if (kind === "duplicate") return [frame(call), frame({ ...call, toolCallId: `${callId}-second` })];
-          if (kind === "replayed") return [frame(call), frame(call)];
-          return [frame(call)];
-        })();
-        const observation = observeEmissionCalls(frames);
-        const submitted = submitArchitectureJudgeResult(baseState, publicationResolver, panelRequestIdentity(fixture.judges[0]!), extractionRaw, { binding, observation, port: testVerdictEmissionPort });
-        expect(submitted.ok).toBe(true);
-        if (!submitted.ok) throw new Error("unreachable");
-        const event = submitted.value.recordedEvent!;
-        const slotAccepted = awaitingJudgeSlots(submitted.value.state).some((slot) => slot.status === "accepted");
-        switch (kind) {
-          case "absent": {
-            expect(event.type).toBe("architecture-judge-accepted");
-            if (event.type !== "architecture-judge-accepted") throw new Error("unreachable");
-            expect(event.source).toEqual({ source: "extraction" });
-            expect(slotAccepted).toBe(true);
-            break;
-          }
-          case "valid-call":
-          case "replayed": {
-            if (args.criterion !== fixture.authority.judgeCriteria[0]) {
-              // The payload carries a foreign criterion: the emission edge
-              // admitted it (shape-level string) and the authoritative parse
-              // refused the join — the source cannot override issuance.
-              expect(event.type).toBe("architecture-judge-rejected");
-              if (event.type !== "architecture-judge-rejected") throw new Error("unreachable");
-              expect(event.category).toBe("result-binding-mismatch");
-              expect(event.message).toContain("refuses its authoritative parse");
-              expect(slotAccepted).toBe(false);
-              break;
-            }
-            expect(event.type).toBe("architecture-judge-accepted");
-            if (event.type !== "architecture-judge-accepted") throw new Error("unreachable");
-            expect(event.source).toEqual({
-              source: "emission-tool",
-              toolCallId: callId,
-              producerKind: "judge-verdict",
-              emissionSchemaVersion: "v1",
-              schemaDigest: binding.schemaDigest,
-            });
-            expect(slotAccepted).toBe(true);
-            break;
-          }
-          case "refused-call": {
-            expect(event.type).toBe("architecture-judge-accepted");
-            if (event.type !== "architecture-judge-accepted") throw new Error("unreachable");
-            expect(event.source).toEqual({ source: "extraction", emissionRefusal: { code: expect.any(String), message: expect.any(String) } });
-            expect(slotAccepted).toBe(true);
-            break;
-          }
-          case "duplicate": {
-            expect(event.type).toBe("architecture-judge-rejected");
-            if (event.type !== "architecture-judge-rejected") throw new Error("unreachable");
-            expect(event.message).toContain("2 distinct emission tool calls");
-            expect(slotAccepted).toBe(false);
-            break;
-          }
-          case "wrong-request": {
-            expect(event.type).toBe("architecture-judge-rejected");
-            if (event.type !== "architecture-judge-rejected") throw new Error("unreachable");
-            expect(event.message).toContain("wrong-request");
-            expect(slotAccepted).toBe(false);
-            break;
-          }
+        const frame = (frameCall: EmissionToolCall): EmissionCallFrame =>
+          Object.freeze({ kind: "complete" as const, call: frameCall });
+        if (kind === "unusable") {
+          // An incomplete/failed frame is representable as itself: the fold
+          // refuses it with its reason and never reclassifies it as absence.
+          return [Object.freeze({ kind: "incomplete" as const, toolCallId: callId, reason: "the tool call ended without arguments" })];
         }
+        if (kind === "absent") return [];
+        if (kind === "duplicate") return [frame(call), frame({ ...call, toolCallId: `${callId}-second` })];
+        if (kind === "replayed") return [frame(call), frame(call)];
+        return [frame(call)];
+      })();
+      const observation = observeEmissionCalls(frames);
+      const submitted = reduced(submitArchitectureJudgeResult(baseState, publicationResolver, panelRequestIdentity(fixture.judges[0]!), extractionRaw, { binding, observation, port: testVerdictEmissionPort }));
+      const event = submitted.recordedEvent!;
+      const slotAccepted = awaitingJudgeSlots(submitted.state).some((slot) => slot.status === "accepted");
+      switch (kind) {
+        case "absent": {
+          expect(event.type).toBe("architecture-judge-accepted");
+          if (event.type !== "architecture-judge-accepted") throw new Error("unreachable");
+          expect(event.source).toEqual({ source: "extraction" });
+          expect(slotAccepted).toBe(true);
+          break;
+        }
+        case "valid-call":
+        case "replayed": {
+          if (args.criterion !== fixture.authority.judgeCriteria[0]) {
+            // The payload carries a foreign criterion: the emission edge
+            // admitted it (shape-level string) and the authoritative parse
+            // refused the join — the source cannot override issuance.
+            expect(event.type).toBe("architecture-judge-rejected");
+            if (event.type !== "architecture-judge-rejected") throw new Error("unreachable");
+            expect(event.category).toBe("result-binding-mismatch");
+            expect(event.message).toContain("refuses its authoritative parse");
+            expect(slotAccepted).toBe(false);
+            break;
+          }
+          expect(event.type).toBe("architecture-judge-accepted");
+          if (event.type !== "architecture-judge-accepted") throw new Error("unreachable");
+          expect(event.source).toEqual({
+            source: "emission-tool",
+            toolCallId: callId,
+            producerKind: "judge-verdict",
+            emissionSchemaVersion: "v1",
+            schemaDigest: binding.schemaDigest,
+          });
+          expect(slotAccepted).toBe(true);
+          break;
+        }
+        case "refused-call": {
+          expect(event.type).toBe("architecture-judge-accepted");
+          if (event.type !== "architecture-judge-accepted") throw new Error("unreachable");
+          expect(event.source).toEqual({ source: "extraction", emissionRefusal: { code: expect.any(String), message: expect.any(String) } });
+          expect(slotAccepted).toBe(true);
+          break;
+        }
+        case "duplicate": {
+          expect(event.type).toBe("architecture-judge-rejected");
+          if (event.type !== "architecture-judge-rejected") throw new Error("unreachable");
+          expect(event.message).toContain("2 distinct emission tool calls");
+          expect(slotAccepted).toBe(false);
+          break;
+        }
+        case "wrong-request": {
+          expect(event.type).toBe("architecture-judge-rejected");
+          if (event.type !== "architecture-judge-rejected") throw new Error("unreachable");
+          expect(event.message).toContain("wrong-request");
+          expect(slotAccepted).toBe(false);
+          break;
+        }
+        case "unusable": {
+          // An incomplete frame is representable as itself (AD-8): a typed
+          // rejection with its reason — never absence, so never an
+          // extraction fallback over the usable final text, never accepted.
+          expect(event.type).toBe("architecture-judge-rejected");
+          if (event.type !== "architecture-judge-rejected") throw new Error("unreachable");
+          expect(event.category).toBe("malformed-result");
+          expect(event.message).toContain("unusable-observation");
+          expect(slotAccepted).toBe(false);
+          break;
+        }
+        default: {
+          const unhandled: never = kind;
+          throw new Error(`unhandled AD-9 row: ${String(unhandled)}`);
+        }
+      }
+    };
+    fc.assert(fc.property(
+      judgeArgumentsArb,
+      fc.string({ minLength: 2, maxLength: 12 }).filter((s) => /^[a-z][a-z0-9]+$/.test(s)),
+      (raw, callId) => {
+        for (const kind of FOLD_OBSERVATION_KINDS) assertRow(raw, kind, callId);
       },
-    );
-    fc.assert(property, { numRuns: 40 });
+    ), { numRuns: 40 });
   });
 });

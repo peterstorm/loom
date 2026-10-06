@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { compareStrings } from "./core/ordering";
+import type { RuntimeBaselineRestore } from "./core/runtime-baseline-restore";
 
 /**
  * Runtime identity published by the in-memory Pi extension and required by
@@ -65,6 +66,11 @@ function revisionFiles(packageRoot: string): readonly string[] {
   return files;
 }
 
+/** A runtime source's package-root-relative path with POSIX separators: the
+ *  path form the revision digest binds. */
+const posixRelative = (packageRoot: string, absolute: string): string =>
+  relative(packageRoot, absolute).split(sep).join("/");
+
 /** The runtime revision domain's paths relative to the package root, in the
  *  same canonical order `captureLoomRuntimeIdentity` enumerates. Consumed by
  *  the implementation settlement's baseline restore: an attempt's authorized
@@ -74,22 +80,22 @@ function revisionFiles(packageRoot: string): readonly string[] {
  *  not only declared artifacts. */
 export function runtimeDomainPaths(rawPackageRoot: string): readonly string[] {
   const packageRoot = realpathSync(resolve(rawPackageRoot));
-  return revisionFiles(packageRoot).map((absolute) =>
-    relative(packageRoot, absolute).split(sep).join("/"));
+  return revisionFiles(packageRoot).map((absolute) => posixRelative(packageRoot, absolute));
 }
 
 /** Capture the mutable checkout bytes that one process is about to load/use. */
 export function captureLoomRuntimeIdentity(rawPackageRoot: string): LoomRuntimeIdentity {
   const packageRoot = realpathSync(resolve(rawPackageRoot));
   const entries = revisionFiles(packageRoot).map((absolute): RuntimeRevisionEntry => Object.freeze({
-    path: relative(packageRoot, absolute).split(sep).join("/"),
+    path: posixRelative(packageRoot, absolute),
     bytes: readFileSync(absolute),
   }));
   return Object.freeze({ packageRoot, revision: runtimeRevisionFromEntries(entries) });
 }
 
-/**
- * Baseline restoration for the implementation-settlement write boundary. Each
+/*
+ * Baseline restoration for the implementation-settlement write boundary
+ * (`RuntimeBaselineRestore`, declared once in `core/runtime-baseline-restore`). Each
  * mapped path hashes the exact bytes it had at its attempt baseline (a Git
  * revision), a `null` mapping excludes the path (it did not exist at the
  * baseline — a file the attempt created), and unmapped paths hash their live
@@ -104,7 +110,6 @@ export function captureLoomRuntimeIdentity(rawPackageRoot: string): LoomRuntimeI
  * their attempt-start bytes keeps the guard's actual purpose intact: any drift
  * OUTSIDE the attempt's declared artifacts still refuses the write.
  */
-export type RuntimeBaselineRestore = ReadonlyMap<string, string | null>;
 
 /** A start_sha is a full Git object name; anything else is refused so a
  *  revision can never smuggle shell-relevant characters into `git show`. */
@@ -129,18 +134,17 @@ export function captureLoomRuntimeIdentityRestoring(
   restore: RuntimeBaselineRestore,
 ): LoomRuntimeIdentity {
   const packageRoot = realpathSync(resolve(rawPackageRoot));
-  const entries = revisionFiles(packageRoot)
-    .map((absolute): { path: string; absolute: string } => ({
-      path: relative(packageRoot, absolute).split(sep).join("/"),
-      absolute,
-    }))
-    .filter(({ path }) => restore.get(path) !== null)
-    .map(({ path, absolute }): RuntimeRevisionEntry => Object.freeze({
+  const entries = revisionFiles(packageRoot).flatMap((absolute): RuntimeRevisionEntry[] => {
+    const path = posixRelative(packageRoot, absolute);
+    const restoredRevision = restore.get(path);
+    if (restoredRevision === null) return [];
+    return [Object.freeze({
       path,
-      bytes: restore.get(path) !== undefined
-        ? baselineBytesAtRevision(packageRoot, restore.get(path) as string, path)
-        : readFileSync(absolute),
-    }));
+      bytes: restoredRevision === undefined
+        ? readFileSync(absolute)
+        : baselineBytesAtRevision(packageRoot, restoredRevision, path),
+    })];
+  });
   return Object.freeze({ packageRoot, revision: runtimeRevisionFromEntries(entries) });
 }
 

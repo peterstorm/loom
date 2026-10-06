@@ -1,4 +1,4 @@
-import { rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -61,7 +61,7 @@ describe("deliveredSpecCheckText", () => {
 
   it("documents why the legacy read cannot reconcile a handback report", () => {
     const path = transcript(handbackTurn(REPORT));
-    const legacy = parseSpecCheckOutput(parseTranscript(require("node:fs").readFileSync(path, "utf8")));
+    const legacy = parseSpecCheckOutput(parseTranscript(readFileSync(path, "utf8")));
     expect(legacy.high).toEqual([]);
   });
 });

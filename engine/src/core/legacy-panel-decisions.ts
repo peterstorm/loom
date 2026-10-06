@@ -161,6 +161,21 @@ export type PanelAttemptVerdictSource =
 
 const BASELINE_VERDICT_SOURCE: PanelAttemptVerdictSource = Object.freeze({ kind: "baseline" as const });
 
+/** The bytes a selection accepts: the admitted emission arguments when the
+ *  selection is emission, otherwise the attempt's own raw bytes. */
+const selectedVerdictBytes = (selection: PanelVerdictSourceSelection | null, raw: string): string =>
+  selection !== null && selection.kind === "emission-tool-arguments" ? selection.rawJson : raw;
+
+/** The selection a resolved source carries (null for the extraction
+ *  baseline) beside the bytes its verdict parse reads. */
+const verdictParseTarget = (
+  source: PanelAttemptVerdictSource,
+  raw: string,
+): Readonly<{ selection: PanelVerdictSourceSelection | null; target: string }> => {
+  const selection = source.kind === "selected" ? source.selection : null;
+  return { selection, target: selectedVerdictBytes(selection, raw) };
+};
+
 /** One panel attempt as its scan holds it: the reserved request, the attempt's raw bytes, and any live emission input. */
 export type PanelAttempt = Readonly<{
   request: AgentRequestAuthority;
@@ -248,7 +263,7 @@ function replayPanelAttemptDurableRecord(attempt: PanelAttempt, record: PanelVer
   if (!replayed.ok) {
     return { ok: false, error: `durable panel verdict source for request ${attempt.request.requestId} could not be replayed: ${replayed.error}` };
   }
-  const payload = replayed.value.kind === "emission-tool-arguments" ? replayed.value.rawJson : attempt.raw;
+  const payload = selectedVerdictBytes(replayed.value, attempt.raw);
   const identity = panelAttemptPayloadIdentity(payload);
   if (identity === null || identity.digest !== record.payloadDigest || identity.byteLength !== record.payloadByteLength) {
     return { ok: false, error: `the durable panel verdict source for request ${attempt.request.requestId} does not describe the accepted attempt bytes` };
@@ -326,8 +341,7 @@ export function panelSubmissionProblem(
     if (lens === undefined) return `request ${logicalRequestId} is not a canonical verifier slot`;
     const selectionProblem = panelVerdictSelectionProblem(source);
     if (selectionProblem !== null) return selectionProblem;
-    const selection = source.kind === "selected" ? source.selection : null;
-    const target = selection !== null && selection.kind === "emission-tool-arguments" ? selection.rawJson : raw;
+    const { selection, target } = verdictParseTarget(source, raw);
     const parsed = parseRefutationVerdict(target, lens, input.criticalFindingIds);
     return parsed.ok ? null : panelVerdictParseProblem(selection, parsed.errors, "refutation verdict");
   }
@@ -356,8 +370,7 @@ export function panelSubmissionProblem(
     if (branded === null) return `request ${logicalRequestId} carries judge criterion ${JSON.stringify(criterion)}, which is outside the validated interview vocabulary`;
     const selectionProblem = panelVerdictSelectionProblem(source);
     if (selectionProblem !== null) return selectionProblem;
-    const selection = source.kind === "selected" ? source.selection : null;
-    const target = selection !== null && selection.kind === "emission-tool-arguments" ? selection.rawJson : raw;
+    const { selection, target } = verdictParseTarget(source, raw);
     const verdict = parseJudgeVerdict(target, branded, input.candidateLenses.map(candidateFilename));
     return verdict.ok ? null : panelVerdictParseProblem(selection, verdict.errors, "judge verdict");
   }
@@ -414,7 +427,7 @@ export function settlePanelAttempt(
     return { ok: false, error: "panel verdict invariant: a live selection exists without an issued emission binding" };
   }
   const source = panelVerdictSourceProvenance(binding, selection);
-  const acceptedRawJson = selection.kind === "emission-tool-arguments" ? selection.rawJson : submission.raw;
+  const acceptedRawJson = selectedVerdictBytes(selection, submission.raw);
   const identity = panelAttemptPayloadIdentity(acceptedRawJson);
   if (identity === null) {
     return { ok: false, error: `the accepted panel verdict bytes for request ${submission.request.requestId} have no bounded digest identity` };
@@ -487,31 +500,36 @@ export function executeDeterministicPanelOperation(
     if (operationId !== "refutation-tally") {
       return { ok: false, message: `unsupported refutation operation ${operationId}` };
     }
-    const verdicts: VerdictEnvelope<RefutationVerdict>[] = [];
-    for (let index = 0; index < input.lenses.length; index += 1) {
+    const verdicts: Readonly<{ lens: (typeof input.lenses)[number]; verdict: VerdictEnvelope<RefutationVerdict> }>[] = [];
+    for (const [index, lens] of input.lenses.entries()) {
       const target = evidence.parseTarget(`refutation:verifier:${index + 1}`);
       if (!target.ok) return target;
-      const parsed = parseRefutationVerdict(target.value, input.lenses[index]!, input.criticalFindingIds);
+      const parsed = parseRefutationVerdict(target.value, lens, input.criticalFindingIds);
       if (!parsed.ok) return { ok: false, message: parsed.errors.join("; ") };
-      verdicts.push(parsed.value);
+      verdicts.push(Object.freeze({ lens, verdict: parsed.value }));
     }
     // The threshold formula and the k-of-n rule are DOMAIN rules and live in
     // the core (`defaultRefutationThreshold` / `countRefutationVotes`), which
     // the persistent panel path already delegates to.
     const threshold = defaultRefutationThreshold(input.lenses.length);
-    const outcomes = input.criticalFindingIds.map((findingId) => {
-      const judgements = verdicts.map((verdict, index) => Object.freeze({
-        lens: input.lenses[index]!,
-        entry: verdict.entries.find((entry) => entry.findingId === findingId)!,
-      }));
+    // The verdict parser proves every finding is covered; a verdict that
+    // still lacks one refuses here as a typed failure, never an undefined vote.
+    const outcomes = [];
+    for (const findingId of input.criticalFindingIds) {
+      const judgements = [];
+      for (const { lens, verdict } of verdicts) {
+        const entry = verdict.entries.find((candidate) => candidate.findingId === findingId);
+        if (entry === undefined) return { ok: false, message: `the ${lens} refutation verdict carries no entry for finding ${findingId}` };
+        judgements.push(Object.freeze({ lens, entry }));
+      }
       const tallied = countRefutationVotes(judgements, threshold);
-      return Object.freeze({
+      outcomes.push(Object.freeze({
         finding_id: findingId,
         survives: tallied.survives,
         refuted_by: Object.freeze(tallied.refutations.map(({ lens }) => lens)),
         votes: Object.freeze(judgements.map(({ lens, entry }) => Object.freeze({ lens, vote: entry }))),
-      });
-    });
+      }));
+    }
     const result = Object.freeze({
       schemaVersion: 1,
       kind: "refutation-panel-result",
@@ -566,10 +584,10 @@ export function executeDeterministicPanelOperation(
       criteria.push(branded);
     }
     const verdicts: JudgeVerdict[] = [];
-    for (let index = 0; index < criteria.length; index += 1) {
+    for (const [index, criterion] of criteria.entries()) {
       const target = evidence.parseTarget(`architecture:judge:${index + 1}`);
       if (!target.ok) return target;
-      const parsed = parseJudgeVerdict(target.value, criteria[index]!, candidates);
+      const parsed = parseJudgeVerdict(target.value, criterion, candidates);
       if (!parsed.ok) return { ok: false, message: parsed.errors.join("; ") };
       verdicts.push(parsed.value);
     }

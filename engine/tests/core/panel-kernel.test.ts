@@ -13,7 +13,6 @@ import {
   type VerdictEnvelope,
 } from "../../src/core/panel-kernel";
 import {
-  architectureCriterion,
   candidateFilename,
   parseJudgeVerdict,
   serializeJudgeVerdict,
@@ -21,8 +20,9 @@ import {
 import {
   parseRefutationVerdict,
   serializeRefutationVerdict,
-  type WaveFindingId,
 } from "../../src/core/review-panel";
+import { mintedCriterion } from "../fixtures/architecture-criterion";
+import { waveFindingIdFixture } from "../fixtures/wave-finding-id";
 
 /**
  * The kernel is the code BOTH panels depend on, and it was reachable only
@@ -254,11 +254,9 @@ describe("parseCriteriaSet — the cross-verdict coverage rule", () => {
 // ---------------------------------------------------------------------------
 
 describe("the panel parsers refuse each other's payloads (cross-parser witness)", () => {
-  const waveId = (raw: string): WaveFindingId => raw as WaveFindingId;
   const JUDGE_IDS = [candidateFilename("simplicity-first"), candidateFilename("type-driven-fp")];
-  const FINDING_IDS = [waveId("T1:code-reviewer-1"), waveId("T1:silent-failure-hunter-1")];
-  const criterion = architectureCriterion("simplicity");
-  if (criterion === null) throw new Error("fixture criterion outside the validated interview vocabulary");
+  const FINDING_IDS = [waveFindingIdFixture("T1:code-reviewer-1"), waveFindingIdFixture("T1:silent-failure-hunter-1")];
+  const criterion = mintedCriterion("simplicity");
 
   const judgeRankings = [
     { candidate: JUDGE_IDS[0], score: 9, fatal_flaw: null, strongest_idea: "one pure boundary" },

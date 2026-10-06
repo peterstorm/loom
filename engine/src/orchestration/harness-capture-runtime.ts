@@ -98,6 +98,12 @@ export type CaptureObservation =
       frames: readonly EmissionCallFrame[];
       /** The unchanged final-payload candidates the extraction arms fold. */
       candidates: readonly FinalPayloadCandidate[];
+      /** Why the adapter's transcript walk cannot prove it saw every call (an
+       *  unclassifiable line, an orphan tool result), or `null` for a complete
+       *  walk. Kept apart from `frames` because it is evidence about the
+       *  transcript, not an observed call: emission authority folds it as one
+       *  more incomplete frame, extraction-only authority refuses naming it. */
+      walkIncompleteness: string | null;
     }>
   | Readonly<{ kind: "unavailable"; reason: string; message: string }>
   | TerminalCaptureRefusal;
@@ -105,8 +111,14 @@ export type CaptureObservation =
 export const captureEmissionObservation = (
   frames: readonly EmissionCallFrame[],
   candidates: readonly FinalPayloadCandidate[],
+  walkIncompleteness: string | null = null,
 ): CaptureObservation =>
-  Object.freeze({ kind: "emission-observed" as const, frames: Object.freeze([...frames]), candidates: Object.freeze([...candidates]) });
+  Object.freeze({
+    kind: "emission-observed" as const,
+    frames: Object.freeze([...frames]),
+    candidates: Object.freeze([...candidates]),
+    walkIncompleteness,
+  });
 
 export type CaptureOutcome =
   | Readonly<{ kind: "not-an-orchestration-run" }>
@@ -801,6 +813,9 @@ const describeRefusalPair = (
  * unchanged extraction semantics when NO emission call was observed, and
  * refuse an observed emission call outright: extraction-only authority cannot
  * be upgraded by a call to a tool the issued request never advertised (AD-7).
+ * An incomplete transcript walk refuses there too (it cannot prove the call
+ * absent), under the same reason but with a message that names the walk
+ * instead of counting calls that were never observed.
  */
 async function captureSelectedEmission(
   handle: RunDirHandle,
@@ -814,25 +829,29 @@ async function captureSelectedEmission(
 ): Promise<CaptureOutcome> {
   const authority = resolveReviewerCaptureEmissionAuthority(handle, request, harness);
   if (authority.kind === "unavailable") return retriableFailure("emission-authority", authority.message);
+  const walk = observation.walkIncompleteness;
   if (authority.kind !== "emission") {
-    if (observation.frames.length > 0) {
+    if (observation.frames.length > 0 || walk !== null) {
       const authorityClass = authority.kind === "extraction-only" ? "extraction-only" : "non-producer";
       const detail = authority.kind === "extraction-only"
         ? authority.reason
         : `request ${request.requestId} carries no issued producer contract`;
-      return reject("unexpected-emission-call",
-        `capture observed ${observation.frames.length} emission tool call(s) under ${authorityClass} authority (${detail}); ` +
-          "extraction-only authority cannot be upgraded by an observed emission call");
+      // A walk-only refusal names the transcript, never a call it did not see.
+      const cause = observation.frames.length > 0
+        ? `capture observed ${observation.frames.length} emission tool call(s) under ${authorityClass} authority (${detail}); ` +
+          "extraction-only authority cannot be upgraded by an observed emission call"
+        : `capture cannot rule out a hidden emission tool call under ${authorityClass} authority (${detail}); ` +
+          "extraction-only authority cannot be upgraded by an emission call the transcript walk may have lost";
+      return reject("unexpected-emission-call", walk === null ? cause : `${cause}; ${walk}`);
     }
     const payload = parseFinalPayload(observation.candidates);
     if (!payload.ok) return reject(payload.error.reason, payload.error.message);
     return bindAndPersistCapture(handle, request, identity, issued, payload.value, persistence, UNSELECTED_SOURCE);
   }
-  const selection = selectCanonicalPayload(
-    authority.binding,
-    observeEmissionCalls(observation.frames),
-    observation.candidates,
-  );
+  const frames: readonly EmissionCallFrame[] = walk === null
+    ? observation.frames
+    : [...observation.frames, Object.freeze({ kind: "incomplete" as const, toolCallId: null, reason: walk })];
+  const selection = selectCanonicalPayload(authority.binding, observeEmissionCalls(frames), observation.candidates);
   switch (selection.kind) {
     case "emission-tool-arguments":
       return bindAndPersistCapture(handle, request, identity, issued, selection.payload, persistence, selectedSource({

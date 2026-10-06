@@ -154,26 +154,16 @@ function candidate(
 type StartFields = Readonly<{ sourceRunsRoot: string; sourceRun: string; supportPaths: readonly string[] }>;
 const DEFAULT_START: StartFields = { sourceRunsRoot: "/runs", sourceRun: SOURCE_RUN_ID, supportPaths: ["src/support.ts"] };
 
-function notRequiredRequest(
-  start: StartFields = DEFAULT_START,
-  overrides: Partial<CreateRemediationRegistrationInput> = {},
+/** The request skeleton both verification arms share; only the authority differs. */
+function registrationRequest(
+  { accounting, plan, manifest }: Readonly<{
+    accounting: PreparedDefectFamilyAccounting;
+    plan: CreateRemediationRegistrationInput["verification"];
+    manifest: CreateRemediationRegistrationInput["manifest"];
+  }>,
+  start: StartFields,
+  overrides: Partial<CreateRemediationRegistrationInput>,
 ): CreateRemediationRegistrationInput {
-  const { accounting, plan } = notRequired();
-  return {
-    remediationRunId: REMEDIATION_RUN_ID,
-    input: { ...start, defectFamily: accounting.declaration },
-    verification: plan,
-    manifest: null,
-    candidateBaseline: candidate(),
-    ...overrides,
-  };
-}
-
-function selectedRequest(
-  start: StartFields = DEFAULT_START,
-  overrides: Partial<CreateRemediationRegistrationInput> = {},
-): CreateRemediationRegistrationInput {
-  const { accounting, plan, manifest } = selected();
   return {
     remediationRunId: REMEDIATION_RUN_ID,
     input: { ...start, defectFamily: accounting.declaration },
@@ -182,6 +172,14 @@ function selectedRequest(
     candidateBaseline: candidate(),
     ...overrides,
   };
+}
+
+function notRequiredRequest(start: StartFields = DEFAULT_START, overrides: Partial<CreateRemediationRegistrationInput> = {}) {
+  return registrationRequest({ ...notRequired(), manifest: null }, start, overrides);
+}
+
+function selectedRequest(start: StartFields = DEFAULT_START, overrides: Partial<CreateRemediationRegistrationInput> = {}) {
+  return registrationRequest(selected(), start, overrides);
 }
 
 const registered = (request: CreateRemediationRegistrationInput): RegisteredRemediationProgramV2 =>

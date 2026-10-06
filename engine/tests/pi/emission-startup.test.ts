@@ -37,8 +37,8 @@
  * `node_modules/.bin/pi`, then PATH — and the runtime identity is carried in
  * the suite title below.
  *
- * The wave-2 protocol suite contains 22 scenarios: matching opens on the
- * judge-v1 and reviewer-v2 cells; held ordering; the zero-request negative
+ * The wave-2 protocol suite covers: matching opens on the judge-v1 and
+ * reviewer-v2 cells; held ordering; the zero-request negative
  * controls (including an active, digest-matching tool under a DRIFTED name
  * and a readiness bound to a foreign context digest — both discriminating
  * only through the real protocol); the bounded-observation law (a readiness
@@ -53,7 +53,9 @@
  * ZERO counted model requests); cancellation; and concurrent isolation. The
  * T5 production suite at the end repeats the protocol against the real Loom
  * extension, including provisioning refusals and the hold's
- * wedge-to-readiness release arc.
+ * wedge-to-readiness release arc; the parent launch-bridge and
+ * installed-launcher suites between them drive the barrier from the parent
+ * side.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -97,6 +99,7 @@ import {
   type EmissionStartupRefusalCode,
   type LauncherExpectation,
   type ReadinessObservation,
+  type ReadinessProbeFacts,
   type ReadinessReport,
   type ReadinessStageObservation,
   type RouteObservation,
@@ -677,7 +680,6 @@ type ScenarioSpec = Readonly<{
    *  (and before the bounded readiness window closes) — the
    *  infrastructure-failure boundary control. */
   killChildAfterReadinessInvocationMs?: number;
-  waitForRequest?: boolean;
   waitForHold?: boolean;
   /** Hold this run's own release open until the promise settles — the AS-020
    *  control keeps the matching child mid-flight across a peer's release. */
@@ -769,21 +771,212 @@ const settleWait = (wait: Promise<RpcEvent>): Promise<SettledWait> =>
     (error): SettledWait => canonicalRecord({ kind: "failed" as const, error }),
   );
 
-const readinessPredicate = (event: RpcEvent): boolean => {
+/** The custom-entry type an `entry_appended` event carries, or undefined. */
+const customEntryTypeOf = (event: RpcEvent): unknown => {
+  if (event.type !== "entry_appended") return undefined;
   const entry = recordOf(event["entry"]);
-  return event.type === "entry_appended" && entry !== null && entry["customType"] === READINESS_ENTRY_TYPE;
+  return entry === null ? undefined : entry["customType"];
 };
 
-const holdResolvedPredicate = (event: RpcEvent): boolean => {
-  const entry = recordOf(event["entry"]);
-  if (event.type !== "entry_appended" || entry === null || entry["customType"] !== HOLD_ENTRY_TYPE) return false;
-  const data = recordOf(entry["data"]);
-  return data !== null && data["phase"] === "resolved";
-};
+/** Every collected `entry_appended` event of one custom entry type. */
+const customEntriesOf = (bus: RpcBus, customType: string): readonly RpcEvent[] =>
+  bus.snapshot().filter((event) => customEntryTypeOf(event) === customType);
+
+const readinessPredicate = (event: RpcEvent): boolean => customEntryTypeOf(event) === READINESS_ENTRY_TYPE;
 
 const entryDataOf = (event: RpcEvent): unknown => {
   const entry = recordOf(event["entry"]);
   return entry === null ? undefined : entry["data"];
+};
+
+const holdResolvedPredicate = (event: RpcEvent): boolean => {
+  if (customEntryTypeOf(event) !== HOLD_ENTRY_TYPE) return false;
+  const data = recordOf(entryDataOf(event));
+  return data !== null && data["phase"] === "resolved";
+};
+
+// ---------------------------------------------------------------------------
+// The launcher-side barrier shell every real-child runner drives
+// ---------------------------------------------------------------------------
+
+type PiRpcChildOptions = Readonly<{
+  /** How diagnostics name the child, e.g. "pi child" or "production child". */
+  role: string;
+  /** The request-id prefix, unique per run. */
+  idPrefix: string;
+  args: readonly string[];
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  /** The response budget of every request after the first get_state. */
+  responseTimeoutMs: number;
+}>;
+
+type PiRpcChild = Readonly<{
+  child: ChildProcess;
+  bus: RpcBus;
+  /** Frame one request and wait, bounded, for its correlated response. */
+  rpcRequest: (message: Record<string, unknown>, label: string) => Promise<RpcEvent>;
+  /** True once the child failed to spawn or exited. */
+  gone: () => boolean;
+  /** After a failed bounded wait: throw as INFRASTRUCTURE when the child is
+   *  gone (never a minted refusal); a live child returns. */
+  assertAliveAfterWait: (error: unknown) => void;
+  stderr: () => string;
+  /** SIGKILL the child once — this run's own reservation; later calls are inert. */
+  release: () => void;
+  releasedAt: () => number | null;
+  /** Release, then wait (capped at 1.5s) for the child's exit. */
+  dispose: () => Promise<void>;
+}>;
+
+/**
+ * Spawn ONE real headless `pi --mode rpc` child and wire the launcher's view
+ * of it: the strict JSONL bus over stdout, stderr capture, and the request
+ * framing. The first `get_state` (the channel check) gets
+ * CHANNEL_STARTUP_TIMEOUT_MS — a cold pi start under parallel suite load —
+ * and every later request the runner's own budget. A spawn error or exit
+ * fails every pending wait with its reason, so no bounded wait outlives its
+ * child. The three runners keep only their scenario-specific protocol steps.
+ */
+const openPiRpcChild = (options: PiRpcChildOptions): PiRpcChild => {
+  const child = spawn(piBinary.bin, [...options.args], { cwd: options.cwd, env: options.env, stdio: ["pipe", "pipe", "pipe"] });
+  const exited = new Promise<void>((resolve) => {
+    child.on("exit", () => resolve());
+  });
+  if (child.stdout === null) {
+    child.kill("SIGKILL");
+    throw new Error(`the ${options.role} has no stdout pipe`);
+  }
+  const bus = makeRpcBus(child.stdout);
+  let spawnError: Error | null = null;
+  let childExited = false;
+  let releasedAt: number | null = null;
+  child.on("error", (error: Error) => {
+    spawnError = error;
+    bus.failAll(`the ${options.role} process failed: ${error.message}`);
+  });
+  child.on("exit", (code: number | null, signal: string | null) => {
+    childExited = true;
+    bus.failAll(`the ${options.role} exited (code ${code === null ? "none" : code}, signal ${signal === null ? "none" : signal}) while the launcher was observing it`);
+  });
+  const stderrChunks: string[] = [];
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderrChunks.push(chunk.toString());
+  });
+  let rpcCallCounter = 0;
+  const rpcRequest = async (message: Record<string, unknown>, label: string): Promise<RpcEvent> => {
+    const stdin = child.stdin;
+    if (stdin === null || !stdin.writable) {
+      const cause: Error | null = spawnError;
+      throw new Error(`the ${options.role}'s stdin is not writable for ${label}${cause === null ? "" : ` (spawn error: ${cause.message})`}`);
+    }
+    const id = `${options.idPrefix}-${++rpcCallCounter}`;
+    stdin.write(`${JSON.stringify({ ...message, id })}\n`);
+    return bus.waitFor((event) => event.type === "response" && event["id"] === id,
+      message["type"] === "get_state" && rpcCallCounter === 1 ? CHANNEL_STARTUP_TIMEOUT_MS : options.responseTimeoutMs, label);
+  };
+  const gone = (): boolean => spawnError !== null || childExited;
+  const release = (): void => {
+    if (releasedAt !== null) return;
+    releasedAt = Date.now();
+    child.kill("SIGKILL");
+  };
+  return Object.freeze({
+    child,
+    bus,
+    rpcRequest,
+    gone,
+    assertAliveAfterWait: (error: unknown): void => {
+      if (gone()) throw new Error(`the ${options.role} died during a bounded wait: ${boundedDiagnostic(error)}`);
+    },
+    stderr: (): string => boundDiagnosticMessage(stderrChunks.join("").trim()),
+    release,
+    releasedAt: (): number | null => releasedAt,
+    dispose: async (): Promise<void> => {
+      release();
+      await Promise.race([exited, sleep(1500)]);
+    },
+  });
+};
+
+/** 1. Channel check — "child up, readiness missing" must be distinguishable
+ *  from "child never came up" (infrastructure). */
+const observeChannel = async (
+  rpc: PiRpcChild,
+): Promise<Readonly<{ channelAlive: boolean; channelDiagnostic: string | null }>> => {
+  try {
+    const state = await rpc.rpcRequest({ type: "get_state" }, "get_state");
+    return state["success"] === true
+      ? { channelAlive: true, channelDiagnostic: null }
+      : { channelAlive: false, channelDiagnostic: `get_state answered success=false: ${boundedEvent(state)}` };
+  } catch (error) {
+    return { channelAlive: false, channelDiagnostic: boundedDiagnostic(error) };
+  }
+};
+
+/** 2. Discovery — the command inventory get_commands reports. The readiness
+ *  command must be REGISTERED before it is invoked: an unknown /command would
+ *  fall through to a real model request. */
+const discoverCommands = async (rpc: PiRpcChild): Promise<readonly Record<string, unknown>[]> => {
+  const response = await rpc.rpcRequest({ type: "get_commands" }, "get_commands");
+  const data = recordOf(response["data"]);
+  const raw = data === null ? undefined : data["commands"];
+  return Array.isArray(raw)
+    ? raw.map(recordOf).filter((record): record is Record<string, unknown> => record !== null)
+    : [];
+};
+
+const listsExtensionCommand = (commands: readonly Record<string, unknown>[], name: string): boolean =>
+  commands.some((command) => command["name"] === name && command["source"] === "extension");
+
+/** 3. One settled bounded readiness wait as the observation the gate reads:
+ *  an observed entry carries its payload and arrival time; a failed wait on a
+ *  dead child throws as infrastructure, and on a live child is `unobserved`. */
+const settledReadiness = (
+  outcome: SettledWait,
+  rpc: PiRpcChild,
+  unobserved: () => ReadinessObservation,
+): Readonly<{ readiness: ReadinessObservation; observedAt: number | null }> => {
+  if (outcome.kind === "observed") {
+    return {
+      readiness: canonicalRecord({ kind: "observed" as const, payload: entryDataOf(outcome.event) }),
+      observedAt: Date.now(),
+    };
+  }
+  rpc.assertAliveAfterWait(outcome.error);
+  return { readiness: unobserved(), observedAt: null };
+};
+
+const readinessAbsentWithinWindow = (): ReadinessObservation =>
+  canonicalRecord({ kind: "absent" as const, reason: `no readiness entry arrived within ${READY_TIMEOUT_MS}ms` });
+
+/** 4. The pure gate decision over the observed protocol facts, then — only on
+ *  a ready child — the fail-closed route binding, then the full decision the
+ *  launcher acts on. */
+const decideStartupThroughRouteBind = async (
+  rpc: PiRpcChild,
+  expectation: LauncherExpectation,
+  facts: ReadinessProbeFacts,
+): Promise<EmissionStartupDecision> => {
+  const stageObservation = parseReadinessStageObservation(facts);
+  const routeObservation: RouteObservation = decideReadinessGate(expectation, stageObservation).kind === "ready"
+    ? await bindRouteWithSettle(rpc.rpcRequest, expectation.route)
+    : canonicalRecord({ kind: "unbound" as const });
+  return decideEmissionStartup(expectation, startupGateObservation(stageObservation, routeObservation));
+};
+
+const issuedPromptText = (expectation: LauncherExpectation): string =>
+  `Emit the issued ${expectation.binding.kind.kind} payload via ${expectation.binding.toolName}.`;
+
+/** 5. Prompt delivery — only ever on the open arm. */
+const deliverIssuedPrompt = async (rpc: PiRpcChild, expectation: LauncherExpectation): Promise<void> => {
+  await rpc.rpcRequest({ type: "set_auto_retry", enabled: false }, "set_auto_retry");
+  await rpc.rpcRequest({ type: "prompt", message: issuedPromptText(expectation) }, "prompt delivery");
+};
+
+const awaitFirstRequestOrDeadline = async (server: CountingServer): Promise<void> => {
+  const requestDeadline = Date.now() + FIRST_REQUEST_TIMEOUT_MS;
+  while (server.hits.length === 0 && Date.now() < requestDeadline) await sleep(50);
 };
 
 /**
@@ -793,24 +986,15 @@ const entryDataOf = (event: RpcEvent): unknown => {
  * discipline: only the refusing run's own reservation is released).
  */
 const startStartupGate = (spec: ScenarioSpec): StartedGate => {
-  const childRef: { current: ChildProcess | null } = { current: null };
-  const releasedRef: { current: boolean } = { current: false };
-  const releasedAtRef: { current: number | null } = { current: null };
+  const rpcRef: { current: PiRpcChild | null } = { current: null };
   /** Live view of the run's own counting substitute — read by the rejection
    *  path below so an infrastructure failure still carries its COUNTED
    *  zero-request evidence. */
   const countingHitsRef: { current: readonly CountedRequest[] } = { current: [] };
   const childReady = deferred<ChildProcess | null>();
   const decisionMade = deferred<void>();
-  const releaseChild = (): void => {
-    const child = childRef.current;
-    if (child === null || releasedRef.current) return;
-    releasedRef.current = true;
-    releasedAtRef.current = Date.now();
-    child.kill("SIGKILL");
-  };
+  const releaseChild = (): void => rpcRef.current?.release();
   const result = (async (): Promise<StartupRun> => {
-    let exitSettled: Promise<void> | null = null;
     const server = await startCountingServer();
     countingHitsRef.current = server.hits;
     const tmp = canonicalTempDir(`loom-emission-startup-${spec.label}-`);
@@ -833,85 +1017,28 @@ const startStartupGate = (spec: ScenarioSpec): StartedGate => {
       if (spec.spawnChildExtension !== false) args.push("-e", extPath);
       const allowlist = spec.allowlist ?? [childCell.toolName];
       if (allowlist.length > 0) args.push("--tools", allowlist.join(","));
-      const child = spawn(piBinary.bin, args, {
+      const rpc = openPiRpcChild({
+        role: "pi child",
+        idPrefix: `t4-${spec.label}`,
+        args,
         cwd: tmp,
         env: { ...childEnvFor(server, spec, childCell, childBinding), ...await isolatedPiEnv(tmp) },
-        stdio: ["pipe", "pipe", "pipe"],
+        responseTimeoutMs: STATE_TIMEOUT_MS,
       });
-      childRef.current = child;
-      childReady.resolve(child);
-      exitSettled = new Promise<void>((resolve) => {
-        child.on("exit", () => resolve());
-      });
-      if (child.stdout === null) throw new Error("the pi child has no stdout pipe");
-      const bus = makeRpcBus(child.stdout);
-      let spawnError: Error | null = null;
-      let childExited = false;
-      child.on("error", (error: Error) => {
-        spawnError = error;
-        bus.failAll(`the pi child process failed: ${error.message}`);
-      });
-      child.on("exit", (code: number | null, signal: string | null) => {
-        childExited = true;
-        bus.failAll(`the pi child exited (code ${code === null ? "none" : code}, signal ${signal === null ? "none" : signal}) while the launcher was observing it`);
-      });
-      const stderrChunks: string[] = [];
-      child.stderr?.on("data", (chunk: Buffer) => {
-        stderrChunks.push(chunk.toString());
-      });
+      rpcRef.current = rpc;
+      childReady.resolve(rpc.child);
 
-      let rpcCallCounter = 0;
-      const rpcRequest = async (message: Record<string, unknown>, label: string): Promise<RpcEvent> => {
-        const stdin = child.stdin;
-        if (stdin === null || !stdin.writable) {
-          throw new Error(`the pi child's stdin is not writable for ${label}${spawnError === null ? "" : ` (spawn error: ${spawnError.message})`}`);
-        }
-        const id = `t4-${spec.label}-${++rpcCallCounter}`;
-        stdin.write(`${JSON.stringify({ ...message, id })}\n`);
-        return bus.waitFor((event) => event.type === "response" && event["id"] === id,
-          label === "get_state" && rpcCallCounter === 1 ? CHANNEL_STARTUP_TIMEOUT_MS : STATE_TIMEOUT_MS, label);
-      };
-      const assertChildAliveDuringWait = (error: unknown): void => {
-        if (spawnError !== null || childExited) {
-          throw new Error(`the launcher's child died during a bounded wait: ${boundedDiagnostic(error)}`);
-        }
-      };
-
-      // 1. Channel check — "child up, readiness missing" must be
-      //    distinguishable from "child never came up" (infrastructure).
-      let channelAlive = false;
-      let channelDiagnostic: string | null = "the RPC channel never answered get_state";
-      try {
-        const state = await rpcRequest({ type: "get_state" }, "get_state");
-        if (state["success"] === true) {
-          channelAlive = true;
-          channelDiagnostic = null;
-        } else {
-          channelDiagnostic = `get_state answered success=false: ${boundedEvent(state)}`;
-        }
-      } catch (error) {
-        channelDiagnostic = boundedDiagnostic(error);
-      }
-
-      // 2. Discovery — the readiness command must be REGISTERED before it is
-      //    invoked; an unknown /command would trigger a real model request.
-      let commandListed = false;
+      const channel = await observeChannel(rpc);
       const commandsSeen: string[] = [];
-      if (channelAlive) {
-        const commandsResponse = await rpcRequest({ type: "get_commands" }, "get_commands");
-        const data = recordOf(commandsResponse["data"]);
-        const rawCommands = data === null ? undefined : data["commands"];
-        const commands: readonly unknown[] = Array.isArray(rawCommands) ? rawCommands : [];
-        for (const raw of commands) {
-          const record = recordOf(raw);
-          if (record !== null && typeof record["name"] === "string" && typeof record["source"] === "string") {
-            commandsSeen.push(`${record["name"]} (${record["source"]})`);
+      let commandListed = false;
+      if (channel.channelAlive) {
+        const commands = await discoverCommands(rpc);
+        for (const command of commands) {
+          if (typeof command["name"] === "string" && typeof command["source"] === "string") {
+            commandsSeen.push(`${command["name"]} (${command["source"]})`);
           }
         }
-        commandListed = commands.some((raw) => {
-          const record = recordOf(raw);
-          return record !== null && record["name"] === expectation.readinessCommand && record["source"] === "extension";
-        });
+        commandListed = listsExtensionCommand(commands, expectation.readinessCommand);
       }
 
       // 3. Readiness — invoke the verified command (no model request) and
@@ -924,7 +1051,7 @@ const startStartupGate = (spec: ScenarioSpec): StartedGate => {
       let readinessObservedAt: number | null = null;
       if (commandListed) {
         invocationCount = 1;
-        const invocation = await rpcRequest(
+        const invocation = await rpc.rpcRequest(
           { type: "prompt", message: `/${expectation.readinessCommand}` },
           "readiness command invocation",
         );
@@ -938,70 +1065,39 @@ const startStartupGate = (spec: ScenarioSpec): StartedGate => {
           // failure, never a minted refusal decision.
           setTimeout(() => releaseChild(), spec.killChildAfterReadinessInvocationMs);
         }
-        const readinessWait = settleWait(bus.waitFor(readinessPredicate, READY_TIMEOUT_MS, "readiness"));
-        if (spec.cancelAfterMs !== undefined) {
-          const outcome = await Promise.race([readinessWait, sleep(spec.cancelAfterMs).then((): "cancelled" => "cancelled")]);
-          if (outcome === "cancelled") {
-            readiness = canonicalRecord({ kind: "cancelled" as const });
-            releaseChild();
-          } else if (outcome.kind === "observed") {
-            readinessObservedAt = Date.now();
-            readiness = canonicalRecord({ kind: "observed" as const, payload: entryDataOf(outcome.event) });
-          } else {
-            assertChildAliveDuringWait(outcome.error);
-            readiness = canonicalRecord({ kind: "absent" as const, reason: `no readiness entry arrived within ${READY_TIMEOUT_MS}ms` });
-          }
+        const readinessWait = settleWait(rpc.bus.waitFor(readinessPredicate, READY_TIMEOUT_MS, "readiness"));
+        const outcome = spec.cancelAfterMs === undefined
+          ? await readinessWait
+          : await Promise.race([readinessWait, sleep(spec.cancelAfterMs).then((): "cancelled" => "cancelled")]);
+        if (outcome === "cancelled") {
+          readiness = canonicalRecord({ kind: "cancelled" as const });
+          releaseChild();
         } else {
-          const outcome = await readinessWait;
-          if (outcome.kind === "observed") {
-            readinessObservedAt = Date.now();
-            readiness = canonicalRecord({ kind: "observed" as const, payload: entryDataOf(outcome.event) });
-          } else {
-            assertChildAliveDuringWait(outcome.error);
-            readiness = canonicalRecord({ kind: "absent" as const, reason: `no readiness entry arrived within ${READY_TIMEOUT_MS}ms` });
-          }
+          const settled = settledReadiness(outcome, rpc, readinessAbsentWithinWindow);
+          readiness = settled.readiness;
+          readinessObservedAt = settled.observedAt;
         }
       }
 
-      // 4. The pure gate decision over the observed protocol facts, then —
-      //    only on a ready child — the fail-closed route binding, then the
-      //    full decision the launcher acts on.
-      const stageObservation = parseReadinessStageObservation({
-        channelAlive,
-        channelDiagnostic,
+      const finalDecision = await decideStartupThroughRouteBind(rpc, expectation, {
+        ...channel,
         commandListed,
         readiness,
       });
-      const stageDecision = decideReadinessGate(expectation, stageObservation);
-      let routeObservation: RouteObservation = canonicalRecord({ kind: "unbound" as const });
-      if (stageDecision.kind === "ready") {
-        routeObservation = await bindRouteWithSettle(rpcRequest, expectation.route);
-      }
-      const observation = startupGateObservation(stageObservation, routeObservation);
-      const finalDecision = decideEmissionStartup(expectation, observation);
       decisionMade.resolve();
       const decisionAt = Date.now();
 
       // 5. Act on the closed decision — prompt delivery ONLY on the open arm.
-      const action = startupGateAction(finalDecision);
       let prompted = false;
       let holdResolvedAt: number | null = null;
-      if (action.kind === "deliver-prompt") {
-        await rpcRequest({ type: "set_auto_retry", enabled: false }, "set_auto_retry");
-        await rpcRequest(
-          {
-            type: "prompt",
-            message: `Emit the issued ${expectation.binding.kind.kind} payload via ${expectation.binding.toolName}.`,
-          },
-          "prompt delivery",
-        );
+      if (startupGateAction(finalDecision).kind === "deliver-prompt") {
+        await deliverIssuedPrompt(rpc, expectation);
         prompted = true;
         if (spec.waitForHold === true) {
-          await bus.waitFor(holdResolvedPredicate, HOLD_RESOLVE_TIMEOUT_MS, "hold resolution");
+          await rpc.bus.waitFor(holdResolvedPredicate, HOLD_RESOLVE_TIMEOUT_MS, "hold resolution");
           holdResolvedAt = Date.now();
         }
-        const requestDeadline = Date.now() + FIRST_REQUEST_TIMEOUT_MS;
-        while (server.hits.length === 0 && Date.now() < requestDeadline) await sleep(50);
+        await awaitFirstRequestOrDeadline(server);
       } else {
         await sleep(REFUSE_GRACE_MS);
       }
@@ -1020,15 +1116,14 @@ const startStartupGate = (spec: ScenarioSpec): StartedGate => {
       return canonicalRecord({
         label: spec.label,
         decision: finalDecision,
-        channelAlive,
-        channelDiagnostic,
+        channelAlive: channel.channelAlive,
+        channelDiagnostic: channel.channelDiagnostic,
         commandListed,
         commandsSeen: Object.freeze(commandsSeen),
         invocationCount,
         readinessPayload: readiness.kind === "observed" ? readiness.payload : null,
         readinessObservedAt,
-        readinessEntriesAfterDecision: bus.snapshot()
-          .filter(readinessPredicate)
+        readinessEntriesAfterDecision: customEntriesOf(rpc.bus, READINESS_ENTRY_TYPE)
           .filter((event) => event.receivedAt > decisionAt).length,
         prompted,
         holdResolvedAt,
@@ -1036,14 +1131,13 @@ const startStartupGate = (spec: ScenarioSpec): StartedGate => {
         requestCount: hits.length,
         issuedRequestId,
         countingBaseUrl: server.baseUrl,
-        childPid: typeof child.pid === "number" ? child.pid : null,
-        childKilled: releasedRef.current,
-        releasedAt: releasedAtRef.current,
-        stderr: boundDiagnosticMessage(stderrChunks.join("").trim()),
+        childPid: typeof rpc.child.pid === "number" ? rpc.child.pid : null,
+        childKilled: rpc.releasedAt() !== null,
+        releasedAt: rpc.releasedAt(),
+        stderr: rpc.stderr(),
       });
     } finally {
-      releaseChild();
-      if (exitSettled !== null) await Promise.race([exitSettled, sleep(1500)]);
+      await rpcRef.current?.dispose();
       await server.close();
       await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
     }
@@ -1088,15 +1182,22 @@ const asRefused = (decision: EmissionStartupDecision): RefusedDecision => {
   return decision;
 };
 
-const expectOpenRun = (run: StartupRun): OpenDecision => {
+/** The observation every barrier run carries — the protocol-fixture runs
+ *  (`StartupRun`) and the production-extension runs (`ProductionRun`) alike —
+ *  so ONE set of assertion helpers serves both suites. */
+type GateRun = Pick<
+  StartupRun,
+  "label" | "decision" | "prompted" | "requestCount" | "firstRequestAt" | "readinessObservedAt" | "childKilled" | "stderr"
+>;
+
+const expectOpenRun = (run: GateRun): OpenDecision => {
   if (run.decision.kind !== "open") {
-    const message = run.decision.kind === "refused" ? run.decision.message : "";
-    throw new Error(`[${run.label}] expected the gate to OPEN, received ${describeStartupDecision(run.decision)} — ${message}; stderr: ${run.stderr}`);
+    throw new Error(`[${run.label}] expected the gate to OPEN, received ${describeStartupDecision(run.decision)} — ${run.decision.message}; stderr: ${run.stderr}`);
   }
   return run.decision;
 };
 
-const expectRefusedRun = (run: StartupRun): RefusedDecision => {
+const expectRefusedRun = (run: GateRun): RefusedDecision => {
   if (run.decision.kind !== "refused") {
     throw new Error(`[${run.label}] expected a REFUSED decision, received ${describeStartupDecision(run.decision)}; stderr: ${run.stderr}`);
   }
@@ -1107,7 +1208,7 @@ const expectRefusedRun = (run: StartupRun): RefusedDecision => {
  *  the expected code, the message names its remediation, the launcher never
  *  prompted, ZERO model requests reached the counting substitute, and the
  *  refusing child's own reservation was released. */
-const expectZeroRequestRefusal = (run: StartupRun, code: EmissionStartupRefusalCode): RefusedDecision => {
+const expectZeroRequestRefusal = (run: GateRun, code: EmissionStartupRefusalCode): RefusedDecision => {
   const refusedDecision = expectRefusedRun(run);
   expect(refusedDecision.code, run.label).toBe(code);
   expect(refusedDecision.message, run.label).toContain(EMISSION_STARTUP_REMEDIATIONS[code]);
@@ -1118,7 +1219,7 @@ const expectZeroRequestRefusal = (run: StartupRun, code: EmissionStartupRefusalC
   return refusedDecision;
 };
 
-const orderingPair = (run: StartupRun): { readonly firstRequestAt: number; readonly readinessObservedAt: number } => {
+const orderingPair = (run: GateRun): { readonly firstRequestAt: number; readonly readinessObservedAt: number } => {
   if (run.firstRequestAt === null || run.readinessObservedAt === null) {
     throw new Error(`[${run.label}] missing ordering timestamps (first=${run.firstRequestAt}, readiness=${run.readinessObservedAt})`);
   }
@@ -1506,13 +1607,13 @@ describe("the emission-startup gate decision — a closed ADT with no semantic a
 });
 
 // ---------------------------------------------------------------------------
-// The 15 real-child scenarios — counting-provider substitute, zero-request
+// The real-child scenarios — counting-provider substitute, zero-request
 // negative controls, release isolation (FR-008 / AS-020)
 // ---------------------------------------------------------------------------
 
 describe(`emission-startup barrier against a real headless pi child on ${piIdentity} — counting-provider substitute`, { timeout: 60_000 }, () => {
   it("matching readiness on the judge-verdict v1 cell opens the gate, and the first model request lands after the readiness observation (FR-008)", async () => {
-    const run = await runStartupGate(scenario("matching-judge-v1", { issuedCell: JUDGE_V1_CELL, waitForRequest: true }));
+    const run = await runStartupGate(scenario("matching-judge-v1", { issuedCell: JUDGE_V1_CELL }));
     const open = expectOpenRun(run);
     expect(run.channelAlive).toBe(true);
     expect(run.commandListed).toBe(true);
@@ -1537,7 +1638,7 @@ describe(`emission-startup barrier against a real headless pi child on ${piIdent
   });
 
   it("matching readiness on the reviewer-payload v2 cell opens the gate, and the first model request lands after the readiness observation (FR-008)", async () => {
-    const run = await runStartupGate(scenario("matching-reviewer-v2", { waitForRequest: true }));
+    const run = await runStartupGate(scenario("matching-reviewer-v2"));
     const open = expectOpenRun(run);
     expect(run.channelAlive).toBe(true);
     expect(run.commandListed).toBe(true);
@@ -1562,7 +1663,7 @@ describe(`emission-startup barrier against a real headless pi child on ${piIdent
   });
 
   it("the in-child before_agent_start hold delays the first model request until the hold resolves — defense-in-depth ordering (AD-4)", async () => {
-    const run = await runStartupGate(scenario("held", { variant: "held", waitForRequest: true, waitForHold: true }));
+    const run = await runStartupGate(scenario("held", { variant: "held", waitForHold: true }));
     expectOpenRun(run);
     expect(run.prompted).toBe(true);
     expect(run.requestCount).toBe(1);
@@ -1824,7 +1925,7 @@ describe(`emission-startup barrier against a real headless pi child on ${piIdent
   it("AS-020: a refused child is released without disturbing a concurrently starting matching child", async () => {
     const holdRelease = deferred<void>();
     const refusedGate = startStartupGate(scenario("as020-refused", { variant: "wrong-digest" }));
-    const matchingGate = startStartupGate(scenario("as020-matching", { waitForRequest: true, holdRelease: holdRelease.promise }));
+    const matchingGate = startStartupGate(scenario("as020-matching", { holdRelease: holdRelease.promise }));
     try {
       // Synchronize: the matching child is past its gate decision (mid-flight)
       // before the refused peer's release is even awaited.
@@ -1938,6 +2039,7 @@ type ProductionRun = Readonly<{
   requestBodies: readonly string[];
   issuedRequestId: string;
   childPid: number | null;
+  childKilled: boolean;
   countingBaseUrl: string;
   stderr: string;
 }>;
@@ -1976,16 +2078,43 @@ const childProvisioningEnv = (
   });
 };
 
-const readinessEntriesOf = (bus: RpcBus): readonly RpcEvent[] => bus.snapshot().filter(readinessPredicate);
-
 const waitReadinessEntryCount = async (bus: RpcBus, count: number, timeoutMs: number): Promise<void> => {
   const deadline = Date.now() + timeoutMs;
-  while (readinessEntriesOf(bus).length < count) {
+  while (customEntriesOf(bus, READINESS_ENTRY_TYPE).length < count) {
     if (Date.now() > deadline) {
-      throw new Error(`expected ${count} readiness entries, observed ${readinessEntriesOf(bus).length} within ${timeoutMs}ms`);
+      throw new Error(`expected ${count} readiness entries, observed ${customEntriesOf(bus, READINESS_ENTRY_TYPE).length} within ${timeoutMs}ms`);
     }
     await sleep(50);
   }
+};
+
+/** The production child's spawn: the production loom extension beside the
+ *  per-run provider substitute, provisioned with `envBinding` (absent when
+ *  undefined) — any ambient binding is stripped first. */
+const openProductionChild = async (
+  label: string,
+  tmp: string,
+  server: CountingServer,
+  envBinding: string | undefined,
+  allowlist: readonly string[],
+): Promise<PiRpcChild> => {
+  const providerExtPath = join(tmp, "loom-counting-provider.mjs");
+  await writeFile(providerExtPath, productionProviderExtensionSource(server.baseUrl), "utf8");
+  const args: string[] = ["--mode", "rpc", "--no-session", "-ne", "-e", PRODUCTION_EXTENSION_PATH, "-e", providerExtPath];
+  if (allowlist.length > 0) args.push("--tools", allowlist.join(","));
+  const childEnv: NodeJS.ProcessEnv = { ...process.env, ...await isolatedPiEnv(tmp) };
+  delete childEnv["PI_CODING_AGENT"];
+  delete childEnv[LOOM_EMISSION_BINDING_ENV];
+  if (envBinding !== undefined) childEnv[LOOM_EMISSION_BINDING_ENV] = envBinding;
+  childEnv["LOOM_EMISSION_STARTUP_PROVIDER_KEY"] = "loom-counting-key";
+  return openPiRpcChild({
+    role: "production child",
+    idPrefix: `t5-${label}`,
+    args,
+    cwd: tmp,
+    env: childEnv,
+    responseTimeoutMs: PRODUCTION_STATE_TIMEOUT_MS,
+  });
 };
 
 /**
@@ -1994,17 +2123,7 @@ const waitReadinessEntryCount = async (bus: RpcBus, count: number, timeoutMs: nu
  * child is released in every outcome.
  */
 const runProductionGate = async (spec: ProductionScenarioSpec): Promise<ProductionRun> => {
-  const childRef: { current: ChildProcess | null } = { current: null };
-  const releasedRef: { current: boolean } = { current: false };
-  const releasedAtRef: { current: number | null } = { current: null };
-  const releaseChild = (): void => {
-    const child = childRef.current;
-    if (child === null || releasedRef.current) return;
-    releasedRef.current = true;
-    releasedAtRef.current = Date.now();
-    child.kill("SIGKILL");
-  };
-  let exitSettled: Promise<void> | null = null;
+  const rpcRef: { current: PiRpcChild | null } = { current: null };
   const server = await startCountingServer();
   const tmp = canonicalTempDir(`loom-emission-startup-t5-${spec.label}-`);
   try {
@@ -2019,87 +2138,22 @@ const runProductionGate = async (spec: ProductionScenarioSpec): Promise<Producti
     const provisioning = spec.provisioning ?? canonicalRecord({ kind: "minted" as const, cell: spec.issuedCell });
     const envBinding = childProvisioningEnv(expectation, issuedRequestId, provisioning);
     const provisioningCell = provisioning.kind === "minted" ? provisioning.cell : spec.issuedCell;
-    const allowlist = spec.allowlist ?? [provisioningCell.toolName];
-    const providerExtPath = join(tmp, "loom-counting-provider.mjs");
-    await writeFile(providerExtPath, productionProviderExtensionSource(server.baseUrl), "utf8");
-    const args: string[] = ["--mode", "rpc", "--no-session", "-ne", "-e", PRODUCTION_EXTENSION_PATH, "-e", providerExtPath];
-    if (allowlist.length > 0) args.push("--tools", allowlist.join(","));
-    const childEnv: NodeJS.ProcessEnv = { ...process.env, ...await isolatedPiEnv(tmp) };
-    delete childEnv["PI_CODING_AGENT"];
-    delete childEnv[LOOM_EMISSION_BINDING_ENV];
-    if (envBinding !== undefined) childEnv[LOOM_EMISSION_BINDING_ENV] = envBinding;
-    childEnv["LOOM_EMISSION_STARTUP_PROVIDER_KEY"] = "loom-counting-key";
-    const child = spawn(piBinary.bin, args, { cwd: tmp, env: childEnv, stdio: ["pipe", "pipe", "pipe"] });
-    childRef.current = child;
-    exitSettled = new Promise<void>((resolve) => {
-      child.on("exit", () => resolve());
-    });
-    if (child.stdout === null) throw new Error("the production child has no stdout pipe");
-    const bus = makeRpcBus(child.stdout);
-    let spawnError: Error | null = null;
-    let childExited = false;
-    child.on("error", (error: Error) => {
-      spawnError = error;
-      bus.failAll(`the production child process failed: ${error.message}`);
-    });
-    child.on("exit", (code: number | null, signal: string | null) => {
-      childExited = true;
-      bus.failAll(`the production child exited (code ${code === null ? "none" : code}, signal ${signal === null ? "none" : signal}) while the launcher was observing it`);
-    });
-    const stderrChunks: string[] = [];
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderrChunks.push(chunk.toString());
-    });
-
-    let rpcCallCounter = 0;
-    const rpcRequest = async (message: Record<string, unknown>, label: string): Promise<RpcEvent> => {
-      const stdin = child.stdin;
-      if (stdin === null || !stdin.writable) {
-        throw new Error(`the production child's stdin is not writable for ${label}${spawnError === null ? "" : ` (spawn error: ${spawnError.message})`}`);
-      }
-      const id = `t5-${spec.label}-${++rpcCallCounter}`;
-      stdin.write(`${JSON.stringify({ ...message, id })}\n`);
-      return bus.waitFor((event) => event.type === "response" && event["id"] === id,
-        label === "get_state" && rpcCallCounter === 1 ? CHANNEL_STARTUP_TIMEOUT_MS : PRODUCTION_STATE_TIMEOUT_MS, label);
-    };
-    const assertChildAliveDuringWait = (error: unknown): void => {
-      if (spawnError !== null || childExited) {
-        throw new Error(`the production child died during a bounded wait: ${boundedDiagnostic(error)}`);
-      }
-    };
+    const rpc = await openProductionChild(
+      spec.label,
+      tmp,
+      server,
+      envBinding,
+      spec.allowlist ?? [provisioningCell.toolName],
+    );
+    rpcRef.current = rpc;
     const extensionErrorsOf = (): readonly Readonly<{ event: string; error: string }>[] =>
-      bus.snapshot()
+      rpc.bus.snapshot()
         .filter((event) => event.type === "extension_error")
         .map((event) => canonicalRecord({ event: stringifyUnknown(event["event"]), error: stringifyUnknown(event["error"]) }));
 
-    // 1. Channel check.
-    let channelAlive = false;
-    let channelDiagnostic: string | null = "the RPC channel never answered get_state";
-    try {
-      const state = await rpcRequest({ type: "get_state" }, "get_state");
-      if (state["success"] === true) {
-        channelAlive = true;
-        channelDiagnostic = null;
-      } else {
-        channelDiagnostic = `get_state answered success=false: ${boundedEvent(state)}`;
-      }
-    } catch (error) {
-      channelDiagnostic = boundedDiagnostic(error);
-    }
-
-    // 2. Discovery — the production command must be REGISTERED before it is
-    //    invoked; the launcher never invokes an unverified command.
-    let commandListed = false;
-    if (channelAlive) {
-      const commandsResponse = await rpcRequest({ type: "get_commands" }, "get_commands");
-      const data = recordOf(commandsResponse["data"]);
-      const rawCommands = data === null ? undefined : data["commands"];
-      const commands: readonly unknown[] = Array.isArray(rawCommands) ? rawCommands : [];
-      commandListed = commands.some((raw) => {
-        const record = recordOf(raw);
-        return record !== null && record["name"] === EMISSION_READINESS_COMMAND && record["source"] === "extension";
-      });
-    }
+    const channel = await observeChannel(rpc);
+    const commandListed = channel.channelAlive &&
+      listsExtensionCommand(await discoverCommands(rpc), EMISSION_READINESS_COMMAND);
 
     // 3. Readiness invocation(s) — the production command registers the exact
     //    tool and appends the bound payload; failures surface as
@@ -2113,105 +2167,74 @@ const runProductionGate = async (spec: ProductionScenarioSpec): Promise<Producti
     let readinessObservedAt: number | null = null;
     if (commandListed) {
       invocationCount = 1;
-      const first = await rpcRequest({ type: "prompt", message: `/${EMISSION_READINESS_COMMAND}` }, "readiness command invocation");
+      const first = await rpc.rpcRequest({ type: "prompt", message: `/${EMISSION_READINESS_COMMAND}` }, "readiness command invocation");
       if (first["success"] !== true) {
         throw new Error(`the readiness command invocation was refused by the production child: ${boundedEvent(first)}`);
       }
       if (spec.doubleInvocation === true) {
         invocationCount = 2;
-        const second = await rpcRequest({ type: "prompt", message: `/${EMISSION_READINESS_COMMAND}` }, "idempotent readiness re-invocation");
+        const second = await rpc.rpcRequest({ type: "prompt", message: `/${EMISSION_READINESS_COMMAND}` }, "idempotent readiness re-invocation");
         if (second["success"] !== true) {
           throw new Error(`the idempotent readiness re-invocation was refused by the production child: ${boundedEvent(second)}`);
         }
       }
-      const outcome = await settleWait(bus.waitFor(readinessPredicate, READY_TIMEOUT_MS, "readiness"));
-      if (outcome.kind === "observed") {
-        readinessObservedAt = Date.now();
-        readiness = canonicalRecord({ kind: "observed" as const, payload: entryDataOf(outcome.event) });
-        if (spec.doubleInvocation === true) {
-          await waitReadinessEntryCount(bus, 2, READY_TIMEOUT_MS);
-        }
-      } else {
-        assertChildAliveDuringWait(outcome.error);
+      const outcome = await settleWait(rpc.bus.waitFor(readinessPredicate, READY_TIMEOUT_MS, "readiness"));
+      const settled = settledReadiness(outcome, rpc, () => {
         const refusalErrors = extensionErrorsOf();
-        readiness = refusalErrors.length > 0
+        return refusalErrors.length > 0
           ? canonicalRecord({
               kind: "startup-unavailable" as const,
               reason: refusalErrors[refusalErrors.length - 1]!.error,
             })
-          : canonicalRecord({
-              kind: "absent" as const,
-              reason: `no readiness entry arrived within ${READY_TIMEOUT_MS}ms`,
-            });
+          : readinessAbsentWithinWindow();
+      });
+      readiness = settled.readiness;
+      readinessObservedAt = settled.observedAt;
+      if (outcome.kind === "observed" && spec.doubleInvocation === true) {
+        await waitReadinessEntryCount(rpc.bus, 2, READY_TIMEOUT_MS);
       }
     }
 
-    // 4. The pure gate decision over the observed protocol facts, then the
-    //    fail-closed route binding on a ready child.
-    const stageObservation = parseReadinessStageObservation({
-      channelAlive,
-      channelDiagnostic,
+    const finalDecision = await decideStartupThroughRouteBind(rpc, expectation, {
+      ...channel,
       commandListed,
       readiness,
     });
-    const stageDecision = decideReadinessGate(expectation, stageObservation);
-    let routeObservation: RouteObservation = canonicalRecord({ kind: "unbound" as const });
-    if (stageDecision.kind === "ready") {
-      routeObservation = await bindRouteWithSettle(rpcRequest, expectation.route);
-    }
-    const observation = startupGateObservation(stageObservation, routeObservation);
-    const finalDecision = decideEmissionStartup(expectation, observation);
 
     // 5. Prompt delivery ONLY on the open arm.
-    const action = startupGateAction(finalDecision);
     let prompted = false;
-    if (action.kind === "deliver-prompt" && spec.deliverPromptOnOpen !== false) {
-      await rpcRequest({ type: "set_auto_retry", enabled: false }, "set_auto_retry");
-      await rpcRequest(
-        { type: "prompt", message: `Emit the issued ${expectation.binding.kind.kind} payload via ${expectation.binding.toolName}.` },
-        "prompt delivery",
-      );
+    if (startupGateAction(finalDecision).kind === "deliver-prompt" && spec.deliverPromptOnOpen !== false) {
+      await deliverIssuedPrompt(rpc, expectation);
       prompted = true;
-      if (spec.waitForRequest === true) {
-        const requestDeadline = Date.now() + FIRST_REQUEST_TIMEOUT_MS;
-        while (server.hits.length === 0 && Date.now() < requestDeadline) await sleep(50);
-      }
+      if (spec.waitForRequest === true) await awaitFirstRequestOrDeadline(server);
     } else {
       await sleep(REFUSE_GRACE_MS);
     }
-    releaseChild();
-    await Promise.race([exitSettled, sleep(1500)]);
+    await rpc.dispose();
     const hits = server.hits;
     return canonicalRecord({
       label: spec.label,
       decision: finalDecision,
-      channelAlive,
-      channelDiagnostic,
+      channelAlive: channel.channelAlive,
+      channelDiagnostic: channel.channelDiagnostic,
       commandListed,
       invocationCount,
-      readinessPayloads: Object.freeze(readinessEntriesOf(bus).map((event) => entryDataOf(event))),
+      readinessPayloads: Object.freeze(customEntriesOf(rpc.bus, READINESS_ENTRY_TYPE).map(entryDataOf)),
       readinessObservedAt,
       extensionErrors: extensionErrorsOf(),
-      holdEntries: Object.freeze(
-        bus.snapshot()
-          .filter((event) => {
-            const entry = recordOf(event["entry"]);
-            return event.type === "entry_appended" && entry !== null && entry["customType"] === EMISSION_HOLD_ENTRY_TYPE;
-          })
-          .map((event) => entryDataOf(event)),
-      ),
+      holdEntries: Object.freeze(customEntriesOf(rpc.bus, EMISSION_HOLD_ENTRY_TYPE).map(entryDataOf)),
       prompted,
       firstRequestAt: hits.length > 0 ? hits[0]!.at : null,
       requestCount: hits.length,
       requestBodies: Object.freeze(hits.map((hit) => hit.body)),
       issuedRequestId,
-      childPid: typeof child.pid === "number" ? child.pid : null,
+      childPid: typeof rpc.child.pid === "number" ? rpc.child.pid : null,
+      childKilled: rpc.releasedAt() !== null,
       countingBaseUrl: server.baseUrl,
-      stderr: boundDiagnosticMessage(stderrChunks.join("").trim()),
+      stderr: rpc.stderr(),
     });
   } finally {
-    releaseChild();
-    if (exitSettled !== null) await Promise.race([exitSettled, sleep(1500)]);
+    await rpcRef.current?.dispose();
     await server.close().catch(() => undefined);
     await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
   }
@@ -2252,14 +2275,8 @@ const runProductionHoldGate = async (spec: ProductionHoldGateSpec): Promise<Read
   requestCount: number;
   stderr: string;
 }>> => {
-  const childRef: { current: ChildProcess | null } = { current: null };
-  const releaseChild = (): void => {
-    const child = childRef.current;
-    if (child === null) return;
-    child.kill("SIGKILL");
-  };
   const HOLD_PROBE_WINDOW_MS = 2_500;
-  let exitSettled: Promise<void> | null = null;
+  const rpcRef: { current: PiRpcChild | null } = { current: null };
   const server = await startCountingServer();
   const tmp = canonicalTempDir(`loom-emission-startup-t5-${spec.label}-`);
   try {
@@ -2267,67 +2284,36 @@ const runProductionHoldGate = async (spec: ProductionHoldGateSpec): Promise<Read
     const expectation = makeExpectation(spec.issuedCell, issuedRequestId, server.baseUrl);
     const provisioning = spec.provisioning ?? canonicalRecord({ kind: "minted" as const, cell: spec.issuedCell });
     const envBinding = childProvisioningEnv(expectation, issuedRequestId, provisioning);
-    const providerExtPath = join(tmp, "loom-counting-provider.mjs");
-    await writeFile(providerExtPath, productionProviderExtensionSource(server.baseUrl), "utf8");
-    const childEnv: NodeJS.ProcessEnv = { ...process.env, ...await isolatedPiEnv(tmp) };
-    delete childEnv["PI_CODING_AGENT"];
-    delete childEnv[LOOM_EMISSION_BINDING_ENV];
     if (envBinding === undefined) throw new Error("the hold control's provisioning env is absent");
-    childEnv[LOOM_EMISSION_BINDING_ENV] = envBinding;
-    childEnv["LOOM_EMISSION_STARTUP_PROVIDER_KEY"] = "loom-counting-key";
-    const child = spawn(
-      piBinary.bin,
-      ["--mode", "rpc", "--no-session", "-ne", "-e", PRODUCTION_EXTENSION_PATH, "-e", providerExtPath, "--tools", spec.issuedCell.toolName],
-      { cwd: tmp, env: childEnv, stdio: ["pipe", "pipe", "pipe"] },
-    );
-    childRef.current = child;
-    exitSettled = new Promise<void>((resolve) => {
-      child.on("exit", () => resolve());
-    });
-    if (child.stdout === null) throw new Error("the production child has no stdout pipe");
-    const bus = makeRpcBus(child.stdout);
-    let spawnError: Error | null = null;
-    let childExited = false;
-    child.on("error", (error: Error) => {
-      spawnError = error;
-      bus.failAll(`the production child process failed: ${error.message}`);
-    });
-    child.on("exit", () => {
-      childExited = true;
-      bus.failAll("the production child exited while the launcher was observing it");
-    });
-    const stderrChunks: string[] = [];
-    child.stderr?.on("data", (chunk: Buffer) => stderrChunks.push(chunk.toString()));
-    let rpcCallCounter = 0;
-    const rpcRequest = (message: Record<string, unknown>): Promise<RpcEvent> => {
-      const id = `t5-hold-${spec.label}-${++rpcCallCounter}`;
-      const stdin = child.stdin;
-      if (stdin === null || !stdin.writable) throw new Error("the production hold child's stdin is not writable");
-      stdin.write(`${JSON.stringify({ ...message, id })}\n`);
-      return bus.waitFor((event) => event.type === "response" && event["id"] === id,
-        message.type === "get_state" && rpcCallCounter === 1 ? CHANNEL_STARTUP_TIMEOUT_MS : PRODUCTION_STATE_TIMEOUT_MS, "rpc");
-    };
-    await rpcRequest({ type: "get_state" });
+    const rpc = await openProductionChild(`hold-${spec.label}`, tmp, server, envBinding, [spec.issuedCell.toolName]);
+    rpcRef.current = rpc;
+    await rpc.rpcRequest({ type: "get_state" }, "get_state");
     // The stale launcher binds the route and delivers the prompt WITHOUT a
     // readiness exchange. Keep the request live so the release variant can
     // prove this exact awaited prompt resumes after readiness.
-    await rpcRequest({ type: "set_model", provider: expectation.route.provider, modelId: expectation.route.modelId });
-    await rpcRequest({ type: "set_auto_retry", enabled: false });
+    await rpc.rpcRequest(
+      { type: "set_model", provider: expectation.route.provider, modelId: expectation.route.modelId },
+      "stale-launcher set_model",
+    );
+    await rpc.rpcRequest({ type: "set_auto_retry", enabled: false }, "set_auto_retry");
     let promptResponse: HoldPromptResponse = canonicalRecord({ kind: "pending" as const });
-    const promptOutcome = settleWait(rpcRequest({
-      type: "prompt",
-      message: `Emit the issued ${expectation.binding.kind.kind} payload via ${expectation.binding.toolName}.`,
-    })).then((outcome) => {
+    const promptOutcome = settleWait(rpc.rpcRequest(
+      { type: "prompt", message: issuedPromptText(expectation) },
+      "stale-launcher prompt delivery",
+    )).then((outcome) => {
       promptResponse = holdPromptResponseOf(outcome);
       return outcome;
     });
     await sleep(HOLD_PROBE_WINDOW_MS);
-    if (spawnError !== null || childExited) {
+    if (rpc.gone()) {
       throw new Error("the production hold child died or failed to spawn inside the probe window");
     }
     const promptResponseBeforeReadiness: HoldPromptResponse = promptResponse;
     if (spec.releaseThroughReadiness === true) {
-      const readinessResponse = await rpcRequest({ type: "prompt", message: `/${EMISSION_READINESS_COMMAND}` });
+      const readinessResponse = await rpc.rpcRequest(
+        { type: "prompt", message: `/${EMISSION_READINESS_COMMAND}` },
+        "hold-release readiness command",
+      );
       if (readinessResponse["success"] !== true) {
         throw new Error(`the hold-release readiness command failed: ${boundedEvent(readinessResponse)}`);
       }
@@ -2336,52 +2322,43 @@ const runProductionHoldGate = async (spec: ProductionHoldGateSpec): Promise<Read
       // mirror the real launcher's post-readiness bind before requiring the
       // first model request from this already-wedged prompt. Otherwise a
       // refreshed default model can receive it instead of the counting route.
-      const rebound = await bindRouteWithSettle((message) => rpcRequest(message), expectation.route);
+      const rebound = await bindRouteWithSettle(rpc.rpcRequest, expectation.route);
       if (rebound.kind !== "bound" || rebound.model.provider !== expectation.route.provider ||
           rebound.model.id !== expectation.route.modelId) {
         throw new Error(`the hold-release route was not rebound after readiness: ${JSON.stringify(rebound)}`);
       }
       const resumed = await promptOutcome;
-      const stderr = boundDiagnosticMessage(stderrChunks.join("").trim());
       if (resumed.kind === "failed") {
-        throw new Error(`the wedged prompt did not resume: ${boundedDiagnostic(resumed.error)}; stderr: ${stderr}`);
+        throw new Error(`the wedged prompt did not resume: ${boundedDiagnostic(resumed.error)}; stderr: ${rpc.stderr()}`);
       }
       if (resumed.event["success"] !== true) {
-        throw new Error(`the resumed prompt response was refused: ${boundedEvent(resumed.event)}; stderr: ${stderr}`);
+        throw new Error(`the resumed prompt response was refused: ${boundedEvent(resumed.event)}; stderr: ${rpc.stderr()}`);
       }
       await awaitFirstCountedRequest(
         server,
         PRODUCTION_HOLD_FIRST_REQUEST_TIMEOUT_MS,
-        () => `prompt response: ${JSON.stringify(promptResponse)}; stderr: ${stderrChunks.join("").trim()}`,
+        () => `prompt response: ${JSON.stringify(promptResponse)}; stderr: ${rpc.stderr()}`,
       );
     }
     await sleep(400);
-    if (spawnError !== null || childExited) {
+    if (rpc.gone()) {
       throw new Error("the production hold child died or failed to spawn before the probe completed");
     }
-    const holdEntries = bus.snapshot()
-      .filter((event) => {
-        const entry = recordOf(event["entry"]);
-        return event.type === "entry_appended" && entry !== null && entry["customType"] === EMISSION_HOLD_ENTRY_TYPE;
-      })
+    const holdPhases = customEntriesOf(rpc.bus, EMISSION_HOLD_ENTRY_TYPE)
       .map((event) => recordOf(entryDataOf(event)))
-      .filter((data): data is Record<string, unknown> => data !== null);
-    const holdPhases = holdEntries
-      .map((data) => data["phase"])
+      .map((data) => (data === null ? undefined : data["phase"]))
       .filter((phase): phase is string => typeof phase === "string");
-    releaseChild();
-    await Promise.race([exitSettled, sleep(1500)]);
+    await rpc.dispose();
     return canonicalRecord({
       holdPhases: Object.freeze(holdPhases),
       childAliveDuringProbe: true,
-      agentStartCount: bus.snapshot().filter((event) => event.type === "agent_start").length,
+      agentStartCount: rpc.bus.snapshot().filter((event) => event.type === "agent_start").length,
       promptResponse: spec.releaseThroughReadiness === true ? promptResponse : promptResponseBeforeReadiness,
       requestCount: server.hits.length,
-      stderr: boundDiagnosticMessage(stderrChunks.join("").trim()),
+      stderr: rpc.stderr(),
     });
   } finally {
-    releaseChild();
-    if (exitSettled !== null) await Promise.race([exitSettled, sleep(1500)]);
+    await rpcRef.current?.dispose();
     await server.close().catch(() => undefined);
     await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
   }
@@ -2399,40 +2376,35 @@ const productionScenario = (label: string, overrides: Partial<Omit<ProductionSce
  *  FR-031 handshake the readiness report is checked against. */
 const PARENT_RUNTIME_REVISION = captureLoomRuntimeIdentity(repoRoot).revision;
 
-const productionOrderingPair = (run: ProductionRun): { readonly firstRequestAt: number; readonly readinessObservedAt: number } => {
-  if (run.firstRequestAt === null || run.readinessObservedAt === null) {
-    throw new Error(`[${run.label}] missing ordering timestamps (first=${run.firstRequestAt}, readiness=${run.readinessObservedAt})`);
-  }
-  return { firstRequestAt: run.firstRequestAt, readinessObservedAt: run.readinessObservedAt };
-};
-
-const expectOpenProductionRun = (run: ProductionRun): OpenDecision => {
+/**
+ * Run `operation` against overridden ambient process state and restore every
+ * touched value in `finally`, so no test leaks state into a later one. Each
+ * `env` key holds its value for the operation (`undefined` deletes it); every
+ * named key is snapshotted and restored, including keys the operation itself
+ * reassigns. `clearArgv1` hides the runner's script path from launchers that
+ * would otherwise re-exec it instead of resolving `pi` on PATH.
+ */
+const withProcessState = async <T>(
+  state: Readonly<{ env: Readonly<Record<string, string | undefined>>; clearArgv1?: boolean }>,
+  operation: () => T | Promise<T>,
+): Promise<T> => {
+  const assignEnv = (key: string, value: string | undefined): void => {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  };
+  const previousEnv = Object.keys(state.env).map((key) => [key, process.env[key]] as const);
+  const previousArgv1 = process.argv[1];
+  for (const [key, value] of Object.entries(state.env)) assignEnv(key, value);
+  if (state.clearArgv1 === true) delete process.argv[1];
   try {
-    return asOpen(run.decision);
-  } catch (error) {
-    throw new Error(`[${run.label}] ${(error as Error).message}; stderr: ${run.stderr}`);
+    return await operation();
+  } finally {
+    for (const [key, value] of previousEnv) assignEnv(key, value);
+    if (state.clearArgv1 === true) {
+      if (previousArgv1 === undefined) delete process.argv[1];
+      else process.argv[1] = previousArgv1;
+    }
   }
-};
-
-/** The production negative-control assertion: the decision refused with
- *  exactly the expected code, the message names its remediation, the launcher
- *  never prompted, ZERO model requests reached the counting substitute. */
-const expectZeroRequestProductionRefusal = (
-  run: ProductionRun,
-  code: EmissionStartupRefusalCode,
-): RefusedDecision => {
-  let refusedDecision: RefusedDecision;
-  try {
-    refusedDecision = asRefused(run.decision);
-  } catch (error) {
-    throw new Error(`[${run.label}] ${(error as Error).message}; stderr: ${run.stderr}`);
-  }
-  expect(refusedDecision.code, run.label).toBe(code);
-  expect(refusedDecision.message, run.label).toContain(EMISSION_STARTUP_REMEDIATIONS[code]);
-  expect(run.prompted, run.label).toBe(false);
-  expect(run.requestCount, run.label).toBe(0);
-  expect(run.firstRequestAt, run.label).toBeNull();
-  return refusedDecision;
 };
 
 const asProvisionedPayload = (run: ProductionRun, index = 0): ReadinessReport => {
@@ -2555,7 +2527,7 @@ const launchResolveEnvelope = (
 };
 
 describe("the parent emission adapter over the installed synchronous launch port", () => {
-  it("keeps ordinary extension initialization available when the event bus is absent and reports the launcher unavailable", () => {
+  it("keeps ordinary extension initialization available when the event bus is absent and reports the launcher unavailable", async () => {
     const bridge = registerPiEmissionLaunchBridge(undefined);
     expect(bridge.probe()).toEqual({ kind: "unavailable", reason: "this Pi runtime exposes no extension event bus" });
     expect(bridge.stage([
@@ -2569,17 +2541,12 @@ describe("the parent emission adapter over the installed synchronous launch port
       bridge.removeSession("01a0e4b3-c4c1-7b63-916d-f5d41d2b5a00");
     }).not.toThrow();
 
-    const previousBinding = process.env[LOOM_EMISSION_BINDING_ENV];
-    delete process.env[LOOM_EMISSION_BINDING_ENV];
-    try {
+    await withProcessState({ env: { [LOOM_EMISSION_BINDING_ENV]: undefined } }, () => {
       const pi = new NoEventBusFakePi();
       expect(() => loomPiExtension(pi as never, () => Object.freeze([]))).not.toThrow();
       expect(pi.handlers.has("tool_call")).toBe(true);
       expect(pi.commands.has(EMISSION_READINESS_COMMAND)).toBe(true);
-    } finally {
-      if (previousBinding === undefined) delete process.env[LOOM_EMISSION_BINDING_ENV];
-      else process.env[LOOM_EMISSION_BINDING_ENV] = previousBinding;
-    }
+    });
   });
 
   it("fails its synchronous capability probe closed when the installed launcher is missing", () => {
@@ -3241,23 +3208,11 @@ describe("production parent tool_call to installed launcher readiness barrier", 
     } as const;
   };
 
-  const withPublishedRunEnvironment = async <T>(
+  const withPublishedRunEnvironment = <T>(
     fixture: PublishedParentSpawnFixture,
     operation: () => Promise<T>,
-  ): Promise<T> => {
-    const previousRoot = process.env[RUNS_ROOT_ENV];
-    const previousRun = process.env[RUN_DIR_ENV];
-    process.env[RUNS_ROOT_ENV] = fixture.runsRoot;
-    process.env[RUN_DIR_ENV] = fixture.runDirectory;
-    try {
-      return await operation();
-    } finally {
-      if (previousRoot === undefined) delete process.env[RUNS_ROOT_ENV];
-      else process.env[RUNS_ROOT_ENV] = previousRoot;
-      if (previousRun === undefined) delete process.env[RUN_DIR_ENV];
-      else process.env[RUN_DIR_ENV] = previousRun;
-    }
-  };
+  ): Promise<T> =>
+    withProcessState({ env: { [RUNS_ROOT_ENV]: fixture.runsRoot, [RUN_DIR_ENV]: fixture.runDirectory } }, operation);
 
   const invokeExistingParentSpawn = async (
     pi: ParentGuardFakePi,
@@ -3279,19 +3234,14 @@ describe("production parent tool_call to installed launcher readiness barrier", 
     toolCallId: string,
     qualified: { count: number },
   ): Promise<Readonly<{ pi: ParentGuardFakePi; result: unknown }>> => {
-    const previousPiAgentDir = process.env["PI_CODING_AGENT_DIR"];
-    process.env["PI_CODING_AGENT_DIR"] = fixture.piAgentDir;
-    try {
+    return withProcessState({ env: { PI_CODING_AGENT_DIR: fixture.piAgentDir } }, async () => {
       const pi = new ParentGuardFakePi(bus);
       loomPiExtension(pi as never, () => Object.freeze([]), qualifiedPublishedReviewerRoute(() => {
         qualified.count += 1;
       }));
       const result = await invokeExistingParentSpawn(pi, fixture, toolCallId);
       return Object.freeze({ pi, result });
-    } finally {
-      if (previousPiAgentDir === undefined) delete process.env["PI_CODING_AGENT_DIR"];
-      else process.env["PI_CODING_AGENT_DIR"] = previousPiAgentDir;
-    }
+    });
   };
 
   const deliverParentToolResult = async (
@@ -3352,17 +3302,15 @@ describe("production parent tool_call to installed launcher readiness barrier", 
       source: "user",
       filePath: join(fixture.root, "code-reviewer.md"),
     } as const;
-    const previousArgv1 = process.argv[1];
-    const previousPath = process.env["PATH"];
-    const previousLog = process.env["FAKE_INSTALLED_LAUNCH_LOG"];
-    const previousRevision = process.env["FAKE_INSTALLED_LAUNCH_REVISION"];
-    const previousVariant = process.env["FAKE_INSTALLED_LAUNCH_VARIANT"];
-    delete process.argv[1];
-    process.env["PATH"] = `${fixture.root}:${previousPath ?? ""}`;
-    process.env["FAKE_INSTALLED_LAUNCH_LOG"] = log;
-    process.env["FAKE_INSTALLED_LAUNCH_REVISION"] = captureLoomRuntimeIdentity(repoRoot).revision;
-    process.env["FAKE_INSTALLED_LAUNCH_VARIANT"] = variant;
-    try {
+    return withProcessState({
+      env: {
+        PATH: `${fixture.root}:${process.env["PATH"] ?? ""}`,
+        FAKE_INSTALLED_LAUNCH_LOG: log,
+        FAKE_INSTALLED_LAUNCH_REVISION: captureLoomRuntimeIdentity(repoRoot).revision,
+        FAKE_INSTALLED_LAUNCH_VARIANT: variant,
+      },
+      clearArgv1: true,
+    }, async () => {
       const result = await installed.launcher.runSingleAgent(
         fixture.root,
         [agent],
@@ -3383,18 +3331,7 @@ describe("production parent tool_call to installed launcher readiness barrier", 
         },
       );
       return Object.freeze({ result, log });
-    } finally {
-      if (previousArgv1 === undefined) delete process.argv[1];
-      else process.argv[1] = previousArgv1;
-      if (previousPath === undefined) delete process.env["PATH"];
-      else process.env["PATH"] = previousPath;
-      if (previousLog === undefined) delete process.env["FAKE_INSTALLED_LAUNCH_LOG"];
-      else process.env["FAKE_INSTALLED_LAUNCH_LOG"] = previousLog;
-      if (previousRevision === undefined) delete process.env["FAKE_INSTALLED_LAUNCH_REVISION"];
-      else process.env["FAKE_INSTALLED_LAUNCH_REVISION"] = previousRevision;
-      if (previousVariant === undefined) delete process.env["FAKE_INSTALLED_LAUNCH_VARIANT"];
-      else process.env["FAKE_INSTALLED_LAUNCH_VARIANT"] = previousVariant;
-    }
+    });
   };
 
   it("refuses a stale disposable generated Agent before authenticating or launching the issued request", async () => {
@@ -3684,15 +3621,7 @@ describe("native installed subagent launcher integration", { timeout: 20_000 }, 
       projectAgentsDir: null,
       results,
     });
-    const previousArgv1 = process.argv[1];
-    const previousPath = process.env["PATH"];
-    const previousLog = process.env["FAKE_INSTALLED_LAUNCH_LOG"];
-    const previousRevision = process.env["FAKE_INSTALLED_LAUNCH_REVISION"];
-    const previousVariant = process.env["FAKE_INSTALLED_LAUNCH_VARIANT"];
-    const previousAmbientBinding = process.env[LOOM_EMISSION_BINDING_ENV];
-    delete process.argv[1];
-    process.env["PATH"] = `${tmp}:${previousPath ?? ""}`;
-    process.env["FAKE_INSTALLED_LAUNCH_LOG"] = log;
+    const ambientBinding = process.env[LOOM_EMISSION_BINDING_ENV];
 
     const run = async (launch: PiEmissionLaunchExpectation) => installed.launcher.runSingleAgent(
       repoRoot,
@@ -3715,76 +3644,77 @@ describe("native installed subagent launcher integration", { timeout: 20_000 }, 
     );
 
     try {
-      for (const [variant, diagnostic] of [
-        ["missing-command", "Required extension command /loom-emission-readiness is unavailable"],
-        ["inactive", "registered but inactive"],
-        ["wrong-schema", "registered schema digest"],
-        ["stale-revision", "reports revision sha256:stale-child"],
-      ] as const) {
-        const refused = bridgeLaunchExpectation(
-          JUDGE_V1_CELL,
-          `tool-call-native-${variant}`,
-          { kind: "single", index: 0 },
-        );
-        expect(bridge.stage([refused])).toEqual({ ok: true });
-        process.env["FAKE_INSTALLED_LAUNCH_VARIANT"] = variant === "stale-revision" ? "matching" : variant;
-        process.env["FAKE_INSTALLED_LAUNCH_REVISION"] = variant === "stale-revision"
-          ? "sha256:stale-child"
-          : refused.revision;
-        const refusedResult = await run(refused);
-        expect(refusedResult.exitCode, variant).toBe(1);
-        expect(refusedResult.stderr, variant).toContain(diagnostic);
-        bridge.removeToolCall(refused.sessionId, refused.toolCallId);
-      }
-      // None of the missing/inactive/wrong-schema/revision children reached
-      // Task prompt — the executable launcher's zero-model-request invariant.
-      await expect(readFile(log, "utf8")).rejects.toThrow();
-
-      const retry = bridgeLaunchExpectation(JUDGE_V1_CELL, "tool-call-native-retry", { kind: "single", index: 0 });
-      expect(bridge.stage([retry])).toEqual({ ok: true });
-      process.env["FAKE_INSTALLED_LAUNCH_VARIANT"] = "matching";
-      process.env["FAKE_INSTALLED_LAUNCH_REVISION"] = retry.revision;
-      const retryResult = await run(retry);
-      expect(retryResult.exitCode).toBe(0);
-      expect(await readFile(log, "utf8")).toBe("emission-task\n");
-
-      bridge.removeToolCall(retry.sessionId, retry.toolCallId);
-      const ordinaryResult = await installed.launcher.runSingleAgent(
-        repoRoot,
-        [agent],
-        agent.name,
-        "ordinary extraction-only task",
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        makeDetails,
-        routingSnapshot,
-        {
-          events: bus,
-          sessionId: "01a0e4b3-c4c1-7b63-916d-f5d41d2b5a00",
-          toolCallId: "tool-call-native-ordinary",
-          slot: { kind: "single", index: 0 },
-          readinessTimeoutMs: 2_000,
+      // The fake launcher's variant and revision are set per launch below; the
+      // ambient emission binding keeps its value and must survive every launch.
+      await withProcessState({
+        env: {
+          PATH: `${tmp}:${process.env["PATH"] ?? ""}`,
+          FAKE_INSTALLED_LAUNCH_LOG: log,
+          FAKE_INSTALLED_LAUNCH_REVISION: undefined,
+          FAKE_INSTALLED_LAUNCH_VARIANT: undefined,
+          [LOOM_EMISSION_BINDING_ENV]: ambientBinding,
         },
-      );
-      expect(ordinaryResult.exitCode).toBe(0);
-      expect(ordinaryResult.messages).toHaveLength(1);
-      expect(await readFile(log, "utf8")).toBe("emission-task\nordinary-task\n");
-      expect(process.env[LOOM_EMISSION_BINDING_ENV]).toBe(previousAmbientBinding);
+        clearArgv1: true,
+      }, async () => {
+        for (const [variant, diagnostic] of [
+          ["missing-command", "Required extension command /loom-emission-readiness is unavailable"],
+          ["inactive", "registered but inactive"],
+          ["wrong-schema", "registered schema digest"],
+          ["stale-revision", "reports revision sha256:stale-child"],
+        ] as const) {
+          const refused = bridgeLaunchExpectation(
+            JUDGE_V1_CELL,
+            `tool-call-native-${variant}`,
+            { kind: "single", index: 0 },
+          );
+          expect(bridge.stage([refused])).toEqual({ ok: true });
+          process.env["FAKE_INSTALLED_LAUNCH_VARIANT"] = variant === "stale-revision" ? "matching" : variant;
+          process.env["FAKE_INSTALLED_LAUNCH_REVISION"] = variant === "stale-revision"
+            ? "sha256:stale-child"
+            : refused.revision;
+          const refusedResult = await run(refused);
+          expect(refusedResult.exitCode, variant).toBe(1);
+          expect(refusedResult.stderr, variant).toContain(diagnostic);
+          bridge.removeToolCall(refused.sessionId, refused.toolCallId);
+        }
+        // None of the missing/inactive/wrong-schema/revision children reached
+        // Task prompt — the executable launcher's zero-model-request invariant.
+        await expect(readFile(log, "utf8")).rejects.toThrow();
+
+        const retry = bridgeLaunchExpectation(JUDGE_V1_CELL, "tool-call-native-retry", { kind: "single", index: 0 });
+        expect(bridge.stage([retry])).toEqual({ ok: true });
+        process.env["FAKE_INSTALLED_LAUNCH_VARIANT"] = "matching";
+        process.env["FAKE_INSTALLED_LAUNCH_REVISION"] = retry.revision;
+        const retryResult = await run(retry);
+        expect(retryResult.exitCode).toBe(0);
+        expect(await readFile(log, "utf8")).toBe("emission-task\n");
+
+        bridge.removeToolCall(retry.sessionId, retry.toolCallId);
+        const ordinaryResult = await installed.launcher.runSingleAgent(
+          repoRoot,
+          [agent],
+          agent.name,
+          "ordinary extraction-only task",
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          makeDetails,
+          routingSnapshot,
+          {
+            events: bus,
+            sessionId: "01a0e4b3-c4c1-7b63-916d-f5d41d2b5a00",
+            toolCallId: "tool-call-native-ordinary",
+            slot: { kind: "single", index: 0 },
+            readinessTimeoutMs: 2_000,
+          },
+        );
+        expect(ordinaryResult.exitCode).toBe(0);
+        expect(ordinaryResult.messages).toHaveLength(1);
+        expect(await readFile(log, "utf8")).toBe("emission-task\nordinary-task\n");
+        expect(process.env[LOOM_EMISSION_BINDING_ENV]).toBe(ambientBinding);
+      });
     } finally {
-      if (previousArgv1 === undefined) delete process.argv[1];
-      else process.argv[1] = previousArgv1;
-      if (previousPath === undefined) delete process.env["PATH"];
-      else process.env["PATH"] = previousPath;
-      if (previousLog === undefined) delete process.env["FAKE_INSTALLED_LAUNCH_LOG"];
-      else process.env["FAKE_INSTALLED_LAUNCH_LOG"] = previousLog;
-      if (previousRevision === undefined) delete process.env["FAKE_INSTALLED_LAUNCH_REVISION"];
-      else process.env["FAKE_INSTALLED_LAUNCH_REVISION"] = previousRevision;
-      if (previousVariant === undefined) delete process.env["FAKE_INSTALLED_LAUNCH_VARIANT"];
-      else process.env["FAKE_INSTALLED_LAUNCH_VARIANT"] = previousVariant;
-      if (previousAmbientBinding === undefined) delete process.env[LOOM_EMISSION_BINDING_ENV];
-      else process.env[LOOM_EMISSION_BINDING_ENV] = previousAmbientBinding;
       await rm(tmp, { recursive: true, force: true });
     }
   });
@@ -3875,41 +3805,39 @@ describe(`the PRODUCTION loom child extension through the real barrier protocol 
     );
     if (rawBinding === undefined) throw new Error("the diagnostic fixture failed to mint provisioning");
 
-    const previousBinding = process.env[LOOM_EMISSION_BINDING_ENV];
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation((() => true) as typeof process.stderr.write);
-    process.env[LOOM_EMISSION_BINDING_ENV] = rawBinding;
     try {
-      const productionExtension = await import("../../../pi/extension");
-      const pi = new EmissionHoldFakePi();
-      productionExtension.default(pi as never, () => Object.freeze([]));
-      const holdHandler = pi.handlers.get("before_agent_start")?.[1];
-      const readiness = pi.commands.get(EMISSION_READINESS_COMMAND);
-      if (holdHandler === undefined || readiness === undefined) {
-        throw new Error("the production extension did not register its emission hold and readiness command");
-      }
+      await withProcessState({ env: { [LOOM_EMISSION_BINDING_ENV]: rawBinding } }, async () => {
+        const productionExtension = await import("../../../pi/extension");
+        const pi = new EmissionHoldFakePi();
+        productionExtension.default(pi as never, () => Object.freeze([]));
+        const holdHandler = pi.handlers.get("before_agent_start")?.[1];
+        const readiness = pi.commands.get(EMISSION_READINESS_COMMAND);
+        if (holdHandler === undefined || readiness === undefined) {
+          throw new Error("the production extension did not register its emission hold and readiness command");
+        }
 
-      let holdSettled = false;
-      const heldPrompt = Promise.resolve(holdHandler({}, {})).then(() => {
-        holdSettled = true;
+        let holdSettled = false;
+        const heldPrompt = Promise.resolve(holdHandler({}, {})).then(() => {
+          holdSettled = true;
+        });
+        await sleep(20);
+        expect(holdSettled).toBe(false);
+
+        await readiness.handler("", {});
+        await heldPrompt;
+        expect(holdSettled).toBe(true);
+        expect(pi.entries.some((entry) => entry.customType === EMISSION_READINESS_ENTRY_TYPE)).toBe(true);
+
+        const diagnostic = stderr.mock.calls.map(([chunk]) => String(chunk)).join("");
+        expect(diagnostic).toContain("emission hold entered diagnostic append failed (Error: hold journal unavailable");
+        expect(diagnostic).toContain("emission hold resolved diagnostic append failed (Error: hold journal unavailable");
+        expect(diagnostic).toContain("the hold remains fail-closed");
+        expect(diagnostic).toContain("…");
+        expect(diagnostic.length).toBeLessThan(1_000);
       });
-      await sleep(20);
-      expect(holdSettled).toBe(false);
-
-      await readiness.handler("", {});
-      await heldPrompt;
-      expect(holdSettled).toBe(true);
-      expect(pi.entries.some((entry) => entry.customType === EMISSION_READINESS_ENTRY_TYPE)).toBe(true);
-
-      const diagnostic = stderr.mock.calls.map(([chunk]) => String(chunk)).join("");
-      expect(diagnostic).toContain("emission hold entered diagnostic append failed (Error: hold journal unavailable");
-      expect(diagnostic).toContain("emission hold resolved diagnostic append failed (Error: hold journal unavailable");
-      expect(diagnostic).toContain("the hold remains fail-closed");
-      expect(diagnostic).toContain("…");
-      expect(diagnostic.length).toBeLessThan(1_000);
     } finally {
       stderr.mockRestore();
-      if (previousBinding === undefined) delete process.env[LOOM_EMISSION_BINDING_ENV];
-      else process.env[LOOM_EMISSION_BINDING_ENV] = previousBinding;
     }
   });
 
@@ -3923,55 +3851,53 @@ describe(`the PRODUCTION loom child extension through the real barrier protocol 
     );
     if (rawBinding === undefined) throw new Error("the shutdown-release fixture failed to mint provisioning");
 
-    const previousBinding = process.env[LOOM_EMISSION_BINDING_ENV];
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation((() => true) as typeof process.stderr.write);
-    process.env[LOOM_EMISSION_BINDING_ENV] = rawBinding;
     try {
-      const productionExtension = await import("../../../pi/extension");
-      const pi = new EmissionHoldFakePi();
-      productionExtension.default(pi as never, () => Object.freeze([]));
-      const holdHandler = pi.handlers.get("before_agent_start")?.[1];
-      // The emission fail-safe is the SECOND session_shutdown handler: the
-      // interactive-subagent bridge registers one first, the emission
-      // fail-safe second, and the general cleanup third (whose fake-ctx
-      // behavior this unit fixture does not drive).
-      const shutdownFailSafe = pi.handlers.get("session_shutdown")?.[1];
-      if (holdHandler === undefined || shutdownFailSafe === undefined) {
-        throw new Error("the production extension did not register its emission hold and shutdown fail-safe");
-      }
+      await withProcessState({ env: { [LOOM_EMISSION_BINDING_ENV]: rawBinding } }, async () => {
+        const productionExtension = await import("../../../pi/extension");
+        const pi = new EmissionHoldFakePi();
+        productionExtension.default(pi as never, () => Object.freeze([]));
+        const holdHandler = pi.handlers.get("before_agent_start")?.[1];
+        // The emission fail-safe is the SECOND session_shutdown handler: the
+        // interactive-subagent bridge registers one first, the emission
+        // fail-safe second, and the general cleanup third (whose fake-ctx
+        // behavior this unit fixture does not drive).
+        const shutdownFailSafe = pi.handlers.get("session_shutdown")?.[1];
+        if (holdHandler === undefined || shutdownFailSafe === undefined) {
+          throw new Error("the production extension did not register its emission hold and shutdown fail-safe");
+        }
 
-      let holdSettled = false;
-      const heldPrompt = Promise.resolve(holdHandler({}, {})).then(() => {
-        holdSettled = true;
+        let holdSettled = false;
+        const heldPrompt = Promise.resolve(holdHandler({}, {})).then(() => {
+          holdSettled = true;
+        });
+        await sleep(20);
+        expect(holdSettled).toBe(false);
+
+        // Shutdown with the hold armed: the wedged coroutine resolves. The
+        // fake journal refuses hold entries, so the shutdown-released marker
+        // surfaces as the bounded stderr diagnostic — the entry emission is
+        // attempted even when the journal is unavailable.
+        await shutdownFailSafe({}, {});
+        await heldPrompt;
+        expect(holdSettled).toBe(true);
+
+        // A second shutdown is inert: the hold is already released, so exactly
+        // one shutdown-released diagnostic is emitted and nothing re-releases.
+        await shutdownFailSafe({}, {});
+        const diagnostic = stderr.mock.calls.map(([chunk]) => String(chunk)).join("");
+        expect(diagnostic).toContain("emission hold shutdown-released diagnostic append failed (Error: hold journal unavailable");
+        expect(diagnostic.match(/shutdown-released diagnostic append failed/g)).toHaveLength(1);
+        expect(diagnostic).toContain("the hold remains fail-closed");
       });
-      await sleep(20);
-      expect(holdSettled).toBe(false);
-
-      // Shutdown with the hold armed: the wedged coroutine resolves. The
-      // fake journal refuses hold entries, so the shutdown-released marker
-      // surfaces as the bounded stderr diagnostic — the entry emission is
-      // attempted even when the journal is unavailable.
-      await shutdownFailSafe({}, {});
-      await heldPrompt;
-      expect(holdSettled).toBe(true);
-
-      // A second shutdown is inert: the hold is already released, so exactly
-      // one shutdown-released diagnostic is emitted and nothing re-releases.
-      await shutdownFailSafe({}, {});
-      const diagnostic = stderr.mock.calls.map(([chunk]) => String(chunk)).join("");
-      expect(diagnostic).toContain("emission hold shutdown-released diagnostic append failed (Error: hold journal unavailable");
-      expect(diagnostic.match(/shutdown-released diagnostic append failed/g)).toHaveLength(1);
-      expect(diagnostic).toContain("the hold remains fail-closed");
     } finally {
       stderr.mockRestore();
-      if (previousBinding === undefined) delete process.env[LOOM_EMISSION_BINDING_ENV];
-      else process.env[LOOM_EMISSION_BINDING_ENV] = previousBinding;
     }
   });
 
   it("matching readiness on the judge-verdict v1 cell opens the gate, exposes the exact registered tool to the constrained route, and the first model request lands after the readiness observation", async () => {
     const run = await runProductionGate(productionScenario("production-matching-judge-v1", { issuedCell: JUDGE_V1_CELL, waitForRequest: true }));
-    const open = expectOpenProductionRun(run);
+    const open = expectOpenRun(run);
     expect(run.channelAlive).toBe(true);
     expect(run.commandListed).toBe(true);
     expect(run.invocationCount).toBe(1);
@@ -3996,13 +3922,13 @@ describe(`the PRODUCTION loom child extension through the real barrier protocol 
     // FR-001 on the production path: the provider request carries the exact
     // registered emission tool.
     expect(run.requestBodies[0]).toContain("loom_emit_judge_verdict");
-    const { firstRequestAt, readinessObservedAt } = productionOrderingPair(run);
+    const { firstRequestAt, readinessObservedAt } = orderingPair(run);
     expect(firstRequestAt).toBeGreaterThanOrEqual(readinessObservedAt);
   });
 
   it("matching readiness on the reviewer-payload v2 cell opens the gate, and the first model request lands after the readiness observation", async () => {
     const run = await runProductionGate(productionScenario("production-matching-reviewer-v2", { waitForRequest: true }));
-    expectOpenProductionRun(run);
+    expectOpenRun(run);
     expect(run.prompted).toBe(true);
     expect(run.requestCount).toBe(1);
     const readiness = asProvisionedPayload(run);
@@ -4013,13 +3939,13 @@ describe(`the PRODUCTION loom child extension through the real barrier protocol 
     expect(readiness.schemaDigest).toBe(sha256Hex(REVIEWER_V2_CELL.schemaBytes));
     expect(readiness.active).toBe(true);
     expect(run.requestBodies[0]).toContain("loom_emit_reviewer_payload");
-    const { firstRequestAt, readinessObservedAt } = productionOrderingPair(run);
+    const { firstRequestAt, readinessObservedAt } = orderingPair(run);
     expect(firstRequestAt).toBeGreaterThanOrEqual(readinessObservedAt);
   });
 
   it("re-invoking the production readiness command is idempotent — identical payloads, exactly ONE registered emission tool", async () => {
     const run = await runProductionGate(productionScenario("production-idempotent-reinvocation", { issuedCell: JUDGE_V1_CELL, doubleInvocation: true, waitForRequest: true }));
-    const open = expectOpenProductionRun(run);
+    const open = expectOpenRun(run);
     expect(run.invocationCount).toBe(2);
     expect(run.readinessPayloads).toHaveLength(2);
     const [first, second] = [asProvisionedPayload(run, 0), asProvisionedPayload(run, 1)];
@@ -4034,7 +3960,7 @@ describe(`the PRODUCTION loom child extension through the real barrier protocol 
 
   it("an honestly-inactive tool under a real --tools allowlist exclusion is reported active:false by the production payload and refused with ZERO model requests", async () => {
     const run = await runProductionGate(productionScenario("production-honestly-inactive", { allowlist: ["read"] }));
-    const refusedDecision = expectZeroRequestProductionRefusal(run, "tool-inactive");
+    const refusedDecision = expectZeroRequestRefusal(run, "tool-inactive");
     const readiness = asProvisionedPayload(run);
     expect(readiness.active).toBe(false);
     expect(readiness.toolName).toBe("loom_emit_reviewer_payload");
@@ -4046,7 +3972,7 @@ describe(`the PRODUCTION loom child extension through the real barrier protocol 
     const run = await runProductionGate(productionScenario("production-wrong-request", {
       provisioning: canonicalRecord({ kind: "minted" as const, cell: REVIEWER_V2_CELL, requestId: staleRequestId }),
     }));
-    const refusedDecision = expectZeroRequestProductionRefusal(run, "wrong-request");
+    const refusedDecision = expectZeroRequestRefusal(run, "wrong-request");
     const readiness = asProvisionedPayload(run);
     expect(readiness.requestId).toBe(staleRequestId);
     expect(refusedDecision.message).toContain(staleRequestId);
@@ -4057,7 +3983,7 @@ describe(`the PRODUCTION loom child extension through the real barrier protocol 
     const run = await runProductionGate(productionScenario("production-wrong-kind", {
       provisioning: canonicalRecord({ kind: "minted" as const, cell: JUDGE_V1_CELL }),
     }));
-    const refusedDecision = expectZeroRequestProductionRefusal(run, "unexpected-kind");
+    const refusedDecision = expectZeroRequestRefusal(run, "unexpected-kind");
     const readiness = asProvisionedPayload(run);
     expect(readiness.kind).toBe("judge-verdict");
     expect(readiness.toolName).toBe("loom_emit_judge_verdict");
@@ -4066,7 +3992,7 @@ describe(`the PRODUCTION loom child extension through the real barrier protocol 
 
   it("a launcher expecting a stale revision is refused by the production child's honest load identity with ZERO model requests", async () => {
     const run = await runProductionGate(productionScenario("production-stale-revision", { expectationRevision: STALE_REVISION }));
-    const refusedDecision = expectZeroRequestProductionRefusal(run, "revision-mismatch");
+    const refusedDecision = expectZeroRequestRefusal(run, "revision-mismatch");
     const readiness = asProvisionedPayload(run);
     expect(readiness.revision).not.toBe(STALE_REVISION);
     expect(refusedDecision.message).toContain(STALE_REVISION);
@@ -4076,7 +4002,7 @@ describe(`the PRODUCTION loom child extension through the real barrier protocol 
     const run = await runProductionGate(productionScenario("production-absent-provisioning", {
       provisioning: canonicalRecord({ kind: "absent" as const }),
     }));
-    const refusedDecision = expectZeroRequestProductionRefusal(run, "startup-unavailable");
+    const refusedDecision = expectZeroRequestRefusal(run, "startup-unavailable");
     expect(run.commandListed).toBe(true);
     expect(run.invocationCount).toBe(1);
     expect(run.readinessPayloads).toHaveLength(0);
@@ -4095,7 +4021,7 @@ describe(`the PRODUCTION loom child extension through the real barrier protocol 
         raw: JSON.stringify({ requestId: "req-t5-garbage-1", contextDigest: sha256Hex("ctx"), kind: "no-such-kind", version: "v1" }),
       }),
     }));
-    const refusedDecision = expectZeroRequestProductionRefusal(run, "startup-unavailable");
+    const refusedDecision = expectZeroRequestRefusal(run, "startup-unavailable");
     expect(run.readinessPayloads).toHaveLength(0);
     const readinessError = run.extensionErrors.map((error) => error.error).join(" | ");
     expect(readinessError).toContain("unknown-producer-kind");

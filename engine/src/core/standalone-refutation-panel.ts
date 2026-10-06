@@ -7,7 +7,7 @@
 import { canonicalDigest } from "./digest";
 import type { Finding } from "./findings";
 import {
-  canonicalRecord, parseArtifactDigest, parseOrchestrationRunId,
+  canonicalRecord, canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId,
   type ArtifactDigest, type DomainResult, type NonEmpty, type OrchestrationRunId,
 } from "./orchestration-contract";
 import { failure, success } from "./orchestration-contract/identity";
@@ -165,7 +165,7 @@ export function freezeStandalonePanelAuthority(
     errors.push("panel authority aggregate belongs to another standalone run");
   }
   if (expectedFindings.length === 0) errors.push("panel authority requires at least one canonical critical finding");
-  if (!Array.isArray(input.panelFindings) || JSON.stringify(input.panelFindings) !== JSON.stringify(expectedFindings)) {
+  if (!Array.isArray(input.panelFindings) || !canonicalStructuralEquals(input.panelFindings, expectedFindings)) {
     errors.push("panel authority findings must exactly match the frozen standalone critical finding brief");
   }
   const lenses = Array.isArray(input.lenses) && input.lenses.every((lens) =>
@@ -228,7 +228,7 @@ export function parseFrozenStandalonePanelAuthority(
   });
   if (!parsed.ok) return parsed;
   if (raw.findingBriefDigest !== parsed.value.findingBriefDigest ||
-      JSON.stringify(raw) !== JSON.stringify(parsed.value)) {
+      !canonicalStructuralEquals(raw, parsed.value)) {
     return failure(canonicalRecord({
       kind: "standalone-panel-authority-rejected" as const,
       message: "persisted standalone panel authority does not match the canonical finding brief",

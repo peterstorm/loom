@@ -1022,9 +1022,26 @@ describe("orchestration CLI", () => {
       if (!parsedDigest.ok) throw new Error(parsedDigest.error.message);
       return parsedDigest.value;
     };
-    /** The semantic refutation authority of a LEGACY panel run's context —
-     *  the `panel-authority` section materializePanelRequest publishes. */
-    function legacyRefutationVerdict(handle: RunDirHandle, authority: AgentRequestAuthority, verdict: "upheld" | "refuted"): string {
+    type RefutationVerdict = "upheld" | "refuted";
+    const refutationProgram = JSON.stringify({ input: { criticalFindingIds: ["T1:finding-1"], lenses: ["reproduction"] }, events: [] });
+
+    /** A started LEGACY refutation run, opened, with its first verifier attempt's authority. */
+    async function startedRefutationRun(runName: string) {
+      const root = project();
+      const runsRoot = join(root, "runs");
+      const runDir = join(runsRoot, runName);
+      mkdirSync(runDir, { recursive: true });
+      const started = await runCli(["start", "refutation", "--runs-root", runsRoot, "--run", runDir], refutationProgram, root);
+      expect(started.status, started.stderr).toBe(0);
+      const request = (JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] }).requests[0]!.authority;
+      const opened = openRunDirectory(runsRoot, runDir);
+      if (!opened.ok) throw new Error(opened.error.message);
+      return { root, runsRoot, runDir, opened: opened.value, request };
+    }
+
+    /** A refutation verdict for every critical finding under the run's first lens, read from the
+     *  `panel-authority` section materializePanelRequest publishes into a LEGACY panel context. */
+    function refutationVerdictArguments(handle: RunDirHandle, authority: AgentRequestAuthority, verdict: RefutationVerdict) {
       const context = handle.readContext(authority.contextDigest);
       if (!context.ok) throw new Error(context.error.message);
       const section = context.value.fixedContext.find(({ label }) => label === "panel-authority");
@@ -1032,15 +1049,24 @@ describe("orchestration CLI", () => {
       const semantic = JSON.parse(Buffer.from(section.bytes).toString("utf8")) as {
         input: { criticalFindingIds: readonly string[]; lenses: readonly string[] };
       };
-      return JSON.stringify({
+      return {
         criterion: semantic.input.lenses[0],
         verdicts: semantic.input.criticalFindingIds.map((id) => ({
           finding_id: id,
           verdict,
-          reasoning: verdict === "upheld"
-            ? "The current immutable packet still exhibits the finding"
-            : "The current immutable packet does not exhibit the finding",
+          reasoning: verdict === "upheld" ? "the current packet still exhibits the finding" : "the current packet does not exhibit the finding",
         })),
+      };
+    }
+
+    /** The complete refutation-verdict emission call of one attempt. */
+    function refutationEmissionCall(handle: RunDirHandle, request: AgentRequestAuthority, toolCallId: string, verdict: RefutationVerdict) {
+      return Object.freeze({
+        requestId: request.requestId,
+        toolCallId,
+        kind: Object.freeze({ kind: "refutation-verdict" as const }),
+        version: "v1" as const,
+        arguments: refutationVerdictArguments(handle, request, verdict),
       });
     }
     const judgeRegistration = () => {
@@ -1201,42 +1227,16 @@ describe("orchestration CLI", () => {
       expect(resolved.error).toContain(`issued emission binding certifies producer kind ${boundKind}, not the ${expectedKind} kind the ${program} attempt ${requestId} belongs to`);
     });
 
-    /** Start a refutation run, mint the issued refutation-verdict binding for
-     *  its verifier attempt, and publish a durable source record through the
-     *  settle seam's own constructor/serializer — the shared fixture of the
-     *  precedence and fail-closed unit tests below. */
-    async function publishedRefutationRecord(runName: string, payloadDigestOverride?: string) {
-      const root = project();
-      const runsRoot = join(root, "runs");
-      const runDir = join(runsRoot, runName);
-      mkdirSync(runDir, { recursive: true });
-      const program = JSON.stringify({ input: { criticalFindingIds: ["T1:finding-1"], lenses: ["reproduction"] }, events: [] });
-      const started = (await runCli(["start", "refutation", "--runs-root", runsRoot, "--run", runDir], program, root));
-      expect(started.status, started.stderr).toBe(0);
-      const request = (JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] }).requests[0]!.authority;
-      const opened = openRunDirectory(runsRoot, runDir);
-      if (!opened.ok) throw new Error(opened.error.message);
-      const context = opened.value.readContext(request.contextDigest);
-      if (!context.ok) throw new Error(context.error.message);
-      const authoritySection = context.value.fixedContext.find(({ label }) => label === "panel-authority");
-      if (authoritySection === undefined) throw new Error("refutation context lacks semantic authority");
-      const semantic = JSON.parse(Buffer.from(authoritySection.bytes).toString("utf8")) as {
-        input: { criticalFindingIds: readonly string[]; lenses: readonly string[] };
-      };
+    /** Mint the issued refutation-verdict binding for the attempt, select a
+     *  refuting emission verdict, and publish the durable source record through
+     *  the settle seam's own constructor/serializer — the same seam
+     *  production's capture-side caller runs. */
+    async function publishRefutationRecord(handle: RunDirHandle, request: AgentRequestAuthority, toolCallId: string, payloadDigestOverride?: string) {
       const minted = issueEmissionBinding({ requestId: request.requestId, kind: "refutation-verdict", version: "v1" });
       if (!minted.ok) throw new Error(minted.error.message);
       const selection = selectVerdictSource(minted.value, observeEmissionCalls([Object.freeze({
         kind: "complete" as const,
-        call: Object.freeze({
-          requestId: request.requestId,
-          toolCallId: "precedence-call",
-          kind: Object.freeze({ kind: "refutation-verdict" as const }),
-          version: "v1" as const,
-          arguments: {
-            criterion: semantic.input.lenses[0],
-            verdicts: semantic.input.criticalFindingIds.map((id) => ({ finding_id: id, verdict: "refuted", reasoning: "the current packet does not exhibit the finding" })),
-          },
-        }),
+        call: refutationEmissionCall(handle, request, toolCallId, "refuted"),
       })]), "prose, not a verdict");
       if (selection.kind !== "emission-tool-arguments") throw new Error(`fixture selection refused: ${selection.kind}`);
       const acceptedBytes = new TextEncoder().encode(selection.rawJson);
@@ -1250,12 +1250,19 @@ describe("orchestration CLI", () => {
         payloadByteLength: acceptedBytes.length,
       });
       if (!record.ok) throw new Error(record.error);
-      const published = await opened.value.publishArtifactSet([{
+      const published = await handle.publishArtifactSet([{
         relativePath: `panel-verdict-sources/${request.requestId}.json`,
         bytes: [...Buffer.from(`${JSON.stringify(record.value, null, 2)}\n`, "utf-8")],
       }]);
       expect(published.ok, published.ok ? "" : published.error.message).toBe(true);
-      return { opened: opened.value, request, binding: minted.value, record: record.value };
+      return { binding: minted.value, record: record.value };
+    }
+
+    /** A started refutation run whose verifier attempt already has a durable
+     *  source record — the shared fixture of the precedence and fail-closed unit tests below. */
+    async function publishedRefutationRecord(runName: string, payloadDigestOverride?: string) {
+      const { opened, request } = await startedRefutationRun(runName);
+      return { opened, request, ...await publishRefutationRecord(opened, request, "precedence-call", payloadDigestOverride) };
     }
 
     it("replays the durable record over a contradicting live emission input, and refuses a record whose payload digest does not certify the attempt bytes", async () => {
@@ -1298,64 +1305,17 @@ describe("orchestration CLI", () => {
     }, 30_000);
 
     it("replays a durable panel verdict source record through the legacy refutation panel", async () => {
-      const root = project();
-      const runsRoot = join(root, "runs");
-      const runDir = join(runsRoot, "run.refutation-emission-record");
-      mkdirSync(runDir, { recursive: true });
-      const program = JSON.stringify({ input: { criticalFindingIds: ["T1:finding-1"], lenses: ["reproduction"] }, events: [] });
-      const started = (await runCli(["start", "refutation", "--runs-root", runsRoot, "--run", runDir], program, root));
-      expect(started.status, started.stderr).toBe(0);
-      const request = (JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] }).requests[0]!.authority;
-      const opened = openRunDirectory(runsRoot, runDir);
-      if (!opened.ok) throw new Error(opened.error.message);
+      const { root, runsRoot, runDir, opened, request } = await startedRefutationRun("run.refutation-emission-record");
 
       // The raw attempt bytes are PROSE — without the record, the legacy scan
       // would refuse them ("not valid JSON") and the run would consume its
       // attempt on a parse failure.
       const raw = "the verifier answered in prose, never emitting a verdict";
-      expect((await captureReviewedTranscript(opened.value, request, [...Buffer.from(raw)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened, request, [...Buffer.from(raw)])).ok).toBe(true);
 
       // Mint the ISSUED refutation-verdict binding for THIS attempt's request,
-      // select the emission verdict, and publish the durable source record —
-      // the same constructor/settle seam production's capture-side caller runs.
-      const context = opened.value.readContext(request.contextDigest);
-      if (!context.ok) throw new Error(context.error.message);
-      const authoritySection = context.value.fixedContext.find(({ label }) => label === "panel-authority");
-      if (authoritySection === undefined) throw new Error("refutation context lacks semantic authority");
-      const semantic = JSON.parse(Buffer.from(authoritySection.bytes).toString("utf8")) as {
-        panel: string;
-        input: { criticalFindingIds: readonly string[]; lenses: readonly string[] };
-      };
-      const minted = issueEmissionBinding({ requestId: request.requestId, kind: "refutation-verdict", version: "v1" });
-      if (!minted.ok) throw new Error(minted.error.message);
-      const emissionCall = Object.freeze({
-        requestId: request.requestId,
-        toolCallId: "legacy-record-call",
-        kind: Object.freeze({ kind: "refutation-verdict" as const }),
-        version: "v1" as const,
-        arguments: {
-          criterion: semantic.input.lenses[0],
-          verdicts: semantic.input.criticalFindingIds.map((id) => ({ finding_id: id, verdict: "refuted", reasoning: "the current packet does not exhibit the finding" })),
-        },
-      });
-      const selection = selectVerdictSource(minted.value, observeEmissionCalls([Object.freeze({ kind: "complete" as const, call: emissionCall })]), raw);
-      if (selection.kind !== "emission-tool-arguments") throw new Error(`fixture selection refused: ${selection.kind}`);
-      const acceptedBytes = new TextEncoder().encode(selection.rawJson);
-      const record = panelVerdictSourceRecord({
-        requestId: request.requestId,
-        slotId: request.slotId,
-        attempt: request.attempt,
-        source: panelVerdictSourceProvenance(minted.value, selection),
-        acceptedCall: selection.call,
-        payloadDigest: artifactDigestOf(createHash("sha256").update(acceptedBytes).digest("hex")),
-        payloadByteLength: acceptedBytes.length,
-      });
-      if (!record.ok) throw new Error(record.error);
-      const published = await opened.value.publishArtifactSet([{
-        relativePath: `panel-verdict-sources/${request.requestId}.json`,
-        bytes: [...Buffer.from(`${JSON.stringify(record.value, null, 2)}\n`, "utf-8")],
-      }]);
-      expect(published.ok, published.ok ? "" : published.error.message).toBe(true);
+      // select the emission verdict, and publish the durable source record.
+      await publishRefutationRecord(opened, request, "legacy-record-call");
 
       // Resume: the reconciliation replays the record through the ONE selection
       // seam, accepts the emission verdict, and drives the panel to done — the
@@ -1377,17 +1337,8 @@ describe("orchestration CLI", () => {
     }, 30_000);
 
     it("fails closed when a durable record cannot be replayed, and keeps the no-record baseline byte-identical", async () => {
-      const root = project();
-      const runsRoot = join(root, "runs");
-      const runDir = join(runsRoot, "run.refutation-record-failclosed");
-      mkdirSync(runDir, { recursive: true });
-      const program = JSON.stringify({ input: { criticalFindingIds: ["T1:finding-1"], lenses: ["reproduction"] }, events: [] });
-      const started = (await runCli(["start", "refutation", "--runs-root", runsRoot, "--run", runDir], program, root));
-      expect(started.status, started.stderr).toBe(0);
-      const request = (JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] }).requests[0]!.authority;
-      const opened = openRunDirectory(runsRoot, runDir);
-      if (!opened.ok) throw new Error(opened.error.message);
-      expect((await captureReviewedTranscript(opened.value, request, [...Buffer.from("prose, not a verdict")])).ok).toBe(true);
+      const { root, runsRoot, runDir, opened, request } = await startedRefutationRun("run.refutation-record-failclosed");
+      expect((await captureReviewedTranscript(opened, request, [...Buffer.from("prose, not a verdict")])).ok).toBe(true);
 
       // A record whose schema digest does NOT certify the frozen schema is
       // unavailable evidence, never a silent extraction baseline: the scan
@@ -1415,7 +1366,7 @@ describe("orchestration CLI", () => {
         payloadDigest: createHash("sha256").update(Buffer.from("prose, not a verdict")).digest("hex"),
         payloadByteLength: Buffer.byteLength("prose, not a verdict"),
       };
-      const published = await opened.value.publishArtifactSet([{
+      const published = await opened.publishArtifactSet([{
         relativePath: `panel-verdict-sources/${request.requestId}.json`,
         bytes: [...Buffer.from(`${JSON.stringify(corrupted, null, 2)}\n`, "utf-8")],
       }]);
@@ -1423,60 +1374,28 @@ describe("orchestration CLI", () => {
       const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
       expect(resumed.status).not.toBe(0);
       expect(resumed.stderr).toContain("could not be replayed");
-      const events = await opened.value.readEvents();
+      const events = await opened.readEvents();
       expect(events.filter(({ event }) => (event as { type?: string }).type === "spawn-outcome")).toHaveLength(0);
 
       // The no-record baseline is unchanged: a VALID verdict under the same
       // slot without any record is accepted exactly as today, and no source
       // record is written for it.
-      const baselineDir = join(runsRoot, "run.refutation-record-baseline");
-      mkdirSync(baselineDir, { recursive: true });
-      const baselineStarted = (await runCli(["start", "refutation", "--runs-root", runsRoot, "--run", baselineDir], program, root));
-      expect(baselineStarted.status, baselineStarted.stderr).toBe(0);
-      const baselineRequest = (JSON.parse(baselineStarted.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] }).requests[0]!.authority;
-      const baselineOpened = openRunDirectory(runsRoot, baselineDir);
-      if (!baselineOpened.ok) throw new Error(baselineOpened.error.message);
-      const verdict = legacyRefutationVerdict(baselineOpened.value, baselineRequest, "upheld");
-      expect((await captureReviewedTranscript(baselineOpened.value, baselineRequest, [...Buffer.from(verdict)])).ok).toBe(true);
-      const baselineResumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", baselineDir], "", root));
+      const baseline = await startedRefutationRun("run.refutation-record-baseline");
+      const verdict = JSON.stringify(refutationVerdictArguments(baseline.opened, baseline.request, "upheld"));
+      expect((await captureReviewedTranscript(baseline.opened, baseline.request, [...Buffer.from(verdict)])).ok).toBe(true);
+      const baselineResumed = (await runCli(["resume", "--runs-root", baseline.runsRoot, "--run", baseline.runDir], "", baseline.root));
       expect(baselineResumed.status, baselineResumed.stderr).toBe(0);
       expect(JSON.parse(baselineResumed.stdout).kind).toBe("done");
-      expect(existsSync(join(baselineDir, "artifacts", "panel-verdict-sources"))).toBe(false);
+      expect(existsSync(join(baseline.runDir, "artifacts", "panel-verdict-sources"))).toBe(false);
     }, 30_000);
 
     it("settles a live emission selection with the write-ahead record through the production seam", async () => {
-      const root = project();
-      const runsRoot = join(root, "runs");
-      const runDir = join(runsRoot, "run.refutation-live-settle");
-      mkdirSync(runDir, { recursive: true });
-      const program = JSON.stringify({ input: { criticalFindingIds: ["T1:finding-1"], lenses: ["reproduction"] }, events: [] });
-      const started = (await runCli(["start", "refutation", "--runs-root", runsRoot, "--run", runDir], program, root));
-      expect(started.status, started.stderr).toBe(0);
-      const request = (JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] }).requests[0]!.authority;
-      const opened = openRunDirectory(runsRoot, runDir);
-      if (!opened.ok) throw new Error(opened.error.message);
-      const context = opened.value.readContext(request.contextDigest);
-      if (!context.ok) throw new Error(context.error.message);
-      const authoritySection = context.value.fixedContext.find(({ label }) => label === "panel-authority");
-      if (authoritySection === undefined) throw new Error("refutation context lacks semantic authority");
-      const semantic = JSON.parse(Buffer.from(authoritySection.bytes).toString("utf8")) as {
-        panel: string;
-        input: { criticalFindingIds: readonly string[]; lenses: readonly string[] };
-      };
+      const { opened, request } = await startedRefutationRun("run.refutation-live-settle");
       const minted = issueEmissionBinding({ requestId: request.requestId, kind: "refutation-verdict", version: "v1" });
       if (!minted.ok) throw new Error(minted.error.message);
-      const emissionCall = Object.freeze({
-        requestId: request.requestId,
-        toolCallId: "live-settle-call",
-        kind: Object.freeze({ kind: "refutation-verdict" as const }),
-        version: "v1" as const,
-        arguments: {
-          criterion: semantic.input.lenses[0],
-          verdicts: semantic.input.criticalFindingIds.map((id) => ({ finding_id: id, verdict: "upheld", reasoning: "the current packet still exhibits the finding" })),
-        },
-      });
+      const emissionCall = refutationEmissionCall(opened, request, "live-settle-call", "upheld");
       const settled = await settlePanelAttemptSubmission({
-        handle: opened.value,
+        handle: opened,
         registration: refutationRegistration(),
         request,
         logicalRequestId: request.requestId,
@@ -1488,10 +1407,10 @@ describe("orchestration CLI", () => {
       expect(settled.value.problem).toBeNull();
       expect(settled.value.source).toMatchObject({ source: "emission-tool", toolCallId: "live-settle-call" });
       // The record is durable BEFORE any outcome is declared, and it replays.
-      const stored = await opened.value.readArtifactBytes(`panel-verdict-sources/${request.requestId}.json`, 65_536);
+      const stored = await opened.readArtifactBytes(`panel-verdict-sources/${request.requestId}.json`, 65_536);
       expect(stored.ok && stored.value !== null).toBe(true);
       const republished = await settlePanelAttemptSubmission({
-        handle: opened.value,
+        handle: opened,
         registration: refutationRegistration(),
         request,
         logicalRequestId: request.requestId,

@@ -5,6 +5,7 @@ import {
   type ObservedArtifact,
   type ReviewedWorkspaceObservation,
 } from "../../core/reviewed-workspace";
+import { taskReviewScope } from "../../core/wave-review-authority";
 import { canonicalRepositoryPaths, inspectRepositoryPath } from "../../utils/repository-path";
 import { repositoryRoot } from "../../utils/git";
 import { worktreeLeafBytes, worktreeVisibleLeaves } from "../../utils/git-leaves";
@@ -45,11 +46,7 @@ export function observeReviewedWorkspace(
   root: string = repositoryRoot() ?? process.cwd(),
 ): readonly ReviewedWorkspaceObservation[] {
   return tasks.map((task) => {
-    const scope = canonicalRepositoryPaths(
-      root,
-      [...new Set([...(task.file_list ?? []), ...(task.files_modified ?? [])])],
-      `Task ${task.id} review scope`,
-    );
+    const scope = canonicalRepositoryPaths(root, taskReviewScope(task), `Task ${task.id} review scope`);
     const byPath = new Map<string, ObservedArtifact>();
     for (const path of scope) {
       for (const artifact of reviewedArtifacts(root, task.id, path)) byPath.set(artifact.path, artifact);

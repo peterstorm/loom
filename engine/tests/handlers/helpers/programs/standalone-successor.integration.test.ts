@@ -10,12 +10,8 @@ import { captureStandaloneCliEvidence } from "../../../fixtures/standalone-cli-c
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession } from "../../../fixtures/pi-session";
 import type { AgentRequestAuthority } from "../../../../src/core/orchestration-contract";
 import type { FacadeAction } from "../../../../src/handlers/helpers/programs/program-result";
-import {
-  EMISSION_DESCRIPTOR_MARKER,
-  emissionToolPrimaryInstruction,
-  parseEmissionDescriptor,
-  renderEmissionDescriptor,
-} from "../../../../src/core/spawn-admission";
+import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/spawn-admission";
+import { CATALOG_ROUTE_ENV, QUALIFIED_ROUTE_ENV, withoutEmissionRouteDelta, withRouteEnv, type EnvironmentOverlay } from "../../../fixtures/issue-route-env";
 import { standaloneOriginReference, standaloneDecisionReference } from "../../../../src/core/standalone-finding-origin";
 import { type PreparedStandaloneSuccessor } from "../../../../src/core/standalone-review-model";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../../../src/core/reviewer-contract";
@@ -551,30 +547,10 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
       const f = await predecessor(root);
       const p = await policy(root, "source", "policy-route", f.publisher);
       writeFileSync(join(root, "a.ts"), "export const value = 2;\n");
-      const QUALIFIED_ROUTE_ENV: Readonly<Record<string, string>> = Object.freeze({
-        PI_PROVIDER: "desktop-vllm", PI_MODEL: "glm-5.3-flash-spark-tp2-v14", PI_REASONING_LEVEL: "high",
-      });
       // The catalog arm explicitly DELETES the election variables: the outer
       // Loom session may run this suite under the qualified-local model, and
       // the catalog issue route must not inherit it.
-      const CATALOG_ROUTE_ENV: Readonly<Record<string, string | undefined>> = Object.freeze({
-        PI_PROVIDER: undefined, PI_MODEL: undefined, PI_REASONING_LEVEL: undefined,
-      });
-      const startSuccessor = async (run: string, environment: Readonly<Record<string, string | undefined>>) => {
-        const previous = Object.keys(environment).map((key) => [key, process.env[key]] as const);
-        try {
-          for (const [key, value] of Object.entries(environment)) {
-            if (value === undefined) delete process.env[key];
-            else process.env[key] = value;
-          }
-          return await successor(root, run, p, f);
-        } finally {
-          for (const [key, value] of previous) {
-            if (value === undefined) delete process.env[key];
-            else process.env[key] = value;
-          }
-        }
-      };
+      const startSuccessor = (run: string, environment: EnvironmentOverlay) => withRouteEnv(environment, () => successor(root, run, p, f));
       const extraction = await startSuccessor("route-extraction", CATALOG_ROUTE_ENV);
       const emission = await startSuccessor("route-emission", QUALIFIED_ROUTE_ENV);
 
@@ -634,10 +610,8 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
         expect(descriptor).toMatchObject({ kind: "issued", contextDigest: emissionRequest.authority.contextDigest,
           binding: { requestId: emissionRequest.authority.requestId, version: "v3" } });
         if (descriptor.kind !== "issued") throw new Error("qualified-route fixture must mint an issued descriptor");
-        const stripped = emissionTask
-          .replace(normalize(renderEmissionDescriptor(descriptor.binding, descriptor.contextDigest), emission, "route-emission"), "")
-          .replace(`\n${emissionToolPrimaryInstruction(descriptor.binding)}`, "");
-        expect(stripped).toBe(extractionTask);
+        expect(withoutEmissionRouteDelta(emissionTask, descriptor.binding, descriptor.contextDigest,
+          (rendered) => normalize(rendered, emission, "route-emission"))).toBe(extractionTask);
         expect(emissionTask).toContain("calling the exact tool loom_emit_reviewer_payload exactly once");
       }
     });
@@ -649,15 +623,7 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
       const f = await predecessor(root);
       const p = await policy(root, "source", "policy-source-record", f.publisher);
       writeFileSync(join(root, "a.ts"), "export const value = 2;\n");
-      const qualified = { PI_PROVIDER: "desktop-vllm", PI_MODEL: "glm-5.3-flash-spark-tp2-v14", PI_REASONING_LEVEL: "high" };
-      const previous = Object.keys(qualified).map((key) => [key, process.env[key]] as const);
-      Object.assign(process.env, qualified);
-      let s: Awaited<ReturnType<typeof successor>>;
-      try {
-        s = await successor(root, "emission-source", p, f);
-      } finally {
-        for (const [key, prior] of previous) { if (prior === undefined) delete process.env[key]; else process.env[key] = prior; }
-      }
+      const s = await withRouteEnv(QUALIFIED_ROUTE_ENV, () => successor(root, "emission-source", p, f));
       const { authority, task } = s.started.requests[0]!;
       const descriptor = parseEmissionDescriptor(task);
       if (descriptor.kind !== "issued") throw Error("qualified-route successor must issue an emission descriptor");

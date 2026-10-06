@@ -1,5 +1,7 @@
 # Brainstorm Summary
 
+> **Superseded wording (historical brainstorm, 2026-09-16).** Every `strict: "require"` below is superseded by spec FR-002 and plan AD-2: the shipped emission tools request `constrainedSampling: { type: "json_schema", strict: "prefer" }`, because pi-ai's `resolveJsonSchemaStrictSampling` throws on constraint-ignoring providers when strict is `"require"`, which would fail the child request before the extraction fallback can engage. Lint rule INV-1 (`.claude/linter/rules/inv-1-no-strict-require-constraint.json`) forbids `strict: "require"` in TypeScript sources. Do not copy the approach text below as the current design.
+
 **Building:** Grammar-constrained decoding for loom's structured agent payloads — reviewer/judge/verifier payload generation routed through provider structured outputs so payloads parse by construction, killing the syntax-level churn class at generation (roadmap churn row 1) instead of admitting it after the fact, with PR #52's fail-closed extraction retained as the deterministic fallback.
 
 **Approach:** Payload emission tool with pi-ai constrained sampling — loom's extension registers a per-kind emission tool in payload-agent child sessions whose parameters schema is the exact frozen payload schema bytes, carrying `constrainedSampling: { type: "json_schema", strict: "require" }`; the engine's ingestion seam gains an additive, deterministic preference for valid emission-tool args over final-message extraction.

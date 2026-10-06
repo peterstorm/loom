@@ -32,6 +32,12 @@ function splitLines(text: string): Lines {
   return { lines: body.split("\n"), finalNewline };
 }
 
+/** The lines the edit script compares. A final line without a newline gets a
+ *  NUL sentinel, so it differs from the same text followed by a newline. */
+function comparableLines(side: Lines): readonly string[] {
+  return side.finalNewline ? side.lines : [...side.lines.slice(0, -1), `${side.lines.at(-1)}\u0000`];
+}
+
 /** Lines as small integers, so the inner loops compare numbers, not strings. */
 function intern(base: readonly string[], head: readonly string[]): readonly [Int32Array, Int32Array] {
   const ids = new Map<string, number>();
@@ -135,10 +141,7 @@ function editScript(base: readonly string[], head: readonly string[]): Edit[] {
 export function unifiedDiff(path: string, base: string | null, head: string | null): string {
   if (base === head) return "";
   const left = splitLines(base ?? ""), right = splitLines(head ?? "");
-  // The final lines differ only by their newline: compare them as distinct.
-  const leftLines = left.finalNewline ? left.lines : [...left.lines.slice(0, -1), `${left.lines.at(-1)}\u0000`];
-  const rightLines = right.finalNewline ? right.lines : [...right.lines.slice(0, -1), `${right.lines.at(-1)}\u0000`];
-  const edits = editScript(leftLines, rightLines);
+  const edits = editScript(comparableLines(left), comparableLines(right));
   const out: string[] = [`--- ${base === null ? "/dev/null" : `a/${path}`}`, `+++ ${head === null ? "/dev/null" : `b/${path}`}`];
   const lineText = (side: Lines, index: number): string[] => {
     const text = side.lines[index]!;

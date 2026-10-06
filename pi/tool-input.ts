@@ -35,13 +35,12 @@ export function piSpawnCwd(raw: unknown, index: number, defaultCwd: string): str
   if (!isRecord(raw)) {
     throw new Error("Pi subagent input must be an object before cwd resolution");
   }
-  const input = raw as Record<string, unknown>;
-  const entry = piSpawnItem(input, index);
+  const entry = piSpawnItem(raw, index);
   let cwd: string;
   if (typeof entry.cwd === "string") {
     cwd = entry.cwd;
-  } else if (typeof input.cwd === "string") {
-    cwd = input.cwd;
+  } else if (typeof raw.cwd === "string") {
+    cwd = raw.cwd;
   } else {
     cwd = defaultCwd;
   }
@@ -53,7 +52,7 @@ export function piSpawnCwd(raw: unknown, index: number, defaultCwd: string): str
  * closed instead of treating input-shape drift as an allowed empty command. */
 export function piBashCommand(raw: unknown): string | null {
   if (!isRecord(raw)) return null;
-  const command = (raw as Record<string, unknown>).command;
+  const command = raw.command;
   return typeof command === "string" ? command : null;
 }
 
@@ -73,17 +72,16 @@ export function piWriteTargetPaths(raw: unknown): PiWriteTargetPathsResult {
   if (!isRecord(raw)) {
     return Object.freeze({ ok: false, error: "write input must be a plain object" });
   }
-  const input = raw as Record<string, unknown>;
-  if (WRITE_TARGET_KEYS.some((key) => key in input)) return writeTarget(input, "write input");
-  if (!Array.isArray(input.edits) || input.edits.length === 0) {
+  if (WRITE_TARGET_KEYS.some((key) => key in raw)) return writeTarget(raw, "write input");
+  if (!Array.isArray(raw.edits) || raw.edits.length === 0) {
     return Object.freeze({ ok: false, error: "write input must contain a target or a non-empty edits array" });
   }
   const paths: string[] = [];
-  for (const [index, edit] of input.edits.entries()) {
+  for (const [index, edit] of raw.edits.entries()) {
     if (!isRecord(edit)) {
       return Object.freeze({ ok: false, error: `write input.edits[${index}] must be a plain object` });
     }
-    const parsed = writeTarget(edit as Record<string, unknown>, `write input.edits[${index}]`);
+    const parsed = writeTarget(edit, `write input.edits[${index}]`);
     if (!parsed.ok) return parsed;
     const target = parsed.value[0];
     if (!paths.includes(target)) paths.push(target);
@@ -95,8 +93,7 @@ export function replacePiSpawnTask(raw: unknown, index: number, task: string): v
   if (!isRecord(raw)) {
     throw new Error("Pi subagent input must be an object before write-grant injection");
   }
-  const input = raw as Record<string, unknown>;
-  piSpawnItem(input, index).task = task;
+  piSpawnItem(raw, index).task = task;
 }
 
 /** Stable per-spawn roster identity shared by tool_call and tool_result.

@@ -56,13 +56,17 @@ import {
   type ArtifactDigest,
   type ContextDigest,
   type RequestId,
+  type SlotId,
 } from "../engine/src/core/orchestration-contract";
 import { piSpawnRosterId, replacePiSpawnTask } from "./tool-input";
 
 type TrustedReviewCapture = Readonly<{
-  requestId: string;
-  slotId: string;
+  /** The receipt's own branded identities: the witness is compared against
+   *  issued authority, so it keeps the authority's types, not bare strings. */
+  requestId: RequestId;
+  slotId: SlotId;
   attempt: 1 | 2;
+  /** The harness-reported agent type, compared against the issued role. */
   role: string;
   /** Branded, because this proof compares two 64-hex fields: as plain strings
    *  the context digest and the transcript digest were mutually interchangeable
@@ -313,14 +317,14 @@ export function qualifyPiIssuedReviewRequest(
   return success({ role: published.role, claim: classified.claim, route });
 }
 
-/** Authenticate a descriptor against this session's reserved Run Directory
- *  request before the pure admission may enable an emission capability. */
 /** Route qualification is the one substitutable pure adapter in this read:
  * RunDirectory reservation, registration, and publication authentication stay
  * fixed here. Production uses the frozen issued route; acceptance supplies the
  * explicit capable-route adapter already used by the T6 projection fixtures. */
 export type PiIssuedReviewRouteQualifier = typeof qualifyPiIssuedReviewRequest;
 
+/** Authenticate a descriptor against this session's reserved Run Directory
+ *  request before the pure admission may enable an emission capability. */
 export function readPiIssuedSpawnRequest(
   sessionId: string | null,
   requestId: RequestId,

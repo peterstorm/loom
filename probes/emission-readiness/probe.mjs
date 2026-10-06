@@ -12,10 +12,11 @@
  *                   observation.
  *   contradictory — readiness carries a wrong schema digest → the gate never
  *                   prompts → 0 model requests.
- *   missing       — no readiness within the bounded window → the gate never
- *                   prompts and kills the child → 0 model requests. Also the
- *                   shape of the stale/absent-extension case: no loom
- *                   extension, no signal.
+ *   missing       — get_commands does not list the readiness command → the
+ *                   gate refuses by absence, never invokes it, never waits
+ *                   and never prompts → 0 model requests. Also the shape of
+ *                   the stale/absent-extension case: no loom extension, no
+ *                   signal.
  *   held          — matching readiness, then the child's before_agent_start
  *                   hold keeps the first model request waiting until the hold
  *                   resolves (the awaited-hook gate, defense-in-depth layer).

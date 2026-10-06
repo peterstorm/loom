@@ -1,9 +1,10 @@
 /**
  * Pi session shutdown: release every capability one session still holds.
  *
- * Capabilities are the security boundary: this session's every outstanding
- * write-grant revocation is scheduled before fallible roster/pointer
- * housekeeping, then every action runs regardless of individual failures.
+ * Capabilities are the security boundary: this session's staged emission
+ * launches and every outstanding write-grant revocation are scheduled before
+ * fallible roster/pointer housekeeping, then every action runs regardless of
+ * individual failures.
  * Each successfully released capability retires independently; whatever
  * failed stays as cleanup debt, and other sessions are untouched.
  */
@@ -34,9 +35,13 @@ export async function shutdownPiSession(rawSessionId: string, ports: PiSessionSh
   const { parentSessions, childWriteGrants, emissionLaunchBridge } = ports;
   forgetTrustedReviewRuns(rawSessionId);
   const sessionId = parseSessionId(rawSessionId);
-  if (sessionId !== null) emissionLaunchBridge.removeSession(sessionId);
   const binding = childWriteGrants.active.get(rawSessionId);
-  const actions: PiCleanupAction[] = [];
+  // Staged emission launches are capabilities too: their removal is one more
+  // action, so a failing bridge cannot skip the revocations scheduled below.
+  const actions: PiCleanupAction[] = sessionId === null ? [] : [{
+    label: `remove staged emission launches for ${sessionId}`,
+    run: () => emissionLaunchBridge.removeSession(sessionId),
+  }];
   const revokedTokens = new Set<string>();
   const removedRosterIds = new Set<AgentId>();
   const releasedPointers = new Set<SessionTaskGraphPointerBinding>();

@@ -66,6 +66,7 @@ import {
 import { recordPiSpawnCorrelators } from "./review-run-authority";
 import {
   cleanupFailureSuffix,
+  describeCause,
   injectPiWriteGrantWithRevocation,
   runPiCleanupActions,
   type PiCleanupAction,
@@ -152,7 +153,7 @@ export async function reservePiSpawnLifecycle(
       reason: `Cannot record Loom subagent lifecycle evidence for invalid session id ${JSON.stringify(sessionId)}; refusing spawn.`,
     };
   }
-  const toolCallId = (event as { toolCallId?: unknown }).toolCallId;
+  const toolCallId = event.toolCallId;
   if (typeof toolCallId !== "string" || toolCallId === "") {
     return {
       block: true,
@@ -435,7 +436,7 @@ export async function reservePiSpawnLifecycle(
       if (!isRecord(event.input)) {
         throw new Error("Pi implementation input became malformed before dispatch registration");
       }
-      const prompt = piSpawnItem(event.input as Record<string, unknown>, state.slot).task;
+      const prompt = piSpawnItem(event.input, state.slot).task;
       if (typeof prompt !== "string") {
         throw new Error(`Pi implementation spawn item ${state.slot + 1} lost its child-visible prompt`);
       }
@@ -451,7 +452,7 @@ export async function reservePiSpawnLifecycle(
       if (!isRecord(event.input)) {
         throw new Error("Pi emission input became malformed before launcher provisioning");
       }
-      const finalTask = piSpawnItem(event.input as Record<string, unknown>, state.slot).task;
+      const finalTask = piSpawnItem(event.input, state.slot).task;
       if (typeof finalTask !== "string") {
         throw new Error(`Pi emission spawn item ${state.slot + 1} lost its final child task`);
       }
@@ -475,7 +476,7 @@ export async function reservePiSpawnLifecycle(
     const cleanupErrors = await rollbackLifecycle();
     return {
       block: true,
-      reason: `Cannot record Loom subagent lifecycle evidence; refusing spawn: ${error instanceof Error ? error.message : String(error)}${cleanupFailureSuffix(cleanupErrors)}`,
+      reason: `Cannot record Loom subagent lifecycle evidence; refusing spawn: ${describeCause(error)}${cleanupFailureSuffix(cleanupErrors)}`,
     };
   }
 
@@ -497,7 +498,7 @@ export async function reservePiSpawnLifecycle(
   } catch (error) {
     const cleanupErrors = await rollbackLifecycle();
     throw new Error(
-      `${error instanceof Error ? error.message : String(error)}${cleanupFailureSuffix(cleanupErrors)}`,
+      `${describeCause(error)}${cleanupFailureSuffix(cleanupErrors)}`,
       error instanceof Error ? { cause: error } : undefined,
     );
   }
@@ -515,34 +516,31 @@ export async function reservePiSpawnLifecycle(
         ok: true as const,
         authoritiesBySlot: Object.freeze(spawnLifecycle.map(() => null)),
       };
-  if (!alignment.ok) {
+  // A registered batch that cannot be aligned unwinds in one fixed order:
+  // the task-state registration first, then every lifecycle claim.
+  const refuseRegisteredBatch = async (
+    authorities: readonly ImplementationAttemptAuthority[],
+    problem: string,
+  ): Promise<PiSpawnRefusal> => {
     const registrationRollback = await rollbackTaskExecutionRegistration(
-      taskRegistration.authorities,
-      spawnGraphPath === null ? undefined : piSpawnCwd(event.input, 0, cwd),
-    );
-    const cleanupErrors = await rollbackLifecycle();
-    const rollbackErrors = [
-      ...(registrationRollback.kind === "block" ? [registrationRollback.message] : []),
-      ...cleanupErrors,
-    ];
-    return {
-      block: true,
-      reason: `BLOCKED: ${alignment.error}${cleanupFailureSuffix(rollbackErrors)}`,
-    };
-  }
-  if (alignment.authoritiesBySlot.length !== spawnLifecycle.length) {
-    const registrationRollback = await rollbackTaskExecutionRegistration(
-      taskRegistration.authorities,
+      authorities,
       spawnGraphPath === null ? undefined : piSpawnCwd(event.input, 0, cwd),
     );
     const cleanupErrors = await rollbackLifecycle();
     return {
       block: true,
-      reason: `BLOCKED: implementation authority alignment lost its structural spawn association${cleanupFailureSuffix([
+      reason: `BLOCKED: ${problem}${cleanupFailureSuffix([
         ...(registrationRollback.kind === "block" ? [registrationRollback.message] : []),
         ...cleanupErrors,
       ])}`,
     };
+  };
+  if (!alignment.ok) return refuseRegisteredBatch(taskRegistration.authorities, alignment.error);
+  if (alignment.authoritiesBySlot.length !== spawnLifecycle.length) {
+    return refuseRegisteredBatch(
+      taskRegistration.authorities,
+      "implementation authority alignment lost its structural spawn association",
+    );
   }
   spawnLifecycle = Object.freeze(spawnLifecycle.map((state) => Object.freeze({
     ...state,
