@@ -1,3 +1,4 @@
+import { captureReviewedTranscript } from "../../fixtures/read-coverage";
 import { spawn, spawnSync } from "node:child_process";
 import { canonicalTempDir } from "../../fixtures/canonical-temp-dir";
 import { createHash } from "node:crypto";
@@ -786,7 +787,7 @@ describe("orchestration CLI", () => {
         : currentWavePayload(run, [], run.prior_finding_ids.map((finding_id) => ({
           finding_id, verdict: "still_present", reason: "Scripted fixture prior remains present",
         })));
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(raw)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
     return resumeWaveFixture(root, runsRoot, runDir);
   }
@@ -1312,7 +1313,7 @@ describe("orchestration CLI", () => {
       // would refuse them ("not valid JSON") and the run would consume its
       // attempt on a parse failure.
       const raw = "the verifier answered in prose, never emitting a verdict";
-      expect((await opened.value.captureTranscript(request, [...Buffer.from(raw)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, request, [...Buffer.from(raw)])).ok).toBe(true);
 
       // Mint the ISSUED refutation-verdict binding for THIS attempt's request,
       // select the emission verdict, and publish the durable source record —
@@ -1386,7 +1387,7 @@ describe("orchestration CLI", () => {
       const request = (JSON.parse(started.stdout) as { requests: readonly { authority: AgentRequestAuthority }[] }).requests[0]!.authority;
       const opened = openRunDirectory(runsRoot, runDir);
       if (!opened.ok) throw new Error(opened.error.message);
-      expect((await opened.value.captureTranscript(request, [...Buffer.from("prose, not a verdict")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, request, [...Buffer.from("prose, not a verdict")])).ok).toBe(true);
 
       // A record whose schema digest does NOT certify the frozen schema is
       // unavailable evidence, never a silent extraction baseline: the scan
@@ -1436,7 +1437,7 @@ describe("orchestration CLI", () => {
       const baselineOpened = openRunDirectory(runsRoot, baselineDir);
       if (!baselineOpened.ok) throw new Error(baselineOpened.error.message);
       const verdict = legacyRefutationVerdict(baselineOpened.value, baselineRequest, "upheld");
-      expect((await baselineOpened.value.captureTranscript(baselineRequest, [...Buffer.from(verdict)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(baselineOpened.value, baselineRequest, [...Buffer.from(verdict)])).ok).toBe(true);
       const baselineResumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", baselineDir], "", root));
       expect(baselineResumed.status, baselineResumed.stderr).toBe(0);
       expect(JSON.parse(baselineResumed.stdout).kind).toBe("done");
@@ -1897,7 +1898,7 @@ describe("orchestration CLI", () => {
     const cleanTranscript = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
     for (const [index, request] of action.requests.entries()) {
       const transcript = index === 0 ? criticalTranscript : cleanTranscript;
-      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(transcript)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(transcript)])).ok).toBe(true);
     }
 
     const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
@@ -1928,7 +1929,7 @@ describe("orchestration CLI", () => {
       const criticalTranscript = currentStandaloneCritical("README.md", "Panel route defect");
       const cleanTranscript = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
       for (const [index, { authority }] of started.requests.entries()) {
-        expect((await opened.value.captureTranscript(authority, [...Buffer.from(index === 0 ? criticalTranscript : cleanTranscript)])).ok).toBe(true);
+        expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(index === 0 ? criticalTranscript : cleanTranscript)])).ok).toBe(true);
       }
       const resumedResponse = await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, routeEnv);
       expect(resumedResponse.status, resumedResponse.stderr).toBe(0);
@@ -2231,7 +2232,7 @@ describe("orchestration CLI", () => {
     const opened = openRunDirectory(runsRoot, runDir);
     if (!opened.ok) throw new Error(opened.error.message);
     for (const [index, request] of initial.requests.slice(1, 1 + WAVE_REVIEW_AGENTS.length).entries()) {
-      expect((await opened.value.captureTranscript(request.authority,
+      expect((await captureReviewedTranscript(opened.value, request.authority,
         [...Buffer.from(transcript(index === 0 ? "new finding from completed sibling packet" : null))])).ok).toBe(true);
     }
 
@@ -2286,7 +2287,7 @@ describe("orchestration CLI", () => {
     const opened = openRunDirectory(runsRoot, runDir);
     if (!opened.ok) throw new Error(opened.error.message);
     for (const { authority } of initial.requests) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from("captured but not accepted")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from("captured but not accepted")])).ok).toBe(true);
     }
 
     const resumed = await resumeWaveFixture(root, runsRoot, runDir);
@@ -2362,7 +2363,7 @@ describe("orchestration CLI", () => {
     // Simulate a crash after durable attempt-2 capture but before semantic
     // application. Resume must reconcile that exact transcript, not exhaust it.
     const crashWindow = recovery.requests[0]!.authority;
-    expect((await opened.value.captureTranscript(crashWindow, [...Buffer.from(reviewerTranscript)])).ok).toBe(true);
+    expect((await captureReviewedTranscript(opened.value, crashWindow, [...Buffer.from(reviewerTranscript)])).ok).toBe(true);
     const reconciled = await resumeWaveFixture(root, runsRoot, runDir);
     const afterCrash = reconciled as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
     expect(afterCrash.kind, JSON.stringify(reconciled)).toBe("spawn-batch");
@@ -2373,7 +2374,7 @@ describe("orchestration CLI", () => {
     expect(afterCrashGraph.tasks[0]?.review_run?.evidence.map(({ agent }) => agent)).toEqual([crashWindow.role]);
 
     for (const { authority } of recovery.requests.slice(1)) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(reviewerTranscript)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(reviewerTranscript)])).ok).toBe(true);
     }
     const afterReview = await resumeWaveFixture(root, runsRoot, runDir);
     const specRecovery = afterReview as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
@@ -2395,7 +2396,7 @@ describe("orchestration CLI", () => {
       const raw = index === 0
         ? "not valid refutation JSON"
         : refutationVerdicts(opened.value, request.authority, "upheld");
-      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(raw)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
     const retriedPanel = await resumeWaveFixture(root, runsRoot, runDir);
     const retryAction = retriedPanel as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
@@ -2506,9 +2507,9 @@ describe("orchestration CLI", () => {
     // spec-check retry from epoch 1's own attempt-1 (the only one in the
     // journal at this point) — the single-epoch happy path.
     for (const { authority } of reviewersOf(initial.requests)) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from("captured but not accepted")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from("captured but not accepted")])).ok).toBe(true);
     }
-    expect((await opened.value.captureTranscript(specCheckOf(initial.requests), [...Buffer.from(specFailureOutput)])).ok).toBe(true);
+    expect((await captureReviewedTranscript(opened.value, specCheckOf(initial.requests), [...Buffer.from(specFailureOutput)])).ok).toBe(true);
     const epochOneRetryBatch = await resumeWaveFixture(root, runsRoot, runDir) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
     expect(epochOneRetryBatch.kind, JSON.stringify(epochOneRetryBatch)).toBe("spawn-batch");
     expect(epochOneRetryBatch.requests.length).toBeGreaterThan(0);
@@ -2519,7 +2520,7 @@ describe("orchestration CLI", () => {
     }).tasks[0]?.review_run;
     expect(epochOneRun).toBeDefined();
     for (const { authority } of reviewersOf(epochOneRetryBatch.requests)) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(acceptedReviewerTranscript(epochOneRun!))])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(acceptedReviewerTranscript(epochOneRun!))])).ok).toBe(true);
     }
     const epochOneSpecSpawn = await resumeWaveFixture(root, runsRoot, runDir) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
     expect(epochOneSpecSpawn.kind, JSON.stringify(epochOneSpecSpawn)).toBe("spawn-batch");
@@ -2557,15 +2558,15 @@ describe("orchestration CLI", () => {
     // Epoch-1 review closed before the invalidation, so the prior finding was
     // already retired; the fresh packet has no remaining prior findings.
     for (const { authority } of reviewersOf(epochTwoBatch.requests)) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from("captured but not accepted")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from("captured but not accepted")])).ok).toBe(true);
     }
-    expect((await opened.value.captureTranscript(specCheckOf(epochTwoBatch.requests), [...Buffer.from(specFailureOutput)])).ok).toBe(true);
+    expect((await captureReviewedTranscript(opened.value, specCheckOf(epochTwoBatch.requests), [...Buffer.from(specFailureOutput)])).ok).toBe(true);
     const epochTwoRetryBatch = await resumeWaveFixture(root, runsRoot, runDir) as { kind: string; requests: readonly { authority: AgentRequestAuthority }[] };
     expect(epochTwoRetryBatch.kind, JSON.stringify(epochTwoRetryBatch)).toBe("spawn-batch");
     expect(epochTwoRetryBatch.requests.length).toBeGreaterThan(0);
     expect(epochTwoRetryBatch.requests.every(({ authority }) => authority.attempt === 2 && authority.role !== "spec-check-invoker")).toBe(true);
     for (const { authority } of reviewersOf(epochTwoRetryBatch.requests)) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(acceptedReviewerTranscript(epochTwoRun!))])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(acceptedReviewerTranscript(epochTwoRun!))])).ok).toBe(true);
     }
 
     // --- the regression: applying those captured epoch-2 reviewer retries
@@ -2632,9 +2633,9 @@ describe("orchestration CLI", () => {
     const specCheck = initial.requests.find(({ authority }) => authority.role === "spec-check-invoker" && authority.attempt === 1)!.authority;
     const reviewers = initial.requests.filter(({ authority }) => authority !== specCheck);
     for (const { authority } of reviewers) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from("captured but not accepted")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from("captured but not accepted")])).ok).toBe(true);
     }
-    expect((await opened.value.captureTranscript(specCheck, [...Buffer.from(
+    expect((await captureReviewedTranscript(opened.value, specCheck, [...Buffer.from(
       "SPEC_CHECK_WAVE: 1\nSPEC_CHECK_CRITICAL_COUNT: 0\nSPEC_CHECK_HIGH_COUNT: 0\nSPEC_CHECK_VERDICT: BLOCKED")])).ok).toBe(true);
     // The reviewer attempt-2 derivation reads every attempt-1 context before
     // the spec retry derivation does — remove them ALL so whichever scan hits
@@ -2729,7 +2730,7 @@ describe("orchestration CLI", () => {
     if (!opened.ok) throw new Error(opened.error.message);
     const specCheck = initial.requests
       .find(({ authority }) => authority.role === "spec-check-invoker" && authority.attempt === 1)!.authority;
-    expect((await opened.value.captureTranscript(specCheck, [...Buffer.from(
+    expect((await captureReviewedTranscript(opened.value, specCheck, [...Buffer.from(
       PASSING_SPEC_CHECK_FOOTER)])).ok).toBe(true);
 
     const firstResume = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
@@ -2796,7 +2797,7 @@ describe("orchestration CLI", () => {
             const run = graph.tasks[0]!.review_run!;
             return currentWavePayload(run);
           })();
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(task)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(task)])).ok).toBe(true);
     }
 
     const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
@@ -2815,7 +2816,7 @@ describe("orchestration CLI", () => {
     });
     expect(retry.requests[0]?.task).toContain("model exited without a final payload");
     expect(retry.requests[0]?.task).toContain("unchanged reviewer-payload-schema");
-    const lateAttemptOne = await opened.value.captureTranscript(rejected, [...Buffer.from("late")]);
+    const lateAttemptOne = await captureReviewedTranscript(opened.value, rejected, [...Buffer.from("late")]);
     expect(lateAttemptOne.ok).toBe(false);
     if (!lateAttemptOne.ok) expect(lateAttemptOne.error.message).toContain("terminally rejected");
   }, 30_000);
@@ -2847,7 +2848,7 @@ describe("orchestration CLI", () => {
     const opened = openRunDirectory(runsRoot, runDir);
     if (!opened.ok) throw new Error(opened.error.message);
     for (const { authority } of initial.requests) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
     }
     const retryResult = await resumeWaveFixture(root, runsRoot, runDir);
     const retries = retryResult as {
@@ -2858,7 +2859,7 @@ describe("orchestration CLI", () => {
     expect(retries.requests).toHaveLength(WAVE_REVIEW_AGENTS.length);
 
     const [exhausted, ...pending] = retries.requests;
-    expect((await opened.value.captureTranscript(
+    expect((await captureReviewedTranscript(opened.value, 
       exhausted!.authority,
       [...Buffer.from("malformed attempt two")],
     )).ok).toBe(true);
@@ -2872,7 +2873,7 @@ describe("orchestration CLI", () => {
       pending.map(({ authority }) => authority.requestId),
     );
     for (const { authority } of drainBatch.requests) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from("malformed attempt two")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from("malformed attempt two")])).ok).toBe(true);
     }
     const blocked = await resumeWaveFixture(root, runsRoot, runDir);
     expect(blocked).toMatchObject({
@@ -3137,7 +3138,7 @@ describe("orchestration CLI", () => {
     const previous = openRunDirectory(runsRoot, previousRun);
     if (!previous.ok) throw new Error(previous.error.message);
     for (const { authority } of initial.requests) {
-      expect((await previous.value.captureTranscript(authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(previous.value, authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
       if (authority.role !== "spec-check-invoker") {
         const retry = deriveWaveAttemptTwo(previous.value, authority);
         const published = await withFixturePiSession(root, () => publishLegacyInitialBatch(previous.value, [retry.request], [retry.packet], `wave-gate-retry:${authority.slotId}`));
@@ -3257,7 +3258,7 @@ describe("orchestration CLI", () => {
     expect(premature.stderr).toContain("restart refused before final-attempt rejection");
 
     for (const { authority } of retries.requests) {
-      expect((await previous.value.captureTranscript(authority, [...Buffer.from("malformed attempt two")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(previous.value, authority, [...Buffer.from("malformed attempt two")])).ok).toBe(true);
     }
     const blocked = (await runCli(["resume", "--runs-root", runsRoot, "--run", previousRun], "", root));
     expect(blocked.status, blocked.stderr).toBe(0);
@@ -3398,9 +3399,9 @@ describe("orchestration CLI", () => {
     const first = reviewerRequests[0]!.authority;
     const opened = openRunDirectory(runsRoot, previousRun);
     if (!opened.ok) throw new Error(opened.error.message);
-    expect((await opened.value.captureTranscript(first, [...Buffer.from(accepted)])).ok).toBe(true);
+    expect((await captureReviewedTranscript(opened.value, first, [...Buffer.from(accepted)])).ok).toBe(true);
     for (const { authority } of initial.requests.filter(({ authority }) => authority.requestId !== first.requestId)) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
     }
     const resumed = await resumeWaveFixture(root, runsRoot, previousRun);
     const retries = resumed as { requests: readonly { authority: AgentRequestAuthority }[] };
@@ -3429,7 +3430,7 @@ describe("orchestration CLI", () => {
       "restart", "--runs-root", runsRoot, "--run", previousRun, "--new-run", replacementRun,
     ], "", root));
     expect(restarted.status, restarted.stderr).toBe(0);
-    const lateCapture = await opened.value.captureTranscript(retries.requests[0]!.authority, [...Buffer.from(accepted)]);
+    const lateCapture = await captureReviewedTranscript(opened.value, retries.requests[0]!.authority, [...Buffer.from(accepted)]);
     expect(lateCapture.ok).toBe(false);
     if (!lateCapture.ok) expect(lateCapture.error.message).toContain("terminally rejected");
     const restartedGraph = JSON.parse(readFileSync(statePath, "utf8")) as {
@@ -3463,7 +3464,7 @@ describe("orchestration CLI", () => {
     const opened = openRunDirectory(runsRoot, previousRun);
     if (!opened.ok) throw new Error(opened.error.message);
     for (const { authority } of initial.requests) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from("malformed attempt one")])).ok).toBe(true);
     }
     const resumed = await resumeWaveFixture(root, runsRoot, previousRun);
     const retries = resumed as { requests: readonly { authority: AgentRequestAuthority }[] };
@@ -3472,13 +3473,13 @@ describe("orchestration CLI", () => {
     }).tasks[0]!.review_run!;
     const valid = currentWavePayload(active);
     for (const { authority } of retries.requests.slice(0, -1)) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(valid)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(valid)])).ok).toBe(true);
     }
     await resumeWaveFixture(root, runsRoot, previousRun);
     const finalValid = retries.requests.at(-1)!.authority;
     // Crash window: final valid bytes landed, but semantic application has not.
     // Applying this slot would close the roster and remove review_run entirely.
-    expect((await opened.value.captureTranscript(finalValid, [...Buffer.from(valid)])).ok).toBe(true);
+    expect((await captureReviewedTranscript(opened.value, finalValid, [...Buffer.from(valid)])).ok).toBe(true);
     const replacementRun = join(runsRoot, "run.wave-valid-retry-replacement");
     mkdirSync(replacementRun);
     const restarted = (await runCli([
@@ -3619,7 +3620,7 @@ describe("orchestration CLI", () => {
     if (!opened.ok) throw new Error(opened.error.message);
     for (const { authority } of action.requests) {
       const raw = refutationVerdicts(opened.value, authority, "upheld");
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(raw)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
 
     // The reducer used to recurse after the tally no matter what: an all-upheld
@@ -3699,7 +3700,7 @@ describe("orchestration CLI", () => {
     if (!opened.ok) throw new Error(opened.error.message);
     for (const { authority } of action.requests) {
       const raw = refutationVerdicts(opened.value, authority, "refuted");
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(raw)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
 
     // A refuting tally retires the critical and promotes the blocked task:
@@ -3782,7 +3783,7 @@ describe("orchestration CLI", () => {
     const critical = currentStandaloneCritical("a.txt", "retry finding");
     const clean = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
     for (const [index, request] of initial.requests.entries()) {
-      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(index === 0 ? critical : clean)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(index === 0 ? critical : clean)])).ok).toBe(true);
     }
     const panelResult = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(panelResult.status, panelResult.stderr).toBe(0);
@@ -3794,7 +3795,7 @@ describe("orchestration CLI", () => {
       const raw = index === 0
         ? "malformed"
         : refutationVerdicts(opened.value, request.authority, "upheld");
-      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(raw)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
 
     const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
@@ -3826,7 +3827,7 @@ describe("orchestration CLI", () => {
     // accepted-only completed-state projection.
     const retryRequest = retry.requests[0]!;
     const valid = refutationVerdicts(opened.value, retryRequest.authority, "upheld");
-    expect((await opened.value.captureTranscript(retryRequest.authority, [...Buffer.from(valid)])).ok).toBe(true);
+    expect((await captureReviewedTranscript(opened.value, retryRequest.authority, [...Buffer.from(valid)])).ok).toBe(true);
     const doneResult = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(doneResult.status, doneResult.stderr).toBe(0);
     expect(JSON.parse(doneResult.stdout).kind, JSON.stringify(JSON.parse(doneResult.stdout))).toBe("done");
@@ -3856,7 +3857,7 @@ describe("orchestration CLI", () => {
     const critical = currentStandaloneCritical("a.txt", "tombstone finding");
     const clean = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
     for (const [index, request] of initial.requests.entries()) {
-      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(index === 0 ? critical : clean)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(index === 0 ? critical : clean)])).ok).toBe(true);
     }
     const panelResult = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(panelResult.status, panelResult.stderr).toBe(0);
@@ -3888,7 +3889,7 @@ describe("orchestration CLI", () => {
         continue;
       }
       const raw = refutationVerdicts(opened.value, request.authority, "upheld");
-      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(raw)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
 
     // Resume: the tombstoned attempt-1 slot must NOT be re-issued — the
@@ -3929,7 +3930,7 @@ describe("orchestration CLI", () => {
     // replay too, not only in the resume path.
     const retryRequest = retry.requests[0]!;
     const valid = refutationVerdicts(opened.value, retryRequest.authority, "upheld");
-    expect((await opened.value.captureTranscript(retryRequest.authority, [...Buffer.from(valid)])).ok).toBe(true);
+    expect((await captureReviewedTranscript(opened.value, retryRequest.authority, [...Buffer.from(valid)])).ok).toBe(true);
     const done = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(done.status, done.stderr).toBe(0);
     expect(JSON.parse(done.stdout).kind, JSON.stringify(JSON.parse(done.stdout))).toBe("done");
@@ -3956,7 +3957,7 @@ describe("orchestration CLI", () => {
     const critical = currentStandaloneCritical("a.txt", "doomed finding");
     const clean = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
     for (const [index, request] of initial.requests.entries()) {
-      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(index === 0 ? critical : clean)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(index === 0 ? critical : clean)])).ok).toBe(true);
     }
     const panelResult = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(panelResult.status, panelResult.stderr).toBe(0);
@@ -3990,7 +3991,7 @@ describe("orchestration CLI", () => {
         continue;
       }
       const raw = refutationVerdicts(opened.value, request.authority, "upheld");
-      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(raw)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
 
     // First resume: the tombstoned attempt-1 advances to its attempt-2 retry
@@ -4053,7 +4054,7 @@ describe("orchestration CLI", () => {
     if (!opened.ok) throw new Error(opened.error.message);
     const transcript = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
     for (const request of action.requests) {
-      expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(transcript)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(transcript)])).ok).toBe(true);
     }
     const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root, piEnv));
     expect(resumed.status, resumed.stderr).toBe(0);
@@ -4082,7 +4083,7 @@ describe("orchestration CLI", () => {
     if (!opened.ok) throw new Error(opened.error.message);
     const transcript = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
     for (const { authority } of action.requests) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(transcript)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(transcript)])).ok).toBe(true);
     }
     mkdirSync(join(runDir, "result.json"));
 
@@ -4126,7 +4127,7 @@ describe("orchestration CLI", () => {
     });
     const cleanTranscript = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
     for (const { authority } of initial.requests.filter(({ authority }) => authority.requestId !== rejected.requestId)) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(cleanTranscript)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(cleanTranscript)])).ok).toBe(true);
     }
     const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(resumed.status, resumed.stderr).toBe(0);
@@ -4161,13 +4162,13 @@ describe("orchestration CLI", () => {
 
     // The terminal rejection still binds: late bytes for attempt 1 cannot
     // overwrite it, and only the exact attempt-2 authority closes the slot.
-    const lateAttemptOne = await opened.value.captureTranscript(rejected, [...Buffer.from("late")]);
+    const lateAttemptOne = await captureReviewedTranscript(opened.value, rejected, [...Buffer.from("late")]);
     expect(lateAttemptOne.ok).toBe(false);
     if (!lateAttemptOne.ok) expect(lateAttemptOne.error.message).toContain("terminally rejected");
 
     // The retry lands, the roster completes, and the run reaches idempotent done.
     const retryRequest = retry.requests[0]!;
-    expect((await opened.value.captureTranscript(retryRequest.authority, [...Buffer.from(cleanTranscript)])).ok).toBe(true);
+    expect((await captureReviewedTranscript(opened.value, retryRequest.authority, [...Buffer.from(cleanTranscript)])).ok).toBe(true);
     const done = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(done.status, done.stderr).toBe(0);
     expect(JSON.parse(done.stdout).kind, JSON.stringify(JSON.parse(done.stdout))).toBe("done");
@@ -4205,7 +4206,7 @@ describe("orchestration CLI", () => {
     if (!opened.ok) throw new Error(opened.error.message);
     const transcript = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
     for (const { authority } of resumedAction.requests) {
-      expect((await opened.value.captureTranscript(authority, [...Buffer.from(transcript)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(transcript)])).ok).toBe(true);
     }
     const done = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
     expect(done.status, done.stderr).toBe(0);
@@ -4244,7 +4245,7 @@ describe("orchestration CLI", () => {
       if (action.kind !== "spawn-batch") throw new Error(`expected spawn-batch, got ${action.kind}`);
       const transcript = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
       for (const request of action.requests) {
-        expect((await opened.value.captureTranscript(request.authority, [...Buffer.from(transcript)])).ok).toBe(true);
+        expect((await captureReviewedTranscript(opened.value, request.authority, [...Buffer.from(transcript)])).ok).toBe(true);
       }
       const raw = opened.value.readProgramRegistration();
       if (!raw.ok) throw new Error(raw.error.message);
@@ -4641,7 +4642,7 @@ describe("orchestration CLI", () => {
             severity: "advisory", file: "src/x.ts", line: 1, claim: "prefer the façade-owned lifecycle request",
             reason: "Scripted nonblocking fixture improvement",
           }] : []);
-        expect((await opened.value.captureTranscript(authority, [...Buffer.from(raw)])).ok).toBe(true);
+        expect((await captureReviewedTranscript(opened.value, authority, [...Buffer.from(raw)])).ok).toBe(true);
       }
 
       const resumed = (await runCli(["resume", "--runs-root", runsRoot, "--run", runDir], "", root));
@@ -4885,7 +4886,7 @@ describe("orchestration CLI", () => {
       const [captured, rejected] = action.requests;
       if (captured === undefined || rejected === undefined) throw new Error("expected at least two reviewer slots");
       const transcript = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
-      expect((await opened.value.captureTranscript(captured.authority, [...Buffer.from(transcript)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(opened.value, captured.authority, [...Buffer.from(transcript)])).ok).toBe(true);
       expect((await opened.value.rejectCapture(
         rejected.authority,
         'agent-failed: exited without a successful result (exitCode=0, stopReason=error, errorMessage="Connection error.")',

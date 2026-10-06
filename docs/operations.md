@@ -181,6 +181,45 @@ final output gets only the existing retry and terminal-blocks attempt 2; current
 transcript locator/read infrastructure failure stays unavailable without a semantic
 rejection tombstone. Missing/corrupt current registration cannot become legacy.
 
+### Read coverage (Reviewer Protocol v4)
+
+See [ADR-0022](adr/ADR-0022-engine-observed-standalone-read-coverage.md). Every
+fresh standalone review registers `readCoverage: loom-standalone-read-coverage v1`
+beside the unchanged v2 payload descriptor. A reviewer's result is admitted only
+after the engine itself observed that the reviewer was shown every unit of the
+scope's frozen diff. Issued v2 registrations without the policy, successor v3 and
+Wave Gate keep their exact admission.
+
+- **What must be read.** Each request's packet carries `standalone-frozen-diff`:
+  one unified diff per scoped file, from the review baseline (the merge base, or
+  HEAD) to the exact frozen bytes. Unchanged and binary files oblige nothing. The
+  issued task lists every obligated file with its unit and page counts under
+  `LOOM_READ_COVERAGE: every-frozen-diff-unit`.
+- **How to read it.** Append `--diff EXACT_SOURCE_PATH` to the task's
+  `LOOM_CONTEXT_READ_COMMAND`, then repeat with `--offset <nextOffset>` until
+  `nextOffset` is null. Pages are up to 12,000 units; other selections keep 4,096.
+  Run each reader call as its own command. A piped, filtered or truncated page
+  earns no credit.
+- **How it is verified.** At capture, the harness transcript's tool results are
+  checked line by line. Only exact reader pages whose text equals the frozen diff
+  at their range count. The verified ranges are written before the transcript to
+  `artifacts/read-coverage/<requestId>.json`, and the first observation of an
+  attempt is kept.
+- **When it refuses.** Resume and checkpoint-independent replay refuse a result
+  with any unread unit through the ordinary bounded retry, and the attempt-2 task
+  names every unread file and range. A capture without observed tool outputs also
+  refuses ("read coverage was not observed"). Attempt 2 failing terminal-blocks the
+  slot as before. Unreadable coverage evidence is infrastructure failure and
+  consumes no attempt.
+- **Budget.** A scope whose frozen diff exceeds 240,000 units is refused at
+  `start`, before anything is registered. Partition it into explicit `--files`
+  runs of at most that size. As a rule of thumb, keep each slice's `git diff`
+  under about 230 KB.
+- **Non-capturing harnesses.** `submit` accepts `--tool-outputs PATH`, a JSON array
+  of the delivered tool-output strings in order. It is verified exactly like a
+  native capture, and is refused for a Run without the policy. Claude Code and Pi
+  capture natively, so a parent on either harness never needs it.
+
 ### Historical reviewer evidence
 
 Completed **and unfinished issued reviewer v1** runs keep their original protocol,

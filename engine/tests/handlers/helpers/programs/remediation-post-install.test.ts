@@ -1,3 +1,4 @@
+import { captureReviewedTranscript } from "../../../fixtures/read-coverage";
 import { spawnSync } from "node:child_process";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -61,7 +62,7 @@ async function completedReviewFixture() {
   if (!source.ok) throw new Error(source.error.message);
   const transcript = JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] });
   for (const { authority } of action.requests) {
-    const captured = await source.value.captureTranscript(authority, [...Buffer.from(transcript)]);
+    const captured = await captureReviewedTranscript(source.value, authority, [...Buffer.from(transcript)]);
     if (!captured.ok) throw new Error(captured.error.message);
   }
   const completed = runCli(repository, ["resume", "--runs-root", runsRoot, "--run", sourceRun]);

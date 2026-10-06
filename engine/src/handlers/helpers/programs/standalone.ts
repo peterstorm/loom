@@ -9,7 +9,7 @@ import { STANDALONE_REVIEWER_PROTOCOL_V3 } from '../../../core/standalone-lineag
 import { prepareStandaloneSuccessorSource, readStandaloneSuccessorAuthority } from './standalone-source';
 import { boundedStandaloneReadHandle, observeStableStandaloneSuccessorSource } from './standalone-successor-source';
 import type { StandaloneSuccessorStartInput, RegisteredStandaloneSuccessorProgram } from './standalone-successor-registration';
-import { admitCapturedStandaloneTranscript, readStandaloneCaptureWitnesses, replayStandaloneCliCaptures, standaloneRefutationPreparation, type StandaloneCaptureWitness, type StandaloneEvidenceReplayResult } from './standalone-evidence';
+import { admitStandaloneReviewerResult, readStandaloneCaptureWitnesses, replayStandaloneCliCaptures, standaloneRefutationPreparation, type StandaloneCaptureWitness, type StandaloneEvidenceReplayResult } from './standalone-evidence';
 // Retain existing caller entry points, not the union of the evidence volume's internal exports.
 export { replayStandaloneCliCaptures, replayStandaloneResultFromEvidence, readStandaloneReviewedSource, standaloneRefutationPreparation } from './standalone-evidence';
 export type { StandaloneCaptureWitness, StandaloneEvidenceReplayResult, StandaloneReviewedSource, StandaloneReviewedSourceFile } from './standalone-evidence';
@@ -33,7 +33,8 @@ import { captureKey } from '../../../core/harness-capture';
 import { type RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { standaloneReviewerProtocolResolver, readRegisteredStandaloneAuthority } from './reviewer-protocol-resolution';
 import { readPublishedStandaloneResult, durableRequests, recoverOrPublishStandaloneRetry, safeScope, standalonePackets, standalonePublicationEffectId } from './standalone-requests';
-import { deriveChangedPaths, gitText, metadata } from './changed-paths';
+import { deriveChangedPaths, gitText, metadata, reviewBaseline } from './changed-paths';
+import { STANDALONE_READ_COVERAGE_V1, readCoverageBudgetProblem } from '../../../core/standalone-read-coverage';
 import { decideRefutationTranscriptRead, refutationRejectionDiagnostic, standaloneRetryTask } from '../../../core/reviewer-retry';
 import { durableCaptureRejection, durablePublishedReceipt, durablePublicationDigest, durableRefutationRequests, publicationResolver } from './durable-requests';
 import { executableRefutationRequests, recoverOrPublishRefutationRetry } from './refutation-requests';
@@ -163,7 +164,14 @@ export async function startStandaloneFacade(
     if (!parsedScope.ok) return failed(parsedScope.errors.join("; "));
     const scope = parsedScope.value;
     const reviewMetadata = metadata(input.kind, scope, changed);
-    const packetSet = standalonePackets(handle.runId, reviewMetadata, scope, changed.authority.head_revision);
+    // Every fresh standalone review carries the read obligation (ADR-0022):
+    // each reviewer must be engine-observed reading the scope's whole frozen
+    // diff. A scope too large for one reviewer to read is refused here, before
+    // anything is registered or issued.
+    const packetSet = standalonePackets(handle.runId, reviewMetadata, scope, changed.authority.head_revision,
+      { baselineRevision: reviewBaseline(changed) });
+    const budget = packetSet.frozenDiff === null ? "read-coverage frozen diff was not built" : readCoverageBudgetProblem(packetSet.frozenDiff);
+    if (budget !== null) return failed(budget);
     const prepared = prepareFreshStandaloneReview({
       runId: handle.runId,
       ...(input.files === null ? {} : { explicitScope: scope }),
@@ -177,6 +185,7 @@ export async function startStandaloneFacade(
     const registration: RegisteredStandaloneProgram = Object.freeze({
       schemaVersion: 2,
       reviewerProtocol: CURRENT_REVIEWER_PROTOCOL,
+      readCoverage: STANDALONE_READ_COVERAGE_V1,
       kind: "standalone-review",
       input,
       authority: JSON.parse(serializeStandaloneReviewAuthority(prepared.value.authority)),
@@ -644,7 +653,7 @@ async function resumeAwaitingResults(
     if (decision?.kind !== "captured") continue;
     const bytes = handle.readTranscriptBytes(authority);
     if (!bytes.ok) return failed(bytes.error.message);
-    const admission = admitCapturedStandaloneTranscript(reviewerProtocols, authority, bytes.value);
+    const admission = admitStandaloneReviewerResult(handle, reviewerProtocols, authority, bytes.value);
     if (!admission.ok) rejected.push({ slot: authority, problems: [...admission.problems] });
   }
   let machine: StandaloneReviewMachineState = state;
@@ -718,7 +727,8 @@ async function resumeAwaitingResults(
     const bytes = handle.readTranscriptBytes(request.authority);
     if (!bytes.ok) return failed(bytes.error.message);
     if (request.authority.attempt === 2) {
-      const admission = admitCapturedStandaloneTranscript(
+      const admission = admitStandaloneReviewerResult(
+        handle,
         reviewerProtocols,
         request.authority,
         bytes.value,

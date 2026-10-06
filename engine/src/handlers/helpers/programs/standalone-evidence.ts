@@ -31,6 +31,7 @@ import {
 import { buildContextPacket, encodeByteSection, type ContextPacket } from '../../../orchestration/context-packets';
 import { captureKey } from '../../../core/harness-capture';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
+import { admitRecordedReadCoverage } from '../../../orchestration/standalone-read-coverage-evidence';
 import { resolveModelProfile, lowerModelProfile } from '../../../core/model-profiles';
 import { boundedStandaloneReadHandle, successorSourceSnapshot } from './standalone-successor-source';
 import { parseRegistration, exactObject, type RegisteredStandaloneProgram } from './registration';
@@ -424,7 +425,8 @@ export function replayStandaloneResultFromEvidence(
       if (captured.value.has(attemptOneKey)) {
         const bytes = witnessedBytes(attemptOne.authority);
         if (!bytes.ok) return failed(bytes.message);
-        const admission = admitCapturedStandaloneTranscript(
+        const admission = admitStandaloneReviewerResult(
+          handle,
           reviewerProtocols,
           attemptOne.authority,
           bytes.value,
@@ -449,7 +451,8 @@ export function replayStandaloneResultFromEvidence(
       }
       const retryBytes = witnessedBytes(retry.value.authority);
       if (!retryBytes.ok) return failed(retryBytes.message);
-      const retryAdmission = admitCapturedStandaloneTranscript(
+      const retryAdmission = admitStandaloneReviewerResult(
+        handle,
         reviewerProtocols,
         retry.value.authority,
         retryBytes.value,
@@ -696,6 +699,25 @@ export function replayStandaloneCliCaptures(handle: RunDirHandle, registration: 
   successor?: PreparedStandaloneSuccessor, processWitnesses?: ReadonlyMap<string, StandaloneCaptureWitness>): StandaloneEvidenceReplayResult {
   const witnesses = readStandaloneCaptureWitnesses(handle, processWitnesses);
   return witnesses.ok ? replayStandaloneResultFromEvidence(handle, registration, witnesses.value, successor) : witnesses;
+}
+
+/**
+ * The one standalone result admission every resume and replay path crosses:
+ * the issued payload contract first, then — for a Run carrying the read
+ * obligation (ADR-0022) — the engine-observed read coverage of the attempt.
+ * A refusal of either is a semantic rejection that consumes the bounded retry;
+ * unreadable coverage evidence throws as infrastructure.
+ */
+export function admitStandaloneReviewerResult(
+  handle: RunDirHandle,
+  reviewerProtocols: StandaloneReviewerProtocolResolver,
+  request: AgentRequestAuthority,
+  bytes: Uint8Array,
+): Pick<Extract<StandaloneTranscriptAdmission, { ok: true }>, "ok"> | Extract<StandaloneTranscriptAdmission, { ok: false }> {
+  const payload = admitCapturedStandaloneTranscript(reviewerProtocols, request, bytes);
+  if (!payload.ok) return payload;
+  const coverage = admitRecordedReadCoverage(handle, request);
+  return coverage.kind === "refused" ? { ok: false, problems: [coverage.problem] } : { ok: true };
 }
 
 export function admitCapturedStandaloneTranscript(

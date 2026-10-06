@@ -14,6 +14,7 @@ import { parseStandaloneReviewAuthority } from '../../../core/standalone-review-
 import { type FrozenStandaloneReviewAuthority } from '../../../core/standalone-review-model';
 import { type StandaloneReviewKind } from '../../../core/standalone-review-scope';
 import { parseReviewerProtocolDescriptor } from '../../../core/reviewer-contract';
+import { parseStandaloneReadCoverage, type StandaloneReadCoveragePolicy } from '../../../core/standalone-read-coverage';
 import type { OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, RegisteredWaveGateProgram, WaveGateRestartAudit } from '../../../core/wave-gate-program';
 import { parseRunDirectoryReference } from '../../../orchestration/run-directory-handle';
 import {
@@ -24,7 +25,17 @@ import {
 } from './remediation-registration';
 import type { ProgramParse } from './program-result';
 
-export type RegisteredStandaloneProgram = RegisteredStandaloneSuccessorProgram | (RegisteredReviewerProtocol & Readonly<{
+/**
+ * A fresh standalone review's read obligation (ADR-0022, "Reviewer Protocol
+ * v4"): the unchanged v2 payload descriptor plus the exact read-coverage
+ * policy. Only a schema-2 registration can carry it; a registration without
+ * it is a v2 run whose admission is exactly what it always was.
+ */
+type StandaloneReadObligation =
+  | Readonly<{ schemaVersion: 1; readCoverage?: never }>
+  | Readonly<{ schemaVersion: 2; readCoverage?: StandaloneReadCoveragePolicy }>;
+
+export type RegisteredStandaloneProgram = RegisteredStandaloneSuccessorProgram | (RegisteredReviewerProtocol & StandaloneReadObligation & Readonly<{
   kind: "standalone-review";
   input: Readonly<{ kind: StandaloneReviewKind; files: readonly string[] | null; dryRun: boolean }>;
   authority: unknown;
@@ -102,9 +113,16 @@ export function parseRegistration(raw: unknown): ProgramParse<RegisteredStandalo
     if (!protocol.ok) return protocol;
     const keys = ["schemaVersion", "kind", "input", "authority"];
     if (protocol.value.schemaVersion === 2) keys.push("reviewerProtocol");
+    const coverageClaimed = typeof raw === "object" && raw !== null && Object.hasOwn(raw, "readCoverage");
+    if (coverageClaimed) {
+      if (protocol.value.schemaVersion !== 2) return { ok: false, message: "only a schema-2 standalone-review registration may carry read coverage" };
+      keys.push("readCoverage");
+    }
     if (!exactObject(raw, keys) || raw.kind !== "standalone-review") {
       return { ok: false, message: "standalone-review registration fields or kind are invalid" };
     }
+    const readCoverage = coverageClaimed ? parseStandaloneReadCoverage(raw.readCoverage) : null;
+    if (readCoverage !== null && !readCoverage.ok) return { ok: false, message: readCoverage.error };
     const input = parseStandaloneStartInput(raw.input);
     if (!input.ok) return input;
     if ("schemaVersion" in input.value) return { ok: false, message: "successor input requires version 3 registration" };
@@ -119,9 +137,14 @@ export function parseRegistration(raw: unknown): ProgramParse<RegisteredStandalo
         (input.value.files !== null && !canonicalStructuralEquals(input.value.files, authority.value.scope))) {
       return { ok: false, message: "standalone-review registration input differs from its frozen kind or complete scope" };
     }
+    const frozenAuthority = freezeRegistrationAuthority(JSON.parse(serializeStandaloneReviewAuthority(authority.value)));
+    if (protocol.value.schemaVersion === 2 && readCoverage !== null) {
+      return { ok: true, value: Object.freeze({
+        ...protocol.value, readCoverage: readCoverage.value, kind: "standalone-review" as const, input: input.value, authority: frozenAuthority,
+      }) };
+    }
     return { ok: true, value: Object.freeze({
-      ...protocol.value, kind: "standalone-review", input: input.value,
-      authority: freezeRegistrationAuthority(JSON.parse(serializeStandaloneReviewAuthority(authority.value))),
+      ...protocol.value, kind: "standalone-review", input: input.value, authority: frozenAuthority,
     }) };
   } catch (thrown) {
     const cause = boundedThrownCause(thrown, "successor standalone-registration");

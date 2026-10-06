@@ -30,6 +30,8 @@ import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import type { RegisteredReviewProgram } from './registration';
 import { durablePublicationDigest, durableRefutationRequests, type DurableRequestRecovery } from './durable-requests';
 import { publishReviewInitialBatch } from './request-publication';
+import { freezeDiff, STANDALONE_FROZEN_DIFF_SECTION, type FrozenDiff, type FrozenDiffSide } from '../../../core/standalone-read-coverage';
+import { baselineBlob } from './changed-paths';
 import type { ProgramParse } from './program-result';
 
 export function safeScope(scope: readonly string[]): readonly Readonly<{ path: string; status: "safe" | "absent" }>[] {
@@ -48,8 +50,15 @@ export function standaloneRequestId(runId: string, role: string, attempt: 1 | 2)
   return `request:${createHash("sha256").update(`${runId}\u0000${role}\u0000${attempt}`).digest("hex")}`;
 }
 
-export function frozenScopeSection(scope: readonly string[], headRevision: string) {
-  const files = scope.map((path) => {
+/** One scoped file as frozen at start: the exact worktree bytes both the
+ *  frozen-source section and the frozen diff derive from. */
+export type FrozenScopeFile =
+  | Readonly<{ path: string; kind: "text"; digest: string; byteLength: number; content: string }>
+  | Readonly<{ path: string; kind: "binary"; digest: string; byteLength: number; contentBase64: string }>
+  | Readonly<{ path: string; kind: "absent"; digest: null; byteLength: 0 }>;
+
+export function frozenScopeFiles(scope: readonly string[]): readonly FrozenScopeFile[] {
+  return Object.freeze(scope.map((path): FrozenScopeFile => {
     try {
       const bytes = readRunBytesNoFollow(path);
       const digest = createHash("sha256").update(bytes).digest("hex");
@@ -76,20 +85,67 @@ export function frozenScopeSection(scope: readonly string[], headRevision: strin
       }
       throw error;
     }
-  });
+  }));
+}
+
+export function frozenScopeSection(scope: readonly string[], headRevision: string) {
+  return frozenSourceSection(frozenScopeFiles(scope), headRevision);
+}
+
+function frozenSourceSection(files: readonly FrozenScopeFile[], headRevision: string) {
   const section = encodeByteSection("standalone-frozen-source", JSON.stringify({ schemaVersion: 1, headRevision, files }));
   if (!section.ok) throw new Error(section.error.message);
   return section.value;
 }
+
+const decodedSide = (bytes: Uint8Array): FrozenDiffSide => {
+  try { return { kind: "text", text: new TextDecoder("utf8", { fatal: true }).decode(bytes) }; }
+  catch { return { kind: "binary" }; }
+};
+
+/**
+ * The read-coverage obligation of a scope (ADR-0022): each frozen file's diff
+ * against its blob at the baseline revision — the same baseline the scope's
+ * added-line count measures against. The head side is the exact frozen bytes,
+ * never a second worktree read.
+ */
+export function frozenScopeDiff(files: readonly FrozenScopeFile[], baselineRevision: string, headRevision: string): FrozenDiff {
+  return freezeDiff({
+    baseRevision: baselineRevision,
+    headRevision,
+    files: files.map((file) => {
+      const base = baselineBlob(baselineRevision, file.path);
+      return {
+        path: file.path,
+        base: base === null ? { kind: "absent" as const } : decodedSide(base),
+        head: file.kind === "absent" ? { kind: "absent" as const }
+          : file.kind === "text" ? { kind: "text" as const, text: file.content } : { kind: "binary" as const },
+      };
+    }),
+  });
+}
+
+/** Read coverage requested at start: the baseline the frozen diff is taken against. */
+export type StandaloneReadCoverageStart = Readonly<{ baselineRevision: string }>;
 
 export function standalonePackets(
   runId: string,
   reviewMetadata: StandaloneReviewMetadata,
   scope: readonly string[],
   headRevision: string,
-): Readonly<{ contexts: readonly Readonly<{ attempts: readonly [string, string] }>[]; packets: readonly ContextPacket[] }> {
+  readCoverage?: StandaloneReadCoverageStart,
+): Readonly<{
+  contexts: readonly Readonly<{ attempts: readonly [string, string] }>[];
+  packets: readonly ContextPacket[];
+  /** The frozen read obligation, present exactly when read coverage was requested. */
+  frozenDiff: FrozenDiff | null;
+}> {
   const reviewers = selectStandaloneReviewers(reviewMetadata);
-  const sourceSection = frozenScopeSection(scope, headRevision);
+  const files = frozenScopeFiles(scope);
+  const sourceSection = frozenSourceSection(files, headRevision);
+  const frozenDiff = readCoverage === undefined ? null : frozenScopeDiff(files, readCoverage.baselineRevision, headRevision);
+  const diffSection = frozenDiff === null ? null : encodeByteSection(STANDALONE_FROZEN_DIFF_SECTION, JSON.stringify(frozenDiff));
+  if (diffSection !== null && !diffSection.ok) throw new Error(diffSection.error.message);
   const packets: ContextPacket[] = [];
   const contexts = reviewers.map((role) => {
     const buildAttempt = (attempt: 1 | 2) => {
@@ -105,7 +161,7 @@ export function standalonePackets(
         requestId: requestId.value,
         role,
         requiredSkill: AGENT_REQUIRED_SKILLS[role] ?? "none",
-        fixedContext: Object.freeze([section.value, sourceSection]),
+        fixedContext: Object.freeze(diffSection === null ? [section.value, sourceSection] : [section.value, sourceSection, diffSection.value]),
         variableContext: Object.freeze([]),
       });
       if (!packet.ok) throw new Error(packet.error.message);
@@ -116,7 +172,7 @@ export function standalonePackets(
     // asserted by a cast (type-design-analyzer-1).
     return Object.freeze({ attempts: Object.freeze([buildAttempt(1), buildAttempt(2)] as const) });
   });
-  return Object.freeze({ contexts: Object.freeze(contexts), packets: Object.freeze(packets) });
+  return Object.freeze({ contexts: Object.freeze(contexts), packets: Object.freeze(packets), frozenDiff });
 }
 
 export function readPublishedStandaloneResult(handle: RunDirHandle, state: StandaloneDoneState, maximumBytes?: number): ProgramParse<StandaloneDoneState> {

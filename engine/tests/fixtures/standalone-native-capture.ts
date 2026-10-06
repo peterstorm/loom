@@ -6,6 +6,7 @@ import type { RunDirHandle } from "../../src/orchestration/run-directory-handle"
 import { LOOM_REVIEW_AUTHORITY_BRIDGE, readLoomReviewAuthorityBridge } from "../../src/handlers/helpers/programs/review-authority-bridge";
 import { fixtureSession } from "./pi-session";
 import { value } from "./standalone-successor-remediation";
+import { frozenDiffReaderPages } from "./read-coverage";
 
 type Handler = (event: Record<string, unknown>, context: Record<string, unknown>) => unknown;
 type Emit = (event: string, payload: Record<string, unknown>) => Promise<unknown[]>;
@@ -18,6 +19,12 @@ async function nativeBatchCapturer(root: string, harness: "claude" | "pi", sessi
   let redeliver: ((texts?: readonly (readonly string[])[]) => Promise<unknown[]>) | undefined;
   const capture = async (handle: RunDirHandle, requests: readonly { authority: AgentRequestAuthority; task: string }[], texts: readonly (readonly string[])[]) => {
     const toolCallId = `owned-native-${++ordinal}`;
+    // Each scripted reviewer read its whole frozen diff (ADR-0022); empty for runs without a read
+    // obligation. A Run whose registration a test deliberately made unreadable gives the reviewer
+    // nothing to read — the engine must refuse that capture before observing anything.
+    const reads = requests.map(({ authority }) => {
+      try { return frozenDiffReaderPages(handle, authority); } catch { return []; }
+    });
     if (harness === "pi") {
       value(await bindings.registerSessionRunBinding(session.transport, session.sessionId, {
         runId: handle.runId, runsRoot: handle.identity.runsRoot, runDirectory: handle.runDirectory,
@@ -28,7 +35,10 @@ async function nativeBatchCapturer(root: string, harness: "claude" | "pi", sessi
       if (calls.some(result => result !== undefined)) throw Error(`native spawn refused: ${JSON.stringify(calls)}`);
       redeliver = (observed = texts) => emit("tool_result", { toolName: "subagent", toolCallId, input, isError: false, content: [],
         details: { results: input.tasks.map((item, index) => ({ agent: item.agent, task: item.task, exitCode: 0,
-          messages: [{ role: "assistant", content: observed[index]!.map(text => ({ type: "text", text })) }] })) } });
+          messages: [...reads[index]!.flatMap((text, read) => [
+            { role: "assistant", content: [{ type: "toolCall", id: `read-${read}`, name: "bash", arguments: { command: "read-context-packet --diff" } }] },
+            { role: "toolResult", toolCallId: `read-${read}`, toolName: "bash", isError: false, content: [{ type: "text", text }] },
+          ]), { role: "assistant", content: observed[index]!.map(text => ({ type: "text", text })) }] })) } });
       return redeliver();
     }
     const deliveries: ((observed: readonly string[]) => Promise<unknown>)[] = [];
@@ -38,7 +48,13 @@ async function nativeBatchCapturer(root: string, harness: "claude" | "pi", sessi
         role: authority.role, attempt: authority.attempt }));
       const transcript = join(session.directory, `${nativeId}.jsonl`);
       deliveries.push(async observed => {
-        writeFileSync(transcript, JSON.stringify({ message: { role: "assistant", content: observed.map(text => ({ type: "text", text })) } }) + "\n");
+        writeFileSync(transcript, [
+          ...reads[index]!.flatMap((text, read) => [
+            JSON.stringify({ message: { role: "assistant", content: [{ type: "tool_use", id: `read-${read}`, name: "Bash", input: { command: "read-context-packet --diff" } }] } }),
+            JSON.stringify({ message: { role: "user", content: [{ type: "tool_result", tool_use_id: `read-${read}`, content: text }] } }),
+          ]),
+          JSON.stringify({ message: { role: "assistant", content: observed.map(text => ({ type: "text", text })) } }),
+        ].join("\n") + "\n");
         process.env.LOOM_ORCHESTRATION_RUNS_ROOT = handle.identity.runsRoot;
         process.env.LOOM_ORCHESTRATION_RUN_DIR = handle.runDirectory;
         return dispatch.runDispatch(JSON.stringify({ session_id: session.sessionId, agent_id: nativeId,

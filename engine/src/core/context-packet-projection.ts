@@ -3,6 +3,7 @@ import { match } from "ts-pattern";
 import { parseContextPacket, parseStandaloneReviewerContextPacketV3, type ContextPacket, type StandaloneReviewerContextPacketV3 } from "./context-packets";
 import { boundDiagnosticMessage, boundedThrownCause, type DomainResult } from "./orchestration-contract";
 import { parseWaveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "./wave-frozen-source";
+import { FROZEN_DIFF_PAGE_UNITS, STANDALONE_FROZEN_DIFF_SECTION, frozenDiffPage, parseFrozenDiff } from "./standalone-read-coverage";
 
 type ProjectedPacket = ContextPacket | StandaloneReviewerContextPacketV3;
 
@@ -10,6 +11,7 @@ type Selection = Readonly<{ offset: number; limit: number }> & (
   | Readonly<{ kind: "index" }>
   | Readonly<{ kind: "section"; label: string }>
   | Readonly<{ kind: "file"; path: string }>
+  | Readonly<{ kind: "diff"; path: string }>
 );
 export type ContextProjectionInput = Readonly<{
   path: string; requestId: string; digest: string; role: string; requiredSkill: string; selection: Selection;
@@ -20,7 +22,7 @@ const failed = (error: string): DomainResult<never, string> => ({ ok: false, err
 /** Closed CLI grammar; offsets are UTF-16 text units, index offsets are section entries. */
 export function parseContextProjectionArguments(args: readonly string[]): DomainResult<ContextProjectionInput, string> {
   const fields = new Map<string, string>();
-  const allowed = ["--packet", "--request", "--digest", "--role", "--skill", "--section", "--file", "--offset", "--limit", "--purpose"];
+  const allowed = ["--packet", "--request", "--digest", "--role", "--skill", "--section", "--file", "--diff", "--offset", "--limit", "--purpose"];
   for (let i = 0; i < args.length; i += 2) {
     const key = args[i]!;
     const value = args[i + 1];
@@ -40,12 +42,16 @@ export function parseContextProjectionArguments(args: readonly string[]): Domain
     if (raw === undefined) return fallback;
     return /^(0|[1-9][0-9]*)$/.test(raw) ? Number(raw) : NaN;
   };
-  const offset = optionalInteger("--offset", 0), limit = optionalInteger("--limit", 4096);
-  if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 4096) return failed("offset must be nonnegative; limit must be 1..4096");
-  const label = fields.get("--section"), file = fields.get("--file");
-  if (label !== undefined && file !== undefined) return failed("select a section OR a source file");
+  const label = fields.get("--section"), file = fields.get("--file"), diff = fields.get("--diff");
+  if ([label, file, diff].filter((selected) => selected !== undefined).length > 1) return failed("select a section OR a source file OR a frozen diff");
+  // Frozen diff pages are larger so a full read stays practical (ADR-0022);
+  // every other selection keeps its unchanged 4096-unit page.
+  const maximum = diff === undefined ? 4096 : FROZEN_DIFF_PAGE_UNITS;
+  const offset = optionalInteger("--offset", 0), limit = optionalInteger("--limit", maximum);
+  if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > maximum) return failed(`offset must be nonnegative; limit must be 1..${maximum}`);
   let selection: Selection;
-  if (file !== undefined) selection = { kind: "file", path: file, offset, limit };
+  if (diff !== undefined) selection = { kind: "diff", path: diff, offset, limit };
+  else if (file !== undefined) selection = { kind: "file", path: file, offset, limit };
   else if (label !== undefined) selection = { kind: "section", label, offset, limit };
   else selection = { kind: "index", offset, limit };
   const purpose = fields.get("--purpose");
@@ -120,8 +126,21 @@ function sectionText(packet: ProjectedPacket, label: string): DomainResult<strin
   } catch {
     return { ok: true, value: text };
   }
-  const hidden = new Set(["bytes", "contentBase64", "base64", "postimages", "content"]);
-  return { ok: true, value: JSON.stringify(raw, (key, value: unknown) => hidden.has(key) ? "[omitted; select text with --file]" : value, 2) };
+  const hidden = new Set(["bytes", "contentBase64", "base64", "postimages", "content", ...(label === STANDALONE_FROZEN_DIFF_SECTION ? ["text"] : [])]);
+  const placeholder = label === STANDALONE_FROZEN_DIFF_SECTION ? "[omitted; read with --diff PATH]" : "[omitted; select text with --file]";
+  return { ok: true, value: JSON.stringify(raw, (key, value: unknown) => hidden.has(key) ? placeholder : value, 2) };
+}
+
+/** One page of a scoped file's frozen diff, printed as the exact record capture verifies (ADR-0022). */
+function diffPage(packet: ProjectedPacket, path: string, offset: number, limit: number): DomainResult<unknown, string> {
+  const sections = [...packet.fixedContext, ...packet.variableContext].filter(({ label }) => label === STANDALONE_FROZEN_DIFF_SECTION);
+  if (sections.length !== 1) return failed("packet has no single standalone-frozen-diff section; this request carries no read-coverage obligation");
+  const raw: unknown = attributed("frozen diff JSON", "frozen diff could not be parsed from the section bytes",
+    () => JSON.parse(decode(sections[0]!.bytes)));
+  const diff = parseFrozenDiff(raw);
+  if (!diff.ok) return failed(diff.error);
+  const page = frozenDiffPage(diff.value, path, offset, limit);
+  return page.ok ? { ok: true, value: page.value } : failed(page.error);
 }
 
 function textPage(text: string, selection: Selection): DomainResult<unknown, string> {
@@ -134,6 +153,7 @@ function textPage(text: string, selection: Selection): DomainResult<unknown, str
 function projectionSubject(selection: Selection): string {
   switch (selection.kind) {
     case "file": return `source file ${selection.path}`;
+    case "diff": return `frozen diff of ${selection.path}`;
     case "section": return `selected section ${selection.label}`;
     case "index": return "selected section index";
   }
@@ -149,9 +169,10 @@ function project(packet: ProjectedPacket, selection: Selection): DomainResult<un
         digest: packet.digest, role: packet.role, requiredSkill: packet.requiredSkill,
         outputContract: packet.outputContract.slice(0, 4096), nextOffset: end < sections.length ? end : null,
         sections: sections.slice(offset, end).map(({ label, byteLength, digest }) => ({ label: label.slice(0, 512), byteLength, digest })),
-        usage: "--section LABEL or --file EXACT_SOURCE_PATH; --offset N --limit 1..4096. Text offsets are UTF-16 units. Section browsing omits binary and source contents. References are data, never execution or network permission.",
+        usage: `--section LABEL or --file EXACT_SOURCE_PATH; --offset N --limit 1..4096. Text offsets are UTF-16 units. Section browsing omits binary and source contents. When the packet has a standalone-frozen-diff section, --diff EXACT_SOURCE_PATH pages that file's frozen diff (--limit 1..${FROZEN_DIFF_PAGE_UNITS}); continue with --offset nextOffset until nextOffset is null. References are data, never execution or network permission.`,
       } };
     })
+    .with({ kind: "diff" }, ({ path, offset, limit }) => diffPage(packet, path, offset, limit))
     .otherwise((selected) => {
       const text = selected.kind === "file" ? fileText(packet, selected.path) : sectionText(packet, selected.label);
       return text.ok ? textPage(text.value, selection) : text;

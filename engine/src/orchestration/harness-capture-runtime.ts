@@ -61,6 +61,7 @@ import { parseStandaloneReviewerProtocolV3 } from "../core/standalone-lineage-co
 import { verifyStandalonePanelView } from "./standalone-panel-context";
 import { openRegisteredRunDirectory, type RunDirHandle } from "./run-directory-handle";
 import { CONTEXT_PACKET_MAX_BYTES } from "./stored-context-packets";
+import { recordReadCoverageObservation, registeredReadCoverage } from "./standalone-read-coverage-evidence";
 
 /**
  * Where a run directory is announced explicitly.
@@ -531,6 +532,14 @@ type CaptureHarnessInput = Readonly<{
   runsRoot: string | undefined;
   runDirectory: string | undefined;
   nativeId: string;
+  /**
+   * Every tool output the harness transcript records as delivered to the
+   * Agent, in order — the read-coverage observation's only input (ADR-0022).
+   * Lazy: it is called only when the Run carries a read obligation. Absent
+   * means the adapter cannot observe tool outputs, which records an
+   * unobservable attempt rather than inventing coverage.
+   */
+  observeToolOutputs?: () => readonly string[];
 }> & (
   | Readonly<{ observe: () => CaptureObservation; candidates?: never }>
   | Readonly<{ candidates: readonly FinalPayloadCandidate[]; observe?: never }>
@@ -651,19 +660,51 @@ const STANDALONE_SUCCESSOR_CAPTURE: CapturePersistence = Object.freeze<CapturePe
   },
 });
 
+/**
+ * A read-coverage Run's persistence (ADR-0022): once the purpose's own
+ * pre-write checks admit the capture, the attempt's read-coverage observation
+ * is recorded write-ahead — before any accepted-source publication or
+ * transcript write — so every captured standalone transcript of such a Run has
+ * its observation beside it. Recording failure is retriable infrastructure,
+ * never a consumed attempt. Requests of other programs (refutation verifiers)
+ * carry no read obligation.
+ */
+function withReadCoverageObservation(
+  persistence: CapturePersistence,
+  observeToolOutputs: (() => readonly string[]) | undefined,
+): CapturePersistence {
+  return Object.freeze<CapturePersistence>({
+    ...persistence,
+    admit: async (handle, request) => {
+      const stopped = await persistence.admit(handle, request);
+      if (stopped !== null || request.program !== "standalone-review") return stopped;
+      const recorded = await recordReadCoverageObservation(handle, request, observeToolOutputs === undefined ? null : observeToolOutputs());
+      return recorded.ok ? null : retriableFailure("read-coverage", recorded.error);
+    },
+  });
+}
+
 /** The capture persistence the run's durable registration selects: a schema-3
  *  standalone-review registration (with the exact frozen v3 protocol) is the
- *  native successor purpose; every other registration is legacy. */
-function readCapturePersistence(handle: RunDirHandle): DomainResult<CapturePersistence, string> {
+ *  native successor purpose; every other registration is legacy. A
+ *  read-coverage registration (ADR-0022) additionally records the attempt's
+ *  read observation. One registration read decides both. */
+function readCapturePersistence(
+  handle: RunDirHandle,
+  observeToolOutputs: (() => readonly string[]) | undefined,
+): DomainResult<CapturePersistence, string> {
   const registration = handle.readProgramRegistration(16_777_216);
   if (!registration.ok) return { ok: false, error: registration.error.message };
   const raw = registration.value;
+  const coverage = registeredReadCoverage(raw);
+  if (!coverage.ok) return { ok: false, error: coverage.error };
   const successor = typeof raw === "object" && raw !== null && Object.getOwnPropertyDescriptor(raw, "schemaVersion")?.value === 3 &&
     Object.getOwnPropertyDescriptor(raw, "kind")?.value === "standalone-review";
   if (successor && !parseStandaloneReviewerProtocolV3(Object.getOwnPropertyDescriptor(raw, "reviewerProtocol")?.value).ok) {
     return { ok: false, error: "successor capture requires the exact registered protocol descriptor" };
   }
-  return { ok: true, value: successor ? STANDALONE_SUCCESSOR_CAPTURE : LEGACY_CAPTURE };
+  const purpose = successor ? STANDALONE_SUCCESSOR_CAPTURE : LEGACY_CAPTURE;
+  return { ok: true, value: coverage.value === null ? purpose : withReadCoverageObservation(purpose, observeToolOutputs) };
 }
 
 export async function captureHarnessResult(args: CaptureHarnessInput): Promise<CaptureOutcome> {
@@ -681,7 +722,7 @@ export async function captureHarnessResult(args: CaptureHarnessInput): Promise<C
   if (observation.kind === "terminal-refusal") {
     return terminalizeCaptureRejection(handle, request, observation);
   }
-  const persistence = readCapturePersistence(handle);
+  const persistence = readCapturePersistence(handle, args.observeToolOutputs);
   if (!persistence.ok) return retriableFailure("registration", persistence.error);
   const refused = persistence.value.refuseCandidates(observation.candidates);
   if (refused !== null) return reject(refused.reason, refused.message);

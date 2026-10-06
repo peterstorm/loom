@@ -1,3 +1,4 @@
+import { captureReviewedTranscript } from "../../../fixtures/read-coverage";
 import { spawnSync } from "node:child_process";
 import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { captureNativeReview } from "../../../fixtures/native-review-capture";
@@ -125,7 +126,7 @@ async function completeCriticalStandaloneReview(repository: string, runsRoot: st
       if (!bytes.ok) throw new Error(bytes.error.message);
       expect(Buffer.from(bytes.value).toString("utf8")).toBe(raw);
     } else {
-      expect((await created.value.captureTranscript(authority, [...Buffer.from(raw)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(created.value, authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
   }
 
@@ -152,7 +153,7 @@ async function completeCriticalStandaloneReview(repository: string, runsRoot: st
       const captured = await captureNativeReview(repository, created.value, authority, index % 2 === 0 ? "pi" : "claude", [raw]);
       expect(captured.captured, captured.diagnostic).toBe(true);
     } else {
-      expect((await created.value.captureTranscript(authority, [...Buffer.from(raw)])).ok).toBe(true);
+      expect((await captureReviewedTranscript(created.value, authority, [...Buffer.from(raw)])).ok).toBe(true);
     }
   }
 
@@ -230,7 +231,7 @@ async function completeCleanStandaloneReview(repository: string, runsRoot: strin
   if (!started.ok) throw new Error(started.message);
   const initial = started.action as { requests: readonly { authority: AgentRequestAuthority }[] };
   for (const { authority } of initial.requests) {
-    expect((await created.value.captureTranscript(authority, [...Buffer.from(reviewerTranscript(false))])).ok).toBe(true);
+    expect((await captureReviewedTranscript(created.value, authority, [...Buffer.from(reviewerTranscript(false))])).ok).toBe(true);
   }
   const done = await inDirectory(repository, () => resumeStandaloneFacade(created.value, registeredStandalone(created.value)));
   expect(done.ok && done.action.kind).toBe("done");

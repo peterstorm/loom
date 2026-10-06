@@ -175,11 +175,39 @@ function assertBatchReplay(cwd: string, runsRoot: string, runDir: string, expect
   check(JSON.stringify(requestIds(replay)) === JSON.stringify(requestIds(expected)), `${label} resume changed pending request authority`);
 }
 
+/**
+ * What a reviewer's own Bash does with a read-coverage task (ADR-0022): run the
+ * issued read command with --diff for every listed file until nextOffset is
+ * null. Each stdout is a real reader page, handed to `submit --tool-outputs`
+ * exactly as a non-capturing harness would; tasks without the obligation read nothing.
+ */
+function frozenDiffReads(cwd: string, request: SpawnRequest): readonly string[] {
+  if (!request.task.includes("LOOM_READ_COVERAGE: every-frozen-diff-unit")) return [];
+  const command = /^LOOM_CONTEXT_READ_COMMAND: (.*)$/m.exec(request.task)?.[1];
+  check(command !== undefined, "read-coverage task is missing its read command");
+  const outputs: string[] = [];
+  for (const [, path] of request.task.matchAll(/^- (.+): \d+ units, \d+ page\(s\)$/gm)) {
+    let offset: number | null = 0;
+    while (offset !== null) {
+      const read = spawnSync("bash", ["-c", `${command} --diff '${path}' --offset ${offset}`], { cwd, encoding: "utf8" });
+      check(read.status === 0, `frozen diff read failed for ${path}: ${read.stderr}`);
+      outputs.push(read.stdout);
+      offset = (JSON.parse(read.stdout) as { nextOffset: number | null }).nextOffset;
+    }
+  }
+  check(outputs.length > 0, "read-coverage task listed no frozen diff to read");
+  return outputs;
+}
+
 function submit(cwd: string, runsRoot: string, runDir: string, request: SpawnRequest, output: string): unknown {
   const { authority } = request;
+  const reads = frozenDiffReads(cwd, request);
+  const toolOutputs = join(runsRoot, `tool-outputs-${authority.requestId.slice(-16)}.json`);
+  if (reads.length > 0) writeFileSync(toolOutputs, JSON.stringify(reads));
   return run(cwd, [
     "submit", "--runs-root", runsRoot, "--run", runDir,
     "--request", authority.requestId, "--slot", authority.slotId, "--attempt", String(authority.attempt),
+    ...(reads.length > 0 ? ["--tool-outputs", toolOutputs] : []),
   ], output);
 }
 

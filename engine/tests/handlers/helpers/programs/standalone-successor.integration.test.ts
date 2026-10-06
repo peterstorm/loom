@@ -1,3 +1,4 @@
+import { captureReviewedTranscript } from "../../../fixtures/read-coverage";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync, truncateSync, chmodSync } from "node:fs";
@@ -79,7 +80,7 @@ async function predecessor(root: string, criticalHistory = false) {
   const started = await shell.startStandaloneFacade(handle, { kind: "types", files: ["a.ts"], dryRun: false });
   if (!started.ok) throw Error(started.message);
   const action = spawnBatch(started.action);
-  for (const [index, { authority }] of action.requests.entries()) value(await handle.captureTranscript(authority, [...Buffer.from(json({ schemaVersion: 2, kind: "standalone-review",
+  for (const [index, { authority }] of action.requests.entries()) value(await captureReviewedTranscript(handle, authority, [...Buffer.from(json({ schemaVersion: 2, kind: "standalone-review",
     findings: index === 0 ? criticalHistory ? [critical, { ...critical, claim: "Unchanged upheld blocker" }]
       : [{ severity: "advisory", file: "a.ts", line: 1, claim: "Original assertion", reason: "Clarity" }] : [] }))]));
   const registration = value(helpers.parseRegistration(value(handle.readProgramRegistration())));
@@ -88,7 +89,7 @@ async function predecessor(root: string, criticalHistory = false) {
     for (const { authority } of spawnBatch(completed.action).requests) {
       const packet = value(handle.readContext(authority.contextDigest));
       const context = JSON.parse(Buffer.from(packet.fixedContext[0]!.bytes).toString());
-      value(await handle.captureTranscript(authority, [...Buffer.from(json({ criterion: context.lens,
+      value(await captureReviewedTranscript(handle, authority, [...Buffer.from(json({ criterion: context.lens,
         verdicts: context.findings.map((finding: { id: string }, index: number) => ({ finding_id: finding.id,
           verdict: index === 0 ? "refuted" : "upheld", reasoning: `Original ${context.lens} exact reasoning` })) }))]));
     }
@@ -331,12 +332,12 @@ describe.sequential("actual standalone successor CLI lifecycle", { timeout: 60_0
       expect(batch.ok).toBe(true);
       const awaiting = value(machine.reduceStandaloneReviewMachine(machine.startStandaloneReviewMachine(prepared.authority), { kind: "review-batch-published", runId: handle.runId }));
       await handle.writeCheckpoint(checkpoint.serializeStandaloneReviewMachineState(awaiting));
-      value(await handle.captureTranscript(prepared.initialRequests[0], [...Buffer.from("Missing historical required markers")]));
+      value(await captureReviewedTranscript(handle, prepared.initialRequests[0], [...Buffer.from("Missing historical required markers")]));
       const retried = await shell.resumeStandaloneFacade(handle, registration);
       if (!retried.ok) throw Error(retried.message);
       const retry = spawnBatch(retried.action).requests[0]!.authority;
       expect(retry.attempt).toBe(2);
-      value(await handle.captureTranscript(retry, [...Buffer.from("### Machine Summary\nCRITICAL_COUNT: 0\nADVISORY_COUNT: 1\nADVISORY: exact original v1 assertion")]));
+      value(await captureReviewedTranscript(handle, retry, [...Buffer.from("### Machine Summary\nCRITICAL_COUNT: 0\nADVISORY_COUNT: 1\nADVISORY: exact original v1 assertion")]));
       expect((await shell.resumeStandaloneFacade(handle, registration)).ok).toBe(true);
       const before = readFileSync(join(handle.runDirectory, "result.json"));
       const p = await policy(root, "source", "policy-zero", publisher);

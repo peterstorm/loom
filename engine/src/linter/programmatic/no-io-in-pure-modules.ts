@@ -119,6 +119,11 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   // The ONE shared plain-record wire guard (state-file-wire, findings,
   // context-packets): a dependency-free pure predicate leaf.
   "engine/src/core/plain-record.ts",
+  // Standalone read coverage (ADR-0022): the obligation, page verification and
+  // admission decision, plus the deterministic diff the obligation is frozen
+  // from. The Context Packet projection imports both.
+  "engine/src/core/standalone-read-coverage.ts",
+  "engine/src/core/unified-diff.ts",
 ];
 
 /** Import specifiers that indicate I/O capability or ambient non-determinism */

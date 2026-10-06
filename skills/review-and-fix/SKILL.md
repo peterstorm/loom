@@ -77,16 +77,28 @@ bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration start standalone-review \
 JSON
 ```
 
+Every fresh review carries an engine-enforced **read obligation** (ADR-0022). Each
+reviewer must be observed paging the scope's complete frozen diff with the reader's
+`--diff` mode, and a result with any unread page is refused and retried with the
+unread ranges. `start` refuses a scope whose frozen diff exceeds one reviewer's
+240,000-unit budget. When it does, partition the scope into explicit `--files` slices
+(roughly ≤ 230 KB of `git diff` each), one registered Run per slice, and review each
+slice. Never pass a larger slice to bypass the budget, and never treat a skimmed
+review's verdict as coverage.
+
 Spawn the exact returned batch. Each reviewer's exact raw bytes must then reach
-its reserved slot. On a harness that captures transcripts itself this already
-happened at spawn completion and a repeat submit is an idempotent confirmation;
-on any other harness the parent performs it, once per issued request:
+its reserved slot. On a harness that captures transcripts itself (Claude Code, Pi)
+this already happened at spawn completion, together with the engine's read-coverage
+observation, and a repeat submit is an idempotent confirmation. On any other harness
+the parent performs it, once per issued request, and hands over the reviewer's
+delivered tool outputs (a JSON array of strings, in order) so coverage can be verified:
 
 ```bash
 bun ${LOOM_DIR}/engine/src/cli.ts helper orchestration submit \
   --runs-root ".claude/reviews/review-and-fix-runs" \
   --run "<same-review-run-id>" \
   --request "<exact-request-id>" --slot "<exact-slot-id>" --attempt 1 \
+  --tool-outputs "<reviewer-tool-outputs.json>" \
   < "<reviewer-raw-output>"
 ```
 

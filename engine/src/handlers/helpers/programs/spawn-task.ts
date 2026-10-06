@@ -19,6 +19,8 @@ import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { parseRegisteredFacadeProgram, type RegisteredReviewProgram } from './registration';
 import { publishedReviewerRequest } from './durable-requests';
 import { reviewerProtocolResolver } from './reviewer-protocol-resolution';
+import { requestFrozenDiff } from '../../../orchestration/standalone-read-coverage-evidence';
+import { FROZEN_DIFF_PAGE_UNITS } from '../../../core/standalone-read-coverage';
 
 /** Observe the parent Pi session at the shell; only exact qualified model
  * identity may elect the catalog's local reviewer profile. */
@@ -272,6 +274,27 @@ function standalonePanelBootstrap(handle: RunDirHandle, request: AgentRequestAut
 }
 
 /**
+ * The read obligation of a read-coverage standalone request (ADR-0022): what
+ * must be read, exactly how, and that the engine — not the reviewer — decides
+ * whether it was. The obligated files are listed from the request's own
+ * frozen diff, so the text can never name a different obligation than the one
+ * admission enforces.
+ */
+function readObligationDelivery(handle: RunDirHandle, request: AgentRequestAuthority): string {
+  const diff = requestFrozenDiff(handle, request);
+  if (!diff.ok) throw new Error(`read-coverage delivery requires the request's frozen diff: ${diff.error}`);
+  const obligated = diff.value.files.flatMap((file) => file.kind === "text-diff"
+    ? [`- ${file.path}: ${file.totalUnits} units, ${Math.ceil(file.totalUnits / FROZEN_DIFF_PAGE_UNITS)} page(s)\n`] : []);
+  return "LOOM_READ_COVERAGE: every-frozen-diff-unit\n" +
+    "This review carries an engine-enforced read obligation. Before your final result you MUST read the complete frozen diff of EVERY file listed below. " +
+    `For each file append --diff EXACT_SOURCE_PATH to LOOM_CONTEXT_READ_COMMAND (one page is up to ${FROZEN_DIFF_PAGE_UNITS} units), then repeat with --offset N, where N is the previous page's nextOffset, until nextOffset is null. ` +
+    "Run every reader call as its own command with no pipe, redirection or filter (head, tail, grep, jq): the engine credits only exact reader pages your harness transcript recorded as delivered, re-verified against the frozen diff text. " +
+    "An unread page is unread whatever your result says; a result with any unread page is refused and you are retried with the exact unread ranges. " +
+    "Use --file EXACT_SOURCE_PATH for surrounding context wherever the diff alone is not enough to judge a change.\n" +
+    (obligated.length === 0 ? "No scoped file has a text diff; there is nothing to read.\n" : `Frozen diff to read (${obligated.length} file(s)):\n${obligated.join("")}`);
+}
+
+/**
  * The shared reviewer compatibility delivery text for an eligible render: the
  * registration read/parse and the eligibility gate live in the projection (so
  * the program-path emission authority is joined BEFORE any delivery I/O), and
@@ -304,7 +327,10 @@ function reviewerCompatibilityBootstrap(
   if (version === 3) return delivery +
     "This is an explicitly issued standalone successor v3 request. Read standalone-lineage and standalone-frozen-source, then the frozen reviewer-payload-schema and reviewer-impact-rubric. Cover every inherited origin exactly once in issued order, retaining original identity and history. Reopening needs the exact prior decision reference and complete new evidence; unavailable context means not-assessable, never repaired. New assertions belong in findings as draft/relation, not reminted prior Findings.\n" +
     "Browse predecessor-frozen-source with --section. Browse an exact predecessor-context:ROLE[:attempt-2] using --archive LABEL --archive-purpose v1-v2 (or standalone-successor for a v3 predecessor), then --section or --file and bounded offsets. These are retained data, not new issuance authority. Native capture records your one exact final payload; registered resume owns admission, retry and panel work.\n";
-  if (version === 2) return delivery + "Read the issued Context Packet FIRST; its frozen schema and rubric govern your final output.\n";
+  if (version === 2) {
+    return delivery + "Read the issued Context Packet FIRST; its frozen schema and rubric govern your final output.\n" +
+      (program.kind === "standalone-review" && program.readCoverage !== undefined ? readObligationDelivery(handle, request) : "");
+  }
   const role = join(LOOM_PACKAGE_ROOT, "references", "reviewer-protocol-v1", "agents", `${request.role}.md`);
   const wire = join(LOOM_PACKAGE_ROOT, "references", "reviewer-protocol-v1", "agents", "_shared", "wire-contract.md");
   if (readRunBytesNoFollow(role).length === 0 || readRunBytesNoFollow(wire).length === 0) {

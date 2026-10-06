@@ -292,6 +292,23 @@ const captureUnclaimedProgramObservation = (
     : terminalCaptureRefusal("transcript-shape", bounded.errors.join("; "));
 };
 
+/**
+ * Every successful tool result's text in a Pi child's messages, in order: the
+ * read-coverage observation's input (ADR-0022). An error result delivered
+ * nothing creditable. Each message is read on its own, like the Claude
+ * adapter's line walk: one malformed unrelated message withholds only its own
+ * text, never credit for every page read — and no message can grant credit,
+ * because each counted page is re-verified against the frozen diff text.
+ */
+export function piToolOutputs(messages: unknown): readonly string[] {
+  if (!Array.isArray(messages)) return Object.freeze([]);
+  return Object.freeze(messages.flatMap((message: unknown) => {
+    if (!isRecord(message) || message["role"] !== "toolResult" || message["isError"] === true || !Array.isArray(message["content"])) return [];
+    return [(message["content"] as unknown[]).flatMap((block) =>
+      isRecord(block) && block["type"] === "text" && typeof block["text"] === "string" ? [block["text"]] : []).join("\n")];
+  }));
+}
+
 export async function capturePiSubagentResult(
   toolCallId: unknown,
   resultIndex: number,
@@ -346,6 +363,7 @@ export async function capturePiSubagentResult(
     runDirectory,
     nativeId: piSpawnRosterId(toolCallId, resultIndex, agentType),
     observe,
+    observeToolOutputs: () => piToolOutputs(messages),
   });
   const audit = captureAuditLine("loom(pi): capture-orchestration-result", outcome);
   if (audit !== null) process.stderr.write(audit);

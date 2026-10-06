@@ -284,6 +284,34 @@ function untrackedAdditions(paths: readonly string[]): number {
   }, 0);
 }
 
+/** The revision a scope's changes are measured against: the merge base, or HEAD without one. */
+export function reviewBaseline(changed: DerivedChangedPaths): string {
+  return changed.authority.base_revision ?? changed.authority.head_revision;
+}
+
+/**
+ * The exact bytes of `path` in `revision`, or null when the revision has no
+ * such path (the file is new in this change). The read-coverage frozen diff
+ * (ADR-0022) takes its base side from here. Only Git's two "path is not in
+ * this revision" refusals mean absence; any other failure (an invalid
+ * revision, an unreadable object) throws with attribution, so an unreadable
+ * base can never become an "added file" diff.
+ */
+export function baselineBlob(revision: string, path: string): Uint8Array | null {
+  const object = `${revision}:${path}`;
+  const probe = spawnSync("git", ["cat-file", "-e", object], { encoding: "buffer" });
+  if (probe.error) throw new Error(`git cat-file could not be spawned: ${probe.error.message}`);
+  if (probe.status !== 0) {
+    const stderr = spawnText(probe.stderr).trim();
+    if (/^fatal: path '.*' (does not exist in|exists on disk, but not in) '/.test(stderr)) return null;
+    throw new Error(stderr || `git cat-file -e failed for ${object}`);
+  }
+  const blob = spawnSync("git", ["cat-file", "blob", object], { encoding: "buffer", maxBuffer: 64 * 1024 * 1024 });
+  if (blob.error) throw new Error(`git cat-file could not be spawned: ${blob.error.message}`);
+  if (blob.status !== 0) throw new Error(spawnText(blob.stderr).trim() || `git cat-file blob failed for ${object}`);
+  return new Uint8Array(blob.stdout);
+}
+
 export function metadata(
   kind: StandaloneReviewKind,
   scope: readonly string[],
@@ -291,7 +319,7 @@ export function metadata(
 ): StandaloneReviewMetadata {
   const scopedUntracked = new Set(changed.untracked.filter((path) => scope.includes(path)));
   const trackedScope = scope.filter((path) => !scopedUntracked.has(path));
-  const baseline = changed.authority.base_revision ?? changed.authority.head_revision;
+  const baseline = reviewBaseline(changed);
   const additions = trackedAdditions(baseline, trackedScope) + untrackedAdditions([...scopedUntracked].sort());
   return classifyScope(kind, scope, changed.created, additions);
 }

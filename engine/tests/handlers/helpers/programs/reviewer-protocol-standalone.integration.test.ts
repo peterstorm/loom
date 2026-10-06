@@ -32,6 +32,7 @@ import { captureHarnessResult } from "../../../../src/orchestration/harness-capt
 import { disposeFixturePiSessions, fixturePiEnvironment, fixtureSession, withFixturePiSession } from "../../../fixtures/pi-session";
 import { startNativeLegacyReview } from "../../../fixtures/standalone-native-history";
 import { readSessionRunBindings } from "../../../../src/orchestration/session-run-bindings";
+import { frozenDiffReaderPages } from "../../../fixtures/read-coverage";
 
 // Route election is ambient-env sensitive: observedReviewerIssueRoute() reads
 // this process's PI_PROVIDER/PI_MODEL/PI_REASONING_LEVEL, and
@@ -108,9 +109,15 @@ async function runCli(root: string, args: readonly string[], stdin = ""): Promis
   if (result.status !== 0) throw new Error(result.stderr);
   return JSON.parse(result.stdout) as Action;
 }
+/** Manual submission from a non-capturing harness: a read-coverage attempt also hands over
+ *  the reader pages its reviewer received (`--tool-outputs`, ADR-0022) — here every page. */
 async function submit(root: string, handle: RunDirHandle, request: AgentRequestAuthority, raw: string): Promise<Action> {
+  const pages = frozenDiffReaderPages(handle, request);
+  const toolOutputs = join(root, `tool-outputs-${request.requestId.slice(-12)}.json`);
+  if (pages.length > 0) writeFileSync(toolOutputs, JSON.stringify(pages));
   return (await runCli(root, ["submit", "--runs-root", handle.identity.runsRoot, "--run", handle.runId,
-    "--request", request.requestId, "--slot", request.slotId, "--attempt", String(request.attempt)], raw));
+    "--request", request.requestId, "--slot", request.slotId, "--attempt", String(request.attempt),
+    ...(pages.length > 0 ? ["--tool-outputs", toolOutputs] : [])], raw));
 }
 async function resume(root: string, handle: RunDirHandle): Promise<Action> {
   return (await runCli(root, ["resume", "--runs-root", handle.identity.runsRoot, "--run", handle.runId]));

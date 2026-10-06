@@ -72,6 +72,8 @@
 import { match } from "ts-pattern";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { recordReadCoverageObservation, runReadCoverage } from "../../orchestration/standalone-read-coverage-evidence";
+import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
 import { dirname, join, resolve } from "node:path";
 import { isReviewAgent, SUBAGENT_DIR, TASK_GRAPH_PATH } from "../../config";
 import { LOOM_PACKAGE_ROOT } from "../../utils/loom-package-root";
@@ -1757,9 +1759,49 @@ async function dispatchSubmission(binding: SubmissionBinding, capture: CapturedS
   return { kind: "allow" };
 }
 
+/**
+ * The tool outputs a non-capturing harness delivered to the reviewer, read
+ * from `--tool-outputs PATH` (a JSON array of strings, in delivery order), or
+ * null when none were supplied. They pass through the SAME page verification
+ * native capture uses (ADR-0022): a string counts only where it is an exact
+ * reader page of the frozen diff, so this input grants no credit native
+ * capture would not.
+ */
+function submittedToolOutputs(args: readonly string[]): Readonly<{ ok: true; value: readonly string[] | null }> | Readonly<{ ok: false; message: string }> {
+  const path = argumentValue(args, "--tool-outputs");
+  if (path === null) return { ok: true, value: null };
+  let raw: unknown;
+  try {
+    const bytes = readRunBytesNoFollow(path, 64 * 1024 * 1024);
+    raw = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch (cause) {
+    return { ok: false, message: `--tool-outputs ${path} is unreadable: ${cause instanceof Error ? cause.message : String(cause)}` };
+  }
+  return Array.isArray(raw) && raw.every((entry) => typeof entry === "string")
+    ? { ok: true, value: Object.freeze([...raw as string[]]) }
+    : { ok: false, message: "--tool-outputs must be a JSON array of strings" };
+}
+
+/** Record the submitted attempt's read-coverage observation before its transcript, when the Run requires one. */
+async function recordSubmittedReadCoverage(binding: SubmissionBinding, toolOutputs: readonly string[] | null): Promise<string | null> {
+  if (binding.facadeRegistration?.kind !== "standalone-review" || binding.reserved.program !== "standalone-review") return null;
+  const attempts = binding.handle.readCapturedAttempts();
+  if (!attempts.ok) return attempts.error.message;
+  if (attempts.value.has(captureKey(binding.reserved.slotId, binding.reserved.attempt))) return null;
+  const policy = runReadCoverage(binding.handle);
+  if (!policy.ok) return policy.error;
+  if (policy.value === null) return toolOutputs === null ? null : "--tool-outputs applies only to a read-coverage standalone review";
+  const recorded = await recordReadCoverageObservation(binding.handle, binding.reserved, toolOutputs);
+  return recorded.ok ? null : recorded.error;
+}
+
 async function submitOperation(stdin: string, args: readonly string[]): Promise<HookResult> {
   const binding = bindSubmission(args);
   if (!binding.ok) return binding.result;
+  const toolOutputs = submittedToolOutputs(args);
+  if (!toolOutputs.ok) return { kind: "error", message: toolOutputs.message };
+  const coverage = await recordSubmittedReadCoverage(binding.value, toolOutputs.value);
+  if (coverage !== null) return { kind: "error", message: coverage };
   const captured = await captureSubmission(binding.value, stdin);
   return captured.ok ? dispatchSubmission(binding.value, captured.value) : captured.result;
 }

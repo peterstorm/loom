@@ -1,3 +1,4 @@
+import { captureReviewedTranscript, readCoverageSubmitArgs } from "../../../fixtures/read-coverage";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
@@ -96,7 +97,8 @@ async function sourceFixturePinned(root: string) {
   const initial = await command(root, ["start", "standalone-review", ...flags(root, "source")], JSON.stringify({ kind: "simplify", files: ["README.md"], dryRun: false }));
   const requests: readonly { authority: AgentRequestAuthority; task?: string }[] = initial.requests;
   for (const [index, { authority }] of requests.entries()) {
-    await command(root, ["submit", ...flags(root, "source"), "--request", authority.requestId, "--slot", authority.slotId, "--attempt", "1"],
+    await command(root, ["submit", ...flags(root, "source"), "--request", authority.requestId, "--slot", authority.slotId, "--attempt", "1",
+      ...readCoverageSubmitArgs(join(root, "runs"), "source", authority)],
       JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: index === 0 ? [
         { severity: "advisory", file: "README.md", line: 1, claim: "First advisory", reason: "Nonblocking clarity" },
         { severity: "advisory", file: "README.md", line: 1, claim: "Second advisory", reason: "Nonblocking organization" },
@@ -148,7 +150,7 @@ describe.sequential("admitted standalone advisory publication, correction and re
         JSON.stringify({ kind: "simplify", files: ["README.md"], dryRun: false }));
       for (const { authority } of other.requests) {
         await command(root, ["submit", ...flags(root, "other-source"), "--request", authority.requestId,
-          "--slot", authority.slotId, "--attempt", "1"], JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] }));
+          "--slot", authority.slotId, "--attempt", "1", ...readCoverageSubmitArgs(join(root, "runs"), "other-source", authority)], JSON.stringify({ schemaVersion: 2, kind: "standalone-review", findings: [] }));
       }
       const locator = join(root, "runs/other-source");
       const foreign = valueOf(await f.publisher.readStandaloneDispositionSource({ locator, runId: "other-source",
@@ -351,7 +353,7 @@ describe.sequential("admitted standalone advisory publication, correction and re
       expect(published.ok).toBe(true);
       const awaiting = valueOf(reduceStandaloneReviewMachine(startStandaloneReviewMachine(prepared.authority), { kind: "review-batch-published", runId: handle.runId }));
       await handle.writeCheckpoint(serializeStandaloneReviewMachineState(awaiting));
-      valueOf(await handle.captureTranscript(prepared.initialRequests[0], [...Buffer.from("### Machine Summary\nCRITICAL_COUNT: 0\nADVISORY_COUNT: 1\nADVISORY: exact historical advisory")]));
+      valueOf(await captureReviewedTranscript(handle, prepared.initialRequests[0], [...Buffer.from("### Machine Summary\nCRITICAL_COUNT: 0\nADVISORY_COUNT: 1\nADVISORY: exact historical advisory")]));
       const completed = await resumeStandaloneFacade(handle, registration);
       expect(completed.ok && completed.action.kind).toBe("done");
       const result = readFileSync(join(handle.runDirectory, "result.json"));

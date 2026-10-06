@@ -454,6 +454,40 @@ function collectClaudeToolBlocks(lines: readonly string[]): {
 }
 
 /**
+ * Every successful tool result's text in a Claude transcript, in transcript
+ * order: the read-coverage observation's input (ADR-0022). A result's content
+ * is either one string or a list of blocks whose text blocks are joined; an
+ * `is_error` result delivered nothing the Agent can be credited with reading.
+ * Unparseable lines are skipped — they can only withhold credit, never grant it,
+ * because each counted page is re-verified against the frozen diff text.
+ */
+export function claudeToolOutputsFromLines(lines: readonly string[]): readonly string[] {
+  const outputs: string[] = [];
+  for (const line of lines) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(line) as unknown; } catch { continue; }
+    if (typeof parsed !== "object" || parsed === null) continue;
+    const message = (parsed as Record<string, unknown>)["message"];
+    if (typeof message !== "object" || message === null) continue;
+    const record = message as Record<string, unknown>;
+    if (record["role"] !== "user" || !Array.isArray(record["content"])) continue;
+    for (const block of record["content"] as unknown[]) {
+      if (typeof block !== "object" || block === null) continue;
+      const result = block as Record<string, unknown>;
+      if (result["type"] !== "tool_result" || result["is_error"] === true) continue;
+      const content = result["content"];
+      if (typeof content === "string") outputs.push(content);
+      else if (Array.isArray(content)) {
+        outputs.push(content.flatMap((item: unknown) =>
+          typeof item === "object" && item !== null && (item as Record<string, unknown>)["type"] === "text" &&
+            typeof (item as Record<string, unknown>)["text"] === "string" ? [(item as Record<string, string>)["text"]!] : []).join("\n"));
+      }
+    }
+  }
+  return Object.freeze(outputs);
+}
+
+/**
  * The emission-tool-call frames observed in a Claude transcript — the same
  * closed vocabulary the Pi adapter projects, so the capture runtime's ONE
  * fold and selection serve both harnesses (FR-033's shared refusals).
@@ -661,6 +695,9 @@ export async function captureClaudeResult(
   // immutable reservation first. An unrelated stop remains `no-reservation`.
   // Actual final-payload refusals can be terminalised against that request;
   // current locator/read unavailability instead preserves its exact attempt.
+  // The bounded transcript read the observation makes, kept for the lazy
+  // read-coverage tool-output projection (ADR-0022) so the file is read once.
+  let observedLines: readonly string[] | null = null;
   const observe = (): CaptureObservation => {
     const transcriptPath = resolveAgentTranscriptPath(input);
     if (transcriptPath === null) {
@@ -699,6 +736,7 @@ export async function captureClaudeResult(
         ? { requestId: correlated.value.request.requestId, version: issuedEmissionVersionOf(parsedRegistration) }
         : null;
       const lines = claudeTranscriptLines(transcriptPath, 16_777_216);
+      observedLines = lines;
       const candidates = claudeCandidatesFromLines(lines);
       return attributed === null
         ? captureCandidates(candidates)
@@ -719,6 +757,11 @@ export async function captureClaudeResult(
     // carries; the spawn side recorded it beside the reservation.
     nativeId: typeof input.agent_id === "string" ? input.agent_id : "",
     observe,
+    // Only the default projection reads the transcript lines; a caller-supplied
+    // payload reader owns its whole observation and supplies no tool outputs.
+    ...(readPayload === claudeFinalPayloadCandidates
+      ? { observeToolOutputs: () => observedLines === null ? Object.freeze([]) : claudeToolOutputsFromLines(observedLines) }
+      : {}),
   });
 }
 
