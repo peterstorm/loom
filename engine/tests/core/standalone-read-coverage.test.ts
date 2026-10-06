@@ -133,6 +133,13 @@ describe("read coverage", () => {
     expect(refused).toMatchObject({ ok: false, error: expect.stringContaining("src/a.ts (") });
   });
 
+  it("tells the retry that coverage is per attempt, so the whole obligation must be read again", () => {
+    // A retried reviewer is a fresh Agent; reading only the named gaps leaves
+    // every page the earlier attempt read unread for this attempt.
+    const refused = admitReadCoverage(DIFF, REQUEST, observeReadCoverage(DIFF, REQUEST, pages(DIFF, "src/new.ts", 5_000)));
+    expect(refused).toMatchObject({ ok: false, error: expect.stringMatching(/observed per attempt.*EVERY file in the read obligation list.*not only these ranges/) });
+  });
+
   it("round-trips the stored observation", () => {
     const observation = observeReadCoverage(DIFF, REQUEST, pages(DIFF, "src/a.ts", 2_500));
     expect(parseReadCoverageObservation(JSON.parse(JSON.stringify(observation)))).toEqual({ ok: true, value: observation });

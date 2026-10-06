@@ -243,6 +243,7 @@ describe("Claude Code standalone review through session run bindings", () => {
     const retry = retried.requests![0]!;
     expect(retry.task).toContain("read coverage incomplete");
     expect(retry.task).toMatch(/README\.md \(\d+ of \d+ units unread: \d+-\d+\)/);
+    expect(retry.task).toContain("not only these ranges");
 
     await backgroundReview(p, "a-skimmer-retry", retry, await readFrozenDiff(p, retry.task));
     const done = await facade(p, ["resume", "--runs-root", p.runsRoot, "--run", "run.claude-coverage"]);

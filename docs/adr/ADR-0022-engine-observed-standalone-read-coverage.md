@@ -70,7 +70,11 @@ observation of an attempt is kept.
 admission, and every resume and checkpoint-independent replay path crosses it.
 A result whose verified ranges leave any unit unread is a semantic rejection. It
 takes the existing bounded retry, and the attempt-2 task names every unread file
-and range. A second failure terminal-blocks the slot exactly as before. Coverage
+and range. Coverage is per attempt: the retry is a fresh Agent and earlier
+attempts' reads are not credited to it, so the diagnostic says the named ranges
+only explain the refusal and the whole obligation must be read again. (A live
+retry that read only the named ranges was refused terminally before that sentence
+existed.) A second failure terminal-blocks the slot exactly as before. Coverage
 evidence that is missing for an attempt, or from a harness that supplied no tool
 outputs, refuses: coverage that was not observed is not coverage. Unreadable
 evidence is infrastructure failure and consumes no attempt. A scope without any

@@ -325,6 +325,7 @@ export function admitReadCoverage(
   return gaps.length === 0 ? { ok: true, value: null } : {
     ok: false,
     error: `read coverage incomplete: the engine observed no frozen diff page for ${describeReadCoverageGaps(gaps)}. ` +
-      "Read every page of every scoped file's frozen diff with the reader's --diff mode before emitting the result.",
+      "Coverage is observed per attempt and a retry starts with nothing read, so these ranges only explain this refusal: " +
+      "read every page of EVERY file in the read obligation list with the reader's --diff mode, not only these ranges, before emitting the result.",
   };
 }
