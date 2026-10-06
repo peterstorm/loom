@@ -12,14 +12,22 @@
  * never a re-parse of pre-selection transcript bytes, and never a silent
  * extraction baseline over evidence that says otherwise.
  *
- * Every function here takes already-read evidence and decides:
+ * Every export here takes already-read evidence and decides:
+ * `registeredPanelProgram`, `parseRegisteredPanelProgram`,
+ * `logicalPanelRequestId`, the `panelVerdictEmissionPort` kernel adapter,
  * `parsePanelVerdictSourceRecordBytes`, `joinPanelAttemptIssuance`,
- * `selectPanelAttemptVerdictSource`, `settlePanelAttempt`,
- * `panelSubmissionProblem`, and `executeDeterministicPanelOperation`. The Run
+ * `selectPanelAttemptVerdictSource`, `panelSubmissionProblem`,
+ * `settlePanelAttempt`, and `executeDeterministicPanelOperation`. The Run
  * Directory reads, the write-ahead record publication, and the operation
  * evidence adapter live in the shell (handlers/helpers/programs/legacy-panel).
  *
- * Pure module: no I/O, no clock, no randomness.
+ * Pure in behavior (no I/O, clock or randomness), but NOT enrolled in
+ * DEFAULT_PURE_MODULES: the purity closure audits every transitive import,
+ * and this module imports the emission transport (emission-ingestion,
+ * emission-tool, harness-capture), which declared pure modules never import
+ * (ADR-0018), and the unenrolled legacy-archive. Instead, the
+ * no-io-in-pure-modules rule runs over this file's own text in
+ * legacy-panel-decisions-purity.test.ts; its imports are not audited.
  */
 import {
   parseArtifactByteLength,
