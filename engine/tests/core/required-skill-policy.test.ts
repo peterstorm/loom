@@ -4,7 +4,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AGENT_REQUIRED_SKILLS } from "../../src/core/orchestration-contract";
 import { checkAgentSkillPrompt, parseDeclaredSkills } from "../../src/core/agent-skills";
-import { requiredSkillMarker } from "../../src/handlers/helpers/programs/spawn-task";
+import { requiredSkillMarker } from "../../src/core/spawn-task-text";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 

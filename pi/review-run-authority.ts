@@ -40,14 +40,14 @@ import {
   replayStandaloneResultFromEvidence,
   replayStandaloneCapturedEvidence,
 } from "../engine/src/handlers/helpers/programs";
-import type { LoomReviewAuthorityReceipt } from "../engine/src/handlers/helpers/programs/review-authority-bridge";
+import type { LoomReviewAuthorityReceipt } from "../engine/src/core/review-authority-receipt";
 import { readRunBytesNoFollow } from "../engine/src/orchestration/no-follow-fs";
 import {
   readSessionRunBindings,
   type SessionRunBinding,
 } from "../engine/src/orchestration/session-run-bindings";
 import { captureKey, type CaptureKey } from "../engine/src/core/harness-capture";
-import { reduceStandaloneReviewMachine } from "../engine/src/core/standalone-review-machine";
+import { reduceStandaloneReviewMachine } from "../engine/src/core/standalone-review";
 import { failure, success, type DomainResult } from "../engine/src/core/orchestration-contract/identity";
 import {
   parseArtifactDigest,

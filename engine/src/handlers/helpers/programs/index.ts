@@ -33,7 +33,6 @@ export {
   readStandaloneReviewedSource,
   replayStandaloneResultFromEvidence,
   resumeStandaloneFacade,
-  type StandaloneReviewedSource,
   startStandaloneFacade,
 } from './standalone';
 export { resumeWaveGateFacade } from './wave-gate';

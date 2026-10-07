@@ -14,7 +14,7 @@ import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_IMPACT_RUBRIC_V1, REVIEWER_PAYLOAD_
 import { prepareStandaloneReview } from "../../../../src/core/standalone-review-preparation";
 import { serializeStandaloneReviewAuthority } from "../../../../src/core/standalone-review-records";
 import { STANDALONE_REVIEWER_ROLES } from "../../../../src/core/standalone-review-scope";
-import { reduceStandaloneReviewMachine, startStandaloneReviewMachine } from "../../../../src/core/standalone-review-machine";
+import { reduceStandaloneReviewMachine, startStandaloneReviewMachine } from "../../../../src/core/standalone-review";
 import { serializeStandaloneReviewMachineState } from "../../../../src/core/standalone-review-checkpoint";
 import { parseRegistration, parseRegisteredFacadeProgram, parsedAuthority } from "../../../../src/handlers/helpers/programs/registration";
 import { publicationFile } from "../../../../src/handlers/helpers/programs/durable-requests";

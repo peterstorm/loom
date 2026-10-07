@@ -44,17 +44,18 @@ import {
   type InitialBatchPublicationIntent,
   type SpawnRequest,
 } from "../../src/core/orchestration-contract";
-import { aggregateStandaloneReview, proveStandaloneRosterCompletion } from "../../src/core/standalone-review";
-import { capturedReviewerResultFromText } from "../../src/core/standalone-reviewer-capture";
-import { prepareStandaloneReview } from "../../src/core/standalone-review-preparation";
-import { serializeAdjudicatedStandaloneReview } from "../../src/core/standalone-review-records";
-import { freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion } from "../../src/core/standalone-refutation-completion";
 import {
+  aggregateStandaloneReview,
+  proveStandaloneRosterCompletion,
   parseAuthoritativeStandaloneReviewResult,
   reduceStandaloneReviewMachine,
   startStandaloneReviewMachine,
   type AuthoritativeStandaloneReviewResult,
-} from "../../src/core/standalone-review-machine";
+} from "../../src/core/standalone-review";
+import { capturedReviewerResultFromText } from "../../src/core/standalone-reviewer-capture";
+import { prepareStandaloneReview } from "../../src/core/standalone-review-preparation";
+import { serializeAdjudicatedStandaloneReview } from "../../src/core/standalone-review-records";
+import { freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion } from "../../src/core/standalone-refutation-completion";
 import { deriveRefutationVerifierBinding, parseRefutationPanelAuthority } from "../../src/core/panel-authority";
 import {
   completePersistentRefutationPanel,

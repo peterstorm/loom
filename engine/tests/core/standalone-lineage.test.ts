@@ -1,13 +1,8 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import fc from "fast-check";
 import { dispositionPublicationFixture } from "../fixtures/standalone-disposition-publication";
-import { readStandaloneReviewPublication } from "../../src/core/standalone-review-machine";
-import { standaloneFixture, valueOf } from "../fixtures/standalone-remediation-authority";
-import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
-import { parseStandaloneReviewerPayloadV3 } from "../../src/core/reviewer-protocol";
-import { STANDALONE_LINEAGE_LIMITS, standaloneLineageInventorySchema, type StandaloneReviewerPayloadV3 } from "../../src/core/standalone-lineage-contract";
-import { attributeFindings } from "../../src/core/findings";
 import {
+  readStandaloneReviewPublication,
   prepareStandaloneLineageSource,
   prepareStandaloneDisposition,
   prepareStandaloneSuccessor,
@@ -17,7 +12,13 @@ import {
   projectStandaloneLineageSource,
   type StandaloneLineageSource,
   type PreparedStandaloneDisposition,
-} from "../../src/core/standalone-lineage";
+  isPreparedStandaloneSuccessor,
+} from "../../src/core/standalone-review";
+import { standaloneFixture, valueOf } from "../fixtures/standalone-remediation-authority";
+import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
+import { parseStandaloneReviewerPayloadV3 } from "../../src/core/reviewer-protocol";
+import { STANDALONE_LINEAGE_LIMITS, standaloneLineageInventorySchema, type StandaloneReviewerPayloadV3 } from "../../src/core/standalone-lineage-contract";
+import { attributeFindings } from "../../src/core/findings";
 import {
   parseFindingOrigin,
   parseStandaloneLineageInventory,
@@ -26,7 +27,6 @@ import {
   findingOf,
 } from "../../src/core/standalone-finding-origin";
 import { type PreparedStandaloneSuccessor } from "../../src/core/standalone-review-model";
-import { isPreparedStandaloneSuccessor } from "../../src/core/standalone-review";
 import { prepareFreshStandaloneReview } from "../../src/core/standalone-review-preparation";
 
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));

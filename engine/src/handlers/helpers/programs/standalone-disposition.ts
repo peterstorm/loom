@@ -5,7 +5,7 @@
 import { dirname } from "node:path";
 import { canonicalStructuralEquals } from "../../../core/orchestration-contract";
 import type { StandalonePublicationReference } from "../../../core/standalone-lineage-contract";
-import type { StandaloneLineageSource } from "../../../core/standalone-lineage";
+import type { StandaloneLineageSource } from "../../../core/standalone-review";
 import { registerStandaloneDisposition, standaloneDispositionReceipt,
   type RegisteredStandaloneDispositionProgram, type StandaloneDispositionStartInput, type StandaloneDispositionState } from "../../../core/standalone-disposition-machine";
 import { parseRunDirectoryReference, parseRunEventResourcePolicy, type RunDirHandle } from "../../../orchestration/run-directory-handle";

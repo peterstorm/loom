@@ -28,7 +28,7 @@ import { STANDALONE_RESULT_SLOT, serializeAdjudicatedStandaloneReview } from "./
 import {
   isAuthoritativeStandaloneReviewResult,
   type AuthoritativeStandaloneReviewResult,
-} from "./standalone-review-machine";
+} from "./standalone-review";
 import { parseReviewPath } from "./review-packet";
 import {
   compareCandidateRepositoryWitnesses,

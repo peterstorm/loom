@@ -32,7 +32,7 @@ import {
   freezeVerificationManifest,
   type FrozenVerificationManifest,
 } from "../../../../src/core/verification-manifest";
-import type { AuthoritativeStandaloneReviewResult } from "../../../../src/core/standalone-review-machine";
+import type { AuthoritativeStandaloneReviewResult } from "../../../../src/core/standalone-review";
 import { standaloneFixture, valueOf } from "../../../fixtures/standalone-remediation-authority";
 
 // ---------------------------------------------------------------------------

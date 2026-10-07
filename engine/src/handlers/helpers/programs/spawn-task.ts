@@ -1,11 +1,14 @@
 /**
- * Engine-issued spawn task rendering: the authority markers, packet path,
- * required-Skill marker, issued emission descriptor and per-version reviewer
- * delivery bootstrap every spawned agent reads first, plus the parent-session
- * observations (Pi model identity, emission capability) the render consumes.
+ * Engine-issued spawn task rendering — the imperative shell. It gathers and
+ * verifies every fact one render depends on in a single observation step (the
+ * parsed durable registration, the published request and Context Packet, the
+ * reader and archive presence, the frozen diff, the Pi parent flag and the
+ * issued emission route), converts every refusal into a thrown bounded error,
+ * reports an extraction-only route on stderr, and hands the facts to the pure
+ * `renderSpawnTaskText` (core/spawn-task-text). The parent-session observation
+ * the review programs need for profile selection lives here too.
  */
 import { LOOM_PACKAGE_ROOT } from "../../../utils/loom-package-root";
-import { join } from 'node:path';
 import { verifyStandalonePanelView } from '../../../orchestration/standalone-panel-context';
 import { canonicalRecord, canonicalStructuralEquals, type AgentRequestAuthority } from '../../../core/orchestration-contract';
 import { STANDALONE_REVIEWER_PROTOCOL_V3 } from '../../../core/standalone-lineage-contract';
@@ -15,34 +18,31 @@ import { CONTEXT_PACKET_MAX_BYTES } from '../../../orchestration/stored-context-
 import type { ReviewerProtocolDescriptor } from '../../../core/reviewer-contract';
 import { projectEmissionTaskText, type IssuedSpawnEmissionRoute } from '../../../core/issued-emission-capability';
 import { issuedReviewerEmissionRoute, reviewerEmissionEligible } from '../../../core/reviewer-emission-route';
+import {
+  archivedReviewerInstructionPaths,
+  contextPacketReaderPath,
+  renderSpawnTaskText,
+  type ReviewerDelivery,
+  type SpawnTaskFacts,
+} from '../../../core/spawn-task-text';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { parseRegisteredFacadeProgram, type RegisteredReviewProgram } from './registration';
 import { publishedReviewerRequest } from './durable-requests';
 import { reviewerProtocolResolver } from './reviewer-protocol-resolution';
 import { requestFrozenDiff } from '../../../orchestration/standalone-read-coverage-evidence';
-import { FROZEN_DIFF_PAGE_UNITS } from '../../../core/standalone-read-coverage';
+
+/** The parent Pi flag: the one ambient read the emission route consumes. */
+const piParentExists = (): boolean => process.env.PI_CODING_AGENT === 'true';
 
 /** Observe the parent Pi session at the shell; only exact qualified model
  * identity may elect the catalog's local reviewer profile. */
 export function observedReviewerIssueRoute(): ReviewerIssueRoute {
   return reviewerIssueRouteForParent({
-    pi: process.env.PI_CODING_AGENT === 'true',
+    pi: piParentExists(),
     provider: process.env.PI_PROVIDER,
     model: process.env.PI_MODEL,
     thinking: process.env.PI_REASONING_LEVEL,
   });
-}
-
-/**
- * One marker line naming the Skill the spawned role's policy requires, or the
- * empty string when the role has none. Load-bearing for Pi: its spawn gate
- * (`checkAgentSkillPrompt`) refuses any loom-agent spawn whose task never
- * names a frontmatter-declared Skill, and the generic packet task otherwise
- * never would (code-simplifier → distill, architecture-tech-lead → deepen,
- * spec-check-invoker → spec-check).
- */
-export function requiredSkillMarker(requiredSkill: string | null): string {
-  return requiredSkill === null ? "" : `LOOM_REQUIRED_SKILL: ${requiredSkill}\n`;
 }
 
 /**
@@ -75,19 +75,6 @@ const describeProtocolProjection = (projection: RegisteredReviewProtocolProjecti
     ? "the archived schema-1 contract (no issued emission schema)"
     : `schema version ${projection.schemaVersion} with issued digest ${projection.reviewerProtocol.schemaDigest}`;
 
-/** What `reviewerEmissionProjection` renders for one request. */
-type ReviewerEmissionProjection = Readonly<{
-  /** The bootstrap text, rendered once and reused by renderSpawnTask. */
-  bootstrap: string;
-  /** The descriptor line; empty when the route is not emission. */
-  descriptor: string;
-  /** The tool-primary instruction on the emission route; otherwise the
-   *  caller's instruction verbatim (FR-020). */
-  instruction: string;
-  /** The issued route the descriptor and instruction were rendered from. */
-  route: IssuedSpawnEmissionRoute;
-}>;
-
 /** The route of a request that is not emission-eligible: it carries no issued
  *  reviewer-payload contract, so it is extraction-only by construction and is
  *  neither rendered with a descriptor nor reported (FR-001). */
@@ -106,79 +93,68 @@ const reportEmissionRoute = (observation: EmissionRouteObservation): void => {
   process.stderr.write(`${JSON.stringify({ event: "loom-emission-route", ...observation })}\n`);
 };
 
+/** The run's durable program registration, read and parsed once per render. */
+function observedRegistration(handle: RunDirHandle, maximumBytes?: number) {
+  const stored = handle.readProgramRegistration(maximumBytes);
+  if (!stored.ok) return { ok: false as const, message: stored.error.message };
+  return { ok: true as const, parsed: parseRegisteredFacadeProgram(stored.value) };
+}
+
+type ReviewerObservation = Readonly<{
+  descriptor: string;
+  instruction: string;
+  delivery: ReviewerDelivery;
+  /** The issued route the descriptor and instruction were projected from. */
+  route: IssuedSpawnEmissionRoute;
+}>;
+
 /**
- * One reviewer request's issued emission projection (AD-6/AD-7): the request
- * programs' descriptor/instruction rendering from ISSUED authority. The
- * eligibility gate decides first (the reviewer roles on standalone/wave-gate
- * requests; every other request — spec-check slots, panel verdicts,
- * implementation spawns — is projected with an empty descriptor and the
- * caller's instruction VERBATIM, so archived and extraction-only contracts
- * keep their exact final-message wording). A supplied emission authority is
- * bound to the request's own program, the durable registration is read and
- * parsed with the bootstrap's exact refusals, the supply is joined against
- * its protocol projection, and only then does the delivery bootstrap render —
- * its throws stay the exact registration/publication refusals callers already
- * fail closed on.
+ * One eligible reviewer request's observed delivery facts (AD-6/AD-7). A
+ * supplied emission authority is bound to the request's own program, the
+ * durable registration is read and parsed with the bootstrap's exact refusals,
+ * the supply is joined against its protocol projection BEFORE any delivery
+ * I/O, and only then are the per-version delivery inputs verified — its throws
+ * stay the exact registration/publication refusals callers already fail closed
+ * on.
  *
- * For an eligible request the ISSUED protocol descriptor names the claim —
- * sourced from the required program-path emission authority for active review
- * programs, or from durable registration on the compatibility replay path —
- * and the pure route decision turns it plus the surface's capability
- * declaration into the request's emission route. A
- * refused route fails CLOSED: the render throws the bounded refusal so the
- * drive reports it — no silent degradation, no fallback to a tool the surface
- * cannot provide (US4).
+ * The ISSUED protocol descriptor names the claim — sourced from the required
+ * program-path emission authority for active review programs, or from durable
+ * registration on the compatibility path (legacy schema-1 batches and Pi's
+ * extraction-only canonical re-render) — and the core's ONE reviewer-route
+ * derivation, the same function the capture runtime selects against, turns it
+ * plus the Pi parent observation into the route. A refused route fails CLOSED:
+ * the observation throws the bounded refusal so the drive reports it — no
+ * silent degradation, no fallback to a tool the surface cannot provide (US4).
  */
-function reviewerEmissionProjection(
+function observeReviewerDelivery(
   handle: RunDirHandle,
   authority: AgentRequestAuthority,
   baseInstruction: string,
   emissionAuthority: RegisteredReviewProgram | undefined,
-): ReviewerEmissionProjection {
-  if (!reviewerEmissionEligible(authority)) {
-    return Object.freeze({ bootstrap: "", descriptor: "", instruction: baseInstruction, route: INELIGIBLE_ROUTE });
-  }
+): ReviewerObservation {
   // The supply's program binding is storage-independent: a descriptor can
   // only ever name the request's own program's issued contract, so a wrong
   // supply is refused before any registration read.
   if (emissionAuthority !== undefined && emissionAuthority.kind !== authority.program) {
     throw new Error(`the supplied emission authority is the ${emissionAuthority.kind} program, not the request's ${authority.program} program; a descriptor binds only its own program's issued contract`);
   }
-  const stored = handle.readProgramRegistration();
-  if (!stored.ok) {
-    throw new Error(`reviewer bootstrap registration is unavailable: ${stored.error.message}`);
-  }
-  const parsed = parseRegisteredFacadeProgram(stored.value);
+  const registration = observedRegistration(handle);
+  if (!registration.ok) throw new Error(`reviewer bootstrap registration is unavailable: ${registration.message}`);
+  const { parsed } = registration;
   if (parsed.kind === "invalid") throw new Error(`reviewer bootstrap registration is invalid: ${parsed.message}`);
   if (parsed.kind !== "registered" || (parsed.program.kind !== "standalone-review" && parsed.program.kind !== "wave-gate")) {
     throw new Error("reviewer bootstrap requires parsed program registration");
   }
-  // Supply coherence (AD-7, FR-012): the descriptor's eligibility inputs flow
-  // through the program path as an explicit input. A supplied authority must
-  // BE the request's own program and must carry the durable registration's
-  // protocol projection — the emission projection's issuance join, proved
-  // BEFORE any delivery I/O — before it can name the issued contract;
-  // divergence fails closed (US4). An absent supply keeps the durable-only
-  // fallback. Production absent-supply renders are the ineligible legacy
-  // orchestration panel path; existing program integration tests also exercise
-  // this fallback with eligible reviewer requests.
-  let claimSource: RegisteredReviewProgram = parsed.program;
+  const program = parsed.program;
   if (emissionAuthority !== undefined) {
     const supplied = registeredReviewProtocolProjection(emissionAuthority);
-    const durable = registeredReviewProtocolProjection(parsed.program);
+    const durable = registeredReviewProtocolProjection(program);
     if (!canonicalStructuralEquals(supplied, durable)) {
       throw new Error(`the supplied ${emissionAuthority.kind} emission authority carries ${describeProtocolProjection(supplied)}, not the durable registration's ${describeProtocolProjection(durable)}; a descriptor names only the joined issued contract`);
     }
-    claimSource = emissionAuthority;
   }
-  const bootstrap = reviewerCompatibilityBootstrap(handle, authority, parsed.program);
-  // The route is the core's ONE reviewer-route derivation — the same function
-  // the capture runtime selects against — so render and capture cannot
-  // disagree about the issued binding; the render never re-derives it.
-  const route = issuedReviewerEmissionRoute(claimSource, authority, process.env.PI_CODING_AGENT === "true");
-  // The shell owns the refusal→throw conversion (US4): a route the child
-  // surface cannot provide fails the render, so the drive reports the bounded
-  // refusal — no silent degradation, no fallback to an unprovidable tool.
+  const delivery = observeDeliveryInputs(handle, authority, program);
+  const route = issuedReviewerEmissionRoute(emissionAuthority ?? program, authority, piParentExists());
   if (route.kind === "refused") {
     throw new Error(`emission route refused for request ${authority.requestId}: ${route.reason}`);
   }
@@ -190,27 +166,68 @@ function reviewerEmissionProjection(
       reason: projected.decision.reason,
     }));
   }
-  return Object.freeze({
-    bootstrap,
-    descriptor: projected.descriptor,
-    instruction: projected.instruction,
-    route: projected.decision,
-  });
+  return Object.freeze({ descriptor: projected.descriptor, instruction: projected.instruction, delivery, route: projected.decision });
+}
+
+/** Verify the per-version delivery inputs of the parsed durable program and return them as data. */
+function observeDeliveryInputs(
+  handle: RunDirHandle,
+  request: AgentRequestAuthority,
+  program: RegisteredReviewProgram,
+): ReviewerDelivery {
+  if (program.schemaVersion === 3) {
+    const published = publishedReviewerRequest(handle, request, 16_777_216);
+    const packet = handle.readStandaloneSuccessorContext(request.contextDigest);
+    if (!published.ok || !packet.ok || packet.value.requestId !== request.requestId || packet.value.role !== request.role) {
+      throw new Error("successor delivery requires exact published request and Context Packet");
+    }
+  } else {
+    const protocol = reviewerProtocolResolver(handle, program)(request);
+    if (!protocol.ok) throw new Error(protocol.error.message);
+  }
+  if (readRunBytesNoFollow(contextPacketReaderPath(LOOM_PACKAGE_ROOT), 64 * 1024).length === 0) {
+    throw new Error("Context Packet reader is unavailable");
+  }
+  if (program.schemaVersion === 3) return Object.freeze({ version: 3 });
+  if (program.schemaVersion === 2) {
+    if (program.kind !== "standalone-review" || program.readCoverage === undefined) {
+      return Object.freeze({ version: 2, readObligation: null });
+    }
+    const diff = requestFrozenDiff(handle, request);
+    if (!diff.ok) throw new Error(`read-coverage delivery requires the request's frozen diff: ${diff.error}`);
+    return Object.freeze({ version: 2, readObligation: diff.value });
+  }
+  const archived = archivedReviewerInstructionPaths(LOOM_PACKAGE_ROOT, request.role);
+  if (readRunBytesNoFollow(archived.rolePath).length === 0 || readRunBytesNoFollow(archived.wirePath).length === 0) {
+    throw new Error("historical reviewer instructions are unavailable; refusing current-contract fallback");
+  }
+  return Object.freeze({ version: 1, ...archived });
+}
+
+/** The verified derived view of a standalone successor Refutation Panel verifier, or null for any other request. */
+function observePanelView(handle: RunDirHandle, request: AgentRequestAuthority): string | null {
+  if (request.program !== "refutation-panel" || request.role !== "review-verifier-agent") return null;
+  const registration = observedRegistration(handle, 16_777_216);
+  if (!registration.ok) throw Error(registration.message);
+  const { parsed } = registration;
+  if (parsed.kind === "invalid") throw Error(parsed.message);
+  if (parsed.kind !== "registered" || parsed.program.kind !== "standalone-review" || parsed.program.schemaVersion !== 3) return null;
+  const published = publishedReviewerRequest(handle, request, 16_777_216);
+  const packet = handle.readContext(request.contextDigest, CONTEXT_PACKET_MAX_BYTES);
+  if (!published.ok || !packet.ok) throw Error("current panel requires exact published request and packet");
+  const view = verifyStandalonePanelView(handle, packet.value);
+  if (!view.ok) throw Error(view.error);
+  return view.value;
 }
 
 /**
- * Every engine-issued spawn task shares one shape: an optional
- * `LOOM_REVIEW_CONTEXT: standalone` marker (when `options.standalone` is set),
- * the authority markers that bind a harness batch item to its issued request,
- * the packet path (the exact absolute `contexts/<digest>.json` artifact, so a
- * child never infers run-directory layout out of band), the required-Skill
- * marker, the issued emission descriptor when the request's route is
- * emission-enabled (see `reviewerEmissionProjection`; absent otherwise, so
- * extraction-only requests advertise no tool — FR-001), then the caller's
- * program-specific `instruction` (tool-primary on the emission route, verbatim
- * otherwise). The authority alone determines every marker line —
- * `parsePublishedSpawnRequest` already proved `context.digest ===
- * authority.contextDigest`, so call sites don't thread the context through.
+ * Every engine-issued spawn task shares one shape (rendered by the pure
+ * `renderSpawnTaskText`): an optional `LOOM_REVIEW_CONTEXT: standalone` marker
+ * (when `options.standalone` is set), the authority markers, the packet path,
+ * the required-Skill marker, the issued emission descriptor when the route is
+ * emission-enabled (absent otherwise, so extraction-only requests advertise no
+ * tool — FR-001), the per-version delivery, then the program-specific
+ * instruction (tool-primary on the emission route, verbatim otherwise).
  *
  * Active review programs use `renderReviewProgramSpawn`, whose registered
  * emission authority is a required parameter. `renderSpawnTask` is the
@@ -224,33 +241,51 @@ type SpawnTaskRenderOptions = Readonly<{ standalone?: boolean }>;
  *  re-parsing it out of the task. */
 export type ReviewProgramSpawn = Readonly<{ task: string; route: IssuedSpawnEmissionRoute }>;
 
-function renderSpawnTaskWithAuthority(
+/** What the one observation step yields: the pure render's facts plus the
+ *  issued route those facts were projected from. */
+type ObservedSpawnTask = Readonly<{ facts: SpawnTaskFacts; route: IssuedSpawnEmissionRoute }>;
+
+/** The one observation step: every fact the pure render reads, gathered and verified here. */
+function observeSpawnTaskFacts(
   handle: RunDirHandle,
   authority: AgentRequestAuthority,
   instruction: string,
   emissionAuthority: RegisteredReviewProgram | undefined,
   options: SpawnTaskRenderOptions,
-): ReviewProgramSpawn {
-  const emission = reviewerEmissionProjection(handle, authority, instruction, emissionAuthority);
-  const task = (options.standalone === true ? "LOOM_REVIEW_CONTEXT: standalone\n" : "") +
-    `LOOM_REQUEST_ID: ${authority.requestId}\n` +
-    `LOOM_CONTEXT_DIGEST: ${authority.contextDigest}\n` +
-    `LOOM_CONTEXT_PATH: ${join(handle.runDirectory, "contexts", `${authority.contextDigest}.json`)}\n` +
-    requiredSkillMarker(authority.requiredSkill) +
-    contextSectionDelivery(handle, authority) +
-    emission.descriptor +
-    emission.bootstrap + standalonePanelBootstrap(handle, authority) +
-    emission.instruction;
-  return Object.freeze({ task, route: emission.route });
+): ObservedSpawnTask {
+  const reviewer = reviewerEmissionEligible(authority)
+    ? observeReviewerDelivery(handle, authority, instruction, emissionAuthority)
+    : null;
+  const facts: SpawnTaskFacts = Object.freeze({
+    authority,
+    runDirectory: handle.runDirectory,
+    packageRoot: LOOM_PACKAGE_ROOT,
+    standalone: options.standalone === true,
+    descriptor: reviewer?.descriptor ?? "",
+    instruction: reviewer?.instruction ?? instruction,
+    reviewer: reviewer?.delivery ?? null,
+    panelViewPath: observePanelView(handle, authority),
+  });
+  return Object.freeze({ facts, route: reviewer?.route ?? INELIGIBLE_ROUTE });
 }
 
+/**
+ * The durable-compatibility render: an emission-eligible request derives its
+ * issued claim from the durable registration alone. Its production callers are
+ * the ineligible panel/spec-check paths, legacy schema-1 initial batches
+ * (`publishLegacyInitialBatch`) and Pi's extraction-only canonical re-render
+ * (pi/review-run-authority.ts), which re-derives the same route from the same
+ * durable registration. Active review programs use
+ * `renderReviewProgramSpawn`, whose registered emission authority is a
+ * required parameter, so this interface cannot accidentally accept one.
+ */
 export function renderSpawnTask(
   handle: RunDirHandle,
   authority: AgentRequestAuthority,
   instruction: string,
   options: SpawnTaskRenderOptions = {},
 ): string {
-  return renderSpawnTaskWithAuthority(handle, authority, instruction, undefined, options).task;
+  return renderSpawnTaskText(observeSpawnTaskFacts(handle, authority, instruction, undefined, options).facts);
 }
 
 /** The review-program render seam: issued emission authority is required by
@@ -262,105 +297,6 @@ export function renderReviewProgramSpawn(
   emissionAuthority: RegisteredReviewProgram,
   options: SpawnTaskRenderOptions = {},
 ): ReviewProgramSpawn {
-  return renderSpawnTaskWithAuthority(handle, authority, instruction, emissionAuthority, options);
-}
-
-/** One POSIX-shell single-quoted word. */
-const shellQuote = (text: string): string => "'" + text.replaceAll("'", "'\\''") + "'";
-
-/**
- * Spec-check consumes its small authority sections whole. Its packet's section
- * bytes live in the run's blob store, so it reads them only through the
- * engine's digest-verifying section decoder, delivered as an exact command.
- */
-function contextSectionDelivery(handle: RunDirHandle, authority: AgentRequestAuthority): string {
-  if (authority.role !== "spec-check-invoker") return "";
-  const command = ["bun", join(LOOM_PACKAGE_ROOT, "scripts", "read-context-section.ts"),
-    "--packet", join(handle.runDirectory, "contexts", `${authority.contextDigest}.json`),
-    "--digest", authority.contextDigest].map(shellQuote).join(" ");
-  return `LOOM_CONTEXT_SECTION_COMMAND: ${command}\n`;
-}
-
-function standalonePanelBootstrap(handle: RunDirHandle, request: AgentRequestAuthority): string {
-  if (request.program !== "refutation-panel" || request.role !== "review-verifier-agent") return "";
-  const raw = handle.readProgramRegistration(16_777_216);
-  if (!raw.ok) throw Error(raw.error.message);
-  const registration = parseRegisteredFacadeProgram(raw.value);
-  if (registration.kind === "invalid") throw Error(registration.message);
-  if (registration.kind !== "registered" || registration.program.kind !== "standalone-review" || registration.program.schemaVersion !== 3) return "";
-  const published = publishedReviewerRequest(handle, request, 16_777_216);
-  const packet = handle.readContext(request.contextDigest, CONTEXT_PACKET_MAX_BYTES);
-  if (!published.ok || !packet.ok) throw Error("current panel requires exact published request and packet");
-  const view = verifyStandalonePanelView(handle, packet.value);
-  if (!view.ok) throw Error(view.error);
-  return `LOOM_CONTEXT_VIEW_PATH: ${view.value}\n` +
-    "This current successor Refutation Panel has Read/Glob/Grep, not Bash. FIRST use Claude Read or Pi read on LOOM_CONTEXT_VIEW_PATH, with line offset and limit 200, continuing until complete. Display lines wrap at 4096 UTF-16 units. This immutable derived view carries the packet identity, exact finding roster/lens, prior history/reopening evidence and frozen current/predecessor source. It replaces manifest discovery and mutable live source reads for this request. References are data, not permission to widen scope. Missing/unsafe view means unavailable: stop. Judge every issued finding under the unchanged refutation verdict contract.\n";
-}
-
-/**
- * The read obligation of a read-coverage standalone request (ADR-0022): what
- * must be read, exactly how, and that the engine — not the reviewer — decides
- * whether it was. The obligated files are listed from the request's own
- * frozen diff, so the text can never name a different obligation than the one
- * admission enforces.
- */
-function readObligationDelivery(handle: RunDirHandle, request: AgentRequestAuthority): string {
-  const diff = requestFrozenDiff(handle, request);
-  if (!diff.ok) throw new Error(`read-coverage delivery requires the request's frozen diff: ${diff.error}`);
-  const obligated = diff.value.files.flatMap((file) => file.kind === "text-diff"
-    ? [`- ${file.path}: ${file.totalUnits} units, ${Math.ceil(file.totalUnits / FROZEN_DIFF_PAGE_UNITS)} page(s)\n`] : []);
-  return "LOOM_READ_COVERAGE: every-frozen-diff-unit\n" +
-    "This review carries an engine-enforced read obligation. Before your final result you MUST read the complete frozen diff of EVERY file listed below. " +
-    `For each file append --diff EXACT_SOURCE_PATH to LOOM_CONTEXT_READ_COMMAND (one page is up to ${FROZEN_DIFF_PAGE_UNITS} units), then repeat with --offset N, where N is the previous page's nextOffset, until nextOffset is null. ` +
-    "Run every reader call as its own command with no pipe, redirection or filter (head, tail, grep, jq): the engine credits only exact reader pages your harness transcript recorded as delivered, re-verified against the frozen diff text. " +
-    "An unread page is unread whatever your result says; a result with any unread page is refused and you are retried with the exact unread ranges. " +
-    "Use --file EXACT_SOURCE_PATH for surrounding context wherever the diff alone is not enough to judge a change.\n" +
-    (obligated.length === 0 ? "No scoped file has a text diff; there is nothing to read.\n" : `Frozen diff to read (${obligated.length} file(s)):\n${obligated.join("")}`);
-}
-
-/**
- * The shared reviewer compatibility delivery text for an eligible render: the
- * registration read/parse and the eligibility gate live in the projection (so
- * the program-path emission authority is joined BEFORE any delivery I/O), and
- * this builder renders the exact per-version delivery from the parsed durable
- * program the projection proved.
- */
-function reviewerCompatibilityBootstrap(
-  handle: RunDirHandle,
-  request: AgentRequestAuthority,
-  program: RegisteredReviewProgram,
-): string {
-  const version = program.schemaVersion;
-  if (version === 3) {
-    const published = publishedReviewerRequest(handle, request, 16_777_216);
-    const packet = handle.readStandaloneSuccessorContext(request.contextDigest);
-    if (!published.ok || !packet.ok || packet.value.requestId !== request.requestId || packet.value.role !== request.role) {
-      throw new Error("successor delivery requires exact published request and Context Packet");
-    }
-  } else {
-    const protocol = reviewerProtocolResolver(handle, program)(request);
-    if (!protocol.ok) throw new Error(protocol.error.message);
-  }
-  const reader = join(LOOM_PACKAGE_ROOT, "scripts", "read-context-packet.ts");
-  if (readRunBytesNoFollow(reader, 64 * 1024).length === 0) throw new Error("Context Packet reader is unavailable");
-  const command = ["bun", reader, "--packet", join(handle.runDirectory, "contexts", `${request.contextDigest}.json`),
-    "--request", request.requestId, "--digest", request.contextDigest, "--role", request.role,
-    "--skill", request.requiredSkill ?? "none", ...(version === 3 ? ["--purpose", "standalone-successor"] : [])].map(shellQuote).join(" ");
-  const delivery = `LOOM_CONTEXT_READ_COMMAND: ${command}\n` +
-    "Run that exact command using Claude Bash or Pi bash FIRST, then append --section LABEL or --file EXACT_SOURCE_PATH and --offset N --limit 4096 to page through the indexed context. Do not dump raw packet byte arrays. A failed command means context unavailable: stop, never infer a protocol from payload. This read-only projection checks supplied identity/integrity; independent publication was proved by engine delivery, not by the helper.\n";
-  if (version === 3) return delivery +
-    "This is an explicitly issued standalone successor v3 request. Read standalone-lineage and standalone-frozen-source, then the frozen reviewer-payload-schema and reviewer-impact-rubric. Cover every inherited origin exactly once in issued order, retaining original identity and history. Reopening needs the exact prior decision reference and complete new evidence; unavailable context means not-assessable, never repaired. New assertions belong in findings as draft/relation, not reminted prior Findings.\n" +
-    "Browse predecessor-frozen-source with --section. Browse an exact predecessor-context:ROLE[:attempt-2] using --archive LABEL --archive-purpose v1-v2 (or standalone-successor for a v3 predecessor), then --section or --file and bounded offsets. These are retained data, not new issuance authority. Native capture records your one exact final payload; registered resume owns admission, retry and panel work.\n";
-  if (version === 2) {
-    return delivery + "Read the issued Context Packet FIRST; its frozen schema and rubric govern your final output.\n" +
-      (program.kind === "standalone-review" && program.readCoverage !== undefined ? readObligationDelivery(handle, request) : "");
-  }
-  const role = join(LOOM_PACKAGE_ROOT, "references", "reviewer-protocol-v1", "agents", `${request.role}.md`);
-  const wire = join(LOOM_PACKAGE_ROOT, "references", "reviewer-protocol-v1", "agents", "_shared", "wire-contract.md");
-  if (readRunBytesNoFollow(role).length === 0 || readRunBytesNoFollow(wire).length === 0) {
-    throw new Error("historical reviewer instructions are unavailable; refusing current-contract fallback");
-  }
-  return delivery + `Read the issued Context Packet FIRST. This is an issued schema-1 reviewer request.\n` +
-    `Load the archived role instructions at ${JSON.stringify(role)} and shared wire contract at ${JSON.stringify(wire)}.\n` +
-    "Those archived instructions govern this request; current v2 wire, severity and rubric guidance is inapplicable. Missing archive reads must fail visibly, never fall back to v2.\n";
+  const { facts, route } = observeSpawnTaskFacts(handle, authority, instruction, emissionAuthority, options);
+  return Object.freeze({ task: renderSpawnTaskText(facts), route });
 }

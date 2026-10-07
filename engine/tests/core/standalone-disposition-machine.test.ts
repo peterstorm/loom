@@ -6,7 +6,7 @@ import {
   prepareStandaloneSuccessor,
   readPublishedStandaloneDisposition,
   type PreparedStandaloneDisposition,
-} from "../../src/core/standalone-lineage";
+} from "../../src/core/standalone-review";
 import { standaloneOriginReference, findingOf } from "../../src/core/standalone-finding-origin";
 import { type PublishedStandaloneDisposition } from "../../src/core/standalone-review-model";
 import { parseStandaloneDispositionStartBytes, parseStandaloneDispositionStartInput, parseRegisteredStandaloneDispositionProgram, registerStandaloneDisposition,

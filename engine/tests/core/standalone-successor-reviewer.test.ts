@@ -6,7 +6,7 @@ import { parseRequestId, parseOrchestrationRunId, parseAgentRequestAuthority, pa
 import { lowerModelProfile, resolveAgentPolicy, resolveModelProfile } from "../../src/core/model-profiles";
 import { parseContextPacket, parseStandaloneReviewerContextPacketV3, buildReviewerContextPacket, encodeByteSection } from "../../src/core/context-packets";
 import { sha256Hex } from "../../src/core/digest";
-import { prepareStandaloneLineageSource, prepareStandaloneSuccessor } from "../../src/core/standalone-lineage";
+import { prepareStandaloneLineageSource, prepareStandaloneSuccessor } from "../../src/core/standalone-review";
 import { standaloneOriginReference } from "../../src/core/standalone-finding-origin";
 import { parseStandaloneReviewerPayloadV3, parseReviewerPayloadV2 } from "../../src/core/reviewer-protocol";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_SCHEMA_V2, REVIEWER_IMPACT_RUBRIC_V1, REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";

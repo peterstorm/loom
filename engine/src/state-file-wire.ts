@@ -70,6 +70,7 @@ import {
   type SpecIndexObservation,
 } from "./core/requirement-coverage";
 import { parseStoredSpecCheck } from "./core/spec-check";
+import { parseProofBoundaryObservation, type ProofBoundaryObservation } from "./core/proof-boundary-observation";
 import { reconcileWaveBlock, waveHasBlockCause, type WaveGate } from "./core/wave-gate-model";
 import { parseWaveSpecCheckDocumentsAuthority, type WaveSpecCheckDocumentRejection, type WaveSpecCheckDocumentsRejection } from "./core/wave-review-authority";
 import { parseIssuedReviewPacketRegistration, parseReviewPath } from "./core/review-packet";
@@ -1117,7 +1118,14 @@ function taskAttemptAuthorityError(
   return null;
 }
 
-/** Persistent unresolved-attempt repository authority and attributed paths. */
+/**
+ * Persistent unresolved-attempt repository authority, plus the legacy
+ * `unresolved_repository_paths` carry. No current writer produces that carry:
+ * every settlement retires the attempt boundary (implementation-application's
+ * RETIRED_ATTEMPT_BOUNDARY), so Task no longer declares the field. State files
+ * written before that retirement still parse under the original invariants
+ * here, and `migrateParsedTask` drops the field so the next write retires it.
+ */
 function taskRepositoryCarryError(
   t: Record<string, unknown>,
   index: number,
@@ -1793,18 +1801,11 @@ function migrateParsedTask(
     if (!baseline.ok) return parseErr(baseline.errors.join("; "));
     migrated = { ...migrated, repository_baseline: baseline.value };
   }
-  if (task.unresolved_repository_paths !== undefined) {
-    if (!Array.isArray(task.unresolved_repository_paths)) {
-      return parseErr(`tasks[${index}].unresolved_repository_paths must be an array`);
-    }
-    const paths: string[] = [];
-    for (const [pathIndex, raw] of task.unresolved_repository_paths.entries()) {
-      const parsed = parseReviewPath(raw, `tasks[${index}].unresolved_repository_paths[${pathIndex}]`);
-      if (!parsed.ok) return parseErr(parsed.errors.join("; "));
-      paths.push(parsed.value);
-    }
-    migrated = { ...migrated, unresolved_repository_paths: Object.freeze(paths.sort()) };
-  }
+  // Legacy carry, already validated by taskRepositoryCarryError: no reader
+  // consumes it, so the parsed Task never carries it again.
+  const { unresolved_repository_paths: retiredUnresolvedCarry, ...withoutUnresolvedCarry } = migrated;
+  void retiredUnresolvedCarry;
+  migrated = withoutUnresolvedCarry;
   if (task.implementation_attempt_history !== undefined) {
     const history = parseImplementationAttemptHistory(task.implementation_attempt_history);
     if (!history.ok) return parseErr(history.error.errors.join("; "));
@@ -2115,6 +2116,7 @@ type ParsedTaskGraphParts = Readonly<{
   waveGates: Readonly<Record<string, unknown>>;
   specCheck: SpecCheck | undefined;
   specIndexObservation: SpecIndexObservation | undefined;
+  proofBoundaryObservation: ProofBoundaryObservation | undefined;
   authority: ParsedTaskGraphAuthorityFields;
   history: ParsedTaskGraphHistoryFields;
 }>;
@@ -2157,6 +2159,9 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
     ...(parts.specIndexObservation === undefined
       ? {}
       : { spec_index_observation: parts.specIndexObservation }),
+    ...(parts.proofBoundaryObservation === undefined
+      ? {}
+      : { proof_boundary_observation: parts.proofBoundaryObservation }),
     ...(waveReviewEpoch === undefined ? {} : { wave_review_epoch: waveReviewEpoch }),
     ...(verificationManifest === undefined ? {} : { verification_manifest: verificationManifest }),
     ...(activeWaveCompletionSuite === undefined ? {} : { active_wave_completion_suite: activeWaveCompletionSuite }),
@@ -2170,7 +2175,8 @@ function taskGraphFromParsedParts(obj: Record<string, unknown>, parts: ParsedTas
 
 function parseTaskGraphDocumentFields(
   obj: Record<string, unknown>,
-): ParseResult<Pick<ParsedTaskGraphParts, "phaseArtifacts" | "skippedPhases" | "specIndexObservation">> {
+): ParseResult<Pick<ParsedTaskGraphParts,
+  "phaseArtifacts" | "skippedPhases" | "specIndexObservation" | "proofBoundaryObservation">> {
   const lifecycleErrors = taskGraphLifecycleErrors(obj);
   if (lifecycleErrors[0] !== undefined) return parseErr(lifecycleErrors[0]);
   const phaseArtifacts = Object.freeze({ ...(obj.phase_artifacts as Record<string, string>) });
@@ -2185,7 +2191,19 @@ function parseTaskGraphDocumentFields(
       specIndexObservationPath(specIndexObservation.value) !== (obj.spec_file ?? null)) {
     return parseErr("spec_index_observation path must match protected spec_file authority");
   }
-  return parseOk({ phaseArtifacts, skippedPhases, specIndexObservation: specIndexObservation.value });
+  // Legacy graphs predate the observation; absence stays absent (unknown).
+  const proofBoundaryObservation = obj.proof_boundary_observation === undefined
+    ? undefined
+    : parseProofBoundaryObservation(obj.proof_boundary_observation);
+  if (proofBoundaryObservation !== undefined && !proofBoundaryObservation.ok) {
+    return parseErr(proofBoundaryObservation.error);
+  }
+  return parseOk({
+    phaseArtifacts,
+    skippedPhases,
+    specIndexObservation: specIndexObservation.value,
+    proofBoundaryObservation: proofBoundaryObservation?.value,
+  });
 }
 
 /**

@@ -179,7 +179,7 @@ describe("Task-local completion observation shell", () => {
 
   it("blocks on an unowned foreign delta until its bytes return to the retained baseline", () => {
     const fixture = repository();
-    const carriedTask = taskFixture({ ...fixture.task, unresolved_repository_paths: ["sibling.ts"] });
+    const carriedTask = fixture.task;
     writeFileSync(join(fixture.root, "sibling.ts"), "export const sibling = 2;\n");
     const persistent = observeTaskLocalCompletion({
       repositoryRoot: fixture.root,

@@ -24,7 +24,7 @@ import { selectStandaloneReviewers, type StandaloneReviewMetadata } from '../../
 import { type FrozenStandaloneReviewAuthority } from '../../../core/standalone-review-model';
 import { safeIoCause } from '../../../core/safe-io-cause';
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ContextPacket } from '../../../core/context-packets';
-import type { StandaloneDoneState } from '../../../core/standalone-review-machine';
+import type { StandaloneDoneState } from '../../../core/standalone-review';
 import { readRunBytesNoFollow } from '../../../orchestration/no-follow-fs';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import type { RegisteredReviewProgram } from './registration';

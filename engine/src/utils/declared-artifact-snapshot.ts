@@ -6,9 +6,8 @@
 import { execFileSync } from "node:child_process";
 import { lstatSync, readFileSync } from "node:fs";
 import {
-  capturedArtifactBaseline,
+  DECLARED_ARTIFACT_BASELINE,
   changedDeclaredArtifacts,
-  parseArtifactBaseline,
   treeSnapshotDigest,
   type ArtifactBaseline,
   type ArtifactSnapshot,
@@ -52,7 +51,7 @@ function snapshotArtifact(root: string, artifact: string): ArtifactSnapshot {
 }
 
 function capture(artifacts: readonly string[], snapshot: (artifact: string) => ArtifactSnapshot): DeclaredBaseline {
-  const captured = capturedArtifactBaseline<"declared-artifact">(artifacts, snapshot, "declared artifact baseline");
+  const captured = DECLARED_ARTIFACT_BASELINE.capture(artifacts, snapshot, "declared artifact baseline");
   if (!captured.ok) throw new Error(captured.errors.join("; "));
   return captured.value;
 }
@@ -160,7 +159,7 @@ export function changedDeclaredArtifactsSince(
   // No start snapshot proves no change. This fail-closed value leaves every
   // declared-artifact obligation unsatisfied rather than trusting tool attempts.
   if (baseline === undefined) return Object.freeze([]);
-  const parsed = parseArtifactBaseline<"declared-artifact">(baseline, "baseline");
+  const parsed = DECLARED_ARTIFACT_BASELINE.parse(baseline, "baseline");
   if (!parsed.ok) throw new Error(parsed.errors.join("; "));
   return changedSince(parsed.value, captureDeclaredArtifactBaseline(root, parsed.value.map(({ artifact }) => artifact)));
 }

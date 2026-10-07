@@ -51,7 +51,6 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/completion-suite.ts",
   "engine/src/core/verification-manifest.ts",
   "engine/src/core/standalone-review.ts",
-  "engine/src/core/standalone-review-machine.ts",
   "engine/src/core/standalone-review-scope.ts",
   "engine/src/core/standalone-review-model.ts",
   "engine/src/core/standalone-review-preparation.ts",
@@ -90,7 +89,6 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/reviewer-contract.ts",
   "engine/src/core/reviewer-protocol.ts",
   "engine/src/core/standalone-lineage-contract.ts",
-  "engine/src/core/standalone-lineage.ts",
   "engine/src/core/standalone-disposition-machine.ts",
   "engine/src/core/standalone-successor-reviewer.ts",
   "engine/src/core/context-packets.ts",
@@ -130,6 +128,12 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/implementation-retry.ts",
   "engine/src/core/implementation-completion.ts",
   "engine/src/core/task-id.ts",
+  // The persisted population proof-boundary observation (types.ts imports it).
+  "engine/src/core/proof-boundary-observation.ts",
+  // Engine-issued spawn task text over shell-gathered facts.
+  "engine/src/core/spawn-task-text.ts",
+  // The Pi review-authority receipt contract and its reviewed-source codec.
+  "engine/src/core/review-authority-receipt.ts",
   // The ONE shared plain-record wire guard (state-file-wire, findings,
   // context-packets): a dependency-free pure predicate leaf.
   "engine/src/core/plain-record.ts",

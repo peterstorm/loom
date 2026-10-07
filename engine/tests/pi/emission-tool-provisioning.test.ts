@@ -23,7 +23,6 @@ import {
   EMISSION_HOLD_ENTRY_TYPE,
   EMISSION_READINESS_COMMAND,
   EMISSION_READINESS_ENTRY_TYPE,
-  emissionToolFamily,
   LOOM_EMISSION_BINDING_ENV,
   parseEmissionChildProvisioning,
   type EmissionToolRegistration,
@@ -296,25 +295,6 @@ describe("the readiness protocol contract — command, entry type, hold marker, 
     expect(report.active).toBe(true);
     expect(report.childPid).toBe(4242);
     expect(report.registeredTools).toEqual([binding.toolName, "read"]);
-  });
-});
-
-describe("emissionToolFamily — the registry-projected family of a tool name (FR-014)", () => {
-  it("maps every frozen registry tool name to its producer kind", () => {
-    expect(emissionToolFamily("loom_emit_reviewer_payload")).toEqual({ kind: "registered", producerKind: "reviewer-payload" });
-    expect(emissionToolFamily("loom_emit_judge_verdict")).toEqual({ kind: "registered", producerKind: "judge-verdict" });
-    expect(emissionToolFamily("loom_emit_refutation_verdict")).toEqual({ kind: "registered", producerKind: "refutation-verdict" });
-  });
-
-  it("prefix-reserved names outside the registry are observed-but-unbindable, never unrelated", () => {
-    expect(emissionToolFamily("loom_emit_gibberish")).toEqual({ kind: "unregistered-emission-name" });
-  });
-
-  it("everything else is unrelated — including non-string names", () => {
-    expect(emissionToolFamily("bash")).toEqual({ kind: "unrelated" });
-    expect(emissionToolFamily("loom")).toEqual({ kind: "unrelated" });
-    expect(emissionToolFamily(undefined)).toEqual({ kind: "unrelated" });
-    expect(emissionToolFamily(42)).toEqual({ kind: "unrelated" });
   });
 });
 

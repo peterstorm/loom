@@ -3,16 +3,28 @@
  * this volume never loads a predecessor or drives program publication.
  */
 import { createHash } from 'node:crypto';
+import { isExactGitSha } from '../../../core/git-sha';
+import {
+  parseStandaloneReviewedSource,
+  type StandaloneReviewedSource,
+  type StandaloneReviewedSourceFile,
+} from '../../../core/review-authority-receipt';
 import type { FrozenStandaloneReviewAuthority, PreparedStandaloneSuccessor } from '../../../core/standalone-review-model';
 import { admitStandaloneSuccessorReviewer } from '../../../core/standalone-successor-reviewer';
 import { standaloneCurrentPanelCriticals } from '../../../core/standalone-refutation-panel';
 import type { IssuedStandaloneReviewerProtocol } from '../../../core/review-output';
 import { canonicalStructuralEquals, parseEffectId, sameAgentRequestAuthority, parseAgentRequestAuthority, parseIssuedSpawnRequest, boundedThrownCause, type AgentRequestAuthority, type InitialSpawnRequestInput, type SpawnRequest } from '../../../core/orchestration-contract';
-import { aggregateStandaloneReview, proveStandaloneRosterCompletion, type StandaloneReviewerProtocolResolver } from '../../../core/standalone-review';
+import {
+  aggregateStandaloneReview,
+  proveStandaloneRosterCompletion,
+  type StandaloneReviewerProtocolResolver,
+  reduceStandaloneReviewMachine,
+  startStandaloneReviewMachine,
+  type StandaloneReviewMachineState,
+} from '../../../core/standalone-review';
 import { bindStandaloneCaptureAuthority, captureStandaloneReviewerBytes, completeStandaloneReviewerCapture } from '../../../core/standalone-reviewer-capture';
 import { serializeAdjudicatedStandaloneReview } from '../../../core/standalone-review-records';
 import { admitStandaloneTranscript, type StandaloneTranscriptAdmission } from '../../../core/standalone-transcript-admission';
-import { reduceStandaloneReviewMachine, startStandaloneReviewMachine, type StandaloneReviewMachineState } from '../../../core/standalone-review-machine';
 import { freezeStandaloneRefutationPanelAuthority, parseStandaloneRefutationCompletion } from '../../../core/standalone-refutation-completion';
 import { buildStandaloneFindingBrief, defaultRefutationThreshold, reviewSignals, selectReviewLenses } from '../../../core/review-panel';
 import { deriveRefutationVerifierBinding, parseRefutationPanelAuthority, type PersistentPanelResult } from '../../../core/panel-authority';
@@ -140,16 +152,6 @@ type StandaloneScopePacketAuthority = Readonly<{
   attempt: 1 | 2;
 }>;
 
-export type StandaloneReviewedSourceFile =
-  | Readonly<{ path: string; kind: "file"; digest: string; byteLength: number }>
-  | Readonly<{ path: string; kind: "absent"; digest: null; byteLength: 0 }>;
-
-export type StandaloneReviewedSource = Readonly<{
-  schemaVersion: 1;
-  headRevision: string;
-  files: readonly StandaloneReviewedSourceFile[];
-}>;
-
 function parseScopePacketAuthority(bytes: Iterable<number>):
   | Readonly<{ ok: true; value: StandaloneScopePacketAuthority }>
   | Readonly<{ ok: false; message: string }> {
@@ -193,8 +195,7 @@ function parseReviewedSource(bytes: Iterable<number>, scope: readonly string[], 
     }
     const record = raw as Record<string, unknown>;
     if (!exactObject(record, ["files", "headRevision", "schemaVersion"]) ||
-        record.schemaVersion !== sourceVersion || typeof record.headRevision !== "string" ||
-        !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(record.headRevision) ||
+        record.schemaVersion !== sourceVersion || !isExactGitSha(record.headRevision) ||
         !Array.isArray(record.files) || record.files.length !== scope.length) {
       return malformed("standalone-frozen-source context section is malformed");
     }
@@ -238,14 +239,12 @@ function parseReviewedSource(bytes: Iterable<number>, scope: readonly string[], 
         byteLength: file.byteLength as number,
       }));
     }
-    return Object.freeze({
-      ok: true as const,
-      value: Object.freeze({
-        schemaVersion: 1 as const,
-        headRevision: record.headRevision,
-        files: Object.freeze(files),
-      }),
-    });
+    // The attestation is minted through the receipt codec the bridge consumer
+    // parses with, so the producer can only build what the consumer accepts.
+    const attested = parseStandaloneReviewedSource({ schemaVersion: 1, headRevision: record.headRevision, files });
+    return attested === null
+      ? malformed("standalone-frozen-source context section does not form a reviewed-source attestation")
+      : Object.freeze({ ok: true as const, value: attested });
   } catch (error) {
     return malformed(`standalone-frozen-source context section is invalid: ${error instanceof Error ? error.message : String(error)}`);
   }

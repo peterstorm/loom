@@ -6,6 +6,7 @@ import {
   canonicalizeEmissionWireArguments,
   EMISSION_CONSTRAINED_SAMPLING_REQUEST,
   EMISSION_TOOL_SPECS,
+  emissionToolFamily,
   frozenPayloadSchemaParameters,
   issuedEmissionParameters,
   issueEmissionBinding,
@@ -604,3 +605,22 @@ describe("the execute shell and the engine selection share ONE admission", () =>
  *  behavioral resolver crossing lives in the real-Pi suite. */
 const _strictIsPreferLiteral: "prefer" = EMISSION_CONSTRAINED_SAMPLING_REQUEST.strict;
 void _strictIsPreferLiteral;
+
+describe("emissionToolFamily — the registry-projected family of a tool name (FR-014)", () => {
+  it("maps every frozen registry tool name to its producer kind", () => {
+    expect(emissionToolFamily("loom_emit_reviewer_payload")).toEqual({ kind: "registered", producerKind: "reviewer-payload" });
+    expect(emissionToolFamily("loom_emit_judge_verdict")).toEqual({ kind: "registered", producerKind: "judge-verdict" });
+    expect(emissionToolFamily("loom_emit_refutation_verdict")).toEqual({ kind: "registered", producerKind: "refutation-verdict" });
+  });
+
+  it("prefix-reserved names outside the registry are observed-but-unbindable, never unrelated", () => {
+    expect(emissionToolFamily("loom_emit_gibberish")).toEqual({ kind: "unregistered-emission-name" });
+  });
+
+  it("everything else is unrelated — including non-string names", () => {
+    expect(emissionToolFamily("bash")).toEqual({ kind: "unrelated" });
+    expect(emissionToolFamily("loom")).toEqual({ kind: "unrelated" });
+    expect(emissionToolFamily(undefined)).toEqual({ kind: "unrelated" });
+    expect(emissionToolFamily(42)).toEqual({ kind: "unrelated" });
+  });
+});

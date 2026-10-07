@@ -169,6 +169,9 @@ export const DEFAULT_BOUNDARIES: readonly BoundaryRule[] = [
       // Standalone scope classification reads each scope path's extension:
       // pure path math (posix.extname) over strings, no filesystem.
       "engine/src/core/scope-classification.ts": ["node:path"],
+      // Spawn task text joins the run directory, packet and reader paths:
+      // pure path math (join) over shell-gathered strings, no filesystem.
+      "engine/src/core/spawn-task-text.ts": ["node:path"],
       "engine/src/core/standalone-review.ts": ["node:util"],
       // Exact runtime entry and transitive implementation bytes are gated by machine-purity.
       "engine/src/core/structured-test-report.ts": ["saxes"],

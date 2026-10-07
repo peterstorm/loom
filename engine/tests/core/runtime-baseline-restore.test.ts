@@ -5,9 +5,15 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   captureLoomRuntimeIdentity,
-  captureLoomRuntimeIdentityRestoring,
+  captureLoomRuntimeIdentityAt,
+  STRICT_RUNTIME_WRITE_BOUNDARY,
+  type RuntimeWriteBoundary,
 } from "../../src/runtime-compatibility";
-import { runtimeBaselineRestoreForTasks } from "../../src/utils/runtime-baseline-restore";
+import {
+  runtimeBaselineBytes,
+  runtimeBaselineRestoreForTasks,
+  runtimeWriteBoundaryForTasks,
+} from "../../src/utils/runtime-baseline-restore";
 import {
   describeRuntimeBaselineRestoreRefusal,
   inFlightAttemptBaseline,
@@ -31,10 +37,10 @@ type RuntimeBaselineTask = Parameters<typeof runtimeBaselineRestoreForTasks>[1][
 
 /** A minimal loom-shaped checkout: the runtime revision domain is exactly
  *  `engine/src` + `pi` + the identity files, so the fixtures mirror that. */
-function gitFixture(): { root: string; revision: string } {
+function gitFixture(objectFormat: "sha1" | "sha256" = "sha1"): { root: string; revision: string } {
   const root = canonicalTempDir("loom-runtime-baseline-");
   roots.push(root);
-  git(root, ["init", "-q", "-b", "main"]);
+  git(root, ["init", "-q", "-b", "main", `--object-format=${objectFormat}`]);
   git(root, ["config", "user.email", "loom@example.test"]);
   git(root, ["config", "user.name", "loom"]);
   mkdirSync(join(root, "engine", "src", "core"), { recursive: true });
@@ -229,16 +235,39 @@ describe("runtime-baseline restoration rules (pure)", () => {
   });
 });
 
-describe("captureLoomRuntimeIdentityRestoring", () => {
+/** The restoring boundary for one restore map, its bytes resolved through Git. */
+const restoringAt = (root: string, restore: ReadonlyMap<string, string | null>): RuntimeWriteBoundary =>
+  Object.freeze({ kind: "restoring", baseline: runtimeBaselineBytes(root, restore) });
+
+describe("captureLoomRuntimeIdentityAt", () => {
+  it("captures the strict boundary exactly as the live identity", () => {
+    const { root } = gitFixture();
+    writeFileSync(join(root, "engine", "src", "core", "task.ts"), "export const task = 2;\n");
+    expect(captureLoomRuntimeIdentityAt(root, STRICT_RUNTIME_WRITE_BOUNDARY)).toEqual(captureLoomRuntimeIdentity(root));
+  });
+
+  it("hashes in-memory baseline bytes without reading Git", () => {
+    const { root } = gitFixture();
+    const clean = captureLoomRuntimeIdentity(root).revision;
+    writeFileSync(join(root, "engine", "src", "core", "task.ts"), "export const task = 2;\n");
+    // No repository needed: the boundary carries the exact attempt-start bytes.
+    rmSync(join(root, ".git"), { recursive: true, force: true });
+    const restored = captureLoomRuntimeIdentityAt(root, {
+      kind: "restoring",
+      baseline: new Map([["engine/src/core/task.ts", new TextEncoder().encode("export const task = 1;\n")]]),
+    }).revision;
+    expect(restored).toBe(clean);
+  });
+
   it("hashes a declared, clean-at-spawn artifact at its attempt-start bytes", () => {
     const { root, revision } = gitFixture();
     const clean = captureLoomRuntimeIdentity(root).revision;
     writeFileSync(join(root, "engine", "src", "core", "task.ts"), "export const task = 2;\n");
     const drifted = captureLoomRuntimeIdentity(root).revision;
     expect(drifted).not.toBe(clean);
-    const restored = captureLoomRuntimeIdentityRestoring(
+    const restored = captureLoomRuntimeIdentityAt(
       root,
-      new Map([["engine/src/core/task.ts", revision]]),
+      restoringAt(root, new Map([["engine/src/core/task.ts", revision]])),
     ).revision;
     expect(restored).toBe(clean);
   });
@@ -248,37 +277,58 @@ describe("captureLoomRuntimeIdentityRestoring", () => {
     const clean = captureLoomRuntimeIdentity(root).revision;
     writeFileSync(join(root, "engine", "src", "core", "created.ts"), "new\n");
     expect(captureLoomRuntimeIdentity(root).revision).not.toBe(clean);
-    const restored = captureLoomRuntimeIdentityRestoring(
+    const restored = captureLoomRuntimeIdentityAt(
       root,
-      new Map([["engine/src/core/created.ts", null]]),
+      restoringAt(root, new Map([["engine/src/core/created.ts", null]])),
     ).revision;
     expect(restored).toBe(clean);
     // The revision must be a real restore, not an unconditional pass-through:
     // an unrelated live edit still drifts.
     writeFileSync(join(root, "pi", "extension.ts"), "export default () => 1;\n");
-    expect(captureLoomRuntimeIdentityRestoring(
+    expect(captureLoomRuntimeIdentityAt(
       root,
-      new Map<string, string | null>([["engine/src/core/created.ts", null]]),
+      restoringAt(root, new Map<string, string | null>([["engine/src/core/created.ts", null]])),
     ).revision).not.toBe(clean);
     // With the unrelated drift reverted, restoring the declared attempt-created
     // file (excluded) plus the declared drifted file (baseline bytes) reproduces
     // the attempt-start identity exactly.
     writeFileSync(join(root, "pi", "extension.ts"), "export default () => undefined;\n");
-    const bothRestored = captureLoomRuntimeIdentityRestoring(
+    const bothRestored = captureLoomRuntimeIdentityAt(
       root,
-      new Map<string, string | null>([
+      restoringAt(root, new Map<string, string | null>([
         ["engine/src/core/created.ts", null],
         ["engine/src/core/task.ts", revision],
-      ]),
+      ])),
     ).revision;
     expect(bothRestored).toBe(clean);
   });
+});
 
+describe("runtimeBaselineBytes", () => {
   it("refuses a non-SHA revision (fail closed, no shell surface)", () => {
     const { root } = gitFixture();
-    expect(() => captureLoomRuntimeIdentityRestoring(
-      root,
-      new Map([["engine/src/core/task.ts", "HEAD; rm -rf /"]]),
-    )).toThrow(/non-SHA revision/);
+    expect(() => runtimeBaselineBytes(root, new Map([["engine/src/core/task.ts", "HEAD; rm -rf /"]])))
+      .toThrow(/non-SHA revision/);
+  });
+
+  it("restores at a SHA-256 repository's 64-hex revision instead of refusing it", () => {
+    const { root, revision } = gitFixture("sha256");
+    expect(revision).toMatch(/^[0-9a-f]{64}$/);
+    const clean = captureLoomRuntimeIdentity(root).revision;
+    writeFileSync(join(root, "engine", "src", "core", "task.ts"), "export const task = 2;\n");
+    expect(captureLoomRuntimeIdentityAt(root, restoringAt(root, new Map([["engine/src/core/task.ts", revision]]))).revision)
+      .toBe(clean);
+  });
+});
+
+describe("runtimeWriteBoundaryForTasks", () => {
+  it("is strict when nothing restores and restoring at HEAD's bytes otherwise", () => {
+    const { root } = gitFixture();
+    expect(runtimeWriteBoundaryForTasks(root, [taskWith()])).toBe(STRICT_RUNTIME_WRITE_BOUNDARY);
+    const clean = captureLoomRuntimeIdentity(root).revision;
+    writeFileSync(join(root, "engine", "src", "core", "task.ts"), "export const task = 2;\n");
+    const boundary = runtimeWriteBoundaryForTasks(root, [taskWith()]);
+    expect(boundary.kind).toBe("restoring");
+    expect(captureLoomRuntimeIdentityAt(root, boundary).revision).toBe(clean);
   });
 });

@@ -12,20 +12,26 @@ import type { StandaloneSuccessorStartInput, RegisteredStandaloneSuccessorProgra
 import { admitStandaloneReviewerResult, readStandaloneCaptureWitnesses, replayStandaloneCliCaptures, standaloneRefutationPreparation, type StandaloneCaptureWitness, type StandaloneEvidenceReplayResult } from './standalone-evidence';
 // Retain existing caller entry points, not the union of the evidence volume's internal exports.
 export { replayStandaloneCliCaptures, replayStandaloneResultFromEvidence, readStandaloneReviewedSource, standaloneRefutationPreparation } from './standalone-evidence';
-export type { StandaloneCaptureWitness, StandaloneEvidenceReplayResult, StandaloneReviewedSource, StandaloneReviewedSourceFile } from './standalone-evidence';
+export type { StandaloneCaptureWitness, StandaloneEvidenceReplayResult } from './standalone-evidence';
 import { parseRunDirectoryReference } from '../../../orchestration/run-directory-handle';
 import { publishStandalonePanelView } from '../../../orchestration/standalone-panel-context';
 import { CURRENT_REVIEWER_PROTOCOL } from '../../../core/reviewer-contract';
 import { batchPublicationIdentity, type AgentRequestAuthority, type SpawnRequest, type PublicationAuthorityResolver, type SemanticAttempt } from '../../../core/orchestration-contract';
 import { decideAttemptOneSlots } from '../../../core/standalone-attempt-admission';
-import { aggregateStandaloneReview, proveStandaloneRosterCompletion, type StandaloneReviewerProtocolResolver } from '../../../core/standalone-review';
+import {
+  aggregateStandaloneReview,
+  proveStandaloneRosterCompletion,
+  type StandaloneReviewerProtocolResolver,
+  reduceStandaloneReviewMachine,
+  startStandaloneReviewMachine,
+  type StandaloneReviewMachineState,
+} from '../../../core/standalone-review';
 import { bindStandaloneCaptureAuthority, captureStandaloneReviewerBytes, completeStandaloneReviewerCapture } from '../../../core/standalone-reviewer-capture';
 import { canonicalStandaloneResultArtifact, serializeStandaloneReviewAuthority, serializeAdjudicatedStandaloneReview } from '../../../core/standalone-review-records';
 import { parseStandaloneReviewScope } from '../../../core/standalone-review-scope';
 import { prepareFreshStandaloneReview } from '../../../core/standalone-review-preparation';
 import { type FrozenStandaloneReviewAuthority } from '../../../core/standalone-review-model';
 import { parseStandaloneReviewMachineState, serializeStandaloneReviewMachineState } from '../../../core/standalone-review-checkpoint';
-import { reduceStandaloneReviewMachine, startStandaloneReviewMachine, type StandaloneReviewMachineState } from '../../../core/standalone-review-machine';
 import { parseStandaloneRefutationCompletion } from '../../../core/standalone-refutation-completion';
 import { completePersistentRefutationPanel, panelRequestIdentity, refutationPanelCheckpoint, rejectRefutationVerdict, startPersistentRefutationPanel, submitRefutationVerdict, type PersistentRefutationPanelEvent } from '../../../core/persistent-panel';
 import { readRunBytesNoFollow, writeRunBytesExclusiveNoFollow } from '../../../orchestration/no-follow-fs';

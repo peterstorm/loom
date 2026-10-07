@@ -1,5 +1,6 @@
 import type { Task, TaskGraph } from "../types";
 import type { DeclaredArtifactBaseline } from "./artifact-baseline";
+import type { ProofBoundaryObservation } from "./proof-boundary-observation";
 import { newWaveGate } from "./wave-gate-model";
 import { derivePendingTaskProof } from "./proof-obligations";
 import {
@@ -73,12 +74,23 @@ export function parseAuthoredTaskRoster(tasks: readonly AuthoredTask[]): Authore
   });
 }
 
-/** Per-Task declared-artifact proof boundaries captured from GIT, keyed by
- *  Task id, together with the ONE revision they were captured at. */
-export type PopulationProofBoundary = Readonly<{
-  baselines: ReadonlyMap<string, readonly DeclaredArtifactBaseline[]>;
-  revision: string;
-}>;
+/** The population-time proof boundary: per-Task declared-artifact baselines
+ *  captured from GIT, keyed by Task id, at ONE revision — or an honest absence
+ *  with its cause, in which case each Task's first dispatch stamps its own. */
+export type PopulationProofBoundary =
+  | Readonly<{
+      kind: "captured";
+      baselines: ReadonlyMap<string, readonly DeclaredArtifactBaseline[]>;
+      revision: string;
+    }>
+  | Readonly<{ kind: "absent"; cause: string }>;
+
+/** The compact persisted observation of a boundary: its revision or its cause, never the baselines. */
+export function proofBoundaryObservationOf(boundary: PopulationProofBoundary): ProofBoundaryObservation {
+  return boundary.kind === "captured"
+    ? Object.freeze({ kind: "captured", revision: boundary.revision })
+    : Object.freeze({ kind: "absent", cause: boundary.cause });
+}
 
 export type TaskGraphPopulationCommand = Readonly<{
   planTitle: string;
@@ -93,10 +105,10 @@ export type TaskGraphPopulationCommand = Readonly<{
   repo?: string;
   /** The proof boundary captured from GIT at the population revision. Captured
    *  BEFORE any work exists, so the boundary always predates the Task's
-   *  production and the stale-flow wedge is unrepresentable. Optional, backward
-   *  compatible; absent when the Git boundary could not be captured and the
-   *  first dispatch then stamps its own. */
-  proofBoundary?: PopulationProofBoundary;
+   *  production and the stale-flow wedge is unrepresentable. The `absent` arm
+   *  records why Git could not capture it; the graph persists either arm as
+   *  its `proof_boundary_observation`. */
+  proofBoundary: PopulationProofBoundary;
 }>;
 
 export type TaskGraphPopulationError = Readonly<{
@@ -129,10 +141,10 @@ function reject(
 function sanitizeTask(
   task: AuthoredTask,
   specIndex: SpecIndexAvailability,
-  proofBoundary: PopulationProofBoundary | undefined,
+  proofBoundary: PopulationProofBoundary,
 ): Task {
   const verificationPolicy = taskVerificationPolicy(task);
-  const proofBaseline = proofBoundary?.baselines.get(task.id);
+  const proofBaseline = proofBoundary.kind === "captured" ? proofBoundary.baselines.get(task.id) : undefined;
   const completionAnchors = Object.freeze([...(task.spec_anchors ?? [])]);
   const anchorHashes = specIndex.kind === "indexed"
     ? recordedAnchorHashes(specIndex.index, completionAnchors)
@@ -151,7 +163,7 @@ function sanitizeTask(
     ...(task.plan_context === undefined ? {} : { plan_context: task.plan_context }),
     file_list: Object.freeze([...task.file_list]),
     ...(proofBaseline === undefined ? {} : { artifact_baseline: proofBaseline }),
-    ...(proofBoundary === undefined ? {} : { start_sha: proofBoundary.revision }),
+    ...(proofBoundary.kind === "captured" ? { start_sha: proofBoundary.revision } : {}),
     proof: derivePendingTaskProof({
       verificationPolicy,
       declaredArtifacts: task.file_list,
@@ -217,6 +229,7 @@ export function populateTaskGraph(
     orphaned_wave_gate_history: _staleOrphanedWaveGateHistory,
     spec_trace_wave_gate_retirements: _staleSpecTraceRetirements,
     spec_index_observation: _staleSpecIndexObservation,
+    proof_boundary_observation: _staleProofBoundaryObservation,
     ...existingWithoutWaveAuthority
   } = existing;
   const state: TaskGraph = Object.freeze({
@@ -226,6 +239,7 @@ export function populateTaskGraph(
     plan_file: command.validatedPlanFile,
     spec_file: lockedSpecFile,
     spec_index_observation: specIndexObservationOf(command.specIndex),
+    proof_boundary_observation: proofBoundaryObservationOf(command.proofBoundary),
     tasks: Object.freeze(command.tasks.map((task) => sanitizeTask(task, command.specIndex, command.proofBoundary))),
     current_wave: 1,
     executing_tasks: Object.freeze([]),

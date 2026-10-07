@@ -32,7 +32,7 @@ import {
   type RemediationState,
   type RepositorySnapshotWitness,
 } from "../../../core/remediation-machine";
-import type { StandaloneDoneState } from "../../../core/standalone-review-machine";
+import type { StandaloneDoneState } from "../../../core/standalone-review";
 import { readAuthenticatedStandaloneSource } from "./standalone-source";
 import {
   freezeVerificationManifest,

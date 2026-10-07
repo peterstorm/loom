@@ -9,7 +9,7 @@ import { canonicalTempDir } from "../../../fixtures/canonical-temp-dir";
 import { CATALOG_ROUTE_ENV, QUALIFIED_ROUTE_ENV, withRouteEnv, type EnvironmentOverlay } from "../../../fixtures/issue-route-env";
 import { disposeFixturePiSessions, fixturePiEnvironment, withFixturePiSession as runInFixturePiSession } from "../../../fixtures/pi-session";
 import { standaloneOriginReference } from "../../../../src/core/standalone-finding-origin";
-import { prepareStandaloneSuccessor } from "../../../../src/core/standalone-lineage";
+import { prepareStandaloneSuccessor } from "../../../../src/core/standalone-review";
 import { type StandaloneDispositionPublicationReference } from "../../../../src/core/standalone-review-model";
 import { parseStandaloneDispositionStartBytes, standaloneDispositionReceipt } from "../../../../src/core/standalone-disposition-machine";
 import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
@@ -310,7 +310,7 @@ describe.sequential("admitted standalone advisory publication, correction and re
     await withFixturePiSession(root, async () => {
       const { createRunDirectory } = await import("../../../../src/orchestration/run-directory-handle");
       const { prepareStandaloneReview } = await import("../../../../src/core/standalone-review-preparation");
-      const { startStandaloneReviewMachine, reduceStandaloneReviewMachine } = await import("../../../../src/core/standalone-review-machine");
+      const { startStandaloneReviewMachine, reduceStandaloneReviewMachine } = await import("../../../../src/core/standalone-review");
       const { serializeStandaloneReviewMachineState } = await import("../../../../src/core/standalone-review-checkpoint");
       const { resolveAgentPolicy, resolveModelProfile, lowerModelProfile } = await import("../../../../src/core/model-profiles");
       const { legacyStandaloneContext, standaloneFixtureRegistration } = await import("../../../fixtures/standalone-reviewer-protocol");

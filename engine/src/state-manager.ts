@@ -27,8 +27,12 @@ import {
 import type { ActiveWaveGateRegistration, CompletedWaveGateRegistration, TaskGraph } from "./types";
 import type { DomainResult } from "./core/orchestration-contract";
 import type { WaveCompletionCommit, WaveCompletionCommitError } from "./core/wave-gate-machine";
-import { assertPiCliMutationCompatible, captureLoomRuntimeIdentityRestoring } from "./runtime-compatibility";
-import type { RuntimeBaselineRestore } from "./core/runtime-baseline-restore";
+import {
+  assertPiCliMutationCompatible,
+  captureLoomRuntimeIdentityAt,
+  STRICT_RUNTIME_WRITE_BOUNDARY,
+  type RuntimeWriteBoundary,
+} from "./runtime-compatibility";
 import { installWaveGateRegistration } from "./core/wave-gate-registration";
 import {
   anchoredDirectoryHasIdentity,
@@ -309,20 +313,20 @@ export function findRegisteredWaveGateCompletionReplay(
 export class StateManager {
   private readonly path: string;
   private readonly authority: TaskGraphFileAuthority;
-  /** Declared artifacts of the in-flight implementation attempts, hashed at
-   *  their attempt-start bytes by the write boundary's revision comparison.
-   *  Empty = the strict full-domain comparison (every non-implementation
-   *  caller). See captureLoomRuntimeIdentityRestoring. */
-  private readonly runtimeBaselineRestore: RuntimeBaselineRestore;
+  /** The write boundary's revision policy: strict for every caller except
+   *  implementation settlement, which restores the in-flight attempts'
+   *  provably-clean runtime paths to their attempt-start bytes. See
+   *  RuntimeWriteBoundary. */
+  private readonly writeBoundary: RuntimeWriteBoundary;
 
   constructor(
     path: string,
     authority: TaskGraphFileAuthority = captureTaskGraphFileAuthority(path, false),
-    runtimeBaselineRestore: RuntimeBaselineRestore = new Map(),
+    writeBoundary: RuntimeWriteBoundary = STRICT_RUNTIME_WRITE_BOUNDARY,
   ) {
     this.path = authority.path;
     this.authority = authority;
-    this.runtimeBaselineRestore = runtimeBaselineRestore;
+    this.writeBoundary = writeBoundary;
   }
 
   static fromSession(sessionId?: string): StateManager | null {
@@ -333,10 +337,10 @@ export class StateManager {
   /** Pi parent adapter seam; see resolveLocalSessionTaskGraphAuthority. */
   static fromLocalSession(
     sessionId: string,
-    runtimeBaselineRestore: RuntimeBaselineRestore = new Map(),
+    writeBoundary: RuntimeWriteBoundary = STRICT_RUNTIME_WRITE_BOUNDARY,
   ): StateManager | null {
     const authority = resolveLocalSessionTaskGraphAuthority(sessionId);
-    return authority === null ? null : new StateManager(authority.path, authority, runtimeBaselineRestore);
+    return authority === null ? null : new StateManager(authority.path, authority, writeBoundary);
   }
 
   /**
@@ -582,15 +586,12 @@ export class StateManager {
     // This is the final shared write boundary, including replacement/repair
     // paths. Check before lock creation so a skewed fresh CLI leaves the
     // protected graph byte-for-byte and metadata-for-metadata untouched.
-    // Implementation settlement restores the in-flight attempts' declared
-    // artifacts to their attempt-start bytes for this comparison: the attempt
-    // writing those files is the product, not runtime drift. Every path outside
-    // the restore map still hashes live, so any other drift refuses exactly as
-    // before. An empty restore map is the strict full-domain capture.
-    assertPiCliMutationCompatible(
-      process.env,
-      captureLoomRuntimeIdentityRestoring(PACKAGE_ROOT, this.runtimeBaselineRestore),
-    );
+    // Implementation settlement's restoring boundary hashes the in-flight
+    // attempts' provably-clean runtime paths at their attempt-start bytes: the
+    // attempt writing those files is the product, not runtime drift. Every
+    // other path still hashes live, so any other drift refuses exactly as
+    // before; the strict boundary is the full-domain live capture.
+    assertPiCliMutationCompatible(process.env, captureLoomRuntimeIdentityAt(PACKAGE_ROOT, this.writeBoundary));
     const directory = this.openAuthorityDirectory();
     return withStateDirectoryAsync(directory, `TaskGraph atomic write of ${this.path}`, () =>
       withAnchoredDirectoryHandleLock(directory, ".task_graph", () => {

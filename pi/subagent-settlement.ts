@@ -347,11 +347,7 @@ export function retireCompletedOrMissingImplementation(
       ...cleared,
       tasks: cleared.tasks.map((candidate) =>
         candidate.id === taskId && candidate.status === "completed"
-          ? {
-              ...candidate,
-              repository_baseline: undefined,
-              unresolved_repository_paths: undefined,
-            }
+          ? { ...candidate, repository_baseline: undefined }
           : candidate),
     },
     retired: true,

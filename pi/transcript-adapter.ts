@@ -4,10 +4,9 @@ import { attributeExit, classifyTestCommandDetailed, type ClassifiedTestCommand 
 import { splitCommandSegmentsWithOps, stripComment, stripEnvPrefix } from "../engine/src/core/shell-command";
 import { extractTestEvidence } from "../engine/src/core/test-evidence";
 import { boundedThrownCause, describeUnknown } from "../engine/src/core/orchestration-contract/identity";
-import type { IssuedEmissionBinding } from "../engine/src/core/emission-tool";
+import { emissionToolFamily, type IssuedEmissionBinding } from "../engine/src/core/emission-tool";
 import type { EmissionCallFrame } from "../engine/src/core/emission-observation";
 import { isRecord } from "../engine/src/core/plain-record";
-import { emissionToolFamily } from "./emission-tool";
 
 const TOOL_NAME_MAP: Readonly<Record<string, string>> = Object.freeze({
   bash: "Bash",

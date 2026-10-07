@@ -37,7 +37,7 @@
  * an in-flight attempt with NO recorded baseline: it proves nothing clean at
  * its spawn, so no path can be restored on its behalf.
  */
-import { parseArtifactBaseline, type DeclaredArtifactBaseline } from "./artifact-baseline";
+import { REPOSITORY_CHANGE_BASELINE, type DeclaredArtifactBaseline } from "./artifact-baseline";
 import { compareStrings } from "./ordering";
 import type { DomainResult } from "./orchestration-contract";
 
@@ -101,7 +101,7 @@ export function runtimeBaselineRestoreCandidates(
     if (attempt.kind === "unrecorded") {
       return { ok: false, error: Object.freeze({ kind: "unrecorded-attempt-baseline", taskId: attempt.taskId }) };
     }
-    const parsed = parseArtifactBaseline<"repository-change">(attempt.repositoryBaseline, "attempt repository baseline");
+    const parsed = REPOSITORY_CHANGE_BASELINE.parse(attempt.repositoryBaseline, "attempt repository baseline");
     if (!parsed.ok) {
       return { ok: false, error: Object.freeze({ kind: "unparseable-attempt-baseline", errors: parsed.errors }) };
     }

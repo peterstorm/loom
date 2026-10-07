@@ -3,7 +3,7 @@ import fc from "fast-check";
 import { buildStandaloneReviewerContextPacketV3, encodeByteSection, serializeStandaloneReviewerContextPacketV3 } from "../../src/core/context-packets";
 import { parseRequestId } from "../../src/core/orchestration-contract";
 import { admitStandaloneSuccessorPacketSize, standaloneSuccessorPackets } from "../../src/handlers/helpers/programs/standalone-successor-source";
-import { prepareStandaloneLineageSource, prepareStandaloneSuccessor } from "../../src/core/standalone-lineage";
+import { prepareStandaloneLineageSource, prepareStandaloneSuccessor } from "../../src/core/standalone-review";
 import { standaloneFixture } from "../fixtures/standalone-remediation-authority";
 import { wrapStandalonePanelLine } from "../../src/orchestration/standalone-panel-context";
 const value = <T>(result: { ok: true; value: T } | { ok: false }): T => {

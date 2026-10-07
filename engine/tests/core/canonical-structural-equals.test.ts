@@ -2,7 +2,7 @@
  * Direct coverage for `canonicalStructuralEquals`.
  *
  * The function backs every checkpoint/replay idempotency comparison in
- * `standalone-review-machine.ts`, and each distinction it draws is load-bearing
+ * the LC-2 reducer (`standalone-review.ts`), and each distinction it draws is load-bearing
  * there: a checkpoint that compared equal when it should not would let a
  * replayed run widen its own authority. Until now it was only ever exercised
  * transitively through those call sites, so an inverted branch inside it —

@@ -2,7 +2,23 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { valueOf, standaloneFixture, publishBatch, upholdStandaloneCriticals } from "../fixtures/standalone-remediation-authority";
 import { dispositionPublicationFixture } from "../fixtures/standalone-disposition-publication";
-import { prepareStandaloneLineageSource, prepareStandaloneSuccessor, prepareStandaloneDisposition } from "../../src/core/standalone-lineage";
+import {
+  prepareStandaloneLineageSource,
+  prepareStandaloneSuccessor,
+  prepareStandaloneDisposition,
+  proveStandaloneRosterCompletion,
+  aggregateStandaloneReview,
+  parseStandaloneAggregate,
+  type StandaloneReviewerProtocolResolver,
+  startStandaloneReviewMachine,
+  reduceStandaloneReviewMachine,
+  parseAuthoritativeStandaloneReviewResult,
+  readStandaloneReviewPublication,
+  isAuthoritativeStandaloneReviewResult,
+  type AuthoritativeStandaloneReviewResult,
+  type StandaloneReviewMachineState,
+  type StandaloneReadyToFinalizeState,
+} from "../../src/core/standalone-review";
 import { standaloneOriginReference, standaloneDecisionReference } from "../../src/core/standalone-finding-origin";
 import { type PreparedStandaloneSuccessor } from "../../src/core/standalone-review-model";
 import { type StandaloneReviewerPayloadV3, STANDALONE_REVIEWER_PROTOCOL_V3, standaloneReviewerPayloadV3Schema } from "../../src/core/standalone-lineage-contract";
@@ -15,23 +31,7 @@ import { emissionCallFrame } from "../fixtures/emission-call-frame";
 import { prepareFreshStandaloneReview, parseStandaloneReviewAuthority } from "../../src/core/standalone-review-preparation";
 import { serializeStandaloneReviewAuthority, serializeAdjudicatedStandaloneReview, serializeStandaloneAggregate } from "../../src/core/standalone-review-records";
 import { capturedReviewerResultFromBytes } from "../../src/core/standalone-reviewer-capture";
-import {
-  proveStandaloneRosterCompletion,
-  aggregateStandaloneReview,
-  parseStandaloneAggregate,
-  type StandaloneReviewerProtocolResolver,
-} from "../../src/core/standalone-review";
 import { type StandaloneReviewState } from "../../src/core/standalone-review-model";
-import {
-  startStandaloneReviewMachine,
-  reduceStandaloneReviewMachine,
-  parseAuthoritativeStandaloneReviewResult,
-  readStandaloneReviewPublication,
-  isAuthoritativeStandaloneReviewResult,
-  type AuthoritativeStandaloneReviewResult,
-  type StandaloneReviewMachineState,
-  type StandaloneReadyToFinalizeState,
-} from "../../src/core/standalone-review-machine";
 import { serializeStandaloneReviewMachineState, parseStandaloneReviewMachineState } from "../../src/core/standalone-review-checkpoint";
 import { acceptedAgentResult, createPublicationAuthorityResolver, parseArtifactRef, parseRequestId,
   parseOrchestrationRunId, parseIssuedSpawnRequest, prepareInitialBatchPublicationIntent,

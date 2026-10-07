@@ -1617,7 +1617,6 @@ describe("applyImplementationPiResult", () => {
         revalidation_required: undefined,
         active_implementation_context: context,
         repository_baseline: task.attempt_repository_baseline,
-        unresolved_repository_paths: ["foreign.ts"],
       })),
     };
     const store = fakeStore(completed);
@@ -1641,7 +1640,7 @@ describe("applyImplementationPiResult", () => {
     expect(store.current().tasks[0]?.attempt_artifact_baseline).toBeUndefined();
     expect(store.current().tasks[0]?.attempt_repository_baseline).toBeUndefined();
     expect(store.current().tasks[0]?.repository_baseline).toBeUndefined();
-    expect(store.current().tasks[0]?.unresolved_repository_paths).toBeUndefined();
+    expect(store.current().tasks[0]).not.toHaveProperty("unresolved_repository_paths");
 
     const failed = await applyFailedPiResult({
       store: failedStore,
@@ -1656,7 +1655,7 @@ describe("applyImplementationPiResult", () => {
     expect(failedStore.current().tasks[0]?.active_implementation_attempt).toBeUndefined();
     expect(failedStore.current().tasks[0]?.active_implementation_context).toBeUndefined();
     expect(failedStore.current().tasks[0]?.repository_baseline).toBeUndefined();
-    expect(failedStore.current().tasks[0]?.unresolved_repository_paths).toBeUndefined();
+    expect(failedStore.current().tasks[0]).not.toHaveProperty("unresolved_repository_paths");
   });
 
   it("keeps a concurrently reopened unreserved Task pending despite a stale completed pre-read", async () => {
@@ -2168,7 +2167,7 @@ describe("applyImplementationPiResult", () => {
         status: "implemented",
         implementation_attempt_history: [{ transition: "implemented" }],
       });
-      expect(store.current().tasks[0]?.unresolved_repository_paths).toBeUndefined();
+      expect(store.current().tasks[0]).not.toHaveProperty("unresolved_repository_paths");
     } finally {
       rmSync(repositoryRoot, { recursive: true, force: true });
     }

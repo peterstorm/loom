@@ -23,7 +23,7 @@ import {
   parseAuthoritativeStandaloneReviewResult,
   reduceStandaloneReviewMachine,
   startStandaloneReviewMachine,
-} from "../../src/core/standalone-review-machine";
+} from "../../src/core/standalone-review";
 import { parseStandaloneReviewMachineState, serializeStandaloneReviewMachineState } from "../../src/core/standalone-review-checkpoint";
 import { aggregateLegacyStandaloneReview } from "../../src/core/legacy-archive";
 import { parseIssuedReviewerProtocol, resolveReviewFindings, type IssuedStandaloneReviewerProtocol, type ReviewerProtocolAuthorityResolver } from "../../src/core/review-output";
