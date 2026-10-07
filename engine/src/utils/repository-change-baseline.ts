@@ -5,9 +5,8 @@
  */
 import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import {
-  capturedArtifactBaseline,
+  REPOSITORY_CHANGE_BASELINE,
   changedDeclaredArtifacts,
-  parseArtifactBaseline,
   restrictedArtifactBaseline,
   type ArtifactBaseline,
   type ArtifactSnapshot,
@@ -44,7 +43,7 @@ function snapshotRepositoryArtifact(root: string, artifact: string): ArtifactSna
 }
 
 function captureRepositoryArtifacts(root: string, artifacts: readonly string[]): RepositoryChangeBaseline {
-  const captured = capturedArtifactBaseline<"repository-change">(artifacts,
+  const captured = REPOSITORY_CHANGE_BASELINE.capture(artifacts,
     (artifact) => snapshotRepositoryArtifact(root, artifact), "repository change baseline");
   if (!captured.ok) throw new Error(captured.errors.join("; "));
   return captured.value;
@@ -67,7 +66,7 @@ export function changedRepositoryArtifactsSince(
   if (baseline === undefined) {
     throw new Error("No implementation-attempt repository baseline is available");
   }
-  const parsed = parseArtifactBaseline<"repository-change">(baseline, "repository baseline");
+  const parsed = REPOSITORY_CHANGE_BASELINE.parse(baseline, "repository baseline");
   if (!parsed.ok) throw new Error(parsed.errors.join("; "));
   const currentPaths = repositoryChangedPaths(root);
   const baselinePaths = new Set<string>(parsed.value.map(({ artifact }) => artifact));

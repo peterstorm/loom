@@ -35,9 +35,10 @@ import {
 } from "./review-packet";
 import { sha256Hex } from "./digest";
 import {
-  artifactBaseline,
+  UNKNOWN_SCHEME_BASELINE,
   type ArtifactBaseline,
   type ArtifactBaselineEntry,
+  type ArtifactBaselineScheme,
   type DeclaredArtifactBaseline,
   type SnapshotScheme,
 } from "./artifact-baseline";
@@ -223,14 +224,22 @@ function parseSnapshot(raw: unknown, path: string): Parsed<DeclaredArtifactBasel
 /**
  * Parse an exact baseline as an unordered path-keyed set and return canonical
  * path order. Duplicate paths and all surplus fields fail closed. A caller
- * that compares the result names the digest scheme its field was captured
- * under; the default wide scheme serves digest-only callers and cannot reach
+ * that compares the result passes the entry points of the digest scheme its
+ * field was captured under; without one the result is the unknown (wide)
+ * scheme, which serves digest-only callers and cannot reach
  * `changedDeclaredArtifacts`.
  */
-export function parseCanonicalArtifactBaseline<Scheme extends SnapshotScheme = SnapshotScheme>(
+export function parseCanonicalArtifactBaseline(raw: unknown, path?: string): Parsed<ArtifactBaseline>;
+export function parseCanonicalArtifactBaseline<Scheme extends SnapshotScheme>(
+  raw: unknown,
+  path: string,
+  scheme: ArtifactBaselineScheme<Scheme>,
+): Parsed<ArtifactBaseline<Scheme>>;
+export function parseCanonicalArtifactBaseline(
   raw: unknown,
   path = "baseline",
-): Parsed<ArtifactBaseline<Scheme>> {
+  scheme: ArtifactBaselineScheme<SnapshotScheme> = UNKNOWN_SCHEME_BASELINE,
+): Parsed<ArtifactBaseline> {
   return total(() => {
     const array = parseDenseArray(raw, path);
     if (!array.ok) return array;
@@ -251,7 +260,7 @@ export function parseCanonicalArtifactBaseline<Scheme extends SnapshotScheme = S
     const sorted = [...entries.value].sort((left, right) => compareStrings(left.artifact, right.artifact));
     const duplicate = sorted.find((entry, index) => index > 0 && sorted[index - 1]?.artifact === entry.artifact);
     if (duplicate !== undefined) return failure([`${path} repeats artifact ${JSON.stringify(duplicate.artifact)}`]);
-    const proven = artifactBaseline<Scheme>(sorted, path);
+    const proven = scheme.fromEntries(sorted, path);
     return proven.ok ? success(proven.value) : failure(proven.errors);
   });
 }

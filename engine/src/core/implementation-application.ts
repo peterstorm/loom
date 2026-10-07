@@ -8,6 +8,7 @@ import {
 } from "../types";
 export { parseNewTestEvidence, type NewTestEvidence } from "../types";
 import {
+  DECLARED_ARTIFACT_BASELINE,
   attributedChangedArtifacts,
   changedDeclaredArtifacts,
   type DeclaredArtifactBaseline,
@@ -99,8 +100,8 @@ function compareExactBaselines(
 }> | Readonly<{ ok: false; errors: readonly string[] }> {
   // Both Task-local scopes (attempt and proof) are captured as declared-artifact
   // snapshots, so both sides parse under that one digest scheme.
-  const parsedBaseline = parseCanonicalArtifactBaseline<"declared-artifact">(baseline, `${path}.baseline`);
-  const parsedCurrent = parseCanonicalArtifactBaseline<"declared-artifact">(current, `${path}.current`);
+  const parsedBaseline = parseCanonicalArtifactBaseline(baseline, `${path}.baseline`, DECLARED_ARTIFACT_BASELINE);
+  const parsedCurrent = parseCanonicalArtifactBaseline(current, `${path}.current`, DECLARED_ARTIFACT_BASELINE);
   if (!parsedBaseline.ok || !parsedCurrent.ok) {
     return freeze({
       ok: false,

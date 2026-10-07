@@ -52,10 +52,12 @@ export type ArtifactBaselineEntry = Readonly<{ artifact: ReviewPath; snapshot: A
 declare const PARSED_BASELINE: unique symbol;
 
 /**
- * A baseline proven by `artifactBaseline`: canonical, unique artifact paths and
+ * A baseline proven by one scheme's entry points (`DECLARED_ARTIFACT_BASELINE`,
+ * `REPOSITORY_CHANGE_BASELINE`): canonical, unique artifact paths and
  * well-formed snapshots, tagged with the digest scheme its snapshots were
  * hashed under. `SnapshotScheme` itself (the union) is a baseline whose scheme
- * its parse site cannot know — the scheme-agnostic State File wire parse.
+ * its parse site cannot know (`UNKNOWN_SCHEME_BASELINE`), which no comparison
+ * accepts.
  */
 export type ArtifactBaseline<Scheme extends SnapshotScheme = SnapshotScheme> =
   readonly ArtifactBaselineEntry[] & { readonly [PARSED_BASELINE]: Scheme };
@@ -72,8 +74,10 @@ function parseArtifactSnapshot(raw: unknown, path: string): ParseResult<Artifact
 }
 
 /** Smart constructor over already-typed entries: the set invariant (one entry
- *  per artifact) is the only thing left to prove. Entry order is preserved. */
-export function artifactBaseline<Scheme extends SnapshotScheme>(
+ *  per artifact) is the only thing left to prove. Entry order is preserved.
+ *  Module-private: `Scheme` is the caller's claim, so only the named per-scheme
+ *  entry points below may make it. */
+function artifactBaseline<Scheme extends SnapshotScheme>(
   entries: readonly ArtifactBaselineEntry[],
   path = "artifact_baseline",
 ): ParseResult<ArtifactBaseline<Scheme>> {
@@ -98,12 +102,8 @@ export function restrictedArtifactBaseline<Scheme extends SnapshotScheme>(
   return Object.freeze(baseline.filter((entry) => keep(entry.artifact))) as unknown as ArtifactBaseline<Scheme>;
 }
 
-/**
- * The one capture shape for every snapshot source: each distinct artifact, in
- * first-seen order, beside its snapshot under ONE digest scheme. `snapshot`
- * runs first, so its own path refusal is the one a caller sees.
- */
-export function capturedArtifactBaseline<Scheme extends SnapshotScheme>(
+/** The one capture shape for every snapshot source (see `ArtifactBaselineScheme.capture`). */
+function capturedArtifactBaseline<Scheme extends SnapshotScheme>(
   artifacts: readonly string[],
   snapshot: (artifact: string) => ArtifactSnapshot,
   path: string,
@@ -118,11 +118,8 @@ export function capturedArtifactBaseline<Scheme extends SnapshotScheme>(
   return artifactBaseline<Scheme>(entries, path);
 }
 
-/** Parse a persisted baseline whose digest scheme the caller knows from the
- *  Task field it came from. Errors are reported in raw index order, a
- *  duplicate artifact inline at its own index (even when that entry's snapshot
- *  also fails to parse). */
-export function parseArtifactBaseline<Scheme extends SnapshotScheme>(
+/** The persisted-baseline parse (see `ArtifactBaselineScheme.parse`). */
+function parseArtifactBaseline<Scheme extends SnapshotScheme>(
   raw: unknown,
   path = "artifact_baseline",
 ): ParseResult<ArtifactBaseline<Scheme>> {
@@ -151,6 +148,41 @@ export function parseArtifactBaseline<Scheme extends SnapshotScheme>(
   return errors.length > 0 ? fail(errors) : artifactBaseline<Scheme>(entries, path);
 }
 
+/**
+ * The construction entry points of ONE digest scheme. The scheme is fixed by
+ * which constant a caller names, never by a type argument it supplies, so the
+ * choice is visible (and reviewable) at every capture and parse site:
+ *
+ * - `fromEntries` proves already-typed entries (one entry per artifact).
+ * - `capture` snapshots each distinct artifact, in first-seen order; `snapshot`
+ *   runs first, so its own path refusal is the one a caller sees.
+ * - `parse` reads a persisted baseline from the Task field that scheme owns.
+ *   Errors are reported in raw index order, a duplicate artifact inline at its
+ *   own index (even when that entry's snapshot also fails to parse).
+ */
+export type ArtifactBaselineScheme<Scheme extends SnapshotScheme> = Readonly<{
+  fromEntries: (entries: readonly ArtifactBaselineEntry[], path?: string) => ParseResult<ArtifactBaseline<Scheme>>;
+  capture: (
+    artifacts: readonly string[],
+    snapshot: (artifact: string) => ArtifactSnapshot,
+    path: string,
+  ) => ParseResult<ArtifactBaseline<Scheme>>;
+  parse: (raw: unknown, path?: string) => ParseResult<ArtifactBaseline<Scheme>>;
+}>;
+
+const schemeEntryPoints = <Scheme extends SnapshotScheme>(): ArtifactBaselineScheme<Scheme> => Object.freeze({
+  fromEntries: (entries, path) => artifactBaseline<Scheme>(entries, path),
+  capture: (artifacts, snapshot, path) => capturedArtifactBaseline<Scheme>(artifacts, snapshot, path),
+  parse: (raw, path) => parseArtifactBaseline<Scheme>(raw, path),
+});
+
+/** `artifact_baseline` / `attempt_artifact_baseline`: raw file bytes or a directory tree digest. */
+export const DECLARED_ARTIFACT_BASELINE = schemeEntryPoints<"declared-artifact">();
+/** `repository_baseline` / `attempt_repository_baseline`: `file\0<mode>\0<bytes>` or `symlink\0<target>`. */
+export const REPOSITORY_CHANGE_BASELINE = schemeEntryPoints<"repository-change">();
+/** A digest-only read whose scheme its site cannot know; the result can never reach a comparison. */
+export const UNKNOWN_SCHEME_BASELINE = schemeEntryPoints<SnapshotScheme>();
+
 /** The scheme-agnostic State File wire parse and nothing more: one wire shape
  *  carries either digest scheme and Task fields store the wire record, so the
  *  result is widened to that record and cannot reach a comparison. A
@@ -159,7 +191,7 @@ export function parseDeclaredArtifactBaseline(
   raw: unknown,
   path = "artifact_baseline",
 ): ParseResult<readonly DeclaredArtifactBaseline[]> {
-  return parseArtifactBaseline<SnapshotScheme>(raw, path);
+  return UNKNOWN_SCHEME_BASELINE.parse(raw, path);
 }
 
 const snapshotEquals = (left: ArtifactSnapshot, right: ArtifactSnapshot): boolean =>

@@ -23,7 +23,7 @@ import {
   type TaskExecutionSpawn,
   type ValidateTaskExecutionInput,
 } from "../core/validate-task-execution";
-import { parseArtifactBaseline, type ArtifactBaseline } from "../core/artifact-baseline";
+import { REPOSITORY_CHANGE_BASELINE, type ArtifactBaseline } from "../core/artifact-baseline";
 import { captureDeclaredArtifactBaseline } from "../utils/declared-artifact-snapshot";
 import { captureRepositoryChangeBaseline } from "../utils/repository-change-baseline";
 import { repositoryContext } from "../utils/git";
@@ -142,7 +142,7 @@ export async function registerTaskExecutionBatch(
     // under its own digest scheme so the in-memory bundle keeps the brand.
     const retained = task.repository_baseline === undefined
       ? undefined
-      : parseArtifactBaseline<"repository-change">(task.repository_baseline, `${taskId} repository_baseline`);
+      : REPOSITORY_CHANGE_BASELINE.parse(task.repository_baseline, `${taskId} repository_baseline`);
     if (retained !== undefined && !retained.ok) {
       return { kind: "block", message: `BLOCKED: Invalid retained repository baseline: ${retained.errors.join("; ")}` };
     }

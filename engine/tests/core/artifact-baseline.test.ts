@@ -7,7 +7,10 @@ import { artifactCovers } from "../../src/core/path-coverage";
 import {
   attributedChangedArtifacts,
   changedDeclaredArtifacts,
-  parseArtifactBaseline,
+  DECLARED_ARTIFACT_BASELINE,
+  REPOSITORY_CHANGE_BASELINE,
+  type ArtifactBaselineScheme,
+  type SnapshotScheme,
   parseDeclaredArtifactBaseline,
   treeSnapshotDigest,
   type TreeEntry,
@@ -17,8 +20,8 @@ import {
   changedDeclaredArtifactsSince,
 } from "../../src/utils/declared-artifact-snapshot";
 
-function parsed<Scheme extends "declared-artifact" | "repository-change">(raw: unknown) {
-  const baseline = parseArtifactBaseline<Scheme>(raw);
+function parsed<Scheme extends SnapshotScheme>(scheme: ArtifactBaselineScheme<Scheme>, raw: unknown) {
+  const baseline = scheme.parse(raw);
   if (!baseline.ok) throw new Error(baseline.errors.join("; "));
   return baseline.value;
 }
@@ -77,24 +80,24 @@ describe("declared artifact baseline", () => {
     }]);
     expect(malformed.ok).toBe(false);
 
-    const baseline = parsed<"declared-artifact">([{ artifact: "src/a.ts", snapshot: { kind: "missing" } }]);
-    const compared = changedDeclaredArtifacts(baseline, parsed<"declared-artifact">([]));
+    const baseline = parsed(DECLARED_ARTIFACT_BASELINE, [{ artifact: "src/a.ts", snapshot: { kind: "missing" } }]);
+    const compared = changedDeclaredArtifacts(baseline, parsed(DECLARED_ARTIFACT_BASELINE, []));
     expect(compared.ok).toBe(false);
     expect(!compared.ok && compared.errors.join("\n")).toContain("missing declared artifact");
   });
 
   it("proves a baseline once: unique canonical artifacts, then compares without re-parsing", () => {
-    const duplicated = parseArtifactBaseline<"declared-artifact">([
+    const duplicated = DECLARED_ARTIFACT_BASELINE.parse([
       { artifact: "src/a.ts", snapshot: { kind: "missing" } },
       { artifact: "src/a.ts", snapshot: { kind: "missing" } },
     ]);
     expect(duplicated).toEqual({ ok: false, errors: ['artifact_baseline[1].artifact duplicates "src/a.ts"'] });
 
-    const before = parsed<"declared-artifact">([
+    const before = parsed(DECLARED_ARTIFACT_BASELINE, [
       { artifact: "src/a.ts", snapshot: { kind: "sha256", digest: "a".repeat(64) } },
       { artifact: "src/b.ts", snapshot: { kind: "missing" } },
     ]);
-    const after = parsed<"declared-artifact">([
+    const after = parsed(DECLARED_ARTIFACT_BASELINE, [
       { artifact: "src/b.ts", snapshot: { kind: "missing" } },
       { artifact: "src/a.ts", snapshot: { kind: "sha256", digest: "b".repeat(64) } },
     ]);
@@ -103,8 +106,8 @@ describe("declared artifact baseline", () => {
   });
 
   it("refuses at compile time to compare snapshots hashed under different digest schemes", () => {
-    const declared = parsed<"declared-artifact">([{ artifact: "a.ts", snapshot: { kind: "missing" } }]);
-    const repository = parsed<"repository-change">([{ artifact: "a.ts", snapshot: { kind: "missing" } }]);
+    const declared = parsed(DECLARED_ARTIFACT_BASELINE, [{ artifact: "a.ts", snapshot: { kind: "missing" } }]);
+    const repository = parsed(REPOSITORY_CHANGE_BASELINE, [{ artifact: "a.ts", snapshot: { kind: "missing" } }]);
     // @ts-expect-error a repository-change preimage is not a declared-artifact snapshot.
     changedDeclaredArtifacts(declared, repository);
     // @ts-expect-error and an unparsed wire array is not a proven baseline.
