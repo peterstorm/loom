@@ -13,26 +13,53 @@ import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input"
 export { parseSpecCheckOutput } from "../../core/spec-check";
 import { StateManager } from "../../state-manager";
 import { passthroughResult, type HookHandler, type HookResult } from "../../types";
-import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";
+import { readSettledTranscript, type TranscriptFileReader } from "../../utils/read-transcript-with-retry";
 import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { observeWaveSpecCheckDocuments } from "../../orchestration/wave-spec-check-documents";
+import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
 import { epochSettledFloor } from "../../core/wave-review-authority";
+import { claudeTranscriptCandidates, parseClaudeTranscript, type ClaudeTranscript } from "../../core/claude-transcript-projection";
 import { observeTaskGraphProjectBoundary } from "../../config";
-import { claudeFinalPayloadCandidates } from "./capture-orchestration-result";
+
+/** The bound the spec-check transcript read observes, the same as request-bound capture's. */
+export const SPEC_CHECK_TRANSCRIPT_MAX_BYTES = 16_777_216;
+
+/** Each retry attempt reads the transcript bounded and no-follow; oversize or non-UTF-8 throws. */
+const boundedTranscriptRead = (maximumBytes: number): TranscriptFileReader => (path) =>
+  new TextDecoder("utf-8", { fatal: true }).decode(readRunBytesNoFollow(path, maximumBytes));
 
 /**
- * The spec-check report text to parse. Current Claude subagents deliver their
- * report through one `SubagentHandback` call, whose JSON-escaped tool input
- * hides every line-start `CRITICAL:`/`HIGH:` finding from the legacy text
- * read while its count markers still match — so the counts can never
- * reconcile. Exactly one delivered handback is the report; anything else keeps
- * the legacy read, whose reconciliation still fails closed.
+ * The spec-check report text to parse, from the ONE settled transcript read.
+ * Current Claude subagents deliver their report through one `SubagentHandback`
+ * call, whose JSON-escaped tool input hides every line-start
+ * `CRITICAL:`/`HIGH:` finding from the legacy text read while its count
+ * markers still match — so the counts can never reconcile. Exactly one
+ * delivered handback is the report; anything else — no handback, several, or
+ * a final turn the strict projection finds malformed (a torn last line the
+ * legacy text read tolerates) — keeps the legacy read, whose reconciliation
+ * still fails closed.
  */
-export function deliveredSpecCheckText(transcriptPath: string, legacyText: string): string {
-  const handbacks = claudeFinalPayloadCandidates(transcriptPath)
-    .filter(({ origin }) => origin.endsWith(".handback"));
+export function deliveredSpecCheckText(transcript: ClaudeTranscript, legacyText: string): string {
+  const candidates = claudeTranscriptCandidates(transcript);
+  const handbacks = candidates.ok ? candidates.value.filter(({ origin }) => origin.endsWith(".handback")) : [];
   return handbacks.length === 1 ? handbacks[0]!.text : legacyText;
+}
+
+/**
+ * Read the spec-check transcript once — waiting for the count marker like the
+ * legacy read, bounded like the capture path — and derive both the legacy text
+ * and the handback candidates from those same bytes. A located transcript that
+ * vanished or cannot be read is unreadable, never an empty report.
+ */
+export async function readSpecCheckReport(
+  transcriptPath: string,
+  maximumBytes = SPEC_CHECK_TRANSCRIPT_MAX_BYTES,
+): Promise<string> {
+  const settled = await readSettledTranscript(
+    transcriptPath, /SPEC_CHECK_CRITICAL_COUNT:\s*\d+/, boundedTranscriptRead(maximumBytes));
+  if (settled.kind === "missing") throw new Error(`no transcript exists at ${transcriptPath}`);
+  return deliveredSpecCheckText(parseClaudeTranscript(settled.content.split("\n")), settled.text);
 }
 
 export const runStoreSpecCheckFindings = async (
@@ -81,10 +108,7 @@ export const runStoreSpecCheckFindings = async (
     : null;
   if (resolvedTranscriptPath !== null) {
     try {
-      transcript = deliveredSpecCheckText(
-        resolvedTranscriptPath,
-        await readTranscriptWithRetry(resolvedTranscriptPath, /SPEC_CHECK_CRITICAL_COUNT:\s*\d+/),
-      );
+      transcript = await readSpecCheckReport(resolvedTranscriptPath);
     } catch (error) {
       transcriptFailure = `spec-check transcript is unreadable: ${error instanceof Error ? error.message : String(error)}`;
     }

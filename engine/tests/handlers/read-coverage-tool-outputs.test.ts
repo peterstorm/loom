@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { claudeToolOutputsFromLines } from "../../src/handlers/subagent-stop/capture-orchestration-result";
+import { claudeToolOutputs, parseClaudeTranscript } from "../../src/core/claude-transcript-projection";
 import { piToolOutputs } from "../../../pi/review-capture";
 
 /**
@@ -20,11 +20,11 @@ describe("Claude tool outputs", () => {
       "not json",
       line({ role: "user", content: "plain prompt" }),
     ];
-    expect(claudeToolOutputsFromLines(lines)).toEqual(["page one", "page\ntwo"]);
+    expect(claudeToolOutputs(parseClaudeTranscript(lines))).toEqual(["page one", "page\ntwo"]);
   });
 
   it("projects nothing from a transcript without tool results", () => {
-    expect(claudeToolOutputsFromLines([line({ role: "assistant", content: [{ type: "text", text: "I read it all." }] })])).toEqual([]);
+    expect(claudeToolOutputs(parseClaudeTranscript([line({ role: "assistant", content: [{ type: "text", text: "I read it all." }] })]))).toEqual([]);
   });
 });
 

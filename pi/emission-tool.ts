@@ -120,51 +120,6 @@ export type EmissionHoldPhase = "entered" | "resolved" | "shutdown-released";
  *  presence is parsed and certified, never trusted. */
 export const LOOM_EMISSION_BINDING_ENV = "LOOM_EMISSION_BINDING";
 
-/** The reserved name prefix of the loom emission tool family. A registered
- *  emission tool is a frozen-registry name; a call to a PREFIX-matching name
- *  outside the registry is an observed-but-unbindable emission call (the
- *  transcript adapter refuses it as incomplete — never absorbed as absence). */
-export const EMISSION_TOOL_NAME_PREFIX = "loom_emit_";
-
-// ---------------------------------------------------------------------------
-// The emission tool family, as the frozen registry projects it to pi
-// ---------------------------------------------------------------------------
-
-/** The closed family membership of a tool name, decided by the frozen
- *  registry — `unrelated` names are not emission calls at all;
- *  `registered` carries the registry's producer kind for the name;
- *  `unregistered-emission-name` is a prefix-reserved name the registry does
- *  not freeze (a stale or foreign child's tool): observable, unbindable,
- *  never silently unrelated. */
-export type EmissionToolFamily =
-  | Readonly<{ kind: "unrelated" }>
-  | Readonly<{ kind: "registered"; producerKind: PayloadProducerKindName }>
-  | Readonly<{ kind: "unregistered-emission-name" }>;
-
-const projectKindsByToolName = (): ReadonlyMap<string, PayloadProducerKindName> => {
-  const projection = new Map<string, PayloadProducerKindName>();
-  for (const [kind, spec] of Object.entries(EMISSION_TOOL_SPECS)) {
-    if (projection.has(spec.toolName)) {
-      throw new Error(`emission tool registry invariant failed: duplicate tool name ${spec.toolName}`);
-    }
-    projection.set(spec.toolName, kind as PayloadProducerKindName);
-  }
-  return projection;
-};
-
-const kindByToolName = projectKindsByToolName();
-
-export function emissionToolFamily(toolName: unknown): EmissionToolFamily {
-  if (typeof toolName !== "string") return canonicalRecord({ kind: "unrelated" as const });
-  const registeredKind = kindByToolName.get(toolName);
-  if (registeredKind !== undefined) {
-    return canonicalRecord({ kind: "registered" as const, producerKind: registeredKind });
-  }
-  return toolName.startsWith(EMISSION_TOOL_NAME_PREFIX)
-    ? canonicalRecord({ kind: "unregistered-emission-name" as const })
-    : canonicalRecord({ kind: "unrelated" as const });
-}
-
 // ---------------------------------------------------------------------------
 // Child provisioning (FR-008): the issued binding, certified — never trusted
 // ---------------------------------------------------------------------------

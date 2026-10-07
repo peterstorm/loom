@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { claudeEmissionFrames, parseClaudeTranscript } from "../../src/core/claude-transcript-projection";
 import { mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -12,15 +13,13 @@ import {
   type FinalPayloadCandidate,
   type HarnessResultIdentity,
 } from "../../src/core/harness-capture";
-import { admitEmissionArguments, EMISSION_TOOL_SPECS } from "../../src/core/emission-tool";
+import { admitEmissionArguments, EMISSION_TOOL_SPECS, emissionToolFamily } from "../../src/core/emission-tool";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, reviewerPayloadV2Schema } from "../../src/core/reviewer-contract";
 import { sha256Hex } from "../../src/core/digest";
 import type { EmissionCallFrame } from "../../src/core/harness-capture";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import captureOrchestrationResult, {
   captureClaudeResult,
-  claudeEmissionFramesFromLines,
-  claudeEmissionToolFamily,
   claudeFinalPayloadCandidates,
 } from "../../src/handlers/subagent-stop/capture-orchestration-result";
 import { recordClaudeSpawnCorrelation } from "../../src/handlers/post-tool-use/record-orchestration-spawn";
@@ -1637,10 +1636,10 @@ describe("the engine capture seam selects the canonical emission source", () => 
     const REVIEWER_TOOL = EMISSION_TOOL_SPECS["reviewer-payload"].toolName;
 
     it("classifies tool names by the frozen registry, never by shape", () => {
-      expect(claudeEmissionToolFamily(REVIEWER_TOOL)).toEqual({ kind: "registered", producerKind: "reviewer-payload" });
-      expect(claudeEmissionToolFamily("loom_emit_unknown_future_kind")).toEqual({ kind: "unregistered-emission-name" });
-      expect(claudeEmissionToolFamily("Bash")).toEqual({ kind: "unrelated" });
-      expect(claudeEmissionToolFamily(42)).toEqual({ kind: "unrelated" });
+      expect(emissionToolFamily(REVIEWER_TOOL)).toEqual({ kind: "registered", producerKind: "reviewer-payload" });
+      expect(emissionToolFamily("loom_emit_unknown_future_kind")).toEqual({ kind: "unregistered-emission-name" });
+      expect(emissionToolFamily("Bash")).toEqual({ kind: "unrelated" });
+      expect(emissionToolFamily(42)).toEqual({ kind: "unrelated" });
     });
 
     it("projects complete frames only for successfully executed calls, and refuses-class frames otherwise", () => {
@@ -1659,7 +1658,7 @@ describe("the engine capture seam selects the canonical emission source", () => 
           { type: "tool_result", tool_use_id: "tu-failed", is_error: true },
         ] } }),
       ];
-      const frames = claudeEmissionFramesFromLines(lines, { requestId: "request:reviewer:1", version: "v2" });
+      const frames = claudeEmissionFrames(parseClaudeTranscript(lines), { requestId: "request:reviewer:1", version: "v2" });
       const complete = frames.filter((frame) => frame.kind === "complete");
       expect(complete).toHaveLength(1);
       if (complete[0]!.kind !== "complete") throw new Error("narrowing");
@@ -1740,7 +1739,7 @@ describe("the engine capture seam selects the canonical emission source", () => 
         `{"message":{"role":"assistant","content":[{"type":"tool_use","id":"tu-lost","name":"${REVIEWER_TOOL}"`,
         JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "VERDICT: PASSED\n" }] } }),
       ];
-      const frames = claudeEmissionFramesFromLines(lines, { requestId: "request:reviewer:1", version: "v2" });
+      const frames = claudeEmissionFrames(parseClaudeTranscript(lines), { requestId: "request:reviewer:1", version: "v2" });
       expect(frames).toHaveLength(1);
       if (frames[0]!.kind !== "incomplete") throw new Error("narrowing");
       expect(frames[0]!.reason).toContain("unclassifiable line");
@@ -1758,7 +1757,7 @@ describe("the engine capture seam selects the canonical emission source", () => 
         ] } }),
         JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "VERDICT: PASSED\n" }] } }),
       ];
-      const frames = claudeEmissionFramesFromLines(lines, { requestId: "request:reviewer:1", version: "v2" });
+      const frames = claudeEmissionFrames(parseClaudeTranscript(lines), { requestId: "request:reviewer:1", version: "v2" });
       expect(frames).toHaveLength(1);
       if (frames[0]!.kind !== "incomplete") throw new Error("narrowing");
       expect(frames[0]!.reason).toContain("orphan tool result");
@@ -1780,7 +1779,7 @@ describe("the engine capture seam selects the canonical emission source", () => 
         JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "done" }] } }),
         "",
       ];
-      expect(claudeEmissionFramesFromLines(lines, { requestId: "request:reviewer:1", version: "v2" })).toEqual([]);
+      expect(claudeEmissionFrames(parseClaudeTranscript(lines), { requestId: "request:reviewer:1", version: "v2" })).toEqual([]);
     });
 
     it("refuses a capture whose transcript lost an emission call to a corrupted line instead of silently extracting", async () => {
@@ -1824,7 +1823,7 @@ describe("the engine capture seam selects the canonical emission source", () => 
         `{"message":{"role":"assistant","content":[{"type":"tool_use","id":"tu-lost","name":"${REVIEWER_TOOL}"`,
         JSON.stringify({ message: { role: "assistant", content: [{ type: "text", text: "VERDICT: PASSED\n" }] } }),
       ];
-      const frames = claudeEmissionFramesFromLines(lines, { requestId: staged.request.requestId, version: "v2" });
+      const frames = claudeEmissionFrames(parseClaudeTranscript(lines), { requestId: staged.request.requestId, version: "v2" });
       expect(frames.some((frame) => frame.kind === "incomplete")).toBe(true);
       const outcome = await captureEmission(staged, frames, [textCandidate("content[0].text", "VERDICT: PASSED\n")]);
 
