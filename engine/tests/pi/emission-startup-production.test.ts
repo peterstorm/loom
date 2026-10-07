@@ -15,9 +15,11 @@
  * release arc and its shutdown release (through the extension's named
  * `registerLoomEmissionReadiness` seam), and runs the parent bridge's SHIPPED
  * `verifyReadiness` against a real production child through the harness's
- * real-RPC readiness adapter. The barrier sequence itself is the shared
- * launcher harness's `runLauncherBarrier`
- * (`engine/tests/fixtures/emission-child-harness.ts`).
+ * real-RPC readiness adapter. Both barrier paths cross the one production
+ * launcher step sequence (`pi/emission-readiness-sequence.ts`): the shipped
+ * verifier as its bridge adapter, and the shared launcher harness's
+ * `runLauncherBarrier` (`engine/tests/fixtures/emission-child-harness.ts`) as
+ * its real-RPC harness adapter.
  */
 
 import { describe, expect, it, vi } from "vitest";

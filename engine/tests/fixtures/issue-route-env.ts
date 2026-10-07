@@ -8,7 +8,11 @@
  * file — so no suite depends on importing a fixture first, and an ambient Pi
  * handshake (a wrapper session running the suite under the qualified-local
  * model) never flips the election. A suite opts into another route explicitly
- * with `withRouteEnv`.
+ * with `withEnvOverlay(QUALIFIED_ROUTE_ENV, …)` (or `CATALOG_ROUTE_ENV`).
+ *
+ * `withEnvOverlay` is the suites' ONE process-environment overlay scope, for
+ * route variables or any other (run-directory roots, the Pi agent marker):
+ * one apply/restore-in-finally implementation, so no suite keeps its own.
  *
  * Dependency-free on purpose: the setup file imports it before every test
  * file, so it must load no engine module a suite might later `vi.mock`.
@@ -40,8 +44,10 @@ export function scrubAmbientIssueRoute(): void {
   applyOverlay(CATALOG_ROUTE_ENV);
 }
 
-/** Run `operation` under `overlay`, restoring every touched variable afterwards. */
-export async function withRouteEnv<T>(overlay: EnvironmentOverlay, operation: () => T | Promise<T>): Promise<T> {
+/** Run `operation` under any process-environment `overlay` (a route constant
+ *  or any other variables), restoring every touched variable afterwards — a
+ *  variable that was unset before is deleted again. */
+export async function withEnvOverlay<T>(overlay: EnvironmentOverlay, operation: () => T | Promise<T>): Promise<T> {
   const previous: EnvironmentOverlay = Object.fromEntries(Object.keys(overlay).map((key) => [key, process.env[key]]));
   try {
     applyOverlay(overlay);

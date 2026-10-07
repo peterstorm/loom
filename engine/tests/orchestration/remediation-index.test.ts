@@ -24,7 +24,8 @@ import {
   parseVerifiedIndexInstallation,
   type CurrentVerifiedIndexInstallation,
 } from "../../src/core/remediation-machine";
-import { standalonePublicationResolver, valueOf } from "../fixtures/standalone-remediation-authority";
+import { standalonePublicationResolver } from "../fixtures/standalone-remediation-authority";
+import { value } from "../fixtures/parse-result";
 
 const cleanup: string[] = [];
 
@@ -273,7 +274,7 @@ describe("installing a verified index", () => {
     const { temporary } = stageInto(repository, ["src/edited.ts"]);
     const current = verifiedRemediationInstallation(repository, temporary);
     const identity = { verifiedIndexDigest: current.verifiedIndexDigest, intent: current.intent };
-    const historical = valueOf(parseVerifiedIndexInstallation({
+    const historical = value(parseVerifiedIndexInstallation({
       schemaVersion: 1,
       kind: "verified-index-installation",
       verified: current.verified,

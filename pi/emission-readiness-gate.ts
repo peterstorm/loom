@@ -16,7 +16,8 @@
  * reach the child.
  *
  * The decision runs in two stages because route binding is I/O that may only
- * happen after readiness opened:
+ * happen after readiness opened (the one launcher step order that gathers
+ * their inputs is `pi/emission-readiness-sequence.ts`):
  *
  * 1. `decideReadinessGate` — raw probe facts are first canonicalised by
  *    `parseReadinessStageObservation` (cancelled > unreachable > command

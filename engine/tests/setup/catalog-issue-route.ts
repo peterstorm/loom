@@ -5,7 +5,7 @@
  * qualified-local model) therefore never reaches an in-process route election
  * or a CLI child's spread environment, whichever fixtures a suite imports and
  * in whatever order. Suites opt into another route explicitly with
- * `withRouteEnv` (tests/fixtures/issue-route-env.ts).
+ * `withEnvOverlay` (tests/fixtures/issue-route-env.ts).
  */
 import { scrubAmbientIssueRoute } from "../fixtures/issue-route-env";
 

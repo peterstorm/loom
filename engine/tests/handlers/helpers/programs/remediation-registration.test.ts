@@ -33,7 +33,8 @@ import {
   type FrozenVerificationManifest,
 } from "../../../../src/core/verification-manifest";
 import type { AuthoritativeStandaloneReviewResult } from "../../../../src/core/standalone-review";
-import { standaloneFixture, valueOf } from "../../../fixtures/standalone-remediation-authority";
+import { standaloneFixture } from "../../../fixtures/standalone-remediation-authority";
+import { value } from "../../../fixtures/parse-result";
 
 // ---------------------------------------------------------------------------
 // Fixtures — built only through the production parsers (no forged authority).
@@ -97,7 +98,7 @@ function frozenManifest(): FrozenVerificationManifest {
       report: { kind: "required-file", path: REPORT_PATH },
     }],
   };
-  return valueOf(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify(raw))));
+  return value(freezeVerificationManifest(new TextEncoder().encode(JSON.stringify(raw))));
 }
 
 type NotRequiredPlan = Extract<DefectFamilyVerificationPlan, { kind: "not-required" }>;
@@ -113,8 +114,8 @@ type SelectedAuthority = Readonly<{
 let notRequiredCache: NotRequiredAuthority | undefined;
 function notRequired(): NotRequiredAuthority {
   if (notRequiredCache !== undefined) return notRequiredCache;
-  const accounting = valueOf(prepareDefectFamilyAccounting(cleanSource(), { kind: "not-required" }));
-  const plan = valueOf(prepareDefectFamilyVerification(accounting, null));
+  const accounting = value(prepareDefectFamilyAccounting(cleanSource(), { kind: "not-required" }));
+  const plan = value(prepareDefectFamilyVerification(accounting, null));
   if (plan.kind !== "not-required") throw new Error("not-required plan required");
   notRequiredCache = { accounting, plan };
   return notRequiredCache;
@@ -124,9 +125,9 @@ let selectedCache: SelectedAuthority | undefined;
 function selected(): SelectedAuthority {
   if (selectedCache !== undefined) return selectedCache;
   const source = criticalSource();
-  const accounting = valueOf(prepareDefectFamilyAccounting(source, repairDeclaration(source)));
+  const accounting = value(prepareDefectFamilyAccounting(source, repairDeclaration(source)));
   const manifest = frozenManifest();
-  const plan = valueOf(prepareDefectFamilyVerification(accounting, manifest));
+  const plan = value(prepareDefectFamilyVerification(accounting, manifest));
   if (plan.kind !== "selected-operator-checks") throw new Error("selected plan required");
   selectedCache = { accounting, plan, manifest };
   return selectedCache;
@@ -135,12 +136,12 @@ function selected(): SelectedAuthority {
 function candidate(
   overrides: Readonly<{ generatedReportExclusions?: readonly string[]; workspaceCharacter?: string }> = {},
 ): CandidateRepositoryWitness {
-  const gitWitness = valueOf(parseRepositorySnapshotWitness({
+  const gitWitness = value(parseRepositorySnapshotWitness({
     baseTreeDigest: hex("1"),
     indexDigest: hex("2"),
     worktreeDigest: hex("3"),
   }));
-  return valueOf(createCandidateRepositoryWitness({
+  return value(createCandidateRepositoryWitness({
     kind: "candidate-repository-witness",
     repositoryRoot: "/repo",
     workspaceDigest: hex(overrides.workspaceCharacter ?? "4"),
@@ -183,7 +184,7 @@ function selectedRequest(start: StartFields = DEFAULT_START, overrides: Partial<
 }
 
 const registered = (request: CreateRemediationRegistrationInput): RegisteredRemediationProgramV2 =>
-  valueOf(createRegisteredRemediationProgramV2(request));
+  value(createRegisteredRemediationProgramV2(request));
 
 /** The stored form: exactly what JSON persistence hands back to the parser. */
 const stored = (value: unknown): Record<string, unknown> => JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
@@ -233,7 +234,7 @@ describe("parseRemediationStartInputV2", () => {
   it("admits the exact four fields as a frozen copy with defectFamily passed through uninterpreted", () => {
     const defectFamily = { kind: "anything-the-accounting-parser-decides-later" };
     const raw = rawStart({ defectFamily });
-    const parsed = valueOf(parseRemediationStartInputV2(raw));
+    const parsed = value(parseRemediationStartInputV2(raw));
 
     expect(parsed).toEqual({ sourceRunsRoot: "/runs", sourceRun: SOURCE_RUN_ID, supportPaths: ["src/a.ts", "src/b.ts"], defectFamily });
     expect(parsed.defectFamily).toBe(defectFamily);
@@ -244,7 +245,7 @@ describe("parseRemediationStartInputV2", () => {
 
   it("admits an empty supportPaths roster and a null-prototype record", () => {
     const raw = Object.assign(Object.create(null) as Record<string, unknown>, rawStart({ supportPaths: [] }));
-    expect(valueOf(parseRemediationStartInputV2(raw)).supportPaths).toEqual([]);
+    expect(value(parseRemediationStartInputV2(raw)).supportPaths).toEqual([]);
   });
 
   it.each([
@@ -345,9 +346,9 @@ describe("parseRemediationStartInputV2", () => {
   it("property: every well-formed input is admitted unchanged and survives a JSON round trip", () => {
     fc.assert(fc.property(startArbitrary, fc.jsonValue(), (start, defectFamily) => {
       const raw = { ...start, supportPaths: [...start.supportPaths], defectFamily };
-      const parsed = valueOf(parseRemediationStartInputV2(raw));
+      const parsed = value(parseRemediationStartInputV2(raw));
       expect(parsed).toEqual(raw);
-      expect(valueOf(parseRemediationStartInputV2(stored(parsed)))).toEqual(stored(parsed));
+      expect(value(parseRemediationStartInputV2(stored(parsed)))).toEqual(stored(parsed));
     }));
   });
 });
@@ -507,7 +508,7 @@ describe("parseRegisteredRemediationProgram", () => {
       ["selected-operator-checks", storedSelected, () => registered(selectedRequest())],
     ] as const)("re-admits a stored %s registration canonically equal to the minted one", (_label, persisted, minted) => {
       const raw = persisted();
-      const parsed = valueOf(parseRegisteredRemediationProgram(raw));
+      const parsed = value(parseRegisteredRemediationProgram(raw));
       expect(parsed).toEqual(minted());
       expect(canonicalStructuralEquals(stored(parsed), stored(minted()))).toBe(true);
       expect(JSON.stringify(parsed)).toBe(JSON.stringify(minted()));
@@ -518,7 +519,7 @@ describe("parseRegisteredRemediationProgram", () => {
       fc.assert(fc.property(startArbitrary, (start) => {
         const minted = registered(notRequiredRequest(start));
         const json = JSON.stringify(minted);
-        const parsed = valueOf(parseRegisteredRemediationProgram(JSON.parse(json)));
+        const parsed = value(parseRegisteredRemediationProgram(JSON.parse(json)));
         expect(JSON.stringify(parsed)).toBe(json);
         expect(parsed).toEqual(minted);
       }), { numRuns: 50 });
@@ -528,14 +529,14 @@ describe("parseRegisteredRemediationProgram", () => {
       fc.assert(fc.property(startArbitrary, (start) => {
         const minted = registered(selectedRequest(start));
         const json = JSON.stringify(minted);
-        expect(JSON.stringify(valueOf(parseRegisteredRemediationProgram(JSON.parse(json))))).toBe(json);
+        expect(JSON.stringify(value(parseRegisteredRemediationProgram(JSON.parse(json))))).toBe(json);
       }), { numRuns: 25 });
     });
   });
 
   describe("schema version dispatch", () => {
     it("admits an exact v1 registration as a frozen copy", () => {
-      const parsed = valueOf(parseRegisteredRemediationProgram(storedV1()));
+      const parsed = value(parseRegisteredRemediationProgram(storedV1()));
       expect(parsed).toEqual(storedV1());
       expect(Object.isFrozen(parsed)).toBe(true);
       if (parsed.schemaVersion !== 1) throw new Error("v1 required");
@@ -656,7 +657,7 @@ describe("parseRegisteredRemediationProgram", () => {
       // so a tampered-but-well-formed record is shown to diverge from its canonical rebuild.
       const minted = registered(selectedRequest());
       const rewritten = tamper(tamper(stored(minted), ["registrationDigest"], hex("b")), ["input", "sourceRun"], "run.other-source");
-      const parsed = valueOf(parseRegisteredRemediationProgram(rewritten));
+      const parsed = value(parseRegisteredRemediationProgram(rewritten));
       if (parsed.schemaVersion !== 2) throw new Error("v2 registration required");
       expect(parsed.registrationDigest).toBe(hex("b"));
       expect(parsed.input.sourceRun).toBe("run.other-source");

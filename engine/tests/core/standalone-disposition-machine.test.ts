@@ -11,18 +11,19 @@ import { standaloneOriginReference, findingOf } from "../../src/core/standalone-
 import { type PublishedStandaloneDisposition } from "../../src/core/standalone-review-model";
 import { parseStandaloneDispositionStartBytes, parseStandaloneDispositionStartInput, parseRegisteredStandaloneDispositionProgram, registerStandaloneDisposition,
   startStandaloneDisposition, reduceStandaloneDisposition, standaloneDispositionReceipt, checkStandaloneDispositionCheckpoint } from "../../src/core/standalone-disposition-machine";
-import { standaloneFixture, valueOf } from "../fixtures/standalone-remediation-authority";
+import { standaloneFixture } from "../fixtures/standalone-remediation-authority";
+import { value } from "../fixtures/parse-result";
 import { dispositionPublicationFixture } from "../fixtures/standalone-disposition-publication";
 
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
-const source = valueOf(prepareStandaloneLineageSource(standaloneFixture(["a.ts"], false,
+const source = value(prepareStandaloneLineageSource(standaloneFixture(["a.ts"], false,
   { firstTranscript: "CRITICAL_COUNT: 0\nADVISORY_COUNT: 1\nADVISORY: bounded advisory" }).input.standaloneResult, "/owned/source"));
 function fixture(reason = "Declared reason") {
   const record = { schemaVersion: 1, source: source.publication, provenance: "DECLARED", revision: { kind: "initial" },
     entries: source.inventory.map(row => ({ origin: standaloneOriginReference(row.origin), decision: "accepted", reason })) };
-  const prepared = valueOf(prepareStandaloneDisposition(source, bytes(record)));
-  const input = valueOf(parseStandaloneDispositionStartBytes(bytes({ source: source.publication, record, previous: null })));
-  const registration = valueOf(registerStandaloneDisposition("run.policy", input));
+  const prepared = value(prepareStandaloneDisposition(source, bytes(record)));
+  const input = value(parseStandaloneDispositionStartBytes(bytes({ source: source.publication, record, previous: null })));
+  const registration = value(registerStandaloneDisposition("run.policy", input));
   return { prepared, input, registration };
 }
 
@@ -41,7 +42,7 @@ describe("durable standalone disposition lifecycle and nominal policy", () => {
     expectTypeOf<PreparedStandaloneDisposition>().not.toMatchTypeOf<PublishedStandaloneDisposition>();
   });
   it("rejects a critical from the same authentic mixed source rather than only foreign origins", () => {
-    const mixed = valueOf(prepareStandaloneLineageSource(standaloneFixture(["a.ts"], true, {
+    const mixed = value(prepareStandaloneLineageSource(standaloneFixture(["a.ts"], true, {
       firstTranscript: "CRITICAL_COUNT: 1\nADVISORY_COUNT: 1\nCRITICAL: original blocking assertion\nADVISORY: original optional assertion",
     }).input.standaloneResult, "/owned/mixed"));
     const advisory = mixed.inventory.find(row => findingOf(row).severity === "advisory")!;
@@ -67,10 +68,10 @@ describe("durable standalone disposition lifecycle and nominal policy", () => {
       const f = fixture(reason);
       expect(parseRegisteredStandaloneDispositionProgram(JSON.parse(JSON.stringify(f.registration)))).toEqual({ ok: true, value: f.registration });
       const registered = startStandaloneDisposition(f.registration);
-      const artifact = valueOf(reduceStandaloneDisposition(f.registration, registered, { kind: "artifact-published" }));
+      const artifact = value(reduceStandaloneDisposition(f.registration, registered, { kind: "artifact-published" }));
       const receipt = standaloneDispositionReceipt(f.registration);
       expect(reduceStandaloneDisposition(f.registration, registered, { kind: "receipt-recorded", receipt }).ok).toBe(false);
-      const done = valueOf(reduceStandaloneDisposition(f.registration, artifact, { kind: "receipt-recorded", receipt }));
+      const done = value(reduceStandaloneDisposition(f.registration, artifact, { kind: "receipt-recorded", receipt }));
       expect(reduceStandaloneDisposition(f.registration, done, { kind: "receipt-recorded", receipt })).toEqual({ ok: true, value: done });
       expect(reduceStandaloneDisposition(f.registration, done, { kind: "artifact-published" })).toEqual({ ok: true, value: done });
       for (const checkpoint of [null, registered, artifact, done]) expect(checkStandaloneDispositionCheckpoint(f.registration, done, checkpoint).ok).toBe(true);

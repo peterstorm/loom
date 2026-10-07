@@ -3,7 +3,7 @@ import { join, relative } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_ROOT_ENV, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../../src/runtime-compatibility";
 import { canonicalTempDir } from "./canonical-temp-dir";
-import { CATALOG_ROUTE_ENV, QUALIFIED_ROUTE_ENV, scrubAmbientIssueRoute, withRouteEnv } from "./issue-route-env";
+import { CATALOG_ROUTE_ENV, QUALIFIED_ROUTE_ENV, scrubAmbientIssueRoute, withEnvOverlay } from "./issue-route-env";
 import { disposeFixturePiSessions, fixturePiEnvironment, fixtureSession, withFixturePiSession } from "./pi-session";
 
 const roots: string[] = [];
@@ -88,7 +88,7 @@ describe("fixture-owned Pi session scopes", () => {
     const root = directory();
     const ambient = fixturePiEnvironment(root);
     for (const key of Object.keys(CATALOG_ROUTE_ENV)) expect(ambient[key], key).toBeUndefined();
-    await withRouteEnv(QUALIFIED_ROUTE_ENV, async () => {
+    await withEnvOverlay(QUALIFIED_ROUTE_ENV, async () => {
       expect(fixturePiEnvironment(root).PI_MODEL).toBe(QUALIFIED_ROUTE_ENV.PI_MODEL);
     });
     for (const key of Object.keys(CATALOG_ROUTE_ENV)) expect(process.env[key], key).toBeUndefined();
