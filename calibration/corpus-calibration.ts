@@ -2,18 +2,15 @@
  * Historical corpus calibration — the PURE core of the default mode of
  * `scripts/run-model-calibration.ts` (one model profile over
  * `calibration/corpus.json`). The script spawns Pi per case; everything it
- * decides about a finished run lives here: folding Pi's JSON event stream to
- * the final assistant text, parsing the (optionally fenced) findings array,
- * and the per-case result. Unrelated to the AD-11 pilot under
- * `grammar-constrained-decoding/`.
+ * decides about a finished run lives here: the final assistant text of Pi's
+ * JSON event stream (folded by the shared `pi-json-stream.ts`), parsing the
+ * (optionally fenced) findings array, and the per-case result. It shares only
+ * the domain-free kernel and the Pi stream fold with the AD-11 pilot under
+ * `grammar-constrained-decoding/`; neither core imports the other.
  */
 
-export type Result<T, E> =
-  | Readonly<{ ok: true; value: T }>
-  | Readonly<{ ok: false; error: E }>;
-
-const ok = <T>(value: T): Result<T, never> => Object.freeze({ ok: true as const, value });
-const err = <E>(error: E): Result<never, E> => Object.freeze({ ok: false as const, error });
+import { err, ok, type Result } from "./kernel";
+import { foldPiJsonStream, piContentText } from "./pi-json-stream";
 
 const message = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
@@ -21,31 +18,19 @@ export type CorpusCaseResult =
   | Readonly<{ case_id: string; status: "executed"; findings: unknown[] }>
   | Readonly<{ case_id: string; status: "not-executed"; reason: string }>;
 
-type PiEvent = Readonly<{ type?: string; message?: Readonly<{ role?: string; content?: ReadonlyArray<Readonly<{ type?: string; text?: string }>> }> }>;
-
 /**
  * The last non-blank assistant text of a `pi --mode json` stream, or null when
- * the run produced none. Any malformed line refuses the whole stream: a
- * dropped event could be the answer.
+ * the run produced none. A malformed stream is refused whole: a dropped event
+ * could be the answer (`pi-json-stream.ts`).
  */
 export function finalAssistantText(stdout: string): Result<string | null, string> {
-  let answer: string | null = null;
-  const malformed: string[] = [];
-  for (const [index, line] of stdout.split("\n").entries()) {
-    if (!line.trim()) continue;
-    try {
-      const event = JSON.parse(line) as PiEvent;
-      if (event.type === "message_end" && event.message?.role === "assistant") {
-        const text = event.message.content?.filter((part) => part.type === "text").map((part) => part.text ?? "").join("") ?? "";
-        if (text.trim()) answer = text;
-      }
-    } catch (error) {
-      malformed.push(`line ${index + 1}: ${message(error)}`);
-    }
-  }
-  return malformed.length > 0
-    ? err(`Pi JSON stream contained ${malformed.length} malformed line(s): ${malformed.join("; ")}`)
-    : ok(answer);
+  const messages = foldPiJsonStream(stdout);
+  if (!messages.ok) return messages;
+  const answers = messages.value
+    .filter((entry) => entry["role"] === "assistant")
+    .map((entry) => piContentText(entry["content"]))
+    .filter((text) => text.trim());
+  return ok(answers.at(-1) ?? null);
 }
 
 /** The findings array of a final answer, with an optional ```json fence. */

@@ -90,15 +90,20 @@ done.**
   `--decide` (re-evaluate a retained window). No new provider serializer is
   added.
 - Pure core, in `calibration/grammar-constrained-decoding/`:
-  - `pilot-core.ts`: preregistration parsing, ABBA-counterbalanced seeded
-    schedule, counters, guardrails and the release-decision union.
-  - `pilot-workload.ts`: fixtures, matched prompts and the deterministic
-    `rubric-v1` assessor.
+  - `pilot-preregistration.ts`: preregistration parsing and the
+    ABBA-counterbalanced seeded schedule; `pilot-observation.ts`,
+    `pilot-preflight.ts` and `pilot-quality.ts`: the counters, the preflight
+    and the blinded quality inputs.
+  - `pilot-core.ts`: `evaluatePilot` — guardrails and the release-decision
+    union.
+  - `pilot-workload.ts`: fixtures, case-input resolution and matched prompts;
+    `pilot-rubric.ts`: the deterministic `rubric-v1` assessor.
   - `pilot-dispatch.ts`: transcript classification through the engine's own
     selection, plus the live Pi adapter.
 - Imperative shell: `pilot-window.ts` performs matched-arm dispatch and the
-  attempt-2 retry behind the `ArmDispatch` port. It also writes the blinding key
-  and the blinded assessment packet.
+  attempt-2 retry behind the `ArmDispatch` port. It also derives the blinding
+  key and the blinded assessment packet, which `pilot-retention.ts`
+  (`recordWindow`) writes.
 - Evidence: `preregistration.json`, `workload-fixtures.json` and `windows/<id>--<timestamp>/`.
   Results are documented in that directory's `README.md`.
 

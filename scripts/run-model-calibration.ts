@@ -15,9 +15,11 @@
  *   preflight is ready — matched emission-enabled vs extraction-only dispatch
  *   with dispatch-to-ingestion counters, persisted incrementally, then the
  *   release decision. Cores: `calibration/grammar-constrained-decoding/`;
- *   the window's retained files and decision rules are `pilot-retention.ts`
- *   (behind its `WindowStore` port), the matched dispatch is `pilot-window.ts`
- *   (behind the `ArmDispatch` port).
+ *   `recordWindow` (`pilot-retention.ts`) runs the whole window — input
+ *   resolution, the matched dispatch, retention and the decision — behind
+ *   its ports, so this shell only gathers the preflight facts and wires the
+ *   live adapters: the filesystem `WindowStore`, the Pi `ArmDispatch`, git's
+ *   changed-path lookup and the clocks.
  * - `--decide <window-dir> [--assessment <file>]...` — offline re-evaluation
  *   of a retained window once blinded assessments arrive. Makes no model
  *   call, so it needs no opt-in.
@@ -28,33 +30,24 @@ import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { parseCalibrationCorpus, type CalibrationCase } from "../engine/src/core/model-calibration";
 import { lowerModelProfile, resolveModelProfile, type LlmProfileId, type PiBinding } from "../engine/src/core/model-profiles";
-import { EMISSION_TOOL_SPECS } from "../engine/src/core/emission-tool";
-import { sha256Hex } from "../engine/src/core/digest";
 import { calibrationRevisionPaths } from "../engine/src/handlers/helpers/model-calibration";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../engine/src/runtime-compatibility";
 import { corpusCaseResult, type CorpusRun } from "../calibration/corpus-calibration";
+import type { Result } from "../calibration/kernel";
 import {
-  CELL_KEYS,
-  contentDigest,
   decidePreflight,
+  stagedRegistryFacts,
   type PreflightFacts,
-  type Preregistration,
-  type Result,
   type RouteProbe,
-} from "../calibration/grammar-constrained-decoding/pilot-core";
-import {
-  CELL_PRODUCER,
-  cellSchemaBytes,
-  parseCaseSource,
-  parseWorkloadFixtures,
-  type CaseInput,
-  type WorkloadFixtures,
-} from "../calibration/grammar-constrained-decoding/pilot-workload";
+} from "../calibration/grammar-constrained-decoding/pilot-preflight";
+import type { Preregistration } from "../calibration/grammar-constrained-decoding/pilot-preregistration";
+import { contentDigest } from "../calibration/grammar-constrained-decoding/pilot-vocabulary";
+import { parseWorkloadFixtures, type WorkloadFixtures } from "../calibration/grammar-constrained-decoding/pilot-workload";
 import { importRpcLauncher, piArmDispatch } from "../calibration/grammar-constrained-decoding/pilot-dispatch";
-import { caseInputKey, dispatchSchedule } from "../calibration/grammar-constrained-decoding/pilot-window";
 import {
   decideRetainedWindow,
   parsePreregistrationFile,
+  pilotWindowId,
   planDispatch,
   recordWindow,
   type DecisionOutcome,
@@ -203,12 +196,8 @@ function observedPiVersion(): string | null {
 }
 
 async function gatherPreflightFacts(prereg: Preregistration, fixturesDigest: string, stagedRevision: string): Promise<PreflightFacts> {
-  const registry = Object.fromEntries(CELL_KEYS.map((cell) => {
-    const producer = CELL_PRODUCER[cell];
-    return [cell, { toolName: EMISSION_TOOL_SPECS[producer.kind].toolName, schemaDigest: sha256Hex(cellSchemaBytes(cell)) }];
-  })) as PreflightFacts["registry"];
   return Object.freeze({
-    registry,
+    registry: stagedRegistryFacts(),
     workloadFixturesDigest: fixturesDigest,
     piVersion: observedPiVersion(),
     stagedRuntimeRevision: stagedRevision,
@@ -217,26 +206,11 @@ async function gatherPreflightFacts(prereg: Preregistration, fixturesDigest: str
   });
 }
 
-function resolveCaseInput(source: string, corpus: ReadonlyMap<string, CalibrationCase>, fixtures: WorkloadFixtures): CaseInput {
-  const parsed = parseCaseSource(source);
-  if (!parsed.ok) throw new Error(parsed.error);
-  if (parsed.value.kind === "corpus") {
-    const corpusCase = corpus.get(parsed.value.id);
-    if (corpusCase === undefined) throw new Error(`corpus case ${parsed.value.id} is not in the corpus`);
-    return { kind: "corpus", corpusCase, changedPaths: calibrationRevisionPaths(corpusCase.revision) };
-  }
-  const fixture = fixtures.fixtures[parsed.value.id];
-  if (fixture === undefined) throw new Error(`workload fixture ${parsed.value.id} is not in the fixture file`);
-  return fixture.kind === "judge-verdict" ? { kind: "judge", fixture } : { kind: "refutation", fixture };
-}
-
-/** Every preregistered case's input, keyed by `caseInputKey`. */
-function resolveWindowInputs(prereg: Preregistration, fixtures: WorkloadFixtures): ReadonlyMap<string, CaseInput> {
-  const corpusCases = parseCalibrationCorpus(readFileSync(resolve(REPO_ROOT, fixtures.reviewer.corpus), "utf-8"));
-  if (!corpusCases.ok) throw new Error(corpusCases.errors.join("\n"));
-  const corpus = new Map(corpusCases.value.cases.map((entry) => [entry.id, entry] as const));
-  return new Map(prereg.cells.flatMap((cell) => cell.workload.cases.map((entry) =>
-    [caseInputKey(cell.cell, entry.caseId), resolveCaseInput(entry.source, corpus, fixtures)] as const)));
+/** The corpus the workload fixtures name, which the reviewer cells' sources resolve in. */
+function loadWorkloadCorpus(fixtures: WorkloadFixtures): readonly CalibrationCase[] {
+  const corpus = parseCalibrationCorpus(readFileSync(resolve(REPO_ROOT, fixtures.reviewer.corpus), "utf-8"));
+  if (!corpus.ok) throw new Error(corpus.errors.join("\n"));
+  return corpus.value.cases;
 }
 
 /** Prints a recorded decision; exit 0 only for `done-allowed`. */
@@ -257,11 +231,12 @@ async function runPilot(): Promise<number> {
   const fixturesPath = resolve(value("--fixtures", join(dirname(preregPath), "workload-fixtures.json")));
   const { digest: fixturesDigest, fixtures } = loadFixtures(fixturesPath);
   const startedAt = new Date().toISOString();
-  const windowId = `${prereg.id}--${startedAt.replace(/[:.]/g, "-")}`;
+  const windowId = pilotWindowId(prereg.id, startedAt);
   const store = fsWindowStore(resolve(value("--window-dir", join(dirname(preregPath), "windows", windowId))));
   const staged = captureLoomRuntimeIdentity(REPO_ROOT);
   const facts = await gatherPreflightFacts(prereg, fixturesDigest, staged.revision);
   const preflight = decidePreflight(prereg, facts);
+  // The composition root: the live adapters of the window's ports; recordWindow runs the rest.
   const outcome = await recordWindow({
     store,
     record: {
@@ -275,29 +250,21 @@ async function runPilot(): Promise<number> {
       dispatch: planDispatch(preflight, args.includes("--preflight-only")),
     },
     preregistration: loaded,
-    // Matched dispatch of the whole schedule through the live Pi adapter.
-    dispatch: async (persist) => {
-      const inputs = resolveWindowInputs(prereg, fixtures);
-      const dispatch = piArmDispatch({
-        repoRoot: REPO_ROOT,
-        piCommand: "pi",
-        loadLauncher: importRpcLauncher(resolve(value("--launcher", join(homedir(), ".pi/agent/extensions/subagent/rpc-launcher.ts")))),
-        provider: prereg.route.provider,
-        model: prereg.route.model,
-        thinking: prereg.route.thinking,
-        tools: PILOT_TOOLS,
-        stagedRevision: staged.revision,
-        timeoutMs: prereg.perAttemptTimeoutMs,
-        readinessTimeoutMs: READINESS_TIMEOUT_MS,
-      });
-      const records = await dispatchSchedule({
-        windowId, prereg, fixtures, inputs, dispatch,
-        now: () => performance.now(),
-        onSample: persist,
-        onPair: (index, total, pair) => { process.stderr.write(`pilot ${index + 1}/${total} ${pair.pairId}\n`); },
-      });
-      return { records, inputs };
-    },
+    workload: { fixtures, corpusCases: loadWorkloadCorpus(fixtures), changedPathsOf: calibrationRevisionPaths },
+    dispatch: piArmDispatch({
+      repoRoot: REPO_ROOT,
+      piCommand: "pi",
+      loadLauncher: importRpcLauncher(resolve(value("--launcher", join(homedir(), ".pi/agent/extensions/subagent/rpc-launcher.ts")))),
+      provider: prereg.route.provider,
+      model: prereg.route.model,
+      thinking: prereg.route.thinking,
+      tools: PILOT_TOOLS,
+      stagedRevision: staged.revision,
+      timeoutMs: prereg.perAttemptTimeoutMs,
+      readinessTimeoutMs: READINESS_TIMEOUT_MS,
+    }),
+    monotonicNow: () => performance.now(),
+    onPair: (index, total, pair) => { process.stderr.write(`pilot ${index + 1}/${total} ${pair.pairId}\n`); },
     externalAssessments: externalAssessments(),
     now: () => new Date().toISOString(),
   });

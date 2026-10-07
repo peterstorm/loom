@@ -1,8 +1,8 @@
 /**
  * Pilot window: the matched dispatch of one calibration window and its
- * blinded assessment packet — the `--pilot` shell's path behind the
- * `ArmDispatch` port (`scripts/run-model-calibration.ts` wires the live
- * `piArmDispatch` adapter and `performance.now`; tests wire plain fakes).
+ * blinded assessment packet, behind the `ArmDispatch` port (the live
+ * `piArmDispatch` adapter in production, plain fakes in tests) and an
+ * injected monotonic clock. `recordWindow` (`pilot-retention.ts`) runs it.
  *
  * - `dispatchSchedule` walks the preregistered pair schedule, dispatching
  *   each pair's two arms in its scheduled order over ONE rendered task body
@@ -10,31 +10,22 @@
  * - Each arm runs attempt 1 and — only after a semantic rejection — the one
  *   fresh engine-issued attempt 2 (AD-9's shared request-slot budget). Wall
  *   clock runs from the initial dispatch through accepted ingestion.
- * - `blind` / `blindedPacket` / `rubricAssessment` derive the retained
- *   blinding key, the arm-free packet an assessor sees, and the deterministic
- *   rubric assessor's scores over that packet.
+ * - `blind` / `blindedPacket` derive the retained blinding key and the
+ *   arm-free packet an assessor sees (the rubric assessor is `pilot-rubric.ts`).
  */
 
 import { randomUUID } from "node:crypto";
-import {
-  buildPairSchedule,
-  parseSampleObservation,
-  SPEC_SEMANTIC_ATTEMPT_BUDGET,
-  type BlindingKey,
-  type CellKey,
-  type PilotArm,
-  type Preregistration,
-  type QualityAssessment,
-  type Result,
-  type SampleObservation,
-  type ScheduledPair,
-} from "./pilot-core";
+import { err, ok, type Result } from "../kernel";
+import { parseSampleObservation, type SampleObservation } from "./pilot-observation";
+import { buildPairSchedule, type Preregistration, type ScheduledPair } from "./pilot-preregistration";
+import type { BlindingKey } from "./pilot-quality";
+import { SPEC_SEMANTIC_ATTEMPT_BUDGET, type CellKey, type PilotArm } from "./pilot-vocabulary";
 import { mintCellBinding, type ArmDispatch, type AttemptClassification } from "./pilot-dispatch";
 import {
+  caseInputKey,
   pilotRequestId,
   renderPilotPrompt,
   renderTaskBody,
-  rubricEscapes,
   type CaseInput,
   type WorkloadFixtures,
 } from "./pilot-workload";
@@ -50,13 +41,10 @@ export type SampleRecord =
 function sampleRecord(sample: SampleObservation, last: AttemptClassification | undefined): Result<SampleRecord, string> {
   const accepted = last?.observation.outcome.kind === "accepted";
   const payload = last?.acceptedPayload ?? null;
-  if (accepted && payload === null) return { ok: false, error: "its accepted outcome carries no accepted payload" };
-  if (!accepted && payload !== null) return { ok: false, error: "it carries an accepted payload without an accepted outcome" };
-  return { ok: true, value: Object.freeze(accepted ? { kind: "accepted" as const, sample, acceptedPayload: payload } : { kind: "terminal" as const, sample }) };
+  if (accepted && payload === null) return err("its accepted outcome carries no accepted payload");
+  if (!accepted && payload !== null) return err("it carries an accepted payload without an accepted outcome");
+  return ok(Object.freeze(accepted ? { kind: "accepted" as const, sample, acceptedPayload: payload } : { kind: "terminal" as const, sample }));
 }
-
-/** The key of one preregistered case's resolved input: `<cell>|<caseId>`. */
-export const caseInputKey = (cell: CellKey, caseId: string): string => `${cell}|${caseId}`;
 
 export type WindowDispatch = Readonly<{
   windowId: string;
@@ -111,11 +99,10 @@ export async function dispatchSchedule(window: WindowDispatch): Promise<readonly
   const schedule = buildPairSchedule(window.prereg);
   for (const [index, pair] of schedule.entries()) {
     const input = window.inputs.get(caseInputKey(pair.cell, pair.caseId));
-    if (input === undefined) throw new Error(`no resolved input for ${pair.cell} case ${pair.caseId}`);
-    const body = renderTaskBody(pair.cell, input, window.fixtures);
-    if (!body.ok) throw new Error(body.error);
+    if (input?.cell !== pair.cell) throw new Error(`no resolved input for ${pair.cell} case ${pair.caseId}`);
+    const body = renderTaskBody(input, window.fixtures);
     for (const arm of pair.armOrder) {
-      const record = await dispatchSample(window, pair, arm, body.value);
+      const record = await dispatchSample(window, pair, arm, body);
       records.push(record);
       window.onSample(record);
     }
@@ -154,51 +141,5 @@ export function blindedPacket(windowId: string, entries: readonly BlindedEntry[]
     windowId,
     instructions: "Score each entry with the preregistered severity rubric: list every KNOWN defect of the entry's case the payload lets escape. The arm is hidden; do not attempt to infer it.",
     entries: entries.map(({ blindId, cell, caseId, payload }) => ({ blindId, cell, caseId, payload })),
-  };
-}
-
-type AssessedEntry = QualityAssessment["entries"][number];
-
-/** One blinded entry scored by the rubric, or why it cannot be scored. */
-function assessEntry(
-  prereg: Preregistration, entry: BlindedEntry, inputs: ReadonlyMap<string, CaseInput>,
-): Result<AssessedEntry, string> {
-  const where = `blinded entry ${entry.blindId} (${entry.cell} case ${entry.caseId})`;
-  const workloadCase = prereg.cells.find((cell) => cell.cell === entry.cell)?.workload.cases.find((item) => item.caseId === entry.caseId);
-  if (workloadCase === undefined) return { ok: false, error: `${where}: the case is not preregistered` };
-  const input = inputs.get(caseInputKey(entry.cell, entry.caseId));
-  if (input === undefined) return { ok: false, error: `${where}: no resolved input` };
-  const escapes = rubricEscapes(workloadCase, input, entry.payload);
-  return escapes.ok
-    ? { ok: true, value: { blindId: entry.blindId, escapedDefects: escapes.value } }
-    : { ok: false, error: `${where}: ${escapes.error}` };
-}
-
-/**
- * The deterministic rubric assessor over the blinded packet. Fails closed:
- * an entry whose case, input or escaped defect cannot be resolved makes the
- * whole assessment an error listing every such entry — it is never scored as
- * zero escapes, so a lookup drift cannot understate a window's escapes.
- */
-export function rubricAssessment(
-  prereg: Preregistration, entries: readonly BlindedEntry[], inputs: ReadonlyMap<string, CaseInput>,
-): Result<QualityAssessment, readonly string[]> {
-  const scored: AssessedEntry[] = [];
-  const problems: string[] = [];
-  for (const entry of entries) {
-    const assessed = assessEntry(prereg, entry, inputs);
-    if (assessed.ok) scored.push(assessed.value);
-    else problems.push(assessed.error);
-  }
-  if (problems.length > 0) return { ok: false, error: Object.freeze(problems) };
-  return {
-    ok: true,
-    value: {
-      schemaVersion: 1,
-      assessorId: "rubric-v1",
-      method: "deterministic rubric: corpus match rules (reviewer), planted-flaw ranking (judge), real-defect refutation (refutation); sees blind id, source and canonical payload only",
-      blinded: true,
-      entries: Object.freeze(scored),
-    },
   };
 }

@@ -22,6 +22,14 @@ describe("finalAssistantText (Pi JSON stream folding)", () => {
   it("refuses the whole stream on any malformed line, naming every one", () => {
     const result = finalAssistantText([messageEnd("assistant", "answer"), "{oops", "also bad"].join("\n"));
     expect(result).toMatchObject({ ok: false, error: expect.stringMatching(/^Pi JSON stream contained 2 malformed line\(s\): line 2: .*; line 3: /) });
+    // JSON that is not an event object is malformed too: the stream's events are objects.
+    expect(finalAssistantText([messageEnd("assistant", "answer"), "null"].join("\n")))
+      .toEqual({ ok: false, error: "Pi JSON stream contained 1 malformed line(s): line 2: not a JSON event object" });
+  });
+
+  it("reads an assistant message whose content is a plain string", () => {
+    const plain = JSON.stringify({ type: "message_end", message: { role: "assistant", content: "[]" } });
+    expect(finalAssistantText(plain)).toEqual({ ok: true, value: "[]" });
   });
 });
 
