@@ -502,13 +502,11 @@ function evidenceFields(evidence: NormalizedImplementationEvidence) {
  * unrelated repository movement between attempts into out-of-scope evidence
  * for THIS task (the wave-3 cross-task retry jam). Foreign or sibling paths
  * observed DURING an attempt still invalidate its review — only the
- * inter-attempt carry is gone. The pair retires together, which keeps the
- * State File wire invariant (unresolved_repository_paths requires
- * repository_baseline) satisfiable.
+ * inter-attempt carry is gone, which is why Task no longer has an
+ * unresolved-path field at all.
  */
 const RETIRED_ATTEMPT_BOUNDARY = Object.freeze({
   repository_baseline: undefined,
-  unresolved_repository_paths: undefined,
 });
 
 function transitionedTask(

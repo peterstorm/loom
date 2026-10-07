@@ -171,7 +171,7 @@ describe("modern implementation attempt registration", () => {
     }
   });
 
-  it("binds a fresh attempt to the first unresolved repository baseline instead of laundering persistent foreign bytes", async () => {
+  it("binds a fresh attempt to a retained repository baseline and retires a legacy unresolved-path carry", async () => {
     const repo = repository();
     writeFileSync(join(repo.root, "foreign.ts"), "foreign write from failed attempt\n");
     const task = taskFixture({
@@ -183,9 +183,14 @@ describe("modern implementation attempt registration", () => {
       depends_on: [],
       file_list: ["src/a.ts"],
       repository_baseline: [],
-      unresolved_repository_paths: ["foreign.ts"],
     });
-    writeGraph(repo.statePath, graph([task]));
+    // State File bytes written before the carry was retired still read: the
+    // parser validates the legacy field and drops it, so the next write omits it.
+    const legacy = graph([task]);
+    writeFileSync(repo.statePath, JSON.stringify({
+      ...legacy,
+      tasks: legacy.tasks.map((entry) => ({ ...entry, unresolved_repository_paths: ["foreign.ts"] })),
+    }, null, 2));
 
     const result = await registerTaskExecutionBatch([spawn("T1")]);
 
@@ -194,7 +199,7 @@ describe("modern implementation attempt registration", () => {
     const stored = JSON.parse(readFileSync(repo.statePath, "utf8")) as TaskGraph;
     expect(stored.tasks[0]?.repository_baseline).toEqual([]);
     expect(stored.tasks[0]?.attempt_repository_baseline).toEqual([]);
-    expect(stored.tasks[0]?.unresolved_repository_paths).toEqual(["foreign.ts"]);
+    expect(stored.tasks[0]).not.toHaveProperty("unresolved_repository_paths");
   });
 
   it("re-arms a retry on a fresh repository boundary so foreign and sibling movement between attempts cannot block or attribute it", async () => {
@@ -254,7 +259,7 @@ describe("modern implementation attempt registration", () => {
       review_status: "pending",
     });
     expect(manager.load().tasks[0]?.repository_baseline).toBeUndefined();
-    expect(manager.load().tasks[0]?.unresolved_repository_paths).toBeUndefined();
+    expect(manager.load().tasks[0]).not.toHaveProperty("unresolved_repository_paths");
 
     // No foreign repair before the retry: the fresh boundary absorbs it.
     const second = await registerTaskExecutionBatch([

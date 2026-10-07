@@ -405,7 +405,7 @@ describe("exact transition application", () => {
     });
     expect(task.active_implementation_attempt).toBeUndefined();
     expect(task.repository_baseline).toBeUndefined();
-    expect(task.unresolved_repository_paths).toBeUndefined();
+    expect(task).not.toHaveProperty("unresolved_repository_paths");
     expect(task.implementation_attempt_history).toHaveLength(1);
     expect(task.implementation_attempt_history?.[0]).toMatchObject({
       transition: "implemented",
@@ -467,7 +467,7 @@ describe("exact transition application", () => {
       // Both semantic-failure arms retire the attempt's repository boundary:
       // the re-armed attempt freezes a fresh one at its own registration.
       expect(result.state.tasks[0]?.repository_baseline).toBeUndefined();
-      expect(result.state.tasks[0]?.unresolved_repository_paths).toBeUndefined();
+      expect(result.state.tasks[0]).not.toHaveProperty("unresolved_repository_paths");
       expect(result.state.tasks[0]).not.toHaveProperty("retry_request");
     }
   });
@@ -515,7 +515,7 @@ describe("exact transition application", () => {
     // attempt, so the re-armed attempt freezes a fresh repository boundary.
     expect(result.state.tasks[0]).toMatchObject({ review_status: "pending", review_generation: 1 });
     expect(result.state.tasks[0]?.repository_baseline).toBeUndefined();
-    expect(result.state.tasks[0]?.unresolved_repository_paths).toBeUndefined();
+    expect(result.state.tasks[0]).not.toHaveProperty("unresolved_repository_paths");
     expect(result.state.tasks[0]?.attempt_repository_baseline).toBeUndefined();
   });
 
@@ -540,7 +540,6 @@ describe("exact transition application", () => {
     // against this attempt's boundary, not a durable carry into the next one.
     expect(result.state.tasks[0]).toMatchObject({
       repository_baseline: undefined,
-      unresolved_repository_paths: undefined,
       failure_reason: expect.stringContaining("infrastructure-blocked"),
     });
   });
@@ -551,7 +550,6 @@ describe("exact transition application", () => {
       test_result: { verdict: "trusted-pass" },
       test_evidence: "historical pass",
       files_modified: ["src/a.ts"],
-      unresolved_repository_paths: ["foreign.ts"],
     }));
     const result = settleUnavailableImplementation(
       initial,
@@ -573,8 +571,8 @@ describe("exact transition application", () => {
       transition: "infrastructure-blocked",
       consumesSemanticAttempt: false,
     });
-    // Stale carried diagnostics against the retired boundary drop with it.
-    expect(result.state.tasks[0]?.unresolved_repository_paths).toBeUndefined();
+    // The retired boundary leaves no unresolved-path carry behind.
+    expect(result.state.tasks[0]).not.toHaveProperty("unresolved_repository_paths");
     expect(result.state.tasks[0]?.repository_baseline).toBeUndefined();
     expect(result.state.executing_tasks).toEqual([]);
   });

@@ -1117,7 +1117,14 @@ function taskAttemptAuthorityError(
   return null;
 }
 
-/** Persistent unresolved-attempt repository authority and attributed paths. */
+/**
+ * Persistent unresolved-attempt repository authority, plus the legacy
+ * `unresolved_repository_paths` carry. No current writer produces that carry:
+ * every settlement retires the attempt boundary (implementation-application's
+ * RETIRED_ATTEMPT_BOUNDARY), so Task no longer declares the field. State files
+ * written before that retirement still parse under the original invariants
+ * here, and `migrateParsedTask` drops the field so the next write retires it.
+ */
 function taskRepositoryCarryError(
   t: Record<string, unknown>,
   index: number,
@@ -1793,18 +1800,11 @@ function migrateParsedTask(
     if (!baseline.ok) return parseErr(baseline.errors.join("; "));
     migrated = { ...migrated, repository_baseline: baseline.value };
   }
-  if (task.unresolved_repository_paths !== undefined) {
-    if (!Array.isArray(task.unresolved_repository_paths)) {
-      return parseErr(`tasks[${index}].unresolved_repository_paths must be an array`);
-    }
-    const paths: string[] = [];
-    for (const [pathIndex, raw] of task.unresolved_repository_paths.entries()) {
-      const parsed = parseReviewPath(raw, `tasks[${index}].unresolved_repository_paths[${pathIndex}]`);
-      if (!parsed.ok) return parseErr(parsed.errors.join("; "));
-      paths.push(parsed.value);
-    }
-    migrated = { ...migrated, unresolved_repository_paths: Object.freeze(paths.sort()) };
-  }
+  // Legacy carry, already validated by taskRepositoryCarryError: no reader
+  // consumes it, so the parsed Task never carries it again.
+  const { unresolved_repository_paths: retiredUnresolvedCarry, ...withoutUnresolvedCarry } = migrated;
+  void retiredUnresolvedCarry;
+  migrated = withoutUnresolvedCarry;
   if (task.implementation_attempt_history !== undefined) {
     const history = parseImplementationAttemptHistory(task.implementation_attempt_history);
     if (!history.ok) return parseErr(history.error.errors.join("; "));

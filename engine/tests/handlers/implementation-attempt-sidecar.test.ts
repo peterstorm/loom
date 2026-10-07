@@ -413,7 +413,7 @@ describe("Claude implementation authority sidecar", () => {
       status: "implemented",
       implementation_attempt_history: [{ transition: "implemented" }],
     });
-    expect(stored.tasks[0]?.unresolved_repository_paths).toBeUndefined();
+    expect(stored.tasks[0]).not.toHaveProperty("unresolved_repository_paths");
   });
 
   it("accepts and settles the real nested tool_reference and image transcript fixture", async () => {

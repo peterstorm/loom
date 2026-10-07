@@ -407,14 +407,11 @@ interface TaskCommonMetadataBase {
   readonly active_implementation_context?: ImplementationAttemptContext;
   readonly attempt_artifact_baseline?: readonly DeclaredArtifactBaseline[];
   readonly attempt_repository_baseline?: readonly DeclaredArtifactBaseline[];
-  /** First repository boundary retained until an exact attempt is accepted.
-   * Fresh attempts bind to this boundary instead of snapshotting unresolved
-   * foreign bytes as their new starting state. */
+  /** The repository boundary frozen at the current attempt's registration.
+   * Every settlement retires it, so a re-armed attempt freezes a fresh one.
+   * (The former `unresolved_repository_paths` carry had no writer after that
+   * retirement; the State File parser validates and drops legacy copies.) */
   readonly repository_baseline?: readonly DeclaredArtifactBaseline[];
-  /** Repository-observed unowned paths still different from the retained
-   * repository boundary, including paths omitted from transcript evidence.
-   * Sibling-owned dirty paths never enter this set. */
-  readonly unresolved_repository_paths?: readonly string[];
   readonly reserved_at?: string;
   readonly legacy_execution_reservation?: true;
   /** Engine-issued packet authority retained after a review run closes. A
