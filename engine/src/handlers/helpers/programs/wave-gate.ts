@@ -23,7 +23,7 @@ import type { TaskGraph } from '../../../types';
 import { waveSpecCheckDocumentsMatch } from '../../../core/wave-review-authority';
 import { exactObject } from './registration';
 import type { FacadeDriveResult } from './program-result';
-import { reportUncaughtWaveGateFailure, waveBlocked, type WavePhase } from './wave-gate-outcome';
+import { reportUncaughtWaveGateFailure, waveBlocked, type WavePhase, type WaveResumeContext } from './wave-gate-outcome';
 import { driveWaveAdvisoryDecision } from './wave-advisory-decision';
 import { driveWaveRefutation } from './wave-refutation';
 import { reconcileCurrentReviewEvidence } from './wave-review-collection';
@@ -174,14 +174,17 @@ export async function resumeWaveGateFacade(
     const captured = handle.readCapturedAttempts();
     if (!issued.ok) return waveBlocked(handle, issued.error.message);
     if (!captured.ok) return waveBlocked(handle, captured.error.message);
-    const issuance = await reconcileWaveReviewIssuance(handle, manager, registration, graph, issued.value);
+    const context: WaveResumeContext = Object.freeze({
+      handle, manager, registration, wave: registration.input.wave, captured: captured.value,
+    });
+    const issuance = await reconcileWaveReviewIssuance(context, graph, issued.value);
     if (issuance.kind !== "proceed") return conclude(issuance);
-    const collection = await reconcileCurrentReviewEvidence(handle, manager, registration, issuance.value, captured.value, registration.input.wave);
+    const collection = await reconcileCurrentReviewEvidence(context, issuance.value);
     if (collection.kind !== "proceed") return conclude(collection);
     const { currentIssued } = issuance.value;
-    const retries = await driveWaveReviewRetries(handle, manager, registration, currentIssued, captured.value);
+    const retries = await driveWaveReviewRetries(context, currentIssued);
     if (retries.kind !== "proceed") return conclude(retries);
-    const specCheck = await driveWaveSpecCheckRetry(handle, manager, registration, currentIssued, captured.value);
+    const specCheck = await driveWaveSpecCheckRetry(context, currentIssued);
     if (specCheck.kind !== "proceed") return conclude(specCheck);
     const refreshed = specCheck.value;
     if (registration.schemaVersion === 2 && refreshed.tasks.some((task) => {
@@ -193,7 +196,7 @@ export async function resumeWaveGateFacade(
     })) return waveBlocked(handle, "current Wave review lacks exact accepted reviewer protocol authority");
     const current = deriveWaveReadiness(refreshed, currentWaveGateDeps(refreshed, handle.runDirectory));
     if (!current.ok) return waveBlocked(handle, current.error.reasons.map(({ message }) => message).join("; "));
-    const refutation = await driveWaveRefutation(handle, manager, registration, current.value);
+    const refutation = await driveWaveRefutation(context, current.value);
     if (refutation.kind !== "proceed") return conclude(refutation);
     const advisory = await driveWaveAdvisoryDecision(handle, current.value);
     if (advisory.kind !== "proceed") return conclude(advisory);

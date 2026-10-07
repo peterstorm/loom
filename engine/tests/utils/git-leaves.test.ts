@@ -5,11 +5,14 @@ import {
   gitOutput,
   nulSeparatedGitPaths,
   presentAtRevision,
+  reviewedDirectoryLeafPaths,
   revisionTreeLeaves,
   worktreeLeafBytes,
+  worktreeVisibleLeafPaths,
   worktreeVisibleLeaves,
   type WorktreeLeaf,
 } from "../../src/utils/git-leaves";
+import { untrackedLeavesAt, visibleLeavesAt } from "../../src/utils/git";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { git, gitResult, write } from "../fixtures/git-repository";
 
@@ -189,6 +192,79 @@ describe("worktreeVisibleLeaves", () => {
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * One enumerator, every caller. The Result adapters in utils/git.ts used to
+ * run their own `ls-files` with no `--literal-pathspecs` and a shadow Git
+ * directory, so a glob-named path was a pattern and `info/exclude` was
+ * ignored for the Review Packet and Wave lint while the snapshot hasher and
+ * reviewed-workspace reader treated both the repository's way.
+ */
+describe("worktreeVisibleLeafPaths and its Result adapters", () => {
+  const unusualRepository = () => {
+    write(root, "lib/a.txt", "a");
+    write(root, "lib/*.txt", "star");
+    write(root, "lib/[ab].txt", "bracket");
+    write(root, "lib/excluded.tmp", "excluded by info/exclude only");
+    write(root, "lib/tracked.txt", "tracked");
+    git(root, ["add", "lib/tracked.txt"]);
+    git(root, ["commit", "--quiet", "-m", "base"]);
+    writeFileSync(join(root, ".git", "info", "exclude"), "*.tmp\n");
+  };
+
+  it("lists the same leaves as the typed enumerator, and only untracked ones on request", () => {
+    unusualRepository();
+    expect(worktreeVisibleLeafPaths(root, "lib")).toEqual(worktreeVisibleLeaves(root, "lib").map(({ path }) => path));
+    expect(worktreeVisibleLeafPaths(root, "lib")).toEqual(["lib/*.txt", "lib/[ab].txt", "lib/a.txt", "lib/tracked.txt"]);
+    expect(worktreeVisibleLeafPaths(root, "lib", "untracked")).toEqual(["lib/*.txt", "lib/[ab].txt", "lib/a.txt"]);
+    expect(Object.isFrozen(worktreeVisibleLeafPaths(root, "lib"))).toBe(true);
+  });
+
+  it("gives every Result-adapter caller the enumerator's literal-pathspec and ignore semantics", () => {
+    unusualRepository();
+    for (const path of ["lib", "lib/*.txt", "lib/[ab].txt"]) {
+      expect(visibleLeavesAt(root, path), path).toEqual({ ok: true, paths: worktreeVisibleLeafPaths(root, path) });
+      expect(untrackedLeavesAt(root, path), path)
+        .toEqual({ ok: true, paths: worktreeVisibleLeafPaths(root, path, "untracked") });
+    }
+    // A glob-named path is that one file, never the pattern it spells.
+    expect(visibleLeavesAt(root, "lib/*.txt")).toEqual({ ok: true, paths: ["lib/*.txt"] });
+    expect(visibleLeavesAt(root, "lib/[ab].txt")).toEqual({ ok: true, paths: ["lib/[ab].txt"] });
+  });
+
+  it("reports an enumeration failure as a value in the Result adapters", () => {
+    const outside = canonicalTempDir("loom-git-leaves-adapter-outside-");
+    try {
+      const listed = visibleLeavesAt(outside, ".");
+      expect(listed.ok).toBe(false);
+      if (!listed.ok) expect(listed.error).toMatch(/^cannot list Git-visible files below "\.": /);
+      const untracked = untrackedLeavesAt(outside, ".");
+      expect(untracked.ok).toBe(false);
+      if (!untracked.ok) expect(untracked.error).toMatch(/^cannot list untracked files below "\.": /);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("reviewedDirectoryLeafPaths", () => {
+  it("is the workspace-visible leaf set plus exactly the leaves deleted since the packet base", () => {
+    write(root, "feature/kept.ts", "kept");
+    write(root, "feature/removed.ts", "removed");
+    write(root, "feature/unstaged-delete.ts", "still indexed");
+    const base = commitAll("base");
+    git(root, ["rm", "--quiet", "feature/removed.ts"]);
+    rmSync(join(root, "feature/unstaged-delete.ts"));
+    write(root, "feature/added.ts", "added");
+
+    const workspace = worktreeVisibleLeafPaths(root, "feature");
+    expect(workspace).toEqual(["feature/added.ts", "feature/kept.ts", "feature/unstaged-delete.ts"]);
+    const packet = reviewedDirectoryLeafPaths(root, base, "feature");
+    expect(packet).toEqual(["feature/added.ts", "feature/kept.ts", "feature/removed.ts", "feature/unstaged-delete.ts"]);
+    expect(packet.filter((path) => !workspace.includes(path))).toEqual(["feature/removed.ts"]);
+    expect(Object.isFrozen(packet)).toBe(true);
   });
 });
 

@@ -4,6 +4,17 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_ROOT_ENV, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../../src/runtime-compatibility";
 import { canonicalTempDir } from "./canonical-temp-dir";
+import { scrubAmbientIssueRoute } from "./issue-route-env";
+
+// This fixture is the seam that propagates ambient state: `fixturePiEnvironment`
+// spreads process.env into every CLI child, and `withFixturePiSession` runs
+// native APIs that read the issue-route election from process.env. So the
+// fixture owns the invariant that an ambient Pi handshake (a wrapper session
+// running the suite under the qualified-local model) never leaks into either:
+// importing it pins this worker's ambient issue route to the catalog route,
+// before any suite body runs. A suite opts into another route explicitly with
+// `withRouteEnv` from ./issue-route-env.
+scrubAmbientIssueRoute();
 
 const packageRoot = fileURLToPath(new URL("../../../", import.meta.url));
 type FixtureSession = Readonly<{ directory: string; sessionId: string; sessionFile: string; transport: string }>;

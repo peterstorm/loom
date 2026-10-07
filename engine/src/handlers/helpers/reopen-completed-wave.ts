@@ -7,8 +7,7 @@ import { parseTaskId } from "../../core/task-id";
 import { taskVerificationPolicy } from "../../core/verification-policy";
 import { observeReviewedWorkspace } from "./reviewed-workspace";
 import { openRunDirectory } from "../../orchestration/run-directory-handle";
-import { handleWaveReviewContext } from "./programs";
-import type { WaveReviewContextAuthority } from "../../core/wave-review-authority";
+import { readWaveReviewContext, type WaveReviewContextAuthority } from "../../core/wave-review-authority";
 import type { HookHandler, Task, TaskGraph, WaveReopeningAudit } from "../../types";
 
 const USAGE = "Usage: helper reopen-completed-wave --runs-root <root> < exact-reopening.json";
@@ -173,7 +172,7 @@ function packetReopeningProof(graph: TaskGraph, request: ReopenRequest, runsRoot
     if (authority.program !== "wave-gate" || authority.role === "spec-check-invoker") continue;
     const read = opened.value.readContext(authority.contextDigest);
     if (!read.ok) throw new Error(`cannot read immutable Review Packet context: ${read.error.message}`);
-    const parsed = handleWaveReviewContext([read.value], authority.contextDigest);
+    const parsed = readWaveReviewContext([read.value], authority.contextDigest);
     if (parsed.kind === "corrupt") throw new Error(`immutable Review Packet context is corrupt: ${parsed.message}`);
     if (parsed.kind === "loaded") contexts.push(parsed.value);
   }

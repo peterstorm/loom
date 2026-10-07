@@ -7,8 +7,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { deriveLoomStatusFromParsedGraph } from "../../src/core/loom-status";
-import { type GateDeps } from "../../src/core/wave-gate-checks";
+import { deriveLoomStatusFromParsedGraph, type StatusDeps } from "../../src/core/loom-status";
 import {
   IMPLEMENTATION_ATTESTATION_CONTEXT_LABEL,
   deriveImplementationAttestationContext,
@@ -22,7 +21,7 @@ const ATTESTED_POLICY: VerificationPolicy = Object.freeze({
   newTests: Object.freeze({ kind: "waived" as const, reason: "existing-tests-sufficient" }),
 });
 
-const statusDeps: GateDeps = {
+const statusDeps: StatusDeps = {
   loadPlanModels: () => ({ kind: "none" }),
   filePresence: () => ({ ok: true, exists: true }),
   implementationReservations: { kind: "observed", observedAtMs: Date.now(), anyActiveForGraph: false },

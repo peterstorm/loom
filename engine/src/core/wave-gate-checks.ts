@@ -252,10 +252,8 @@ export function checkLifecycleArtifacts(
     bound.map(({ lifecycle, machineFile }) => `     ${lifecycle.id}: ${machineFile}`).join("\n"));
 }
 
-export type ImplementationReservationStatusObservation =
-  | Readonly<{ kind: "observed"; observedAtMs: number; anyActiveForGraph: boolean }>
-  | Readonly<{ kind: "unavailable"; reason: string }>;
-
+/** The shell observations gate checks consume, and only those. Status-only
+ *  observations extend this in `loom-status.ts` as `StatusDeps`. */
 export interface GateDeps {
   readonly loadPlanModels: (planFile: string | null | undefined) => PlanModelsSource;
   readonly filePresence: (path: string) => FilePresence;
@@ -268,9 +266,6 @@ export interface GateDeps {
   /** Shell-supplied persisted result observation, separate from workspace
    * authority so absence cannot be confused with an unreadable artifact. */
   readonly currentWaveCompletionResult?: WaveCompletionResultObservation;
-  /** Shell observation used only to make policy-expired reservations
-   * dispatchable again. Absence/unavailability keeps them active fail-closed. */
-  readonly implementationReservations?: ImplementationReservationStatusObservation;
 }
 
 export function checkWaveCompletionSuite(

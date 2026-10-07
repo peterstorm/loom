@@ -61,7 +61,7 @@ describe("observeReviewedWorkspace", () => {
     mkdirSync(join(root, "empty"));
     writeFileSync(join(root, "empty", "only.log"), "ignored\n");
     const [observed] = observeReviewedWorkspace([task(["empty"])], root);
-    expect(observed?.artifacts).toEqual([{ path: "empty", bytes: null }]);
+    expect(observed?.artifacts).toEqual([{ path: "empty", contentBase64: null }]);
   });
 
   it("refuses a declared path that is neither a file nor a directory", () => {

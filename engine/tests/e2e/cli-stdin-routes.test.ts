@@ -10,7 +10,8 @@ import { afterAll, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { KNOWN_HANDLERS, routeConsumesStdin } from "../../src/handler-routes";
+import { KNOWN_HANDLERS, piRuntimeHandshakeRequired, routeConsumesStdin } from "../../src/handler-routes";
+import { ORCHESTRATION_OPERATIONS } from "../../src/handlers/helpers/orchestration-operations";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 
 const CLI_PATH = join(__dirname, "../../src/cli.ts");
@@ -27,6 +28,18 @@ describe("routeConsumesStdin", () => {
       expect(routeConsumesStdin("helper", "orchestration", [operation]), operation).toBe(false);
     }
     expect(routeConsumesStdin("helper", "orchestration", [])).toBe(false);
+  });
+
+  it("derives both route decisions from each operation's declared traits", () => {
+    for (const [operation, traits] of Object.entries(ORCHESTRATION_OPERATIONS)) {
+      expect(routeConsumesStdin("helper", "orchestration", [operation]), operation).toBe(traits.input === "stdin");
+      expect(piRuntimeHandshakeRequired("helper", "orchestration", [operation]), operation)
+        .toBe(traits.runtimeSkew === "handshake-required");
+    }
+    // An operation the table does not declare reads nothing and stays gated.
+    expect(routeConsumesStdin("helper", "orchestration", ["unknown"])).toBe(false);
+    expect(piRuntimeHandshakeRequired("helper", "orchestration", ["unknown"])).toBe(true);
+    expect(piRuntimeHandshakeRequired("helper", "orchestration", ["toString"])).toBe(true);
   });
 
   it("keeps every other known route on stdin", () => {

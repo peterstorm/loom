@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { isExactGitSha } from "../core/git-sha";
 import { observeGitProbe } from "./git-probe";
+import { worktreeVisibleLeafPaths, type WorktreeLeafSelection } from "./git-leaves";
 
 /**
  * Resolve the git repository root FRESH: CLAUDE_PROJECT_DIR > git rev-parse >
@@ -508,10 +509,9 @@ export type GitPathListResult =
   | Readonly<{ ok: true; paths: readonly string[] }>
   | Readonly<{ ok: false; error: string }>;
 
-/** Git-visible untracked leaves at or below one pathspec, sorted. `--no-index`
- *  diffs one file, never a directory, so a directory artifact's new files must
- *  be enumerated first. Ignored files stay out, as they do for directory
- *  artifact snapshots; `-z` keeps every path name intact. */
+/** Git-visible untracked leaves at or below one repository path, sorted.
+ *  `--no-index` diffs one file, never a directory, so a directory artifact's
+ *  new files must be enumerated first. */
 export function untrackedLeaves(path: string): GitPathListResult {
   const root = currentRepoRoot("untrackedLeaves");
   return root === undefined
@@ -521,31 +521,25 @@ export function untrackedLeaves(path: string): GitPathListResult {
 
 /** Untracked leaves from an EXPLICIT root — see `diffFilesAt`. */
 export function untrackedLeavesAt(root: string, path: string): GitPathListResult {
-  return listLeavesAt(root, path, ["--others"], "untracked files");
+  return listedLeaves(root, path, "untracked", "untracked files");
 }
 
-/** Every Git-visible leaf at or below one pathspec — tracked (including a
- *  deleted index entry) or untracked, never ignored — sorted. */
+/** Every Git-visible leaf at or below one repository path — tracked
+ *  (including a deleted index entry) or untracked, never ignored — sorted. */
 export function visibleLeavesAt(root: string, path: string): GitPathListResult {
-  return listLeavesAt(root, path, ["--cached", "--others"], "Git-visible files");
+  return listedLeaves(root, path, "visible", "Git-visible files");
 }
 
-function listLeavesAt(
+/** The warn-and-return Result adapter over the one throwing leaf enumerator
+ *  in `git-leaves.ts`, which owns the pathspec and ignore semantics. */
+function listedLeaves(
   root: string,
   path: string,
-  selection: readonly string[],
+  selection: WorktreeLeafSelection,
   description: string,
 ): GitPathListResult {
   try {
-    const listed = withShadowGit(root, (environment) =>
-      execFileSync("git", ["ls-files", ...selection, "--exclude-standard", "-z", "--", path], {
-        ...diffExecOptions(root, environment),
-        stdio: ["ignore", "pipe", "pipe"],
-      }));
-    return {
-      ok: true,
-      paths: Object.freeze([...new Set(listed.split("\0").filter((leaf) => leaf !== ""))].sort()),
-    };
+    return { ok: true, paths: worktreeVisibleLeafPaths(root, path, selection) };
   } catch (error) {
     return { ok: false, error: `cannot list ${description} below ${JSON.stringify(path)}: ${commandFailure(error)}` };
   }

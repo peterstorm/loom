@@ -46,7 +46,8 @@ describe("reviewed workspace shell observation", () => {
     expect(observed!.scope).toEqual([
       "src/binary.bin", "src/deleted.ts", "src/tracked.ts", "src/untracked.ts",
     ]);
-    expect(observed!.headSha).toBe(observedWorkspace("T1", observed!.scope, observed!.artifacts).headSha);
+    expect(observed!.headSha).toBe(observedWorkspace("T1", observed!.scope, observed!.artifacts.map(({ path, contentBase64 }) =>
+      ({ path, bytes: contentBase64 === null ? null : Buffer.from(contentBase64, "base64") }))).headSha);
 
     const source = waveFrozenSource(observed!);
     expect(parseWaveFrozenSource(source)).toEqual({ ok: true, value: source });

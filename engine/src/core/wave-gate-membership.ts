@@ -7,7 +7,14 @@
  */
 import type { Task, TaskGraph } from "../types";
 import type { ContextPacket } from "./context-packets";
-import { canonicalStructuralEquals, parseRequestId, parseStoredAgentRequestAuthority, type AgentRequestAuthority } from "./orchestration-contract";
+import {
+  canonicalStructuralEquals,
+  parseRequestId,
+  parseStoredAgentRequestAuthority,
+  type AgentRequestAuthority,
+  type DomainResult,
+  type RequestId,
+} from "./orchestration-contract";
 import type { RefutationPanelAuthority } from "./panel-authority";
 import type { IssuedWaveReviewerProtocol } from "./review-output";
 import { buildFindingBrief } from "./review-panel";
@@ -194,6 +201,48 @@ const sameContextSections = (
     section.byteLength === candidate.byteLength && section.digest === candidate.digest;
 });
 
+/** The canonical attempt-2 request id of one Wave attempt 1: its `:1` suffix
+ *  replaced by `:2`. The retry packet binds it before the envelope exists. */
+export function waveAttemptTwoRequestId(attemptOne: AgentRequestAuthority): DomainResult<RequestId, string> {
+  const requestId = parseRequestId(attemptOne.requestId.replace(/:1$/, ":2"));
+  return requestId.ok && requestId.value !== attemptOne.requestId
+    ? { ok: true, value: requestId.value }
+    : { ok: false, error: `Wave request ${attemptOne.requestId} cannot derive canonical attempt-2 identity` };
+}
+
+/**
+ * The canonical attempt-2 request envelope of one Wave attempt 1 whose retry
+ * context has `contextDigest`: the same authority with the attempt-2 request
+ * id, attempt and output slot. The only definition, shared by retry issuance
+ * and the persisted-retry compatibility check, so the two cannot disagree
+ * about retry identity.
+ *
+ * Stored mode: attempt 1 was read back from this run's durable artifacts, so
+ * its role-to-profile and skill couplings belong to the policy tables in force
+ * when it was ISSUED. Checking them against today's tables would strand every
+ * run on disk across an agent's profile promotion.
+ */
+export function deriveWaveAttemptTwoAuthority(
+  attemptOne: AgentRequestAuthority,
+  contextDigest: string,
+): DomainResult<AgentRequestAuthority, string> {
+  const requestId = waveAttemptTwoRequestId(attemptOne);
+  if (!requestId.ok) return requestId;
+  const authority = parseStoredAgentRequestAuthority({
+    ...attemptOne,
+    requestId: requestId.value,
+    attempt: 2,
+    contextDigest,
+    outputSlot: {
+      kind: "fixed-artifact-slot",
+      path: attemptOne.outputSlot.path.replace(/attempt-1\.raw$/, "attempt-2.raw"),
+    },
+  });
+  return authority.ok
+    ? authority
+    : { ok: false, error: authority.error.violations.map(({ message }) => message).join("; ") };
+}
+
 /** Whether a persisted Wave attempt-2 request/context is the canonical
  *  derivation of its attempt 1: the same envelope with the attempt-2 identity,
  *  unchanged fixed authority, and either the legacy unchanged variable context
@@ -204,20 +253,9 @@ export function persistedWaveAttemptTwoCompatibilityProblem(
   first: ContextPacket,
   second: ContextPacket,
 ): string | null {
-  const requestId = parseRequestId(attemptOne.requestId.replace(/:1$/, ":2"));
-  if (!requestId.ok || requestId.value === attemptOne.requestId) {
-    return `Wave request ${attemptOne.requestId} cannot derive canonical attempt-2 identity`;
-  }
-  const expectedAuthority = parseStoredAgentRequestAuthority({
-    ...attemptOne,
-    requestId: requestId.value,
-    attempt: 2,
-    contextDigest: attemptTwo.contextDigest,
-    outputSlot: {
-      kind: "fixed-artifact-slot",
-      path: attemptOne.outputSlot.path.replace(/attempt-1\.raw$/, "attempt-2.raw"),
-    },
-  });
+  const requestId = waveAttemptTwoRequestId(attemptOne);
+  if (!requestId.ok) return requestId.error;
+  const expectedAuthority = deriveWaveAttemptTwoAuthority(attemptOne, attemptTwo.contextDigest);
   if (!expectedAuthority.ok || !canonicalStructuralEquals(expectedAuthority.value, attemptTwo)) {
     return "persisted attempt-2 request envelope does not derive from attempt 1";
   }

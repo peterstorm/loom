@@ -9,7 +9,7 @@ import {
   parseReviewedArtifacts,
   reviewedWorkspaceHeadSha,
   type ObservedArtifact,
-  type ReviewedWorkspaceSnapshot,
+  type ReviewedWorkspaceObservation,
 } from "./reviewed-workspace";
 
 export const WAVE_FROZEN_SOURCE_SECTION = "wave-frozen-source";
@@ -29,10 +29,10 @@ export type WaveFrozenSource = Readonly<{
 
 const failed = <T>(error: string): DomainResult<T, string> => ({ ok: false, error });
 
-export function waveFrozenSource(snapshot: ReviewedWorkspaceSnapshot): WaveFrozenSource {
-  const files = snapshot.artifacts.map(({ path, bytes }): WaveFrozenSourceFile => {
-    if (bytes === null) return Object.freeze({ path, kind: "absent", digest: null, byteLength: 0 });
-    const materialized = Uint8Array.from(bytes);
+export function waveFrozenSource(snapshot: ReviewedWorkspaceObservation): WaveFrozenSource {
+  const files = snapshot.artifacts.map(({ path, contentBase64 }): WaveFrozenSourceFile => {
+    if (contentBase64 === null) return Object.freeze({ path, kind: "absent", digest: null, byteLength: 0 });
+    const materialized = Buffer.from(contentBase64, "base64");
     const digest = sha256Bytes(materialized);
     try {
       return Object.freeze({
@@ -48,7 +48,7 @@ export function waveFrozenSource(snapshot: ReviewedWorkspaceSnapshot): WaveFroze
         kind: "binary",
         digest,
         byteLength: materialized.byteLength,
-        contentBase64: Buffer.from(materialized).toString("base64"),
+        contentBase64,
       });
     }
   });

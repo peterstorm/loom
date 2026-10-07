@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_ROOT_ENV, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../../src/runtime-compatibility";
 import { canonicalTempDir } from "./canonical-temp-dir";
+import { CATALOG_ROUTE_ENV, QUALIFIED_ROUTE_ENV, withRouteEnv } from "./issue-route-env";
 import { disposeFixturePiSessions, fixturePiEnvironment, fixtureSession, withFixturePiSession } from "./pi-session";
 
 const roots: string[] = [];
@@ -78,6 +79,26 @@ describe("fixture-owned Pi session scopes", () => {
     expect(fixtureSession(first).sessionId).not.toBe(fixtureSession(second).sessionId);
     expect(process.env).toEqual(before);
     expect(process.cwd()).toBe(cwd);
+  });
+
+  it("pins an ambient issue route away on import, so a CLI child sees only an explicitly chosen route", async () => {
+    const previous = { ...process.env };
+    try {
+      Object.assign(process.env, QUALIFIED_ROUTE_ENV);
+      vi.resetModules();
+      const fresh = await import("./pi-session");
+      for (const key of Object.keys(CATALOG_ROUTE_ENV)) expect(process.env[key], key).toBeUndefined();
+      const root = directory();
+      const ambient = fresh.fixturePiEnvironment(root);
+      for (const key of Object.keys(CATALOG_ROUTE_ENV)) expect(ambient[key], key).toBeUndefined();
+      await withRouteEnv(QUALIFIED_ROUTE_ENV, async () => {
+        expect(fresh.fixturePiEnvironment(root).PI_MODEL).toBe(QUALIFIED_ROUTE_ENV.PI_MODEL);
+      });
+      fresh.disposeFixturePiSessions();
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+      Object.assign(process.env, previous);
+    }
   });
 
   it("restores a failed scope acquisition and does not strand subsequent native work", async () => {

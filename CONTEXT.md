@@ -384,6 +384,18 @@ _Avoid_: Barrel, API surface, exports (bare), the index
 A plan invariant (`INV-N`, tier `checkable`) expressed as a lint rule enforced fail-closed on every edit. Invariants that cannot be deterministically checked are tiered `advisory` and stay honest prose.
 _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory rules are never enforced)
 
+**Git-Visible Leaf**:
+A file or symlink Git can see at or below a repository path: a tracked entry (even one deleted from the worktree) or an untracked file Git does not ignore under the repository's own ignore rules. A path containing glob characters names itself, never a pattern. `utils/git-leaves.ts` is the only enumerator; the declared-artifact snapshot, the reviewed workspace, the Review Packet, Wave lint and the task-local diff all read it.
+_Avoid_: Directory listing, file walk, pathspec match
+
+**Reviewed Workspace Observation**:
+The exact bytes one Task's review scope held when a Wave review was prepared, with their content digest (`headSha`). Only the reviewed-workspace core mints one; it is branded and runtime-proven, so a value rebuilt around the smart constructor is refused rather than re-hashed.
+_Avoid_: Workspace snapshot (alias), file dump, worktree state
+
+**Implementation Window**:
+An execute Wave with no live Wave Gate: before its gate starts, or after an abandoned Run that names no successor. One pure classifier decides which Tasks are active, reclaimable, escalated or dispatchable and the one recovery that follows; status only renders it.
+_Avoid_: Unstarted Wave (alone), pre-gate state
+
 ## Relationships
 
 - A **Phase** produces one or more artifacts consumed by subsequent **Phases**
@@ -438,6 +450,7 @@ _Avoid_: Constraint (too generic), rule (alone), enforced guideline (advisory ru
 - A **Lifecycle Machine** is implemented by a dedicated **Task** in the earliest wave; dependent **Tasks** import it
 - Every declared **Lifecycle Machine** reaches production by checkpoint or by projection; one that neither checkpoints nor projects is not an **Executable Model**
 - A module's **Public Surface** is curated, and every symbol on it has a consumer outside that module
+- A Review Packet reviews the **Git-Visible Leaves** of a scoped directory plus the leaves at its base, so a deletion shows; its **Reviewed Workspace Observation** hashes only the **Git-Visible Leaves**, where a deleted leaf has no bytes
 - A **Checkable Invariant** is written as a lint rule during the architecture **Phase** and enforced by **Hooks** on every edit thereafter
 
 ## Example Dialogue

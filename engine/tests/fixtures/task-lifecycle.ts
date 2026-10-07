@@ -3,14 +3,87 @@ import {
   evaluateProofObligations,
   type TaskProof,
 } from "../../src/core/proof-obligations";
+import type { ParseResult } from "../../src/machine";
+import {
+  parseActiveWaveGateRegistration,
+  parseCompletedWaveGateRegistration,
+  parseTaskGraph,
+} from "../../src/state-file-wire";
 import {
   parseNewTestEvidence,
+  type ActiveWaveGateRegistration,
+  type CompletedWaveGateRegistration,
   type NewTestEvidence,
   type Task,
   type TaskCommonMetadata,
   type TaskGraph,
   type TaskStatus,
 } from "../../src/types";
+
+/*
+ * Protected-state builders. Each mints its value through the production
+ * State File parser instead of casting a literal past the type system, so a
+ * schema change to the shape breaks the fixture at the load boundary rather
+ * than leaving a test asserting against a state no engine could load.
+ */
+
+const parsedFixture = <T>(what: string, result: ParseResult<T>): T => {
+  if (!result.ok) throw new Error(`${what} fixture is not loadable protected state: ${result.error}`);
+  return result.value;
+};
+
+/** A whole protected TaskGraph, proven by the State File wire parser. */
+export function protectedGraphFixture(raw: unknown): TaskGraph {
+  return parsedFixture("TaskGraph", parseTaskGraph(raw));
+}
+
+/** An `active_wave_gate` anchor, proven by its State File parser: live by
+ *  default, at revision 0, under the `/runs` authoritative parent. */
+export function activeWaveGateFixture(input: Readonly<{
+  runId: string;
+  wave: number;
+  authorityDigest: string;
+  revision?: number;
+  runsRoot?: string;
+  terminalOutcome?: unknown;
+}>): ActiveWaveGateRegistration {
+  return parsedFixture("active_wave_gate", parseActiveWaveGateRegistration({
+    schemaVersion: 1,
+    kind: "active-wave-gate",
+    runId: input.runId,
+    wave: input.wave,
+    authorityDigest: input.authorityDigest,
+    revision: input.revision ?? 0,
+    runsRoot: input.runsRoot ?? "/runs",
+    terminalOutcome: input.terminalOutcome ?? null,
+  }));
+}
+
+/** One completed `wave_gate_history` entry, proven by its State File parser,
+ *  with a completion receipt committed at the entry's own revision. */
+export function completedWaveGateFixture(input: Readonly<{
+  runId: string;
+  wave: number;
+  authorityDigest?: string;
+  revision?: number;
+}>): CompletedWaveGateRegistration {
+  const revision = input.revision ?? 1;
+  return parsedFixture("wave_gate_history entry", parseCompletedWaveGateRegistration({
+    schemaVersion: 1,
+    kind: "completed-wave-gate",
+    runId: input.runId,
+    wave: input.wave,
+    authorityDigest: input.authorityDigest ?? "d".repeat(64),
+    revision,
+    completionReceipt: {
+      kind: "protected-wave-state-committed",
+      effectId: `effect:wave-gate-complete:${input.runId}`,
+      runId: input.runId,
+      committedRevision: revision,
+      stateDigest: "e".repeat(64),
+    },
+  }));
+}
 
 /** Canonical modern pending lifecycle fixture for tests outside Proof-specific suites. */
 export function pendingTaskProof(

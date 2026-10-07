@@ -21,6 +21,7 @@ import { lowerModelProfile, resolveModelProfile } from "../src/core/model-profil
 import { parseTaskGraph } from "../src/state-manager";
 import { observeTaskGraphProjectBoundary } from "../src/config";
 import { graphFixture, taskFixture } from "./fixtures/task-lifecycle";
+import { scrubAmbientIssueRoute } from "./fixtures/issue-route-env";
 import { publishLegacyInitialBatch } from "../src/handlers/helpers/programs/request-publication";
 import { readLoomReviewAuthorityBridge } from "../src/handlers/helpers/programs/review-authority-bridge";
 import { waveGateAuthorityDigest } from "../src/core/wave-review-authority";
@@ -37,13 +38,11 @@ import {
 } from "../src/runtime-compatibility";
 
 // Route election is ambient-env sensitive: the engine elects the reviewer
-// issue route from this process's PI_PROVIDER/PI_MODEL/PI_REASONING_LEVEL.
-// These fixtures pin the catalog route, so an ambient Pi handshake (a wrapper
-// session running the suite under the qualified-local model) must not flip
-// spawn admission or capture routing mid-file.
-for (const routeEnv of ["PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL"] as const) {
-  delete process.env[routeEnv];
-}
+// issue route in-process from PI_PROVIDER/PI_MODEL/PI_REASONING_LEVEL. This
+// suite does not import ./fixtures/pi-session, so it pins the catalog route
+// itself, keeping an ambient Pi handshake from flipping spawn admission or
+// capture routing mid-file.
+scrubAmbientIssueRoute();
 
 type Handler = (event: Record<string, unknown>, context: Record<string, unknown>) => unknown;
 

@@ -9,14 +9,15 @@ import type { ContextPacket } from '../../../core/context-packets';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { observeTaskGraphProjectBoundary, type TaskGraphProjectBoundary } from '../../../config';
 import type { StateManager } from '../../../state-manager';
-import { WAVE_REVIEW_AGENTS } from '../../../core/model-profiles';
 import { observeReviewedWorkspace } from '../reviewed-workspace';
 import { observeWaveSpecCheckDocuments } from '../../../orchestration/wave-spec-check-documents';
 import type { Task } from '../../../types';
 import { installWaveReviewRunsTransition, waveBatchSpecCheckAuthority } from '../../../core/wave-review-issuance';
 import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
 import {
+  classifyPersistedWaveBatch,
   prepareWaveReviewBatch,
+  type PersistedWaveBatchCandidate,
   type WaveRequestBatch,
   type WaveReviewRegistrationAuthority,
 } from '../../../core/wave-review-authority';
@@ -24,8 +25,8 @@ import { durableRefutationRequests, publicationResolver } from './durable-reques
 import { failed } from './program-result';
 import { publishReviewInitialBatch } from './request-publication';
 import { observedReviewerIssueRoute } from './spawn-task';
-import { proceed, settled, waveBlocked, type WavePhase } from './wave-gate-outcome';
-import { readWaveRequestContext, waveReviewContextTaskId, type ReadableWaveReviewContext } from './wave-review-context';
+import { proceed, settled, waveBlocked, type WavePhase, type WaveResumeContext } from './wave-gate-outcome';
+import { readWaveRequestContext, waveReviewContextTaskId } from './wave-review-context';
 
 /** Imperative shell: observe current bytes, then delegate every authority
  * decision to the single pure Wave review preparation function. */
@@ -109,12 +110,11 @@ const CURRENT_BATCH_LABEL = "wave-gate-current";
  * prefix is partial.
  */
 export async function reconcileWaveReviewIssuance(
-  handle: RunDirHandle,
-  manager: StateManager,
-  registration: RegisteredWaveGateProgram,
+  context: WaveResumeContext,
   graph: ReturnType<StateManager["load"]>,
   issued: readonly AgentRequestAuthority[],
 ): Promise<WavePhase<IssuedWaveReviewBatch>> {
+  const { handle, manager, registration, wave } = context;
   // The three issuance paths differ only in the graph they derive the
   // deterministic batch from and in what they do after publishing it under
   // the one current-batch effect label.
@@ -138,12 +138,16 @@ export async function reconcileWaveReviewIssuance(
     await installWaveReviewRuns(manager, registration, batch);
     return settled({ ok: true, action: {
       ...action,
-      requests: action.requests.map((request, index) => ({
-        ...request,
-        task: index === 0
-          ? `${request.task}\nSpec-check Wave ${registration.input.wave}.`
-          : `${request.task}\nReview Task ${registration.taskIds[Math.floor((index - 1) / WAVE_REVIEW_AGENTS.length)]}.`,
-      })),
+      requests: action.requests.map((request, index) => {
+        const subject = batch.subjects[index];
+        if (subject === undefined) throw new Error(`published Wave review request ${index} has no batch subject`);
+        return {
+          ...request,
+          task: subject.taskId === null
+            ? `${request.task}\nSpec-check Wave ${wave}.`
+            : `${request.task}\nReview Task ${subject.taskId}.`,
+        };
+      }),
     } });
   }
 
@@ -166,26 +170,23 @@ export async function reconcileWaveReviewIssuance(
   let currentIssued = issued;
   if (currentRuns.length > 0) {
     const epoch = refreshed.wave_review_epoch;
-    if (epoch?.runId !== handle.runId || epoch.wave !== registration.input.wave) {
+    if (epoch?.runId !== handle.runId || epoch.wave !== wave) {
       return settled(waveBlocked(handle, "active Wave Review Packets lack exact persisted batch epoch authority"));
     }
-    const candidates: { authority: AgentRequestAuthority; packet: ContextPacket; context: ReadableWaveReviewContext }[] = [];
+    const candidates: PersistedWaveBatchCandidate<Readonly<{ authority: AgentRequestAuthority; packet: ContextPacket }>>[] = [];
     for (const authority of issued.filter((request) => request.program === "wave-gate" && request.attempt === 1)) {
       const read = readWaveRequestContext(handle, authority);
       if (!read.ok) return settled(read.result);
       if (read.context.kind === "loaded" && read.context.value.batchEpoch === epoch.batchEpoch) {
-        candidates.push({ authority, packet: read.packet, context: read.context });
+        candidates.push({
+          role: authority.role,
+          taskId: waveReviewContextTaskId(read.context),
+          value: { authority, packet: read.packet },
+        });
       }
     }
-    const rank = (candidate: typeof candidates[number]): number => {
-      if (candidate.authority.role === "spec-check-invoker") return 0;
-      const taskIndex = registration.taskIds.indexOf(waveReviewContextTaskId(candidate.context) ?? "");
-      const reviewerIndex = WAVE_REVIEW_AGENTS.indexOf(candidate.authority.role as typeof WAVE_REVIEW_AGENTS[number]);
-      return taskIndex < 0 || reviewerIndex < 0 ? Number.MAX_SAFE_INTEGER : 1 + taskIndex * WAVE_REVIEW_AGENTS.length + reviewerIndex;
-    };
-    candidates.sort((left, right) => rank(left) - rank(right));
-    const expectedCount = 1 + registration.taskIds.length * WAVE_REVIEW_AGENTS.length;
-    if (candidates.length !== expectedCount || candidates.some((candidate, index) => rank(candidate) !== index)) {
+    const persisted = classifyPersistedWaveBatch(registration.taskIds, candidates);
+    if (persisted.kind === "incomplete") {
       const expectedBatch = batchFor(refreshed);
       if (expectedBatch.batchEpoch !== epoch.batchEpoch) {
         return settled(waveBlocked(handle, "persisted current Wave review batch differs from deterministic protected authority"));
@@ -194,7 +195,7 @@ export async function reconcileWaveReviewIssuance(
       if (!republished.ok) return settled(failed(republished.message));
       return settled({ ok: true, action: republished.action });
     }
-    const inputs = candidates.map(({ authority }) => Object.freeze({
+    const inputs = persisted.ordered.map(({ authority }) => Object.freeze({
       authority,
       context: Object.freeze({
         digest: authority.contextDigest,
@@ -208,7 +209,7 @@ export async function reconcileWaveReviewIssuance(
     if (recovered.kind === "found") {
       currentIssued = Object.freeze(recovered.requests.map(({ authority }) => authority));
     } else {
-      const published = await publishCurrent(inputs, candidates.map(({ packet }) => packet));
+      const published = await publishCurrent(inputs, persisted.ordered.map(({ packet }) => packet));
       if (!published.ok) return settled(failed(published.message));
       currentIssued = Object.freeze(published.requests.map(({ authority }) => authority));
     }

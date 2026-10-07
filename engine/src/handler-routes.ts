@@ -3,8 +3,12 @@
  * before dynamic import. Extracted from cli.ts so it can be imported by
  * tests (importing cli.ts would run main()): hooks-sync pins that every
  * `cli.ts <hook-type> <handler>` route the hooks/scripts shims invoke is a
- * subset of this table.
+ * subset of this table. Per-operation traits of the orchestration helper live
+ * beside its operation names in `orchestration-operations.ts`; this module
+ * only consumes them.
  */
+import { ORCHESTRATION_OPERATIONS, parseOrchestrationOperation } from "./handlers/helpers/orchestration-operations";
+
 export const KNOWN_HANDLERS: Readonly<Record<string, ReadonlySet<string>>> = {
   "pre-tool-use": new Set([
     "block-direct-edits", "guard-state-file", "validate-phase-order",
@@ -98,19 +102,20 @@ export const PI_RUNTIME_HANDSHAKE_ROUTES: ReadonlySet<string> = new Set([
   "helper/orchestration",
 ]);
 
-/**
- * The orchestration reads that stay available during runtime skew.
- *
- * Both are pure projections that mutate nothing, and both are what an operator
- * needs precisely WHILE recovering from skew: `status` answers "where is the
- * graph", `inspect` answers "what state is this run in, and is it recoverable".
- * Gating them would make the handshake failure undiagnosable from inside the
- * session that hit it. Every other orchestration operation — `abandon`
- * included, since its marker is durable and terminal — stays behind the
- * handshake.
- */
-const SKEW_SAFE_ORCHESTRATION_READS: ReadonlySet<string> = new Set(["status", "inspect", "brief"]);
+/** The traits of the orchestration operation a route names, or null when the
+ *  route is not the orchestration helper or names no known operation. */
+function orchestrationOperationTraits(
+  hookType: string | undefined,
+  handlerName: string | undefined,
+  extraArgs: readonly string[],
+) {
+  if (hookType !== "helper" || handlerName !== "orchestration") return null;
+  const operation = parseOrchestrationOperation(extraArgs[0]);
+  return operation === null ? null : ORCHESTRATION_OPERATIONS[operation];
+}
 
+/** Whether a route must prove it matches the Pi extension runtime first. An
+ *  orchestration operation declared skew-`available` never does. */
 export function piRuntimeHandshakeRequired(
   hookType: string | undefined,
   handlerName: string | undefined,
@@ -118,26 +123,20 @@ export function piRuntimeHandshakeRequired(
 ): boolean {
   if (hookType === "init-state") return true;
   if (!PI_RUNTIME_HANDSHAKE_ROUTES.has(`${hookType}/${handlerName}`)) return false;
-  return !(hookType === "helper" && handlerName === "orchestration" &&
-    extraArgs[0] !== undefined && SKEW_SAFE_ORCHESTRATION_READS.has(extraArgs[0]));
+  return orchestrationOperationTraits(hookType, handlerName, extraArgs)?.runtimeSkew !== "available";
 }
 
-/**
- * The orchestration operations whose input arrives on stdin. Every other
- * orchestration operation takes only flags, so the CLI must not wait for an
- * end-of-input that an inherited, still-open stdin never delivers — that wait
- * hung `abandon`/`resume`/`inspect` indefinitely under a parent whose stdin
- * stayed open. Hook routes always receive their event payload on stdin.
- */
-const ORCHESTRATION_STDIN_OPERATIONS: ReadonlySet<string> = new Set(["start", "submit", "decide"]);
-
+/** Whether a route reads stdin to end-of-input. Hook routes always receive
+ *  their event payload on stdin; the orchestration helper reads it only for
+ *  an operation declared `stdin` (an unknown operation reads nothing and
+ *  prints usage). */
 export function routeConsumesStdin(
   hookType: string | undefined,
   handlerName: string | undefined,
   extraArgs: readonly string[] = [],
 ): boolean {
   if (hookType === "helper" && handlerName === "orchestration") {
-    return extraArgs[0] !== undefined && ORCHESTRATION_STDIN_OPERATIONS.has(extraArgs[0]);
+    return orchestrationOperationTraits(hookType, handlerName, extraArgs)?.input === "stdin";
   }
   return true;
 }
