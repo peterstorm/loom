@@ -194,7 +194,7 @@ describe("quality-program helper boundaries", () => {
     // this curated surface (FR-001/FR-020; the parent callers get the
     // durable-compatibility `renderSpawnTask` and the publication-proving
     // `publishedReviewerRequest` only).
-    expect(Object.keys(surface)).not.toContain("renderReviewProgramSpawnTask");
+    expect(Object.keys(surface)).not.toContain("renderReviewProgramSpawn");
     expect(Object.keys(surface)).not.toContain("publishReviewInitialBatch");
     expect(Object.keys(surface)).not.toContain("projectEmissionTaskText");
   });

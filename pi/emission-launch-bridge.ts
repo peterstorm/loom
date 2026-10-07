@@ -9,7 +9,7 @@
  * pre-prompt startup refusal.
  */
 
-import type { SpawnEmissionExpectation } from "../engine/src/core/spawn-admission";
+import type { SpawnEmissionExpectation } from "../engine/src/core/issued-emission-capability";
 import { isRecord } from "../engine/src/core/plain-record";
 import {
   boundedThrownCause,

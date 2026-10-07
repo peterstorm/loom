@@ -30,10 +30,9 @@
  *     and accepted-call provenance can only carry a minted schema digest.
  *
  * The observation side of that pipeline — the transport frames, the closed
- * emission observation and its ONE fold — lives in `harness-capture` (the
- * additive emission observation/rejection vocabulary's stated home, shared
- * with the tool-surface contracts); this module imports it and owns the
- * BINDING and the SELECTION over it. Wrong kind/version/request and unusable
+ * emission observation and its ONE fold — lives in `emission-observation`;
+ * this module imports it and owns the BINDING and the SELECTION over it, and
+ * builds the accepted payload through `harness-capture`'s `finalPayloadOf`. Wrong kind/version/request and unusable
  * observations therefore reject before schema selection, and they are
  * REFUSALS, not absence: the boundary
  * classifies them (evidence/infrastructure), the kernel never invents a
@@ -69,16 +68,18 @@ import {
   type IssuedEmissionBindingOf,
 } from "./emission-tool";
 import {
-  canonicalCall,
   finalPayloadOf,
   parseFinalPayload,
   type CaptureRejection,
-  type EmissionObservation,
-  type EmissionObservationRefusal,
-  type EmissionToolCall,
   type FinalPayload,
   type FinalPayloadCandidate,
 } from "./harness-capture";
+import {
+  canonicalCall,
+  type EmissionObservation,
+  type EmissionObservationRefusal,
+  type EmissionToolCall,
+} from "./emission-observation";
 import {
   canonicalRecord,
   parseRequestId,

@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { agentRequestAuthority } from "../../../fixtures/agent-request-authority";
 import { issueEmissionBinding } from "../../../../src/core/emission-tool";
-import { observeEmissionCalls } from "../../../../src/core/harness-capture";
+import { observeEmissionCalls } from "../../../../src/core/emission-observation";
 import {
   executeDeterministicPanelOperation,
   joinPanelAttemptIssuance,

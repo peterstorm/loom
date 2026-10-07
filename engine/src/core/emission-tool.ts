@@ -1,16 +1,18 @@
 /**
  * The emission-tool kernel: the frozen registry mapping each cataloged
  * producer payload kind to its emission tool spec — the one place kind→schema
- * knowledge lives — plus the admission gate at the emission edge, the
- * capability ADT, and the ONE constructor of an emission tool's `parameters`
- * object.
+ * knowledge lives — plus the issued-binding mint, the ONE admission at the
+ * emission edge (`admitIssuedEmissionArguments`), the ONE constructor of an
+ * emission tool's `parameters` object, and the tool surface the Pi
+ * registration shell binds to (the constrained-sampling request and the
+ * execute-shell acknowledgment).
  *
  * Pure module: no I/O, no clock, no randomness, no pi-package import — the
  * dependency direction stays pi → engine. Every trust boundary is explicit and
- * fail-closed: `admitEmissionArguments` re-validates untrusted model input
- * with the same parsers the fallback uses before anything is ingestable (the
- * parse IS the gate), and the frozen bytes are the ONE serialization chain
- * (AD-5) — no TypeBox mirror, no drift.
+ * fail-closed: `admitIssuedEmissionArguments` re-validates untrusted model
+ * input, under the issued binding, with the same parsers the fallback uses
+ * before anything is ingestable (the parse IS the gate), and the frozen bytes
+ * are the ONE serialization chain (AD-5) — no TypeBox mirror, no drift.
  */
 
 import { z } from "zod/v4";
@@ -46,9 +48,9 @@ export type EmissionToolName =
 /**
  * The schema-version vocabulary of the frozen per-kind registry — the
  * transport-level union, deliberately flat. Which (kind, version) pairs a tool
- * carries is the registry's knowledge (`spec.schemaVersions`), and a spawn
- * bound to a version its tool does not carry is the degradation path the
- * admission gate refuses (`unsupported-schema-version`), not a type error — a
+ * carries is the registry's knowledge (`spec.schemaVersions`), and an issuance
+ * claiming a version its tool does not carry is the degradation path the
+ * binding mint refuses (`unsupported-schema-version`), not a type error — a
  * compound union of the valid pairs would type away the degradation the
  * capability ADT exists to express.
  */
@@ -66,16 +68,16 @@ const EMISSION_SCHEMA_VERSIONS: readonly EmissionSchemaVersion[] = Object.freeze
  * a code is a member of THIS union, never a free string, so an unknown code is
  * unrepresentable behind every consumer that switches on it (the tool result
  * mapping, the Phase-2 execute shell). It is the reviewer protocol's own
- * failure codes (the registry's reviewer parsers mint exactly these) plus two
- * added vocabulary members minted elsewhere: `unsupported-schema-version`
- * (the admission gateway below and the issued-binding mint) and `invalid-schema`
- * (the verdict-args parser). The gateway's deterministic-serialization refusal
- * reuses the protocol's own `invalid-json` code rather than adding a member.
+ * failure codes (the registry's reviewer parsers mint exactly these) plus one
+ * added member, `invalid-schema` (the verdict-args parser). The admission's
+ * deterministic-serialization refusal reuses the protocol's own `invalid-json`
+ * code rather than adding a member. An unsupported schema version is not an
+ * argument refusal: the issued-binding mint refuses it before any admission
+ * (`EmissionBindingRefusalCode`).
  */
 export type EmissionParseFailureCode =
   | ReviewerProtocolFailure["code"]
-  | "invalid-schema"
-  | "unsupported-schema-version";
+  | "invalid-schema";
 
 /**
  * The failure the emission edge refuses. `code` is the parse's own code
@@ -435,58 +437,13 @@ export function canonicalizeEmissionWireArguments(schema: unknown, args: unknown
  * The admission ADT: admitted or refused — exactly one arm per argument, so
  * the tool result mapping switches on the discriminant. The refused arm is
  * named for the VERDICT (refused = never-ingestable, FR-006), not for one of
- * its reasons: the `code` field carries the precise refusal (unsupported
- * version, non-serializable arguments, or schema non-conformance), and naming
- * the arm after one reason would read as schema non-conformance when the
- * version or the serialization failed.
+ * its reasons: the `code` field carries the precise refusal (non-serializable
+ * arguments or schema non-conformance), and naming the arm after one reason
+ * would read as schema non-conformance when the serialization failed.
  */
 export type EmissionArgumentAdmission =
   | Readonly<{ kind: "valid"; payload: unknown }>
   | Readonly<{ kind: "refused"; code: EmissionParseFailureCode; message: string }>;
-
-/**
- * The parse IS the gate at the emission edge. The arguments are serialized
- * deterministically and parsed through the registry's parsePayload — for
- * reviewer-payload the SAME full schema-level parser the fallback uses; for
- * the verdict kinds the pure schema-conformance parse of the frozen verdict
- * schema. A refused admission is never-ingestable (FR-006); the tool result
- * is an error the model sees. The model then finishes with the final-message
- * fallback; re-emitting in the same spawn is a `duplicate-emission-call`
- * rejection that consumes the attempt (ADR-0019).
- */
-export function admitEmissionArguments(
-  spec: EmissionToolSpec,
-  version: EmissionSchemaVersion,
-  rawArgs: unknown,
-): EmissionArgumentAdmission {
-  const schemaVersion = spec.schemaVersions[version];
-  if (schemaVersion === undefined) {
-    return Object.freeze({
-      kind: "refused" as const,
-      code: "unsupported-schema-version",
-      message: `emission tool ${spec.toolName} carries no schema version ${version}`,
-    });
-  }
-  let bytes: Uint8Array;
-  try {
-    bytes = encoder.encode(JSON.stringify(rawArgs, null, 2));
-  } catch (error) {
-    return Object.freeze({
-      kind: "refused" as const,
-      code: "invalid-json",
-      message: `emission arguments could not be serialized deterministically: ` +
-        `${error instanceof Error ? error.message : String(error)}`,
-    });
-  }
-  const parsed = schemaVersion.parsePayload(bytes);
-  return parsed.ok
-    ? Object.freeze({ kind: "valid" as const, payload: parsed.value })
-    : Object.freeze({
-        kind: "refused" as const,
-        code: parsed.error.code,
-        message: parsed.error.message,
-      });
-}
 
 // ---------------------------------------------------------------------------
 // Issued binding (AD-8): authenticated issuance selects exactly one cell of
@@ -641,60 +598,185 @@ export function issueEmissionBinding<K extends PayloadProducerKindName>(
   }) as IssuedEmissionBindingOf<K>);
 }
 
+/** One frozen registry cell: the schema bytes and the parse gate over them. */
+type EmissionRegistryCell = NonNullable<EmissionToolSpec["schemaVersions"][EmissionSchemaVersion]>;
+
 /**
- * The ONE admission of untrusted emission arguments under an issued binding,
- * shared by both shells that admit them — the Pi execute shell
+ * The registry cell a minted binding selects. Total over minted bindings: the
+ * nominal brand proves the (kind, version) pair is registry-carried, so a miss
+ * is a broken construction invariant (a binding forged by cast), thrown as
+ * such and never refused as if it were model input. The unsupported-version
+ * refusal lives where it is reachable, in `issueEmissionBinding`.
+ */
+function issuedRegistryCell(binding: IssuedEmissionBinding): EmissionRegistryCell {
+  const spec: EmissionToolSpec = EMISSION_TOOL_SPECS[binding.kind.kind];
+  const cell = spec.schemaVersions[binding.version];
+  if (cell === undefined) {
+    throw new Error(
+      `issued emission binding invariant failed: ${binding.requestId} names ${binding.kind.kind}/${binding.version}, which the frozen registry does not carry`,
+    );
+  }
+  return cell;
+}
+
+/**
+ * The emission tool `parameters` an issued binding registers with: its
+ * registry cell's frozen bytes through `frozenPayloadSchemaParameters`, the
+ * ONE serialization chain (AD-5). The Pi registration surface and the
+ * admission below read the binding's cell through this one lookup.
+ */
+export function issuedEmissionParameters(binding: IssuedEmissionBinding): unknown {
+  return frozenPayloadSchemaParameters(issuedRegistryCell(binding).schemaBytes);
+}
+
+/**
+ * The ONE admission of untrusted emission arguments, under an issued binding.
+ * Both shells that admit arguments call it: the Pi execute shell
  * (`acknowledgeEmissionExecution`) and the engine's selection over the
- * observed transcript (`emission-ingestion`) — so "the same admission" is one
- * function rather than two call sequences kept equal by convention.
+ * observed transcript (`emission-ingestion`). "The same admission" is
+ * therefore one function, not two call sequences kept equal by convention.
+ * The issued binding is the only authority path (ADR-0018), so there is no
+ * spec-plus-version entry point that could name a cell no issuance selected.
  *
- * The schema-driven wire-form canonicalization runs first (the transport
- * parse of `canonicalizeEmissionWireArguments` over the cell's frozen
- * parameters; idempotent, so arguments Pi's `prepareArguments` already
- * canonicalized pass through unchanged), then the registry cell's parse gate.
- * The binding is nominal, so its cell is registry-certified by type; the
- * lookup miss below is unreachable for a minted binding and refuses through
- * the admission's own `unsupported-schema-version` vocabulary.
+ * The parse IS the gate at the emission edge:
+ *
+ * 1. The schema-driven wire-form canonicalization runs first: the transport
+ *    parse of `canonicalizeEmissionWireArguments` over the cell's frozen
+ *    parameters. It is idempotent, so arguments Pi's `prepareArguments`
+ *    already canonicalized pass through unchanged.
+ * 2. The canonical arguments are serialized deterministically. A value
+ *    `JSON.stringify` cannot serialize refuses with the protocol's own
+ *    `invalid-json` code.
+ * 3. The bytes are parsed through the cell's `parsePayload`: for
+ *    reviewer-payload the SAME full schema-level parser the fallback uses, and
+ *    for the verdict kinds the pure schema-conformance parse of the frozen
+ *    verdict schema.
+ *
+ * A refused admission is never-ingestable (FR-006), and the tool result is an
+ * error the model sees. The model then finishes with the final-message
+ * fallback; re-emitting in the same spawn is a `duplicate-emission-call`
+ * rejection that consumes the attempt (ADR-0019).
  */
 export function admitIssuedEmissionArguments(
   binding: IssuedEmissionBinding,
   rawArgs: unknown,
 ): EmissionArgumentAdmission {
-  const spec: EmissionToolSpec = EMISSION_TOOL_SPECS[binding.kind.kind];
-  const schemaVersion = spec.schemaVersions[binding.version];
-  if (schemaVersion === undefined) return admitEmissionArguments(spec, binding.version, rawArgs);
-  const canonical = canonicalizeEmissionWireArguments(frozenPayloadSchemaParameters(schemaVersion.schemaBytes), rawArgs);
-  return admitEmissionArguments(spec, binding.version, canonical);
+  const cell = issuedRegistryCell(binding);
+  const canonical = canonicalizeEmissionWireArguments(frozenPayloadSchemaParameters(cell.schemaBytes), rawArgs);
+  let bytes: Uint8Array;
+  try {
+    bytes = encoder.encode(JSON.stringify(canonical, null, 2));
+  } catch (error) {
+    return Object.freeze({
+      kind: "refused" as const,
+      code: "invalid-json",
+      message: `emission arguments could not be serialized deterministically: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
+  const parsed = cell.parsePayload(bytes);
+  return parsed.ok
+    ? Object.freeze({ kind: "valid" as const, payload: parsed.value })
+    : Object.freeze({
+        kind: "refused" as const,
+        code: parsed.error.code,
+        message: parsed.error.message,
+      });
 }
+
+// ---------------------------------------------------------------------------
+// The emission tool surface (FR-002/INV-1, FR-013)
+// ---------------------------------------------------------------------------
 
 /**
- * The capability ADT (US4/US2): per harness × producer kind, whether the
- * constrained path can be provided. The producer is
- * `qualifyIssuedSpawnEmissionRoute` in `spawn-admission.ts`: it declares
- * not-provided with degradation "extraction" for a non-Pi parent (Claude Code
- * has no Loom extension seam), for a Pi route that is not the qualified
- * emission route, and for a missing registry cell; otherwise it declares
- * provided with the issued cell's schema digest. The consumer is
- * `decideRequestEmissionRoute`: a provided digest that differs from the
- * issued cell's is the US4 hard refusal (parent-side loaded-revision
- * containment, remediated by /reload — NOT the FR-008 child-readiness proof,
- * which the launcher gate owns), and a not-provided "refuse" degradation is
- * the same hard refusal; "extraction" is the US2 capability-aware degradation
- * the guard admits (AD-7). ADR-0017 records the route decision.
+ * The ONE constrained-sampling request every emission tool registers with
+ * (FR-002/INV-1): JSON-schema constrained sampling requested with strict
+ * PREFERRED, never required. The harness's capability resolver
+ * (pi-ai's `resolveJsonSchemaStrictSampling`) resolves a preferred request on
+ * a strict-incapable ROUTE to "no strict flag", and (pi-ai ≥0.84) it likewise
+ * declines — never throws — a preferred request whose parameters the schema
+ * strictifier cannot strictify (the frozen bytes carry $defs/$ref and v2/v3's
+ * root oneOf, which the strictifier rejects); the wire request still goes out
+ * and the engine stays validity/count authoritative (AD-2's
+ * unconstrained-emission class). A required request is the INV-1 failure mode:
+ * the resolver THROWS on every decline path, failing the child's request
+ * before the extraction fallback could ever engage. The checkable INV-1 rule
+ * file is `.claude/linter/rules/inv-1-no-strict-require-constraint.json`; its
+ * regex is a spelling guard, and the behavioral acceptance crosses the REAL
+ * resolver (engine/tests/pi/emission-tool-runtime.test.ts). The resolver's
+ * strict-flag truth table is qualification evidence, not an engine contract:
+ * the installed 0.83.0 runtime carried `strict: true` for all four frozen
+ * schemas (the committed qualification recordings), and a resolver behavior
+ * change is a feasibility §2.8 requalification trigger.
+ *
+ * The shape is structurally pi-ai's `ConstrainedSamplingConfig`; the pi
+ * registration surface claims it as one — the same confined-cast pattern as
+ * `frozenPayloadSchemaParameters`' TSchema claim — because the engine core
+ * imports no pi package. The frozen registry's tool specs carry no separate
+ * request: ONE request vocabulary for every emission tool, minted here and
+ * nowhere else.
  */
-export type EmissionToolCapability =
-  | Readonly<{ kind: "provided"; schemaDigest: ArtifactDigest }>
-  | Readonly<{ kind: "not-provided"; reason: string; degradation: "refuse" | "extraction" }>;
+export type EmissionConstrainedSamplingRequest = Readonly<{
+  type: "json_schema";
+  strict: "prefer";
+}>;
 
-/** The ONLY mint of the provided capability; the schema digest is branded. */
-export function providedEmissionCapability(schemaDigest: ArtifactDigest): EmissionToolCapability {
-  return canonicalRecord({ kind: "provided" as const, schemaDigest });
-}
+export const EMISSION_CONSTRAINED_SAMPLING_REQUEST: EmissionConstrainedSamplingRequest =
+  Object.freeze({ type: "json_schema", strict: "prefer" });
 
-/** The ONLY mint of the not-provided capability; the degradation class is data. */
-export function notProvidedEmissionCapability(
-  reason: string,
-  degradation: "refuse" | "extraction",
-): EmissionToolCapability {
-  return canonicalRecord({ kind: "not-provided" as const, reason, degradation });
+/**
+ * The minimal terminating tool result (FR-013): one bounded text line naming
+ * the outcome, empty details, and the harness's terminating flag. It NEVER
+ * echoes the payload (AD-3: no large payload echo in acknowledgment content),
+ * and `terminate: true` suppresses the follow-up model turn only when EVERY
+ * finalized result in the batch is terminating (pi 0.83.0 documented
+ * semantics) — the shell returns it verbatim, never wraps it.
+ */
+export type EmissionToolAcknowledgment = Readonly<{
+  content: readonly [Readonly<{ type: "text"; text: string }>];
+  details: Readonly<Record<string, never>>;
+  terminate: true;
+}>;
+
+/**
+ * The execute shell's ONE decision (FR-013): the arguments are admitted
+ * through the frozen registry's parser (the parse IS the gate — the same
+ * admission the engine's selection later re-runs), and the shell either
+ * returns the minimal terminating acknowledgment or carries the refusal the
+ * shell THROWS at the harness boundary. A refusal must never become a
+ * successful tool result: returning an error-labeled object does not set the
+ * harness's error flag, so the throw IS the error signal (AD-3). The outcome
+ * is closed — a consumer switching on `kind` is exhaustive — and the refused
+ * arm carries the admission's own code and message verbatim, so the model's
+ * correction surface (and the engine's retained diagnostics, FR-006) is the
+ * parse's vocabulary, never a shell-invented string.
+ */
+export type EmissionExecutionOutcome =
+  | Readonly<{ kind: "acknowledged"; acknowledgment: EmissionToolAcknowledgment }>
+  | Readonly<{ kind: "refused"; code: EmissionParseFailureCode; message: string }>;
+
+/**
+ * The production execute shell's decision, minted once: admit the untrusted
+ * arguments through the issued binding — `admitIssuedEmissionArguments`, the
+ * SAME admission the engine's selection runs over the observed call — and
+ * acknowledge or refuse. The real Pi tool surface (T5's registration) calls
+ * exactly this, so the acceptance suite drives the same policy seam as
+ * production — never a test twin.
+ */
+export function acknowledgeEmissionExecution(
+  binding: IssuedEmissionBinding,
+  args: unknown,
+): EmissionExecutionOutcome {
+  const admitted = admitIssuedEmissionArguments(binding, args);
+  if (admitted.kind === "refused") {
+    return canonicalRecord({ kind: "refused" as const, code: admitted.code, message: admitted.message });
+  }
+  return canonicalRecord({
+    kind: "acknowledged" as const,
+    acknowledgment: canonicalRecord({
+      content: Object.freeze([Object.freeze({ type: "text" as const, text: "payload acknowledged" })]),
+      details: Object.freeze({}),
+      terminate: true as const,
+    }),
+  });
 }

@@ -8,24 +8,21 @@ import {
   type VerdictSourceSelection,
 } from "../../src/core/emission-ingestion";
 import {
-  admitEmissionArguments,
+  admitIssuedEmissionArguments,
   EMISSION_TOOL_SPECS,
   issueEmissionBinding,
   type EmissionArgumentAdmission,
   type EmissionParseFailure,
-  type EmissionSchemaVersion,
   type IssuedEmissionBinding,
   type IssuedEmissionBindingOf,
 } from "../../src/core/emission-tool";
+import { parseFinalPayload, type CaptureRejection, type FinalPayload } from "../../src/core/harness-capture";
 import {
   canonicalCall,
   observeEmissionCalls,
-  parseFinalPayload,
-  type CaptureRejection,
   type EmissionCallFrame,
   type EmissionToolCall,
-  type FinalPayload,
-} from "../../src/core/harness-capture";
+} from "../../src/core/emission-observation";
 import {
   canonicalStructuralEquals,
   type ArtifactDigest,
@@ -119,16 +116,8 @@ const invalidArgsArb = fc.record({ arbitrary: fc.string({ maxLength: 20 }) });
 
 /** The admission refusals the refused-call fixtures retain — pinned in the
  *  fixture-integrity test so a schema change surfaces here first. */
-const REVIEWER_REFUSED = admitEmissionArguments(
-  EMISSION_TOOL_SPECS["reviewer-payload"],
-  "v2",
-  INVALID_ARGUMENTS,
-);
-const JUDGE_REFUSED = admitEmissionArguments(
-  EMISSION_TOOL_SPECS["judge-verdict"],
-  "v1",
-  { criterion: "x", rankings: [] },
-);
+const REVIEWER_REFUSED = admitIssuedEmissionArguments(REVIEWER_V2, INVALID_ARGUMENTS);
+const JUDGE_REFUSED = admitIssuedEmissionArguments(JUDGE_V1, { criterion: "x", rankings: [] });
 
 const asRefusal = (admission: EmissionArgumentAdmission): { code: string; message: string } => {
   if (admission.kind !== "refused") throw new Error("fixture admission must be refused");
@@ -546,7 +535,7 @@ describe("selectCanonicalPayload", () => {
   it("never ingests the single refused call's arguments and retains its refusal with unchanged extraction (FR-006/AS-007)", () => {
     fc.assert(
       fc.property(invalidArgsArb, candidatesArb, (args, candidates) => {
-        const admission = admitEmissionArguments(EMISSION_TOOL_SPECS["reviewer-payload"], "v2", args);
+        const admission = admitIssuedEmissionArguments(REVIEWER_V2, args);
         // Asserted, not skipped: an admission that is not refused here would
         // mean the fixture generator can mint valid payloads, and this
         // property would be silently vacuous (AD-9's warning to test authors).
@@ -1025,7 +1014,7 @@ describe("selectVerdictSource", () => {
  * prose passes Pi's frozen JSON Schema validation (the emitted bytes express
  * shape only — minLength — and never the zod refinements) but fails the
  * engine's admission. The pi-validation half is pinned by the real-Pi suite
- * (engine/tests/pi/emission-tool.test.ts) through the REAL
+ * (engine/tests/pi/emission-tool-runtime.test.ts) through the REAL
  * `validateToolArguments`; this suite pins the engine half: the harness-valid
  * call is a REFUSED call at the selection, never an ingested payload — and the
  * refusal is retained on whichever extraction arm the final candidates allow.
@@ -1034,9 +1023,8 @@ describe("whitespace-only schema-vs-parser disagreement (AD-5)", () => {
   it("refuses the whitespace-only call for every kind even though its shape passes the frozen JSON Schema", () => {
     for (const [kindName, spec] of Object.entries(EMISSION_TOOL_SPECS)) {
       for (const version of Object.keys(spec.schemaVersions)) {
-        const admission = admitEmissionArguments(
-          EMISSION_TOOL_SPECS[kindName as PayloadProducerKindName],
-          version as EmissionSchemaVersion,
+        const admission = admitIssuedEmissionArguments(
+          mustMint({ requestId: REQUEST_ID, kind: kindName as PayloadProducerKindName, version }),
           whitespaceOnlyArguments(kindName as PayloadProducerKindName),
         );
         expect(admission.kind, `${kindName}/${version}`).toBe("refused");
@@ -1347,7 +1335,7 @@ const v3AuthoredIdRefusal = (): Record<string, unknown> => ({
 });
 
 const v3RefusalOf = (arguments_: unknown): { code: string; message: string } => {
-  const admitted = admitEmissionArguments(EMISSION_TOOL_SPECS["reviewer-payload"], "v3", arguments_);
+  const admitted = admitIssuedEmissionArguments(REVIEWER_V3, arguments_);
   if (admitted.kind !== "refused") throw new Error("fixture v3 admission must be refused");
   return { code: admitted.code, message: admitted.message };
 };
@@ -1397,7 +1385,7 @@ describe("the successor v3 reviewer path rides the shared selection kernel (T9)"
       ["whitespace-only prose", v3WhitespaceRefusal()],
       ["authored finding id", v3AuthoredIdRefusal()],
     ] as const) {
-      const admission = admitEmissionArguments(EMISSION_TOOL_SPECS["reviewer-payload"], "v3", refused);
+      const admission = admitIssuedEmissionArguments(REVIEWER_V3, refused);
       expect(admission.kind, label).toBe("refused");
       if (admission.kind !== "refused") throw new Error(`${label} fixture must refuse`);
       expect(admission.code, label).toBe("invalid-payload");

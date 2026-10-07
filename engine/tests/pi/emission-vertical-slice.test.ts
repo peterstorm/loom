@@ -18,10 +18,10 @@
  *
  * Nothing here is a test twin of production: the child runs the real
  * registration surface (with the suite's observation record wrapping the
- * PRODUCTION execute, exactly as emission-tool.test.ts does), the transcript
+ * PRODUCTION execute, exactly as emission-tool-runtime.test.ts does), the transcript
  * is scanned by the production adapters, and the capture crosses the same
  * runtime the Pi and Claude adapters call. The model transport is scripted
- * through the shared `fixtures/pi-scripted-loop` harness emission-tool.test.ts
+ * through the shared `fixtures/pi-scripted-loop` harness emission-tool-runtime.test.ts
  * also runs, so "real" means the real harness surfaces and real run
  * directory, never a real provider dial.
  *
@@ -47,13 +47,13 @@ import {
   scriptTurns,
 } from "../fixtures/pi-scripted-loop";
 import {
-  admitEmissionArguments,
+  admitIssuedEmissionArguments,
   EMISSION_TOOL_SPECS,
   issueEmissionBinding,
 } from "../../src/core/emission-tool";
 import {
   issuedReviewerPayloadClaim,
-} from "../../src/core/spawn-admission";
+} from "../../src/core/issued-emission-capability";
 import { REVIEWER_PAYLOAD_SCHEMA_V2, CURRENT_REVIEWER_PROTOCOL } from "../../src/core/reviewer-contract";
 import { sha256Hex } from "../../src/core/digest";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
@@ -61,7 +61,7 @@ import { buildContextPacket, encodeByteSection } from "../../src/orchestration/c
 import { createRunDirectory, openRunDirectory, type RunDirHandle } from "../../src/orchestration/run-directory-handle";
 import { captureEmissionObservation, captureHarnessResult } from "../../src/orchestration/harness-capture-runtime";
 import { piEmissionCallFrames, piResultFinalPayloadCandidates } from "../../../pi/transcript-adapter";
-import type { EmissionCallFrame } from "../../src/core/harness-capture";
+import type { EmissionCallFrame } from "../../src/core/emission-observation";
 import type { IssuedEmissionBinding } from "../../src/core/emission-tool";
 
 const cleanup: string[] = [];
@@ -371,7 +371,7 @@ describe("the real reviewer v2 request-to-ingestion vertical slice", () => {
     // retained single-call refusal is published beside the accepted source
     // (FR-006/AD-9). The real Pi child classifies a THROWN execute refusal as
     // an incomplete observation (its own terminal posture, proven in
-    // emission-tool.test.ts); this case exercises the kernel's complete-call
+    // emission-tool-runtime.test.ts); this case exercises the kernel's complete-call
     // row through the same production scan and seam.
     const refusalArgs = whitespaceOnlyArguments("reviewer-payload");
     const finalPayload = validReviewerArgumentsV2("settled after the refusal");
@@ -383,7 +383,7 @@ describe("the real reviewer v2 request-to-ingestion vertical slice", () => {
     expect(outcome.kind).toBe("captured");
     if (outcome.kind !== "captured") return;
     expect(capturedBytes(staged)).toBe(JSON.stringify(finalPayload, null, 2));
-    const expected = admitEmissionArguments(V2_SPEC, "v2", refusalArgs);
+    const expected = admitIssuedEmissionArguments(staged.issued, refusalArgs);
     if (expected.kind !== "refused") throw new Error("fixture must be engine-refused");
     const record = sourceRecord(staged);
     expect(record).toMatchObject({
@@ -422,10 +422,13 @@ describe("the real reviewer v2 request-to-ingestion vertical slice", () => {
     it("the always-accept control would ingest exactly what the binding check refuses", async () => {
       const staged = await stagedReviewerRequest("pi-vertical-accept-control");
       // An always-accept seam (registry admission without the issued binding
-      // check) would ingest these schema-valid arguments. Production refuses
-      // the misbound kind before any schema selection.
+      // check) would ingest these schema-valid arguments: they admit under a
+      // judge binding for the same request. Production refuses the misbound
+      // kind before any schema selection.
       const judgeSpec = EMISSION_TOOL_SPECS["judge-verdict"];
-      const admitted = admitEmissionArguments(judgeSpec, "v1", JUDGE_ARGUMENTS);
+      const judgeBinding = issueEmissionBinding({ requestId: staged.request.requestId, kind: "judge-verdict", version: "v1" });
+      if (!judgeBinding.ok) throw new Error(judgeBinding.error.message);
+      const admitted = admitIssuedEmissionArguments(judgeBinding.value, JUDGE_ARGUMENTS);
       expect(admitted.kind).toBe("valid");
       const messages: readonly unknown[] = [
         ...acknowledgedEmissionCall("call-judge-control", judgeSpec.toolName, JUDGE_ARGUMENTS),

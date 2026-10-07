@@ -12,7 +12,7 @@ import { standaloneOriginReference } from "../../../../src/core/standalone-findi
 import { prepareStandaloneSuccessor } from "../../../../src/core/standalone-lineage";
 import { type StandaloneDispositionPublicationReference } from "../../../../src/core/standalone-review-model";
 import { parseStandaloneDispositionStartBytes, standaloneDispositionReceipt } from "../../../../src/core/standalone-disposition-machine";
-import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/spawn-admission";
+import { EMISSION_DESCRIPTOR_MARKER, parseEmissionDescriptor } from "../../../../src/core/issued-emission-capability";
 function valueOf<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T {
   if (!result.ok) throw Error(JSON.stringify(result));
   return result.value;

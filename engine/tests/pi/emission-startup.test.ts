@@ -74,7 +74,7 @@ import {
   emissionToolPrimaryInstruction,
   projectEmissionTaskText,
   renderEmissionDescriptor,
-} from "../../src/core/spawn-admission";
+} from "../../src/core/issued-emission-capability";
 import {
   EMISSION_TOOL_SPECS,
   issueEmissionBinding,
@@ -104,7 +104,7 @@ import {
   type ReadinessStageObservation,
   type RouteObservation,
 } from "../../../pi/emission-tool";
-import { EMISSION_CONSTRAINED_SAMPLING_REQUEST } from "../../src/core/harness-capture";
+import { EMISSION_CONSTRAINED_SAMPLING_REQUEST } from "../../src/core/emission-tool";
 import {
   boundDiagnosticMessage,
   canonicalRecord,
@@ -130,7 +130,7 @@ import { createRunDirectory, openRegisteredRunDirectory } from "../../src/orches
 import { RUN_DIR_ENV, RUNS_ROOT_ENV } from "../../src/orchestration/harness-capture-runtime";
 import { parsedAuthority, type RegisteredStandaloneProgram } from "../../src/handlers/helpers/programs/registration";
 import { publishReviewInitialBatch } from "../../src/handlers/helpers/programs/request-publication";
-import { renderReviewProgramSpawnTask } from "../../src/handlers/helpers/programs/spawn-task";
+import { renderReviewProgramSpawn } from "../../src/handlers/helpers/programs/spawn-task";
 import { standaloneRequestId } from "../../src/handlers/helpers/programs/standalone-requests";
 import { standaloneFixtureRegistration } from "../fixtures/standalone-reviewer-protocol";
 import { fixtureSession, withFixturePiSession } from "../fixtures/pi-session";
@@ -3012,13 +3012,13 @@ const publishedParentSpawnFixture = async (label: string): Promise<PublishedPare
     baseInstruction,
   );
   const toolPrimaryInstruction = emissionToolPrimaryInstruction(binding.value);
-  const task = projected.descriptor + renderReviewProgramSpawnTask(
+  const task = projected.descriptor + renderReviewProgramSpawn(
     handle,
     authority,
     projected.instruction,
     registration,
     { standalone: true },
-  );
+  ).task;
   return Object.freeze({
     root,
     piAgentDir,

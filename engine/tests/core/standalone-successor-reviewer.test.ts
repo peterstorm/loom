@@ -17,7 +17,7 @@ import { buildStandaloneSuccessorReviewerContext, standaloneSuccessorReviewerReg
 import { EMISSION_TOOL_SPECS, issueEmissionBinding, type IssuedEmissionBindingOf } from "../../src/core/emission-tool";
 import { issuedReviewerEmissionRoute, projectRegisteredReviewerProtocol } from "../../src/core/reviewer-emission-route";
 import { selectCanonicalPayload } from "../../src/core/emission-ingestion";
-import { observeEmissionCalls } from "../../src/core/harness-capture";
+import { observeEmissionCalls } from "../../src/core/emission-observation";
 import { emissionCallFrame } from "../fixtures/emission-call-frame";
 
 const bytes = (raw: unknown) => new TextEncoder().encode(JSON.stringify(raw));

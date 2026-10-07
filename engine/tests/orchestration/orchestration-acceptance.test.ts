@@ -12,10 +12,10 @@ import {
   type FinalPayloadCandidate,
   type HarnessResultIdentity,
 } from "../../src/core/harness-capture";
-import { admitEmissionArguments, EMISSION_TOOL_SPECS } from "../../src/core/emission-tool";
+import { admitIssuedEmissionArguments, EMISSION_TOOL_SPECS, issueEmissionBinding } from "../../src/core/emission-tool";
 import { CURRENT_REVIEWER_PROTOCOL, REVIEWER_PAYLOAD_EXAMPLE_V2, reviewerPayloadV2Schema } from "../../src/core/reviewer-contract";
 import { sha256Hex } from "../../src/core/digest";
-import type { EmissionCallFrame } from "../../src/core/harness-capture";
+import type { EmissionCallFrame } from "../../src/core/emission-observation";
 import type { AgentRequestAuthority } from "../../src/core/orchestration-contract";
 import captureOrchestrationResult, {
   captureClaudeResult,
@@ -1289,6 +1289,14 @@ describe("the engine capture seam selects the canonical emission source", () => 
   const V2_SPEC = EMISSION_TOOL_SPECS["reviewer-payload"];
   const V2_DIGEST = sha256Hex(V2_SPEC.schemaVersions["v2"]!.schemaBytes);
 
+  /** The reviewer v2 binding a request is issued under — the admission oracle
+   *  the expected refusals and the always-accept control are computed with. */
+  const issuedV2 = (requestId: string) => {
+    const minted = issueEmissionBinding({ requestId, kind: "reviewer-payload", version: "v2" });
+    if (!minted.ok) throw new Error(`fixture binding refused: ${minted.error.code} — ${minted.error.message}`);
+    return minted.value;
+  };
+
   const reviewerV2Arguments = (): unknown => reviewerPayloadV2Schema.parse({
     schemaVersion: 2,
     kind: "standalone-review",
@@ -1472,7 +1480,7 @@ describe("the engine capture seam selects the canonical emission source", () => 
     const bytes = readFileSync(join(staged.directory, "transcripts", staged.request.slotId, `attempt-${staged.request.attempt}.raw`), "utf-8");
     expect(bytes).toBe(finalText);
 
-    const expected = admitEmissionArguments(V2_SPEC, "v2", refusalArgs);
+    const expected = admitIssuedEmissionArguments(issuedV2(staged.request.requestId), refusalArgs);
     if (expected.kind !== "refused") throw new Error("fixture must be engine-refused");
     const record = sourceRecord(staged);
     expect(record).toMatchObject({
@@ -1609,7 +1617,7 @@ describe("the engine capture seam selects the canonical emission source", () => 
       const misbound = completeFrame(staged.request, "call-misbound", reviewerV2Arguments(), { requestId: "request:reviewer:other" });
       // What an always-accept seam (registry admission without the binding
       // check) would ingest: the arguments themselves are schema-valid.
-      const admitted = admitEmissionArguments(V2_SPEC, "v2", reviewerV2Arguments());
+      const admitted = admitIssuedEmissionArguments(issuedV2(staged.request.requestId), reviewerV2Arguments());
       expect(admitted.kind).toBe("valid");
       // Production refuses: the call was observed under another request.
       const outcome = await captureEmission(staged, [misbound], []);

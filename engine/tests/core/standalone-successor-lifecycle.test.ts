@@ -10,7 +10,7 @@ import { buildStandaloneSuccessorReviewerContext, parseIssuedStandaloneSuccessor
   standaloneSuccessorReviewerRegistration } from "../../src/core/standalone-successor-reviewer";
 import { selectCanonicalPayload } from "../../src/core/emission-ingestion";
 import { issueEmissionBinding } from "../../src/core/emission-tool";
-import { observeEmissionCalls } from "../../src/core/harness-capture";
+import { observeEmissionCalls } from "../../src/core/emission-observation";
 import { emissionCallFrame } from "../fixtures/emission-call-frame";
 import { prepareFreshStandaloneReview, parseStandaloneReviewAuthority } from "../../src/core/standalone-review-preparation";
 import { serializeStandaloneReviewAuthority, serializeAdjudicatedStandaloneReview, serializeStandaloneAggregate } from "../../src/core/standalone-review-records";

@@ -4,32 +4,30 @@
  * Refutation Panel verifiers), the byte-exact parse of a persisted Wave retry
  * diagnostic, and the classification of a refutation transcript read. Pure —
  * the program volume reads the bytes and renders the spawn; this module only
- * decides the words and the route.
+ * decides the words. The reviewer retry route is DATA: the render that
+ * produced the attempt-2 task hands over its own issued route, so nothing here
+ * re-derives the route from rendered prose.
  */
 import { canonicalRecord, type DomainResult } from "./orchestration-contract";
 import type { PersistentRefutationPanelEvent } from "./persistent-panel";
-import { emissionToolPrimaryInstruction, parseEmissionDescriptor } from "./spawn-admission";
+import { emissionToolPrimaryInstruction, type IssuedSpawnEmissionRoute } from "./issued-emission-capability";
 import type { FrozenStandaloneReviewAuthority } from "./standalone-review-model";
 
 /**
- * The extraction-only final-action wording for a reviewer retry whose task
- * carries no issued emission descriptor: archived schema-1 and protocol-v1
- * routes, and any non-emission retry route, close attempt 2 with exactly this
- * instruction so their required final message stays byte-identical to
- * attempt 1's contract.
+ * The extraction-only final-action wording for a reviewer retry whose route
+ * is not emission: archived schema-1 and protocol-v1 routes, and any
+ * extraction-only retry route, close attempt 2 with exactly this instruction
+ * so their required final message stays byte-identical to attempt 1's
+ * contract.
  */
 export const REVIEWER_EXTRACTION_RETRY_INSTRUCTION =
   "Emit exactly one JSON object conforming to the unchanged reviewer-payload-schema and reviewer-impact-rubric sections.";
 
-/** Render retry final-action wording from the descriptor that records the
- *  actual route. Attempt 2 is a fresh spawn, so its one-call budget is fresh. */
-export function reviewerRetryInstruction(task: string): string {
-  const descriptor = parseEmissionDescriptor(task);
-  if (descriptor.kind === "malformed") {
-    throw new Error(`retry task carries an unusable emission descriptor: ${descriptor.reason}`);
-  }
-  return descriptor.kind === "issued"
-    ? `This is a fresh spawn with a fresh one-call budget. ${emissionToolPrimaryInstruction(descriptor.binding)}`
+/** Retry final-action wording for the request's issued route. Attempt 2 is a
+ *  fresh spawn, so an emission route's one-call budget is fresh. */
+export function reviewerRetryInstruction(route: IssuedSpawnEmissionRoute): string {
+  return route.kind === "emission"
+    ? `This is a fresh spawn with a fresh one-call budget. ${emissionToolPrimaryInstruction(route.binding)}`
     : REVIEWER_EXTRACTION_RETRY_INSTRUCTION;
 }
 
@@ -41,17 +39,19 @@ export function reviewerRetryInstruction(task: string): string {
  * `### Machine Summary` block told the reviewer to fix its scope — the retried
  * agent then re-emitted the same unparseable shape and exhausted the slot. Both
  * failure classes are now stated, with the engine's own diagnostic first
- * whenever one survived to here.
+ * whenever one survived to here. `route` is the issued route the render of
+ * `task` decided; it selects the closing final action.
  */
 export function standaloneRetryTask(
   task: string,
+  route: IssuedSpawnEmissionRoute,
   diagnostic: string | null,
   authority: Pick<FrozenStandaloneReviewAuthority, "schemaVersion">,
 ): string {
   if (authority.schemaVersion !== 1) {
     return [task, "", "Your previous attempt was rejected by the engine's admission check.",
       ...(diagnostic === null ? [] : [JSON.stringify(diagnostic)]), "",
-      `This is your final attempt. ${reviewerRetryInstruction(task)}`].join("\n");
+      `This is your final attempt. ${reviewerRetryInstruction(route)}`].join("\n");
   }
   const marker = diagnostic === null
     ? ["Your previous attempt was rejected by the engine's admission check."]
@@ -190,25 +190,56 @@ export function specCheckRetryDiagnostic(reason: string): string {
   return `${WAVE_RETRY_PREAMBLE}${boundedRetryReason(reason)}\n\n${SPEC_CHECK_RETRY_TAIL}`;
 }
 
+/** The diagnostic body of a v2 Wave reviewer retry: the fixed preamble and the
+ *  bounded parser rejection reason, before its closing final action. */
+const currentWaveRetryLead = (reason: string): string => `${WAVE_RETRY_PREAMBLE}${boundedRetryReason(reason)}`;
+
 /** The persisted Wave reviewer retry diagnostic for an issued protocol version:
  *  archived v1 restates the review_lifecycle schema verbatim; current v2 bounds
  *  the reason and closes with the unchanged extraction instruction. */
 export function waveRetryDiagnostic(reason: string, protocolVersion: 1 | 2): string {
   return protocolVersion === 2
-    ? `${WAVE_RETRY_PREAMBLE}${boundedRetryReason(reason)}\n\n${CURRENT_WAVE_RETRY_TAIL}`
+    ? `${currentWaveRetryLead(reason)}\n\n${CURRENT_WAVE_RETRY_TAIL}`
     : `${WAVE_RETRY_PREAMBLE}${reason}\n\n${WAVE_RETRY_FIXED_TAIL}`;
 }
 
-/** Compose attempt-2 task text from the actual rendered route. Persisted
- *  extraction diagnostics retain their canonical bytes; an emission render
- *  replaces only the route-blind final action with the fresh-spawn tool rule. */
-export function renderCurrentWaveRetryTask(task: string, retryDiagnostic: string): string {
-  const instruction = reviewerRetryInstruction(task);
-  if (instruction === CURRENT_WAVE_RETRY_TAIL) return [task, retryDiagnostic].join("\n");
-  const diagnostic = retryDiagnostic.endsWith(CURRENT_WAVE_RETRY_TAIL)
-    ? `${retryDiagnostic.slice(0, -CURRENT_WAVE_RETRY_TAIL.length)}${instruction}`
-    : `${retryDiagnostic}\n\n${instruction}`;
-  return [task, diagnostic].join("\n");
+/** The fallback diagnostic of a retry spawn no outstanding retry names. */
+const UNATTRIBUTED_WAVE_RETRY_DIAGNOSTIC = "Attempt 1 was rejected; correct the packet evidence contract.";
+
+/**
+ * What a Wave reviewer retry spawn tells the reviewer about attempt 1: the
+ * parser rejection reason under the slot's issued protocol version, or — for
+ * a retry spawn no outstanding retry names — the fixed unattributed notice.
+ */
+export type WaveReviewerRetryDiagnostic =
+  | Readonly<{ kind: "rejected"; reason: string; protocolVersion: 1 | 2 }>
+  | Readonly<{ kind: "unattributed" }>;
+
+/** The diagnostic exactly as an extraction-route retry carries it: for a
+ *  rejected attempt, the bytes `waveRetryDiagnostic` persists. */
+const extractionWaveRetryDiagnostic = (diagnostic: WaveReviewerRetryDiagnostic): string =>
+  diagnostic.kind === "rejected"
+    ? waveRetryDiagnostic(diagnostic.reason, diagnostic.protocolVersion)
+    : UNATTRIBUTED_WAVE_RETRY_DIAGNOSTIC;
+
+/**
+ * Compose attempt-2 task text for the request's issued route. An extraction
+ * route carries the canonical extraction diagnostic unchanged. An emission
+ * route closes with the fresh-spawn tool rule instead of the extraction
+ * instruction: a current (v2) rejection keeps its preamble and bounded reason
+ * and swaps only the closing action; any other diagnostic gains the tool rule
+ * after it.
+ */
+export function renderCurrentWaveRetryTask(
+  task: string,
+  route: IssuedSpawnEmissionRoute,
+  diagnostic: WaveReviewerRetryDiagnostic,
+): string {
+  if (route.kind !== "emission") return [task, extractionWaveRetryDiagnostic(diagnostic)].join("\n");
+  const lead = diagnostic.kind === "rejected" && diagnostic.protocolVersion === 2
+    ? currentWaveRetryLead(diagnostic.reason)
+    : extractionWaveRetryDiagnostic(diagnostic);
+  return [task, `${lead}\n\n${reviewerRetryInstruction(route)}`].join("\n");
 }
 
 /**

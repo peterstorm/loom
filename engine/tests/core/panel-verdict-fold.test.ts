@@ -56,7 +56,7 @@ import {
 } from "../../src/core/panel-verdict-source";
 import { selectVerdictSource } from "../../src/core/emission-ingestion";
 import { issueEmissionBinding, type IssuedEmissionBindingOf } from "../../src/core/emission-tool";
-import { observeEmissionCalls, type EmissionCallFrame, type EmissionToolCall } from "../../src/core/harness-capture";
+import { observeEmissionCalls, type EmissionCallFrame, type EmissionToolCall } from "../../src/core/emission-observation";
 import {
   createAtomicInitialPublicationClaimPort,
   createInitialBatchPublicationReconciler,

@@ -226,7 +226,9 @@ export type WaveTaskReviewRetry = Readonly<{
   packetId: string;
   agent: string;
   slotId: string;
-  retryDiagnostic: string;
+  /** The parser rejection reason attempt 2 is told about; the retry render
+   *  builds its route-specific diagnostic from it. */
+  retryReason: string;
   protocol: IssuedWaveReviewerProtocol;
   request: InitialSpawnRequestInput;
   packet: ContextPacket;

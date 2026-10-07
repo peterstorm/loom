@@ -35,7 +35,7 @@ The decision also feeds the retry budget (ADR-0019: one existing request-slot bu
 ## Decision
 **Fold harness tool-call observations once, bind every observed call to the one issued request attempt, decide by distinct-call count in one pure kernel, and let each path build its own payload from that decision before its unchanged authoritative join.**
 
-**Observation (`engine/src/core/harness-capture.ts`).**
+**Observation (`engine/src/core/emission-observation.ts`).**
 - `observeEmissionCalls(frames)` is the single fold from transport frames to the closed `EmissionObservation`, which has four arms: `absent | single-call | multiple-calls | unusable{reason}`.
 - The fold does not look at the binding. It groups frames by tool-call identity:
   - Exact replays are idempotent.
@@ -51,7 +51,7 @@ The decision also feeds the retry budget (ADR-0019: one existing request-slot bu
 1. An unusable observation refuses.
 2. Every observed call is checked against the issued binding, in order: request attempt, then producer kind, then schema version. A misbound call is never filtered out, never decoded with its own decoder, and never absorbed into an ambiguity count.
 3. The distinct-call count decides: zero means extraction verbatim, one goes to schema admission, two or more is `duplicate-emission-call`, and that arm carries the observed calls.
-4. Only the single-call state reaches `admitIssuedEmissionArguments`: the schema-driven wire-form canonicalization, then `admitEmissionArguments` (schema selection through the issued binding's frozen registry cell). The Pi execute shell admits through the same function. The binding is nominal (only `issueEmissionBinding` mints it), so its registry cell is certified by type and the kernel does not re-verify it.
+4. Only the single-call state reaches `admitIssuedEmissionArguments`: the schema-driven wire-form canonicalization, then the parse through the issued binding's frozen registry cell. The Pi execute shell admits through the same function. The binding is nominal (only `issueEmissionBinding` mints it), so its registry cell is certified by type and the kernel does not re-verify it.
 
 Wrong kind, version or request, and unusable observations, therefore reject before schema selection. They are refusals, not absence.
 
@@ -87,7 +87,7 @@ Two functions share this decision and differ only in how they build output:
 
 **Layering.**
 - `emission-ingestion.ts` is pure: no I/O, no clock, no randomness.
-- It imports only `emission-tool.ts` (binding types, `admitIssuedEmissionArguments`), `harness-capture.ts` (observation vocabulary, `finalPayloadOf`, `parseFinalPayload`), and `orchestration-contract/identity` (`DomainResult`, `canonicalRecord`, `parseRequestId`).
+- It imports only `emission-tool.ts` (binding types, `admitIssuedEmissionArguments`), `emission-observation.ts` (observation vocabulary), `harness-capture.ts` (`finalPayloadOf`, `parseFinalPayload`), and `orchestration-contract/identity` (`DomainResult`, `canonicalRecord`, `parseRequestId`).
 - It must not import `panel-program.ts`, the panel verdict modules (`panel-verdict-source.ts`, `persistent-panel.ts`) or any I/O adapter.
 - Shared schema definitions stay below the program layer, so no registry-to-program import cycle exists.
 - Results use the existing `DomainResult` and `canonicalRecord` immutable-record conventions. No branded wrappers were added for values that carry no invariant.

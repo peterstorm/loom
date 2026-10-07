@@ -34,7 +34,8 @@ import {
   type EmissionToolSpec,
   type IssuedEmissionBindingOf,
 } from "../../engine/src/core/emission-tool";
-import { observeEmissionCalls, parseFinalPayload } from "../../engine/src/core/harness-capture";
+import { parseFinalPayload } from "../../engine/src/core/harness-capture";
+import { observeEmissionCalls } from "../../engine/src/core/emission-observation";
 import { selectCanonicalPayload, selectVerdictSource } from "../../engine/src/core/emission-ingestion";
 import { parseContextDigest } from "../../engine/src/core/orchestration-contract/identity";
 import { piEmissionCallFrames, piResultFinalPayloadCandidates } from "../../pi/transcript-adapter";

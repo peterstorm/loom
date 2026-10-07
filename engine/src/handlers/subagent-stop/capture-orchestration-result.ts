@@ -49,7 +49,8 @@ import { EMISSION_TOOL_SPECS, type EmissionSchemaVersion } from "../../core/emis
 import { isReviewAgent } from "../../config";
 import { parseRegisteredFacadeProgram } from "../helpers/programs";
 import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
-import type { EmissionCallFrame, FinalPayloadCandidate } from "../../core/harness-capture";
+import type { FinalPayloadCandidate } from "../../core/harness-capture";
+import type { EmissionCallFrame } from "../../core/emission-observation";
 import type { PayloadProducerKindName } from "../../core/model-profiles";
 import { resolveAgentTranscriptPath, resolveAgentType } from "../../utils/agent-transcript-path";
 import { stripNamespace } from "../../utils/strip-namespace";

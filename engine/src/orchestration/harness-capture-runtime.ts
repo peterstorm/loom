@@ -35,18 +35,17 @@ import {
   bindCapture,
   captureKey,
   nativeCaptureObservation,
-  observeEmissionCalls,
   recoverNativeCaptureArtifact,
   captureRejectionAuditRecord,
   captureRejectionDedupKey,
   parseFinalPayload,
   type CaptureKey,
   type CaptureReceipt,
-  type EmissionCallFrame,
   type FinalPayload,
   type FinalPayloadCandidate,
   type HarnessResultIdentity,
 } from "../core/harness-capture";
+import { observeEmissionCalls, type EmissionCallFrame } from "../core/emission-observation";
 import { selectCanonicalPayload } from "../core/emission-ingestion";
 import type { IssuedEmissionBindingOf } from "../core/emission-tool";
 import {

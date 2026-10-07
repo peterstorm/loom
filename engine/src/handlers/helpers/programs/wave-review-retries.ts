@@ -19,7 +19,7 @@ import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program'
 import { durableCaptureRejection, durableRefutationRequests, isCaptureRejectionOf, publicationResolver } from './durable-requests';
 import { failed, type FacadeDriveResult } from './program-result';
 import { publishLegacyInitialBatch, publishReviewInitialBatch } from './request-publication';
-import { renderReviewProgramSpawnTask, renderSpawnTask } from './spawn-task';
+import { renderReviewProgramSpawn, renderSpawnTask } from './spawn-task';
 import { proceed, rederive, settled, waveBlocked, type WavePhase } from './wave-gate-outcome';
 import { applyWaveFacadeSubmission } from './wave-gate-submission';
 import { issuedWaveProtocol, readWaveRequestContext } from './wave-review-context';
@@ -27,7 +27,7 @@ import { issuedWaveProtocol, readWaveRequestContext } from './wave-review-contex
 export function deriveWaveAttemptTwo(
   handle: RunDirHandle,
   attemptOne: AgentRequestAuthority,
-  retryDiagnostic: string | null = null,
+  retryReason: string | null = null,
 ): Readonly<{ request: InitialSpawnRequestInput; packet: ContextPacket }> {
   if (attemptOne.program !== "wave-gate" || attemptOne.attempt !== 1) {
     throw new Error(`slot ${attemptOne.slotId} has no canonical Wave attempt-1 authority`);
@@ -38,17 +38,17 @@ export function deriveWaveAttemptTwo(
   }
   const original = handle.readContext(attemptOne.contextDigest);
   if (!original.ok) throw new Error(original.error.message);
-  if (original.value.schemaVersion === 2 && retryDiagnostic === null) {
+  if (original.value.schemaVersion === 2 && retryReason === null) {
     throw new Error("current Wave reviewer retry requires its rejection diagnostic");
   }
   // Attempt 1 was rejected. Surface the parser's exact reason plus the exact
   // required schema so the model corrects the specific defect instead of
   // re-emitting the same malformed shape into its final attempt — a silent
   // identical retry is how a whole reviewer batch exhausts its allowance.
-  const variableContext = retryDiagnostic === null
+  const variableContext = retryReason === null
     ? original.value.variableContext
     : (() => {
-        const diagnostic = waveRetryDiagnostic(retryDiagnostic, original.value.schemaVersion === 2 ? 2 : 1);
+        const diagnostic = waveRetryDiagnostic(retryReason, original.value.schemaVersion === 2 ? 2 : 1);
         const section = encodeByteSection("wave-review-attempt-1-rejection", diagnostic);
         if (!section.ok) throw new Error(section.error.message);
         return Object.freeze([...original.value.variableContext, section.value]);
@@ -151,7 +151,6 @@ export async function currentWaveTaskReviewRetries(
             "attempt 1 was accepted but did not close this outstanding slot"
           : rejectionReason(attemptOne) ?? task.review_error ?? captured.error.message;
         const protocol = issuedWaveProtocol(handle, registration, attemptOne);
-        const retryDiagnostic = waveRetryDiagnostic(retryReason, protocol.protocolVersion);
         const derived = deriveWaveAttemptTwo(handle, attemptOne, retryReason);
         const retry = persistedWaveReviewerRetry(handle, task.id, protocol, derived, storedRequests.value);
         return [Object.freeze({
@@ -159,7 +158,7 @@ export async function currentWaveTaskReviewRetries(
           packetId: run.packet_id,
           agent,
           slotId: slot.slot_id,
-          retryDiagnostic,
+          retryReason,
           protocol,
           request: retry.request,
           packet: retry.packet,
@@ -229,12 +228,12 @@ export async function driveWaveReviewRetries(
       kind: "spawn-batch", runId: handle.runId,
       requests: requests.map((request) => {
         const retry = retries.find(({ slotId }) => slotId === request.authority.slotId);
+        const spawn = renderReviewProgramSpawn(handle, request.authority, "Read the immutable context packet at LOOM_CONTEXT_PATH, then retry the exact current Wave Review Packet slot.", registration);
         return {
           ...request,
-          task: renderCurrentWaveRetryTask(
-            renderReviewProgramSpawnTask(handle, request.authority, "Read the immutable context packet at LOOM_CONTEXT_PATH, then retry the exact current Wave Review Packet slot.", registration),
-            retry?.retryDiagnostic ?? "Attempt 1 was rejected; correct the packet evidence contract.",
-          ),
+          task: renderCurrentWaveRetryTask(spawn.task, spawn.route, retry === undefined
+            ? { kind: "unattributed" }
+            : { kind: "rejected", reason: retry.retryReason, protocolVersion: retry.protocol.protocolVersion }),
         };
       }),
     } });

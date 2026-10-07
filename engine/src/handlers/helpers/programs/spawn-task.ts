@@ -13,7 +13,7 @@ import { reviewerIssueRouteForParent, type ReviewerIssueRoute } from '../../../c
 import { readRunBytesNoFollow } from '../../../orchestration/no-follow-fs';
 import { CONTEXT_PACKET_MAX_BYTES } from '../../../orchestration/stored-context-packets';
 import type { ReviewerProtocolDescriptor } from '../../../core/reviewer-contract';
-import { projectEmissionTaskText } from '../../../core/spawn-admission';
+import { projectEmissionTaskText, type IssuedSpawnEmissionRoute } from '../../../core/issued-emission-capability';
 import { issuedReviewerEmissionRoute, reviewerEmissionEligible } from '../../../core/reviewer-emission-route';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { parseRegisteredFacadeProgram, type RegisteredReviewProgram } from './registration';
@@ -84,7 +84,17 @@ type ReviewerEmissionProjection = Readonly<{
   /** The tool-primary instruction on the emission route; otherwise the
    *  caller's instruction verbatim (FR-020). */
   instruction: string;
+  /** The issued route the descriptor and instruction were rendered from. */
+  route: IssuedSpawnEmissionRoute;
 }>;
+
+/** The route of a request that is not emission-eligible: it carries no issued
+ *  reviewer-payload contract, so it is extraction-only by construction and is
+ *  neither rendered with a descriptor nor reported (FR-001). */
+const INELIGIBLE_ROUTE: IssuedSpawnEmissionRoute = Object.freeze({
+  kind: "extraction-only",
+  reason: "the request is not emission-eligible: only reviewer roles on standalone-review and wave-gate requests carry the issued reviewer-payload contract",
+});
 
 type EmissionRouteObservation = Readonly<{
   kind: "extraction-only";
@@ -125,7 +135,9 @@ function reviewerEmissionProjection(
   baseInstruction: string,
   emissionAuthority: RegisteredReviewProgram | undefined,
 ): ReviewerEmissionProjection {
-  if (!reviewerEmissionEligible(authority)) return Object.freeze({ bootstrap: "", descriptor: "", instruction: baseInstruction });
+  if (!reviewerEmissionEligible(authority)) {
+    return Object.freeze({ bootstrap: "", descriptor: "", instruction: baseInstruction, route: INELIGIBLE_ROUTE });
+  }
   // The supply's program binding is storage-independent: a descriptor can
   // only ever name the request's own program's issued contract, so a wrong
   // supply is refused before any registration read.
@@ -178,7 +190,12 @@ function reviewerEmissionProjection(
       reason: projected.decision.reason,
     }));
   }
-  return Object.freeze({ bootstrap, descriptor: projected.descriptor, instruction: projected.instruction });
+  return Object.freeze({
+    bootstrap,
+    descriptor: projected.descriptor,
+    instruction: projected.instruction,
+    route: projected.decision,
+  });
 }
 
 /**
@@ -195,12 +212,17 @@ function reviewerEmissionProjection(
  * `parsePublishedSpawnRequest` already proved `context.digest ===
  * authority.contextDigest`, so call sites don't thread the context through.
  *
- * Active review programs use `renderReviewProgramSpawnTask`, whose registered
+ * Active review programs use `renderReviewProgramSpawn`, whose registered
  * emission authority is a required parameter. `renderSpawnTask` is the
  * distinct durable-compatibility/ineligible interface and therefore cannot
  * accidentally accept a program authority in an optional property.
  */
 type SpawnTaskRenderOptions = Readonly<{ standalone?: boolean }>;
+
+/** One rendered review-program spawn: the task text and the issued route it
+ *  was rendered from, so a retry closes on the route as data rather than
+ *  re-parsing it out of the task. */
+export type ReviewProgramSpawn = Readonly<{ task: string; route: IssuedSpawnEmissionRoute }>;
 
 function renderSpawnTaskWithAuthority(
   handle: RunDirHandle,
@@ -208,9 +230,9 @@ function renderSpawnTaskWithAuthority(
   instruction: string,
   emissionAuthority: RegisteredReviewProgram | undefined,
   options: SpawnTaskRenderOptions,
-): string {
+): ReviewProgramSpawn {
   const emission = reviewerEmissionProjection(handle, authority, instruction, emissionAuthority);
-  return (options.standalone === true ? "LOOM_REVIEW_CONTEXT: standalone\n" : "") +
+  const task = (options.standalone === true ? "LOOM_REVIEW_CONTEXT: standalone\n" : "") +
     `LOOM_REQUEST_ID: ${authority.requestId}\n` +
     `LOOM_CONTEXT_DIGEST: ${authority.contextDigest}\n` +
     `LOOM_CONTEXT_PATH: ${join(handle.runDirectory, "contexts", `${authority.contextDigest}.json`)}\n` +
@@ -219,6 +241,7 @@ function renderSpawnTaskWithAuthority(
     emission.descriptor +
     emission.bootstrap + standalonePanelBootstrap(handle, authority) +
     emission.instruction;
+  return Object.freeze({ task, route: emission.route });
 }
 
 export function renderSpawnTask(
@@ -227,18 +250,18 @@ export function renderSpawnTask(
   instruction: string,
   options: SpawnTaskRenderOptions = {},
 ): string {
-  return renderSpawnTaskWithAuthority(handle, authority, instruction, undefined, options);
+  return renderSpawnTaskWithAuthority(handle, authority, instruction, undefined, options).task;
 }
 
 /** The review-program render seam: issued emission authority is required by
  *  the compiler rather than remembered in a comment or recovered implicitly. */
-export function renderReviewProgramSpawnTask(
+export function renderReviewProgramSpawn(
   handle: RunDirHandle,
   authority: AgentRequestAuthority,
   instruction: string,
   emissionAuthority: RegisteredReviewProgram,
   options: SpawnTaskRenderOptions = {},
-): string {
+): ReviewProgramSpawn {
   return renderSpawnTaskWithAuthority(handle, authority, instruction, emissionAuthority, options);
 }
 

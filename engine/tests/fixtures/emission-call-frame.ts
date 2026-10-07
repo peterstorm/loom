@@ -1,5 +1,5 @@
 import type { IssuedEmissionBinding } from "../../src/core/emission-tool";
-import type { EmissionCallFrame } from "../../src/core/harness-capture";
+import type { EmissionCallFrame } from "../../src/core/emission-observation";
 
 /**
  * One complete emission call frame bound to `binding`'s request, kind and
