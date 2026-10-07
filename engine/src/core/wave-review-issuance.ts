@@ -18,7 +18,7 @@ import {
 } from "./orchestration-contract";
 import type { IssuedWaveReviewerProtocol } from "./review-output";
 import type { ReviewedWorkspaceObservation } from "./reviewed-workspace";
-import { WAVE_REVIEW_AGENTS } from "./model-profiles";
+import { WAVE_REVIEW_AGENTS } from "./agent-catalog-projections";
 import { waveReviewerSlotProblem } from "./wave-gate-membership";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
 import {

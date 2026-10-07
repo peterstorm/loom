@@ -6,10 +6,8 @@
 
 import { readFileSync } from "node:fs";
 import type { HookHandler, PreToolUseInput } from "../../types";
-import {
-  TASK_GRAPH_PATH, PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS,
-  REVIEW_PANEL_AGENTS, UTILITY_AGENTS, ARCH_PANEL_AGENTS, pathExistsFailClosed,
-} from "../../config";
+import { TASK_GRAPH_PATH, UTILITY_AGENTS, pathExistsFailClosed } from "../../config";
+import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS, REVIEW_PANEL_AGENTS, ARCH_PANEL_AGENTS } from "../../core/agent-catalog-projections";
 import { SUBAGENT_SPAWN_TOOLS } from "../../core/tool-vocabulary";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { resolveClaudeAgentDefinitionPath } from "../../utils/agent-definition";

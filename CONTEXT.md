@@ -29,7 +29,7 @@ A specialized AI subagent spawned to perform one phase or task. Defined by a mar
 _Avoid_: Worker, bot, assistant
 
 **Agent Catalog**:
-The single declarative registry defining every Agent's identity: its kind (phase, architecture-panel, implementation, reviewer, spec-check, review-verifier, utility), model profile, required Skill, and Pi transport contract (headless or interactive RPC) — one record per Agent, keyed by name so a duplicate or double-kinded Agent is unrepresentable. Every agent set, phase map, transport projection, and policy table is derived from the catalog, never a second source.
+The single declarative registry defining every Agent's identity: its kind (phase, architecture-panel, implementation, reviewer, spec-check, review-verifier, utility), model profile, required Skill, and Pi transport contract (headless or interactive RPC) — one record per Agent, keyed by name so a duplicate or double-kinded Agent is unrepresentable. Every agent set, phase map, transport projection, and policy table is derived from the catalog, never a second source, and each derived projection has exactly one import path (`core/agent-catalog-projections.ts`).
 _Avoid_: Agent list, agent config, roster (a roster is an ordered per-run selection drawn from the catalog, not identity)
 
 **Skill**:
@@ -249,7 +249,7 @@ A sum type representing success (`Right`) or failure (`Left`). Used for error ha
 _Avoid_: Result (acceptable in Rust), Optional (different semantics)
 
 **LLM Profile**:
-A semantic policy assigning one Agent role to complete harness-specific requested bindings: a Claude Code model and an exact Pi provider/model/thinking tuple. Missing bindings fail closed. Wave/standalone reviewer issuance may explicitly select the catalog's `qualified-local-review` alternative only when the observed Pi parent has the exact qualified provider, model, and thinking setting; other roles and cloud sessions retain their assigned default. Both harness bindings and the selected profile are frozen in Agent Request Authority. Pi launcher policy may explicitly inherit a local parent model at the spawn boundary, but cannot change issued authority or infer a new profile from task text.
+A semantic policy assigning one Agent role to complete harness-specific requested bindings: a Claude Code model and an exact Pi provider/model/thinking tuple. Missing bindings fail closed. Wave/standalone reviewer issuance may explicitly select the catalog's `qualified-local-review` alternative only when the observed Pi parent has the exact qualified provider, model, and thinking setting; other roles and cloud sessions retain their assigned default. That eligibility is one rule (`isIssuableProfile`) that issuance elects through and request validation checks against, so the two cannot disagree. Both harness bindings and the selected profile are frozen in Agent Request Authority. Pi launcher policy may explicitly inherit a local parent model at the spawn boundary, but cannot change issued authority or infer a new profile from task text.
 _Avoid_: Model alias, Sonnet equivalent, current model, implicit model fallback
 
 **Runtime Revision**:

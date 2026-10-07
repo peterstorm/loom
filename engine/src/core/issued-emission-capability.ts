@@ -26,7 +26,9 @@
  */
 
 import { match } from "ts-pattern";
-import { DESKTOP_VLLM_ROUTE, producerKindsOfAgent, type LoomAgentName, type PayloadProducerKindName, type PiSpawnItem } from "./model-profiles";
+import { DESKTOP_VLLM_ROUTE, type LoomAgentName } from "./model-profiles";
+import { producerKindsOfAgent, type PayloadProducerKindName } from "./agent-catalog-projections";
+import type { PiSpawnItem } from "./pi-spawn-input";
 import {
   EMISSION_TOOL_SPECS,
   issueEmissionBinding,

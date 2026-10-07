@@ -4,7 +4,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findResidualPlaceholders } from "../src/core/validate-template-substitution";
 import { parseRefutationVerdict, serializeRefutationVerdict, REVIEW_LENSES, REFUTATION_VERDICTS, type WaveFindingId } from "../src/core/review-panel";
-import { REVIEW_PANEL_AGENTS } from "../src/config";
+import { REVIEW_PANEL_AGENTS } from "../src/core/agent-catalog-projections";
 import { detectPhase, isReviewPanelAgent } from "../src/core/validate-phase-order";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");

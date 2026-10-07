@@ -48,7 +48,7 @@ import { readRunBytesNoFollow } from "../../orchestration/no-follow-fs";
 import type { HookHandler, HookResult, SubagentStopInput } from "../../types";
 import type { AgentRequestAuthority } from "../../core/orchestration-contract";
 import type { EmissionSchemaVersion } from "../../core/emission-tool";
-import { isReviewAgent } from "../../config";
+import { isReviewAgent } from "../../core/agent-catalog-projections";
 import { parseRegisteredFacadeProgram } from "../helpers/programs";
 import { parseSubagentStopStdin } from "../../parsers/parse-subagent-stop-input";
 import type { FinalPayloadCandidate } from "../../core/harness-capture";

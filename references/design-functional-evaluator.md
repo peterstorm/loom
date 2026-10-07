@@ -168,7 +168,7 @@ Add functional check results to `generateWaveGateSummary()` output.
 | File | Change |
 |---|---|
 | `engine/src/types.ts` | Add `FunctionalCheck` interface, add to `TaskGraph` |
-| `engine/src/config.ts` | Add `"functional-evaluator"` to `REVIEW_AGENTS` |
+| `engine/src/core/model-profiles.ts` | Add a `"functional-evaluator"` entry to `AGENT_CATALOG` (`REVIEW_AGENTS` in `core/agent-catalog-projections.ts` derives from it) |
 | `engine/src/handlers/subagent-stop/dispatch.ts` | New category + route |
 | `engine/src/handlers/subagent-stop/store-functional-check-findings.ts` | **New file** |
 | `engine/src/handlers/helpers/complete-wave-gate.ts` | Add `checkFunctionalCheck()` |

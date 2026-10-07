@@ -18,14 +18,8 @@ import {
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ByteSection, type ContextPacket } from "./context-packets";
 import { parseReviewerProtocolDescriptor } from "./reviewer-contract";
 import type { OrphanedWaveGateRecoveryAudit, RegisteredReviewerProtocol, WaveGateRestartAudit } from "./wave-gate-program";
-import {
-  DECISION_RECORD_AGENT,
-  issuedReviewerProfile,
-  lowerModelProfile,
-  resolveAgentPolicy,
-  WAVE_REVIEW_AGENTS,
-  type ReviewerIssueRoute,
-} from "./model-profiles";
+import { DECISION_RECORD_AGENT, issuedReviewerProfile, lowerModelProfile, resolveAgentPolicy, type ReviewerIssueRoute } from "./model-profiles";
+import { WAVE_REVIEW_AGENTS } from "./agent-catalog-projections";
 import {
   canonicalRecord,
   parseAgentRequestAuthority,
@@ -896,7 +890,7 @@ export function prepareWaveReviewBatch(
     if (!requestId.ok) return failure(requestId.error.message);
     const policy = resolveAgentPolicy(subject.role);
     if (!policy.ok) return failure(policy.error.message);
-    const profile = issuedReviewerProfile(subject.role, reviewerRoute);
+    const profile = issuedReviewerProfile(subject.role, "wave-gate", reviewerRoute);
     if (!profile.ok) return failure(profile.error.message);
     const task = subject.taskId === null ? null : tasks.find(({ id }) => id === subject.taskId) ?? null;
     const section = encodeByteSection(WAVE_REVIEW_AUTHORITY_SECTION, JSON.stringify({

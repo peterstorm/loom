@@ -121,7 +121,7 @@ The project follows “parse, do not cast”: untrusted JSON, transcripts, paths
 | Advisory publication (P5) | `standalone-disposition-machine.ts` | No-agent immutable DECLARED publication and exact effect reconciliation |
 | Wave Gate | `wave-gate-machine.ts` (LC-1 reducer, proof-carrying readiness snapshot, next-action proof, completion commit), `wave-gate-checks.ts` (gate evaluation), `wave-completion-suite-readiness.ts`, `wave-gate-preparation.ts` (refutation/advisory actions), `wave-gate-registration.ts` (admission, install with abandoned-run supersession, review-authority reset), `wave-status-facts.ts`, `loom-status.ts` (canonical status read model), `task-implementation-dispatch.ts` | Review/refutation/advisory/completion lifecycle and canonical status |
 | Remediation | `remediation-machine.ts` | Scope authority, excluded evidence paths, audit/stage/install lifecycle |
-| Model policy | `model-profiles.ts`, `model-calibration.ts` | Explicit cross-harness bindings and deterministic calibration scoring |
+| Model policy | `model-profiles.ts` (profile and Agent Catalog, resolution, issuance eligibility), `agent-catalog-projections.ts` (derived agent sets, phase map, producer kinds), `pi-spawn-input.ts` (Pi `subagent` input parse), `model-calibration.ts` | Explicit cross-harness bindings, catalog-derived dispatch sets, and deterministic calibration scoring |
 | Compatibility | `legacy-archive.ts` | Read-only parsers for historical artifacts; never new domain behavior |
 
 ### Algebraic state machines

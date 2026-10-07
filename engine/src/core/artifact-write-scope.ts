@@ -20,13 +20,13 @@
  *
  * The decision functions perform no I/O, clock, or randomness, and importing
  * this module is side-effect-free: `PHASE_AGENT_MAP` comes from the pure
- * model-profiles leaf (the catalog-derived projections), not from `config.ts`
+ * agent-catalog-projections leaf, not from `config.ts`
  * — whose initialization resolves the Task Graph through filesystem and Git
  * probes. Runtime discovery still lives in config, exactly where this module
  * never reaches.
  */
 
-import { PHASE_AGENT_MAP } from "./model-profiles";
+import { PHASE_AGENT_MAP } from "./agent-catalog-projections";
 import { stripNamespace } from "../utils/strip-namespace";
 import type { LoomAgentName } from "./model-profiles";
 import type { Phase } from "../types";

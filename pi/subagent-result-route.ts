@@ -25,14 +25,14 @@
  */
 
 import { describeCaptureFailure, type CaptureOutcome } from "../engine/src/orchestration/harness-capture-runtime";
-// `isReviewAgent` lives in `config`, NOT in `core/review-output` beside the
-// review-output helpers: it reads the review-agent roster, and `core/review-output`
-// declares itself free of config so its parse/merge rules stay pure. Importing it
+// `isReviewAgent` lives in `core/agent-catalog-projections` beside the
+// review-agent roster it reads, NOT in `core/review-output` beside the
+// review-output helpers, whose parse/merge rules stay free of it. Importing it
 // from the wrong module is a LINK-time ESM failure that takes the whole extension
 // with it — every hook, not just review capture. `engine/tests/pi-imports.test.ts`
 // resolves every engine import in `pi/` against the real exports so the next
 // move of a shared symbol fails a test instead of silently disarming Pi.
-import { isReviewAgent, PHASE_AGENT_MAP, IMPL_AGENTS } from "../engine/src/config";
+import { isReviewAgent, PHASE_AGENT_MAP, IMPL_AGENTS } from "../engine/src/core/agent-catalog-projections";
 import type { TaskExecutionSpawn } from "../engine/src/core/validate-task-execution";
 import type { Phase } from "../engine/src/types";
 

@@ -15,7 +15,7 @@
  */
 
 import { match } from "ts-pattern";
-import { isImplementationAgent } from "../core/model-profiles";
+import { isImplementationAgent } from "../core/agent-catalog-projections";
 import {
   identifyImplementationAttempt,
   type FirstPromptObservation,

@@ -47,7 +47,7 @@ import { join } from "node:path";
 import { canonicalTempDir } from "../fixtures/canonical-temp-dir";
 import { EMISSION_CONSTRAINED_SAMPLING_REQUEST } from "../../src/core/emission-tool";
 import { canonicalRecord, type ContextDigest } from "../../src/core/orchestration-contract/identity";
-import type { PayloadProducerKindName } from "../../src/core/model-profiles";
+import type { PayloadProducerKindName } from "../../src/core/agent-catalog-projections";
 import type { EmissionStartupDecision, ReadinessObservation } from "../../../pi/emission-readiness-gate";
 import {
   boundedEvent,

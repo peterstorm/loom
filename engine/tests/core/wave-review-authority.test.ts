@@ -1,6 +1,6 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { WAVE_REVIEW_AGENTS } from "../../src/core/model-profiles";
+import { WAVE_REVIEW_AGENTS } from "../../src/core/agent-catalog-projections";
 import {
   classifyPersistedWaveBatch,
   taskReviewScope,

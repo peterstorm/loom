@@ -32,10 +32,10 @@ import {
 import { parseSpecCheckOutput } from "../engine/src/core/spec-check";
 import { observeWaveSpecCheckDocuments } from "../engine/src/orchestration/wave-spec-check-documents";
 import { parseSpecArtifactDirectory } from "../engine/src/core/phase-artifact-paths";
-import { agentsOfKind } from "../engine/src/core/model-profiles";
 import type { Phase, TaskGraph } from "../engine/src/types";
 import type { ParsedTaskGraph } from "../engine/src/state-manager";
-import { IMPL_AGENTS, isReviewAgent, type TaskGraphProjectBoundary } from "../engine/src/config";
+import type { TaskGraphProjectBoundary } from "../engine/src/config";
+import { agentsOfKind, IMPL_AGENTS, isReviewAgent } from "../engine/src/core/agent-catalog-projections";
 import {
   parseIsoInstant,
   type ImplementationAttemptAuthority,

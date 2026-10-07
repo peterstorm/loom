@@ -12,14 +12,7 @@
 
 import { match } from "ts-pattern";
 import type { HookResult, Phase, TaskGraph } from "../types";
-import {
-  ARCH_PANEL_AGENTS,
-  isImplementationAgent,
-  isStandaloneReviewAgent,
-  PHASE_AGENT_MAP,
-  REVIEW_AGENTS,
-  REVIEW_PANEL_AGENTS,
-} from "./model-profiles";
+import { ARCH_PANEL_AGENTS, isImplementationAgent, isStandaloneReviewAgent, PHASE_AGENT_MAP, REVIEW_AGENTS, REVIEW_PANEL_AGENTS } from "./agent-catalog-projections";
 import {
   CLARIFY_THRESHOLD,
   ARCH_PANEL_PHASE,

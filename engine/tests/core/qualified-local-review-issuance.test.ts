@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { lowerModelProfile, resolveModelProfile } from "../../src/core/model-profiles";
+import {
+  AGENT_POLICIES,
+  isIssuableProfile,
+  issuedReviewerProfile,
+  LLM_PROFILE_IDS,
+  lowerModelProfile,
+  QUALIFIED_LOCAL_REVIEW_PROGRAMS,
+  resolveModelProfile,
+} from "../../src/core/model-profiles";
 import { parseAgentRequestAuthority, parseStoredAgentRequestAuthority } from "../../src/core/orchestration-contract";
+import { ORCHESTRATION_PROGRAMS } from "../../src/core/orchestration-contract/artifacts";
 import { prepareFreshStandaloneReview, parseStandaloneReviewAuthority } from "../../src/core/standalone-review-preparation";
 import { serializeStandaloneReviewAuthority } from "../../src/core/standalone-review-records";
 
@@ -26,6 +35,40 @@ function request(role: string, program: string, harnessBinding: unknown = bindin
     outputSlot: "transcripts/slot:qualified-local-issuance/attempt-1.raw",
   };
 }
+
+/** Exact bindings for any catalog profile, so a policy verdict is never masked
+ *  by a binding mismatch. */
+function bindingOf(profileId: string) {
+  const profile = resolveModelProfile(profileId);
+  if (!profile.ok) throw new Error(profile.error.message);
+  return { pi: lowerModelProfile(profile.value, "pi"), claude: lowerModelProfile(profile.value, "claude-code") };
+}
+
+describe("issuer and issue-mode parser share one eligibility rule", () => {
+  it("the parser raises model-policy-mismatch exactly where isIssuableProfile refuses", () => {
+    for (const policy of AGENT_POLICIES) for (const program of ORCHESTRATION_PROGRAMS) for (const id of LLM_PROFILE_IDS) {
+      const parsed = parseAgentRequestAuthority({
+        ...request(policy.agent, program, bindingOf(id)), modelProfile: id, requiredSkill: policy.requiredSkill,
+      });
+      const policyMismatch = !parsed.ok && parsed.error.violations.some(({ kind }) => kind === "model-policy-mismatch");
+      expect(policyMismatch, `${policy.agent}/${program}/${id}`).toBe(!isIssuableProfile(policy, program, id));
+    }
+  });
+
+  it("every request the issuer elects on either route is accepted by the parser", () => {
+    for (const policy of AGENT_POLICIES) for (const program of QUALIFIED_LOCAL_REVIEW_PROGRAMS) {
+      for (const route of ["catalog", "qualified-local"] as const) {
+        const profile = issuedReviewerProfile(policy.agent, program, route);
+        if (!profile.ok) throw new Error(profile.error.message);
+        const parsed = parseAgentRequestAuthority({
+          ...request(policy.agent, program, bindingOf(profile.value.id)),
+          modelProfile: profile.value.id, requiredSkill: policy.requiredSkill,
+        });
+        expect(parsed.ok, `${policy.agent}/${program}/${route}`).toBe(true);
+      }
+    }
+  });
+});
 
 describe("issued qualified-local reviewer profile", () => {
   it.each(["wave-gate", "standalone-review"])("mints a complete exact %s reviewer request", (program) => {

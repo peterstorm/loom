@@ -74,7 +74,7 @@ import {
   parseContextDigest,
   type ContextDigest,
 } from "../engine/src/core/orchestration-contract/identity";
-import type { PayloadProducerKindName } from "../engine/src/core/model-profiles";
+import type { PayloadProducerKindName } from "../engine/src/core/agent-catalog-projections";
 
 // ---------------------------------------------------------------------------
 // The launcher↔child readiness protocol contract (AD-4, probe-proven shape)

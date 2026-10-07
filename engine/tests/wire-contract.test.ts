@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentsOfKind } from "../src/core/model-profiles";
+import { agentsOfKind } from "../src/core/agent-catalog-projections";
 import {
   READ_COVERAGE_BULLET_ANCHOR,
   extractReadCoverageBullet,

@@ -12,7 +12,7 @@
  * owns result I/O and delegates only positional reconciliation to this module.
  */
 
-import { REVIEW_SUB_AGENTS } from "../engine/src/core/model-profiles";
+import { REVIEW_SUB_AGENTS } from "../engine/src/core/agent-catalog-projections";
 import { stripNamespace } from "../engine/src/utils/strip-namespace";
 import { type TaskExecutionSpawn } from "../engine/src/core/validate-task-execution";
 import type { ImplementationAttemptAuthority } from "../engine/src/core/implementation-completion";

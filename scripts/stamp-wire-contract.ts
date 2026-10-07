@@ -21,7 +21,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentsOfKind } from "../engine/src/core/model-profiles";
+import { agentsOfKind } from "../engine/src/core/agent-catalog-projections";
 import { renderReviewerWireContract } from "../engine/src/core/reviewer-protocol";
 import {
   READ_COVERAGE_BULLET_ANCHOR,

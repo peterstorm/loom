@@ -25,13 +25,9 @@
 
 import type { HookResult } from "../types";
 import { checkAgentSkillPrompt } from "./agent-skills";
-import {
-  agentRequiresInteractiveTransport,
-  classifyPiSpawnItems,
-  expectedSpawnModel,
-  type LoomAgentName,
-  type PiSpawnItem,
-} from "./model-profiles";
+import { expectedSpawnModel, type LoomAgentName } from "./model-profiles";
+import { agentRequiresInteractiveTransport } from "./agent-catalog-projections";
+import { classifyPiSpawnItems, type PiSpawnItem } from "./pi-spawn-input";
 import { classifyTaskExecutionSpawn, type TaskExecutionSpawn } from "./validate-task-execution";
 import {
   expectedSpawnEmissionCapability,

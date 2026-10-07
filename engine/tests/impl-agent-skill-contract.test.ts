@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkAgentSkillPrompt, parseDeclaredSkills } from "../src/core/agent-skills";
-import { IMPL_AGENTS } from "../src/config";
+import { IMPL_AGENTS } from "../src/core/agent-catalog-projections";
 import { renderImplementationBrief, RULE_DOCUMENTS, type RuleDocument } from "../src/core/implementation-brief";
 import { deriveTaskImplementationDispatch } from "../src/core/task-implementation-dispatch";
 import { taskFixture } from "./fixtures/task-lifecycle";

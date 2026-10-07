@@ -11,7 +11,7 @@ import { captureKey } from "./harness-capture";
 import { canonicalStructuralEquals, parseArtifactDigest, parseOrchestrationRunId } from "./orchestration-contract";
 import { CURRENT_REVIEWER_PROTOCOL } from "./reviewer-contract";
 import { resetWaveGateReviewAuthority } from "./wave-gate-registration";
-import { WAVE_REVIEW_AGENTS } from "./model-profiles";
+import { WAVE_REVIEW_AGENTS } from "./agent-catalog-projections";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
 import { waveGateAuthorityDigest } from "./wave-review-authority";
 

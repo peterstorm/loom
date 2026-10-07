@@ -16,7 +16,7 @@ import {
   type EmissionToolSpec,
   type IssuedEmissionBinding,
 } from "../../src/core/emission-tool";
-import { producerKindsOfAgent, type PayloadProducerKindName } from "../../src/core/model-profiles";
+import { producerKindsOfAgent, type PayloadProducerKindName } from "../../src/core/agent-catalog-projections";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2, REVIEWER_PAYLOAD_SCHEMA_V2 } from "../../src/core/reviewer-contract";
 import { judgeVerdictV1Schema } from "../../src/core/panel-contract";
 import { parseReviewerPayloadV2, parseStandaloneReviewerPayloadV3 } from "../../src/core/reviewer-protocol";

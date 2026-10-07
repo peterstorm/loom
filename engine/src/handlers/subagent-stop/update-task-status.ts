@@ -13,7 +13,8 @@
 import { readFileSync, realpathSync } from "node:fs";
 import type { HookHandler, HookResult } from "../../types";
 import { NEW_TEST_EVIDENCE_NOT_WRITTEN, legacyTestsPassedNote } from "../../types";
-import { IMPL_AGENTS, machinesDir, observeTaskGraphProjectBoundary } from "../../config";
+import { machinesDir, observeTaskGraphProjectBoundary } from "../../config";
+import { IMPL_AGENTS } from "../../core/agent-catalog-projections";
 import { StateManager } from "../../state-manager";
 import { stripNamespace } from "../../utils/strip-namespace";
 import { extractTaskId } from "../../utils/extract-task-id";

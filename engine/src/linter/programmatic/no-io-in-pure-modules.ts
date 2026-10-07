@@ -103,6 +103,10 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   // The orchestration helper's operation table, read by handler-routes.
   "engine/src/handlers/helpers/orchestration-operations.ts",
   "engine/src/core/model-profiles.ts",
+  // The Agent Catalog's derived projections and the Pi spawn-input parser,
+  // split out of model-profiles; both are pure leaves over the catalog.
+  "engine/src/core/agent-catalog-projections.ts",
+  "engine/src/core/pi-spawn-input.ts",
   "engine/src/core/phases.ts",
   "engine/src/core/repository-path.ts",
   "engine/src/core/orchestration-contract/index.ts",

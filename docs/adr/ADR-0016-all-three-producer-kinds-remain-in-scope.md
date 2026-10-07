@@ -36,7 +36,7 @@ Eligibility is the second force. A producer kind cannot be inferred from an Agen
 **Retain `reviewer-payload` (v2 and standalone-successor v3), `judge-verdict` v1, and `refutation-verdict` v1 in scope. Eligibility comes from the Agent Catalog, and each request's authenticated issuance selects exactly one eligible kind/version.**
 
 - **Frozen registry.** `EMISSION_TOOL_SPECS` in `engine/src/core/emission-tool.ts` maps every `PayloadProducerKindName` to its tool (`loom_emit_reviewer_payload`, `loom_emit_judge_verdict`, `loom_emit_refutation_verdict`) and its per-version frozen schema bytes plus engine parser: reviewer v2 → `REVIEWER_PAYLOAD_SCHEMA_V2`/`parseReviewerPayloadV2`, reviewer v3 → `STANDALONE_REVIEWER_SCHEMA_V3`/`parseStandaloneReviewerPayloadV3`, and the verdict v1 schemas → `verdictArgsParser`. The `satisfies Record<PayloadProducerKindName, EmissionToolSpec>` check is exhaustive over the kind union, so a kind without a cell fails to compile.
-- **Catalog-derived eligibility.** `producerKindsOfAgent` in `engine/src/core/model-profiles.ts` is a derived projection of `AGENT_CATALOG`, never a second source. Here is how it maps Agents to kinds:
+- **Catalog-derived eligibility.** `producerKindsOfAgent` in `engine/src/core/agent-catalog-projections.ts` is a derived projection of `AGENT_CATALOG`, never a second source. Here is how it maps Agents to kinds:
   - `reviewer` and `review-verifier` produce `reviewer-payload`.
   - `review-verifier` additionally produces `refutation-verdict`, in that fixed order.
   - Only the `arch-panel` Agent carrying the `panel-judge` profile produces `judge-verdict`.

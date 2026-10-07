@@ -7,17 +7,14 @@ import {
   AGENT_POLICIES,
   LLM_PROFILE_IDS,
   LLM_PROFILES,
-  LOOM_OWNED_AGENTS,
-  assertPanelJudgeProfileUnique,
-  classifyPiSpawnItems,
+  QUALIFIED_LOCAL_REVIEW_PROGRAMS,
+  isIssuableProfile,
   lowerModelProfile,
   issuedReviewerProfile,
   reviewerIssueRouteForParent,
-  panelJudgeProfileCarriers,
   parseAgentFrontmatter,
   parseLlmProfile,
   parseLlmProfileId,
-  parsePiSpawnItems,
   resolveAgentPolicy,
   resolveAgentProfile,
   resolveHarnessBinding,
@@ -29,7 +26,13 @@ import {
   type LlmProfileId,
   type LoomAgentName,
 } from "../../src/core/model-profiles";
-import { IMPL_AGENTS } from "../../src/config";
+import {
+  IMPL_AGENTS,
+  LOOM_OWNED_AGENTS,
+  assertPanelJudgeProfileUnique,
+  panelJudgeProfileCarriers,
+} from "../../src/core/agent-catalog-projections";
+import { classifyPiSpawnItems, parsePiSpawnItems } from "../../src/core/pi-spawn-input";
 
 const EXPECTED_PROFILES = {
   implementation: {
@@ -150,13 +153,55 @@ describe("qualified-local reviewer issuance", () => {
     ]) expect(reviewerIssueRouteForParent({ ...qualified, ...changed })).toBe("catalog");
   });
 
-  it("preserves the catalog for all non-reviewers and the cloud default", () => {
-    expect(issuedReviewerProfile("code-reviewer", "qualified-local")).toMatchObject({
+  it.each(QUALIFIED_LOCAL_REVIEW_PROGRAMS)("preserves the catalog for all non-reviewers and the cloud default in %s", (program) => {
+    expect(issuedReviewerProfile("code-reviewer", program, "qualified-local")).toMatchObject({
       ok: true, value: { id: "qualified-local-review", pi: qualifiedRoute },
     });
-    expect(issuedReviewerProfile("code-reviewer", "catalog")).toEqual(resolveModelProfile("general-review"));
-    expect(issuedReviewerProfile("spec-check-invoker", "qualified-local")).toEqual(resolveModelProfile("spec-check-review"));
-    expect(issuedReviewerProfile("review-verifier-agent", "qualified-local")).toEqual(resolveModelProfile("refutation"));
+    expect(issuedReviewerProfile("code-reviewer", program, "catalog")).toEqual(resolveModelProfile("general-review"));
+    expect(issuedReviewerProfile("spec-check-invoker", program, "qualified-local")).toEqual(resolveModelProfile("spec-check-review"));
+    expect(issuedReviewerProfile("review-verifier-agent", program, "qualified-local")).toEqual(resolveModelProfile("refutation"));
+  });
+
+  it("names exactly the Wave Gate and Standalone Review programs as electing", () => {
+    expect(QUALIFIED_LOCAL_REVIEW_PROGRAMS).toEqual(["wave-gate", "standalone-review"]);
+    expect(Object.isFrozen(QUALIFIED_LOCAL_REVIEW_PROGRAMS)).toBe(true);
+  });
+});
+
+describe("the one profile-eligibility rule", () => {
+  const programs = ["architecture-panel", "refutation-panel", "wave-gate", "standalone-review", "unknown", 7, null];
+
+  it("admits a role's catalog profile in every program, and only qualified-local-review besides", () => {
+    for (const policy of AGENT_POLICIES) for (const program of programs) for (const id of LLM_PROFILE_IDS) {
+      const electsLocal = id === "qualified-local-review" && policy.kind.kind === "reviewer" &&
+        (program === "wave-gate" || program === "standalone-review");
+      expect(isIssuableProfile(policy, program, id), `${policy.agent}/${String(program)}/${id}`)
+        .toBe(id === policy.profile || electsLocal);
+    }
+  });
+
+  it("issuance only ever elects a profile the rule admits", () => {
+    fc.assert(fc.property(
+      fc.constantFrom(...AGENT_POLICIES),
+      fc.constantFrom(...QUALIFIED_LOCAL_REVIEW_PROGRAMS),
+      fc.constantFrom("catalog" as const, "qualified-local" as const),
+      (policy, program, route) => {
+        const issued = issuedReviewerProfile(policy.agent, program, route);
+        expect(issued.ok).toBe(true);
+        if (!issued.ok) return;
+        expect(isIssuableProfile(policy, program, issued.value.id)).toBe(true);
+        // The catalog route never leaves the role's catalog profile.
+        if (route === "catalog") expect(issued.value.id).toBe(policy.profile);
+      },
+    ));
+  });
+
+  it("issuance elects the local profile for every reviewer the rule admits it for", () => {
+    for (const policy of AGENT_POLICIES) for (const program of QUALIFIED_LOCAL_REVIEW_PROGRAMS) {
+      const issued = issuedReviewerProfile(policy.agent, program, "qualified-local");
+      expect(issued.ok && issued.value.id === "qualified-local-review", policy.agent)
+        .toBe(isIssuableProfile(policy, program, "qualified-local-review"));
+    }
   });
 });
 

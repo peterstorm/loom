@@ -27,7 +27,7 @@
 import { isAbsolute, join, relative, sep } from "node:path";
 import { match } from "ts-pattern";
 import type { HookResult } from "../types";
-import { IMPL_AGENTS } from "./model-profiles";
+import { IMPL_AGENTS } from "./agent-catalog-projections";
 import { artifactWriteRoots } from "./artifact-write-scope";
 import { PENDING_BINDING_ESCALATION, type ImplementationBinding } from "./implementation-binding";
 import {

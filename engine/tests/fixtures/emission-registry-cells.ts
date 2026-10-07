@@ -7,7 +7,7 @@
  * change is one edit here.
  */
 import { EMISSION_TOOL_SPECS, type EmissionSchemaVersion, type EmissionToolSpec, type IssuedEmissionBindingOf } from "../../src/core/emission-tool";
-import type { PayloadProducerKindName } from "../../src/core/model-profiles";
+import type { PayloadProducerKindName } from "../../src/core/agent-catalog-projections";
 import { sha256Hex } from "../../src/core/digest";
 import {
   validJudgeArguments,

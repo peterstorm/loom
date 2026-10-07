@@ -20,7 +20,9 @@ import {
 } from "../../src/core/issued-emission-capability";
 import { AGENT_REQUIRED_SKILLS } from "../../src/core/orchestration-contract";
 import { parseContextDigest, type ContextDigest } from "../../src/core/orchestration-contract/identity";
-import type { LoomAgentName, PayloadProducerKindName, PiSpawnItem } from "../../src/core/model-profiles";
+import type { LoomAgentName } from "../../src/core/model-profiles";
+import type { PayloadProducerKindName } from "../../src/core/agent-catalog-projections";
+import type { PiSpawnItem } from "../../src/core/pi-spawn-input";
 
 /** Fixture unwrapping: a refused parse is a fixture bug, thrown loudly. */
 export function fixtureValue<T, E>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error: E }>): T {

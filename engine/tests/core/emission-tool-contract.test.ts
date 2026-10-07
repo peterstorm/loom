@@ -4,7 +4,7 @@ import {
   type EmissionSchemaVersion, type EmissionToolSpec,
 } from "../../src/core/emission-tool";
 import { EMISSION_CONSTRAINED_SAMPLING_REQUEST } from "../../src/core/emission-tool";
-import type { PayloadProducerKindName } from "../../src/core/model-profiles";
+import type { PayloadProducerKindName } from "../../src/core/agent-catalog-projections";
 import { emissionToolDefinition } from "../../../pi/emission-tool";
 import { JUDGE_VERDICT_SCHEMA_V1, JUDGE_VERDICT_SCHEMA_V1_DIGEST } from "../../src/core/panel-contract";
 import { REFUTATION_VERDICT_SCHEMA_V1, REFUTATION_VERDICT_SCHEMA_V1_DIGEST } from "../../src/core/review-panel";

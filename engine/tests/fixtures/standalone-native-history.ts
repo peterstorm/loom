@@ -25,7 +25,7 @@ export async function startNativeLegacyReview(handle: RunDirHandle, issueRoute: 
   const contexts: ContextPacket[] = [];
   const roster = scopePolicy.STANDALONE_REVIEWER_ROLES.map(role => {
     const policy = value(models.resolveAgentPolicy(role));
-    const profile = value(models.issuedReviewerProfile(role, issueRoute));
+    const profile = value(models.issuedReviewerProfile(role, "standalone-review", issueRoute));
     return { slotId: `slot:${role}`, attempts: ([1, 2] as const).map(attempt => {
       const identity = { runId: handle.runId, requestId: standaloneRequests.standaloneRequestId(handle.runId, role, attempt),
         role, attempt, requiredSkill: policy.requiredSkill };

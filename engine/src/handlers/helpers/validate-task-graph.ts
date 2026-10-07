@@ -6,7 +6,8 @@
 
 import { readFileSync } from "node:fs";
 import type { HookHandler } from "../../types";
-import { PHASE_ORDER, KNOWN_AGENTS, REVIEW_SUB_AGENTS } from "../../config";
+import { PHASE_ORDER } from "../../config";
+import { KNOWN_AGENTS, REVIEW_SUB_AGENTS } from "../../core/agent-catalog-projections";
 import {
   attributeFindings,
   claimsOfSeverity,

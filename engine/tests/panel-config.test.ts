@@ -3,26 +3,8 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import fc from "fast-check";
-import {
-  ARCH_PANEL_AGENTS,
-  ARCH_PANEL_PHASE,
-  PANEL_DESIGNERS_DEFAULT,
-  PANEL_DESIGNERS_MIN,
-  PANEL_JUDGES_DEFAULT,
-  PANEL_LENS_COUNT,
-  PHASE_AGENT_MAP,
-  KNOWN_AGENTS,
-  IMPL_AGENTS,
-  UTILITY_AGENTS,
-  REVIEW_SUB_AGENTS,
-  REVIEW_AGENTS,
-  EXECUTE_AGENTS,
-  READ_ONLY_STATE_COMMANDS,
-  panelPhaseOverlap,
-  assertPanelPhaseDisjoint,
-  panelExecuteOverlap,
-  assertPanelExecuteDisjoint,
-} from "../src/config";
+import { ARCH_PANEL_PHASE, PANEL_DESIGNERS_DEFAULT, PANEL_DESIGNERS_MIN, PANEL_JUDGES_DEFAULT, PANEL_LENS_COUNT, UTILITY_AGENTS, EXECUTE_AGENTS, READ_ONLY_STATE_COMMANDS, panelPhaseOverlap, assertPanelPhaseDisjoint, panelExecuteOverlap, assertPanelExecuteDisjoint } from "../src/config";
+import { ARCH_PANEL_AGENTS, PHASE_AGENT_MAP, KNOWN_AGENTS, IMPL_AGENTS, REVIEW_SUB_AGENTS, REVIEW_AGENTS } from "../src/core/agent-catalog-projections";
 import {
   PANEL_BASELINE_LENSES,
   PANEL_LENSES,

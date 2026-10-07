@@ -29,7 +29,7 @@ import {
   type DomainResult,
 } from "../../src/core/orchestration-contract/identity";
 import { sha256Hex } from "../../src/core/digest";
-import type { PayloadProducerKind, PayloadProducerKindName } from "../../src/core/model-profiles";
+import type { PayloadProducerKind, PayloadProducerKindName } from "../../src/core/agent-catalog-projections";
 import { parseStandaloneReviewerPayloadV3 } from "../../src/core/reviewer-protocol";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
 import {

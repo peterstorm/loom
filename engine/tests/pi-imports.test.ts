@@ -228,12 +228,14 @@ describe("pi/ imports resolve against the engine that has to satisfy them", () =
   });
 
   it("keeps isReviewAgent's home honest — the regression this file exists for", () => {
-    // Named explicitly rather than left to the generic sweep: the symbol moved
-    // to `config` ON PURPOSE, so `core/review-output` could keep claiming it is
-    // free of config, and the fix for the broken import must not be to move it
-    // back.
+    // Named explicitly rather than left to the generic sweep: the symbol left
+    // `core/review-output` ON PURPOSE, so that module could keep claiming it is
+    // free of config, and the fix for a broken import must not be to move it
+    // back. Its one home is the pure Agent Catalog projection leaf beside the
+    // set it queries; config no longer re-exports it, so a config import of it
+    // is exactly the link-time failure this file exists to catch.
     // Every Pi module that imports it — the spawn lifecycle and the result
-    // router, since the extension shell was split — imports it from config.
+    // router, since the extension shell was split — imports it from that leaf.
     const importsOf = (file: string): readonly string[] => [
       ...readFileSync(join(PI_DIR, file), "utf-8")
         .matchAll(/import\s*\{[^}]*\bisReviewAgent\b[^}]*\}\s*from\s*["']([^"']+)["']/g),
@@ -241,7 +243,7 @@ describe("pi/ imports resolve against the engine that has to satisfy them", () =
     const importers = PI_FILES.filter((file) => importsOf(file).length > 0);
     expect(importers).toEqual(expect.arrayContaining(["spawn-lifecycle.ts", "subagent-result-route.ts"]));
     for (const file of importers) {
-      expect(importsOf(file), file).toEqual(["../engine/src/config"]);
+      expect(importsOf(file), file).toEqual(["../engine/src/core/agent-catalog-projections"]);
     }
   });
 });

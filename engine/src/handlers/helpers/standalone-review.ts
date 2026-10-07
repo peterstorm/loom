@@ -11,7 +11,7 @@ import {
   realpathSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { isReviewAgent } from "../../config";
+import { isReviewAgent } from "../../core/agent-catalog-projections";
 import type { HookHandler, HookResult } from "../../types";
 import {
   captureStandaloneReviewerBytes,

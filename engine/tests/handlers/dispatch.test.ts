@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { categorize } from "../../src/handlers/subagent-stop/dispatch";
-import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS, REVIEW_SUB_AGENTS } from "../../src/config";
+import { PHASE_AGENT_MAP, IMPL_AGENTS, REVIEW_AGENTS, REVIEW_SUB_AGENTS } from "../../src/core/agent-catalog-projections";
 
 describe("categorize (pure)", () => {
   it("categorizes phase agents", () => {

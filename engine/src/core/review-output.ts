@@ -70,7 +70,7 @@ import { parseReviewerProtocolDescriptor, REVIEWER_PAYLOAD_LIMITS, type Reviewer
 import { acceptedAgentResult, boundedThrownCause, canonicalStructuralEquals, type AgentRequestAuthority, type DomainResult, type OrchestrationRunId, type SpawnRequest } from "./orchestration-contract";
 import { readWaveReviewContext } from "./wave-review-authority";
 import { readExactDataRecord } from "./orchestration-contract/bytes";
-import { isStandaloneReviewAgent } from "./model-profiles";
+import { isStandaloneReviewAgent } from "./agent-catalog-projections";
 import { scopeCovers } from "./path-coverage";
 
 export type ReviewerSubjectBinding =

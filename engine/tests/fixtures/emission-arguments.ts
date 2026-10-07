@@ -1,4 +1,4 @@
-import type { PayloadProducerKindName } from "../../src/core/model-profiles";
+import type { PayloadProducerKindName } from "../../src/core/agent-catalog-projections";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2, reviewerPayloadV2Schema } from "../../src/core/reviewer-contract";
 import { standaloneReviewerPayloadV3Schema } from "../../src/core/standalone-lineage-contract";
 

@@ -13,42 +13,22 @@ import { PHASES, type Phase } from "./types";
 // restated here. Its pure-core dependencies add no cycle back to config.
 import { PANEL_BASELINE_LENSES, PANEL_LENSES } from "./core/panel-contract";
 // The Agent Catalog is the single identity source for every Loom-owned agent
-// (kind, profile, required Skill). model-profiles is a pure leaf module — this
-// import adds no cycle. Every Loom-owned agent set and phase map below is a
-// DERIVED projection of the catalog; harness compatibility utilities are not.
+// (kind, profile, required Skill). Its derived agent sets and phase map live in
+// the pure agent-catalog-projections leaf — this import adds no cycle — and
+// every consumer, shell or core, imports them from there: config does not
+// re-export them. config owns only the harness-level sets below and the
+// load-time disjointness guards over the catalog's sets.
 import {
   ARCH_PANEL_AGENTS,
   frozenSet,
   IMPL_AGENTS,
-  isReviewAgent,
-  KNOWN_AGENTS,
   PHASE_AGENT_MAP,
   REVIEW_AGENTS,
   REVIEW_PANEL_AGENTS,
-  REVIEW_SUB_AGENTS,
-  WAVE_REVIEW_AGENTS,
-} from "./core/model-profiles";
+} from "./core/agent-catalog-projections";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "./core/verification-manifest";
 import { projectRootForStateFile } from "./core/phase-artifact-paths";
 import { observeGitProbe } from "./utils/git-probe";
-
-// The catalog-derived agent-policy projections live in the PURE model-profiles
-// leaf (see its catalog-derived section), so the core modules that need them
-// can import the leaf without dragging in config's initialization — which
-// resolves the Task Graph through filesystem and Git probes and runs three
-// load-time assertions. config re-exports every moved name for the shell-side
-// consumers whose import sites predate the move.
-export {
-  ARCH_PANEL_AGENTS,
-  IMPL_AGENTS,
-  isReviewAgent,
-  KNOWN_AGENTS,
-  PHASE_AGENT_MAP,
-  REVIEW_AGENTS,
-  REVIEW_PANEL_AGENTS,
-  REVIEW_SUB_AGENTS,
-  WAVE_REVIEW_AGENTS,
-};
 
 /** Markers above this trigger mandatory clarify phase */
 export const CLARIFY_THRESHOLD = 3;
@@ -179,7 +159,7 @@ export const PANEL_JUDGES_DEFAULT = 3;
 
 /** Utility agents allowed through phase validation — HARNESS-level names
  *  (Claude Code built-ins), not catalog identities, so they stay here rather
- *  than in the catalog-derived section of the model-profiles leaf. */
+ *  than in the catalog-derived agent-catalog-projections leaf. */
 export const UTILITY_AGENTS: ReadonlySet<string> = frozenSet(["Explore", "Plan", "haiku"]);
 
 /** Review-panel agents that would be MISROUTED by colliding with a phase,

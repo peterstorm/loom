@@ -1,23 +1,19 @@
 import { describe, expect, it } from "vitest";
+import { AGENT_CATALOG, AGENT_POLICIES, type AgentKind } from "../../src/core/model-profiles";
 import {
-  AGENT_CATALOG,
-  AGENT_POLICIES,
   agentsOfKind,
-  isImplementationAgent,
-  isStandaloneReviewAgent,
-  WAVE_REVIEW_AGENTS,
-  type AgentKind,
-} from "../../src/core/model-profiles";
-import { AGENT_REQUIRED_SKILLS } from "../../src/core/orchestration-contract";
-import {
   ARCH_PANEL_AGENTS,
   IMPL_AGENTS,
+  isImplementationAgent,
+  isStandaloneReviewAgent,
   PHASE_AGENT_MAP,
   REVIEW_AGENTS,
   REVIEW_PANEL_AGENTS,
   REVIEW_SUB_AGENTS,
-  WAVE_REVIEW_AGENTS as CONFIG_WAVE_REVIEW_AGENTS,
-} from "../../src/config";
+  WAVE_REVIEW_AGENTS,
+} from "../../src/core/agent-catalog-projections";
+import * as config from "../../src/config";
+import { AGENT_REQUIRED_SKILLS } from "../../src/core/orchestration-contract";
 
 /**
  * The Agent Catalog is the single identity source; everything an agent's name
@@ -91,8 +87,15 @@ describe("Agent Catalog projections match the pre-catalog memberships", () => {
 });
 
 describe("the wave review roster is a selection from the catalog", () => {
-  it("config and the wave-gate machine expose the SAME roster object", () => {
-    expect(CONFIG_WAVE_REVIEW_AGENTS).toBe(WAVE_REVIEW_AGENTS);
+  // One import path per symbol: the projections have a single home, so no
+  // core module can reach them through config's impure initialization and no
+  // second roster object can exist. config re-exporting any of them again would
+  // reopen both doors.
+  it("config publishes none of the catalog projections", () => {
+    for (const name of [
+      "ARCH_PANEL_AGENTS", "IMPL_AGENTS", "isReviewAgent", "KNOWN_AGENTS", "PHASE_AGENT_MAP",
+      "REVIEW_AGENTS", "REVIEW_PANEL_AGENTS", "REVIEW_SUB_AGENTS", "WAVE_REVIEW_AGENTS", "frozenSet",
+    ]) expect(Object.keys(config), name).not.toContain(name);
   });
 
   it("keeps its index-binding order", () => {

@@ -11,12 +11,8 @@ import {
   MAX_PI_ORCHESTRATION_BATCH_SIZE,
   type SpawnAdmissionPorts,
 } from "../../src/core/spawn-admission";
-import {
-  agentRequiresInteractiveTransport,
-  DESKTOP_VLLM_ROUTE,
-  LOOM_OWNED_AGENTS,
-  type LoomAgentName,
-} from "../../src/core/model-profiles";
+import { DESKTOP_VLLM_ROUTE, type LoomAgentName } from "../../src/core/model-profiles";
+import { agentRequiresInteractiveTransport, LOOM_OWNED_AGENTS } from "../../src/core/agent-catalog-projections";
 import { AGENT_REQUIRED_SKILLS } from "../../src/core/orchestration-contract";
 import {
   CONTEXT_DIGEST,

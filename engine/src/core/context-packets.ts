@@ -17,7 +17,7 @@
 import { match } from "ts-pattern";
 import { STANDALONE_REVIEWER_PROTOCOL_V3, STANDALONE_REVIEWER_FIXED_SECTIONS_V3, parseStandaloneReviewerProtocolV3 } from "./standalone-lineage-contract";
 import { sha256Bytes, sha256Hex } from "./digest";
-import { isStandaloneReviewAgent } from "./model-profiles";
+import { isStandaloneReviewAgent } from "./agent-catalog-projections";
 import { isRecord } from "./plain-record";
 import { readExactDataRecord } from "./orchestration-contract/bytes";
 import {

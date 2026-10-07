@@ -4,7 +4,7 @@
  * kernel and exports its internals so sibling volumes can import them.
  * Pure module: no I/O, no clock, no randomness.
  */
-import { lowerModelProfile, parseAgentName, parseLlmProfileId, resolveAgentPolicy, resolveModelProfile, type ClaudeCodeBinding, type LlmProfile, type LlmProfileId, type LoomAgentName, type PiBinding } from '../model-profiles';
+import { isIssuableProfile, lowerModelProfile, parseAgentName, parseLlmProfileId, resolveAgentPolicy, resolveModelProfile, type ClaudeCodeBinding, type LlmProfile, type LlmProfileId, type LoomAgentName, type PiBinding } from '../model-profiles';
 import { canonicalRecord, describeUnknown, failure, parseArtifactByteLength, parseArtifactDigest, parseContextDigest, parseOrchestrationRunId, parseRequestId, parseSlotId, success, type ArtifactByteLength, type ArtifactDigest, type ContextDigest, type DomainResult, type NonEmpty, type OrchestrationRunId, type RequestId, type SemanticAttempt, type SlotId } from './identity';
 import { includes, readDenseDataArray, readExactDataRecord, type DataBoundaryError, type DataBoundaryReason } from './bytes';
 import { AGENT_REQUIRED_SKILLS, ORCHESTRATION_PROGRAMS, parseFixedArtifactSlot, type ExactHarnessBinding, type FixedArtifactSlot, type OrchestrationProgram } from './artifacts';
@@ -164,9 +164,10 @@ export const AGENT_REQUEST_KEYS = [
  * How a request authority reached this parser.
  *
  * "issue"  — the authority is being CONSTRUCTED now from the live catalog.
- *            Only reviewer roles in Wave/standalone review may elect the
- *            catalog's explicit qualified-local alternative; all other roles
- *            must use their assigned default profile.
+ *            The profile must satisfy the catalog's one eligibility rule
+ *            (`isIssuableProfile`): only reviewer roles in Wave/standalone
+ *            review may elect the qualified-local alternative; all other
+ *            roles must use their assigned default profile.
  * "stored" — the authority is being READ BACK from an immutable run artifact,
  *            event, receipt, or publication record. It is HISTORY: "issued
  *            under profile X, ran on model Y." Re-checking history against
@@ -238,10 +239,7 @@ function parseAgentRequestAuthorityInMode(
       ));
     } else {
       policyResolved = true;
-      if (profileId.ok && policy.value.profile !== profileId.value && !(
-        profileId.value === "qualified-local-review" && policy.value.kind.kind === "reviewer" &&
-        (fields.program === "wave-gate" || fields.program === "standalone-review")
-      )) {
+      if (profileId.ok && !isIssuableProfile(policy.value, fields.program, profileId.value)) {
         violations.push(violation(
           "model-policy-mismatch",
           "modelProfile",

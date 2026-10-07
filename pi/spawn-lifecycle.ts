@@ -32,7 +32,8 @@ import {
 } from "../engine/src/handlers/task-execution";
 import { isRecord } from "../engine/src/core/plain-record";
 import { hasStandaloneReviewContext } from "../engine/src/core/review-output";
-import { isReviewAgent, subagentDir } from "../engine/src/config";
+import { subagentDir } from "../engine/src/config";
+import { isReviewAgent } from "../engine/src/core/agent-catalog-projections";
 import { StateManager } from "../engine/src/state-manager";
 import {
   anyActiveSubagent,

@@ -20,7 +20,7 @@
 
 import { canonicalRecord, canonicalStructuralEquals } from "./orchestration-contract/identity";
 import type { EmissionSchemaVersion } from "./emission-tool";
-import type { PayloadProducerKind } from "./model-profiles";
+import type { PayloadProducerKind } from "./agent-catalog-projections";
 
 /**
  * One complete, request-bound emission-tool call as the harness adapters

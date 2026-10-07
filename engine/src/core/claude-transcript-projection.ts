@@ -22,7 +22,7 @@
 import { emissionToolFamily, type EmissionSchemaVersion } from "./emission-tool";
 import type { FinalPayloadCandidate } from "./harness-capture";
 import type { EmissionCallFrame } from "./emission-observation";
-import type { PayloadProducerKindName } from "./model-profiles";
+import type { PayloadProducerKindName } from "./agent-catalog-projections";
 
 type Block = Readonly<Record<string, unknown>>;
 

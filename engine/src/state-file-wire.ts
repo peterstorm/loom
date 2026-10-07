@@ -103,7 +103,8 @@ import {
   type FrozenVerificationManifest,
 } from "./core/verification-manifest";
 import { parseReviewerProtocolDescriptor } from "./core/reviewer-contract";
-import { KNOWN_AGENTS, PHASE_ORDER, REVIEW_SUB_AGENTS } from "./config";
+import { PHASE_ORDER } from "./config";
+import { KNOWN_AGENTS, REVIEW_SUB_AGENTS } from "./core/agent-catalog-projections";
 import { isRecord } from "./core/plain-record";
 import type { LegacyWaveGateCompatibilityAuthority } from "./core/legacy-archive";
 

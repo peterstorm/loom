@@ -11,7 +11,7 @@ import type { RegisteredWaveGateProgram } from "../../../src/core/wave-gate-prog
 import type { TaskGraph, WaveReviewEpochAuthority } from "../../../src/types";
 import { parseTaskGraph, StateManager } from "../../../src/state-manager";
 import { taskFixture } from "../../fixtures/task-lifecycle";
-import { WAVE_REVIEW_AGENTS } from "../../../src/core/model-profiles";
+import { WAVE_REVIEW_AGENTS } from "../../../src/core/agent-catalog-projections";
 import { CURRENT_REVIEWER_PROTOCOL } from "../../../src/core/reviewer-contract";
 import {
   decideWaveReviewEpochReplay,

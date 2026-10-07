@@ -55,7 +55,7 @@ import {
   parseContextDigest,
   type ContextDigest,
 } from "../../src/core/orchestration-contract/identity";
-import type { PayloadProducerKindName } from "../../src/core/model-profiles";
+import type { PayloadProducerKindName } from "../../src/core/agent-catalog-projections";
 
 // ---------------------------------------------------------------------------
 // Shared unknown-value helpers (the one confined projection of untrusted data)

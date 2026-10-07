@@ -32,14 +32,9 @@ import {
   type SpawnEmissionAdmission,
   type SpawnEmissionRefusal,
 } from "../../src/core/issued-emission-capability";
-import {
-  DESKTOP_VLLM_ROUTE,
-  LOOM_OWNED_AGENTS,
-  lowerModelProfile,
-  resolveModelProfile,
-  type LoomAgentName,
-  type PiSpawnItem,
-} from "../../src/core/model-profiles";
+import { DESKTOP_VLLM_ROUTE, lowerModelProfile, resolveModelProfile, type LoomAgentName } from "../../src/core/model-profiles";
+import { LOOM_OWNED_AGENTS } from "../../src/core/agent-catalog-projections";
+import type { PiSpawnItem } from "../../src/core/pi-spawn-input";
 import {
   canonicalStructuralEquals,
   parseRequestId,

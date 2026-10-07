@@ -12,7 +12,7 @@ import { observeTaskGraphProjectBoundary, TASK_GRAPH_PATH } from '../../../confi
 import { StateManager } from '../../../state-manager';
 import { commitWaveGateCompletion, deriveWaveReadiness } from '../../../core/wave-gate-machine';
 import { deriveWaveStartReadiness } from '../../../core/wave-gate-checks';
-import { WAVE_REVIEW_AGENTS } from '../../../core/model-profiles';
+import { WAVE_REVIEW_AGENTS } from '../../../core/agent-catalog-projections';
 import type { RegisteredWaveGateProgram } from '../../../core/wave-gate-program';
 import { inspectFilePresence, loadPlanModelsSource } from '../complete-wave-gate';
 import { runFullTierWaveLint } from '../lint-wave-gate';

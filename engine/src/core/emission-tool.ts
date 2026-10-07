@@ -33,7 +33,7 @@ import {
   type DomainResult,
   type RequestId,
 } from "./orchestration-contract/identity";
-import type { PayloadProducerKind, PayloadProducerKindName } from "./model-profiles";
+import type { PayloadProducerKind, PayloadProducerKindName } from "./agent-catalog-projections";
 
 /** FR-009 vocabulary: the recorded source of every ingested payload. */
 export type PayloadSource = "emission-tool" | "extraction";

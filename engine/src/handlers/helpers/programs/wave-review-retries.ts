@@ -10,7 +10,7 @@ import { captureKey } from '../../../core/harness-capture';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import type { StateManager } from '../../../state-manager';
 import type { IssuedWaveReviewerProtocol } from '../../../core/review-output';
-import { WAVE_REVIEW_AGENTS } from '../../../core/model-profiles';
+import { WAVE_REVIEW_AGENTS } from '../../../core/agent-catalog-projections';
 import { renderCurrentWaveRetryTask, specCheckRetryDiagnostic, waveRetryDiagnostic } from '../../../core/reviewer-retry';
 import {
   deriveWaveAttemptTwoAuthority,

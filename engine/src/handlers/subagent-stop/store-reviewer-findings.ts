@@ -26,7 +26,7 @@ import {
   reviewResolutionLog,
   type ReviewResolution,
 } from "../../core/review-output";
-import { isReviewAgent } from "../../config";
+import { isReviewAgent } from "../../core/agent-catalog-projections";
 import { StateManager } from "../../state-manager";
 import { extractTaskId } from "../../utils/extract-task-id";
 import { readTranscriptWithRetry } from "../../utils/read-transcript-with-retry";

@@ -21,7 +21,7 @@ import { buildFindingBrief } from "./review-panel";
 import { parseWaveRetryDiagnosticSection } from "./reviewer-retry";
 import { settleSpecCheck } from "./spec-check";
 import { deriveWaveAdvisoryDecisionRequest } from "./wave-gate-preparation";
-import { WAVE_REVIEW_AGENTS } from "./model-profiles";
+import { WAVE_REVIEW_AGENTS } from "./agent-catalog-projections";
 import type { RegisteredWaveGateProgram } from "./wave-gate-program";
 import { taskReviewScope, waveSpecCheckDocumentsMatch, type WaveReviewContextAuthority } from "./wave-review-authority";
 

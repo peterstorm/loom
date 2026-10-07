@@ -27,7 +27,7 @@ import { captureKey } from "../../../src/core/harness-capture";
 import { observeEmissionCalls } from "../../../src/core/emission-observation";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2, type ReviewerDraftV2 } from "../../../src/core/reviewer-contract";
 import { type GateDeps } from "../../../src/core/wave-gate-checks";
-import { WAVE_REVIEW_AGENTS } from "../../../src/core/model-profiles";
+import { WAVE_REVIEW_AGENTS } from "../../../src/core/agent-catalog-projections";
 import { evaluateTaskProof } from "../../../src/core/proof-obligations";
 import { acceptedWaveCompletionSuite } from "../../fixtures/accepted-wave-completion-suite";
 import { parseAgentRequestAuthority, parseArtifactDigest, type AgentRequestAuthority } from "../../../src/core/orchestration-contract";

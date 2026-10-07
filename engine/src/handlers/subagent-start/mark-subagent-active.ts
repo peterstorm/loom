@@ -18,7 +18,7 @@
 import { mkdirSync } from "node:fs";
 import { blockResult, type HookHandler } from "../../types";
 import { machinesDir, pathExistsFailClosed, subagentDir, taskGraphPath } from "../../config";
-import { isImplementationAgent } from "../../core/model-profiles";
+import { isImplementationAgent } from "../../core/agent-catalog-projections";
 import { stripNamespace } from "../../utils/strip-namespace";
 import {
   bindMachineAgent,

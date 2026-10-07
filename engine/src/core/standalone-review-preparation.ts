@@ -190,7 +190,7 @@ export function prepareFreshStandaloneReview(
       authorityErrors.push(`${role}: policy resolution failed: ${policy.error.message}`);
       return null;
     }
-    const profile = issuedReviewerProfile(role, input.reviewerIssueRoute ?? "catalog");
+    const profile = issuedReviewerProfile(role, "standalone-review", input.reviewerIssueRoute ?? "catalog");
     if (!profile.ok) {
       authorityErrors.push(`${role}: model profile resolution failed: ${profile.error.message}`);
       return null;

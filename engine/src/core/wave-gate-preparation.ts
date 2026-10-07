@@ -11,6 +11,7 @@
 
 import type { Task, WaveGateNextAction } from "../types";
 import { sha256Bytes, sha256Hex } from "./digest";
+import { lowerModelProfile, resolveAgentProfile, type LoomAgentName } from "./model-profiles";
 import {
   awaitUserAction,
   canonicalRecord,
@@ -108,10 +109,17 @@ export type WaveRefutationAuthorityClaims = Readonly<{
   verifierSlots?: readonly AgentRosterSlot[];
 }>;
 
+/** The Refutation Panel verifier role. Its model profile and both harness
+ *  bindings are resolved through the catalog, never spelled here, so a catalog
+ *  change re-routes Wave verifiers exactly as it re-routes every other role. */
+const WAVE_REFUTATION_VERIFIER_ROLE = "review-verifier-agent" satisfies LoomAgentName;
+
 function deriveWaveRefutationVerifierSlots(plan: WaveRefutationPlan): DomainResult<NonEmpty<AgentRosterSlot>, WavePreparationError> {
+  const profile = resolveAgentProfile(WAVE_REFUTATION_VERIFIER_ROLE);
+  if (!profile.ok) return preparationFailure(profile.error.message);
   const panelBindings = canonicalRecord({
-    pi: canonicalRecord({ harness: "pi" as const, provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" as const }),
-    claude: canonicalRecord({ harness: "claude-code" as const, model: "opus" as const }),
+    pi: lowerModelProfile(profile.value, "pi"),
+    claude: lowerModelProfile(profile.value, "claude-code"),
   });
   const slots: AgentRosterSlot[] = [];
   const findingIds = [plan.findings[0].id, ...plan.findings.slice(1).map(({ id }) => id)] as const;
@@ -127,9 +135,9 @@ function deriveWaveRefutationVerifierSlots(plan: WaveRefutationPlan): DomainResu
         requestId,
         slotId: binding.value.slotId,
         program: "refutation-panel",
-        role: "review-verifier-agent",
+        role: WAVE_REFUTATION_VERIFIER_ROLE,
         attempt,
-        modelProfile: "refutation",
+        modelProfile: profile.value.id,
         harnessBinding: panelBindings,
         requiredSkill: null,
         contextDigest: contextDigest.value,

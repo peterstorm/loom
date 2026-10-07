@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { REVIEW_SUB_AGENTS, WAVE_REVIEW_AGENTS, isReviewAgent } from "../src/config";
+import { REVIEW_SUB_AGENTS, WAVE_REVIEW_AGENTS, isReviewAgent } from "../src/core/agent-catalog-projections";
 import { carriedOverCount, resolveReviewFindings, resolveTaskReviewFindings } from "../src/core/review-output";
 import type { ReviewRun } from "../src/types";
 import { buildContextPacket, buildReviewerContextPacket, encodeByteSection, type ContextPacket } from "../src/core/context-packets";

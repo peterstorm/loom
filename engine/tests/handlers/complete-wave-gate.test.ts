@@ -83,7 +83,8 @@ import {
   prepareWaveRefutationPanel,
   waveAdvisoryDecisionActionRequest,
 } from "../../src/core/wave-gate-preparation";
-import { WAVE_REVIEW_AGENTS } from "../../src/core/model-profiles";
+import { WAVE_REVIEW_AGENTS } from "../../src/core/agent-catalog-projections";
+import { lowerModelProfile, resolveAgentPolicy, resolveAgentProfile } from "../../src/core/model-profiles";
 import {
   blockedAction,
   doneAction,
@@ -2249,6 +2250,25 @@ describe("authoritative Wave refutation, panel, and advisory contracts", () => {
     expect(panel.authority.findings).toEqual(plan.findings);
     expect(panel.authority.lenses).toEqual(plan.lenses);
     expect(panel.authority.verifierRoster.orderedSlots).toHaveLength(plan.lenses.length);
+    // Verifier routing comes from the catalog: the verifier role's own profile
+    // and its exact lowering, never a binding spelled in the Wave Gate core.
+    const verifierPolicy = authorityValue(resolveAgentPolicy("review-verifier-agent"));
+    const verifierProfile = authorityValue(resolveAgentProfile("review-verifier-agent"));
+    for (const request of panel.authority.verifierRoster.orderedSlots.flatMap(({ attempts }) => attempts)) {
+      expect(request.role).toBe("review-verifier-agent");
+      expect(request.modelProfile).toBe(verifierPolicy.profile);
+      expect(request.harnessBinding).toEqual({
+        pi: lowerModelProfile(verifierProfile, "pi"),
+        claude: lowerModelProfile(verifierProfile, "claude-code"),
+      });
+      // Golden bytes: the serialized authority is unchanged by resolving the
+      // binding through the catalog instead of a literal.
+      expect(JSON.stringify(request.harnessBinding)).toBe(
+        '{"pi":{"harness":"pi","provider":"openai-codex","model":"gpt-5.6-sol","thinking":"high"},' +
+        '"claude":{"harness":"claude-code","model":"opus"}}',
+      );
+      expect(request.modelProfile).toBe("refutation");
+    }
     const claimedReplay = authorityValue(prepareWaveRefutationPanel(snapshot, {
       verifierSlots: panel.authority.verifierRoster.orderedSlots,
     }));

@@ -11,7 +11,8 @@ import {
 import { dirname } from "node:path";
 import type { HookHandler, Task } from "../../types";
 import { StateManager } from "../../state-manager";
-import { taskGraphPath, WAVE_REVIEW_AGENTS } from "../../config";
+import { taskGraphPath } from "../../config";
+import { WAVE_REVIEW_AGENTS } from "../../core/agent-catalog-projections";
 import {
   createReviewPacket,
   parseBaseSha,

@@ -12,7 +12,7 @@
  * discovered by an applier after the child has run.
  */
 
-import { IMPL_AGENTS, REVIEW_SUB_AGENTS } from "../engine/src/core/model-profiles";
+import { IMPL_AGENTS, REVIEW_SUB_AGENTS } from "../engine/src/core/agent-catalog-projections";
 import { waveSpecCheckDocumentsMatch } from "../engine/src/core/wave-review-authority";
 import type { ImplementationAttemptAuthority } from "../engine/src/core/implementation-completion";
 import type {
