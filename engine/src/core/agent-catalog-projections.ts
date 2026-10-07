@@ -20,6 +20,7 @@
  */
 
 import type { Phase } from "./phases";
+import { frozenSet } from "./frozen";
 import { AGENT_CATALOG, AGENT_POLICIES, type AgentKind, type AgentPolicy, type LoomAgentName } from "./model-profiles";
 
 /** Does this catalog Agent require same-turn user interaction in Pi? */
@@ -162,22 +163,6 @@ export const LOOM_OWNED_AGENTS: readonly LoomAgentName[] = Object.freeze(
 // Catalog-derived agent sets and the phase map — what every harness gate and
 // validator consumes. Shell and core consumers alike import them from here.
 // ---------------------------------------------------------------------------
-
-/** A read-only Set that blocks ordinary runtime mutator calls. `Object.freeze`
- *  alone does NOT stop `set.add(...)`, so the instance's `add`/`delete`/`clear`
- *  methods are shadowed with throwing functions before the object shell is
- *  frozen. This protects normal consumers; it does not claim to defeat exotic
- *  prototype calls such as `Set.prototype.add.call(set, value)`. */
-export function frozenSet<T>(values: Iterable<T>): ReadonlySet<T> {
-  const s = new Set(values);
-  const immutable = (): never => {
-    throw new Error("loom model-policy invariant violated: this Set is immutable");
-  };
-  s.add = immutable as typeof s.add;
-  s.delete = immutable as typeof s.delete;
-  s.clear = immutable as typeof s.clear;
-  return Object.freeze(s);
-}
 
 /** Phase agents → their phase. DERIVED from the Agent Catalog (kind `phase`).
  *  The catalog's AgentKind is a union, not a record with a `role` beside a

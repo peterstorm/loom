@@ -77,6 +77,9 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/emission-tool.ts",
   "engine/src/core/emission-observation.ts",
   "engine/src/core/harness-capture.ts",
+  // The one parse and walk of a Claude transcript into final-payload
+  // candidates, emission frames and tool outputs.
+  "engine/src/core/claude-transcript-projection.ts",
   "engine/src/core/emission-ingestion.ts",
   "engine/src/core/legacy-archive.ts",
   "engine/src/core/legacy-panel-decisions.ts",

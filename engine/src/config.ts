@@ -20,12 +20,12 @@ import { PANEL_BASELINE_LENSES, PANEL_LENSES } from "./core/panel-contract";
 // load-time disjointness guards over the catalog's sets.
 import {
   ARCH_PANEL_AGENTS,
-  frozenSet,
   IMPL_AGENTS,
   PHASE_AGENT_MAP,
   REVIEW_AGENTS,
   REVIEW_PANEL_AGENTS,
 } from "./core/agent-catalog-projections";
+import { frozenSet } from "./core/frozen";
 import { VERIFICATION_MANIFEST_SOURCE_PATH } from "./core/verification-manifest";
 import { projectRootForStateFile } from "./core/phase-artifact-paths";
 import { observeGitProbe } from "./utils/git-probe";

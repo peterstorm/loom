@@ -18,7 +18,7 @@
 
 function denyMutation(operation: string): () => never {
   return () => {
-    throw new TypeError(`${operation} is not available on a frozen set`);
+    throw new TypeError(`${operation} is not available: this Set is immutable`);
   };
 }
 
