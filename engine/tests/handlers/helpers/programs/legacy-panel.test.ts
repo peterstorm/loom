@@ -2,10 +2,13 @@
  * The legacy panel program's functional core (core/legacy-panel-decisions), at
  * its interface: registration, the issuance join, record parsing,
  * verdict-source selection, settlement, and the deterministic operation
- * reducer — all over plain data, no Run Directory. The shell adapters in
- * handlers/helpers/programs/legacy-panel (`resolvePanelAttemptVerdictSource`,
- * `settlePanelAttemptSubmission`, `panelOperationEvidence`) are exercised
- * end-to-end by tests/handlers/helpers/orchestration.test.ts.
+ * reducer — all over plain data, no Run Directory. The shell in
+ * handlers/helpers/programs/legacy-panel is pinned over a real Run Directory
+ * at its entry points (`driveRegisteredPanel`, `submitRegisteredPanelAttempt`,
+ * `resumeRegisteredPanel`) by legacy-panel-driver.test.ts, and its adapters
+ * (`resolvePanelAttemptVerdictSource`, `settlePanelAttemptSubmission`,
+ * `panelOperationEvidence`) end-to-end by
+ * tests/handlers/helpers/orchestration.test.ts.
  */
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
@@ -16,7 +19,6 @@ import {
   executeDeterministicPanelOperation,
   joinPanelAttemptIssuance,
   logicalPanelRequestId,
-  panelVerdictEmissionPort,
   parsePanelVerdictSourceRecordBytes,
   parseRegisteredPanelProgram,
   selectPanelAttemptVerdictSource,
@@ -71,7 +73,7 @@ function refutationEmission(requestId = VERIFIER, kind: "refutation-verdict" | "
       arguments: verdictPayload("refuted"),
     }),
   })]);
-  return { binding: binding.value, observation, port: panelVerdictEmissionPort };
+  return { binding: binding.value, observation };
 }
 
 function joined(attempt: PanelAttempt) {

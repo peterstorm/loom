@@ -139,13 +139,7 @@ describe("explicit extraction-only routes retain final-message instructions (FR-
     const verdictKinds = ["judge-verdict", "refutation-verdict"] as const;
     for (const kind of verdictKinds) {
       const binding = mustMint({ kind, version: "v1" });
-      const emissionRoute: PanelVerdictInstructionRoute = Object.freeze({
-        kind: "emission" as const,
-        binding: {
-          requestId: binding.requestId, kind: binding.kind, version: binding.version,
-          toolName: binding.toolName, schemaDigest: binding.schemaDigest,
-        },
-      });
+      const emissionRoute: PanelVerdictInstructionRoute = Object.freeze({ kind: "emission" as const, binding });
       expect(renderPanelVerdictInstructions(emissionRoute, "canonical refutation verdict")).toBe(
         reviewerEmissionToolContract(binding.toolName),
       );

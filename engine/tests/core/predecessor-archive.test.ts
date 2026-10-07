@@ -7,6 +7,7 @@ import {
   publishedPacketReference, serializePublishedPacketReference, verifyPredecessorArchiveBytes,
   type PredecessorArchiveRecord, type PredecessorArchiveRefusal,
 } from "../../src/core/predecessor-archive";
+import { refusal, value } from "../fixtures/parse-result";
 
 const BOUNDS = { expandedBytes: 16_777_216, encodedBytes: 16_777_216 };
 const bytesOf = (text: string) => new Uint8Array(Buffer.from(text, "utf8"));
@@ -14,16 +15,9 @@ const gzipRecord = (bytes: Uint8Array) => ({ encoding: "gzip-base64", contentBas
   byteLength: bytes.byteLength, digest: sha256Bytes(bytes) });
 const referenceRecord = (bytes: Uint8Array, path = "/runs/source/contexts/a.json", purpose = "v1-v2") =>
   ({ encoding: "published-packet-reference", byteLength: bytes.byteLength, digest: sha256Bytes(bytes), path, purpose });
-const parsed = (raw: unknown, bounds = BOUNDS): PredecessorArchiveRecord => {
-  const result = parsePredecessorArchiveRecord(raw, bounds);
-  if (!result.ok) throw Error(result.error.message);
-  return result.value;
-};
-const refusal = (raw: unknown, bounds = BOUNDS): PredecessorArchiveRefusal["kind"] => {
-  const result = parsePredecessorArchiveRecord(raw, bounds);
-  if (result.ok) throw Error("expected a refusal");
-  return result.error.kind;
-};
+const parsed = (raw: unknown, bounds = BOUNDS): PredecessorArchiveRecord => value(parsePredecessorArchiveRecord(raw, bounds));
+const refusalKind = (raw: unknown, bounds = BOUNDS): PredecessorArchiveRefusal["kind"] =>
+  refusal(parsePredecessorArchiveRecord(raw, bounds)).kind;
 const packet = bytesOf('{"schemaVersion":2,"requestId":"request:a"}');
 
 describe("predecessor archive codec: retained-record ADT", () => {
@@ -73,14 +67,14 @@ describe("predecessor archive codec: retained-record ADT", () => {
     ["a gzip record with a numeric payload", { ...gzipRecord(packet), contentBase64: 7 }, "invalid-gzip-record"],
     ["non-canonical base64", { ...gzipRecord(packet), contentBase64: `${gzipRecord(packet).contentBase64}\n` }, "noncanonical-base64"],
   ])("refuses %s", (_name, raw, kind) => {
-    expect(refusal(raw)).toBe(kind);
+    expect(refusalKind(raw)).toBe(kind);
   });
 
   it("holds byteLength and the encoded payload to the caller's bounds", () => {
-    expect(refusal(referenceRecord(packet), { expandedBytes: packet.byteLength - 1, encodedBytes: 1024 })).toBe("invalid-reference");
-    expect(refusal(gzipRecord(packet), { expandedBytes: packet.byteLength - 1, encodedBytes: 1024 })).toBe("invalid-gzip-record");
+    expect(refusalKind(referenceRecord(packet), { expandedBytes: packet.byteLength - 1, encodedBytes: 1024 })).toBe("invalid-reference");
+    expect(refusalKind(gzipRecord(packet), { expandedBytes: packet.byteLength - 1, encodedBytes: 1024 })).toBe("invalid-gzip-record");
     const record = gzipRecord(packet);
-    expect(refusal(record, { expandedBytes: 1024, encodedBytes: record.contentBase64.length - 1 })).toBe("invalid-gzip-record");
+    expect(refusalKind(record, { expandedBytes: 1024, encodedBytes: record.contentBase64.length - 1 })).toBe("invalid-gzip-record");
     expect(parsed(record, { expandedBytes: packet.byteLength, encodedBytes: record.contentBase64.length }).byteLength).toBe(packet.byteLength);
   });
 

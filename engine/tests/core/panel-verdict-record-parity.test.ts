@@ -8,9 +8,10 @@ import { describe, expect, it } from "vitest";
 import {
   panelVerdictSourceRecord,
   parsePanelVerdictSourceRecord,
-  type PanelVerdictEmissionCall,
+  type EmissionToolVerdictSource,
   type PanelVerdictSource,
 } from "../../src/core/panel-verdict-source";
+import type { EmissionToolCall } from "../../src/core/harness-capture";
 import {
   parseArtifactDigest,
   parseRequestId,
@@ -36,13 +37,13 @@ const slot = (() => {
 })();
 
 const requestId = requestIdOf("run.record-parity:judge:1:1");
-const source: PanelVerdictSource = {
+const source: EmissionToolVerdictSource = {
   source: "emission-tool", toolCallId: "call-1", producerKind: "judge-verdict", emissionSchemaVersion: "v1", schemaDigest: digest("schema"),
 };
-const call: PanelVerdictEmissionCall = {
+const call: EmissionToolCall = {
   requestId, toolCallId: "call-1", kind: { kind: "judge-verdict" }, version: "v1", arguments: { criterion: "simplicity" },
 };
-const build = (overrides: Readonly<{ source?: PanelVerdictSource; acceptedCall?: PanelVerdictEmissionCall | undefined }>) =>
+const build = (overrides: Readonly<{ source?: PanelVerdictSource; acceptedCall?: EmissionToolCall | undefined }>) =>
   panelVerdictSourceRecord({
     requestId, slotId: slot, attempt: 1, source, acceptedCall: call,
     payloadDigest: digest("payload"), payloadByteLength: 12, ...overrides,
@@ -56,6 +57,13 @@ const disagreements: readonly (readonly [string, Parameters<typeof build>[0], st
   ["a different schema version", { acceptedCall: { ...call, version: "v2" } }, "schema version disagrees"],
   ["no accepted call on the emission arm", { acceptedCall: undefined }, "requires the accepted call"],
   ["an accepted call on the extraction arm", { source: { source: "extraction" } }, "must not carry an accepted call"],
+  // A record names a verdict producer kind: the constructor refuses a
+  // non-verdict call exactly as the parser does, so no such record is ever
+  // built and handed to the replay.
+  ["a non-verdict producer kind", {
+    source: { ...source, producerKind: "reviewer-payload", emissionSchemaVersion: "v2" },
+    acceptedCall: { ...call, kind: { kind: "reviewer-payload" }, version: "v2" },
+  }, "is not a panel verdict kind"],
 ];
 
 describe("panel verdict source record: constructor and parser share one invariant", () => {

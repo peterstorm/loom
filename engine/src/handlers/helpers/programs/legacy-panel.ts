@@ -1,21 +1,54 @@
 /**
  * The legacy panel program's Run Directory shell (AD-8/AD-9, FR-006/009/011/012).
  *
- * Every decision — registration, the verdict-source selection policy,
- * submission settlement, and deterministic operations — lives in the pure
- * core/legacy-panel-decisions module and takes already-read evidence. This
- * module only moves bytes across the Run Directory:
- * `resolvePanelAttemptVerdictSource` reads one attempt's durable
- * panel-verdict-source record (after the issuance joins hold) and hands it to
- * the core's selection; `settlePanelAttemptSubmission` settles the attempt and
- * publishes the write-ahead source record the settlement owes; and
+ * Every decision — registration, the dispatch program's next action, the
+ * verdict-source selection policy, submission settlement, and deterministic
+ * operations — lives in the pure core (core/panel-program and
+ * core/legacy-panel-decisions) and takes already-read evidence. This module
+ * only moves bytes across the Run Directory, behind three entry points the
+ * orchestration façade calls:
+ *
+ *   - `driveRegisteredPanel` replays the run's journal through the dispatch
+ *     program and drives deterministic operations until the next external
+ *     boundary: materializing and reserving a spawn batch, re-emitting the
+ *     pending requests, or reporting done/blocked;
+ *   - `resumeRegisteredPanel` first settles every captured-but-unsettled
+ *     attempt, then drives;
+ *   - `submitRegisteredPanelAttempt` settles one submitted attempt, records
+ *     its outcome, then drives.
+ *
+ * Underneath them, `resolvePanelAttemptVerdictSource` reads one attempt's
+ * durable panel-verdict-source record (after the issuance joins hold) and
+ * hands it to the core's selection; `settlePanelAttemptSubmission` settles the
+ * attempt and publishes the write-ahead source record the settlement owes; and
  * `panelOperationEvidence` is the Run Directory adapter of a deterministic
  * operation's capture lookup.
  */
-import type { AgentRequestAuthority, DomainResult } from "../../../core/orchestration-contract";
+import { createHash } from "node:crypto";
+import {
+  AGENT_REQUIRED_SKILLS,
+  parseAgentRequestAuthority,
+  parseEffectId,
+  parseFixedArtifactSlot,
+  parseRequestId,
+  parseSlotId,
+  type AgentRequestAuthority,
+  type DomainResult,
+} from "../../../core/orchestration-contract";
 import type { PanelVerdictSource, PanelVerdictSourceRecord } from "../../../core/panel-verdict-source";
 import { captureKey } from "../../../core/harness-capture";
 import {
+  reduceArchitectureProgram,
+  reduceRefutationProgram,
+  startArchitectureDispatchProgram,
+  startRefutationDispatchProgram,
+  type PanelProgramAction,
+  type SpawnRequest as PanelSpawnRequest,
+} from "../../../core/panel-program";
+import { lowerModelProfile, resolveModelProfile } from "../../../core/model-profiles";
+import { translateLegacyPanelJournal } from "../../../core/legacy-archive";
+import {
+  executeDeterministicPanelOperation,
   joinPanelAttemptIssuance,
   logicalPanelRequestId,
   parsePanelVerdictSourceRecordBytes,
@@ -25,9 +58,13 @@ import {
   type PanelAttemptVerdictSource,
   type PanelOperationEvidence,
   type PanelSubmission,
+  type RegisteredPanelProgram,
 } from "../../../core/legacy-panel-decisions";
+import { buildContextPacket, encodeByteSection, type ContextPacket } from "../../../orchestration/context-packets";
 import type { RunDirHandle } from "../../../orchestration/run-directory-handle";
-import type { ProgramParse } from "./program-result";
+import type { FacadeDriveResult, ProgramParse } from "./program-result";
+import { runDirectoryEffectRunner } from "./run-directory-effects";
+import { renderSpawnTask } from "./spawn-task";
 
 // ---------------------------------------------------------------------------
 // Verdict-source shell: the durable record's read and write-ahead publication
@@ -143,4 +180,335 @@ export function panelOperationEvidence(handle: RunDirHandle): PanelOperationEvid
         : { ok: true, value: captured.raw };
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// The panel driver: journal replay, request materialization, deterministic operations
+// ---------------------------------------------------------------------------
+
+/**
+ * Record how one semantic attempt settled, keyed so a replay is a no-op.
+ *
+ * The dedup key is derived from the RESERVED request id and attempt (the pair
+ * that names the slot on disk), while the event carries the LOGICAL request id
+ * the panel program reasons about — the two differ for a retried panel attempt.
+ * One function owns that pairing, because a dedup key that drifted from the
+ * slot identity would make a replayed submission mint a second outcome for the
+ * same attempt.
+ */
+async function appendSpawnOutcome(
+  handle: RunDirHandle,
+  reservedRequestId: string,
+  attempt: 1 | 2,
+  logicalRequestId: string,
+  problem: string | null,
+): Promise<void> {
+  await handle.appendEvent({
+    schemaVersion: 1,
+    sequence: 0,
+    dedupKey: `result:${createHash("sha256").update(`${reservedRequestId}:${attempt}`).digest("hex")}`,
+    recordedAtMs: Date.now(),
+    event: {
+      type: "spawn-outcome",
+      requestId: logicalRequestId,
+      attempt,
+      outcome: problem === null ? "succeeded" : "failed",
+      ...(problem === null ? {} : { error: problem }),
+    },
+  });
+}
+
+type MaterializedPanelRequest = Readonly<{
+  request: PanelSpawnRequest;
+  authority: AgentRequestAuthority;
+  packet: ContextPacket;
+}>;
+
+function materializePanelRequest(
+  handle: RunDirHandle,
+  registration: RegisteredPanelProgram,
+  request: PanelSpawnRequest,
+): ProgramParse<MaterializedPanelRequest> {
+  const requestId = parseRequestId(
+    request.attempt === 1 ? request.id : `${request.id}:attempt-${request.attempt}`,
+  );
+  const slotId = parseSlotId(`slot:${createHash("sha256").update(request.id).digest("hex").slice(0, 32)}`);
+  const profile = resolveModelProfile(request.modelProfile);
+  const role = request.agent as keyof typeof AGENT_REQUIRED_SKILLS;
+  if (!requestId.ok) return { ok: false, message: requestId.error.message };
+  if (!slotId.ok) return { ok: false, message: slotId.error.message };
+  if (!profile.ok) return { ok: false, message: profile.error.message };
+  if (!Object.hasOwn(AGENT_REQUIRED_SKILLS, role)) {
+    return { ok: false, message: `unknown panel agent ${request.agent}` };
+  }
+  const requiredSkill = AGENT_REQUIRED_SKILLS[role];
+  const authoritySection = encodeByteSection("panel-authority", JSON.stringify({
+    panel: registration.kind,
+    input: registration.input,
+    context: registration.context,
+  }));
+  if (!authoritySection.ok) return { ok: false, message: authoritySection.error.message };
+  const requestSection = encodeByteSection("panel-request", JSON.stringify({
+    panel: registration.kind,
+    logicalRequestId: request.id,
+    requestId: requestId.value,
+    attempt: request.attempt,
+    role: request.agent,
+    outputContract: request.outputContract,
+  }));
+  if (!requestSection.ok) return { ok: false, message: requestSection.error.message };
+  const packet = buildContextPacket({
+    requestId: requestId.value,
+    role: request.agent,
+    requiredSkill: requiredSkill ?? "none",
+    outputContract: request.outputContract,
+    fixedContext: Object.freeze([authoritySection.value]),
+    variableContext: Object.freeze([requestSection.value]),
+  });
+  if (!packet.ok) return { ok: false, message: packet.error.message };
+  const outputSlot = parseFixedArtifactSlot(
+    `transcripts/${slotId.value}/attempt-${request.attempt}.raw`,
+  );
+  if (!outputSlot.ok) return { ok: false, message: outputSlot.error.message };
+  const authority = parseAgentRequestAuthority({
+    runId: handle.runId,
+    requestId: requestId.value,
+    slotId: slotId.value,
+    program: registration.kind === "architecture" ? "architecture-panel" : "refutation-panel",
+    role,
+    attempt: request.attempt,
+    modelProfile: profile.value.id,
+    harnessBinding: {
+      pi: lowerModelProfile(profile.value, "pi"),
+      claude: lowerModelProfile(profile.value, "claude-code"),
+    },
+    requiredSkill,
+    contextDigest: packet.value.digest,
+    outputSlot: outputSlot.value,
+  });
+  return authority.ok
+    ? { ok: true, value: Object.freeze({ request, authority: authority.value, packet: packet.value }) }
+    : { ok: false, message: authority.error.violations.map(({ message }) => message).join("; ") };
+}
+
+async function materializePanelAction(
+  handle: RunDirHandle,
+  registration: RegisteredPanelProgram,
+  action: Exclude<PanelProgramAction, Readonly<{ type: "engine-operation" }>>,
+): Promise<FacadeDriveResult> {
+  if (action.type === "done") {
+    return { ok: true, action: Object.freeze({ kind: "done", panel: action.panel, outcome: action.outcome }) };
+  }
+  if (action.type === "blocked") return { ok: true, action: Object.freeze({ kind: "blocked", runId: handle.runId, diagnostic: action }) };
+  const panelRequests: readonly PanelSpawnRequest[] = action.type === "spawn-batch" ? action.requests : [action.request];
+
+  const materialized: MaterializedPanelRequest[] = [];
+  for (const request of panelRequests) {
+    const parsed = materializePanelRequest(handle, registration, request);
+    if (!parsed.ok) return parsed;
+    materialized.push(parsed.value);
+  }
+  for (const entry of materialized) {
+    const published = await handle.publishContext(entry.packet);
+    if (!published.ok) return { ok: false, message: published.error.message };
+  }
+  const effectId = parseEffectId(`effect:reserve:${createHash("sha256").update(JSON.stringify(
+    materialized.map(({ authority }) => authority.requestId),
+  )).digest("hex")}`);
+  if (!effectId.ok) return { ok: false, message: effectId.error.message };
+  const reserved = await runDirectoryEffectRunner(handle)({
+    kind: "reserve-agent-requests",
+    effectId: effectId.value,
+    runId: handle.runId,
+    requests: materialized.map(({ authority }) => authority) as [AgentRequestAuthority, ...AgentRequestAuthority[]],
+  });
+  if (!reserved.ok) return { ok: false, message: reserved.error.message };
+
+  const enriched = materialized.map(({ request, authority, packet }) => Object.freeze({
+    ...request,
+    authority,
+    // Harness adapters execute this exact task text. The marker binds a Pi
+    // batch item to one issued request without reconstructing authority from
+    // role or lexical request ordering.
+    task: renderSpawnTask(handle, authority, `Read the immutable context packet at LOOM_CONTEXT_PATH, then ${request.outputContract}`),
+    context: Object.freeze({
+      digest: packet.digest,
+      slot: Object.freeze({ kind: "fixed-artifact-slot", path: `contexts/${packet.digest}.json` }),
+    }),
+  }));
+  return { ok: true, action: Object.freeze({
+    kind: "spawn-batch",
+    runId: handle.runId,
+    requests: Object.freeze(enriched),
+  }) };
+}
+
+/** The panel program has no next action: its issued requests await results. */
+const AWAIT_RESULTS = Object.freeze({ type: "await-results" as const });
+
+async function nextRegisteredPanelAction(
+  handle: RunDirHandle,
+  registration: RegisteredPanelProgram,
+): Promise<ProgramParse<PanelProgramAction | Readonly<{ type: "await-results" }>>> {
+  const records = await handle.readEvents();
+  const translated = translateLegacyPanelJournal(registration.kind, {
+    input: registration.input,
+    events: records.map(({ event }) => event),
+  });
+  if (!translated.ok) return { ok: false, message: translated.error };
+
+  if (translated.value.panel === "architecture") {
+    let step = startArchitectureDispatchProgram(translated.value.input);
+    if (!step.ok) return { ok: false, message: step.errors.join("\n") };
+    for (const event of translated.value.events) {
+      const reduced = reduceArchitectureProgram(step.value.state, event);
+      if (!reduced.ok) return { ok: false, message: JSON.stringify(reduced.error) };
+      step = { ok: true, value: reduced.value };
+    }
+    return { ok: true, value: step.value.action ?? AWAIT_RESULTS };
+  }
+
+  let step = startRefutationDispatchProgram(translated.value.input);
+  if (!step.ok) return { ok: false, message: step.errors.join("\n") };
+  for (const event of translated.value.events) {
+    const reduced = reduceRefutationProgram(step.value.state, event);
+    if (!reduced.ok) return { ok: false, message: JSON.stringify(reduced.error) };
+    step = { ok: true, value: reduced.value };
+  }
+  return { ok: true, value: step.value.action ?? AWAIT_RESULTS };
+}
+
+/**
+ * Drive deterministic operations internally until the program reaches a true
+ * external boundary. Publication precedes the immutable success event; resume
+ * safely republishes byte-identical artifacts after a publication→event crash.
+ */
+export async function driveRegisteredPanel(
+  handle: RunDirHandle,
+  registration: RegisteredPanelProgram,
+): Promise<FacadeDriveResult> {
+  for (let operationCount = 0; operationCount <= 4; operationCount += 1) {
+    const next = await nextRegisteredPanelAction(handle, registration);
+    if (!next.ok) return next;
+    if (next.value.type === "await-results") {
+      const issued = handle.readIssuedRequests();
+      const captured = handle.readCapturedAttempts();
+      if (!issued.ok) return { ok: false, message: issued.error.message };
+      if (!captured.ok) return { ok: false, message: captured.error.message };
+      const pending = issued.value.filter((request) => !captured.value.has(captureKey(request.slotId, request.attempt)));
+      return { ok: true, action: Object.freeze({
+        kind: "spawn-batch",
+        runId: handle.runId,
+        requests: Object.freeze(pending.map((authority) => Object.freeze({
+          authority,
+          context: Object.freeze({
+            digest: authority.contextDigest,
+            slot: Object.freeze({ kind: "fixed-artifact-slot", path: `contexts/${authority.contextDigest}.json` }),
+          }),
+          task: renderSpawnTask(handle, authority, "Read the immutable context packet at LOOM_CONTEXT_PATH, then complete the exact pending panel request."),
+        }))),
+      }) };
+    }
+    if (next.value.type !== "engine-operation") {
+      return materializePanelAction(handle, registration, next.value);
+    }
+    const operationId = next.value.operation;
+    const executed = executeDeterministicPanelOperation(handle.runId, registration, operationId, panelOperationEvidence(handle));
+    if (!executed.ok) return executed;
+    const published = await handle.publishArtifactSet(executed.artifacts);
+    if (!published.ok) return { ok: false, message: published.error.message };
+    await handle.appendEvent({
+      schemaVersion: 1,
+      sequence: 0,
+      dedupKey: `engine:${createHash("sha256").update(`${operationId}:succeeded`).digest("hex")}`,
+      recordedAtMs: Date.now(),
+      event: { type: "engine-outcome", operationId, outcome: "succeeded" },
+    });
+  }
+  return { ok: false, message: "panel emitted more deterministic operations than its closed operation vocabulary allows" };
+}
+
+// ---------------------------------------------------------------------------
+// Settlement entry points: one submitted attempt, or every captured attempt
+// ---------------------------------------------------------------------------
+
+/**
+ * Settle one submitted attempt through its resolved verdict source, record how
+ * it settled, and drive the panel to its next external boundary.
+ */
+export async function submitRegisteredPanelAttempt(
+  handle: RunDirHandle,
+  registration: RegisteredPanelProgram,
+  request: AgentRequestAuthority,
+  raw: string,
+): Promise<FacadeDriveResult> {
+  const logicalRequestId = logicalPanelRequestId(request.requestId, request.attempt);
+  const settled = await settlePanelAttemptSubmission({ handle, registration, request, logicalRequestId, raw });
+  if (!settled.ok) return { ok: false, message: settled.error };
+  await appendSpawnOutcome(handle, request.requestId, request.attempt, logicalRequestId, settled.value.problem);
+  return driveRegisteredPanel(handle, registration);
+}
+
+/**
+ * Fold every captured-but-unsettled panel attempt into a `spawn-outcome` event.
+ *
+ * A transcript can be captured into its reserved slot without the program yet
+ * having judged it — the capture and the judgement are separate writes. This
+ * settles each such attempt through the same verdict-source seam a submission
+ * uses and records the verdict, keyed so a repeat is a no-op. It decides no
+ * policy of its own.
+ */
+async function reconcileCapturedPanelResults(
+  handle: RunDirHandle,
+  registration: RegisteredPanelProgram,
+): Promise<ProgramParse<true>> {
+  const events = await handle.readEvents();
+  const settled = new Set(events.flatMap(({ event }) => {
+    if (typeof event !== "object" || event === null) return [];
+    const record = event as Record<string, unknown>;
+    return record["type"] === "spawn-outcome" && typeof record["requestId"] === "string" &&
+      (record["attempt"] === 1 || record["attempt"] === 2)
+      ? [`${record["requestId"]}:${record["attempt"]}`]
+      : [];
+  }));
+  const issued = handle.readIssuedRequests();
+  if (!issued.ok) return { ok: false, message: issued.error.message };
+  const captured = handle.readCapturedAttempts();
+  if (!captured.ok) return { ok: false, message: captured.error.message };
+
+  for (const request of issued.value) {
+    if (!captured.value.has(captureKey(request.slotId, request.attempt))) continue;
+    const logicalRequestId = logicalPanelRequestId(request.requestId, request.attempt);
+    if (settled.has(`${logicalRequestId}:${request.attempt}`)) continue;
+    const bytes = handle.readTranscriptBytes(request);
+    if (!bytes.ok) return { ok: false, message: bytes.error.message };
+    // The verdict-source seam resolves this attempt's emission evidence — the
+    // durable record's replay when one was published, otherwise the extraction
+    // baseline — and the submission decision runs over exactly that resolution
+    // (the same policy every later scan of the same attempt reproduces).
+    const settledAttempt = await settlePanelAttemptSubmission({
+      handle,
+      registration,
+      request,
+      logicalRequestId,
+      raw: Buffer.from(bytes.value).toString("utf-8"),
+    });
+    if (!settledAttempt.ok) return { ok: false, message: settledAttempt.error };
+    await appendSpawnOutcome(handle, request.requestId, request.attempt, logicalRequestId, settledAttempt.value.problem);
+  }
+  return { ok: true, value: true };
+}
+
+/**
+ * Resume a registered panel: settle every captured-but-unsettled attempt, then
+ * drive to the next external boundary. Idempotent — a settled attempt is
+ * never settled twice.
+ */
+export async function resumeRegisteredPanel(
+  handle: RunDirHandle,
+  registration: RegisteredPanelProgram,
+): Promise<FacadeDriveResult> {
+  const reconciled = await reconcileCapturedPanelResults(handle, registration);
+  if (!reconciled.ok) return reconciled;
+  return driveRegisteredPanel(handle, registration);
 }

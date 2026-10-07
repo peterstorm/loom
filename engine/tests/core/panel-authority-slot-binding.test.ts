@@ -22,6 +22,7 @@ import {
   type SlotId,
 } from "../../src/core/orchestration-contract";
 import { parseWaveFindingId, type BriefFinding, type ReviewLens, type WaveFindingId } from "../../src/core/review-panel";
+import { value } from "../fixtures/parse-result";
 
 /**
  * The slot-to-entry refusals of the panel authority: a slot the roster does
@@ -29,10 +30,6 @@ import { parseWaveFindingId, type BriefFinding, type ReviewLens, type WaveFindin
  * typed `request-binding-mismatch`, never an entry read as `undefined`.
  */
 
-function parsed<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T {
-  if (!result.ok) throw new Error(`expected success: ${JSON.stringify(result)}`);
-  return result.value;
-}
 
 const hexDigest = (seed: string): string => createHash("sha256").update(seed).digest("hex");
 const harnessBinding = {
@@ -49,9 +46,9 @@ function attemptAuthority(
   role: "arch-designer-agent" | "arch-judge-agent" | "review-verifier-agent",
 ) {
   const modelProfile = role === "arch-designer-agent" ? "panel-design" : role === "arch-judge-agent" ? "panel-judge" : "refutation";
-  return parsed(parseAgentRequestAuthority({
+  return value(parseAgentRequestAuthority({
     runId,
-    requestId: parsed(parseRequestId(requestId)),
+    requestId: value(parseRequestId(requestId)),
     slotId,
     program,
     role,
@@ -59,7 +56,7 @@ function attemptAuthority(
     modelProfile,
     harnessBinding,
     requiredSkill: role === "arch-designer-agent" ? "architecture-tech-lead" : null,
-    contextDigest: parsed(parseContextDigest(hexDigest(`${requestId}:context`))),
+    contextDigest: value(parseContextDigest(hexDigest(`${requestId}:context`))),
     outputSlot: `transcripts/${slotId.replace(/:/g, "-")}-attempt-${attempt}.json`,
   }));
 }
@@ -70,16 +67,16 @@ function ordinalSlot(
   ordinal: number,
   role: "arch-designer-agent" | "arch-judge-agent",
 ) {
-  const slotId = parsed(parseSlotId(`${stage}:${ordinal}`));
-  return parsed(parseAgentRosterSlot(
+  const slotId = value(parseSlotId(`${stage}:${ordinal}`));
+  return value(parseAgentRosterSlot(
     attemptAuthority(runId, slotId, `${runId}:${stage}:${ordinal}:1`, 1, "architecture-panel", role),
     attemptAuthority(runId, slotId, `${runId}:${stage}:${ordinal}:2`, 2, "architecture-panel", role),
   ));
 }
 
 function architectureAuthority(): ArchitecturePanelAuthority {
-  const runId = parsed(parseOrchestrationRunId("run.architecture.slot-binding"));
-  return parsed(parseArchitecturePanelAuthority({
+  const runId = value(parseOrchestrationRunId("run.architecture.slot-binding"));
+  return value(parseArchitecturePanelAuthority({
     runId,
     candidateLenses: ["simplicity-first", "type-driven-fp"],
     judgeCriteria: ["simplicity", "pure functional core"],
@@ -95,23 +92,23 @@ const waveId = (raw: string): WaveFindingId => {
 };
 
 function refutationAuthority(): RefutationPanelAuthority {
-  const runId = parsed(parseOrchestrationRunId("run.refutation.slot-binding"));
+  const runId = value(parseOrchestrationRunId("run.refutation.slot-binding"));
   const findings: readonly [BriefFinding, ...BriefFinding[]] = [
     { id: waveId("T1:code-reviewer-1"), taskId: "T1", agent: "code-reviewer", severity: "critical", file: "src/a.ts", line: 10, claim: "first claim" },
   ];
   const findingIds = findings.map(({ id }) => id) as unknown as NonEmpty<WaveFindingId>;
   const lenses = ["reproduction", "intent"] as const;
   const verifierSlots = lenses.map((lens) => {
-    const binding = parsed(deriveRefutationVerifierBinding(runId, lens as ReviewLens, findingIds));
-    return parsed(parseAgentRosterSlot(
+    const binding = value(deriveRefutationVerifierBinding(runId, lens as ReviewLens, findingIds));
+    return value(parseAgentRosterSlot(
       attemptAuthority(runId, binding.slotId, binding.requestIds[0], 1, "refutation-panel", "review-verifier-agent"),
       attemptAuthority(runId, binding.slotId, binding.requestIds[1], 2, "refutation-panel", "review-verifier-agent"),
     ));
   });
-  return parsed(parseRefutationPanelAuthority({ runId, findings, lenses, verifierSlots }));
+  return value(parseRefutationPanelAuthority({ runId, findings, lenses, verifierSlots }));
 }
 
-const unknownSlot = parsed(parseSlotId("stranger:9"));
+const unknownSlot = value(parseSlotId("stranger:9"));
 
 const expectBindingRefusal = (
   result: { readonly ok: true } | { readonly ok: false; readonly error: Readonly<{ kind: string; message: string }> },

@@ -1,4 +1,4 @@
-/** Executable FC/IS closure for the Guarded Skill Machine and Defect-Family Accounting. */
+/** Executable FC/IS closure for the Guarded Skill Machine, Defect-Family Accounting, and the emission kernel with the legacy panel decisions. */
 import { afterEach, describe, it, expect } from "vitest";
 import fc from "fast-check";
 import ts from "typescript";
@@ -140,6 +140,11 @@ const LINEAGE_CONTRACT = "engine/src/core/standalone-lineage-contract.ts";
 const CODEC = "engine/src/core/reviewer-protocol.ts";
 const PANEL_CONTRACT = "engine/src/core/panel-contract.ts";
 const PANEL_TALLY = "engine/src/core/review-panel.ts";
+const EMISSION_TOOL = "engine/src/core/emission-tool.ts";
+const EMISSION_OBSERVATION = "engine/src/core/harness-capture.ts";
+const EMISSION_SELECTION = "engine/src/core/emission-ingestion.ts";
+const LEGACY_ARCHIVE = "engine/src/core/legacy-archive.ts";
+const LEGACY_PANEL_DECISIONS = "engine/src/core/legacy-panel-decisions.ts";
 const REVIEWER_ENTRIES = new Map([
   ["zod/v4", "zod/v4/index.js"], ["jsonc-parser", "jsonc-parser/lib/umd/main.js"],
 ]);
@@ -220,7 +225,7 @@ function auditClosure(roots: readonly string[], overlays: ReadonlyMap<string, st
           ? DEFAULT_PURE_MODULES.includes(candidate) : runtime.dependencies.includes(specifier) && AUDITED_RUNTIME.has(candidate));
         if (target === undefined) errors.push(`${mod}: ${specifier} leaves the declared pure closure`);
         else queue.push(target);
-      } else if (([CONTRACT, LINEAGE_CONTRACT, PANEL_CONTRACT, PANEL_TALLY].includes(mod) && specifier === "zod/v4") || (mod === CODEC && specifier === "jsonc-parser")) {
+      } else if (([CONTRACT, LINEAGE_CONTRACT, PANEL_CONTRACT, PANEL_TALLY, EMISSION_TOOL].includes(mod) && specifier === "zod/v4") || (mod === CODEC && specifier === "jsonc-parser")) {
         const entry = REVIEWER_ENTRIES.get(specifier);
         if (entry !== undefined) queue.push(entry);
       } else if ((mod === PARSER && specifier === "saxes") || runtime?.dependencies.includes(specifier)) {
@@ -386,6 +391,65 @@ describe("functional core — executable purity closure", () => {
       "./types", "./barrel", "./side-effect", "./cjs", "./dynamic", "./equals", "./type-expression",
     ]);
   });
+});
+
+describe("emission kernel and legacy panel decisions — executable purity closure", () => {
+  const ENROLLED = [EMISSION_TOOL, EMISSION_OBSERVATION, EMISSION_SELECTION, LEGACY_ARCHIVE, LEGACY_PANEL_DECISIONS] as const;
+
+  it("enrolls the emission kernel and the legacy panel decisions with a pure transitive closure", () => {
+    for (const mod of ENROLLED) expect(isPureModule(mod), mod).toBe(true);
+    const audit = auditClosure([LEGACY_PANEL_DECISIONS]);
+    expect(audit.errors).toEqual([]);
+    for (const required of [...ENROLLED, "engine/src/core/panel-verdict-source.ts", "zod/v4/index.js"]) {
+      expect(audit.visited, `walk must reach ${required}`).toContain(required);
+    }
+  });
+
+  // One impurity class per enrolled module (I/O import, entropy import,
+  // ambient clock, ambient randomness, process state), so every module and
+  // every class is probed once: each walk reaches the zod runtime, and the
+  // full probe matrix stays on the accounting closure above.
+  const CLASS_PROBES = [
+    'import { readFileSync } from "node:fs";',
+    'import { randomBytes } from "crypto";',
+    "const clock = Date.now();",
+    "const entropy = Math.random();",
+    "const cwd = process.cwd();",
+  ] as const;
+
+  it.each(ENROLLED.map((mod, index) => [mod, CLASS_PROBES[index]!] as const))(
+    "%s cannot hide transitive impurity from the legacy panel decisions: %s",
+    (mod, probe) => {
+      const audit = auditClosure([LEGACY_PANEL_DECISIONS], new Map([[mod, `${readSource(mod)}\n${probe}`]]));
+      expect(audit.errors.some((error) => error.startsWith(`${mod}:`))).toBe(true);
+    },
+  );
+
+  it.each([EMISSION_OBSERVATION, EMISSION_SELECTION, LEGACY_ARCHIVE, LEGACY_PANEL_DECISIONS])(
+    "%s holds no zod grant of its own",
+    (mod) => {
+      const audit = auditClosure([mod], new Map([[mod, `${readSource(mod)}\nimport "zod/v4";`]]));
+      expect(audit.errors).toContain(`${mod}: unaudited package zod/v4`);
+    },
+  );
+
+  // ADR-0018 layering: the emission kernel sits below the program layer, so no
+  // emission module imports the panel program or the panel verdict modules.
+  // Both sides are pure, so the closure alone cannot see this edge.
+  it.each([EMISSION_TOOL, EMISSION_OBSERVATION, EMISSION_SELECTION])("%s stays below the panel program layer", (mod) => {
+    const specifiers = dependencies(readSource(mod)).map(({ specifier }) => specifier);
+    for (const forbidden of ["./panel-program", "./panel-verdict-source", "./persistent-panel", "./legacy-panel-decisions"]) {
+      expect(specifiers, `${mod} -> ${forbidden}`).not.toContain(forbidden);
+    }
+  });
+
+  it.each(["../handlers/helpers/programs/legacy-panel", "../orchestration/harness-capture-runtime"])(
+    "the legacy panel decisions cannot import their shell: %s",
+    (specifier) => {
+      const audit = auditClosure([LEGACY_PANEL_DECISIONS], new Map([[LEGACY_PANEL_DECISIONS, `${readSource(LEGACY_PANEL_DECISIONS)}\nimport "${specifier}";`]]));
+      expect(audit.errors.some((error) => error.startsWith(`${LEGACY_PANEL_DECISIONS}:`))).toBe(true);
+    },
+  );
 });
 
 describe("audited reviewer runtime closure", () => {

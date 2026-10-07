@@ -24,6 +24,20 @@ import {
   type RefutationPanelAuthority,
 } from "../../src/core/panel-authority";
 import {
+  architecturePanelFixture,
+  issuePanelRequests as issue,
+  PANEL_FIXTURE_FINDINGS as findings,
+  PANEL_HARNESS_BINDINGS as panelBindings,
+  panelPublicationResolver as publicationResolver,
+  panelRosterSlot as rosterSlot,
+  refutationPanelFixture,
+  semanticVerifierSlots,
+  withRewrittenPanelRegistration,
+  type ArchitecturePanelFixture as ArchitectureFixture,
+  type RefutationPanelFixture as RefutationFixture,
+} from "../fixtures/panel-authority";
+import { value } from "../fixtures/parse-result";
+import {
   architecturePanelCheckpoint,
   completePersistentArchitecturePanel,
   completePersistentRefutationPanel,
@@ -58,32 +72,10 @@ import {
   type PersistentRefutationPanelHistory,
   type PersistentRefutationStep,
 } from "../../src/core/persistent-panel";
-import type { NonEmpty } from "../../src/core/orchestration-contract";
-import { parseWaveFindingId, projectFindingForPanel, type BriefFinding, type ReviewLens, type WaveFindingId } from "../../src/core/review-panel";
+import { parseWaveFindingId, projectFindingForPanel, type BriefFinding } from "../../src/core/review-panel";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2 } from "../../src/core/reviewer-contract";
 import { attributeFindings } from "../../src/core/findings";
-import {
-  createAtomicInitialPublicationClaimPort,
-  createInitialBatchPublicationReconciler,
-  createInitialPublicationEffectPort,
-  createPublicationAuthorityResolver,
-  parseAgentRequestAuthority,
-  parseAgentRosterSlot,
-  parseBatchPublishedReceipt,
-  parseContextDigest,
-  parseEffectId,
-  parseOrchestrationRunId,
-  parseRequestId,
-  parseSlotId,
-  prepareInitialBatchPublicationIntent,
-  spawnBatchAction as issueSpawnBatchAction,
-  type AgentRequestAuthority,
-  type AgentRosterSlot,
-  type EffectId,
-  type OrchestrationRunId,
-  type SpawnRequest as IssuedSpawnRequest,
-  type TrustedPublicationRegistrationLoader,
-} from "../../src/core/orchestration-contract";
+import { createPublicationAuthorityResolver, parseOrchestrationRunId } from "../../src/core/orchestration-contract";
 
 const waveId = (raw: string) => {
   const parsed = parseWaveFindingId(raw);
@@ -101,26 +93,12 @@ const refutationInput = {
   lenses: ["reproduction", "intent", "blast-radius"] as const,
 };
 
-function parsed<T>(result: { readonly ok: true; readonly value: T } | { readonly ok: false }): T {
-  expect(result.ok).toBe(true);
-  if (!result.ok) throw new Error("expected ParseResult success");
-  return result.value;
-}
-
-function reduced<T, E extends Readonly<{ kind: string }>>(
-  result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error: E }>,
-): T {
-  expect(result.ok).toBe(true);
-  if (!result.ok) throw new Error(`expected reducer success, got ${result.error.kind}`);
-  return result.value;
-}
-
 function architectureStart(): ProgramStep<ArchitectureProgramState> {
-  return parsed(startArchitectureProgram(architectureInput));
+  return value(startArchitectureProgram(architectureInput));
 }
 
 function refutationStart(): ProgramStep<RefutationProgramState> {
-  return parsed(startRefutationProgram(refutationInput));
+  return value(startRefutationProgram(refutationInput));
 }
 
 const spawnSucceeded = (requestId: string, attempt: 1 | 2 = 1) => ({
@@ -138,11 +116,11 @@ const engineSucceeded = (operationId: ArchitectureEngineOperation) => ({
 
 function enterCandidates(): ProgramStep<ArchitectureProgramState> {
   const start = architectureStart();
-  const prepared = reduced(reduceArchitectureProgram(
+  const prepared = value(reduceArchitectureProgram(
     start.state,
     spawnSucceeded("architecture:interview"),
   ));
-  return reduced(reduceArchitectureProgram(
+  return value(reduceArchitectureProgram(
     prepared.state,
     engineSucceeded("architecture-prepare-candidates"),
   ));
@@ -151,9 +129,9 @@ function enterCandidates(): ProgramStep<ArchitectureProgramState> {
 function enterJudges(): ProgramStep<ArchitectureProgramState> {
   let step = enterCandidates();
   for (const id of ["architecture:candidate:1", "architecture:candidate:2"]) {
-    step = reduced(reduceArchitectureProgram(step.state, spawnSucceeded(id)));
+    step = value(reduceArchitectureProgram(step.state, spawnSucceeded(id)));
   }
-  return reduced(reduceArchitectureProgram(
+  return value(reduceArchitectureProgram(
     step.state,
     engineSucceeded("architecture-prepare-judges"),
   ));
@@ -161,7 +139,7 @@ function enterJudges(): ProgramStep<ArchitectureProgramState> {
 
 function enterVerifiers(): ProgramStep<RefutationProgramState> {
   const start = refutationStart();
-  return reduced(reduceRefutationProgram(start.state, {
+  return value(reduceRefutationProgram(start.state, {
     type: "engine-outcome",
     operationId: "refutation-prepare-verifiers",
     outcome: "succeeded",
@@ -182,10 +160,10 @@ describe("architecture panel program", () => {
       },
     });
 
-    step = reduced(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:interview")));
+    step = value(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:interview")));
     expect(step.action).toMatchObject({ type: "engine-operation", operation: "architecture-prepare-candidates" });
 
-    step = reduced(reduceArchitectureProgram(step.state, engineSucceeded("architecture-prepare-candidates")));
+    step = value(reduceArchitectureProgram(step.state, engineSucceeded("architecture-prepare-candidates")));
     expect(step.action?.type).toBe("spawn-batch");
     if (step.action?.type !== "spawn-batch") throw new Error("expected candidate batch");
     expect(step.action.requests.map((request) => request.id)).toEqual([
@@ -203,12 +181,12 @@ describe("architecture panel program", () => {
     expect(isParallelSpawnBatch(step.action)).toBe(true);
 
     // Completion order is deliberately opposite to dispatch order.
-    step = reduced(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:candidate:2")));
+    step = value(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:candidate:2")));
     expect(step.action).toBeNull();
-    step = reduced(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:candidate:1")));
+    step = value(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:candidate:1")));
     expect(step.action).toMatchObject({ type: "engine-operation", operation: "architecture-prepare-judges" });
 
-    step = reduced(reduceArchitectureProgram(step.state, engineSucceeded("architecture-prepare-judges")));
+    step = value(reduceArchitectureProgram(step.state, engineSucceeded("architecture-prepare-judges")));
     expect(step.action?.type).toBe("spawn-batch");
     if (step.action?.type !== "spawn-batch") throw new Error("expected judge batch");
     expect(step.action.requests).toHaveLength(3);
@@ -218,11 +196,11 @@ describe("architecture panel program", () => {
     )).toBe(true);
 
     for (const id of ["architecture:judge:3", "architecture:judge:1", "architecture:judge:2"]) {
-      step = reduced(reduceArchitectureProgram(step.state, spawnSucceeded(id)));
+      step = value(reduceArchitectureProgram(step.state, spawnSucceeded(id)));
     }
     expect(step.action).toMatchObject({ type: "engine-operation", operation: "architecture-aggregate" });
 
-    step = reduced(reduceArchitectureProgram(step.state, engineSucceeded("architecture-aggregate")));
+    step = value(reduceArchitectureProgram(step.state, engineSucceeded("architecture-aggregate")));
     expect(step.action).toMatchObject({
       type: "await-user",
       request: {
@@ -233,17 +211,17 @@ describe("architecture panel program", () => {
       },
     });
 
-    step = reduced(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:finalize")));
+    step = value(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:finalize")));
     expect(step.state.stage).toBe("complete");
     expect(step.action).toEqual({ type: "done", panel: "architecture", outcome: "completed" });
   });
 
   it("blocks on failed prepare and aggregate engine operations with the original reason", () => {
-    const afterInterview = reduced(reduceArchitectureProgram(
+    const afterInterview = value(reduceArchitectureProgram(
       architectureStart().state,
       spawnSucceeded("architecture:interview"),
     ));
-    const prepareFailed = reduced(reduceArchitectureProgram(afterInterview.state, {
+    const prepareFailed = value(reduceArchitectureProgram(afterInterview.state, {
       type: "engine-outcome",
       operationId: "architecture-prepare-candidates",
       outcome: "failed",
@@ -256,9 +234,9 @@ describe("architecture panel program", () => {
 
     let aggregate = enterJudges();
     for (const id of ["architecture:judge:1", "architecture:judge:2", "architecture:judge:3"]) {
-      aggregate = reduced(reduceArchitectureProgram(aggregate.state, spawnSucceeded(id)));
+      aggregate = value(reduceArchitectureProgram(aggregate.state, spawnSucceeded(id)));
     }
-    const aggregateFailed = reduced(reduceArchitectureProgram(aggregate.state, {
+    const aggregateFailed = value(reduceArchitectureProgram(aggregate.state, {
       type: "engine-outcome",
       operationId: "architecture-aggregate",
       outcome: "failed",
@@ -272,8 +250,8 @@ describe("architecture panel program", () => {
 
   it("does not make aggregate reachable until every judge slot succeeds", () => {
     let step = enterJudges();
-    step = reduced(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:judge:1")));
-    step = reduced(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:judge:3")));
+    step = value(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:judge:1")));
+    step = value(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:judge:3")));
     expect(step.state.stage).toBe("judges");
     expect(step.action).toBeNull();
 
@@ -283,13 +261,13 @@ describe("architecture panel program", () => {
       error: { kind: "unexpected-event", panel: "architecture", stage: "judges" },
     });
 
-    step = reduced(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:judge:2")));
+    step = value(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:judge:2")));
     expect(step.state.stage).toBe("aggregate");
   });
 
   it("retries only the failed slot once, then blocks", () => {
     let step = enterCandidates();
-    step = reduced(reduceArchitectureProgram(step.state, {
+    step = value(reduceArchitectureProgram(step.state, {
       type: "spawn-outcome",
       requestId: "architecture:candidate:2",
       attempt: 1,
@@ -301,7 +279,7 @@ describe("architecture panel program", () => {
       requests: [{ id: "architecture:candidate:2", attempt: 2 }],
     });
 
-    step = reduced(reduceArchitectureProgram(step.state, {
+    step = value(reduceArchitectureProgram(step.state, {
       type: "spawn-outcome",
       requestId: "architecture:candidate:2",
       attempt: 2,
@@ -319,7 +297,7 @@ describe("architecture panel program", () => {
 
   it("rejects duplicate, unknown, and stale-attempt outcomes without changing state", () => {
     let step = enterCandidates();
-    step = reduced(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:candidate:1")));
+    step = value(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:candidate:1")));
 
     expect(reduceArchitectureProgram(step.state, spawnSucceeded("architecture:candidate:1"))).toEqual({
       ok: false,
@@ -330,7 +308,7 @@ describe("architecture panel program", () => {
       error: { kind: "unknown-outcome", requestId: "architecture:candidate:99" },
     });
 
-    step = reduced(reduceArchitectureProgram(step.state, {
+    step = value(reduceArchitectureProgram(step.state, {
       type: "spawn-outcome",
       requestId: "architecture:candidate:2",
       attempt: 1,
@@ -348,8 +326,8 @@ describe("architecture panel program", () => {
 
     // A settled slot stays a duplicate after the program advances stages.
     let advanced = enterCandidates();
-    advanced = reduced(reduceArchitectureProgram(advanced.state, spawnSucceeded("architecture:candidate:1")));
-    advanced = reduced(reduceArchitectureProgram(advanced.state, spawnSucceeded("architecture:candidate:2")));
+    advanced = value(reduceArchitectureProgram(advanced.state, spawnSucceeded("architecture:candidate:1")));
+    advanced = value(reduceArchitectureProgram(advanced.state, spawnSucceeded("architecture:candidate:2")));
     expect(reduceArchitectureProgram(advanced.state, spawnSucceeded("architecture:candidate:1"))).toEqual({
       ok: false,
       error: { kind: "duplicate-outcome", requestId: "architecture:candidate:1" },
@@ -362,9 +340,9 @@ describe("architecture panel program", () => {
       judgeOrder: readonly string[],
     ): ProgramStep<ArchitectureProgramState> => {
       let step = enterCandidates();
-      for (const id of candidateOrder) step = reduced(reduceArchitectureProgram(step.state, spawnSucceeded(id)));
-      step = reduced(reduceArchitectureProgram(step.state, engineSucceeded("architecture-prepare-judges")));
-      for (const id of judgeOrder) step = reduced(reduceArchitectureProgram(step.state, spawnSucceeded(id)));
+      for (const id of candidateOrder) step = value(reduceArchitectureProgram(step.state, spawnSucceeded(id)));
+      step = value(reduceArchitectureProgram(step.state, engineSucceeded("architecture-prepare-judges")));
+      for (const id of judgeOrder) step = value(reduceArchitectureProgram(step.state, spawnSucceeded(id)));
       return step;
     };
 
@@ -383,7 +361,7 @@ describe("architecture panel program", () => {
 
 describe("refutation panel program", () => {
   it("skips exactly when there are no critical findings", () => {
-    const step = parsed(startRefutationProgram({
+    const step = value(startRefutationProgram({
       criticalFindingIds: [],
       // A skip does not require or retain a verifier panel.
       lenses: [],
@@ -415,8 +393,8 @@ describe("refutation panel program", () => {
       request.outputContract.length > 0,
     )).toBe(true);
 
-    step = reduced(reduceRefutationProgram(step.state, spawnSucceeded("refutation:verifier:2")));
-    step = reduced(reduceRefutationProgram(step.state, spawnSucceeded("refutation:verifier:1")));
+    step = value(reduceRefutationProgram(step.state, spawnSucceeded("refutation:verifier:2")));
+    step = value(reduceRefutationProgram(step.state, spawnSucceeded("refutation:verifier:1")));
     expect(step.action).toBeNull();
 
     const earlyTally = reduceRefutationProgram(step.state, {
@@ -429,9 +407,9 @@ describe("refutation panel program", () => {
       error: { kind: "unexpected-event", panel: "refutation", stage: "verifiers" },
     });
 
-    step = reduced(reduceRefutationProgram(step.state, spawnSucceeded("refutation:verifier:3")));
+    step = value(reduceRefutationProgram(step.state, spawnSucceeded("refutation:verifier:3")));
     expect(step.action).toMatchObject({ type: "engine-operation", operation: "refutation-tally" });
-    step = reduced(reduceRefutationProgram(step.state, {
+    step = value(reduceRefutationProgram(step.state, {
       type: "engine-outcome",
       operationId: "refutation-tally",
       outcome: "succeeded",
@@ -441,7 +419,7 @@ describe("refutation panel program", () => {
   });
 
   it("blocks on failed prepare and tally engine operations with the original reason", () => {
-    const prepareFailed = reduced(reduceRefutationProgram(refutationStart().state, {
+    const prepareFailed = value(reduceRefutationProgram(refutationStart().state, {
       type: "engine-outcome",
       operationId: "refutation-prepare-verifiers",
       outcome: "failed",
@@ -454,9 +432,9 @@ describe("refutation panel program", () => {
 
     let tally = enterVerifiers();
     for (const id of ["refutation:verifier:1", "refutation:verifier:2", "refutation:verifier:3"]) {
-      tally = reduced(reduceRefutationProgram(tally.state, spawnSucceeded(id)));
+      tally = value(reduceRefutationProgram(tally.state, spawnSucceeded(id)));
     }
-    const tallyFailed = reduced(reduceRefutationProgram(tally.state, {
+    const tallyFailed = value(reduceRefutationProgram(tally.state, {
       type: "engine-outcome",
       operationId: "refutation-tally",
       outcome: "failed",
@@ -470,7 +448,7 @@ describe("refutation panel program", () => {
 
   it("retries one verifier once and preserves deterministic completion", () => {
     let retried = enterVerifiers();
-    retried = reduced(reduceRefutationProgram(retried.state, {
+    retried = value(reduceRefutationProgram(retried.state, {
       type: "spawn-outcome",
       requestId: "refutation:verifier:1",
       attempt: 1,
@@ -480,13 +458,13 @@ describe("refutation panel program", () => {
       type: "spawn-batch",
       requests: [{ id: "refutation:verifier:1", attempt: 2 }],
     });
-    retried = reduced(reduceRefutationProgram(retried.state, spawnSucceeded("refutation:verifier:3")));
-    retried = reduced(reduceRefutationProgram(retried.state, spawnSucceeded("refutation:verifier:1", 2)));
-    retried = reduced(reduceRefutationProgram(retried.state, spawnSucceeded("refutation:verifier:2")));
+    retried = value(reduceRefutationProgram(retried.state, spawnSucceeded("refutation:verifier:3")));
+    retried = value(reduceRefutationProgram(retried.state, spawnSucceeded("refutation:verifier:1", 2)));
+    retried = value(reduceRefutationProgram(retried.state, spawnSucceeded("refutation:verifier:2")));
 
     let ordinary = enterVerifiers();
     for (const id of ["refutation:verifier:1", "refutation:verifier:2", "refutation:verifier:3"]) {
-      ordinary = reduced(reduceRefutationProgram(ordinary.state, spawnSucceeded(id)));
+      ordinary = value(reduceRefutationProgram(ordinary.state, spawnSucceeded(id)));
     }
     expect(retried.action).toEqual(ordinary.action);
     expect(retried.state.stage).toBe("tally");
@@ -497,187 +475,17 @@ describe("refutation panel program", () => {
 // Persistent authority-bound programs
 // ---------------------------------------------------------------------------
 
-const registrationBytes = new Map<string, readonly number[]>();
-const bytes = (value: unknown): readonly number[] => [...new TextEncoder().encode(JSON.stringify(value))];
-const registrationKey = ({ runId, effectId }: Readonly<{ runId: string; effectId: string }>) => `${runId}\u0000${effectId}`;
-const registrationLoader: TrustedPublicationRegistrationLoader = (lookup) => {
-  const found = registrationBytes.get(registrationKey(lookup));
-  return found === undefined
-    ? { ok: false, error: { kind: "publication-authority-unavailable", message: "not registered" } }
-    : { ok: true, value: found };
-};
-const publicationResolver = createPublicationAuthorityResolver(registrationLoader);
 const unavailableResolver = createPublicationAuthorityResolver(() => ({
   ok: false,
   error: { kind: "publication-authority-unavailable", field: "registration", message: "registration unavailable after restart" },
 }));
 const hexDigest = (seed: string): string => createHash("sha256").update(seed).digest("hex");
-const panelBindings = {
-  pi: { harness: "pi", provider: "openai-codex", model: "gpt-5.6-sol", thinking: "high" },
-  claude: { harness: "claude-code", model: "opus" },
-} as const;
 
-function authorityFor(
-  runId: OrchestrationRunId,
-  stage: string,
-  slotIndex: number,
-  attempt: 1 | 2,
-  program: "architecture-panel" | "refutation-panel",
-  role: "arch-designer-agent" | "arch-judge-agent" | "review-verifier-agent",
-): AgentRequestAuthority {
-  const profile = role === "arch-designer-agent" ? "panel-design" : role === "arch-judge-agent" ? "panel-judge" : "refutation";
-  const skill = role === "arch-designer-agent" ? "architecture-tech-lead" : null;
-  return parsed(parseAgentRequestAuthority({
-    runId,
-    requestId: parsed(parseRequestId(`${runId}:${stage}:${slotIndex}:${attempt}`)),
-    slotId: parsed(parseSlotId(`${stage}:${slotIndex}`)),
-    program,
-    role,
-    attempt,
-    modelProfile: profile,
-    harnessBinding: panelBindings,
-    requiredSkill: skill,
-    contextDigest: parsed(parseContextDigest(hexDigest(`${runId}:${stage}:${slotIndex}:${attempt}:context`))),
-    outputSlot: `transcripts/${stage}-${slotIndex}-attempt-${attempt}.json`,
-  }));
-}
+const architectureFixture = (suffix: string): ArchitectureFixture => architecturePanelFixture(`run.architecture.${suffix}`);
 
-function rosterSlot(
-  runId: OrchestrationRunId,
-  stage: string,
-  slotIndex: number,
-  program: "architecture-panel" | "refutation-panel",
-  role: "arch-designer-agent" | "arch-judge-agent" | "review-verifier-agent",
-) {
-  return parsed(parseAgentRosterSlot(
-    authorityFor(runId, stage, slotIndex, 1, program, role),
-    authorityFor(runId, stage, slotIndex, 2, program, role),
-  ));
-}
-
-function publicationDigest(requests: readonly AgentRequestAuthority[], effectId: EffectId, runId: OrchestrationRunId): string {
-  const canonical = {
-    schemaVersion: 1,
-    kind: "batch-published",
-    effectId,
-    runId,
-    requestIds: requests.map(({ requestId }) => requestId),
-    contextDigests: requests.map(({ contextDigest }) => contextDigest),
-    issuedRequests: requests.map((authority) => ({
-      authority,
-      context: { digest: authority.contextDigest, slot: { kind: "fixed-artifact-slot", path: `contexts/${authority.contextDigest}.json` } },
-    })),
-  };
-  return createHash("sha256").update(new TextEncoder().encode(JSON.stringify(canonical))).digest("hex");
-}
-
-let publicationSequence = 0;
-function issue(requests: readonly AgentRequestAuthority[]): readonly IssuedSpawnRequest[] {
-  publicationSequence += 1;
-  const effectId = parsed(parseEffectId(`effect:panel-test:${publicationSequence}`));
-  const runId = requests[0]!.runId;
-  const rawRequests = requests.map((authority) => ({
-    authority,
-    context: { digest: authority.contextDigest, slot: `contexts/${authority.contextDigest}.json` },
-  }));
-  const rawReceipt = {
-    schemaVersion: 1,
-    kind: "batch-published",
-    effectId,
-    runId,
-    requestIds: requests.map(({ requestId }) => requestId),
-    contextDigests: requests.map(({ contextDigest }) => contextDigest),
-    issuedRequests: rawRequests,
-    publicationDigest: publicationDigest(requests, effectId, runId),
-  };
-  const receipt = parsed(parseBatchPublishedReceipt(rawReceipt));
-  const intent = parsed(prepareInitialBatchPublicationIntent(runId, effectId, rawRequests));
-  const reconcile = createInitialBatchPublicationReconciler(
-    createInitialPublicationEffectPort(() => ({ ok: true, value: bytes(rawReceipt) })),
-    createAtomicInitialPublicationClaimPort((request) => ({
-      ok: true,
-      value: { schemaVersion: 1, kind: "initial-publication-claimed", key: request.key, identity: request.identity },
-    })),
-  );
-  const issuance = parsed(reconcile(intent));
-  const action = parsed(issueSpawnBatchAction(issuance, rawRequests));
-  registrationBytes.set(registrationKey(receipt), bytes(receipt));
-  return action.requests;
-}
-
-type ArchitectureFixture = Readonly<{
-  authority: ArchitecturePanelAuthority;
-  candidates: readonly IssuedSpawnRequest[];
-  judges: readonly IssuedSpawnRequest[];
-}>;
-
-function architectureFixture(suffix: string): ArchitectureFixture {
-  const runId = parsed(parseOrchestrationRunId(`run.architecture.${suffix}`));
-  const candidateSlots = [
-    rosterSlot(runId, "candidate", 1, "architecture-panel", "arch-designer-agent"),
-    rosterSlot(runId, "candidate", 2, "architecture-panel", "arch-designer-agent"),
-  ];
-  const judgeSlots = [
-    rosterSlot(runId, "judge", 1, "architecture-panel", "arch-judge-agent"),
-    rosterSlot(runId, "judge", 2, "architecture-panel", "arch-judge-agent"),
-  ];
-  const authority = parsed(parseArchitecturePanelAuthority({
-    runId,
-    candidateLenses: ["simplicity-first", "type-driven-fp"],
-    judgeCriteria: ["simplicity", "pure functional core"],
-    candidateSlots,
-    judgeSlots,
-  }));
-  return { authority, candidates: issue(candidateSlots.map(({ attempts }) => attempts[0])), judges: issue(judgeSlots.map(({ attempts }) => attempts[0])) };
-}
-
-const findings: readonly [BriefFinding, BriefFinding] = [
-  { id: waveId("T1:code-reviewer-1"), taskId: "T1", agent: "code-reviewer", severity: "critical", file: "src/a.ts", line: 10, claim: "first claim" },
-  { id: waveId("T2:security-agent-1"), taskId: "T2", agent: "security-agent", severity: "critical", file: "src/b.ts", line: 20, claim: "second claim" },
-];
-
-type RefutationFixture = Readonly<{ authority: RefutationPanelAuthority; requests: readonly IssuedSpawnRequest[] }>;
-function semanticVerifierSlots(
-  runId: OrchestrationRunId,
-  lenses: readonly string[],
-  findingIds: NonEmpty<WaveFindingId>,
-): AgentRosterSlot[] {
-  return lenses.map((lens) => {
-    const binding = parsed(deriveRefutationVerifierBinding(runId, lens as ReviewLens, findingIds));
-    const attempts = ([1, 2] as const).map((attempt, index) =>
-      parsed(parseAgentRequestAuthority({
-        runId,
-        requestId: binding.requestIds[index],
-        slotId: binding.slotId,
-        program: "refutation-panel",
-        role: "review-verifier-agent",
-        attempt,
-        modelProfile: "refutation",
-        harnessBinding: panelBindings,
-        requiredSkill: null,
-        contextDigest: parsed(parseContextDigest(hexDigest(`${runId}:${binding.slotId}:${attempt}:context`))),
-        outputSlot: `transcripts/${binding.slotId}-attempt-${attempt}.json`,
-      })));
-    return parsed(parseAgentRosterSlot(attempts[0], attempts[1]));
-  });
-}
-
-function refutationFixture(suffix: string, entries: readonly [BriefFinding, BriefFinding] = findings): RefutationFixture {
-  const runId = parsed(parseOrchestrationRunId(`run.refutation.${suffix}`));
-  // Verifier roster identities are SEMANTIC: each slot is derived from the
-  // run, its lens, and the exact finding set (deriveRefutationVerifierBinding),
-  // so reordering lenses or findings cannot relabel issued verifier requests.
-  const lensList = ["reproduction", "intent", "blast-radius"] as const;
-  const findingIds = entries.map(({ id }) => id) as unknown as NonEmpty<WaveFindingId>;
-  const slots = semanticVerifierSlots(runId, lensList, findingIds);
-  const authority = parsed(parseRefutationPanelAuthority({
-    runId,
-    findings: entries,
-    lenses: lensList as readonly string[],
-    verifierSlots: slots,
-  }));
-  return { authority, requests: issue(slots.map(({ attempts }) => attempts[0])) };
-}
+const REFUTATION_LENSES = ["reproduction", "intent", "blast-radius"] as const;
+const refutationFixture = (suffix: string, entries: readonly [BriefFinding, BriefFinding] = findings): RefutationFixture =>
+  refutationPanelFixture(`run.refutation.${suffix}`, REFUTATION_LENSES, entries);
 
 function candidatePayload(authority: ArchitecturePanelAuthority, index: number) {
   return { lens: authority.candidateLenses[index], candidate: authority.candidateIds[index], artifact: `# Candidate ${index + 1}` };
@@ -725,14 +533,14 @@ function fullArchitectureHistory(fixture: ArchitectureFixture) {
   let step = startPersistentArchitecturePanel(fixture.authority);
   const events: PersistentArchitecturePanelEvent[] = [];
   for (const index of [1, 0]) {
-    step = reduced(submitCandidate(step.state, fixture, index));
+    step = value(submitCandidate(step.state, fixture, index));
     events.push(step.recordedEvent!);
   }
   for (const index of [1, 0]) {
-    step = reduced(submitJudge(step.state, fixture, index));
+    step = value(submitJudge(step.state, fixture, index));
     events.push(step.recordedEvent!);
   }
-  step = reduced(completePersistentArchitecturePanel(step.state, publicationResolver));
+  step = value(completePersistentArchitecturePanel(step.state, publicationResolver));
   events.push(step.recordedEvent!);
   return { step, events };
 }
@@ -741,7 +549,7 @@ function fullRefutationHistory(fixture: RefutationFixture) {
   let step = startPersistentRefutationPanel(fixture.authority);
   const events: PersistentRefutationPanelEvent[] = [];
   for (const index of [2, 0, 1]) {
-    step = reduced(submitRefutationVerdict(
+    step = value(submitRefutationVerdict(
       step.state,
       publicationResolver,
       panelRequestIdentity(fixture.requests[index]!),
@@ -749,7 +557,7 @@ function fullRefutationHistory(fixture: RefutationFixture) {
     ));
     events.push(step.recordedEvent!);
   }
-  step = reduced(completePersistentRefutationPanel(step.state, publicationResolver));
+  step = value(completePersistentRefutationPanel(step.state, publicationResolver));
   events.push(step.recordedEvent!);
   return { step, events };
 }
@@ -940,7 +748,7 @@ describe("persistent panel authority", () => {
       fixture.authority.lenses,
       [onlyId],
     );
-    const parsedAuthority = reduced(parseRefutationPanelAuthority({
+    const parsedAuthority = value(parseRefutationPanelAuthority({
       runId: fixture.authority.runId,
       findings: only,
       lenses: fixture.authority.lenses,
@@ -959,7 +767,7 @@ describe("persistent architecture panel", () => {
   it("binds candidate and criterion exactly to the canonical request slot; permutations consume only that slot retry", () => {
     const fixture = architectureFixture("slot-binding");
     let step = startPersistentArchitecturePanel(fixture.authority);
-    step = reduced(submitArchitectureCandidateResult(
+    step = value(submitArchitectureCandidateResult(
       step.state,
       publicationResolver,
       panelRequestIdentity(fixture.candidates[0]!),
@@ -970,16 +778,16 @@ describe("persistent architecture panel", () => {
     expect(step.action).toMatchObject({ requests: [{ attempt: 2, slotId: fixture.authority.candidateRoster.orderedSlots[0]!.slotId }] });
 
     const retry = issue([fixture.authority.candidateRoster.orderedSlots[0]!.attempts[1]])[0]!;
-    step = reduced(submitArchitectureCandidateResult(
+    step = value(submitArchitectureCandidateResult(
       step.state,
       publicationResolver,
       panelRequestIdentity(retry),
       candidatePayload(fixture.authority, 0),
     ));
-    step = reduced(submitCandidate(step.state, fixture, 1));
+    step = value(submitCandidate(step.state, fixture, 1));
     expect(step.state.stage).toBe("awaiting-judges");
 
-    step = reduced(submitArchitectureJudgeResult(
+    step = value(submitArchitectureJudgeResult(
       step.state,
       publicationResolver,
       panelRequestIdentity(fixture.judges[0]!),
@@ -1022,7 +830,7 @@ describe("persistent architecture panel", () => {
       },
     });
 
-    let step = reduced(submitArchitectureCandidateResult(
+    let step = value(submitArchitectureCandidateResult(
       startPersistentArchitecturePanel(fixture.authority).state,
       publicationResolver,
       identity,
@@ -1040,12 +848,12 @@ describe("persistent architecture panel", () => {
     let step = startPersistentArchitecturePanel(fixture.authority);
     const events: PersistentArchitecturePanelEvent[] = [];
     for (const index of [0, 1]) {
-      step = reduced(submitCandidate(step.state, fixture, index));
+      step = value(submitCandidate(step.state, fixture, index));
       events.push(step.recordedEvent!);
     }
 
     const awaitingJudgeState = step.state;
-    step = reduced(submitArchitectureJudgeResult(
+    step = value(submitArchitectureJudgeResult(
       awaitingJudgeState,
       publicationResolver,
       panelRequestIdentity(fixture.judges[0]!),
@@ -1076,7 +884,7 @@ describe("persistent architecture panel", () => {
     expect(selectAcceptedArchitectureJudges(step.state)).toEqual([]);
 
     const retry = issue([fixture.authority.judgeRoster.orderedSlots[0]!.attempts[1]])[0]!;
-    step = reduced(submitArchitectureJudgeResult(
+    step = value(submitArchitectureJudgeResult(
       step.state,
       publicationResolver,
       panelRequestIdentity(retry),
@@ -1095,7 +903,7 @@ describe("persistent architecture panel", () => {
     });
     expect(selectAcceptedArchitectureCandidates(step.state)).toHaveLength(2);
     expect(selectAcceptedArchitectureJudges(step.state)).toEqual([]);
-    expect(reduced(replayPersistentArchitecturePanel(
+    expect(value(replayPersistentArchitecturePanel(
       fixture.authority,
       JSON.parse(JSON.stringify(events)),
       publicationResolver,
@@ -1120,7 +928,7 @@ describe("persistent architecture panel", () => {
       error: { kind: "malformed-checkpoint" },
     });
 
-    const accepted = reduced(submitCandidate(started.state, fixture, 0)).state;
+    const accepted = value(submitCandidate(started.state, fixture, 0)).state;
     expect(accepted).not.toHaveProperty("acceptedCandidates");
     expect(accepted).not.toHaveProperty("acceptedJudges");
     const selected = selectAcceptedArchitectureCandidates(accepted);
@@ -1144,15 +952,15 @@ describe("persistent architecture panel", () => {
       () => completePersistentArchitecturePanel(step.state, publicationResolver),
     ];
     for (const submit of submissions) {
-      step = reduced(submit());
+      step = value(submit());
       events.push(step.recordedEvent!);
       const jsonEvents = JSON.parse(JSON.stringify(events));
-      const firstReplay = reduced(replayPersistentArchitecturePanel(fixture.authority, jsonEvents, publicationResolver));
-      const secondReplay = reduced(replayPersistentArchitecturePanel(fixture.authority, jsonEvents, publicationResolver));
+      const firstReplay = value(replayPersistentArchitecturePanel(fixture.authority, jsonEvents, publicationResolver));
+      const secondReplay = value(replayPersistentArchitecturePanel(fixture.authority, jsonEvents, publicationResolver));
       expect(firstReplay.state).toEqual(step.state);
       expect(secondReplay.state).toEqual(firstReplay.state);
-      const checkpoint = reduced(architecturePanelCheckpoint(step.state, events, publicationResolver));
-      const resumed = reduced(parseArchitecturePanelCheckpoint(JSON.parse(JSON.stringify(checkpoint)), publicationResolver));
+      const checkpoint = value(architecturePanelCheckpoint(step.state, events, publicationResolver));
+      const resumed = value(parseArchitecturePanelCheckpoint(JSON.parse(JSON.stringify(checkpoint)), publicationResolver));
       expect(JSON.parse(JSON.stringify(resumed.state))).toEqual(JSON.parse(JSON.stringify(step.state)));
     }
     expect(step.state.stage).toBe("done");
@@ -1161,9 +969,9 @@ describe("persistent architecture panel", () => {
 
   it("strictly rejects forged completion payloads and checkpoint structural disagreement", () => {
     const fixture = architectureFixture("checkpoint-disagreement");
-    const accepted = reduced(submitCandidate(startPersistentArchitecturePanel(fixture.authority).state, fixture, 0));
+    const accepted = value(submitCandidate(startPersistentArchitecturePanel(fixture.authority).state, fixture, 0));
     const event = accepted.recordedEvent!;
-    const checkpoint = reduced(architecturePanelCheckpoint(accepted.state, [event], publicationResolver));
+    const checkpoint = value(architecturePanelCheckpoint(accepted.state, [event], publicationResolver));
     const forged = JSON.parse(JSON.stringify(checkpoint));
     forged.state.slots[0] = {
       slotId: forged.state.slots[0].slotId,
@@ -1176,9 +984,9 @@ describe("persistent architecture panel", () => {
     });
 
     let ready = accepted;
-    ready = reduced(submitCandidate(ready.state, fixture, 1));
-    ready = reduced(submitJudge(ready.state, fixture, 0));
-    ready = reduced(submitJudge(ready.state, fixture, 1));
+    ready = value(submitCandidate(ready.state, fixture, 1));
+    ready = value(submitJudge(ready.state, fixture, 0));
+    ready = value(submitJudge(ready.state, fixture, 1));
     expect(parsePersistentArchitecturePanelEvent(ready.state, {
       schemaVersion: 1,
       type: "architecture-ranking-completed",
@@ -1191,8 +999,8 @@ describe("persistent architecture panel", () => {
     const { step: done, events } = fullArchitectureHistory(fixture);
     const states: ArchitecturePanelState[] = [
       startPersistentArchitecturePanel(fixture.authority).state,
-      reduced(replayPersistentArchitecturePanel(fixture.authority, events.slice(0, 2), publicationResolver)).state,
-      reduced(replayPersistentArchitecturePanel(fixture.authority, events.slice(0, 4), publicationResolver)).state,
+      value(replayPersistentArchitecturePanel(fixture.authority, events.slice(0, 2), publicationResolver)).state,
+      value(replayPersistentArchitecturePanel(fixture.authority, events.slice(0, 4), publicationResolver)).state,
       done.state,
     ];
     const malformed = [{}, { schemaVersion: 1, type: "unknown" }, { schemaVersion: 1, type: "architecture-ranking-completed", ranking: [] }];
@@ -1206,9 +1014,9 @@ describe("persistent architecture panel", () => {
 
   it("produces durable journal/checkpoint effects and accepts only exact receipts", () => {
     const fixture = architectureFixture("persistence-contract");
-    const step = reduced(submitCandidate(startPersistentArchitecturePanel(fixture.authority).state, fixture, 0));
-    const history = reduced(parsePersistentArchitecturePanelHistory(fixture.authority, [], publicationResolver));
-    const effects = reduced(planArchitecturePanelPersistence(step, history, publicationResolver));
+    const step = value(submitCandidate(startPersistentArchitecturePanel(fixture.authority).state, fixture, 0));
+    const history = value(parsePersistentArchitecturePanelHistory(fixture.authority, [], publicationResolver));
+    const effects = value(planArchitecturePanelPersistence(step, history, publicationResolver));
     expect(effects.map(({ kind }) => kind)).toEqual([
       "append-architecture-panel-event",
       "replace-architecture-panel-checkpoint",
@@ -1218,19 +1026,19 @@ describe("persistent architecture panel", () => {
     // resumes from that append and plans only the next deterministic sequence.
     const append = effects[0];
     if (append.kind !== "append-architecture-panel-event") throw new Error("expected append effect first");
-    const interruptedHistory = reduced(parsePersistentArchitecturePanelHistory(
+    const interruptedHistory = value(parsePersistentArchitecturePanelHistory(
       fixture.authority,
       [JSON.parse(JSON.stringify(append.event))],
       publicationResolver,
     ));
-    const resumed = reduced(replayPersistentArchitecturePanel(
+    const resumed = value(replayPersistentArchitecturePanel(
       fixture.authority,
       interruptedHistory.events,
       publicationResolver,
     ));
     expect(resumed.state).toEqual(step.state);
-    const afterResume = reduced(submitCandidate(resumed.state, fixture, 1));
-    const resumedEffects = reduced(planArchitecturePanelPersistence(
+    const afterResume = value(submitCandidate(resumed.state, fixture, 1));
+    const resumedEffects = value(planArchitecturePanelPersistence(
       afterResume,
       interruptedHistory,
       publicationResolver,
@@ -1238,13 +1046,13 @@ describe("persistent architecture panel", () => {
     expect(resumedEffects.map(({ sequence }) => sequence)).toEqual([2, 2]);
     const replacement = resumedEffects[1];
     if (replacement.kind !== "replace-architecture-panel-checkpoint") throw new Error("expected checkpoint replacement second");
-    expect(JSON.parse(JSON.stringify(reduced(parseArchitecturePanelCheckpoint(
+    expect(JSON.parse(JSON.stringify(value(parseArchitecturePanelCheckpoint(
       JSON.parse(JSON.stringify(replacement.checkpoint)),
       publicationResolver,
     )).state))).toEqual(JSON.parse(JSON.stringify(afterResume.state)));
 
     for (const effect of effects) {
-      expect(reduced(parsePanelPersistenceReceipt({
+      expect(value(parsePanelPersistenceReceipt({
         schemaVersion: 1,
         kind: "panel-persistence-recorded",
         panel: "architecture",
@@ -1266,9 +1074,9 @@ describe("persistent architecture panel", () => {
   it("emits no persistence effects from structural steps/histories or a prefix that does not replay to the step state", () => {
     const fixture = architectureFixture("persistence-forgery");
     const initial = startPersistentArchitecturePanel(fixture.authority);
-    const first = reduced(submitCandidate(initial.state, fixture, 0));
-    const second = reduced(submitCandidate(first.state, fixture, 1));
-    const emptyHistory = reduced(parsePersistentArchitecturePanelHistory(fixture.authority, [], publicationResolver));
+    const first = value(submitCandidate(initial.state, fixture, 0));
+    const second = value(submitCandidate(first.state, fixture, 1));
+    const emptyHistory = value(parsePersistentArchitecturePanelHistory(fixture.authority, [], publicationResolver));
 
     const structuralStep = Object.freeze({ ...first }) as PersistentArchitectureStep;
     expect(planArchitecturePanelPersistence(structuralStep, emptyHistory, publicationResolver)).toMatchObject({
@@ -1302,7 +1110,7 @@ describe("persistent architecture panel", () => {
 
 describe("persistent refutation panel", () => {
   it("structurally hashes verifier authority so delimiter-bearing finding sets cannot collide", () => {
-    const runId = parsed(parseOrchestrationRunId("run.refutation.structural-hash"));
+    const runId = value(parseOrchestrationRunId("run.refutation.structural-hash"));
     const firstA = parseWaveFindingId("T:a|b");
     const firstB = parseWaveFindingId("X:c");
     const secondA = parseWaveFindingId("T:a");
@@ -1320,7 +1128,7 @@ describe("persistent refutation panel", () => {
     const fixture = refutationFixture("slot-binding");
     let step = startPersistentRefutationPanel(fixture.authority);
     const events: PersistentRefutationPanelEvent[] = [];
-    step = reduced(submitRefutationVerdict(
+    step = value(submitRefutationVerdict(
       step.state,
       publicationResolver,
       panelRequestIdentity(fixture.requests[0]!),
@@ -1337,7 +1145,7 @@ describe("persistent refutation panel", () => {
     expect(step.action).toMatchObject({ requests: [{ attempt: 2, slotId: fixture.authority.verifierRoster.orderedSlots[0]!.slotId }] });
 
     const retry = issue([fixture.authority.verifierRoster.orderedSlots[0]!.attempts[1]])[0]!;
-    step = reduced(submitRefutationVerdict(step.state, publicationResolver, panelRequestIdentity(retry), "not-json"));
+    step = value(submitRefutationVerdict(step.state, publicationResolver, panelRequestIdentity(retry), "not-json"));
     events.push(step.recordedEvent!);
     expect(step.state.stage).toBe("terminal-blocked");
     expect(step.action).toMatchObject({ diagnostic: { retry: { eligible: false } } });
@@ -1348,8 +1156,8 @@ describe("persistent refutation panel", () => {
     );
     if (!replayResult.ok) throw new Error(JSON.stringify(replayResult.error));
     expect(JSON.parse(JSON.stringify(replayResult.value.state))).toEqual(JSON.parse(JSON.stringify(step.state)));
-    const checkpoint = reduced(refutationPanelCheckpoint(step.state, events, publicationResolver));
-    expect(reduced(parseRefutationPanelCheckpoint(
+    const checkpoint = value(refutationPanelCheckpoint(step.state, events, publicationResolver));
+    expect(value(parseRefutationPanelCheckpoint(
       JSON.parse(JSON.stringify(checkpoint)),
       publicationResolver,
     )).state.stage).toBe("terminal-blocked");
@@ -1360,22 +1168,22 @@ describe("persistent refutation panel", () => {
     let step = startPersistentRefutationPanel(fixture.authority);
     const events: PersistentRefutationPanelEvent[] = [];
     for (const index of [2, 0, 1]) {
-      step = reduced(submitRefutationVerdict(
+      step = value(submitRefutationVerdict(
         step.state,
         publicationResolver,
         panelRequestIdentity(fixture.requests[index]!),
         verdictJson(fixture.authority, index, votes[index]!),
       ));
       events.push(step.recordedEvent!);
-      expect(reduced(replayPersistentRefutationPanel(
+      expect(value(replayPersistentRefutationPanel(
         fixture.authority,
         JSON.parse(JSON.stringify(events)),
         publicationResolver,
       )).state).toEqual(step.state);
     }
-    step = reduced(completePersistentRefutationPanel(step.state, publicationResolver));
+    step = value(completePersistentRefutationPanel(step.state, publicationResolver));
     events.push(step.recordedEvent!);
-    const restarted = reduced(replayPersistentRefutationPanel(
+    const restarted = value(replayPersistentRefutationPanel(
       fixture.authority,
       JSON.parse(JSON.stringify(events)),
       publicationResolver,
@@ -1385,8 +1193,8 @@ describe("persistent refutation panel", () => {
       stage: "done",
       decision: { threshold: 2, refuted: [{ finding: { id: findings[0].id } }], retained: [{ finding: { id: findings[1].id } }] },
     });
-    const checkpoint = reduced(refutationPanelCheckpoint(step.state, events, publicationResolver));
-    expect(JSON.parse(JSON.stringify(reduced(
+    const checkpoint = value(refutationPanelCheckpoint(step.state, events, publicationResolver));
+    expect(JSON.parse(JSON.stringify(value(
       parseRefutationPanelCheckpoint(JSON.parse(JSON.stringify(checkpoint)), publicationResolver),
     ).state))).toEqual(JSON.parse(JSON.stringify(step.state)));
     expect(events.at(-1)).not.toHaveProperty("roster");
@@ -1396,7 +1204,7 @@ describe("persistent refutation panel", () => {
     const fixture = refutationFixture("strict-majority-threshold");
     let ready = startPersistentRefutationPanel(fixture.authority);
     for (const index of [0, 1, 2]) {
-      ready = reduced(submitRefutationVerdict(
+      ready = value(submitRefutationVerdict(
         ready.state,
         publicationResolver,
         panelRequestIdentity(fixture.requests[index]!),
@@ -1412,7 +1220,7 @@ describe("persistent refutation panel", () => {
       },
     });
 
-    const completed = reduced(completePersistentRefutationPanel(ready.state, publicationResolver));
+    const completed = value(completePersistentRefutationPanel(ready.state, publicationResolver));
     expect(completed.state).toMatchObject({
       stage: "done",
       decision: { threshold: 2, refuted: [{ finding: { id: findings[0].id } }] },
@@ -1441,14 +1249,14 @@ describe("persistent refutation panel", () => {
     ] as const;
     let step = startPersistentRefutationPanel(fixture.authority);
     for (const index of [2, 0, 1]) {
-      step = reduced(submitRefutationVerdict(
+      step = value(submitRefutationVerdict(
         step.state,
         publicationResolver,
         panelRequestIdentity(fixture.requests[index]!),
         verdictJson(fixture.authority, index, tieVotes[index]!),
       ));
     }
-    step = reduced(completePersistentRefutationPanel(step.state, publicationResolver));
+    step = value(completePersistentRefutationPanel(step.state, publicationResolver));
     expect(step.state).toMatchObject({
       stage: "done",
       decision: {
@@ -1487,14 +1295,14 @@ describe("persistent refutation panel", () => {
     expect(JSON.stringify(completed.state)).toBe(completedBefore);
 
     const blockedFixture = refutationFixture("terminal-blocked");
-    let blocked = reduced(submitRefutationVerdict(
+    let blocked = value(submitRefutationVerdict(
       startPersistentRefutationPanel(blockedFixture.authority).state,
       publicationResolver,
       panelRequestIdentity(blockedFixture.requests[0]!),
       "{}",
     ));
     const retry = issue([blockedFixture.authority.verifierRoster.orderedSlots[0]!.attempts[1]])[0]!;
-    blocked = reduced(submitRefutationVerdict(
+    blocked = value(submitRefutationVerdict(
       blocked.state,
       publicationResolver,
       panelRequestIdentity(retry),
@@ -1518,14 +1326,14 @@ describe("persistent refutation panel", () => {
       (order) => {
         let step = startPersistentRefutationPanel(fixture.authority);
         for (const index of order) {
-          step = reduced(submitRefutationVerdict(
+          step = value(submitRefutationVerdict(
             step.state,
             publicationResolver,
             panelRequestIdentity(fixture.requests[index]!),
             verdictJson(fixture.authority, index, votes[index]!),
           ));
         }
-        step = reduced(completePersistentRefutationPanel(step.state, publicationResolver));
+        step = value(completePersistentRefutationPanel(step.state, publicationResolver));
         expect(step.state).toEqual(canonical);
       },
     ), { numRuns: 30 });
@@ -1533,7 +1341,7 @@ describe("persistent refutation panel", () => {
 
   it("keeps malformed, duplicate, stale, and incomplete evidence closed without losing siblings", () => {
     const fixture = refutationFixture("negative-evidence");
-    let step = reduced(submitRefutationVerdict(
+    let step = value(submitRefutationVerdict(
       startPersistentRefutationPanel(fixture.authority).state,
       publicationResolver,
       panelRequestIdentity(fixture.requests[1]!),
@@ -1549,7 +1357,7 @@ describe("persistent refutation panel", () => {
     expect(step.state).toBe(before);
     expect(completePersistentRefutationPanel(step.state, publicationResolver)).toMatchObject({ ok: false, error: { kind: "incomplete-roster" } });
 
-    const malformed = reduced(submitRefutationVerdict(
+    const malformed = value(submitRefutationVerdict(
       step.state,
       publicationResolver,
       panelRequestIdentity(fixture.requests[0]!),
@@ -1568,20 +1376,20 @@ describe("persistent refutation panel", () => {
   it("produces symmetric refutation persistence effects, exact receipts, and rejects structural forgeries", () => {
     const fixture = refutationFixture("persistence-contract");
     const initial = startPersistentRefutationPanel(fixture.authority);
-    const first = reduced(submitRefutationVerdict(
+    const first = value(submitRefutationVerdict(
       initial.state,
       publicationResolver,
       panelRequestIdentity(fixture.requests[0]!),
       verdictJson(fixture.authority, 0, votes[0]!),
     ));
-    const second = reduced(submitRefutationVerdict(
+    const second = value(submitRefutationVerdict(
       first.state,
       publicationResolver,
       panelRequestIdentity(fixture.requests[1]!),
       verdictJson(fixture.authority, 1, votes[1]!),
     ));
-    const emptyHistory = reduced(parsePersistentRefutationPanelHistory(fixture.authority, [], publicationResolver));
-    const effects = reduced(planRefutationPanelPersistence(first, emptyHistory, publicationResolver));
+    const emptyHistory = value(parsePersistentRefutationPanelHistory(fixture.authority, [], publicationResolver));
+    const effects = value(planRefutationPanelPersistence(first, emptyHistory, publicationResolver));
     expect(effects.map(({ kind }) => kind)).toEqual([
       "append-refutation-panel-event",
       "replace-refutation-panel-checkpoint",
@@ -1596,7 +1404,7 @@ describe("persistent refutation panel", () => {
         sequence: effect.sequence,
         dedupKey: effect.dedupKey,
       } as const;
-      expect(reduced(parsePanelPersistenceReceipt(receipt, effect))).toEqual(receipt);
+      expect(value(parsePanelPersistenceReceipt(receipt, effect))).toEqual(receipt);
       expect(parsePanelPersistenceReceipt({ ...receipt, dedupKey: `${effect.dedupKey}:forged` }, effect)).toMatchObject({
         ok: false,
         error: { kind: "persistence-receipt-mismatch" },
@@ -1646,19 +1454,19 @@ describe("current and historical Findings through the full persistent panel", ()
     let step = startPersistentRefutationPanel(fixture.authority);
     const events: PersistentRefutationPanelEvent[] = [];
     for (const index of [2, 0, 1, 3]) {
-      const history = reduced(parsePersistentRefutationPanelHistory(fixture.authority, JSON.parse(JSON.stringify(events)), publicationResolver));
-      step = index === 3 ? reduced(completePersistentRefutationPanel(step.state, publicationResolver))
-        : reduced(submitRefutationVerdict(step.state, publicationResolver, panelRequestIdentity(fixture.requests[index]!), verdictJson(fixture.authority, index, votes[index]!)));
-      const effects = reduced(planRefutationPanelPersistence(step, history, publicationResolver));
+      const history = value(parsePersistentRefutationPanelHistory(fixture.authority, JSON.parse(JSON.stringify(events)), publicationResolver));
+      step = index === 3 ? value(completePersistentRefutationPanel(step.state, publicationResolver))
+        : value(submitRefutationVerdict(step.state, publicationResolver, panelRequestIdentity(fixture.requests[index]!), verdictJson(fixture.authority, index, votes[index]!)));
+      const effects = value(planRefutationPanelPersistence(step, history, publicationResolver));
       events.push(step.recordedEvent!);
       expect(effects.map(({ sequence }) => sequence)).toEqual([events.length, events.length]);
       const replacement = effects[1];
       if (replacement.kind !== "replace-refutation-panel-checkpoint") throw new Error("checkpoint expected");
       expect(replacement.checkpoint.schemaVersion).toBe(2);
       const snapshot = JSON.stringify(replacement.checkpoint);
-      const reloaded = reduced(parseRefutationPanelCheckpoint(JSON.parse(snapshot), publicationResolver));
+      const reloaded = value(parseRefutationPanelCheckpoint(JSON.parse(snapshot), publicationResolver));
       expect(JSON.stringify(reloaded.state)).toBe(JSON.stringify(step.state));
-      expect(JSON.stringify(reduced(replayPersistentRefutationPanel(fixture.authority, JSON.parse(JSON.stringify(events)), publicationResolver)).state))
+      expect(JSON.stringify(value(replayPersistentRefutationPanel(fixture.authority, JSON.parse(JSON.stringify(events)), publicationResolver)).state))
         .toBe(JSON.stringify(step.state));
       expect(reloaded.state.authority.findings).toEqual(fixture.authority.findings);
       expect(Object.isFrozen(reloaded.state.authority.findings[0]?.basis?.evidence)).toBe(true);
@@ -1680,7 +1488,7 @@ describe("current and historical Findings through the full persistent panel", ()
   it.each(["protocol", "basis", "nested", "claim", "consequence", "advisory"])("refuses %s authority tampering during completed checkpoint reload", (mutation) => {
     const fixture = mixedRefutationFixture(`current-tamper-${mutation}`);
     const { step, events } = fullRefutationHistory(fixture);
-    const checkpoint = JSON.parse(JSON.stringify(reduced(refutationPanelCheckpoint(step.state, events, publicationResolver))));
+    const checkpoint = JSON.parse(JSON.stringify(value(refutationPanelCheckpoint(step.state, events, publicationResolver))));
     const entry = checkpoint.authority.findings[0];
     if (mutation === "protocol") delete entry.protocolVersion;
     if (mutation === "basis") delete entry.basis;
@@ -1706,8 +1514,8 @@ describe("current and historical Findings through the full persistent panel", ()
   it("refuses an independently minted history for a changed current basis at persistence planning", () => {
     const original = mixedRefutationFixture("current-parent-join", 50);
     const changed = mixedRefutationFixture("current-parent-join", 51);
-    const history = reduced(parsePersistentRefutationPanelHistory(original.authority, [], publicationResolver));
-    const step = reduced(submitRefutationVerdict(startPersistentRefutationPanel(changed.authority).state,
+    const history = value(parsePersistentRefutationPanelHistory(original.authority, [], publicationResolver));
+    const step = value(submitRefutationVerdict(startPersistentRefutationPanel(changed.authority).state,
       publicationResolver, panelRequestIdentity(changed.requests[0]!), verdictJson(changed.authority, 0, votes[0]!)));
     expect(planRefutationPanelPersistence(step, history, publicationResolver)).toMatchObject({ ok: false, error: { kind: "malformed-history" } });
   });
@@ -1717,9 +1525,9 @@ describe("current and historical Findings through the full persistent panel", ()
       const fixture = mixedRefutationFixture(`current-confidence-${confidence}`, confidence);
       let step = startPersistentRefutationPanel(fixture.authority);
       const tied = [["refuted", "uncertain"], ["upheld", "uncertain"], ["uncertain", "uncertain"]] as const;
-      for (const index of [0, 1, 2]) step = reduced(submitRefutationVerdict(step.state, publicationResolver,
+      for (const index of [0, 1, 2]) step = value(submitRefutationVerdict(step.state, publicationResolver,
         panelRequestIdentity(fixture.requests[index]!), verdictJson(fixture.authority, index, tied[index]!)));
-      step = reduced(completePersistentRefutationPanel(step.state, publicationResolver));
+      step = value(completePersistentRefutationPanel(step.state, publicationResolver));
       if (step.state.stage !== "done") throw new Error("done expected");
       expect(step.state.decision.threshold).toBe(2);
       expect(step.state.decision.refuted).toHaveLength(0);
@@ -1821,32 +1629,25 @@ describe("a registration diverging from the canonical roster is refused", () => 
 
     // Re-register the SAME publication identity with a tampered issued request,
     // so the identity still resolves but the authority behind it has moved.
-    const key = registrationKey({ runId: request.issuance.runId, effectId: request.issuance.effectId });
-    const original = JSON.parse(new TextDecoder().decode(Uint8Array.from(registrationBytes.get(key)!)));
-    const tampered = {
+    const tamper = (original: Readonly<Record<string, unknown>>) => ({
       ...original,
-      issuedRequests: original.issuedRequests.map((entry: Record<string, unknown>, index: number) =>
+      issuedRequests: (original.issuedRequests as readonly Record<string, unknown>[]).map((entry, index) =>
         index === request.issuance.batchIndex
           ? { ...entry, authority: { ...(entry.authority as Record<string, unknown>), ...override } }
           : entry),
-    };
-    registrationBytes.set(key, bytes(tampered));
+    });
 
-    try {
-      const submitted = submitArchitectureCandidateResult(
-        startPersistentArchitecturePanel(fixture.authority).state,
-        publicationResolver,
-        identity,
-        candidatePayload(fixture.authority, 0),
-      );
+    const submitted = withRewrittenPanelRegistration(request, tamper, () => submitArchitectureCandidateResult(
+      startPersistentArchitecturePanel(fixture.authority).state,
+      publicationResolver,
+      identity,
+      candidatePayload(fixture.authority, 0),
+    ));
 
-      expect(submitted.ok).toBe(false);
-      if (submitted.ok) return;
-      expect(submitted.error.kind).toBe("request-rehydration-failed");
-      expect(submitted.error).toMatchObject({ requestId: request.authority.requestId });
-    } finally {
-      registrationBytes.set(key, bytes(original));
-    }
+    expect(submitted.ok).toBe(false);
+    if (submitted.ok) return;
+    expect(submitted.error.kind).toBe("request-rehydration-failed");
+    expect(submitted.error).toMatchObject({ requestId: request.authority.requestId });
   });
 
   it("accepts the untampered registration the divergences are varied from", () => {

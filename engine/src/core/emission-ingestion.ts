@@ -44,12 +44,12 @@
  * Startup/transport infrastructure unavailability produces no observation at
  * all and stays the shell's existing infrastructure recovery.
  *
- * Pure module: no I/O, no clock, no randomness; it must not import
- * panel-program.ts, the panel verdict modules (panel-verdict-source.ts,
- * persistent-panel.ts) or any I/O adapter (a placement constraint this header
- * states and review audits: the cross-import linter admits core-to-core
- * imports and the module is not enrolled in the purity closure, so this
- * declaration is the invariant's stated home, not an automated gate). PR
+ * Pure module: no I/O, no clock, no randomness; enrolled in
+ * DEFAULT_PURE_MODULES, so machine-purity.test.ts audits its whole transitive
+ * closure. It must not import panel-program.ts, the panel verdict modules
+ * (panel-verdict-source.ts, persistent-panel.ts) or legacy-panel-decisions.ts
+ * — ADR-0018's layering, gated by the same suite because both sides of that
+ * edge are pure and the closure alone cannot see it. PR
  * #52's fail-closed extraction is consumed verbatim
  * (`parseFinalPayload` — never modified, called exactly as the capture runtime
  * calls it), so wherever the selection is extraction the fallback behavior is

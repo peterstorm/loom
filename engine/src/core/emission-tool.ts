@@ -56,10 +56,10 @@ export type EmissionSchemaVersion = "v2" | "v3" | "v1";
 
 /** The closed vocabulary as data, for boundary parses of untrusted claimed
  *  version strings (the mint refuses a non-member before any registry lookup).
- *  Module-local: its only consumer is `issueEmissionBinding`'s boundary parse
- *  in this module; the registry's typed cells carry the vocabulary to every
- *  other reader. */
-const EMISSION_SCHEMA_VERSIONS: readonly EmissionSchemaVersion[] = Object.freeze(["v2", "v3", "v1"]);
+ *  Its consumers are `issueEmissionBinding`'s boundary parse here and the
+ *  panel verdict source record parse (panel-verdict-source), which admits a
+ *  durable record's schema version through the same vocabulary. */
+export const EMISSION_SCHEMA_VERSIONS: readonly EmissionSchemaVersion[] = Object.freeze(["v2", "v3", "v1"]);
 
 /**
  * The emission edge's closed refusal-code vocabulary — parse, don't validate:
