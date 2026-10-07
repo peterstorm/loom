@@ -87,7 +87,6 @@ describe("a digest-scheme claim is unforgeable outside the baseline module", () 
       fromEntries: DECLARED_ARTIFACT_BASELINE.fromEntries,
       capture: DECLARED_ARTIFACT_BASELINE.capture,
       parse: DECLARED_ARTIFACT_BASELINE.parse,
-      scheme: "declared-artifact",
     };
     // @ts-expect-error a spread copies members, never the private brand.
     const spread: ArtifactBaselineScheme<"declared-artifact"> = { ...DECLARED_ARTIFACT_BASELINE };
@@ -106,8 +105,15 @@ describe("a digest-scheme claim is unforgeable outside the baseline module", () 
     // @ts-expect-error a canonical parse cannot claim a scheme its issued entry points do not prove.
     parseCanonicalArtifactBaseline<"declared-artifact">([], "baseline", UNKNOWN_SCHEME_BASELINE);
     expect([swapped, widened]).toHaveLength(2);
-    expect([DECLARED_ARTIFACT_BASELINE, REPOSITORY_CHANGE_BASELINE, UNKNOWN_SCHEME_BASELINE].map((scheme) => scheme.scheme))
-      .toEqual(["declared-artifact", "repository-change", "unknown"]);
+  });
+
+  it("carries the scheme in the type alone: an issued instance exposes only its entry points", () => {
+    for (const scheme of [DECLARED_ARTIFACT_BASELINE, REPOSITORY_CHANGE_BASELINE, UNKNOWN_SCHEME_BASELINE]) {
+      expect(Object.isFrozen(scheme)).toBe(true);
+      expect(Object.keys(scheme)).toEqual([]);
+      expect(Object.getOwnPropertyNames(Object.getPrototypeOf(scheme)).sort()).toEqual(["capture", "constructor", "fromEntries", "parse"]);
+    }
+    expect(new Set([DECLARED_ARTIFACT_BASELINE, REPOSITORY_CHANGE_BASELINE, UNKNOWN_SCHEME_BASELINE]).size).toBe(3);
   });
 });
 

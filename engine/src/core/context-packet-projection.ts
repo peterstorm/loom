@@ -4,6 +4,7 @@ import { parseContextPacket, parseStandaloneReviewerContextPacketV3, type Contex
 import { boundDiagnosticMessage, boundedThrownCause, type DomainResult } from "./orchestration-contract";
 import { parseWaveFrozenSource, WAVE_FROZEN_SOURCE_SECTION } from "./wave-frozen-source";
 import { FROZEN_DIFF_PAGE_UNITS, STANDALONE_FROZEN_DIFF_SECTION, frozenDiffPage, parseFrozenDiff } from "./standalone-read-coverage";
+import { isFlagToken } from "./cli-flag-token";
 
 type ProjectedPacket = ContextPacket | StandaloneReviewerContextPacketV3;
 
@@ -18,11 +19,6 @@ export type ContextProjectionInput = Readonly<{
   purpose?: "standalone-successor";
 }>;
 const failed = (error: string): DomainResult<never, string> => ({ ok: false, error });
-
-/** The shared value-is-a-flag rule both reader grammars below apply (and the
- *  CLI grammar in handlers/helpers/cli-args.ts): a `--`-prefixed token is a
- *  flag, never a value. */
-const isFlagToken = (token: string): boolean => token.startsWith("--");
 
 /** Closed CLI grammar; offsets are UTF-16 text units, index offsets are section entries. */
 export function parseContextProjectionArguments(args: readonly string[]): DomainResult<ContextProjectionInput, string> {
@@ -69,7 +65,8 @@ export type ContextSectionReadInput = Readonly<{ path: string; digest: string; l
 
 /**
  * The whole-section reader's CLI grammar, beside the projection reader's so
- * both reader grammars have one owner and share `isFlagToken`. Each of
+ * both reader grammars have one owner and share `isFlagToken` (the CLI
+ * value-is-a-flag rule of core/cli-flag-token). Each of
  * `--packet`, `--digest` and `--section` is read at its first occurrence and
  * must carry a value: a missing, empty or flag-token value is absent. The
  * packet path must be absolute. Duplicate handling deliberately differs from

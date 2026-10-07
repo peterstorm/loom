@@ -71,6 +71,7 @@ import {
   type PanelStep,
 } from "./persistent-panel-program";
 import { safeArray, safeRecord } from "./exact-data";
+import { isRecord } from "./plain-record";
 import {
   authorityMatches,
   boundCandidateEntry,
@@ -98,6 +99,7 @@ import {
 import {
   acceptedAgentResult,
   boundedThrownCause,
+  canonicalExactRosterJson,
   parseArtifactDigest,
   parseCompleteRoster,
   parseEffectId,
@@ -1037,6 +1039,21 @@ function reduceRefutationVerdictRejected(state: RefutationPanelState, event: Ref
 // The two programs over the persistent program kernel
 // ---------------------------------------------------------------------------
 
+/**
+ * The canonical form of one panel's state (live, or JSON read back from a
+ * checkpoint): the issued rosters of its authority — the only place either
+ * panel's state carries a derived view — each taken to the roster's own
+ * canonical form (`canonicalExactRosterJson`), and every other field, key
+ * order included, untouched. Positional, never by key name: a `byId` anywhere
+ * else in the state stays part of the comparison.
+ */
+const canonicalPanelStateJson = (rosterFields: readonly string[]) => (state: unknown): unknown => {
+  if (!isRecord(state) || !isRecord(state.authority)) return state;
+  const authority = Object.fromEntries(Object.entries(state.authority).map(([field, value]) =>
+    [field, rosterFields.includes(field) ? canonicalExactRosterJson(value) : value] as const));
+  return { ...state, authority };
+};
+
 const ARCHITECTURE_PROGRAM: PanelProgramDefinition<"architecture", ArchitecturePanelAuthority, ArchitecturePanelAuthorityInput, ArchitecturePanelState, ArchitecturePanelAction, PersistentArchitecturePanelEvent> = {
   panel: "architecture",
   proofs,
@@ -1046,6 +1063,7 @@ const ARCHITECTURE_PROGRAM: PanelProgramDefinition<"architecture", ArchitectureP
   transition: reduceArchitectureTransition,
   parseAuthority: parseArchitecturePanelAuthority,
   authorityJson: (authority) => Object.freeze({ runId: authority.runId, candidateLenses: authority.candidateLenses, judgeCriteria: authority.judgeCriteria, candidateSlots: authority.candidateRoster.orderedSlots, judgeSlots: authority.judgeRoster.orderedSlots }),
+  canonicalStateJson: canonicalPanelStateJson(["candidateRoster", "judgeRoster"]),
 };
 
 const REFUTATION_PROGRAM: PanelProgramDefinition<"refutation", RefutationPanelAuthority, RefutationPanelAuthorityInput, RefutationPanelState, RefutationPanelAction, PersistentRefutationPanelEvent> = {
@@ -1063,6 +1081,7 @@ const REFUTATION_PROGRAM: PanelProgramDefinition<"refutation", RefutationPanelAu
     lenses: authority.lenses,
     verifierSlots: authority.verifierRoster.orderedSlots,
   }),
+  canonicalStateJson: canonicalPanelStateJson(["verifierRoster"]),
 };
 
 export function reducePersistentArchitecturePanel(state: ArchitecturePanelState, event: PersistentArchitecturePanelEvent): PersistentPanelResult<PersistentArchitectureStep> {

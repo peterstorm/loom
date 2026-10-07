@@ -89,4 +89,32 @@ describe("panel verdict source record: constructor and parser share one invarian
     if (reread.ok) throw new Error("unreachable");
     expect(reread.error).toContain(diagnostic);
   });
+
+  // The panel-verdict-kind guard reads its table by OWN key only. An inherited
+  // `Object.prototype` name is truthy under a plain index lookup
+  // (`PANEL_VERDICT_KINDS["constructor"]` is a function), and the table's own
+  // `false` row must refuse exactly as an unknown name does.
+  it.each(["constructor", "toString", "__proto__", "hasOwnProperty", "reviewer-payload"])(
+    "refuses an accepted call naming %j as its producer kind, at construction and on re-read", (kindName) => {
+      const kind = { kind: kindName } as unknown as EmissionToolCall["kind"];
+      const built = build({
+        source: { ...source, producerKind: kindName as EmissionToolVerdictSource["producerKind"] },
+        acceptedCall: { ...call, kind },
+      });
+      expect(built.ok).toBe(false);
+      if (built.ok) throw new Error("unreachable");
+      expect(built.error).toContain(`producer kind ${JSON.stringify(kindName)}, which is not a panel verdict kind`);
+
+      const valid = build({});
+      if (!valid.ok) throw new Error(valid.error);
+      const persisted = JSON.parse(JSON.stringify(valid.value)) as Record<string, unknown>;
+      const reread = parsePanelVerdictSourceRecord({
+        ...persisted,
+        source: { ...(persisted.source as object), producerKind: kindName },
+        acceptedCall: { ...(persisted.acceptedCall as object), kind: JSON.parse(`{"kind":${JSON.stringify(kindName)}}`) },
+      });
+      expect(reread.ok).toBe(false);
+      if (reread.ok) throw new Error("unreachable");
+      expect(reread.error).toContain(`producer kind ${JSON.stringify(kindName)}, which is not a panel verdict kind`);
+    });
 });

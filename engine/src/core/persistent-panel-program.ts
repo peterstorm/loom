@@ -3,8 +3,9 @@
  * every persistent (schema v2) panel program instantiates.
  *
  * A program is a `PanelProgramDefinition` — its start, its next action, its
- * strict durable event parser, its unguarded stage transition, and its
- * authority codec. Everything else is stated once here:
+ * strict durable event parser, its unguarded stage transition, its
+ * authority codec, and the canonical form of its state's JSON. Everything
+ * else is stated once here:
  *
  *   - the reducer guard (`reducePanelProgram`): only a proved, non-terminal
  *     state and a strictly parsed durable event reach a transition, and a
@@ -27,7 +28,9 @@
  *
  * Durable bytes are the programs' own: every checkpoint and effect is built
  * with the key order its persisted form has always had, because checkpoint
- * parsing compares the recorded state with the replayed one as JSON text.
+ * parsing compares the recorded state with the replayed one as JSON text —
+ * each first taken to the program's `canonicalStateJson`, so the kernel itself
+ * knows no field of any program's state.
  *
  * Pure module: no I/O, no clock, no randomness.
  */
@@ -76,34 +79,15 @@ export function createPanelProofs(): PanelProofs {
 // ---------------------------------------------------------------------------
 
 /**
- * The roster's DERIVED lookup views. `ExactRoster.byId` and `CompleteRoster.bySlot`
- * are built by the roster parser from `orderedSlots`/`ordered` and by nothing
- * else, so they carry no information a comparison of those arrays does not
- * already have.
- */
-const DERIVED_ROSTER_VIEWS: ReadonlySet<string> = new Set(["byId", "bySlot"]);
-
-/**
- * Structural equality for any two panel values compared by content: a durable
- * checkpoint's state, a replayed event prefix, a deterministic aggregate, and a
- * panel authority projection all come through here.
- *
- * The derived roster views are dropped from BOTH sides, because including them
- * made the comparison depend on how a `Map` happens to serialize — and it did,
- * silently and wrongly. A checkpoint written before the roster view became a
- * real `Map` holds the literal text `"byId":{"size":3}`: `JSON.stringify` had
- * dropped every function-valued key of the old fake-`ReadonlyMap` record and
- * left only its size, so this check was proving that two rosters had the same
- * NUMBER of slots and nothing whatsoever about which slots they were.
- *
- * Dropping the derived keys compares the arrays they are projected from, which
- * is strictly stronger, and makes the check independent of any serialization
- * choice for `Map` — including the correct one.
+ * Structural equality of two values as JSON text: a deterministic aggregate
+ * against its persisted form, two authority projections, or two canonical
+ * states. Nothing is filtered — a value that carries a derived view is
+ * compared through its owner's canonical projection first (`statesAgree`
+ * below does exactly that for program states). A value JSON cannot encode (a
+ * cycle, a BigInt, a throwing accessor) equals nothing.
  */
 export function jsonEqual(left: unknown, right: unknown): boolean {
-  const withoutDerivedViews = (value: unknown): string | undefined =>
-    JSON.stringify(value, (key, entry: unknown) => (DERIVED_ROSTER_VIEWS.has(key) ? undefined : entry));
-  try { return withoutDerivedViews(left) === withoutDerivedViews(right); } catch { return false; }
+  try { return JSON.stringify(left) === JSON.stringify(right); } catch { return false; }
 }
 
 // ---------------------------------------------------------------------------
@@ -121,9 +105,10 @@ export type PanelState<Authority> = Readonly<{ authority: Authority; stage: stri
 /**
  * What one panel contributes to the program kernel: its membership domain,
  * start, next action, strict durable event parser, unguarded stage
- * transition, and authority codec. Everything else — the reducer guard,
- * replay-equals-state, the recorded-step and history proofs, the checkpoint
- * record, the persistence plan and its dedup key — is the kernel's, once.
+ * transition, authority codec, and the canonical form of its state's JSON.
+ * Everything else — the reducer guard, replay-equals-state, the recorded-step
+ * and history proofs, the checkpoint record, the persistence plan and its
+ * dedup key — is the kernel's, once.
  */
 export type PanelProgramDefinition<P extends PanelKind, Authority extends PanelAuthority, AuthorityInput,
   State extends PanelState<Authority>, Action, Event> = Readonly<{
@@ -134,9 +119,32 @@ export type PanelProgramDefinition<P extends PanelKind, Authority extends PanelA
   parseEvent: (state: State, raw: unknown, resolver: PublicationAuthorityResolver) => PersistentPanelResult<Event>;
   /** The stage transition over an already-guarded state and event. */
   transition: (state: State, event: Event) => PersistentPanelResult<PanelStep<State, Action, Event>>;
-  parseAuthority: (raw: AuthorityInput) => PersistentPanelResult<Authority>;
+  /** The authority codec's parse: UNTRUSTED input — a durable checkpoint's
+   *  `authority` field arrives here as read back from disk, so the codec owns
+   *  the whole parse and assumes no shape. */
+  parseAuthority: (raw: unknown) => PersistentPanelResult<Authority>;
+  /** The authority codec's durable form, which `parseAuthority` reads back. */
   authorityJson: (authority: Authority) => AuthorityInput;
+  /** The canonical form of a state — a recorded checkpoint state read back
+   *  from disk (JSON data) or a live replayed state alike — with every view
+   *  the state DERIVES from its own content omitted, ready to serialize. The
+   *  kernel compares states only through it, so which fields are derived is
+   *  the program's knowledge (and its roster's), never the kernel's. */
+  canonicalStateJson: (state: unknown) => unknown;
 }>;
+
+/**
+ * Do a recorded and a replayed state agree? Both are taken to the program's
+ * canonical form and compared as JSON text: the comparison is of durable
+ * content only, independent of how any derived view happens to serialize.
+ */
+function statesAgree<P extends PanelKind, A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
+  program: PanelProgramDefinition<P, A, I, S, Ac, E>,
+  recorded: unknown,
+  replayed: S,
+): boolean {
+  return jsonEqual(program.canonicalStateJson(recorded), program.canonicalStateJson(replayed));
+}
 
 /**
  * The reducer prelude and its fail-closed boundary: only a proved,
@@ -267,7 +275,7 @@ export function panelProgramCheckpoint<P extends PanelKind, A extends PanelAutho
   const authority = state.authority;
   const replayed = replayPrefix(program, authority, events, resolver);
   if (!replayed.ok) return replayed;
-  if (!jsonEqual(replayed.value.step.state, state)) return persistentFailure(panelError(panel, "malformed-checkpoint", `${panel} checkpoint event prefix does not replay to the supplied state`));
+  if (!statesAgree(program, state, replayed.value.step.state)) return persistentFailure(panelError(panel, "malformed-checkpoint", `${panel} checkpoint event prefix does not replay to the supplied state`));
   const replayedState = JSON.parse(JSON.stringify(replayed.value.step.state)) as unknown;
   return persistentSuccess(Object.freeze({
     schemaVersion: 2 as const,
@@ -287,11 +295,11 @@ export function parsePanelProgramCheckpoint<P extends PanelKind, A extends Panel
   const { panel } = program;
   const checkpoint = safeRecord(raw, ["schemaVersion", "kind", "authority", "events", "state"]);
   if (checkpoint === null || checkpoint.schemaVersion !== 2 || checkpoint.kind !== `${panel}-panel-checkpoint`) return persistentFailure(panelError(panel, "malformed-checkpoint", `${panel} checkpoint must be an exact schemaVersion 2 record`));
-  const authority = program.parseAuthority(checkpoint.authority as I);
+  const authority = program.parseAuthority(checkpoint.authority);
   if (!authority.ok) return authority;
   const replayed = replayPrefix(program, authority.value, checkpoint.events, resolver);
   if (!replayed.ok) return replayed;
-  if (!jsonEqual(checkpoint.state, replayed.value.step.state)) return persistentFailure(panelError(panel, "malformed-checkpoint", `${panel} checkpoint state disagrees with its immutable event prefix`));
+  if (!statesAgree(program, checkpoint.state, replayed.value.step.state)) return persistentFailure(panelError(panel, "malformed-checkpoint", `${panel} checkpoint state disagrees with its immutable event prefix`));
   return persistentSuccess(replayed.value.step);
 }
 
@@ -333,7 +341,7 @@ export function planPanelProgramPersistence<P extends PanelKind, A extends Panel
   const events = Object.freeze([...history.events, event]);
   const replayed = replayPrefix(program, authority, events, resolver);
   if (!replayed.ok) return replayed;
-  if (!jsonEqual(replayed.value.step.state, step.state)) {
+  if (!statesAgree(program, step.state, replayed.value.step.state)) {
     return persistentFailure(panelError(panel, "malformed-checkpoint", `${panel} event prefix does not replay exactly to the proposed checkpoint state`));
   }
   const checkpoint = panelProgramCheckpoint(program, replayed.value.step.state, replayed.value.events, resolver);
