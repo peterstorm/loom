@@ -25,7 +25,7 @@ import type { BlindingKey } from "./pilot-quality";
 import { SPEC_SEMANTIC_ATTEMPT_BUDGET, type CellKey, type PilotArm } from "./pilot-vocabulary";
 import { mintCellBinding, pilotRequestId } from "./pilot-binding";
 import type { ArmDispatch, AttemptClassification } from "./pilot-dispatch";
-import { caseInputOf, renderPilotPrompt, renderTaskBody, type WindowInputs, type WorkloadFixtures } from "./pilot-workload";
+import { renderPilotPrompt, renderTaskBody, type WindowInputs, type WorkloadFixtures } from "./pilot-workload";
 
 /** One landed sample: an accepted sample carries its canonical payload; a
  *  terminal (non-accepted) sample carries none. */
@@ -95,7 +95,7 @@ export async function dispatchSchedule(window: WindowDispatch): Promise<readonly
   const records: SampleRecord[] = [];
   const schedule = buildPairSchedule(window.prereg);
   for (const [index, pair] of schedule.entries()) {
-    const input = caseInputOf(window.inputs, pair.cell, pair.caseId);
+    const input = window.inputs.caseInput(pair.cell, pair.caseId);
     if (input === undefined) throw new Error(`no resolved input for ${pair.cell} case ${pair.caseId}`);
     const body = renderTaskBody(input, window.fixtures);
     for (const arm of pair.armOrder) {

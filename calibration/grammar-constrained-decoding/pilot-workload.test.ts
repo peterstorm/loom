@@ -4,12 +4,12 @@ import { mintCellBinding, pilotRequestId, type CellBinding } from "./pilot-bindi
 import { corpusCases, fixtures, inputOf, inputs, prereg } from "./pilot-test-fixtures";
 import { PILOT_CELLS, type CellKey } from "./pilot-vocabulary";
 import {
-  caseInputOf,
   parseCaseSource,
   renderPilotPrompt,
   renderTaskBody,
   resolveCaseInput,
   resolveWindowInputs,
+  WindowInputs,
   type CaseInput,
 } from "./pilot-workload";
 
@@ -25,7 +25,7 @@ describe("case-input resolution (the one resolver the window and the tests share
     const cases = prereg.cells.flatMap((cell) => cell.workload.cases.map((entry) => ({ cell: cell.cell, entry })));
     expect(resolved.value.size).toBe(cases.length);
     for (const { cell, entry } of cases) {
-      const input = caseInputOf(resolved.value, cell, entry.caseId);
+      const input = resolved.value.caseInput(cell, entry.caseId);
       expect(input?.cell).toBe(cell);
       expect(input?.caseId).toBe(entry.caseId);
       if (input !== undefined && "corpusCase" in input) {
@@ -72,10 +72,30 @@ describe("case-input resolution (the one resolver the window and the tests share
   it("looks an input up only for exactly the cell and case it was resolved for", () => {
     const [judge = "", refutation = ""] = (["judge-verdict/v1", "refutation-verdict/v1"] as const)
       .map((cell) => prereg.cells.find((entry) => entry.cell === cell)?.workload.cases[0]?.caseId ?? "");
-    expect(caseInputOf(inputs, "judge-verdict/v1", judge)).toMatchObject({ cell: "judge-verdict/v1", caseId: judge });
-    expect(caseInputOf(inputs, "refutation-verdict/v1", judge)).toBeUndefined();
-    expect(caseInputOf(inputs, "judge-verdict/v1", refutation)).toBeUndefined();
-    expect(caseInputOf(inputs, "judge-verdict/v1", "no-such-case")).toBeUndefined();
+    expect(inputs.caseInput("judge-verdict/v1", judge)).toMatchObject({ cell: "judge-verdict/v1", caseId: judge });
+    expect(inputs.caseInput("refutation-verdict/v1", judge)).toBeUndefined();
+    expect(inputs.caseInput("judge-verdict/v1", refutation)).toBeUndefined();
+    expect(inputs.caseInput("judge-verdict/v1", "no-such-case")).toBeUndefined();
+  });
+
+  it("files every input under the cell and case it carries — the one builder derives the key", () => {
+    const all = inputs.values();
+    const rebuilt = WindowInputs.of([...all].reverse());
+    expect(rebuilt.size).toBe(all.length);
+    for (const input of all) expect(rebuilt.caseInput(input.cell, input.caseId)).toBe(input);
+    // A case id spelled like another key's separator cannot collide with a different (cell, case).
+    const [first] = all;
+    if (first === undefined) throw new Error("the window resolved no input");
+    const tricky = WindowInputs.of([{ ...first, caseId: `${first.caseId}|x` }]);
+    expect(tricky.caseInput(first.cell, first.caseId)).toBeUndefined();
+    expect(tricky.caseInput(first.cell, `${first.caseId}|x`)?.caseId).toBe(`${first.caseId}|x`);
+    expect(Object.isFrozen(inputs) && Object.isFrozen(all)).toBe(true);
+  });
+
+  it("refuses two inputs for one case as a broken construction invariant", () => {
+    const [first] = inputs.values();
+    if (first === undefined) throw new Error("the window resolved no input");
+    expect(() => WindowInputs.of([first, first])).toThrow(`two resolved inputs for ${first.cell} case ${first.caseId}`);
   });
 
   it("refuses a window's inputs naming every unresolvable case", () => {

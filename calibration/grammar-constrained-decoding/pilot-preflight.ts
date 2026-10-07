@@ -73,6 +73,10 @@ export type PreflightDecision =
   | Readonly<{ kind: "ready"; runtime: RuntimeIdentityRecord }>
   | Readonly<{ kind: "blocked"; blocks: NonEmpty<PreflightBlock>; runtime: RuntimeIdentityRecord }>;
 
+/** Staging and the loaded runtime stay distinct: `unobserved` is never a
+ *  match. A loaded revision the shell could not read proves nothing about
+ *  what the operator's Pi extension runs, so the null branch records
+ *  `unobserved` — it never borrows the staged revision as `matches-staged`. */
 function loadedRuntimeRecord(loaded: string | null, staged: string): RuntimeIdentityRecord["loadedRuntime"] {
   if (loaded === null) return Object.freeze({ kind: "unobserved" as const });
   if (loaded === staged) return Object.freeze({ kind: "matches-staged" as const, revision: loaded });

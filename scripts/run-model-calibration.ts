@@ -19,7 +19,8 @@
  *   resolution, the matched dispatch, retention and the decision — behind
  *   its ports, so this shell only gathers the preflight facts and wires the
  *   live adapters: the filesystem `WindowStore`, the Pi `ArmDispatch`, the
- *   lazy workload-corpus loader, git's changed-path lookup and the clocks.
+ *   lazy workload-corpus loader (`pilot-corpus-loader.ts`), git's
+ *   changed-path lookup and the clocks.
  * - `--decide <window-dir> [--assessment <file>]...` — offline re-evaluation
  *   of a retained window once blinded assessments arrive. Makes no model
  *   call, so it needs no opt-in.
@@ -28,12 +29,12 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
-import { parseCalibrationCorpus, type CalibrationCase } from "../engine/src/core/model-calibration";
+import { parseCalibrationCorpus } from "../engine/src/core/model-calibration";
 import { lowerModelProfile, resolveModelProfile, type LlmProfileId, type PiBinding } from "../engine/src/core/model-profiles";
 import { calibrationRevisionPaths } from "../engine/src/handlers/helpers/model-calibration";
 import { captureLoomRuntimeIdentity, PI_EXTENSION_RUNTIME_REVISION_ENV } from "../engine/src/runtime-compatibility";
 import { corpusCaseResult, type CorpusRun } from "../calibration/corpus-calibration";
-import { err, ok, type Result } from "../calibration/kernel";
+import { ok, type Result } from "../calibration/kernel";
 import {
   decidePreflight,
   stagedRegistryFacts,
@@ -43,6 +44,7 @@ import {
 import type { Preregistration } from "../calibration/grammar-constrained-decoding/pilot-preregistration";
 import { contentDigest } from "../calibration/grammar-constrained-decoding/pilot-vocabulary";
 import { parseWorkloadFixtures, type WorkloadFixtures } from "../calibration/grammar-constrained-decoding/pilot-workload";
+import { workloadCorpusLoader } from "../calibration/grammar-constrained-decoding/pilot-corpus-loader";
 import { importRpcLauncher, piArmDispatch } from "../calibration/grammar-constrained-decoding/pilot-dispatch";
 import {
   decideRetainedWindow,
@@ -206,22 +208,6 @@ async function gatherPreflightFacts(prereg: Preregistration, fixturesDigest: str
   });
 }
 
-/** The corpus the workload fixtures name, which the reviewer cells' sources
- *  resolve in. `recordWindow` invokes this port only for a window that
- *  dispatches, so an unreadable corpus never costs a non-dispatching window
- *  its record; an unreadable or invalid corpus is a refusal, not a throw. */
-const workloadCorpusLoader = (fixtures: WorkloadFixtures) => (): Result<readonly CalibrationCase[], string> => {
-  const path = resolve(REPO_ROOT, fixtures.reviewer.corpus);
-  let text: string;
-  try {
-    text = readFileSync(path, "utf-8");
-  } catch (error) {
-    return err(`cannot read ${repoRelative(path)}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  const corpus = parseCalibrationCorpus(text);
-  return corpus.ok ? ok(corpus.value.cases) : err(`invalid corpus ${repoRelative(path)}:\n  - ${corpus.errors.join("\n  - ")}`);
-};
-
 /** Prints a recorded decision; exit 0 only for `done-allowed`. */
 function reportDecision(outcome: DecisionOutcome): number {
   if (outcome.kind === "inconsistent") {
@@ -259,7 +245,7 @@ async function runPilot(): Promise<number> {
       dispatch: planDispatch(preflight, args.includes("--preflight-only")),
     },
     preregistration: loaded,
-    workload: { fixtures, loadCorpusCases: workloadCorpusLoader(fixtures), changedPathsOf: calibrationRevisionPaths },
+    workload: { fixtures, loadCorpusCases: workloadCorpusLoader(REPO_ROOT, fixtures), changedPathsOf: calibrationRevisionPaths },
     dispatch: piArmDispatch({
       repoRoot: REPO_ROOT,
       piCommand: "pi",

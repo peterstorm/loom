@@ -146,8 +146,9 @@ This is a minimum operational pilot, not a statistical proof of universal non-re
 | `pilot-preflight.ts` | pure: preflight facts parsing, the staged registry facts, the preflight decision |
 | `pilot-quality.ts` | pure: blinding key and assessment parsing, the paired escaped-defect comparison (AS-016) |
 | `pilot-core.ts` | pure: `evaluatePilot` — cell measurements, guardrails and the release decision |
-| `pilot-workload.ts` | pure: fixtures, case-input resolution (cell-indexed, each input carrying its case, refused before a window opens), the checked `caseInputOf` lookup, matched prompt rendering |
-| `pilot-binding.ts` | pure: per-attempt request identity and the issued binding minted for it through the engine's one mint |
+| `pilot-workload.ts` | pure: fixtures, case-input resolution (cell-indexed, each input carrying its case, refused before a window opens), the opaque `WindowInputs` (one builder that files each input under its own cell and case, so its `caseInput` lookup needs no re-check), matched prompt rendering |
+| `pilot-binding.ts` | pure: per-attempt request identity and the issued binding minted for it through the engine's one mint, its ingestion-path tag derived from the same producer kind as its refinement |
+| `pilot-corpus-loader.ts` | shell: the filesystem adapter of the window's lazy corpus port (`workloadCorpusLoader`); an unreadable or invalid corpus is a refusal naming the checkout-relative path |
 | `pilot-rubric.ts` | pure: the deterministic `rubric-v1` assessor over typed payloads |
 | `pilot-dispatch.ts` | pure transcript classification + the live Pi dispatch adapter (it consumes the issued binding; it never mints one) |
 | `pilot-window.ts` | shell: matched-arm window dispatch over the `ArmDispatch` port and an injected clock, the attempt-2 retry, blinding key, arm-free packet; imports only the dispatch port's types, never the child-process adapter |
@@ -157,6 +158,7 @@ This is a minimum operational pilot, not a statistical proof of universal non-re
 | `pilot-window.test.ts` | `dispatchSchedule` against a fake route (matched arms, the attempt-2 budget, fail-closed aborts) and `blind` / `blindedPacket` over plain records (exactly the accepted samples blinded, an arm-free packet) |
 | `pilot-retention.test.ts` | retention rules and `recordWindow`'s wiring at the `WindowStore` and `ArmDispatch` ports (including the lazy corpus load), and re-decision of every retained window to its retained bytes |
 | `pilot-dispatch.test.ts` | transcript classification, and the live Pi adapter against a fake launcher, readiness client and `pi` executable |
+| `pilot-corpus-loader.test.ts` | the corpus adapter over a real directory: the retained corpus loads; a missing, non-JSON or invalid corpus is a refusal; nothing is read until the port is invoked |
 | `runner.test.ts` | CLI subprocess runs against an unreachable route (including an unreadable workload corpus, which a non-dispatching window never loads) |
 | `pilot-test-fixtures.ts` | the retained workload resolved by the production resolver, the `inputOf` lookup, sample builders and the fake route |
 | `../kernel.ts`, `../pi-json-stream.ts` | the Result kernel (plus the pilot's NonEmpty helper) and Pi's JSON event stream, shared with the corpus core |

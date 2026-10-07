@@ -25,11 +25,10 @@ import type { WindowWorkload } from "./pilot-retention";
 import type { CellKey, PilotArm } from "./pilot-vocabulary";
 import { dispatchSchedule, type SampleRecord } from "./pilot-window";
 import {
-  caseInputOf,
   parseWorkloadFixtures,
   resolveWindowInputs,
+  WindowInputs,
   type CaseInput,
-  type WindowInputs,
   type WorkloadFixtures,
 } from "./pilot-workload";
 
@@ -69,14 +68,14 @@ export const inputs: WindowInputs = resolved.value;
 
 /** One preregistered case's resolved input, through the production lookup; a missing one throws. */
 export function inputOf(cell: CellKey, caseId: string): CaseInput {
-  const input = caseInputOf(inputs, cell, caseId);
+  const input = inputs.caseInput(cell, caseId);
   if (input === undefined) throw new Error(`${cell} ${caseId} has no resolved input`);
   return input;
 }
 
 /** The resolved inputs without one case's: a window whose lookup for it fails. */
 export const inputsWithout = (cell: CellKey, caseId: string): WindowInputs =>
-  new Map([...inputs].filter(([, input]) => !(input.cell === cell && input.caseId === caseId)));
+  WindowInputs.of(inputs.values().filter((input) => !(input.cell === cell && input.caseId === caseId)));
 
 /** A test preregistration: the retained one, optionally with every cell (but
  *  `unconstrained`, which keeps the retained unconstrained qualification)

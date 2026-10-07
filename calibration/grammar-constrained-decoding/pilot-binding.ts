@@ -8,6 +8,7 @@
  * pure core loads the child-process adapter to issue a binding.
  */
 
+import type { PayloadProducerKindName } from "../../engine/src/core/agent-catalog-projections";
 import { issueEmissionBinding, type IssuedEmissionBindingOf } from "../../engine/src/core/emission-tool";
 import { parseContextDigest } from "../../engine/src/core/orchestration-contract/identity";
 import { err, ok, type Result } from "../kernel";
@@ -20,10 +21,36 @@ export function pilotRequestId(windowId: string, pairId: string, arm: PilotArm, 
   return `cal-${contentDigest(`${windowId}\0${pairId}`).slice(0, 16)}-${armCode}-a${attempt}`;
 }
 
-/** The issued binding of one attempt, path-refined by its cell's producer kind. */
-export type CellBinding =
-  | Readonly<{ path: "reviewer"; binding: IssuedEmissionBindingOf<"reviewer-payload">; contextDigest: string }>
-  | Readonly<{ path: "verdict"; binding: IssuedEmissionBindingOf<"judge-verdict" | "refutation-verdict">; contextDigest: string }>;
+/** The ingestion path each producer kind's binding is refined for: the
+ *  reviewer-payload selection, or the verdict-kind selection. */
+const INGESTION_PATH = Object.freeze({
+  "reviewer-payload": "reviewer",
+  "judge-verdict": "verdict",
+  "refutation-verdict": "verdict",
+} as const satisfies Record<PayloadProducerKindName, string>);
+
+/** A producer kind's issued binding, tagged with the path it is refined for —
+ *  one member per kind (a correlated union, so a generic kind stays typed). */
+type CellBindingOf<K extends PayloadProducerKindName> = { [P in K]: Readonly<{
+  path: (typeof INGESTION_PATH)[P];
+  binding: IssuedEmissionBindingOf<P>;
+  contextDigest: string;
+}> }[K];
+
+/** The issued binding of one attempt, path-refined by its cell's producer
+ *  kind: `path` narrows `binding` to the reviewer or the verdict refinement. */
+export type CellBinding = CellBindingOf<PayloadProducerKindName>;
+
+/** Issue one producer kind's binding, tagged by its path — the kind decides
+ *  both, so the tag and the refinement cannot disagree. */
+function issueCellBinding<K extends PayloadProducerKindName>(
+  kind: K, version: string, requestId: string, contextDigest: string,
+): Result<CellBindingOf<K>, string> {
+  const minted = issueEmissionBinding({ requestId, kind, version });
+  if (!minted.ok) return err(minted.error.message);
+  const issued: CellBindingOf<K> = Object.freeze({ path: INGESTION_PATH[kind], binding: minted.value, contextDigest });
+  return ok(issued);
+}
 
 /** Mint the issued binding for one attempt through the engine's one mint,
  *  `issueEmissionBinding`; the context digest is the content address of the
@@ -32,14 +59,5 @@ export function mintCellBinding(cell: CellKey, requestId: string, prompt: string
   const contextDigest = parseContextDigest(contentDigest(prompt));
   if (!contextDigest.ok) return err(contextDigest.error.message);
   const producer = PILOT_CELLS[cell];
-  if (producer.kind === "reviewer-payload") {
-    const minted = issueEmissionBinding({ requestId, kind: "reviewer-payload", version: producer.version });
-    return minted.ok
-      ? ok(Object.freeze({ path: "reviewer" as const, binding: minted.value, contextDigest: contextDigest.value }))
-      : err(minted.error.message);
-  }
-  const minted = issueEmissionBinding({ requestId, kind: producer.kind, version: producer.version });
-  return minted.ok
-    ? ok(Object.freeze({ path: "verdict" as const, binding: minted.value, contextDigest: contextDigest.value }))
-    : err(minted.error.message);
+  return issueCellBinding(producer.kind, producer.version, requestId, contextDigest.value);
 }
