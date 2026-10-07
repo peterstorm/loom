@@ -70,7 +70,7 @@ describe("withStoredSectionBytes", () => {
   const blobs = new Map<string, Uint8Array>(stored.blobs.map(({ digest, bytes }) => [digest, bytes]));
 
   it("restores every section's bytes from the blob store", () => {
-    const resolved = withStoredSectionBytes(JSON.parse(stored.text), (digest) => blobs.get(digest) ?? null);
+    const resolved = withStoredSectionBytes(JSON.parse(stored.text), (digest) => ({ ok: true, value: blobs.get(digest) ?? null }));
     expect(resolved.ok).toBe(true);
     if (!resolved.ok) return;
     const sections = (resolved.value as { fixedContext: { bytes: Uint8Array }[] }).fixedContext;
@@ -91,9 +91,21 @@ describe("withStoredSectionBytes", () => {
   ])("refuses %s", (_name, corrupt, message) => {
     const raw = JSON.parse(stored.text) as Record<string, unknown>;
     corrupt(raw);
-    const resolved = withStoredSectionBytes(raw, () => null);
+    const resolved = withStoredSectionBytes(raw, () => ({ ok: true, value: null }));
     expect(resolved.ok).toBe(false);
-    if (!resolved.ok) expect(resolved.error.message).toContain(message);
+    if (!resolved.ok) expect(resolved.error).toMatchObject({ kind: "invalid-context-packet", message: expect.stringContaining(message) });
+  });
+
+  it("refuses an unreadable blob with the lookup's own refusal and looks up no later blob", () => {
+    const lookups: string[] = [];
+    const first = packet.fixedContext[0]!.digest;
+    const resolved = withStoredSectionBytes(JSON.parse(stored.text), (digest) => {
+      lookups.push(digest);
+      return { ok: false, error: `blob ${digest} is unreadable: EACCES` };
+    });
+    expect(resolved).toEqual({ ok: false, error: { kind: "section-blob-unreadable", field: "fixedContext[0]", digest: first,
+      message: `blob ${first} is unreadable: EACCES` } });
+    expect(lookups).toEqual([first]);
   });
 });
 

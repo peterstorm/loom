@@ -317,6 +317,18 @@ describe("projectArchivedPredecessor: the reader's whole --archive path", () => 
       expect(refusedWith(read(retained, { files, blobs: store }))).toEqual({ kind: "refused", message });
     });
 
+    it("stops at the first unreadable blob, refusing with the lookup's message and looking up no later blob", () => {
+      expect(stored.blobs.length).toBeGreaterThan(1);
+      const reads: string[] = [];
+      const resolveReference: ResolvePublishedPacket = () => ({ ok: true, value: { fileBytes: storedBytes,
+        readSectionBlob: (digest) => { reads.push(digest); return { ok: false, error: `blob ${digest} is unreadable` }; } } });
+      const { outer, input } = successor(retained);
+      const result = projectArchivedPredecessor(outer, input, { kind: "archive", label: LABEL, purpose: "v1-v2" },
+        { bounds: BOUNDS, resolveReference });
+      expect(result).toEqual({ ok: false, error: { kind: "refused", message: `blob ${reads[0]} is unreadable` } });
+      expect(reads).toHaveLength(1);
+    });
+
     it("never reads a blob before the file bytes verify against the reference", () => {
       const reads: string[] = [];
       const resolveReference: ResolvePublishedPacket = () => ({ ok: true, value: { fileBytes: storedBytes,
@@ -331,12 +343,26 @@ describe("projectArchivedPredecessor: the reader's whole --archive path", () => 
 
   it("admits no port value that carries a decoded record beside the bytes", () => {
     const readSectionBlob: PublishedPacketFile["readSectionBlob"] = () => ({ ok: true, value: null });
+    // A smuggled record that records every reflective touch — any property
+    // read, key enumeration, `in` test or descriptor read — so the test fails
+    // if the projection consults the record at all, even for a field its
+    // value would happen to share with the verified bytes' own packet.
+    const touched: string[] = [];
+    const note = (trap: string, key?: PropertyKey): void => { touched.push(key === undefined ? trap : `${trap}:${String(key)}`); };
+    const record = new Proxy({ ...predecessor, requestId: "request:forged" }, {
+      get: (target, key, receiver) => { note("get", key); return Reflect.get(target, key, receiver); },
+      has: (target, key) => { note("has", key); return Reflect.has(target, key); },
+      ownKeys: (target) => { note("ownKeys"); return Reflect.ownKeys(target); },
+      getOwnPropertyDescriptor: (target, key) => { note("getOwnPropertyDescriptor", key); return Reflect.getOwnPropertyDescriptor(target, key); },
+    });
     // @ts-expect-error the port returns bytes and a blob lookup only; a separately supplied record is not part of it
-    const inconsistent: PublishedPacketFile = { fileBytes: predecessorBytes, readSectionBlob, record: { requestId: "request:forged" } };
+    const inconsistent: PublishedPacketFile = { fileBytes: predecessorBytes, readSectionBlob, record };
     // Even smuggled past the type, a record is never read: the projection is the verified bytes' own packet.
     const outcome = read(reference(), {});
-    const smuggled = projectArchivedPredecessor(successor(reference()).outer, successor(reference()).input,
+    const { outer, input } = successor(reference());
+    const smuggled = projectArchivedPredecessor(outer, input,
       { kind: "archive", label: LABEL, purpose: "v1-v2" }, { bounds: BOUNDS, resolveReference: () => ({ ok: true, value: inconsistent }) });
+    expect(touched).toEqual([]);
     expect(value(smuggled)).toEqual(value(outcome.result));
     expect(value(smuggled)).toMatchObject({ requestId: predecessor.requestId });
   });

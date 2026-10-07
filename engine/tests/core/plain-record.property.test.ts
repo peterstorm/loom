@@ -131,6 +131,22 @@ describe("hasExactKeys", () => {
     expect(hasExactKeys({ kind: "x", [Symbol("hidden")]: true }, ["kind"])).toBe(true);
     expect(hasExactKeys(Object.assign(Object.create({ inherited: true }) as object, { kind: "x" }), ["kind"])).toBe(true);
   });
+
+  it("reads the expected list as a set: repeating a name never changes the verdict", () => {
+    fc.assert(fc.property(fieldList, fieldList, fc.array(fc.nat()), (keys, present, repeats) => {
+      const record = recordOf(present);
+      const repeated = keys.length === 0 ? keys : [...keys, ...repeats.map((at) => keys[at % keys.length]!)];
+      expect(hasExactKeys(record, repeated)).toBe(hasExactKeys(record, keys));
+    }));
+    expect(hasExactKeys({ kind: "x" }, ["kind", "kind"])).toBe(true);
+  });
+
+  it("counts non-enumerable own keys: a hidden surplus key refuses and a hidden expected key is present", () => {
+    const hidden = (visible: Record<string, unknown>, name: string) =>
+      Object.defineProperty({ ...visible }, name, { value: true, enumerable: false });
+    expect(hasExactKeys(hidden({ kind: "x" }, "extra"), ["kind"])).toBe(false);
+    expect(hasExactKeys(hidden({ kind: "x" }, "revision"), ["kind", "revision"])).toBe(true);
+  });
 });
 
 const identity = (value: unknown): ElementResult<unknown> => ({ ok: true, value });

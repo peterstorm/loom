@@ -4,7 +4,7 @@
  * Packets under the state lock, and the resume phase that publishes, installs
  * or recovers the current batch before evidence collection.
  */
-import type { AgentRequestAuthority } from '../../../core/orchestration-contract';
+import type { AgentRequestAuthority, DomainResult } from '../../../core/orchestration-contract';
 import type { ContextPacket } from '../../../core/context-packets';
 import type { RunDirHandle } from '../../../orchestration/run-directory-handle';
 import { observeTaskGraphProjectBoundary, type TaskGraphProjectBoundary } from '../../../config';
@@ -103,21 +103,40 @@ export type IssuedWaveReviewBatch = Readonly<{
 /** The effect label every current-batch publication and its durable recovery share. */
 const CURRENT_BATCH_LABEL = "wave-gate-current";
 
+/** A published batch whose request count differs from its subject count. */
+export type BatchSubjectMismatch = Readonly<{
+  kind: "batch-subject-mismatch";
+  published: number;
+  subjects: number;
+  message: string;
+}>;
+
 /**
  * Pair each published request with the batch subject it was published for.
  * Publication preserves the batch's request order, and `WaveRequestBatch`
  * keeps `requests` index-aligned with `subjects`, so the correlation is stated
- * once here: a count mismatch is a publication defect, refused before any
- * request is paired, rather than checked per element.
+ * once here: a count mismatch is a publication defect, returned as a typed
+ * refusal before any request is paired, rather than checked per element.
+ *
+ * The check is deliberately EXACT equality, in both directions — a
+ * tightening of the per-element lookup it replaced, which refused only a
+ * published request with no subject and let a publication with FEWER
+ * requests than subjects through. Fewer requests means some batch subject
+ * was never published for, which the index-alignment invariant forbids.
  */
 export function withBatchSubjects<R>(
   published: readonly R[],
   subjects: WaveRequestBatch["subjects"],
-): readonly (readonly [R, WaveRequestBatch["subjects"][number]])[] {
+): DomainResult<readonly (readonly [R, WaveRequestBatch["subjects"][number]])[], BatchSubjectMismatch> {
   if (published.length !== subjects.length) {
-    throw new Error(`published ${published.length} Wave review request(s) for ${subjects.length} batch subject(s)`);
+    return { ok: false, error: Object.freeze({
+      kind: "batch-subject-mismatch",
+      published: published.length,
+      subjects: subjects.length,
+      message: `published ${published.length} Wave review request(s) for ${subjects.length} batch subject(s)`,
+    }) };
   }
-  return published.map((request, index) => [request, subjects[index]!] as const);
+  return { ok: true, value: Object.freeze(published.map((request, index) => [request, subjects[index]!] as const)) };
 }
 
 /**
@@ -152,10 +171,14 @@ export async function reconcileWaveReviewIssuance(
     const published = await publishCurrent(batch.requests, batch.packets);
     if (!published.ok) return settled(failed(published.message));
     const action = published.action;
+    // A publication that broke index alignment is refused before its Review
+    // Packets are installed, so no run collects for a mispublished batch.
+    const paired = withBatchSubjects(action.requests, batch.subjects);
+    if (!paired.ok) return settled(waveBlocked(handle, paired.error.message));
     await installWaveReviewRuns(manager, registration, batch);
     return settled({ ok: true, action: {
       ...action,
-      requests: withBatchSubjects(action.requests, batch.subjects).map(([request, subject]) => ({
+      requests: paired.value.map(([request, subject]) => ({
         ...request,
         task: subject.taskId === null
           ? `${request.task}\nSpec-check Wave ${wave}.`

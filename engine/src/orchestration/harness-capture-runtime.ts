@@ -923,19 +923,36 @@ async function persistBoundCapture(
 ): Promise<CaptureOutcome> {
   const stopped = await plan.purpose.admit(handle, request);
   if (stopped !== null) return stopped;
-  if (plan.readCoverage.kind !== "none" && request.program === "standalone-review") {
-    const toolOutputs = match(plan.readCoverage)
-      .with({ kind: "record-observed" }, ({ toolOutputs: observe }) => observe())
-      .with({ kind: "record-unobservable" }, () => null)
-      .exhaustive();
-    const recorded = await recordReadCoverageObservation(handle, request, toolOutputs);
-    if (!recorded.ok) return retriableFailure("read-coverage", recorded.error);
-  }
+  const uncovered = await match(plan.readCoverage)
+    .with({ kind: "none" }, async () => null)
+    .with({ kind: "record-observed" }, ({ toolOutputs }) => recordReadCoverage(handle, request, toolOutputs))
+    .with({ kind: "record-unobservable" }, () => recordReadCoverage(handle, request, () => null))
+    .exhaustive();
+  if (uncovered !== null) return uncovered;
   if (source.kind === "selected") {
     const published = await publishCaptureSourceRecord(handle, request, receipt.harness, source.provenance, payload);
     if (!published.ok) return retriableFailure("capture-source", published.error);
   }
   return plan.purpose.write(handle, request, receipt, payload, observation);
+}
+
+/**
+ * The read-coverage write-ahead step of a Run that carries a read obligation:
+ * a standalone-review request records its observation — `observe()` is called
+ * only then, so tool outputs are projected only for a request that owes them
+ * (`null` records an unobservable attempt). Requests of other programs
+ * (refutation verifiers) carry no read obligation and record nothing. A
+ * failed record is the retriable outcome that stops the capture; otherwise
+ * `null` proceeds.
+ */
+async function recordReadCoverage(
+  handle: RunDirHandle,
+  request: AgentRequestAuthority,
+  observe: () => readonly string[] | null,
+): Promise<CaptureOutcome | null> {
+  if (request.program !== "standalone-review") return null;
+  const recorded = await recordReadCoverageObservation(handle, request, observe());
+  return recorded.ok ? null : retriableFailure("read-coverage", recorded.error);
 }
 
 async function observeNativeCaptureArtifact(

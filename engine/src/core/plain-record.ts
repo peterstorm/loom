@@ -45,13 +45,21 @@ export function isPlainRecord(value: unknown): value is UnknownRecord {
 
 /**
  * The diagnostic-free exact-key predicate for the lax guard: the record's own
- * enumerable string keys are exactly `keys` (any order, distinct), with no
- * prototype check. For callers that word their own single refusal; callers
- * that report per-field missing/surplus diagnostics use `parseExactRecord`.
+ * string keys — enumerable or not — are exactly the SET named by `keys`, in any
+ * order, with no prototype check. Symbol keys are not compared.
+ *
+ * The expected list is read as a set, so a repeated name is the same key named
+ * twice, never an unsatisfiable length; the invariant lives here, not in every
+ * call site's literal list. A non-enumerable own key counts like any other: a
+ * hidden surplus key refuses, and a hidden expected key is present.
+ *
+ * For callers that word their own single refusal; callers that report
+ * per-field missing/surplus diagnostics use `parseExactRecord`.
  */
 export function hasExactKeys(record: Readonly<UnknownRecord>, keys: readonly string[]): boolean {
-  const own = Object.keys(record);
-  return own.length === keys.length && keys.every((key) => own.includes(key));
+  const expected = new Set(keys);
+  const own = Object.getOwnPropertyNames(record);
+  return own.length === expected.size && own.every((key) => expected.has(key));
 }
 
 export type ExactRecordResult =

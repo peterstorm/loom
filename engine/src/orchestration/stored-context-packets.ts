@@ -69,10 +69,12 @@ export function readStoredContextRecord(
   sectionBound: number | undefined,
 ):DomainResult<StoredContextRecord, string> {
   let sectionBytes = 0;
+  // A blob read fault other than absence throws past the restore, for the
+  // caller's own unreadable-packet report.
   const resolved = withStoredSectionBytes(JSON.parse(packetFile.toString("utf8")) as unknown, (digest) => {
     const bytes = readSectionBlob(runDirectory, digest, sectionBound);
     if (bytes !== null) sectionBytes += bytes.length;
-    return bytes;
+    return { ok: true, value: bytes };
   });
   return resolved.ok
     ? { ok: true, value: Object.freeze({ record: resolved.value, sectionBytes }) }

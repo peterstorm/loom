@@ -174,8 +174,9 @@ export async function resumeWaveGateFacade(
     const captured = handle.readCapturedAttempts();
     if (!issued.ok) return waveBlocked(handle, issued.error.message);
     if (!captured.ok) return waveBlocked(handle, captured.error.message);
-    const context = waveResumeContext(handle, manager, registration, captured.value);
-    if (context === null) return waveBlocked(handle, "registered Wave Gate authority lacks an exact Wave");
+    const resumed = waveResumeContext(handle, manager, registration, captured.value);
+    if (resumed.kind !== "proceed") return conclude(resumed);
+    const context = resumed.value;
     const issuance = await reconcileWaveReviewIssuance(context, graph, issued.value);
     if (issuance.kind !== "proceed") return conclude(issuance);
     const collection = await reconcileCurrentReviewEvidence(context, issuance.value);
