@@ -7,6 +7,7 @@ import {
   presentAtRevision,
   reviewedDirectoryLeafPaths,
   revisionTreeLeaves,
+  splitNulPaths,
   worktreeLeafBytes,
   worktreeVisibleLeafPaths,
   worktreeVisibleLeaves,
@@ -59,7 +60,7 @@ describe("gitOutput", () => {
   });
 
   it("throws when git exits non-zero", () => {
-    expect(() => gitOutput(root, ["rev-parse", "--verify", "no-such-revision"])).toThrow(/Command failed: git rev-parse --verify no-such-revision/);
+    expect(() => gitOutput(root, ["rev-parse", "--verify", "no-such-revision"])).toThrow(/Command failed: git -c core\.fsmonitor=false rev-parse --verify no-such-revision/);
   });
 });
 
@@ -75,6 +76,15 @@ describe("nulSeparatedGitPaths", () => {
 
   it("returns no paths for empty output", () => {
     expect(nulSeparatedGitPaths(root, ["ls-files", "-z"])).toEqual([]);
+  });
+});
+
+describe("splitNulPaths", () => {
+  it("parses NUL-terminated UTF-8 records, dropping only the empty terminator records", () => {
+    const records = splitNulPaths(Buffer.from("a b.txt\0line\nbreak\0ünï.txt\0\0", "utf-8"));
+    expect(records).toEqual(["a b.txt", "line\nbreak", "ünï.txt"]);
+    expect(Object.isFrozen(records)).toBe(true);
+    expect(splitNulPaths(Buffer.alloc(0))).toEqual([]);
   });
 });
 
@@ -421,7 +431,7 @@ describe("revisionTreeLeaves / presentAtRevision", () => {
   it("throws for an unknown revision", () => {
     write(root, "a.ts", "a");
     commitAll("base");
-    expect(() => revisionTreeLeaves(root, "no-such-revision", "a.ts")).toThrow(/Command failed: git ls-tree/);
-    expect(() => presentAtRevision(root, "no-such-revision", ["a.ts"])).toThrow(/Command failed: git ls-tree/);
+    expect(() => revisionTreeLeaves(root, "no-such-revision", "a.ts")).toThrow(/Command failed: git -c core\.fsmonitor=false ls-tree/);
+    expect(() => presentAtRevision(root, "no-such-revision", ["a.ts"])).toThrow(/Command failed: git -c core\.fsmonitor=false ls-tree/);
   });
 });
