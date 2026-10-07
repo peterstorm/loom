@@ -19,8 +19,9 @@
  *   repository-configured executable hook a read-only metadata command
  *   (`rev-parse`, `ls-files`, `ls-tree`, `cat-file`, `show`) can reach.
  *
- * Diffs, which can run repository-authored clean filters and diff drivers, and
- * the tracking probe additionally run inside `utils/git.ts`'s shadow
+ * Diffs, which can run repository-authored clean filters and diff drivers —
+ * patches, and the repository change baseline's dirty-path listing
+ * (`shadowChangedPaths`) — and the tracking probe additionally run inside `utils/git.ts`'s shadow
  * administration directory, which removes repository config entirely. Leaf
  * listing deliberately does NOT: the shadow directory has no `info/exclude`
  * and no repository `core.excludesFile`, which the enumerator's ignore rules

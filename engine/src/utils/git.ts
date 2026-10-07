@@ -422,6 +422,38 @@ export function diffFilesSinceAt(root: string, revision: string, files: string[]
     : diffArgsAt(root, ["diff", FULL_POSTIMAGE_CONTEXT, "--end-of-options", revision, "HEAD", "--", ...files]);
 }
 
+/** Which Git-dirty paths to name: worktree bytes that differ from the index,
+ *  or index entries that differ from HEAD. */
+export type ChangedPathComparison = "worktree" | "index";
+
+const CHANGED_PATH_LIST_LIMIT = 100 * 1024 * 1024;
+
+/**
+ * The repository-relative paths Git reports as changed for one comparison,
+ * named inside the shadow administration directory. `git diff --name-only`
+ * re-hashes every stat-dirty tracked file, and that re-hash runs the file's
+ * clean filter — repository-authored code, the same executable path
+ * `diffArgsAt` closes for patches. In the shadow directory no filter is
+ * defined, so filter attributes are inert data and the bytes are compared raw.
+ * For a repository that does rely on a clean filter, a file whose raw bytes
+ * differ from its filtered blob is named as changed: an over-report a byte
+ * baseline absorbs, never a missed change. THROWS on failure, like the leaf
+ * enumerator it is listed beside in `repository-change-baseline.ts`.
+ */
+export function shadowChangedPaths(root: string, comparison: ChangedPathComparison): readonly string[] {
+  const argv = [
+    "diff", ...DIFF_DRIVER_SUPPRESSION, ...(comparison === "index" ? ["--cached"] : []), "--name-only", "-z", "--",
+  ];
+  const listed = withShadowGit(root, (environment) => execFileSync("git", argv, {
+    cwd: root,
+    encoding: "buffer",
+    env: environment,
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: CHANGED_PATH_LIST_LIMIT,
+  }));
+  return Object.freeze(listed.toString("utf-8").split("\0").filter((path) => path !== ""));
+}
+
 export type GitTrackedResult =
   | Readonly<{ ok: true; tracked: boolean }>
   | Readonly<{ ok: false; error: string }>;

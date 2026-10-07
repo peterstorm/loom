@@ -1,15 +1,20 @@
 import { artifactBaselineRepository, type ArtifactBaselineRepository } from "../fixtures/artifact-baseline-repository";
+import { execFileSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
+  mkdtempSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   captureRepositoryChangeBaseline,
   changedRepositoryArtifactsSince,
+  repositoryChangedPaths,
 } from "../../src/utils/repository-change-baseline";
 
 const cleanup: string[] = [];
@@ -83,5 +88,32 @@ describe("repository attempt change boundaries", () => {
     const { root } = repository();
     expect(() => changedRepositoryArtifactsSince(root, undefined))
       .toThrow(/No implementation-attempt repository baseline/);
+  });
+
+  it("never executes a workspace-defined clean filter while naming dirty paths", () => {
+    // `git diff --name-only` re-hashes a stat-dirty tracked file through its
+    // clean filter, so the change boundary must name dirty paths through the
+    // shadow administration directory, where no repository filter is defined.
+    const root = mkdtempSync(join(tmpdir(), "loom-change-baseline-filter-"));
+    cleanup.push(root);
+    const marker = join(root, "CLEAN_EXECUTED");
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
+    git("init", "--quiet");
+    writeFileSync(join(root, ".gitattributes"), "*.dat filter=evil\n");
+    writeFileSync(join(root, "data.dat"), "before\n");
+    writeFileSync(join(root, "staged.dat"), "before\n");
+    git("add", ".");
+    git("-c", "user.name=Loom Test", "-c", "user.email=loom@example.test", "commit", "--quiet", "-m", "base");
+    writeFileSync(join(root, "staged.dat"), "staged\n");
+    git("add", "staged.dat");
+    git("config", "filter.evil.clean", `sh -c 'touch ${marker}; cat'`);
+    writeFileSync(join(root, "data.dat"), "after\n");
+    writeFileSync(join(root, "new.dat"), "untracked\n");
+
+    expect(repositoryChangedPaths(root)).toEqual(["data.dat", "new.dat", "staged.dat"]);
+    const baseline = captureRepositoryChangeBaseline(root);
+    writeFileSync(join(root, "data.dat"), "again\n");
+    expect(changedRepositoryArtifactsSince(root, baseline)).toEqual(["data.dat"]);
+    expect(existsSync(marker)).toBe(false);
   });
 });

@@ -57,10 +57,11 @@ Integration fixes made after merging:
 
 ## Not in scope, reported
 
-- **W4 observation (unreviewed, not part of this delta's findings):**
-  - `utils/repository-change-baseline.ts` still runs `git diff --name-only` in the real repository.
-  - It now uses the hardened environment, but repository-local clean filters can still run during the index refresh.
-  - The real fix moves those diffs into the shadow directory.
+- **W4 observation, fixed in a follow-up commit:**
+  - `utils/repository-change-baseline.ts` ran `git diff --name-only` in the real repository, where a repository-local
+    clean filter executed while stat-dirty files were re-hashed. The regression test reproduced this.
+  - Both diffs now run through `shadowChangedPaths` in the shadow administration directory.
+  - The untracked listing keeps the shared leaf policy, because it needs the repository's own ignore rules.
 - **W8:** `session-shutdown.ts` keeps its own cross-tool-call release loop. Neither advisory named it.
 - **Test timeouts:** the machine-purity parser-to-SAX grant `it.each` (30 s) and the cold extension-factory imports in
   `agent-directory.test.ts` (30 s). Both are load-induced timeouts at the 5 s default and both were also observed on the
