@@ -118,6 +118,8 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/task-id.ts",
   // The persisted population proof-boundary observation (types.ts imports it).
   "engine/src/core/proof-boundary-observation.ts",
+  // Engine-issued spawn task text over shell-gathered facts.
+  "engine/src/core/spawn-task-text.ts",
   // The ONE shared plain-record wire guard (state-file-wire, findings,
   // context-packets): a dependency-free pure predicate leaf.
   "engine/src/core/plain-record.ts",
