@@ -36,7 +36,7 @@ import { parseBlindingKey, parseQualityAssessment, type BlindingKey, type Qualit
 import { rubricAssessment } from "./pilot-rubric";
 import { contentDigest } from "./pilot-vocabulary";
 import { blind, blindedPacket, dispatchSchedule, type SampleRecord } from "./pilot-window";
-import { resolveWindowInputs, type ChangedPathsOf, type WindowInputs, type WorkloadFixtures } from "./pilot-workload";
+import { resolveWindowInputs, WindowInputs, type ChangedPathsOf, type WorkloadFixtures } from "./pilot-workload";
 
 // ---------------------------------------------------------------------------
 // The window's files and the store port
@@ -366,7 +366,7 @@ async function openAndDispatch(run: WindowRun): Promise<Result<OpenedWindow, str
   const open = (): void => store.write(WINDOW_FILES.window, jsonText(record));
   if (record.dispatch.kind !== "dispatched") {
     open();
-    return ok(Object.freeze({ records: Object.freeze([]), inputs: new Map() }));
+    return ok(Object.freeze({ records: Object.freeze([]), inputs: WindowInputs.of([]) }));
   }
   const inputs = resolveDispatchInputs(run);
   if (!inputs.ok) return inputs;

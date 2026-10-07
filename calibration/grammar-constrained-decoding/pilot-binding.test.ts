@@ -1,6 +1,6 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { mintCellBinding, pilotRequestId } from "./pilot-binding";
+import { mintCellBinding, pilotRequestId, type CellBinding } from "./pilot-binding";
 import { CELL_KEYS, contentDigest, PILOT_CELLS, PILOT_ARMS } from "./pilot-vocabulary";
 
 /**
@@ -9,7 +9,7 @@ import { CELL_KEYS, contentDigest, PILOT_CELLS, PILOT_ARMS } from "./pilot-vocab
  */
 
 describe("per-attempt request identity", () => {
-  it("is SAFE_AUTHORITY_ID-shaped and fresh per window, pair, arm and attempt (property)", () => {
+  it("is SAFE_AUTHORITY_ID-shaped, deterministic, and fresh per arm and attempt (property)", () => {
     fc.assert(fc.property(
       fc.string(), fc.string(), fc.constantFrom(...PILOT_ARMS), fc.integer({ min: 1, max: 2 }),
       (windowId, pairId, arm, attempt) => {
@@ -18,6 +18,18 @@ describe("per-attempt request identity", () => {
         expect(id).toBe(pilotRequestId(windowId, pairId, arm, attempt));
         expect(id).not.toBe(pilotRequestId(windowId, pairId, arm, attempt + 1));
         expect(id).not.toBe(pilotRequestId(windowId, pairId, arm === "emission-enabled" ? "extraction-only" : "emission-enabled", attempt));
+      },
+    ), { numRuns: 100 });
+  });
+
+  it("is fresh per window and per pair (property)", () => {
+    fc.assert(fc.property(
+      fc.string(), fc.string(), fc.string(), fc.constantFrom(...PILOT_ARMS), fc.integer({ min: 1, max: 2 }),
+      (windowId, pairId, other, arm, attempt) => {
+        fc.pre(other !== windowId && other !== pairId);
+        const id = pilotRequestId(windowId, pairId, arm, attempt);
+        expect(id).not.toBe(pilotRequestId(other, pairId, arm, attempt));
+        expect(id).not.toBe(pilotRequestId(windowId, other, arm, attempt));
       },
     ), { numRuns: 100 });
   });
@@ -38,6 +50,14 @@ describe("issued binding per attempt", () => {
       expect(minted.value.contextDigest).toBe(contentDigest("the exact prompt"));
       expect(Object.isFrozen(minted.value)).toBe(true);
     }
+  });
+
+  it("ties the path tag to the binding's refinement, so they cannot disagree (type-level)", () => {
+    const minted = mintCellBinding("judge-verdict/v1", pilotRequestId("w", "p", "emission-enabled", 1), "prompt");
+    if (!minted.ok || minted.value.path !== "verdict") throw new Error("the judge cell minted no verdict-path binding");
+    // @ts-expect-error — a verdict-kind binding cannot be tagged for the reviewer path.
+    const crossed: CellBinding = { ...minted.value, path: "reviewer" };
+    expect(crossed.binding.kind.kind).toBe("judge-verdict");
   });
 
   it("refuses a request id the engine's mint does not issue", () => {

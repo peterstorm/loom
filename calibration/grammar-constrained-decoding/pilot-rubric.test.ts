@@ -30,6 +30,12 @@ const refutationFixture = (id: string): RefutationFixture => {
   if (fixture?.kind !== "refutation-verdict") throw new Error(`${id} is not a refutation fixture`);
   return fixture;
 };
+/** The real-defect refutation case's input, bound once: payload in, escapes out. */
+const realInput = {
+  cell: "refutation-verdict/v1",
+  caseId: "refutation-easy-off-by-one",
+  fixture: refutationFixture("refutation-easy-off-by-one"),
+} as const satisfies CaseInput;
 const vulnerable = corpusCases.find((entry) => entry.id === "round12-finding-repair-idempotency-vulnerable");
 if (vulnerable === undefined) throw new Error("the corpus carries no round12 vulnerable case");
 
@@ -80,12 +86,12 @@ describe("rubric assessor", () => {
   });
 
   it("flags a refuted real defect but not an upheld one or a refuted false positive", () => {
-    const real = refutationFixture("refutation-easy-off-by-one");
-    const workloadCase = caseOf("refutation-verdict/v1", "refutation-easy-off-by-one");
+    const real = realInput.fixture;
+    const workloadCase = caseOf(realInput.cell, realInput.caseId);
     const payload = (verdict: string) => ({ criterion: real.lens, verdicts: [{ finding_id: real.finding.findingId, verdict, reasoning: "r" }] });
-    expect(escapesOf(workloadCase, { cell: "refutation-verdict/v1", caseId: "refutation-easy-off-by-one", fixture: real }, payload("refuted"))).toEqual([{ defectId: "loop-skips-last-line", severity: "major" }]);
-    expect(escapesOf(workloadCase, { cell: "refutation-verdict/v1", caseId: "refutation-easy-off-by-one", fixture: real }, payload("upheld"))).toEqual([]);
-    expect(escapesOf(workloadCase, { cell: "refutation-verdict/v1", caseId: "refutation-easy-off-by-one", fixture: real }, payload("uncertain"))).toEqual([]);
+    expect(escapesOf(workloadCase, realInput, payload("refuted"))).toEqual([{ defectId: "loop-skips-last-line", severity: "major" }]);
+    expect(escapesOf(workloadCase, realInput, payload("upheld"))).toEqual([]);
+    expect(escapesOf(workloadCase, realInput, payload("uncertain"))).toEqual([]);
     const fp = refutationFixture("refutation-easy-guarded-null");
     expect(escapesOf(caseOf("refutation-verdict/v1", "refutation-easy-guarded-null"), { cell: "refutation-verdict/v1", caseId: "refutation-easy-guarded-null", fixture: fp }, payload("refuted"))).toEqual([]);
   });
@@ -112,11 +118,11 @@ describe("rubric assessor", () => {
   });
 
   it("fails closed on an escaped defect id the case does not declare — never an empty escape list", () => {
-    const real = refutationFixture("refutation-easy-off-by-one");
-    const declared = caseOf("refutation-verdict/v1", "refutation-easy-off-by-one");
+    const real = realInput.fixture;
+    const declared = caseOf(realInput.cell, realInput.caseId);
     const drifted = { ...declared, knownDefects: [{ defectId: "renamed-defect", severity: "major" as const }] };
     const refuted = { criterion: real.lens, verdicts: [{ finding_id: real.finding.findingId, verdict: "refuted", reasoning: "r" }] };
-    expect(rubricEscapes(drifted, { cell: "refutation-verdict/v1", caseId: "refutation-easy-off-by-one", fixture: real }, refuted)).toEqual({
+    expect(rubricEscapes(drifted, realInput, refuted)).toEqual({
       ok: false,
       error: `case ${declared.caseId} declares no known defect "loop-skips-last-line"`,
     });
@@ -124,10 +130,10 @@ describe("rubric assessor", () => {
 
   it("an undeclared escape is an error exactly when the declared case lets a defect escape (property)", () => {
     const judge = judgeFixture("judge-hard-readiness-barrier");
-    const real = refutationFixture("refutation-easy-off-by-one");
+    const real = realInput.fixture;
     const subjects = [
       { workloadCase: caseOf("judge-verdict/v1", "judge-hard-readiness-barrier"), input: { cell: "judge-verdict/v1", caseId: "judge-hard-readiness-barrier", fixture: judge } },
-      { workloadCase: caseOf("refutation-verdict/v1", "refutation-easy-off-by-one"), input: { cell: "refutation-verdict/v1", caseId: "refutation-easy-off-by-one", fixture: real } },
+      { workloadCase: caseOf(realInput.cell, realInput.caseId), input: realInput },
     ] as const;
     const payload = fc.oneof(
       fc.anything(),

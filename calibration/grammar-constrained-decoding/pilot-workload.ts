@@ -10,8 +10,9 @@
  * names a missing case or a fixture of another cell is refused at resolution,
  * before anything is dispatched, so a mismatched input is unrepresentable
  * past this seam. Each input carries the case it was resolved for, and the
- * window's inputs are keyed by a key only this module mints, so a lookup
- * (`caseInputOf`) proves the input belongs to the scheduled cell AND case.
+ * window's inputs (`WindowInputs`) file every input under the cell and case
+ * it carries, so an input filed under another case is unrepresentable and a
+ * lookup returns only the input resolved for exactly that cell AND case.
  *
  * Matched requests (AD-11): both arms of a pair receive byte-identical task
  * bodies (same source snapshot, same schema, same rubric, same seed-free
@@ -95,21 +96,50 @@ export type CaseInput =
 
 type FixtureInput = Extract<CaseInput, { fixture: unknown }>;
 
-declare const caseInputKeyBrand: unique symbol;
+/** The private key of one (cell, case) — the JSON of the pair, so injective. */
+const caseKey = (cell: CellKey, caseId: string): string => JSON.stringify([cell, caseId]);
 
-/** The key of one preregistered case's resolved input, minted only here. */
-type CaseInputKey = string & Readonly<{ [caseInputKeyBrand]: true }>;
+/**
+ * Every preregistered case's resolved input, as `resolveWindowInputs` returns
+ * it. Opaque, with one builder (`WindowInputs.of`) that derives each key from
+ * the cell and case the input itself carries: no entry can sit under another
+ * case's key, so a lookup needs no re-check.
+ */
+export class WindowInputs {
+  readonly #byCase: ReadonlyMap<string, CaseInput>;
 
-const caseInputKey = (cell: CellKey, caseId: string): CaseInputKey => `${cell}|${caseId}` as CaseInputKey;
+  private constructor(byCase: ReadonlyMap<string, CaseInput>) {
+    this.#byCase = byCase;
+    Object.freeze(this);
+  }
 
-/** Every preregistered case's resolved input, as `resolveWindowInputs` returns it. */
-export type WindowInputs = ReadonlyMap<CaseInputKey, CaseInput>;
+  /** The inputs, each filed under its own (cell, case). Two inputs for one
+   *  case break a construction invariant (the preregistration parse refuses
+   *  duplicate case ids within a cell) and are thrown as such. */
+  static of(inputs: Iterable<CaseInput>): WindowInputs {
+    const byCase = new Map<string, CaseInput>();
+    for (const input of inputs) {
+      const key = caseKey(input.cell, input.caseId);
+      if (byCase.has(key)) throw new Error(`two resolved inputs for ${input.cell} case ${input.caseId}`);
+      byCase.set(key, input);
+    }
+    return new WindowInputs(byCase);
+  }
 
-/** The resolved input of one scheduled case — only an input resolved for
- *  exactly that cell and case; `undefined` when there is none. */
-export function caseInputOf(inputs: WindowInputs, cell: CellKey, caseId: string): CaseInput | undefined {
-  const input = inputs.get(caseInputKey(cell, caseId));
-  return input?.cell === cell && input.caseId === caseId ? input : undefined;
+  get size(): number {
+    return this.#byCase.size;
+  }
+
+  /** Every input, in the order it was filed. */
+  values(): readonly CaseInput[] {
+    return Object.freeze([...this.#byCase.values()]);
+  }
+
+  /** The resolved input of one scheduled case — the input resolved for
+   *  exactly that cell and case; `undefined` when there is none. */
+  caseInput(cell: CellKey, caseId: string): CaseInput | undefined {
+    return this.#byCase.get(caseKey(cell, caseId));
+  }
 }
 
 /** The revision-derived changed-path scope of a corpus snapshot (git in the shell, a constant in tests). */
@@ -173,16 +203,16 @@ export function resolveWindowInputs(
   changedPathsOf: ChangedPathsOf,
 ): Result<WindowInputs, readonly string[]> {
   const corpus = new Map(corpusCases.map((entry) => [entry.id, entry] as const));
-  const inputs = new Map<CaseInputKey, CaseInput>();
+  const inputs: CaseInput[] = [];
   const problems: string[] = [];
   for (const cell of prereg.cells) {
     for (const entry of cell.workload.cases) {
       const resolved = resolveCaseInput(cell.cell, entry, corpus, fixtures, changedPathsOf);
-      if (resolved.ok) inputs.set(caseInputKey(cell.cell, entry.caseId), resolved.value);
+      if (resolved.ok) inputs.push(resolved.value);
       else problems.push(`${cell.cell} case ${entry.caseId}: ${resolved.error}`);
     }
   }
-  return problems.length > 0 ? err(Object.freeze(problems)) : ok(inputs);
+  return problems.length > 0 ? err(Object.freeze(problems)) : ok(WindowInputs.of(inputs));
 }
 
 // ---------------------------------------------------------------------------
