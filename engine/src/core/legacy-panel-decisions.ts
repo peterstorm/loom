@@ -14,20 +14,19 @@
  *
  * Every export here takes already-read evidence and decides:
  * `registeredPanelProgram`, `parseRegisteredPanelProgram`,
- * `logicalPanelRequestId`, the `panelVerdictEmissionPort` kernel adapter,
- * `parsePanelVerdictSourceRecordBytes`, `joinPanelAttemptIssuance`,
- * `selectPanelAttemptVerdictSource`, `panelSubmissionProblem`,
- * `settlePanelAttempt`, and `executeDeterministicPanelOperation`. The Run
- * Directory reads, the write-ahead record publication, and the operation
- * evidence adapter live in the shell (handlers/helpers/programs/legacy-panel).
+ * `logicalPanelRequestId`, `parsePanelVerdictSourceRecordBytes`,
+ * `joinPanelAttemptIssuance`, `selectPanelAttemptVerdictSource`,
+ * `panelSubmissionProblem`, `settlePanelAttempt`, and
+ * `executeDeterministicPanelOperation`. The Run Directory reads, the
+ * write-ahead record publication, the operation evidence adapter and the
+ * panel driver loop live in the shell (handlers/helpers/programs/legacy-panel).
  *
- * Pure in behavior (no I/O, clock or randomness), but NOT enrolled in
- * DEFAULT_PURE_MODULES: the purity closure audits every transitive import,
- * and this module imports the emission transport (emission-ingestion,
- * emission-tool, emission-observation), which declared pure modules never import
- * (ADR-0018), and the unenrolled legacy-archive. Instead, the
- * no-io-in-pure-modules rule runs over this file's own text in
- * legacy-panel-decisions-purity.test.ts; its imports are not audited.
+ * Pure module: no I/O, no clock, no randomness. Enrolled in
+ * DEFAULT_PURE_MODULES together with legacy-archive and the emission kernel
+ * its verdict-source selection reaches through panel-verdict-source
+ * (emission-ingestion, emission-tool, emission-observation, harness-capture), so
+ * machine-purity.test.ts audits the whole transitive closure, not only this
+ * file's text.
  */
 import {
   parseArtifactByteLength,
@@ -39,21 +38,17 @@ import {
 import {
   describePanelRefusalPair,
   describePanelVerdictEmissionParseFailure,
+  foldPanelVerdictEmission,
   panelVerdictSelectionRejection,
   panelVerdictSourceProvenance,
   panelVerdictSourceRecord,
   parsePanelVerdictSourceRecord,
   replayPanelVerdictSourceSelection,
-  type PanelVerdictEmissionBindingOf,
-  type PanelVerdictEmissionPort,
   type PanelVerdictEmissionSelection,
   type PanelVerdictSource,
   type PanelVerdictSourceRecord,
   type PanelVerdictSourceSelection,
 } from "./panel-verdict-source";
-import { selectVerdictSource } from "./emission-ingestion";
-import { issueEmissionBinding, type IssuedEmissionBindingOf } from "./emission-tool";
-import { observeEmissionCalls } from "./emission-observation";
 import { countRefutationVotes, defaultRefutationThreshold, parseRefutationVerdict, type RefutationVerdict } from "./review-panel";
 import { aggregateVerdicts, architectureCriterion, candidateFilename, parseArchitectureCandidate, parseArchitectureFinalization, parseJudgeVerdict, type ArchitectureCriterion, type JudgeVerdict } from "./panel-contract";
 import type { VerdictEnvelope } from "./panel-kernel";
@@ -99,57 +94,6 @@ export function logicalPanelRequestId(requestId: string, attempt: 1 | 2): string
     ? requestId.slice(0, -":attempt-2".length)
     : requestId;
 }
-
-// ---------------------------------------------------------------------------
-// The emission kernel port
-// ---------------------------------------------------------------------------
-
-/**
- * Re-establish the kernel's nominal binding where the panel core's structural
- * mirror re-enters it. The declared-pure panel-verdict-source module may not
- * import the emission transport, so it relays bindings as
- * `PanelVerdictEmissionBinding`; this port is the ONE place that mirror
- * crosses back, and it parses it through the mint — certifying the tool name
- * and schema digest against the registry cell — rather than trusting the
- * shape. panel-verdict-source only ever relays minted bindings, so a mirror
- * the mint refuses is a caller defect and the port throws instead of folding
- * it.
- */
-function certifiedVerdictBinding(
-  binding: PanelVerdictEmissionBindingOf<"judge-verdict" | "refutation-verdict">,
-): IssuedEmissionBindingOf<"judge-verdict" | "refutation-verdict"> {
-  const minted = issueEmissionBinding({
-    requestId: binding.requestId,
-    kind: binding.kind.kind,
-    version: binding.version,
-    toolName: binding.toolName,
-    schemaDigest: binding.schemaDigest,
-  });
-  if (!minted.ok) {
-    throw new Error(`panel verdict emission binding does not certify its registry cell [${minted.error.code}]: ${minted.error.message}`);
-  }
-  return minted.value;
-}
-
-/**
- * The PRODUCTION adapter of the panel seam's kernel port — the ONE place the
- * legacy panel couples panel-verdict-source to the emission kernel
- * (panel-verdict-source never imports the transport modules). The fold is the
- * kernel's ONE verdict-source selection; the AD-9 replay capability
- * re-certifies a record's emission claims through the frozen registry mint
- * and re-folds the single accepted call over a complete observation,
- * returning the minted schema digest for the core's certification
- * cross-check.
- */
-export const panelVerdictEmissionPort: PanelVerdictEmissionPort = {
-  fold: ({ binding, observation, rawJson }) => selectVerdictSource(certifiedVerdictBinding(binding), observation, rawJson),
-  replayAcceptedCall: (claims, call, rawJson) => {
-    const minted = issueEmissionBinding(claims);
-    if (!minted.ok) return { ok: false, error: minted.error.message };
-    const selection = selectVerdictSource(minted.value, observeEmissionCalls([Object.freeze({ kind: "complete" as const, call })]), rawJson);
-    return { ok: true, value: Object.freeze({ schemaDigest: minted.value.schemaDigest, selection }) };
-  },
-};
 
 // ---------------------------------------------------------------------------
 // Verdict-source resolution
@@ -259,7 +203,7 @@ function replayPanelAttemptDurableRecord(attempt: PanelAttempt, record: PanelVer
   if (record.requestId !== attempt.request.requestId) {
     return { ok: false, error: `the durable panel verdict source for request ${record.requestId} does not describe request ${attempt.request.requestId}` };
   }
-  const replayed = replayPanelVerdictSourceSelection(record, attempt.raw, panelVerdictEmissionPort);
+  const replayed = replayPanelVerdictSourceSelection(record, attempt.raw);
   if (!replayed.ok) {
     return { ok: false, error: `durable panel verdict source for request ${attempt.request.requestId} could not be replayed: ${replayed.error}` };
   }
@@ -289,7 +233,7 @@ export function selectPanelAttemptVerdictSource(
 ): DomainResult<PanelAttemptVerdictSource, string> {
   if (record !== null) return replayPanelAttemptDurableRecord(attempt, record);
   if (attempt.emission !== undefined) {
-    const selection = panelVerdictEmissionPort.fold({ binding: attempt.emission.binding, observation: attempt.emission.observation, rawJson: attempt.raw });
+    const selection = foldPanelVerdictEmission(attempt.emission, attempt.raw);
     return { ok: true, value: Object.freeze({ kind: "selected" as const, selection, record: null }) };
   }
   return { ok: true, value: BASELINE_VERDICT_SOURCE };

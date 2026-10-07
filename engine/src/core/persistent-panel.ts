@@ -3,12 +3,33 @@
  * and refutation reducers over strictly parsed durable events, their replay,
  * checkpoints, and the journal/checkpoint persistence plans.
  *
- * Every state, event, recorded step and history is minted here and proved by
- * module-private membership, so a value that did not come from start,
- * reduction, replay or checkpoint parsing cannot be resumed, reduced or
- * persisted. The issued roster authority comes from `panel-authority`; the
- * verdict-source selection both verdict submissions run before their
- * authoritative parse comes from `panel-verdict-source`.
+ * Both panels are instances of ONE persistent program shape — the durable
+ * half of the panel kernel both panels instantiate — so every invariant they
+ * share is stated once:
+ *
+ *   - the slot-progress kernel (`locateProgress`, `acceptSlot`, `rejectSlot`,
+ *     `reduceRejectedSlot`) owns stale-request, duplicate-result,
+ *     retry-to-attempt-2 and terminal-blocked for every roster stage;
+ *   - the program kernel (`PanelProgramDefinition` with `replayPrefix`,
+ *     `guardedReduce`, `reduceParsed`, `parseHistory`, `checkpointOf`,
+ *     `parseCheckpoint`, `planPersistence`) owns replay-equals-state, the
+ *     checkpoint record, the persistence plan and its dedup key;
+ *   - one membership proof map (`proofs`) owns which values came from start,
+ *     reduction, replay or checkpoint parsing.
+ *
+ * Each panel contributes only its stage topology (which roster each stage
+ * waits on and which stage follows) and its result parsing. Every state,
+ * event, recorded step and history is minted here and proved by module-private
+ * membership, so a value that did not come from start, reduction, replay or
+ * checkpoint parsing cannot be resumed, reduced or persisted. The issued
+ * roster authority comes from `panel-authority`; the verdict-source selection
+ * both verdict submissions run before their authoritative parse comes from
+ * `panel-verdict-source`.
+ *
+ * Durable bytes are unchanged by the shared kernel: every state, event,
+ * checkpoint and effect is built with the key order its persisted form has
+ * always had, because checkpoint parsing compares the recorded state with the
+ * replayed one as JSON text.
  *
  * Pure module: no I/O, no clock, no randomness.
  */
@@ -199,36 +220,29 @@ export type RefutationPanelAction =
   | Readonly<{ kind: "refutation-blocked"; runId: OrchestrationRunId; diagnostic: BlockedDiagnostic }>
   | Readonly<{ kind: "refutation-done"; runId: OrchestrationRunId; decision: RefutationDecision }>;
 
-/**
- * The issuance join between an emission selection input and the submitted
- * request: the binding must certify THIS slot's request. A binding for another
- * request is a caller defect, not an attempt observation — a typed failure
- * before any selection, never a rejection event consuming the attempt.
- */
-function panelVerdictEmissionIssuanceProblem<K extends "judge-verdict" | "refutation-verdict">(
-  emission: PanelVerdictEmissionSelectionOf<K> | undefined,
-  expectedRequestId: RequestId,
-  panel: "architecture" | "refutation",
-): PersistentPanelError | null {
-  if (emission === undefined || emission.binding.requestId === expectedRequestId) return null;
-  return panelError(panel, "invalid-authority",
-    `issued emission binding certifies request ${emission.binding.requestId}, not the submitted request ${expectedRequestId}`);
-}
+/** The two durable rejection categories a slot rejection event carries. */
+type RejectionCategory = "malformed-result" | "result-binding-mismatch";
+
+/** The fields every slot rejection event carries, whichever panel stage it rejects. */
+type SlotRejection = Readonly<{ request: PanelRequestIdentity; attempt: SemanticAttempt; category: RejectionCategory; message: string }>;
 
 export type PersistentArchitecturePanelEvent =
   | Readonly<{ schemaVersion: 1; type: "architecture-candidate-accepted"; request: PanelRequestIdentity; value: ArchitectureCandidateResult }>
-  | Readonly<{ schemaVersion: 1; type: "architecture-candidate-rejected"; request: PanelRequestIdentity; attempt: SemanticAttempt; category: "malformed-result" | "result-binding-mismatch"; message: string }>
+  | Readonly<{ schemaVersion: 1; type: "architecture-candidate-rejected"; request: PanelRequestIdentity; attempt: SemanticAttempt; category: RejectionCategory; message: string }>
   | Readonly<{ schemaVersion: 1; type: "architecture-judge-accepted"; request: PanelRequestIdentity; value: JudgeVerdict; source: PanelVerdictSource }>
-  | Readonly<{ schemaVersion: 1; type: "architecture-judge-rejected"; request: PanelRequestIdentity; attempt: SemanticAttempt; category: "malformed-result" | "result-binding-mismatch"; message: string }>
+  | Readonly<{ schemaVersion: 1; type: "architecture-judge-rejected"; request: PanelRequestIdentity; attempt: SemanticAttempt; category: RejectionCategory; message: string }>
   | Readonly<{ schemaVersion: 1; type: "architecture-ranking-completed"; ranking: readonly CandidateRanking[] }>;
 
 export type PersistentRefutationPanelEvent =
   | Readonly<{ schemaVersion: 1; type: "refutation-verdict-accepted"; request: PanelRequestIdentity; value: VerdictEnvelope<RefutationVerdict>; source: PanelVerdictSource }>
-  | Readonly<{ schemaVersion: 1; type: "refutation-verdict-rejected"; request: PanelRequestIdentity; attempt: SemanticAttempt; category: "malformed-result" | "result-binding-mismatch"; message: string }>
+  | Readonly<{ schemaVersion: 1; type: "refutation-verdict-rejected"; request: PanelRequestIdentity; attempt: SemanticAttempt; category: RejectionCategory; message: string }>
   | Readonly<{ schemaVersion: 1; type: "refutation-tally-completed"; decision: RefutationDecision }>;
 
-export type PersistentArchitectureStep = Readonly<{ state: ArchitecturePanelState; action: ArchitecturePanelAction | null; recordedEvent?: PersistentArchitecturePanelEvent }>;
-export type PersistentRefutationStep = Readonly<{ state: RefutationPanelState; action: RefutationPanelAction | null; recordedEvent?: PersistentRefutationPanelEvent }>;
+/** One program step: the next state, its action, and the durable event a submission recorded. */
+type PanelStep<State, Action, Event> = Readonly<{ state: State; action: Action | null; recordedEvent?: Event }>;
+
+export type PersistentArchitectureStep = PanelStep<ArchitecturePanelState, ArchitecturePanelAction, PersistentArchitecturePanelEvent>;
+export type PersistentRefutationStep = PanelStep<RefutationPanelState, RefutationPanelAction, PersistentRefutationPanelEvent>;
 
 declare const PERSISTENT_ARCHITECTURE_HISTORY: unique symbol;
 declare const PERSISTENT_REFUTATION_HISTORY: unique symbol;
@@ -246,105 +260,38 @@ export type PersistentRefutationPanelHistory = Readonly<{
   readonly [PERSISTENT_REFUTATION_HISTORY]: "PersistentRefutationPanelHistory";
 }>;
 
-const architectureStateProofs = new WeakSet<object>();
-const refutationStateProofs = new WeakSet<object>();
-const architectureEventProofs = new WeakSet<object>();
-const refutationEventProofs = new WeakSet<object>();
-const architectureRecordedStepProofs = new WeakSet<object>();
-const refutationRecordedStepProofs = new WeakSet<object>();
-const architectureHistoryProofs = new WeakSet<object>();
-const refutationHistoryProofs = new WeakSet<object>();
-const architectureJudgeRosterProofs = new WeakMap<object, ArchitecturePanelAuthority>();
-const refutationRosterProofs = new WeakMap<object, RefutationPanelAuthority>();
+// ---------------------------------------------------------------------------
+// Membership proofs: the ONE authority over which values this module minted
+// ---------------------------------------------------------------------------
+
+type PanelKind = "architecture" | "refutation";
+type ProofTag = `${PanelKind}:${"state" | "event" | "recorded-step" | "history"}`;
+
+/** Every minted state, event, recorded step and history, tagged with its panel
+ *  and role, so a refutation state can never pass as an architecture one. */
+const proofs = new WeakMap<object, ProofTag>();
+/** Each proved complete roster, bound to the exact panel authority it was proved for. */
+const completeRosterProofs = new WeakMap<object, ArchitecturePanelAuthority | RefutationPanelAuthority>();
+
+function prove<T extends object>(tag: ProofTag, value: T): T {
+  proofs.set(value, tag);
+  return value;
+}
+
+function proven(tag: ProofTag, value: unknown): boolean {
+  return typeof value === "object" && value !== null && proofs.get(value) === tag;
+}
 
 function architectureState<T extends ArchitecturePanelStateData>(state: T): T & ArchitecturePanelStateBrand {
-  architectureStateProofs.add(state);
-  return state as T & ArchitecturePanelStateBrand;
+  return prove("architecture:state", state) as T & ArchitecturePanelStateBrand;
 }
 function refutationState<T extends RefutationPanelStateData>(state: T): T & RefutationPanelStateBrand {
-  refutationStateProofs.add(state);
-  return state as T & RefutationPanelStateBrand;
-}
-function architectureEvent<T extends PersistentArchitecturePanelEvent>(event: T): T {
-  architectureEventProofs.add(event);
-  return event;
-}
-function refutationEvent<T extends PersistentRefutationPanelEvent>(event: T): T {
-  refutationEventProofs.add(event);
-  return event;
-}
-function architectureRecordedStep(step: PersistentArchitectureStep & Readonly<{ recordedEvent: PersistentArchitecturePanelEvent }>): PersistentArchitectureStep {
-  architectureRecordedStepProofs.add(step);
-  return step;
-}
-function refutationRecordedStep(step: PersistentRefutationStep & Readonly<{ recordedEvent: PersistentRefutationPanelEvent }>): PersistentRefutationStep {
-  refutationRecordedStepProofs.add(step);
-  return step;
+  return prove("refutation:state", state) as T & RefutationPanelStateBrand;
 }
 
-function initialSlots<Result>(roster: ExactRoster): NonEmpty<OpenSlot<Result>> {
-  return Object.freeze(roster.orderedSlots.map(({ slotId }) => Object.freeze({ slotId, status: "pending" as const, nextAttempt: 1 as const }))) as unknown as NonEmpty<OpenSlot<Result>>;
-}
-
-function pendingAuthorities<Result>(roster: ExactRoster, slots: NonEmpty<OpenSlot<Result>>): NonEmpty<AgentRequestAuthority> | null {
-  const requests = slots.flatMap((progress) => progress.status === "accepted" ? [] : [requireRosterAttempt(roster, progress.slotId, progress.nextAttempt)]);
-  return requests.length === 0 ? null : Object.freeze(requests) as unknown as NonEmpty<AgentRequestAuthority>;
-}
-
-function architectureAction(state: ArchitecturePanelState): ArchitecturePanelAction | null {
-  switch (state.stage) {
-    case "awaiting-candidates": {
-      const requests = pendingAuthorities(state.authority.candidateRoster, state.slots);
-      return requests === null ? null : Object.freeze({ kind: "spawn-architecture-candidates", runId: state.authority.runId, requests });
-    }
-    case "awaiting-judges": {
-      const requests = pendingAuthorities(state.authority.judgeRoster, state.slots);
-      return requests === null ? null : Object.freeze({ kind: "spawn-architecture-judges", runId: state.authority.runId, requests });
-    }
-    case "ready-to-aggregate": return Object.freeze({ kind: "architecture-aggregate-ready", runId: state.authority.runId });
-    case "terminal-blocked": return Object.freeze({ kind: "architecture-blocked", runId: state.authority.runId, diagnostic: state.diagnostic });
-    case "done": return Object.freeze({ kind: "architecture-done", runId: state.authority.runId, ranking: state.ranking });
-  }
-}
-
-function refutationAction(state: RefutationPanelState): RefutationPanelAction | null {
-  switch (state.stage) {
-    case "awaiting-verdicts": {
-      const requests = pendingAuthorities(state.authority.verifierRoster, state.slots);
-      return requests === null ? null : Object.freeze({ kind: "spawn-refutation-verifiers", runId: state.authority.runId, requests });
-    }
-    case "ready-to-tally": return Object.freeze({ kind: "refutation-tally-ready", runId: state.authority.runId });
-    case "terminal-blocked": return Object.freeze({ kind: "refutation-blocked", runId: state.authority.runId, diagnostic: state.diagnostic });
-    case "done": return Object.freeze({ kind: "refutation-done", runId: state.authority.runId, decision: state.decision });
-  }
-}
-
-export function startPersistentArchitecturePanel(authority: ArchitecturePanelAuthority): PersistentArchitectureStep {
-  const state = architectureState(Object.freeze({
-    panel: "architecture" as const, authority, stage: "awaiting-candidates" as const,
-    slots: initialSlots<ArchitectureCandidateResult>(authority.candidateRoster),
-  }));
-  return Object.freeze({ state, action: architectureAction(state) });
-}
-
-export function startPersistentRefutationPanel(authority: RefutationPanelAuthority): PersistentRefutationStep {
-  const state = refutationState(Object.freeze({
-    panel: "refutation" as const, authority, stage: "awaiting-verdicts" as const,
-    slots: initialSlots<VerdictEnvelope<RefutationVerdict>>(authority.verifierRoster),
-  }));
-  return Object.freeze({ state, action: refutationAction(state) });
-}
-
-export function resumePersistentArchitecturePanel(state: ArchitecturePanelState): PersistentPanelResult<PersistentArchitectureStep> {
-  return architectureStateProofs.has(state)
-    ? persistentSuccess(Object.freeze({ state, action: architectureAction(state) }))
-    : persistentFailure(panelError("architecture", "malformed-checkpoint", "architecture state must come from start, reduction, replay, or checkpoint parsing"));
-}
-export function resumePersistentRefutationPanel(state: RefutationPanelState): PersistentPanelResult<PersistentRefutationStep> {
-  return refutationStateProofs.has(state)
-    ? persistentSuccess(Object.freeze({ state, action: refutationAction(state) }))
-    : persistentFailure(panelError("refutation", "malformed-checkpoint", "refutation state must come from start, reduction, replay, or checkpoint parsing"));
-}
+// ---------------------------------------------------------------------------
+// Roster access
+// ---------------------------------------------------------------------------
 
 function findRosterRequest(roster: ExactRoster, requestId: string): AgentRequestAuthority | null {
   for (const slot of roster.orderedSlots) {
@@ -376,21 +323,31 @@ function requireRosterAttempt(roster: ExactRoster, slotId: SlotId, attempt: numb
   return request;
 }
 
-/** Proven request lookup: the caller has already located this request (a
- *  settled outcome), so absence would be a broken invariant, not a degraded
- *  input — throw instead of asserting. */
-function requireRosterRequest(roster: ExactRoster, requestId: string): AgentRequestAuthority {
-  const found = findRosterRequest(roster, requestId);
-  if (found === null) throw new Error(`panel program invariant: request '${requestId}' is not in the roster`);
-  return found;
+const rosterPanel = (roster: ExactRoster): PanelKind => roster.program === "architecture-panel" ? "architecture" : "refutation";
+
+// ---------------------------------------------------------------------------
+// The slot-progress kernel: every roster stage of both panels
+// ---------------------------------------------------------------------------
+
+function initialSlots<Result>(roster: ExactRoster): NonEmpty<OpenSlot<Result>> {
+  return Object.freeze(roster.orderedSlots.map(({ slotId }) => Object.freeze({ slotId, status: "pending" as const, nextAttempt: 1 as const }))) as unknown as NonEmpty<OpenSlot<Result>>;
 }
 
+function pendingAuthorities<Result>(roster: ExactRoster, slots: NonEmpty<OpenSlot<Result>>): NonEmpty<AgentRequestAuthority> | null {
+  const requests = slots.flatMap((progress) => progress.status === "accepted" ? [] : [requireRosterAttempt(roster, progress.slotId, progress.nextAttempt)]);
+  return requests.length === 0 ? null : Object.freeze(requests) as unknown as NonEmpty<AgentRequestAuthority>;
+}
+
+type LocatedProgress<Result> = Readonly<{ index: number; slot: OpenSlot<Result>; expected: AgentRequestAuthority }>;
+
+/** The open slot a request belongs to: unknown, other-stage, duplicate and
+ *  stale requests refuse here, once, for every stage of both panels. */
 function locateProgress<Result>(
   roster: ExactRoster,
   slots: NonEmpty<OpenSlot<Result>>,
   requestId: string,
-): PersistentPanelResult<Readonly<{ index: number; slot: OpenSlot<Result>; expected: AgentRequestAuthority }>> {
-  const panel = roster.program === "architecture-panel" ? "architecture" : "refutation";
+): PersistentPanelResult<LocatedProgress<Result>> {
+  const panel = rosterPanel(roster);
   const authority = findRosterRequest(roster, requestId);
   if (authority === null) return persistentFailure(panelError(panel, "unknown-request", `request ${requestId} is not in the active canonical roster`, { requestId }));
   const index = slots.findIndex(({ slotId }) => slotId === authority.slotId);
@@ -401,6 +358,120 @@ function locateProgress<Result>(
   if (expected.requestId !== requestId) return persistentFailure(panelError(panel, "stale-request", `slot ${progress.slotId} expects attempt ${progress.nextAttempt}, not request ${requestId}`, { requestId, slotId: progress.slotId }));
   return persistentSuccess(Object.freeze({ index, slot: progress, expected }));
 }
+
+function orderedAccepted<Result>(roster: ExactRoster, slots: NonEmpty<OpenSlot<Result>>): readonly DurableAcceptedPanelResult<Result>[] {
+  return Object.freeze(roster.orderedSlots.flatMap(({ slotId }) => {
+    const slot = slots.find((candidate) => candidate.slotId === slotId);
+    return slot?.status === "accepted" ? [slot.result] : [];
+  }));
+}
+
+function completeSlotProgress<Result>(slots: NonEmpty<OpenSlot<Result>>): CompleteSlotProgress<Result> | null {
+  return slots.every((slot): slot is AcceptedSlot<Result> => slot.status === "accepted")
+    ? slots as CompleteSlotProgress<Result>
+    : null;
+}
+
+function replaceSlot<Result>(slots: NonEmpty<OpenSlot<Result>>, index: number, replacement: OpenSlot<Result>): NonEmpty<OpenSlot<Result>> {
+  return Object.freeze(slots.map((slot, candidateIndex) => candidateIndex === index ? replacement : slot)) as unknown as NonEmpty<OpenSlot<Result>>;
+}
+
+function durableAccepted<T>(request: PanelRequestIdentity, value: T): DurableAcceptedPanelResult<T> {
+  return Object.freeze({ schemaVersion: 1, kind: "panel-result-accepted", request, value });
+}
+
+/** An accepted result either leaves its stage waiting (`partial`) or completes it. */
+type SlotAcceptance<Result> =
+  | Readonly<{ kind: "partial"; slots: NonEmpty<OpenSlot<Result>> }>
+  | Readonly<{ kind: "complete"; slots: CompleteSlotProgress<Result> }>;
+
+function acceptSlot<Result>(
+  roster: ExactRoster,
+  slots: NonEmpty<OpenSlot<Result>>,
+  request: PanelRequestIdentity,
+  value: Result,
+): PersistentPanelResult<SlotAcceptance<Result>> {
+  const located = locateProgress(roster, slots, request.requestId);
+  if (!located.ok) return located;
+  const settled = replaceSlot(slots, located.value.index, Object.freeze({
+    slotId: located.value.expected.slotId,
+    status: "accepted" as const,
+    result: durableAccepted(request, value),
+  }));
+  const complete = completeSlotProgress(settled);
+  return persistentSuccess(complete === null
+    ? Object.freeze({ kind: "partial" as const, slots: settled })
+    : Object.freeze({ kind: "complete" as const, slots: complete }));
+}
+
+function retryDiagnostic(roster: ExactRoster, slotId: SlotId, category: RejectionCategory, message: string): BlockedDiagnostic | null {
+  const slot = roster.byId.get(slotId);
+  if (slot === undefined) return null;
+  const diagnostic = semanticRetryDiagnostic({ category, failedRequest: slot.attempts[0], retryRequest: slot.attempts[1], message });
+  return diagnostic.ok ? diagnostic.value : null;
+}
+
+/** A rejected attempt 1 retries its slot at attempt 2; a rejected attempt 2 is terminal. */
+type SlotRejectionOutcome<Result> =
+  | Readonly<{ kind: "retry"; slots: NonEmpty<OpenSlot<Result>>; retry: AgentRequestAuthority }>
+  | Readonly<{ kind: "terminal"; diagnostic: TerminalBlockedDiagnostic }>;
+
+function rejectSlot<Result>(
+  panel: PanelKind,
+  roster: ExactRoster,
+  slots: NonEmpty<OpenSlot<Result>>,
+  event: SlotRejection,
+): PersistentPanelResult<SlotRejectionOutcome<Result>> {
+  const located = locateProgress(roster, slots, event.request.requestId);
+  if (!located.ok) return located;
+  const { expected, index } = located.value;
+  if (event.attempt !== expected.attempt) return persistentFailure(panelError(panel, "stale-request", `expected attempt ${expected.attempt}, received ${event.attempt}`, { requestId: event.request.requestId, slotId: expected.slotId }));
+  const message = sanitizeProse(event.message);
+  if (message.length === 0) return persistentFailure(panelError(panel, "malformed-result", "rejection message must be non-empty after sanitization"));
+  if (event.attempt === 1) {
+    const diagnostic = retryDiagnostic(roster, expected.slotId, event.category, message);
+    if (diagnostic === null) return persistentFailure(panelError(panel, "invalid-authority", "cannot construct retry diagnostic"));
+    return persistentSuccess(Object.freeze({
+      kind: "retry" as const,
+      slots: replaceSlot(slots, index, Object.freeze({ slotId: expected.slotId, status: "pending" as const, nextAttempt: 2 as const })),
+      retry: requireRosterAttempt(roster, expected.slotId, 2),
+    }));
+  }
+  const terminal = terminalBlockedDiagnostic({ category: event.category, failedRequest: expected as AgentRequestAuthority<2>, message });
+  if (!terminal.ok) return persistentFailure(panelError(panel, "invalid-authority", terminal.error.message));
+  return persistentSuccess(Object.freeze({ kind: "terminal" as const, diagnostic: terminal.value }));
+}
+
+/**
+ * The ONE rejected-slot transition every roster stage of both panels shares:
+ * the retry-versus-terminal decision, the attempt-2 lookup and the retry spawn
+ * live here. A stage supplies only its terminal state, the state that keeps
+ * waiting with the retried slot, and the spawn action that carries the retry.
+ */
+function reduceRejectedSlot<Result, State, Action, Event>(
+  panel: PanelKind,
+  roster: ExactRoster,
+  slots: NonEmpty<OpenSlot<Result>>,
+  event: SlotRejection,
+  stage: Readonly<{
+    terminal: (diagnostic: TerminalBlockedDiagnostic) => PanelStep<State, Action, Event>;
+    waiting: (slots: NonEmpty<OpenSlot<Result>>) => State;
+    spawn: (requests: NonEmpty<AgentRequestAuthority>) => Action;
+  }>,
+): PersistentPanelResult<PanelStep<State, Action, Event>> {
+  const rejected = rejectSlot(panel, roster, slots, event);
+  if (!rejected.ok) return rejected;
+  const outcome = rejected.value;
+  if (outcome.kind === "terminal") return persistentSuccess(stage.terminal(outcome.diagnostic));
+  return persistentSuccess(Object.freeze({
+    state: stage.waiting(outcome.slots),
+    action: stage.spawn(Object.freeze([outcome.retry]) as NonEmpty<AgentRequestAuthority>),
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Request identity and rehydration
+// ---------------------------------------------------------------------------
 
 export function panelRequestIdentity(request: IssuedSpawnRequest): PanelRequestIdentity {
   return Object.freeze({
@@ -450,19 +521,21 @@ function parsePanelRequestIdentity(raw: unknown): PersistentPanelResult<PanelReq
   }));
 }
 
-function rehydrationFailure(panel: "architecture" | "refutation", expected: AgentRequestAuthority, error: Readonly<{ kind: "invalid-accepted-agent-result"; field?: string; message: string }>): PersistentPanelResult<never> {
+function rehydrationFailure(panel: PanelKind, expected: AgentRequestAuthority, error: Readonly<{ kind: "invalid-accepted-agent-result"; field?: string; message: string }>): PersistentPanelResult<never> {
   const cause = Object.freeze({ kind: error.kind, ...(error.field === undefined ? {} : { field: error.field }), message: boundedPanelMessage(error.message) });
   return persistentFailure(panelError(panel, "request-rehydration-failed", `request ${expected.requestId} could not be rehydrated: ${cause.message}`, {
     requestId: expected.requestId, slotId: expected.slotId, rehydration: cause,
   }));
 }
 
+type ResolvedPanelRequest = Readonly<{ identity: PanelRequestIdentity; request: IssuedSpawnRequest; expected: AgentRequestAuthority }>;
+
 function resolvePanelRequest(
-  panel: "architecture" | "refutation",
+  panel: PanelKind,
   roster: ExactRoster,
   identityRaw: unknown,
   resolver: PublicationAuthorityResolver,
-): PersistentPanelResult<Readonly<{ identity: PanelRequestIdentity; request: IssuedSpawnRequest; expected: AgentRequestAuthority }>> {
+): PersistentPanelResult<ResolvedPanelRequest> {
   const identity = parsePanelRequestIdentity(identityRaw);
   if (!identity.ok) return persistentFailure(panelError(panel, identity.error.kind, identity.error.message));
   const expected = findRosterRequest(roster, identity.value.requestId);
@@ -479,18 +552,26 @@ function resolvePanelRequest(
   return persistentSuccess(Object.freeze({ identity: identity.value, request: issued.value, expected }));
 }
 
-function orderedAccepted<Result>(roster: ExactRoster, slots: NonEmpty<OpenSlot<Result>>): readonly DurableAcceptedPanelResult<Result>[] {
-  return Object.freeze(roster.orderedSlots.flatMap(({ slotId }) => {
-    const slot = slots.find((candidate) => candidate.slotId === slotId);
-    return slot?.status === "accepted" ? [slot.result] : [];
-  }));
+/** A rehydrated request that is also the expected attempt of an open slot of
+ *  the active stage — the joint precondition of every submission and of every
+ *  durable slot event. */
+function resolveOpenRequest<Result>(
+  panel: PanelKind,
+  roster: ExactRoster,
+  slots: NonEmpty<OpenSlot<Result>>,
+  identityRaw: unknown,
+  resolver: PublicationAuthorityResolver,
+): PersistentPanelResult<Readonly<{ resolved: ResolvedPanelRequest; located: LocatedProgress<Result> }>> {
+  const resolved = resolvePanelRequest(panel, roster, identityRaw, resolver);
+  if (!resolved.ok) return resolved;
+  const located = locateProgress(roster, slots, resolved.value.expected.requestId);
+  if (!located.ok) return located;
+  return persistentSuccess(Object.freeze({ resolved: resolved.value, located: located.value }));
 }
 
-function completeSlotProgress<Result>(slots: NonEmpty<OpenSlot<Result>>): CompleteSlotProgress<Result> | null {
-  return slots.every((slot): slot is AcceptedSlot<Result> => slot.status === "accepted")
-    ? slots as CompleteSlotProgress<Result>
-    : null;
-}
+// ---------------------------------------------------------------------------
+// Accepted-result projections
+// ---------------------------------------------------------------------------
 
 /** Canonical accepted candidate projection, derived only from slot progress. */
 export function selectAcceptedArchitectureCandidates(
@@ -522,54 +603,9 @@ export function selectAcceptedRefutationVerdicts(
   return orderedAccepted(state.authority.verifierRoster, state.slots);
 }
 
-function replaceSlot<Result>(slots: NonEmpty<OpenSlot<Result>>, index: number, replacement: OpenSlot<Result>): NonEmpty<OpenSlot<Result>> {
-  return Object.freeze(slots.map((slot, candidateIndex) => candidateIndex === index ? replacement : slot)) as unknown as NonEmpty<OpenSlot<Result>>;
-}
-
-function settleAccepted<Result>(
-  roster: ExactRoster,
-  slots: NonEmpty<OpenSlot<Result>>,
-  result: DurableAcceptedPanelResult<Result>,
-): PersistentPanelResult<NonEmpty<OpenSlot<Result>>> {
-  const located = locateProgress(roster, slots, result.request.requestId);
-  if (!located.ok) return located;
-  return persistentSuccess(replaceSlot(slots, located.value.index, Object.freeze({
-    slotId: located.value.expected.slotId,
-    status: "accepted" as const,
-    result,
-  })));
-}
-
-function retryDiagnostic(roster: ExactRoster, slotId: SlotId, category: "malformed-result" | "result-binding-mismatch", message: string): BlockedDiagnostic | null {
-  const slot = roster.byId.get(slotId);
-  if (slot === undefined) return null;
-  const diagnostic = semanticRetryDiagnostic({ category, failedRequest: slot.attempts[0], retryRequest: slot.attempts[1], message });
-  return diagnostic.ok ? diagnostic.value : null;
-}
-
-function settleRejected<Result>(
-  panel: "architecture" | "refutation",
-  roster: ExactRoster,
-  slots: NonEmpty<OpenSlot<Result>>,
-  event: Readonly<{ request: PanelRequestIdentity; attempt: SemanticAttempt; category: "malformed-result" | "result-binding-mismatch"; message: string }>,
-): PersistentPanelResult<Readonly<{ slots?: NonEmpty<OpenSlot<Result>>; diagnostic: BlockedDiagnostic; terminal: boolean }>> {
-  const located = locateProgress(roster, slots, event.request.requestId);
-  if (!located.ok) return located;
-  if (event.attempt !== located.value.expected.attempt) return persistentFailure(panelError(panel, "stale-request", `expected attempt ${located.value.expected.attempt}, received ${event.attempt}`, { requestId: event.request.requestId, slotId: located.value.expected.slotId }));
-  const message = sanitizeProse(event.message);
-  if (message.length === 0) return persistentFailure(panelError(panel, "malformed-result", "rejection message must be non-empty after sanitization"));
-  if (event.attempt === 1) {
-    const diagnostic = retryDiagnostic(roster, located.value.expected.slotId, event.category, message);
-    if (diagnostic === null) return persistentFailure(panelError(panel, "invalid-authority", "cannot construct retry diagnostic"));
-    return persistentSuccess(Object.freeze({
-      slots: replaceSlot(slots, located.value.index, Object.freeze({ slotId: located.value.expected.slotId, status: "pending" as const, nextAttempt: 2 as const })),
-      diagnostic, terminal: false,
-    }));
-  }
-  const terminal = terminalBlockedDiagnostic({ category: event.category, failedRequest: located.value.expected as AgentRequestAuthority<2>, message });
-  if (!terminal.ok) return persistentFailure(panelError(panel, "invalid-authority", terminal.error.message));
-  return persistentSuccess(Object.freeze({ diagnostic: terminal.value, terminal: true }));
-}
+// ---------------------------------------------------------------------------
+// Result parsing
+// ---------------------------------------------------------------------------
 
 function parseCandidateClaim(raw: unknown, expectedLens: PanelLens, expectedCandidate: CandidateFilename): PersistentPanelResult<ArchitectureCandidateResult> {
   const candidate = safeRecord(raw, ["lens", "candidate", "artifact"]);
@@ -627,32 +663,6 @@ function parseCanonicalRefutation(raw: unknown, authority: RefutationPanelAuthor
   }
 }
 
-function parseRejection<Result>(
-  raw: Readonly<Record<string, unknown>>,
-  panel: "architecture" | "refutation",
-  roster: ExactRoster,
-  slots: NonEmpty<OpenSlot<Result>>,
-  resolver: PublicationAuthorityResolver,
-): PersistentPanelResult<Readonly<{ request: PanelRequestIdentity; attempt: SemanticAttempt; category: "malformed-result" | "result-binding-mismatch"; message: string }>> {
-  const resolved = resolvePanelRequest(panel, roster, raw.request, resolver);
-  if (!resolved.ok) return resolved;
-  const located = locateProgress(roster, slots, resolved.value.expected.requestId);
-  if (!located.ok) return located;
-  const attempt = raw.attempt === 1 || raw.attempt === 2 ? raw.attempt : null;
-  const category = raw.category === "malformed-result" || raw.category === "result-binding-mismatch" ? raw.category : null;
-  const message = typeof raw.message === "string" ? sanitizeProse(raw.message) : "";
-  if (attempt === null || category === null || message.length === 0) {
-    return persistentFailure(panelError(panel, "malformed-event", "rejection event requires issued request identity, attempt, category, and non-empty sanitized message"));
-  }
-  if (attempt !== resolved.value.expected.attempt) {
-    return persistentFailure(panelError(panel, "stale-request", `expected attempt ${resolved.value.expected.attempt}, received ${attempt}`, {
-      requestId: resolved.value.expected.requestId,
-      slotId: resolved.value.expected.slotId,
-    }));
-  }
-  return persistentSuccess(Object.freeze({ request: resolved.value.identity, attempt, category, message }));
-}
-
 /**
  * The roster's DERIVED lookup views. `ExactRoster.byId` and `CompleteRoster.bySlot`
  * are built by the roster parser from `orderedSlots`/`ordered` and by nothing
@@ -684,80 +694,151 @@ function jsonEqual(left: unknown, right: unknown): boolean {
   try { return withoutDerivedViews(left) === withoutDerivedViews(right); } catch { return false; }
 }
 
+// ---------------------------------------------------------------------------
+// Durable event parsing
+// ---------------------------------------------------------------------------
+
+/** The exact schemaVersion-1 envelope of one durable event, parsed only over a proved state. */
+function parseEventEnvelope(
+  panel: PanelKind,
+  state: unknown,
+  raw: unknown,
+  fields: readonly string[],
+): PersistentPanelResult<Readonly<Record<string, unknown>> & Readonly<{ type: string }>> {
+  if (!proven(`${panel}:state`, state)) return persistentFailure(panelError(panel, "malformed-checkpoint", `event parsing requires a parser-produced ${panel} state`));
+  const envelope = safeRecord(raw, fields);
+  if (envelope === null || envelope.schemaVersion !== 1 || typeof envelope.type !== "string") return persistentFailure(panelError(panel, "malformed-event", `${panel} event must be an exact schemaVersion 1 data record`));
+  return persistentSuccess(envelope as Readonly<Record<string, unknown>> & Readonly<{ type: string }>);
+}
+
+/** A durable slot rejection: the issued request identity of the open slot's expected attempt, its category and sanitized message. */
+function parseRejection<Result>(
+  raw: Readonly<Record<string, unknown>>,
+  panel: PanelKind,
+  roster: ExactRoster,
+  slots: NonEmpty<OpenSlot<Result>>,
+  resolver: PublicationAuthorityResolver,
+): PersistentPanelResult<SlotRejection> {
+  const open = resolveOpenRequest(panel, roster, slots, raw.request, resolver);
+  if (!open.ok) return open;
+  const { expected, identity } = open.value.resolved;
+  const attempt = raw.attempt === 1 || raw.attempt === 2 ? raw.attempt : null;
+  const category = raw.category === "malformed-result" || raw.category === "result-binding-mismatch" ? raw.category : null;
+  const message = typeof raw.message === "string" ? sanitizeProse(raw.message) : "";
+  if (attempt === null || category === null || message.length === 0) {
+    return persistentFailure(panelError(panel, "malformed-event", "rejection event requires issued request identity, attempt, category, and non-empty sanitized message"));
+  }
+  if (attempt !== expected.attempt) {
+    return persistentFailure(panelError(panel, "stale-request", `expected attempt ${expected.attempt}, received ${attempt}`, {
+      requestId: expected.requestId,
+      slotId: expected.slotId,
+    }));
+  }
+  return persistentSuccess(Object.freeze({ request: identity, attempt, category, message }));
+}
+
+/** The exact durable rejection event of one stage, after its stage guard. */
+function parseRejectionEvent<Result>(
+  panel: PanelKind,
+  raw: unknown,
+  stageOpen: Readonly<{ roster: ExactRoster; slots: NonEmpty<OpenSlot<Result>> }> | null,
+  unexpected: string,
+  resolver: PublicationAuthorityResolver,
+): PersistentPanelResult<SlotRejection> {
+  const exact = safeRecord(raw, ["schemaVersion", "type", "request", "attempt", "category", "message"]);
+  if (exact === null) return persistentFailure(panelError(panel, "malformed-event", `${panel} rejection event contains unknown or missing fields`));
+  if (stageOpen === null) return persistentFailure(panelError(panel, "unexpected-event", unexpected));
+  return parseRejection(exact, panel, stageOpen.roster, stageOpen.slots, resolver);
+}
+
+/**
+ * The accepted verdict event of one verdict stage: its open-slot request, the
+ * canonical verdict under the slot's bound criterion or lens, and the source
+ * arm. An absent arm is the historical projection (genuinely pre-feature
+ * accepted events were extraction); a present arm must be exact — malformed
+ * present-day source fields are NOT historical absence.
+ */
+function parseAcceptedVerdictEvent<Result, Binding>(
+  panel: PanelKind,
+  exact: Readonly<Record<string, unknown>>,
+  roster: ExactRoster,
+  slots: NonEmpty<OpenSlot<Result>>,
+  resolver: PublicationAuthorityResolver,
+  bind: (slotId: SlotId) => PersistentPanelResult<Binding>,
+  parseValue: (raw: unknown, binding: Binding) => DomainResult<Result, Readonly<{ message: string }>>,
+): PersistentPanelResult<Readonly<{ request: PanelRequestIdentity; value: Result; source: PanelVerdictSource }>> {
+  const open = resolveOpenRequest(panel, roster, slots, exact.request, resolver);
+  if (!open.ok) return open;
+  const { expected, identity } = open.value.resolved;
+  const binding = bind(expected.slotId);
+  if (!binding.ok) return binding;
+  const value = parseValue(exact.value, binding.value);
+  if (!value.ok) return persistentFailure(panelError(panel, "request-binding-mismatch", value.error.message, { requestId: expected.requestId, slotId: expected.slotId }));
+  const source = projectPanelVerdictSourceArm(exact.source);
+  if (!source.ok) return persistentFailure(panelError(panel, "malformed-event", source.error));
+  return persistentSuccess(Object.freeze({ request: identity, value: value.value, source: source.value }));
+}
+
+const ARCHITECTURE_EVENT_FIELDS = ["schemaVersion", "type", "request", "value", "attempt", "category", "message", "ranking", "source"] as const;
+const REFUTATION_EVENT_FIELDS = ["schemaVersion", "type", "request", "value", "attempt", "category", "message", "decision", "source"] as const;
+
 export function parsePersistentArchitecturePanelEvent(
   state: ArchitecturePanelState,
   raw: unknown,
   resolver: PublicationAuthorityResolver,
 ): PersistentPanelResult<PersistentArchitecturePanelEvent> {
-  if (!architectureStateProofs.has(state)) return persistentFailure(panelError("architecture", "malformed-checkpoint", "event parsing requires a parser-produced architecture state"));
-  const envelope = safeRecord(raw, ["schemaVersion", "type", "request", "value", "attempt", "category", "message", "ranking", "source"]);
-  if (envelope === null || envelope.schemaVersion !== 1 || typeof envelope.type !== "string") return persistentFailure(panelError("architecture", "malformed-event", "architecture event must be an exact schemaVersion 1 data record"));
-  if (envelope.type === "architecture-candidate-accepted") {
-    const exact = safeRecord(raw, ["schemaVersion", "type", "request", "value"]);
-    if (exact === null || state.stage !== "awaiting-candidates") return persistentFailure(panelError("architecture", "unexpected-event", `candidate result is not accepted during ${state.stage}`));
-    const resolved = resolvePanelRequest("architecture", state.authority.candidateRoster, exact.request, resolver);
-    if (!resolved.ok) return resolved;
-    const located = locateProgress(state.authority.candidateRoster, state.slots, resolved.value.expected.requestId);
-    if (!located.ok) return located;
-    const bound = boundCandidateEntry(state.authority, resolved.value.expected.slotId);
-    if (!bound.ok) return bound;
-    const value = parseCandidateClaim(exact.value, bound.value.lens, bound.value.candidate);
-    if (!value.ok) return value;
-    return persistentSuccess(architectureEvent(Object.freeze({ schemaVersion: 1, type: "architecture-candidate-accepted", request: resolved.value.identity, value: value.value })));
-  }
-  if (envelope.type === "architecture-judge-accepted") {
-    const exact = safeRecord(raw, ["schemaVersion", "type", "request", "value", "source"]);
-    if (exact === null || state.stage !== "awaiting-judges") return persistentFailure(panelError("architecture", "unexpected-event", `judge result is not accepted during ${state.stage}`));
-    const resolved = resolvePanelRequest("architecture", state.authority.judgeRoster, exact.request, resolver);
-    if (!resolved.ok) return resolved;
-    const located = locateProgress(state.authority.judgeRoster, state.slots, resolved.value.expected.requestId);
-    if (!located.ok) return located;
-    const criterion = boundJudgeCriterion(state.authority, resolved.value.expected.slotId);
-    if (!criterion.ok) return criterion;
-    const value = parseCanonicalJudge(exact.value, state.authority, criterion.value);
-    if (!value.ok) return persistentFailure(panelError("architecture", "request-binding-mismatch", value.error.message, { requestId: resolved.value.expected.requestId, slotId: resolved.value.expected.slotId }));
-    // The accepted event's source arm: absent is the historical projection
-    // (genuinely pre-feature accepted events were extraction); present must be
-    // exact — malformed present-day source fields are NOT historical absence.
-    const source = projectPanelVerdictSourceArm(exact.source);
-    if (!source.ok) return persistentFailure(panelError("architecture", "malformed-event", source.error));
-    return persistentSuccess(architectureEvent(Object.freeze({ schemaVersion: 1, type: "architecture-judge-accepted", request: resolved.value.identity, value: value.value, source: source.value })));
-  }
-  // One branch per rejection kind rather than a shared stage-guard prelude and
-  // a re-test of the same conditions below it: the paired form left a third
-  // "wrong stage" arm that the guards had already made unreachable, and the
-  // re-test was the only thing narrowing `state` for its own roster.
-  if (envelope.type === "architecture-candidate-rejected") {
-    const exact = safeRecord(raw, ["schemaVersion", "type", "request", "attempt", "category", "message"]);
-    if (exact === null) return persistentFailure(panelError("architecture", "malformed-event", "architecture rejection event contains unknown or missing fields"));
-    if (state.stage !== "awaiting-candidates") {
-      return persistentFailure(panelError("architecture", "unexpected-event", `candidate rejection is not accepted during ${state.stage}`));
+  const envelope = parseEventEnvelope("architecture", state, raw, ARCHITECTURE_EVENT_FIELDS);
+  if (!envelope.ok) return envelope;
+  const event = (parsed: PersistentArchitecturePanelEvent): PersistentPanelResult<PersistentArchitecturePanelEvent> =>
+    persistentSuccess(prove("architecture:event", Object.freeze(parsed)));
+  switch (envelope.value.type) {
+    case "architecture-candidate-accepted": {
+      const exact = safeRecord(raw, ["schemaVersion", "type", "request", "value"]);
+      if (exact === null || state.stage !== "awaiting-candidates") return persistentFailure(panelError("architecture", "unexpected-event", `candidate result is not accepted during ${state.stage}`));
+      const open = resolveOpenRequest("architecture", state.authority.candidateRoster, state.slots, exact.request, resolver);
+      if (!open.ok) return open;
+      const bound = boundCandidateEntry(state.authority, open.value.resolved.expected.slotId);
+      if (!bound.ok) return bound;
+      const value = parseCandidateClaim(exact.value, bound.value.lens, bound.value.candidate);
+      if (!value.ok) return value;
+      return event({ schemaVersion: 1, type: "architecture-candidate-accepted", request: open.value.resolved.identity, value: value.value });
     }
-    const rejection = parseRejection(exact, "architecture", state.authority.candidateRoster, state.slots, resolver);
-    if (!rejection.ok) return rejection;
-    return persistentSuccess(architectureEvent(Object.freeze({ schemaVersion: 1, type: envelope.type, ...rejection.value })));
-  }
-  if (envelope.type === "architecture-judge-rejected") {
-    const exact = safeRecord(raw, ["schemaVersion", "type", "request", "attempt", "category", "message"]);
-    if (exact === null) return persistentFailure(panelError("architecture", "malformed-event", "architecture rejection event contains unknown or missing fields"));
-    if (state.stage !== "awaiting-judges") {
-      return persistentFailure(panelError("architecture", "unexpected-event", `judge rejection is not accepted during ${state.stage}`));
+    case "architecture-judge-accepted": {
+      const exact = safeRecord(raw, ["schemaVersion", "type", "request", "value", "source"]);
+      if (exact === null || state.stage !== "awaiting-judges") return persistentFailure(panelError("architecture", "unexpected-event", `judge result is not accepted during ${state.stage}`));
+      const accepted = parseAcceptedVerdictEvent("architecture", exact, state.authority.judgeRoster, state.slots, resolver,
+        (slotId) => boundJudgeCriterion(state.authority, slotId),
+        (value, criterion) => parseCanonicalJudge(value, state.authority, criterion));
+      if (!accepted.ok) return accepted;
+      return event({ schemaVersion: 1, type: "architecture-judge-accepted", ...accepted.value });
     }
-    const rejection = parseRejection(exact, "architecture", state.authority.judgeRoster, state.slots, resolver);
-    if (!rejection.ok) return rejection;
-    return persistentSuccess(architectureEvent(Object.freeze({ schemaVersion: 1, type: envelope.type, ...rejection.value })));
+    // One branch per rejection kind: the stage guard is the only thing that
+    // narrows `state` to the stage whose roster the rejection belongs to.
+    case "architecture-candidate-rejected": {
+      const stageOpen = state.stage === "awaiting-candidates" ? { roster: state.authority.candidateRoster, slots: state.slots } : null;
+      const rejection = parseRejectionEvent("architecture", raw, stageOpen, `candidate rejection is not accepted during ${state.stage}`, resolver);
+      if (!rejection.ok) return rejection;
+      return event({ schemaVersion: 1, type: "architecture-candidate-rejected", ...rejection.value });
+    }
+    case "architecture-judge-rejected": {
+      const stageOpen = state.stage === "awaiting-judges" ? { roster: state.authority.judgeRoster, slots: state.slots } : null;
+      const rejection = parseRejectionEvent("architecture", raw, stageOpen, `judge rejection is not accepted during ${state.stage}`, resolver);
+      if (!rejection.ok) return rejection;
+      return event({ schemaVersion: 1, type: "architecture-judge-rejected", ...rejection.value });
+    }
+    case "architecture-ranking-completed": {
+      const exact = safeRecord(raw, ["schemaVersion", "type", "ranking"]);
+      if (exact === null || state.stage !== "ready-to-aggregate") return persistentFailure(panelError("architecture", "unexpected-event", `ranking is not available during ${state.stage}`));
+      const proof = proveArchitectureJudgeRoster(state, resolver);
+      if (!proof.ok) return proof;
+      const ranking = aggregateArchitecturePanel(state.authority, proof.value);
+      if (!ranking.ok) return ranking;
+      if (!jsonEqual(exact.ranking, ranking.value)) return persistentFailure(panelError("architecture", "invalid-aggregate", "persisted ranking does not equal the deterministic complete-roster aggregate"));
+      return event({ schemaVersion: 1, type: "architecture-ranking-completed", ranking: ranking.value });
+    }
+    default:
+      return persistentFailure(panelError("architecture", "malformed-event", `unknown architecture event type: ${envelope.value.type}`));
   }
-  if (envelope.type === "architecture-ranking-completed") {
-    const exact = safeRecord(raw, ["schemaVersion", "type", "ranking"]);
-    if (exact === null || state.stage !== "ready-to-aggregate") return persistentFailure(panelError("architecture", "unexpected-event", `ranking is not available during ${state.stage}`));
-    const proof = proveArchitectureJudgeRoster(state, resolver);
-    if (!proof.ok) return proof;
-    const ranking = aggregateArchitecturePanel(state.authority, proof.value);
-    if (!ranking.ok) return ranking;
-    if (!jsonEqual(exact.ranking, ranking.value)) return persistentFailure(panelError("architecture", "invalid-aggregate", "persisted ranking does not equal the deterministic complete-roster aggregate"));
-    return persistentSuccess(architectureEvent(Object.freeze({ schemaVersion: 1, type: "architecture-ranking-completed", ranking: ranking.value })));
-  }
-  return persistentFailure(panelError("architecture", "malformed-event", `unknown architecture event type: ${envelope.type}`));
 }
 
 export function parsePersistentRefutationPanelEvent(
@@ -765,263 +846,499 @@ export function parsePersistentRefutationPanelEvent(
   raw: unknown,
   resolver: PublicationAuthorityResolver,
 ): PersistentPanelResult<PersistentRefutationPanelEvent> {
-  if (!refutationStateProofs.has(state)) return persistentFailure(panelError("refutation", "malformed-checkpoint", "event parsing requires a parser-produced refutation state"));
-  const envelope = safeRecord(raw, ["schemaVersion", "type", "request", "value", "attempt", "category", "message", "decision", "source"]);
-  if (envelope === null || envelope.schemaVersion !== 1 || typeof envelope.type !== "string") return persistentFailure(panelError("refutation", "malformed-event", "refutation event must be an exact schemaVersion 1 data record"));
-  if (envelope.type === "refutation-verdict-accepted") {
-    const exact = safeRecord(raw, ["schemaVersion", "type", "request", "value", "source"]);
-    if (exact === null || state.stage !== "awaiting-verdicts") return persistentFailure(panelError("refutation", "unexpected-event", `verdict is not accepted during ${state.stage}`));
-    const resolved = resolvePanelRequest("refutation", state.authority.verifierRoster, exact.request, resolver);
-    if (!resolved.ok) return resolved;
-    const located = locateProgress(state.authority.verifierRoster, state.slots, resolved.value.expected.requestId);
-    if (!located.ok) return located;
-    const boundLens = boundRefutationLens(state.authority, resolved.value.expected.slotId);
-    if (!boundLens.ok) return boundLens;
-    const value = parseCanonicalRefutation(exact.value, state.authority, boundLens.value);
-    if (!value.ok) return persistentFailure(panelError("refutation", "request-binding-mismatch", value.error.message, { requestId: resolved.value.expected.requestId, slotId: resolved.value.expected.slotId }));
-    // The same source-arm projection the judge events use (AD-8 historical
-    // projection; malformed present-day arms refuse).
-    const source = projectPanelVerdictSourceArm(exact.source);
-    if (!source.ok) return persistentFailure(panelError("refutation", "malformed-event", source.error));
-    return persistentSuccess(refutationEvent(Object.freeze({ schemaVersion: 1, type: "refutation-verdict-accepted", request: resolved.value.identity, value: value.value, source: source.value })));
-  }
-  if (envelope.type === "refutation-verdict-rejected") {
-    const exact = safeRecord(raw, ["schemaVersion", "type", "request", "attempt", "category", "message"]);
-    if (exact === null) return persistentFailure(panelError("refutation", "malformed-event", "refutation rejection event contains unknown or missing fields"));
-    if (state.stage !== "awaiting-verdicts") {
-      return persistentFailure(panelError("refutation", "unexpected-event", `verdict rejection is not accepted during ${state.stage}`));
+  const envelope = parseEventEnvelope("refutation", state, raw, REFUTATION_EVENT_FIELDS);
+  if (!envelope.ok) return envelope;
+  const event = (parsed: PersistentRefutationPanelEvent): PersistentPanelResult<PersistentRefutationPanelEvent> =>
+    persistentSuccess(prove("refutation:event", Object.freeze(parsed)));
+  switch (envelope.value.type) {
+    case "refutation-verdict-accepted": {
+      const exact = safeRecord(raw, ["schemaVersion", "type", "request", "value", "source"]);
+      if (exact === null || state.stage !== "awaiting-verdicts") return persistentFailure(panelError("refutation", "unexpected-event", `verdict is not accepted during ${state.stage}`));
+      const accepted = parseAcceptedVerdictEvent("refutation", exact, state.authority.verifierRoster, state.slots, resolver,
+        (slotId) => boundRefutationLens(state.authority, slotId),
+        (value, lens) => parseCanonicalRefutation(value, state.authority, lens));
+      if (!accepted.ok) return accepted;
+      return event({ schemaVersion: 1, type: "refutation-verdict-accepted", ...accepted.value });
     }
-    const rejection = parseRejection(exact, "refutation", state.authority.verifierRoster, state.slots, resolver);
-    if (!rejection.ok) return rejection;
-    return persistentSuccess(refutationEvent(Object.freeze({ schemaVersion: 1, type: "refutation-verdict-rejected", ...rejection.value })));
+    case "refutation-verdict-rejected": {
+      const stageOpen = state.stage === "awaiting-verdicts" ? { roster: state.authority.verifierRoster, slots: state.slots } : null;
+      const rejection = parseRejectionEvent("refutation", raw, stageOpen, `verdict rejection is not accepted during ${state.stage}`, resolver);
+      if (!rejection.ok) return rejection;
+      return event({ schemaVersion: 1, type: "refutation-verdict-rejected", ...rejection.value });
+    }
+    case "refutation-tally-completed": {
+      const exact = safeRecord(raw, ["schemaVersion", "type", "decision"]);
+      if (exact === null || state.stage !== "ready-to-tally") return persistentFailure(panelError("refutation", "unexpected-event", `tally is not available during ${state.stage}`));
+      const proof = proveRefutationRoster(state, resolver);
+      if (!proof.ok) return proof;
+      const rawDecision = safeRecord(exact.decision, ["threshold", "lenses", "verdicts", "outcomes", "retained", "refuted"]);
+      const threshold = rawDecision?.threshold;
+      if (typeof threshold !== "number") return persistentFailure(panelError("refutation", "invalid-aggregate", "persisted decision threshold is malformed"));
+      const decision = tallyRefutationPanel(state.authority, proof.value, threshold);
+      if (!decision.ok) return decision;
+      if (!jsonEqual(exact.decision, decision.value)) return persistentFailure(panelError("refutation", "invalid-aggregate", "persisted decision does not equal the deterministic complete-roster tally"));
+      return event({ schemaVersion: 1, type: "refutation-tally-completed", decision: decision.value });
+    }
+    default:
+      return persistentFailure(panelError("refutation", "malformed-event", `unknown refutation event type: ${envelope.value.type}`));
   }
-  if (envelope.type === "refutation-tally-completed") {
-    const exact = safeRecord(raw, ["schemaVersion", "type", "decision"]);
-    if (exact === null || state.stage !== "ready-to-tally") return persistentFailure(panelError("refutation", "unexpected-event", `tally is not available during ${state.stage}`));
-    const proof = proveRefutationRoster(state, resolver);
-    if (!proof.ok) return proof;
-    const rawDecision = safeRecord(exact.decision, ["threshold", "lenses", "verdicts", "outcomes", "retained", "refuted"]);
-    const threshold = rawDecision?.threshold;
-    if (typeof threshold !== "number") return persistentFailure(panelError("refutation", "invalid-aggregate", "persisted decision threshold is malformed"));
-    const decision = tallyRefutationPanel(state.authority, proof.value, threshold);
-    if (!decision.ok) return decision;
-    if (!jsonEqual(exact.decision, decision.value)) return persistentFailure(panelError("refutation", "invalid-aggregate", "persisted decision does not equal the deterministic complete-roster tally"));
-    return persistentSuccess(refutationEvent(Object.freeze({ schemaVersion: 1, type: "refutation-tally-completed", decision: decision.value })));
+}
+
+// ---------------------------------------------------------------------------
+// The reducers: each panel's stage topology over the slot-progress kernel
+// ---------------------------------------------------------------------------
+
+/**
+ * The reducer prelude and its fail-closed boundary, shared by both panels:
+ * only a proved, non-terminal state and a strictly parsed durable event reach
+ * a transition. The catch KEEPS the thrown message: `requireRosterEntry`/
+ * `requireRosterAttempt` throw a specific invariant violation naming the slot
+ * and attempt, and collapsing that into the malformed-event sentence would
+ * make a code regression indistinguishable from bad input — exactly as
+ * `panel-kernel`'s analogous catch already keeps it.
+ */
+function guardedReduce<State extends Readonly<{ stage: string }>, Event, Step>(
+  panel: PanelKind,
+  state: State,
+  event: Event,
+  transition: (state: State, event: Event) => PersistentPanelResult<Step>,
+): PersistentPanelResult<Step> {
+  try {
+    if (!proven(`${panel}:state`, state)) return persistentFailure(panelError(panel, "malformed-checkpoint", `${panel} reducer requires a parser-produced state`));
+    if (state.stage === "done" || state.stage === "terminal-blocked") return persistentFailure(panelError(panel, "terminal-state", `${panel} panel is ${state.stage} and cannot transition`));
+    if (!proven(`${panel}:event`, event)) return persistentFailure(panelError(panel, "malformed-event", `${panel} reducer requires a strictly parsed durable event`));
+    return transition(state, event);
+  } catch (error) {
+    return persistentFailure(panelError(
+      panel,
+      "malformed-event",
+      `${panel} event could not be safely reduced: ${error instanceof Error ? error.message : String(error)}`,
+    ));
   }
-  return persistentFailure(panelError("refutation", "malformed-event", `unknown refutation event type: ${envelope.type}`));
 }
 
-function durableAccepted<T>(request: PanelRequestIdentity, value: T): DurableAcceptedPanelResult<T> {
-  return Object.freeze({ schemaVersion: 1, kind: "panel-result-accepted", request, value });
+function architectureAction(state: ArchitecturePanelState): ArchitecturePanelAction | null {
+  switch (state.stage) {
+    case "awaiting-candidates": {
+      const requests = pendingAuthorities(state.authority.candidateRoster, state.slots);
+      return requests === null ? null : Object.freeze({ kind: "spawn-architecture-candidates", runId: state.authority.runId, requests });
+    }
+    case "awaiting-judges": {
+      const requests = pendingAuthorities(state.authority.judgeRoster, state.slots);
+      return requests === null ? null : Object.freeze({ kind: "spawn-architecture-judges", runId: state.authority.runId, requests });
+    }
+    case "ready-to-aggregate": return Object.freeze({ kind: "architecture-aggregate-ready", runId: state.authority.runId });
+    case "terminal-blocked": return Object.freeze({ kind: "architecture-blocked", runId: state.authority.runId, diagnostic: state.diagnostic });
+    case "done": return Object.freeze({ kind: "architecture-done", runId: state.authority.runId, ranking: state.ranking });
+  }
 }
 
-function terminalArchitecture(state: ArchitecturePanelState): PersistentPanelResult<PersistentArchitectureStep> {
-  return persistentFailure(panelError("architecture", "terminal-state", `architecture panel is ${state.stage} and cannot transition`));
-}
-function terminalRefutation(state: RefutationPanelState): PersistentPanelResult<PersistentRefutationStep> {
-  return persistentFailure(panelError("refutation", "terminal-state", `refutation panel is ${state.stage} and cannot transition`));
+function refutationAction(state: RefutationPanelState): RefutationPanelAction | null {
+  switch (state.stage) {
+    case "awaiting-verdicts": {
+      const requests = pendingAuthorities(state.authority.verifierRoster, state.slots);
+      return requests === null ? null : Object.freeze({ kind: "spawn-refutation-verifiers", runId: state.authority.runId, requests });
+    }
+    case "ready-to-tally": return Object.freeze({ kind: "refutation-tally-ready", runId: state.authority.runId });
+    case "terminal-blocked": return Object.freeze({ kind: "refutation-blocked", runId: state.authority.runId, diagnostic: state.diagnostic });
+    case "done": return Object.freeze({ kind: "refutation-done", runId: state.authority.runId, decision: state.decision });
+  }
 }
 
-function reduceArchitectureCandidateAccepted(state: ArchitecturePanelState, event: Extract<PersistentArchitecturePanelEvent, { type: "architecture-candidate-accepted" }>): PersistentPanelResult<PersistentArchitectureStep> {
+/** A step that entered `next`: its action is the new state's own. */
+const architectureStep = (next: ArchitecturePanelState): PersistentArchitectureStep => Object.freeze({ state: next, action: architectureAction(next) });
+const refutationStep = (next: RefutationPanelState): PersistentRefutationStep => Object.freeze({ state: next, action: refutationAction(next) });
+/** A step that stays in its stage still waiting on other slots: nothing new to spawn. */
+const waitingStep = <State>(next: State) => Object.freeze({ state: next, action: null });
+
+export function startPersistentArchitecturePanel(authority: ArchitecturePanelAuthority): PersistentArchitectureStep {
+  return architectureStep(architectureState(Object.freeze({
+    panel: "architecture" as const, authority, stage: "awaiting-candidates" as const,
+    slots: initialSlots<ArchitectureCandidateResult>(authority.candidateRoster),
+  })));
+}
+
+export function startPersistentRefutationPanel(authority: RefutationPanelAuthority): PersistentRefutationStep {
+  return refutationStep(refutationState(Object.freeze({
+    panel: "refutation" as const, authority, stage: "awaiting-verdicts" as const,
+    slots: initialSlots<VerdictEnvelope<RefutationVerdict>>(authority.verifierRoster),
+  })));
+}
+
+type ArchitectureEventOf<T extends PersistentArchitecturePanelEvent["type"]> = Extract<PersistentArchitecturePanelEvent, Readonly<{ type: T }>>;
+
+function reduceArchitectureTransition(state: ArchitecturePanelState, event: PersistentArchitecturePanelEvent): PersistentPanelResult<PersistentArchitectureStep> {
+  switch (event.type) {
+    case "architecture-candidate-accepted": return reduceArchitectureCandidateAccepted(state, event);
+    case "architecture-candidate-rejected": return reduceArchitectureCandidateRejected(state, event);
+    case "architecture-judge-accepted": return reduceArchitectureJudgeAccepted(state, event);
+    case "architecture-judge-rejected": return reduceArchitectureJudgeRejected(state, event);
+    case "architecture-ranking-completed": {
+      if (state.stage !== "ready-to-aggregate") return persistentFailure(panelError("architecture", "unexpected-event", `ranking is not available during ${state.stage}`));
+      return persistentSuccess(architectureStep(architectureState(Object.freeze({ ...state, stage: "done" as const, ranking: event.ranking }))));
+    }
+  }
+}
+
+function reduceArchitectureCandidateAccepted(state: ArchitecturePanelState, event: ArchitectureEventOf<"architecture-candidate-accepted">): PersistentPanelResult<PersistentArchitectureStep> {
   if (state.stage !== "awaiting-candidates") return persistentFailure(panelError("architecture", "unexpected-event", `candidate result is not accepted during ${state.stage}`));
-  const result = durableAccepted(event.request, event.value);
-  const settled = settleAccepted(state.authority.candidateRoster, state.slots, result);
-  if (!settled.ok) return settled;
-  const complete = completeSlotProgress(settled.value);
-  const next = complete !== null
-    ? architectureState(Object.freeze({
+  const accepted = acceptSlot(state.authority.candidateRoster, state.slots, event.request, event.value);
+  if (!accepted.ok) return accepted;
+  return persistentSuccess(accepted.value.kind === "complete"
+    ? architectureStep(architectureState(Object.freeze({
         panel: "architecture" as const,
         authority: state.authority,
         stage: "awaiting-judges" as const,
-        candidateSlots: complete,
+        candidateSlots: accepted.value.slots,
         slots: initialSlots<JudgeVerdict>(state.authority.judgeRoster),
-      }))
-    : architectureState(Object.freeze({ ...state, slots: settled.value }));
-  return persistentSuccess(Object.freeze({ state: next, action: next.stage === "awaiting-candidates" ? null : architectureAction(next) }));
+      })))
+    : waitingStep(architectureState(Object.freeze({ ...state, slots: accepted.value.slots }))));
 }
 
-function reduceArchitectureCandidateRejected(state: ArchitecturePanelState, event: Extract<PersistentArchitecturePanelEvent, { type: "architecture-candidate-rejected" }>): PersistentPanelResult<PersistentArchitectureStep> {
+function reduceArchitectureCandidateRejected(state: ArchitecturePanelState, event: ArchitectureEventOf<"architecture-candidate-rejected">): PersistentPanelResult<PersistentArchitectureStep> {
   if (state.stage !== "awaiting-candidates") return persistentFailure(panelError("architecture", "unexpected-event", `candidate rejection is not accepted during ${state.stage}`));
-  const settled = settleRejected("architecture", state.authority.candidateRoster, state.slots, event);
-  if (!settled.ok) return settled;
-  if (settled.value.terminal) {
-    const next = architectureState(Object.freeze({
+  return reduceRejectedSlot("architecture", state.authority.candidateRoster, state.slots, event, {
+    terminal: (diagnostic) => architectureStep(architectureState(Object.freeze({
       panel: "architecture" as const,
       authority: state.authority,
       stage: "terminal-blocked" as const,
       failedStage: "candidates" as const,
       slots: state.slots,
-      diagnostic: settled.value.diagnostic as TerminalBlockedDiagnostic,
-    }));
-    return persistentSuccess(Object.freeze({ state: next, action: architectureAction(next) }));
-  }
-  const next = architectureState(Object.freeze({ ...state, slots: settled.value.slots! }));
-  const retry = requireRosterAttempt(state.authority.candidateRoster, requireRosterRequest(state.authority.candidateRoster, event.request.requestId).slotId, 2);
-  return persistentSuccess(Object.freeze({ state: next, action: Object.freeze({ kind: "spawn-architecture-candidates" as const, runId: state.authority.runId, requests: Object.freeze([retry]) as NonEmpty<AgentRequestAuthority> }) }));
+      diagnostic,
+    }))),
+    waiting: (slots) => architectureState(Object.freeze({ ...state, slots })),
+    spawn: (requests) => Object.freeze({ kind: "spawn-architecture-candidates" as const, runId: state.authority.runId, requests }),
+  });
 }
 
-function reduceArchitectureJudgeRejected(state: ArchitecturePanelState, event: Extract<PersistentArchitecturePanelEvent, { type: "architecture-judge-rejected" }>): PersistentPanelResult<PersistentArchitectureStep> {
+function reduceArchitectureJudgeAccepted(state: ArchitecturePanelState, event: ArchitectureEventOf<"architecture-judge-accepted">): PersistentPanelResult<PersistentArchitectureStep> {
+  if (state.stage !== "awaiting-judges") return persistentFailure(panelError("architecture", "unexpected-event", `judge result is not accepted during ${state.stage}`));
+  const accepted = acceptSlot(state.authority.judgeRoster, state.slots, event.request, event.value);
+  if (!accepted.ok) return accepted;
+  return persistentSuccess(accepted.value.kind === "complete"
+    ? architectureStep(architectureState(Object.freeze({
+        panel: "architecture" as const,
+        authority: state.authority,
+        stage: "ready-to-aggregate" as const,
+        candidateSlots: state.candidateSlots,
+        judgeSlots: accepted.value.slots,
+      })))
+    : waitingStep(architectureState(Object.freeze({ ...state, slots: accepted.value.slots }))));
+}
+
+function reduceArchitectureJudgeRejected(state: ArchitecturePanelState, event: ArchitectureEventOf<"architecture-judge-rejected">): PersistentPanelResult<PersistentArchitectureStep> {
   if (state.stage !== "awaiting-judges") return persistentFailure(panelError("architecture", "unexpected-event", `judge rejection is not accepted during ${state.stage}`));
-  const settled = settleRejected("architecture", state.authority.judgeRoster, state.slots, event);
-  if (!settled.ok) return settled;
-  if (settled.value.terminal) {
-    const next = architectureState(Object.freeze({
+  return reduceRejectedSlot("architecture", state.authority.judgeRoster, state.slots, event, {
+    terminal: (diagnostic) => architectureStep(architectureState(Object.freeze({
       panel: "architecture" as const,
       authority: state.authority,
       stage: "terminal-blocked" as const,
       failedStage: "judges" as const,
       candidateSlots: state.candidateSlots,
       slots: state.slots,
-      diagnostic: settled.value.diagnostic as TerminalBlockedDiagnostic,
-    }));
-    return persistentSuccess(Object.freeze({ state: next, action: architectureAction(next) }));
-  }
-  const next = architectureState(Object.freeze({ ...state, slots: settled.value.slots! }));
-  const retry = requireRosterAttempt(state.authority.judgeRoster, requireRosterRequest(state.authority.judgeRoster, event.request.requestId).slotId, 2);
-  return persistentSuccess(Object.freeze({ state: next, action: Object.freeze({ kind: "spawn-architecture-judges" as const, runId: state.authority.runId, requests: Object.freeze([retry]) as NonEmpty<AgentRequestAuthority> }) }));
+      diagnostic,
+    }))),
+    waiting: (slots) => architectureState(Object.freeze({ ...state, slots })),
+    spawn: (requests) => Object.freeze({ kind: "spawn-architecture-judges" as const, runId: state.authority.runId, requests }),
+  });
 }
 
-function reduceArchitectureJudgeAccepted(state: ArchitecturePanelState, event: Extract<PersistentArchitecturePanelEvent, { type: "architecture-judge-accepted" }>): PersistentPanelResult<PersistentArchitectureStep> {
-  if (state.stage !== "awaiting-judges") return persistentFailure(panelError("architecture", "unexpected-event", `judge result is not accepted during ${state.stage}`));
-  const result = durableAccepted(event.request, event.value);
-  const settled = settleAccepted(state.authority.judgeRoster, state.slots, result);
-  if (!settled.ok) return settled;
-  const complete = completeSlotProgress(settled.value);
-  const next = complete !== null
-    ? architectureState(Object.freeze({
-        panel: "architecture" as const,
-        authority: state.authority,
-        stage: "ready-to-aggregate" as const,
-        candidateSlots: state.candidateSlots,
-        judgeSlots: complete,
-      }))
-    : architectureState(Object.freeze({ ...state, slots: settled.value }));
-  return persistentSuccess(Object.freeze({ state: next, action: next.stage === "awaiting-judges" ? null : architectureAction(next) }));
+type RefutationEventOf<T extends PersistentRefutationPanelEvent["type"]> = Extract<PersistentRefutationPanelEvent, Readonly<{ type: T }>>;
+
+function reduceRefutationTransition(state: RefutationPanelState, event: PersistentRefutationPanelEvent): PersistentPanelResult<PersistentRefutationStep> {
+  switch (event.type) {
+    case "refutation-verdict-accepted": return reduceRefutationVerdictAccepted(state, event);
+    case "refutation-verdict-rejected": return reduceRefutationVerdictRejected(state, event);
+    case "refutation-tally-completed": {
+      if (state.stage !== "ready-to-tally") return persistentFailure(panelError("refutation", "unexpected-event", `tally is not available during ${state.stage}`));
+      return persistentSuccess(refutationStep(refutationState(Object.freeze({ ...state, stage: "done" as const, decision: event.decision }))));
+    }
+  }
+}
+
+function reduceRefutationVerdictAccepted(state: RefutationPanelState, event: RefutationEventOf<"refutation-verdict-accepted">): PersistentPanelResult<PersistentRefutationStep> {
+  if (state.stage !== "awaiting-verdicts") return persistentFailure(panelError("refutation", "unexpected-event", `verdict is not accepted during ${state.stage}`));
+  const accepted = acceptSlot(state.authority.verifierRoster, state.slots, event.request, event.value);
+  if (!accepted.ok) return accepted;
+  return persistentSuccess(accepted.value.kind === "complete"
+    ? refutationStep(refutationState(Object.freeze({ panel: "refutation" as const, authority: state.authority, stage: "ready-to-tally" as const, slots: accepted.value.slots })))
+    : waitingStep(refutationState(Object.freeze({ ...state, slots: accepted.value.slots }))));
+}
+
+function reduceRefutationVerdictRejected(state: RefutationPanelState, event: RefutationEventOf<"refutation-verdict-rejected">): PersistentPanelResult<PersistentRefutationStep> {
+  if (state.stage !== "awaiting-verdicts") return persistentFailure(panelError("refutation", "unexpected-event", `verdict rejection is not accepted during ${state.stage}`));
+  return reduceRejectedSlot("refutation", state.authority.verifierRoster, state.slots, event, {
+    terminal: (diagnostic) => refutationStep(refutationState(Object.freeze({
+      panel: "refutation" as const,
+      authority: state.authority,
+      stage: "terminal-blocked" as const,
+      slots: state.slots,
+      diagnostic,
+    }))),
+    waiting: (slots) => refutationState(Object.freeze({ ...state, slots })),
+    spawn: (requests) => Object.freeze({ kind: "spawn-refutation-verifiers" as const, runId: state.authority.runId, requests }),
+  });
 }
 
 export function reducePersistentArchitecturePanel(state: ArchitecturePanelState, event: PersistentArchitecturePanelEvent): PersistentPanelResult<PersistentArchitectureStep> {
-  try {
-    if (!architectureStateProofs.has(state)) return persistentFailure(panelError("architecture", "malformed-checkpoint", "architecture reducer requires a parser-produced state"));
-    if (state.stage === "done" || state.stage === "terminal-blocked") return terminalArchitecture(state);
-    if (typeof event !== "object" || event === null || !architectureEventProofs.has(event)) return persistentFailure(panelError("architecture", "malformed-event", "architecture reducer requires a strictly parsed durable event"));
-    switch (event.type) {
-      case "architecture-candidate-accepted":
-        return reduceArchitectureCandidateAccepted(state, event);
-      case "architecture-candidate-rejected":
-        return reduceArchitectureCandidateRejected(state, event);
-      case "architecture-judge-rejected":
-        return reduceArchitectureJudgeRejected(state, event);
-      case "architecture-judge-accepted":
-        return reduceArchitectureJudgeAccepted(state, event);
-      case "architecture-ranking-completed": {
-        if (state.stage !== "ready-to-aggregate") return persistentFailure(panelError("architecture", "unexpected-event", `ranking is not available during ${state.stage}`));
-        const next = architectureState(Object.freeze({ ...state, stage: "done" as const, ranking: event.ranking }));
-        return persistentSuccess(Object.freeze({ state: next, action: architectureAction(next) }));
-      }
-    }
-  } catch (error) {
-    // The message is KEPT. `requireRosterEntry`/`requireRosterAttempt` throw a
-    // specific invariant violation naming the slot and attempt, and a bare
-    // `catch {}` collapsed that into the same sentence a genuinely malformed
-    // event produces — an operator could not tell a code regression from bad
-    // input. Fail-closed is unchanged; only the diagnostic survives, exactly as
-    // `panel-kernel`’s analogous catch already does.
-    return persistentFailure(panelError(
-      "architecture",
-      "malformed-event",
-      `architecture event could not be safely reduced: ${error instanceof Error ? error.message : String(error)}`,
-    ));
-  }
+  return guardedReduce("architecture", state, event, reduceArchitectureTransition);
 }
 
 export function reducePersistentRefutationPanel(state: RefutationPanelState, event: PersistentRefutationPanelEvent): PersistentPanelResult<PersistentRefutationStep> {
-  try {
-    if (!refutationStateProofs.has(state)) return persistentFailure(panelError("refutation", "malformed-checkpoint", "refutation reducer requires a parser-produced state"));
-    if (state.stage === "done" || state.stage === "terminal-blocked") return terminalRefutation(state);
-    if (typeof event !== "object" || event === null || !refutationEventProofs.has(event)) return persistentFailure(panelError("refutation", "malformed-event", "refutation reducer requires a strictly parsed durable event"));
-    if (event.type === "refutation-verdict-accepted") {
-      if (state.stage !== "awaiting-verdicts") return persistentFailure(panelError("refutation", "unexpected-event", `verdict is not accepted during ${state.stage}`));
-      const result = durableAccepted(event.request, event.value);
-      const settled = settleAccepted(state.authority.verifierRoster, state.slots, result);
-      if (!settled.ok) return settled;
-      const complete = completeSlotProgress(settled.value);
-      const next = complete !== null
-        ? refutationState(Object.freeze({ panel: "refutation" as const, authority: state.authority, stage: "ready-to-tally" as const, slots: complete }))
-        : refutationState(Object.freeze({ ...state, slots: settled.value }));
-      return persistentSuccess(Object.freeze({ state: next, action: next.stage === "awaiting-verdicts" ? null : refutationAction(next) }));
-    }
-    if (event.type === "refutation-verdict-rejected") {
-      if (state.stage !== "awaiting-verdicts") return persistentFailure(panelError("refutation", "unexpected-event", `verdict rejection is not accepted during ${state.stage}`));
-      const settled = settleRejected("refutation", state.authority.verifierRoster, state.slots, event);
-      if (!settled.ok) return settled;
-      if (settled.value.terminal) {
-        const next = refutationState(Object.freeze({
-          panel: "refutation" as const,
-          authority: state.authority,
-          stage: "terminal-blocked" as const,
-          slots: state.slots,
-          diagnostic: settled.value.diagnostic as TerminalBlockedDiagnostic,
-        }));
-        return persistentSuccess(Object.freeze({ state: next, action: refutationAction(next) }));
-      }
-      const next = refutationState(Object.freeze({ ...state, slots: settled.value.slots! }));
-      const retry = requireRosterAttempt(state.authority.verifierRoster, requireRosterRequest(state.authority.verifierRoster, event.request.requestId).slotId, 2);
-      return persistentSuccess(Object.freeze({ state: next, action: Object.freeze({ kind: "spawn-refutation-verifiers" as const, runId: state.authority.runId, requests: Object.freeze([retry]) as NonEmpty<AgentRequestAuthority> }) }));
-    }
-    if (state.stage !== "ready-to-tally") return persistentFailure(panelError("refutation", "unexpected-event", `tally is not available during ${state.stage}`));
-    const next = refutationState(Object.freeze({ ...state, stage: "done" as const, decision: event.decision }));
-    return persistentSuccess(Object.freeze({ state: next, action: refutationAction(next) }));
-  } catch (error) {
-    // Same reason as the architecture reducer above: the thrown invariant names
-    // the slot and attempt, and discarding it made a regression indistinguishable
-    // from malformed input.
-    return persistentFailure(panelError(
-      "refutation",
-      "malformed-event",
-      `refutation event could not be safely reduced: ${error instanceof Error ? error.message : String(error)}`,
-    ));
-  }
+  return guardedReduce("refutation", state, event, reduceRefutationTransition);
 }
 
-function rejectionEvent(panel: "architecture" | "refutation", stage: "candidate" | "judge" | "verdict", request: PanelRequestIdentity, expected: AgentRequestAuthority, error: PersistentPanelError): PersistentArchitecturePanelEvent | PersistentRefutationPanelEvent {
-  const category: "malformed-result" | "result-binding-mismatch" = error.kind === "request-binding-mismatch"
+// ---------------------------------------------------------------------------
+// The program kernel: replay, history, checkpoints and persistence plans
+// ---------------------------------------------------------------------------
+
+/**
+ * What one panel contributes to the program kernel. Everything else —
+ * replay-equals-state, the recorded-step and history proofs, the checkpoint
+ * record, the persistence plan and its dedup key — is the kernel's, once.
+ */
+/** What the kernel needs of a panel authority and state: the run, and the state's authority. */
+type PanelAuthority = Readonly<{ runId: OrchestrationRunId }>;
+type PanelState<Authority> = Readonly<{ authority: Authority }>;
+
+type PanelProgramDefinition<P extends PanelKind, Authority extends PanelAuthority, AuthorityInput, State extends PanelState<Authority>, Action, Event> = Readonly<{
+  panel: P;
+  start: (authority: Authority) => PanelStep<State, Action, Event>;
+  action: (state: State) => Action | null;
+  parseEvent: (state: State, raw: unknown, resolver: PublicationAuthorityResolver) => PersistentPanelResult<Event>;
+  reduce: (state: State, event: Event) => PersistentPanelResult<PanelStep<State, Action, Event>>;
+  parseAuthority: (raw: AuthorityInput) => PersistentPanelResult<Authority>;
+  authorityJson: (authority: Authority) => AuthorityInput;
+}>;
+
+const ARCHITECTURE_PROGRAM: PanelProgramDefinition<"architecture", ArchitecturePanelAuthority, ArchitecturePanelAuthorityInput, ArchitecturePanelState, ArchitecturePanelAction, PersistentArchitecturePanelEvent> = {
+  panel: "architecture",
+  start: startPersistentArchitecturePanel,
+  action: architectureAction,
+  parseEvent: parsePersistentArchitecturePanelEvent,
+  reduce: reducePersistentArchitecturePanel,
+  parseAuthority: parseArchitecturePanelAuthority,
+  authorityJson: (authority) => Object.freeze({ runId: authority.runId, candidateLenses: authority.candidateLenses, judgeCriteria: authority.judgeCriteria, candidateSlots: authority.candidateRoster.orderedSlots, judgeSlots: authority.judgeRoster.orderedSlots }),
+};
+
+const REFUTATION_PROGRAM: PanelProgramDefinition<"refutation", RefutationPanelAuthority, RefutationPanelAuthorityInput, RefutationPanelState, RefutationPanelAction, PersistentRefutationPanelEvent> = {
+  panel: "refutation",
+  start: startPersistentRefutationPanel,
+  action: refutationAction,
+  parseEvent: parsePersistentRefutationPanelEvent,
+  reduce: reducePersistentRefutationPanel,
+  parseAuthority: parseRefutationPanelAuthority,
+  authorityJson: (authority) => Object.freeze({
+    runId: authority.runId,
+    identityRunId: authority.identityRunId,
+    findings: authority.findings,
+    lenses: authority.lenses,
+    verifierSlots: authority.verifierRoster.orderedSlots,
+  }),
+};
+
+function resume<P extends PanelKind, A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(program: PanelProgramDefinition<P, A, I, S, Ac, E>, state: S): PersistentPanelResult<PanelStep<S, Ac, E>> {
+  return proven(`${program.panel}:state`, state)
+    ? persistentSuccess(Object.freeze({ state, action: program.action(state) }))
+    : persistentFailure(panelError(program.panel, "malformed-checkpoint", `${program.panel} state must come from start, reduction, replay, or checkpoint parsing`));
+}
+
+/** Parse a submitted event over `state`, reduce it, and prove the recorded step. */
+function reduceParsed<P extends PanelKind, A extends PanelAuthority, I, S extends PanelState<A>, Ac, E extends object>(
+  program: PanelProgramDefinition<P, A, I, S, Ac, E>,
+  state: S,
+  rawEvent: E,
+  resolver: PublicationAuthorityResolver,
+): PersistentPanelResult<PanelStep<S, Ac, E>> {
+  const parsed = program.parseEvent(state, rawEvent, resolver);
+  if (!parsed.ok) return parsed;
+  const reduced = program.reduce(state, parsed.value);
+  return reduced.ok
+    ? persistentSuccess(prove(`${program.panel}:recorded-step`, Object.freeze({ ...reduced.value, recordedEvent: parsed.value })))
+    : reduced;
+}
+
+type ReplayedPrefix<S, Ac, E> = Readonly<{ step: PanelStep<S, Ac, E>; events: readonly E[] }>;
+
+/** Strictly parse and reduce an event prefix from the panel's start: the ONE replay both panels' checkpoints, histories and persistence plans trust. */
+function replayPrefix<P extends PanelKind, A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
+  program: PanelProgramDefinition<P, A, I, S, Ac, E>,
+  authority: A,
+  rawEvents: unknown,
+  resolver: PublicationAuthorityResolver,
+): PersistentPanelResult<ReplayedPrefix<S, Ac, E>> {
+  const events = safeArray(rawEvents);
+  if (events === null) return persistentFailure(panelError(program.panel, "malformed-event", `${program.panel} history must be a dense JSON event array`));
+  const parsedEvents: E[] = [];
+  let step = program.start(authority);
+  for (const raw of events) {
+    const parsed = program.parseEvent(step.state, raw, resolver);
+    if (!parsed.ok) return parsed;
+    const reduced = program.reduce(step.state, parsed.value);
+    if (!reduced.ok) return reduced;
+    parsedEvents.push(parsed.value);
+    step = reduced.value;
+  }
+  return persistentSuccess(Object.freeze({ step, events: Object.freeze(parsedEvents) }));
+}
+
+type PanelHistory<P extends PanelKind, A, E> = Readonly<{ panel: P; authority: A; events: readonly E[] }>;
+
+function parseHistory<P extends PanelKind, A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
+  program: PanelProgramDefinition<P, A, I, S, Ac, E>,
+  authority: A,
+  rawEvents: unknown,
+  resolver: PublicationAuthorityResolver,
+): PersistentPanelResult<PanelHistory<P, A, E>> {
+  const replayed = replayPrefix(program, authority, rawEvents, resolver);
+  if (!replayed.ok) return replayed;
+  return persistentSuccess(prove(`${program.panel}:history`, Object.freeze({
+    panel: program.panel,
+    authority,
+    events: replayed.value.events,
+  })));
+}
+
+type PanelCheckpoint<P extends PanelKind, I, E> = Readonly<{ schemaVersion: 2; kind: `${P}-panel-checkpoint`; authority: I; events: readonly E[]; state: unknown }>;
+
+function checkpointOf<P extends PanelKind, A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
+  program: PanelProgramDefinition<P, A, I, S, Ac, E>,
+  state: S,
+  events: readonly E[],
+  resolver: PublicationAuthorityResolver,
+): PersistentPanelResult<PanelCheckpoint<P, I, E>> {
+  const { panel } = program;
+  if (!proven(`${panel}:state`, state)) return persistentFailure(panelError(panel, "malformed-checkpoint", `checkpoint requires parser-produced ${panel} state`));
+  const authority = state.authority;
+  const replayed = replayPrefix(program, authority, events, resolver);
+  if (!replayed.ok) return replayed;
+  if (!jsonEqual(replayed.value.step.state, state)) return persistentFailure(panelError(panel, "malformed-checkpoint", `${panel} checkpoint event prefix does not replay to the supplied state`));
+  const replayedState = JSON.parse(JSON.stringify(replayed.value.step.state)) as unknown;
+  return persistentSuccess(Object.freeze({
+    schemaVersion: 2 as const,
+    kind: `${panel}-panel-checkpoint` as const,
+    authority: program.authorityJson(authority),
+    events: replayed.value.events,
+    state: replayedState,
+  }));
+}
+
+function parseCheckpoint<P extends PanelKind, A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
+  program: PanelProgramDefinition<P, A, I, S, Ac, E>,
+  raw: unknown,
+  resolver: PublicationAuthorityResolver,
+): PersistentPanelResult<PanelStep<S, Ac, E>> {
+  const { panel } = program;
+  const checkpoint = safeRecord(raw, ["schemaVersion", "kind", "authority", "events", "state"]);
+  if (checkpoint === null || checkpoint.schemaVersion !== 2 || checkpoint.kind !== `${panel}-panel-checkpoint`) return persistentFailure(panelError(panel, "malformed-checkpoint", `${panel} checkpoint must be an exact schemaVersion 2 record`));
+  const authority = program.parseAuthority(checkpoint.authority as I);
+  if (!authority.ok) return authority;
+  const replayed = replayPrefix(program, authority.value, checkpoint.events, resolver);
+  if (!replayed.ok) return replayed;
+  if (!jsonEqual(checkpoint.state, replayed.value.step.state)) return persistentFailure(panelError(panel, "malformed-checkpoint", `${panel} checkpoint state disagrees with its immutable event prefix`));
+  return persistentSuccess(replayed.value.step);
+}
+
+type PanelPersistenceEffect<P extends PanelKind, I, E> =
+  | Readonly<{ schemaVersion: 1; kind: `append-${P}-panel-event`; runId: OrchestrationRunId; sequence: number; dedupKey: string; event: E }>
+  | Readonly<{ schemaVersion: 1; kind: `replace-${P}-panel-checkpoint`; runId: OrchestrationRunId; sequence: number; dedupKey: string; checkpoint: PanelCheckpoint<P, I, E> }>;
+
+function persistenceKey(runId: OrchestrationRunId, sequence: number, payload: unknown): string {
+  return `${runId}:${sequence}:${sha256Hex(JSON.stringify(payload))}`;
+}
+
+/**
+ * The journal append and checkpoint replacement of one recorded step: the
+ * step must be a proved recorded step over a proved history of the same panel
+ * authority, and the history plus the step's event must replay exactly to the
+ * step's state before either effect is planned.
+ */
+function planPersistence<P extends PanelKind, A extends PanelAuthority, I, S extends PanelState<A>, Ac, E>(
+  program: PanelProgramDefinition<P, A, I, S, Ac, E>,
+  step: PanelStep<S, Ac, E>,
+  history: PanelHistory<P, A, E>,
+  resolver: PublicationAuthorityResolver,
+): PersistentPanelResult<readonly [PanelPersistenceEffect<P, I, E>, PanelPersistenceEffect<P, I, E>]> {
+  const { panel } = program;
+  const event = step.recordedEvent;
+  if (event === undefined || !proven(`${panel}:recorded-step`, step) ||
+      !proven(`${panel}:state`, step.state) || !proven(`${panel}:event`, event)) {
+    return persistentFailure(panelError(panel, "malformed-event", `persistence planning requires a parser/reducer-produced ${panel} step and event`));
+  }
+  const authority = step.state.authority;
+  if (!proven(`${panel}:history`, history) || history.panel !== panel ||
+      !jsonEqual(program.authorityJson(history.authority), program.authorityJson(authority))) {
+    return persistentFailure(panelError(panel, "malformed-history", `persistence planning requires a replay-proved ${panel} history for the same panel authority`));
+  }
+  const events = Object.freeze([...history.events, event]);
+  const replayed = replayPrefix(program, authority, events, resolver);
+  if (!replayed.ok) return replayed;
+  if (!jsonEqual(replayed.value.step.state, step.state)) {
+    return persistentFailure(panelError(panel, "malformed-checkpoint", `${panel} event prefix does not replay exactly to the proposed checkpoint state`));
+  }
+  const checkpoint = checkpointOf(program, replayed.value.step.state, replayed.value.events, resolver);
+  if (!checkpoint.ok) return checkpoint;
+  const { runId } = authority;
+  const sequence = events.length;
+  const append = Object.freeze({ schemaVersion: 1 as const, kind: `append-${panel}-panel-event` as const, runId, sequence, dedupKey: persistenceKey(runId, sequence, event), event });
+  const replace = Object.freeze({ schemaVersion: 1 as const, kind: `replace-${panel}-panel-checkpoint` as const, runId, sequence, dedupKey: persistenceKey(runId, sequence, checkpoint.value), checkpoint: checkpoint.value });
+  return persistentSuccess(Object.freeze([append, replace]) as readonly [PanelPersistenceEffect<P, I, E>, PanelPersistenceEffect<P, I, E>]);
+}
+
+// ---------------------------------------------------------------------------
+// Resume
+// ---------------------------------------------------------------------------
+
+export function resumePersistentArchitecturePanel(state: ArchitecturePanelState): PersistentPanelResult<PersistentArchitectureStep> {
+  return resume(ARCHITECTURE_PROGRAM, state);
+}
+export function resumePersistentRefutationPanel(state: RefutationPanelState): PersistentPanelResult<PersistentRefutationStep> {
+  return resume(REFUTATION_PROGRAM, state);
+}
+
+// ---------------------------------------------------------------------------
+// Submissions
+// ---------------------------------------------------------------------------
+
+/**
+ * The issuance join between an emission selection input and the submitted
+ * request: the binding must certify THIS slot's request. A binding for another
+ * request is a caller defect, not an attempt observation — a typed failure
+ * before any selection, never a rejection event consuming the attempt.
+ */
+function panelVerdictEmissionIssuanceProblem<K extends "judge-verdict" | "refutation-verdict">(
+  emission: PanelVerdictEmissionSelectionOf<K> | undefined,
+  expectedRequestId: RequestId,
+  panel: PanelKind,
+): PersistentPanelError | null {
+  if (emission === undefined || emission.binding.requestId === expectedRequestId) return null;
+  return panelError(panel, "invalid-authority",
+    `issued emission binding certifies request ${emission.binding.requestId}, not the submitted request ${expectedRequestId}`);
+}
+
+/** The durable rejection event of one slot attempt, its category derived from the submission's error kind. */
+function rejectionEvent<T extends "architecture-candidate-rejected" | "architecture-judge-rejected" | "refutation-verdict-rejected">(
+  type: T,
+  request: PanelRequestIdentity,
+  expected: AgentRequestAuthority,
+  error: PersistentPanelError,
+): Readonly<{ type: T; schemaVersion: 1 } & SlotRejection> {
+  const category: RejectionCategory = error.kind === "request-binding-mismatch"
     ? "result-binding-mismatch"
     : "malformed-result";
-  const fields = { schemaVersion: 1 as const, request, attempt: expected.attempt, category, message: error.message };
-  if (panel === "refutation") return Object.freeze({ type: "refutation-verdict-rejected" as const, ...fields });
-  return stage === "candidate"
-    ? Object.freeze({ type: "architecture-candidate-rejected" as const, ...fields })
-    : Object.freeze({ type: "architecture-judge-rejected" as const, ...fields });
-}
-
-function reduceParsedArchitecture(state: ArchitecturePanelState, rawEvent: PersistentArchitecturePanelEvent, resolver: PublicationAuthorityResolver): PersistentPanelResult<PersistentArchitectureStep> {
-  const parsed = parsePersistentArchitecturePanelEvent(state, rawEvent, resolver);
-  if (!parsed.ok) return parsed;
-  const reduced = reducePersistentArchitecturePanel(state, parsed.value);
-  return reduced.ok
-    ? persistentSuccess(architectureRecordedStep(Object.freeze({ ...reduced.value, recordedEvent: parsed.value })))
-    : reduced;
-}
-function reduceParsedRefutation(state: RefutationPanelState, rawEvent: PersistentRefutationPanelEvent, resolver: PublicationAuthorityResolver): PersistentPanelResult<PersistentRefutationStep> {
-  const parsed = parsePersistentRefutationPanelEvent(state, rawEvent, resolver);
-  if (!parsed.ok) return parsed;
-  const reduced = reducePersistentRefutationPanel(state, parsed.value);
-  return reduced.ok
-    ? persistentSuccess(refutationRecordedStep(Object.freeze({ ...reduced.value, recordedEvent: parsed.value })))
-    : reduced;
+  return Object.freeze({ type, schemaVersion: 1 as const, request, attempt: expected.attempt, category, message: error.message });
 }
 
 export function submitArchitectureCandidateResult(state: ArchitecturePanelState, resolver: PublicationAuthorityResolver, requestIdentity: unknown, raw: unknown): PersistentPanelResult<PersistentArchitectureStep> {
   if (state.stage !== "awaiting-candidates") return persistentFailure(panelError("architecture", "unexpected-event", `candidate cannot be submitted during ${state.stage}`));
-  const resolved = resolvePanelRequest("architecture", state.authority.candidateRoster, requestIdentity, resolver);
-  if (!resolved.ok) return resolved;
-  const located = locateProgress(state.authority.candidateRoster, state.slots, resolved.value.expected.requestId);
-  if (!located.ok) return located;
-  const bound = boundCandidateEntry(state.authority, resolved.value.expected.slotId);
+  const open = resolveOpenRequest("architecture", state.authority.candidateRoster, state.slots, requestIdentity, resolver);
+  if (!open.ok) return open;
+  const { identity, expected } = open.value.resolved;
+  const bound = boundCandidateEntry(state.authority, expected.slotId);
   if (!bound.ok) return bound;
   const parsed = parseCandidateClaim(raw, bound.value.lens, bound.value.candidate);
-  if (!parsed.ok) return reduceParsedArchitecture(state, rejectionEvent("architecture", "candidate", resolved.value.identity, resolved.value.expected, parsed.error) as PersistentArchitecturePanelEvent, resolver);
-  return reduceParsedArchitecture(state, Object.freeze({ schemaVersion: 1, type: "architecture-candidate-accepted", request: resolved.value.identity, value: parsed.value }), resolver);
+  if (!parsed.ok) return reduceParsed(ARCHITECTURE_PROGRAM, state, rejectionEvent("architecture-candidate-rejected", identity, expected, parsed.error), resolver);
+  return reduceParsed(ARCHITECTURE_PROGRAM, state, Object.freeze({ schemaVersion: 1, type: "architecture-candidate-accepted", request: identity, value: parsed.value }), resolver);
 }
 
 /** The parsed JSON value of `text`, or `null` when it is not JSON. */
@@ -1068,22 +1385,21 @@ export function submitArchitectureJudgeResult(
   emission?: PanelVerdictEmissionSelectionOf<"judge-verdict">,
 ): PersistentPanelResult<PersistentArchitectureStep> {
   if (state.stage !== "awaiting-judges") return persistentFailure(panelError("architecture", "unexpected-event", `judge cannot be submitted during ${state.stage}`));
-  const resolved = resolvePanelRequest("architecture", state.authority.judgeRoster, requestIdentity, resolver);
-  if (!resolved.ok) return resolved;
-  const located = locateProgress(state.authority.judgeRoster, state.slots, resolved.value.expected.requestId);
-  if (!located.ok) return located;
-  const bound = boundJudgeCriterion(state.authority, resolved.value.expected.slotId);
+  const open = resolveOpenRequest("architecture", state.authority.judgeRoster, state.slots, requestIdentity, resolver);
+  if (!open.ok) return open;
+  const { identity, expected } = open.value.resolved;
+  const bound = boundJudgeCriterion(state.authority, expected.slotId);
   if (!bound.ok) return bound;
   // AD-8: the verdict-source selection runs BEFORE the authoritative parse —
   // `foldVerdictSubmission` selects which bytes reach `parseJudgeVerdict`, and
   // the parse keeps its criterion binding and complete candidate coverage (the
   // source can never override issuance). Without an emission input the fold is
   // this seam's pre-selection behavior exactly.
-  const issuanceProblem = panelVerdictEmissionIssuanceProblem(emission, resolved.value.expected.requestId, "architecture");
+  const issuanceProblem = panelVerdictEmissionIssuanceProblem(emission, expected.requestId, "architecture");
   if (issuanceProblem !== null) return persistentFailure(issuanceProblem);
   const fold = foldVerdictSubmission({
     label: "judge verdict",
-    expectedRequestId: resolved.value.expected.requestId,
+    expectedRequestId: expected.requestId,
     emission,
     rawJson,
     parse: (target): ParseResult<JudgeVerdict> => typeof target === "string"
@@ -1100,9 +1416,9 @@ export function submitArchitectureJudgeResult(
     foreignAuthorityMessage: "judge criterion or candidate claims do not match the canonical request slot",
   });
   if (fold.kind === "rejected") {
-    return reduceParsedArchitecture(state, rejectionEvent("architecture", "judge", resolved.value.identity, resolved.value.expected, panelError("architecture", fold.errorKind, fold.message)) as PersistentArchitecturePanelEvent, resolver);
+    return reduceParsed(ARCHITECTURE_PROGRAM, state, rejectionEvent("architecture-judge-rejected", identity, expected, panelError("architecture", fold.errorKind, fold.message)), resolver);
   }
-  return reduceParsedArchitecture(state, Object.freeze({ schemaVersion: 1, type: "architecture-judge-accepted", request: resolved.value.identity, value: fold.value, source: fold.source }), resolver);
+  return reduceParsed(ARCHITECTURE_PROGRAM, state, Object.freeze({ schemaVersion: 1, type: "architecture-judge-accepted", request: identity, value: fold.value, source: fold.source }), resolver);
 }
 
 export function submitRefutationVerdict(
@@ -1113,21 +1429,20 @@ export function submitRefutationVerdict(
   emission?: PanelVerdictEmissionSelectionOf<"refutation-verdict">,
 ): PersistentPanelResult<PersistentRefutationStep> {
   if (state.stage !== "awaiting-verdicts") return persistentFailure(panelError("refutation", "unexpected-event", `verdict cannot be submitted during ${state.stage}`));
-  const resolved = resolvePanelRequest("refutation", state.authority.verifierRoster, requestIdentity, resolver);
-  if (!resolved.ok) return resolved;
-  const located = locateProgress(state.authority.verifierRoster, state.slots, resolved.value.expected.requestId);
-  if (!located.ok) return located;
-  const boundLens = boundRefutationLens(state.authority, resolved.value.expected.slotId);
+  const open = resolveOpenRequest("refutation", state.authority.verifierRoster, state.slots, requestIdentity, resolver);
+  if (!open.ok) return open;
+  const { identity, expected } = open.value.resolved;
+  const boundLens = boundRefutationLens(state.authority, expected.slotId);
   if (!boundLens.ok) return boundLens;
   const lens = boundLens.value;
   const findingIds = state.authority.findings.map(({ id }) => id);
   // AD-8, as the judge seam above: selection before the authoritative parse;
   // the parse keeps its lens binding and complete finding coverage (FR-012).
-  const issuanceProblem = panelVerdictEmissionIssuanceProblem(emission, resolved.value.expected.requestId, "refutation");
+  const issuanceProblem = panelVerdictEmissionIssuanceProblem(emission, expected.requestId, "refutation");
   if (issuanceProblem !== null) return persistentFailure(issuanceProblem);
   const fold = foldVerdictSubmission({
     label: "refutation verdict",
-    expectedRequestId: resolved.value.expected.requestId,
+    expectedRequestId: expected.requestId,
     emission,
     rawJson,
     parse: (target): ParseResult<VerdictEnvelope<RefutationVerdict>> => typeof target === "string"
@@ -1144,9 +1459,9 @@ export function submitRefutationVerdict(
     foreignAuthorityMessage: "refutation criterion or Finding claims do not match the canonical request slot",
   });
   if (fold.kind === "rejected") {
-    return reduceParsedRefutation(state, rejectionEvent("refutation", "verdict", resolved.value.identity, resolved.value.expected, panelError("refutation", fold.errorKind, fold.message)) as PersistentRefutationPanelEvent, resolver);
+    return reduceParsed(REFUTATION_PROGRAM, state, rejectionEvent("refutation-verdict-rejected", identity, expected, panelError("refutation", fold.errorKind, fold.message)), resolver);
   }
-  return reduceParsedRefutation(state, Object.freeze({ schemaVersion: 1, type: "refutation-verdict-accepted", request: resolved.value.identity, value: fold.value, source: fold.source }), resolver);
+  return reduceParsed(REFUTATION_PROGRAM, state, Object.freeze({ schemaVersion: 1, type: "refutation-verdict-accepted", request: identity, value: fold.value, source: fold.source }), resolver);
 }
 
 /**
@@ -1162,14 +1477,16 @@ export function submitRefutationVerdict(
  */
 export function rejectRefutationVerdict(state: RefutationPanelState, resolver: PublicationAuthorityResolver, requestIdentity: unknown, diagnostic: string): PersistentPanelResult<PersistentRefutationStep> {
   if (state.stage !== "awaiting-verdicts") return persistentFailure(panelError("refutation", "unexpected-event", `a capture rejection cannot be recorded during ${state.stage}`));
-  const resolved = resolvePanelRequest("refutation", state.authority.verifierRoster, requestIdentity, resolver);
-  if (!resolved.ok) return resolved;
-  const located = locateProgress(state.authority.verifierRoster, state.slots, resolved.value.expected.requestId);
-  if (!located.ok) return located;
-  return reduceParsedRefutation(state, rejectionEvent("refutation", "verdict", resolved.value.identity, located.value.expected, panelError("refutation", "malformed-result", diagnostic)) as PersistentRefutationPanelEvent, resolver);
+  const open = resolveOpenRequest("refutation", state.authority.verifierRoster, state.slots, requestIdentity, resolver);
+  if (!open.ok) return open;
+  return reduceParsed(REFUTATION_PROGRAM, state, rejectionEvent("refutation-verdict-rejected", open.value.resolved.identity, open.value.located.expected, panelError("refutation", "malformed-result", diagnostic)), resolver);
 }
 
-function rehydrateAccepted<T>(panel: "architecture" | "refutation", roster: ExactRoster, accepted: readonly DurableAcceptedPanelResult<T>[], resolver: PublicationAuthorityResolver): PersistentPanelResult<readonly AcceptedAgentResult<T>[]> {
+// ---------------------------------------------------------------------------
+// Complete-roster proofs and deterministic aggregates
+// ---------------------------------------------------------------------------
+
+function rehydrateAccepted<T>(panel: PanelKind, roster: ExactRoster, accepted: readonly DurableAcceptedPanelResult<T>[], resolver: PublicationAuthorityResolver): PersistentPanelResult<readonly AcceptedAgentResult<T>[]> {
   const results: AcceptedAgentResult<T>[] = [];
   for (const durable of accepted) {
     const resolved = resolvePanelRequest(panel, roster, durable.request, resolver);
@@ -1181,30 +1498,44 @@ function rehydrateAccepted<T>(panel: "architecture" | "refutation", roster: Exac
   return persistentSuccess(Object.freeze(results));
 }
 
-export function proveArchitectureJudgeRoster(state: ArchitecturePanelState, resolver: PublicationAuthorityResolver): PersistentPanelResult<CompleteRoster<AcceptedAgentResult<JudgeVerdict>>> {
-  const accepted = rehydrateAccepted("architecture", state.authority.judgeRoster, selectAcceptedArchitectureJudges(state), resolver);
-  if (!accepted.ok) return accepted;
-  const proven = parseCompleteRoster(resolver, state.authority.judgeRoster, accepted.value, (raw) => {
+/**
+ * Prove one verdict stage's complete roster: every accepted result rehydrates
+ * against its issued publication, the roster is exact and complete, and each
+ * value re-parses under an authoritative criterion or lens. The proof is bound
+ * to the exact panel authority, so only the aggregate of THIS panel accepts it.
+ */
+function proveCompleteRoster<T, Authority extends ArchitecturePanelAuthority | RefutationPanelAuthority, Criterion extends string>(
+  panel: PanelKind,
+  authority: Authority,
+  roster: ExactRoster,
+  accepted: readonly DurableAcceptedPanelResult<T>[],
+  resolver: PublicationAuthorityResolver,
+  criteria: readonly Criterion[],
+  notAuthoritative: string,
+  parseCanonical: (raw: unknown, criterion: Criterion) => DomainResult<T, Readonly<{ message: string }>>,
+): PersistentPanelResult<CompleteRoster<AcceptedAgentResult<T>>> {
+  const rehydrated = rehydrateAccepted(panel, roster, accepted, resolver);
+  if (!rehydrated.ok) return rehydrated;
+  const proven = parseCompleteRoster(resolver, roster, rehydrated.value, (raw) => {
     const record = safeRecord(raw, ["criterion", "entries"]);
-    const expected = record === null ? undefined : state.authority.judgeCriteria.find((criterion) => criterion === record.criterion);
-    return expected === undefined ? { ok: false, error: { message: "judge criterion is not authoritative" } } : parseCanonicalJudge(raw, state.authority, expected);
+    const expected = record === null ? undefined : criteria.find((criterion) => criterion === record.criterion);
+    return expected === undefined ? { ok: false, error: { message: notAuthoritative } } : parseCanonical(raw, expected);
   });
-  if (!proven.ok) return persistentFailure(panelError("architecture", "incomplete-roster", proven.error.violations.map(({ kind }) => kind).join("; ")));
-  architectureJudgeRosterProofs.set(proven.value, state.authority);
+  if (!proven.ok) return persistentFailure(panelError(panel, "incomplete-roster", proven.error.violations.map(({ kind }) => kind).join("; ")));
+  completeRosterProofs.set(proven.value, authority);
   return persistentSuccess(proven.value);
 }
 
+export function proveArchitectureJudgeRoster(state: ArchitecturePanelState, resolver: PublicationAuthorityResolver): PersistentPanelResult<CompleteRoster<AcceptedAgentResult<JudgeVerdict>>> {
+  return proveCompleteRoster("architecture", state.authority, state.authority.judgeRoster, selectAcceptedArchitectureJudges(state), resolver,
+    state.authority.judgeCriteria, "judge criterion is not authoritative",
+    (raw, criterion) => parseCanonicalJudge(raw, state.authority, criterion));
+}
+
 export function proveRefutationRoster(state: RefutationPanelState, resolver: PublicationAuthorityResolver): PersistentPanelResult<CompleteRoster<AcceptedAgentResult<VerdictEnvelope<RefutationVerdict>>>> {
-  const accepted = rehydrateAccepted("refutation", state.authority.verifierRoster, selectAcceptedRefutationVerdicts(state), resolver);
-  if (!accepted.ok) return accepted;
-  const proven = parseCompleteRoster(resolver, state.authority.verifierRoster, accepted.value, (raw) => {
-    const record = safeRecord(raw, ["criterion", "entries"]);
-    const expected = record === null ? undefined : state.authority.lenses.find((lens) => lens === record.criterion);
-    return expected === undefined ? { ok: false, error: { message: "refutation lens is not authoritative" } } : parseCanonicalRefutation(raw, state.authority, expected);
-  });
-  if (!proven.ok) return persistentFailure(panelError("refutation", "incomplete-roster", proven.error.violations.map(({ kind }) => kind).join("; ")));
-  refutationRosterProofs.set(proven.value, state.authority);
-  return persistentSuccess(proven.value);
+  return proveCompleteRoster("refutation", state.authority, state.authority.verifierRoster, selectAcceptedRefutationVerdicts(state), resolver,
+    state.authority.lenses, "refutation lens is not authoritative",
+    (raw, lens) => parseCanonicalRefutation(raw, state.authority, lens));
 }
 
 function completeRosterMatches(roster: ExactRoster, complete: CompleteRoster<AcceptedAgentResult<unknown>>): boolean {
@@ -1216,20 +1547,20 @@ function completeRosterMatches(roster: ExactRoster, complete: CompleteRoster<Acc
 
 export function aggregateArchitecturePanel(authority: ArchitecturePanelAuthority, complete: CompleteRoster<AcceptedAgentResult<JudgeVerdict>>): PersistentPanelResult<readonly CandidateRanking[]> {
   try {
-    if (architectureJudgeRosterProofs.get(complete) !== authority || !completeRosterMatches(authority.judgeRoster, complete as CompleteRoster<AcceptedAgentResult<unknown>>)) return persistentFailure(panelError("architecture", "incomplete-roster", "complete judge roster is unproved, stale, or belongs to another panel"));
+    if (completeRosterProofs.get(complete) !== authority || !completeRosterMatches(authority.judgeRoster, complete as CompleteRoster<AcceptedAgentResult<unknown>>)) return persistentFailure(panelError("architecture", "incomplete-roster", "complete judge roster is unproved, stale, or belongs to another panel"));
     const aggregated = aggregateVerdicts(complete.ordered.map(({ value }) => value), authority.judgeCriteria, authority.candidateIds);
     return aggregated.ok ? persistentSuccess(Object.freeze([...aggregated.value])) : persistentFailure(panelError("architecture", "invalid-aggregate", aggregated.errors.join("; ")));
   } catch (error) {
-    // The message is KEPT, for the reason the sibling reducers above document:
-    // a bare `catch {}` makes a code regression indistinguishable from bad
-    // input. Fail-closed is unchanged; only the diagnostic survives.
+    // The message is KEPT, for the reason `guardedReduce` documents: a bare
+    // `catch {}` makes a code regression indistinguishable from bad input.
+    // Fail-closed is unchanged; only the diagnostic survives.
     return persistentFailure(panelError("architecture", "invalid-aggregate", `judge roster could not be safely aggregated: ${error instanceof Error ? error.message : String(error)}`));
   }
 }
 
 export function tallyRefutationPanel(authority: RefutationPanelAuthority, complete: CompleteRoster<AcceptedAgentResult<VerdictEnvelope<RefutationVerdict>>>, requestedThreshold = defaultRefutationThreshold(authority.lenses.length)): PersistentPanelResult<RefutationDecision> {
   try {
-    if (refutationRosterProofs.get(complete) !== authority || !completeRosterMatches(authority.verifierRoster, complete as CompleteRoster<AcceptedAgentResult<unknown>>)) return persistentFailure(panelError("refutation", "incomplete-roster", "complete verifier roster is unproved, stale, or belongs to another panel"));
+    if (completeRosterProofs.get(complete) !== authority || !completeRosterMatches(authority.verifierRoster, complete as CompleteRoster<AcceptedAgentResult<unknown>>)) return persistentFailure(panelError("refutation", "incomplete-roster", "complete verifier roster is unproved, stale, or belongs to another panel"));
     const strictMajority = defaultRefutationThreshold(authority.lenses.length);
     if (requestedThreshold !== strictMajority) return persistentFailure(panelError("refutation", "invalid-aggregate", `threshold must equal the derived strict majority ${strictMajority}`));
     const verdicts = complete.ordered.map(({ value }) => value);
@@ -1248,7 +1579,7 @@ export function completePersistentArchitecturePanel(state: ArchitecturePanelStat
   if (!proof.ok) return proof;
   const ranking = aggregateArchitecturePanel(state.authority, proof.value);
   if (!ranking.ok) return ranking;
-  return reduceParsedArchitecture(state, Object.freeze({ schemaVersion: 1, type: "architecture-ranking-completed", ranking: ranking.value }), resolver);
+  return reduceParsed(ARCHITECTURE_PROGRAM, state, Object.freeze({ schemaVersion: 1, type: "architecture-ranking-completed", ranking: ranking.value }), resolver);
 }
 
 export function completePersistentRefutationPanel(state: RefutationPanelState, resolver: PublicationAuthorityResolver, threshold?: number): PersistentPanelResult<PersistentRefutationStep> {
@@ -1256,65 +1587,20 @@ export function completePersistentRefutationPanel(state: RefutationPanelState, r
   if (!proof.ok) return proof;
   const decision = tallyRefutationPanel(state.authority, proof.value, threshold);
   if (!decision.ok) return decision;
-  return reduceParsedRefutation(state, Object.freeze({ schemaVersion: 1, type: "refutation-tally-completed", decision: decision.value }), resolver);
+  return reduceParsed(REFUTATION_PROGRAM, state, Object.freeze({ schemaVersion: 1, type: "refutation-tally-completed", decision: decision.value }), resolver);
 }
 
-type ReplayedArchitecturePrefix = Readonly<{
-  step: PersistentArchitectureStep;
-  events: readonly PersistentArchitecturePanelEvent[];
-}>;
-type ReplayedRefutationPrefix = Readonly<{
-  step: PersistentRefutationStep;
-  events: readonly PersistentRefutationPanelEvent[];
-}>;
-
-function replayArchitecturePrefix(
-  authority: ArchitecturePanelAuthority,
-  rawEvents: unknown,
-  resolver: PublicationAuthorityResolver,
-): PersistentPanelResult<ReplayedArchitecturePrefix> {
-  const events = safeArray(rawEvents);
-  if (events === null) return persistentFailure(panelError("architecture", "malformed-event", "architecture history must be a dense JSON event array"));
-  const parsedEvents: PersistentArchitecturePanelEvent[] = [];
-  let step = startPersistentArchitecturePanel(authority);
-  for (const raw of events) {
-    const parsed = parsePersistentArchitecturePanelEvent(step.state, raw, resolver);
-    if (!parsed.ok) return parsed;
-    const reduced = reducePersistentArchitecturePanel(step.state, parsed.value);
-    if (!reduced.ok) return reduced;
-    parsedEvents.push(parsed.value);
-    step = reduced.value;
-  }
-  return persistentSuccess(Object.freeze({ step, events: Object.freeze(parsedEvents) }));
-}
-
-function replayRefutationPrefix(
-  authority: RefutationPanelAuthority,
-  rawEvents: unknown,
-  resolver: PublicationAuthorityResolver,
-): PersistentPanelResult<ReplayedRefutationPrefix> {
-  const events = safeArray(rawEvents);
-  if (events === null) return persistentFailure(panelError("refutation", "malformed-event", "refutation history must be a dense JSON event array"));
-  const parsedEvents: PersistentRefutationPanelEvent[] = [];
-  let step = startPersistentRefutationPanel(authority);
-  for (const raw of events) {
-    const parsed = parsePersistentRefutationPanelEvent(step.state, raw, resolver);
-    if (!parsed.ok) return parsed;
-    const reduced = reducePersistentRefutationPanel(step.state, parsed.value);
-    if (!reduced.ok) return reduced;
-    parsedEvents.push(parsed.value);
-    step = reduced.value;
-  }
-  return persistentSuccess(Object.freeze({ step, events: Object.freeze(parsedEvents) }));
-}
+// ---------------------------------------------------------------------------
+// Replay, histories, checkpoints and persistence plans (per panel)
+// ---------------------------------------------------------------------------
 
 export function replayPersistentArchitecturePanel(authority: ArchitecturePanelAuthority, rawEvents: unknown, resolver: PublicationAuthorityResolver): PersistentPanelResult<PersistentArchitectureStep> {
-  const replayed = replayArchitecturePrefix(authority, rawEvents, resolver);
+  const replayed = replayPrefix(ARCHITECTURE_PROGRAM, authority, rawEvents, resolver);
   return replayed.ok ? persistentSuccess(replayed.value.step) : replayed;
 }
 
 export function replayPersistentRefutationPanel(authority: RefutationPanelAuthority, rawEvents: unknown, resolver: PublicationAuthorityResolver): PersistentPanelResult<PersistentRefutationStep> {
-  const replayed = replayRefutationPrefix(authority, rawEvents, resolver);
+  const replayed = replayPrefix(REFUTATION_PROGRAM, authority, rawEvents, resolver);
   return replayed.ok ? persistentSuccess(replayed.value.step) : replayed;
 }
 
@@ -1324,15 +1610,7 @@ export function parsePersistentArchitecturePanelHistory(
   rawEvents: unknown,
   resolver: PublicationAuthorityResolver,
 ): PersistentPanelResult<PersistentArchitecturePanelHistory> {
-  const replayed = replayArchitecturePrefix(authority, rawEvents, resolver);
-  if (!replayed.ok) return replayed;
-  const history = Object.freeze({
-    panel: "architecture" as const,
-    authority,
-    events: replayed.value.events,
-  }) as PersistentArchitecturePanelHistory;
-  architectureHistoryProofs.add(history);
-  return persistentSuccess(history);
+  return parseHistory(ARCHITECTURE_PROGRAM, authority, rawEvents, resolver) as PersistentPanelResult<PersistentArchitecturePanelHistory>;
 }
 
 /** Parse and replay an immutable refutation event prefix into persistence authority. */
@@ -1341,144 +1619,51 @@ export function parsePersistentRefutationPanelHistory(
   rawEvents: unknown,
   resolver: PublicationAuthorityResolver,
 ): PersistentPanelResult<PersistentRefutationPanelHistory> {
-  const replayed = replayRefutationPrefix(authority, rawEvents, resolver);
-  if (!replayed.ok) return replayed;
-  const history = Object.freeze({
-    panel: "refutation" as const,
-    authority,
-    events: replayed.value.events,
-  }) as PersistentRefutationPanelHistory;
-  refutationHistoryProofs.add(history);
-  return persistentSuccess(history);
+  return parseHistory(REFUTATION_PROGRAM, authority, rawEvents, resolver) as PersistentPanelResult<PersistentRefutationPanelHistory>;
 }
 
-function architectureAuthorityJson(authority: ArchitecturePanelAuthority): ArchitecturePanelAuthorityInput {
-  return Object.freeze({ runId: authority.runId, candidateLenses: authority.candidateLenses, judgeCriteria: authority.judgeCriteria, candidateSlots: authority.candidateRoster.orderedSlots, judgeSlots: authority.judgeRoster.orderedSlots });
-}
-function refutationAuthorityJson(authority: RefutationPanelAuthority): RefutationPanelAuthorityInput {
-  return Object.freeze({
-    runId: authority.runId,
-    identityRunId: authority.identityRunId,
-    findings: authority.findings,
-    lenses: authority.lenses,
-    verifierSlots: authority.verifierRoster.orderedSlots,
-  });
-}
-
-export type ArchitecturePanelCheckpoint = Readonly<{ schemaVersion: 2; kind: "architecture-panel-checkpoint"; authority: ArchitecturePanelAuthorityInput; events: readonly PersistentArchitecturePanelEvent[]; state: unknown }>;
-export type RefutationPanelCheckpoint = Readonly<{ schemaVersion: 2; kind: "refutation-panel-checkpoint"; authority: RefutationPanelAuthorityInput; events: readonly PersistentRefutationPanelEvent[]; state: unknown }>;
+export type ArchitecturePanelCheckpoint = PanelCheckpoint<"architecture", ArchitecturePanelAuthorityInput, PersistentArchitecturePanelEvent>;
+export type RefutationPanelCheckpoint = PanelCheckpoint<"refutation", RefutationPanelAuthorityInput, PersistentRefutationPanelEvent>;
 
 export function architecturePanelCheckpoint(
   state: ArchitecturePanelState,
   events: readonly PersistentArchitecturePanelEvent[],
   resolver: PublicationAuthorityResolver,
 ): PersistentPanelResult<ArchitecturePanelCheckpoint> {
-  if (!architectureStateProofs.has(state)) return persistentFailure(panelError("architecture", "malformed-checkpoint", "checkpoint requires parser-produced architecture state"));
-  const replayed = replayArchitecturePrefix(state.authority, events, resolver);
-  if (!replayed.ok) return replayed;
-  if (!jsonEqual(replayed.value.step.state, state)) return persistentFailure(panelError("architecture", "malformed-checkpoint", "architecture checkpoint event prefix does not replay to the supplied state"));
-  const replayedState = JSON.parse(JSON.stringify(replayed.value.step.state)) as unknown;
-  return persistentSuccess(Object.freeze({ schemaVersion: 2, kind: "architecture-panel-checkpoint", authority: architectureAuthorityJson(state.authority), events: replayed.value.events, state: replayedState }));
+  return checkpointOf(ARCHITECTURE_PROGRAM, state, events, resolver);
 }
 export function refutationPanelCheckpoint(
   state: RefutationPanelState,
   events: readonly PersistentRefutationPanelEvent[],
   resolver: PublicationAuthorityResolver,
 ): PersistentPanelResult<RefutationPanelCheckpoint> {
-  if (!refutationStateProofs.has(state)) return persistentFailure(panelError("refutation", "malformed-checkpoint", "checkpoint requires parser-produced refutation state"));
-  const replayed = replayRefutationPrefix(state.authority, events, resolver);
-  if (!replayed.ok) return replayed;
-  if (!jsonEqual(replayed.value.step.state, state)) return persistentFailure(panelError("refutation", "malformed-checkpoint", "refutation checkpoint event prefix does not replay to the supplied state"));
-  const replayedState = JSON.parse(JSON.stringify(replayed.value.step.state)) as unknown;
-  return persistentSuccess(Object.freeze({ schemaVersion: 2, kind: "refutation-panel-checkpoint", authority: refutationAuthorityJson(state.authority), events: replayed.value.events, state: replayedState }));
+  return checkpointOf(REFUTATION_PROGRAM, state, events, resolver);
 }
 
 export function parseArchitecturePanelCheckpoint(raw: unknown, resolver: PublicationAuthorityResolver): PersistentPanelResult<PersistentArchitectureStep> {
-  const checkpoint = safeRecord(raw, ["schemaVersion", "kind", "authority", "events", "state"]);
-  if (checkpoint === null || checkpoint.schemaVersion !== 2 || checkpoint.kind !== "architecture-panel-checkpoint") return persistentFailure(panelError("architecture", "malformed-checkpoint", "architecture checkpoint must be an exact schemaVersion 2 record"));
-  const authority = parseArchitecturePanelAuthority(checkpoint.authority as ArchitecturePanelAuthorityInput);
-  if (!authority.ok) return authority;
-  const replayed = replayPersistentArchitecturePanel(authority.value, checkpoint.events, resolver);
-  if (!replayed.ok) return replayed;
-  if (!jsonEqual(checkpoint.state, replayed.value.state)) return persistentFailure(panelError("architecture", "malformed-checkpoint", "architecture checkpoint state disagrees with its immutable event prefix"));
-  return replayed;
+  return parseCheckpoint(ARCHITECTURE_PROGRAM, raw, resolver);
 }
 export function parseRefutationPanelCheckpoint(raw: unknown, resolver: PublicationAuthorityResolver): PersistentPanelResult<PersistentRefutationStep> {
-  const checkpoint = safeRecord(raw, ["schemaVersion", "kind", "authority", "events", "state"]);
-  if (checkpoint === null || checkpoint.schemaVersion !== 2 || checkpoint.kind !== "refutation-panel-checkpoint") return persistentFailure(panelError("refutation", "malformed-checkpoint", "refutation checkpoint must be an exact schemaVersion 2 record"));
-  const authority = parseRefutationPanelAuthority(checkpoint.authority as RefutationPanelAuthorityInput);
-  if (!authority.ok) return authority;
-  const replayed = replayPersistentRefutationPanel(authority.value, checkpoint.events, resolver);
-  if (!replayed.ok) return replayed;
-  if (!jsonEqual(checkpoint.state, replayed.value.state)) return persistentFailure(panelError("refutation", "malformed-checkpoint", "refutation checkpoint state disagrees with its immutable event prefix"));
-  return replayed;
+  return parseCheckpoint(REFUTATION_PROGRAM, raw, resolver);
 }
 
-export type ArchitecturePanelPersistenceEffect =
-  | Readonly<{ schemaVersion: 1; kind: "append-architecture-panel-event"; runId: OrchestrationRunId; sequence: number; dedupKey: string; event: PersistentArchitecturePanelEvent }>
-  | Readonly<{ schemaVersion: 1; kind: "replace-architecture-panel-checkpoint"; runId: OrchestrationRunId; sequence: number; dedupKey: string; checkpoint: ArchitecturePanelCheckpoint }>;
-export type RefutationPanelPersistenceEffect =
-  | Readonly<{ schemaVersion: 1; kind: "append-refutation-panel-event"; runId: OrchestrationRunId; sequence: number; dedupKey: string; event: PersistentRefutationPanelEvent }>
-  | Readonly<{ schemaVersion: 1; kind: "replace-refutation-panel-checkpoint"; runId: OrchestrationRunId; sequence: number; dedupKey: string; checkpoint: RefutationPanelCheckpoint }>;
-export type PanelPersistenceReceipt = Readonly<{ schemaVersion: 1; kind: "panel-persistence-recorded"; panel: "architecture" | "refutation"; runId: OrchestrationRunId; sequence: number; dedupKey: string }>;
-
-function persistenceKey(runId: OrchestrationRunId, sequence: number, payload: unknown): string {
-  return `${runId}:${sequence}:${sha256Hex(JSON.stringify(payload))}`;
-}
+export type ArchitecturePanelPersistenceEffect = PanelPersistenceEffect<"architecture", ArchitecturePanelAuthorityInput, PersistentArchitecturePanelEvent>;
+export type RefutationPanelPersistenceEffect = PanelPersistenceEffect<"refutation", RefutationPanelAuthorityInput, PersistentRefutationPanelEvent>;
+export type PanelPersistenceReceipt = Readonly<{ schemaVersion: 1; kind: "panel-persistence-recorded"; panel: PanelKind; runId: OrchestrationRunId; sequence: number; dedupKey: string }>;
 
 export function planArchitecturePanelPersistence(
   step: PersistentArchitectureStep,
   history: PersistentArchitecturePanelHistory,
   resolver: PublicationAuthorityResolver,
 ): PersistentPanelResult<readonly [ArchitecturePanelPersistenceEffect, ArchitecturePanelPersistenceEffect]> {
-  const event = step.recordedEvent;
-  if (event === undefined || !architectureRecordedStepProofs.has(step) ||
-      !architectureStateProofs.has(step.state) || !architectureEventProofs.has(event)) {
-    return persistentFailure(panelError("architecture", "malformed-event", "persistence planning requires a parser/reducer-produced architecture step and event"));
-  }
-  if (!architectureHistoryProofs.has(history) || history.panel !== "architecture" ||
-      !jsonEqual(architectureAuthorityJson(history.authority), architectureAuthorityJson(step.state.authority))) {
-    return persistentFailure(panelError("architecture", "malformed-history", "persistence planning requires a replay-proved architecture history for the same panel authority"));
-  }
-  const events = Object.freeze([...history.events, event]);
-  const replayed = replayArchitecturePrefix(step.state.authority, events, resolver);
-  if (!replayed.ok) return replayed;
-  if (!jsonEqual(replayed.value.step.state, step.state)) {
-    return persistentFailure(panelError("architecture", "malformed-checkpoint", "architecture event prefix does not replay exactly to the proposed checkpoint state"));
-  }
-  const checkpoint = architecturePanelCheckpoint(replayed.value.step.state, replayed.value.events, resolver);
-  if (!checkpoint.ok) return checkpoint;
-  const sequence = events.length;
-  const append = Object.freeze({ schemaVersion: 1 as const, kind: "append-architecture-panel-event" as const, runId: step.state.authority.runId, sequence, dedupKey: persistenceKey(step.state.authority.runId, sequence, event), event });
-  const replace = Object.freeze({ schemaVersion: 1 as const, kind: "replace-architecture-panel-checkpoint" as const, runId: step.state.authority.runId, sequence, dedupKey: persistenceKey(step.state.authority.runId, sequence, checkpoint.value), checkpoint: checkpoint.value });
-  return persistentSuccess(Object.freeze([append, replace]) as readonly [ArchitecturePanelPersistenceEffect, ArchitecturePanelPersistenceEffect]);
+  return planPersistence(ARCHITECTURE_PROGRAM, step, history, resolver);
 }
 export function planRefutationPanelPersistence(
   step: PersistentRefutationStep,
   history: PersistentRefutationPanelHistory,
   resolver: PublicationAuthorityResolver,
 ): PersistentPanelResult<readonly [RefutationPanelPersistenceEffect, RefutationPanelPersistenceEffect]> {
-  const event = step.recordedEvent;
-  if (event === undefined || !refutationRecordedStepProofs.has(step) ||
-      !refutationStateProofs.has(step.state) || !refutationEventProofs.has(event)) {
-    return persistentFailure(panelError("refutation", "malformed-event", "persistence planning requires a parser/reducer-produced refutation step and event"));
-  }
-  if (!refutationHistoryProofs.has(history) || history.panel !== "refutation" ||
-      !jsonEqual(refutationAuthorityJson(history.authority), refutationAuthorityJson(step.state.authority))) {
-    return persistentFailure(panelError("refutation", "malformed-history", "persistence planning requires a replay-proved refutation history for the same panel authority"));
-  }
-  const events = Object.freeze([...history.events, event]);
-  const replayed = replayRefutationPrefix(step.state.authority, events, resolver);
-  if (!replayed.ok) return replayed;
-  if (!jsonEqual(replayed.value.step.state, step.state)) {
-    return persistentFailure(panelError("refutation", "malformed-checkpoint", "refutation event prefix does not replay exactly to the proposed checkpoint state"));
-  }
-  const checkpoint = refutationPanelCheckpoint(replayed.value.step.state, replayed.value.events, resolver);
-  if (!checkpoint.ok) return checkpoint;
-  const sequence = events.length;
-  const append = Object.freeze({ schemaVersion: 1 as const, kind: "append-refutation-panel-event" as const, runId: step.state.authority.runId, sequence, dedupKey: persistenceKey(step.state.authority.runId, sequence, event), event });
-  const replace = Object.freeze({ schemaVersion: 1 as const, kind: "replace-refutation-panel-checkpoint" as const, runId: step.state.authority.runId, sequence, dedupKey: persistenceKey(step.state.authority.runId, sequence, checkpoint.value), checkpoint: checkpoint.value });
-  return persistentSuccess(Object.freeze([append, replace]) as readonly [RefutationPanelPersistenceEffect, RefutationPanelPersistenceEffect]);
+  return planPersistence(REFUTATION_PROGRAM, step, history, resolver);
 }
 
 export function parsePanelPersistenceReceipt(raw: unknown, expected: ArchitecturePanelPersistenceEffect | RefutationPanelPersistenceEffect): PersistentPanelResult<PanelPersistenceReceipt> {
@@ -1489,4 +1674,3 @@ export function parsePanelPersistenceReceipt(raw: unknown, expected: Architectur
   }
   return persistentSuccess(Object.freeze({ schemaVersion: 1, kind: "panel-persistence-recorded", panel, runId: expected.runId, sequence: expected.sequence, dedupKey: expected.dedupKey }));
 }
-

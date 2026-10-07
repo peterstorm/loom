@@ -209,6 +209,9 @@ describe("quality-program helper boundaries", () => {
     const allowedVolumeImports = new Set([
       "engine/src/handlers/helpers/orchestration.ts -> legacy-panel",
       "engine/src/handlers/helpers/orchestration.ts -> remediation-events",
+      // The run-directory-only effect runner: the façade's transcript capture
+      // and the legacy panel driver share it, so neither restates it.
+      "engine/src/handlers/helpers/orchestration.ts -> run-directory-effects",
       "engine/src/handlers/helpers/orchestration.ts -> standalone-disposition",
       "engine/src/handlers/helpers/orchestration.ts -> standalone-source",
       "pi/extension.ts -> review-authority-bridge",

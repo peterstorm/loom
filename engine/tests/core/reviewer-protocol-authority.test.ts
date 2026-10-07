@@ -9,12 +9,9 @@ import { reconcileFindings, makeParsedFindings, type CurrentParsedFindings, reso
 import { makeDraftFinding, mergeFindings, attributeFindings, parseStoredFindings, reviewFindingCounts, recoverViewOnlyClaims } from "../../src/core/findings";
 import { taskFixture } from "../fixtures/task-lifecycle";
 import { findingId } from "../fixtures/finding-id";
+import { value } from "../fixtures/parse-result";
 
 const bytes = (raw: unknown) => new TextEncoder().encode(JSON.stringify(raw));
-function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T {
-  if (!result.ok) throw new Error(JSON.stringify(result));
-  return result.value;
-}
 const runId = value(parseOrchestrationRunId("run.protocol-authority"));
 const prior = attributeFindings([{ severity: "critical", claim: "old", file: null, line: null }], "old-reviewer");
 const basis = REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!;

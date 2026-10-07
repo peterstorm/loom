@@ -79,16 +79,17 @@ Two functions share this decision and differ only in how they build output:
 - **Reviewer:** `engine/src/orchestration/harness-capture-runtime.ts` calls `selectCanonicalPayload(authority.binding, observeEmissionCalls(observation.frames), observation.candidates)` and folds the six arms exhaustively.
   - Accepted sources go through the existing `bindAndPersistCapture`, which performs reviewer protocol admission. Provenance (`source`, `toolCallId`, `producerKind`, `emissionSchemaVersion`, `schemaDigest`, retained `emissionRefusal`) is taken from the selection result.
   - Rejections map to `ambiguous-emission-call`, `emission-and-extraction-refused`, or the refusal code.
-- **Verdict:** `engine/src/core/panel-program.ts` remains a declared pure module and does not import the emission transport modules. It receives the kernel through the injected `PanelVerdictEmissionPort`. The single production adapter, `panelVerdictEmissionPort` in `engine/src/core/legacy-panel-decisions.ts` (the legacy panel's pure decisions; like `emission-ingestion.ts` it is not enrolled in the purity closure because it imports the emission modules), does two things:
-  - It supplies `fold` as `selectVerdictSource`.
-  - It supplies `replayAcceptedCall`, which re-certifies a recorded emission claim through `issueEmissionBinding` and re-folds the single accepted call.
+- **Verdict:** `engine/src/core/panel-verdict-source.ts` composes the kernel directly, for both panel paths (the persistent submissions and the legacy attempt resolution in `engine/src/core/legacy-panel-decisions.ts`):
+  - `foldPanelVerdictEmission` is the one live fold, `selectVerdictSource` over the issued binding and observation.
+  - `replayPanelVerdictSourceSelection` re-certifies a recorded emission claim through `issueEmissionBinding`, refuses a record whose schema digest does not certify the minted one, and re-folds the single accepted call.
+  - *Amended 2026-10-07 (deepen pass).* The kernel used to reach the panel layer through an injected `PanelVerdictEmissionPort` whose only production adapter lived in `legacy-panel-decisions.ts`, with structural mirror types of the kernel's binding, call, observation and selection, because the emission modules were outside the purity closure and the panel modules are declared pure. Once `emission-tool.ts`, `harness-capture.ts`, `emission-ingestion.ts`, `legacy-archive.ts` and `legacy-panel-decisions.ts` were enrolled in `DEFAULT_PURE_MODULES` (their transitive closure audited by `engine/tests/linter/programmatic/machine-purity.test.ts`), the port protected no purity and had one adapter — the core tests carried a hand-written twin of it. The port, its adapter, the twin and the mirror types were removed; the panel layer imports the kernel downward, and the kernel still never imports the panel layer.
 - The panel parsers keep their criterion, lens and roster bindings and their complete candidate/finding coverage. A selection chooses which bytes are parsed, never what those bytes must bind to.
 - No `FinalPayload` or serialized verdict bypasses these joins.
 
 **Layering.**
 - `emission-ingestion.ts` is pure: no I/O, no clock, no randomness.
 - It imports only `emission-tool.ts` (binding types, `admitIssuedEmissionArguments`), `emission-observation.ts` (observation vocabulary), `harness-capture.ts` (`finalPayloadOf`, `parseFinalPayload`), and `orchestration-contract/identity` (`DomainResult`, `canonicalRecord`, `parseRequestId`).
-- It must not import `panel-program.ts`, the panel verdict modules (`panel-verdict-source.ts`, `persistent-panel.ts`) or any I/O adapter.
+- It must not import `panel-program.ts`, the panel verdict modules (`panel-verdict-source.ts`, `persistent-panel.ts`), `legacy-panel-decisions.ts` or any I/O adapter. `machine-purity.test.ts` gates both halves: the emission modules' direct imports exclude the panel layer, and their transitive closure stays inside the declared pure modules.
 - Shared schema definitions stay below the program layer, so no registry-to-program import cycle exists.
 - Results use the existing `DomainResult` and `canonicalRecord` immutable-record conventions. No branded wrappers were added for values that carry no invariant.
 
@@ -104,7 +105,7 @@ Two functions share this decision and differ only in how they build output:
 
 **Negative:**
 - Two selection functions with deliberately different unions (the verdict path has no `refused-call-no-fallback` arm) are a lasting maintenance cost. Anyone extending one must decide whether the asymmetry still holds.
-- `panel-program.ts` mirrors the kernel's result shapes structurally behind an injected port to keep its purity. Kernel drift fails to compile at the adapter rather than at the core, which is an indirection future readers must follow.
-- The rule that `emission-ingestion.ts` does not import `panel-program.ts`, the panel verdict modules or I/O adapters is stated in the module header and enforced by review, not by an automated gate. The cross-import linter allows core-to-core imports, and the module is not enrolled in the purity closure.
+- *(Superseded 2026-10-07.)* The panel core used to mirror the kernel's result shapes structurally behind an injected port to keep its purity, so kernel drift failed to compile at the adapter rather than at the core. The panel core now uses the kernel's own types; only the replayed extraction-over-refused-call arm widens its retained refusal code to the durable provenance string.
+- *(Superseded 2026-10-07.)* The rule that `emission-ingestion.ts` does not import the panel layer or I/O adapters was enforced by review only. It is now an automated gate in `machine-purity.test.ts`, beside the module's enrolment in the purity closure.
 - The closed observation and refusal unions mean any new harness observation state (for example, a new partial-frame shape) requires a deliberate kernel change and new matrix rows. It cannot be absorbed ad hoc in an adapter.
 - Treating incomplete or contradictory observations as refusals rather than absence means some attempts that a lenient selector would have "rescued" through extraction now surface as evidence/infrastructure refusals at the boundary. This trade of availability for honesty is accepted.

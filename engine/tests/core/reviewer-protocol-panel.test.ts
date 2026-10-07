@@ -15,11 +15,8 @@ import { canonicalStandalonePanelFindingAuthority, freezeStandalonePanelAuthorit
 import { canonicalDigest } from "../../src/core/digest";
 import { type StandaloneReviewAggregate } from "../../src/core/standalone-review-model";
 import { findingId } from "../fixtures/finding-id";
+import { value } from "../fixtures/parse-result";
 
-function value<T>(result: Readonly<{ ok: true; value: T }> | Readonly<{ ok: false }>): T {
-  if (!result.ok) throw new Error(JSON.stringify(result));
-  return result.value;
-}
 const example = REVIEWER_PAYLOAD_EXAMPLE_V2.findings[0]!;
 if (example.severity !== "critical") throw new Error("critical fixture required");
 const basis = example.basis;

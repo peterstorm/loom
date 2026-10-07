@@ -13,7 +13,6 @@ import {
 } from "../../../src/handlers/helpers/orchestration";
 import {
   panelSubmissionProblem,
-  panelVerdictEmissionPort,
   parseRegisteredPanelProgram,
 } from "../../../src/core/legacy-panel-decisions";
 import {
@@ -23,7 +22,7 @@ import {
 import { candidateFilename, type PanelLens } from "../../../src/core/panel-contract";
 import { panelVerdictSourceProvenance, panelVerdictSourceRecord } from "../../../src/core/panel-verdict-source";
 import { selectVerdictSource } from "../../../src/core/emission-ingestion";
-import { issueEmissionBinding } from "../../../src/core/emission-tool";
+import { issueEmissionBinding, type IssuedEmissionBindingOf } from "../../../src/core/emission-tool";
 import { captureKey } from "../../../src/core/harness-capture";
 import { observeEmissionCalls } from "../../../src/core/emission-observation";
 import { REVIEWER_PAYLOAD_EXAMPLE_V2, type ReviewerDraftV2 } from "../../../src/core/reviewer-contract";
@@ -1191,42 +1190,45 @@ describe("orchestration CLI", () => {
         .toContain("extraction-only panel slot that advertises no emission tool");
     });
 
-    it("refuses an emission binding minted for another request", () => {
-      const binding = issueEmissionBinding({ requestId: "refutation:verifier:1", kind: "refutation-verdict", version: "v1" });
-      if (!binding.ok) throw new Error(binding.error.message);
-      const resolved = resolvePanelAttemptVerdictSource({
-        handle: {} as never,
-        request: agentRequestAuthority("run.legacy-fold", { requestId: "refutation:verifier:2", slotId: "refutation-slot:x", attempt: 1 }),
+    it("refuses a misbound emission binding before it reads the attempt's durable record", async () => {
+      const { opened, request } = await startedRefutationRun("run.legacy-fold-join-order");
+      // An unparseable durable record for this attempt: a shell that read the
+      // record before the issuance join would refuse with the record's parse
+      // failure instead of the join's caller-defect refusal.
+      const published = await opened.publishArtifactSet([{
+        relativePath: `panel-verdict-sources/${request.requestId}.json`,
+        bytes: [...Buffer.from("not json", "utf-8")],
+      }]);
+      expect(published.ok, published.ok ? "" : published.error.message).toBe(true);
+      const resolve = (binding: IssuedEmissionBindingOf<"judge-verdict" | "refutation-verdict">) => resolvePanelAttemptVerdictSource({
+        handle: opened,
+        request,
         raw: "raw",
-        emission: { binding: binding.value, observation: { kind: "absent" }, port: panelVerdictEmissionPort },
+        emission: { binding, observation: { kind: "absent" } },
       });
-      expect(resolved.ok).toBe(false);
-      if (resolved.ok) throw new Error("unreachable");
-      expect(resolved.error).toContain("issued emission binding certifies request refutation:verifier:1, not the submitted request refutation:verifier:2");
-    });
+      const minted = <K extends "judge-verdict" | "refutation-verdict">(requestId: string, kind: K): IssuedEmissionBindingOf<K> => {
+        const binding = issueEmissionBinding({ requestId, kind, version: "v1" });
+        if (!binding.ok) throw new Error(binding.error.message);
+        return binding.value;
+      };
 
-    it.each([
-      ["refutation-panel", "judge-verdict", "refutation-verdict"],
-      ["architecture-panel", "refutation-verdict", "judge-verdict"],
-    ] as const)("refuses a %s attempt whose emission binding certifies %s instead of %s, before any selection", (program, boundKind, expectedKind) => {
-      const requestId = program === "refutation-panel" ? "refutation:verifier:2" : "architecture:judge:2";
-      // The binding certifies the RIGHT request but the WRONG verdict kind for
-      // the panel program: the legacy seam's second issuance join (the one the
-      // persistent seam's refinement types do at compile time) refuses it as a
-      // caller defect before any evidence is read or any selection runs — the
-      // attempt is never consumed on a defect that is not the model's.
-      const binding = issueEmissionBinding({ requestId, kind: boundKind, version: "v1" });
-      if (!binding.ok) throw new Error(binding.error.message);
-      const resolved = resolvePanelAttemptVerdictSource({
-        handle: {} as never,
-        request: agentRequestAuthority("run.legacy-fold", { requestId, slotId: "refutation-slot:x", attempt: 1, program }),
-        raw: "raw",
-        emission: { binding: binding.value, observation: { kind: "absent" }, port: panelVerdictEmissionPort },
-      });
-      expect(resolved.ok).toBe(false);
-      if (resolved.ok) throw new Error("unreachable");
-      expect(resolved.error).toContain(`issued emission binding certifies producer kind ${boundKind}, not the ${expectedKind} kind the ${program} attempt ${requestId} belongs to`);
-    });
+      const foreignRequest = resolve(minted("refutation:verifier:other", "refutation-verdict"));
+      expect(foreignRequest.ok).toBe(false);
+      if (foreignRequest.ok) throw new Error("unreachable");
+      expect(foreignRequest.error).toContain(`issued emission binding certifies request refutation:verifier:other, not the submitted request ${request.requestId}`);
+
+      const wrongKind = resolve(minted(request.requestId, "judge-verdict"));
+      expect(wrongKind.ok).toBe(false);
+      if (wrongKind.ok) throw new Error("unreachable");
+      expect(wrongKind.error).toContain(`issued emission binding certifies producer kind judge-verdict, not the refutation-verdict kind the refutation-panel attempt ${request.requestId} belongs to`);
+
+      // Control: with no live emission input the join holds, the record IS
+      // read, and its malformed bytes refuse closed.
+      const read = resolvePanelAttemptVerdictSource({ handle: opened, request, raw: "raw" });
+      expect(read.ok).toBe(false);
+      if (read.ok) throw new Error("unreachable");
+      expect(read.error).toContain(`the durable panel verdict source for request ${request.requestId} is not valid JSON`);
+    }, 30_000);
 
     /** Mint the issued refutation-verdict binding for the attempt, select a
      *  refuting emission verdict, and publish the durable source record through
@@ -1277,7 +1279,7 @@ describe("orchestration CLI", () => {
         // the durable record is authoritative when present (FR-009) — the
         // returned selection is the record's accepted call, never the live
         // input's arm, and the record rides beside it.
-        emission: { binding: good.binding, observation: { kind: "absent" }, port: panelVerdictEmissionPort },
+        emission: { binding: good.binding, observation: { kind: "absent" } },
       });
       expect(resolved.ok, resolved.ok ? "" : resolved.error).toBe(true);
       if (!resolved.ok) throw new Error("unreachable");
@@ -1298,7 +1300,7 @@ describe("orchestration CLI", () => {
         handle: stale.opened,
         request: stale.request,
         raw: "prose, not a verdict",
-        emission: { binding: stale.binding, observation: { kind: "absent" }, port: panelVerdictEmissionPort },
+        emission: { binding: stale.binding, observation: { kind: "absent" } },
       });
       expect(refused.ok).toBe(false);
       if (refused.ok) throw new Error("unreachable");
@@ -1401,7 +1403,7 @@ describe("orchestration CLI", () => {
         request,
         logicalRequestId: request.requestId,
         raw: "prose, not a verdict",
-        emission: { binding: minted.value, observation: observeEmissionCalls([Object.freeze({ kind: "complete" as const, call: emissionCall })]), port: panelVerdictEmissionPort },
+        emission: { binding: minted.value, observation: observeEmissionCalls([Object.freeze({ kind: "complete" as const, call: emissionCall })]) },
       });
       expect(settled.ok, settled.ok ? "" : settled.error).toBe(true);
       if (!settled.ok) throw new Error("unreachable");
@@ -1416,7 +1418,7 @@ describe("orchestration CLI", () => {
         request,
         logicalRequestId: request.requestId,
         raw: "prose, not a verdict",
-        emission: { binding: minted.value, observation: observeEmissionCalls([Object.freeze({ kind: "complete" as const, call: emissionCall })]), port: panelVerdictEmissionPort },
+        emission: { binding: minted.value, observation: observeEmissionCalls([Object.freeze({ kind: "complete" as const, call: emissionCall })]) },
       });
       expect(republished.ok, republished.ok ? "" : republished.error).toBe(true);
       if (!republished.ok) throw new Error("unreachable");
@@ -5038,28 +5040,5 @@ describe("orchestration CLI", () => {
       expect(usage.stderr).toContain("inspect --runs-root <root> --run <run-directory> [--json]");
       expect(usage.stderr).toContain("abandon --runs-root <root> --run <run-directory> --reason <text>");
     });
-  });
-});
-
-describe("the production panel verdict port certifies the core's structural binding", () => {
-  // The declared-pure panel core relays bindings as a structural mirror; the
-  // port is where it re-enters the nominal kernel, so it parses the mirror
-  // through the mint instead of trusting the shape.
-  const minted = issueEmissionBinding({ requestId: "request:panel-port-cert", kind: "judge-verdict", version: "v1" });
-  if (!minted.ok) throw new Error(minted.error.message);
-  type RelayedBinding = Parameters<typeof panelVerdictEmissionPort.fold>[0]["binding"];
-
-  it("folds a minted binding the core relayed unchanged", () => {
-    expect(panelVerdictEmissionPort.fold({ binding: minted.value, observation: observeEmissionCalls([]), rawJson: "raw" }))
-      .toMatchObject({ kind: "final-message-extraction", rawJson: "raw" });
-  });
-
-  it.each([
-    ["schema digest", { schemaDigest: "0".repeat(64) }, "schema-digest-mismatch"],
-    ["tool name", { toolName: "loom_emit_reviewer_payload" }, "tool-name-mismatch"],
-  ] as const)("throws on a mirror whose %s does not certify the registry cell — never folds it", (_label, forged, code) => {
-    const mirror = { ...minted.value, ...forged } as unknown as RelayedBinding;
-    expect(() => panelVerdictEmissionPort.fold({ binding: mirror, observation: observeEmissionCalls([]), rawJson: "raw" }))
-      .toThrow(`panel verdict emission binding does not certify its registry cell [${code}]`);
   });
 });

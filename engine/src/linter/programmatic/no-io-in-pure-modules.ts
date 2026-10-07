@@ -71,6 +71,16 @@ export const DEFAULT_PURE_MODULES: readonly string[] = [
   "engine/src/core/panel-authority.ts",
   "engine/src/core/panel-verdict-source.ts",
   "engine/src/core/persistent-panel.ts",
+  // The emission kernel (ADR-0018) and the legacy panel's pure decisions that
+  // consume it: the frozen registry, the observation fold, the selection
+  // decision, the legacy journal archive, and the decisions themselves. Their
+  // purity is the closure's transitive property, not a per-file text rule.
+  "engine/src/core/emission-tool.ts",
+  "engine/src/core/emission-observation.ts",
+  "engine/src/core/harness-capture.ts",
+  "engine/src/core/emission-ingestion.ts",
+  "engine/src/core/legacy-archive.ts",
+  "engine/src/core/legacy-panel-decisions.ts",
   "engine/src/core/exact-data.ts",
   // The ONE deterministic SHA-256 leaf every hashing core module shares.
   "engine/src/core/digest.ts",
